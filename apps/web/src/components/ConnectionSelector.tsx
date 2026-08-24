@@ -33,6 +33,7 @@ interface SshFormData {
   privateKey: string;
   privateKeyPath: string;
   passphrase: string;
+  hostKeyFingerprint: string;
 }
 
 interface ConnectionFormData {
@@ -57,6 +58,7 @@ const defaultSshFormData: SshFormData = {
   privateKey: '',
   privateKeyPath: '',
   passphrase: '',
+  hostKeyFingerprint: '',
 };
 
 /**
@@ -77,6 +79,7 @@ function buildSshTunnelPayload(ssh: SshFormData) {
     privateKey: usesKey && ssh.keySource === 'inline' ? ssh.privateKey || undefined : undefined,
     privateKeyPath: usesKey && ssh.keySource === 'file' ? ssh.privateKeyPath || undefined : undefined,
     passphrase: usesKey ? ssh.passphrase || undefined : undefined,
+    hostKeyFingerprint: ssh.hostKeyFingerprint || undefined,
   };
 }
 
@@ -156,6 +159,11 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
     setTestResult(null);
   };
 
+  // In cloud mode a loopback host is normally unreachable — but with an SSH
+  // tunnel the bastion resolves the host, so localhost/127.* is valid there.
+  const cloudLoopbackBlocked =
+    !!isCloudMode && !formData.ssh.enabled && isLocalhostHost(formData.host);
+
   // Pasting a full connection URL (redis://user:pass@host:6379/0) into Host fills the whole
   // form. Paste-only on purpose: expanding on change would fire on intermediate keystrokes
   // while someone types a URL by hand and scatter fragments across the fields.
@@ -179,7 +187,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   };
 
   const handleTestConnection = async () => {
-    if (isCloudMode && isLocalhostHost(formData.host)) {
+    if (cloudLoopbackBlocked) {
       setTestResult({ success: false, message: 'localhost is not reachable from the cloud. Please provide a publicly accessible host.' });
       return;
     }
@@ -218,7 +226,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       setTestResult({ success: false, message: 'Name and host are required' });
       return;
     }
-    if (isCloudMode && isLocalhostHost(formData.host)) {
+    if (cloudLoopbackBlocked) {
       setTestResult({ success: false, message: 'localhost is not reachable from the cloud. Please provide a publicly accessible host.' });
       return;
     }
@@ -461,10 +469,10 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                       onPaste={handleHostPaste}
                       placeholder={isCloudMode ? 'your-redis-host.example.com' : 'localhost'}
                       className={`w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary ${
-                        isCloudMode && isLocalhostHost(formData.host) ? 'border-amber-500 focus:ring-amber-500' : ''
+                        cloudLoopbackBlocked ? 'border-amber-500 focus:ring-amber-500' : ''
                       }`}
                     />
-                    {isCloudMode && isLocalhostHost(formData.host) && (
+                    {cloudLoopbackBlocked && (
                       <div className="mt-1.5 text-xs text-amber-600 dark:text-amber-500 leading-snug space-y-1">
                         <p><strong>localhost won't work on the cloud.</strong> Please provide a publicly accessible address.</p>
                         <a
@@ -486,7 +494,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                         </a>
                       </div>
                     )}
-                    {!(isCloudMode && isLocalhostHost(formData.host)) && (
+                    {!(cloudLoopbackBlocked) && (
                       <p className="mt-1 text-[11px] text-muted-foreground">
                         Tip: paste a full URL like rediss://user:pass@host:6379 to fill every field.
                       </p>
@@ -698,6 +706,20 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                           </div>
                         </>
                       )}
+
+                      <div>
+                        <label className="block text-xs font-medium mb-1">Host key fingerprint (optional)</label>
+                        <input
+                          type="text"
+                          value={formData.ssh.hostKeyFingerprint}
+                          onChange={(e) => handleSshChange('hostKeyFingerprint', e.target.value)}
+                          placeholder="SHA256:..."
+                          className="w-full px-3 py-2 border rounded-md bg-background font-mono text-xs focus:outline-none focus:ring-2 focus:ring-primary"
+                        />
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Pin the SSH server's key to prevent MITM. Get it with <code>ssh-keyscan -t ed25519 host | ssh-keygen -lf -</code>. Left blank, the server identity is not verified.
+                        </p>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -712,7 +734,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
               <div className="flex items-center justify-between pt-3 border-t bg-muted/30 -mx-4 -mb-4 px-4 py-3 rounded-b-xl">
                 <button
                   onClick={handleTestConnection}
-                  disabled={testing || !formData.host || (isCloudMode && isLocalhostHost(formData.host))}
+                  disabled={testing || !formData.host || (cloudLoopbackBlocked)}
                   className="px-4 py-2 text-sm border rounded-md hover:bg-muted disabled:opacity-50"
                 >
                   {testing ? 'Testing...' : 'Test Connection'}
@@ -730,7 +752,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                   </button>
                   <button
                     onClick={handleSaveConnection}
-                    disabled={saving || !formData.name || !formData.host || (isCloudMode && isLocalhostHost(formData.host))}
+                    disabled={saving || !formData.name || !formData.host || (cloudLoopbackBlocked)}
                     className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50"
                   >
                     {saving ? 'Saving...' : 'Save'}

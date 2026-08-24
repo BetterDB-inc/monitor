@@ -3,6 +3,7 @@ import { Client } from 'ssh2';
 import * as net from 'net';
 import * as fs from 'fs';
 import * as path from 'path';
+import { createHash } from 'crypto';
 import type { SshAuthMethod, SshKeySource } from '@betterdb/shared';
 
 /**
@@ -30,6 +31,8 @@ export interface SshTunnelParams {
   /** Server-side key path (option B) when `keySource === 'file'`. */
   privateKeyPath?: string;
   passphrase?: string;
+  /** Pinned SHA256 fingerprint of the SSH server host key, if any. */
+  hostKeyFingerprint?: string;
   /** Final destination reachable from the SSH server. */
   remoteHost: string;
   remotePort: number;
@@ -39,6 +42,25 @@ interface TunnelInfo {
   client: Client;
   server: net.Server;
   localPort: number;
+  /** Live forwarded sockets, destroyed on teardown so server.close() settles. */
+  sockets: Set<net.Socket>;
+}
+
+/**
+ * Whether an SSH host key matches a pinned SHA256 fingerprint. Accepts the
+ * OpenSSH `SHA256:<base64>` form (case-sensitive, padding optional) or a hex
+ * digest (case-insensitive, separators like colons ignored).
+ */
+export function hostKeyMatchesFingerprint(key: Buffer, pin: string): boolean {
+  const sha = createHash('sha256').update(key).digest();
+  const base64 = sha.toString('base64').replace(/=+$/, '');
+  const hex = sha.toString('hex');
+
+  const pinNoPrefix = pin.trim().replace(/^sha256:/i, '');
+  if (pinNoPrefix.replace(/=+$/, '') === base64) return true;
+
+  const pinHex = pinNoPrefix.replace(/[^a-f0-9]/gi, '').toLowerCase();
+  return pinHex.length > 0 && pinHex === hex;
 }
 
 /**
@@ -128,6 +150,7 @@ export class SshTunnelService implements OnModuleDestroy {
       params.authMethod === 'privateKey' ? this.resolvePrivateKey(params) : undefined;
 
     const sshClient = new Client();
+    let hostKeyRejected = false;
 
     await new Promise<void>((resolve, reject) => {
       sshClient.on('ready', () => {
@@ -135,7 +158,13 @@ export class SshTunnelService implements OnModuleDestroy {
         resolve();
       });
       sshClient.on('error', (err: Error & { level?: string }) => {
-        if (err.level === 'client-authentication') {
+        if (hostKeyRejected) {
+          reject(
+            new Error(
+              `SSH host-key verification failed for ${params.sshHost}:${params.sshPort} — the server key does not match the pinned fingerprint`,
+            ),
+          );
+        } else if (err.level === 'client-authentication') {
           reject(
             new Error(
               `SSH authentication failed for ${params.sshUsername}@${params.sshHost}:${params.sshPort} — check your credentials`,
@@ -154,6 +183,14 @@ export class SshTunnelService implements OnModuleDestroy {
         }
       });
 
+      const pinnedFingerprint = params.hostKeyFingerprint?.trim();
+      if (!pinnedFingerprint) {
+        this.logger.warn(
+          `[${connectionId}] No SSH host-key fingerprint pinned for ${params.sshHost}:${params.sshPort}; ` +
+            'the server identity is not verified (set hostKeyFingerprint to prevent MITM).',
+        );
+      }
+
       sshClient.connect({
         host: params.sshHost,
         port: params.sshPort,
@@ -161,6 +198,19 @@ export class SshTunnelService implements OnModuleDestroy {
         password: params.authMethod === 'password' ? params.password : undefined,
         privateKey: params.authMethod === 'privateKey' ? privateKey : undefined,
         passphrase: params.authMethod === 'privateKey' ? params.passphrase : undefined,
+        // When a fingerprint is pinned, reject any server whose host key does
+        // not match. Without a pin we accept the key (and warned above).
+        hostVerifier: (key: Buffer) => {
+          if (!pinnedFingerprint) return true;
+          const ok = hostKeyMatchesFingerprint(key, pinnedFingerprint);
+          if (!ok) {
+            hostKeyRejected = true;
+            this.logger.error(
+              `[${connectionId}] SSH host-key verification failed for ${params.sshHost}:${params.sshPort}`,
+            );
+          }
+          return ok;
+        },
       });
     });
 
@@ -182,7 +232,10 @@ export class SshTunnelService implements OnModuleDestroy {
         });
       });
 
+      const sockets = new Set<net.Socket>();
       const server = net.createServer((socket) => {
+        sockets.add(socket);
+        socket.on('close', () => sockets.delete(socket));
         sshClient.forwardOut(
           '127.0.0.1',
           0,
@@ -218,19 +271,24 @@ export class SshTunnelService implements OnModuleDestroy {
         });
       });
 
-      // Tear the local listener down if the SSH connection drops.
+      const info: TunnelInfo = { client: sshClient, server, localPort, sockets };
+
+      // Tear the local listener down if the SSH connection drops. Compare
+      // identity so a stale handler from a replaced tunnel never closes the
+      // tunnel that superseded it under the same id.
       sshClient.on('error', () => {
-        this.closeTunnel(connectionId).catch(() => {});
-      });
-      sshClient.on('close', () => {
-        const tunnel = this.tunnels.get(connectionId);
-        if (tunnel) {
-          tunnel.server.close();
-          this.tunnels.delete(connectionId);
+        if (this.tunnels.get(connectionId) === info) {
+          this.closeTunnel(connectionId).catch(() => {});
         }
       });
+      sshClient.on('close', () => {
+        if (this.tunnels.get(connectionId) === info) {
+          this.tunnels.delete(connectionId);
+        }
+        server.close();
+      });
 
-      this.tunnels.set(connectionId, { client: sshClient, server, localPort });
+      this.tunnels.set(connectionId, info);
       this.logger.log(`[${connectionId}] SSH tunnel listening on 127.0.0.1:${localPort}`);
       return localPort;
     } catch (err) {
@@ -245,6 +303,13 @@ export class SshTunnelService implements OnModuleDestroy {
       return;
     }
     this.tunnels.delete(connectionId);
+    // Destroy live forwarded sockets first: net.Server.close() only invokes its
+    // callback once every open connection has ended, so a still-connected
+    // database client would otherwise hang teardown (and onModuleDestroy).
+    for (const socket of tunnel.sockets) {
+      socket.destroy();
+    }
+    tunnel.sockets.clear();
     await new Promise<void>((resolve) => {
       tunnel.server.close(() => resolve());
     });

@@ -1,10 +1,25 @@
 import { EventEmitter } from 'events';
-import { SshTunnelService, SSH_KEY_DIR_ENV } from '../ssh-tunnel.service';
+import { createHash } from 'crypto';
+import {
+  SshTunnelService,
+  SSH_KEY_DIR_ENV,
+  hostKeyMatchesFingerprint,
+} from '../ssh-tunnel.service';
 
 // --- ssh2 mock -------------------------------------------------------------
 
+const FAKE_HOST_KEY = Buffer.from('FAKE-HOST-KEY');
+
 class MockSshClient extends EventEmitter {
-  connect = jest.fn(() => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  connect = jest.fn((opts?: any) => {
+    // Mimic ssh2 invoking the host verifier during the handshake.
+    if (opts && typeof opts.hostVerifier === 'function') {
+      if (!opts.hostVerifier(FAKE_HOST_KEY)) {
+        setImmediate(() => this.emit('error', new Error('handshake failed')));
+        return;
+      }
+    }
     // Emit ready asynchronously to mimic a successful handshake.
     setImmediate(() => this.emit('ready'));
   });
@@ -33,11 +48,15 @@ jest.mock('ssh2', () => ({
 
 // --- net mock: server binds an ephemeral port ------------------------------
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let lastServer: any;
 jest.mock('net', () => {
   const actual = jest.requireActual('events');
   return {
-    createServer: jest.fn(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    createServer: jest.fn((connectionHandler: (socket: any) => void) => {
       const server = new actual.EventEmitter();
+      server.connectionHandler = connectionHandler;
       server.listen = jest.fn((_port: number, _host: string, cb: () => void) => {
         setImmediate(cb);
       });
@@ -45,6 +64,7 @@ jest.mock('net', () => {
       server.close = jest.fn((cb?: () => void) => {
         if (cb) cb();
       });
+      lastServer = server;
       return server;
     }),
   };
@@ -172,5 +192,80 @@ describe('SshTunnelService', () => {
 
   it('closeTunnel is a no-op for an unknown id', async () => {
     await expect(service.closeTunnel('nope')).resolves.toBeUndefined();
+  });
+
+  it('accepts the server when the pinned host-key fingerprint matches', async () => {
+    const fingerprint =
+      'SHA256:' + createHash('sha256').update(FAKE_HOST_KEY).digest('base64').replace(/=+$/, '');
+    const port = await service.createTunnel('c7', {
+      sshHost: 'bastion',
+      sshPort: 22,
+      sshUsername: 'user',
+      authMethod: 'password',
+      password: 'secret',
+      hostKeyFingerprint: fingerprint,
+      remoteHost: 'db.internal',
+      remotePort: 6379,
+    });
+    expect(port).toBe(54321);
+  });
+
+  it('rejects the server when the pinned host-key fingerprint does not match', async () => {
+    await expect(
+      service.createTunnel('c8', {
+        sshHost: 'bastion',
+        sshPort: 22,
+        sshUsername: 'user',
+        authMethod: 'password',
+        password: 'secret',
+        hostKeyFingerprint: 'SHA256:definitelywrongfingerprint',
+        remoteHost: 'db.internal',
+        remotePort: 6379,
+      }),
+    ).rejects.toThrow(/host-key verification failed/);
+    expect(service.hasTunnel('c8')).toBe(false);
+  });
+
+  it('destroys live forwarded sockets on closeTunnel so server.close settles', async () => {
+    await service.createTunnel('c9', {
+      sshHost: 'bastion',
+      sshPort: 22,
+      sshUsername: 'user',
+      authMethod: 'password',
+      password: 'secret',
+      remoteHost: 'db.internal',
+      remotePort: 6379,
+    });
+
+    // Simulate an accepted client socket flowing through the tunnel.
+    const socket = new EventEmitter() as EventEmitter & { destroy: jest.Mock; pipe: jest.Mock };
+    socket.destroy = jest.fn();
+    socket.pipe = jest.fn();
+    lastServer.connectionHandler(socket);
+
+    await service.closeTunnel('c9');
+    expect(socket.destroy).toHaveBeenCalled();
+    expect(lastServer.close).toHaveBeenCalled();
+  });
+});
+
+describe('hostKeyMatchesFingerprint', () => {
+  const key = Buffer.from('some-host-key-bytes');
+  const sha = createHash('sha256').update(key).digest();
+
+  it('matches an OpenSSH SHA256:<base64> fingerprint (padding optional)', () => {
+    const b64 = sha.toString('base64').replace(/=+$/, '');
+    expect(hostKeyMatchesFingerprint(key, `SHA256:${b64}`)).toBe(true);
+    expect(hostKeyMatchesFingerprint(key, b64)).toBe(true);
+  });
+
+  it('matches a hex fingerprint case-insensitively, ignoring colons', () => {
+    const hex = sha.toString('hex');
+    const colonized = hex.match(/../g)!.join(':').toUpperCase();
+    expect(hostKeyMatchesFingerprint(key, colonized)).toBe(true);
+  });
+
+  it('rejects a non-matching fingerprint', () => {
+    expect(hostKeyMatchesFingerprint(key, 'SHA256:AAAA')).toBe(false);
   });
 });

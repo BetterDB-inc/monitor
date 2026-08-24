@@ -8,7 +8,7 @@ import { SshTunnelService } from '../../database/ssh/ssh-tunnel.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../../common/interfaces/database-port.interface';
 import { DatabaseConnectionConfig } from '@betterdb/shared';
-import { resetEncryptionService } from '../../common/utils/encryption';
+import { resetEncryptionService, EnvelopeEncryptionService } from '../../common/utils/encryption';
 
 // Mock UnifiedDatabaseAdapter
 jest.mock('../../database/adapters/unified.adapter', () => ({
@@ -627,6 +627,41 @@ describe('ConnectionRegistry with encryption', () => {
 
     expect(savedConfig.password).not.toBe('new-secret-password');
     expect(savedConfig.passwordEncrypted).toBe(true);
+  });
+
+  it('encrypts SSH tunnel secrets and ignores a client-supplied secretsEncrypted flag', async () => {
+    mockStorage.getConnections.mockResolvedValue([]);
+    await registry.onModuleInit();
+
+    await registry.addConnection({
+      name: 'Tunneled',
+      host: 'db.internal',
+      port: 6379,
+      // A malicious client tries to mark plaintext secrets as already-encrypted
+      // to skip envelope encryption. secretsEncrypted must be ignored on input.
+      sshTunnel: {
+        enabled: true,
+        host: 'bastion',
+        port: 22,
+        username: 'ec2-user',
+        authMethod: 'privateKey',
+        keySource: 'inline',
+        privateKey: 'PLAINTEXT-KEY',
+        passphrase: 'PLAINTEXT-PASS',
+        secretsEncrypted: true,
+      } as unknown as import('@betterdb/shared').SshTunnelInput,
+    });
+
+    const savedConfig = mockStorage.saveConnection.mock.calls[1][0];
+    const tunnel = savedConfig.sshTunnel!;
+    expect(tunnel.secretsEncrypted).toBe(true);
+    // Secrets must be ciphertext, not the submitted plaintext.
+    expect(tunnel.privateKey).toBeDefined();
+    expect(tunnel.privateKey).not.toBe('PLAINTEXT-KEY');
+    expect(tunnel.passphrase).not.toBe('PLAINTEXT-PASS');
+    // And they must be recoverable (valid envelope).
+    const enc = new EnvelopeEncryptionService('test-encryption-key-for-tests');
+    expect(enc.decrypt(tunnel.privateKey!)).toBe('PLAINTEXT-KEY');
   });
 
   it('should decrypt password when loading saved connections', async () => {

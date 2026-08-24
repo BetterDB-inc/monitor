@@ -282,6 +282,20 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Strip server-managed fields from a caller-supplied SSH tunnel. In
+   * particular `secretsEncrypted` must never be trusted from input, or a client
+   * could submit plaintext secrets flagged as already-encrypted and bypass
+   * encryption at rest.
+   */
+  private sanitizeSshTunnelInput(
+    tunnel: DatabaseConnectionConfig['sshTunnel'],
+  ): DatabaseConnectionConfig['sshTunnel'] {
+    if (!tunnel) return tunnel;
+    const { secretsEncrypted: _ignored, ...rest } = tunnel;
+    return { ...rest, secretsEncrypted: false };
+  }
+
+  /**
    * Encrypt the secret fields of an SSH tunnel config for storage. `privateKeyPath`
    * is a filesystem path, not a secret, and is left as-is.
    */
@@ -437,7 +451,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       password: request.password,
       dbIndex: request.dbIndex,
       tls: request.tls,
-      sshTunnel: request.sshTunnel,
+      sshTunnel: this.sanitizeSshTunnelInput(request.sshTunnel),
       isDefault: false, // Will be set via setDefault() if requested
       createdAt: now,
       updatedAt: now,
@@ -506,8 +520,13 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
     const removedConfig = this.configs.get(id);
     const connection = this.connections.get(id);
-    if (connection && connection.isConnected()) {
-      await connection.disconnect();
+    if (connection) {
+      // Always disconnect, even if isConnected() is false: an SSH tunnel can be
+      // up while the Valkey client is down, and only disconnect() tears the
+      // tunnel down. disconnect() tolerates an already-closed client.
+      await connection.disconnect().catch((err) => {
+        this.logger.warn(`Failed to disconnect ${id} during removal: ${err instanceof Error ? err.message : err}`);
+      });
     }
 
     this.connections.delete(id);
@@ -577,7 +596,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       tls: request.tls,
       // Unique id so a test tunnel never collides with a live connection's tunnel.
       connectionId: `test:${randomUUID()}`,
-      sshTunnel: request.sshTunnel,
+      sshTunnel: this.sanitizeSshTunnelInput(request.sshTunnel),
       sshTunnelService: request.sshTunnel?.enabled ? this.sshTunnelService : undefined,
     });
 
@@ -660,6 +679,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
               username: config.sshTunnel.username,
               authMethod: config.sshTunnel.authMethod,
               keySource: config.sshTunnel.keySource,
+              hostKeyPinned: !!config.sshTunnel.hostKeyFingerprint,
             }
           : undefined,
         isDefault: config.isDefault,
@@ -711,9 +731,12 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     try {
       await newAdapter.connect();
 
-      // Only disconnect old adapter after new one successfully connects
+      // Only disconnect old adapter after new one successfully connects.
+      // Disconnect unconditionally (not just when isConnected): the old adapter
+      // may still hold an open SSH tunnel even with a down client, and the new
+      // adapter uses its own tunnel key so this cannot affect it.
       const oldAdapter = this.connections.get(id);
-      if (oldAdapter && oldAdapter.isConnected()) {
+      if (oldAdapter) {
         await oldAdapter.disconnect().catch((err) => {
           this.logger.warn(`Failed to disconnect old adapter for ${id}: ${err instanceof Error ? err.message : err}`);
         });

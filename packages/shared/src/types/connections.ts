@@ -49,9 +49,25 @@ export interface SshTunnelConfig {
   privateKeyPath?: string;
   /** Optional passphrase protecting the private key (secret). */
   passphrase?: string;
-  /** Whether the secret fields above are currently encrypted at rest. */
+  /**
+   * Optional pinned SSH server host-key fingerprint. When set, the connection
+   * is rejected unless the server presents a key whose SHA256 fingerprint
+   * matches. Accepts a `SHA256:<base64>` string or the raw base64/hex digest.
+   */
+  hostKeyFingerprint?: string;
+  /**
+   * Whether the secret fields above are currently encrypted at rest.
+   * Server-managed only — never accepted from API input (see `SshTunnelInput`).
+   */
   secretsEncrypted?: boolean;
 }
+
+/**
+ * SSH tunnel shape accepted from API requests. Excludes `secretsEncrypted`,
+ * which is set server-side after encryption; a client must never be able to
+ * assert that plaintext secrets are already encrypted.
+ */
+export type SshTunnelInput = Omit<SshTunnelConfig, 'secretsEncrypted'>;
 
 /**
  * Connection configuration for storing database connections
@@ -118,6 +134,8 @@ export interface SshTunnelStatus {
   username: string;
   authMethod: SshAuthMethod;
   keySource?: SshKeySource;
+  /** Whether a host-key fingerprint is pinned for this tunnel. */
+  hostKeyPinned?: boolean;
 }
 
 /**
@@ -158,7 +176,7 @@ export interface CreateConnectionRequest {
   dbIndex?: number;
   tls?: boolean;
   /** Optional SSH tunnel used to reach the database. */
-  sshTunnel?: SshTunnelConfig;
+  sshTunnel?: SshTunnelInput;
   setAsDefault?: boolean;
 }
 

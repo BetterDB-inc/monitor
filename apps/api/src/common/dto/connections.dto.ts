@@ -10,15 +10,18 @@ import type {
   ConnectionListResponse,
   CurrentConnectionResponse,
   AllConnectionsHealthResponse,
-  SshTunnelConfig,
+  SshTunnelInput,
   SshAuthMethod,
   SshKeySource,
 } from '@betterdb/shared';
 
 /**
  * DTO for an SSH tunnel used to reach the database.
+ *
+ * Implements `SshTunnelInput` (not `SshTunnelConfig`) so `secretsEncrypted` can
+ * never be asserted by a caller — it is set server-side only after encryption.
  */
-export class SshTunnelDto implements SshTunnelConfig {
+export class SshTunnelDto implements SshTunnelInput {
   @ApiProperty({ description: 'Whether the SSH tunnel is enabled', example: true })
   @IsBoolean()
   enabled: boolean;
@@ -68,10 +71,10 @@ export class SshTunnelDto implements SshTunnelConfig {
   @IsString()
   passphrase?: string;
 
-  @ApiPropertyOptional({ description: 'Internal: whether secrets are encrypted at rest' })
+  @ApiPropertyOptional({ description: 'Pinned SSH host-key fingerprint (SHA256:<base64>) to verify the server against' })
   @IsOptional()
-  @IsBoolean()
-  secretsEncrypted?: boolean;
+  @IsString()
+  hostKeyFingerprint?: string;
 }
 
 /**

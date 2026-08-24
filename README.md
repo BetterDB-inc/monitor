@@ -225,8 +225,10 @@ Connections can reach a database through an SSH bastion/jump host instead of con
 
 Authentication is either a password or a private key. Private keys come from one of two sources:
 
-- **Paste key** (inline): the PEM key content is submitted with the connection and stored encrypted at rest (envelope encryption via `ENCRYPTION_KEY`). Works everywhere, including managed/cloud deployments.
-- **Server file path**: the key already lives on the monitor server's filesystem and is referenced by path. This requires setting the `BETTERDB_SSH_KEY_DIR` environment variable to the directory holding the allowed keys — the referenced path must resolve inside it, so the API can never be coerced into reading arbitrary files. Leave `BETTERDB_SSH_KEY_DIR` unset to disable this option.
+- **Paste key** (inline): the PEM key content is submitted with the connection. It is stored encrypted at rest **only when `ENCRYPTION_KEY` is set** (envelope encryption); without that key it is stored in plaintext, like connection passwords. Works everywhere, including managed/cloud deployments.
+- **Server file path**: the key already lives on the monitor server's filesystem and is referenced by path. This requires setting the `BETTERDB_SSH_KEY_DIR` environment variable to the directory holding the allowed keys, and the referenced path must resolve inside it, so the API can never be coerced into reading arbitrary files. Leave `BETTERDB_SSH_KEY_DIR` unset to disable this option.
+
+Optionally pin the SSH server's **host key fingerprint** (`SHA256:...`) on the connection; when set, the tunnel is refused unless the server presents a matching key, preventing man-in-the-middle attacks on the bastion path. Left blank, the server identity is not verified (a warning is logged).
 
 The tunnel forwards to the database over `127.0.0.1`; when TLS is enabled the certificate is still validated against the real database hostname. Set `ENCRYPTION_KEY` so SSH passwords, key passphrases, and inline keys are encrypted at rest.
 

@@ -1,4 +1,5 @@
 import Valkey from 'iovalkey';
+import { randomUUID } from 'crypto';
 import { Logger } from '@nestjs/common';
 import {
   DatabasePort,
@@ -80,6 +81,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   private readonly config: UnifiedDatabaseAdapterConfig;
   private cliClient: Valkey | null = null;
   private readonly connectionId: string;
+  // Unique per adapter instance so two adapters sharing a connectionId (e.g.
+  // the old and new adapter during reconnect) never collide on the same tunnel.
+  private readonly tunnelKey: string;
   private readonly usesTunnel: boolean;
   private tunnelActive: boolean = false;
   // Host/port the Valkey clients actually dial. Rewritten to 127.0.0.1:<localPort>
@@ -130,6 +134,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   constructor(config: UnifiedDatabaseAdapterConfig) {
     this.config = config;
     this.connectionId = config.connectionId ?? `conn:${config.host}:${config.port}`;
+    this.tunnelKey = `${this.connectionId}:${randomUUID()}`;
     this.usesTunnel = !!config.sshTunnel?.enabled;
     this.connectHost = config.host;
     this.connectPort = config.port;
@@ -149,7 +154,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   private async establishTunnel(): Promise<void> {
     const tunnel = this.config.sshTunnel!;
     const service = this.config.sshTunnelService!;
-    const localPort = await service.createTunnel(this.connectionId, {
+    const localPort = await service.createTunnel(this.tunnelKey, {
       sshHost: tunnel.host,
       sshPort: tunnel.port,
       sshUsername: tunnel.username,
@@ -159,6 +164,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       privateKey: tunnel.privateKey,
       privateKeyPath: tunnel.privateKeyPath,
       passphrase: tunnel.passphrase,
+      hostKeyFingerprint: tunnel.hostKeyFingerprint,
       remoteHost: this.config.host,
       remotePort: this.config.port,
     });
@@ -169,8 +175,17 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
   private async teardownTunnel(): Promise<void> {
     if (this.tunnelActive && this.config.sshTunnelService) {
-      await this.config.sshTunnelService.closeTunnel(this.connectionId).catch(() => {});
+      await this.config.sshTunnelService.closeTunnel(this.tunnelKey).catch(() => {});
       this.tunnelActive = false;
+      // The current client's options still point at the now-closed local port,
+      // so it must be rebuilt (against a freshly established tunnel) before the
+      // next connect(). Discard it and restore the pre-tunnel target.
+      if (this.client) {
+        this.client.disconnect();
+        this.client = undefined as unknown as Valkey;
+      }
+      this.connectHost = this.config.host;
+      this.connectPort = this.config.port;
     }
   }
 
@@ -202,7 +217,12 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       this.cliClient = null;
     }
     if (this.client) {
-      await this.client.quit();
+      // iovalkey rejects quit() when the client is already closed / never
+      // connected. Swallow it (falling back to a hard disconnect) so a failed
+      // quit can never skip the tunnel teardown below and leak the SSH session.
+      await this.client.quit().catch(() => {
+        this.client?.disconnect();
+      });
     }
     await this.teardownTunnel();
     this.connected = false;
