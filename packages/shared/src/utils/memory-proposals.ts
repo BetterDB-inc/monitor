@@ -136,19 +136,35 @@ export const ListMemoryProposalsOptionsSchema = z.object({
 });
 export type ListMemoryProposalsOptions = z.infer<typeof ListMemoryProposalsOptionsSchema>;
 
-export const UpdateMemoryProposalStatusInputSchema = z.object({
-  id: z.string(),
-  expected_status: z
-    .union([MemoryProposalStatusSchema, z.array(MemoryProposalStatusSchema)])
-    .optional(),
-  status: MemoryProposalStatusSchema,
-  reviewed_by: z.string().nullish(),
-  reviewed_at: z.number().nullish(),
-  applying_at: z.number().nullish(),
-  applied_at: z.number().nullish(),
-  applied_result: AppliedResultSchema.nullish(),
-  proposal_payload: MemoryForgetPayloadSchema.optional(),
-});
+export const UpdateMemoryProposalStatusInputSchema = z
+  .object({
+    id: z.string(),
+    expected_status: z
+      .union([MemoryProposalStatusSchema, z.array(MemoryProposalStatusSchema)])
+      .optional(),
+    status: MemoryProposalStatusSchema,
+    reviewed_by: z.string().nullish(),
+    reviewed_at: z.number().nullish(),
+    applying_at: z.number().nullish(),
+    applied_at: z.number().nullish(),
+    applied_result: AppliedResultSchema.nullish(),
+    proposal_payload: MemoryForgetPayloadSchema.optional(),
+  })
+  // An `applying` row with no claim time is invisible to the stale sweep, which
+  // selects on `applying_at`, so it would sit in-flight forever. The apply path
+  // stamps it; this stops any future writer from reintroducing the stuck state.
+  .refine(
+    (input) => {
+      if (input.status !== 'applying') {
+        return true;
+      }
+      return typeof input.applying_at === 'number';
+    },
+    {
+      message: 'applying_at is required when moving a proposal to applying',
+      path: ['applying_at'],
+    },
+  );
 export type UpdateMemoryProposalStatusInput = z.infer<typeof UpdateMemoryProposalStatusInputSchema>;
 
 export const AppendMemoryProposalAuditInputSchema = z.object({

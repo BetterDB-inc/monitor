@@ -87,11 +87,14 @@ export class MemoryProposalService {
     try {
       proposal = await this.storage.createMemoryProposal(createInput);
     } catch (err) {
-      if (isUniqueViolation(err)) {
-        throw new DuplicatePendingMemoryProposalError({ store_name: input.storeName });
-      }
+      // Released on every exit, the duplicate included: the loser of the index
+      // race created nothing, so holding its slot would burn budget for an hour
+      // against a proposal that does not exist.
       if (reservation.releaseToken !== undefined) {
         this.rateLimiter.release(connectionId, reservation.releaseToken);
+      }
+      if (isUniqueViolation(err)) {
+        throw new DuplicatePendingMemoryProposalError({ store_name: input.storeName });
       }
       throw err;
     }
@@ -181,7 +184,10 @@ export class MemoryProposalService {
         appliedResult: approved.applied_result ?? { success: false, error: 'apply unavailable' },
       };
     }
-    return this.applyService.apply(approved, { actor: input.actor, actorSource: input.actorSource });
+    return this.applyService.apply(approved, {
+      actor: input.actor,
+      actorSource: input.actorSource,
+    });
   }
 
   async reject(input: {

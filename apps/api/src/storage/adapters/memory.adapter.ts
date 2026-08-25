@@ -1726,13 +1726,19 @@ export class MemoryAdapter implements StoragePort {
   }
 
   async createMemoryProposal(input: CreateMemoryProposalInput): Promise<StoredMemoryProposal> {
-    const discriminator = memoryForgetTargetDiscriminator(input.proposal_payload);
+    const discriminator =
+      input.target_discriminator ?? memoryForgetTargetDiscriminator(input.proposal_payload);
     for (const existing of this.memoryProposals.values()) {
+      // Matched on the stored column, not re-derived from the payload, so this
+      // stays equivalent to the partial unique index even when an explicit
+      // discriminator is supplied. Null is outside that index, so it never
+      // collides here either.
       if (
         existing.status === 'pending' &&
         existing.connection_id === input.connection_id &&
         existing.store_name === input.store_name &&
-        memoryForgetTargetDiscriminator(existing.proposal_payload) === discriminator
+        existing.target_discriminator !== null &&
+        existing.target_discriminator === discriminator
       ) {
         throw new Error(
           `UNIQUE constraint failed: memory_proposals (connection_id, store_name, target) where status='pending'`,
@@ -1753,7 +1759,7 @@ export class MemoryAdapter implements StoragePort {
       applied_at: null,
       applied_result: null,
       expires_at: expiresAt,
-      target_discriminator: input.target_discriminator ?? discriminator,
+      target_discriminator: discriminator,
     });
     this.memoryProposals.set(proposal.id, proposal);
     return structuredClone(proposal);
@@ -1896,7 +1902,7 @@ export class MemoryAdapter implements StoragePort {
         proposal.status === 'pending' &&
         proposal.connection_id === input.connection_id &&
         proposal.store_name === input.store_name &&
-        memoryForgetTargetDiscriminator(proposal.proposal_payload) === input.target_discriminator
+        proposal.target_discriminator === input.target_discriminator
       ) {
         count++;
       }

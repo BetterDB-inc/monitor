@@ -186,4 +186,43 @@ describe('memory_proposals upgrade from a pre-#276 database', () => {
       'p1',
     ]);
   });
+  it('finishes a backfill that a crash left half-done', async () => {
+    // Every statement in the migration auto-commits, so a crash partway through
+    // the backfill leaves the column present and the rest of the rows NULL. The
+    // second startup sees the column and used to skip the backfill entirely,
+    // stranding those rows outside the partial index and unguarded forever.
+    seedLegacy(
+      `INSERT INTO memory_proposals VALUES
+        ('p1','c1','s1','forget','{"target_kind":"id","memory_id":"m1"}',NULL,'pending',NULL,1,NULL,NULL,NULL,NULL,${FAR_FUTURE}),
+        ('p2','c1','s1','forget','{"target_kind":"id","memory_id":"m2"}',NULL,'pending',NULL,1,NULL,NULL,NULL,NULL,${FAR_FUTURE});`,
+    );
+
+    const crashed = new Database(dbPath);
+    crashed.exec('ALTER TABLE memory_proposals ADD COLUMN applying_at INTEGER');
+    crashed.exec('ALTER TABLE memory_proposals ADD COLUMN target_discriminator TEXT');
+    crashed
+      .prepare("UPDATE memory_proposals SET target_discriminator = ? WHERE id = 'p1'")
+      .run(memoryForgetTargetDiscriminator({ target_kind: 'id', memory_id: 'm1' }));
+    crashed.close();
+
+    adapter = new SqliteAdapter({ filepath: dbPath });
+    await adapter.initialize();
+
+    const stranded = await adapter.getMemoryProposal('p2');
+    expect(stranded?.target_discriminator).toBe(
+      memoryForgetTargetDiscriminator({ target_kind: 'id', memory_id: 'm2' }),
+    );
+
+    // And being keyed, it is now actually guarded.
+    await expect(
+      adapter.countPendingMemoryProposalsByTarget({
+        connection_id: 'c1',
+        store_name: 's1',
+        target_discriminator: memoryForgetTargetDiscriminator({
+          target_kind: 'id',
+          memory_id: 'm2',
+        }),
+      }),
+    ).resolves.toBe(1);
+  });
 });

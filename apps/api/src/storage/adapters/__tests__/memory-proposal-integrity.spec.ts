@@ -2,7 +2,10 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
-import { memoryForgetTargetDiscriminator } from '@betterdb/shared';
+import {
+  memoryForgetTargetDiscriminator,
+  UpdateMemoryProposalStatusInputSchema,
+} from '@betterdb/shared';
 import type { MemoryForgetPayload, StoredMemoryProposal } from '@betterdb/shared';
 import { MemoryAdapter } from '../memory.adapter';
 import { SqliteAdapter } from '../sqlite.adapter';
@@ -220,5 +223,35 @@ describe.each<[string, () => Promise<StoragePort>]>([
 
       expect(expired.map((p) => p.id)).toEqual([created.id]);
     });
+  });
+});
+
+describe('UpdateMemoryProposalStatusInputSchema', () => {
+  it('rejects a move to applying with no claim time', () => {
+    const parsed = UpdateMemoryProposalStatusInputSchema.safeParse({
+      id: 'p-1',
+      status: 'applying',
+    });
+
+    expect(parsed.success).toBe(false);
+  });
+
+  it('accepts a move to applying that stamps the claim time', () => {
+    const parsed = UpdateMemoryProposalStatusInputSchema.safeParse({
+      id: 'p-1',
+      status: 'applying',
+      applying_at: 1_000,
+    });
+
+    expect(parsed.success).toBe(true);
+  });
+
+  it('leaves the other transitions unconstrained', () => {
+    const parsed = UpdateMemoryProposalStatusInputSchema.safeParse({
+      id: 'p-1',
+      status: 'approved',
+    });
+
+    expect(parsed.success).toBe(true);
   });
 });

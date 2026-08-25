@@ -1,14 +1,8 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { MemoryProposalService } from './memory-proposal.service';
+import { STALE_APPLY_AFTER_MS } from './apply-timing';
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
-
-/**
- * How long an `applying` row may sit before it is presumed dead. Well above any
- * realistic forget: the cost of sweeping too early is marking live work as
- * failed, while the cost of sweeping late is only that a stuck row lingers.
- */
-const STALE_APPLY_AFTER_MS = 15 * 60 * 1000;
 
 @Injectable()
 export class MemoryExpirationCron implements OnModuleInit, OnModuleDestroy {

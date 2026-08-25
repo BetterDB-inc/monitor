@@ -157,10 +157,13 @@ function addMemoryProposalIntegrityColumns(db: Database.Database): void {
          WHERE status = 'pending' AND target_discriminator IS NOT NULL`,
     ).run();
 
-    if (hadDiscriminator) {
-      return;
-    }
-
+    // Run unconditionally rather than only on the migrating startup. Each
+    // statement above auto-commits, so a crash partway through the backfill
+    // leaves the column present and the remaining rows NULL: gated on
+    // `hadDiscriminator` they would never be keyed, staying outside the partial
+    // index and unguarded forever. The select below is already the idempotent
+    // form, and matches nothing once the backfill has completed.
+    //
     // Backfill row by row, tolerating a unique violation rather than failing the
     // migration: a database that already holds duplicate pending rows for one
     // target — exactly what #276 describes — cannot have all of them keyed, so
