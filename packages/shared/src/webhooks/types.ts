@@ -342,6 +342,12 @@ export interface IWebhookEventsProService {
      * unchanged, so the consumer needs this to know what happened.
      */
     reasons?: string[];
+    /**
+     * Which nodes moved and how. Empty for a state-only or slot-failure
+     * trigger; a consumer paging on a clean failover needs it to know what
+     * actually changed.
+     */
+    changedNodes?: Array<{ nodeId: string; reason: string; from: string; to: string }>;
     slotsAssigned: number;
     slotsFailed: number;
     knownNodes: number;

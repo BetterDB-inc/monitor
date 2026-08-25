@@ -1211,14 +1211,17 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         // OTLP mirror is decoupled from the Pro webhook gate (the dispatcher
         // no-ops unless OTEL_* is set).
         try {
+          // Serialized, not passed raw: buildEventAttributes keeps scalars only,
+          // so an array lands as nothing at all and the event arrives saying
+          // `ok` with no reason — the exact gap `reasons` exists to close.
           this.otelEvents?.dispatch(
             WebhookEventType.CLUSTER_FAILOVER,
             {
               clusterState,
               slotsFailed: slotsFail,
               knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
-              reasons,
-              changedNodes,
+              reasons: reasons.join(','),
+              ...(changedNodes.length > 0 ? { changedNodes: JSON.stringify(changedNodes) } : {}),
             },
             connectionId,
           );
@@ -1232,6 +1235,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
               clusterState,
               previousState: state.previousClusterState ?? undefined,
               reasons,
+              changedNodes,
               slotsAssigned: parseInt(clusterInfo.cluster_slots_assigned) || 0,
               slotsFailed: slotsFail,
               knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,

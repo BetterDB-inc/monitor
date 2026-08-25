@@ -131,6 +131,12 @@ export class WebhookEventsProService implements OnModuleInit {
      * ok" and tells an operator nothing.
      */
     reasons?: string[];
+    /**
+     * Which nodes moved and how. Empty for a state-only or slot-failure
+     * trigger; a consumer paging on a clean failover needs it to know what
+     * actually changed.
+     */
+    changedNodes?: Array<{ nodeId: string; reason: string; from: string; to: string }>;
     slotsAssigned: number;
     slotsFailed: number;
     knownNodes: number;
@@ -152,6 +158,7 @@ export class WebhookEventsProService implements OnModuleInit {
         slotsFailed: data.slotsFailed,
         knownNodes: data.knownNodes,
         reasons: data.reasons,
+        changedNodes: data.changedNodes,
         message: clusterFailoverMessage(data),
         timestamp: data.timestamp,
         instance: data.instance,
