@@ -176,17 +176,21 @@ export const MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS = 24 * 60 * 60 * 1000;
  *
  * Absent and empty-string scope fields are deliberately the same thing — both
  * mean "not scoped by this dimension".
+ *
+ * Values are percent-encoded so a value cannot forge a separator: without it
+ * `tags: ['a', 'b']` and `tags: ['a,b']` produce the same key and one target
+ * silently blocks the other.
  */
 export function memoryForgetTargetDiscriminator(payload: MemoryForgetPayload): string {
   if (payload.target_kind === 'id') {
-    return `id:${payload.memory_id}`;
+    return `id:${encodeURIComponent(payload.memory_id)}`;
   }
   const scope = payload.scope ?? {};
   const scopeKey = (['agentId', 'namespace', 'threadId'] as const)
     .map((field) => {
-      return `${field}=${scope[field] ?? ''}`;
+      return `${field}=${encodeURIComponent(scope[field] ?? '')}`;
     })
     .join('&');
   const tags = Array.isArray(payload.tags) ? [...payload.tags].sort() : [];
-  return `scope:${scopeKey}|tags:${tags.join(',')}`;
+  return `scope:${scopeKey}|tags:${tags.map(encodeURIComponent).join(',')}`;
 }

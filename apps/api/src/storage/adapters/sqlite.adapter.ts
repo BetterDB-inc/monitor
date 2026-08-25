@@ -119,21 +119,57 @@ function addMemoryProposalIntegrityColumns(db: Database.Database): void {
     if (cols.length === 0) {
       return;
     }
+
+    // Columns first. The indexes below reference them, and on an existing
+    // database CREATE TABLE IF NOT EXISTS did not create anything — putting the
+    // index DDL in createSchema made initialize() throw `no such column`.
     if (!cols.some((c) => c.name === 'applying_at')) {
       db.prepare(`ALTER TABLE memory_proposals ADD COLUMN applying_at INTEGER`).run();
+      // Rows already sitting in `applying` were claimed by a process that no
+      // longer exists — an upgrade restarts it — so they are stuck by
+      // definition and must be sweepable. Without a claim time they would be
+      // skipped forever, which is precisely the state #277 exists to clear.
+      db.prepare(
+        `UPDATE memory_proposals
+         SET applying_at = COALESCE(reviewed_at, proposed_at)
+         WHERE status = 'applying' AND applying_at IS NULL`,
+      ).run();
     }
-    if (cols.some((c) => c.name === 'target_discriminator')) {
-      return;
+
+    const hadDiscriminator = cols.some((c) => c.name === 'target_discriminator');
+    if (!hadDiscriminator) {
+      db.prepare(`ALTER TABLE memory_proposals ADD COLUMN target_discriminator TEXT`).run();
     }
-    db.prepare(`ALTER TABLE memory_proposals ADD COLUMN target_discriminator TEXT`).run();
+
+    db.prepare(
+      `CREATE INDEX IF NOT EXISTS idx_memory_proposals_applying
+         ON memory_proposals(applying_at)
+         WHERE status = 'applying'`,
+    ).run();
+    // Closes the duplicate-pending race: the guard was list -> compare in JS ->
+    // insert, so two concurrent proposeForget calls for one target both passed
+    // the pre-check. Partial so a target can be proposed again once the
+    // previous one is approved, rejected or expired.
     db.prepare(
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_proposals_pending_target
          ON memory_proposals(connection_id, store_name, target_discriminator)
          WHERE status = 'pending' AND target_discriminator IS NOT NULL`,
     ).run();
 
+    if (hadDiscriminator) {
+      return;
+    }
+
+    // Backfill row by row, tolerating a unique violation rather than failing the
+    // migration: a database that already holds duplicate pending rows for one
+    // target — exactly what #276 describes — cannot have all of them keyed, so
+    // the first keeps the discriminator and the rest stay NULL, outside the
+    // partial index, and age out.
     const pending = db
-      .prepare(`SELECT id, proposal_payload FROM memory_proposals WHERE status = 'pending'`)
+      .prepare(
+        `SELECT id, proposal_payload FROM memory_proposals
+         WHERE status = 'pending' AND target_discriminator IS NULL`,
+      )
       .all() as { id: string; proposal_payload: string }[];
     const update = db.prepare(
       `UPDATE memory_proposals SET target_discriminator = ? WHERE id = ?`,
@@ -1626,16 +1662,7 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_memory_proposals_pending_lookup
         ON memory_proposals(connection_id, store_name)
         WHERE status = 'pending';
-      CREATE INDEX IF NOT EXISTS idx_memory_proposals_applying
-        ON memory_proposals(applying_at)
-        WHERE status = 'applying';
-      -- Closes the duplicate-pending race: the guard was list -> compare in JS
-      -- -> insert, so two concurrent proposeForget calls for one target both
-      -- passed the pre-check. Partial so a target can be proposed again once
-      -- the previous one is approved, rejected or expired.
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_proposals_pending_target
-        ON memory_proposals(connection_id, store_name, target_discriminator)
-        WHERE status = 'pending' AND target_discriminator IS NOT NULL;
+
 
       CREATE TABLE IF NOT EXISTS memory_proposal_audit (
         id TEXT PRIMARY KEY,

@@ -78,6 +78,26 @@ describe('memoryForgetTargetDiscriminator', () => {
     );
   });
 
+  it('does not collide a tag containing the tag separator', () => {
+    // ['a','b'] and ['a,b'] joined to the same key before values were encoded,
+    // so one target silently blocked the other.
+    expect(memoryForgetTargetDiscriminator({ target_kind: 'scope', tags: ['a', 'b'] })).not.toBe(
+      memoryForgetTargetDiscriminator({ target_kind: 'scope', tags: ['a,b'] }),
+    );
+  });
+
+  it('does not collide a tag containing the section separator', () => {
+    expect(memoryForgetTargetDiscriminator({ target_kind: 'scope', tags: ['a|tags:b'] })).not.toBe(
+      memoryForgetTargetDiscriminator({ target_kind: 'scope', tags: ['a'], scope: {} }),
+    );
+  });
+
+  it('does not collide an id containing a separator', () => {
+    expect(memoryForgetTargetDiscriminator({ target_kind: 'id', memory_id: 'a|b' })).not.toBe(
+      memoryForgetTargetDiscriminator({ target_kind: 'id', memory_id: 'a%7Cb' }),
+    );
+  });
+
   it('never collides an id target with a scope target', () => {
     expect(memoryForgetTargetDiscriminator({ target_kind: 'id', memory_id: 'x' })).not.toBe(
       memoryForgetTargetDiscriminator({ target_kind: 'scope', tags: ['x'] }),

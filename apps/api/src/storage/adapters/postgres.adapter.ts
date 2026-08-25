@@ -84,6 +84,7 @@ import {
   memoryForgetTargetDiscriminator,
   StoredMemoryProposalSchema,
   StoredMemoryProposalAuditSchema,
+  MemoryForgetPayload,
 } from '@betterdb/shared';
 import type {
   StoredMemoryProposal,
@@ -322,6 +323,7 @@ export class PostgresAdapter implements StoragePort {
       // This must happen before createSchema() which creates indexes on connection_id.
       await this.migrateConnectionId();
       await this.createSchema();
+      await this.backfillMemoryProposalDiscriminators();
 
       this.ready = true;
 
@@ -1083,6 +1085,47 @@ export class PostgresAdapter implements StoragePort {
     return result.rowCount || 0;
   }
 
+  /**
+   * Key pending proposals written before `target_discriminator` existed.
+   *
+   * Runs in JS rather than SQL because the discriminator is one shared function
+   * — expressing it twice is how the two would drift. Tolerates a unique
+   * violation per row: a database that already holds duplicate pending rows for
+   * one target cannot have all of them keyed, so the first keeps the
+   * discriminator and the rest stay NULL, outside the partial index.
+   */
+  private async backfillMemoryProposalDiscriminators(): Promise<void> {
+    if (!this.pool) {
+      return;
+    }
+    const { rows } = await this.pool.query(
+      `SELECT id, proposal_payload FROM memory_proposals
+       WHERE status = 'pending' AND target_discriminator IS NULL`,
+    );
+    let skipped = 0;
+    for (const row of rows as { id: string; proposal_payload: unknown }[]) {
+      try {
+        const payload = (
+          typeof row.proposal_payload === 'string'
+            ? JSON.parse(row.proposal_payload)
+            : row.proposal_payload
+        ) as MemoryForgetPayload;
+        await this.pool.query(
+          `UPDATE memory_proposals SET target_discriminator = $1 WHERE id = $2`,
+          [memoryForgetTargetDiscriminator(payload), row.id],
+        );
+      } catch {
+        skipped++;
+      }
+    }
+    if (skipped > 0) {
+      console.warn(
+        `[postgres] ${skipped} pending memory proposal(s) left unkeyed during backfill — ` +
+          `already duplicates of another pending row, or an unparseable payload.`,
+      );
+    }
+  }
+
   private async createSchema(): Promise<void> {
     if (!this.pool) {
       return;
@@ -1792,6 +1835,13 @@ export class PostgresAdapter implements StoragePort {
 
       ALTER TABLE memory_proposals ADD COLUMN IF NOT EXISTS applying_at BIGINT;
       ALTER TABLE memory_proposals ADD COLUMN IF NOT EXISTS target_discriminator TEXT;
+      -- Rows already sitting in applying were claimed by a process that no
+      -- longer exists (an upgrade restarts it), so they are stuck by
+      -- definition. Without a claim time the sweep would skip them forever,
+      -- which is precisely the state #277 exists to clear.
+      UPDATE memory_proposals
+        SET applying_at = COALESCE(reviewed_at, proposed_at)
+        WHERE status = 'applying' AND applying_at IS NULL;
 
       CREATE INDEX IF NOT EXISTS idx_memory_proposals_conn_status_proposed
         ON memory_proposals(connection_id, status, proposed_at DESC);
