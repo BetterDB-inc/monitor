@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import {
   MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS,
+  memoryForgetTargetDiscriminator,
   type StoredMemoryProposal,
   type MemoryForgetPayload,
   type CreateMemoryProposalInput,
@@ -75,6 +76,7 @@ export class MemoryProposalService {
       store_name: input.storeName,
       proposal_type: 'forget',
       proposal_payload: payload,
+      target_discriminator: memoryForgetTargetDiscriminator(payload),
       reasoning: input.reasoning,
       proposed_by: input.proposedBy ?? null,
       proposed_at: proposedAt,
@@ -112,6 +114,39 @@ export class MemoryProposalService {
 
   async get(proposalId: string): Promise<StoredMemoryProposal | null> {
     return this.storage.getMemoryProposal(proposalId);
+  }
+
+  /**
+   * Move `applying` rows claimed before `cutoff` to `failed`.
+   *
+   * The apply path deliberately leaves a visible in-flight row when the process
+   * dies mid-apply, so the row is never falsely `applied`. Nothing reaped them,
+   * so a crashed apply stayed `applying` forever and was found only by hand.
+   *
+   * The recorded result says partial deletion is unknown rather than claiming a
+   * clean rollback: a crash inside dispatch may already have removed memories.
+   */
+  async failStaleApplyingProposals(
+    cutoff: number,
+    actorSource: ActorSource = 'system',
+  ): Promise<number> {
+    const swept = await this.storage.failStaleApplyingMemoryProposalsBefore(cutoff);
+    for (const proposal of swept) {
+      try {
+        await this.appendAudit(
+          proposal.id,
+          'failed',
+          { reason: 'stale_apply', applying_at: proposal.applying_at ?? null },
+          'system',
+          actorSource,
+        );
+      } catch (err) {
+        this.logger.warn(
+          `Failed to write stale-apply audit for ${proposal.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return swept.length;
   }
 
   async expireProposals(now: number, actorSource: ActorSource = 'system'): Promise<number> {
@@ -235,15 +270,16 @@ export class MemoryProposalService {
     storeName: string,
     payload: MemoryForgetPayload,
   ): Promise<void> {
-    const pending = await this.storage.listMemoryProposals({
+    // Asked in the query rather than by paging rows in and comparing them here.
+    // The previous form read `limit: 1000`, so past a thousand pending rows for
+    // one store the guard silently stopped guarding — no error, no log. That
+    // needs no concurrency to hit, unlike the race the unique index closes.
+    const clashes = await this.storage.countPendingMemoryProposalsByTarget({
       connection_id: connectionId,
-      status: 'pending',
       store_name: storeName,
-      limit: 1000,
+      target_discriminator: memoryForgetTargetDiscriminator(payload),
     });
-    const target = targetDiscriminator(payload);
-    const clash = pending.some((p) => targetDiscriminator(p.proposal_payload) === target);
-    if (clash) {
+    if (clashes > 0) {
       throw new DuplicatePendingMemoryProposalError({ store_name: storeName });
     }
   }
@@ -289,15 +325,6 @@ function buildForgetPayload(input: ProposeForgetInput): MemoryForgetPayload {
     );
   }
   return { target_kind: 'scope', scope: hasScope ? scope : undefined, tags: input.tags };
-}
-
-function targetDiscriminator(payload: MemoryForgetPayload): string {
-  if (payload.target_kind === 'id') {
-    return `id:${payload.memory_id}`;
-  }
-  const scope = payload.scope ?? {};
-  const tags = Array.isArray(payload.tags) ? [...payload.tags].sort() : [];
-  return `scope:${JSON.stringify(scope)}|tags:${tags.join(',')}`;
 }
 
 function isUniqueViolation(err: unknown): boolean {

@@ -85,6 +85,7 @@ import {
   StoredCacheProposalAuditSchema,
   variantPayloadSchemaFor,
   MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS,
+  memoryForgetTargetDiscriminator,
   StoredMemoryProposalSchema,
   StoredMemoryProposalAuditSchema,
 } from '@betterdb/shared';
@@ -95,10 +96,68 @@ import type {
   ListMemoryProposalsOptions,
   UpdateMemoryProposalStatusInput,
   AppendMemoryProposalAuditInput,
+  MemoryForgetPayload,
 } from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
 import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repository';
 import { SlowLogSqliteRepository } from './repositories/slowlog.sqlite.repository';
+
+/**
+ * Idempotent migration for the memory_proposals columns added with the
+ * duplicate-pending guard (#276) and the stale-apply sweep (#277).
+ *
+ * The backfill runs row by row and tolerates a unique violation rather than
+ * failing the migration: a database that already holds duplicate pending rows
+ * for one target — exactly what #276 describes — cannot have all of them keyed,
+ * so the first keeps the discriminator and the rest stay NULL. The index is
+ * partial on `target_discriminator IS NOT NULL`, so those rows simply sit
+ * outside the constraint and age out, while every new insert is guarded.
+ */
+function addMemoryProposalIntegrityColumns(db: Database.Database): void {
+  try {
+    const cols = db.prepare(`PRAGMA table_info(memory_proposals)`).all() as { name: string }[];
+    if (cols.length === 0) {
+      return;
+    }
+    if (!cols.some((c) => c.name === 'applying_at')) {
+      db.prepare(`ALTER TABLE memory_proposals ADD COLUMN applying_at INTEGER`).run();
+    }
+    if (cols.some((c) => c.name === 'target_discriminator')) {
+      return;
+    }
+    db.prepare(`ALTER TABLE memory_proposals ADD COLUMN target_discriminator TEXT`).run();
+    db.prepare(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_proposals_pending_target
+         ON memory_proposals(connection_id, store_name, target_discriminator)
+         WHERE status = 'pending' AND target_discriminator IS NOT NULL`,
+    ).run();
+
+    const pending = db
+      .prepare(`SELECT id, proposal_payload FROM memory_proposals WHERE status = 'pending'`)
+      .all() as { id: string; proposal_payload: string }[];
+    const update = db.prepare(
+      `UPDATE memory_proposals SET target_discriminator = ? WHERE id = ?`,
+    );
+    let skipped = 0;
+    for (const row of pending) {
+      try {
+        const payload = JSON.parse(row.proposal_payload) as MemoryForgetPayload;
+        update.run(memoryForgetTargetDiscriminator(payload), row.id);
+      } catch {
+        skipped++;
+      }
+    }
+    if (skipped > 0) {
+      console.warn(
+        `[sqlite] ${skipped} pending memory proposal(s) left unkeyed during backfill — ` +
+          `already duplicates of another pending row, or an unparseable payload.`,
+      );
+    }
+  } catch {
+    // Table absent on a fresh database: createSchema builds it with the columns
+    // already present, so there is nothing to migrate.
+  }
+}
 
 /**
  * Idempotent migrations for capture_sessions columns landed across PR 14a + 14b.
@@ -1555,9 +1614,11 @@ export class SqliteAdapter implements StoragePort {
         proposed_at INTEGER NOT NULL,
         reviewed_by TEXT,
         reviewed_at INTEGER,
+        applying_at INTEGER,
         applied_at INTEGER,
         applied_result TEXT,
-        expires_at INTEGER NOT NULL
+        expires_at INTEGER NOT NULL,
+        target_discriminator TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_memory_proposals_conn_status_proposed
@@ -1565,6 +1626,16 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_memory_proposals_pending_lookup
         ON memory_proposals(connection_id, store_name)
         WHERE status = 'pending';
+      CREATE INDEX IF NOT EXISTS idx_memory_proposals_applying
+        ON memory_proposals(applying_at)
+        WHERE status = 'applying';
+      -- Closes the duplicate-pending race: the guard was list -> compare in JS
+      -- -> insert, so two concurrent proposeForget calls for one target both
+      -- passed the pre-check. Partial so a target can be proposed again once
+      -- the previous one is approved, rejected or expired.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_proposals_pending_target
+        ON memory_proposals(connection_id, store_name, target_discriminator)
+        WHERE status = 'pending' AND target_discriminator IS NOT NULL;
 
       CREATE TABLE IF NOT EXISTS memory_proposal_audit (
         id TEXT PRIMARY KEY,
@@ -1706,6 +1777,7 @@ export class SqliteAdapter implements StoragePort {
     addColumnIfMissing('command_stats_samples', 'rejected_calls', 'INTEGER', '0');
     addColumnIfMissing('command_stats_samples', 'failed_calls', 'INTEGER', '0');
     addCaptureSessionsTargetNodeColumn(this.db!);
+    addMemoryProposalIntegrityColumns(this.db!);
   }
 
   async saveBulkDeleteAudit(record: StoredBulkDeleteAudit): Promise<string> {
@@ -4297,8 +4369,9 @@ export class SqliteAdapter implements StoragePort {
       .prepare(
         `INSERT INTO memory_proposals (
           id, connection_id, store_name, proposal_type,
-          proposal_payload, reasoning, status, proposed_by, proposed_at, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+          proposal_payload, reasoning, status, proposed_by, proposed_at, expires_at,
+          target_discriminator
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -4310,6 +4383,7 @@ export class SqliteAdapter implements StoragePort {
         input.proposed_by ?? null,
         proposedAt,
         expiresAt,
+        input.target_discriminator ?? memoryForgetTargetDiscriminator(input.proposal_payload),
       );
     const row = this.db
       .prepare('SELECT * FROM memory_proposals WHERE id = ?')
@@ -4393,6 +4467,10 @@ export class SqliteAdapter implements StoragePort {
       sets.push('applied_at = ?');
       params.push(input.applied_at);
     }
+    if (input.applying_at !== undefined) {
+      sets.push('applying_at = ?');
+      params.push(input.applying_at);
+    }
     if (input.applied_result !== undefined) {
       sets.push('applied_result = ?');
       params.push(input.applied_result === null ? null : JSON.stringify(input.applied_result));
@@ -4474,6 +4552,49 @@ export class SqliteAdapter implements StoragePort {
       )
       .all(now) as MemoryProposalRow[];
     return rows.map((row) => this.mapMemoryProposalRow(row));
+  }
+
+  async failStaleApplyingMemoryProposalsBefore(cutoff: number): Promise<StoredMemoryProposal[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    // `failed` rather than a new status: it already exists everywhere, and it
+    // is honest — the apply did not complete. The result says explicitly that
+    // partial deletion is unknown, because a crash mid-dispatch may have
+    // removed memories already and claiming a clean rollback would be a lie.
+    const rows = this.db
+      .prepare(
+        `UPDATE memory_proposals
+         SET status = 'failed', applied_at = ?, applied_result = ?
+         WHERE status = 'applying' AND applying_at IS NOT NULL AND applying_at <= ?
+         RETURNING *`,
+      )
+      .all(
+        Date.now(),
+        JSON.stringify({
+          success: false,
+          error: 'apply presumed dead',
+          details: { reason: 'stale_apply', partial: 'unknown' },
+        }),
+        cutoff,
+      ) as MemoryProposalRow[];
+    return rows.map((row) => this.mapMemoryProposalRow(row));
+  }
+
+  async countPendingMemoryProposalsByTarget(input: {
+    connection_id: string;
+    store_name: string;
+    target_discriminator: string;
+  }): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM memory_proposals
+         WHERE connection_id = ? AND store_name = ? AND target_discriminator = ?
+           AND status = 'pending'`,
+      )
+      .get(input.connection_id, input.store_name, input.target_discriminator) as {
+      count: number;
+    };
+    return row.count;
   }
 
   async saveCaptureSession(

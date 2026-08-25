@@ -81,6 +81,7 @@ import {
   StoredCacheProposalAuditSchema,
   variantPayloadSchemaFor,
   MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS,
+  memoryForgetTargetDiscriminator,
   StoredMemoryProposalSchema,
   StoredMemoryProposalAuditSchema,
 } from '@betterdb/shared';
@@ -1780,18 +1781,33 @@ export class PostgresAdapter implements StoragePort {
         proposed_at BIGINT NOT NULL,
         reviewed_by TEXT,
         reviewed_at BIGINT,
+        applying_at BIGINT,
         applied_at BIGINT,
         applied_result JSONB,
         expires_at BIGINT NOT NULL,
+        target_discriminator TEXT,
         CHECK (proposal_type = 'forget'),
         CHECK (status IN ('pending','approved','applying','applied','failed','rejected','expired'))
       );
+
+      ALTER TABLE memory_proposals ADD COLUMN IF NOT EXISTS applying_at BIGINT;
+      ALTER TABLE memory_proposals ADD COLUMN IF NOT EXISTS target_discriminator TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_memory_proposals_conn_status_proposed
         ON memory_proposals(connection_id, status, proposed_at DESC);
       CREATE INDEX IF NOT EXISTS idx_memory_proposals_pending_lookup
         ON memory_proposals(connection_id, store_name)
         WHERE status = 'pending';
+      CREATE INDEX IF NOT EXISTS idx_memory_proposals_applying
+        ON memory_proposals(applying_at)
+        WHERE status = 'applying';
+      -- Closes the duplicate-pending race: the guard was list -> compare in JS
+      -- -> insert, so two concurrent proposeForget calls for one target both
+      -- passed the pre-check. Partial so a target can be proposed again once
+      -- the previous one is approved, rejected or expired.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_proposals_pending_target
+        ON memory_proposals(connection_id, store_name, target_discriminator)
+        WHERE status = 'pending' AND target_discriminator IS NOT NULL;
 
       CREATE TABLE IF NOT EXISTS memory_proposal_audit (
         id TEXT PRIMARY KEY,
@@ -4571,8 +4587,9 @@ export class PostgresAdapter implements StoragePort {
     const result = await this.pool.query(
       `INSERT INTO memory_proposals (
         id, connection_id, store_name, proposal_type,
-        proposal_payload, reasoning, status, proposed_by, proposed_at, expires_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, $9)
+        proposal_payload, reasoning, status, proposed_by, proposed_at, expires_at,
+        target_discriminator
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, $9, $10)
       RETURNING *`,
       [
         input.id,
@@ -4584,6 +4601,7 @@ export class PostgresAdapter implements StoragePort {
         input.proposed_by ?? null,
         proposedAt,
         expiresAt,
+        input.target_discriminator ?? memoryForgetTargetDiscriminator(input.proposal_payload),
       ],
     );
     return this.mapMemoryProposalRow(result.rows[0]);
@@ -4682,6 +4700,9 @@ export class PostgresAdapter implements StoragePort {
     if (input.applied_at !== undefined) {
       pushSet('applied_at', input.applied_at);
     }
+    if (input.applying_at !== undefined) {
+      pushSet('applying_at', input.applying_at);
+    }
     if (input.applied_result !== undefined) {
       pushSet(
         'applied_result',
@@ -4744,6 +4765,45 @@ export class PostgresAdapter implements StoragePort {
       [now],
     );
     return result.rows.map((row: MemoryProposalRow) => this.mapMemoryProposalRow(row));
+  }
+
+  async failStaleApplyingMemoryProposalsBefore(cutoff: number): Promise<StoredMemoryProposal[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    // `failed` rather than a new status: it already exists everywhere and is
+    // honest — the apply did not complete. The result says partial deletion is
+    // unknown, because a crash inside dispatch may have removed memories and
+    // claiming a clean rollback would be a lie.
+    const result = await this.pool.query(
+      `UPDATE memory_proposals
+       SET status = 'failed', applied_at = $1, applied_result = $2
+       WHERE status = 'applying' AND applying_at IS NOT NULL AND applying_at <= $3
+       RETURNING *`,
+      [
+        Date.now(),
+        JSON.stringify({
+          success: false,
+          error: 'apply presumed dead',
+          details: { reason: 'stale_apply', partial: 'unknown' },
+        }),
+        cutoff,
+      ],
+    );
+    return result.rows.map((row: MemoryProposalRow) => this.mapMemoryProposalRow(row));
+  }
+
+  async countPendingMemoryProposalsByTarget(input: {
+    connection_id: string;
+    store_name: string;
+    target_discriminator: string;
+  }): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      `SELECT COUNT(*)::int AS count FROM memory_proposals
+       WHERE connection_id = $1 AND store_name = $2 AND target_discriminator = $3
+         AND status = 'pending'`,
+      [input.connection_id, input.store_name, input.target_discriminator],
+    );
+    return result.rows[0]?.count ?? 0;
   }
 
   async saveCaptureSession(

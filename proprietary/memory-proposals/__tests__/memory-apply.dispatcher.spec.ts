@@ -32,6 +32,8 @@ function proposal(payload: StoredMemoryProposal['proposal_payload']): StoredMemo
     proposed_at: 1,
     reviewed_by: null,
     reviewed_at: null,
+    applying_at: null,
+    target_discriminator: null,
     applied_at: null,
     applied_result: null,
     expires_at: 9_999_999_999_999,

@@ -3,6 +3,13 @@ import { MemoryProposalService } from './memory-proposal.service';
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
 
+/**
+ * How long an `applying` row may sit before it is presumed dead. Well above any
+ * realistic forget: the cost of sweeping too early is marking live work as
+ * failed, while the cost of sweeping late is only that a stuck row lingers.
+ */
+const STALE_APPLY_AFTER_MS = 15 * 60 * 1000;
+
 @Injectable()
 export class MemoryExpirationCron implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MemoryExpirationCron.name);
@@ -48,6 +55,19 @@ export class MemoryExpirationCron implements OnModuleInit, OnModuleDestroy {
     const expired = await this.service.expireProposals(this.now(), 'system');
     if (expired > 0) {
       this.logger.log(`Expired ${expired} memory proposal(s)`);
+    }
+    // Rides the same timer rather than adding a second one. Distinct from
+    // expiry: expires_at is how long a human has to decide, while this is how
+    // long an in-flight apply may run before being presumed dead.
+    const stale = await this.service.failStaleApplyingProposals(
+      this.now() - STALE_APPLY_AFTER_MS,
+      'system',
+    );
+    if (stale > 0) {
+      this.logger.warn(
+        `Failed ${stale} memory proposal(s) stuck in 'applying' — a process died mid-apply. ` +
+          `Deletion may have been partial; verify the affected stores.`,
+      );
     }
     return expired;
   }

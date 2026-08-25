@@ -85,11 +85,20 @@ export const StoredMemoryProposalSchema = z.object({
   proposed_at: epochMs,
   reviewed_by: z.string().nullable(),
   reviewed_at: epochMsNullable,
+  // When `approved -> applying` was claimed. Distinct from reviewed_at, which
+  // records approval: the two coincide today only because approve and apply
+  // happen in one request, and a stale-apply sweep measured off reviewed_at
+  // would start sweeping live work the moment that stops being true.
+  applying_at: epochMsNullable.optional().default(null),
   applied_at: epochMsNullable,
   applied_result: jsonColumn(AppliedResultSchema.nullable()),
   expires_at: epochMs,
   proposal_type: MemoryProposalTypeSchema,
   proposal_payload: jsonColumn(MemoryForgetPayloadSchema),
+  // Stable key for the forget target, materialised at insert so the
+  // duplicate-pending guard can be a uniqueness constraint instead of a
+  // read-then-write race. Nullable for rows written before this column existed.
+  target_discriminator: z.string().nullable().optional().default(null),
 });
 export type StoredMemoryProposal = z.infer<typeof StoredMemoryProposalSchema>;
 
@@ -114,6 +123,7 @@ export const CreateMemoryProposalInputSchema = z.object({
   expires_at: z.number().optional(),
   proposal_type: MemoryProposalTypeSchema,
   proposal_payload: MemoryForgetPayloadSchema,
+  target_discriminator: z.string().optional(),
 });
 export type CreateMemoryProposalInput = z.infer<typeof CreateMemoryProposalInputSchema>;
 
@@ -134,6 +144,7 @@ export const UpdateMemoryProposalStatusInputSchema = z.object({
   status: MemoryProposalStatusSchema,
   reviewed_by: z.string().nullish(),
   reviewed_at: z.number().nullish(),
+  applying_at: z.number().nullish(),
   applied_at: z.number().nullish(),
   applied_result: AppliedResultSchema.nullish(),
   proposal_payload: MemoryForgetPayloadSchema.optional(),
@@ -152,3 +163,30 @@ export const AppendMemoryProposalAuditInputSchema = z.object({
 export type AppendMemoryProposalAuditInput = z.infer<typeof AppendMemoryProposalAuditInputSchema>;
 
 export const MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Stable identity for what a forget proposal targets — two proposals with the
+ * same discriminator are duplicates of each other.
+ *
+ * Scope keys are emitted in a fixed order rather than via `JSON.stringify` on
+ * the object: stringify follows insertion order, so `{threadId, agentId}` and
+ * `{agentId, threadId}` describe the same target and would otherwise produce
+ * different keys. Harmless while this was only compared in memory; permanent
+ * once it backs a uniqueness constraint.
+ *
+ * Absent and empty-string scope fields are deliberately the same thing — both
+ * mean "not scoped by this dimension".
+ */
+export function memoryForgetTargetDiscriminator(payload: MemoryForgetPayload): string {
+  if (payload.target_kind === 'id') {
+    return `id:${payload.memory_id}`;
+  }
+  const scope = payload.scope ?? {};
+  const scopeKey = (['agentId', 'namespace', 'threadId'] as const)
+    .map((field) => {
+      return `${field}=${scope[field] ?? ''}`;
+    })
+    .join('&');
+  const tags = Array.isArray(payload.tags) ? [...payload.tags].sort() : [];
+  return `scope:${scopeKey}|tags:${tags.join(',')}`;
+}

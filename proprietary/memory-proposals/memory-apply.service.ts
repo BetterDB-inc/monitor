@@ -42,6 +42,11 @@ export class MemoryApplyService {
       id: approved.id,
       expected_status: ['approved'],
       status: 'applying',
+      // Stamped here rather than reused from reviewed_at: the two coincide only
+      // because approve and apply happen in one request today, and a sweep
+      // measured off approval would start failing live work the moment that
+      // stops being true.
+      applying_at: Date.now(),
     });
     if (claimed === null) {
       const current = (await this.storage.getMemoryProposal(approved.id)) ?? approved;
