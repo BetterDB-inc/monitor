@@ -178,3 +178,13 @@ jobs:
           done
           echo "Package not available after 5 attempts"
           exit 1
+
+  publish-facade:
+    needs: verify
+    # verify is what confirms this child is actually installable from PyPI,
+    # which is the precondition for the facade pinning it.
+    if: ${{ !inputs.skip_pypi }}
+    permissions:
+      contents: write
+      id-token: write
+    uses: ./.github/workflows/ai-py-facade-release.yml

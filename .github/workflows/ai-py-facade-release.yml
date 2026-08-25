@@ -1,0 +1,274 @@
+# Publish betterdb-ai to PyPI
+#
+# Uses PyPI Trusted Publisher (OIDC) — no API token required. The trusted
+# publisher for `betterdb-ai` must be registered at
+# pypi.org/manage/account/publishing/ against THIS workflow filename before the
+# first release, exactly as the five child packages are.
+#
+# Invoked automatically by each child package's release workflow once that
+# child is verified live on PyPI, and manually via workflow_dispatch.
+#
+# The version and the child `==` pins are written into pyproject.toml in the
+# runner and are never committed, so the ai-py-v* tag marks the commit a
+# release was built FROM, not a tree that reproduces it. The authoritative
+# pins live in the published artifact — read them with
+# `pip download --no-deps betterdb-ai==<version>`. @betterdb/ai has the same
+# property; changing it means a publish job that commits and tags, which is a
+# larger change than either facade has needed so far.
+
+name: Publish AI Facade (Python)
+
+on:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 0.2.0). Defaults to a patch bump.'
+        required: false
+        type: string
+
+# Publishes are serialised on this group. If two or three children release
+# around the same time, GitHub only keeps one pending run per concurrency
+# group — a caller's publish-facade job queued behind others can end up
+# cancelled, and that child's release run will report as cancelled even
+# though the child itself published fine. `continue-on-error` is not a legal
+# key on a reusable-workflow-call job, so avoiding that would need a
+# dispatching wrapper job. We accept it instead: any later child release
+# re-pins all five children here, so a skipped facade publish self-heals
+# within one release cycle.
+concurrency:
+  group: publish-ai-py-facade
+  cancel-in-progress: false
+
+jobs:
+  publish-pypi:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: write
+      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: pip install build hatchling packaging
+
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            echo "version=$INPUT_VERSION" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          # GitHub runs `run:` under `bash -eo pipefail`, so a cold start —
+          # betterdb-ai not on PyPI yet — must not abort the step here.
+          CURRENT=$(pip index versions betterdb-ai 2>/dev/null \
+            | sed -n 's/^betterdb-ai (\(.*\))$/\1/p' || true)
+          if [ -z "$CURRENT" ]; then
+            SEED=$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('packages/ai-py/pyproject.toml').read_text())['project']['version'])")
+            echo "No published betterdb-ai yet — seeding from the committed manifest: $SEED"
+            echo "version=$SEED" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          NEXT=$(CURRENT="$CURRENT" python - <<'PY'
+          import os, re, sys
+          current = os.environ["CURRENT"]
+          m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", current)
+          if not m:
+              sys.exit(
+                  f'Refusing to auto-bump from "{current}": only plain MAJOR.MINOR.PATCH '
+                  "versions can be bumped automatically. Whether a prerelease should be "
+                  "promoted to a stable patch or incremented as a prerelease is a release "
+                  "decision, so make it explicitly: re-run this workflow via "
+                  "workflow_dispatch with an exact version input."
+              )
+          major, minor, patch = m.groups()
+          print(f"{major}.{minor}.{int(patch) + 1}")
+          PY
+          )
+          echo "version=$NEXT" >> $GITHUB_OUTPUT
+
+      - name: Set version and pin children from PyPI
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        working-directory: packages/ai-py
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import sys
+          import tomllib
+
+          from packaging.requirements import Requirement
+
+          path = pathlib.Path("pyproject.toml")
+          text = path.read_text()
+
+          for raw in tomllib.loads(text)["project"]["dependencies"]:
+              req = Requirement(raw)
+              listing = subprocess.run(
+                  [sys.executable, "-m", "pip", "index", "versions", req.name],
+                  capture_output=True,
+                  text=True,
+              ).stdout
+              found = re.search(rf"^{re.escape(req.name)} \((.+)\)$", listing, re.MULTILINE)
+              if found is None:
+                  raise SystemExit(f"Could not resolve a published version for {req.name}")
+
+              latest = found.group(1)
+              # A floor in the manifest states what the facade needs, so a child
+              # whose newest release is below it is a reason to stop, not a
+              # version to pin. Publishing anyway would ship a facade
+              # re-exporting the very code the floor exists to exclude.
+              if not req.specifier.contains(latest):
+                  raise SystemExit(
+                      f"{req.name} {latest} is the newest release on PyPI but does not "
+                      f"satisfy '{raw}'. Release {req.name} first, then re-run."
+                  )
+
+              print(f"{req.name} -> {latest}")
+              text, count = re.subn(
+                  rf'^(\s*)"{re.escape(raw)}",$',
+                  rf'\g<1>"{req.name}=={latest}",',
+                  text,
+                  count=1,
+                  flags=re.MULTILINE,
+              )
+              if count != 1:
+                  raise SystemExit(
+                      f"Expected exactly one dependency line for {req.name}, replaced {count}"
+                  )
+
+          text = re.sub(
+              r'^version\s*=\s*"[^"]+"',
+              f'version = "{os.environ["VERSION"]}"',
+              text,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          path.write_text(text)
+          print(text.split("[project.optional-dependencies]")[0])
+          PY
+
+      - name: Verify every child is pinned
+        working-directory: packages/ai-py
+        run: |
+          UNPINNED=$(python - <<'PY'
+          import pathlib, tomllib
+          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          for dep in data["project"]["dependencies"]:
+              if "==" not in dep:
+                  print(dep)
+          PY
+          )
+          if [ -n "$UNPINNED" ]; then
+            echo "Dependencies left unpinned in the manifest about to be published:"
+            echo "$UNPINNED"
+            exit 1
+          fi
+          echo "all five children pinned to published versions"
+
+      - name: Build wheel and sdist
+        working-directory: packages/ai-py
+        run: python -m build
+
+      - name: Verify build artifacts
+        working-directory: packages/ai-py
+        run: |
+          ls dist/
+          test -n "$(ls dist/*.whl 2>/dev/null)"
+          test -n "$(ls dist/*.tar.gz 2>/dev/null)"
+
+      - name: Validate the built wheel against the pinned children
+        run: |
+          set -euo pipefail
+
+          # The only point in the pipeline where the artifact and the real
+          # published children coexist. Everything before this resolves the
+          # children from the working tree.
+          python -m venv "$RUNNER_TEMP/facade-check"
+          "$RUNNER_TEMP/facade-check/bin/pip" install --quiet \
+            "$(ls "$PWD"/packages/ai-py/dist/*.whl)[all]"
+
+          "$RUNNER_TEMP/facade-check/bin/python" - <<'PY'
+          import importlib
+
+          import betterdb_ai
+
+          for name in betterdb_ai.__all__:
+              assert hasattr(betterdb_ai, name), name
+
+          for module in [
+              "langchain",
+              "langgraph",
+              "openai",
+              "openai_responses",
+              "anthropic",
+              "llamaindex",
+              "openai_agents",
+              "pydantic_ai",
+              "embed.openai",
+              "embed.bedrock",
+              "embed.voyage",
+              "embed.cohere",
+              "embed.ollama",
+              "embed.google",
+          ]:
+              importlib.import_module(f"betterdb_ai.{module}")
+
+          print(f"betterdb_ai {betterdb_ai.__version__}: "
+                f"{len(betterdb_ai.__all__)} root names, 14 submodules, all importable")
+          PY
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packages/ai-py/dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ai-py-v${{ steps.version.outputs.version }}
+          name: AI Facade Python v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  verify:
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify PyPI package (with retry)
+        env:
+          VERSION: ${{ needs.publish-pypi.outputs.version }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if pip install "betterdb-ai==$VERSION" --dry-run --quiet 2>/dev/null; then
+              echo "Package betterdb-ai==$VERSION verified"
+              exit 0
+            fi
+            echo "Attempt $i: not yet available, retrying in 30s…"
+            sleep 30
+          done
+          echo "Package not available after 5 attempts"
+          exit 1

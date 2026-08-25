@@ -1,0 +1,83 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "betterdb-ai"
+version = "0.1.0"
+description = "One install for the BetterDB AI stack on Valkey: agent cache, semantic cache, retrieval, agent memory, and search helpers"
+keywords = [
+    "valkey",
+    "redis",
+    "ai",
+    "llm",
+    "cache",
+    "semantic-cache",
+    "retrieval",
+    "agent-memory",
+    "vector-search",
+]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.11"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+# Floors only. The release workflow rewrites these to `==` pins resolved from
+# PyPI at publish time, so a published facade always names the exact child
+# versions it was tested against — and refuses to publish when the latest
+# release of a child does not satisfy the floor declared here.
+dependencies = [
+    "betterdb-agent-cache>=0.12.0",
+    "betterdb-agent-memory>=0.7.0",
+    "betterdb-retrieval>=0.5.0",
+    "betterdb-semantic-cache>=0.11.0",
+    "betterdb-valkey-search-kit>=0.1.1",
+]
+
+# Each extra fans out to the same extra on every child that declares it, so
+# `pip install betterdb-ai[langchain]` pulls what both caches need for their
+# LangChain adapters.
+[project.optional-dependencies]
+openai = ["betterdb-agent-cache[openai]", "betterdb-semantic-cache[openai]"]
+anthropic = ["betterdb-agent-cache[anthropic]", "betterdb-semantic-cache[anthropic]"]
+langchain = ["betterdb-agent-cache[langchain]", "betterdb-semantic-cache[langchain]"]
+langgraph = ["betterdb-agent-cache[langgraph]", "betterdb-semantic-cache[langgraph]"]
+llamaindex = ["betterdb-agent-cache[llamaindex]", "betterdb-semantic-cache[llamaindex]"]
+openai_agents = ["betterdb-agent-cache[openai_agents]"]
+pydantic_ai = ["betterdb-agent-cache[pydantic_ai]"]
+normalizer = ["betterdb-agent-cache[normalizer]"]
+bedrock = ["betterdb-semantic-cache[bedrock]"]
+httpx = ["betterdb-semantic-cache[httpx]"]
+all = [
+    "betterdb-agent-cache[all]",
+    "betterdb-semantic-cache[all]",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.urls]
+Repository = "https://github.com/BetterDB-inc/monitor"
+Homepage = "https://betterdb.com"
+
+[tool.uv.sources]
+betterdb-agent-cache = { path = "../agent-cache-py", editable = true }
+betterdb-agent-memory = { path = "../agent-memory-py", editable = true }
+betterdb-retrieval = { path = "../retrieval-py", editable = true }
+betterdb-semantic-cache = { path = "../semantic-cache-py", editable = true }
+betterdb-valkey-search-kit = { path = "../valkey-search-kit-py", editable = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["betterdb_ai"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
