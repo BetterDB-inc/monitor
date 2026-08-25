@@ -8,13 +8,7 @@ import { databasesApi, Database, DatabaseStatus, DatabaseCredentials } from '../
 import { workspaceApi } from '../api/workspace';
 import type { Connection } from '../hooks/useConnection';
 import type { AgentConnectionInfo } from '@betterdb/shared';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from './ui/select';
+import { ConnectionSwitcher } from './connection-selector/ConnectionSwitcher';
 import {
   Dialog,
   DialogContent,
@@ -300,24 +294,11 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
             </div>
           </div>
         ) : (
-          <Select
-            value={currentConnection?.id ?? ''}
-            onValueChange={(value) => setConnection(value)}
-          >
-            <SelectTrigger className="w-full h-auto py-1.5 text-sm">
-              <SelectValue placeholder="Select connection" />
-            </SelectTrigger>
-            <SelectContent>
-              {connections.map((conn) => (
-                <SelectItem key={conn.id} value={conn.id}>
-                  <span className="flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full flex-shrink-0 ${conn.isConnected ? 'bg-green-500' : 'bg-destructive'}`} />
-                    {conn.name} ({conn.host}:{conn.port})
-                  </span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <ConnectionSwitcher
+            connections={connections}
+            current={currentConnection}
+            onSelect={(id) => setConnection(id)}
+          />
         )}
       </div>
 
