@@ -206,7 +206,11 @@ describe('ConnectionSwitcher', () => {
     const search = screen.getByRole('searchbox');
     fireEvent.keyDown(search, { key: 'ArrowDown' });
 
-    fireEvent.mouseMove(screen.getByRole('listbox'));
+    // Real movement produces a stream of events at changing coordinates; a
+    // single event cannot be told apart from one a scroll emitted.
+    const listbox = screen.getByRole('listbox');
+    fireEvent.mouseMove(listbox, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(listbox, { clientX: 24, clientY: 31 });
     fireEvent.mouseEnter(screen.getAllByRole('option')[2]);
     fireEvent.keyDown(search, { key: 'Enter' });
 
@@ -242,6 +246,61 @@ describe('ConnectionSwitcher', () => {
         onSelect={onSelect}
       />,
     );
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Enter' });
+
+    expect(onSelect).toHaveBeenCalledWith('a');
+  });
+
+  it('re-scrolls when filtering changes which rows are on screen', () => {
+    // Filtering while the highlight stays at index 0 changes neither the index
+    // nor the open state, so a stale scroll offset can leave the active row
+    // out of view on a list the user had already scrolled.
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    open();
+    scrollIntoView.mockClear();
+
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'local' } });
+
+    expect(scrollIntoView).toHaveBeenCalled();
+  });
+
+  it('ignores a mousemove that did not actually move', () => {
+    // Scrolling under a stationary cursor can emit mousemove without the
+    // pointer going anywhere. Treating that as mouse intent hands the
+    // highlight back and undoes the keyboard guard.
+    open();
+    const search = screen.getByRole('searchbox');
+    fireEvent.keyDown(search, { key: 'ArrowDown' });
+
+    const listbox = screen.getByRole('listbox');
+    fireEvent.mouseMove(listbox, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(listbox, { clientX: 10, clientY: 10 });
+    fireEvent.mouseEnter(screen.getAllByRole('option')[2]);
+    fireEvent.keyDown(search, { key: 'Enter' });
+
+    expect(onSelect).toHaveBeenCalledWith('b');
+  });
+
+  it('moves the highlight on the first ArrowUp after the list shrinks', () => {
+    // ArrowUp decremented the raw index while the visible highlight follows
+    // the clamped one, so after a shrink several presses did nothing.
+    const { rerender } = render(
+      <ConnectionSwitcher connections={CONNECTIONS} current={CONNECTIONS[0]} onSelect={onSelect} />,
+    );
+    fireEvent.click(screen.getByRole('combobox'));
+    const search = screen.getByRole('searchbox');
+    fireEvent.keyDown(search, { key: 'ArrowDown' });
+    fireEvent.keyDown(search, { key: 'ArrowDown' });
+
+    rerender(
+      <ConnectionSwitcher
+        connections={CONNECTIONS.slice(0, 2)}
+        current={CONNECTIONS[0]}
+        onSelect={onSelect}
+      />,
+    );
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'ArrowUp' });
     fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Enter' });
 
     expect(onSelect).toHaveBeenCalledWith('a');

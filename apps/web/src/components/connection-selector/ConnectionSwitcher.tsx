@@ -34,6 +34,10 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
   // slides under a motionless pointer. Honouring that would yank the highlight
   // away from where the keyboard is, on exactly the long lists this exists for.
   const keyboardNav = useRef(false);
+  // Position, not just the event: scrolling under a stationary cursor can emit
+  // mousemove without the pointer going anywhere, and treating that as intent
+  // hands the highlight straight back to the row that slid underneath.
+  const lastPointer = useRef<{ x: number; y: number } | null>(null);
   const optionIdPrefix = useId();
 
   const filtered = useMemo(() => {
@@ -55,7 +59,7 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
     }
     const active = listRef.current?.querySelectorAll('[role="option"]')[effectiveIndex];
     active?.scrollIntoView({ block: 'nearest' });
-  }, [effectiveIndex, open]);
+  }, [effectiveIndex, open, filtered]);
 
   function handleSelect(id: string): void {
     onSelect(id);
@@ -67,17 +71,16 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
     if (event.key === 'ArrowDown') {
       event.preventDefault();
       keyboardNav.current = true;
-      setActiveIndex((index) => {
-        return Math.min(index + 1, Math.max(filtered.length - 1, 0));
-      });
+      // From the clamped position, not the raw one: after the list shrinks
+      // they diverge, and stepping from the raw index leaves the visible
+      // highlight motionless while state catches up.
+      setActiveIndex(Math.min(effectiveIndex + 1, Math.max(filtered.length - 1, 0)));
       return;
     }
     if (event.key === 'ArrowUp') {
       event.preventDefault();
       keyboardNav.current = true;
-      setActiveIndex((index) => {
-        return Math.max(index - 1, 0);
-      });
+      setActiveIndex(Math.max(effectiveIndex - 1, 0));
       return;
     }
     if (event.key === 'Enter') {
@@ -167,8 +170,14 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
             id={`${optionIdPrefix}-listbox`}
             role="listbox"
             className="max-h-64 overflow-y-auto p-1"
-            onMouseMove={() => {
-              keyboardNav.current = false;
+            onMouseMove={(event) => {
+              const previous = lastPointer.current;
+              const moved =
+                previous === null || previous.x !== event.clientX || previous.y !== event.clientY;
+              lastPointer.current = { x: event.clientX, y: event.clientY };
+              if (moved && previous !== null) {
+                keyboardNav.current = false;
+              }
             }}
           >
             {filtered.length === 0 ? (
