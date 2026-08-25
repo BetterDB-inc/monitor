@@ -4670,7 +4670,7 @@ export class PostgresAdapter implements StoragePort {
         input.proposed_by ?? null,
         proposedAt,
         expiresAt,
-        input.target_discriminator ?? memoryForgetTargetDiscriminator(input.proposal_payload),
+        memoryForgetTargetDiscriminator(input.proposal_payload),
       ],
     );
     return this.mapMemoryProposalRow(result.rows[0]);

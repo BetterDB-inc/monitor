@@ -1726,8 +1726,7 @@ export class MemoryAdapter implements StoragePort {
   }
 
   async createMemoryProposal(input: CreateMemoryProposalInput): Promise<StoredMemoryProposal> {
-    const discriminator =
-      input.target_discriminator ?? memoryForgetTargetDiscriminator(input.proposal_payload);
+    const discriminator = memoryForgetTargetDiscriminator(input.proposal_payload);
     for (const existing of this.memoryProposals.values()) {
       // Matched on the stored column, not re-derived from the payload, so this
       // stays equivalent to the partial unique index even when an explicit

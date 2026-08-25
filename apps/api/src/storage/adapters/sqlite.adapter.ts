@@ -126,16 +126,20 @@ function addMemoryProposalIntegrityColumns(db: Database.Database): void {
     // index DDL in createSchema made initialize() throw `no such column`.
     if (!cols.some((c) => c.name === 'applying_at')) {
       db.prepare(`ALTER TABLE memory_proposals ADD COLUMN applying_at INTEGER`).run();
-      // Rows already sitting in `applying` were claimed by a process that no
-      // longer exists — an upgrade restarts it — so they are stuck by
-      // definition and must be sweepable. Without a claim time they would be
-      // skipped forever, which is precisely the state #277 exists to clear.
-      db.prepare(
-        `UPDATE memory_proposals
+    }
+
+    // Rows already sitting in `applying` were claimed by a process that no
+    // longer exists — an upgrade restarts it — so they are stuck by definition
+    // and must be sweepable. Without a claim time they would be skipped
+    // forever, which is precisely the state #277 exists to clear. Outside the
+    // ADD COLUMN guard because that statement auto-commits on its own: a crash
+    // between the two would leave the column present and the claim times null,
+    // and a gated backfill would never run again.
+    db.prepare(
+      `UPDATE memory_proposals
          SET applying_at = COALESCE(reviewed_at, proposed_at)
          WHERE status = 'applying' AND applying_at IS NULL`,
-      ).run();
-    }
+    ).run();
 
     const hadDiscriminator = cols.some((c) => c.name === 'target_discriminator');
     if (!hadDiscriminator) {
@@ -4439,7 +4443,7 @@ export class SqliteAdapter implements StoragePort {
         input.proposed_by ?? null,
         proposedAt,
         expiresAt,
-        input.target_discriminator ?? memoryForgetTargetDiscriminator(input.proposal_payload),
+        memoryForgetTargetDiscriminator(input.proposal_payload),
       );
     const row = this.db
       .prepare('SELECT * FROM memory_proposals WHERE id = ?')

@@ -122,8 +122,10 @@ export const CreateMemoryProposalInputSchema = z.object({
   proposed_at: z.number().optional(),
   expires_at: z.number().optional(),
   proposal_type: MemoryProposalTypeSchema,
+  // No `target_discriminator`: every adapter derives it from the payload, so a
+  // caller cannot hand one backend a key the other would not have chosen and
+  // silently split the duplicate guard between them.
   proposal_payload: MemoryForgetPayloadSchema,
-  target_discriminator: z.string().optional(),
 });
 export type CreateMemoryProposalInput = z.infer<typeof CreateMemoryProposalInputSchema>;
 

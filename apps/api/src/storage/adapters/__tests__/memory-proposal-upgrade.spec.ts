@@ -225,4 +225,27 @@ describe('memory_proposals upgrade from a pre-#276 database', () => {
       }),
     ).resolves.toBe(1);
   });
+
+  it('stamps a claim time a crash left null on an applying row', async () => {
+    // Same shape one column over: ADD COLUMN applying_at commits on its own, so
+    // a crash before the claim-time backfill leaves legacy `applying` rows with
+    // no claim time. The sweep selects on `applying_at`, so a gated backfill
+    // would leave them invisible to it — stuck exactly as #277 describes.
+    seedLegacy(
+      `INSERT INTO memory_proposals VALUES
+        ('p1','c1','s1','forget','{"target_kind":"id","memory_id":"m1"}',NULL,'applying','proposer',1,'reviewer',7000,NULL,NULL,${FAR_FUTURE});`,
+    );
+
+    const crashed = new Database(dbPath);
+    crashed.exec('ALTER TABLE memory_proposals ADD COLUMN applying_at INTEGER');
+    crashed.close();
+
+    adapter = new SqliteAdapter({ filepath: dbPath });
+    await adapter.initialize();
+
+    expect((await adapter.getMemoryProposal('p1'))?.applying_at).toBe(7_000);
+
+    const swept = await adapter.failStaleApplyingMemoryProposalsBefore(8_000);
+    expect(swept.map((p) => p.id)).toEqual(['p1']);
+  });
 });

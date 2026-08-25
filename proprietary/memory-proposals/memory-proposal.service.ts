@@ -76,7 +76,6 @@ export class MemoryProposalService {
       store_name: input.storeName,
       proposal_type: 'forget',
       proposal_payload: payload,
-      target_discriminator: memoryForgetTargetDiscriminator(payload),
       reasoning: input.reasoning,
       proposed_by: input.proposedBy ?? null,
       proposed_at: proposedAt,

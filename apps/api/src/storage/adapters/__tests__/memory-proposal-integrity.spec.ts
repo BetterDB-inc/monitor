@@ -27,7 +27,6 @@ function proposalInput(payload: MemoryForgetPayload = BY_ID) {
     store_name: STORE,
     proposal_type: 'forget' as const,
     proposal_payload: payload,
-    target_discriminator: memoryForgetTargetDiscriminator(payload),
   };
 }
 
