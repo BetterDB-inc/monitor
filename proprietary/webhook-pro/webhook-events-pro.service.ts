@@ -518,11 +518,20 @@ export function clusterFailoverMessage(data: {
   previousState?: string;
   reasons?: string[];
 }): string {
-  // Gate on the reason the dispatcher recorded, not on the states differing.
-  // cluster_state is only added on ok -> fail, so a topology failover seen on
-  // the same poll as a fail -> ok recovery would otherwise be reported as that
-  // recovery and bury the real signal.
-  const stateWasTheSignal = (data.reasons ?? []).includes('cluster_state');
+  // A caller that declares its reasons is trusted over the raw states:
+  // cluster_state is only recorded on ok -> fail, so a topology failover seen
+  // on the same poll as a fail -> ok recovery would otherwise be reported as
+  // that recovery and bury the real signal.
+  //
+  // A caller that declares none keeps the original state-difference wording.
+  // anomaly.service dispatches without reasons and is the only path reporting
+  // fail -> ok recovery, so gating on reasons unconditionally would strip the
+  // from/to wording from every recovery alert.
+  const reasons = data.reasons ?? [];
+  const stateWasTheSignal =
+    reasons.length > 0
+      ? reasons.includes('cluster_state')
+      : data.previousState !== undefined && data.previousState !== data.clusterState;
   if (stateWasTheSignal) {
     return `Cluster state changed from ${data.previousState ?? 'unknown'} to ${data.clusterState}`;
   }

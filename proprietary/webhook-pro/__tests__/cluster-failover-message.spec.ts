@@ -63,6 +63,22 @@ describe('clusterFailoverMessage', () => {
     ).toBe('Cluster failover detected while state stayed ok: a node changed role');
   });
 
+  it('keeps the transition wording for a caller that declares no reasons', () => {
+    // anomaly.service dispatches without `reasons` and is the only path that
+    // reports fail -> ok recovery. Gating the transition text on `reasons`
+    // unconditionally would strip the from/to wording from every one of its
+    // alerts.
+    expect(clusterFailoverMessage({ clusterState: 'ok', previousState: 'fail' })).toBe(
+      'Cluster state changed from fail to ok',
+    );
+  });
+
+  it('keeps the transition wording for a reasonless ok -> fail caller', () => {
+    expect(clusterFailoverMessage({ clusterState: 'fail', previousState: 'ok' })).toBe(
+      'Cluster state changed from ok to fail',
+    );
+  });
+
   it('does not invent a transition when there is no previous state', () => {
     // The old message read "changed from unknown to fail", which asserts a
     // transition nobody observed. With no baseline, report the state we have.
