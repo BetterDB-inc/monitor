@@ -15,6 +15,6 @@ declare module '@tanstack/hotkeys' {
      * `formatForDisplay` at render time. A stored label would be a second copy
      * to keep in step, and would not adapt per platform.
      */
-    group?: 'Navigation' | 'Panels' | 'Help';
+    group?: 'Navigation' | 'Panels' | 'View' | 'Help';
   }
 }

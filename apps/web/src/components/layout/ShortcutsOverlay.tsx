@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useHotkeyRegistrations } from '@tanstack/react-hotkeys';
 import { formatForDisplay, formatHotkeySequence } from '@tanstack/hotkeys';
 
-const GROUP_ORDER = ['Navigation', 'Panels', 'Help'] as const;
+const GROUP_ORDER = ['Navigation', 'Panels', 'View', 'Help'] as const;
 
 interface Row {
   label: string;

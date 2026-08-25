@@ -3,7 +3,15 @@ import { render, screen, fireEvent } from '@testing-library/react';
 
 // Mock the shadcn Switch (its @/ imports don't resolve in vitest)
 vi.mock('./ui/switch', () => ({
-  Switch: ({ checked, onCheckedChange, ...props }: { checked?: boolean; onCheckedChange?: (v: boolean) => void; 'aria-label'?: string }) => (
+  Switch: ({
+    checked,
+    onCheckedChange,
+    ...props
+  }: {
+    checked?: boolean;
+    onCheckedChange?: (v: boolean) => void;
+    'aria-label'?: string;
+  }) => (
     <button
       role="switch"
       aria-checked={checked}
@@ -30,12 +38,22 @@ const localStorageMock = (() => {
   let store: Record<string, string> = {};
   return {
     getItem: vi.fn((key: string) => store[key] ?? null),
-    setItem: vi.fn((key: string, value: string) => { store[key] = value; }),
-    removeItem: vi.fn((key: string) => { delete store[key]; }),
-    clear: vi.fn(() => { store = {}; }),
-    get length() { return Object.keys(store).length; },
+    setItem: vi.fn((key: string, value: string) => {
+      store[key] = value;
+    }),
+    removeItem: vi.fn((key: string) => {
+      delete store[key];
+    }),
+    clear: vi.fn(() => {
+      store = {};
+    }),
+    get length() {
+      return Object.keys(store).length;
+    },
     key: vi.fn((i: number) => Object.keys(store)[i] ?? null),
-    _reset() { store = {}; },
+    _reset() {
+      store = {};
+    },
   };
 })();
 
@@ -100,5 +118,28 @@ describe('ModeToggle', () => {
 
     const toggle = screen.getByRole('switch');
     expect(toggle).toHaveAttribute('aria-label', 'Toggle dark mode');
+  });
+
+  it('flips the theme on Mod+Shift+L', () => {
+    render(<ModeToggle />);
+    expect(screen.getByRole('switch')).not.toBeChecked();
+
+    // The manager listens on document, so dispatch there rather than on a node.
+    fireEvent.keyDown(document, { key: 'L', code: 'KeyL', ctrlKey: true, shiftKey: true });
+
+    expect(screen.getByText('Dark mode')).toBeInTheDocument();
+    expect(document.documentElement.classList.contains('dark')).toBe(true);
+  });
+
+  it('keeps the visible switch in step with the shortcut', () => {
+    // Registered inside this component rather than alongside the other
+    // bindings because useTheme holds per-instance state — toggling from
+    // elsewhere would change the document and leave this switch stale.
+    render(<ModeToggle />);
+
+    fireEvent.keyDown(document, { key: 'L', code: 'KeyL', ctrlKey: true, shiftKey: true });
+
+    const checked = screen.getByRole('switch').getAttribute('aria-checked') === 'true';
+    expect(document.documentElement.classList.contains('dark')).toBe(checked);
   });
 });

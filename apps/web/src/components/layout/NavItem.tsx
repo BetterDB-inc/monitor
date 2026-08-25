@@ -54,13 +54,13 @@ export function NavItem({ children, active, to, requiredFeature, demoLocked }: N
   return (
     <Link
       to={to}
-      className={`group/navitem flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
+      className={`group/navitem flex w-full items-center justify-between gap-2 rounded-md ps-3 pe-2 py-2 text-sm transition-colors ${
         active ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'
       }`}
     >
       <span className="min-w-0 truncate">{children}</span>
       {chord !== undefined && (
-        <kbd className="shrink-0 shadow-lg px-1 font-mono font-bold text-xs opacity-0 transition-opacity duration-300 ease-out group-hover/navitem:opacity-40 group-focus-visible/navitem:opacity-60">
+        <kbd className="shrink-0 border-accent-foreground border  px-1 font-mono font-bold text-xs opacity-0 transition-opacity duration-300 ease-out group-hover/navitem:opacity-40 group-focus-visible/navitem:opacity-60">
           {labelFor(chord)}
         </kbd>
       )}
