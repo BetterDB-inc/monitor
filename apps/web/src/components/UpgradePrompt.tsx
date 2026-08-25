@@ -1,3 +1,4 @@
+import { useNavigate } from 'react-router-dom';
 import { Card } from './ui/card';
 import { PaymentRequiredError } from '../api/client';
 
@@ -7,6 +8,18 @@ interface UpgradePromptProps {
 }
 
 export function UpgradePrompt({ error, onDismiss }: UpgradePromptProps) {
+  const navigate = useNavigate();
+
+  /**
+   * Declining has to leave the gated route, not just hide the prompt.
+   * Dismissing in place left the user on a blank licensed page where the next
+   * interaction raised the same prompt again, with no way out but the URL bar.
+   */
+  function decline(): void {
+    onDismiss();
+    navigate('/');
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
       <Card className="max-w-md p-6 space-y-4">
@@ -18,7 +31,7 @@ export function UpgradePrompt({ error, onDismiss }: UpgradePromptProps) {
             </p>
           </div>
           <button
-            onClick={onDismiss}
+            onClick={decline}
             className="text-muted-foreground hover:text-foreground"
             aria-label="Close"
           >
@@ -44,7 +57,7 @@ export function UpgradePrompt({ error, onDismiss }: UpgradePromptProps) {
             Upgrade Now
           </a>
           <button
-            onClick={onDismiss}
+            onClick={decline}
             className="px-4 py-2 rounded-md text-sm font-medium hover:bg-muted"
           >
             Maybe Later
