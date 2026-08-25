@@ -214,7 +214,10 @@ function addMemoryProposalIntegrityColumns(db: Database.Database): void {
     if (/no such table/i.test(message)) {
       return;
     }
-    throw new Error(`memory_proposals integrity migration failed: ${message}`);
+    // `cause` keeps the original stack: this throw exists to make a migration
+    // failure visible, and a message without the underlying error makes it
+    // harder to diagnose, not easier.
+    throw new Error(`memory_proposals integrity migration failed: ${message}`, { cause: err });
   }
 }
 
