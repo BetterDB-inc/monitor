@@ -40,6 +40,9 @@ import { Members } from '../../pages/Members';
 import { CloudUser } from '../../api/workspace';
 import { AppSidebar } from './AppSidebar.tsx';
 import { FeedbackModal } from './FeedbackModal';
+import { ShortcutsOverlay } from '@/components/layout/ShortcutsOverlay';
+import { useAppKeybindings } from '@/keybindings/useAppKeybindings';
+import { useSidebar } from '@/components/ui/sidebar';
 import { SidebarProvider } from '@/components/ui/sidebar.tsx';
 
 function DemoGuardedRoute({ children }: { children: ReactNode }) {
@@ -50,8 +53,31 @@ function DemoGuardedRoute({ children }: { children: ReactNode }) {
 }
 
 export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
+  return (
+    <SidebarProvider>
+      <AppLayoutInner cloudUser={cloudUser} />
+    </SidebarProvider>
+  );
+}
+
+/**
+ * Split out so the keybindings can reach `useSidebar`, which only exists
+ * inside `SidebarProvider`.
+ */
+function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
   const [showFeedback, setShowFeedback] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
   const cliPanel = useCliPanel();
+  const { toggleSidebar } = useSidebar();
+
+  useAppKeybindings({
+    toggleCli: cliPanel.toggle,
+    toggleSidebar,
+    openConnectionSwitcher: () => {
+      window.dispatchEvent(new CustomEvent('betterdb:open-connection-switcher'));
+    },
+    showShortcuts: () => setShowShortcuts(true),
+  });
   useIdleTracker();
   useNavigationTracker();
   // Mirror ready managed Valkey instances into the connection list app-wide, so
@@ -59,11 +85,15 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
   useValkeyAutoLink(cloudUser);
 
   return (
-    <SidebarProvider>
       <div className="min-h-screen bg-background w-full">
-        <AppSidebar cloudUser={cloudUser} onFeedbackClick={() => setShowFeedback(true)} />
+        <AppSidebar
+          cloudUser={cloudUser}
+          onFeedbackClick={() => setShowFeedback(true)}
+          onShortcutsClick={() => setShowShortcuts(true)}
+        />
 
         {showFeedback && <FeedbackModal onClose={() => setShowFeedback(false)} />}
+        {showShortcuts && <ShortcutsOverlay onClose={() => setShowShortcuts(false)} />}
 
         <main className="min-h-screen  flex flex-col pl-0 transition-[padding] duration-200 ease-linear md:peer-data-[state=expanded]:pl-64">
           <DemoBanner cloudUser={cloudUser} />
@@ -303,6 +333,5 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
         }
       `}</style>
       </div>
-    </SidebarProvider>
   );
 }

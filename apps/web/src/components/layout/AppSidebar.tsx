@@ -15,13 +15,15 @@ import {
 } from '@/components/ui/sidebar.tsx';
 import { Feature } from '@betterdb/shared';
 import { CommunityBanner } from '@/components/layout/CommunityBanner.tsx';
+import { formatForDisplay } from '@tanstack/hotkeys';
 
 interface SidebarProps {
   cloudUser: CloudUser | null;
   onFeedbackClick: () => void;
+  onShortcutsClick: () => void;
 }
 
-export function AppSidebar({ cloudUser, onFeedbackClick }: SidebarProps) {
+export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: SidebarProps) {
   const location = useLocation();
   const { hasVectorSearch } = useCapabilities();
   const { unreadCount: cacheProposalsUnread } = useCacheProposalsUnread();
@@ -99,20 +101,14 @@ export function AppSidebar({ cloudUser, onFeedbackClick }: SidebarProps) {
               Vector / AI
             </NavItem>
           )}
-          <NavItem
-            to="/ai-cache-memory"
-            active={location.pathname === '/ai-cache-memory'}
-          >
+          <NavItem to="/ai-cache-memory" active={location.pathname === '/ai-cache-memory'}>
             AI Cache &amp; Memory
           </NavItem>
           <NavItem to="/ai-traces" active={location.pathname === '/ai-traces'}>
             AI Traces
           </NavItem>
           {hasVectorSearch && (
-            <NavItem
-              to="/inference-latency"
-              active={location.pathname === '/inference-latency'}
-            >
+            <NavItem to="/inference-latency" active={location.pathname === '/inference-latency'}>
               Inference Latency
             </NavItem>
           )}
@@ -175,8 +171,19 @@ export function AppSidebar({ cloudUser, onFeedbackClick }: SidebarProps) {
           >
             Feedback
           </button>
+          <button
+            onClick={onShortcutsClick}
+            className="flex w-full items-center justify-between rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted"
+          >
+            <span>Keyboard shortcuts</span>
+            <kbd className="text-xs font-mono font-bold text-muted-foreground shadow-lg px-1">{formatForDisplay('shift+?')}</kbd>
+          </button>
           {cloudUser && (
-            <NavItem to="/workspace/members" active={location.pathname === '/workspace/members'} demoLocked={isDemo}>
+            <NavItem
+              to="/workspace/members"
+              active={location.pathname === '/workspace/members'}
+              demoLocked={isDemo}
+            >
               Team
             </NavItem>
           )}

@@ -7,9 +7,14 @@ import '@tanstack/react-hotkeys';
  */
 declare module '@tanstack/hotkeys' {
   interface HotkeyMeta {
-    /** Section the binding appears under in the cheat sheet. */
+    /**
+     * Section the binding appears under in the cheat sheet.
+     *
+     * Deliberately no `label`: every registration view carries its own `hotkey`
+     * or `sequence`, so the display string is derived with the library's
+     * `formatForDisplay` at render time. A stored label would be a second copy
+     * to keep in step, and would not adapt per platform.
+     */
     group?: 'Navigation' | 'Panels' | 'Help';
-    /** How the chord reads to a human, e.g. `g d` or `Mod+K`. */
-    label?: string;
   }
 }

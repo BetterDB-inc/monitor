@@ -11,17 +11,9 @@ export function useCliPanel() {
     sessionStorage.setItem(STORAGE_KEY, String(isOpen));
   }, [isOpen]);
 
-  // Global Ctrl+` shortcut
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key === '`') {
-        e.preventDefault();
-        setIsOpen((prev) => !prev);
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, []);
+  // The Ctrl+` binding lives in src/keybindings, registered alongside every
+  // other shortcut so it appears in the cheat sheet and is guarded consistently.
+  // Keeping a second listener here toggled twice on platforms where Mod is Ctrl.
 
   const toggle = useCallback(() => setIsOpen((prev) => !prev), []);
   const open = useCallback(() => setIsOpen(true), []);

@@ -6,7 +6,7 @@
  * prefix guard below be a test instead of a code review.
  */
 
-import type { Hotkey } from '@tanstack/hotkeys';
+import { formatHotkeySequence, type Hotkey } from '@tanstack/hotkeys';
 
 export type BindingGroup = 'Navigation' | 'Panels' | 'Help';
 
@@ -65,7 +65,23 @@ export function sequenceFor(chord: NavChord): Hotkey[] {
   return [NAV_LEADER, ...chord.keys];
 }
 
-/** How a chord reads in the cheat sheet. */
+/**
+ * How a chord reads to a human. Delegates to the library's formatter rather
+ * than joining by hand, so display stays consistent with how it renders every
+ * other binding.
+ */
 export function labelFor(chord: NavChord): string {
-  return sequenceFor(chord).join(' ');
+  return formatHotkeySequence(sequenceFor(chord));
+}
+
+/**
+ * The chord that reaches a route, if it has one.
+ *
+ * Looked up by path rather than passed in as a prop, so a nav item's hint and
+ * the binding that actually fires come from the same row and cannot drift.
+ */
+export function chordForPath(path: string): NavChord | undefined {
+  return NAV_CHORDS.find((chord) => {
+    return chord.path === path;
+  });
 }

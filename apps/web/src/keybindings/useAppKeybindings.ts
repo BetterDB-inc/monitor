@@ -1,6 +1,6 @@
 import { useNavigate } from 'react-router-dom';
 import { useHotkeys, useHotkeySequences } from '@tanstack/react-hotkeys';
-import { NAV_CHORDS, labelFor, sequenceFor } from './bindings';
+import { NAV_CHORDS, sequenceFor } from './bindings';
 
 export interface AppKeybindingActions {
   toggleCli: () => void;
@@ -26,7 +26,7 @@ export function useAppKeybindings(actions: AppKeybindingActions): void {
         sequence: sequenceFor(chord),
         callback: () => navigate(chord.path),
         options: {
-          meta: { name: chord.name, group: 'Navigation', label: labelFor(chord) },
+          meta: { name: chord.name, group: 'Navigation' },
         },
       };
     }),
@@ -36,25 +36,29 @@ export function useAppKeybindings(actions: AppKeybindingActions): void {
     {
       hotkey: 'Mod+K',
       callback: actions.openConnectionSwitcher,
-      options: { meta: { name: 'Switch connection', group: 'Panels', label: 'Mod+K' } },
+      options: { meta: { name: 'Switch connection', group: 'Panels' } },
     },
     {
-      // Was Ctrl-only in useCliPanel, so it never worked with Cmd on macOS.
-      // `Mod` resolves per platform, which is the fix rather than a special case.
-      hotkey: 'Mod+`',
+      // Ctrl on every platform, deliberately NOT Mod. Cmd+` is a macOS system
+      // shortcut (cycle windows within an app), so Mod would collide there —
+      // which is why terminals bind Ctrl+` everywhere, macOS included. The
+      // original Ctrl-only binding was right; treating it as a bug was my error.
+      hotkey: 'Control+`',
       callback: actions.toggleCli,
-      options: { meta: { name: 'Toggle CLI', group: 'Panels', label: 'Mod+`' } },
+      options: { meta: { name: 'Toggle CLI', group: 'Panels' } },
     },
     {
       hotkey: 'Mod+B',
       callback: actions.toggleSidebar,
-      options: { meta: { name: 'Toggle sidebar', group: 'Panels', label: 'Mod+B' } },
+      options: { meta: { name: 'Toggle sidebar', group: 'Panels' } },
     },
     {
-      // Object form: '?' is Shift+/ and not in the type-safe Hotkey union.
-      hotkey: { key: '?' },
+      // Object form: '?' is not in the type-safe Hotkey union. `shift` must be
+      // set explicitly — it defaults to false, so `{ key: '?' }` registered a
+      // '?' pressed *without* Shift, which no keyboard can produce.
+      hotkey: { key: '?', shift: true },
       callback: actions.showShortcuts,
-      options: { meta: { name: 'Keyboard shortcuts', group: 'Help', label: '?' } },
+      options: { meta: { name: 'Keyboard shortcuts', group: 'Help' } },
     },
   ]);
 }
