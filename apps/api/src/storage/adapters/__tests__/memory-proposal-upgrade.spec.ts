@@ -101,15 +101,20 @@ describe('memory_proposals upgrade from a pre-#276 database', () => {
     adapter = new SqliteAdapter({ filepath: dbPath });
     await adapter.initialize();
 
-    await expect(
-      adapter.createMemoryProposal({
+    let message: string | null = null;
+    try {
+      await adapter.createMemoryProposal({
         id: 'p2',
         connection_id: 'c1',
         store_name: 's1',
         proposal_type: 'forget',
         proposal_payload: { target_kind: 'id', memory_id: 'm1' },
-      }),
-    ).rejects.toThrow(/unique/i);
+      });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+
+    expect(message).toMatch(/unique/i);
   });
 
   it('leaves pre-existing duplicates in place rather than failing the migration', async () => {

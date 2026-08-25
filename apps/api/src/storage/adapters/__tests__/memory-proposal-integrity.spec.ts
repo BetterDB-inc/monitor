@@ -110,7 +110,53 @@ describe.each<[string, () => Promise<StoragePort>]>([
     it('rejects a second pending proposal for the same target at the storage layer', async () => {
       await storage.createMemoryProposal(proposalInput());
 
-      await expect(storage.createMemoryProposal(proposalInput())).rejects.toThrow(/unique/i);
+      // Captured rather than asserted with `.rejects.toThrow`: that form
+      // reported "did not throw" intermittently here while the adapter was
+      // demonstrably raising a UNIQUE error, so it was measuring itself rather
+      // than the guarantee.
+      let message: string | null = null;
+      try {
+        await storage.createMemoryProposal(proposalInput());
+      } catch (err) {
+        message = err instanceof Error ? err.message : String(err);
+      }
+
+      expect(message).toMatch(/unique/i);
+    });
+
+    it('has the partial unique index that enforces the guard', async () => {
+      // Asserted directly because it is the mechanism. Without this, a missing
+      // index is indistinguishable from a constraint that did not fire, and the
+      // two have very different causes.
+      const db = (
+        storage as unknown as { db?: { prepare: (q: string) => { all: () => unknown[] } } }
+      ).db;
+      if (db === undefined) {
+        return;
+      }
+      const rows = db
+        .prepare(
+          "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='memory_proposals'",
+        )
+        .all() as { name: string; sql: string | null }[];
+      const target = rows.find((row) => {
+        return row.name === 'idx_memory_proposals_pending_target';
+      });
+
+      expect(target).toBeDefined();
+      // The name alone proves nothing — a non-unique index of the same name
+      // would satisfy IF NOT EXISTS and silently leave the guard off.
+      expect(target?.sql).toMatch(/CREATE UNIQUE INDEX/i);
+      expect(target?.sql).toMatch(/status = 'pending'/);
+    });
+
+    it('keys the stored row so the constraint has something to match on', async () => {
+      // Separated from the rejection above so a failure says which half broke:
+      // an unkeyed row sits outside the partial index and is silently
+      // unguarded, which looks identical to the constraint not firing.
+      const created = await storage.createMemoryProposal(proposalInput());
+
+      expect(created.target_discriminator).toBe(memoryForgetTargetDiscriminator(BY_ID));
     });
   });
 

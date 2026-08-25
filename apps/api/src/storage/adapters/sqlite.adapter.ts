@@ -189,9 +189,16 @@ function addMemoryProposalIntegrityColumns(db: Database.Database): void {
           `already duplicates of another pending row, or an unparseable payload.`,
       );
     }
-  } catch {
-    // Table absent on a fresh database: createSchema builds it with the columns
-    // already present, so there is nothing to migrate.
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // "no such table" is the only benign case, and it cannot happen after
+    // createSchema. Anything else means the duplicate-pending index may not
+    // exist, and swallowing that silently ships the race this migration is
+    // here to close.
+    if (/no such table/i.test(message)) {
+      return;
+    }
+    throw new Error(`memory_proposals integrity migration failed: ${message}`);
   }
 }
 
