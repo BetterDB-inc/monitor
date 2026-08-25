@@ -63,6 +63,20 @@ describe('clusterFailoverMessage', () => {
     ).toBe('Cluster failover detected while state stayed ok: a node changed role');
   });
 
+  it('renders the topology signals alongside a real state transition', () => {
+    // A cluster-wide outage trips the CLUSTER INFO edge and churns the topology
+    // on the same poll. Returning only the transition drops the detail that
+    // says which nodes moved.
+    const message = clusterFailoverMessage({
+      clusterState: 'fail',
+      previousState: 'ok',
+      reasons: ['cluster_state', 'role_change'],
+    });
+
+    expect(message).toContain('from ok to fail');
+    expect(message).toContain('a node changed role');
+  });
+
   it('keeps the transition wording for a caller that declares no reasons', () => {
     // anomaly.service dispatches without `reasons` and is the only path that
     // reports fail -> ok recovery. Gating the transition text on `reasons`

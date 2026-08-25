@@ -532,16 +532,28 @@ export function clusterFailoverMessage(data: {
     reasons.length > 0
       ? reasons.includes('cluster_state')
       : data.previousState !== undefined && data.previousState !== data.clusterState;
-  if (stateWasTheSignal) {
-    return `Cluster state changed from ${data.previousState ?? 'unknown'} to ${data.clusterState}`;
-  }
-  // cluster_state held steady, so the topology is what moved. Naming the signal
-  // is the only thing that tells an operator what happened.
-  const labels = (data.reasons ?? [])
+
+  const labels = reasons
+    .filter((reason) => {
+      return reason !== 'cluster_state';
+    })
     .map((reason) => {
       return TOPOLOGY_REASON_LABELS[reason] ?? reason;
     })
     .join(', ');
+
+  if (stateWasTheSignal) {
+    const transition = `Cluster state changed from ${data.previousState ?? 'unknown'} to ${data.clusterState}`;
+    // An outage trips the CLUSTER INFO edge and churns the topology on the same
+    // poll. Reporting only the transition drops which nodes actually moved.
+    if (labels === '') {
+      return transition;
+    }
+    return `${transition} (also: ${labels})`;
+  }
+
+  // cluster_state held steady, so the topology is what moved. Naming the signal
+  // is the only thing that tells an operator what happened.
   if (labels === '') {
     return `Cluster failover detected (state ${data.clusterState})`;
   }
