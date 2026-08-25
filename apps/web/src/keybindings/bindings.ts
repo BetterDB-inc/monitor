@@ -1,0 +1,71 @@
+/**
+ * Every keyboard binding in the app, as data.
+ *
+ * The cheat sheet renders from the live registry rather than from this file, so
+ * the two cannot drift — but keeping the table declarative is what lets the
+ * prefix guard below be a test instead of a code review.
+ */
+
+import type { Hotkey } from '@tanstack/hotkeys';
+
+export type BindingGroup = 'Navigation' | 'Panels' | 'Help';
+
+export interface NavChord {
+  /** Keys pressed after the leader. `['d']` means `g d`. */
+  keys: readonly Hotkey[];
+  path: string;
+  name: string;
+}
+
+/**
+ * The leader every navigation chord starts with.
+ *
+ * Keys are the library's canonical uppercase names — they identify the key, not
+ * the character it produces, so the user still presses lowercase `g`.
+ */
+export const NAV_LEADER: Hotkey = 'G';
+
+/**
+ * Navigation chords.
+ *
+ * A terminal chord cannot also be the prefix of a longer one — `g a` fires the
+ * moment `a` lands, so `g a c` could never complete. `v` and `y` are therefore
+ * reserved as prefixes and have no single-key chord of their own.
+ * `bindings.test.ts` enforces this.
+ */
+export const NAV_CHORDS: readonly NavChord[] = [
+  { keys: ['D'], path: '/', name: 'Dashboard' },
+  { keys: ['S'], path: '/slowlog', name: 'Slow log' },
+  { keys: ['L'], path: '/latency', name: 'Latency' },
+  { keys: ['U'], path: '/cluster', name: 'Cluster' },
+  { keys: ['A'], path: '/anomalies', name: 'Anomalies' },
+  { keys: ['M'], path: '/monitor', name: 'Monitor' },
+  { keys: ['C'], path: '/clients', name: 'Clients' },
+  { keys: ['K'], path: '/key-analytics', name: 'Key analytics' },
+  { keys: ['F'], path: '/forecasting', name: 'Forecasting' },
+  { keys: ['W'], path: '/webhooks', name: 'Webhooks' },
+  { keys: ['H'], path: '/helper', name: 'AI helper' },
+  { keys: ['B'], path: '/bulk-delete', name: 'Bulk delete' },
+  { keys: ['P'], path: '/cache-proposals', name: 'Cache proposals' },
+  { keys: ['I'], path: '/inference-latency', name: 'Inference latency' },
+  { keys: ['R'], path: '/migration', name: 'Migration' },
+  { keys: ['O'], path: '/audit', name: 'Audit log' },
+  { keys: ['N'], path: '/workspace/members', name: 'Members' },
+  { keys: [','], path: '/settings', name: 'Settings' },
+  { keys: ['V', 'S'], path: '/vector-search', name: 'Vector search' },
+  { keys: ['V', 'A'], path: '/vector-ai', name: 'Vector AI' },
+  { keys: ['V', 'C'], path: '/ai-cache-memory', name: 'AI cache memory' },
+  { keys: ['V', 'T'], path: '/ai-traces', name: 'AI traces' },
+  { keys: ['Y', 'C'], path: '/client-analytics', name: 'Client analytics' },
+  { keys: ['Y', 'D'], path: '/client-analytics/deep-dive', name: 'Client analytics deep dive' },
+] as const;
+
+/** The full sequence for a chord, leader included. */
+export function sequenceFor(chord: NavChord): Hotkey[] {
+  return [NAV_LEADER, ...chord.keys];
+}
+
+/** How a chord reads in the cheat sheet. */
+export function labelFor(chord: NavChord): string {
+  return sequenceFor(chord).join(' ');
+}
