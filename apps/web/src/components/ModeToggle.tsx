@@ -7,12 +7,13 @@ export function ModeToggle() {
   const { resolvedTheme, setTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
 
-  // Mod+Shift+L follows Notion, the closest thing to a convention for web apps;
-  // there is no OS-level standard. Registered here rather than with the other
-  // bindings because useTheme keeps per-instance state — toggling from
-  // elsewhere would flip the document and leave this switch showing the old
-  // value. The manager is a singleton, so it still lists in the cheat sheet.
-  useHotkey('Mod+Shift+L', () => setTheme(isDark ? 'light' : 'dark'), {
+  // Ctrl on every platform, deliberately NOT Mod: Notion binds Ctrl+Shift+L on
+  // macOS too, so Cmd would be the odd one out. Registered here rather than
+  // with the other bindings because useTheme keeps per-instance state —
+  // toggling from elsewhere would flip the document and leave this switch
+  // showing the old value. The manager is a singleton, so it still lists in
+  // the cheat sheet.
+  useHotkey('Control+Shift+L', () => setTheme(isDark ? 'light' : 'dark'), {
     meta: { name: 'Toggle theme', group: 'View' },
   });
 

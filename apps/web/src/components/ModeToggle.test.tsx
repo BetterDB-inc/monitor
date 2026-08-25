@@ -120,7 +120,7 @@ describe('ModeToggle', () => {
     expect(toggle).toHaveAttribute('aria-label', 'Toggle dark mode');
   });
 
-  it('flips the theme on Mod+Shift+L', () => {
+  it('flips the theme on Ctrl+Shift+L', () => {
     render(<ModeToggle />);
     expect(screen.getByRole('switch')).not.toBeChecked();
 
