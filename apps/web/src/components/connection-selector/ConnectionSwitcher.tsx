@@ -136,7 +136,11 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
         <Popover.Content
           align="start"
           sideOffset={4}
-          className="z-50 w-[var(--radix-popover-trigger-width)] min-w-[16rem] rounded-md border bg-popover text-popover-foreground shadow-md"
+          // Grows with its rows rather than being pinned to the trigger, the way
+          // the Manage Connections list does — a hosted `host:port` is far wider
+          // than the sidebar. Floored at the trigger so it never looks detached,
+          // capped at whatever the viewport leaves so it cannot run off-screen.
+          className="z-50 w-auto min-w-[max(16rem,var(--radix-popover-trigger-width))] max-w-[min(32rem,var(--radix-popover-content-available-width))] rounded-md border bg-popover text-popover-foreground shadow-md"
           onOpenAutoFocus={(event) => {
             event.preventDefault();
             searchRef.current?.focus();
@@ -216,8 +220,14 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
                         connection.isConnected ? 'bg-green-500' : 'bg-destructive',
                       )}
                     />
-                    <span className="truncate">{connection.name}</span>
-                    <span className="ml-auto text-xs text-muted-foreground flex-shrink-0">
+                    {/* `truncate` sets overflow:hidden, which drops a flex
+                        item's automatic minimum size to zero: the name would
+                        collapse to nothing while an unshrinkable host kept its
+                        full width and pushed the row into a horizontal scroll.
+                        Both shrink now, in proportion to their length, so the
+                        long hosted URL gives ground before the name does. */}
+                    <span className="min-w-0 truncate">{connection.name}</span>
+                    <span className="ml-auto min-w-0 truncate ps-2 text-xs text-muted-foreground">
                       {connection.host}:{connection.port}
                     </span>
                     {isCurrent ? <CheckIcon className="w-4 h-4 flex-shrink-0" /> : null}
