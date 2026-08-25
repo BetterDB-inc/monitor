@@ -7,6 +7,7 @@
  */
 
 import { formatHotkeySequence, type Hotkey } from '@tanstack/hotkeys';
+import { Feature } from '@betterdb/shared';
 
 export type BindingGroup = 'Navigation' | 'Panels' | 'Help';
 
@@ -15,6 +16,12 @@ export interface NavChord {
   keys: readonly Hotkey[];
   path: string;
   name: string;
+  /**
+   * Licence gate, mirroring the `requiredFeature` the sidebar passes to
+   * NavItem. A chord for a feature the licence does not cover is never
+   * registered, so the keyboard cannot reach a route the mouse cannot.
+   */
+  requiredFeature?: Feature;
 }
 
 /**
@@ -38,15 +45,30 @@ export const NAV_CHORDS: readonly NavChord[] = [
   { keys: ['S'], path: '/slowlog', name: 'Slow log' },
   { keys: ['L'], path: '/latency', name: 'Latency' },
   { keys: ['U'], path: '/cluster', name: 'Cluster' },
-  { keys: ['A'], path: '/anomalies', name: 'Anomalies' },
+  {
+    keys: ['A'],
+    path: '/anomalies',
+    name: 'Anomalies',
+    requiredFeature: Feature.ANOMALY_DETECTION,
+  },
   { keys: ['M'], path: '/monitor', name: 'Monitor' },
   { keys: ['C'], path: '/clients', name: 'Clients' },
-  { keys: ['K'], path: '/key-analytics', name: 'Key analytics' },
+  {
+    keys: ['K'],
+    path: '/key-analytics',
+    name: 'Key analytics',
+    requiredFeature: Feature.KEY_ANALYTICS,
+  },
   { keys: ['F'], path: '/forecasting', name: 'Forecasting' },
   { keys: ['W'], path: '/webhooks', name: 'Webhooks' },
   { keys: ['H'], path: '/helper', name: 'AI helper' },
-  { keys: ['B'], path: '/bulk-delete', name: 'Bulk delete' },
-  { keys: ['P'], path: '/cache-proposals', name: 'Cache proposals' },
+  { keys: ['B'], path: '/bulk-delete', name: 'Bulk delete', requiredFeature: Feature.BULK_DELETE },
+  {
+    keys: ['P'],
+    path: '/cache-proposals',
+    name: 'Cache proposals',
+    requiredFeature: Feature.CACHE_INTELLIGENCE,
+  },
   { keys: ['I'], path: '/inference-latency', name: 'Inference latency' },
   { keys: ['R'], path: '/migration', name: 'Migration' },
   { keys: ['O'], path: '/audit', name: 'Audit log' },
@@ -83,5 +105,23 @@ export function labelFor(chord: NavChord): string {
 export function chordForPath(path: string): NavChord | undefined {
   return NAV_CHORDS.find((chord) => {
     return chord.path === path;
+  });
+}
+
+/**
+ * The chords a given licence can actually use.
+ *
+ * Gated chords are filtered out rather than redirected: the sidebar sends an
+ * unlicensed click to /settings, but a chord that navigated straight to the
+ * gated route bypassed that gate entirely and dropped the user on a blank page
+ * behind an upgrade prompt. Not registering is the honest equivalent of the
+ * link not being there.
+ */
+export function availableChords(hasFeature: (feature: Feature) => boolean): NavChord[] {
+  return NAV_CHORDS.filter((chord) => {
+    if (chord.requiredFeature === undefined) {
+      return true;
+    }
+    return hasFeature(chord.requiredFeature);
   });
 }

@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom';
+import { useLicense } from '../hooks/useLicense';
 import { useHotkeys, useHotkeySequences } from '@tanstack/react-hotkeys';
-import { NAV_CHORDS, sequenceFor } from './bindings';
+import { availableChords, sequenceFor } from './bindings';
 
 export interface AppKeybindingActions {
   toggleCli: () => void;
@@ -19,9 +20,10 @@ export interface AppKeybindingActions {
  */
 export function useAppKeybindings(actions: AppKeybindingActions): void {
   const navigate = useNavigate();
+  const { hasFeature } = useLicense();
 
   useHotkeySequences(
-    NAV_CHORDS.map((chord) => {
+    availableChords(hasFeature).map((chord) => {
       return {
         sequence: sequenceFor(chord),
         callback: () => navigate(chord.path),
