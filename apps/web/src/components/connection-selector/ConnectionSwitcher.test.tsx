@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import type { Connection } from '../../hooks/useConnection';
 import { ConnectionSwitcher } from './ConnectionSwitcher';
@@ -31,8 +31,16 @@ function optionNames(): string[] {
 }
 
 describe('ConnectionSwitcher', () => {
+  const originalScrollIntoView = Element.prototype.scrollIntoView;
+
   beforeEach(() => {
     onSelect.mockClear();
+  });
+
+  afterEach(() => {
+    // Restored rather than left installed: this is a prototype method, so a
+    // stub leaks into every later test sharing the worker.
+    Element.prototype.scrollIntoView = originalScrollIntoView;
   });
 
   it('shows the current connection on the trigger without opening', () => {
@@ -165,16 +173,78 @@ describe('ConnectionSwitcher', () => {
     expect(onSelect).toHaveBeenCalledWith('a');
   });
 
-  it('scrolls the highlighted row into view', () => {
+  it('scrolls the highlighted row into view when navigating by keyboard', () => {
     // The list is height-capped and scrollable, which is the whole point for a
     // long connection list — a highlight that never scrolls is unusable.
     const scrollIntoView = vi.fn();
     Element.prototype.scrollIntoView = scrollIntoView;
     open();
+    // Opening scrolls too, so the assertion has to isolate the navigation.
+    scrollIntoView.mockClear();
 
     fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'ArrowDown' });
 
     expect(scrollIntoView).toHaveBeenCalled();
+  });
+
+  it('does not let the row under a stationary cursor steal the keyboard highlight', () => {
+    // Arrow keys scroll the list, so the browser fires mouseenter on whatever
+    // row slides under the motionless pointer. Honouring that yanks the
+    // highlight away from where the keyboard is.
+    open();
+    const search = screen.getByRole('searchbox');
+
+    fireEvent.keyDown(search, { key: 'ArrowDown' });
+    fireEvent.mouseEnter(screen.getAllByRole('option')[2]);
+    fireEvent.keyDown(search, { key: 'Enter' });
+
+    expect(onSelect).toHaveBeenCalledWith('b');
+  });
+
+  it('follows the mouse again once it actually moves', () => {
+    open();
+    const search = screen.getByRole('searchbox');
+    fireEvent.keyDown(search, { key: 'ArrowDown' });
+
+    fireEvent.mouseMove(screen.getByRole('listbox'));
+    fireEvent.mouseEnter(screen.getAllByRole('option')[2]);
+    fireEvent.keyDown(search, { key: 'Enter' });
+
+    expect(onSelect).toHaveBeenCalledWith('c');
+  });
+
+  it('points assistive technology at the highlighted option, not the current one', () => {
+    // aria-selected marks the connection in use; it says nothing about where
+    // the keyboard is, so arrow navigation is invisible to a screen reader.
+    open();
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'ArrowDown' });
+
+    const active = screen.getByRole('searchbox').getAttribute('aria-activedescendant');
+    expect(active).toBeTruthy();
+    expect(screen.getAllByRole('option')[1].id).toBe(active);
+  });
+
+  it('keeps Enter working when the connection list shrinks while open', () => {
+    // refreshConnections can land at any moment; an activeIndex left pointing
+    // past the end makes Enter silently do nothing.
+    const { rerender } = render(
+      <ConnectionSwitcher connections={CONNECTIONS} current={CONNECTIONS[0]} onSelect={onSelect} />,
+    );
+    fireEvent.click(screen.getByRole('combobox'));
+    const search = screen.getByRole('searchbox');
+    fireEvent.keyDown(search, { key: 'ArrowDown' });
+    fireEvent.keyDown(search, { key: 'ArrowDown' });
+
+    rerender(
+      <ConnectionSwitcher
+        connections={[CONNECTIONS[0]]}
+        current={CONNECTIONS[0]}
+        onSelect={onSelect}
+      />,
+    );
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Enter' });
+
+    expect(onSelect).toHaveBeenCalledWith('a');
   });
 
   it('shows connection health per row', () => {

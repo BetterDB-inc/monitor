@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Popover } from 'radix-ui';
 import { CheckIcon, ChevronDownIcon, SearchIcon } from 'lucide-react';
 import type { Connection } from '../../hooks/useConnection';
@@ -30,6 +30,11 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
   const [activeIndex, setActiveIndex] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  // Arrow keys scroll the list, so the browser fires mouseenter on whatever row
+  // slides under a motionless pointer. Honouring that would yank the highlight
+  // away from where the keyboard is, on exactly the long lists this exists for.
+  const keyboardNav = useRef(false);
+  const optionIdPrefix = useId();
 
   const filtered = useMemo(() => {
     return connections.filter((connection) => {
@@ -37,10 +42,20 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
     });
   }, [connections, query]);
 
+  // Derived rather than corrected in an effect: `connections` can change under
+  // an open popover (refreshConnections lands whenever it lands), and an index
+  // left pointing past the end makes Enter silently do nothing.
+  const effectiveIndex = filtered.length === 0 ? -1 : Math.min(activeIndex, filtered.length - 1);
+  const activeOptionId =
+    effectiveIndex >= 0 ? `${optionIdPrefix}-option-${effectiveIndex}` : undefined;
+
   useEffect(() => {
-    const active = listRef.current?.querySelectorAll('[role="option"]')[activeIndex];
+    if (effectiveIndex < 0) {
+      return;
+    }
+    const active = listRef.current?.querySelectorAll('[role="option"]')[effectiveIndex];
     active?.scrollIntoView({ block: 'nearest' });
-  }, [activeIndex, open]);
+  }, [effectiveIndex, open]);
 
   function handleSelect(id: string): void {
     onSelect(id);
@@ -51,6 +66,7 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
   function handleKeyDown(event: React.KeyboardEvent<HTMLInputElement>): void {
     if (event.key === 'ArrowDown') {
       event.preventDefault();
+      keyboardNav.current = true;
       setActiveIndex((index) => {
         return Math.min(index + 1, Math.max(filtered.length - 1, 0));
       });
@@ -58,6 +74,7 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
     }
     if (event.key === 'ArrowUp') {
       event.preventDefault();
+      keyboardNav.current = true;
       setActiveIndex((index) => {
         return Math.max(index - 1, 0);
       });
@@ -65,7 +82,7 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
     }
     if (event.key === 'Enter') {
       event.preventDefault();
-      const choice = filtered[activeIndex];
+      const choice = filtered[effectiveIndex];
       if (choice === undefined) {
         return;
       }
@@ -129,8 +146,11 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
               role="searchbox"
               aria-label="Search connections"
               value={query}
+              aria-controls={`${optionIdPrefix}-listbox`}
+              aria-activedescendant={activeOptionId}
               onChange={(event) => {
                 setQuery(event.target.value);
+                keyboardNav.current = true;
                 // The highlight indexes into the FILTERED list, so it must come
                 // back into range whenever the filter changes — otherwise Enter
                 // selects a row the operator cannot see.
@@ -142,7 +162,15 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
             />
           </div>
 
-          <div ref={listRef} role="listbox" className="max-h-64 overflow-y-auto p-1">
+          <div
+            ref={listRef}
+            id={`${optionIdPrefix}-listbox`}
+            role="listbox"
+            className="max-h-64 overflow-y-auto p-1"
+            onMouseMove={() => {
+              keyboardNav.current = false;
+            }}
+          >
             {filtered.length === 0 ? (
               <p className="px-2 py-3 text-sm text-muted-foreground">
                 {connections.length === 0
@@ -155,14 +183,20 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
                 return (
                   <button
                     key={connection.id}
+                    id={`${optionIdPrefix}-option-${index}`}
                     type="button"
                     role="option"
                     aria-selected={isCurrent}
-                    onMouseEnter={() => setActiveIndex(index)}
+                    onMouseEnter={() => {
+                      if (keyboardNav.current) {
+                        return;
+                      }
+                      setActiveIndex(index);
+                    }}
                     onClick={() => handleSelect(connection.id)}
                     className={cn(
                       'w-full flex items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-left',
-                      index === activeIndex && 'bg-accent',
+                      index === effectiveIndex && 'bg-accent',
                     )}
                   >
                     <span
