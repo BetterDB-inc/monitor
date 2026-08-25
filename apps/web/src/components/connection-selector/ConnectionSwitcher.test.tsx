@@ -136,6 +136,47 @@ describe('ConnectionSwitcher', () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
+  it('starts from the first row again after close and reopen', () => {
+    // Closing cleared the query but kept the highlight, so reopening and
+    // pressing Enter selected a row the operator never highlighted.
+    render(
+      <ConnectionSwitcher connections={CONNECTIONS} current={CONNECTIONS[0]} onSelect={onSelect} />,
+    );
+    fireEvent.click(screen.getByRole('combobox'));
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'ArrowDown' });
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Escape' });
+
+    fireEvent.click(screen.getByRole('combobox'));
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Enter' });
+
+    expect(onSelect).toHaveBeenCalledWith('a');
+  });
+
+  it('does not drive the highlight negative when nothing matches', () => {
+    open();
+    const search = screen.getByRole('searchbox');
+    fireEvent.change(search, { target: { value: 'zzz' } });
+    fireEvent.keyDown(search, { key: 'ArrowDown' });
+
+    // Clearing the filter must land back on a real row, not an index of -1.
+    fireEvent.change(search, { target: { value: '' } });
+    fireEvent.keyDown(search, { key: 'Enter' });
+
+    expect(onSelect).toHaveBeenCalledWith('a');
+  });
+
+  it('scrolls the highlighted row into view', () => {
+    // The list is height-capped and scrollable, which is the whole point for a
+    // long connection list — a highlight that never scrolls is unusable.
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    open();
+
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'ArrowDown' });
+
+    expect(scrollIntoView).toHaveBeenCalled();
+  });
+
   it('shows connection health per row', () => {
     open();
 

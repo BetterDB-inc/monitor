@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Popover } from 'radix-ui';
 import { CheckIcon, ChevronDownIcon, SearchIcon } from 'lucide-react';
 import type { Connection } from '../../hooks/useConnection';
@@ -29,12 +29,18 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
   const filtered = useMemo(() => {
     return connections.filter((connection) => {
       return matches(connection, query);
     });
   }, [connections, query]);
+
+  useEffect(() => {
+    const active = listRef.current?.querySelectorAll('[role="option"]')[activeIndex];
+    active?.scrollIntoView({ block: 'nearest' });
+  }, [activeIndex, open]);
 
   function handleSelect(id: string): void {
     onSelect(id);
@@ -46,7 +52,7 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
     if (event.key === 'ArrowDown') {
       event.preventDefault();
       setActiveIndex((index) => {
-        return Math.min(index + 1, filtered.length - 1);
+        return Math.min(index + 1, Math.max(filtered.length - 1, 0));
       });
       return;
     }
@@ -74,6 +80,10 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
         setOpen(next);
         if (!next) {
           setQuery('');
+          // Without this, highlighting a later row and dismissing leaves the
+          // highlight behind, so the next Enter selects a row the operator
+          // never chose.
+          setActiveIndex(0);
         }
       }}
     >
@@ -132,7 +142,7 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
             />
           </div>
 
-          <div role="listbox" className="max-h-64 overflow-y-auto p-1">
+          <div ref={listRef} role="listbox" className="max-h-64 overflow-y-auto p-1">
             {filtered.length === 0 ? (
               <p className="px-2 py-3 text-sm text-muted-foreground">
                 {connections.length === 0
