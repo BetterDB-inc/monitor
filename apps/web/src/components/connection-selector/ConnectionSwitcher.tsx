@@ -1,8 +1,9 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Popover } from 'radix-ui';
 import { CheckIcon, ChevronDownIcon, SearchIcon } from 'lucide-react';
 import type { Connection } from '../../hooks/useConnection';
 import { cn } from '@/lib/utils';
+import { ConnectionSwitcherOpenContext } from './switcher-open-context';
 
 interface ConnectionSwitcherProps {
   connections: Connection[];
@@ -25,7 +26,10 @@ function matches(connection: Connection, query: string): boolean {
 }
 
 export function ConnectionSwitcher({ connections, current, onSelect }: ConnectionSwitcherProps) {
-  const [open, setOpen] = useState(false);
+  const shared = useContext(ConnectionSwitcherOpenContext);
+  const [localOpen, setLocalOpen] = useState(false);
+  const open = shared?.open ?? localOpen;
+  const setOpen = shared?.setOpen ?? setLocalOpen;
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);

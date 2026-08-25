@@ -1,4 +1,4 @@
-import { useState, ReactNode } from 'react';
+import { useMemo, useState, ReactNode } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useDemoState } from '../../contexts/DemoContext';
 import { DemoBanner } from '../DemoBanner';
@@ -42,6 +42,7 @@ import { AppSidebar } from './AppSidebar.tsx';
 import { FeedbackModal } from './FeedbackModal';
 import { ShortcutsOverlay } from '@/components/layout/ShortcutsOverlay';
 import { useAppKeybindings } from '@/keybindings/useAppKeybindings';
+import { ConnectionSwitcherOpenContext } from '@/components/connection-selector/switcher-open-context';
 import { useSidebar } from '@/components/ui/sidebar';
 import { SidebarProvider } from '@/components/ui/sidebar.tsx';
 
@@ -67,17 +68,32 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
 function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
   const [showFeedback, setShowFeedback] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   const cliPanel = useCliPanel();
-  const { toggleSidebar } = useSidebar();
+  const { toggleSidebar, isMobile, setOpen, setOpenMobile } = useSidebar();
 
-  useAppKeybindings({
-    toggleCli: cliPanel.toggle,
-    toggleSidebar,
-    openConnectionSwitcher: () => {
-      window.dispatchEvent(new CustomEvent('betterdb:open-connection-switcher'));
+  const switcherState = useMemo(() => {
+    return { open: switcherOpen, setOpen: setSwitcherOpen };
+  }, [switcherOpen]);
+
+  useAppKeybindings(
+    {
+      toggleCli: cliPanel.toggle,
+      toggleSidebar,
+      openConnectionSwitcher: () => {
+        // The switcher is inside the sidebar, so reveal that first — on mobile
+        // it is a Sheet whose contents do not exist while closed.
+        if (isMobile) {
+          setOpenMobile(true);
+        } else {
+          setOpen(true);
+        }
+        setSwitcherOpen(true);
+      },
+      showShortcuts: () => setShowShortcuts(true),
     },
-    showShortcuts: () => setShowShortcuts(true),
-  });
+    { isCloud: cloudUser !== null },
+  );
   useIdleTracker();
   useNavigationTracker();
   // Mirror ready managed Valkey instances into the connection list app-wide, so
@@ -85,6 +101,7 @@ function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
   useValkeyAutoLink(cloudUser);
 
   return (
+    <ConnectionSwitcherOpenContext.Provider value={switcherState}>
       <div className="min-h-screen bg-background w-full">
         <AppSidebar
           cloudUser={cloudUser}
@@ -333,5 +350,6 @@ function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
         }
       `}</style>
       </div>
+    </ConnectionSwitcherOpenContext.Provider>
   );
 }

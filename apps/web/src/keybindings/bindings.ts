@@ -22,6 +22,23 @@ export interface NavChord {
    * registered, so the keyboard cannot reach a route the mouse cannot.
    */
   requiredFeature?: Feature;
+  /** Mirrors the sidebar's `hasVectorSearch` guard. */
+  requiresVectorSearch?: boolean;
+  /** Mirrors the sidebar's `demoLocked`, which renders an inert label. */
+  demoLocked?: boolean;
+  /** Routes the sidebar shows in only one of the two deployment modes. */
+  availableIn?: 'cloud' | 'self-hosted';
+}
+
+/**
+ * Everything `availableChords` needs to reach the same verdict the sidebar
+ * reaches for the matching nav item.
+ */
+export interface ChordGates {
+  hasFeature: (feature: Feature) => boolean;
+  hasVectorSearch: boolean;
+  isDemo: boolean;
+  isCloud: boolean;
 }
 
 /**
@@ -60,22 +77,39 @@ export const NAV_CHORDS: readonly NavChord[] = [
     requiredFeature: Feature.KEY_ANALYTICS,
   },
   { keys: ['F'], path: '/forecasting', name: 'Forecasting' },
-  { keys: ['W'], path: '/webhooks', name: 'Webhooks' },
-  { keys: ['H'], path: '/helper', name: 'AI helper' },
-  { keys: ['B'], path: '/bulk-delete', name: 'Bulk delete', requiredFeature: Feature.BULK_DELETE },
+  { keys: ['W'], path: '/webhooks', name: 'Webhooks', demoLocked: true },
+  { keys: ['H'], path: '/helper', name: 'AI helper', availableIn: 'self-hosted' },
+  {
+    keys: ['B'],
+    path: '/bulk-delete',
+    name: 'Bulk delete',
+    requiredFeature: Feature.BULK_DELETE,
+    demoLocked: true,
+  },
   {
     keys: ['P'],
     path: '/cache-proposals',
     name: 'Cache proposals',
     requiredFeature: Feature.CACHE_INTELLIGENCE,
   },
-  { keys: ['I'], path: '/inference-latency', name: 'Inference latency' },
+  {
+    keys: ['I'],
+    path: '/inference-latency',
+    name: 'Inference latency',
+    requiresVectorSearch: true,
+  },
   { keys: ['R'], path: '/migration', name: 'Migration' },
   { keys: ['O'], path: '/audit', name: 'Audit log' },
-  { keys: ['N'], path: '/workspace/members', name: 'Members' },
-  { keys: [','], path: '/settings', name: 'Settings' },
-  { keys: ['V', 'S'], path: '/vector-search', name: 'Vector search' },
-  { keys: ['V', 'A'], path: '/vector-ai', name: 'Vector AI' },
+  {
+    keys: ['N'],
+    path: '/workspace/members',
+    name: 'Members',
+    availableIn: 'cloud',
+    demoLocked: true,
+  },
+  { keys: [','], path: '/settings', name: 'Settings', demoLocked: true },
+  { keys: ['V', 'S'], path: '/vector-search', name: 'Vector search', requiresVectorSearch: true },
+  { keys: ['V', 'A'], path: '/vector-ai', name: 'Vector AI', requiresVectorSearch: true },
   { keys: ['V', 'C'], path: '/ai-cache-memory', name: 'AI cache memory' },
   { keys: ['V', 'T'], path: '/ai-traces', name: 'AI traces' },
   { keys: ['Y', 'C'], path: '/client-analytics', name: 'Client analytics' },
@@ -109,19 +143,35 @@ export function chordForPath(path: string): NavChord | undefined {
 }
 
 /**
- * The chords a given licence can actually use.
+ * The chords this session can actually use.
  *
  * Gated chords are filtered out rather than redirected: the sidebar sends an
  * unlicensed click to /settings, but a chord that navigated straight to the
  * gated route bypassed that gate entirely and dropped the user on a blank page
  * behind an upgrade prompt. Not registering is the honest equivalent of the
  * link not being there.
+ *
+ * The licence is only one of four gates the sidebar applies. Demo mode, the
+ * vector-search capability and the cloud/self-hosted split each hide nav items
+ * too, and a chord that ignored them reached a route the mouse could not.
  */
-export function availableChords(hasFeature: (feature: Feature) => boolean): NavChord[] {
+export function availableChords(gates: ChordGates): NavChord[] {
   return NAV_CHORDS.filter((chord) => {
-    if (chord.requiredFeature === undefined) {
-      return true;
+    if (chord.requiredFeature !== undefined && !gates.hasFeature(chord.requiredFeature)) {
+      return false;
     }
-    return hasFeature(chord.requiredFeature);
+    if (chord.requiresVectorSearch === true && !gates.hasVectorSearch) {
+      return false;
+    }
+    if (chord.demoLocked === true && gates.isDemo) {
+      return false;
+    }
+    if (chord.availableIn === 'cloud' && !gates.isCloud) {
+      return false;
+    }
+    if (chord.availableIn === 'self-hosted' && gates.isCloud) {
+      return false;
+    }
+    return true;
   });
 }

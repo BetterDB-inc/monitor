@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useHotkeyRegistrations } from '@tanstack/react-hotkeys';
 import { formatForDisplay, formatHotkeySequence } from '@tanstack/hotkeys';
 
@@ -17,11 +18,22 @@ interface Row {
  */
 export function ShortcutsOverlay({ onClose }: { onClose: () => void }) {
   const dialogRef = useRef<HTMLDivElement>(null);
+  const { pathname } = useLocation();
+  const openedAt = useRef(pathname);
   const { hotkeys, sequences } = useHotkeyRegistrations();
 
   useEffect(() => {
     dialogRef.current?.focus();
   }, []);
+
+  // The sheet lists the navigation chords, and those chords still fire while it
+  // is open — leaving it covering the page the user just asked for.
+  useEffect(() => {
+    if (pathname === openedAt.current) {
+      return;
+    }
+    onClose();
+  }, [pathname, onClose]);
 
   const grouped = new Map<string, Row[]>();
   const unlabelled: Row[] = [];
