@@ -1108,10 +1108,21 @@ export class PostgresAdapter implements StoragePort {
       // Parsed, not cast. A malformed legacy payload such as `{}` falls
       // through to the scope branch and takes the key a genuine empty-scope
       // target needs, leaving the valid row unkeyed and unguarded.
+      // pg already JSON.parses jsonb, so a column holding a scalar string comes
+      // back as a plain string — and JSON.parse on that throws. Outside a
+      // guard that rejection escapes initialize() and the process will not
+      // start, so the parse is contained the same way sqlite's is.
       const parsed = MemoryForgetPayloadSchema.safeParse(
-        typeof row.proposal_payload === 'string'
-          ? JSON.parse(row.proposal_payload)
-          : row.proposal_payload,
+        (() => {
+          if (typeof row.proposal_payload !== 'string') {
+            return row.proposal_payload;
+          }
+          try {
+            return JSON.parse(row.proposal_payload);
+          } catch {
+            return null;
+          }
+        })(),
       );
       if (!parsed.success) {
         skipped++;
