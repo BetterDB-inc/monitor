@@ -50,6 +50,19 @@ describe('clusterFailoverMessage', () => {
     );
   });
 
+  it('does not claim a recovery was the failover signal', () => {
+    // The dispatcher only adds cluster_state on ok -> fail. A topology failover
+    // seen on the same poll as a fail -> ok recovery would otherwise be
+    // reported as "changed from fail to ok", hiding the real signal.
+    expect(
+      clusterFailoverMessage({
+        clusterState: 'ok',
+        previousState: 'fail',
+        reasons: ['role_change'],
+      }),
+    ).toBe('Cluster failover detected while state stayed ok: a node changed role');
+  });
+
   it('does not invent a transition when there is no previous state', () => {
     // The old message read "changed from unknown to fail", which asserts a
     // transition nobody observed. With no baseline, report the state we have.

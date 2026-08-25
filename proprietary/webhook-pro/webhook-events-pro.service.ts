@@ -518,9 +518,13 @@ export function clusterFailoverMessage(data: {
   previousState?: string;
   reasons?: string[];
 }): string {
-  const stateMoved = data.previousState !== undefined && data.previousState !== data.clusterState;
-  if (stateMoved) {
-    return `Cluster state changed from ${data.previousState} to ${data.clusterState}`;
+  // Gate on the reason the dispatcher recorded, not on the states differing.
+  // cluster_state is only added on ok -> fail, so a topology failover seen on
+  // the same poll as a fail -> ok recovery would otherwise be reported as that
+  // recovery and bury the real signal.
+  const stateWasTheSignal = (data.reasons ?? []).includes('cluster_state');
+  if (stateWasTheSignal) {
+    return `Cluster state changed from ${data.previousState ?? 'unknown'} to ${data.clusterState}`;
   }
   // cluster_state held steady, so the topology is what moved. Naming the signal
   // is the only thing that tells an operator what happened.

@@ -74,6 +74,13 @@ export function snapshotTopology(nodes: ClusterNode[]): TopologySnapshot {
  * Nodes that appear or disappear between snapshots are deliberately NOT a
  * failover: scaling and node loss are their own events, and reporting them here
  * would make every topology change look like a promotion.
+ *
+ * Neither is a lone `configEpoch` bump. Epochs advance on `CLUSTER BUMPEPOCH`
+ * and on the ownership claim during resharding, with no failover involved.
+ * Every real failover promotes a replica, so `role_change` already covers them
+ * — treating the epoch as sufficient on its own would page on routine
+ * rebalancing. It stays in `reasons` when it accompanies a genuine promotion,
+ * where it is useful detail.
  */
 export function diffClusterTopology(
   previous: TopologySnapshot | null,
@@ -132,7 +139,8 @@ export function diffClusterTopology(
     }
   }
 
-  if (reasons.size === 0) {
+  const isFailover = reasons.has('role_change') || reasons.has('primary_change');
+  if (!isFailover) {
     return NO_CHANGE;
   }
 

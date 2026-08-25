@@ -70,14 +70,44 @@ describe('diffClusterTopology', () => {
     expect(result.reasons).toContain('primary_change');
   });
 
-  it('detects a configEpoch bump with no role or primary change', () => {
+  it('does not call a lone configEpoch bump a failover', () => {
+    // Epochs also advance on CLUSTER BUMPEPOCH and on the slot-ownership claim
+    // during resharding, neither of which is a failover. Every real failover
+    // promotes a replica, so role_change already covers them; firing on the
+    // epoch alone would page on routine rebalancing.
     const before = snapshotTopology([MASTER_A]);
     const after = snapshotTopology([node({ id: 'a', configEpoch: 7 })]);
 
     const result = diffClusterTopology(before, after);
 
+    expect(result.changed).toBe(false);
+    expect(result.reasons).toEqual([]);
+  });
+
+  it("reports another node's epoch bump once a real failover is in the diff", () => {
+    // A promoted node bumps its own epoch as part of promotion, so that is not
+    // separate information. A bump on an uninvolved node during the same window
+    // is, and it rides along once something genuinely failed over.
+    const before = snapshotTopology([MASTER_A, REPLICA_B, node({ id: 'c' })]);
+    const after = snapshotTopology([
+      replica('a', 'b'),
+      node({ id: 'b' }),
+      node({ id: 'c', configEpoch: 9 }),
+    ]);
+
+    const result = diffClusterTopology(before, after);
+
     expect(result.changed).toBe(true);
-    expect(result.reasons).toContain('epoch_bump');
+    expect(result.reasons).toEqual(expect.arrayContaining(['role_change', 'epoch_bump']));
+  });
+
+  it("does not report a promoted node's own epoch bump separately", () => {
+    const before = snapshotTopology([REPLICA_B]);
+    const after = snapshotTopology([node({ id: 'b', configEpoch: 9 })]);
+
+    const result = diffClusterTopology(before, after);
+
+    expect(result.reasons).toEqual(['role_change']);
   });
 
   it('ignores a configEpoch that decreases', () => {
