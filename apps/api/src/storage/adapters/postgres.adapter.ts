@@ -82,6 +82,7 @@ import {
   variantPayloadSchemaFor,
   MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS,
   memoryForgetTargetDiscriminator,
+  MemoryForgetPayloadSchema,
   StoredMemoryProposalSchema,
   StoredMemoryProposalAuditSchema,
   MemoryForgetPayload,
@@ -1104,15 +1105,22 @@ export class PostgresAdapter implements StoragePort {
     );
     let skipped = 0;
     for (const row of rows as { id: string; proposal_payload: unknown }[]) {
+      // Parsed, not cast. A malformed legacy payload such as `{}` falls
+      // through to the scope branch and takes the key a genuine empty-scope
+      // target needs, leaving the valid row unkeyed and unguarded.
+      const parsed = MemoryForgetPayloadSchema.safeParse(
+        typeof row.proposal_payload === 'string'
+          ? JSON.parse(row.proposal_payload)
+          : row.proposal_payload,
+      );
+      if (!parsed.success) {
+        skipped++;
+        continue;
+      }
       try {
-        const payload = (
-          typeof row.proposal_payload === 'string'
-            ? JSON.parse(row.proposal_payload)
-            : row.proposal_payload
-        ) as MemoryForgetPayload;
         await this.pool.query(
           `UPDATE memory_proposals SET target_discriminator = $1 WHERE id = $2`,
-          [memoryForgetTargetDiscriminator(payload), row.id],
+          [memoryForgetTargetDiscriminator(parsed.data), row.id],
         );
       } catch {
         skipped++;

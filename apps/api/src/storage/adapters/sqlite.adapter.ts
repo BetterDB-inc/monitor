@@ -86,6 +86,7 @@ import {
   variantPayloadSchemaFor,
   MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS,
   memoryForgetTargetDiscriminator,
+  MemoryForgetPayloadSchema,
   StoredMemoryProposalSchema,
   StoredMemoryProposalAuditSchema,
 } from '@betterdb/shared';
@@ -176,9 +177,24 @@ function addMemoryProposalIntegrityColumns(db: Database.Database): void {
     );
     let skipped = 0;
     for (const row of pending) {
+      // Parsed, not cast. A malformed legacy payload such as `{}` falls
+      // through to the scope branch and takes the key a genuine empty-scope
+      // target needs, leaving the valid row unkeyed and unguarded.
+      const parsed = MemoryForgetPayloadSchema.safeParse(
+        (() => {
+          try {
+            return JSON.parse(row.proposal_payload);
+          } catch {
+            return null;
+          }
+        })(),
+      );
+      if (!parsed.success) {
+        skipped++;
+        continue;
+      }
       try {
-        const payload = JSON.parse(row.proposal_payload) as MemoryForgetPayload;
-        update.run(memoryForgetTargetDiscriminator(payload), row.id);
+        update.run(memoryForgetTargetDiscriminator(parsed.data), row.id);
       } catch {
         skipped++;
       }

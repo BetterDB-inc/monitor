@@ -131,6 +131,34 @@ describe('memory_proposals upgrade from a pre-#276 database', () => {
     expect(await adapter.getMemoryProposal('p2')).not.toBeNull();
   });
 
+  it('does not let a malformed legacy payload claim a valid target key', async () => {
+    // `{}` falls through to the scope branch and produces the same key as a
+    // genuine empty-scope target. Keyed first, it would win the unique index
+    // and leave the real row unkeyed — silently unguarded.
+    seedLegacy(
+      `INSERT INTO memory_proposals VALUES
+        ('bad','c1','s1','forget','{}',NULL,'pending',NULL,1,NULL,NULL,NULL,NULL,${FAR_FUTURE}),
+        ('good','c1','s1','forget','{"target_kind":"scope"}',NULL,'pending',NULL,2,NULL,NULL,NULL,NULL,${FAR_FUTURE});`,
+    );
+    adapter = new SqliteAdapter({ filepath: dbPath });
+    await adapter.initialize();
+
+    // Read over SQL: a malformed payload cannot round-trip through the row
+    // schema, which is pre-existing behaviour and not what this covers.
+    const db = (adapter as unknown as { db: Database.Database }).db;
+    const keys = db
+      .prepare('SELECT id, target_discriminator FROM memory_proposals ORDER BY id')
+      .all() as { id: string; target_discriminator: string | null }[];
+
+    expect(keys).toEqual([
+      { id: 'bad', target_discriminator: null },
+      {
+        id: 'good',
+        target_discriminator: memoryForgetTargetDiscriminator({ target_kind: 'scope' }),
+      },
+    ]);
+  });
+
   it('makes a row already stuck in applying sweepable', async () => {
     // The rows #277 exists to clear are the ones that predate it. Leaving
     // applying_at NULL would skip them forever.
