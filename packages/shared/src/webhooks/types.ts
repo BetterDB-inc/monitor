@@ -375,9 +375,9 @@ export interface IWebhookEventsProService {
     opsPerSec: number;
     /**
      * Write-command calls counted on the node since it began disagreeing about
-     * its role. Absent when the node does not expose commandstats, in which
-     * case opsPerSec is the only traffic evidence and the writes are inferred,
-     * not counted.
+     * its role. Absent when nothing could be counted — the node exposes no
+     * commandstats, or its counter was reset — in which case opsPerSec is the
+     * only traffic evidence and the writes are inferred, not counted.
      */
     writeCallsDelta?: number;
     message: string;

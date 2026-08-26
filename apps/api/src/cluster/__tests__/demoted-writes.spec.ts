@@ -289,6 +289,69 @@ describe('evaluateDemotedWrites', () => {
     expect(alerts[0].opsPerSec).toBe(340);
   });
 
+  it('counts writes again after the node reset its counter', () => {
+    const watch = watchWithDemotedA(1_000);
+
+    evaluateDemotedWrites(
+      watch,
+      [observation({ writeCommandCalls: 500 })],
+      2_000,
+      POLL_INTERVAL_MS,
+    );
+    // A restart or CONFIG RESETSTAT drops the counter; the writes that follow
+    // are still writes to a node the cluster has demoted.
+    evaluateDemotedWrites(watch, [observation({ writeCommandCalls: 3 })], 2_040, POLL_INTERVAL_MS);
+    const alerts = evaluateDemotedWrites(
+      watch,
+      [observation({ writeCommandCalls: 55 })],
+      7_000,
+      POLL_INTERVAL_MS,
+    );
+
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].writeCallsDelta).toBe(52);
+  });
+
+  it('keeps the writes counted before the counter was reset', () => {
+    const watch = watchWithDemotedA(1_000);
+
+    evaluateDemotedWrites(
+      watch,
+      [observation({ writeCommandCalls: 500 })],
+      2_000,
+      POLL_INTERVAL_MS,
+    );
+    evaluateDemotedWrites(
+      watch,
+      [observation({ writeCommandCalls: 512 })],
+      2_040,
+      POLL_INTERVAL_MS,
+    );
+    evaluateDemotedWrites(watch, [observation({ writeCommandCalls: 3 })], 2_080, POLL_INTERVAL_MS);
+    const alerts = evaluateDemotedWrites(
+      watch,
+      [observation({ writeCommandCalls: 20 })],
+      7_000,
+      POLL_INTERVAL_MS,
+    );
+
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].writeCallsDelta).toBe(29);
+  });
+
+  it('keeps ops evidence when commandstats only appears mid-window', () => {
+    const watch = watchWithDemotedA(1_000);
+
+    // The first poll saw traffic it could not attribute — a node with no
+    // commandstats, or one whose only writes were module commands.
+    evaluate(watch, [observation({ opsPerSec: 300 })], 2_000);
+    const alerts = evaluate(watch, [observation({ opsPerSec: 0, writeCommandCalls: 7 })], 7_000);
+
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].opsPerSec).toBe(300);
+    expect(alerts[0].writeCallsDelta).toBeUndefined();
+  });
+
   it('does not alert until the disagreement has outlasted one poll interval', () => {
     const watch = watchWithDemotedA(1_000);
 
