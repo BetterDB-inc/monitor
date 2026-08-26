@@ -10,6 +10,7 @@ vi.mock('../components/ui/switch', () => ({
 }));
 
 import { ModeToggle } from '../components/ModeToggle';
+import { SidebarProvider, useSidebar } from '../components/ui/sidebar';
 
 const noop = () => {};
 
@@ -141,6 +142,41 @@ describe('useAppKeybindings', () => {
     expect(screen.getByTestId('path')).toHaveTextContent('/slowlog');
   });
 
+  it('toggles the sidebar exactly once on Mod+B', () => {
+    // SidebarProvider used to ship its own window listener for Cmd/Ctrl+B, so
+    // one press ran both handlers and the sidebar ended where it started.
+    render(
+      <MemoryRouter>
+        <SidebarProvider>
+          <SidebarBound />
+        </SidebarProvider>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId('sidebar-state')).toHaveTextContent('expanded');
+
+    fireEvent.keyDown(document, { key: 'b', code: 'KeyB', ctrlKey: true });
+
+    expect(screen.getByTestId('sidebar-state')).toHaveTextContent('collapsed');
+  });
+
+  it('suspends the sidebar shortcut too while the cheat sheet is open', () => {
+    // SidebarProvider shipped its own window listener for Cmd/Ctrl+B, outside
+    // the registry — disabling our binding left that one toggling the sidebar
+    // underneath the modal.
+    render(
+      <MemoryRouter>
+        <SidebarProvider>
+          <SidebarBound shortcutsOpen />
+        </SidebarProvider>
+      </MemoryRouter>,
+    );
+
+    fireEvent.keyDown(document, { key: 'b', code: 'KeyB', ctrlKey: true });
+
+    expect(screen.getByTestId('sidebar-state')).toHaveTextContent('expanded');
+  });
+
   it('navigates on a leader chord', () => {
     render(
       <MemoryRouter initialEntries={['/']}>
@@ -161,6 +197,12 @@ describe('useAppKeybindings', () => {
 function Bound({ shortcutsOpen = false }: { shortcutsOpen?: boolean }) {
   useAppKeybindings(ACTIONS, { isCloud: false, shortcutsOpen });
   return null;
+}
+
+function SidebarBound({ shortcutsOpen = false }: { shortcutsOpen?: boolean }) {
+  const { state, toggleSidebar } = useSidebar();
+  useAppKeybindings({ ...ACTIONS, toggleSidebar }, { isCloud: false, shortcutsOpen });
+  return <span data-testid="sidebar-state">{state}</span>;
 }
 
 function Path() {
