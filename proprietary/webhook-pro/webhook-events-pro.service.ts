@@ -125,6 +125,18 @@ export class WebhookEventsProService implements OnModuleInit {
   async dispatchClusterFailover(data: {
     clusterState: string;
     previousState?: string;
+    /**
+     * What tripped the detection. A clean failover leaves cluster_state
+     * unchanged, so without this the message below reads "changed from ok to
+     * ok" and tells an operator nothing.
+     */
+    reasons?: string[];
+    /**
+     * Which nodes moved and how. Empty for a state-only or slot-failure
+     * trigger; a consumer paging on a clean failover needs it to know what
+     * actually changed.
+     */
+    changedNodes?: Array<{ nodeId: string; reason: string; from: string; to: string }>;
     slotsAssigned: number;
     slotsFailed: number;
     knownNodes: number;
@@ -145,7 +157,9 @@ export class WebhookEventsProService implements OnModuleInit {
         slotsAssigned: data.slotsAssigned,
         slotsFailed: data.slotsFailed,
         knownNodes: data.knownNodes,
-        message: `Cluster state changed from ${data.previousState || 'unknown'} to ${data.clusterState}`,
+        reasons: data.reasons,
+        changedNodes: data.changedNodes,
+        message: clusterFailoverMessage(data),
         timestamp: data.timestamp,
         instance: data.instance,
       },
@@ -496,4 +510,59 @@ export class WebhookEventsProService implements OnModuleInit {
       data.connectionId,
     );
   }
+}
+
+const TOPOLOGY_REASON_LABELS: Record<string, string> = {
+  role_change: 'a node changed role',
+  primary_change: "a shard's primary changed",
+  epoch_bump: 'a configEpoch advanced',
+  cluster_state: 'cluster state changed',
+  slot_failures: 'slots entered a failed state',
+};
+
+export function clusterFailoverMessage(data: {
+  clusterState: string;
+  previousState?: string;
+  reasons?: string[];
+}): string {
+  // A caller that declares its reasons is trusted over the raw states:
+  // cluster_state is only recorded on ok -> fail, so a topology failover seen
+  // on the same poll as a fail -> ok recovery would otherwise be reported as
+  // that recovery and bury the real signal.
+  //
+  // A caller that declares none keeps the original state-difference wording.
+  // anomaly.service dispatches without reasons and is the only path reporting
+  // fail -> ok recovery, so gating on reasons unconditionally would strip the
+  // from/to wording from every recovery alert.
+  const reasons = data.reasons ?? [];
+  const stateWasTheSignal =
+    reasons.length > 0
+      ? reasons.includes('cluster_state')
+      : data.previousState !== undefined && data.previousState !== data.clusterState;
+
+  const labels = reasons
+    .filter((reason) => {
+      return reason !== 'cluster_state';
+    })
+    .map((reason) => {
+      return TOPOLOGY_REASON_LABELS[reason] ?? reason;
+    })
+    .join(', ');
+
+  if (stateWasTheSignal) {
+    const transition = `Cluster state changed from ${data.previousState ?? 'unknown'} to ${data.clusterState}`;
+    // An outage trips the CLUSTER INFO edge and churns the topology on the same
+    // poll. Reporting only the transition drops which nodes actually moved.
+    if (labels === '') {
+      return transition;
+    }
+    return `${transition} (also: ${labels})`;
+  }
+
+  // cluster_state held steady, so the topology is what moved. Naming the signal
+  // is the only thing that tells an operator what happened.
+  if (labels === '') {
+    return `Cluster failover detected (state ${data.clusterState})`;
+  }
+  return `Cluster failover detected while state stayed ${data.clusterState}: ${labels}`;
 }

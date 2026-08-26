@@ -34,4 +34,30 @@ describe('buildEventAttributes', () => {
       breached: true,
     });
   });
+  it('drops arrays, which is why the failover call site serializes them', () => {
+    // Pins the constraint rather than the bug: a raw array is silently
+    // discarded, so `cluster.failover` shipped `ok` with no reason and no
+    // changed nodes. Anything that "simplifies" the call site back to raw
+    // arrays must fail here.
+    const attributes = buildEventAttributes('cluster.failover', {
+      clusterState: 'ok',
+      reasons: ['role_change', 'epoch_bump'],
+      changedNodes: [{ nodeId: 'n1', reason: 'role_change', from: 'replica', to: 'master' }],
+    });
+    expect(attributes).toEqual({ 'event.name': 'cluster.failover', clusterState: 'ok' });
+  });
+
+  it('keeps the serialized forms the failover call site actually sends', () => {
+    const attributes = buildEventAttributes('cluster.failover', {
+      clusterState: 'ok',
+      reasons: ['role_change', 'epoch_bump'].join(','),
+      changedNodes: JSON.stringify([
+        { nodeId: 'n1', reason: 'role_change', from: 'replica', to: 'master' },
+      ]),
+    });
+    expect(attributes.reasons).toBe('role_change,epoch_bump');
+    expect(JSON.parse(attributes.changedNodes as string)).toEqual([
+      { nodeId: 'n1', reason: 'role_change', from: 'replica', to: 'master' },
+    ]);
+  });
 });
