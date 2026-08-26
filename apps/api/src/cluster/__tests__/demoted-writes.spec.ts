@@ -50,6 +50,17 @@ function observation(overrides: Partial<DemotedNodeObservation> = {}): DemotedNo
   };
 }
 
+/** The poll interval the detector is told to require, matching the 5s gaps below. */
+const POLL_INTERVAL_MS = 5_000;
+
+function evaluate(
+  watch: DemotionWatch,
+  observations: DemotedNodeObservation[],
+  now: number,
+): ReturnType<typeof evaluateDemotedWrites> {
+  return evaluateDemotedWrites(watch, observations, now, POLL_INTERVAL_MS);
+}
+
 describe('recordDemotions', () => {
   it('watches the node the failover demoted', () => {
     const watch = watchWithDemotedA(1_000);
@@ -131,8 +142,8 @@ describe('evaluateDemotedWrites', () => {
   it('alerts on the second consecutive poll of disagreement with traffic', () => {
     const watch = watchWithDemotedA(1_000);
 
-    expect(evaluateDemotedWrites(watch, [observation()], 2_000)).toEqual([]);
-    const alerts = evaluateDemotedWrites(watch, [observation()], 7_000);
+    expect(evaluate(watch, [observation()], 2_000)).toEqual([]);
+    const alerts = evaluate(watch, [observation()], 7_000);
 
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toMatchObject({
@@ -147,18 +158,14 @@ describe('evaluateDemotedWrites', () => {
   it('does not alert on a single poll of disagreement', () => {
     const watch = watchWithDemotedA(1_000);
 
-    expect(evaluateDemotedWrites(watch, [observation()], 2_000)).toEqual([]);
+    expect(evaluate(watch, [observation()], 2_000)).toEqual([]);
   });
 
   it('does not alert when the node agrees it is a replica', () => {
     const watch = watchWithDemotedA(1_000);
 
-    evaluateDemotedWrites(watch, [observation({ selfReportedRole: 'replica' })], 2_000);
-    const alerts = evaluateDemotedWrites(
-      watch,
-      [observation({ selfReportedRole: 'replica' })],
-      7_000,
-    );
+    evaluate(watch, [observation({ selfReportedRole: 'replica' })], 2_000);
+    const alerts = evaluate(watch, [observation({ selfReportedRole: 'replica' })], 7_000);
 
     expect(alerts).toEqual([]);
   });
@@ -166,8 +173,8 @@ describe('evaluateDemotedWrites', () => {
   it('does not alert when a disagreeing node serves no traffic', () => {
     const watch = watchWithDemotedA(1_000);
 
-    evaluateDemotedWrites(watch, [observation({ opsPerSec: 0 })], 2_000);
-    const alerts = evaluateDemotedWrites(watch, [observation({ opsPerSec: 0 })], 7_000);
+    evaluate(watch, [observation({ opsPerSec: 0 })], 2_000);
+    const alerts = evaluate(watch, [observation({ opsPerSec: 0 })], 7_000);
 
     expect(alerts).toEqual([]);
   });
@@ -176,17 +183,17 @@ describe('evaluateDemotedWrites', () => {
     const watch = watchWithDemotedA(1_000);
     const other = observation({ nodeId: 'z', nodeAddress: 'z:6379' });
 
-    evaluateDemotedWrites(watch, [other], 2_000);
+    evaluate(watch, [other], 2_000);
 
-    expect(evaluateDemotedWrites(watch, [other], 7_000)).toEqual([]);
+    expect(evaluate(watch, [other], 7_000)).toEqual([]);
   });
 
   it('restarts the persistence count when the disagreement resolves and returns', () => {
     const watch = watchWithDemotedA(1_000);
 
-    evaluateDemotedWrites(watch, [observation()], 2_000);
-    evaluateDemotedWrites(watch, [observation({ selfReportedRole: 'replica' })], 7_000);
-    const alerts = evaluateDemotedWrites(watch, [observation()], 12_000);
+    evaluate(watch, [observation()], 2_000);
+    evaluate(watch, [observation({ selfReportedRole: 'replica' })], 7_000);
+    const alerts = evaluate(watch, [observation()], 12_000);
 
     expect(alerts).toEqual([]);
   });
@@ -194,16 +201,16 @@ describe('evaluateDemotedWrites', () => {
   it('alerts once per demotion window, not on every poll', () => {
     const watch = watchWithDemotedA(1_000);
 
-    evaluateDemotedWrites(watch, [observation()], 2_000);
-    expect(evaluateDemotedWrites(watch, [observation()], 7_000)).toHaveLength(1);
-    expect(evaluateDemotedWrites(watch, [observation()], 12_000)).toEqual([]);
+    evaluate(watch, [observation()], 2_000);
+    expect(evaluate(watch, [observation()], 7_000)).toHaveLength(1);
+    expect(evaluate(watch, [observation()], 12_000)).toEqual([]);
   });
 
   it('counts the writes served between the two polls when commandstats is available', () => {
     const watch = watchWithDemotedA(1_000);
 
-    evaluateDemotedWrites(watch, [observation({ writeCommandCalls: 500 })], 2_000);
-    const alerts = evaluateDemotedWrites(watch, [observation({ writeCommandCalls: 512 })], 7_000);
+    evaluate(watch, [observation({ writeCommandCalls: 500 })], 2_000);
+    const alerts = evaluate(watch, [observation({ writeCommandCalls: 512 })], 7_000);
 
     expect(alerts[0].writeCallsDelta).toBe(12);
   });
@@ -211,8 +218,8 @@ describe('evaluateDemotedWrites', () => {
   it('does not alert on a demoted node serving only reads', () => {
     const watch = watchWithDemotedA(1_000);
 
-    evaluateDemotedWrites(watch, [observation({ writeCommandCalls: 500 })], 2_000);
-    const alerts = evaluateDemotedWrites(watch, [observation({ writeCommandCalls: 500 })], 7_000);
+    evaluate(watch, [observation({ writeCommandCalls: 500 })], 2_000);
+    const alerts = evaluate(watch, [observation({ writeCommandCalls: 500 })], 7_000);
 
     expect(alerts).toEqual([]);
   });
@@ -220,8 +227,8 @@ describe('evaluateDemotedWrites', () => {
   it('falls back to ops when the counter went backwards after a restart', () => {
     const watch = watchWithDemotedA(1_000);
 
-    evaluateDemotedWrites(watch, [observation({ writeCommandCalls: 500 })], 2_000);
-    const alerts = evaluateDemotedWrites(watch, [observation({ writeCommandCalls: 3 })], 7_000);
+    evaluate(watch, [observation({ writeCommandCalls: 500 })], 2_000);
+    const alerts = evaluate(watch, [observation({ writeCommandCalls: 3 })], 7_000);
 
     expect(alerts).toHaveLength(1);
     expect(alerts[0].writeCallsDelta).toBeUndefined();
@@ -230,14 +237,27 @@ describe('evaluateDemotedWrites', () => {
   it('does not alert while the node role read is failing', () => {
     const watch = watchWithDemotedA(1_000);
 
-    evaluateDemotedWrites(watch, [observation({ selfReportedRole: undefined })], 2_000);
-    const alerts = evaluateDemotedWrites(
-      watch,
-      [observation({ selfReportedRole: undefined })],
-      7_000,
-    );
+    evaluate(watch, [observation({ selfReportedRole: undefined })], 2_000);
+    const alerts = evaluate(watch, [observation({ selfReportedRole: undefined })], 7_000);
 
     expect(alerts).toEqual([]);
+  });
+
+  it('does not alert until the disagreement has outlasted one poll interval', () => {
+    const watch = watchWithDemotedA(1_000);
+
+    // Two /metrics scrapes 40ms apart drive the same update path as the poller,
+    // so the observation count alone would already be satisfied here.
+    evaluateDemotedWrites(watch, [observation()], 2_000, POLL_INTERVAL_MS);
+    const tooSoon = evaluateDemotedWrites(watch, [observation()], 2_040, POLL_INTERVAL_MS);
+
+    expect(tooSoon).toEqual([]);
+    expect(watch.get('a')?.alerted).toBe(false);
+
+    const alerts = evaluateDemotedWrites(watch, [observation()], 7_000, POLL_INTERVAL_MS);
+
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].disagreementMs).toBe(5_000);
   });
 });
 

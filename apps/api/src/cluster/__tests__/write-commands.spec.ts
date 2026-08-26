@@ -44,17 +44,48 @@ describe('isWriteCommand', () => {
 
 describe('sumWriteCalls', () => {
   it('adds up only the write commands', () => {
-    const total = sumWriteCalls([
+    const totals = sumWriteCalls([
       { command: 'get', calls: 900 },
       { command: 'set', calls: 30 },
       { command: 'hset', calls: 12 },
       { command: 'info', calls: 5 },
     ]);
 
-    expect(total).toBe(42);
+    expect(totals).toEqual({ writes: 42, moduleCalls: 0 });
   });
 
   it('is zero when the node served no writes', () => {
-    expect(sumWriteCalls([{ command: 'get', calls: 900 }])).toBe(0);
+    expect(sumWriteCalls([{ command: 'get', calls: 900 }])).toEqual({
+      writes: 0,
+      moduleCalls: 0,
+    });
+  });
+
+  it('counts module commands apart from the writes it can name', () => {
+    const totals = sumWriteCalls([
+      { command: 'json.set', calls: 40 },
+      { command: 'ts.add', calls: 60 },
+      { command: 'set', calls: 7 },
+    ]);
+
+    expect(totals).toEqual({ writes: 7, moduleCalls: 100 });
+  });
+
+  it('reports zero writes alongside module traffic so the caller can fall back', () => {
+    const totals = sumWriteCalls([
+      { command: 'json.set', calls: 40 },
+      { command: 'get', calls: 900 },
+    ]);
+
+    expect(totals).toEqual({ writes: 0, moduleCalls: 40 });
+  });
+
+  it('does not mistake a container subcommand for a module command', () => {
+    const totals = sumWriteCalls([
+      { command: 'xgroup|create', calls: 3 },
+      { command: 'client|list', calls: 9 },
+    ]);
+
+    expect(totals).toEqual({ writes: 3, moduleCalls: 0 });
   });
 });

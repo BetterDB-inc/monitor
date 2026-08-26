@@ -29,6 +29,8 @@ function nodeStats(overrides: Partial<NodeStats> & { nodeId: string }): NodeStat
   };
 }
 
+const POLL_INTERVAL_MS = 5000;
+
 describe('PrometheusService demoted-writes detection', () => {
   let service: PrometheusService;
   let getClusterNodeStats: jest.Mock;
@@ -49,7 +51,7 @@ describe('PrometheusService demoted-writes detection', () => {
     return new PrometheusService(
       {} as StoragePort,
       registry,
-      { get: jest.fn().mockReturnValue(5000) } as unknown as ConfigService,
+      { get: jest.fn().mockReturnValue(POLL_INTERVAL_MS) } as unknown as ConfigService,
       {} as RuntimeCapabilityTracker,
       {} as SlowLogAnalyticsService,
       {} as CommandLogAnalyticsService,
@@ -74,20 +76,30 @@ describe('PrometheusService demoted-writes detection', () => {
     return state;
   }
 
-  /** Run the detector once per supplied poll, against an already-armed watch. */
-  async function poll(stats: NodeStats[][]): Promise<void> {
+  /**
+   * Run the detector once per supplied poll, against an already-armed watch,
+   * spacing the polls a full interval apart the way the scheduler does.
+   */
+  async function poll(stats: NodeStats[][], gapMs: number = POLL_INTERVAL_MS): Promise<void> {
     const state = armWatch();
     for (const nodes of stats) {
+      jest.setSystemTime(Date.now() + gapMs);
       getClusterNodeStats.mockResolvedValueOnce(nodes);
       await service['detectDemotedMasterWrites'](CONNECTION_ID, state, INSTANCE);
     }
   }
 
   beforeEach(() => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    jest.setSystemTime(new Date('2026-01-01T00:00:00Z'));
     getClusterNodeStats = jest.fn();
     dispatchClusterDemotedWrites = jest.fn().mockResolvedValue(undefined);
     otelDispatch = jest.fn();
     service = buildService({ withProWebhooks: true });
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
   });
 
   it('does not touch the nodes while nothing is being watched', async () => {
@@ -138,6 +150,19 @@ describe('PrometheusService demoted-writes detection', () => {
       instance: INSTANCE,
       connectionId: CONNECTION_ID,
     });
+  });
+
+  it('stays quiet when two scrapes land inside one poll interval', async () => {
+    await poll(
+      [
+        [nodeStats({ nodeId: 'node-a', selfReportedRole: 'master', opsPerSec: 120 })],
+        [nodeStats({ nodeId: 'node-a', selfReportedRole: 'master', opsPerSec: 120 })],
+      ],
+      40,
+    );
+
+    expect(otelDispatch).not.toHaveBeenCalled();
+    expect(dispatchClusterDemotedWrites).not.toHaveBeenCalled();
   });
 
   it('stays quiet for a demoted node that agrees it is a replica', async () => {

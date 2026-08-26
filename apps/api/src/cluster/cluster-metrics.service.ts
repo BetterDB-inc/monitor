@@ -497,7 +497,9 @@ export class ClusterMetricsService {
    * INFO is Redis 7.0+/Valkey only, and single-section INFO is universal.
    *
    * A node that denies or lacks the section yields undefined rather than zero —
-   * zero would read as "served no writes", which is a different claim.
+   * zero would read as "served no writes", which is a different claim. So does
+   * a node whose only traffic is module commands, which carry no read/write
+   * classification: the caller falls back to `opsPerSec` for both.
    */
   private async getWriteCommandCalls(client: Valkey, nodeId: string): Promise<number | undefined> {
     try {
@@ -507,7 +509,11 @@ export class ClusterMetricsService {
       if (section === undefined) {
         return undefined;
       }
-      return sumWriteCalls(parseCommandStatsSection(section));
+      const totals = sumWriteCalls(parseCommandStatsSection(section));
+      if (totals.writes === 0 && totals.moduleCalls > 0) {
+        return undefined;
+      }
+      return totals.writes;
     } catch (error) {
       const errorKey = `commandstats-${nodeId}`;
       if (!this.loggedErrors.has(errorKey)) {

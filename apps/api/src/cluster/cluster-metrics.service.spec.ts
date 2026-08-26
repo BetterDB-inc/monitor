@@ -182,6 +182,39 @@ used_cpu_user:20.3\r
       expect(stats[0].writeCommandCalls).toBe(42);
     });
 
+    it('reports no write calls rather than zero when only modules served the traffic', async () => {
+      mockClient.info.mockImplementation((section?: string) => {
+        if (section === 'commandstats') {
+          return Promise.resolve(
+            '# Commandstats\r\n' +
+              'cmdstat_get:calls=900,usec=1000,usec_per_call=1.11,rejected_calls=0,failed_calls=0\r\n' +
+              'cmdstat_json.set:calls=40,usec=800,usec_per_call=20,rejected_calls=0,failed_calls=0\r\n',
+          );
+        }
+        return Promise.resolve(mockInfoString);
+      });
+
+      const stats = await service.getClusterNodeStats(undefined, { includeCommandStats: true });
+
+      expect(stats[0].writeCommandCalls).toBeUndefined();
+    });
+
+    it('reports zero write calls when the node served only core reads', async () => {
+      mockClient.info.mockImplementation((section?: string) => {
+        if (section === 'commandstats') {
+          return Promise.resolve(
+            '# Commandstats\r\n' +
+              'cmdstat_get:calls=900,usec=1000,usec_per_call=1.11,rejected_calls=0,failed_calls=0\r\n',
+          );
+        }
+        return Promise.resolve(mockInfoString);
+      });
+
+      const stats = await service.getClusterNodeStats(undefined, { includeCommandStats: true });
+
+      expect(stats[0].writeCommandCalls).toBe(0);
+    });
+
     it('reports no write calls rather than zero when the node has no commandstats', async () => {
       mockClient.info.mockImplementation((section?: string) => {
         if (section === 'commandstats') {

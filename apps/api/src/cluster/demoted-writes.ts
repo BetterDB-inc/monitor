@@ -106,9 +106,12 @@ export function pruneDemotionWatch(
  * node knows it is a replica and answers `-MOVED` — fails loudly and is
  * deliberately not reported here.
  *
- * Two consecutive disagreeing polls are required, which is the issue's
- * "longer than one poll interval" criterion and also what makes the write
- * delta computable: the first poll only establishes the baseline.
+ * Two disagreeing observations are required, which is what makes the write
+ * delta computable — the first only establishes the baseline. The count alone
+ * is not the persistence guarantee, because `/metrics` scrapes drive the same
+ * update path as the poller and two of them can land milliseconds apart; the
+ * disagreement must also have lasted `minDisagreementMs`, the caller's poll
+ * interval.
  *
  * Mutates `watch` — the counters and baselines it advances are the state that
  * makes the persistence requirement work across polls.
@@ -117,6 +120,7 @@ export function evaluateDemotedWrites(
   watch: DemotionWatch,
   observations: ReadonlyArray<DemotedNodeObservation>,
   now: number,
+  minDisagreementMs: number,
 ): DemotedWriteAlert[] {
   const alerts: DemotedWriteAlert[] = [];
 
@@ -149,6 +153,9 @@ export function evaluateDemotedWrites(
       continue;
     }
     if (entry.consecutiveDisagreements < 2) {
+      continue;
+    }
+    if (now - entry.disagreementSince < minDisagreementMs) {
       continue;
     }
 

@@ -1596,7 +1596,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       return;
     }
 
-    const alerts = evaluateDemotedWrites(state.demotionWatch, observations, Date.now());
+    const alerts = evaluateDemotedWrites(
+      state.demotionWatch,
+      observations,
+      Date.now(),
+      this.pollIntervalMs,
+    );
     for (const alert of alerts) {
       const message = demotedWritesMessage(alert);
       this.logger.warn(message);

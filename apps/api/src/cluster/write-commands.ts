@@ -9,9 +9,9 @@
  * because it rewrites its own cached cardinality, but a client issuing it is
  * reading — it stays out for the same reason.
  *
- * Module commands are not enumerated. The detector's fallback is `opsPerSec`,
- * so a node taking only module writes is still reported as taking traffic;
- * it just loses the write-specific attribution.
+ * Module commands are not enumerated — there is no fixed list of them. They are
+ * counted separately instead, so a caller can tell a node that served no writes
+ * apart from one whose writes this module cannot name.
  */
 const WRITE_COMMANDS: ReadonlySet<string> = new Set([
   'append',
@@ -125,6 +125,13 @@ const WRITE_COMMANDS: ReadonlySet<string> = new Set([
   'zunionstore',
 ]);
 
+export interface WriteCallTotals {
+  /** Calls across every command this module recognises as a write. */
+  writes: number;
+  /** Calls across module commands, which carry no classification either way. */
+  moduleCalls: number;
+}
+
 /**
  * `commandstats` reports container commands as `parent|subcommand`. Every
  * subcommand of a write container is itself a write, and none of the
@@ -137,17 +144,36 @@ export function isWriteCommand(command: string): boolean {
 }
 
 /**
- * Total calls across every write command the node has served since it started.
- * A cumulative counter, not a rate — the caller diffs it against its own
- * previous reading.
+ * Modules namespace their commands with a dot — `json.set`, `ts.add`,
+ * `bf.add`. No core command does, and container subcommands use `|`, so the
+ * dot is enough to tell a module command from one this module simply reads.
  */
-export function sumWriteCalls(samples: ReadonlyArray<{ command: string; calls: number }>): number {
-  let total = 0;
+function isModuleCommand(command: string): boolean {
+  return command.includes('.');
+}
+
+/**
+ * Calls the node has served since it started, split into the writes this module
+ * can name and the module commands it cannot. Cumulative counters, not rates —
+ * the caller diffs them against its own previous reading.
+ *
+ * The split matters because zero writes alongside module traffic is not the
+ * same claim as zero writes on a node serving plain reads: the first means the
+ * attribution failed and the caller should fall back to `opsPerSec`, the second
+ * means the node really is taking no writes.
+ */
+export function sumWriteCalls(
+  samples: ReadonlyArray<{ command: string; calls: number }>,
+): WriteCallTotals {
+  const totals = { writes: 0, moduleCalls: 0 };
   for (const sample of samples) {
-    if (!isWriteCommand(sample.command)) {
+    if (isWriteCommand(sample.command)) {
+      totals.writes += sample.calls;
       continue;
     }
-    total += sample.calls;
+    if (isModuleCommand(sample.command)) {
+      totals.moduleCalls += sample.calls;
+    }
   }
-  return total;
+  return totals;
 }
