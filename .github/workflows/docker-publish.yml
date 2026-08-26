@@ -15,20 +15,49 @@ env:
   IMAGE_NAME: betterdb/monitor
 
 jobs:
-  build:
+  # Resolve the version once so every downstream job agrees on it.
+  version:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+  # Build every (variant x platform) combination on its OWN native runner, in
+  # parallel, and push by digest only (no tags yet). arm64 builds on
+  # ubuntu-24.04-arm hardware, so there is no QEMU emulation — that emulated
+  # `pnpm install` was the multi-hour tail of the old single-runner build.
+  build:
+    needs: version
+    runs-on: ${{ matrix.platform.runner }}
     permissions:
       contents: read
       packages: write
-      id-token: write
-      attestations: write
-
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - name: with-ai
+            target: production
+          - name: without-ai
+            target: production-no-ai
+        platform:
+          - name: linux/amd64
+            arch: amd64
+            runner: ubuntu-24.04
+          - name: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -39,89 +68,158 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Determine version
-        id: version
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: ${{ matrix.variant.target }}
+          platforms: ${{ matrix.platform.name }}
+          # Push by digest only; the merge job assembles the tagged manifest list.
+          # provenance/sbom are attached at the manifest level in merge (via
+          # attest-build-provenance), not here — inline attestations create extra
+          # child manifests that complicate the digest-based merge.
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          provenance: false
+          sbom: false
+          # Cache is scoped per variant AND per arch so the four parallel jobs
+          # never clobber each other's scope.
+          cache-from: type=gha,scope=${{ matrix.variant.name }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant.name }}-${{ matrix.platform.arch }}
+          build-args: |
+            APP_VERSION=${{ needs.version.outputs.version }}
+            VITE_PUBLIC_POSTHOG_PROJECT_TOKEN=${{ secrets.VITE_PUBLIC_POSTHOG_PROJECT_TOKEN }}
+            POSTHOG_API_KEY=${{ secrets.POSTHOG_API_KEY }}
+
+      - name: Export digest
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
-            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-          fi
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.variant.name }}-${{ matrix.platform.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assemble the per-arch digests into a single multi-arch manifest list, tag it,
+  # and attest it. One merge job per variant because the tag rules differ:
+  # `latest` tracks the no-ai image only.
+  merge-with-ai:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digest-with-ai-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract metadata (with AI)
-        id: meta-with-ai
+        id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
-          # `latest` must never track the AI image; the no-ai step owns it.
-          # Without this, latest=auto would auto-add `latest` here on a semver tag.
+          # `latest` must never track the AI image; the no-ai variant owns it.
           flavor: latest=false
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=${{ steps.version.outputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=${{ needs.version.outputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
-      - name: Extract metadata (without AI)
-        id: meta-without-ai
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=semver,pattern={{version}}-no-ai
-            type=raw,value=${{ steps.version.outputs.version }}-no-ai,enable=${{ github.event_name == 'workflow_dispatch' }}
-            # `latest` tracks the no-ai image (the smaller, default variant).
-            # Only stable releases move `latest`; SemVer prereleases (which contain a `-`) are excluded.
-            type=raw,value=latest,enable=${{ github.ref == format('refs/tags/v{0}', steps.version.outputs.version) && !contains(steps.version.outputs.version, '-') }}
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.IMAGE_NAME }}@sha256:%s ' *)
 
-      - name: Build and push (with AI)
-        id: push-with-ai
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          target: production
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta-with-ai.outputs.tags }}
-          labels: ${{ steps.meta-with-ai.outputs.labels }}
-          provenance: true
-          sbom: true
-          cache-from: type=gha,scope=with-ai
-          cache-to: type=gha,mode=max,scope=with-ai
-          build-args: |
-            APP_VERSION=${{ steps.version.outputs.version }}
-            VITE_PUBLIC_POSTHOG_PROJECT_TOKEN=${{ secrets.VITE_PUBLIC_POSTHOG_PROJECT_TOKEN }}
-            POSTHOG_API_KEY=${{ secrets.POSTHOG_API_KEY }}
-
-      - name: Build and push (without AI)
-        id: push-without-ai
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          target: production-no-ai
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta-without-ai.outputs.tags }}
-          labels: ${{ steps.meta-without-ai.outputs.labels }}
-          provenance: true
-          sbom: true
-          cache-from: type=gha,scope=without-ai
-          cache-to: type=gha,mode=max,scope=without-ai
-          build-args: |
-            APP_VERSION=${{ steps.version.outputs.version }}
-            VITE_PUBLIC_POSTHOG_PROJECT_TOKEN=${{ secrets.VITE_PUBLIC_POSTHOG_PROJECT_TOKEN }}
-            POSTHOG_API_KEY=${{ secrets.POSTHOG_API_KEY }}
+      - name: Capture merged digest
+        id: digest
+        run: |
+          tag=$(jq -cr '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          digest=$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Generate artifact attestation (with AI)
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: docker.io/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.push-with-ai.outputs.digest }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
           push-to-registry: true
+
+  merge-without-ai:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digest-without-ai-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata (without AI)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}-no-ai
+            type=raw,value=${{ needs.version.outputs.version }}-no-ai,enable=${{ github.event_name == 'workflow_dispatch' }}
+            # `latest` tracks the no-ai image (the smaller, default variant).
+            # Only stable releases move `latest`; SemVer prereleases (which contain a `-`) are excluded.
+            type=raw,value=latest,enable=${{ github.ref == format('refs/tags/v{0}', needs.version.outputs.version) && !contains(needs.version.outputs.version, '-') }}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Capture merged digest
+        id: digest
+        run: |
+          tag=$(jq -cr '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          digest=$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Generate artifact attestation (without AI)
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: docker.io/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.push-without-ai.outputs.digest }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
           push-to-registry: true
