@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { MemoryProposalService } from './memory-proposal.service';
+import { STALE_APPLY_AFTER_MS } from './apply-timing';
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -48,6 +49,19 @@ export class MemoryExpirationCron implements OnModuleInit, OnModuleDestroy {
     const expired = await this.service.expireProposals(this.now(), 'system');
     if (expired > 0) {
       this.logger.log(`Expired ${expired} memory proposal(s)`);
+    }
+    // Rides the same timer rather than adding a second one. Distinct from
+    // expiry: expires_at is how long a human has to decide, while this is how
+    // long an in-flight apply may run before being presumed dead.
+    const stale = await this.service.failStaleApplyingProposals(
+      this.now() - STALE_APPLY_AFTER_MS,
+      'system',
+    );
+    if (stale > 0) {
+      this.logger.warn(
+        `Failed ${stale} memory proposal(s) stuck in 'applying' — a process died mid-apply. ` +
+          `Deletion may have been partial; verify the affected stores.`,
+      );
     }
     return expired;
   }

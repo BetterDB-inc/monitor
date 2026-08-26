@@ -42,6 +42,11 @@ export class MemoryApplyService {
       id: approved.id,
       expected_status: ['approved'],
       status: 'applying',
+      // Stamped here rather than reused from reviewed_at: the two coincide only
+      // because approve and apply happen in one request today, and a sweep
+      // measured off approval would start failing live work the moment that
+      // stops being true.
+      applying_at: Date.now(),
     });
     if (claimed === null) {
       const current = (await this.storage.getMemoryProposal(approved.id)) ?? approved;
@@ -63,22 +68,30 @@ export class MemoryApplyService {
         error: message,
         details: { proposal_id: approved.id },
       };
+      // Guarded on `applying`: the stale sweep can have taken this row while the
+      // forget was running, and it already recorded its own failure. A null
+      // return means it did, so leave its verdict alone.
       const updated = await this.storage.updateMemoryProposalStatus({
         id: approved.id,
+        expected_status: ['applying'],
         status: 'failed',
         applied_at: appliedAt,
         applied_result: appliedResult,
       });
+      if (updated === null) {
+        const swept = (await this.storage.getMemoryProposal(approved.id)) ?? claimed;
+        return { proposal: swept, appliedResult: resultFor(swept) };
+      }
       await this.appendAudit(approved.id, 'failed', { error: message }, context).catch(
         () => undefined,
       );
-      return { proposal: updated ?? claimed, appliedResult };
+      return { proposal: updated, appliedResult };
     }
 
     // The forget succeeded and is durable. Finalize + audit are best-effort from
     // here: a bookkeeping error must never re-record an already-applied forget as
-    // failed. We hold the exclusive `applying` claim, so the finalize is
-    // unconditional.
+    // failed. The claim is exclusive against other appliers but not against the
+    // stale sweep, so the write is still guarded on `applying`.
     const appliedResult: AppliedResult = {
       success: true,
       details: {
@@ -91,10 +104,29 @@ export class MemoryApplyService {
     try {
       updated = await this.storage.updateMemoryProposalStatus({
         id: approved.id,
+        expected_status: ['applying'],
         status: 'applied',
         applied_at: appliedAt,
         applied_result: appliedResult,
       });
+      if (updated === null) {
+        // The sweep declared this apply stale and told operators the delete may
+        // be partial. Overwriting that with a clean success would contradict
+        // the warning they already acted on, so the terminal state stands and
+        // the audit trail carries the reconciliation instead.
+        this.logger.error(
+          `Memory forget for ${approved.id} completed after the stale sweep failed it; ` +
+            'the delete did succeed and the proposal stays failed',
+        );
+        await this.appendAudit(
+          approved.id,
+          'failed',
+          { reconciled: 'completed_after_stale_sweep', ...(appliedResult.details ?? {}) },
+          context,
+        ).catch(() => undefined);
+        const swept = (await this.storage.getMemoryProposal(approved.id)) ?? claimed;
+        return { proposal: swept, appliedResult: resultFor(swept) };
+      }
       await this.appendAudit(approved.id, 'applied', appliedResult.details ?? null, context);
     } catch (err) {
       this.logger.warn(

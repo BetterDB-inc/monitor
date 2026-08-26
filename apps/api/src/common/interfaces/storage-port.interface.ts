@@ -703,4 +703,20 @@ export interface StoragePort {
   ): Promise<StoredMemoryProposalAudit>;
   getMemoryProposalAudit(proposalId: string): Promise<StoredMemoryProposalAudit[]>;
   expireMemoryProposalsBefore(now: number): Promise<StoredMemoryProposal[]>;
+  /**
+   * Move `applying` rows claimed before `cutoff` to `failed`. The apply path
+   * deliberately leaves a visible in-flight row if the process dies mid-apply;
+   * without this they stay `applying` forever and are found only by hand.
+   */
+  failStaleApplyingMemoryProposalsBefore(cutoff: number): Promise<StoredMemoryProposal[]>;
+  /**
+   * How many pending proposals in this store already target the same thing.
+   * Answers the duplicate question in the query rather than paging rows into
+   * memory and comparing them there.
+   */
+  countPendingMemoryProposalsByTarget(input: {
+    connection_id: string;
+    store_name: string;
+    target_discriminator: string;
+  }): Promise<number>;
 }

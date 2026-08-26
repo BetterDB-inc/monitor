@@ -82,8 +82,11 @@ import {
   StoredCacheProposalAuditSchema,
   variantPayloadSchemaFor,
   MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS,
+  memoryForgetTargetDiscriminator,
+  MemoryForgetPayloadSchema,
   StoredMemoryProposalSchema,
   StoredMemoryProposalAuditSchema,
+  MemoryForgetPayload,
 } from '@betterdb/shared';
 import type {
   StoredMemoryProposal,
@@ -322,6 +325,7 @@ export class PostgresAdapter implements StoragePort {
       // This must happen before createSchema() which creates indexes on connection_id.
       await this.migrateConnectionId();
       await this.createSchema();
+      await this.backfillMemoryProposalDiscriminators();
 
       this.ready = true;
 
@@ -1083,6 +1087,65 @@ export class PostgresAdapter implements StoragePort {
     return result.rowCount || 0;
   }
 
+  /**
+   * Key pending proposals written before `target_discriminator` existed.
+   *
+   * Runs in JS rather than SQL because the discriminator is one shared function
+   * — expressing it twice is how the two would drift. Tolerates a unique
+   * violation per row: a database that already holds duplicate pending rows for
+   * one target cannot have all of them keyed, so the first keeps the
+   * discriminator and the rest stay NULL, outside the partial index.
+   */
+  private async backfillMemoryProposalDiscriminators(): Promise<void> {
+    if (!this.pool) {
+      return;
+    }
+    const { rows } = await this.pool.query(
+      `SELECT id, proposal_payload FROM memory_proposals
+       WHERE status = 'pending' AND target_discriminator IS NULL`,
+    );
+    let skipped = 0;
+    for (const row of rows as { id: string; proposal_payload: unknown }[]) {
+      // Parsed, not cast. A malformed legacy payload such as `{}` falls
+      // through to the scope branch and takes the key a genuine empty-scope
+      // target needs, leaving the valid row unkeyed and unguarded.
+      // pg already JSON.parses jsonb, so a column holding a scalar string comes
+      // back as a plain string — and JSON.parse on that throws. Outside a
+      // guard that rejection escapes initialize() and the process will not
+      // start, so the parse is contained the same way sqlite's is.
+      const parsed = MemoryForgetPayloadSchema.safeParse(
+        (() => {
+          if (typeof row.proposal_payload !== 'string') {
+            return row.proposal_payload;
+          }
+          try {
+            return JSON.parse(row.proposal_payload);
+          } catch {
+            return null;
+          }
+        })(),
+      );
+      if (!parsed.success) {
+        skipped++;
+        continue;
+      }
+      try {
+        await this.pool.query(
+          `UPDATE memory_proposals SET target_discriminator = $1 WHERE id = $2`,
+          [memoryForgetTargetDiscriminator(parsed.data), row.id],
+        );
+      } catch {
+        skipped++;
+      }
+    }
+    if (skipped > 0) {
+      console.warn(
+        `[postgres] ${skipped} pending memory proposal(s) left unkeyed during backfill — ` +
+          `already duplicates of another pending row, or an unparseable payload.`,
+      );
+    }
+  }
+
   private async createSchema(): Promise<void> {
     if (!this.pool) {
       return;
@@ -1785,18 +1848,40 @@ export class PostgresAdapter implements StoragePort {
         proposed_at BIGINT NOT NULL,
         reviewed_by TEXT,
         reviewed_at BIGINT,
+        applying_at BIGINT,
         applied_at BIGINT,
         applied_result JSONB,
         expires_at BIGINT NOT NULL,
+        target_discriminator TEXT,
         CHECK (proposal_type = 'forget'),
         CHECK (status IN ('pending','approved','applying','applied','failed','rejected','expired'))
       );
+
+      ALTER TABLE memory_proposals ADD COLUMN IF NOT EXISTS applying_at BIGINT;
+      ALTER TABLE memory_proposals ADD COLUMN IF NOT EXISTS target_discriminator TEXT;
+      -- Rows already sitting in applying were claimed by a process that no
+      -- longer exists (an upgrade restarts it), so they are stuck by
+      -- definition. Without a claim time the sweep would skip them forever,
+      -- which is precisely the state #277 exists to clear.
+      UPDATE memory_proposals
+        SET applying_at = COALESCE(reviewed_at, proposed_at)
+        WHERE status = 'applying' AND applying_at IS NULL;
 
       CREATE INDEX IF NOT EXISTS idx_memory_proposals_conn_status_proposed
         ON memory_proposals(connection_id, status, proposed_at DESC);
       CREATE INDEX IF NOT EXISTS idx_memory_proposals_pending_lookup
         ON memory_proposals(connection_id, store_name)
         WHERE status = 'pending';
+      CREATE INDEX IF NOT EXISTS idx_memory_proposals_applying
+        ON memory_proposals(applying_at)
+        WHERE status = 'applying';
+      -- Closes the duplicate-pending race: the guard was list -> compare in JS
+      -- -> insert, so two concurrent proposeForget calls for one target both
+      -- passed the pre-check. Partial so a target can be proposed again once
+      -- the previous one is approved, rejected or expired.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_proposals_pending_target
+        ON memory_proposals(connection_id, store_name, target_discriminator)
+        WHERE status = 'pending' AND target_discriminator IS NOT NULL;
 
       CREATE TABLE IF NOT EXISTS memory_proposal_audit (
         id TEXT PRIMARY KEY,
@@ -4580,8 +4665,9 @@ export class PostgresAdapter implements StoragePort {
     const result = await this.pool.query(
       `INSERT INTO memory_proposals (
         id, connection_id, store_name, proposal_type,
-        proposal_payload, reasoning, status, proposed_by, proposed_at, expires_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, $9)
+        proposal_payload, reasoning, status, proposed_by, proposed_at, expires_at,
+        target_discriminator
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, $9, $10)
       RETURNING *`,
       [
         input.id,
@@ -4593,6 +4679,7 @@ export class PostgresAdapter implements StoragePort {
         input.proposed_by ?? null,
         proposedAt,
         expiresAt,
+        memoryForgetTargetDiscriminator(input.proposal_payload),
       ],
     );
     return this.mapMemoryProposalRow(result.rows[0]);
@@ -4691,6 +4778,9 @@ export class PostgresAdapter implements StoragePort {
     if (input.applied_at !== undefined) {
       pushSet('applied_at', input.applied_at);
     }
+    if (input.applying_at !== undefined) {
+      pushSet('applying_at', input.applying_at);
+    }
     if (input.applied_result !== undefined) {
       pushSet(
         'applied_result',
@@ -4753,6 +4843,45 @@ export class PostgresAdapter implements StoragePort {
       [now],
     );
     return result.rows.map((row: MemoryProposalRow) => this.mapMemoryProposalRow(row));
+  }
+
+  async failStaleApplyingMemoryProposalsBefore(cutoff: number): Promise<StoredMemoryProposal[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    // `failed` rather than a new status: it already exists everywhere and is
+    // honest — the apply did not complete. The result says partial deletion is
+    // unknown, because a crash inside dispatch may have removed memories and
+    // claiming a clean rollback would be a lie.
+    const result = await this.pool.query(
+      `UPDATE memory_proposals
+       SET status = 'failed', applied_at = $1, applied_result = $2
+       WHERE status = 'applying' AND applying_at IS NOT NULL AND applying_at <= $3
+       RETURNING *`,
+      [
+        Date.now(),
+        JSON.stringify({
+          success: false,
+          error: 'apply presumed dead',
+          details: { reason: 'stale_apply', partial: 'unknown' },
+        }),
+        cutoff,
+      ],
+    );
+    return result.rows.map((row: MemoryProposalRow) => this.mapMemoryProposalRow(row));
+  }
+
+  async countPendingMemoryProposalsByTarget(input: {
+    connection_id: string;
+    store_name: string;
+    target_discriminator: string;
+  }): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      `SELECT COUNT(*)::int AS count FROM memory_proposals
+       WHERE connection_id = $1 AND store_name = $2 AND target_discriminator = $3
+         AND status = 'pending'`,
+      [input.connection_id, input.store_name, input.target_discriminator],
+    );
+    return result.rows[0]?.count ?? 0;
   }
 
   async saveCaptureSession(

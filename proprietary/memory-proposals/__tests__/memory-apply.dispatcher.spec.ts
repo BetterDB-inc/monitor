@@ -12,6 +12,7 @@ jest.mock('@betterdb/agent-memory', () => ({
 }));
 
 import { MemoryApplyDispatcher } from '../memory-apply.dispatcher';
+import { MemoryApplyTimeoutError } from '../apply-timing';
 
 function makeRegistry(): ConnectionRegistry {
   return {
@@ -32,6 +33,8 @@ function proposal(payload: StoredMemoryProposal['proposal_payload']): StoredMemo
     proposed_at: 1,
     reviewed_by: null,
     reviewed_at: null,
+    applying_at: null,
+    target_discriminator: null,
     applied_at: null,
     applied_result: null,
     expires_at: 9_999_999_999_999,
@@ -62,6 +65,41 @@ describe('MemoryApplyDispatcher', () => {
     const outcome = await dispatcher.dispatch(proposal({ target_kind: 'id', memory_id: 'gone' }));
 
     expect(outcome.actualAffected).toBe(0);
+  });
+
+  it('does not leave an unhandled rejection when an abandoned forget fails later', async () => {
+    let rejectForget: (error: Error) => void = () => undefined;
+    mockForget.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectForget = reject;
+      }),
+    );
+    const dispatcher = new MemoryApplyDispatcher(makeRegistry());
+    dispatcher.configureForTesting({ timeoutMs: 5 });
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      await expect(
+        dispatcher.dispatch(proposal({ target_kind: 'id', memory_id: 'm1' })),
+      ).rejects.toBeInstanceOf(MemoryApplyTimeoutError);
+
+      rejectForget(new Error('connection dropped'));
+      await new Promise((resolve) => {
+        setImmediate(resolve);
+      });
+      await new Promise((resolve) => {
+        setImmediate(resolve);
+      });
+
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 
   it('forgets by scope and tags, returning the removed count', async () => {

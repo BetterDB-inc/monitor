@@ -4,6 +4,7 @@ import { MemoryProposalService } from '../memory-proposal.service';
 import { MemoryApplyService } from '../memory-apply.service';
 import type { MemoryApplyDispatcher, ApplyOutcome } from '../memory-apply.dispatcher';
 import { MemoryExpirationCron } from '../memory-expiration.cron';
+import type { SlidingWindowRateLimiter } from '@proprietary/cache-proposals/rate-limiter';
 import {
   MemoryProposalValidationError,
   DuplicatePendingMemoryProposalError,
@@ -31,7 +32,11 @@ describe('MemoryProposalService.proposeForget', () => {
   it('rejects reasoning shorter than the minimum', async () => {
     const { service } = build();
     await expect(
-      service.proposeForget(CONNECTION_ID, { storeName: STORE, reasoning: 'too short', memoryId: 'm1' }),
+      service.proposeForget(CONNECTION_ID, {
+        storeName: STORE,
+        reasoning: 'too short',
+        memoryId: 'm1',
+      }),
     ).rejects.toBeInstanceOf(MemoryProposalValidationError);
   });
 
@@ -58,10 +63,36 @@ describe('MemoryProposalService.proposeForget', () => {
 
   it('rejects a duplicate pending proposal for the same target', async () => {
     const { service } = build();
-    await service.proposeForget(CONNECTION_ID, { storeName: STORE, reasoning: REASON, memoryId: 'm1' });
+    await service.proposeForget(CONNECTION_ID, {
+      storeName: STORE,
+      reasoning: REASON,
+      memoryId: 'm1',
+    });
     await expect(
       service.proposeForget(CONNECTION_ID, { storeName: STORE, reasoning: REASON, memoryId: 'm1' }),
     ).rejects.toBeInstanceOf(DuplicatePendingMemoryProposalError);
+  });
+
+  it('frees the rate-limit slot when it loses the index race', async () => {
+    // The pre-check catches most duplicates before a slot is reserved. This is
+    // the other path: the check passed, the insert lost, and the caller created
+    // nothing — so holding its slot burns budget for an hour against a proposal
+    // that does not exist.
+    const { service, storage } = build();
+    jest
+      .spyOn(storage, 'createMemoryProposal')
+      .mockRejectedValueOnce(
+        new Error(
+          "UNIQUE constraint failed: memory_proposals (connection_id, store_name, target) where status='pending'",
+        ),
+      );
+
+    await expect(
+      service.proposeForget(CONNECTION_ID, { storeName: STORE, reasoning: REASON, memoryId: 'm1' }),
+    ).rejects.toBeInstanceOf(DuplicatePendingMemoryProposalError);
+
+    const limiter = (service as unknown as { rateLimiter: SlidingWindowRateLimiter }).rateLimiter;
+    expect(limiter.check(CONNECTION_ID).remaining).toBe(30);
   });
 });
 
@@ -74,12 +105,20 @@ describe('MemoryProposalService.approve', () => {
       memoryId: 'm1',
     });
 
-    const first = await service.approve({ proposalId: proposal.id, actor: 'human', actorSource: 'mcp' });
+    const first = await service.approve({
+      proposalId: proposal.id,
+      actor: 'human',
+      actorSource: 'mcp',
+    });
     expect(first.proposal.status).toBe('applied');
     expect(first.appliedResult.success).toBe(true);
     expect(dispatch).toHaveBeenCalledTimes(1);
 
-    const second = await service.approve({ proposalId: proposal.id, actor: 'human', actorSource: 'mcp' });
+    const second = await service.approve({
+      proposalId: proposal.id,
+      actor: 'human',
+      actorSource: 'mcp',
+    });
     expect(second.proposal.status).toBe('applied');
     expect(dispatch).toHaveBeenCalledTimes(1);
 
@@ -101,7 +140,11 @@ describe('MemoryProposalService.approve', () => {
       memoryId: 'm1',
     });
 
-    const result = await service.approve({ proposalId: proposal.id, actor: null, actorSource: 'mcp' });
+    const result = await service.approve({
+      proposalId: proposal.id,
+      actor: null,
+      actorSource: 'mcp',
+    });
     expect(result.proposal.status).toBe('failed');
     expect(result.appliedResult.success).toBe(false);
     expect(result.appliedResult.error).toContain('valkey down');
