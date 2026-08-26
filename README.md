@@ -309,13 +309,14 @@ docker rm betterdb-monitor             # remove
 
 ## Storage Backends
 
-BetterDB Monitor persists audit trail, analytics, captures, and anomaly data to one of three backends:
+BetterDB Monitor persists audit trail, analytics, captures, and anomaly data to one of four backends:
 
 | Backend | Use case | Notes |
 |---------|----------|-------|
 | `memory` | Testing, ephemeral environments | Default in Docker; all data lost on restart |
 | `postgres` | Production | `STORAGE_TYPE=postgres` + `STORAGE_URL=postgresql://user:pass@host:port/db` |
-| `sqlite` | Local development / CLI | Not included in Docker production images; `STORAGE_SQLITE_FILEPATH` optional |
+| `turso` | Production / serverless SQLite | `STORAGE_TYPE=turso` + `STORAGE_URL=libsql://...` + `STORAGE_AUTH_TOKEN`; works in Docker |
+| `sqlite` | Local development / CLI | Native module stripped from the `latest` Docker image; `STORAGE_SQLITE_FILEPATH` optional |
 
 ## Prometheus Metrics
 

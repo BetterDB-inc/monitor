@@ -15,21 +15,26 @@ export class StorageClientFactory {
 
     switch (storageType.toLowerCase()) {
       case 'sqlite': {
-        // SQLite adapter only available for local development
-        // This import will fail in Docker builds (excluded via .dockerignore)
-        try {
-          // @ts-ignore - SQLite adapter is excluded from Docker builds via .dockerignore
-          const { SqliteAdapter } = await import('../adapters/sqlite.adapter');
-          const filepath = this.configService.get<string>(
-            'STORAGE_SQLITE_FILEPATH',
-            './data/audit.db',
-          );
-          client = new SqliteAdapter({ filepath });
-        } catch (error) {
-          throw new Error(
-            'SQLite storage is not available in this build. Use STORAGE_TYPE=postgres or STORAGE_TYPE=memory instead.',
-          );
+        const { SqliteAdapter } = await import('../adapters/sqlite.adapter');
+        const filepath = this.configService.get<string>(
+          'STORAGE_SQLITE_FILEPATH',
+          './data/audit.db',
+        );
+        client = new SqliteAdapter({ filepath });
+        break;
+      }
+      case 'turso': {
+        const url = this.configService.get<string>('STORAGE_URL');
+        if (!url) {
+          throw new Error('STORAGE_URL is required for Turso storage');
         }
+        const { SqliteAdapter } = await import('../adapters/sqlite.adapter');
+        const authToken = this.configService.get<string>('STORAGE_AUTH_TOKEN');
+        const filepath = this.configService.get<string>(
+          'STORAGE_SQLITE_FILEPATH',
+          './data/audit.db',
+        );
+        client = new SqliteAdapter({ filepath, url, authToken });
         break;
       }
       case 'postgres':

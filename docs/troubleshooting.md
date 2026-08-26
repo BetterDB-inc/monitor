@@ -41,14 +41,23 @@ Common issues and solutions for BetterDB Monitor.
 2. Format: `postgresql://user:password@host:port/database`
 3. Verify PostgreSQL is accessible from the container
 
-### "SQLite storage is not available in this build"
+### "Local SQLite files require the better-sqlite3 native module"
 
-**Symptoms:** Cannot use SQLite storage in Docker.
+**Symptoms:** `STORAGE_TYPE=sqlite` fails to start in Docker.
 
 **Solutions:**
-- SQLite is excluded from Docker builds for size optimization
-- Use `STORAGE_TYPE=postgres` or `STORAGE_TYPE=memory` instead
-- SQLite is only available for local development (`pnpm dev`)
+- The `better-sqlite3` native module is stripped from the `latest` (no-AI) image for size optimization
+- Use `STORAGE_TYPE=turso` with a remote `STORAGE_URL` for SQLite semantics in Docker, or `STORAGE_TYPE=postgres` / `STORAGE_TYPE=memory`
+- Local file storage is available in local development (`pnpm dev`) and in the AI image
+
+### "STORAGE_URL is required for Turso storage"
+
+**Symptoms:** `STORAGE_TYPE=turso` refuses to start.
+
+**Solutions:**
+1. Set `STORAGE_URL` to your libSQL endpoint, e.g. `libsql://your-db-your-org.turso.io`
+2. Set `STORAGE_AUTH_TOKEN` - it is required whenever `STORAGE_URL` starts with `libsql://`
+3. Confirm the token is valid: `turso db tokens create <database>`
 
 ## Docker Issues
 
