@@ -1,0 +1,61 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+annotations:
+  artifacthub.io/images: |
+    - name: monitor
+      image: betterdb/monitor:0.40.0-no-ai
+    - name: monitor-ai
+      image: betterdb/monitor:0.40.0
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://docs.betterdb.com
+    - name: Kubernetes guide
+      url: https://docs.betterdb.com/kubernetes
+    - name: Source
+      url: https://github.com/BetterDB-inc/monitor
+  artifacthub.io/signKey: |
+    fingerprint: 16A10658BACC9E469EC1F988D75C3B25AD1783C8
+    url: https://docs.betterdb.com/charts/pubkey.asc
+apiVersion: v2
+appVersion: 0.40.0
+description: BetterDB Monitor - monitoring, analytics, and anomaly detection for Valkey
+  and Redis
+home: https://betterdb.com
+icon: https://docs.betterdb.com/assets/images/favicon.svg
+keywords:
+- - valkey
+- - redis
+- - monitoring
+- - observability
+- - anomaly-detection
+maintainers:
+- - name: BetterDB
+  url: https://betterdb.com
+name: betterdb-monitor
+sources:
+- - https://github.com/BetterDB-inc/monitor
+type: application
+version: 0.40.0
+
+...
+files:
+  betterdb-monitor-0.40.0.tgz: sha256:2c0853ec732857d828d7720e54f47f23e89a05d3776268bc8dc3d6916315acf6
+
+-----BEGIN PGP SIGNATURE-----
+
+wsG5BAEBCgBtBYJqjvCMCRDXXDslrReDyEUUAAAAAAAcACBzYWx0QG5vdGF0aW9u
+cy5vcGVucGdwanMub3Jn1tlK154l1Ge5gpkh6HH6sdnXOTBN03g2sz/vCFTuCCMW
+IQQWoQZYusyeRp7B+YjXXDslrReDyAAAwzQQALeIhhwxlDjexkafG4zbCbrVvBmj
+u6YEl7rrYCKtBTzozEFBuF3eUJAqmuvPmL4CyHsvrILGOeMFCG2/Rf2SraVmQvo7
+gRPAeoi/98szsNM4vKQ3CBd0uCPRJvrqij8FZYEa1jDy1/JdGY/hPqIrbgKZypPg
+tDcz5HNW8dVWwiRbpXVnCr5lRXWf/CwSPGt/s1vV/ZX8c6a+71/yIQBsQtOG+H7V
+O+W4NGpoiV+R/B26vwGWB1IMWRslSPoIRKU6xJ97SQRc9KfDn2sqF6+s6VIB0aqe
+WggLmM0zkqmx7CAilAZhy9NZ4omQFAPZVqf55LuYAxLTiHITK/iyVFLEeeFFnRgo
+jw6iURB9kLHYfLaxNOq/+MZYT0sYDE0ny/VjY1xsSBFaWJG+02Q+TlMfFiohEjFZ
+AhuVMXfr6KL7iKIu+xqP6qKBphTlQyhlIqDzP6EfRkxUwxTKfrlFJMZi1o9tN0GG
+8Yiv9VgKF8H3VbJXrXXvyFlbTN9M01EzjOxnXcVJ3e9D85ft4ZKSOAmWh9jVXREa
+Ywx/cHTUUeIj6tWmn0GTqAJBSwJUU/Y6A6hERMzBchRFu2Su5wQS79uUf8DhUnqu
+kn/zltjSTx6xlMUaYAG1yesMv/z8eZIaaCixZ4kRMVHw737m8F7AV8LrADlQXCVH
+KxYqiZITKyD+N4Cv
+-----END PGP SIGNATURE-----
