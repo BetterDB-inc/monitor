@@ -1,12 +1,22 @@
 import { isWriteCommand, sumWriteCalls } from '../write-commands';
 
 describe('isWriteCommand', () => {
-  it.each(['set', 'hset', 'lpush', 'zadd', 'xadd', 'del', 'unlink', 'expire', 'eval'])(
-    'classifies %s as a write',
-    (command) => {
-      expect(isWriteCommand(command)).toBe(true);
-    },
-  );
+  it.each([
+    'set',
+    'hset',
+    'hsetex',
+    'hgetex',
+    'hgetdel',
+    'lpush',
+    'zadd',
+    'xadd',
+    'del',
+    'unlink',
+    'expire',
+    'eval',
+  ])('classifies %s as a write', (command) => {
+    expect(isWriteCommand(command)).toBe(true);
+  });
 
   it.each(['get', 'mget', 'hgetall', 'lrange', 'zrange', 'scan', 'info', 'ping', 'cluster'])(
     'classifies %s as a read',
