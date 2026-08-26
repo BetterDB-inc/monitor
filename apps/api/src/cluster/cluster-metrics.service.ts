@@ -4,7 +4,14 @@ import { ClusterDiscoveryService, DiscoveredNode } from './cluster-discovery.ser
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { InfoParser } from '../database/parsers/info.parser';
-import { SlowLogEntry, ClientInfo, CommandLogEntry, CommandLogType } from '../common/types/metrics.types';
+import {
+  SlowLogEntry,
+  ClientInfo,
+  CommandLogEntry,
+  CommandLogType,
+} from '../common/types/metrics.types';
+import { parseCommandStatsSection } from '../metrics/commandstats-parser';
+import { sumWriteCalls } from './write-commands';
 
 const MAX_KEYS_TO_CHECK_IN_SLOT = 10000;
 
@@ -26,7 +33,14 @@ export interface ClusterCommandlogEntry extends CommandLogEntry {
 export interface NodeStats {
   nodeId: string;
   nodeAddress: string;
+  /** The cluster's view of the node, from CLUSTER NODES via discovery. */
   role: 'master' | 'replica';
+  /**
+   * The node's own view, from its `INFO replication`. Disagreement with `role`
+   * after a failover is the window in which writes are accepted and then lost.
+   * Absent when the node reports no role at all.
+   */
+  selfReportedRole?: 'master' | 'replica';
   memoryUsed: number;
   memoryPeak: number;
   memoryFragmentationRatio: number;
@@ -41,6 +55,22 @@ export interface NodeStats {
   cpuSys?: number;
   cpuUser?: number;
   uptimeSeconds?: number;
+  /**
+   * Cumulative calls across every write command the node has served, from
+   * `INFO commandstats`. Only populated when the caller asks for it — it costs
+   * a second INFO round trip per node — and absent when the node does not
+   * expose the section.
+   */
+  writeCommandCalls?: number;
+}
+
+export interface NodeStatsOptions {
+  /**
+   * Fetch `INFO commandstats` per node as well. Off by default: the section is
+   * one extra round trip per node and only the demoted-writes detector needs
+   * the read/write split.
+   */
+  includeCommandStats?: boolean;
 }
 
 export interface SlotMigration {
@@ -76,7 +106,10 @@ export class ClusterMetricsService {
     this.loggedErrors.delete(`${operation}-${nodeId}`);
   }
 
-  async getClusterSlowlog(limit: number = 100, connectionId?: string): Promise<ClusterSlowlogEntry[]> {
+  async getClusterSlowlog(
+    limit: number = 100,
+    connectionId?: string,
+  ): Promise<ClusterSlowlogEntry[]> {
     const nodes = await this.discoveryService.discoverNodes(connectionId);
     const slowlogPromises = nodes.map((node) => this.getNodeSlowlog(node, limit, connectionId));
 
@@ -96,7 +129,11 @@ export class ClusterMetricsService {
     return allEntries.slice(0, limit);
   }
 
-  private async getNodeSlowlog(node: DiscoveredNode, limit: number, connectionId?: string): Promise<ClusterSlowlogEntry[]> {
+  private async getNodeSlowlog(
+    node: DiscoveredNode,
+    limit: number,
+    connectionId?: string,
+  ): Promise<ClusterSlowlogEntry[]> {
     try {
       const client = await this.discoveryService.getNodeConnection(node.id, connectionId);
       const rawLog = await client.slowlog('GET', limit);
@@ -160,7 +197,10 @@ export class ClusterMetricsService {
     }
   }
 
-  async getClusterCommandlog(type: CommandLogType, limit: number = 100): Promise<ClusterCommandlogEntry[]> {
+  async getClusterCommandlog(
+    type: CommandLogType,
+    limit: number = 100,
+  ): Promise<ClusterCommandlogEntry[]> {
     const nodes = await this.discoveryService.discoverNodes();
     const commandlogPromises = nodes.map((node) => this.getNodeCommandlog(node, type, limit));
 
@@ -207,9 +247,12 @@ export class ClusterMetricsService {
     }
   }
 
-  async getClusterNodeStats(connectionId?: string): Promise<NodeStats[]> {
+  async getClusterNodeStats(
+    connectionId?: string,
+    options?: NodeStatsOptions,
+  ): Promise<NodeStats[]> {
     const nodes = await this.discoveryService.discoverNodes(connectionId);
-    const statsPromises = nodes.map((node) => this.getNodeStats(node, connectionId));
+    const statsPromises = nodes.map((node) => this.getNodeStats(node, connectionId, options));
 
     const results = await Promise.allSettled(statsPromises);
 
@@ -224,7 +267,11 @@ export class ClusterMetricsService {
     return allStats;
   }
 
-  private async getNodeStats(node: DiscoveredNode, connectionId?: string): Promise<NodeStats | null> {
+  private async getNodeStats(
+    node: DiscoveredNode,
+    connectionId?: string,
+    options?: NodeStatsOptions,
+  ): Promise<NodeStats | null> {
     try {
       const client = await this.discoveryService.getNodeConnection(node.id, connectionId);
       const infoString = await client.info();
@@ -232,7 +279,11 @@ export class ClusterMetricsService {
 
       const memoryUsed = this.parseInfoValue(info, 'memory.used_memory', 0);
       const memoryPeak = this.parseInfoValue(info, 'memory.used_memory_peak', 0);
-      const memoryFragmentationRatio = this.parseInfoValue(info, 'memory.mem_fragmentation_ratio', 1);
+      const memoryFragmentationRatio = this.parseInfoValue(
+        info,
+        'memory.mem_fragmentation_ratio',
+        1,
+      );
 
       const opsPerSec = this.parseInfoValue(info, 'stats.instantaneous_ops_per_sec', 0);
       const inputKbps = this.parseInfoValue(info, 'stats.instantaneous_input_kbps', 0);
@@ -243,12 +294,21 @@ export class ClusterMetricsService {
 
       const replicationOffset = this.getReplicationOffset(info, node.role);
       const masterLinkStatus = this.getInfoString(info, 'replication.master_link_status');
-      const masterLastIoSecondsAgo = this.parseInfoValue(info, 'replication.master_last_io_seconds_ago');
+      const masterLastIoSecondsAgo = this.parseInfoValue(
+        info,
+        'replication.master_last_io_seconds_ago',
+      );
 
       const cpuSys = this.parseInfoValue(info, 'cpu.used_cpu_sys');
       const cpuUser = this.parseInfoValue(info, 'cpu.used_cpu_user');
 
       const uptimeSeconds = this.parseInfoValue(info, 'server.uptime_in_seconds');
+
+      const selfReportedRole = this.getSelfReportedRole(info);
+      const writeCommandCalls =
+        options?.includeCommandStats === true
+          ? await this.getWriteCommandCalls(client, node.id)
+          : undefined;
 
       // Clear error on success
       this.clearNodeError(node.id, 'stats');
@@ -257,6 +317,7 @@ export class ClusterMetricsService {
         nodeId: node.id,
         nodeAddress: node.address,
         role: node.role,
+        selfReportedRole,
         memoryUsed: memoryUsed ?? 0,
         memoryPeak: memoryPeak ?? 0,
         memoryFragmentationRatio: memoryFragmentationRatio ?? 1.0,
@@ -271,6 +332,7 @@ export class ClusterMetricsService {
         cpuSys,
         cpuUser,
         uptimeSeconds,
+        writeCommandCalls,
       };
     } catch (error) {
       // Only log each unique error once to avoid spam
@@ -361,7 +423,12 @@ export class ClusterMetricsService {
 
   private async getKeysInSlot(client: Valkey, slot: number): Promise<number | undefined> {
     try {
-      const keys = (await client.call('CLUSTER', 'GETKEYSINSLOT', slot, MAX_KEYS_TO_CHECK_IN_SLOT)) as string[];
+      const keys = (await client.call(
+        'CLUSTER',
+        'GETKEYSINSLOT',
+        slot,
+        MAX_KEYS_TO_CHECK_IN_SLOT,
+      )) as string[];
       return keys.length;
     } catch (error) {
       this.logger.debug(
@@ -371,7 +438,11 @@ export class ClusterMetricsService {
     }
   }
 
-  private parseInfoValue(info: Record<string, unknown>, path: string, defaultValue?: number): number | undefined {
+  private parseInfoValue(
+    info: Record<string, unknown>,
+    path: string,
+    defaultValue?: number,
+  ): number | undefined {
     const parts = path.split('.');
     let current: unknown = info;
 
@@ -410,7 +481,49 @@ export class ClusterMetricsService {
     return typeof current === 'string' ? current : undefined;
   }
 
-  private getReplicationOffset(info: Record<string, unknown>, role: 'master' | 'replica'): number | undefined {
+  private getSelfReportedRole(info: Record<string, unknown>): 'master' | 'replica' | undefined {
+    const role = this.getInfoString(info, 'replication.role');
+    if (role === 'master') {
+      return 'master';
+    }
+    if (role === 'slave' || role === 'replica') {
+      return 'replica';
+    }
+    return undefined;
+  }
+
+  /**
+   * A second INFO call rather than `INFO default commandstats`: multi-section
+   * INFO is Redis 7.0+/Valkey only, and single-section INFO is universal.
+   *
+   * A node that denies or lacks the section yields undefined rather than zero —
+   * zero would read as "served no writes", which is a different claim.
+   */
+  private async getWriteCommandCalls(client: Valkey, nodeId: string): Promise<number | undefined> {
+    try {
+      const raw = await client.info('commandstats');
+      const parsed = InfoParser.parse(raw);
+      const section = parsed.commandstats as Record<string, string> | undefined;
+      if (section === undefined) {
+        return undefined;
+      }
+      return sumWriteCalls(parseCommandStatsSection(section));
+    } catch (error) {
+      const errorKey = `commandstats-${nodeId}`;
+      if (!this.loggedErrors.has(errorKey)) {
+        this.logger.debug(
+          `Failed to get commandstats from node ${nodeId}: ${error instanceof Error ? error.message : error}`,
+        );
+        this.addLoggedError(errorKey);
+      }
+      return undefined;
+    }
+  }
+
+  private getReplicationOffset(
+    info: Record<string, unknown>,
+    role: 'master' | 'replica',
+  ): number | undefined {
     if (role === 'master') {
       return this.parseInfoValue(info, 'replication.master_repl_offset');
     } else {
