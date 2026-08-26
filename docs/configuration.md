@@ -164,16 +164,39 @@ This means:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `ENCRYPTION_KEY` | No | - | Master key for encrypting stored passwords (min 16 characters) |
+| `ENCRYPTION_KEY` | No | - | Master key for encrypting stored connection passwords **and SSH tunnel secrets** (min 16 characters) |
 | `ENCRYPTION_KEK_SALT` | No | `betterdb-kek-salt-v1` | Salt used for key derivation (customize for additional security) |
 
-**Password Encryption**: When `ENCRYPTION_KEY` is set, all connection passwords are encrypted at rest using envelope encryption (AES-256-GCM). Each password gets a unique encryption key (DEK) that is itself encrypted with a master key (KEK) derived from your `ENCRYPTION_KEY`.
+**Password Encryption**: When `ENCRYPTION_KEY` is set, all connection passwords are encrypted at rest using envelope encryption (AES-256-GCM). Each password gets a unique encryption key (DEK) that is itself encrypted with a master key (KEK) derived from your `ENCRYPTION_KEY`. The same encryption covers SSH tunnel secrets (SSH password, key passphrase, and inline private keys).
 
 - If not set, passwords are stored in plaintext (a warning is logged at startup)
 - Use a strong, random key (e.g., `openssl rand -base64 32`)
 - Store the key securely (e.g., in a secrets manager)
 - If you lose the key, encrypted passwords cannot be recovered
 - Optionally set `ENCRYPTION_KEK_SALT` to a custom value for defense-in-depth (attackers would need both key and salt)
+
+### SSH Tunnels
+
+A connection can reach its database through an SSH bastion/jump host (single hop) instead of connecting directly. Configure it per-connection via the web UI ("Connect via SSH tunnel") or the connection API (`sshTunnel` field). Authentication is a password or a private key.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `BETTERDB_SSH_KEY_DIR` | No | - | Directory that server-side SSH private keys must live in. Enables the "server file path" key source; a connection's `privateKeyPath` must resolve inside this directory. Unset disables file-based keys. |
+
+**Private key sources**:
+
+- **Inline (paste key)** — the PEM key content is submitted with the connection. It is encrypted at rest **only when `ENCRYPTION_KEY` is set**; without it, the key (like connection passwords) is stored in plaintext and a warning is logged at startup. Works in any deployment, including managed/cloud.
+- **Server file path** — the key already exists on the monitor server's filesystem. Set `BETTERDB_SSH_KEY_DIR` to the directory holding allowed keys; the connection's `privateKeyPath` is resolved relative to it and rejected if it escapes the directory (no path traversal). Best for self-hosted deployments that mount keys as a secret volume.
+
+**Host key verification**: pin the SSH server's SHA256 host-key fingerprint on the connection (`hostKeyFingerprint`, e.g. `SHA256:...` from `ssh-keyscan -t ed25519 HOST | ssh-keygen -lf -`). When set, the tunnel is refused unless the server presents a matching key, which prevents a man-in-the-middle on the bastion path. When left unset the server key is accepted and a warning is logged.
+
+The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through the tunnel. When TLS is enabled, the certificate is still validated against the real database hostname (SNI `servername`), not localhost.
+
+**Host key verification (TOFU):** if you leave `hostKeyFingerprint` unset, the SSH server's key is trusted on first connect and then pinned automatically — subsequent connects are refused if the key changes. Pin the fingerprint up front (see above) to avoid trusting the first key blind.
+
+**Password auth:** password and keyboard-interactive (PAM) bastions are both supported; a password is answered to interactive prompts automatically.
+
+**Known limitation — cluster/Sentinel:** only the configured connection is tunnelled. Cluster/Sentinel monitoring connects to peer nodes at the addresses they advertise, directly rather than through the tunnel, so nodes reachable only via the bastion (e.g. ElastiCache/MemoryDB in a private subnet) will not have per-node views. Use tunnels for single-node/primary monitoring.
 
 ### Audit Trail
 

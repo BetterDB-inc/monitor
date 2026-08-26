@@ -4,10 +4,11 @@ import { NotFoundException } from '@nestjs/common';
 import { ConnectionRegistry } from '../connection-registry.service';
 import { ENV_DEFAULT_ID } from '../connection.constants';
 import { RuntimeCapabilityTracker } from '../runtime-capability-tracker.service';
+import { SshTunnelService } from '../../database/ssh/ssh-tunnel.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../../common/interfaces/database-port.interface';
 import { DatabaseConnectionConfig } from '@betterdb/shared';
-import { resetEncryptionService } from '../../common/utils/encryption';
+import { resetEncryptionService, EnvelopeEncryptionService } from '../../common/utils/encryption';
 
 // Mock UnifiedDatabaseAdapter
 jest.mock('../../database/adapters/unified.adapter', () => ({
@@ -114,6 +115,7 @@ describe('ConnectionRegistry', () => {
       providers: [
         ConnectionRegistry,
         RuntimeCapabilityTracker,
+        SshTunnelService,
         { provide: 'STORAGE_CLIENT', useValue: mockStorage },
         { provide: ConfigService, useValue: mockConfigService },
       ],
@@ -204,6 +206,7 @@ describe('ConnectionRegistry', () => {
         providers: [
           ConnectionRegistry,
           RuntimeCapabilityTracker,
+          SshTunnelService,
           { provide: 'STORAGE_CLIENT', useValue: mockStorage },
           { provide: ConfigService, useValue: mockConfigService },
         ],
@@ -578,6 +581,7 @@ describe('ConnectionRegistry with encryption', () => {
       providers: [
         ConnectionRegistry,
         RuntimeCapabilityTracker,
+        SshTunnelService,
         { provide: 'STORAGE_CLIENT', useValue: mockStorage },
         { provide: ConfigService, useValue: mockConfigService },
       ],
@@ -625,6 +629,68 @@ describe('ConnectionRegistry with encryption', () => {
     expect(savedConfig.passwordEncrypted).toBe(true);
   });
 
+  it('encrypts SSH tunnel secrets and ignores a client-supplied secretsEncrypted flag', async () => {
+    mockStorage.getConnections.mockResolvedValue([]);
+    await registry.onModuleInit();
+
+    await registry.addConnection({
+      name: 'Tunneled',
+      host: 'db.internal',
+      port: 6379,
+      // A malicious client tries to mark plaintext secrets as already-encrypted
+      // to skip envelope encryption. secretsEncrypted must be ignored on input.
+      sshTunnel: {
+        enabled: true,
+        host: 'bastion',
+        port: 22,
+        username: 'ec2-user',
+        authMethod: 'privateKey',
+        keySource: 'inline',
+        privateKey: 'PLAINTEXT-KEY',
+        passphrase: 'PLAINTEXT-PASS',
+        secretsEncrypted: true,
+      } as unknown as import('@betterdb/shared').SshTunnelInput,
+    });
+
+    const savedConfig = mockStorage.saveConnection.mock.calls[1][0];
+    const tunnel = savedConfig.sshTunnel!;
+    expect(tunnel.secretsEncrypted).toBe(true);
+    // Secrets must be ciphertext, not the submitted plaintext.
+    expect(tunnel.privateKey).toBeDefined();
+    expect(tunnel.privateKey).not.toBe('PLAINTEXT-KEY');
+    expect(tunnel.passphrase).not.toBe('PLAINTEXT-PASS');
+    // And they must be recoverable (valid envelope).
+    const enc = new EnvelopeEncryptionService('test-encryption-key-for-tests');
+    expect(enc.decrypt(tunnel.privateKey!)).toBe('PLAINTEXT-KEY');
+  });
+
+  it('normalizes a blank host-key fingerprint to undefined (status matches runtime)', async () => {
+    mockStorage.getConnections.mockResolvedValue([]);
+    await registry.onModuleInit();
+
+    const id = await registry.addConnection({
+      name: 'Blank FP',
+      host: 'db.internal',
+      port: 6379,
+      sshTunnel: {
+        enabled: true,
+        host: 'bastion',
+        port: 22,
+        username: 'ec2-user',
+        authMethod: 'password',
+        password: 'pw',
+        hostKeyFingerprint: '   ',
+      },
+    });
+
+    // Persisted config has no fingerprint...
+    const savedConfig = mockStorage.saveConnection.mock.calls[1][0];
+    expect(savedConfig.sshTunnel!.hostKeyFingerprint).toBeUndefined();
+    // ...and the reported status is not "pinned".
+    const status = registry.list().find((c) => c.id === id);
+    expect(status?.sshTunnel?.hostKeyPinned).toBe(false);
+  });
+
   it('should decrypt password when loading saved connections', async () => {
     // Simulate a previously saved encrypted connection
     const { EnvelopeEncryptionService } = require('../../common/utils/encryption');
@@ -669,6 +735,7 @@ describe('ConnectionRegistry with encryption', () => {
       providers: [
         ConnectionRegistry,
         RuntimeCapabilityTracker,
+        SshTunnelService,
         { provide: 'STORAGE_CLIENT', useValue: mockStorage },
         { provide: ConfigService, useValue: mockConfigService },
       ],

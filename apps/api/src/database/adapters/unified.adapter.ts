@@ -1,4 +1,5 @@
 import Valkey from 'iovalkey';
+import { randomUUID } from 'crypto';
 import { Logger } from '@nestjs/common';
 import {
   DatabasePort,
@@ -49,6 +50,9 @@ import type {
 } from '@betterdb/shared';
 import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT } from '@betterdb/shared';
 
+import type { SshTunnelConfig } from '@betterdb/shared';
+import { SshTunnelService } from '../ssh/ssh-tunnel.service';
+
 export interface UnifiedDatabaseAdapterConfig {
   host: string;
   port: number;
@@ -56,6 +60,12 @@ export interface UnifiedDatabaseAdapterConfig {
   password: string;
   connectionName?: string;
   tls?: boolean;
+  /** Optional SSH tunnel used to reach the database (secrets already decrypted). */
+  sshTunnel?: SshTunnelConfig;
+  /** Tunnel manager; required when sshTunnel is enabled. */
+  sshTunnelService?: SshTunnelService;
+  /** Stable id used to key the tunnel (defaults to a generated id). */
+  connectionId?: string;
 }
 
 function isIpAddress(host: string): boolean {
@@ -65,16 +75,43 @@ function isIpAddress(host: string): boolean {
 
 export class UnifiedDatabaseAdapter implements DatabasePort {
   private readonly logger = new Logger(UnifiedDatabaseAdapter.name);
-  private client: Valkey;
+  // Backing field is genuinely nullable: a tunnelled adapter has no client
+  // until connect() runs, and teardown discards it. Every internal read goes
+  // through the `client` getter below, which throws a clear error instead of
+  // letting an undefined slip through to a TypeError deep in a query method.
+  private _client: Valkey | null = null;
+  private get client(): Valkey {
+    if (!this._client) {
+      throw new Error(
+        'Database connection is not established (no active client). ' +
+          'The server may be unreachable or its SSH tunnel may be down.',
+      );
+    }
+    return this._client;
+  }
   private connected: boolean = false;
   private capabilities: DatabaseCapabilities | null = null;
   private readonly config: UnifiedDatabaseAdapterConfig;
   private cliClient: Valkey | null = null;
+  private readonly connectionId: string;
+  // Unique per adapter instance so two adapters sharing a connectionId (e.g.
+  // the old and new adapter during reconnect) never collide on the same tunnel.
+  private readonly tunnelKey: string;
+  private readonly usesTunnel: boolean;
+  private tunnelActive: boolean = false;
+  // SHA256 fingerprint the SSH server presented, captured on first connect when
+  // no fingerprint was pinned (trust-on-first-use). The registry reads this back
+  // after a successful connect to persist it for subsequent verification.
+  private observedHostKeyFingerprint?: string;
+  // Host/port the Valkey clients actually dial. Rewritten to 127.0.0.1:<localPort>
+  // once an SSH tunnel is established.
+  private connectHost: string;
+  private connectPort: number;
 
   private createValkeyClient(connectionName: string): Valkey {
     return new Valkey({
-      host: this.config.host,
-      port: this.config.port,
+      host: this.connectHost,
+      port: this.connectPort,
       username: this.config.username,
       password: this.config.password,
       lazyConnect: true,
@@ -84,7 +121,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // SNI-routed endpoints (e.g. Traefik HostSNI in front of managed Valkey)
       // would otherwise get the default cert and a non-RESP response
       // ("Protocol error, got 'H'"). Send the hostname as servername unless it
-      // is a bare IP, which SNI does not allow.
+      // is a bare IP, which SNI does not allow. Through a tunnel the socket
+      // points at localhost, but the certificate is still for the real host.
       tls: this.config.tls
         ? isIpAddress(this.config.host)
           ? {}
@@ -93,26 +131,136 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     });
   }
 
-  constructor(config: UnifiedDatabaseAdapterConfig) {
-    this.config = config;
-    this.client = this.createValkeyClient(config.connectionName ?? 'BetterDB-Monitor');
+  private initClient(): void {
+    const client = this.createValkeyClient(this.config.connectionName ?? 'BetterDB-Monitor');
+    this._client = client;
 
-    this.client.on('connect', () => {
+    // Identity-guard the state writes: iovalkey emits `close` asynchronously
+    // after disconnect(), so a discarded client can fire after a fresh client
+    // has already connected. Without the guard, that stale `close` would flip
+    // `connected` to false on a healthy connection.
+    client.on('connect', () => {
+      if (this._client !== client) return;
       this.connected = true;
     });
 
-    this.client.on('error', (err) => {
+    client.on('error', (err) => {
       this.logger.error(`Connection error: ${err.message}`);
+      if (this._client !== client) return;
       this.connected = false;
     });
 
-    this.client.on('close', () => {
+    client.on('close', () => {
+      if (this._client !== client) return;
       this.connected = false;
     });
   }
 
+  constructor(config: UnifiedDatabaseAdapterConfig) {
+    this.config = config;
+    this.connectionId = config.connectionId ?? `conn:${config.host}:${config.port}`;
+    this.tunnelKey = `${this.connectionId}:${randomUUID()}`;
+    this.usesTunnel = !!config.sshTunnel?.enabled;
+    this.connectHost = config.host;
+    this.connectPort = config.port;
+
+    if (this.usesTunnel && !config.sshTunnelService) {
+      throw new Error('sshTunnelService is required when an SSH tunnel is configured');
+    }
+
+    // Without a tunnel, create the client eagerly (existing behaviour). With a
+    // tunnel we must open the tunnel first (async) to know the local port, so
+    // the client is created in connect().
+    if (!this.usesTunnel) {
+      this.initClient();
+    }
+  }
+
+  private async establishTunnel(): Promise<void> {
+    const tunnel = this.config.sshTunnel!;
+    const service = this.config.sshTunnelService!;
+    const localPort = await service.createTunnel(this.tunnelKey, {
+      sshHost: tunnel.host,
+      sshPort: tunnel.port,
+      sshUsername: tunnel.username,
+      authMethod: tunnel.authMethod,
+      password: tunnel.password,
+      keySource: tunnel.keySource,
+      privateKey: tunnel.privateKey,
+      privateKeyPath: tunnel.privateKeyPath,
+      passphrase: tunnel.passphrase,
+      hostKeyFingerprint: tunnel.hostKeyFingerprint,
+      // Trust-on-first-use: record the key the server presents so the registry
+      // can persist it and pin it on the next connect.
+      onHostKey: (fingerprint) => {
+        this.observedHostKeyFingerprint = fingerprint;
+      },
+      // If the tunnel drops on its own, stop dialing the dead local port.
+      onUnexpectedClose: () => this.handleTunnelDropped(),
+      remoteHost: this.config.host,
+      remotePort: this.config.port,
+    });
+    this.connectHost = '127.0.0.1';
+    this.connectPort = localPort;
+    this.tunnelActive = true;
+  }
+
+  /**
+   * Called when the SSH tunnel drops unexpectedly. Discards the client (so
+   * iovalkey stops retrying the now-dead loopback port, whose number the OS may
+   * reassign to another process) and resets state so the next connect()
+   * re-establishes the tunnel.
+   */
+  private handleTunnelDropped(): void {
+    if (!this.tunnelActive) {
+      return;
+    }
+    this.logger.warn('SSH tunnel dropped; marking connection down until re-established');
+    this.tunnelActive = false;
+    this.connected = false;
+    if (this._client) {
+      this._client.disconnect();
+      this._client = null;
+    }
+    // The CLI client rode the same tunnel, so it now points at the dead local
+    // port too. Discard it so getCliClient() rebuilds it after re-establish.
+    if (this.cliClient) {
+      this.cliClient.disconnect();
+      this.cliClient = null;
+    }
+    this.connectHost = this.config.host;
+    this.connectPort = this.config.port;
+  }
+
+  private async teardownTunnel(): Promise<void> {
+    if (this.tunnelActive && this.config.sshTunnelService) {
+      await this.config.sshTunnelService.closeTunnel(this.tunnelKey).catch(() => {});
+      this.tunnelActive = false;
+      // The current client's options still point at the now-closed local port,
+      // so it must be rebuilt (against a freshly established tunnel) before the
+      // next connect(). Discard it and restore the pre-tunnel target.
+      if (this._client) {
+        this._client.disconnect();
+        this._client = null;
+      }
+      this.connectHost = this.config.host;
+      this.connectPort = this.config.port;
+    }
+  }
+
+  /** The host-key fingerprint observed on connect, if learned via TOFU. */
+  getObservedHostKeyFingerprint(): string | undefined {
+    return this.observedHostKeyFingerprint;
+  }
+
   async connect(): Promise<void> {
     try {
+      if (this.usesTunnel && !this.tunnelActive) {
+        await this.establishTunnel();
+      }
+      if (!this._client) {
+        this.initClient();
+      }
       this.logger.log(`Connecting to ${this.client.options.host}:${this.client.options.port}...`);
       await this.client.connect();
       this.connected = true;
@@ -121,6 +269,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       this.logger.log(`Detected ${this.capabilities?.dbType} ${this.capabilities?.version}`);
     } catch (error) {
       this.connected = false;
+      await this.teardownTunnel();
       this.logger.error(`Connection failed: ${error instanceof Error ? error.message : error}`);
       throw error;
     }
@@ -131,12 +280,20 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       await this.cliClient.quit().catch(() => {});
       this.cliClient = null;
     }
-    await this.client.quit();
+    if (this._client) {
+      // iovalkey rejects quit() when the client is already closed / never
+      // connected. Swallow it (falling back to a hard disconnect) so a failed
+      // quit can never skip the tunnel teardown below and leak the SSH session.
+      await this._client.quit().catch(() => {
+        this._client?.disconnect();
+      });
+    }
+    await this.teardownTunnel();
     this.connected = false;
   }
 
   isConnected(): boolean {
-    return this.connected && this.client.status === 'ready';
+    return this.connected && this._client?.status === 'ready';
   }
 
   async ping(): Promise<boolean> {
@@ -938,6 +1095,15 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       return this.cliClient;
     }
 
+    // After a tunnel drop, connectHost/connectPort are reset to the real
+    // (possibly bastion-only) database endpoint. Building a CLI client now would
+    // dial it directly and hang. Refuse until the tunnel is re-established.
+    if (this.usesTunnel && !this.tunnelActive) {
+      throw new Error(
+        'SSH tunnel is not established; reconnect the connection before running CLI commands.',
+      );
+    }
+
     this.cliClient = this.createValkeyClient('BetterDB-CLI');
     await this.cliClient.connect();
     this.logger.log('CLI client connected');
@@ -953,6 +1119,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   }
 
   getClient(): Valkey {
+    // Throws a clear "connection not established" error (via the getter) rather
+    // than handing back an undefined that blows up as a TypeError in the caller.
     return this.client;
   }
 }

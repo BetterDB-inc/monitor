@@ -5,6 +5,7 @@ import { ConnectionStatus, CreateConnectionRequest, TestConnectionResponse, Data
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { UnifiedDatabaseAdapter } from '../database/adapters/unified.adapter';
+import { SshTunnelService } from '../database/ssh/ssh-tunnel.service';
 import { EnvelopeEncryptionService, getEncryptionService } from '../common/utils/encryption';
 import { RuntimeCapabilityTracker } from './runtime-capability-tracker.service';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
@@ -25,6 +26,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly configService: ConfigService,
     private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
+    private readonly sshTunnelService: SshTunnelService,
     @Optional() private readonly usageTelemetry?: UsageTelemetryService,
   ) {
     this.encryption = getEncryptionService();
@@ -123,6 +125,13 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
           const adapter = this.createAdapter(decryptedConfig);
           await adapter.connect();
           this.connections.set(config.id, adapter);
+          // Trust-on-first-use: persist a newly-learned SSH host key so it is
+          // verified on the next startup.
+          if (this.captureLearnedHostKey(decryptedConfig, adapter)) {
+            await this.storage.saveConnection(this.encryptConfig(decryptedConfig)).catch((err) => {
+              this.logger.warn(`Failed to persist learned SSH host key for ${config.name}: ${err instanceof Error ? err.message : err}`);
+            });
+          }
           // Mark credentials as valid after successful connection
           this.configs.set(config.id, { ...decryptedConfig, credentialStatus: 'valid' });
           this.logger.log(`Connected to ${config.name} (${config.host}:${config.port})`);
@@ -254,6 +263,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       password: config.password || '',
       connectionName,
       tls: config.tls,
+      connectionId: config.id,
+      sshTunnel: config.sshTunnel,
+      sshTunnelService: config.sshTunnel?.enabled ? this.sshTunnelService : undefined,
     });
   }
 
@@ -262,15 +274,118 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
    * Returns a new config object with encrypted password.
    */
   private encryptConfig(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
-    if (!this.encryption || !config.password) {
-      return config;
+    let result = config;
+
+    if (this.encryption && config.password) {
+      result = {
+        ...result,
+        password: this.encryption.encrypt(config.password),
+        passwordEncrypted: true,
+      };
     }
 
+    result = { ...result, sshTunnel: this.encryptSshTunnel(result.sshTunnel) };
+    return result;
+  }
+
+  /**
+   * Strip server-managed fields from a caller-supplied SSH tunnel. In
+   * particular `secretsEncrypted` must never be trusted from input, or a client
+   * could submit plaintext secrets flagged as already-encrypted and bypass
+   * encryption at rest.
+   */
+  private sanitizeSshTunnelInput(
+    tunnel: DatabaseConnectionConfig['sshTunnel'],
+  ): DatabaseConnectionConfig['sshTunnel'] {
+    if (!tunnel) return tunnel;
+    const { secretsEncrypted: _ignored, ...rest } = tunnel;
+    // Normalise a blank/whitespace-only fingerprint to undefined so the pinned
+    // status reported by list() matches the runtime behaviour (the tunnel
+    // service trims it and skips verification when empty).
+    const hostKeyFingerprint = rest.hostKeyFingerprint?.trim() || undefined;
+    return { ...rest, hostKeyFingerprint, secretsEncrypted: false };
+  }
+
+  /**
+   * Trust-on-first-use: if a tunnelled connection has no pinned host-key
+   * fingerprint and the adapter observed one on connect, fold it into the
+   * config (mutated in place) so the caller persists it. Returns whether a new
+   * fingerprint was captured. `hostKeyFingerprint` is not a secret.
+   */
+  private captureLearnedHostKey(config: DatabaseConnectionConfig, adapter: DatabasePort): boolean {
+    if (!config.sshTunnel?.enabled || config.sshTunnel.hostKeyFingerprint) {
+      return false;
+    }
+    const fingerprint = adapter.getObservedHostKeyFingerprint?.();
+    if (!fingerprint) {
+      return false;
+    }
+    config.sshTunnel = { ...config.sshTunnel, hostKeyFingerprint: fingerprint };
+    this.logger.log(`Pinned SSH host key for ${config.name} on first use (${fingerprint})`);
+    return true;
+  }
+
+  /**
+   * Encrypt the secret fields of an SSH tunnel config for storage. `privateKeyPath`
+   * is a filesystem path, not a secret, and is left as-is.
+   */
+  private encryptSshTunnel(
+    tunnel: DatabaseConnectionConfig['sshTunnel'],
+  ): DatabaseConnectionConfig['sshTunnel'] {
+    if (!tunnel || !this.encryption || tunnel.secretsEncrypted) {
+      return tunnel;
+    }
     return {
-      ...config,
-      password: this.encryption.encrypt(config.password),
-      passwordEncrypted: true,
+      ...tunnel,
+      password: tunnel.password ? this.encryption.encrypt(tunnel.password) : tunnel.password,
+      privateKey: tunnel.privateKey ? this.encryption.encrypt(tunnel.privateKey) : tunnel.privateKey,
+      passphrase: tunnel.passphrase ? this.encryption.encrypt(tunnel.passphrase) : tunnel.passphrase,
+      secretsEncrypted: true,
     };
+  }
+
+  /**
+   * Decrypt the secret fields of a persisted SSH tunnel config for use.
+   * Returns the tunnel unchanged (secrets dropped) if the key is unavailable.
+   */
+  private decryptSshTunnel(
+    tunnel: DatabaseConnectionConfig['sshTunnel'],
+  ): DatabaseConnectionConfig['sshTunnel'] {
+    if (!tunnel || !tunnel.secretsEncrypted) {
+      return tunnel;
+    }
+    if (!this.encryption) {
+      this.logger.error(
+        'ENCRYPTION_KEY not set but SSH tunnel secrets are encrypted; tunnel credentials unavailable',
+      );
+      return {
+        ...tunnel,
+        password: undefined,
+        privateKey: undefined,
+        passphrase: undefined,
+        secretsEncrypted: false,
+      };
+    }
+    try {
+      return {
+        ...tunnel,
+        password: tunnel.password ? this.encryption.decrypt(tunnel.password) : tunnel.password,
+        privateKey: tunnel.privateKey ? this.encryption.decrypt(tunnel.privateKey) : tunnel.privateKey,
+        passphrase: tunnel.passphrase ? this.encryption.decrypt(tunnel.passphrase) : tunnel.passphrase,
+        secretsEncrypted: false,
+      };
+    } catch (error) {
+      this.logger.error(
+        `Failed to decrypt SSH tunnel secrets: ${error instanceof Error ? error.message : error}`,
+      );
+      return {
+        ...tunnel,
+        password: undefined,
+        privateKey: undefined,
+        passphrase: undefined,
+        secretsEncrypted: false,
+      };
+    }
   }
 
   /**
@@ -279,8 +394,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
    * Sets credentialStatus to 'decryption_failed' if decryption fails.
    */
   private decryptConfig(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
+    const sshTunnel = this.decryptSshTunnel(config.sshTunnel);
+
     if (!config.passwordEncrypted || !config.password) {
-      return { ...config, credentialStatus: 'unknown' };
+      return { ...config, sshTunnel, credentialStatus: 'unknown' };
     }
 
     if (!this.encryption) {
@@ -291,6 +408,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       );
       return {
         ...config,
+        sshTunnel,
         password: undefined,
         credentialStatus: 'decryption_failed',
         credentialError: errorMsg,
@@ -300,6 +418,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     try {
       return {
         ...config,
+        sshTunnel,
         password: this.encryption.decrypt(config.password),
         passwordEncrypted: false, // Mark as decrypted in memory
         credentialStatus: 'unknown', // Will be validated on connection attempt
@@ -311,6 +430,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       );
       return {
         ...config,
+        sshTunnel,
         password: undefined,
         credentialStatus: 'decryption_failed',
         credentialError: errorMsg,
@@ -361,6 +481,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       password: request.password,
       dbIndex: request.dbIndex,
       tls: request.tls,
+      sshTunnel: this.sanitizeSshTunnelInput(request.sshTunnel),
       isDefault: false, // Will be set via setDefault() if requested
       createdAt: now,
       updatedAt: now,
@@ -391,6 +512,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     // If storage fails, disconnect the adapter to prevent leaks
     try {
       const caps = adapter.getCapabilities();
+      // Trust-on-first-use: capture the SSH host key so it is pinned from now on.
+      this.captureLearnedHostKey(config, adapter);
       // Store encrypted config in DB, decrypted config in memory
       await this.storage.saveConnection(this.encryptConfig(config));
       // Mark credentials as valid since connection succeeded
@@ -429,8 +552,13 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
     const removedConfig = this.configs.get(id);
     const connection = this.connections.get(id);
-    if (connection && connection.isConnected()) {
-      await connection.disconnect();
+    if (connection) {
+      // Always disconnect, even if isConnected() is false: an SSH tunnel can be
+      // up while the Valkey client is down, and only disconnect() tears the
+      // tunnel down. disconnect() tolerates an already-closed client.
+      await connection.disconnect().catch((err) => {
+        this.logger.warn(`Failed to disconnect ${id} during removal: ${err instanceof Error ? err.message : err}`);
+      });
     }
 
     this.connections.delete(id);
@@ -498,6 +626,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       username: request.username || 'default',
       password: request.password || '',
       tls: request.tls,
+      // Unique id so a test tunnel never collides with a live connection's tunnel.
+      connectionId: `test:${randomUUID()}`,
+      sshTunnel: this.sanitizeSshTunnelInput(request.sshTunnel),
+      sshTunnelService: request.sshTunnel?.enabled ? this.sshTunnelService : undefined,
     });
 
     try {
@@ -571,6 +703,17 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         username: config.username,
         dbIndex: config.dbIndex,
         tls: config.tls,
+        sshTunnel: config.sshTunnel
+          ? {
+              enabled: config.sshTunnel.enabled,
+              host: config.sshTunnel.host,
+              port: config.sshTunnel.port,
+              username: config.sshTunnel.username,
+              authMethod: config.sshTunnel.authMethod,
+              keySource: config.sshTunnel.keySource,
+              hostKeyPinned: !!config.sshTunnel.hostKeyFingerprint,
+            }
+          : undefined,
         isDefault: config.isDefault,
         createdAt: config.createdAt,
         updatedAt: config.updatedAt,
@@ -620,9 +763,12 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     try {
       await newAdapter.connect();
 
-      // Only disconnect old adapter after new one successfully connects
+      // Only disconnect old adapter after new one successfully connects.
+      // Disconnect unconditionally (not just when isConnected): the old adapter
+      // may still hold an open SSH tunnel even with a down client, and the new
+      // adapter uses its own tunnel key so this cannot affect it.
       const oldAdapter = this.connections.get(id);
-      if (oldAdapter && oldAdapter.isConnected()) {
+      if (oldAdapter) {
         await oldAdapter.disconnect().catch((err) => {
           this.logger.warn(`Failed to disconnect old adapter for ${id}: ${err instanceof Error ? err.message : err}`);
         });
@@ -630,6 +776,13 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
       this.connections.set(id, newAdapter);
       this.runtimeCapabilityTracker.resetConnection(id);
+
+      // Trust-on-first-use: persist a newly-learned SSH host key.
+      if (this.captureLearnedHostKey(config, newAdapter)) {
+        await this.storage.saveConnection(this.encryptConfig(config)).catch((err) => {
+          this.logger.warn(`Failed to persist learned SSH host key for ${config.name}: ${err instanceof Error ? err.message : err}`);
+        });
+      }
 
       // Update credential status to valid after successful reconnection
       this.configs.set(id, {

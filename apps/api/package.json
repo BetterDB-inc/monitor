@@ -86,6 +86,7 @@
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
     "semver": "^7.7.4",
+    "ssh2": "^1.17.0",
     "ws": "^8.21.0",
     "zod": "^4.3.6"
   },
@@ -99,6 +100,7 @@
     "@types/node": "^22.19.15",
     "@types/pg": "^8.20.0",
     "@types/semver": "^7.7.1",
+    "@types/ssh2": "^1.15.5",
     "@types/supertest": "^7.2.0",
     "@types/ws": "^8.18.1",
     "eslint": "^10.1.0",

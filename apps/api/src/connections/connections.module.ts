@@ -5,12 +5,13 @@ import { TelemetryModule } from '../telemetry/telemetry.module';
 import { ConnectionRegistry } from './connection-registry.service';
 import { ConnectionsController } from './connections.controller';
 import { RuntimeCapabilityTracker } from './runtime-capability-tracker.service';
+import { SshTunnelService } from '../database/ssh/ssh-tunnel.service';
 
 @Global()
 @Module({
   imports: [ConfigModule, StorageModule, TelemetryModule],
   controllers: [ConnectionsController],
-  providers: [ConnectionRegistry, RuntimeCapabilityTracker],
+  providers: [ConnectionRegistry, RuntimeCapabilityTracker, SshTunnelService],
   exports: [ConnectionRegistry, RuntimeCapabilityTracker],
 })
 export class ConnectionsModule {}

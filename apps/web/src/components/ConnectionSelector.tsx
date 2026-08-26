@@ -16,6 +16,20 @@ import {
   DialogTitle,
 } from './ui/dialog';
 
+interface SshFormData {
+  enabled: boolean;
+  host: string;
+  port: number;
+  username: string;
+  authMethod: 'password' | 'privateKey';
+  password: string;
+  keySource: 'inline' | 'file';
+  privateKey: string;
+  privateKeyPath: string;
+  passphrase: string;
+  hostKeyFingerprint: string;
+}
+
 interface ConnectionFormData {
   name: string;
   host: string;
@@ -24,6 +38,43 @@ interface ConnectionFormData {
   password: string;
   dbIndex: number;
   tls: boolean;
+  ssh: SshFormData;
+}
+
+const defaultSshFormData: SshFormData = {
+  enabled: false,
+  host: '',
+  port: 22,
+  username: '',
+  authMethod: 'privateKey',
+  password: '',
+  keySource: 'inline',
+  privateKey: '',
+  privateKeyPath: '',
+  passphrase: '',
+  hostKeyFingerprint: '',
+};
+
+/**
+ * Build the SSH tunnel payload (or undefined) from the form. Secrets that don't
+ * apply to the chosen auth method / key source are dropped.
+ */
+function buildSshTunnelPayload(ssh: SshFormData) {
+  if (!ssh.enabled) return undefined;
+  const usesKey = ssh.authMethod === 'privateKey';
+  return {
+    enabled: true,
+    host: ssh.host,
+    port: ssh.port,
+    username: ssh.username,
+    authMethod: ssh.authMethod,
+    password: ssh.authMethod === 'password' ? ssh.password || undefined : undefined,
+    keySource: usesKey ? ssh.keySource : undefined,
+    privateKey: usesKey && ssh.keySource === 'inline' ? ssh.privateKey || undefined : undefined,
+    privateKeyPath: usesKey && ssh.keySource === 'file' ? ssh.privateKeyPath || undefined : undefined,
+    passphrase: usesKey ? ssh.passphrase || undefined : undefined,
+    hostKeyFingerprint: ssh.hostKeyFingerprint || undefined,
+  };
 }
 
 function isLocalhostHost(host: string): boolean {
@@ -44,6 +95,7 @@ const defaultFormData: ConnectionFormData = {
   password: '',
   dbIndex: 0,
   tls: false,
+  ssh: defaultSshFormData,
 };
 
 type AddTab = 'direct' | 'agent' | 'valkey';
@@ -96,6 +148,16 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
     setTestResult(null);
   };
 
+  const handleSshChange = (field: keyof SshFormData, value: string | number | boolean) => {
+    setFormData(prev => ({ ...prev, ssh: { ...prev.ssh, [field]: value } }));
+    setTestResult(null);
+  };
+
+  // In cloud mode a loopback host is normally unreachable — but with an SSH
+  // tunnel the bastion resolves the host, so localhost/127.* is valid there.
+  const cloudLoopbackBlocked =
+    !!isCloudMode && !formData.ssh.enabled && isLocalhostHost(formData.host);
+
   // Pasting a full connection URL (redis://user:pass@host:6379/0) into Host fills the whole
   // form. Paste-only on purpose: expanding on change would fire on intermediate keystrokes
   // while someone types a URL by hand and scatter fragments across the fields.
@@ -119,7 +181,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   };
 
   const handleTestConnection = async () => {
-    if (isCloudMode && isLocalhostHost(formData.host)) {
+    if (cloudLoopbackBlocked) {
       setTestResult({ success: false, message: 'localhost is not reachable from the cloud. Please provide a publicly accessible host.' });
       return;
     }
@@ -136,6 +198,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
           password: formData.password || undefined,
           dbIndex: formData.dbIndex,
           tls: formData.tls,
+          sshTunnel: buildSshTunnelPayload(formData.ssh),
         }),
       });
       setTestResult({
@@ -157,7 +220,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       setTestResult({ success: false, message: 'Name and host are required' });
       return;
     }
-    if (isCloudMode && isLocalhostHost(formData.host)) {
+    if (cloudLoopbackBlocked) {
       setTestResult({ success: false, message: 'localhost is not reachable from the cloud. Please provide a publicly accessible host.' });
       return;
     }
@@ -174,6 +237,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
           password: formData.password || undefined,
           dbIndex: formData.dbIndex,
           tls: formData.tls,
+          sshTunnel: buildSshTunnelPayload(formData.ssh),
           setAsDefault: connections.length === 0,
         }),
       });
@@ -386,10 +450,10 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                       onPaste={handleHostPaste}
                       placeholder={isCloudMode ? 'your-redis-host.example.com' : 'localhost'}
                       className={`w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary ${
-                        isCloudMode && isLocalhostHost(formData.host) ? 'border-amber-500 focus:ring-amber-500' : ''
+                        cloudLoopbackBlocked ? 'border-amber-500 focus:ring-amber-500' : ''
                       }`}
                     />
-                    {isCloudMode && isLocalhostHost(formData.host) && (
+                    {cloudLoopbackBlocked && (
                       <div className="mt-1.5 text-xs text-amber-600 dark:text-amber-500 leading-snug space-y-1">
                         <p><strong>localhost won't work on the cloud.</strong> Please provide a publicly accessible address.</p>
                         <a
@@ -411,7 +475,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                         </a>
                       </div>
                     )}
-                    {!(isCloudMode && isLocalhostHost(formData.host)) && (
+                    {!(cloudLoopbackBlocked) && (
                       <p className="mt-1 text-[11px] text-muted-foreground">
                         Tip: paste a full URL like rediss://user:pass@host:6379 to fill every field.
                       </p>
@@ -475,6 +539,172 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                   </div>
                 </div>
 
+                <div className="border rounded-md">
+                  <label className="flex items-center gap-2 cursor-pointer px-3 py-2">
+                    <input
+                      type="checkbox"
+                      checked={formData.ssh.enabled}
+                      onChange={(e) => handleSshChange('enabled', e.target.checked)}
+                      className="rounded"
+                    />
+                    <span className="text-sm font-medium">Connect via SSH tunnel</span>
+                  </label>
+
+                  {formData.ssh.enabled && (
+                    <div className="px-3 pb-3 space-y-3 border-t pt-3">
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="col-span-2 sm:col-span-1">
+                          <label className="block text-xs font-medium mb-1">SSH Host</label>
+                          <input
+                            type="text"
+                            value={formData.ssh.host}
+                            onChange={(e) => handleSshChange('host', e.target.value)}
+                            placeholder="bastion.example.com"
+                            className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium mb-1">SSH Port</label>
+                          <input
+                            type="number"
+                            value={formData.ssh.port}
+                            onChange={(e) => handleSshChange('port', parseInt(e.target.value) || 22)}
+                            min="1"
+                            max="65535"
+                            className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-medium mb-1">SSH Username</label>
+                        <input
+                          type="text"
+                          value={formData.ssh.username}
+                          onChange={(e) => handleSshChange('username', e.target.value)}
+                          placeholder="ec2-user"
+                          className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-medium mb-1">Authentication</label>
+                        <div className="flex gap-4 text-sm">
+                          <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                              type="radio"
+                              name="ssh-auth"
+                              checked={formData.ssh.authMethod === 'privateKey'}
+                              onChange={() => handleSshChange('authMethod', 'privateKey')}
+                            />
+                            <span>Private key</span>
+                          </label>
+                          <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                              type="radio"
+                              name="ssh-auth"
+                              checked={formData.ssh.authMethod === 'password'}
+                              onChange={() => handleSshChange('authMethod', 'password')}
+                            />
+                            <span>Password</span>
+                          </label>
+                        </div>
+                      </div>
+
+                      {formData.ssh.authMethod === 'password' ? (
+                        <div>
+                          <label className="block text-xs font-medium mb-1">SSH Password</label>
+                          <input
+                            type="password"
+                            value={formData.ssh.password}
+                            onChange={(e) => handleSshChange('password', e.target.value)}
+                            autoComplete="new-password"
+                            className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                          />
+                        </div>
+                      ) : (
+                        <>
+                          <div>
+                            <label className="block text-xs font-medium mb-1">Key source</label>
+                            <div className="flex gap-4 text-sm">
+                              <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                  type="radio"
+                                  name="ssh-key-source"
+                                  checked={formData.ssh.keySource === 'inline'}
+                                  onChange={() => handleSshChange('keySource', 'inline')}
+                                />
+                                <span>Paste key</span>
+                              </label>
+                              <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                  type="radio"
+                                  name="ssh-key-source"
+                                  checked={formData.ssh.keySource === 'file'}
+                                  onChange={() => handleSshChange('keySource', 'file')}
+                                />
+                                <span>Server file path</span>
+                              </label>
+                            </div>
+                          </div>
+
+                          {formData.ssh.keySource === 'inline' ? (
+                            <div>
+                              <label className="block text-xs font-medium mb-1">Private key (PEM)</label>
+                              <textarea
+                                value={formData.ssh.privateKey}
+                                onChange={(e) => handleSshChange('privateKey', e.target.value)}
+                                rows={4}
+                                placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                                className="w-full px-3 py-2 border rounded-md bg-background font-mono text-xs focus:outline-none focus:ring-2 focus:ring-primary"
+                              />
+                            </div>
+                          ) : (
+                            <div>
+                              <label className="block text-xs font-medium mb-1">Server key path</label>
+                              <input
+                                type="text"
+                                value={formData.ssh.privateKeyPath}
+                                onChange={(e) => handleSshChange('privateKeyPath', e.target.value)}
+                                placeholder="id_ed25519"
+                                className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                              />
+                              <p className="text-xs text-muted-foreground mt-1">
+                                Resolved inside the server's <code>BETTERDB_SSH_KEY_DIR</code> directory.
+                              </p>
+                            </div>
+                          )}
+
+                          <div>
+                            <label className="block text-xs font-medium mb-1">Key passphrase (optional)</label>
+                            <input
+                              type="password"
+                              value={formData.ssh.passphrase}
+                              onChange={(e) => handleSshChange('passphrase', e.target.value)}
+                              autoComplete="new-password"
+                              className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                            />
+                          </div>
+                        </>
+                      )}
+
+                      <div>
+                        <label className="block text-xs font-medium mb-1">Host key fingerprint (optional)</label>
+                        <input
+                          type="text"
+                          value={formData.ssh.hostKeyFingerprint}
+                          onChange={(e) => handleSshChange('hostKeyFingerprint', e.target.value)}
+                          placeholder="SHA256:..."
+                          className="w-full px-3 py-2 border rounded-md bg-background font-mono text-xs focus:outline-none focus:ring-2 focus:ring-primary"
+                        />
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Pin the SSH server's key to prevent MITM. Get it with <code>ssh-keyscan -t ed25519 host | ssh-keygen -lf -</code>. Left blank, the server identity is not verified.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 {testResult && (
                   <div className={`p-3 rounded-md text-sm ${testResult.success ? 'bg-green-500/10 text-green-500' : 'bg-destructive/10 text-destructive'}`}>
                     {testResult.message}
@@ -485,7 +715,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
               <div className="flex items-center justify-between pt-3 border-t bg-muted/30 -mx-4 -mb-4 px-4 py-3 rounded-b-xl">
                 <button
                   onClick={handleTestConnection}
-                  disabled={testing || !formData.host || (isCloudMode && isLocalhostHost(formData.host))}
+                  disabled={testing || !formData.host || (cloudLoopbackBlocked)}
                   className="px-4 py-2 text-sm border rounded-md hover:bg-muted disabled:opacity-50"
                 >
                   {testing ? 'Testing...' : 'Test Connection'}
@@ -503,7 +733,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                   </button>
                   <button
                     onClick={handleSaveConnection}
-                    disabled={saving || !formData.name || !formData.host || (isCloudMode && isLocalhostHost(formData.host))}
+                    disabled={saving || !formData.name || !formData.host || (cloudLoopbackBlocked)}
                     className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50"
                   >
                     {saving ? 'Saving...' : 'Save'}
