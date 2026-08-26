@@ -1,9 +1,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { act, render, renderHook, screen, fireEvent } from '@testing-library/react';
 
 // Mock the shadcn Switch (its @/ imports don't resolve in vitest)
 vi.mock('./ui/switch', () => ({
-  Switch: ({ checked, onCheckedChange, ...props }: { checked?: boolean; onCheckedChange?: (v: boolean) => void; 'aria-label'?: string }) => (
+  Switch: ({
+    checked,
+    onCheckedChange,
+    ...props
+  }: {
+    checked?: boolean;
+    onCheckedChange?: (v: boolean) => void;
+    'aria-label'?: string;
+  }) => (
     <button
       role="switch"
       aria-checked={checked}
@@ -15,6 +23,7 @@ vi.mock('./ui/switch', () => ({
 }));
 
 import { ModeToggle } from './ModeToggle';
+import { useTheme } from '../hooks/useTheme';
 
 // Mock matchMedia
 function createMatchMediaMock(matches: boolean) {
@@ -30,12 +39,22 @@ const localStorageMock = (() => {
   let store: Record<string, string> = {};
   return {
     getItem: vi.fn((key: string) => store[key] ?? null),
-    setItem: vi.fn((key: string, value: string) => { store[key] = value; }),
-    removeItem: vi.fn((key: string) => { delete store[key]; }),
-    clear: vi.fn(() => { store = {}; }),
-    get length() { return Object.keys(store).length; },
+    setItem: vi.fn((key: string, value: string) => {
+      store[key] = value;
+    }),
+    removeItem: vi.fn((key: string) => {
+      delete store[key];
+    }),
+    clear: vi.fn(() => {
+      store = {};
+    }),
+    get length() {
+      return Object.keys(store).length;
+    },
     key: vi.fn((i: number) => Object.keys(store)[i] ?? null),
-    _reset() { store = {}; },
+    _reset() {
+      store = {};
+    },
   };
 })();
 
@@ -100,5 +119,21 @@ describe('ModeToggle', () => {
 
     const toggle = screen.getByRole('switch');
     expect(toggle).toHaveAttribute('aria-label', 'Toggle dark mode');
+  });
+
+  it('keeps the visible switch in step with a change made elsewhere', () => {
+    // The Ctrl+Shift+L binding used to live in this component precisely because
+    // useTheme was per-instance. It is global now, so the switch has to follow
+    // a theme set from outside it or it shows a value the page contradicts.
+    render(<ModeToggle />);
+    expect(screen.getByRole('switch')).not.toBeChecked();
+
+    const elsewhere = renderHook(() => useTheme());
+    act(() => {
+      elsewhere.result.current.setTheme('dark');
+    });
+
+    expect(screen.getByRole('switch')).toBeChecked();
+    expect(screen.getByText('Dark mode')).toBeInTheDocument();
   });
 });

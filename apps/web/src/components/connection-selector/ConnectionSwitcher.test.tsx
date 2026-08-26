@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { useState } from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import type { Connection } from '../../hooks/useConnection';
 import { ConnectionSwitcher } from './ConnectionSwitcher';
+import { ConnectionSwitcherOpenContext } from './switcher-open-context';
 
 function connection(over: Partial<Connection> & { id: string }): Connection {
   return {
@@ -41,6 +43,47 @@ describe('ConnectionSwitcher', () => {
     // Restored rather than left installed: this is a prototype method, so a
     // stub leaks into every later test sharing the worker.
     Element.prototype.scrollIntoView = originalScrollIntoView;
+  });
+
+  it('opens when a shortcut requests it through the shared context', () => {
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      return (
+        <ConnectionSwitcherOpenContext.Provider value={{ open, setOpen }}>
+          <button onClick={() => setOpen(true)}>request</button>
+          <ConnectionSwitcher
+            connections={CONNECTIONS}
+            current={CONNECTIONS[0]}
+            onSelect={onSelect}
+          />
+        </ConnectionSwitcherOpenContext.Provider>
+      );
+    }
+
+    render(<Harness />);
+    expect(screen.queryByRole('option')).toBeNull();
+
+    fireEvent.click(screen.getByText('request'));
+
+    expect(optionNames()).toHaveLength(3);
+  });
+
+  it('honours a request that was made before it mounted', () => {
+    // Mod+K has to reveal the sidebar first, and on mobile that sidebar is a
+    // Sheet whose contents do not exist while closed — so the request always
+    // predates this component. Holding it above the switcher is what stops the
+    // shortcut being a no-op there.
+    render(
+      <ConnectionSwitcherOpenContext.Provider value={{ open: true, setOpen: () => {} }}>
+        <ConnectionSwitcher
+          connections={CONNECTIONS}
+          current={CONNECTIONS[0]}
+          onSelect={onSelect}
+        />
+      </ConnectionSwitcherOpenContext.Provider>,
+    );
+
+    expect(optionNames()).toHaveLength(3);
   });
 
   it('shows the current connection on the trigger without opening', () => {

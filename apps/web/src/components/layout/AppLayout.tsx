@@ -1,4 +1,4 @@
-import { useState, ReactNode } from 'react';
+import { useMemo, useState, ReactNode } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useDemoState } from '../../contexts/DemoContext';
 import { DemoBanner } from '../DemoBanner';
@@ -40,6 +40,10 @@ import { Members } from '../../pages/Members';
 import { CloudUser } from '../../api/workspace';
 import { AppSidebar } from './AppSidebar.tsx';
 import { FeedbackModal } from './FeedbackModal';
+import { ShortcutsOverlay } from '@/components/layout/ShortcutsOverlay';
+import { useAppKeybindings } from '@/keybindings/useAppKeybindings';
+import { ConnectionSwitcherOpenContext } from '@/components/connection-selector/switcher-open-context';
+import { useSidebar } from '@/components/ui/sidebar';
 import { SidebarProvider } from '@/components/ui/sidebar.tsx';
 
 function DemoGuardedRoute({ children }: { children: ReactNode }) {
@@ -50,8 +54,46 @@ function DemoGuardedRoute({ children }: { children: ReactNode }) {
 }
 
 export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
+  return (
+    <SidebarProvider>
+      <AppLayoutInner cloudUser={cloudUser} />
+    </SidebarProvider>
+  );
+}
+
+/**
+ * Split out so the keybindings can reach `useSidebar`, which only exists
+ * inside `SidebarProvider`.
+ */
+function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
   const [showFeedback, setShowFeedback] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   const cliPanel = useCliPanel();
+  const { toggleSidebar, isMobile, setOpen, setOpenMobile } = useSidebar();
+
+  const switcherState = useMemo(() => {
+    return { open: switcherOpen, setOpen: setSwitcherOpen };
+  }, [switcherOpen]);
+
+  useAppKeybindings(
+    {
+      toggleCli: cliPanel.toggle,
+      toggleSidebar,
+      openConnectionSwitcher: () => {
+        // The switcher is inside the sidebar, so reveal that first — on mobile
+        // it is a Sheet whose contents do not exist while closed.
+        if (isMobile) {
+          setOpenMobile(true);
+        } else {
+          setOpen(true);
+        }
+        setSwitcherOpen(true);
+      },
+      showShortcuts: () => setShowShortcuts(true),
+    },
+    { isCloud: cloudUser !== null, shortcutsOpen: showShortcuts },
+  );
   useIdleTracker();
   useNavigationTracker();
   // Mirror ready managed Valkey instances into the connection list app-wide, so
@@ -59,11 +101,16 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
   useValkeyAutoLink(cloudUser);
 
   return (
-    <SidebarProvider>
+    <ConnectionSwitcherOpenContext.Provider value={switcherState}>
       <div className="min-h-screen bg-background w-full">
-        <AppSidebar cloudUser={cloudUser} onFeedbackClick={() => setShowFeedback(true)} />
+        <AppSidebar
+          cloudUser={cloudUser}
+          onFeedbackClick={() => setShowFeedback(true)}
+          onShortcutsClick={() => setShowShortcuts(true)}
+        />
 
         {showFeedback && <FeedbackModal onClose={() => setShowFeedback(false)} />}
+        {showShortcuts && <ShortcutsOverlay onClose={() => setShowShortcuts(false)} />}
 
         <main className="min-h-screen  flex flex-col pl-0 transition-[padding] duration-200 ease-linear md:peer-data-[state=expanded]:pl-64">
           <DemoBanner cloudUser={cloudUser} />
@@ -303,6 +350,6 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
         }
       `}</style>
       </div>
-    </SidebarProvider>
+    </ConnectionSwitcherOpenContext.Provider>
   );
 }

@@ -5,6 +5,13 @@ export type ResolvedTheme = 'light' | 'dark';
 
 const STORAGE_KEY = 'theme';
 
+/**
+ * Instances hold their own state, so a change made through one would leave any
+ * other showing the previous value. Broadcasting keeps them in step — which is
+ * what lets the keyboard shortcut live outside the switch it drives.
+ */
+const CHANGE_EVENT = 'betterdb:theme-change';
+
 function getSystemPreference(): ResolvedTheme {
   if (typeof window === 'undefined') return 'light';
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -32,14 +39,30 @@ function getStoredTheme(): Theme {
 
 export function useTheme() {
   const [theme, setThemeState] = useState<Theme>(getStoredTheme);
-  const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() => resolveTheme(getStoredTheme()));
+  const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() =>
+    resolveTheme(getStoredTheme()),
+  );
 
   const setTheme = useCallback((newTheme: Theme) => {
-    const resolved = resolveTheme(newTheme);
-    setThemeState(newTheme);
-    setResolvedTheme(resolved);
     localStorage.setItem(STORAGE_KEY, newTheme);
-    applyTheme(resolved);
+    applyTheme(resolveTheme(newTheme));
+    window.dispatchEvent(new CustomEvent<Theme>(CHANGE_EVENT, { detail: newTheme }));
+  }, []);
+
+  const toggleTheme = useCallback(() => {
+    // Derived at press time rather than captured, so the binding does not
+    // depend on the hotkey manager re-registering its callback every render.
+    setTheme(resolveTheme(getStoredTheme()) === 'dark' ? 'light' : 'dark');
+  }, [setTheme]);
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const next = (event as CustomEvent<Theme>).detail;
+      setThemeState(next);
+      setResolvedTheme(resolveTheme(next));
+    };
+    window.addEventListener(CHANGE_EVENT, handler);
+    return () => window.removeEventListener(CHANGE_EVENT, handler);
   }, []);
 
   // Apply theme on mount and when resolvedTheme changes
@@ -62,5 +85,5 @@ export function useTheme() {
     return () => mediaQuery.removeEventListener('change', handler);
   }, [theme]);
 
-  return { theme, resolvedTheme, setTheme } as const;
+  return { theme, resolvedTheme, setTheme, toggleTheme } as const;
 }
