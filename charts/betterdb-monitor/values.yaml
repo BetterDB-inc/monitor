@@ -10,7 +10,7 @@ image:
   repository: betterdb/monitor
   # Empty => "<appVersion>-no-ai", the standard image (every monitoring
   # feature, without the experimental local-LLM AI Helper dependencies).
-  # Set to e.g. "0.39.0" for the AI-enabled variant, or "latest" to track
+  # Set to e.g. "0.40.0" for the AI-enabled variant, or "latest" to track
   # the newest release (not recommended for reproducible deploys).
   tag: ""
   pullPolicy: IfNotPresent

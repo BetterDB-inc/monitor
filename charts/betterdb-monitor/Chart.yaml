@@ -4,10 +4,10 @@ description: BetterDB Monitor - monitoring, analytics, and anomaly detection for
 type: application
 # Chart version — bump on chart changes. CI (helm-publish.yml) only releases
 # versions that do not already exist, so an unbumped version is a no-op.
-version: 0.2.0
+version: 0.40.0
 # Monitor release the chart defaults to. The default image tag is
 # "<appVersion>-no-ai" (the standard image); see values.yaml image.tag.
-appVersion: "0.39.0"
+appVersion: "0.40.0"
 icon: https://docs.betterdb.com/assets/images/favicon.svg
 keywords:
   - valkey
@@ -34,9 +34,9 @@ annotations:
       url: https://github.com/BetterDB-inc/monitor
   artifacthub.io/images: |
     - name: monitor
-      image: betterdb/monitor:0.39.0-no-ai
+      image: betterdb/monitor:0.40.0-no-ai
     - name: monitor-ai
-      image: betterdb/monitor:0.39.0
+      image: betterdb/monitor:0.40.0
   # PGP provenance: the chart is signed in CI; this points Artifact Hub at the
   # public key so it verifies the .prov and shows the Signed badge.
   artifacthub.io/signKey: |
