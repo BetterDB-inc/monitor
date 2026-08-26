@@ -45,10 +45,10 @@ export class MemoryExpirationCron implements OnModuleInit, OnModuleDestroy {
   }
 
   async tick(): Promise<number> {
-    const expired = await this.service.expireProposals(this.now(), 'system');
-    if (expired > 0) {
-      this.logger.log(`Expired ${expired} memory proposal(s)`);
+    const processed = await this.service.expireProposals(this.now(), 'system');
+    if (processed > 0) {
+      this.logger.log(`Expired/failed ${processed} memory proposal(s)`);
     }
-    return expired;
+    return processed;
   }
 }
