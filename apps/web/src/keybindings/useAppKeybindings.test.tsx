@@ -44,7 +44,9 @@ describe('useAppKeybindings', () => {
     // The binding used to live inside ModeToggle, which the mobile sidebar
     // renders in a Sheet — closed, the switch and its shortcut both stopped
     // existing. Registered globally it survives that unmount.
-    renderHook(() => useAppKeybindings(ACTIONS, { isCloud: false }), { wrapper: MemoryRouter });
+    renderHook(() => useAppKeybindings(ACTIONS, { isCloud: false, shortcutsOpen: false }), {
+      wrapper: MemoryRouter,
+    });
 
     pressThemeShortcut();
 
@@ -54,7 +56,9 @@ describe('useAppKeybindings', () => {
   it('flips back on a second press', () => {
     // Registered once, so a captured `resolvedTheme` would leave every press
     // after the first setting the theme it was already on.
-    renderHook(() => useAppKeybindings(ACTIONS, { isCloud: false }), { wrapper: MemoryRouter });
+    renderHook(() => useAppKeybindings(ACTIONS, { isCloud: false, shortcutsOpen: false }), {
+      wrapper: MemoryRouter,
+    });
 
     pressThemeShortcut();
     pressThemeShortcut();
@@ -78,7 +82,11 @@ describe('useAppKeybindings', () => {
   it('opens the connection switcher on Mod+K', () => {
     const openConnectionSwitcher = vi.fn();
     renderHook(
-      () => useAppKeybindings({ ...ACTIONS, openConnectionSwitcher }, { isCloud: false }),
+      () =>
+        useAppKeybindings(
+          { ...ACTIONS, openConnectionSwitcher },
+          { isCloud: false, shortcutsOpen: false },
+        ),
       {
         wrapper: MemoryRouter,
       },
@@ -87,6 +95,50 @@ describe('useAppKeybindings', () => {
     fireEvent.keyDown(document, { key: 'k', code: 'KeyK', ctrlKey: true });
 
     expect(openConnectionSwitcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('suspends the panel and theme bindings while the cheat sheet is open', () => {
+    // The sheet is aria-modal, so Mod+K opening the switcher underneath it, or
+    // Ctrl+Shift+L repainting the page behind it, contradicts what it claims.
+    const openConnectionSwitcher = vi.fn();
+    const toggleSidebar = vi.fn();
+    const toggleCli = vi.fn();
+    renderHook(
+      () =>
+        useAppKeybindings(
+          { ...ACTIONS, openConnectionSwitcher, toggleSidebar, toggleCli },
+          { isCloud: false, shortcutsOpen: true },
+        ),
+      { wrapper: MemoryRouter },
+    );
+
+    fireEvent.keyDown(document, { key: 'k', code: 'KeyK', ctrlKey: true });
+    fireEvent.keyDown(document, { key: 'b', code: 'KeyB', ctrlKey: true });
+    fireEvent.keyDown(document, { key: '`', code: 'Backquote', ctrlKey: true });
+    pressThemeShortcut();
+
+    expect(openConnectionSwitcher).not.toHaveBeenCalled();
+    expect(toggleSidebar).not.toHaveBeenCalled();
+    expect(toggleCli).not.toHaveBeenCalled();
+    expect(document.documentElement.classList.contains('dark')).toBe(false);
+  });
+
+  it('leaves the navigation chords live while the cheat sheet is open', () => {
+    // Deliberate: the sheet closes itself on a route change, so listing a chord
+    // the user then cannot press would be the wrong half to suspend.
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Bound shortcutsOpen />
+        <Routes>
+          <Route path="*" element={<Path />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.keyDown(document, { key: 'g', code: 'KeyG' });
+    fireEvent.keyDown(document, { key: 's', code: 'KeyS' });
+
+    expect(screen.getByTestId('path')).toHaveTextContent('/slowlog');
   });
 
   it('navigates on a leader chord', () => {
@@ -106,8 +158,8 @@ describe('useAppKeybindings', () => {
   });
 });
 
-function Bound() {
-  useAppKeybindings(ACTIONS, { isCloud: false });
+function Bound({ shortcutsOpen = false }: { shortcutsOpen?: boolean }) {
+  useAppKeybindings(ACTIONS, { isCloud: false, shortcutsOpen });
   return null;
 }
 

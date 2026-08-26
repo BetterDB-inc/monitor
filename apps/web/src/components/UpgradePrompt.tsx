@@ -14,10 +14,12 @@ export function UpgradePrompt({ error, onDismiss }: UpgradePromptProps) {
    * Declining has to leave the gated route, not just hide the prompt.
    * Dismissing in place left the user on a blank licensed page where the next
    * interaction raised the same prompt again, with no way out but the URL bar.
+   * Replacing rather than pushing keeps the refused route out of history, so
+   * Back does not land on it and raise the same prompt again.
    */
   function decline(): void {
     onDismiss();
-    navigate('/');
+    navigate('/', { replace: true });
   }
 
   return (
@@ -42,8 +44,12 @@ export function UpgradePrompt({ error, onDismiss }: UpgradePromptProps) {
         <div className="space-y-2">
           <p className="text-sm">{error.message}</p>
           <div className="text-sm text-muted-foreground">
-            <p>Current tier: <span className="font-medium">{error.currentTier}</span></p>
-            <p>Required tier: <span className="font-medium">{error.requiredTier}</span></p>
+            <p>
+              Current tier: <span className="font-medium">{error.currentTier}</span>
+            </p>
+            <p>
+              Required tier: <span className="font-medium">{error.requiredTier}</span>
+            </p>
           </div>
         </div>
 

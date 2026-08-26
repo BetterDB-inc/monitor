@@ -16,6 +16,13 @@ export interface AppKeybindingActions {
 export interface AppKeybindingEnvironment {
   /** Cloud and self-hosted expose different routes; chords follow the sidebar. */
   isCloud: boolean;
+  /**
+   * The cheat sheet is `aria-modal`, so the bindings that act on the page
+   * behind it are suspended while it is open. Navigation chords stay live —
+   * the sheet closes itself on a route change, which is the point of listing
+   * them.
+   */
+  shortcutsOpen: boolean;
 }
 
 /**
@@ -50,11 +57,13 @@ export function useAppKeybindings(
     ),
   );
 
+  const behindOverlay = { enabled: !environment.shortcutsOpen };
+
   useHotkeys([
     {
       hotkey: 'Mod+K',
       callback: actions.openConnectionSwitcher,
-      options: { meta: { name: 'Switch connection', group: 'Panels' } },
+      options: { ...behindOverlay, meta: { name: 'Switch connection', group: 'Panels' } },
     },
     {
       // Ctrl on every platform, deliberately NOT Mod. Cmd+` is a macOS system
@@ -63,12 +72,12 @@ export function useAppKeybindings(
       // original Ctrl-only binding was right; treating it as a bug was my error.
       hotkey: 'Control+`',
       callback: actions.toggleCli,
-      options: { meta: { name: 'Toggle CLI', group: 'Panels' } },
+      options: { ...behindOverlay, meta: { name: 'Toggle CLI', group: 'Panels' } },
     },
     {
       hotkey: 'Mod+B',
       callback: actions.toggleSidebar,
-      options: { meta: { name: 'Toggle sidebar', group: 'Panels' } },
+      options: { ...behindOverlay, meta: { name: 'Toggle sidebar', group: 'Panels' } },
     },
     {
       // Object form: '?' is not in the type-safe Hotkey union. `shift` must be
@@ -85,7 +94,7 @@ export function useAppKeybindings(
       // the binding.
       hotkey: 'Control+Shift+L',
       callback: toggleTheme,
-      options: { meta: { name: 'Toggle theme', group: 'View' } },
+      options: { ...behindOverlay, meta: { name: 'Toggle theme', group: 'View' } },
     },
   ]);
 }

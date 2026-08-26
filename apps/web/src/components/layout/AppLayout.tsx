@@ -92,7 +92,7 @@ function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
       },
       showShortcuts: () => setShowShortcuts(true),
     },
-    { isCloud: cloudUser !== null },
+    { isCloud: cloudUser !== null, shortcutsOpen: showShortcuts },
   );
   useIdleTracker();
   useNavigationTracker();

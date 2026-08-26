@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { MemoryRouter, Routes, Route } from 'react-router-dom';
+import { MemoryRouter, Routes, Route, useNavigate } from 'react-router-dom';
 import { UpgradePrompt } from './UpgradePrompt';
 import type { PaymentRequiredError } from '../api/client';
 
@@ -13,6 +13,7 @@ const error = {
 function renderAt(path: string, onDismiss = vi.fn()) {
   render(
     <MemoryRouter initialEntries={[path]}>
+      <Back />
       <Routes>
         <Route path="/" element={<div>dashboard</div>} />
         <Route path="/anomalies" element={<UpgradePrompt error={error} onDismiss={onDismiss} />} />
@@ -20,6 +21,11 @@ function renderAt(path: string, onDismiss = vi.fn()) {
     </MemoryRouter>,
   );
   return onDismiss;
+}
+
+function Back() {
+  const navigate = useNavigate();
+  return <button onClick={() => navigate(-1)}>back</button>;
 }
 
 describe('UpgradePrompt', () => {
@@ -39,6 +45,18 @@ describe('UpgradePrompt', () => {
     fireEvent.click(screen.getByLabelText('Close'));
 
     expect(screen.getByText('dashboard')).toBeInTheDocument();
+  });
+
+  it('keeps the refused route out of history', async () => {
+    // Pushing left the gated route one Back press away, where the next request
+    // raised the same prompt again — the loop this was meant to close.
+    renderAt('/anomalies');
+
+    fireEvent.click(screen.getByText('Maybe Later'));
+    await screen.findByText('dashboard');
+    fireEvent.click(screen.getByText('back'));
+
+    expect(screen.queryByText('Upgrade Required')).not.toBeInTheDocument();
   });
 
   it('still clears the prompt state so it does not reopen', () => {
