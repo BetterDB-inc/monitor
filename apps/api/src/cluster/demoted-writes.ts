@@ -246,15 +246,28 @@ function accumulateWriteCalls(entry: DemotedNodeWatchEntry, current?: number): v
   entry.writeCallsSeen += current - previous;
 }
 
+/**
+ * Only the counted-writes form states that writes were lost. `opsPerSec` totals
+ * every command, reads included, so a node whose commandstats could not be read
+ * may have served nothing but reads — the message says what was observed and
+ * leaves the conclusion conditional.
+ */
 export function demotedWritesMessage(alert: DemotedWriteAlert): string {
   const seconds = Math.round(alert.disagreementMs / 1000);
-  const traffic =
-    alert.writeCallsDelta === undefined
-      ? `${alert.opsPerSec} ops/sec at peak`
-      : `${alert.writeCallsDelta} write commands`;
-  return (
+  const preamble =
     `Node ${alert.nodeId} (${alert.nodeAddress}) was demoted to replica but still ` +
-    `reports role:master after ${seconds}s and served ${traffic}. ` +
+    `reports role:master after ${seconds}s and served `;
+
+  if (alert.writeCallsDelta === undefined) {
+    return (
+      `${preamble}${alert.opsPerSec} ops/sec at peak. The read/write split was ` +
+      `unavailable, so any writes in that traffic are lost when clients refresh ` +
+      `their slot cache.`
+    );
+  }
+
+  return (
+    `${preamble}${alert.writeCallsDelta} write commands. ` +
     `Writes accepted in this window are lost when clients refresh their slot cache.`
   );
 }

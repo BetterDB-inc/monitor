@@ -40,6 +40,13 @@ import {
   DemotionWatch,
 } from '../cluster/demoted-writes';
 
+/**
+ * Ceiling on the demoted-node read, clamped down to the poll interval when that
+ * is shorter. Two INFO round trips to one node take milliseconds when the node
+ * is answering at all.
+ */
+const DEMOTED_NODE_READ_TIMEOUT_MS = 2_000;
+
 // Per-connection state for tracking previous values and stale labels
 interface ConnectionMetricState {
   previousClusterState: string | null;
@@ -1570,22 +1577,24 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
     let observations: DemotedNodeObservation[];
     try {
-      const nodeStats = await this.clusterMetricsService.getClusterNodeStats(connectionId, {
-        includeCommandStats: true,
+      // Scoped to the watched IDs: a demoted node is one node, and reading the
+      // whole cluster to observe it would cost two INFO round trips per node
+      // on every poll and every /metrics scrape for the length of the window.
+      const nodeStats = await this.readWithTimeout(
+        this.clusterMetricsService.getClusterNodeStats(connectionId, {
+          includeCommandStats: true,
+          nodeIds: [...state.demotionWatch.keys()],
+        }),
+      );
+      observations = nodeStats.map((node) => {
+        return {
+          nodeId: node.nodeId,
+          nodeAddress: node.nodeAddress,
+          selfReportedRole: node.selfReportedRole,
+          opsPerSec: node.opsPerSec,
+          writeCommandCalls: node.writeCommandCalls,
+        };
       });
-      observations = nodeStats
-        .filter((node) => {
-          return state.demotionWatch.has(node.nodeId);
-        })
-        .map((node) => {
-          return {
-            nodeId: node.nodeId,
-            nodeAddress: node.nodeAddress,
-            selfReportedRole: node.selfReportedRole,
-            opsPerSec: node.opsPerSec,
-            writeCommandCalls: node.writeCommandCalls,
-          };
-        });
     } catch (err) {
       // Per-node reads fail independently of the cluster-wide ones. Losing them
       // must not take the poll down, and must not advance the watch — the next
@@ -1643,6 +1652,29 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           this.logger.error('Failed to dispatch cluster.demoted.writes webhook', err);
         }
       }
+    }
+  }
+
+  /**
+   * Bound the demoted-node read so a hung node cannot stall the metrics pass.
+   *
+   * The node under observation is by definition in a bad state, and the read is
+   * awaited inline in the poll. A timeout is treated like any other failed read:
+   * the watch keeps its evidence and the next poll tries again.
+   */
+  private async readWithTimeout<T>(work: Promise<T>): Promise<T> {
+    const limit = Math.min(this.pollIntervalMs, DEMOTED_NODE_READ_TIMEOUT_MS);
+    let timer: NodeJS.Timeout | undefined;
+    const expiry = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`demoted-node read exceeded ${limit}ms`));
+      }, limit);
+    });
+
+    try {
+      return await Promise.race([work, expiry]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 

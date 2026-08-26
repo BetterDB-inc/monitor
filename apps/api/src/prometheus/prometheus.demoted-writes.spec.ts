@@ -113,12 +113,25 @@ describe('PrometheusService demoted-writes detection', () => {
     expect(getClusterNodeStats).not.toHaveBeenCalled();
   });
 
-  it('asks for commandstats when it does read the nodes', async () => {
+  it('reads only the watched nodes, with commandstats', async () => {
     await poll([[nodeStats({ nodeId: 'node-a', selfReportedRole: 'master', opsPerSec: 120 })]]);
 
     expect(getClusterNodeStats).toHaveBeenCalledWith(CONNECTION_ID, {
       includeCommandStats: true,
+      nodeIds: ['node-a'],
     });
+  });
+
+  it('gives up on a node that does not answer instead of stalling the poll', async () => {
+    const state = armWatch();
+    getClusterNodeStats.mockReturnValueOnce(new Promise(() => {}));
+
+    const pass = service['detectDemotedMasterWrites'](CONNECTION_ID, state, INSTANCE);
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+    await pass;
+
+    expect(state.demotionWatch.get('node-a')?.consecutiveDisagreements).toBe(0);
+    expect(dispatchClusterDemotedWrites).not.toHaveBeenCalled();
   });
 
   it('dispatches to OTLP and the Pro webhook once the disagreement persists', async () => {

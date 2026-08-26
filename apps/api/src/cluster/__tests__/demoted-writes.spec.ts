@@ -395,4 +395,30 @@ describe('demotedWritesMessage', () => {
 
     expect(message).toContain('120 ops/sec');
   });
+
+  it('does not conclude writes were lost when only ops were observed', () => {
+    const message = demotedWritesMessage({
+      nodeId: 'a',
+      nodeAddress: 'a:6379',
+      demotedForMs: 6_000,
+      disagreementMs: 5_000,
+      opsPerSec: 120,
+    });
+
+    expect(message).toContain('any writes in that traffic are lost');
+    expect(message).not.toContain('Writes accepted in this window are lost');
+  });
+
+  it('concludes writes were lost when they were counted', () => {
+    const message = demotedWritesMessage({
+      nodeId: 'a',
+      nodeAddress: 'a:6379',
+      demotedForMs: 6_000,
+      disagreementMs: 5_000,
+      opsPerSec: 120,
+      writeCallsDelta: 12,
+    });
+
+    expect(message).toContain('Writes accepted in this window are lost');
+  });
 });

@@ -229,6 +229,20 @@ used_cpu_user:20.3\r
       expect(stats[0].writeCommandCalls).toBeUndefined();
     });
 
+    it('reads only the nodes the caller asked for', async () => {
+      const stats = await service.getClusterNodeStats(undefined, { nodeIds: ['node2'] });
+
+      expect(stats.map((stat) => stat.nodeId)).toEqual(['node2']);
+      expect(mockDiscoveryService.getNodeConnection).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads nothing when the caller asked for an empty set of nodes', async () => {
+      const stats = await service.getClusterNodeStats(undefined, { nodeIds: [] });
+
+      expect(stats).toEqual([]);
+      expect(mockDiscoveryService.getNodeConnection).not.toHaveBeenCalled();
+    });
+
     it('should handle errors from individual nodes gracefully', async () => {
       mockDiscoveryService.getNodeConnection.mockRejectedValueOnce(new Error('Connection failed'));
 

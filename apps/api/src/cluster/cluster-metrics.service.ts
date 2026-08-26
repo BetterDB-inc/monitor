@@ -71,6 +71,11 @@ export interface NodeStatsOptions {
    * the read/write split.
    */
   includeCommandStats?: boolean;
+  /**
+   * Restrict the fan-out to these node IDs. A caller watching one node should
+   * not pay an `INFO` round trip per node in the cluster to observe it.
+   */
+  nodeIds?: ReadonlyArray<string>;
 }
 
 export interface SlotMigration {
@@ -252,7 +257,8 @@ export class ClusterMetricsService {
     options?: NodeStatsOptions,
   ): Promise<NodeStats[]> {
     const nodes = await this.discoveryService.discoverNodes(connectionId);
-    const statsPromises = nodes.map((node) => this.getNodeStats(node, connectionId, options));
+    const wanted = selectNodes(nodes, options?.nodeIds);
+    const statsPromises = wanted.map((node) => this.getNodeStats(node, connectionId, options));
 
     const results = await Promise.allSettled(statsPromises);
 
@@ -536,4 +542,23 @@ export class ClusterMetricsService {
       return this.parseInfoValue(info, 'replication.slave_repl_offset');
     }
   }
+}
+
+/**
+ * Narrow a discovered node list to the IDs a caller asked for.
+ *
+ * An empty `nodeIds` means "none", not "all" — the caller asked for a specific
+ * set and it happened to be empty.
+ */
+function selectNodes(
+  nodes: ReadonlyArray<DiscoveredNode>,
+  nodeIds?: ReadonlyArray<string>,
+): DiscoveredNode[] {
+  if (nodeIds === undefined) {
+    return [...nodes];
+  }
+  const wanted = new Set(nodeIds);
+  return nodes.filter((node) => {
+    return wanted.has(node.id);
+  });
 }
