@@ -23,7 +23,18 @@ export interface DemotedNodeWatchEntry {
   /** When the node first disagreed with the cluster; null while it agrees. */
   disagreementSince: number | null;
   consecutiveDisagreements: number;
+  /**
+   * The node's write counter when the disagreement began. Pinned for the whole
+   * window rather than advanced per poll, so evidence gathered before the
+   * alert's gates open is still there when they do.
+   */
   writeCallsBaseline?: number;
+  /**
+   * The highest `opsPerSec` seen since the disagreement began. Kept rather than
+   * read fresh at alert time because it is a one-second sample: the poll that
+   * clears the gates may land in a quiet moment and read zero.
+   */
+  peakOpsPerSec: number;
   alerted: boolean;
 }
 
@@ -35,11 +46,12 @@ export interface DemotedWriteAlert {
   nodeAddress: string;
   demotedForMs: number;
   disagreementMs: number;
+  /** The busiest one-second sample seen since the disagreement began. */
   opsPerSec: number;
   /**
-   * Write calls counted since the previous poll. Absent when the node exposes
-   * no commandstats — the alert then rests on `opsPerSec` alone and says
-   * "traffic", not "writes".
+   * Write calls counted since the disagreement began. Absent when the node
+   * exposes no commandstats — the alert then rests on `opsPerSec` alone and
+   * says "traffic", not "writes".
    */
   writeCallsDelta?: number;
 }
@@ -66,6 +78,7 @@ export function recordDemotions(watch: DemotionWatch, diff: TopologyDiff, now: n
       demotedAt: now,
       disagreementSince: null,
       consecutiveDisagreements: 0,
+      peakOpsPerSec: 0,
       alerted: false,
     });
   }
@@ -113,8 +126,13 @@ export function pruneDemotionWatch(
  * disagreement must also have lasted `minDisagreementMs`, the caller's poll
  * interval.
  *
- * Mutates `watch` — the counters and baselines it advances are the state that
- * makes the persistence requirement work across polls.
+ * Everything the alert rests on is accumulated across the window rather than
+ * read off the poll that happens to clear the gates: the write baseline is
+ * pinned when the disagreement starts, and the ops reading is the peak seen
+ * since.
+ *
+ * Mutates `watch` — that accumulated state is what makes the persistence
+ * requirement work across polls.
  */
 export function evaluateDemotedWrites(
   watch: DemotionWatch,
@@ -134,6 +152,7 @@ export function evaluateDemotedWrites(
       entry.disagreementSince = null;
       entry.consecutiveDisagreements = 0;
       entry.writeCallsBaseline = undefined;
+      entry.peakOpsPerSec = 0;
       continue;
     }
 
@@ -142,10 +161,17 @@ export function evaluateDemotedWrites(
     }
     entry.consecutiveDisagreements += 1;
 
-    const baseline = entry.writeCallsBaseline;
-    if (observation.writeCommandCalls !== undefined) {
+    if (entry.writeCallsBaseline === undefined) {
       entry.writeCallsBaseline = observation.writeCommandCalls;
     }
+
+    // Recorded before the gates, never after: an observation that does not
+    // clear them still saw what it saw.
+    entry.peakOpsPerSec = Math.max(entry.peakOpsPerSec, observation.opsPerSec);
+    const writeCallsDelta = writeCallsSinceBaseline(
+      observation.writeCommandCalls,
+      entry.writeCallsBaseline,
+    );
 
     // One alert per demotion window. The entry is dropped once the window
     // closes, so a later failover re-arms it.
@@ -159,7 +185,6 @@ export function evaluateDemotedWrites(
       continue;
     }
 
-    const writeCallsDelta = deltaSincePreviousPoll(observation.writeCommandCalls, baseline);
     if (writeCallsDelta !== undefined) {
       // Counted writes are the stronger evidence, so they replace the ops gate
       // rather than adding to it: instantaneous_ops_per_sec is a one-second
@@ -167,7 +192,7 @@ export function evaluateDemotedWrites(
       if (writeCallsDelta <= 0) {
         continue;
       }
-    } else if (observation.opsPerSec <= 0) {
+    } else if (entry.peakOpsPerSec <= 0) {
       continue;
     }
 
@@ -177,7 +202,7 @@ export function evaluateDemotedWrites(
       nodeAddress: observation.nodeAddress,
       demotedForMs: now - entry.demotedAt,
       disagreementMs: now - entry.disagreementSince,
-      opsPerSec: observation.opsPerSec,
+      opsPerSec: entry.peakOpsPerSec,
       writeCallsDelta,
     });
   }
@@ -186,25 +211,27 @@ export function evaluateDemotedWrites(
 }
 
 /**
+ * Writes the node has served since the disagreement began.
+ *
  * A counter that went backwards means the node restarted and re-baselined, not
  * that writes were undone. Returning undefined sends the caller to the
  * `opsPerSec` fallback for this poll instead of reporting a negative delta.
  */
-function deltaSincePreviousPoll(current?: number, previous?: number): number | undefined {
-  if (current === undefined || previous === undefined) {
+function writeCallsSinceBaseline(current?: number, baseline?: number): number | undefined {
+  if (current === undefined || baseline === undefined) {
     return undefined;
   }
-  if (current < previous) {
+  if (current < baseline) {
     return undefined;
   }
-  return current - previous;
+  return current - baseline;
 }
 
 export function demotedWritesMessage(alert: DemotedWriteAlert): string {
   const seconds = Math.round(alert.disagreementMs / 1000);
   const traffic =
     alert.writeCallsDelta === undefined
-      ? `${alert.opsPerSec} ops/sec`
+      ? `${alert.opsPerSec} ops/sec at peak`
       : `${alert.writeCallsDelta} write commands`;
   return (
     `Node ${alert.nodeId} (${alert.nodeAddress}) was demoted to replica but still ` +

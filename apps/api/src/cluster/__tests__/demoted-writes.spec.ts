@@ -206,7 +206,7 @@ describe('evaluateDemotedWrites', () => {
     expect(evaluate(watch, [observation()], 12_000)).toEqual([]);
   });
 
-  it('counts the writes served between the two polls when commandstats is available', () => {
+  it('counts the writes served since the disagreement began', () => {
     const watch = watchWithDemotedA(1_000);
 
     evaluate(watch, [observation({ writeCommandCalls: 500 })], 2_000);
@@ -241,6 +241,52 @@ describe('evaluateDemotedWrites', () => {
     const alerts = evaluate(watch, [observation({ selfReportedRole: undefined })], 7_000);
 
     expect(alerts).toEqual([]);
+  });
+
+  it('keeps write evidence a premature scrape saw', () => {
+    const watch = watchWithDemotedA(1_000);
+
+    evaluateDemotedWrites(
+      watch,
+      [observation({ writeCommandCalls: 500 })],
+      2_000,
+      POLL_INTERVAL_MS,
+    );
+    // The scrape that sees the writes is 40ms in, so the time gate turns it
+    // away. The 12 writes still happened.
+    evaluateDemotedWrites(
+      watch,
+      [observation({ writeCommandCalls: 512 })],
+      2_040,
+      POLL_INTERVAL_MS,
+    );
+    const alerts = evaluateDemotedWrites(
+      watch,
+      [observation({ writeCommandCalls: 512 })],
+      7_000,
+      POLL_INTERVAL_MS,
+    );
+
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].writeCallsDelta).toBe(12);
+  });
+
+  it('keeps ops evidence a premature scrape saw when the node has no commandstats', () => {
+    const watch = watchWithDemotedA(1_000);
+
+    evaluateDemotedWrites(watch, [observation({ opsPerSec: 0 })], 2_000, POLL_INTERVAL_MS);
+    evaluateDemotedWrites(watch, [observation({ opsPerSec: 340 })], 2_040, POLL_INTERVAL_MS);
+    // instantaneous_ops_per_sec samples one second; the poll that clears the
+    // gate can easily land in a quiet one.
+    const alerts = evaluateDemotedWrites(
+      watch,
+      [observation({ opsPerSec: 0 })],
+      7_000,
+      POLL_INTERVAL_MS,
+    );
+
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].opsPerSec).toBe(340);
   });
 
   it('does not alert until the disagreement has outlasted one poll interval', () => {

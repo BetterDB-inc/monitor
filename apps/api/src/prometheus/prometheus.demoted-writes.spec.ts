@@ -71,6 +71,7 @@ describe('PrometheusService demoted-writes detection', () => {
       demotedAt: Date.now(),
       disagreementSince: null,
       consecutiveDisagreements: 0,
+      peakOpsPerSec: 0,
       alerted: false,
     });
     return state;

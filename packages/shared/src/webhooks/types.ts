@@ -374,9 +374,10 @@ export interface IWebhookEventsProService {
     demotedForMs: number;
     opsPerSec: number;
     /**
-     * Write-command calls counted on the node since the previous poll. Absent
-     * when the node does not expose commandstats, in which case opsPerSec is
-     * the only traffic evidence and the writes are inferred, not counted.
+     * Write-command calls counted on the node since it began disagreeing about
+     * its role. Absent when the node does not expose commandstats, in which
+     * case opsPerSec is the only traffic evidence and the writes are inferred,
+     * not counted.
      */
     writeCallsDelta?: number;
     message: string;
