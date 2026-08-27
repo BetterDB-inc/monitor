@@ -133,6 +133,35 @@ export interface SemanticCacheOptions {
    * Defaults: enabled=true, intervalMs=30000.
    */
   configRefresh?: ConfigRefreshOptions;
+  /**
+   * What to do when initialize() finds that the cache was populated by a
+   * different embedding model than the one configured now.
+   *
+   * - 'throw' (default): raise EmbeddingModelChangedError. Vectors from two
+   *   models are not comparable, so every subsequent check() would be a
+   *   correctness failure, not merely a slow one.
+   * - 'warn': log and carry on. Use when you are mid-migration and accept
+   *   meaningless similarity scores until the old entries expire.
+   * - 'flush': drop the index and every entry, then initialize clean. Never
+   *   the default — discarding a warm production cache as a startup side
+   *   effect is a worse surprise than a startup error.
+   *
+   * Detection needs a described embedder. The bundled create*Embed() helpers
+   * are described; a hand-rolled closure must be wrapped in describeEmbedder()
+   * or the check reports itself inactive and does nothing.
+   */
+  onEmbeddingModelChange?: EmbeddingModelChangeAction;
+  /**
+   * Sink for operational warnings. Default: the global console.
+   * Pass `{ warn: () => {} }` to silence them.
+   */
+  logger?: SemanticCacheLogger;
+}
+
+export type EmbeddingModelChangeAction = 'throw' | 'warn' | 'flush';
+
+export interface SemanticCacheLogger {
+  warn: (message: string) => void;
 }
 
 export interface RerankOptions {

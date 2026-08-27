@@ -39,3 +39,27 @@ export class ValkeyCommandError extends Error {
     this.name = 'ValkeyCommandError';
   }
 }
+
+/**
+ * Thrown by initialize() when the cache holds vectors from a different
+ * embedding model than the one configured now.
+ *
+ * Vectors from two models occupy different spaces, so similarity scores
+ * across them are meaningless. Resolve it by flushing the cache, by pointing
+ * this process back at the original model, or by choosing a different
+ * `onEmbeddingModelChange` policy.
+ */
+export class EmbeddingModelChangedError extends Error {
+  constructor(
+    public readonly expected: string,
+    public readonly actual: string,
+  ) {
+    super(
+      `Embedding model changed: the cache was populated with '${expected}' but this process ` +
+        `embeds with '${actual}'. Vectors from different models are not comparable. Call ` +
+        `flush() to discard the cache, revert to '${expected}', or set ` +
+        `onEmbeddingModelChange to 'warn' or 'flush'.`,
+    );
+    this.name = 'EmbeddingModelChangedError';
+  }
+}

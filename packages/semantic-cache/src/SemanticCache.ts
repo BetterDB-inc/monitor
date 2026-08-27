@@ -14,8 +14,17 @@ import type {
   EmbedFn,
   ModelCost,
   ConfigRefreshOptions,
+  EmbedderDescriptor,
+  EmbeddingModelChangeAction,
+  SemanticCacheLogger,
 } from './types';
-import { SemanticCacheUsageError, EmbeddingError, ValkeyCommandError } from './errors';
+import {
+  SemanticCacheUsageError,
+  EmbeddingError,
+  EmbeddingModelChangedError,
+  ValkeyCommandError,
+} from './errors';
+import { embedderFingerprint, getEmbedderDescriptor } from './embedder-identity';
 import { createTelemetry, type Telemetry } from './telemetry';
 import {
   isIndexNotFoundError,
@@ -34,7 +43,12 @@ import {
 import { DEFAULT_COST_TABLE } from './defaultCostTable';
 import { clusterScan } from './cluster';
 import { createAnalytics, NOOP_ANALYTICS, type Analytics } from './analytics';
-import { DiscoveryManager, buildSemanticMetadata, type DiscoveryOptions } from './discovery';
+import {
+  DiscoveryManager,
+  buildSemanticMetadata,
+  readMarker,
+  type DiscoveryOptions,
+} from './discovery';
 
 const INVALIDATE_BATCH_SIZE = 1000;
 
@@ -83,6 +97,11 @@ export class SemanticCache {
   private readonly _initialDefaultThreshold: number;
   private readonly _initialCategoryThresholds: Record<string, number>;
   private readonly configRefreshOptions: Required<ConfigRefreshOptions>;
+  private readonly embedderDescriptor: EmbedderDescriptor | undefined;
+  private readonly embeddingModel: string | undefined;
+  private readonly onEmbeddingModelChange: EmbeddingModelChangeAction;
+  private readonly logger: SemanticCacheLogger;
+  private embeddingModelWarned = false;
   private configRefreshTimer: ReturnType<typeof setInterval> | undefined;
   private discovery: DiscoveryManager | null = null;
 
@@ -145,6 +164,14 @@ export class SemanticCache {
       registry: options.telemetry?.registry,
     });
 
+    this.embedderDescriptor = getEmbedderDescriptor(options.embedFn);
+    this.embeddingModel =
+      this.embedderDescriptor === undefined
+        ? undefined
+        : embedderFingerprint(this.embedderDescriptor);
+    this.onEmbeddingModelChange = options.onEmbeddingModelChange ?? 'throw';
+    this.logger = options.logger ?? console;
+
     this.analyticsOpts = options.analytics;
     this.usesDefaultCostTable = useDefault;
     this.discoveryOptions = options.discovery ?? {};
@@ -189,6 +216,17 @@ export class SemanticCache {
       await discoveryToStop.stop({ deleteHeartbeat: true });
     }
 
+    await this.dropIndexAndKeys();
+    this.analytics.capture('cache_flush');
+  }
+
+  /**
+   * Drop the index and every key this cache owns, without touching the
+   * initialization lifecycle. flush() layers the lifecycle reset on top;
+   * _doInitialize() calls this directly, because bumping the generation from
+   * inside an in-flight initialize would abandon that initialize halfway.
+   */
+  private async dropIndexAndKeys(): Promise<void> {
     // Valkey Search 1.2 does not support the DD (Delete Documents) flag on
     // FT.DROPINDEX. Drop the index first, then clean up keys separately.
     try {
@@ -211,7 +249,6 @@ export class SemanticCache {
     await this.client.del(this.statsKey);
     await this.client.del(this.similarityWindowKey);
     await this.client.del(this.missPendingKey);
-    this.analytics.capture('cache_flush');
   }
 
   /**
@@ -381,7 +418,11 @@ export class SemanticCache {
           .filter(({ s }) => !isNaN(s))
           .map(({ i, s }) => ({
             origIdx: i,
-            candidate: { response: parsed[i].fields['response'] ?? '', similarity: s, prompt: parsed[i].fields['prompt'] ?? '' },
+            candidate: {
+              response: parsed[i].fields['response'] ?? '',
+              similarity: s,
+              prompt: parsed[i].fields['prompt'] ?? '',
+            },
           }));
         const picked = await rerankOpts.rerankFn(
           promptText,
@@ -1249,7 +1290,12 @@ export class SemanticCache {
       const ttlRaw = raw['ttl'];
       if (ttlRaw !== undefined && ttlRaw !== null && ttlRaw !== '') {
         const parsed = Number(ttlRaw);
-        if (Number.isFinite(parsed) && Number.isInteger(parsed) && parsed >= 10 && parsed <= 86400) {
+        if (
+          Number.isFinite(parsed) &&
+          Number.isInteger(parsed) &&
+          parsed >= 10 &&
+          parsed <= 86400
+        ) {
           nextTtl = parsed;
         }
       }
@@ -1335,8 +1381,11 @@ export class SemanticCache {
   }
 
   private async _doInitialize(): Promise<void> {
-    const gen = this._initGeneration;
     return this.traced('initialize', async () => {
+      // Runs before the index work so a 'flush' outcome drops the index
+      // rather than adopting it and dropping it a moment later.
+      await this.checkEmbeddingModel();
+      const gen = this._initGeneration;
       const { dim, hasBinaryRefs } = await this.ensureIndexAndGetDimension();
       if (this._initGeneration !== gen) {
         return;
@@ -1362,6 +1411,78 @@ export class SemanticCache {
     });
   }
 
+  /**
+   * Refuse to compare vectors across embedding spaces.
+   *
+   * The marker a previous run left records which model populated this cache.
+   * A mismatch against this process's embedder means every subsequent check()
+   * would score against vectors it cannot be compared with.
+   */
+  private async checkEmbeddingModel(): Promise<void> {
+    const marker = await readMarker(this.client, this.name);
+    if (marker === null) {
+      return;
+    }
+
+    const recorded = marker.embedding_model;
+    const existing = typeof recorded === 'string' ? recorded : undefined;
+    const current = this.embeddingModel;
+
+    if (existing === undefined && current === undefined) {
+      this.warnAboutEmbeddingModel(
+        'embedding model is not recorded and this embedder is undescribed, so model-change ' +
+          'detection is inactive. Wrap embedFn in describeEmbedder() to enable it.',
+      );
+      return;
+    }
+
+    if (existing === undefined) {
+      this.warnAboutEmbeddingModel(
+        `cache predates embedding-model recording; adopting '${String(current)}' as its model. ` +
+          'Entries embedded by an earlier model are indistinguishable — flush() if unsure.',
+      );
+      return;
+    }
+
+    if (current === undefined) {
+      this.warnAboutEmbeddingModel(
+        `cache was populated with '${existing}' but this embedder is undescribed, so the model ` +
+          'cannot be verified. Wrap embedFn in describeEmbedder() to enable detection.',
+      );
+      return;
+    }
+
+    if (existing === current) {
+      return;
+    }
+
+    if (this.onEmbeddingModelChange === 'throw') {
+      throw new EmbeddingModelChangedError(existing, current);
+    }
+
+    if (this.onEmbeddingModelChange === 'warn') {
+      this.warnAboutEmbeddingModel(
+        `embedding model changed from '${existing}' to '${current}'. Similarity scores against ` +
+          'existing entries are meaningless until they are replaced or expire.',
+      );
+      return;
+    }
+
+    this.warnAboutEmbeddingModel(
+      `embedding model changed from '${existing}' to '${current}'; discarding the cache as ` +
+        "configured by onEmbeddingModelChange: 'flush'.",
+    );
+    await this.dropIndexAndKeys();
+  }
+
+  private warnAboutEmbeddingModel(message: string): void {
+    if (this.embeddingModelWarned) {
+      return;
+    }
+    this.embeddingModelWarned = true;
+    this.logger.warn(`@betterdb/semantic-cache '${this.name}': ${message}`);
+  }
+
   private async registerDiscovery(): Promise<DiscoveryManager | null> {
     if (this.discoveryOptions.enabled === false) {
       return null;
@@ -1373,6 +1494,8 @@ export class SemanticCache {
       categoryThresholds: this.categoryThresholds,
       uncertaintyBand: this.uncertaintyBand,
       includeCategories: this.discoveryOptions.includeCategories ?? true,
+      embeddingModel: this.embeddingModel,
+      embeddingDescriptor: this.embedderDescriptor,
     });
     const manager = new DiscoveryManager({
       client: this.client,
@@ -1742,7 +1865,6 @@ export class SemanticCache {
       );
     }
   }
-
 }
 
 // -- ThresholdEffectiveness types --

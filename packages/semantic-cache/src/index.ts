@@ -17,6 +17,8 @@ export type {
   RerankOptions,
   JudgeOptions,
   ConfigRefreshOptions,
+  EmbeddingModelChangeAction,
+  SemanticCacheLogger,
 } from './types';
 export { describeEmbedder, embedderFingerprint, getEmbedderDescriptor } from './embedder-identity';
 export { createKeywordOverlapRerank } from './rerank';
