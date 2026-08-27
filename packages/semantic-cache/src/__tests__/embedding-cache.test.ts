@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { SemanticCache } from '../SemanticCache';
-import { describeEmbedder } from '../embedder-identity';
+import { describeEmbedder, getEmbedderDescriptor } from '../embedder-identity';
+import { createGoogleEmbed, type GoogleEmbedOptions } from '../embed/google';
 import type { EmbedFn, EmbedderDescriptor, Valkey } from '../types';
 
 function makeMockClient(mockSearchResult?: { key: string; fields: Record<string, string> }) {
@@ -144,6 +145,10 @@ describe('embedding cache', () => {
 describe('embedding cache namespacing', () => {
   type MockClient = ReturnType<typeof makeMockClient>;
 
+  function googleDescriptor(opts: GoogleEmbedOptions): EmbedderDescriptor {
+    return getEmbedderDescriptor(createGoogleEmbed(opts)) as EmbedderDescriptor;
+  }
+
   async function warmThenProbe(
     client: MockClient,
     first: EmbedderDescriptor | undefined,
@@ -197,6 +202,26 @@ describe('embedding cache namespacing', () => {
 
   it('keeps an undescribed embedder sharing its own namespace across instances', async () => {
     const calls = await warmThenProbe(makeMockClient(), undefined, undefined);
+
+    expect(calls).toBe(0);
+  });
+
+  it('re-embeds when a google document title changes the text behind the same key', async () => {
+    const calls = await warmThenProbe(
+      makeMockClient(),
+      googleDescriptor({ taskType: 'RETRIEVAL_DOCUMENT', title: 'Release notes' }),
+      googleDescriptor({ taskType: 'RETRIEVAL_DOCUMENT', title: 'Runbook' }),
+    );
+
+    expect(calls).toBe(1);
+  });
+
+  it('shares vectors across a title the request never carries', async () => {
+    const calls = await warmThenProbe(
+      makeMockClient(),
+      googleDescriptor({ taskType: 'RETRIEVAL_QUERY', title: 'Release notes' }),
+      googleDescriptor({ taskType: 'RETRIEVAL_QUERY', title: 'Runbook' }),
+    );
 
     expect(calls).toBe(0);
   });

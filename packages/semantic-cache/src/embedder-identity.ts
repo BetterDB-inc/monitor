@@ -14,10 +14,23 @@ import type { DescribedEmbedFn, EmbedderDescriptor, EmbedFn } from './types';
  * Returns the same function reference; the descriptor is a non-enumerable,
  * read-only property, so the function stays a plain `EmbedFn` to every caller
  * that does not look for it.
+ *
+ * The descriptor is snapshotted and frozen rather than stored by reference.
+ * A cache reads it once to compute its fingerprint and again when it writes
+ * its discovery marker; a caller still holding the original object could
+ * otherwise change the model between those two reads and have the marker
+ * claim a model the vectors were never embedded with.
  */
 export function describeEmbedder(fn: EmbedFn, descriptor: EmbedderDescriptor): DescribedEmbedFn {
+  const snapshot: EmbedderDescriptor = {
+    provider: descriptor.provider,
+    model: descriptor.model,
+  };
+  if (descriptor.params !== undefined) {
+    snapshot.params = Object.freeze({ ...descriptor.params });
+  }
   Object.defineProperty(fn, 'descriptor', {
-    value: descriptor,
+    value: Object.freeze(snapshot),
     enumerable: false,
     writable: false,
   });
@@ -25,15 +38,22 @@ export function describeEmbedder(fn: EmbedFn, descriptor: EmbedderDescriptor): D
 }
 
 /**
- * Render a descriptor as a stable, human-readable identity string.
+ * Render a descriptor as a stable identity string.
  *
  * `provider:model`, with sorted `key=value` params appended after `#`. Params
  * are sorted so insertion order cannot change the result, and undefined values
  * are dropped so introducing an option nobody sets cannot invalidate an
  * existing cache.
+ *
+ * Every component is percent-encoded, which is what makes the separators
+ * unambiguous: without it `{ a: 'x&b=y' }` and `{ a: 'x', b: 'y' }` render
+ * identically, and two embedders that share a fingerprint share both the
+ * discovery identity and the embedding-cache namespace. Model names carrying
+ * a separator — `nomic-embed-text:latest` — are the everyday case.
+ * `embedding_descriptor` on the marker keeps the readable form.
  */
 export function embedderFingerprint(descriptor: EmbedderDescriptor): string {
-  const base = `${descriptor.provider}:${descriptor.model}`;
+  const base = `${encodeURIComponent(descriptor.provider)}:${encodeURIComponent(descriptor.model)}`;
   const params = descriptor.params;
   if (params === undefined) {
     return base;
@@ -45,7 +65,7 @@ export function embedderFingerprint(descriptor: EmbedderDescriptor): string {
     if (value === undefined) {
       continue;
     }
-    parts.push(`${key}=${String(value)}`);
+    parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
   }
 
   if (parts.length === 0) {

@@ -74,7 +74,7 @@ describe('embed provider identity', () => {
       },
       provider: 'bedrock',
       model: 'amazon.titan-embed-text-v2:0',
-      fingerprint: 'bedrock:amazon.titan-embed-text-v2:0',
+      fingerprint: 'bedrock:amazon.titan-embed-text-v2%3A0',
     },
     {
       name: 'ollama',
@@ -136,6 +136,35 @@ describe('embed provider identity', () => {
 
     expect(embedderFingerprint(getEmbedderDescriptor(embed) as EmbedderDescriptor)).toBe(
       'voyage:voyage-3-lite#inputType=document',
+    );
+  });
+
+  it('carries a google document title that the request folds into the text', () => {
+    const embed = createGoogleEmbed({ taskType: 'RETRIEVAL_DOCUMENT', title: 'Runbook' });
+
+    expect(embedderFingerprint(getEmbedderDescriptor(embed) as EmbedderDescriptor)).toBe(
+      'google:gemini-embedding-2#outputDimensionality=768&taskType=RETRIEVAL_DOCUMENT&title=Runbook',
+    );
+  });
+
+  it('omits a google title that gemini-embedding-2 never sends', () => {
+    const titled = createGoogleEmbed({ taskType: 'RETRIEVAL_QUERY', title: 'Runbook' });
+    const untitled = createGoogleEmbed({ taskType: 'RETRIEVAL_QUERY' });
+
+    expect(embedderFingerprint(getEmbedderDescriptor(titled) as EmbedderDescriptor)).toBe(
+      embedderFingerprint(getEmbedderDescriptor(untitled) as EmbedderDescriptor),
+    );
+  });
+
+  it('keeps a google title that a model outside gemini-embedding-2 forwards', () => {
+    const embed = createGoogleEmbed({
+      model: 'gemini-embedding-001',
+      taskType: 'RETRIEVAL_QUERY',
+      title: 'Runbook',
+    });
+
+    expect(embedderFingerprint(getEmbedderDescriptor(embed) as EmbedderDescriptor)).toBe(
+      'google:gemini-embedding-001#taskType=RETRIEVAL_QUERY&title=Runbook',
     );
   });
 

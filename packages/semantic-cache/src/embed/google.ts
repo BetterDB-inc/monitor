@@ -102,6 +102,13 @@ export function createGoogleEmbed(opts?: GoogleEmbedOptions): DescribedEmbedFn {
   const taskType = opts?.taskType ?? 'RETRIEVAL_QUERY';
   const isGeminiEmbedding2 = model === 'gemini-embedding-2';
   const outputDimensionality = opts?.outputDimensionality ?? (isGeminiEmbedding2 ? 768 : undefined);
+  // Part of the identity only where it reaches the request: gemini-embedding-2
+  // folds the title into the input text, and only for documents, while every
+  // other model forwards it whenever it is set. A title that changes the text
+  // changes the vector, so an embedder that ignores it must not share a
+  // fingerprint — or an embedding-cache namespace — with one that does not.
+  const titleReachesRequest = isGeminiEmbedding2 ? taskType === 'RETRIEVAL_DOCUMENT' : true;
+  const effectiveTitle = titleReachesRequest ? opts?.title : undefined;
 
   const embed = async (text: string): Promise<number[]> => {
     const apiKey = opts?.apiKey ?? process.env.GOOGLE_API_KEY;
@@ -149,6 +156,6 @@ export function createGoogleEmbed(opts?: GoogleEmbedOptions): DescribedEmbedFn {
   return describeEmbedder(embed, {
     provider: 'google',
     model,
-    params: { taskType, outputDimensionality },
+    params: { taskType, outputDimensionality, title: effectiveTitle },
   });
 }
