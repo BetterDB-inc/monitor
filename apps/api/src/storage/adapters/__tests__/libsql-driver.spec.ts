@@ -240,4 +240,26 @@ describe('openLibsqlDatabase', () => {
       'exec:COMMIT',
     ]);
   });
+
+  it('rolls the outer transaction back when a savepoint cannot be unwound', async () => {
+    const db = await openRemote();
+    (db as unknown as FakeDatabase).failExec = 'ROLLBACK TO betterdb_sp_1';
+
+    const inner = db.transaction(() => {
+      db.prepare('INSERT INTO inner VALUES (1)').run();
+      throw new Error('inner failed');
+    });
+    const outer = db.transaction(() => {
+      db.prepare('INSERT INTO outer VALUES (1)').run();
+      try {
+        inner();
+      } catch {
+        // swallowed on purpose: the outer body decides to carry on
+      }
+    });
+
+    expect(outer).toThrow('could not be unwound');
+    expect(log).toContain('exec:ROLLBACK');
+    expect(log).not.toContain('exec:COMMIT');
+  });
 });

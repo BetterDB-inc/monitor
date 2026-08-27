@@ -61,6 +61,7 @@ function patchForRemote(db: Database.Database): void {
 
   let generation = 0;
   let depth = 0;
+  let rollbackOnly = false;
 
   const readGeneration = (): number => {
     return generation;
@@ -92,8 +93,10 @@ function patchForRemote(db: Database.Database): void {
             nativeExec(`ROLLBACK TO ${savepoint}`);
             nativeExec(`RELEASE ${savepoint}`);
           } catch {
-            // The server already unwound past this savepoint; surface the
-            // original error.
+            // The savepoint did not unwind, so whatever the nested body wrote is
+            // still live. The outer body may swallow this error, so the outer
+            // transaction has to be barred from committing.
+            rollbackOnly = true;
           }
           throw error;
         } finally {
@@ -104,20 +107,34 @@ function patchForRemote(db: Database.Database): void {
       nativeExec('BEGIN');
       generation += 1;
       depth = 1;
+      rollbackOnly = false;
+      let unwound = false;
       try {
         const result = fn(...args);
+        if (rollbackOnly) {
+          unwound = true;
+          try {
+            nativeExec('ROLLBACK');
+          } catch {
+            // The server already unwound the transaction.
+          }
+          throw new Error('Transaction rolled back: a nested savepoint could not be unwound');
+        }
         nativeExec('COMMIT');
         return result;
       } catch (error) {
-        try {
-          nativeExec('ROLLBACK');
-        } catch {
-          // The server already unwound the transaction; surface the original error.
+        if (!unwound) {
+          try {
+            nativeExec('ROLLBACK');
+          } catch {
+            // The server already unwound the transaction; surface the original error.
+          }
         }
         throw error;
       } finally {
         depth = 0;
         generation += 1;
+        rollbackOnly = false;
       }
     };
 
