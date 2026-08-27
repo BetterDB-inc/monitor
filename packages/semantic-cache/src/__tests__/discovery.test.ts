@@ -231,6 +231,19 @@ describe('readMarker', () => {
     expect(read.status === 'unreadable' && read.reason).toContain('not valid JSON');
   });
 
+  it.each(['null', '42', '[1,2]', '"a string"'])(
+    'rejects %s, which parses but has no fields to read',
+    async (raw) => {
+      const client = new FakeClient();
+      client.hashes.set(REGISTRY_KEY, new Map([['foo', raw]]));
+
+      const read = await readMarker(asValkey(client), 'foo');
+
+      expect(read.status).toBe('unreadable');
+      expect(read.status === 'unreadable' && read.reason).toContain('not a JSON object');
+    },
+  );
+
   it('separates a failed read from an absent marker', async () => {
     const client = new FakeClient();
     client.failHgetOnce();

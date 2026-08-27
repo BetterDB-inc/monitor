@@ -650,7 +650,7 @@ describe('flush(): FT.DROPINDEX path', () => {
     expect(dropCalls).toEqual([['FT.DROPINDEX', 'ftchar:idx']]);
     expect(client.del).toHaveBeenCalledWith('ftchar:__stats');
     expect(client.del).toHaveBeenCalledWith('ftchar:__similarity_window');
-    expect(client.hdel).toHaveBeenCalledWith('__betterdb:caches', 'ftchar');
+    expect(client.hdel).not.toHaveBeenCalled();
   });
 
   it('wraps other FT.DROPINDEX failures as ValkeyCommandError("FT.DROPINDEX", ...)', async () => {

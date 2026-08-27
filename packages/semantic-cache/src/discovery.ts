@@ -98,11 +98,25 @@ export async function readMarker(client: Valkey, name: string): Promise<MarkerRe
   if (raw === null) {
     return { status: 'absent' };
   }
+  return parseMarker(raw);
+}
+
+/**
+ * JSON.parse happily yields null, a number or an array, none of which a caller
+ * can read fields off. Failing them here keeps every non-marker value on the
+ * one path that warns instead of throwing out of the caller.
+ */
+function parseMarker(raw: string): MarkerRead {
+  let parsed: unknown;
   try {
-    return { status: 'present', marker: JSON.parse(raw) as Partial<MarkerMetadata> };
+    parsed = JSON.parse(raw);
   } catch (err) {
     return { status: 'unreadable', reason: `its marker is not valid JSON: ${errMsg(err)}` };
   }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { status: 'unreadable', reason: 'its marker is not a JSON object' };
+  }
+  return { status: 'present', marker: parsed as Partial<MarkerMetadata> };
 }
 
 export interface DiscoveryLogger {
@@ -225,12 +239,11 @@ export class DiscoveryManager {
   }
 
   private checkCollision(existingJson: string): void {
-    let parsed: Partial<MarkerMetadata>;
-    try {
-      parsed = JSON.parse(existingJson) as Partial<MarkerMetadata>;
-    } catch {
+    const read = parseMarker(existingJson);
+    if (read.status !== 'present') {
       return;
     }
+    const parsed = read.marker;
     if (parsed.type && parsed.type !== CACHE_TYPE) {
       throw new SemanticCacheUsageError(
         `cache name collision: '${this.name}' is already registered as type '${String(parsed.type)}' on this Valkey instance`,

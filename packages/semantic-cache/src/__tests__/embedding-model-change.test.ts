@@ -315,6 +315,30 @@ describe('embedding model change detection', () => {
     await cache.dispose();
   });
 
+  it('starts rather than throwing on a marker that parses but has no fields', async () => {
+    const client = makeMockClient();
+    client.hashes.set(REGISTRY_KEY, new Map([['model_change', 'null']]));
+
+    const { cache, warn } = makeCache(client, OPENAI_SMALL);
+    await cache.initialize();
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('not a JSON object');
+    await cache.dispose();
+  });
+
+  it('does not touch the registry on flush when discovery is off', async () => {
+    const client = makeMockClient();
+    const { cache } = makeCache(client, OPENAI_SMALL, { discovery: { enabled: false } });
+    await cache.initialize();
+    client.hdel.mockClear();
+
+    await expect(cache.flush()).resolves.toBeUndefined();
+
+    expect(client.hdel).not.toHaveBeenCalled();
+    await cache.dispose();
+  });
+
   it('leaves no stale marker behind for the next start to trip over', async () => {
     const client = makeMockClient();
     await seed(client, OPENAI_SMALL);

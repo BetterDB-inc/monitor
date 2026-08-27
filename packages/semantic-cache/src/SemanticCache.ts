@@ -272,6 +272,13 @@ export class SemanticCache {
     // initialize() would read the retired model off the stale marker and throw
     // again, so the recovery the error recommends would destroy the cache and
     // still refuse to start. registerDiscovery() writes a fresh one.
+    //
+    // A cache that opted out of discovery never wrote one, and its deployment
+    // may well deny __betterdb:* outright, so touching the registry there would
+    // turn a working flush() into a failure after the keys are already gone.
+    if (this.discoveryOptions.enabled === false) {
+      return;
+    }
     try {
       await this.client.hdel(REGISTRY_KEY, this.name);
     } catch (err: unknown) {
