@@ -113,13 +113,13 @@ Requires Node.js >= 20.0.0 and a Valkey or Redis instance to monitor. For SQLite
 - **Vector search observability** - FT.SEARCH ops/sec and latency with per-index health for [valkey-search](https://github.com/valkey-io/valkey-search) and RediSearch. See [docs/vector-ai](docs/vector-ai/README.md).
 - **Inference latency** - p50/p95/p99 per index, with SLA breach alerts (Pro, free in early access).
 - **Semantic cache intelligence** (Pro, free in early access) - hit-rate health, similarity-threshold recommendations, and an approve/reject proposal workflow. Agent memory observability included.
-- **AI traces** - OTLP span waterfalls from your AI application, correlated with the live Valkey state underneath each request.
+- **AI traces** - OTLP span waterfalls from your AI application, correlated with the live Valkey state underneath each request. See [docs/opentelemetry.md](docs/opentelemetry.md).
 
 ### Plugs into everything
 
 - **MCP server** - 60 tools for Claude Code, Cursor, or any MCP client via [`@betterdb/mcp`](packages/mcp).
 - **Prometheus endpoint** - 100+ `betterdb_*` metrics. See [docs/prometheus-metrics.md](docs/prometheus-metrics.md).
-- **OpenTelemetry** - mirror metrics and events to any OTLP backend.
+- **OpenTelemetry** - ingest OTLP traces, and mirror metrics and events to any OTLP backend. See [docs/opentelemetry.md](docs/opentelemetry.md).
 - **REST API** - everything in the UI is an API call, documented via OpenAPI.
 
 ## Access Your Data Your Way
@@ -217,7 +217,7 @@ docker run -d \
 | `BETTERDB_SSH_KEY_DIR` | No | - | Directory that server-side SSH private keys must live in. Enables the "server file path" key source for [SSH tunnels](#ssh-tunnels); a connection's key path must resolve inside it. Unset disables file-based keys (inline pasted keys still work) |
 | `BETTERDB_TELEMETRY` | No | `true` | Set `false` to disable anonymous telemetry |
 
-Full reference, including AI, OTLP export, webhook tuning, and health-gate thresholds: [docs/configuration.md](docs/configuration.md).
+Full reference, including AI, webhook tuning, and health-gate thresholds: [docs/configuration.md](docs/configuration.md). For OTLP trace ingest and metrics/event export, see [docs/opentelemetry.md](docs/opentelemetry.md).
 
 ### SSH Tunnels
 
