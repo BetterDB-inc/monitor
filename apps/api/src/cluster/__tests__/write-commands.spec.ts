@@ -42,50 +42,93 @@ describe('isWriteCommand', () => {
   });
 });
 
+const SERVER_VERDICTS: Record<string, boolean> = {
+  get: false,
+  info: false,
+  'client|list': false,
+  'json.set': true,
+  'ts.add': true,
+  vadd: true,
+};
+
+function classify(command: string): boolean | undefined {
+  return SERVER_VERDICTS[command];
+}
+
 describe('sumWriteCalls', () => {
   it('adds up only the write commands', () => {
-    const totals = sumWriteCalls([
-      { command: 'get', calls: 900 },
-      { command: 'set', calls: 30 },
-      { command: 'hset', calls: 12 },
-      { command: 'info', calls: 5 },
-    ]);
+    const totals = sumWriteCalls(
+      [
+        { command: 'get', calls: 900 },
+        { command: 'set', calls: 30 },
+        { command: 'hset', calls: 12 },
+        { command: 'info', calls: 5 },
+      ],
+      classify,
+    );
 
-    expect(totals).toEqual({ writes: 42, moduleCalls: 0 });
+    expect(totals).toEqual({ writes: 42, unclassified: 0 });
   });
 
-  it('is zero when the node served no writes', () => {
-    expect(sumWriteCalls([{ command: 'get', calls: 900 }])).toEqual({
+  it('is zero when the node is proven to have served no writes', () => {
+    expect(sumWriteCalls([{ command: 'get', calls: 900 }], classify)).toEqual({
       writes: 0,
-      moduleCalls: 0,
+      unclassified: 0,
     });
   });
 
-  it('counts module commands apart from the writes it can name', () => {
-    const totals = sumWriteCalls([
-      { command: 'json.set', calls: 40 },
-      { command: 'ts.add', calls: 60 },
-      { command: 'set', calls: 7 },
-    ]);
+  it('counts a server-classified module write', () => {
+    const totals = sumWriteCalls(
+      [
+        { command: 'json.set', calls: 40 },
+        { command: 'ts.add', calls: 60 },
+        { command: 'set', calls: 7 },
+      ],
+      classify,
+    );
 
-    expect(totals).toEqual({ writes: 7, moduleCalls: 100 });
+    expect(totals).toEqual({ writes: 107, unclassified: 0 });
   });
 
-  it('reports zero writes alongside module traffic so the caller can fall back', () => {
-    const totals = sumWriteCalls([
-      { command: 'json.set', calls: 40 },
-      { command: 'get', calls: 900 },
-    ]);
+  it('counts a core write the built-in list does not name', () => {
+    const totals = sumWriteCalls([{ command: 'vadd', calls: 12 }], classify);
 
-    expect(totals).toEqual({ writes: 0, moduleCalls: 40 });
+    expect(totals).toEqual({ writes: 12, unclassified: 0 });
   });
 
-  it('does not mistake a container subcommand for a module command', () => {
-    const totals = sumWriteCalls([
-      { command: 'xgroup|create', calls: 3 },
-      { command: 'client|list', calls: 9 },
-    ]);
+  it('reports unclassified traffic so the caller can fall back', () => {
+    const totals = sumWriteCalls(
+      [
+        { command: 'unknowncmd', calls: 40 },
+        { command: 'get', calls: 900 },
+      ],
+      classify,
+    );
 
-    expect(totals).toEqual({ writes: 3, moduleCalls: 0 });
+    expect(totals).toEqual({ writes: 0, unclassified: 40 });
+  });
+
+  it('leaves a client-read command out of the writes without a server verdict', () => {
+    const totals = sumWriteCalls(
+      [
+        { command: 'pfcount', calls: 30 },
+        { command: 'eval_ro', calls: 4 },
+      ],
+      classify,
+    );
+
+    expect(totals).toEqual({ writes: 0, unclassified: 0 });
+  });
+
+  it('does not mistake a container subcommand for unclassified traffic', () => {
+    const totals = sumWriteCalls(
+      [
+        { command: 'xgroup|create', calls: 3 },
+        { command: 'client|list', calls: 9 },
+      ],
+      classify,
+    );
+
+    expect(totals).toEqual({ writes: 3, unclassified: 0 });
   });
 });

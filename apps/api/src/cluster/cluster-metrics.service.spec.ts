@@ -59,6 +59,17 @@ used_cpu_sys:10.5\r
 used_cpu_user:20.3\r
 `;
 
+  const serverWriteCommands = new Set(['json.set', 'vadd']);
+  const serverKnownCommands = new Set(['get', 'info', 'json.set', 'vadd']);
+
+  function commandInfoEntry(name: string): unknown {
+    if (!serverKnownCommands.has(name)) {
+      return null;
+    }
+    const flags = serverWriteCommands.has(name) ? ['write', 'denyoom'] : ['readonly', 'fast'];
+    return [name, -2, flags, 1, 1, 1];
+  }
+
   beforeEach(async () => {
     mockClient = {
       call: jest.fn().mockImplementation((cmd, ...args) => {
@@ -77,6 +88,13 @@ used_cpu_user:20.3\r
         }
         if (cmd === 'COMMANDLOG' && args[0] === 'GET') {
           return Promise.resolve([]);
+        }
+        if (cmd === 'COMMAND' && args[0] === 'INFO') {
+          return Promise.resolve(
+            args.slice(1).map((name: string) => {
+              return commandInfoEntry(name);
+            }),
+          );
         }
         return Promise.resolve(null);
       }),
@@ -182,7 +200,7 @@ used_cpu_user:20.3\r
       expect(stats[0].writeCommandCalls).toBe(42);
     });
 
-    it('reports no write calls rather than zero when only modules served the traffic', async () => {
+    it('counts a module write the server classifies', async () => {
       mockClient.info.mockImplementation((section?: string) => {
         if (section === 'commandstats') {
           return Promise.resolve(
@@ -196,7 +214,40 @@ used_cpu_user:20.3\r
 
       const stats = await service.getClusterNodeStats(undefined, { includeCommandStats: true });
 
+      expect(stats[0].writeCommandCalls).toBe(40);
+    });
+
+    it('reports no write calls rather than zero when the traffic cannot be classified', async () => {
+      mockClient.info.mockImplementation((section?: string) => {
+        if (section === 'commandstats') {
+          return Promise.resolve(
+            '# Commandstats\r\n' +
+              'cmdstat_get:calls=900,usec=1000,usec_per_call=1.11,rejected_calls=0,failed_calls=0\r\n' +
+              'cmdstat_mysteryctl:calls=40,usec=800,usec_per_call=20,rejected_calls=0,failed_calls=0\r\n',
+          );
+        }
+        return Promise.resolve(mockInfoString);
+      });
+
+      const stats = await service.getClusterNodeStats(undefined, { includeCommandStats: true });
+
       expect(stats[0].writeCommandCalls).toBeUndefined();
+    });
+
+    it('counts a core write the built-in list does not name', async () => {
+      mockClient.info.mockImplementation((section?: string) => {
+        if (section === 'commandstats') {
+          return Promise.resolve(
+            '# Commandstats\r\n' +
+              'cmdstat_vadd:calls=12,usec=800,usec_per_call=20,rejected_calls=0,failed_calls=0\r\n',
+          );
+        }
+        return Promise.resolve(mockInfoString);
+      });
+
+      const stats = await service.getClusterNodeStats(undefined, { includeCommandStats: true });
+
+      expect(stats[0].writeCommandCalls).toBe(12);
     });
 
     it('reports zero write calls when the node served only core reads', async () => {

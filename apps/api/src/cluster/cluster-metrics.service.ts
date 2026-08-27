@@ -11,7 +11,7 @@ import {
   CommandLogType,
 } from '../common/types/metrics.types';
 import { parseCommandStatsSection } from '../metrics/commandstats-parser';
-import { sumWriteCalls } from './write-commands';
+import { isClientReadCommand, isWriteCommand, sumWriteCalls } from './write-commands';
 
 const MAX_KEYS_TO_CHECK_IN_SLOT = 10000;
 
@@ -92,6 +92,7 @@ export interface SlotMigration {
 export class ClusterMetricsService {
   private readonly logger = new Logger(ClusterMetricsService.name);
   private loggedErrors: Set<string> = new Set();
+  private readonly commandVerdicts: Map<string, boolean> = new Map();
   private readonly MAX_LOGGED_ERRORS = 500;
 
   constructor(
@@ -504,8 +505,9 @@ export class ClusterMetricsService {
    *
    * A node that denies or lacks the section yields undefined rather than zero —
    * zero would read as "served no writes", which is a different claim. So does
-   * a node whose only traffic is module commands, which carry no read/write
-   * classification: the caller falls back to `opsPerSec` for both.
+   * a node with traffic this service could not classify: a module command, or a
+   * core command newer than the built-in write list. The caller falls back to
+   * `opsPerSec` for all of them.
    */
   private async getWriteCommandCalls(client: Valkey, nodeId: string): Promise<number | undefined> {
     try {
@@ -515,8 +517,18 @@ export class ClusterMetricsService {
       if (section === undefined) {
         return undefined;
       }
-      const totals = sumWriteCalls(parseCommandStatsSection(section));
-      if (totals.writes === 0 && totals.moduleCalls > 0) {
+      const samples = parseCommandStatsSection(section);
+      await this.resolveCommandVerdicts(
+        client,
+        nodeId,
+        samples.map((sample) => {
+          return sample.command;
+        }),
+      );
+      const totals = sumWriteCalls(samples, (command) => {
+        return this.commandVerdicts.get(command.toLowerCase());
+      });
+      if (totals.writes === 0 && totals.unclassified > 0) {
         return undefined;
       }
       return totals.writes;
@@ -529,6 +541,63 @@ export class ClusterMetricsService {
         this.addLoggedError(errorKey);
       }
       return undefined;
+    }
+  }
+
+  /**
+   * Ask the server to classify the commands the built-in list does not name, so
+   * a core command added after that list was written still counts as a write.
+   * `COMMAND INFO` predates every supported server and accepts the
+   * `parent|subcommand` form `commandstats` reports.
+   *
+   * Verdicts are cached for the process: a command's flags do not change while
+   * the server is running, so this costs one call per newly seen command name.
+   * A name the server does not answer for stays uncached and is reported as
+   * unclassified, which routes the caller to the `opsPerSec` fallback.
+   */
+  private async resolveCommandVerdicts(
+    client: Valkey,
+    nodeId: string,
+    commands: ReadonlyArray<string>,
+  ): Promise<void> {
+    const unresolved = [
+      ...new Set(
+        commands.map((command) => {
+          return command.toLowerCase();
+        }),
+      ),
+    ].filter((command) => {
+      if (isWriteCommand(command) || isClientReadCommand(command)) {
+        return false;
+      }
+      return !this.commandVerdicts.has(command);
+    });
+
+    if (unresolved.length === 0) {
+      return;
+    }
+
+    try {
+      const reply = (await client.call('COMMAND', 'INFO', ...unresolved)) as unknown[];
+      unresolved.forEach((command, index) => {
+        const entry = reply[index];
+        if (!Array.isArray(entry)) {
+          return;
+        }
+        const flags = entry[2];
+        if (!Array.isArray(flags)) {
+          return;
+        }
+        this.commandVerdicts.set(command, flags.includes('write'));
+      });
+    } catch (error) {
+      const errorKey = `command-info-${nodeId}`;
+      if (!this.loggedErrors.has(errorKey)) {
+        this.logger.debug(
+          `Failed to classify commands on node ${nodeId}: ${error instanceof Error ? error.message : error}`,
+        );
+        this.addLoggedError(errorKey);
+      }
     }
   }
 

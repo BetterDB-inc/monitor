@@ -9,9 +9,11 @@
  * because it rewrites its own cached cardinality, but a client issuing it is
  * reading — it stays out for the same reason.
  *
- * Module commands are not enumerated — there is no fixed list of them. They are
- * counted separately instead, so a caller can tell a node that served no writes
- * apart from one whose writes this module cannot name.
+ * The list names writes; it cannot name every non-write. Anything absent from
+ * both this set and CLIENT_READ_COMMANDS is left for the caller's classifier to
+ * resolve against the server, so a core command added after this list was
+ * written — or a module command, which is never enumerable — is reported as
+ * unclassified rather than silently counted as a read.
  */
 const WRITE_COMMANDS: ReadonlySet<string> = new Set([
   'append',
@@ -125,12 +127,33 @@ const WRITE_COMMANDS: ReadonlySet<string> = new Set([
   'zunionstore',
 ]);
 
+/**
+ * Commands the server flags `write` that a client issuing them is nonetheless
+ * reading through. Without this set a server-backed classifier would overturn
+ * the deliberate exclusions above and make every healthy replica look like it
+ * was taking writes.
+ */
+const CLIENT_READ_COMMANDS: ReadonlySet<string> = new Set([
+  'eval_ro',
+  'evalsha_ro',
+  'fcall_ro',
+  'georadius_ro',
+  'georadiusbymember_ro',
+  'pfcount',
+]);
+
 export interface WriteCallTotals {
-  /** Calls across every command this module recognises as a write. */
+  /** Calls across every command known to write. */
   writes: number;
-  /** Calls across module commands, which carry no classification either way. */
-  moduleCalls: number;
+  /** Calls across commands that could not be classified either way. */
+  unclassified: number;
 }
+
+/**
+ * Verdict for a command this module does not name: `true` for a write, `false`
+ * for a read, `undefined` when the answer is unavailable.
+ */
+export type CommandClassifier = (command: string) => boolean | undefined;
 
 /**
  * `commandstats` reports container commands as `parent|subcommand`. Every
@@ -144,36 +167,45 @@ export function isWriteCommand(command: string): boolean {
 }
 
 /**
- * Modules namespace their commands with a dot — `json.set`, `ts.add`,
- * `bf.add`. No core command does, and container subcommands use `|`, so the
- * dot is enough to tell a module command from one this module simply reads.
+ * True for a command that reads despite the server flagging it `write`.
  */
-function isModuleCommand(command: string): boolean {
-  return command.includes('.');
+export function isClientReadCommand(command: string): boolean {
+  return CLIENT_READ_COMMANDS.has(command.toLowerCase());
 }
 
 /**
- * Calls the node has served since it started, split into the writes this module
- * can name and the module commands it cannot. Cumulative counters, not rates —
- * the caller diffs them against its own previous reading.
+ * Calls the node has served since it started, split into the writes that could
+ * be established and the calls that could not be classified either way.
+ * Cumulative counters, not rates — the caller diffs them against its own
+ * previous reading.
  *
- * The split matters because zero writes alongside module traffic is not the
- * same claim as zero writes on a node serving plain reads: the first means the
- * attribution failed and the caller should fall back to `opsPerSec`, the second
- * means the node really is taking no writes.
+ * The split matters because zero writes alongside unclassified traffic is not
+ * the same claim as zero writes on a node proven to serve reads: the first
+ * means the attribution failed and the caller should fall back to `opsPerSec`,
+ * the second means the node really is taking no writes.
  */
 export function sumWriteCalls(
   samples: ReadonlyArray<{ command: string; calls: number }>,
+  classify: CommandClassifier,
 ): WriteCallTotals {
-  const totals = { writes: 0, moduleCalls: 0 };
+  const totals = { writes: 0, unclassified: 0 };
   for (const sample of samples) {
     if (isWriteCommand(sample.command)) {
       totals.writes += sample.calls;
       continue;
     }
-    if (isModuleCommand(sample.command)) {
-      totals.moduleCalls += sample.calls;
+    if (isClientReadCommand(sample.command)) {
+      continue;
     }
+    const verdict = classify(sample.command);
+    if (verdict === true) {
+      totals.writes += sample.calls;
+      continue;
+    }
+    if (verdict === false) {
+      continue;
+    }
+    totals.unclassified += sample.calls;
   }
   return totals;
 }
