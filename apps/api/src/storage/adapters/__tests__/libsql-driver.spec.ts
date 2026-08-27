@@ -31,8 +31,13 @@ class FakeDatabase {
     return new FakeStatement(sql, this.log);
   }
 
+  failExec: string | null = null;
+
   exec(sql: string): void {
     this.log.push(`exec:${sql}`);
+    if (this.failExec === sql) {
+      throw new Error('no transaction is active');
+    }
   }
 
   transaction<F extends (...args: never[]) => unknown>(fn: F): F {
@@ -193,18 +198,46 @@ describe('openLibsqlDatabase', () => {
 
   it('surfaces the original error when the rollback itself fails', async () => {
     const db = await openRemote();
-    const originalExec = db.exec.bind(db);
-    jest.spyOn(db, 'exec').mockImplementation((sql: string) => {
-      if (sql === 'ROLLBACK') {
-        throw new Error('no transaction is active');
-      }
-      originalExec(sql);
-    });
+    // The driver binds exec at patch time, so the failure has to come from the
+    // database itself: a spy installed here would never be reached.
+    (db as unknown as FakeDatabase).failExec = 'ROLLBACK';
 
     const failing = db.transaction(() => {
       throw new Error('constraint failed');
     });
 
     expect(failing).toThrow('constraint failed');
+    expect(log).toEqual(['exec:BEGIN', 'exec:ROLLBACK']);
+  });
+
+  it('unwinds a nested body to its savepoint when the outer body swallows the error', async () => {
+    const db = await openRemote();
+
+    const inner = db.transaction(() => {
+      db.prepare('INSERT INTO inner VALUES (1)').run();
+      throw new Error('inner failed');
+    });
+    const outer = db.transaction(() => {
+      db.prepare('INSERT INTO outer VALUES (1)').run();
+      try {
+        inner();
+      } catch {
+        // swallowed on purpose: the outer body decides to carry on
+      }
+    });
+
+    outer();
+
+    expect(log).toEqual([
+      'exec:BEGIN',
+      'prepare:INSERT INTO outer VALUES (1)',
+      'run:INSERT INTO outer VALUES (1)',
+      'exec:SAVEPOINT betterdb_sp_1',
+      'prepare:INSERT INTO inner VALUES (1)',
+      'run:INSERT INTO inner VALUES (1)',
+      'exec:ROLLBACK TO betterdb_sp_1',
+      'exec:RELEASE betterdb_sp_1',
+      'exec:COMMIT',
+    ]);
   });
 });

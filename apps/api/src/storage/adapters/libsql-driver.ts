@@ -77,9 +77,25 @@ function patchForRemote(db: Database.Database): void {
   const transaction = <F extends VariadicFunction>(fn: F): F => {
     const wrapped = (...args: Parameters<F>): unknown => {
       if (depth > 0) {
+        // A nested body must be able to unwind on its own. Without a savepoint
+        // its writes ride on the outer COMMIT even when it threw and the outer
+        // body swallowed the error.
+        const savepoint = `betterdb_sp_${depth}`;
+        nativeExec(`SAVEPOINT ${savepoint}`);
         depth += 1;
         try {
-          return fn(...args);
+          const result = fn(...args);
+          nativeExec(`RELEASE ${savepoint}`);
+          return result;
+        } catch (error) {
+          try {
+            nativeExec(`ROLLBACK TO ${savepoint}`);
+            nativeExec(`RELEASE ${savepoint}`);
+          } catch {
+            // The server already unwound past this savepoint; surface the
+            // original error.
+          }
+          throw error;
         } finally {
           depth -= 1;
         }

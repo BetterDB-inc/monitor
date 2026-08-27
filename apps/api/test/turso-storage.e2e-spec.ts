@@ -122,8 +122,9 @@ describeTurso('SqliteAdapter against a remote libSQL/Turso database', () => {
   });
 
   it('creates the schema and runs migrations over the network', async () => {
-    const settings = await storage.getSettings();
-    expect(settings).toBeDefined();
+    // A missing table rejects rather than resolving, so this asserts the schema
+    // exists. A fresh database carries no settings row until one is written.
+    await expect(storage.getSettings()).resolves.toBeNull();
   });
 
   it('writes ACL entries through a batched transaction', async () => {
