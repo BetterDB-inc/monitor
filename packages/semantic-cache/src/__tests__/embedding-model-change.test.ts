@@ -56,6 +56,12 @@ function makeMockClient() {
       hash.set(field, value);
       return 1;
     }),
+    hdel: vi.fn(async (key: string, field: string) => {
+      if (client.freezeRegistry && key === REGISTRY_KEY) {
+        return 0;
+      }
+      return hashes.get(key)?.delete(field) === true ? 1 : 0;
+    }),
     hgetall: vi.fn(async () => {
       return {};
     }),
@@ -297,14 +303,30 @@ describe('embedding model change detection', () => {
     await cache.dispose();
   });
 
-  it('ignores a marker that is not parseable', async () => {
+  it('warns rather than starting silently on a marker it cannot parse', async () => {
     const client = makeMockClient();
     client.hashes.set(REGISTRY_KEY, new Map([['model_change', 'not json']]));
 
     const { cache, warn } = makeCache(client, OPENAI_SMALL);
     await cache.initialize();
 
-    expect(warn).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('not valid JSON');
     await cache.dispose();
+  });
+
+  it('leaves no stale marker behind for the next start to trip over', async () => {
+    const client = makeMockClient();
+    await seed(client, OPENAI_SMALL);
+
+    const { cache } = makeCache(client, OPENAI_LARGE, { onEmbeddingModelChange: 'flush' });
+    await cache.initialize();
+    await cache.dispose();
+
+    const { cache: second, warn } = makeCache(client, OPENAI_LARGE);
+    await second.initialize();
+
+    expect(warn).not.toHaveBeenCalled();
+    await second.dispose();
   });
 });

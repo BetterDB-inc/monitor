@@ -209,29 +209,36 @@ describe('readMarker', () => {
     const client = new FakeClient();
     client.hashes.set(REGISTRY_KEY, new Map([['foo', JSON.stringify(metadataFor('foo'))]]));
 
-    const marker = await readMarker(asValkey(client), 'foo');
+    const read = await readMarker(asValkey(client), 'foo');
 
-    expect(marker?.prefix).toBe('foo');
+    expect(read.status).toBe('present');
+    expect(read.status === 'present' && read.marker.prefix).toBe('foo');
   });
 
-  it('returns null when there is no marker for this name', async () => {
+  it('reports a name with no marker as absent, not as a failure', async () => {
     const client = new FakeClient();
 
-    await expect(readMarker(asValkey(client), 'missing')).resolves.toBeNull();
+    await expect(readMarker(asValkey(client), 'missing')).resolves.toEqual({ status: 'absent' });
   });
 
-  it('returns null for a marker that is not parseable JSON', async () => {
+  it('separates a marker that is not parseable JSON from an absent one', async () => {
     const client = new FakeClient();
     client.hashes.set(REGISTRY_KEY, new Map([['foo', 'not json']]));
 
-    await expect(readMarker(asValkey(client), 'foo')).resolves.toBeNull();
+    const read = await readMarker(asValkey(client), 'foo');
+
+    expect(read.status).toBe('unreadable');
+    expect(read.status === 'unreadable' && read.reason).toContain('not valid JSON');
   });
 
-  it('returns null when the read itself fails', async () => {
+  it('separates a failed read from an absent marker', async () => {
     const client = new FakeClient();
     client.failHgetOnce();
 
-    await expect(readMarker(asValkey(client), 'foo')).resolves.toBeNull();
+    const read = await readMarker(asValkey(client), 'foo');
+
+    expect(read.status).toBe('unreadable');
+    expect(read.status === 'unreadable' && read.reason).toContain('registry read failed');
   });
 });
 

@@ -76,29 +76,32 @@ export function buildSemanticMetadata(input: BuildSemanticMetadataInput): Marker
 }
 
 /**
- * Read the marker a previous run left for this cache name.
+ * Outcome of reading the marker a previous run left for this cache name.
  *
- * Returns null when there is no marker, when the read fails, or when the
- * stored value is not parseable JSON — all of which mean "nothing reliable to
- * compare against", never "something changed".
+ * `absent` and `unreadable` are kept apart because they are different claims.
+ * No marker is a first run and nothing is wrong. A marker that would not read
+ * or would not parse means a cache exists whose contents cannot be checked —
+ * silence there would hide it. Neither ever means "something changed".
  */
-export async function readMarker(
-  client: Valkey,
-  name: string,
-): Promise<Partial<MarkerMetadata> | null> {
+export type MarkerRead =
+  | { status: 'absent' }
+  | { status: 'unreadable'; reason: string }
+  | { status: 'present'; marker: Partial<MarkerMetadata> };
+
+export async function readMarker(client: Valkey, name: string): Promise<MarkerRead> {
   let raw: string | null;
   try {
     raw = await client.hget(REGISTRY_KEY, name);
-  } catch {
-    return null;
+  } catch (err) {
+    return { status: 'unreadable', reason: `the registry read failed: ${errMsg(err)}` };
   }
   if (raw === null) {
-    return null;
+    return { status: 'absent' };
   }
   try {
-    return JSON.parse(raw) as Partial<MarkerMetadata>;
-  } catch {
-    return null;
+    return { status: 'present', marker: JSON.parse(raw) as Partial<MarkerMetadata> };
+  } catch (err) {
+    return { status: 'unreadable', reason: `its marker is not valid JSON: ${errMsg(err)}` };
   }
 }
 
