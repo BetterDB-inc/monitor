@@ -9,7 +9,8 @@
  *   const embed = createOllamaEmbed({ model: 'nomic-embed-text' });
  *   const cache = new SemanticCache({ client, embedFn: embed });
  */
-import type { EmbedFn } from '../types';
+import type { DescribedEmbedFn } from '../types';
+import { describeEmbedder } from '../embedder-identity';
 
 export interface OllamaEmbedOptions {
   /**
@@ -29,11 +30,11 @@ export interface OllamaEmbedOptions {
  * Create an EmbedFn backed by a local Ollama instance.
  * Uses native fetch - no SDK required.
  */
-export function createOllamaEmbed(opts?: OllamaEmbedOptions): EmbedFn {
+export function createOllamaEmbed(opts?: OllamaEmbedOptions): DescribedEmbedFn {
   const model = opts?.model ?? 'nomic-embed-text';
-  const baseUrl = opts?.baseUrl ?? (process.env.OLLAMA_HOST ?? 'http://localhost:11434');
+  const baseUrl = opts?.baseUrl ?? process.env.OLLAMA_HOST ?? 'http://localhost:11434';
 
-  return async (text: string): Promise<number[]> => {
+  const embed = async (text: string): Promise<number[]> => {
     const res = await fetch(`${baseUrl}/api/embed`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -48,4 +49,6 @@ export function createOllamaEmbed(opts?: OllamaEmbedOptions): EmbedFn {
     const json = (await res.json()) as { embeddings: number[][] };
     return json.embeddings[0] ?? [];
   };
+
+  return describeEmbedder(embed, { provider: 'ollama', model });
 }

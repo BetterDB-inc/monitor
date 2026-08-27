@@ -9,7 +9,8 @@
  *   const embed = createVoyageEmbed({ model: 'voyage-3-lite' });
  *   const cache = new SemanticCache({ client, embedFn: embed });
  */
-import type { EmbedFn } from '../types';
+import type { DescribedEmbedFn } from '../types';
+import { describeEmbedder } from '../embedder-identity';
 
 export interface VoyageEmbedOptions {
   /**
@@ -30,12 +31,12 @@ export interface VoyageEmbedOptions {
  * Create an EmbedFn backed by the Voyage AI Embeddings API.
  * Uses native fetch - no SDK required.
  */
-export function createVoyageEmbed(opts?: VoyageEmbedOptions): EmbedFn {
+export function createVoyageEmbed(opts?: VoyageEmbedOptions): DescribedEmbedFn {
   const model = opts?.model ?? 'voyage-3-lite';
   const baseUrl = opts?.baseUrl ?? 'https://api.voyageai.com/v1';
   const inputType = opts?.inputType ?? 'query';
 
-  return async (text: string): Promise<number[]> => {
+  const embed = async (text: string): Promise<number[]> => {
     const apiKey = opts?.apiKey ?? process.env.VOYAGE_API_KEY;
     if (!apiKey) {
       throw new Error(
@@ -60,4 +61,6 @@ export function createVoyageEmbed(opts?: VoyageEmbedOptions): EmbedFn {
     const json = (await res.json()) as { data: Array<{ embedding: number[] }> };
     return json.data[0].embedding;
   };
+
+  return describeEmbedder(embed, { provider: 'voyage', model, params: { inputType } });
 }

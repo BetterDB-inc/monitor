@@ -9,7 +9,8 @@
  *   const embed = createGoogleEmbed({ model: 'gemini-embedding-2' });
  *   const cache = new SemanticCache({ client, embedFn: embed });
  */
-import type { EmbedFn } from '../types';
+import type { DescribedEmbedFn } from '../types';
+import { describeEmbedder } from '../embedder-identity';
 
 export type GoogleEmbedTaskType =
   | 'RETRIEVAL_QUERY'
@@ -95,14 +96,14 @@ export interface GoogleEmbedOptions {
  * Create an EmbedFn backed by the Google AI (Gemini) Embeddings API.
  * Uses native fetch - no SDK required.
  */
-export function createGoogleEmbed(opts?: GoogleEmbedOptions): EmbedFn {
+export function createGoogleEmbed(opts?: GoogleEmbedOptions): DescribedEmbedFn {
   const model = opts?.model ?? 'gemini-embedding-2';
   const baseUrl = opts?.baseUrl ?? 'https://generativelanguage.googleapis.com/v1beta';
   const taskType = opts?.taskType ?? 'RETRIEVAL_QUERY';
   const isGeminiEmbedding2 = model === 'gemini-embedding-2';
   const outputDimensionality = opts?.outputDimensionality ?? (isGeminiEmbedding2 ? 768 : undefined);
 
-  return async (text: string): Promise<number[]> => {
+  const embed = async (text: string): Promise<number[]> => {
     const apiKey = opts?.apiKey ?? process.env.GOOGLE_API_KEY;
     if (!apiKey) {
       throw new Error(
@@ -144,4 +145,10 @@ export function createGoogleEmbed(opts?: GoogleEmbedOptions): EmbedFn {
     const json = (await res.json()) as { embedding: { values: number[] } };
     return json.embedding?.values ?? [];
   };
+
+  return describeEmbedder(embed, {
+    provider: 'google',
+    model,
+    params: { taskType, outputDimensionality },
+  });
 }
