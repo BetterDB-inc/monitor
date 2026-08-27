@@ -229,6 +229,23 @@ Cost savings scale with the model. Observed values from live examples:
 | `@betterdb/semantic-cache/embed/ollama` | `nomic-embed-text` | 768 |
 | `@betterdb/semantic-cache/embed/google` | `gemini-embedding-2` | 768 |
 
+Every helper returns a *described* embedder: the function carries a
+`descriptor` naming the provider, the model, and any option that changes the
+vector space. The cache reads it to detect a change of embedding model — see
+[Changing the embedding model](#changing-the-embedding-model).
+
+A hand-rolled `embedFn` is still accepted and still works, but detection stays
+inactive for it unless you opt in:
+
+```ts
+import { describeEmbedder } from '@betterdb/semantic-cache';
+
+const embedFn = describeEmbedder(
+  async (text: string) => myProvider.embed(text),
+  { provider: 'my-provider', model: 'v2', params: { inputType: 'query' } },
+);
+```
+
 ### Discovery markers
 
 Starting in `0.2.0`, `initialize()` writes a small advisory record to a shared `__betterdb:caches` hash on the Valkey instance so Monitor (and other tooling) can enumerate caches without configuration. A 60s-TTL heartbeat key is refreshed every 30s; `flush()` and `dispose()` remove the heartbeat immediately. No sensitive data is ever written — only cache metadata (type, prefix, version, capabilities, configured thresholds).
