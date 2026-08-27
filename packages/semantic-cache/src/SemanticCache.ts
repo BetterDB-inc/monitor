@@ -52,6 +52,21 @@ import {
 
 const INVALIDATE_BATCH_SIZE = 1000;
 
+/**
+ * Namespace tag for the embedding cache.
+ *
+ * The embedding cache keys on the text alone, so without this a model change
+ * is defeated before it is noticed: embed() returns an old-model vector and
+ * the new model is never called. Undescribed embedders share a single 'none'
+ * namespace, which is exactly the collision they already have today.
+ */
+function embedSpaceTag(fingerprint: string | undefined): string {
+  if (fingerprint === undefined) {
+    return 'none';
+  }
+  return createHash('sha256').update(fingerprint).digest('hex').slice(0, 8);
+}
+
 const PACKAGE_VERSION = (require('../package.json') as { version: string }).version;
 
 function errMsg(err: unknown): string {
@@ -130,6 +145,14 @@ export class SemanticCache {
   constructor(options: SemanticCacheOptions) {
     this.client = options.client;
     this.embedFn = options.embedFn;
+    this.embedderDescriptor = getEmbedderDescriptor(options.embedFn);
+    this.embeddingModel =
+      this.embedderDescriptor === undefined
+        ? undefined
+        : embedderFingerprint(this.embedderDescriptor);
+    this.onEmbeddingModelChange = options.onEmbeddingModelChange ?? 'throw';
+    this.logger = options.logger ?? console;
+
     this.name = options.name ?? 'betterdb_scache';
     this.indexName = `${this.name}:idx`;
     this.entryPrefix = `${this.name}:entry:`;
@@ -137,7 +160,7 @@ export class SemanticCache {
     this.similarityWindowKey = `${this.name}:__similarity_window`;
     this.missPendingKey = `${this.name}:__miss_pending`;
     this.configKey = `${this.name}:__config`;
-    this.embedKeyPrefix = `${this.name}:embed:`;
+    this.embedKeyPrefix = `${this.name}:embed:${embedSpaceTag(this.embeddingModel)}:`;
     this.defaultThreshold = options.defaultThreshold ?? 0.1;
     this.defaultTtl = options.defaultTtl;
     this._initialDefaultTtl = options.defaultTtl;
@@ -163,14 +186,6 @@ export class SemanticCache {
       tracerName: options.telemetry?.tracerName ?? '@betterdb/semantic-cache',
       registry: options.telemetry?.registry,
     });
-
-    this.embedderDescriptor = getEmbedderDescriptor(options.embedFn);
-    this.embeddingModel =
-      this.embedderDescriptor === undefined
-        ? undefined
-        : embedderFingerprint(this.embedderDescriptor);
-    this.onEmbeddingModelChange = options.onEmbeddingModelChange ?? 'throw';
-    this.logger = options.logger ?? console;
 
     this.analyticsOpts = options.analytics;
     this.usesDefaultCostTable = useDefault;
