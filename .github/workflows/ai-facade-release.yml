@@ -259,7 +259,12 @@ jobs:
               "module": "node16",
               "moduleResolution": "node16",
               "strict": true,
-              "skipLibCheck": false,
+              // Validate that @betterdb/ai's own subpaths resolve and expose the
+              // expected exports (missing modules/exports still surface as errors
+              // in check.ts). Skip lib checks so the framework SDKs' own .d.ts
+              // issues (missing json-schema/undici-types/ajv types, CJS/ESM
+              // interop) don't fail an otherwise-valid facade publish.
+              "skipLibCheck": true,
               "noEmit": true
             },
             "files": ["check.ts"]
