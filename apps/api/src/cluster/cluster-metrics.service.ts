@@ -11,7 +11,7 @@ import {
   CommandLogType,
 } from '../common/types/metrics.types';
 import { parseCommandStatsSection } from '../metrics/commandstats-parser';
-import { isClientReadCommand, isWriteCommand, sumWriteCalls } from './write-commands';
+import { isReadCommand, isWriteCommand, sumWriteCalls } from './write-commands';
 
 const MAX_KEYS_TO_CHECK_IN_SLOT = 10000;
 
@@ -567,7 +567,7 @@ export class ClusterMetricsService {
         }),
       ),
     ].filter((command) => {
-      if (isWriteCommand(command) || isClientReadCommand(command)) {
+      if (isWriteCommand(command) || isReadCommand(command)) {
         return false;
       }
       return !this.commandVerdicts.has(command);

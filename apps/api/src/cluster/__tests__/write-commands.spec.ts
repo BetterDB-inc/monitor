@@ -1,4 +1,4 @@
-import { isWriteCommand, sumWriteCalls } from '../write-commands';
+import { isReadCommand, isWriteCommand, sumWriteCalls } from '../write-commands';
 
 describe('isWriteCommand', () => {
   it.each([
@@ -39,6 +39,37 @@ describe('isWriteCommand', () => {
 
   it('is case-insensitive', () => {
     expect(isWriteCommand('SET')).toBe(true);
+  });
+});
+
+describe('isReadCommand', () => {
+  it.each(['get', 'mget', 'hgetall', 'lrange', 'zrange', 'scan', 'exists', 'ttl'])(
+    'rules out %s without asking the server',
+    (command) => {
+      expect(isReadCommand(command)).toBe(true);
+    },
+  );
+
+  it.each(['info', 'ping', 'command|info', 'cluster|nodes', 'config|get', 'client|list'])(
+    'rules out the polling command %s',
+    (command) => {
+      expect(isReadCommand(command)).toBe(true);
+    },
+  );
+
+  it('still rules out the commands the server flags write but a client reads', () => {
+    expect(isReadCommand('pfcount')).toBe(true);
+    expect(isReadCommand('eval_ro')).toBe(true);
+  });
+
+  it('does not rule out a write, nor a command it has never heard of', () => {
+    expect(isReadCommand('set')).toBe(false);
+    expect(isReadCommand('xgroup|create')).toBe(false);
+    expect(isReadCommand('json.get')).toBe(false);
+  });
+
+  it('is case-insensitive', () => {
+    expect(isReadCommand('GET')).toBe(true);
   });
 });
 
@@ -115,6 +146,23 @@ describe('sumWriteCalls', () => {
         { command: 'eval_ro', calls: 4 },
       ],
       classify,
+    );
+
+    expect(totals).toEqual({ writes: 0, unclassified: 0 });
+  });
+
+  it('attributes ordinary read traffic with no server verdicts at all', () => {
+    const totals = sumWriteCalls(
+      [
+        { command: 'get', calls: 900 },
+        { command: 'mget', calls: 120 },
+        { command: 'info', calls: 40 },
+        { command: 'command|info', calls: 1 },
+        { command: 'cluster|nodes', calls: 40 },
+      ],
+      () => {
+        return undefined;
+      },
     );
 
     expect(totals).toEqual({ writes: 0, unclassified: 0 });

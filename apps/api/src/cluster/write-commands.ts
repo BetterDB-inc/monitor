@@ -142,6 +142,152 @@ const CLIENT_READ_COMMANDS: ReadonlySet<string> = new Set([
   'pfcount',
 ]);
 
+/**
+ * Core commands that read the keyspace, plus the introspection this service
+ * issues against every node it polls.
+ *
+ * Naming them matters because `commandstats` is cumulative since the server
+ * started, so a single unnamed command name poisons the whole reading: the
+ * caller sees zero writes alongside unclassified traffic and falls back to
+ * `opsPerSec`. Without this set that fallback is not the exception — the
+ * poller's own `INFO` guarantees it on every node whenever `COMMAND INFO` is
+ * denied, renamed or otherwise unavailable, so a node serving pure reads
+ * raises a write alert.
+ *
+ * Like the write list this cannot be complete, and it does not need to be: a
+ * command absent from both lists is still resolved against the server, and
+ * still reported as unclassified when the server has no answer.
+ */
+const READ_COMMANDS: ReadonlySet<string> = new Set([
+  'auth',
+  'bitcount',
+  'bitfield_ro',
+  'bitpos',
+  'dbsize',
+  'dump',
+  'echo',
+  'exists',
+  'expiretime',
+  'geodist',
+  'geohash',
+  'geopos',
+  'geosearch',
+  'get',
+  'getbit',
+  'getrange',
+  'hello',
+  'hexists',
+  'hexpiretime',
+  'hget',
+  'hgetall',
+  'hkeys',
+  'hlen',
+  'hmget',
+  'hpexpiretime',
+  'hpttl',
+  'hrandfield',
+  'hscan',
+  'hstrlen',
+  'httl',
+  'hvals',
+  'info',
+  'keys',
+  'lastsave',
+  'lcs',
+  'lindex',
+  'llen',
+  'lolwut',
+  'lpos',
+  'lrange',
+  'mget',
+  'pexpiretime',
+  'ping',
+  'psubscribe',
+  'psync',
+  'pttl',
+  'publish',
+  'punsubscribe',
+  'randomkey',
+  'replconf',
+  'reset',
+  'scan',
+  'scard',
+  'sdiff',
+  'select',
+  'sinter',
+  'sintercard',
+  'sismember',
+  'smembers',
+  'smismember',
+  'sort_ro',
+  'spublish',
+  'srandmember',
+  'sscan',
+  'ssubscribe',
+  'strlen',
+  'subscribe',
+  'substr',
+  'sunion',
+  'sunsubscribe',
+  'sync',
+  'time',
+  'touch',
+  'ttl',
+  'type',
+  'unsubscribe',
+  'wait',
+  'waitaof',
+  'xlen',
+  'xpending',
+  'xrange',
+  'xread',
+  'xrevrange',
+  'zcard',
+  'zcount',
+  'zdiff',
+  'zinter',
+  'zintercard',
+  'zlexcount',
+  'zmscore',
+  'zrandmember',
+  'zrange',
+  'zrangebylex',
+  'zrangebyscore',
+  'zrank',
+  'zrevrange',
+  'zrevrangebylex',
+  'zrevrangebyscore',
+  'zrevrank',
+  'zscan',
+  'zscore',
+  'zunion',
+]);
+
+/**
+ * Container commands whose subcommands never write the keyspace. `CONFIG SET`
+ * and `CLUSTER SETSLOT` change the server, not the data a client would lose to
+ * a slot-cache refresh, so the whole container is safe to match on the parent
+ * the way the write list does.
+ *
+ * `xgroup` is deliberately absent: it writes, and the write list claims it
+ * first.
+ */
+const NON_KEYSPACE_CONTAINERS: ReadonlySet<string> = new Set([
+  'acl',
+  'client',
+  'cluster',
+  'command',
+  'config',
+  'function',
+  'latency',
+  'memory',
+  'object',
+  'pubsub',
+  'script',
+  'slowlog',
+  'xinfo',
+]);
+
 export interface WriteCallTotals {
   /** Calls across every command known to write. */
   writes: number;
@@ -167,10 +313,16 @@ export function isWriteCommand(command: string): boolean {
 }
 
 /**
- * True for a command that reads despite the server flagging it `write`.
+ * True for a command this module can rule out as a keyspace write without
+ * asking the server — either because it plainly reads, or because it reads
+ * despite the server flagging it `write`.
  */
-export function isClientReadCommand(command: string): boolean {
-  return CLIENT_READ_COMMANDS.has(command.toLowerCase());
+export function isReadCommand(command: string): boolean {
+  const name = command.toLowerCase();
+  if (CLIENT_READ_COMMANDS.has(name) || READ_COMMANDS.has(name)) {
+    return true;
+  }
+  return NON_KEYSPACE_CONTAINERS.has(name.split('|')[0]);
 }
 
 /**
@@ -194,7 +346,7 @@ export function sumWriteCalls(
       totals.writes += sample.calls;
       continue;
     }
-    if (isClientReadCommand(sample.command)) {
+    if (isReadCommand(sample.command)) {
       continue;
     }
     const verdict = classify(sample.command);
