@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "betterdb-ai"
-version = "0.1.0"
+version = "1.0.0"
 description = "One install for the BetterDB AI stack on Valkey: agent cache, semantic cache, retrieval, agent memory, and search helpers"
 keywords = [
     "valkey",
