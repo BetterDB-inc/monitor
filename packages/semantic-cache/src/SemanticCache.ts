@@ -45,6 +45,7 @@ import { clusterScan } from './cluster';
 import { createAnalytics, NOOP_ANALYTICS, type Analytics } from './analytics';
 import {
   DiscoveryManager,
+  REGISTRY_KEY,
   buildSemanticMetadata,
   readMarker,
   type DiscoveryOptions,
@@ -264,6 +265,18 @@ export class SemanticCache {
     await this.client.del(this.statsKey);
     await this.client.del(this.similarityWindowKey);
     await this.client.del(this.missPendingKey);
+
+    // The marker describes vectors that no longer exist, and one of the things
+    // it records is the model that produced them. Leaving it behind would make
+    // flush() unable to clear an embedding-model mismatch: the next
+    // initialize() would read the retired model off the stale marker and throw
+    // again, so the recovery the error recommends would destroy the cache and
+    // still refuse to start. registerDiscovery() writes a fresh one.
+    try {
+      await this.client.hdel(REGISTRY_KEY, this.name);
+    } catch (err: unknown) {
+      throw new ValkeyCommandError('HDEL', err);
+    }
   }
 
   /**
@@ -1397,10 +1410,17 @@ export class SemanticCache {
 
   private async _doInitialize(): Promise<void> {
     return this.traced('initialize', async () => {
+      // Captured before the first await, never after: a flush() landing during
+      // one of them bumps the generation, and a snapshot taken afterwards
+      // would adopt that bump and let this abandoned initialize race the one
+      // the flush expects to follow it.
+      const gen = this._initGeneration;
       // Runs before the index work so a 'flush' outcome drops the index
       // rather than adopting it and dropping it a moment later.
       await this.checkEmbeddingModel();
-      const gen = this._initGeneration;
+      if (this._initGeneration !== gen) {
+        return;
+      }
       const { dim, hasBinaryRefs } = await this.ensureIndexAndGetDimension();
       if (this._initGeneration !== gen) {
         return;
@@ -1434,12 +1454,19 @@ export class SemanticCache {
    * would score against vectors it cannot be compared with.
    */
   private async checkEmbeddingModel(): Promise<void> {
-    const marker = await readMarker(this.client, this.name);
-    if (marker === null) {
+    const read = await readMarker(this.client, this.name);
+    if (read.status === 'absent') {
+      return;
+    }
+    if (read.status === 'unreadable') {
+      this.warnAboutEmbeddingModel(
+        `${read.reason}, so the embedding model behind the existing entries cannot be ` +
+          'verified. flush() if you cannot otherwise account for what populated them.',
+      );
       return;
     }
 
-    const recorded = marker.embedding_model;
+    const recorded = read.marker.embedding_model;
     const existing = typeof recorded === 'string' ? recorded : undefined;
     const current = this.embeddingModel;
 
