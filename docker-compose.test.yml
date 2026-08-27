@@ -120,10 +120,6 @@ services:
     restart: "no"
     entrypoint: >
       sh -c "
-        valkey-cli --cluster create
-          127.0.0.1:6401
-          127.0.0.1:6402
-          127.0.0.1:6403
-          --cluster-replicas 0 --cluster-yes &&
+        valkey-cli --cluster create 127.0.0.1:6401 127.0.0.1:6402 127.0.0.1:6403 --cluster-replicas 0 --cluster-yes &&
         echo 'Cluster created successfully'
       "
