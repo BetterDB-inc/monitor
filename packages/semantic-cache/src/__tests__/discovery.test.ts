@@ -8,6 +8,7 @@ import {
   PROTOCOL_VERSION,
   REGISTRY_KEY,
   buildSemanticMetadata,
+  readMarker,
   type MarkerMetadata,
 } from '../discovery';
 import { SemanticCacheUsageError } from '../errors';
@@ -170,6 +171,68 @@ describe('buildSemanticMetadata', () => {
     });
     expect(meta.category_thresholds).toBeUndefined();
   });
+
+  it('carries the embedding model and descriptor when the embedder is described', () => {
+    const meta = buildSemanticMetadata({
+      name: 'foo',
+      version: '0.2.0',
+      defaultThreshold: 0.1,
+      categoryThresholds: {},
+      uncertaintyBand: 0.05,
+      includeCategories: true,
+      embeddingModel: 'openai:text-embedding-3-small',
+      embeddingDescriptor: { provider: 'openai', model: 'text-embedding-3-small' },
+    });
+    expect(meta.embedding_model).toBe('openai:text-embedding-3-small');
+    expect(meta.embedding_descriptor).toEqual({
+      provider: 'openai',
+      model: 'text-embedding-3-small',
+    });
+  });
+
+  it('omits both embedding keys when the embedder is undescribed', () => {
+    const meta = buildSemanticMetadata({
+      name: 'foo',
+      version: '0.2.0',
+      defaultThreshold: 0.1,
+      categoryThresholds: {},
+      uncertaintyBand: 0.05,
+      includeCategories: true,
+    });
+    expect(Object.hasOwn(meta, 'embedding_model')).toBe(false);
+    expect(Object.hasOwn(meta, 'embedding_descriptor')).toBe(false);
+  });
+});
+
+describe('readMarker', () => {
+  it('returns the parsed marker a previous run wrote', async () => {
+    const client = new FakeClient();
+    client.hashes.set(REGISTRY_KEY, new Map([['foo', JSON.stringify(metadataFor('foo'))]]));
+
+    const marker = await readMarker(asValkey(client), 'foo');
+
+    expect(marker?.prefix).toBe('foo');
+  });
+
+  it('returns null when there is no marker for this name', async () => {
+    const client = new FakeClient();
+
+    await expect(readMarker(asValkey(client), 'missing')).resolves.toBeNull();
+  });
+
+  it('returns null for a marker that is not parseable JSON', async () => {
+    const client = new FakeClient();
+    client.hashes.set(REGISTRY_KEY, new Map([['foo', 'not json']]));
+
+    await expect(readMarker(asValkey(client), 'foo')).resolves.toBeNull();
+  });
+
+  it('returns null when the read itself fails', async () => {
+    const client = new FakeClient();
+    client.failHgetOnce();
+
+    await expect(readMarker(asValkey(client), 'foo')).resolves.toBeNull();
+  });
 });
 
 describe('DiscoveryManager.register', () => {
@@ -246,7 +309,9 @@ describe('DiscoveryManager.register', () => {
     await mgr.register();
 
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/overwriting marker/));
-    const parsed = JSON.parse(client.hashes.get(REGISTRY_KEY)?.get('foo') ?? '{}') as MarkerMetadata;
+    const parsed = JSON.parse(
+      client.hashes.get(REGISTRY_KEY)?.get('foo') ?? '{}',
+    ) as MarkerMetadata;
     expect(parsed.version).toBe('0.2.0');
 
     await mgr.stop({ deleteHeartbeat: true });
@@ -319,9 +384,7 @@ describe('DiscoveryManager heartbeat', () => {
 
     await mgr.tickHeartbeat();
 
-    const heartbeatSet = client.setCalls.find(
-      (c) => c.key === `${HEARTBEAT_KEY_PREFIX}foo`,
-    );
+    const heartbeatSet = client.setCalls.find((c) => c.key === `${HEARTBEAT_KEY_PREFIX}foo`);
     expect(heartbeatSet).toBeDefined();
     const exIndex = heartbeatSet?.args.indexOf('EX') ?? -1;
     expect(exIndex).toBeGreaterThanOrEqual(0);

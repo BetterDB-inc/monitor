@@ -1,6 +1,6 @@
 import { hostname } from 'node:os';
 
-import type { Valkey } from './types';
+import type { EmbedderDescriptor, Valkey } from './types';
 import { SemanticCacheUsageError } from './errors';
 
 export const PROTOCOL_VERSION = 1;
@@ -41,6 +41,8 @@ export interface BuildSemanticMetadataInput {
   categoryThresholds: Record<string, number>;
   uncertaintyBand: number;
   includeCategories: boolean;
+  embeddingModel?: string;
+  embeddingDescriptor?: EmbedderDescriptor;
 }
 
 export function buildSemanticMetadata(input: BuildSemanticMetadataInput): MarkerMetadata {
@@ -62,7 +64,42 @@ export function buildSemanticMetadata(input: BuildSemanticMetadataInput): Marker
   if (input.includeCategories && Object.keys(input.categoryThresholds).length > 0) {
     metadata.category_thresholds = { ...input.categoryThresholds };
   }
+  // An undescribed embedder leaves both keys absent, which is what the
+  // model-change check reads as "unknown" rather than "changed".
+  if (input.embeddingModel !== undefined) {
+    metadata.embedding_model = input.embeddingModel;
+  }
+  if (input.embeddingDescriptor !== undefined) {
+    metadata.embedding_descriptor = { ...input.embeddingDescriptor };
+  }
   return metadata;
+}
+
+/**
+ * Read the marker a previous run left for this cache name.
+ *
+ * Returns null when there is no marker, when the read fails, or when the
+ * stored value is not parseable JSON — all of which mean "nothing reliable to
+ * compare against", never "something changed".
+ */
+export async function readMarker(
+  client: Valkey,
+  name: string,
+): Promise<Partial<MarkerMetadata> | null> {
+  let raw: string | null;
+  try {
+    raw = await client.hget(REGISTRY_KEY, name);
+  } catch {
+    return null;
+  }
+  if (raw === null) {
+    return null;
+  }
+  try {
+    return JSON.parse(raw) as Partial<MarkerMetadata>;
+  } catch {
+    return null;
+  }
 }
 
 export interface DiscoveryLogger {
