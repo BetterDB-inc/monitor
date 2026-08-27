@@ -14,6 +14,24 @@ export interface ConfigRefreshOptions {
 
 export type EmbedFn = (text: string) => Promise<number[]>;
 
+/**
+ * Identity of the model that produces a vector.
+ *
+ * `params` carries only what changes the vector space — task type, input type,
+ * output dimensionality. Credentials, base URLs and timeouts do not belong
+ * here: they change how the vector is fetched, not what it means.
+ */
+export interface EmbedderDescriptor {
+  provider: string;
+  model: string;
+  params?: Record<string, string | number | undefined>;
+}
+
+/** An {@link EmbedFn} that knows which model produced its vectors. */
+export interface DescribedEmbedFn extends EmbedFn {
+  readonly descriptor: EmbedderDescriptor;
+}
+
 export interface ModelCost {
   inputPer1k: number;
   outputPer1k: number;
