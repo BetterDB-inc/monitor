@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Embedding model change detection** — `initialize()` now compares the
+  embedding model recorded in the discovery marker against the model this
+  process embeds with, and refuses to serve a cache built in a different
+  vector space. Controlled by the new `onEmbeddingModelChange` option:
+  `'throw'` (default), `'warn'`, or `'flush'`.
+- **Described embedders** — every `create*Embed()` helper now returns a
+  `DescribedEmbedFn` carrying provider, model, and the options that change
+  the vector space. `describeEmbedder()`, `embedderFingerprint()`, and
+  `getEmbedderDescriptor()` are exported so a hand-rolled `embedFn` can opt
+  in. Detection is inactive for an undescribed embedder, which warns once.
+- **`embedding_model` / `embedding_descriptor`** on the discovery marker,
+  omitted when the embedder is undescribed.
+- Optional `logger` option (default: `console`) for the operational warnings
+  above. Pass `{ warn: () => {} }` to silence them.
+
+### Changed
+
+- **BREAKING (behaviour): changing the embedding model now fails at startup.**
+  An operator who swaps embedding model on upgrade previously got silent
+  corruption — every `check()` scored against vectors from an incomparable
+  space. They now get an `EmbeddingModelChangedError` from `initialize()`
+  naming both models. Set `onEmbeddingModelChange: 'warn'` to restore the old
+  behaviour, or `'flush'` to discard the cache and start clean. Caches
+  written before this release record no model, so upgrading on its own warns
+  once and adopts; it does not throw.
+- The embedding cache is now namespaced by embedder identity
+  (`{name}:embed:{tag}:{hash}`). Existing embedding-cache entries are not
+  read after upgrade and expire on their own TTL; cached *responses* are
+  untouched.
+
 ## [0.11.0] - 2026-07-12
 
 ### Added
