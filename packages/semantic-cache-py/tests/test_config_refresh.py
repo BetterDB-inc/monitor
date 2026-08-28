@@ -6,6 +6,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
+from betterdb_semantic_cache.constants import TTL_SECONDS_MAX, TTL_SECONDS_MIN
 from betterdb_semantic_cache.semantic_cache import SemanticCache
 from betterdb_semantic_cache.types import (
     ConfigRefreshOptions,
@@ -395,7 +396,8 @@ async def test_ttl_ignores_negative():
 
 @pytest.mark.asyncio
 async def test_ttl_ignores_below_minimum():
-    cache, client = _make_cache(config={"ttl": "9"}, default_ttl=300, enabled=False)
+    config = {"ttl": str(TTL_SECONDS_MIN - 1)}
+    cache, client = _make_cache(config=config, default_ttl=300, enabled=False)
     await cache.initialize()
     await cache.refresh_config()
     await cache.store("prompt", "response")
@@ -404,11 +406,32 @@ async def test_ttl_ignores_below_minimum():
 
 @pytest.mark.asyncio
 async def test_ttl_ignores_above_maximum():
-    cache, client = _make_cache(config={"ttl": "86401"}, default_ttl=300, enabled=False)
+    config = {"ttl": str(TTL_SECONDS_MAX + 1)}
+    cache, client = _make_cache(config=config, default_ttl=300, enabled=False)
     await cache.initialize()
     await cache.refresh_config()
     await cache.store("prompt", "response")
     client.expire.assert_called_with(ANY, 300)
+
+
+@pytest.mark.asyncio
+async def test_ttl_accepts_the_canonical_minimum():
+    config = {"ttl": str(TTL_SECONDS_MIN)}
+    cache, client = _make_cache(config=config, default_ttl=300, enabled=False)
+    await cache.initialize()
+    await cache.refresh_config()
+    await cache.store("prompt", "response")
+    client.expire.assert_called_with(ANY, TTL_SECONDS_MIN)
+
+
+@pytest.mark.asyncio
+async def test_ttl_accepts_the_canonical_maximum():
+    config = {"ttl": str(TTL_SECONDS_MAX)}
+    cache, client = _make_cache(config=config, default_ttl=300, enabled=False)
+    await cache.initialize()
+    await cache.refresh_config()
+    await cache.store("prompt", "response")
+    client.expire.assert_called_with(ANY, TTL_SECONDS_MAX)
 
 
 @pytest.mark.asyncio

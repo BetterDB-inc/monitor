@@ -4,6 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createRequire } from 'node:module';
 import { z } from 'zod';
+import { TTL_SECONDS_MAX, TTL_SECONDS_MIN } from './constants.js';
 import { initTelemetry, trackToolCall, stopTelemetry } from './telemetry.js';
 
 const require = createRequire(import.meta.url);
@@ -1185,9 +1186,9 @@ server.tool(
     new_ttl_seconds: z
       .number()
       .int()
-      .min(10)
-      .max(86400)
-      .describe('Proposed TTL in seconds (10–86400)'),
+      .min(TTL_SECONDS_MIN)
+      .max(TTL_SECONDS_MAX)
+      .describe(`Proposed TTL in seconds (${TTL_SECONDS_MIN}–${TTL_SECONDS_MAX})`),
     reasoning: z.string().min(20).describe('Why the change is being proposed (≥20 chars)'),
     instanceId: z
       .string()
@@ -1479,8 +1480,8 @@ server.tool(
     new_ttl_seconds: z
       .number()
       .int()
-      .min(10)
-      .max(86400)
+      .min(TTL_SECONDS_MIN)
+      .max(TTL_SECONDS_MAX)
       .optional()
       .describe('For tool_ttl_adjust proposals'),
     actor: z

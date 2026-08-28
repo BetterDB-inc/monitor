@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SemanticCache } from '../SemanticCache';
 import type { Valkey } from '../types';
+import { TTL_SECONDS_MAX, TTL_SECONDS_MIN } from '../constants';
 
 function makeMockClient(initialConfig: Record<string, string> = {}) {
   let configResponse: Record<string, string> = { ...initialConfig };
@@ -69,7 +70,7 @@ describe('config refresh', () => {
       client: client as unknown as Valkey,
       embedFn: vi.fn(async () => [0.1, 0.2]),
       name: 'cfg_test',
-      defaultThreshold: 0.10,
+      defaultThreshold: 0.1,
       embeddingCache: { enabled: false },
     });
     await cache.initialize();
@@ -87,7 +88,7 @@ describe('config refresh', () => {
       client: client as unknown as Valkey,
       embedFn: vi.fn(async () => [0.1, 0.2]),
       name: 'cfg_categories',
-      defaultThreshold: 0.10,
+      defaultThreshold: 0.1,
       embeddingCache: { enabled: false },
     });
     await cache.initialize();
@@ -118,12 +119,12 @@ describe('config refresh', () => {
       client: client as unknown as Valkey,
       embedFn: vi.fn(async () => [0.1, 0.2]),
       name: 'cfg_nan',
-      defaultThreshold: 0.20,
+      defaultThreshold: 0.2,
       embeddingCache: { enabled: false },
     });
     await cache.initialize();
     await flushMicrotasks(5);
-    expect(cache._defaultThreshold).toBeCloseTo(0.20);
+    expect(cache._defaultThreshold).toBeCloseTo(0.2);
   });
 
   it('ignores out-of-range values', async () => {
@@ -135,14 +136,14 @@ describe('config refresh', () => {
       client: client as unknown as Valkey,
       embedFn: vi.fn(async () => [0.1, 0.2]),
       name: 'cfg_range',
-      defaultThreshold: 0.20,
-      categoryThresholds: { faq: 0.10 },
+      defaultThreshold: 0.2,
+      categoryThresholds: { faq: 0.1 },
       embeddingCache: { enabled: false },
     });
     await cache.initialize();
     await flushMicrotasks(5);
-    expect(cache._defaultThreshold).toBeCloseTo(0.20);
-    expect(cache._categoryThresholds['faq']).toBeCloseTo(0.10);
+    expect(cache._defaultThreshold).toBeCloseTo(0.2);
+    expect(cache._categoryThresholds['faq']).toBeCloseTo(0.1);
   });
 
   it('refreshes on the configured interval', async () => {
@@ -153,7 +154,7 @@ describe('config refresh', () => {
         client: client as unknown as Valkey,
         embedFn: vi.fn(async () => [0.1, 0.2]),
         name: 'cfg_interval',
-        defaultThreshold: 0.10,
+        defaultThreshold: 0.1,
         configRefresh: { intervalMs: 2000 },
         embeddingCache: { enabled: false },
       });
@@ -182,17 +183,17 @@ describe('config refresh', () => {
         client: client as unknown as Valkey,
         embedFn: vi.fn(async () => [0.1, 0.2]),
         name: 'cfg_disabled',
-        defaultThreshold: 0.20,
+        defaultThreshold: 0.2,
         configRefresh: { enabled: false },
         embeddingCache: { enabled: false },
       });
       await cache.initialize();
       await flushMicrotasks(5);
-      expect(cache._defaultThreshold).toBeCloseTo(0.20);
+      expect(cache._defaultThreshold).toBeCloseTo(0.2);
 
       vi.advanceTimersByTime(60_000);
       await flushMicrotasks(5);
-      expect(cache._defaultThreshold).toBeCloseTo(0.20);
+      expect(cache._defaultThreshold).toBeCloseTo(0.2);
     } finally {
       vi.useRealTimers();
     }
@@ -270,7 +271,7 @@ describe('config refresh', () => {
         client: client as unknown as Valkey,
         embedFn: vi.fn(async () => [0.1, 0.2]),
         name: 'cfg_remove_cat',
-        defaultThreshold: 0.10,
+        defaultThreshold: 0.1,
         configRefresh: { intervalMs: 1000 },
         embeddingCache: { enabled: false },
       });
@@ -372,8 +373,8 @@ describe('TTL runtime override', () => {
     expect(client.expire).toHaveBeenCalledWith(expect.stringMatching(/:entry:/), 300);
   });
 
-  it('ignores ttl below minimum (9)', async () => {
-    const client = makeMockClient({ ttl: '9' });
+  it('ignores a ttl one below the canonical minimum', async () => {
+    const client = makeMockClient({ ttl: String(TTL_SECONDS_MIN - 1) });
     const cache = new SemanticCache({
       client: client as unknown as Valkey,
       embedFn: vi.fn(async () => [0.1, 0.2]),
@@ -387,8 +388,8 @@ describe('TTL runtime override', () => {
     expect(client.expire).toHaveBeenCalledWith(expect.stringMatching(/:entry:/), 300);
   });
 
-  it('ignores ttl above maximum (86401)', async () => {
-    const client = makeMockClient({ ttl: '86401' });
+  it('ignores a ttl one above the canonical maximum', async () => {
+    const client = makeMockClient({ ttl: String(TTL_SECONDS_MAX + 1) });
     const cache = new SemanticCache({
       client: client as unknown as Valkey,
       embedFn: vi.fn(async () => [0.1, 0.2]),
@@ -400,6 +401,36 @@ describe('TTL runtime override', () => {
     await flushMicrotasks(5);
     await cache.store('prompt', 'response');
     expect(client.expire).toHaveBeenCalledWith(expect.stringMatching(/:entry:/), 300);
+  });
+
+  it('accepts the canonical minimum ttl', async () => {
+    const client = makeMockClient({ ttl: String(TTL_SECONDS_MIN) });
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: vi.fn(async () => [0.1, 0.2]),
+      name: 'ttl_at_min',
+      defaultTtl: 300,
+      embeddingCache: { enabled: false },
+    });
+    await cache.initialize();
+    await flushMicrotasks(5);
+    await cache.store('prompt', 'response');
+    expect(client.expire).toHaveBeenCalledWith(expect.stringMatching(/:entry:/), TTL_SECONDS_MIN);
+  });
+
+  it('accepts the canonical maximum ttl', async () => {
+    const client = makeMockClient({ ttl: String(TTL_SECONDS_MAX) });
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: vi.fn(async () => [0.1, 0.2]),
+      name: 'ttl_at_max',
+      defaultTtl: 300,
+      embeddingCache: { enabled: false },
+    });
+    await cache.initialize();
+    await flushMicrotasks(5);
+    await cache.store('prompt', 'response');
+    expect(client.expire).toHaveBeenCalledWith(expect.stringMatching(/:entry:/), TTL_SECONDS_MAX);
   });
 
   it('ignores non-integer ttl', async () => {

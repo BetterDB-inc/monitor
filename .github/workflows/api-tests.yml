@@ -16,8 +16,25 @@ on:
       - 'packages/**'
       - 'proprietary/**'
       - 'pnpm-lock.yaml'
+      - 'scripts/**'
 
 jobs:
+  constants-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check canonical TTL bounds against every mirror
+        run: node scripts/check-ttl-constants.mjs
+
   api-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15

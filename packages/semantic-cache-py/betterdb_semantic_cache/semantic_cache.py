@@ -12,6 +12,7 @@ from opentelemetry.trace import StatusCode
 
 from .analytics import NOOP_ANALYTICS, Analytics, create_analytics
 from .cluster import cluster_scan
+from .constants import TTL_SECONDS_MAX, TTL_SECONDS_MIN
 from .default_cost_table import DEFAULT_COST_TABLE
 from .discovery import (
     BuildSemanticMetadataInput,
@@ -1103,7 +1104,8 @@ class SemanticCache:
         self._default_threshold = next_default
         self._category_thresholds = next_category
 
-        # TTL — integer seconds in 10..86400. Falls back to constructor value when absent or invalid.
+        # TTL — integer seconds within the canonical bounds. Falls back to the
+        # constructor value when absent or invalid.
         next_ttl = self._initial_default_ttl
         if raw:
             ttl_key = b"ttl" if any(isinstance(k, bytes) for k in raw) else "ttl"
@@ -1112,7 +1114,7 @@ class SemanticCache:
                 ttl_str = ttl_raw.decode() if isinstance(ttl_raw, bytes) else ttl_raw
                 try:
                     parsed = int(ttl_str)
-                    if 10 <= parsed <= 86400:
+                    if TTL_SECONDS_MIN <= parsed <= TTL_SECONDS_MAX:
                         next_ttl = parsed
                 except (ValueError, TypeError):
                     pass
