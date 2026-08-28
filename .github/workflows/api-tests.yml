@@ -204,12 +204,15 @@ jobs:
 
   api-tests:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.branch || github.ref }}
+          persist-credentials: false
 
       - uses: pnpm/action-setup@v4
 
@@ -247,12 +250,15 @@ jobs:
 
   ai-facade-tests:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.branch || github.ref }}
+          persist-credentials: false
 
       - uses: pnpm/action-setup@v4
 

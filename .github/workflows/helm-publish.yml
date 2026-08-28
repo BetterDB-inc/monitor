@@ -39,6 +39,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # Fail before anything is published if the publish token is missing or the
       # chart's version has drifted from the app. Chart.yaml is not templated, so
