@@ -66,12 +66,16 @@ function expandGlob(glob) {
     return [];
   }
 
-  const entries = readdirSync(baseDir).filter((entry) => {
-    return statSync(join(baseDir, entry)).isDirectory();
+  const entries = readdirSync(baseDir, { withFileTypes: true }).filter((entry) => {
+    if (entry.name === 'node_modules') {
+      return false;
+    }
+    const stats = statSync(join(baseDir, entry.name), { throwIfNoEntry: false });
+    return stats !== undefined && stats.isDirectory();
   });
 
   return entries.map((entry) => {
-    return `${base}/${entry}`;
+    return `${base}/${entry.name}`;
   });
 }
 
