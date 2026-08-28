@@ -12,8 +12,9 @@ const dim = 8;
 
 const fakeEmbed: EmbedFn = async (text: string) => {
   const hash = sha256(text);
-  const vec = Array.from({ length: dim }, (_, i) =>
-    parseInt(hash.slice(i * 2, i * 2 + 2), 16) / 255,
+  const vec = Array.from(
+    { length: dim },
+    (_, i) => parseInt(hash.slice(i * 2, i * 2 + 2), 16) / 255,
   );
   const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
   return vec.map((v) => v / norm);
@@ -37,7 +38,14 @@ beforeAll(async () => {
   try {
     await client.connect();
     await client.ping();
-  } catch {
+    await client.call('FT._LIST');
+  } catch (error) {
+    if (process.env.CI === 'true' && process.env.ALLOW_INTEGRATION_SKIP !== 'true') {
+      throw new Error(
+        `No usable server at ${VALKEY_URL} — this suite cannot verify anything. ` +
+          `Set ALLOW_INTEGRATION_SKIP=true to skip it instead. Cause: ${String(error)}`,
+      );
+    }
     skip = true;
     // Suppress further error events from the disconnected client
     client.on('error', () => {});
@@ -134,9 +142,7 @@ describe('SemanticCache integration', () => {
       telemetry: { registry },
     });
 
-    await expect(uninitCache.store('test', 'test')).rejects.toThrow(
-      SemanticCacheUsageError,
-    );
+    await expect(uninitCache.store('test', 'test')).rejects.toThrow(SemanticCacheUsageError);
   });
 
   it('stats() returns correct counts after hits and misses', async () => {
@@ -327,7 +333,7 @@ describe('SemanticCache integration', () => {
         client,
         embedFn: controlledEmbed,
         defaultThreshold: 0.15,
-        uncertaintyBand: 0.10,
+        uncertaintyBand: 0.1,
         telemetry: { registry: judgeRegistry },
         embeddingCache: { enabled: false },
       });

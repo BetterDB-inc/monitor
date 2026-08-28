@@ -55,7 +55,14 @@ beforeAll(async () => {
   try {
     await client.connect();
     await client.ping();
-  } catch {
+    await client.call('FT._LIST');
+  } catch (error) {
+    if (process.env.CI === 'true' && process.env.ALLOW_INTEGRATION_SKIP !== 'true') {
+      throw new Error(
+        `No usable server at ${VALKEY_URL} — this suite cannot verify anything. ` +
+          `Set ALLOW_INTEGRATION_SKIP=true to skip it instead. Cause: ${String(error)}`,
+      );
+    }
     skip = true;
     return;
   }
@@ -145,7 +152,12 @@ describe('MemoryStore integration (real valkey-search)', () => {
     await pollUntil(async () => (await ftCount('@namespace:{cons}')) >= 2);
 
     const summarize = vi.fn(async (items: { id: string }[]) => `Summary of ${items.length} notes`);
-    const result = await store.consolidate({ namespace: 'cons', maxImportance: 0.5, summarize });
+    const result = await store.consolidate({
+      mode: 'summary',
+      namespace: 'cons',
+      maxImportance: 0.5,
+      summarize,
+    });
 
     expect(summarize).toHaveBeenCalledTimes(1);
     expect(result.consolidated).toBe(2);

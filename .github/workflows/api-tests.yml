@@ -18,6 +18,181 @@ on:
       - 'pnpm-lock.yaml'
 
 jobs:
+  test-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      node_matrix: ${{ steps.select.outputs.node_matrix }}
+      python_matrix: ${{ steps.select.outputs.python_matrix }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Select the suites this change affects
+        id: select
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: node scripts/ci-test-matrix.mjs
+
+  package-tests:
+    needs: test-matrix
+    if: needs.test-matrix.outputs.node_matrix != '[]'
+    name: package (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.test-matrix.outputs.node_matrix) }}
+
+    services:
+      valkey:
+        image: valkey/valkey-bundle:9.1-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    env:
+      VALKEY_URL: redis://localhost:6379
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build ${{ matrix.name }} and its dependencies
+        run: pnpm build --filter ${{ matrix.name }}
+
+      - name: Run ${{ matrix.name }} tests
+        run: pnpm --filter ${{ matrix.name }} test ${{ matrix.testArgs }}
+
+  package-tests-python:
+    needs: test-matrix
+    if: needs.test-matrix.outputs.python_matrix != '[]'
+    name: package (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.test-matrix.outputs.python_matrix) }}
+
+    services:
+      valkey:
+        image: valkey/valkey-bundle:9.1-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    env:
+      VALKEY_URL: redis://localhost:6379
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ${{ matrix.name }} and its local dependencies
+        run: ${{ matrix.install }}
+
+      - name: Run ${{ matrix.name }} tests
+        working-directory: ${{ matrix.dir }}
+        run: pytest tests/ -q
+
+  package-cluster-tests:
+    needs: test-matrix
+    if: >-
+      contains(needs.test-matrix.outputs.node_matrix, '@betterdb/agent-cache') ||
+      contains(needs.test-matrix.outputs.node_matrix, '@betterdb/semantic-cache')
+    name: package cluster suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      VALKEY_CLUSTER_NODES: localhost:6401,localhost:6402,localhost:6403
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Start the three-node Valkey cluster
+        run: |
+          docker compose -p betterdb-test -f docker-compose.test.yml up -d \
+            valkey-cluster-1 valkey-cluster-2 valkey-cluster-3 valkey-cluster-init
+          for _ in $(seq 1 60); do
+            if docker exec betterdb-test-cluster-1 valkey-cli -p 6401 cluster info \
+              | grep -q '^cluster_state:ok'; then
+              echo 'Cluster reached cluster_state:ok'
+              exit 0
+            fi
+            sleep 2
+          done
+          echo 'Cluster never reached cluster_state:ok'
+          docker compose -p betterdb-test -f docker-compose.test.yml logs valkey-cluster-init
+          exit 1
+
+      - name: Build the packages under test
+        run: pnpm build --filter @betterdb/agent-cache --filter @betterdb/semantic-cache
+
+      - name: Run @betterdb/agent-cache cluster suite
+        run: >-
+          pnpm --filter @betterdb/agent-cache exec vitest run
+          src/__tests__/AgentCache.cluster.integration.test.ts
+
+      - name: Run @betterdb/semantic-cache cluster suite
+        run: >-
+          pnpm --filter @betterdb/semantic-cache exec vitest run
+          src/__tests__/SemanticCache.cluster.integration.test.ts
+
+      - name: Show cluster logs on failure
+        if: failure()
+        run: |
+          docker compose -p betterdb-test -f docker-compose.test.yml logs \
+            valkey-cluster-1 valkey-cluster-2 valkey-cluster-3
+
   api-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -114,8 +289,4 @@ jobs:
 
       - name: Run betterdb-ai export completeness guard
         working-directory: packages/ai-py
-        run: pytest tests/ -q
-
-      - name: Run betterdb-semantic-cache tests
-        working-directory: packages/semantic-cache-py
         run: pytest tests/ -q
