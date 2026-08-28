@@ -289,7 +289,7 @@ export class ClientAnalyticsAnalysisService {
         connectionId,
       });
     } catch (error) {
-      this.logger.error('Failed to fetch snapshots for activity timeline', error);
+      this.logger.error(`Failed to fetch snapshots for activity timeline for ${connectionId}`, error);
       throw new HttpException('Failed to fetch analytics data', HttpStatus.INTERNAL_SERVER_ERROR);
     }
 
