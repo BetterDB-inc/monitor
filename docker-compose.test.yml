@@ -59,13 +59,9 @@ services:
     image: valkey/valkey-bundle:9.1-alpine
     container_name: betterdb-test-cluster-1
     network_mode: host
-    command: >
-      valkey-server
-      --port 6401
-      --cluster-enabled yes
-      --cluster-config-file nodes.conf
-      --cluster-node-timeout 5000
-      --appendonly no
+    volumes:
+      - ./docker/valkey-cluster-node.conf:/etc/valkey/cluster-node.conf:ro
+    command: ["/etc/valkey/cluster-node.conf", "--port", "6401"]
     healthcheck:
       test: ["CMD", "valkey-cli", "-p", "6401", "ping"]
       interval: 3s
@@ -76,13 +72,9 @@ services:
     image: valkey/valkey-bundle:9.1-alpine
     container_name: betterdb-test-cluster-2
     network_mode: host
-    command: >
-      valkey-server
-      --port 6402
-      --cluster-enabled yes
-      --cluster-config-file nodes.conf
-      --cluster-node-timeout 5000
-      --appendonly no
+    volumes:
+      - ./docker/valkey-cluster-node.conf:/etc/valkey/cluster-node.conf:ro
+    command: ["/etc/valkey/cluster-node.conf", "--port", "6402"]
     healthcheck:
       test: ["CMD", "valkey-cli", "-p", "6402", "ping"]
       interval: 3s
@@ -93,13 +85,9 @@ services:
     image: valkey/valkey-bundle:9.1-alpine
     container_name: betterdb-test-cluster-3
     network_mode: host
-    command: >
-      valkey-server
-      --port 6403
-      --cluster-enabled yes
-      --cluster-config-file nodes.conf
-      --cluster-node-timeout 5000
-      --appendonly no
+    volumes:
+      - ./docker/valkey-cluster-node.conf:/etc/valkey/cluster-node.conf:ro
+    command: ["/etc/valkey/cluster-node.conf", "--port", "6403"]
     healthcheck:
       test: ["CMD", "valkey-cli", "-p", "6403", "ping"]
       interval: 3s

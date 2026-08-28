@@ -77,20 +77,8 @@ beforeAll(async () => {
 
   cacheName = `betterdb_sc_cluster_${Date.now()}`;
 
-  // FT.CREATE has no key, so a cluster client sends it to one node and the index
-  // exists only there. Every master needs its own — see "Cluster mode" in the
-  // package README.
-  for (const node of client.nodes('master')) {
-    const perNode = new SemanticCache({
-      name: cacheName,
-      client: node,
-      embedFn: fakeEmbed,
-      defaultThreshold: 0.1,
-      uncertaintyBand: 0.05,
-    });
-    await perNode.initialize();
-  }
-
+  // The nodes run valkey-search with --use-coordinator, so a single FT.CREATE
+  // propagates the index to every master and FT.SEARCH fans out across shards.
   cache = new SemanticCache({
     name: cacheName,
     client: client as unknown as Valkey,
@@ -141,8 +129,11 @@ describe('SemanticCache cluster integration', () => {
     const results = await cache.checkBatch(prompts);
 
     expect(results).toHaveLength(prompts.length);
-    for (const result of results) {
-      expect(typeof result.hit).toBe('boolean');
+    for (const [index, result] of results.entries()) {
+      expect(result).toMatchObject({
+        hit: true,
+        response: responseFor(prompts[index]),
+      });
     }
   });
 
@@ -159,9 +150,7 @@ describe('SemanticCache cluster integration', () => {
     const results = await cache.checkBatch(prompts);
 
     for (const result of results) {
-      if (result.hit === false) {
-        continue;
-      }
+      expect(result.hit).toBe(true);
       expect(stored.has(String(result.response))).toBe(true);
     }
   });
