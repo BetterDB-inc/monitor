@@ -436,7 +436,7 @@ await client.quit();
 
 Load `valkey-search` with `--use-coordinator` on every node. With the coordinator running, a single `FT.CREATE` propagates the index to all masters and `FT.SEARCH` fans out across shards; without it each node only creates and searches its own index, so results are silently partial.
 
-`flush()` fans out via `clusterScan()` across all master nodes, but batches a multi-key `DEL` per node, which a cluster rejects with `CROSSSLOT`. Delete cluster keys one at a time until this is fixed.
+`flush()` fans out via `clusterScan()` across all master nodes and `invalidate()` deletes what `FT.SEARCH` returns from every shard. Both delete one key per command, because a cluster rejects a multi-key `DEL` with `CROSSSLOT` — the keys carry no hash tag, so they scatter across slots by design.
 
 ### Streaming
 

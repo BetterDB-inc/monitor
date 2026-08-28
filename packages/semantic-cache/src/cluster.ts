@@ -2,6 +2,15 @@ import type Valkey from 'iovalkey';
 import { Cluster } from 'iovalkey';
 import { ValkeyCommandError } from './errors';
 
+/**
+ * True when the client talks to a cluster, so callers can pick a command shape
+ * the cluster accepts. Multi-key commands are the usual reason to ask: a
+ * cluster rejects them with CROSSSLOT unless every key hashes to one slot.
+ */
+export function isClusterClient(client: Valkey): boolean {
+  return client instanceof Cluster;
+}
+
 function getMasterNodes(client: Valkey): Valkey[] {
   if (!(client instanceof Cluster)) return [client];
   // Cast needed: TypeScript can't narrow Valkey & Cluster because both classes

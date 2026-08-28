@@ -43,6 +43,8 @@ const prompts = Array.from({ length: 24 }, (_, i) => {
   return `cluster batch prompt number ${i}`;
 });
 
+const INVALIDATE_MODEL = 'cluster-invalidate-probe';
+
 const responseFor = (prompt: string): string => {
   return `answer for ${prompt}`;
 };
@@ -94,20 +96,22 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (skip === false && client !== undefined) {
-    // flush() batches a multi-key DEL, which a cluster rejects with CROSSSLOT,
-    // so clean up one key at a time on each master instead.
-    for (const node of client.nodes('master')) {
-      const keys = await node.keys(`${cacheName}:*`);
-      for (const key of keys) {
-        await node.del(key);
-      }
-    }
+  if (skip === false && cache !== undefined) {
+    await cache.flush().catch(() => undefined);
   }
   if (client !== undefined) {
     client.disconnect();
   }
 });
+
+async function keyCount(): Promise<number> {
+  let total = 0;
+  for (const node of client.nodes('master')) {
+    const keys = await node.keys(`${cacheName}:entry:*`);
+    total += keys.length;
+  }
+  return total;
+}
 
 describe('SemanticCache cluster integration', () => {
   it('creates the index on every master', async () => {
@@ -152,6 +156,44 @@ describe('SemanticCache cluster integration', () => {
     for (const result of results) {
       expect(result.hit).toBe(true);
       expect(stored.has(String(result.response))).toBe(true);
+    }
+  });
+
+  it('invalidate deletes entries scattered across every shard', async () => {
+    if (skip) {
+      return;
+    }
+
+    const tagged = Array.from({ length: 12 }, (_, i) => {
+      return `cluster invalidate prompt number ${i}`;
+    });
+    for (const prompt of tagged) {
+      await cache.store(prompt, responseFor(prompt), { model: INVALIDATE_MODEL });
+    }
+
+    const before = await keyCount();
+    const deleted = await cache.invalidateByModel(INVALIDATE_MODEL);
+
+    expect(deleted).toBe(tagged.length);
+    expect(await keyCount()).toBe(before - tagged.length);
+    // A second pass finds nothing left carrying the tag, on any shard.
+    expect(await cache.invalidateByModel(INVALIDATE_MODEL)).toBe(0);
+  });
+
+  // Last: flush() tears the cache down, so nothing can run against it after.
+  it('flush removes every entry on every master', async () => {
+    if (skip) {
+      return;
+    }
+
+    expect(await keyCount()).toBeGreaterThan(0);
+
+    await cache.flush();
+
+    expect(await keyCount()).toBe(0);
+    for (const node of client.nodes('master')) {
+      const indexes = (await node.call('FT._LIST')) as string[];
+      expect(indexes).not.toContain(`${cacheName}:idx`);
     }
   });
 });
