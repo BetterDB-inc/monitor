@@ -66,11 +66,20 @@ const TEST_PATH =
  *      the runtime clamp. One-sided comparisons are left alone.
  */
 
-/** A schema field declaring a TTL: `new_ttl_seconds: z…` or `ttl: Field(…)`. */
-const TTL_SCHEMA_FIELD = /^[ \t]*([A-Za-z_]\w*ttl\w*)\s*:\s*(?:z\b|\w*Field\()/gim;
+/**
+ * A schema field: `new_ttl_seconds: z…`, `ttl: Field(…)`, or the annotated
+ * pydantic form `ttl_seconds: int = Field(…)`, which is the idiom the bare form
+ * is the exception to. Which fields are a TTL's is decided by name afterwards,
+ * because folding that into the pattern is what made a field simply called
+ * `ttl_seconds` match nothing at all.
+ */
+const SCHEMA_FIELD = /^[ \t]*([A-Za-z_]\w*)\s*:\s*(?:z\b|(?:[^=\n]+=\s*)?\w*Field\()/gim;
+
+/** A schema field name that denotes a TTL. */
+const TTL_FIELD_NAME = /ttl/i;
 
 /** Where a sibling schema field starts, and so the TTL field's bounds end. */
-const NEXT_SCHEMA_FIELD = /\n[ \t]*[A-Za-z_]\w*\s*:\s*(?:z\b|\w*Field\()/;
+const NEXT_SCHEMA_FIELD = /\n[ \t]*[A-Za-z_]\w*\s*:\s*(?:z\b|(?:[^=\n]+=\s*)?\w*Field\()/;
 
 /** Fallback span for a TTL field with no sibling after it. */
 const SCHEMA_FIELD_SPAN = 400;
@@ -181,12 +190,24 @@ function readDeclarations(file, source, problems) {
 
 /**
  * A declaration line is where the literal is supposed to live, so it is not
- * itself a call site.
+ * itself a call site. Only an actual assignment counts: a clamp that keeps one
+ * constant and replaces the other with a literal — `ttl >= TTL_SECONDS_MIN &&
+ * ttl <= 86400` — mentions a name without declaring one, and is precisely the
+ * half-drift the guard exists to catch.
  */
 function isDeclarationLine(line) {
   return NAMES.some((name) => {
-    return line.includes(name);
+    return new RegExp(`^\\s*(?:export\\s+const\\s+)?${name}\\s*(?::[^=\\n]+)?=`).test(line);
   });
+}
+
+/**
+ * A range written in prose describes a bound rather than applying one. Only the
+ * line the match starts on is tested, so code carrying a trailing comment is
+ * still a call site.
+ */
+function isCommentLine(line) {
+  return /^(?:\/\/|\/\*|\*|#)/.test(line);
 }
 
 function lineAt(source, offset) {
@@ -211,9 +232,12 @@ function boundsIn(span, patterns) {
 }
 
 function schemaBoundsIn(file, source, report) {
-  TTL_SCHEMA_FIELD.lastIndex = 0;
+  SCHEMA_FIELD.lastIndex = 0;
 
-  for (const field of source.matchAll(TTL_SCHEMA_FIELD)) {
+  for (const field of source.matchAll(SCHEMA_FIELD)) {
+    if (TTL_FIELD_NAME.test(field[1]) === false) {
+      continue;
+    }
     const start = field.index + field[0].length;
     const rest = source.slice(start, start + SCHEMA_FIELD_SPAN);
     const sibling = NEXT_SCHEMA_FIELD.exec(rest);
@@ -244,14 +268,17 @@ function clampBoundsIn(file, source, lines, report) {
         continue;
       }
 
+      // The range text counts as context: in `ttl >= 10 && ttl <= TTL_SECONDS_MAX`
+      // the only mention of a TTL is inside the match, and looking at the
+      // preceding lines alone would read it as an unrelated comparison.
       const before = source.slice(Math.max(0, hit.index - CLAMP_WINDOW), hit.index);
-      if (TTL_MENTION.test(before) === false) {
+      if (TTL_MENTION.test(`${before}\n${hit[0]}`) === false) {
         continue;
       }
 
       const line = lineAt(source, hit.index);
       const text = textAt(lines, line);
-      if (isDeclarationLine(text)) {
+      if (isDeclarationLine(text) || isCommentLine(text)) {
         continue;
       }
 
