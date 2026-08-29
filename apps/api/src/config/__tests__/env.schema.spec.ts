@@ -146,6 +146,46 @@ describe('envSchema', () => {
       });
       expect(result.success).toBe(false);
     });
+
+    it('should require STORAGE_AUTH_TOKEN for a libsql:// STORAGE_URL', () => {
+      const result = envSchema.safeParse({
+        STORAGE_TYPE: 'turso',
+        STORAGE_URL: 'libsql://db.turso.io',
+      });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues[0].path).toContain('STORAGE_AUTH_TOKEN');
+      }
+    });
+
+    it('should accept an https:// STORAGE_URL with a token', () => {
+      const result = envSchema.safeParse({
+        STORAGE_TYPE: 'turso',
+        STORAGE_URL: 'https://db.turso.io',
+        STORAGE_AUTH_TOKEN: 'token',
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('should accept an http:// STORAGE_URL with no token', () => {
+      const result = envSchema.safeParse({
+        STORAGE_TYPE: 'turso',
+        STORAGE_URL: 'http://localhost:8080',
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('should reject a token on an http:// STORAGE_URL', () => {
+      const result = envSchema.safeParse({
+        STORAGE_TYPE: 'turso',
+        STORAGE_URL: 'http://localhost:8080',
+        STORAGE_AUTH_TOKEN: 'token',
+      });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues[0].message).toContain('cleartext');
+      }
+    });
   });
 
   describe('polling interval validation', () => {

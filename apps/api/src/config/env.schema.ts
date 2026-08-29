@@ -181,6 +181,16 @@ export const envSchema = z
           path: ['STORAGE_AUTH_TOKEN'],
         });
       }
+      if (data.STORAGE_URL.startsWith('http://') && data.STORAGE_AUTH_TOKEN) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'STORAGE_AUTH_TOKEN cannot be used with an http:// STORAGE_URL: the token ' +
+            'would cross the network in cleartext. Use https:// or libsql://, or drop ' +
+            'the token for an unauthenticated local endpoint',
+          path: ['STORAGE_URL'],
+        });
+      }
     }
 
     // Validate STORAGE_URL is a valid postgres URL when provided
