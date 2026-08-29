@@ -11,7 +11,7 @@ import {
   CommandLogType,
 } from '../common/types/metrics.types';
 import { parseCommandStatsSection } from '../metrics/commandstats-parser';
-import { isReadCommand, isWriteCommand, sumWriteCalls } from './write-commands';
+import { isAmbiguousCommand, isReadCommand, isWriteCommand, sumWriteCalls } from './write-commands';
 
 const MAX_KEYS_TO_CHECK_IN_SLOT = 10000;
 
@@ -548,7 +548,9 @@ export class ClusterMetricsService {
    * Ask the server to classify the commands the built-in list does not name, so
    * a core command added after that list was written still counts as a write.
    * `COMMAND INFO` predates every supported server and accepts the
-   * `parent|subcommand` form `commandstats` reports.
+   * `parent|subcommand` form `commandstats` reports. The commands whose bucket
+   * merges a read and a write form are not asked about: the server flags them
+   * `write`, which is the wrong answer for the read-only form it cannot see.
    *
    * Verdicts are cached for the process: a command's flags do not change while
    * the server is running, so this costs one call per newly seen command name.
@@ -568,6 +570,9 @@ export class ClusterMetricsService {
       ),
     ].filter((command) => {
       if (isWriteCommand(command) || isReadCommand(command)) {
+        return false;
+      }
+      if (isAmbiguousCommand(command)) {
         return false;
       }
       return !this.commandVerdicts.has(command);

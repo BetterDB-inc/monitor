@@ -9,6 +9,9 @@
  * because it rewrites its own cached cardinality, but a client issuing it is
  * reading — it stays out for the same reason.
  *
+ * The names whose bucket merges a writing and a non-writing form are absent
+ * too; AMBIGUOUS_COMMANDS below holds them.
+ *
  * The list names writes; it cannot name every non-write. Anything absent from
  * both this set and CLIENT_READ_COMMANDS is left for the caller's classifier to
  * resolve against the server, so a core command added after this list was
@@ -39,8 +42,6 @@ const WRITE_COMMANDS: ReadonlySet<string> = new Set([
   'flushall',
   'flushdb',
   'geoadd',
-  'georadius',
-  'georadiusbymember',
   'geosearchstore',
   'getdel',
   'getex',
@@ -97,7 +98,6 @@ const WRITE_COMMANDS: ReadonlySet<string> = new Set([
   'setrange',
   'sinterstore',
   'smove',
-  'sort',
   'spop',
   'srem',
   'sunionstore',
@@ -141,6 +141,21 @@ const CLIENT_READ_COMMANDS: ReadonlySet<string> = new Set([
   'georadiusbymember_ro',
   'pfcount',
 ]);
+
+/**
+ * Commands whose `commandstats` bucket merges a writing and a non-writing form.
+ * `SORT` writes only with `STORE`, `GEORADIUS` and `GEORADIUSBYMEMBER` only
+ * with `STORE` or `STOREDIST`, and the bucket keeps the command name, not the
+ * options, so it cannot say which form ran.
+ *
+ * The server flags all three `write`, so the fallback classifier would resolve
+ * them the wrong way for the common read-only case and inflate the write count
+ * on a node serving nothing but reads. Their calls go to the unclassified total
+ * instead, which is where incomplete attribution already belongs. The explicit
+ * read-only spellings — `sort_ro`, `georadius_ro`, `georadiusbymember_ro` — are
+ * unambiguous and stay named as reads.
+ */
+const AMBIGUOUS_COMMANDS: ReadonlySet<string> = new Set(['georadius', 'georadiusbymember', 'sort']);
 
 /**
  * Core commands that read the keyspace, plus the introspection this service
@@ -313,6 +328,14 @@ export function isWriteCommand(command: string): boolean {
 }
 
 /**
+ * True for a command whose call count cannot be attributed either way, because
+ * `commandstats` merges its writing and non-writing forms under one name.
+ */
+export function isAmbiguousCommand(command: string): boolean {
+  return AMBIGUOUS_COMMANDS.has(command.toLowerCase());
+}
+
+/**
  * True for a command this module can rule out as a keyspace write without
  * asking the server — either because it plainly reads, or because it reads
  * despite the server flagging it `write`.
@@ -344,6 +367,10 @@ export function sumWriteCalls(
   for (const sample of samples) {
     if (isWriteCommand(sample.command)) {
       totals.writes += sample.calls;
+      continue;
+    }
+    if (isAmbiguousCommand(sample.command)) {
+      totals.unclassified += sample.calls;
       continue;
     }
     if (isReadCommand(sample.command)) {

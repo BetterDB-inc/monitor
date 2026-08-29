@@ -1,4 +1,9 @@
-import { isReadCommand, isWriteCommand, sumWriteCalls } from '../write-commands';
+import {
+  isAmbiguousCommand,
+  isReadCommand,
+  isWriteCommand,
+  sumWriteCalls,
+} from '../write-commands';
 
 describe('isWriteCommand', () => {
   it.each([
@@ -42,6 +47,29 @@ describe('isWriteCommand', () => {
   });
 });
 
+describe('isAmbiguousCommand', () => {
+  it.each(['sort', 'georadius', 'georadiusbymember'])(
+    'cannot attribute %s, whose bucket merges a read and a write form',
+    (command) => {
+      expect(isAmbiguousCommand(command)).toBe(true);
+      expect(isWriteCommand(command)).toBe(false);
+      expect(isReadCommand(command)).toBe(false);
+    },
+  );
+
+  it.each(['sort_ro', 'georadius_ro', 'georadiusbymember_ro'])(
+    'reads %s unambiguously',
+    (command) => {
+      expect(isAmbiguousCommand(command)).toBe(false);
+      expect(isReadCommand(command)).toBe(true);
+    },
+  );
+
+  it('is case-insensitive', () => {
+    expect(isAmbiguousCommand('SORT')).toBe(true);
+  });
+});
+
 describe('isReadCommand', () => {
   it.each(['get', 'mget', 'hgetall', 'lrange', 'zrange', 'scan', 'exists', 'ttl'])(
     'rules out %s without asking the server',
@@ -80,6 +108,9 @@ const SERVER_VERDICTS: Record<string, boolean> = {
   'json.set': true,
   'ts.add': true,
   vadd: true,
+  sort: true,
+  georadius: true,
+  georadiusbymember: true,
 };
 
 function classify(command: string): boolean | undefined {
@@ -137,6 +168,31 @@ describe('sumWriteCalls', () => {
     );
 
     expect(totals).toEqual({ writes: 0, unclassified: 40 });
+  });
+
+  it('does not count a non-storing SORT as a write on a reads-only node', () => {
+    const totals = sumWriteCalls(
+      [
+        { command: 'sort', calls: 40 },
+        { command: 'get', calls: 900 },
+      ],
+      classify,
+    );
+
+    expect(totals).toEqual({ writes: 0, unclassified: 40 });
+  });
+
+  it('does not let the server verdict resolve an ambiguous geo query', () => {
+    const totals = sumWriteCalls(
+      [
+        { command: 'georadius', calls: 12 },
+        { command: 'georadiusbymember', calls: 8 },
+        { command: 'georadius_ro', calls: 100 },
+      ],
+      classify,
+    );
+
+    expect(totals).toEqual({ writes: 0, unclassified: 20 });
   });
 
   it('leaves a client-read command out of the writes without a server verdict', () => {

@@ -63,6 +63,14 @@ export interface DemotedWriteAlert {
    * rather than "writes".
    */
   writeCallsDelta?: number;
+  /**
+   * `critical` only when writes were actually counted, because only then is
+   * data known to be going missing. Traffic that could not be attributed is
+   * `warning`: `opsPerSec` totals every command, so a demoted node serving
+   * nothing but reads reaches this point with no data loss to report, and
+   * paging on it trains an operator to ignore the alert that matters.
+   */
+  severity: 'critical' | 'warning';
 }
 
 /**
@@ -206,13 +214,15 @@ export function evaluateDemotedWrites(
     }
 
     entry.alerted = true;
+    const counted = entry.writeCallsSeen > 0;
     alerts.push({
       nodeId: observation.nodeId,
       nodeAddress: observation.nodeAddress,
       demotedForMs: now - entry.demotedAt,
       disagreementMs: now - entry.disagreementSince,
       opsPerSec: entry.peakOpsPerSec,
-      writeCallsDelta: entry.writeCallsSeen > 0 ? entry.writeCallsSeen : undefined,
+      writeCallsDelta: counted ? entry.writeCallsSeen : undefined,
+      severity: counted ? 'critical' : 'warning',
     });
   }
 
@@ -249,8 +259,9 @@ function accumulateWriteCalls(entry: DemotedNodeWatchEntry, current?: number): v
 /**
  * Only the counted-writes form states that writes were lost. `opsPerSec` totals
  * every command, reads included, so a node whose commandstats could not be read
- * may have served nothing but reads — the message says what was observed and
- * leaves the conclusion conditional.
+ * may have served nothing but reads — the message reports the unattributed
+ * traffic and names what has to be checked, rather than asserting data loss the
+ * observation cannot support.
  */
 export function demotedWritesMessage(alert: DemotedWriteAlert): string {
   const seconds = Math.round(alert.disagreementMs / 1000);
@@ -261,8 +272,9 @@ export function demotedWritesMessage(alert: DemotedWriteAlert): string {
   if (alert.writeCallsDelta === undefined) {
     return (
       `${preamble}${alert.opsPerSec} ops/sec at peak. The read/write split was ` +
-      `unavailable, so any writes in that traffic are lost when clients refresh ` +
-      `their slot cache.`
+      `unavailable, so this traffic may have been reads only. Check whether the ` +
+      `node took writes: any it accepted are lost when clients refresh their ` +
+      `slot cache.`
     );
   }
 

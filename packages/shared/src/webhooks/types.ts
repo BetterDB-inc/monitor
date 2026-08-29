@@ -380,6 +380,12 @@ export interface IWebhookEventsProService {
      * only traffic evidence and the writes are inferred, not counted.
      */
     writeCallsDelta?: number;
+    /**
+     * `critical` when writes were counted, `warning` when the alert rests on
+     * `opsPerSec` alone — that total includes reads, so the traffic may have
+     * cost nothing and does not warrant a page.
+     */
+    severity: 'critical' | 'warning';
     message: string;
     timestamp: number;
     instance: WebhookInstanceInfo;

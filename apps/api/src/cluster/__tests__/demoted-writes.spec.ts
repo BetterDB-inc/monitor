@@ -215,6 +215,26 @@ describe('evaluateDemotedWrites', () => {
     expect(alerts[0].writeCallsDelta).toBe(12);
   });
 
+  it('rates counted writes critical', () => {
+    const watch = watchWithDemotedA(1_000);
+
+    evaluate(watch, [observation({ writeCommandCalls: 500 })], 2_000);
+    const alerts = evaluate(watch, [observation({ writeCommandCalls: 512 })], 7_000);
+
+    expect(alerts[0].severity).toBe('critical');
+  });
+
+  it('rates unattributed traffic warning rather than paging on possible reads', () => {
+    const watch = watchWithDemotedA(1_000);
+
+    evaluate(watch, [observation()], 2_000);
+    const alerts = evaluate(watch, [observation()], 7_000);
+
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].writeCallsDelta).toBeUndefined();
+    expect(alerts[0].severity).toBe('warning');
+  });
+
   it('does not alert on a demoted node serving only reads', () => {
     const watch = watchWithDemotedA(1_000);
 
@@ -379,6 +399,7 @@ describe('demotedWritesMessage', () => {
       disagreementMs: 5_000,
       opsPerSec: 120,
       writeCallsDelta: 12,
+      severity: 'critical',
     });
 
     expect(message).toContain('12 write commands');
@@ -391,6 +412,7 @@ describe('demotedWritesMessage', () => {
       demotedForMs: 6_000,
       disagreementMs: 5_000,
       opsPerSec: 120,
+      severity: 'warning',
     });
 
     expect(message).toContain('120 ops/sec');
@@ -403,9 +425,10 @@ describe('demotedWritesMessage', () => {
       demotedForMs: 6_000,
       disagreementMs: 5_000,
       opsPerSec: 120,
+      severity: 'warning',
     });
 
-    expect(message).toContain('any writes in that traffic are lost');
+    expect(message).toContain('may have been reads only');
     expect(message).not.toContain('Writes accepted in this window are lost');
   });
 
@@ -417,6 +440,7 @@ describe('demotedWritesMessage', () => {
       disagreementMs: 5_000,
       opsPerSec: 120,
       writeCallsDelta: 12,
+      severity: 'critical',
     });
 
     expect(message).toContain('Writes accepted in this window are lost');

@@ -1613,7 +1613,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     );
     for (const alert of alerts) {
       const message = demotedWritesMessage(alert);
-      this.logger.warn(message);
+      if (alert.severity === 'critical') {
+        this.logger.error(message);
+      } else {
+        this.logger.warn(message);
+      }
 
       try {
         this.otelEvents?.dispatch(
@@ -1624,6 +1628,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
             disagreementMs: alert.disagreementMs,
             demotedForMs: alert.demotedForMs,
             opsPerSec: alert.opsPerSec,
+            severity: alert.severity,
             ...(alert.writeCallsDelta === undefined
               ? {}
               : { writeCallsDelta: alert.writeCallsDelta }),
@@ -1643,6 +1648,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
             demotedForMs: alert.demotedForMs,
             opsPerSec: alert.opsPerSec,
             writeCallsDelta: alert.writeCallsDelta,
+            severity: alert.severity,
             message,
             timestamp: Date.now(),
             instance: { host: config?.host || 'localhost', port: config?.port || 6379 },

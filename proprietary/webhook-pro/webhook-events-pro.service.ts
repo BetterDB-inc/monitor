@@ -181,6 +181,7 @@ export class WebhookEventsProService implements OnModuleInit {
     demotedForMs: number;
     opsPerSec: number;
     writeCallsDelta?: number;
+    severity: 'critical' | 'warning';
     message: string;
     timestamp: number;
     instance: { host: string; port: number };
@@ -200,6 +201,7 @@ export class WebhookEventsProService implements OnModuleInit {
         demotedForMs: data.demotedForMs,
         opsPerSec: data.opsPerSec,
         writeCallsDelta: data.writeCallsDelta,
+        severity: data.severity,
         message: data.message,
         timestamp: data.timestamp,
         instance: data.instance,

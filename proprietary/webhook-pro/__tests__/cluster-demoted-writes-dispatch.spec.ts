@@ -16,6 +16,7 @@ describe('WebhookEventsProService - dispatchClusterDemotedWrites', () => {
     demotedForMs: 6_000,
     opsPerSec: 120,
     writeCallsDelta: 12,
+    severity: 'critical' as const,
     message: 'Node node-a was demoted but still reports role:master',
     timestamp: 1_700_000_000_000,
     instance: { host: 'localhost', port: 6379 },
@@ -52,6 +53,7 @@ describe('WebhookEventsProService - dispatchClusterDemotedWrites', () => {
       demotedForMs: 6_000,
       opsPerSec: 120,
       writeCallsDelta: 12,
+      severity: 'critical',
     });
   });
 
@@ -62,6 +64,18 @@ describe('WebhookEventsProService - dispatchClusterDemotedWrites', () => {
 
     expect(payload.writeCallsDelta).toBeUndefined();
     expect(payload.opsPerSec).toBe(120);
+  });
+
+  it('carries the severity through so a receiver can tell a page from a warning', async () => {
+    await service.dispatchClusterDemotedWrites({
+      ...alert,
+      writeCallsDelta: undefined,
+      severity: 'warning',
+    });
+
+    const [, payload] = webhookDispatcher.dispatchEvent.mock.calls[0];
+
+    expect(payload.severity).toBe('warning');
   });
 
   it('stays silent without a PRO license', async () => {
