@@ -255,11 +255,15 @@ function addCaptureSessionsTargetNodeColumn(db: Database.Database): void {
   }
 }
 
-export interface SqliteAdapterConfig {
-  filepath: string;
-  url?: string;
-  authToken?: string;
-}
+/**
+ * Either a local file or a remote libSQL endpoint, never both. A remote
+ * database is opened by URL and never touches the filesystem, so a config
+ * carrying a filepath alongside a url would read as if the local file still
+ * mattered.
+ */
+export type SqliteAdapterConfig =
+  | { filepath: string; url?: undefined; authToken?: undefined }
+  | { url: string; authToken?: string; filepath?: undefined };
 
 type MetricForecastSettingsRow = {
   connection_id: string;
@@ -355,7 +359,7 @@ export class SqliteAdapter implements StoragePort {
   }
 
   private async openDatabase(): Promise<Database.Database> {
-    if (this.config.url) {
+    if (this.config.url !== undefined) {
       return openLibsqlDatabase({ url: this.config.url, authToken: this.config.authToken });
     }
 

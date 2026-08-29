@@ -149,12 +149,14 @@ This means:
 |----------|----------|---------|-------------|
 | `STORAGE_TYPE` | No | `memory` | Storage backend: `memory`, `postgres`, `sqlite`, or `turso` |
 | `STORAGE_URL` | Conditional | - | PostgreSQL connection URL (required if `STORAGE_TYPE=postgres`), or libSQL URL (required if `STORAGE_TYPE=turso`) |
-| `STORAGE_AUTH_TOKEN` | Conditional | - | Turso auth token (required when `STORAGE_URL` uses `libsql://`) |
+| `STORAGE_AUTH_TOKEN` | Conditional | - | Turso auth token (startup requires it when `STORAGE_URL` uses `libsql://`; a hosted `https://` endpoint needs it too but is not checked at startup - see below) |
 | `STORAGE_SQLITE_FILEPATH` | No | `./data/audit.db` | SQLite database file path (only for `STORAGE_TYPE=sqlite`) |
 
 **Note**: `sqlite` writes to a local file through the `better-sqlite3` native module, which is stripped from the `latest` (no-AI) Docker image - use it for local development, or pick `postgres`, `turso`, or `memory` for Docker deployments.
 
 **Note**: `turso` reuses the SQLite adapter over the libSQL wire protocol, so it needs no native module and works in every Docker image. It is opt-in: set `STORAGE_TYPE=turso` plus `STORAGE_URL` (and `STORAGE_AUTH_TOKEN` for `libsql://` URLs), exactly like the `postgres` backend.
+
+**Note**: only `libsql://` makes the auth token a startup requirement. `https://` and `http://` are also accepted so a self-hosted or local `sqld` can run without one, which means a hosted `https://` Turso URL with a missing or empty `STORAGE_AUTH_TOKEN` starts cleanly and fails on the first query instead. If a `turso` deployment starts and then reports auth errors on every read, check the token before anything else.
 
 ### Application Settings
 

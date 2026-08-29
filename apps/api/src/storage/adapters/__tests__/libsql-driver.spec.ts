@@ -3,6 +3,8 @@ import { isRemoteLibsqlUrl, openLibsqlDatabase } from '../libsql-driver';
 type CallLog = string[];
 
 class FakeStatement {
+  private plucked = false;
+
   constructor(
     private readonly sql: string,
     private readonly log: CallLog,
@@ -13,9 +15,19 @@ class FakeStatement {
     return { changes: 1 };
   }
 
-  get(): { value: number } {
+  get(): { value: number } | number {
+    if (this.plucked) {
+      this.log.push(`get:${this.sql}:plucked`);
+      return 1;
+    }
     this.log.push(`get:${this.sql}`);
     return { value: 1 };
+  }
+
+  pluck(toggle = true): this {
+    this.plucked = toggle;
+    this.log.push(`pluck:${this.sql}`);
+    return this;
   }
 }
 
@@ -159,6 +171,51 @@ describe('openLibsqlDatabase', () => {
     select.get();
 
     expect(log).toEqual(['prepare:SELECT 1', 'get:SELECT 1', 'get:SELECT 1']);
+  });
+
+  it('applies a fluent modifier to the statement it prepares', async () => {
+    const db = await openRemote();
+
+    const select = db.prepare('SELECT 1').pluck();
+    select.get();
+
+    expect(log).toEqual(['prepare:SELECT 1', 'pluck:SELECT 1', 'get:SELECT 1:plucked']);
+  });
+
+  it('replays a fluent modifier onto the statement it re-prepares', async () => {
+    const db = await openRemote();
+
+    const select = db.prepare('SELECT 1');
+    select.pluck();
+    db.transaction(() => {
+      select.get();
+    })();
+
+    expect(log).toEqual([
+      'prepare:SELECT 1',
+      'pluck:SELECT 1',
+      'exec:BEGIN',
+      'prepare:SELECT 1',
+      'pluck:SELECT 1',
+      'get:SELECT 1:plucked',
+      'exec:COMMIT',
+    ]);
+  });
+
+  it('keeps a chain off a fluent modifier inside the transaction wrapper', async () => {
+    const db = await openRemote();
+
+    const select = db.prepare('SELECT 1').pluck();
+    db.transaction(() => {
+      select.get();
+    })();
+
+    expect(
+      log.filter((entry) => {
+        return entry.startsWith('prepare:');
+      }),
+    ).toHaveLength(2);
+    expect(log).toContain('get:SELECT 1:plucked');
   });
 
   it('rolls back and rethrows when the transaction body fails', async () => {

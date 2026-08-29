@@ -20,6 +20,13 @@ export function isRemoteLibsqlUrl(url: string): boolean {
 }
 
 /**
+ * better-sqlite3's fluent statement modifiers. Each mutates the statement and
+ * returns it, so a re-prepared statement has to be told about them again or it
+ * comes back with the modifier silently dropped.
+ */
+const FLUENT_STATEMENT_METHODS = new Set(['pluck', 'expand', 'raw', 'safeIntegers', 'bind']);
+
+/**
  * Remote libSQL executes each statement on its own implicit stream. A statement
  * prepared before BEGIN therefore runs outside the transaction, which ends it and
  * silently discards the write. Statements are re-prepared whenever a transaction
@@ -32,27 +39,50 @@ function createLazyStatement(
 ): Database.Statement {
   let statement: Database.Statement | null = null;
   let preparedAt = -1;
+  const modifiers: { name: string; args: unknown[] }[] = [];
 
-  const ensure = (): Database.Statement => {
+  const ensure = (): StatementRecord => {
     if (statement === null || preparedAt !== readGeneration()) {
       statement = prepare(sql);
       preparedAt = readGeneration();
+      for (const modifier of modifiers) {
+        const method = (statement as unknown as StatementRecord)[modifier.name];
+        (method as (...args: unknown[]) => unknown).apply(statement, modifier.args);
+      }
     }
-    return statement;
+    return statement as unknown as StatementRecord;
   };
 
   const target = {} as StatementRecord;
 
-  return new Proxy(target, {
+  const proxy: Database.Statement = new Proxy(target, {
     get(_target, property: string | symbol): unknown {
-      const current = ensure() as unknown as StatementRecord;
+      const current = ensure();
       const value = current[property as string];
-      if (typeof value === 'function') {
-        return (value as (...args: unknown[]) => unknown).bind(current);
+      if (typeof value !== 'function') {
+        return value;
       }
-      return value;
+
+      const name = String(property);
+      return (...args: unknown[]): unknown => {
+        // ensure() again: an earlier argument may have crossed a transaction
+        // boundary, and `current` would then be prepared on a dead stream.
+        const live = ensure();
+        const result = (live[name] as (...a: unknown[]) => unknown).apply(live, args);
+        if (result !== live) {
+          return result;
+        }
+        // A fluent modifier returned the statement. Record it so a re-prepare
+        // replays it, and hand back the proxy so the chain stays wrapped.
+        if (FLUENT_STATEMENT_METHODS.has(name)) {
+          modifiers.push({ name, args });
+        }
+        return proxy;
+      };
     },
   }) as unknown as Database.Statement;
+
+  return proxy;
 }
 
 function patchForRemote(db: Database.Database): void {

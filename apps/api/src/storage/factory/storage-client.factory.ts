@@ -30,11 +30,7 @@ export class StorageClientFactory {
         }
         const { SqliteAdapter } = await import('../adapters/sqlite.adapter');
         const authToken = this.configService.get<string>('STORAGE_AUTH_TOKEN');
-        const filepath = this.configService.get<string>(
-          'STORAGE_SQLITE_FILEPATH',
-          './data/audit.db',
-        );
-        client = new SqliteAdapter({ filepath, url, authToken });
+        client = new SqliteAdapter({ url, authToken });
         break;
       }
       case 'postgres':

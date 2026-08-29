@@ -108,7 +108,6 @@ describeTurso('SqliteAdapter against a remote libSQL/Turso database', () => {
 
   beforeAll(async () => {
     storage = new SqliteAdapter({
-      filepath: './data/unused-for-remote.db',
       url: TURSO_URL as string,
       authToken: process.env.TURSO_TEST_AUTH_TOKEN,
     });

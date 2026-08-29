@@ -14,6 +14,7 @@ Common issues and solutions for BetterDB Monitor.
 **Symptoms:** BetterDB cannot connect to your Valkey/Redis instance.
 
 **Solutions:**
+
 1. Verify the host is reachable: `ping your-valkey-host`
 2. Check the port is open: `nc -zv your-valkey-host 6379`
 3. If using Docker, ensure network connectivity:
@@ -26,6 +27,7 @@ Common issues and solutions for BetterDB Monitor.
 **Symptoms:** Connection fails with authentication error.
 
 **Solutions:**
+
 1. Set `DB_PASSWORD` environment variable
 2. If using ACL with username: set both `DB_USERNAME` and `DB_PASSWORD`
 3. Verify credentials work with CLI: `valkey-cli -h host -p port -a password PING`
@@ -37,6 +39,7 @@ Common issues and solutions for BetterDB Monitor.
 **Symptoms:** App fails to start with PostgreSQL storage type.
 
 **Solutions:**
+
 1. Ensure `STORAGE_URL` is set when using `STORAGE_TYPE=postgres`
 2. Format: `postgresql://user:password@host:port/database`
 3. Verify PostgreSQL is accessible from the container
@@ -46,6 +49,7 @@ Common issues and solutions for BetterDB Monitor.
 **Symptoms:** `STORAGE_TYPE=sqlite` fails to start in Docker.
 
 **Solutions:**
+
 - The `better-sqlite3` native module is stripped from the `latest` (no-AI) image for size optimization
 - Use `STORAGE_TYPE=turso` with a remote `STORAGE_URL` for SQLite semantics in Docker, or `STORAGE_TYPE=postgres` / `STORAGE_TYPE=memory`
 - Local file storage is available in local development (`pnpm dev`) and in the AI image
@@ -55,9 +59,21 @@ Common issues and solutions for BetterDB Monitor.
 **Symptoms:** `STORAGE_TYPE=turso` refuses to start.
 
 **Solutions:**
+
 1. Set `STORAGE_URL` to your libSQL endpoint, e.g. `libsql://your-db-your-org.turso.io`
 2. Set `STORAGE_AUTH_TOKEN` - it is required whenever `STORAGE_URL` starts with `libsql://`
 3. Confirm the token is valid: `turso db tokens create <database>`
+
+### Turso starts, then every query fails to authenticate
+
+**Symptoms:** `STORAGE_TYPE=turso` boots without complaint, then each storage read or write returns an auth error.
+
+**Cause:** the auth token is only required at startup for `libsql://` URLs. `https://` and `http://` stay optional so a self-hosted or local `sqld` can run unauthenticated, so a hosted `https://` URL with a missing or empty `STORAGE_AUTH_TOKEN` passes validation and fails on the first query.
+
+**Solutions:**
+
+1. Set `STORAGE_AUTH_TOKEN`, or switch `STORAGE_URL` to the `libsql://` form so the missing token is caught at startup
+2. Confirm the token is valid: `turso db tokens create <database>`
 
 ## Docker Issues
 
@@ -66,6 +82,7 @@ Common issues and solutions for BetterDB Monitor.
 **Symptoms:** `docker ps` shows container as unhealthy.
 
 **Solutions:**
+
 1. Check if the app started: `docker logs betterdb-monitor`
 2. Verify port mapping matches PORT env var
 3. Health check expects response at `/health` endpoint
@@ -76,6 +93,7 @@ Common issues and solutions for BetterDB Monitor.
 **Symptoms:** Container fails to start due to port conflict.
 
 **Solutions:**
+
 1. Change the port: `-p 8080:8080 -e PORT=8080`
 2. Find what's using the port: `lsof -i :3001`
 3. Stop conflicting service or use different port
@@ -87,6 +105,7 @@ Common issues and solutions for BetterDB Monitor.
 **Symptoms:** `/api/prometheus/metrics` returns minimal data.
 
 **Solutions:**
+
 1. Wait for first poll cycle (metrics populate after ~5 seconds)
 2. Verify database connection is healthy
 3. Check logs for polling errors
@@ -96,6 +115,7 @@ Common issues and solutions for BetterDB Monitor.
 **Symptoms:** `betterdb_commandlog_*` metrics not appearing.
 
 **Explanation:** Valkey-specific metrics only populate when:
+
 - Connected to Valkey (not Redis)
 - The specific feature is available for that version
 - Data exists (e.g., COMMANDLOG has entries)
