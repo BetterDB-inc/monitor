@@ -123,6 +123,10 @@ export interface SemanticCacheOptions {
    * Discovery-marker protocol controls. See
    * docs/plans/specs/spec-semantic-cache-discovery-markers.md.
    * Defaults: enabled=true, heartbeatIntervalMs=30000, includeCategories=true.
+   *
+   * The marker also carries the embedding model, so disabling discovery
+   * disables `onEmbeddingModelChange` with it — there is nothing to compare a
+   * later run against, and the check silently passes.
    */
   discovery?: DiscoveryOptions;
   /**
@@ -146,9 +150,20 @@ export interface SemanticCacheOptions {
    *   the default — discarding a warm production cache as a startup side
    *   effect is a worse surprise than a startup error.
    *
+   * 'warn' fires once, not once per restart. The run that warns goes on to
+   * write its discovery marker with the new model, so every later start
+   * matches and stays quiet while the old-model vectors are still in the
+   * index — and a later switch to 'throw' or 'flush' will not catch the
+   * change either. Only set a `defaultTtl` and let them expire, or flush.
+   *
    * Detection needs a described embedder. The bundled create*Embed() helpers
    * are described; a hand-rolled closure must be wrapped in describeEmbedder()
    * or the check reports itself inactive and does nothing.
+   *
+   * Detection also needs `discovery` left enabled: the model is recorded on
+   * the discovery marker, so with `discovery: { enabled: false }` nothing is
+   * ever written, every start reads as a first run, and this option has no
+   * effect whichever value it holds.
    */
   onEmbeddingModelChange?: EmbeddingModelChangeAction;
   /**

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { describeEmbedder, embedderFingerprint, getEmbedderDescriptor } from '../embedder-identity';
+import { SemanticCacheUsageError } from '../errors';
 import type { EmbedderDescriptor, EmbedFn } from '../types';
 
 function plainEmbed(): EmbedFn {
@@ -61,6 +62,36 @@ describe('describeEmbedder', () => {
       (described.descriptor as EmbedderDescriptor).model = 'large';
     }).toThrow(TypeError);
     expect(described.descriptor.model).toBe('small');
+  });
+
+  it('is idempotent when the same function is described identically twice', () => {
+    const fn = plainEmbed();
+    describeEmbedder(fn, { provider: 'openai', model: 'small', params: { inputType: 'query' } });
+    const again = describeEmbedder(fn, {
+      provider: 'openai',
+      model: 'small',
+      params: { inputType: 'query' },
+    });
+
+    expect(again).toBe(fn);
+    expect(again.descriptor).toEqual({
+      provider: 'openai',
+      model: 'small',
+      params: { inputType: 'query' },
+    });
+  });
+
+  it('names the conflict when the same function is redescribed differently', () => {
+    const fn = plainEmbed();
+    describeEmbedder(fn, { provider: 'openai', model: 'small' });
+
+    expect(() => {
+      describeEmbedder(fn, { provider: 'cohere', model: 'v3' });
+    }).toThrow(SemanticCacheUsageError);
+    expect(() => {
+      describeEmbedder(fn, { provider: 'cohere', model: 'v3' });
+    }).toThrow(/already described as 'openai:small'.*cohere:v3/);
+    expect(getEmbedderDescriptor(fn)).toEqual({ provider: 'openai', model: 'small' });
   });
 });
 

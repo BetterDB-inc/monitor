@@ -6,6 +6,7 @@
  * knowable, which is what lets the cache refuse to compare vectors across
  * incompatible embedding spaces.
  */
+import { SemanticCacheUsageError } from './errors';
 import type { DescribedEmbedFn, EmbedderDescriptor, EmbedFn } from './types';
 
 /**
@@ -20,6 +21,12 @@ import type { DescribedEmbedFn, EmbedderDescriptor, EmbedFn } from './types';
  * its discovery marker; a caller still holding the original object could
  * otherwise change the model between those two reads and have the marker
  * claim a model the vectors were never embedded with.
+ *
+ * Describing the same function twice is allowed when both descriptors agree —
+ * a module-level embedder passed through two factories is the ordinary case.
+ * A second, conflicting descriptor throws: the property stays non-configurable
+ * on purpose, because a descriptor that can be swapped after the fact is the
+ * exact hole the snapshot closes.
  */
 export function describeEmbedder(fn: EmbedFn, descriptor: EmbedderDescriptor): DescribedEmbedFn {
   const snapshot: EmbedderDescriptor = {
@@ -29,6 +36,19 @@ export function describeEmbedder(fn: EmbedFn, descriptor: EmbedderDescriptor): D
   if (descriptor.params !== undefined) {
     snapshot.params = Object.freeze({ ...descriptor.params });
   }
+
+  const existing = getEmbedderDescriptor(fn);
+  if (existing !== undefined) {
+    if (embedderFingerprint(existing) === embedderFingerprint(snapshot)) {
+      return fn as DescribedEmbedFn;
+    }
+    throw new SemanticCacheUsageError(
+      `describeEmbedder: this function is already described as ` +
+        `'${embedderFingerprint(existing)}' and cannot be redescribed as ` +
+        `'${embedderFingerprint(snapshot)}'. Wrap each model in its own function.`,
+    );
+  }
+
   Object.defineProperty(fn, 'descriptor', {
     value: Object.freeze(snapshot),
     enumerable: false,
