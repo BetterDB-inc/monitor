@@ -1,0 +1,32 @@
+name: Constants Guard
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to check'
+        required: false
+        type: string
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  ttl-constants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check canonical TTL bounds against every mirror and call site
+        run: node scripts/check-ttl-constants.mjs
