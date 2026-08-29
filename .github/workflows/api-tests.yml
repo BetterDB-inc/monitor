@@ -88,7 +88,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Build ${{ matrix.name }} and its dependencies
-        run: pnpm build --filter ${{ matrix.name }}
+        run: pnpm build --filter ${{ matrix.name }}...
 
       - name: Run ${{ matrix.name }} tests
         run: pnpm --filter ${{ matrix.name }} test ${{ matrix.testArgs }}
@@ -184,7 +184,7 @@ jobs:
           exit 1
 
       - name: Build the packages under test
-        run: pnpm build --filter @betterdb/agent-cache --filter @betterdb/semantic-cache
+        run: pnpm build --filter @betterdb/agent-cache... --filter @betterdb/semantic-cache...
 
       - name: Run @betterdb/agent-cache cluster suite
         run: >-
