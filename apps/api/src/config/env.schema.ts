@@ -18,8 +18,9 @@ export const envSchema = z
     DB_TYPE: z.enum(['valkey', 'redis', 'auto']).default('auto'),
 
     // Storage configuration
-    STORAGE_TYPE: z.enum(['sqlite', 'postgres', 'postgresql', 'memory']).default('sqlite'),
+    STORAGE_TYPE: z.enum(['sqlite', 'postgres', 'postgresql', 'turso', 'memory']).default('sqlite'),
     STORAGE_URL: z.string().url().optional(),
+    STORAGE_AUTH_TOKEN: z.string().optional(),
     STORAGE_SQLITE_FILEPATH: z.string().default('./data/audit.db'),
     DB_SCHEMA: z
       .string()
@@ -148,6 +149,48 @@ export const envSchema = z
         message: 'STORAGE_URL is required when STORAGE_TYPE is postgres or postgresql',
         path: ['STORAGE_URL'],
       });
+    }
+
+    // Require STORAGE_URL when using turso
+    if (data.STORAGE_TYPE === 'turso' && !data.STORAGE_URL) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'STORAGE_URL is required when STORAGE_TYPE is turso',
+        path: ['STORAGE_URL'],
+      });
+    }
+
+    // Validate STORAGE_URL is a libSQL connection string when using turso
+    if (data.STORAGE_TYPE === 'turso' && data.STORAGE_URL) {
+      const isLibsqlUrl =
+        data.STORAGE_URL.startsWith('libsql://') ||
+        data.STORAGE_URL.startsWith('https://') ||
+        data.STORAGE_URL.startsWith('http://');
+      if (!isLibsqlUrl) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'STORAGE_URL must be a valid libSQL connection string (libsql://, https:// or http://)',
+          path: ['STORAGE_URL'],
+        });
+      }
+      if (data.STORAGE_URL.startsWith('libsql://') && !data.STORAGE_AUTH_TOKEN) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'STORAGE_AUTH_TOKEN is required when STORAGE_URL uses libsql://',
+          path: ['STORAGE_AUTH_TOKEN'],
+        });
+      }
+      if (data.STORAGE_URL.startsWith('http://') && data.STORAGE_AUTH_TOKEN) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'STORAGE_AUTH_TOKEN cannot be used with an http:// STORAGE_URL: the token ' +
+            'would cross the network in cleartext. Use https:// or libsql://, or drop ' +
+            'the token for an unauthenticated local endpoint',
+          path: ['STORAGE_URL'],
+        });
+      }
     }
 
     // Validate STORAGE_URL is a valid postgres URL when provided

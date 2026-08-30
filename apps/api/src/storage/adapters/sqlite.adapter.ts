@@ -1,6 +1,4 @@
-// SQLite adapter for local development only
-// This file is excluded from Docker builds via .dockerignore
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
@@ -101,6 +99,8 @@ import type {
   MemoryForgetPayload,
 } from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
+import { openLibsqlDatabase } from './libsql-driver';
+import { loadBetterSqlite3 } from './better-sqlite3-driver';
 import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repository';
 import { SlowLogSqliteRepository } from './repositories/slowlog.sqlite.repository';
 
@@ -255,9 +255,15 @@ function addCaptureSessionsTargetNodeColumn(db: Database.Database): void {
   }
 }
 
-export interface SqliteAdapterConfig {
-  filepath: string;
-}
+/**
+ * Either a local file or a remote libSQL endpoint, never both. A remote
+ * database is opened by URL and never touches the filesystem, so a config
+ * carrying a filepath alongside a url would read as if the local file still
+ * mattered.
+ */
+export type SqliteAdapterConfig =
+  | { filepath: string; url?: undefined; authToken?: undefined }
+  | { url: string; authToken?: string; filepath?: undefined };
 
 type MetricForecastSettingsRow = {
   connection_id: string;
@@ -335,16 +341,7 @@ export class SqliteAdapter implements StoragePort {
 
   async initialize(): Promise<void> {
     try {
-      // Ensure directory exists
-      const dir = path.dirname(this.config.filepath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-
-      // Open database with WAL mode for better concurrency
-      this.db = new Database(this.config.filepath);
-      this.db.pragma('journal_mode = WAL');
-      this.db.pragma('synchronous = NORMAL');
+      this.db = await this.openDatabase();
 
       // Create schema
       this.createSchema();
@@ -359,6 +356,24 @@ export class SqliteAdapter implements StoragePort {
         `Failed to initialize SQLite: ${error instanceof Error ? error.message : 'Unknown error'}`,
       );
     }
+  }
+
+  private async openDatabase(): Promise<Database.Database> {
+    if (this.config.url !== undefined) {
+      return openLibsqlDatabase({ url: this.config.url, authToken: this.config.authToken });
+    }
+
+    // Ensure directory exists
+    const dir = path.dirname(this.config.filepath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    // Open database with WAL mode for better concurrency
+    const db = new (await loadBetterSqlite3())(this.config.filepath);
+    db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = NORMAL');
+    return db;
   }
 
   /**
