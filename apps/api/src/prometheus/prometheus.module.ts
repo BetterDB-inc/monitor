@@ -7,6 +7,7 @@ import { SlowLogAnalyticsModule } from '../slowlog-analytics/slowlog-analytics.m
 import { CommandLogAnalyticsModule } from '../commandlog-analytics/commandlog-analytics.module';
 import { HealthModule } from '../health/health.module';
 import { MetricForecastingModule } from '../metric-forecasting/metric-forecasting.module';
+import { ClusterModule } from '../cluster/cluster.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { MetricForecastingModule } from '../metric-forecasting/metric-forecastin
     CommandLogAnalyticsModule,
     forwardRef(() => HealthModule),
     MetricForecastingModule,
+    ClusterModule,
   ],
   controllers: [PrometheusController],
   providers: [PrometheusService],

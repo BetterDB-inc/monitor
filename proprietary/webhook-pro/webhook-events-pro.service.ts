@@ -167,6 +167,49 @@ export class WebhookEventsProService implements OnModuleInit {
     );
   }
 
+  /**
+   * Dispatch cluster demoted-writes event (PRO+)
+   * Called when a node the cluster has already demoted keeps answering as a
+   * master and keeps taking traffic. Distinct from cluster.failover: the
+   * failover is over, and this is the window in which writes are accepted and
+   * then discarded when the client's slot cache catches up.
+   */
+  async dispatchClusterDemotedWrites(data: {
+    nodeId: string;
+    nodeAddress: string;
+    disagreementMs: number;
+    demotedForMs: number;
+    opsPerSec: number;
+    writeCallsDelta?: number;
+    severity: 'critical' | 'warning';
+    message: string;
+    timestamp: number;
+    instance: { host: string; port: number };
+    connectionId?: string;
+  }): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.debug('Cluster demoted writes event skipped - requires PRO license');
+      return;
+    }
+
+    await this.webhookDispatcher.dispatchEvent(
+      WebhookEventType.CLUSTER_DEMOTED_WRITES,
+      {
+        nodeId: data.nodeId,
+        nodeAddress: data.nodeAddress,
+        disagreementMs: data.disagreementMs,
+        demotedForMs: data.demotedForMs,
+        opsPerSec: data.opsPerSec,
+        writeCallsDelta: data.writeCallsDelta,
+        severity: data.severity,
+        message: data.message,
+        timestamp: data.timestamp,
+        instance: data.instance,
+      },
+      data.connectionId,
+    );
+  }
+
   async dispatchClusterBusCorruption(data: {
     crcMismatchTotal: number;
     crcMismatchDelta: number;

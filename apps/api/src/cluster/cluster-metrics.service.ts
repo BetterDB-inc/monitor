@@ -4,7 +4,14 @@ import { ClusterDiscoveryService, DiscoveredNode } from './cluster-discovery.ser
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { InfoParser } from '../database/parsers/info.parser';
-import { SlowLogEntry, ClientInfo, CommandLogEntry, CommandLogType } from '../common/types/metrics.types';
+import {
+  SlowLogEntry,
+  ClientInfo,
+  CommandLogEntry,
+  CommandLogType,
+} from '../common/types/metrics.types';
+import { parseCommandStatsSection } from '../metrics/commandstats-parser';
+import { isAmbiguousCommand, isReadCommand, isWriteCommand, sumWriteCalls } from './write-commands';
 
 const MAX_KEYS_TO_CHECK_IN_SLOT = 10000;
 
@@ -26,7 +33,14 @@ export interface ClusterCommandlogEntry extends CommandLogEntry {
 export interface NodeStats {
   nodeId: string;
   nodeAddress: string;
+  /** The cluster's view of the node, from CLUSTER NODES via discovery. */
   role: 'master' | 'replica';
+  /**
+   * The node's own view, from its `INFO replication`. Disagreement with `role`
+   * after a failover is the window in which writes are accepted and then lost.
+   * Absent when the node reports no role at all.
+   */
+  selfReportedRole?: 'master' | 'replica';
   memoryUsed: number;
   memoryPeak: number;
   memoryFragmentationRatio: number;
@@ -41,6 +55,27 @@ export interface NodeStats {
   cpuSys?: number;
   cpuUser?: number;
   uptimeSeconds?: number;
+  /**
+   * Cumulative calls across every write command the node has served, from
+   * `INFO commandstats`. Only populated when the caller asks for it — it costs
+   * a second INFO round trip per node — and absent when the node does not
+   * expose the section.
+   */
+  writeCommandCalls?: number;
+}
+
+export interface NodeStatsOptions {
+  /**
+   * Fetch `INFO commandstats` per node as well. Off by default: the section is
+   * one extra round trip per node and only the demoted-writes detector needs
+   * the read/write split.
+   */
+  includeCommandStats?: boolean;
+  /**
+   * Restrict the fan-out to these node IDs. A caller watching one node should
+   * not pay an `INFO` round trip per node in the cluster to observe it.
+   */
+  nodeIds?: ReadonlyArray<string>;
 }
 
 export interface SlotMigration {
@@ -57,6 +92,7 @@ export interface SlotMigration {
 export class ClusterMetricsService {
   private readonly logger = new Logger(ClusterMetricsService.name);
   private loggedErrors: Set<string> = new Set();
+  private readonly commandVerdicts: Map<string, boolean> = new Map();
   private readonly MAX_LOGGED_ERRORS = 500;
 
   constructor(
@@ -76,7 +112,10 @@ export class ClusterMetricsService {
     this.loggedErrors.delete(`${operation}-${nodeId}`);
   }
 
-  async getClusterSlowlog(limit: number = 100, connectionId?: string): Promise<ClusterSlowlogEntry[]> {
+  async getClusterSlowlog(
+    limit: number = 100,
+    connectionId?: string,
+  ): Promise<ClusterSlowlogEntry[]> {
     const nodes = await this.discoveryService.discoverNodes(connectionId);
     const slowlogPromises = nodes.map((node) => this.getNodeSlowlog(node, limit, connectionId));
 
@@ -96,7 +135,11 @@ export class ClusterMetricsService {
     return allEntries.slice(0, limit);
   }
 
-  private async getNodeSlowlog(node: DiscoveredNode, limit: number, connectionId?: string): Promise<ClusterSlowlogEntry[]> {
+  private async getNodeSlowlog(
+    node: DiscoveredNode,
+    limit: number,
+    connectionId?: string,
+  ): Promise<ClusterSlowlogEntry[]> {
     try {
       const client = await this.discoveryService.getNodeConnection(node.id, connectionId);
       const rawLog = await client.slowlog('GET', limit);
@@ -160,7 +203,10 @@ export class ClusterMetricsService {
     }
   }
 
-  async getClusterCommandlog(type: CommandLogType, limit: number = 100): Promise<ClusterCommandlogEntry[]> {
+  async getClusterCommandlog(
+    type: CommandLogType,
+    limit: number = 100,
+  ): Promise<ClusterCommandlogEntry[]> {
     const nodes = await this.discoveryService.discoverNodes();
     const commandlogPromises = nodes.map((node) => this.getNodeCommandlog(node, type, limit));
 
@@ -207,9 +253,13 @@ export class ClusterMetricsService {
     }
   }
 
-  async getClusterNodeStats(connectionId?: string): Promise<NodeStats[]> {
+  async getClusterNodeStats(
+    connectionId?: string,
+    options?: NodeStatsOptions,
+  ): Promise<NodeStats[]> {
     const nodes = await this.discoveryService.discoverNodes(connectionId);
-    const statsPromises = nodes.map((node) => this.getNodeStats(node, connectionId));
+    const wanted = selectNodes(nodes, options?.nodeIds);
+    const statsPromises = wanted.map((node) => this.getNodeStats(node, connectionId, options));
 
     const results = await Promise.allSettled(statsPromises);
 
@@ -224,7 +274,11 @@ export class ClusterMetricsService {
     return allStats;
   }
 
-  private async getNodeStats(node: DiscoveredNode, connectionId?: string): Promise<NodeStats | null> {
+  private async getNodeStats(
+    node: DiscoveredNode,
+    connectionId?: string,
+    options?: NodeStatsOptions,
+  ): Promise<NodeStats | null> {
     try {
       const client = await this.discoveryService.getNodeConnection(node.id, connectionId);
       const infoString = await client.info();
@@ -232,7 +286,11 @@ export class ClusterMetricsService {
 
       const memoryUsed = this.parseInfoValue(info, 'memory.used_memory', 0);
       const memoryPeak = this.parseInfoValue(info, 'memory.used_memory_peak', 0);
-      const memoryFragmentationRatio = this.parseInfoValue(info, 'memory.mem_fragmentation_ratio', 1);
+      const memoryFragmentationRatio = this.parseInfoValue(
+        info,
+        'memory.mem_fragmentation_ratio',
+        1,
+      );
 
       const opsPerSec = this.parseInfoValue(info, 'stats.instantaneous_ops_per_sec', 0);
       const inputKbps = this.parseInfoValue(info, 'stats.instantaneous_input_kbps', 0);
@@ -243,12 +301,21 @@ export class ClusterMetricsService {
 
       const replicationOffset = this.getReplicationOffset(info, node.role);
       const masterLinkStatus = this.getInfoString(info, 'replication.master_link_status');
-      const masterLastIoSecondsAgo = this.parseInfoValue(info, 'replication.master_last_io_seconds_ago');
+      const masterLastIoSecondsAgo = this.parseInfoValue(
+        info,
+        'replication.master_last_io_seconds_ago',
+      );
 
       const cpuSys = this.parseInfoValue(info, 'cpu.used_cpu_sys');
       const cpuUser = this.parseInfoValue(info, 'cpu.used_cpu_user');
 
       const uptimeSeconds = this.parseInfoValue(info, 'server.uptime_in_seconds');
+
+      const selfReportedRole = this.getSelfReportedRole(info);
+      const writeCommandCalls =
+        options?.includeCommandStats === true
+          ? await this.getWriteCommandCalls(client, node.id)
+          : undefined;
 
       // Clear error on success
       this.clearNodeError(node.id, 'stats');
@@ -257,6 +324,7 @@ export class ClusterMetricsService {
         nodeId: node.id,
         nodeAddress: node.address,
         role: node.role,
+        selfReportedRole,
         memoryUsed: memoryUsed ?? 0,
         memoryPeak: memoryPeak ?? 0,
         memoryFragmentationRatio: memoryFragmentationRatio ?? 1.0,
@@ -271,6 +339,7 @@ export class ClusterMetricsService {
         cpuSys,
         cpuUser,
         uptimeSeconds,
+        writeCommandCalls,
       };
     } catch (error) {
       // Only log each unique error once to avoid spam
@@ -361,7 +430,12 @@ export class ClusterMetricsService {
 
   private async getKeysInSlot(client: Valkey, slot: number): Promise<number | undefined> {
     try {
-      const keys = (await client.call('CLUSTER', 'GETKEYSINSLOT', slot, MAX_KEYS_TO_CHECK_IN_SLOT)) as string[];
+      const keys = (await client.call(
+        'CLUSTER',
+        'GETKEYSINSLOT',
+        slot,
+        MAX_KEYS_TO_CHECK_IN_SLOT,
+      )) as string[];
       return keys.length;
     } catch (error) {
       this.logger.debug(
@@ -371,7 +445,11 @@ export class ClusterMetricsService {
     }
   }
 
-  private parseInfoValue(info: Record<string, unknown>, path: string, defaultValue?: number): number | undefined {
+  private parseInfoValue(
+    info: Record<string, unknown>,
+    path: string,
+    defaultValue?: number,
+  ): number | undefined {
     const parts = path.split('.');
     let current: unknown = info;
 
@@ -410,11 +488,151 @@ export class ClusterMetricsService {
     return typeof current === 'string' ? current : undefined;
   }
 
-  private getReplicationOffset(info: Record<string, unknown>, role: 'master' | 'replica'): number | undefined {
+  private getSelfReportedRole(info: Record<string, unknown>): 'master' | 'replica' | undefined {
+    const role = this.getInfoString(info, 'replication.role');
+    if (role === 'master') {
+      return 'master';
+    }
+    if (role === 'slave' || role === 'replica') {
+      return 'replica';
+    }
+    return undefined;
+  }
+
+  /**
+   * A second INFO call rather than `INFO default commandstats`: multi-section
+   * INFO is Redis 7.0+/Valkey only, and single-section INFO is universal.
+   *
+   * A node that denies or lacks the section yields undefined rather than zero —
+   * zero would read as "served no writes", which is a different claim. So does
+   * a node with traffic this service could not classify: a module command, or a
+   * core command newer than the built-in write list. The caller falls back to
+   * `opsPerSec` for all of them.
+   */
+  private async getWriteCommandCalls(client: Valkey, nodeId: string): Promise<number | undefined> {
+    try {
+      const raw = await client.info('commandstats');
+      const parsed = InfoParser.parse(raw);
+      const section = parsed.commandstats as Record<string, string> | undefined;
+      if (section === undefined) {
+        return undefined;
+      }
+      const samples = parseCommandStatsSection(section);
+      await this.resolveCommandVerdicts(
+        client,
+        nodeId,
+        samples.map((sample) => {
+          return sample.command;
+        }),
+      );
+      const totals = sumWriteCalls(samples, (command) => {
+        return this.commandVerdicts.get(command.toLowerCase());
+      });
+      if (totals.writes === 0 && totals.unclassified > 0) {
+        return undefined;
+      }
+      return totals.writes;
+    } catch (error) {
+      const errorKey = `commandstats-${nodeId}`;
+      if (!this.loggedErrors.has(errorKey)) {
+        this.logger.debug(
+          `Failed to get commandstats from node ${nodeId}: ${error instanceof Error ? error.message : error}`,
+        );
+        this.addLoggedError(errorKey);
+      }
+      return undefined;
+    }
+  }
+
+  /**
+   * Ask the server to classify the commands the built-in list does not name, so
+   * a core command added after that list was written still counts as a write.
+   * `COMMAND INFO` predates every supported server and accepts the
+   * `parent|subcommand` form `commandstats` reports. The commands whose bucket
+   * merges a read and a write form are not asked about: the server flags them
+   * `write`, which is the wrong answer for the read-only form it cannot see.
+   *
+   * Verdicts are cached for the process: a command's flags do not change while
+   * the server is running, so this costs one call per newly seen command name.
+   * A name the server does not answer for stays uncached and is reported as
+   * unclassified, which routes the caller to the `opsPerSec` fallback.
+   */
+  private async resolveCommandVerdicts(
+    client: Valkey,
+    nodeId: string,
+    commands: ReadonlyArray<string>,
+  ): Promise<void> {
+    const unresolved = [
+      ...new Set(
+        commands.map((command) => {
+          return command.toLowerCase();
+        }),
+      ),
+    ].filter((command) => {
+      if (isWriteCommand(command) || isReadCommand(command)) {
+        return false;
+      }
+      if (isAmbiguousCommand(command)) {
+        return false;
+      }
+      return !this.commandVerdicts.has(command);
+    });
+
+    if (unresolved.length === 0) {
+      return;
+    }
+
+    try {
+      const reply = (await client.call('COMMAND', 'INFO', ...unresolved)) as unknown[];
+      unresolved.forEach((command, index) => {
+        const entry = reply[index];
+        if (!Array.isArray(entry)) {
+          return;
+        }
+        const flags = entry[2];
+        if (!Array.isArray(flags)) {
+          return;
+        }
+        this.commandVerdicts.set(command, flags.includes('write'));
+      });
+    } catch (error) {
+      const errorKey = `command-info-${nodeId}`;
+      if (!this.loggedErrors.has(errorKey)) {
+        this.logger.debug(
+          `Failed to classify commands on node ${nodeId}: ${error instanceof Error ? error.message : error}`,
+        );
+        this.addLoggedError(errorKey);
+      }
+    }
+  }
+
+  private getReplicationOffset(
+    info: Record<string, unknown>,
+    role: 'master' | 'replica',
+  ): number | undefined {
     if (role === 'master') {
       return this.parseInfoValue(info, 'replication.master_repl_offset');
     } else {
       return this.parseInfoValue(info, 'replication.slave_repl_offset');
     }
   }
+}
+
+/**
+ * Narrow a discovered node list to the IDs a caller asked for.
+ *
+ * An empty `nodeIds` means "none", not "all" — the caller asked for a specific
+ * set and it happened to be empty.
+ */
+function selectNodes(
+  nodes: ReadonlyArray<DiscoveredNode>,
+  nodeIds?: ReadonlyArray<string>,
+): DiscoveredNode[] {
+  if (nodeIds === undefined) {
+    return [...nodes];
+  }
+  const wanted = new Set(nodeIds);
+  return nodes.filter((node) => {
+    return wanted.has(node.id);
+  });
 }

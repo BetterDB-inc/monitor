@@ -5,12 +5,26 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 
 describe('ClusterMetricsService', () => {
   let service: ClusterMetricsService;
-  let mockDiscoveryService: any;
-  let mockConnectionRegistry: any;
+  let mockDiscoveryService: { discoverNodes: jest.Mock; getNodeConnection: jest.Mock };
+  let mockConnectionRegistry: { get: jest.Mock; getDefaultId: jest.Mock; list: jest.Mock };
+  let mockClient: { call: jest.Mock; info: jest.Mock; slowlog: jest.Mock; status: string };
 
   const mockNodes = [
-    { id: 'node1', address: '192.168.1.10:6379', role: 'master' as const, healthy: true, slots: [[0, 5460]] },
-    { id: 'node2', address: '192.168.1.11:6379', role: 'replica' as const, healthy: true, masterId: 'node1', slots: [] },
+    {
+      id: 'node1',
+      address: '192.168.1.10:6379',
+      role: 'master' as const,
+      healthy: true,
+      slots: [[0, 5460]],
+    },
+    {
+      id: 'node2',
+      address: '192.168.1.11:6379',
+      role: 'replica' as const,
+      healthy: true,
+      masterId: 'node1',
+      slots: [],
+    },
   ];
 
   const mockSlowlog = [
@@ -45,20 +59,42 @@ used_cpu_sys:10.5\r
 used_cpu_user:20.3\r
 `;
 
+  const serverWriteCommands = new Set(['json.set', 'vadd']);
+  const serverKnownCommands = new Set(['get', 'info', 'json.set', 'vadd']);
+
+  function commandInfoEntry(name: string): unknown {
+    if (!serverKnownCommands.has(name)) {
+      return null;
+    }
+    const flags = serverWriteCommands.has(name) ? ['write', 'denyoom'] : ['readonly', 'fast'];
+    return [name, -2, flags, 1, 1, 1];
+  }
+
   beforeEach(async () => {
-    const mockClient = {
+    mockClient = {
       call: jest.fn().mockImplementation((cmd, ...args) => {
         if (cmd === 'SLOWLOG' && args[0] === 'GET') {
           return Promise.resolve(mockSlowlog);
         }
         if (cmd === 'CLIENT' && args[0] === 'LIST') {
-          return Promise.resolve('id=1 addr=127.0.0.1:12345 name=test age=10 idle=5 flags=N db=0 sub=0 psub=0 multi=-1 qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 events=r cmd=get user=default\n');
+          return Promise.resolve(
+            'id=1 addr=127.0.0.1:12345 name=test age=10 idle=5 flags=N db=0 sub=0 psub=0 multi=-1 qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 events=r cmd=get user=default\n',
+          );
         }
         if (cmd === 'CLUSTER' && args[0] === 'NODES') {
-          return Promise.resolve('node1 192.168.1.10:6379 master - 0 0 1 connected 0-5460\nnode2 192.168.1.11:6379 slave node1 0 0 2 connected\n');
+          return Promise.resolve(
+            'node1 192.168.1.10:6379 master - 0 0 1 connected 0-5460\nnode2 192.168.1.11:6379 slave node1 0 0 2 connected\n',
+          );
         }
         if (cmd === 'COMMANDLOG' && args[0] === 'GET') {
           return Promise.resolve([]);
+        }
+        if (cmd === 'COMMAND' && args[0] === 'INFO') {
+          return Promise.resolve(
+            args.slice(1).map((name: string) => {
+              return commandInfoEntry(name);
+            }),
+          );
         }
         return Promise.resolve(null);
       }),
@@ -124,6 +160,138 @@ used_cpu_user:20.3\r
 
       // Should only return 1 entry (the most recent)
       expect(result.length).toBeLessThanOrEqual(1);
+    });
+
+    it('records the role the node reports for itself, alongside the topology role', async () => {
+      const stats = await service.getClusterNodeStats();
+
+      const replicaNode = stats.find((stat) => {
+        return stat.nodeId === 'node2';
+      });
+
+      // The topology has demoted it; its own INFO has not caught up. That
+      // disagreement is the data-loss window #413 detects.
+      expect(replicaNode?.role).toBe('replica');
+      expect(replicaNode?.selfReportedRole).toBe('master');
+    });
+
+    it('leaves write calls unread unless the caller asks for commandstats', async () => {
+      const stats = await service.getClusterNodeStats();
+
+      expect(stats[0].writeCommandCalls).toBeUndefined();
+      expect(mockClient.info).not.toHaveBeenCalledWith('commandstats');
+    });
+
+    it('totals only write commands when commandstats is requested', async () => {
+      mockClient.info.mockImplementation((section?: string) => {
+        if (section === 'commandstats') {
+          return Promise.resolve(
+            '# Commandstats\r\n' +
+              'cmdstat_get:calls=900,usec=1000,usec_per_call=1.11,rejected_calls=0,failed_calls=0\r\n' +
+              'cmdstat_set:calls=30,usec=500,usec_per_call=16.67,rejected_calls=0,failed_calls=0\r\n' +
+              'cmdstat_hset:calls=12,usec=200,usec_per_call=16.67,rejected_calls=0,failed_calls=0\r\n',
+          );
+        }
+        return Promise.resolve(mockInfoString);
+      });
+
+      const stats = await service.getClusterNodeStats(undefined, { includeCommandStats: true });
+
+      expect(stats[0].writeCommandCalls).toBe(42);
+    });
+
+    it('counts a module write the server classifies', async () => {
+      mockClient.info.mockImplementation((section?: string) => {
+        if (section === 'commandstats') {
+          return Promise.resolve(
+            '# Commandstats\r\n' +
+              'cmdstat_get:calls=900,usec=1000,usec_per_call=1.11,rejected_calls=0,failed_calls=0\r\n' +
+              'cmdstat_json.set:calls=40,usec=800,usec_per_call=20,rejected_calls=0,failed_calls=0\r\n',
+          );
+        }
+        return Promise.resolve(mockInfoString);
+      });
+
+      const stats = await service.getClusterNodeStats(undefined, { includeCommandStats: true });
+
+      expect(stats[0].writeCommandCalls).toBe(40);
+    });
+
+    it('reports no write calls rather than zero when the traffic cannot be classified', async () => {
+      mockClient.info.mockImplementation((section?: string) => {
+        if (section === 'commandstats') {
+          return Promise.resolve(
+            '# Commandstats\r\n' +
+              'cmdstat_get:calls=900,usec=1000,usec_per_call=1.11,rejected_calls=0,failed_calls=0\r\n' +
+              'cmdstat_mysteryctl:calls=40,usec=800,usec_per_call=20,rejected_calls=0,failed_calls=0\r\n',
+          );
+        }
+        return Promise.resolve(mockInfoString);
+      });
+
+      const stats = await service.getClusterNodeStats(undefined, { includeCommandStats: true });
+
+      expect(stats[0].writeCommandCalls).toBeUndefined();
+    });
+
+    it('counts a core write the built-in list does not name', async () => {
+      mockClient.info.mockImplementation((section?: string) => {
+        if (section === 'commandstats') {
+          return Promise.resolve(
+            '# Commandstats\r\n' +
+              'cmdstat_vadd:calls=12,usec=800,usec_per_call=20,rejected_calls=0,failed_calls=0\r\n',
+          );
+        }
+        return Promise.resolve(mockInfoString);
+      });
+
+      const stats = await service.getClusterNodeStats(undefined, { includeCommandStats: true });
+
+      expect(stats[0].writeCommandCalls).toBe(12);
+    });
+
+    it('reports zero write calls when the node served only core reads', async () => {
+      mockClient.info.mockImplementation((section?: string) => {
+        if (section === 'commandstats') {
+          return Promise.resolve(
+            '# Commandstats\r\n' +
+              'cmdstat_get:calls=900,usec=1000,usec_per_call=1.11,rejected_calls=0,failed_calls=0\r\n',
+          );
+        }
+        return Promise.resolve(mockInfoString);
+      });
+
+      const stats = await service.getClusterNodeStats(undefined, { includeCommandStats: true });
+
+      expect(stats[0].writeCommandCalls).toBe(0);
+    });
+
+    it('reports no write calls rather than zero when the node has no commandstats', async () => {
+      mockClient.info.mockImplementation((section?: string) => {
+        if (section === 'commandstats') {
+          return Promise.reject(new Error('ERR unknown section'));
+        }
+        return Promise.resolve(mockInfoString);
+      });
+
+      const stats = await service.getClusterNodeStats(undefined, { includeCommandStats: true });
+
+      expect(stats.length).toBeGreaterThan(0);
+      expect(stats[0].writeCommandCalls).toBeUndefined();
+    });
+
+    it('reads only the nodes the caller asked for', async () => {
+      const stats = await service.getClusterNodeStats(undefined, { nodeIds: ['node2'] });
+
+      expect(stats.map((stat) => stat.nodeId)).toEqual(['node2']);
+      expect(mockDiscoveryService.getNodeConnection).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads nothing when the caller asked for an empty set of nodes', async () => {
+      const stats = await service.getClusterNodeStats(undefined, { nodeIds: [] });
+
+      expect(stats).toEqual([]);
+      expect(mockDiscoveryService.getNodeConnection).not.toHaveBeenCalled();
     });
 
     it('should handle errors from individual nodes gracefully', async () => {
@@ -283,8 +451,20 @@ used_cpu_user:20.3\r
     it('should parse migrating slots correctly when target node exists', async () => {
       // Create nodes with matching IDs for migrations
       const migrationMockNodes = [
-        { id: 'abc123node1', address: '192.168.1.10:6379', role: 'master' as const, healthy: true, slots: [[0, 5460]] },
-        { id: 'def456node2', address: '192.168.1.11:6379', role: 'master' as const, healthy: true, slots: [[5461, 10922]] },
+        {
+          id: 'abc123node1',
+          address: '192.168.1.10:6379',
+          role: 'master' as const,
+          healthy: true,
+          slots: [[0, 5460]],
+        },
+        {
+          id: 'def456node2',
+          address: '192.168.1.11:6379',
+          role: 'master' as const,
+          healthy: true,
+          slots: [[5461, 10922]],
+        },
       ];
 
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce(migrationMockNodes);
@@ -294,7 +474,7 @@ used_cpu_user:20.3\r
           if (cmd === 'CLUSTER' && args[0] === 'NODES') {
             return Promise.resolve(
               'abc123node1 192.168.1.10:6379 master - 0 0 1 connected 0-5460 [5461->-def456]\n' +
-              'def456node2 192.168.1.11:6379 master - 0 0 2 connected 5461-10922\n'
+                'def456node2 192.168.1.11:6379 master - 0 0 2 connected 5461-10922\n',
             );
           }
           return Promise.resolve(null);
@@ -310,7 +490,7 @@ used_cpu_user:20.3\r
 
       // Should find the migrating slot
       expect(migrations.length).toBeGreaterThan(0);
-      const migratingSlots = migrations.filter(m => m.state === 'migrating');
+      const migratingSlots = migrations.filter((m) => m.state === 'migrating');
       expect(migratingSlots.length).toBeGreaterThan(0);
       expect(migratingSlots[0].slot).toBe(5461);
       expect(migratingSlots[0].sourceNodeId).toBe('abc123node1');
@@ -328,7 +508,7 @@ used_cpu_user:20.3\r
             // Reference a node ID that doesn't exist in mockNodes
             return Promise.resolve(
               'somenode 192.168.1.10:6379 master - 0 0 1 connected 0-5460\n' +
-              'othernode 192.168.1.11:6379 master - 0 0 2 connected 5461-10922 [5461-<-unknownnode]\n'
+                'othernode 192.168.1.11:6379 master - 0 0 2 connected 5461-10922 [5461-<-unknownnode]\n',
             );
           }
           return Promise.resolve(null);

@@ -24,7 +24,28 @@ import {
 import { MetricForecastingService } from '../metric-forecasting/metric-forecasting.service';
 import { ALL_METRIC_KINDS } from '@betterdb/shared';
 import { OtelEventDispatcherService } from '../otel-telemetry/otel-event-dispatcher.service';
-import { diffClusterTopology, snapshotTopology, TopologySnapshot } from '../cluster/topology-diff';
+import {
+  diffClusterTopology,
+  snapshotTopology,
+  TopologyDiff,
+  TopologySnapshot,
+} from '../cluster/topology-diff';
+import { ClusterMetricsService } from '../cluster/cluster-metrics.service';
+import {
+  demotedWritesMessage,
+  evaluateDemotedWrites,
+  pruneDemotionWatch,
+  recordDemotions,
+  DemotedNodeObservation,
+  DemotionWatch,
+} from '../cluster/demoted-writes';
+
+/**
+ * Ceiling on the demoted-node read, clamped down to the poll interval when that
+ * is shorter. Two INFO round trips to one node take milliseconds when the node
+ * is answering at all.
+ */
+const DEMOTED_NODE_READ_TIMEOUT_MS = 2_000;
 
 // Per-connection state for tracking previous values and stale labels
 interface ConnectionMetricState {
@@ -32,6 +53,7 @@ interface ConnectionMetricState {
   previousSlotsFail: number;
   previousCrcMismatch: number | null;
   previousTopology: TopologySnapshot | null;
+  demotionWatch: DemotionWatch;
   currentKeyspaceDbLabels: Set<string>;
   currentClusterSlotLabels: Set<string>;
   // Storage-based metric labels (per-connection)
@@ -214,6 +236,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     private readonly metricForecastingService?: MetricForecastingService,
     @Optional()
     private readonly otelEvents?: OtelEventDispatcherService,
+    @Optional()
+    private readonly clusterMetricsService?: ClusterMetricsService,
   ) {
     super(connectionRegistry);
     this.pollIntervalMs = this.configService.get<number>('PROMETHEUS_POLL_INTERVAL_MS', 5000);
@@ -272,6 +296,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         previousSlotsFail: 0,
         previousCrcMismatch: null,
         previousTopology: null,
+        demotionWatch: new Map(),
         currentKeyspaceDbLabels: new Set(),
         currentClusterSlotLabels: new Set(),
         // Storage-based metric labels
@@ -1178,11 +1203,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       // failed slots and produces nothing — and that is the common case under
       // load and during rolling upgrades (valkey#4340). Diff the topology too.
       let topology: TopologySnapshot | null = null;
+      let topologyDiff: TopologyDiff | null = null;
       let topologyReasons: string[] = [];
       let changedNodes: Array<{ nodeId: string; reason: string; from: string; to: string }> = [];
       try {
         topology = snapshotTopology(await client.getClusterNodes());
-        const topologyDiff = diffClusterTopology(state.previousTopology, topology);
+        topologyDiff = diffClusterTopology(state.previousTopology, topology);
         topologyReasons = topologyDiff.reasons;
         changedNodes = topologyDiff.changedNodes;
       } catch (err) {
@@ -1254,6 +1280,17 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       if (topology !== null) {
         state.previousTopology = topology;
       }
+
+      // cluster.demoted.writes: the failover above is over, but the node it
+      // demoted may not know yet. While it still answers `role:master` it keeps
+      // accepting writes for slots it no longer owns, and those writes are
+      // discarded the moment the client's slot cache refreshes — silently.
+      const demotionCheckedAt = Date.now();
+      if (topologyDiff !== null) {
+        recordDemotions(state.demotionWatch, topologyDiff, demotionCheckedAt);
+      }
+      pruneDemotionWatch(state.demotionWatch, topology, demotionCheckedAt);
+      await this.detectDemotedMasterWrites(connectionId, state, config);
 
       const capabilities = client.getCapabilities();
       if (
@@ -1517,6 +1554,133 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         error instanceof Error ? error : String(error),
       );
       this.logger.error(`Failed to update slowlog raw metrics for ${connLabel}`, error);
+    }
+  }
+
+  /**
+   * Report nodes stuck in the window between "the cluster demoted it" and "the
+   * node knows it was demoted". Only runs while the watch holds something, so
+   * a cluster that has not failed over pays nothing — the per-node INFO and
+   * commandstats reads are the expensive part.
+   */
+  private async detectDemotedMasterWrites(
+    connectionId: string,
+    state: ConnectionMetricState,
+    config: { host: string; port: number } | null,
+  ): Promise<void> {
+    if (state.demotionWatch.size === 0) {
+      return;
+    }
+    if (!this.clusterMetricsService) {
+      return;
+    }
+
+    let observations: DemotedNodeObservation[];
+    try {
+      // Scoped to the watched IDs: a demoted node is one node, and reading the
+      // whole cluster to observe it would cost two INFO round trips per node
+      // on every poll and every /metrics scrape for the length of the window.
+      const nodeStats = await this.readWithTimeout(
+        this.clusterMetricsService.getClusterNodeStats(connectionId, {
+          includeCommandStats: true,
+          nodeIds: [...state.demotionWatch.keys()],
+        }),
+      );
+      observations = nodeStats.map((node) => {
+        return {
+          nodeId: node.nodeId,
+          nodeAddress: node.nodeAddress,
+          selfReportedRole: node.selfReportedRole,
+          opsPerSec: node.opsPerSec,
+          writeCommandCalls: node.writeCommandCalls,
+        };
+      });
+    } catch (err) {
+      // Per-node reads fail independently of the cluster-wide ones. Losing them
+      // must not take the poll down, and must not advance the watch — the next
+      // successful read still sees the disagreement.
+      this.logger.debug(
+        `Demoted-node stats failed for ${connectionId}: ${err instanceof Error ? err.message : err}`,
+      );
+      return;
+    }
+
+    const alerts = evaluateDemotedWrites(
+      state.demotionWatch,
+      observations,
+      Date.now(),
+      this.pollIntervalMs,
+    );
+    for (const alert of alerts) {
+      const message = demotedWritesMessage(alert);
+      if (alert.severity === 'critical') {
+        this.logger.error(message);
+      } else {
+        this.logger.warn(message);
+      }
+
+      try {
+        this.otelEvents?.dispatch(
+          WebhookEventType.CLUSTER_DEMOTED_WRITES,
+          {
+            nodeId: alert.nodeId,
+            nodeAddress: alert.nodeAddress,
+            disagreementMs: alert.disagreementMs,
+            demotedForMs: alert.demotedForMs,
+            opsPerSec: alert.opsPerSec,
+            severity: alert.severity,
+            ...(alert.writeCallsDelta === undefined
+              ? {}
+              : { writeCallsDelta: alert.writeCallsDelta }),
+          },
+          connectionId,
+        );
+      } catch (err) {
+        this.logger.error('Failed to dispatch cluster.demoted.writes OTLP event', err);
+      }
+
+      if (this.webhookEventsProService) {
+        try {
+          await this.webhookEventsProService.dispatchClusterDemotedWrites({
+            nodeId: alert.nodeId,
+            nodeAddress: alert.nodeAddress,
+            disagreementMs: alert.disagreementMs,
+            demotedForMs: alert.demotedForMs,
+            opsPerSec: alert.opsPerSec,
+            writeCallsDelta: alert.writeCallsDelta,
+            severity: alert.severity,
+            message,
+            timestamp: Date.now(),
+            instance: { host: config?.host || 'localhost', port: config?.port || 6379 },
+            connectionId,
+          });
+        } catch (err) {
+          this.logger.error('Failed to dispatch cluster.demoted.writes webhook', err);
+        }
+      }
+    }
+  }
+
+  /**
+   * Bound the demoted-node read so a hung node cannot stall the metrics pass.
+   *
+   * The node under observation is by definition in a bad state, and the read is
+   * awaited inline in the poll. A timeout is treated like any other failed read:
+   * the watch keeps its evidence and the next poll tries again.
+   */
+  private async readWithTimeout<T>(work: Promise<T>): Promise<T> {
+    const limit = Math.min(this.pollIntervalMs, DEMOTED_NODE_READ_TIMEOUT_MS);
+    let timer: NodeJS.Timeout | undefined;
+    const expiry = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`demoted-node read exceeded ${limit}ms`));
+      }, limit);
+    });
+
+    try {
+      return await Promise.race([work, expiry]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 

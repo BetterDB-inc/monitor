@@ -58,6 +58,7 @@ const EVENT_LABELS: Record<WebhookEventType, string> = {
   'replication.lag': 'Replication Lag',
   'cluster.failover': 'Cluster Failover',
   'cluster.bus.corruption': 'Cluster Bus Corruption',
+  'cluster.demoted.writes': 'Writes to Demoted Master',
   'failover.started': 'Failover Started',
   'failover.completed': 'Failover Completed',
   'data.loss.detected': 'Data Loss Detected',
