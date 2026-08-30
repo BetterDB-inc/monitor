@@ -229,6 +229,55 @@ Cost savings scale with the model. Observed values from live examples:
 | `@betterdb/semantic-cache/embed/ollama` | `nomic-embed-text` | 768 |
 | `@betterdb/semantic-cache/embed/google` | `gemini-embedding-2` | 768 |
 
+Every helper returns a *described* embedder: the function carries a
+`descriptor` naming the provider, the model, and any option that changes the
+vector space. The cache reads it to detect a change of embedding model — see
+[Changing the embedding model](#changing-the-embedding-model).
+
+A hand-rolled `embedFn` is still accepted and still works, but detection stays
+inactive for it unless you opt in:
+
+```ts
+import { describeEmbedder } from '@betterdb/semantic-cache';
+
+const embedFn = describeEmbedder(
+  async (text: string) => myProvider.embed(text),
+  { provider: 'my-provider', model: 'v2', params: { inputType: 'query' } },
+);
+```
+
+### Changing the embedding model
+
+Vectors from two embedding models occupy different spaces. Comparing them
+produces similarity scores that look ordinary and mean nothing, so swapping
+model against a populated cache is silent corruption rather than a visible
+failure.
+
+`initialize()` records the model in the discovery marker and compares it on
+every subsequent start. When it changes, `onEmbeddingModelChange` decides:
+
+| Value | Behaviour | Use when |
+|---|---|---|
+| `'throw'` (default) | `initialize()` raises `EmbeddingModelChangedError` naming both models | Always, unless you have a reason not to |
+| `'warn'` | Logs and carries on | Mid-migration, and you accept meaningless scores until the old entries expire |
+| `'flush'` | Drops the index and every entry, then initializes clean | The cache is cheap to rebuild and you want the switch to be automatic |
+
+```ts
+const cache = new SemanticCache({
+  client,
+  embedFn: createOpenAIEmbed({ model: 'text-embedding-3-large' }),
+  onEmbeddingModelChange: 'flush',
+});
+```
+
+The check needs a described embedder on both sides. A cache written before
+this feature records no model: the first start after upgrading warns once and
+adopts the current model rather than throwing. An undescribed `embedFn` warns
+that detection is inactive — see [Embedding Helpers](#embedding-helpers).
+
+Warnings go to `console` by default; pass `logger: { warn: () => {} }` to
+silence them, or your own sink to route them.
+
 ### Discovery markers
 
 Starting in `0.2.0`, `initialize()` writes a small advisory record to a shared `__betterdb:caches` hash on the Valkey instance so Monitor (and other tooling) can enumerate caches without configuration. A 60s-TTL heartbeat key is refreshed every 30s; `flush()` and `dispose()` remove the heartbeat immediately. No sensitive data is ever written — only cache metadata (type, prefix, version, capabilities, configured thresholds).

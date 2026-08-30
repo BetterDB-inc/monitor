@@ -1,6 +1,6 @@
 import { hostname } from 'node:os';
 
-import type { Valkey } from './types';
+import type { EmbedderDescriptor, Valkey } from './types';
 import { SemanticCacheUsageError } from './errors';
 
 export const PROTOCOL_VERSION = 1;
@@ -41,6 +41,8 @@ export interface BuildSemanticMetadataInput {
   categoryThresholds: Record<string, number>;
   uncertaintyBand: number;
   includeCategories: boolean;
+  embeddingModel?: string;
+  embeddingDescriptor?: EmbedderDescriptor;
 }
 
 export function buildSemanticMetadata(input: BuildSemanticMetadataInput): MarkerMetadata {
@@ -62,7 +64,59 @@ export function buildSemanticMetadata(input: BuildSemanticMetadataInput): Marker
   if (input.includeCategories && Object.keys(input.categoryThresholds).length > 0) {
     metadata.category_thresholds = { ...input.categoryThresholds };
   }
+  // An undescribed embedder leaves both keys absent, which is what the
+  // model-change check reads as "unknown" rather than "changed".
+  if (input.embeddingModel !== undefined) {
+    metadata.embedding_model = input.embeddingModel;
+  }
+  if (input.embeddingDescriptor !== undefined) {
+    metadata.embedding_descriptor = { ...input.embeddingDescriptor };
+  }
   return metadata;
+}
+
+/**
+ * Outcome of reading the marker a previous run left for this cache name.
+ *
+ * `absent` and `unreadable` are kept apart because they are different claims.
+ * No marker is a first run and nothing is wrong. A marker that would not read
+ * or would not parse means a cache exists whose contents cannot be checked —
+ * silence there would hide it. Neither ever means "something changed".
+ */
+export type MarkerRead =
+  | { status: 'absent' }
+  | { status: 'unreadable'; reason: string }
+  | { status: 'present'; marker: Partial<MarkerMetadata> };
+
+export async function readMarker(client: Valkey, name: string): Promise<MarkerRead> {
+  let raw: string | null;
+  try {
+    raw = await client.hget(REGISTRY_KEY, name);
+  } catch (err) {
+    return { status: 'unreadable', reason: `the registry read failed: ${errMsg(err)}` };
+  }
+  if (raw === null) {
+    return { status: 'absent' };
+  }
+  return parseMarker(raw);
+}
+
+/**
+ * JSON.parse happily yields null, a number or an array, none of which a caller
+ * can read fields off. Failing them here keeps every non-marker value on the
+ * one path that warns instead of throwing out of the caller.
+ */
+function parseMarker(raw: string): MarkerRead {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return { status: 'unreadable', reason: `its marker is not valid JSON: ${errMsg(err)}` };
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { status: 'unreadable', reason: 'its marker is not a JSON object' };
+  }
+  return { status: 'present', marker: parsed as Partial<MarkerMetadata> };
 }
 
 export interface DiscoveryLogger {
@@ -185,12 +239,11 @@ export class DiscoveryManager {
   }
 
   private checkCollision(existingJson: string): void {
-    let parsed: Partial<MarkerMetadata>;
-    try {
-      parsed = JSON.parse(existingJson) as Partial<MarkerMetadata>;
-    } catch {
+    const read = parseMarker(existingJson);
+    if (read.status !== 'present') {
       return;
     }
+    const parsed = read.marker;
     if (parsed.type && parsed.type !== CACHE_TYPE) {
       throw new SemanticCacheUsageError(
         `cache name collision: '${this.name}' is already registered as type '${String(parsed.type)}' on this Valkey instance`,

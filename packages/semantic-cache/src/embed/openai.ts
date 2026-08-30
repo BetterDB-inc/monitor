@@ -9,7 +9,8 @@
  *   const embed = createOpenAIEmbed({ model: 'text-embedding-3-small' });
  *   const cache = new SemanticCache({ client, embedFn: embed });
  */
-import type { EmbedFn } from '../types';
+import type { DescribedEmbedFn } from '../types';
+import { describeEmbedder } from '../embedder-identity';
 
 export interface OpenAIEmbedOptions {
   /**
@@ -31,7 +32,7 @@ export interface OpenAIEmbedOptions {
  * Create an EmbedFn backed by the OpenAI Embeddings API.
  * Requires the 'openai' package to be installed as a peer dependency.
  */
-export function createOpenAIEmbed(opts?: OpenAIEmbedOptions): EmbedFn {
+export function createOpenAIEmbed(opts?: OpenAIEmbedOptions): DescribedEmbedFn {
   const model = opts?.model ?? 'text-embedding-3-small';
   let clientPromise: Promise<unknown> | null = null;
 
@@ -53,7 +54,7 @@ export function createOpenAIEmbed(opts?: OpenAIEmbedOptions): EmbedFn {
     return clientPromise;
   }
 
-  return async (text: string): Promise<number[]> => {
+  const embed = async (text: string): Promise<number[]> => {
     const client = (await getClient()) as {
       embeddings: {
         create: (params: {
@@ -65,4 +66,6 @@ export function createOpenAIEmbed(opts?: OpenAIEmbedOptions): EmbedFn {
     const response = await client.embeddings.create({ input: text, model });
     return response.data[0].embedding;
   };
+
+  return describeEmbedder(embed, { provider: 'openai', model });
 }

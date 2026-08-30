@@ -30,9 +30,13 @@ export type {
 
 export {
   EmbeddingError,
+  EmbeddingModelChangedError,
   SemanticCache,
   SemanticCacheUsageError,
   createKeywordOverlapRerank,
+  describeEmbedder,
+  embedderFingerprint,
+  getEmbedderDescriptor,
 } from '@betterdb/semantic-cache';
 export type {
   CacheCheckOptions,
@@ -40,10 +44,14 @@ export type {
   CacheConfidence,
   CacheStats,
   CacheStoreOptions,
+  DescribedEmbedFn,
+  EmbedderDescriptor,
+  EmbeddingModelChangeAction,
   IndexInfo,
   InvalidateResult,
   JudgeOptions,
   RerankOptions,
+  SemanticCacheLogger,
   SemanticCacheOptions,
   ThresholdEffectivenessResult,
 } from '@betterdb/semantic-cache';

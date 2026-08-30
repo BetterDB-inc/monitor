@@ -14,6 +14,24 @@ export interface ConfigRefreshOptions {
 
 export type EmbedFn = (text: string) => Promise<number[]>;
 
+/**
+ * Identity of the model that produces a vector.
+ *
+ * `params` carries only what changes the vector space — task type, input type,
+ * output dimensionality. Credentials, base URLs and timeouts do not belong
+ * here: they change how the vector is fetched, not what it means.
+ */
+export interface EmbedderDescriptor {
+  provider: string;
+  model: string;
+  params?: Record<string, string | number | undefined>;
+}
+
+/** An {@link EmbedFn} that knows which model produced its vectors. */
+export interface DescribedEmbedFn extends EmbedFn {
+  readonly descriptor: EmbedderDescriptor;
+}
+
 export interface ModelCost {
   inputPer1k: number;
   outputPer1k: number;
@@ -105,6 +123,10 @@ export interface SemanticCacheOptions {
    * Discovery-marker protocol controls. See
    * docs/plans/specs/spec-semantic-cache-discovery-markers.md.
    * Defaults: enabled=true, heartbeatIntervalMs=30000, includeCategories=true.
+   *
+   * The marker also carries the embedding model, so disabling discovery
+   * disables `onEmbeddingModelChange` with it — there is nothing to compare a
+   * later run against, and the check silently passes.
    */
   discovery?: DiscoveryOptions;
   /**
@@ -115,6 +137,46 @@ export interface SemanticCacheOptions {
    * Defaults: enabled=true, intervalMs=30000.
    */
   configRefresh?: ConfigRefreshOptions;
+  /**
+   * What to do when initialize() finds that the cache was populated by a
+   * different embedding model than the one configured now.
+   *
+   * - 'throw' (default): raise EmbeddingModelChangedError. Vectors from two
+   *   models are not comparable, so every subsequent check() would be a
+   *   correctness failure, not merely a slow one.
+   * - 'warn': log and carry on. Use when you are mid-migration and accept
+   *   meaningless similarity scores until the old entries expire.
+   * - 'flush': drop the index and every entry, then initialize clean. Never
+   *   the default — discarding a warm production cache as a startup side
+   *   effect is a worse surprise than a startup error.
+   *
+   * 'warn' fires once, not once per restart. The run that warns goes on to
+   * write its discovery marker with the new model, so every later start
+   * matches and stays quiet while the old-model vectors are still in the
+   * index — and a later switch to 'throw' or 'flush' will not catch the
+   * change either. Only set a `defaultTtl` and let them expire, or flush.
+   *
+   * Detection needs a described embedder. The bundled create*Embed() helpers
+   * are described; a hand-rolled closure must be wrapped in describeEmbedder()
+   * or the check reports itself inactive and does nothing.
+   *
+   * Detection also needs `discovery` left enabled: the model is recorded on
+   * the discovery marker, so with `discovery: { enabled: false }` nothing is
+   * ever written, every start reads as a first run, and this option has no
+   * effect whichever value it holds.
+   */
+  onEmbeddingModelChange?: EmbeddingModelChangeAction;
+  /**
+   * Sink for operational warnings. Default: the global console.
+   * Pass `{ warn: () => {} }` to silence them.
+   */
+  logger?: SemanticCacheLogger;
+}
+
+export type EmbeddingModelChangeAction = 'throw' | 'warn' | 'flush';
+
+export interface SemanticCacheLogger {
+  warn: (message: string) => void;
 }
 
 export interface RerankOptions {

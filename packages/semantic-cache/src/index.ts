@@ -11,16 +11,22 @@ export type {
   InvalidateResult,
   CacheConfidence,
   EmbedFn,
+  DescribedEmbedFn,
+  EmbedderDescriptor,
   ModelCost,
   RerankOptions,
   JudgeOptions,
   ConfigRefreshOptions,
+  EmbeddingModelChangeAction,
+  SemanticCacheLogger,
 } from './types';
+export { describeEmbedder, embedderFingerprint, getEmbedderDescriptor } from './embedder-identity';
 export { createKeywordOverlapRerank } from './rerank';
 export {
   SemanticCacheUsageError,
   EmbeddingError,
   ValkeyCommandError,
+  EmbeddingModelChangedError,
 } from './errors';
 export type {
   ContentBlock,

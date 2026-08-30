@@ -9,7 +9,8 @@
  *   const embed = createBedrockEmbed({ modelId: 'amazon.titan-embed-text-v2:0' });
  *   const cache = new SemanticCache({ client, embedFn: embed });
  */
-import type { EmbedFn } from '../types';
+import type { DescribedEmbedFn } from '../types';
+import { describeEmbedder } from '../embedder-identity';
 
 export type BedrockEmbedModelId =
   | 'amazon.titan-embed-text-v2:0'
@@ -38,7 +39,7 @@ export interface BedrockEmbedOptions {
  * Create an EmbedFn backed by the AWS Bedrock embedding models.
  * Requires @aws-sdk/client-bedrock-runtime to be installed.
  */
-export function createBedrockEmbed(opts?: BedrockEmbedOptions): EmbedFn {
+export function createBedrockEmbed(opts?: BedrockEmbedOptions): DescribedEmbedFn {
   const modelId = opts?.modelId ?? 'amazon.titan-embed-text-v2:0';
   let clientPromise: Promise<unknown> | null = null;
   let CommandClass: unknown = null;
@@ -62,7 +63,10 @@ export function createBedrockEmbed(opts?: BedrockEmbedOptions): EmbedFn {
         try {
           // @ts-ignore - optional peer dep
           const mod = await import('@aws-sdk/client-bedrock-runtime' as string);
-          const { BedrockRuntimeClient, InvokeModelCommand } = mod as { BedrockRuntimeClient: new (cfg: unknown) => unknown; InvokeModelCommand: new (cmd: unknown) => unknown };
+          const { BedrockRuntimeClient, InvokeModelCommand } = mod as {
+            BedrockRuntimeClient: new (cfg: unknown) => unknown;
+            InvokeModelCommand: new (cmd: unknown) => unknown;
+          };
           CommandClass = InvokeModelCommand;
           return new BedrockRuntimeClient({
             region: opts?.region ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-1',
@@ -77,7 +81,7 @@ export function createBedrockEmbed(opts?: BedrockEmbedOptions): EmbedFn {
     return clientPromise;
   }
 
-  return async (text: string): Promise<number[]> => {
+  const embed = async (text: string): Promise<number[]> => {
     const client = await getClient();
 
     const isTitan = modelId.startsWith('amazon.titan');
@@ -99,7 +103,9 @@ export function createBedrockEmbed(opts?: BedrockEmbedOptions): EmbedFn {
       accept: 'application/json',
     });
 
-    const response = await (client as { send: (cmd: unknown) => Promise<{ body: Uint8Array }> }).send(command);
+    const response = await (
+      client as { send: (cmd: unknown) => Promise<{ body: Uint8Array }> }
+    ).send(command);
     const decoded = new TextDecoder().decode(response.body);
     const parsed = JSON.parse(decoded) as Record<string, unknown>;
 
@@ -113,4 +119,6 @@ export function createBedrockEmbed(opts?: BedrockEmbedOptions): EmbedFn {
     // Generic fallback
     return (parsed.embedding as number[]) ?? (parsed.embeddings as number[][])?.[0] ?? [];
   };
+
+  return describeEmbedder(embed, { provider: 'bedrock', model: modelId });
 }

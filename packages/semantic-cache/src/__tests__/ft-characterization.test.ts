@@ -11,6 +11,7 @@ interface MockClient {
   hset: Mock<(...args: unknown[]) => Promise<number>>;
   hgetall: Mock<(key: string) => Promise<Record<string, string>>>;
   hincrby: Mock<(...args: unknown[]) => Promise<number>>;
+  hdel: Mock<(...args: unknown[]) => Promise<number>>;
   expire: Mock<(...args: unknown[]) => Promise<number>>;
   del: Mock<(...args: unknown[]) => Promise<number>>;
   scan: Mock<(...args: unknown[]) => Promise<[string, string[]]>>;
@@ -33,6 +34,9 @@ function makeClient(callImpl: CallFn): MockClient {
       return {};
     }),
     hincrby: vi.fn(async (..._args: unknown[]) => {
+      return 1;
+    }),
+    hdel: vi.fn(async (..._args: unknown[]) => {
       return 1;
     }),
     expire: vi.fn(async (..._args: unknown[]) => {
@@ -646,6 +650,7 @@ describe('flush(): FT.DROPINDEX path', () => {
     expect(dropCalls).toEqual([['FT.DROPINDEX', 'ftchar:idx']]);
     expect(client.del).toHaveBeenCalledWith('ftchar:__stats');
     expect(client.del).toHaveBeenCalledWith('ftchar:__similarity_window');
+    expect(client.hdel).not.toHaveBeenCalled();
   });
 
   it('wraps other FT.DROPINDEX failures as ValkeyCommandError("FT.DROPINDEX", ...)', async () => {

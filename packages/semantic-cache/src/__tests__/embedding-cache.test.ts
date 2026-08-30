@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { SemanticCache } from '../SemanticCache';
-import type { Valkey } from '../types';
+import { describeEmbedder, getEmbedderDescriptor } from '../embedder-identity';
+import { createGoogleEmbed, type GoogleEmbedOptions } from '../embed/google';
+import type { EmbedFn, EmbedderDescriptor, Valkey } from '../types';
 
 function makeMockClient(mockSearchResult?: { key: string; fields: Record<string, string> }) {
   const hashStore = new Map<string, Record<string, string>>();
@@ -25,7 +27,9 @@ function makeMockClient(mockSearchResult?: { key: string; fields: Record<string,
         return [
           '1',
           key,
-          Object.entries(fields).flatMap(([k, v]) => [k, v]).concat(['__score', '0.01']),
+          Object.entries(fields)
+            .flatMap(([k, v]) => [k, v])
+            .concat(['__score', '0.01']),
         ];
       }
       return null;
@@ -135,5 +139,100 @@ describe('embedding cache', () => {
     // Verify kvStore was NOT written to (no set calls for embed keys)
     const embedKeys = [...client.kvStore.keys()].filter((k) => k.includes(':embed:'));
     expect(embedKeys.length).toBe(0);
+  });
+});
+
+describe('embedding cache namespacing', () => {
+  type MockClient = ReturnType<typeof makeMockClient>;
+
+  function googleDescriptor(opts: GoogleEmbedOptions): EmbedderDescriptor {
+    return getEmbedderDescriptor(createGoogleEmbed(opts)) as EmbedderDescriptor;
+  }
+
+  async function warmThenProbe(
+    client: MockClient,
+    first: EmbedderDescriptor | undefined,
+    second: EmbedderDescriptor | undefined,
+  ): Promise<number> {
+    const embed: EmbedFn = async () => {
+      return [0.5, 0.5];
+    };
+    const warming = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: first === undefined ? embed : describeEmbedder(embed, first),
+      name: 'test_ns',
+      embeddingCache: { enabled: true, ttl: 3600 },
+    });
+    await warming.initialize();
+    await warming.store('Hello world', 'Hi');
+
+    const probe = vi.fn(async () => {
+      return [0.5, 0.5];
+    });
+    const reading = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: second === undefined ? probe : describeEmbedder(probe, second),
+      name: 'test_ns',
+      embeddingCache: { enabled: true, ttl: 3600 },
+    });
+    await reading.initialize();
+    await reading.store('Hello world', 'Hi');
+    return probe.mock.calls.length;
+  }
+
+  it('re-embeds when the descriptor differs', async () => {
+    const calls = await warmThenProbe(
+      makeMockClient(),
+      { provider: 'openai', model: 'text-embedding-3-small' },
+      { provider: 'openai', model: 'text-embedding-3-large' },
+    );
+
+    expect(calls).toBe(1);
+  });
+
+  it('shares cached vectors when the descriptor matches', async () => {
+    const calls = await warmThenProbe(
+      makeMockClient(),
+      { provider: 'openai', model: 'text-embedding-3-small' },
+      { provider: 'openai', model: 'text-embedding-3-small' },
+    );
+
+    expect(calls).toBe(0);
+  });
+
+  it('keeps an undescribed embedder sharing its own namespace across instances', async () => {
+    const calls = await warmThenProbe(makeMockClient(), undefined, undefined);
+
+    expect(calls).toBe(0);
+  });
+
+  it('re-embeds when a google document title changes the text behind the same key', async () => {
+    const calls = await warmThenProbe(
+      makeMockClient(),
+      googleDescriptor({ taskType: 'RETRIEVAL_DOCUMENT', title: 'Release notes' }),
+      googleDescriptor({ taskType: 'RETRIEVAL_DOCUMENT', title: 'Runbook' }),
+    );
+
+    expect(calls).toBe(1);
+  });
+
+  it('shares vectors across a title the request never carries', async () => {
+    const calls = await warmThenProbe(
+      makeMockClient(),
+      googleDescriptor({ taskType: 'RETRIEVAL_QUERY', title: 'Release notes' }),
+      googleDescriptor({ taskType: 'RETRIEVAL_QUERY', title: 'Runbook' }),
+    );
+
+    expect(calls).toBe(0);
+  });
+
+  it("does not let an undescribed embedder read a described one's vectors", async () => {
+    const calls = await warmThenProbe(
+      makeMockClient(),
+      { provider: 'openai', model: 'small' },
+      undefined,
+    );
+
+    expect(calls).toBe(1);
   });
 });

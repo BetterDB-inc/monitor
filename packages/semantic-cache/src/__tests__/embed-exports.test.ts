@@ -2,6 +2,15 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+import { createBedrockEmbed } from '../embed/bedrock';
+import { createCohereEmbed } from '../embed/cohere';
+import { createGoogleEmbed } from '../embed/google';
+import { createOllamaEmbed } from '../embed/ollama';
+import { createOpenAIEmbed } from '../embed/openai';
+import { createVoyageEmbed } from '../embed/voyage';
+import { embedderFingerprint, getEmbedderDescriptor } from '../embedder-identity';
+import type { DescribedEmbedFn, EmbedderDescriptor } from '../types';
+
 const packageRoot = resolve(__dirname, '../..');
 
 function embedProviders(): string[] {
@@ -38,5 +47,132 @@ describe('embed provider exports', () => {
         types: `./dist/embed/${name}.d.ts`,
       });
     }
+  });
+});
+
+describe('embed provider identity', () => {
+  const cases: Array<{
+    name: string;
+    create: () => DescribedEmbedFn;
+    provider: string;
+    model: string;
+    fingerprint: string;
+  }> = [
+    {
+      name: 'openai',
+      create: () => {
+        return createOpenAIEmbed();
+      },
+      provider: 'openai',
+      model: 'text-embedding-3-small',
+      fingerprint: 'openai:text-embedding-3-small',
+    },
+    {
+      name: 'bedrock',
+      create: () => {
+        return createBedrockEmbed();
+      },
+      provider: 'bedrock',
+      model: 'amazon.titan-embed-text-v2:0',
+      fingerprint: 'bedrock:amazon.titan-embed-text-v2%3A0',
+    },
+    {
+      name: 'ollama',
+      create: () => {
+        return createOllamaEmbed();
+      },
+      provider: 'ollama',
+      model: 'nomic-embed-text',
+      fingerprint: 'ollama:nomic-embed-text',
+    },
+    {
+      name: 'voyage',
+      create: () => {
+        return createVoyageEmbed();
+      },
+      provider: 'voyage',
+      model: 'voyage-3-lite',
+      fingerprint: 'voyage:voyage-3-lite#inputType=query',
+    },
+    {
+      name: 'cohere',
+      create: () => {
+        return createCohereEmbed();
+      },
+      provider: 'cohere',
+      model: 'embed-english-v3.0',
+      fingerprint: 'cohere:embed-english-v3.0#inputType=search_query',
+    },
+    {
+      name: 'google',
+      create: () => {
+        return createGoogleEmbed();
+      },
+      provider: 'google',
+      model: 'gemini-embedding-2',
+      fingerprint: 'google:gemini-embedding-2#outputDimensionality=768&taskType=RETRIEVAL_QUERY',
+    },
+  ];
+
+  it.each(cases)('describes the $name default embedder', (testCase) => {
+    const descriptor = getEmbedderDescriptor(testCase.create());
+
+    expect(descriptor).toBeDefined();
+    expect(descriptor?.provider).toBe(testCase.provider);
+    expect(descriptor?.model).toBe(testCase.model);
+    expect(embedderFingerprint(descriptor as EmbedderDescriptor)).toBe(testCase.fingerprint);
+  });
+
+  it('reflects a non-default model in the fingerprint', () => {
+    const embed = createOpenAIEmbed({ model: 'text-embedding-3-large' });
+
+    expect(embedderFingerprint(getEmbedderDescriptor(embed) as EmbedderDescriptor)).toBe(
+      'openai:text-embedding-3-large',
+    );
+  });
+
+  it('reflects a non-default space-affecting param in the fingerprint', () => {
+    const embed = createVoyageEmbed({ inputType: 'document' });
+
+    expect(embedderFingerprint(getEmbedderDescriptor(embed) as EmbedderDescriptor)).toBe(
+      'voyage:voyage-3-lite#inputType=document',
+    );
+  });
+
+  it('carries a google document title that the request folds into the text', () => {
+    const embed = createGoogleEmbed({ taskType: 'RETRIEVAL_DOCUMENT', title: 'Runbook' });
+
+    expect(embedderFingerprint(getEmbedderDescriptor(embed) as EmbedderDescriptor)).toBe(
+      'google:gemini-embedding-2#outputDimensionality=768&taskType=RETRIEVAL_DOCUMENT&title=Runbook',
+    );
+  });
+
+  it('omits a google title that gemini-embedding-2 never sends', () => {
+    const titled = createGoogleEmbed({ taskType: 'RETRIEVAL_QUERY', title: 'Runbook' });
+    const untitled = createGoogleEmbed({ taskType: 'RETRIEVAL_QUERY' });
+
+    expect(embedderFingerprint(getEmbedderDescriptor(titled) as EmbedderDescriptor)).toBe(
+      embedderFingerprint(getEmbedderDescriptor(untitled) as EmbedderDescriptor),
+    );
+  });
+
+  it('keeps a google title that a model outside gemini-embedding-2 forwards', () => {
+    const embed = createGoogleEmbed({
+      model: 'gemini-embedding-001',
+      taskType: 'RETRIEVAL_QUERY',
+      title: 'Runbook',
+    });
+
+    expect(embedderFingerprint(getEmbedderDescriptor(embed) as EmbedderDescriptor)).toBe(
+      'google:gemini-embedding-001#taskType=RETRIEVAL_QUERY&title=Runbook',
+    );
+  });
+
+  it('omits outputDimensionality for a google model that has no default width', () => {
+    const embed = createGoogleEmbed({ model: 'gemini-embedding-001' });
+
+    expect(embedderFingerprint(getEmbedderDescriptor(embed) as EmbedderDescriptor)).toBe(
+      'google:gemini-embedding-001#taskType=RETRIEVAL_QUERY',
+    );
   });
 });

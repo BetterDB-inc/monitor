@@ -9,7 +9,8 @@
  *   const embed = createCohereEmbed({ model: 'embed-english-v3.0' });
  *   const cache = new SemanticCache({ client, embedFn: embed });
  */
-import type { EmbedFn } from '../types';
+import type { DescribedEmbedFn } from '../types';
+import { describeEmbedder } from '../embedder-identity';
 
 export interface CohereEmbedOptions {
   /**
@@ -33,12 +34,12 @@ export interface CohereEmbedOptions {
  * Create an EmbedFn backed by the Cohere Embed API.
  * Uses native fetch - no SDK required.
  */
-export function createCohereEmbed(opts?: CohereEmbedOptions): EmbedFn {
+export function createCohereEmbed(opts?: CohereEmbedOptions): DescribedEmbedFn {
   const model = opts?.model ?? 'embed-english-v3.0';
   const baseUrl = opts?.baseUrl ?? 'https://api.cohere.com/v2';
   const inputType = opts?.inputType ?? 'search_query';
 
-  return async (text: string): Promise<number[]> => {
+  const embed = async (text: string): Promise<number[]> => {
     const apiKey = opts?.apiKey ?? process.env.COHERE_API_KEY;
     if (!apiKey) {
       throw new Error(
@@ -70,4 +71,6 @@ export function createCohereEmbed(opts?: CohereEmbedOptions): EmbedFn {
     };
     return json.embeddings.float[0] ?? [];
   };
+
+  return describeEmbedder(embed, { provider: 'cohere', model, params: { inputType } });
 }
