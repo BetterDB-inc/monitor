@@ -18,6 +18,7 @@ import type {
   EmbeddingModelChangeAction,
   SemanticCacheLogger,
 } from './types';
+import { TTL_SECONDS_MAX, TTL_SECONDS_MIN } from './constants';
 import {
   SemanticCacheUsageError,
   EmbeddingError,
@@ -1319,7 +1320,8 @@ export class SemanticCache {
     this.defaultThreshold = nextDefault;
     this.categoryThresholds = nextCategory;
 
-    // TTL — integer seconds in 10..86400. Falls back to constructor value when absent or invalid.
+    // TTL — integer seconds within the canonical bounds. Falls back to the
+    // constructor value when absent or invalid.
     let nextTtl = this._initialDefaultTtl;
     if (raw) {
       const ttlRaw = raw['ttl'];
@@ -1328,8 +1330,8 @@ export class SemanticCache {
         if (
           Number.isFinite(parsed) &&
           Number.isInteger(parsed) &&
-          parsed >= 10 &&
-          parsed <= 86400
+          parsed >= TTL_SECONDS_MIN &&
+          parsed <= TTL_SECONDS_MAX
         ) {
           nextTtl = parsed;
         }

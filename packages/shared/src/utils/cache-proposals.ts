@@ -41,10 +41,22 @@ export const SemanticThresholdAdjustPayloadSchema = z.object({
 });
 export type SemanticThresholdAdjustPayload = z.infer<typeof SemanticThresholdAdjustPayloadSchema>;
 
+/**
+ * Canonical bounds for a proposed or runtime-overridden TTL, in seconds.
+ *
+ * Mirrored in every independently-published artifact, which cannot depend on
+ * this package: packages/semantic-cache/src/constants.ts,
+ * packages/mcp/src/constants.ts, and
+ * packages/semantic-cache-py/betterdb_semantic_cache/constants.py.
+ * scripts/check-ttl-constants.mjs fails CI if a mirror drifts from this file.
+ */
+export const TTL_SECONDS_MIN = 10;
+export const TTL_SECONDS_MAX = 86400;
+
 export const AgentToolTtlAdjustPayloadSchema = z.object({
   tool_name: z.string().min(1),
   current_ttl_seconds: z.number().int().min(0),
-  new_ttl_seconds: z.number().int().min(10).max(86400),
+  new_ttl_seconds: z.number().int().min(TTL_SECONDS_MIN).max(TTL_SECONDS_MAX),
 });
 export type AgentToolTtlAdjustPayload = z.infer<typeof AgentToolTtlAdjustPayloadSchema>;
 
