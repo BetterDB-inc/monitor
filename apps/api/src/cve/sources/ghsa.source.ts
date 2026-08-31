@@ -1,4 +1,10 @@
-import type { Advisory, BranchRange, CveProduct, CveSeverity } from '@betterdb/shared';
+import type {
+  Advisory,
+  BranchRange,
+  CveConfidence,
+  CveProduct,
+  CveSeverity,
+} from '@betterdb/shared';
 import { GHSA_REPOS } from '../cve.constants';
 import { branchOf } from '../matcher/version-range';
 import {
@@ -35,24 +41,81 @@ function toSeverity(raw: string): CveSeverity {
   return known ?? 'medium';
 }
 
-function toRange(vulnerability: GhsaVulnerability): BranchRange | null {
-  const raw = vulnerability.vulnerable_version_range?.trim();
-  if (!raw) {
-    return null;
+const VERSION_PATTERN = /\d+\.\d+\.\d+/g;
+const BARE_UPPER_BOUND_PATTERN = /^<=\s*(\d+\.\d+\.\d+)$/;
+
+function decrementPatch(version: string): string {
+  const [major, minor, patch] = version.split('.').map((part) => {
+    return parseInt(part, 10);
+  });
+
+  return `${major}.${minor}.${patch - 1}`;
+}
+
+function exactRangesFromPatchedVersions(patchedVersions: string): BranchRange[] {
+  const versions = patchedVersions.match(VERSION_PATTERN) ?? [];
+  const ranges: BranchRange[] = [];
+
+  for (const version of versions) {
+    const patchSegment = parseInt(version.split('.')[2], 10);
+    if (patchSegment === 0) {
+      continue;
+    }
+
+    ranges.push({
+      branch: branchOf(version),
+      vulnerableAtOrBelow: decrementPatch(version),
+      patchedAt: version,
+    });
   }
 
-  const upper = raw.replace(/^<=?\s*/, '').trim();
-  if (upper.length === 0) {
+  return ranges;
+}
+
+function broadRangeFromVulnerableVersionRange(vulnerableVersionRange: string): BranchRange | null {
+  const match = vulnerableVersionRange.trim().match(BARE_UPPER_BOUND_PATTERN);
+  if (!match) {
     return null;
   }
-
-  const patched = vulnerability.patched_versions?.trim();
 
   return {
-    branch: branchOf(upper),
-    vulnerableAtOrBelow: upper,
-    ...(patched ? { patchedAt: patched } : {}),
+    branch: '*',
+    vulnerableAtOrBelow: match[1],
   };
+}
+
+interface AffectedRanges {
+  affected: BranchRange[];
+  confidence: CveConfidence;
+}
+
+function toAffectedRanges(vulnerabilities: GhsaVulnerability[]): AffectedRanges {
+  const exact: BranchRange[] = [];
+
+  for (const vulnerability of vulnerabilities) {
+    const patchedVersions = vulnerability.patched_versions?.trim();
+    if (patchedVersions) {
+      exact.push(...exactRangesFromPatchedVersions(patchedVersions));
+    }
+  }
+
+  if (exact.length > 0) {
+    return { affected: exact, confidence: 'exact' };
+  }
+
+  for (const vulnerability of vulnerabilities) {
+    const vulnerableVersionRange = vulnerability.vulnerable_version_range?.trim();
+    if (!vulnerableVersionRange) {
+      continue;
+    }
+
+    const broad = broadRangeFromVulnerableVersionRange(vulnerableVersionRange);
+    if (broad) {
+      return { affected: [broad], confidence: 'broad' };
+    }
+  }
+
+  return { affected: [], confidence: 'unversioned' };
 }
 
 function toAdvisory(raw: GhsaAdvisory, product: CveProduct): Advisory | null {
@@ -60,11 +123,7 @@ function toAdvisory(raw: GhsaAdvisory, product: CveProduct): Advisory | null {
     return null;
   }
 
-  const affected = (raw.vulnerabilities ?? [])
-    .map(toRange)
-    .filter((range): range is BranchRange => {
-      return range !== null;
-    });
+  const { affected, confidence } = toAffectedRanges(raw.vulnerabilities ?? []);
 
   return {
     cveId: raw.cve_id,
@@ -75,7 +134,7 @@ function toAdvisory(raw: GhsaAdvisory, product: CveProduct): Advisory | null {
     ...(typeof raw.cvss?.score === 'number' ? { cvssScore: raw.cvss.score } : {}),
     cwes: raw.cwe_ids ?? [],
     knownExploited: false,
-    confidence: affected.length > 0 ? 'exact' : 'unversioned',
+    confidence,
     sources: [{ source: 'ghsa', fields: ['affected', 'severity', 'cvssScore', 'summary'] }],
     summary: raw.summary,
     references: [raw.html_url],

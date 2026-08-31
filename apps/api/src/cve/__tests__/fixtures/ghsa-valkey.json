@@ -1,30 +1,104 @@
 [
   {
-    "ghsa_id": "GHSA-jqcm-9gh4-2vgv",
+    "ghsa_id": "GHSA-mvcj-73cw-22m4",
     "cve_id": "CVE-2026-63639",
-    "summary": "Heap overflow in the Valkey server",
+    "url": "https://api.github.com/repos/valkey-io/valkey/security-advisories/GHSA-mvcj-73cw-22m4",
+    "html_url": "https://github.com/valkey-io/valkey/security/advisories/GHSA-mvcj-73cw-22m4",
+    "summary": "UAF in stream deserialization may lead to remote code execution",
+    "description": "An authenticated user may use a specially crafted RESTORE command to trigger a use-after-free during stream consumer group deserialization.",
     "severity": "high",
-    "cvss": { "score": 8.8 },
-    "cwe_ids": ["CWE-122"],
-    "html_url": "https://github.com/valkey-io/valkey/security/advisories/GHSA-jqcm-9gh4-2vgv",
+    "state": "published",
+    "published_at": "2026-07-22T04:50:54Z",
     "vulnerabilities": [
-      { "vulnerable_version_range": "<= 9.1.0", "patched_versions": "9.1.1" },
-      { "vulnerable_version_range": "<= 9.0.4", "patched_versions": "9.0.5" },
-      { "vulnerable_version_range": "<= 8.1.8", "patched_versions": "8.1.9" },
-      { "vulnerable_version_range": "<= 8.0.9", "patched_versions": "8.0.10" },
-      { "vulnerable_version_range": "<= 7.2.13", "patched_versions": "7.2.14" }
-    ]
+      {
+        "package": { "ecosystem": "", "name": "valkey-server" },
+        "vulnerable_version_range": "<= 9.1.0, <= 9.0.4, <= 8.1.8, <= 8.0.9, <= 7.2.13",
+        "patched_versions": "9.1.1, 9.0.5, 8.1.9, 8.0.10, 7.2.14",
+        "vulnerable_functions": []
+      }
+    ],
+    "cvss": {
+      "vector_string": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "score": 8.8
+    },
+    "cwes": [],
+    "cwe_ids": []
+  },
+  {
+    "ghsa_id": "GHSA-c677-q3wr-gggq",
+    "cve_id": "CVE-2026-21863",
+    "url": "https://api.github.com/repos/valkey-io/valkey/security-advisories/GHSA-c677-q3wr-gggq",
+    "html_url": "https://github.com/valkey-io/valkey/security/advisories/GHSA-c677-q3wr-gggq",
+    "summary": "Remote DoS with malformed Valkey Cluster bus message",
+    "description": "A malicious actor with access to the Valkey clusterbus port can send an invalid packet that may cause an out of bounds read.",
+    "severity": "medium",
+    "state": "published",
+    "published_at": "2026-02-23T17:36:26Z",
+    "vulnerabilities": [
+      {
+        "package": { "ecosystem": "", "name": "valkey-server" },
+        "vulnerable_version_range": "<= 9.0.2",
+        "patched_versions": "9.0.3, 8.1.6, 8.0.7, 7.2.12",
+        "vulnerable_functions": []
+      }
+    ],
+    "cvss": {
+      "vector_string": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+      "score": 6.5
+    },
+    "cwes": [{ "cwe_id": "CWE-125", "name": "Out-of-bounds Read" }],
+    "cwe_ids": ["CWE-125"]
   },
   {
     "ghsa_id": "GHSA-9rfg-jx7v-52p6",
     "cve_id": "CVE-2025-49844",
-    "summary": "Use-after-free reachable from a scripted command",
-    "severity": "critical",
-    "cvss": { "score": 9.9 },
-    "cwe_ids": ["CWE-416"],
+    "url": "https://api.github.com/repos/valkey-io/valkey/security-advisories/GHSA-9rfg-jx7v-52p6",
     "html_url": "https://github.com/valkey-io/valkey/security/advisories/GHSA-9rfg-jx7v-52p6",
+    "summary": "Lua Use-After-Free may lead to remote code execution",
+    "description": "An authenticated user may use a specially crafted Lua script to manipulate the garbage collector and trigger a use-after-free.",
+    "severity": "high",
+    "state": "published",
+    "published_at": "2025-10-03T13:32:41Z",
     "vulnerabilities": [
-      { "vulnerable_version_range": "<= 8.0.8", "patched_versions": "8.0.9" }
-    ]
+      {
+        "package": { "ecosystem": "", "name": "Valkey" },
+        "vulnerable_version_range": "7.2.10 and below, 8.0.5 and below, 8.1.3 and below",
+        "patched_versions": "7.2.11 and above, 8.0.6 and above, 8.1.4 and above",
+        "vulnerable_functions": []
+      }
+    ],
+    "cvss": {
+      "vector_string": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "score": 8.8
+    },
+    "cwes": [],
+    "cwe_ids": []
+  },
+  {
+    "ghsa_id": "GHSA-24vm-hv6g-2mj5",
+    "cve_id": "CVE-2025-21605",
+    "url": "https://api.github.com/repos/valkey-io/valkey/security-advisories/GHSA-24vm-hv6g-2mj5",
+    "html_url": "https://github.com/valkey-io/valkey/security/advisories/GHSA-24vm-hv6g-2mj5",
+    "summary": "DoS Vulnerability due to unlimited growth of output buffers abused by unauthenticated client",
+    "description": "An unauthenticated client can cause unlimited growth of output buffers, until the server runs out of memory or is killed.",
+    "severity": "high",
+    "state": "published",
+    "published_at": "2025-04-28T04:51:07Z",
+    "vulnerabilities": [
+      {
+        "package": { "ecosystem": "", "name": "Valkey" },
+        "vulnerable_version_range": ">= 7.2",
+        "patched_versions": "7.2.9, 8.0.3, 8.1.1",
+        "vulnerable_functions": []
+      }
+    ],
+    "cvss": {
+      "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+      "score": 7.5
+    },
+    "cwes": [
+      { "cwe_id": "CWE-770", "name": "Allocation of Resources Without Limits or Throttling" }
+    ],
+    "cwe_ids": ["CWE-770"]
   }
 ]
