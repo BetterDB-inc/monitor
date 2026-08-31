@@ -1,5 +1,5 @@
 {
-  "totalResults": 4,
+  "totalResults": 6,
   "vulnerabilities": [
     {
       "cve": {
@@ -51,30 +51,22 @@
           {
             "url": "https://github.com/redis/redis/releases/tag/7.4.3",
             "source": "security-advisories@github.com",
-            "tags": [
-              "Release Notes"
-            ]
+            "tags": ["Release Notes"]
           },
           {
             "url": "https://github.com/redis/redis/security/advisories/GHSA-r67f-p999-2gff",
             "source": "security-advisories@github.com",
-            "tags": [
-              "Third Party Advisory"
-            ]
+            "tags": ["Third Party Advisory"]
           },
           {
             "url": "https://github.com/valkey-io/valkey/releases/tag/8.1.1",
             "source": "af854a3a-2127-422b-91ae-364da2661108",
-            "tags": [
-              "Release Notes"
-            ]
+            "tags": ["Release Notes"]
           },
           {
             "url": "https://lists.debian.org/debian-lts-announce/2025/05/msg00014.html",
             "source": "af854a3a-2127-422b-91ae-364da2661108",
-            "tags": [
-              "Mailing List"
-            ]
+            "tags": ["Mailing List"]
           },
           {
             "url": "https://www.vicarius.io/vsociety/posts/cve-2025-21605-detection-script-memory-exhaustion-vulnerability-in-redis-database",
@@ -225,8 +217,7 @@
             "url": "https://github.com/valkey-io/valkey/pull/2101",
             "source": "cve@mitre.org"
           }
-        ],
-        "configurations": null
+        ]
       }
     },
     {
@@ -289,9 +280,7 @@
           {
             "url": "https://github.com/valkey-io/valkey/security/advisories/GHSA-c677-q3wr-gggq",
             "source": "security-advisories@github.com",
-            "tags": [
-              "Vendor Advisory"
-            ]
+            "tags": ["Vendor Advisory"]
           },
           {
             "url": "https://access.redhat.com/errata/RHSA-2026:3443",
@@ -427,17 +416,12 @@
           {
             "url": "https://github.com/redis/redis/commit/a30d367a71b7017581cf1ca104242a3c644dec0f",
             "source": "security-advisories@github.com",
-            "tags": [
-              "Patch",
-              "Third Party Advisory"
-            ]
+            "tags": ["Patch", "Third Party Advisory"]
           },
           {
             "url": "https://github.com/redis/redis/security/advisories/GHSA-m3mf-8x9w-r27q",
             "source": "security-advisories@github.com",
-            "tags": [
-              "Third Party Advisory"
-            ]
+            "tags": ["Third Party Advisory"]
           },
           {
             "url": "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/HTYQ5ZF37HNGTZWVNJD3VXP7I6MEEF42/",
@@ -454,46 +438,32 @@
           {
             "url": "https://security.gentoo.org/glsa/202209-17",
             "source": "security-advisories@github.com",
-            "tags": [
-              "Third Party Advisory"
-            ]
+            "tags": ["Third Party Advisory"]
           },
           {
             "url": "https://security.netapp.com/advisory/ntap-20211104-0003/",
             "source": "security-advisories@github.com",
-            "tags": [
-              "Third Party Advisory"
-            ]
+            "tags": ["Third Party Advisory"]
           },
           {
             "url": "https://www.debian.org/security/2021/dsa-5001",
             "source": "security-advisories@github.com",
-            "tags": [
-              "Third Party Advisory"
-            ]
+            "tags": ["Third Party Advisory"]
           },
           {
             "url": "https://www.oracle.com/security-alerts/cpuapr2022.html",
             "source": "security-advisories@github.com",
-            "tags": [
-              "Patch",
-              "Third Party Advisory"
-            ]
+            "tags": ["Patch", "Third Party Advisory"]
           },
           {
             "url": "https://github.com/redis/redis/commit/a30d367a71b7017581cf1ca104242a3c644dec0f",
             "source": "af854a3a-2127-422b-91ae-364da2661108",
-            "tags": [
-              "Patch",
-              "Third Party Advisory"
-            ]
+            "tags": ["Patch", "Third Party Advisory"]
           },
           {
             "url": "https://github.com/redis/redis/security/advisories/GHSA-m3mf-8x9w-r27q",
             "source": "af854a3a-2127-422b-91ae-364da2661108",
-            "tags": [
-              "Third Party Advisory"
-            ]
+            "tags": ["Third Party Advisory"]
           },
           {
             "url": "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/HTYQ5ZF37HNGTZWVNJD3VXP7I6MEEF42/",
@@ -510,31 +480,22 @@
           {
             "url": "https://security.gentoo.org/glsa/202209-17",
             "source": "af854a3a-2127-422b-91ae-364da2661108",
-            "tags": [
-              "Third Party Advisory"
-            ]
+            "tags": ["Third Party Advisory"]
           },
           {
             "url": "https://security.netapp.com/advisory/ntap-20211104-0003/",
             "source": "af854a3a-2127-422b-91ae-364da2661108",
-            "tags": [
-              "Third Party Advisory"
-            ]
+            "tags": ["Third Party Advisory"]
           },
           {
             "url": "https://www.debian.org/security/2021/dsa-5001",
             "source": "af854a3a-2127-422b-91ae-364da2661108",
-            "tags": [
-              "Third Party Advisory"
-            ]
+            "tags": ["Third Party Advisory"]
           },
           {
             "url": "https://www.oracle.com/security-alerts/cpuapr2022.html",
             "source": "af854a3a-2127-422b-91ae-364da2661108",
-            "tags": [
-              "Patch",
-              "Third Party Advisory"
-            ]
+            "tags": ["Patch", "Third Party Advisory"]
           }
         ],
         "configurations": [
@@ -654,6 +615,262 @@
                     "vulnerable": true,
                     "criteria": "cpe:2.3:a:oracle:communications_operations_monitor:5.0:*:*:*:*:*:*:*",
                     "matchCriteriaId": "B8FBE260-E306-4215-80C0-D2D27CA43E0F"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2021-31294",
+        "vulnStatus": "Modified",
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Redis before 6cbea7d allows a replica to cause an assertion failure in a primary server by sending a non-administrative command (specifically, a SET command). NOTE: this was fixed for Redis 6.2.x and 7.x in 2021. Versions before 6.2 were not intended to have safety guarantees related to this."
+          }
+        ],
+        "metrics": {
+          "cvssMetricV31": [
+            {
+              "source": "nvd@nist.gov",
+              "type": "Primary",
+              "cvssData": {
+                "version": "3.1",
+                "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                "baseScore": 5.9,
+                "baseSeverity": "MEDIUM",
+                "attackVector": "NETWORK",
+                "attackComplexity": "HIGH",
+                "privilegesRequired": "NONE",
+                "userInteraction": "NONE",
+                "scope": "UNCHANGED",
+                "confidentialityImpact": "NONE",
+                "integrityImpact": "NONE",
+                "availabilityImpact": "HIGH"
+              },
+              "exploitabilityScore": 2.2,
+              "impactScore": 3.6
+            }
+          ]
+        },
+        "weaknesses": [
+          {
+            "source": "nvd@nist.gov",
+            "type": "Primary",
+            "description": [
+              {
+                "lang": "en",
+                "value": "CWE-617"
+              }
+            ]
+          }
+        ],
+        "references": [
+          {
+            "url": "https://github.com/redis/redis/commit/46f4ebbe842620f0976a36741a72482620aa4b48",
+            "source": "cve@mitre.org",
+            "tags": ["Patch"]
+          },
+          {
+            "url": "https://github.com/redis/redis/commit/6cbea7d29b5285692843bc1c351abba1a7ef326f",
+            "source": "cve@mitre.org",
+            "tags": ["Patch"]
+          },
+          {
+            "url": "https://github.com/redis/redis/issues/8712",
+            "source": "cve@mitre.org",
+            "tags": ["Exploit", "Third Party Advisory"]
+          },
+          {
+            "url": "https://security.netapp.com/advisory/ntap-20230814-0007/",
+            "source": "cve@mitre.org"
+          },
+          {
+            "url": "https://github.com/redis/redis/commit/46f4ebbe842620f0976a36741a72482620aa4b48",
+            "source": "af854a3a-2127-422b-91ae-364da2661108",
+            "tags": ["Patch"]
+          },
+          {
+            "url": "https://github.com/redis/redis/commit/6cbea7d29b5285692843bc1c351abba1a7ef326f",
+            "source": "af854a3a-2127-422b-91ae-364da2661108",
+            "tags": ["Patch"]
+          },
+          {
+            "url": "https://github.com/redis/redis/issues/8712",
+            "source": "af854a3a-2127-422b-91ae-364da2661108",
+            "tags": ["Exploit", "Third Party Advisory"]
+          },
+          {
+            "url": "https://security.netapp.com/advisory/ntap-20230814-0007/",
+            "source": "af854a3a-2127-422b-91ae-364da2661108"
+          }
+        ],
+        "configurations": [
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*",
+                    "versionEndExcluding": "6.2.0",
+                    "matchCriteriaId": "28E377D7-3E6B-40DE-B628-CABF8CFF59AB"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2025-49844",
+        "vulnStatus": "Modified",
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Redis is an open source, in-memory database that persists on disk. Versions 8.2.1 and below allow an authenticated user to use a specially crafted Lua script to manipulate the garbage collector, trigger a use-after-free and potentially lead to remote code execution. The problem exists in all versions of Redis with Lua scripting. This issue is fixed in version 8.2.2. To workaround this issue without patching the redis-server executable is to prevent users from executing Lua scripts. This can be done using ACL to restrict EVAL and EVALSHA commands."
+          }
+        ],
+        "metrics": {
+          "cvssMetricV31": [
+            {
+              "source": "security-advisories@github.com",
+              "type": "Secondary",
+              "cvssData": {
+                "version": "3.1",
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+                "baseScore": 9.9,
+                "baseSeverity": "CRITICAL",
+                "attackVector": "NETWORK",
+                "attackComplexity": "LOW",
+                "privilegesRequired": "LOW",
+                "userInteraction": "NONE",
+                "scope": "CHANGED",
+                "confidentialityImpact": "HIGH",
+                "integrityImpact": "HIGH",
+                "availabilityImpact": "HIGH"
+              },
+              "exploitabilityScore": 3.1,
+              "impactScore": 6.0
+            }
+          ]
+        },
+        "weaknesses": [
+          {
+            "source": "security-advisories@github.com",
+            "type": "Secondary",
+            "description": [
+              {
+                "lang": "en",
+                "value": "CWE-416"
+              }
+            ]
+          }
+        ],
+        "references": [
+          {
+            "url": "https://github.com/redis/redis/commit/d5728cb5795c966c5b5b1e0f0ac576a7e69af539",
+            "source": "security-advisories@github.com",
+            "tags": ["Patch"]
+          },
+          {
+            "url": "https://github.com/redis/redis/releases/tag/8.2.2",
+            "source": "security-advisories@github.com",
+            "tags": ["Release Notes"]
+          },
+          {
+            "url": "https://github.com/redis/redis/security/advisories/GHSA-4789-qfc9-5f9q",
+            "source": "security-advisories@github.com",
+            "tags": ["Third Party Advisory"]
+          },
+          {
+            "url": "http://www.openwall.com/lists/oss-security/2025/10/07/2",
+            "source": "af854a3a-2127-422b-91ae-364da2661108",
+            "tags": ["Mailing List", "Third Party Advisory"]
+          },
+          {
+            "url": "https://github.com/lastvocher/redis-CVE-2025-49844",
+            "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0"
+          }
+        ],
+        "configurations": [
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*",
+                    "versionEndExcluding": "6.2.20",
+                    "matchCriteriaId": "C2F4D4F6-6F7C-46BC-B37C-DFAC34B097AC"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "7.0",
+                    "versionEndExcluding": "7.2.11",
+                    "matchCriteriaId": "4F82BD2A-473F-4F3F-9C80-C6448D07C45D"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "7.4.0",
+                    "versionEndExcluding": "7.4.6",
+                    "matchCriteriaId": "F6E336B8-E000-4EFA-95F8-F2B74A4913F0"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "8.0.0",
+                    "versionEndExcluding": "8.0.4",
+                    "matchCriteriaId": "459EBC07-D37A-44E5-95DB-4C3FD9F008FF"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "8.2.0",
+                    "versionEndExcluding": "8.2.2",
+                    "matchCriteriaId": "CBF13EC1-FE0A-4242-B8D3-2681485DDDF2"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:lfprojects:valkey:*:*:*:*:*:*:*:*",
+                    "versionEndExcluding": "7.2.11",
+                    "matchCriteriaId": "8CAF97D0-BE35-43AE-B820-3A88D1F49050"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:lfprojects:valkey:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "8.0.0",
+                    "versionEndExcluding": "8.0.6",
+                    "matchCriteriaId": "F0285AE3-BBEA-4D0E-A8AD-957EC3E78870"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:lfprojects:valkey:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "8.1.0",
+                    "versionEndExcluding": "8.1.4",
+                    "matchCriteriaId": "725746C6-025D-4364-9D97-E1315D670DF6"
                   }
                 ]
               }

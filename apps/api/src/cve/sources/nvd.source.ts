@@ -1,6 +1,6 @@
 import type { Advisory, BranchRange, CveProduct, CveSeverity } from '@betterdb/shared';
 import { NVD_CPES } from '../cve.constants';
-import { branchOf } from '../matcher/version-range';
+import { branchOf, compareVersions } from '../matcher/version-range';
 import {
   fetchJson,
   type CveSource,
@@ -47,25 +47,72 @@ function toSeverity(raw: string | undefined): CveSeverity {
   return known ?? 'medium';
 }
 
-function decrementPatch(version: string): string {
-  const [major, minor, patch] = version.split('.').map((part) => {
+function decrementPatch(version: string): string | null {
+  const parts = version.split('.');
+  if (parts.length !== 3) {
+    return null;
+  }
+
+  const [major, minor, patch] = parts.map((part) => {
     return parseInt(part, 10);
   });
+
+  if (!Number.isInteger(patch) || patch <= 0) {
+    return null;
+  }
 
   return `${major}.${minor}.${patch - 1}`;
 }
 
-function toRange(match: NvdCpeMatch): BranchRange | null {
-  const branch = match.versionStartIncluding ? branchOf(match.versionStartIncluding) : '*';
-
+function upperBoundOf(match: NvdCpeMatch): { raw: string; inclusive: boolean } | null {
   if (match.versionEndExcluding) {
-    return { branch, vulnerableAtOrBelow: decrementPatch(match.versionEndExcluding) };
+    return { raw: match.versionEndExcluding, inclusive: false };
   }
   if (match.versionEndIncluding) {
-    return { branch, vulnerableAtOrBelow: match.versionEndIncluding };
+    return { raw: match.versionEndIncluding, inclusive: true };
   }
 
   return null;
+}
+
+function branchFor(match: NvdCpeMatch, upperBoundRaw: string): string {
+  if (!match.versionStartIncluding) {
+    return '*';
+  }
+
+  const startBranch = branchOf(match.versionStartIncluding);
+  if (startBranch !== branchOf(upperBoundRaw)) {
+    return '*';
+  }
+
+  return startBranch;
+}
+
+function toRange(match: NvdCpeMatch): BranchRange | null {
+  const upperBound = upperBoundOf(match);
+  if (!upperBound) {
+    return null;
+  }
+
+  const branch = branchFor(match, upperBound.raw);
+  const vulnerableAtOrBelow = upperBound.inclusive
+    ? upperBound.raw
+    : (decrementPatch(upperBound.raw) ?? upperBound.raw);
+
+  return { branch, vulnerableAtOrBelow };
+}
+
+function collapseByBranch(ranges: BranchRange[]): BranchRange[] {
+  const highestByBranch = new Map<string, BranchRange>();
+
+  for (const range of ranges) {
+    const current = highestByBranch.get(range.branch);
+    if (!current || compareVersions(range.vulnerableAtOrBelow, current.vulnerableAtOrBelow) > 0) {
+      highestByBranch.set(range.branch, range);
+    }
+  }
+
+  return Array.from(highestByBranch.values());
 }
 
 function toRanges(cve: NvdCve, cpePrefix: string): BranchRange[] {
@@ -86,7 +133,7 @@ function toRanges(cve: NvdCve, cpePrefix: string): BranchRange[] {
     }
   }
 
-  return ranges;
+  return collapseByBranch(ranges);
 }
 
 function toAdvisory(cve: NvdCve, product: CveProduct, cpePrefix: string): Advisory {
