@@ -60,4 +60,38 @@ describe('EpssSource', () => {
     expect(stub).not.toHaveBeenCalled();
     expect(result.entries).toEqual([]);
   });
+
+  it('flags a batch as a partial failure when it reports zero total for a non-empty request', async () => {
+    const stub = fetchStub({ total: 0, data: [] });
+    const result = await new EpssSource(stub).enrich(['CVE-2022-0543']);
+
+    expect(result.entries).toEqual([]);
+    expect(result.partialFailures).toBeDefined();
+    expect(result.partialFailures).toHaveLength(1);
+  });
+
+  it('keeps entries from a good batch when a later batch reports zero total', async () => {
+    const ids = Array.from({ length: 150 }, (_, index) => {
+      return `CVE-2026-${String(index).padStart(5, '0')}`;
+    });
+    let call = 0;
+    const stub = jest.fn().mockImplementation(async () => {
+      call += 1;
+      if (call === 1) {
+        return { ok: true, status: 200, json: async () => EPSS_BODY };
+      }
+      return { ok: true, status: 200, json: async () => ({ total: 0, data: [] }) };
+    });
+    const result = await new EpssSource(stub).enrich(ids);
+
+    expect(result.entries.length).toBeGreaterThan(0);
+    expect(result.partialFailures).toHaveLength(1);
+  });
+
+  it('does not flag a batch as failed when the response has no total field at all', async () => {
+    const stub = fetchStub(EPSS_BODY);
+    const result = await new EpssSource(stub).enrich(['CVE-2022-0543', 'CVE-2026-21863']);
+
+    expect(result.partialFailures).toBeUndefined();
+  });
 });

@@ -165,6 +165,7 @@ describe('GhsaSource', () => {
       ),
     ).toBe(true);
     expect(result.source).toBe('ghsa');
+    expect(result.partialFailures).toBeUndefined();
   });
 
   it('reports the record count and the query it used', async () => {
@@ -188,6 +189,23 @@ describe('GhsaSource', () => {
     const result = await source.fetchAdvisories();
 
     expect(result.recordCount).toBeGreaterThan(0);
+  });
+
+  it('reports the repo that failed as a partial failure instead of discarding it silently', async () => {
+    let call = 0;
+    const flaky = jest.fn().mockImplementation(async () => {
+      call += 1;
+      if (call === 1) {
+        return { ok: false, status: 403, json: async () => ({}) };
+      }
+      return { ok: true, status: 200, json: async () => ghsaValkey };
+    });
+    const source = new GhsaSource(flaky);
+    const result = await source.fetchAdvisories();
+
+    expect(result.partialFailures).toBeDefined();
+    expect(result.partialFailures).toHaveLength(1);
+    expect(result.partialFailures?.[0]).toContain('redis/redis');
   });
 
   it('throws when every repo fails, so the refresh keeps the previous dataset', async () => {

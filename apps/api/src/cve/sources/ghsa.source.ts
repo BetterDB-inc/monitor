@@ -181,6 +181,7 @@ export class GhsaSource implements CveSource {
       recordCount: advisories.length,
       query: `github.com/repos/{${GHSA_REPOS.length} repos}/security-advisories`,
       fetchedAt: Date.now(),
+      ...(failures.length > 0 ? { partialFailures: failures } : {}),
     };
   }
 }
