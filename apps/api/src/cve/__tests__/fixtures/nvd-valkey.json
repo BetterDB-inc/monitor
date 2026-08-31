@@ -1,0 +1,363 @@
+{
+  "totalResults": 3,
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-2025-21605",
+        "vulnStatus": "Modified",
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Redis is an open source, in-memory database that persists on disk. In versions starting at 2.6 and prior to 7.4.3, An unauthenticated client can cause unlimited growth of output buffers, until the server runs out of memory or is killed. By default, the Redis configuration does not limit the output buffer of normal clients (see client-output-buffer-limit). Therefore, the output buffer can grow unlimitedly over time. As a result, the service is exhausted and the memory is unavailable. When password authentication is enabled on the Redis server, but no password is provided, the client can still cause the output buffer to grow from \"NOAUTH\" responses until the system will run out of memory. This issue has been patched in version 7.4.3. An additional workaround to mitigate this problem without patching the redis-server executable is to block access to prevent unauthenticated users from connecting to Redis. This can be done in different ways. Either using network access control tools like firewalls, iptables, security groups, etc, or enabling TLS and requiring users to authenticate using client side certificates."
+          }
+        ],
+        "metrics": {
+          "cvssMetricV31": [
+            {
+              "source": "security-advisories@github.com",
+              "type": "Secondary",
+              "cvssData": {
+                "version": "3.1",
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                "baseScore": 7.5,
+                "baseSeverity": "HIGH",
+                "attackVector": "NETWORK",
+                "attackComplexity": "LOW",
+                "privilegesRequired": "NONE",
+                "userInteraction": "NONE",
+                "scope": "UNCHANGED",
+                "confidentialityImpact": "NONE",
+                "integrityImpact": "NONE",
+                "availabilityImpact": "HIGH"
+              },
+              "exploitabilityScore": 3.9,
+              "impactScore": 3.6
+            }
+          ]
+        },
+        "weaknesses": [
+          {
+            "source": "security-advisories@github.com",
+            "type": "Secondary",
+            "description": [
+              {
+                "lang": "en",
+                "value": "CWE-770"
+              }
+            ]
+          }
+        ],
+        "references": [
+          {
+            "url": "https://github.com/redis/redis/releases/tag/7.4.3",
+            "source": "security-advisories@github.com",
+            "tags": [
+              "Release Notes"
+            ]
+          },
+          {
+            "url": "https://github.com/redis/redis/security/advisories/GHSA-r67f-p999-2gff",
+            "source": "security-advisories@github.com",
+            "tags": [
+              "Third Party Advisory"
+            ]
+          },
+          {
+            "url": "https://github.com/valkey-io/valkey/releases/tag/8.1.1",
+            "source": "af854a3a-2127-422b-91ae-364da2661108",
+            "tags": [
+              "Release Notes"
+            ]
+          },
+          {
+            "url": "https://lists.debian.org/debian-lts-announce/2025/05/msg00014.html",
+            "source": "af854a3a-2127-422b-91ae-364da2661108",
+            "tags": [
+              "Mailing List"
+            ]
+          },
+          {
+            "url": "https://www.vicarius.io/vsociety/posts/cve-2025-21605-detection-script-memory-exhaustion-vulnerability-in-redis-database",
+            "source": "af854a3a-2127-422b-91ae-364da2661108"
+          },
+          {
+            "url": "https://www.vicarius.io/vsociety/posts/cve-2025-21605-mitigation-script-memory-exhaustion-vulnerability-in-redis-database",
+            "source": "af854a3a-2127-422b-91ae-364da2661108"
+          }
+        ],
+        "configurations": [
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "2.6.0",
+                    "versionEndExcluding": "6.2.18",
+                    "matchCriteriaId": "F1053565-D448-4F0C-B918-CFBA980CF334"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "7.0",
+                    "versionEndExcluding": "7.2.8",
+                    "matchCriteriaId": "85E8DCD0-90DC-4AF5-A97C-60A29D6D1E73"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "7.4.0",
+                    "versionEndExcluding": "7.4.3",
+                    "matchCriteriaId": "115DBB04-814E-4C70-BBD6-E628472B0490"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:lfprojects:valkey:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "7.2.4",
+                    "versionEndExcluding": "7.2.9",
+                    "matchCriteriaId": "FA5DAFF4-B496-4C30-AD4E-A8840E258B95"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:lfprojects:valkey:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "8.0.0",
+                    "versionEndExcluding": "8.0.3",
+                    "matchCriteriaId": "76CF44DA-432D-4AED-8346-56694C520EFA"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:lfprojects:valkey:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "8.1.0",
+                    "versionEndExcluding": "8.1.1",
+                    "matchCriteriaId": "B579FCAC-72C6-4A20-B54C-036B12B279CF"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:o:debian:debian_linux:11.0:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "FA6FEEC2-9F11-4643-8827-749718254FED"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2025-49112",
+        "vulnStatus": "Deferred",
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "setDeferredReply in networking.c in Valkey through 8.1.1 has an integer underflow for prev->size - prev->used."
+          }
+        ],
+        "metrics": {
+          "cvssMetricV31": [
+            {
+              "source": "cve@mitre.org",
+              "type": "Secondary",
+              "cvssData": {
+                "version": "3.1",
+                "vectorString": "CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L",
+                "baseScore": 3.1,
+                "baseSeverity": "LOW",
+                "attackVector": "ADJACENT_NETWORK",
+                "attackComplexity": "HIGH",
+                "privilegesRequired": "NONE",
+                "userInteraction": "NONE",
+                "scope": "UNCHANGED",
+                "confidentialityImpact": "NONE",
+                "integrityImpact": "NONE",
+                "availabilityImpact": "LOW"
+              },
+              "exploitabilityScore": 1.6,
+              "impactScore": 1.4
+            }
+          ]
+        },
+        "weaknesses": [
+          {
+            "source": "cve@mitre.org",
+            "type": "Secondary",
+            "description": [
+              {
+                "lang": "en",
+                "value": "CWE-191"
+              }
+            ]
+          }
+        ],
+        "references": [
+          {
+            "url": "https://github.com/redis/redis/blob/994bc96bb1744cb153392fc96bdba43eae56e17f/src/networking.c#L783",
+            "source": "cve@mitre.org"
+          },
+          {
+            "url": "https://github.com/valkey-io/valkey/blob/daea05b1e26db29bfd1c033e27f9d519a2f8ccbb/src/networking.c#L886",
+            "source": "cve@mitre.org"
+          },
+          {
+            "url": "https://github.com/valkey-io/valkey/pull/2101",
+            "source": "cve@mitre.org"
+          }
+        ],
+        "configurations": null
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2025-67733",
+        "vulnStatus": "Modified",
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Valkey is a distributed key-value database. Prior to versions 9.0.2, 8.1.6, 8.0.7, and 7.2.12, a malicious user can use scripting commands to inject arbitrary information into the response stream for the given client, potentially corrupting or returning tampered data to other users on the same connection. The error handling code for lua scripts does not properly handle null characters. Versions 9.0.2, 8.1.6, 8.0.7, and 7.2.12 fix the issue."
+          }
+        ],
+        "metrics": {
+          "cvssMetricV31": [
+            {
+              "source": "security-advisories@github.com",
+              "type": "Secondary",
+              "cvssData": {
+                "version": "3.1",
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:H",
+                "baseScore": 8.5,
+                "baseSeverity": "HIGH",
+                "attackVector": "NETWORK",
+                "attackComplexity": "LOW",
+                "privilegesRequired": "LOW",
+                "userInteraction": "NONE",
+                "scope": "CHANGED",
+                "confidentialityImpact": "NONE",
+                "integrityImpact": "LOW",
+                "availabilityImpact": "HIGH"
+              },
+              "exploitabilityScore": 3.1,
+              "impactScore": 4.7
+            }
+          ]
+        },
+        "weaknesses": [
+          {
+            "source": "security-advisories@github.com",
+            "type": "Secondary",
+            "description": [
+              {
+                "lang": "en",
+                "value": "CWE-74"
+              }
+            ]
+          },
+          {
+            "source": "0b0ca135-0b70-47e7-9f44-1890c2a1c46c",
+            "type": "Secondary",
+            "description": [
+              {
+                "lang": "en",
+                "value": "CWE-170"
+              }
+            ]
+          }
+        ],
+        "references": [
+          {
+            "url": "https://github.com/valkey-io/valkey/security/advisories/GHSA-p876-p7q5-hv2m",
+            "source": "security-advisories@github.com",
+            "tags": [
+              "Vendor Advisory"
+            ]
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:3443",
+            "source": "0b0ca135-0b70-47e7-9f44-1890c2a1c46c"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:3507",
+            "source": "0b0ca135-0b70-47e7-9f44-1890c2a1c46c"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:5445",
+            "source": "0b0ca135-0b70-47e7-9f44-1890c2a1c46c"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2025-67733",
+            "source": "0b0ca135-0b70-47e7-9f44-1890c2a1c46c"
+          },
+          {
+            "url": "https://bugzilla.redhat.com/show_bug.cgi?id=2442025",
+            "source": "0b0ca135-0b70-47e7-9f44-1890c2a1c46c"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2025/cve-2025-67733.json",
+            "source": "0b0ca135-0b70-47e7-9f44-1890c2a1c46c"
+          }
+        ],
+        "configurations": [
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:lfprojects:valkey:*:*:*:*:*:*:*:*",
+                    "versionEndExcluding": "7.2.12",
+                    "matchCriteriaId": "0A7DFDB2-5FDE-4F69-9B9E-7ED6D910EF76"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:lfprojects:valkey:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "8.0.0",
+                    "versionEndExcluding": "8.0.7",
+                    "matchCriteriaId": "2375C3CF-6580-4EA0-AA6A-A92198CB7E1F"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:lfprojects:valkey:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "8.1.0",
+                    "versionEndExcluding": "8.1.6",
+                    "matchCriteriaId": "03050B63-5660-4DFF-B6AC-3E701B9D199D"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:lfprojects:valkey:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "9.0.0",
+                    "versionEndExcluding": "9.0.2",
+                    "matchCriteriaId": "315880B4-E0D2-4366-8E7B-2B97D82BA92E"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
