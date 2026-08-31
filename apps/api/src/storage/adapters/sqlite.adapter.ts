@@ -1187,10 +1187,32 @@ export class SqliteAdapter implements StoragePort {
     return result.changes;
   }
 
+  private migrateCveAdvisoriesTable(): void {
+    if (!this.db) {
+      return;
+    }
+
+    const columns = this.db.prepare('PRAGMA table_info(cve_advisories)').all() as Array<{
+      name: string;
+    }>;
+    const hasDatasetVersionColumn = columns.some((column) => {
+      return column.name === 'dataset_version';
+    });
+    const hasIdColumn = columns.some((column) => {
+      return column.name === 'id';
+    });
+
+    if (hasDatasetVersionColumn && !hasIdColumn) {
+      this.db.exec('DROP TABLE cve_advisories');
+    }
+  }
+
   private createSchema(): void {
     if (!this.db) {
       return;
     }
+
+    this.migrateCveAdvisoriesTable();
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS acl_audit (
@@ -1629,7 +1651,8 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_vis_connection_index ON vector_index_snapshots(connection_id, index_name);
 
       CREATE TABLE IF NOT EXISTS cve_advisories (
-        dataset_version TEXT PRIMARY KEY,
+        id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+        dataset_version TEXT NOT NULL,
         refreshed_at INTEGER NOT NULL,
         advisories TEXT NOT NULL,
         snapshots TEXT NOT NULL
@@ -3884,11 +3907,15 @@ export class SqliteAdapter implements StoragePort {
   async saveCveDataset(dataset: StoredCveDataset): Promise<void> {
     if (!this.db) throw new Error('Database not initialized');
 
-    this.db.prepare('DELETE FROM cve_advisories').run();
     this.db
       .prepare(
-        `INSERT INTO cve_advisories (dataset_version, refreshed_at, advisories, snapshots)
-         VALUES (?, ?, ?, ?)`,
+        `INSERT INTO cve_advisories (id, dataset_version, refreshed_at, advisories, snapshots)
+         VALUES (1, ?, ?, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET
+           dataset_version = excluded.dataset_version,
+           refreshed_at = excluded.refreshed_at,
+           advisories = excluded.advisories,
+           snapshots = excluded.snapshots`,
       )
       .run(
         dataset.datasetVersion,
@@ -3905,7 +3932,7 @@ export class SqliteAdapter implements StoragePort {
       .prepare(
         `SELECT dataset_version, refreshed_at, advisories, snapshots
          FROM cve_advisories
-         LIMIT 1`,
+         WHERE id = 1`,
       )
       .get() as
       | { dataset_version: string; refreshed_at: number; advisories: string; snapshots: string }

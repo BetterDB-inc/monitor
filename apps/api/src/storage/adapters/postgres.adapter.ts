@@ -1709,15 +1709,26 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_vis_timestamp ON vector_index_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_vis_connection_index ON vector_index_snapshots(connection_id, index_name);
 
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'cve_advisories' AND column_name = 'dataset_version'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'cve_advisories' AND column_name = 'id'
+        ) THEN
+          DROP TABLE cve_advisories;
+        END IF;
+      END $$;
+
       CREATE TABLE IF NOT EXISTS cve_advisories (
-        dataset_version TEXT PRIMARY KEY,
+        id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+        dataset_version TEXT NOT NULL,
         refreshed_at BIGINT NOT NULL,
         advisories JSONB NOT NULL,
-        snapshots JSONB NOT NULL,
-        seq BIGSERIAL NOT NULL
+        snapshots JSONB NOT NULL
       );
-
-      ALTER TABLE cve_advisories ADD COLUMN IF NOT EXISTS seq BIGSERIAL NOT NULL;
 
       CREATE TABLE IF NOT EXISTS cve_scan_results (
         id TEXT PRIMARY KEY,
@@ -4141,29 +4152,46 @@ export class PostgresAdapter implements StoragePort {
   }
 
   // CVE Inspection Methods
-  private stripNulEscapes(json: string): string {
-    return json.replace(/\\u0000/g, '');
+  private stripNulCharacters(text: string): string {
+    return text.split('\u0000').join('');
+  }
+
+  private sanitizeNulBytes<T>(value: T): T {
+    if (typeof value === 'string') {
+      return this.stripNulCharacters(value) as unknown as T;
+    }
+
+    if (Array.isArray(value)) {
+      return value.map((entry) => this.sanitizeNulBytes(entry)) as unknown as T;
+    }
+
+    if (value !== null && typeof value === 'object') {
+      const sanitized: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+        sanitized[this.stripNulCharacters(key)] = this.sanitizeNulBytes(entry);
+      }
+      return sanitized as unknown as T;
+    }
+
+    return value;
   }
 
   async saveCveDataset(dataset: StoredCveDataset): Promise<void> {
     if (!this.pool) throw new Error('Database not initialized');
 
     await this.pool.query(
-      `WITH upsert AS (
-         INSERT INTO cve_advisories (dataset_version, refreshed_at, advisories, snapshots)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (dataset_version) DO UPDATE SET
-           refreshed_at = EXCLUDED.refreshed_at,
-           advisories = EXCLUDED.advisories,
-           snapshots = EXCLUDED.snapshots
-         RETURNING dataset_version
-       )
-       DELETE FROM cve_advisories WHERE dataset_version <> (SELECT dataset_version FROM upsert)`,
+      `INSERT INTO cve_advisories (id, dataset_version, refreshed_at, advisories, snapshots)
+       VALUES (1, $1, $2, $3, $4)
+       ON CONFLICT (id) DO UPDATE SET
+         dataset_version = EXCLUDED.dataset_version,
+         refreshed_at = EXCLUDED.refreshed_at,
+         advisories = EXCLUDED.advisories,
+         snapshots = EXCLUDED.snapshots`,
       [
         dataset.datasetVersion,
         dataset.refreshedAt,
-        this.stripNulEscapes(JSON.stringify(dataset.advisories)),
-        this.stripNulEscapes(JSON.stringify(dataset.snapshots)),
+        JSON.stringify(this.sanitizeNulBytes(dataset.advisories)),
+        JSON.stringify(this.sanitizeNulBytes(dataset.snapshots)),
       ],
     );
   }
@@ -4174,8 +4202,7 @@ export class PostgresAdapter implements StoragePort {
     const result = await this.pool.query(
       `SELECT dataset_version, refreshed_at, advisories, snapshots
        FROM cve_advisories
-       ORDER BY refreshed_at DESC, seq DESC
-       LIMIT 1`,
+       WHERE id = 1`,
     );
     const row = result.rows[0] as
       | { dataset_version: string; refreshed_at: string; advisories: unknown; snapshots: unknown }
@@ -4211,7 +4238,7 @@ export class PostgresAdapter implements StoragePort {
         result.datasetVersion,
         result.scannedAt,
         result.lastCheckedAt,
-        this.stripNulEscapes(JSON.stringify(result)),
+        JSON.stringify(this.sanitizeNulBytes(result)),
       ],
     );
 
