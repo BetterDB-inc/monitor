@@ -434,7 +434,9 @@ await client.quit();
 
 ### Cluster mode
 
-`flush()` fans out via `clusterScan()` across all master nodes. `FT.SEARCH` routes correctly via hash slots. `FT.CREATE` only creates the index on the receiving node - in a full cluster, create the index on each node separately.
+Load `valkey-search` with `--use-coordinator` on every node. With the coordinator running, a single `FT.CREATE` propagates the index to all masters and `FT.SEARCH` fans out across shards; without it each node only creates and searches its own index, so results are silently partial.
+
+`flush()` fans out via `clusterScan()` across all master nodes and `invalidate()` deletes what `FT.SEARCH` returns from every shard. Both delete one key per command, because a cluster rejects a multi-key `DEL` with `CROSSSLOT` — the keys carry no hash tag, so they scatter across slots by design.
 
 ### Streaming
 

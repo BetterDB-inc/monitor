@@ -8,7 +8,9 @@ import { Cluster } from 'iovalkey';
 import { AgentCache } from '../AgentCache';
 import { Registry } from 'prom-client';
 
-const CLUSTER_NODES = (process.env.VALKEY_CLUSTER_NODES ?? 'localhost:6401,localhost:6402,localhost:6403')
+const CLUSTER_NODES = (
+  process.env.VALKEY_CLUSTER_NODES ?? 'localhost:6401,localhost:6402,localhost:6403'
+)
   .split(',')
   .map((hp) => {
     const [host, portStr] = hp.trim().split(':');
@@ -33,7 +35,13 @@ beforeAll(async () => {
   try {
     await client.connect();
     await client.ping();
-  } catch {
+  } catch (error) {
+    if (process.env.CI === 'true' && process.env.ALLOW_INTEGRATION_SKIP !== 'true') {
+      throw new Error(
+        `No usable cluster at ${CLUSTER_NODES.map((node) => `${node.host}:${node.port}`).join(', ')} — this suite cannot verify anything. ` +
+          `Set ALLOW_INTEGRATION_SKIP=true to skip it instead. Cause: ${String(error)}`,
+      );
+    }
     skip = true;
     client.on('error', () => {});
     return;
@@ -55,9 +63,13 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!skip && cache) {
-    try { await cache.flush(); } catch {}
+    try {
+      await cache.flush();
+    } catch {}
   }
-  if (client) { client.disconnect(); }
+  if (client) {
+    client.disconnect();
+  }
 });
 
 describe('AgentCache cluster integration', () => {
@@ -102,10 +114,26 @@ describe('AgentCache cluster integration', () => {
     // A 3-master cluster splits 16384 hash slots ~5461 each; 20 random keys
     // gives high probability of spanning multiple nodes.
     const threads = [
-      'thread-a', 'thread-b', 'thread-c', 'thread-d', 'thread-e',
-      'thread-f', 'thread-g', 'thread-h', 'thread-i', 'thread-j',
-      'thread-k', 'thread-l', 'thread-m', 'thread-n', 'thread-o',
-      'thread-p', 'thread-q', 'thread-r', 'thread-s', 'thread-t',
+      'thread-a',
+      'thread-b',
+      'thread-c',
+      'thread-d',
+      'thread-e',
+      'thread-f',
+      'thread-g',
+      'thread-h',
+      'thread-i',
+      'thread-j',
+      'thread-k',
+      'thread-l',
+      'thread-m',
+      'thread-n',
+      'thread-o',
+      'thread-p',
+      'thread-q',
+      'thread-r',
+      'thread-s',
+      'thread-t',
     ];
     for (const thread of threads) {
       await flushCache.session.set(thread, 'data', `value-${thread}`);
@@ -125,8 +153,13 @@ describe('AgentCache cluster integration', () => {
 
     // Write fields for multiple threads to increase cross-node likelihood
     const threadIds = [
-      'destroy-a', 'destroy-b', 'destroy-c', 'destroy-d', 'destroy-e',
-      'destroy-f', 'destroy-g',
+      'destroy-a',
+      'destroy-b',
+      'destroy-c',
+      'destroy-d',
+      'destroy-e',
+      'destroy-f',
+      'destroy-g',
     ];
     const fields = ['f1', 'f2', 'f3', 'f4'];
 
@@ -162,12 +195,21 @@ describe('AgentCache cluster integration', () => {
     const modelName = 'gpt-cluster-invalidate-test';
     // 15 different prompts → 15 different SHA-256 hashes → likely different hash slots
     const prompts = [
-      'What is Valkey?', 'How does cluster work?', 'What is Redis?',
-      'Explain cache invalidation', 'What is a hash slot?',
-      'How many hash slots exist?', 'What is a master node?', 'What is a replica?',
-      'How does failover work?', 'What is SCAN?',
-      'How does replication work?', 'What is AOF?', 'What is RDB?',
-      'What is keyspace notification?', 'What is pub/sub?',
+      'What is Valkey?',
+      'How does cluster work?',
+      'What is Redis?',
+      'Explain cache invalidation',
+      'What is a hash slot?',
+      'How many hash slots exist?',
+      'What is a master node?',
+      'What is a replica?',
+      'How does failover work?',
+      'What is SCAN?',
+      'How does replication work?',
+      'What is AOF?',
+      'What is RDB?',
+      'What is keyspace notification?',
+      'What is pub/sub?',
     ];
 
     for (const prompt of prompts) {
@@ -205,9 +247,21 @@ describe('AgentCache cluster integration', () => {
     const toolName = 'cluster_weather_invalidate';
     // 15 different argument sets → different hashes → different hash slots
     const cities = [
-      'Sofia', 'Berlin', 'Paris', 'London', 'Tokyo',
-      'New York', 'Sydney', 'Toronto', 'Rome', 'Madrid',
-      'Amsterdam', 'Vienna', 'Prague', 'Warsaw', 'Lisbon',
+      'Sofia',
+      'Berlin',
+      'Paris',
+      'London',
+      'Tokyo',
+      'New York',
+      'Sydney',
+      'Toronto',
+      'Rome',
+      'Madrid',
+      'Amsterdam',
+      'Vienna',
+      'Prague',
+      'Warsaw',
+      'Lisbon',
     ];
 
     for (const city of cities) {

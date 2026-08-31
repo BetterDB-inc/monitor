@@ -57,7 +57,13 @@ beforeAll(async () => {
     await client.ping();
     // The search module is required for FT.* — skip gracefully if it is absent.
     await client.call('FT._LIST');
-  } catch {
+  } catch (error) {
+    if (process.env.CI === 'true' && process.env.ALLOW_INTEGRATION_SKIP !== 'true') {
+      throw new Error(
+        `No usable server at ${VALKEY_URL} — this suite cannot verify anything. ` +
+          `Set ALLOW_INTEGRATION_SKIP=true to skip it instead. Cause: ${String(error)}`,
+      );
+    }
     skip = true;
     client.on('error', () => {});
     return;

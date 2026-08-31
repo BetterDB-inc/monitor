@@ -42,7 +42,7 @@ import {
   type TextBlock,
 } from './utils';
 import { DEFAULT_COST_TABLE } from './defaultCostTable';
-import { clusterScan } from './cluster';
+import { clusterScan, isClusterClient } from './cluster';
 import { createAnalytics, NOOP_ANALYTICS, type Analytics } from './analytics';
 import {
   DiscoveryManager,
@@ -53,6 +53,7 @@ import {
 } from './discovery';
 
 const INVALIDATE_BATCH_SIZE = 1000;
+const CLUSTER_DELETE_CONCURRENCY = 32;
 
 /**
  * Namespace tag for the embedding cache.
@@ -259,7 +260,29 @@ export class SemanticCache {
 
     for (const pattern of patterns) {
       await clusterScan(this.client, pattern, async (keys, nodeClient) => {
-        await nodeClient.del(keys);
+        // A multi-key DEL is rejected with CROSSSLOT even against a single
+        // master, because the keys it owns still span thousands of hash slots.
+        const pipeline = nodeClient.pipeline();
+        for (const key of keys) {
+          pipeline.del(key);
+        }
+
+        let delResults: Array<[Error | null, unknown]> | null;
+        try {
+          delResults = (await pipeline.exec()) as Array<[Error | null, unknown]> | null;
+        } catch (err) {
+          throw new ValkeyCommandError('DEL', err);
+        }
+
+        if (delResults === null) {
+          throw new ValkeyCommandError('DEL', new Error('pipeline was discarded'));
+        }
+
+        for (const [delErr] of delResults) {
+          if (delErr !== null) {
+            throw new ValkeyCommandError('DEL', delErr);
+          }
+        }
       });
     }
 
@@ -1014,6 +1037,40 @@ export class SemanticCache {
   }
 
   /**
+   * Deletes keys that may live on different shards.
+   *
+   * FT.SEARCH results fan out across the whole keyspace, so neither a multi-key
+   * DEL nor a pipeline can carry them on a cluster — iovalkey requires every key
+   * in a cluster pipeline to share one hash slot. Single-key deletes are routed
+   * individually; standalone keeps the one-command path.
+   */
+  private async deleteKeys(keys: string[]): Promise<void> {
+    if (!isClusterClient(this.client)) {
+      try {
+        await this.client.del(keys);
+      } catch (err) {
+        throw new ValkeyCommandError('DEL', err);
+      }
+      return;
+    }
+
+    for (let i = 0; i < keys.length; i += CLUSTER_DELETE_CONCURRENCY) {
+      const chunk = keys.slice(i, i + CLUSTER_DELETE_CONCURRENCY);
+      const settled = await Promise.allSettled(
+        chunk.map((key) => {
+          return this.client.del(key);
+        }),
+      );
+
+      for (const result of settled) {
+        if (result.status === 'rejected') {
+          throw new ValkeyCommandError('DEL', result.reason);
+        }
+      }
+    }
+  }
+
+  /**
    * Deletes all entries matching a valkey-search filter expression.
    *
    * **Security note:** `filter` is passed directly to FT.SEARCH. Only pass
@@ -1055,11 +1112,7 @@ export class SemanticCache {
 
       const keys = parsed.map((r) => r.key);
       const truncated = keys.length === INVALIDATE_BATCH_SIZE;
-      try {
-        await this.client.del(keys);
-      } catch (err) {
-        throw new ValkeyCommandError('DEL', err);
-      }
+      await this.deleteKeys(keys);
 
       span.setAttributes({
         'cache.name': this.name,

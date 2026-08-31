@@ -23,7 +23,13 @@ beforeAll(async () => {
   try {
     await client.connect();
     await client.ping();
-  } catch {
+  } catch (error) {
+    if (process.env.CI === 'true' && process.env.ALLOW_INTEGRATION_SKIP !== 'true') {
+      throw new Error(
+        `No usable server at ${VALKEY_URL} — this suite cannot verify anything. ` +
+          `Set ALLOW_INTEGRATION_SKIP=true to skip it instead. Cause: ${String(error)}`,
+      );
+    }
     skip = true;
     // Suppress further error events from the disconnected client
     client.on('error', () => {});

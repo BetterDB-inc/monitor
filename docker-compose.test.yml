@@ -56,16 +56,12 @@ services:
       - /var/lib/postgresql/data
 
   valkey-cluster-1:
-    image: valkey/valkey:8-alpine
+    image: valkey/valkey-bundle:9.1-alpine
     container_name: betterdb-test-cluster-1
     network_mode: host
-    command: >
-      valkey-server
-      --port 6401
-      --cluster-enabled yes
-      --cluster-config-file nodes.conf
-      --cluster-node-timeout 5000
-      --appendonly no
+    volumes:
+      - ./docker/valkey-cluster-node.conf:/etc/valkey/cluster-node.conf:ro
+    command: ["/etc/valkey/cluster-node.conf", "--port", "6401"]
     healthcheck:
       test: ["CMD", "valkey-cli", "-p", "6401", "ping"]
       interval: 3s
@@ -73,16 +69,12 @@ services:
       retries: 5
 
   valkey-cluster-2:
-    image: valkey/valkey:8-alpine
+    image: valkey/valkey-bundle:9.1-alpine
     container_name: betterdb-test-cluster-2
     network_mode: host
-    command: >
-      valkey-server
-      --port 6402
-      --cluster-enabled yes
-      --cluster-config-file nodes.conf
-      --cluster-node-timeout 5000
-      --appendonly no
+    volumes:
+      - ./docker/valkey-cluster-node.conf:/etc/valkey/cluster-node.conf:ro
+    command: ["/etc/valkey/cluster-node.conf", "--port", "6402"]
     healthcheck:
       test: ["CMD", "valkey-cli", "-p", "6402", "ping"]
       interval: 3s
@@ -90,16 +82,12 @@ services:
       retries: 5
 
   valkey-cluster-3:
-    image: valkey/valkey:8-alpine
+    image: valkey/valkey-bundle:9.1-alpine
     container_name: betterdb-test-cluster-3
     network_mode: host
-    command: >
-      valkey-server
-      --port 6403
-      --cluster-enabled yes
-      --cluster-config-file nodes.conf
-      --cluster-node-timeout 5000
-      --appendonly no
+    volumes:
+      - ./docker/valkey-cluster-node.conf:/etc/valkey/cluster-node.conf:ro
+    command: ["/etc/valkey/cluster-node.conf", "--port", "6403"]
     healthcheck:
       test: ["CMD", "valkey-cli", "-p", "6403", "ping"]
       interval: 3s
@@ -107,7 +95,7 @@ services:
       retries: 5
 
   valkey-cluster-init:
-    image: valkey/valkey:8-alpine
+    image: valkey/valkey-bundle:9.1-alpine
     container_name: betterdb-test-cluster-init
     network_mode: host
     depends_on:
@@ -118,8 +106,11 @@ services:
       valkey-cluster-3:
         condition: service_healthy
     restart: "no"
-    entrypoint: >
-      sh -c "
-        valkey-cli --cluster create 127.0.0.1:6401 127.0.0.1:6402 127.0.0.1:6403 --cluster-replicas 0 --cluster-yes &&
+    entrypoint:
+      - sh
+      - -c
+      - >
+        valkey-cli --cluster create
+        127.0.0.1:6401 127.0.0.1:6402 127.0.0.1:6403
+        --cluster-replicas 0 --cluster-yes &&
         echo 'Cluster created successfully'
-      "

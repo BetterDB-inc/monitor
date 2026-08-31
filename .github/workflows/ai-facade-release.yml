@@ -292,6 +292,8 @@ jobs:
   verify:
     needs: publish-npm
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Setup Node.js
