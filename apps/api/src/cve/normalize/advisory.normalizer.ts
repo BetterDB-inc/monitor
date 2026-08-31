@@ -44,10 +44,6 @@ interface CanonicalAdvisory {
   knownExploited: boolean;
   cvssScore: number | null;
   affected: CanonicalRange[];
-  aliases: string[];
-  cwes: string[];
-  references: string[];
-  sources: SourceProvenance[];
 }
 
 function compareStrings(a: string, b: string): number {
@@ -79,6 +75,10 @@ function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
 
+function hasRanges(view: SourceView): boolean {
+  return view.advisory.affected.length > 0;
+}
+
 function orderByPrecedence(views: SourceView[]): SourceView[] {
   return [...views].sort((a, b) => {
     const byRank = rankOf(a.owner) - rankOf(b.owner);
@@ -86,7 +86,11 @@ function orderByPrecedence(views: SourceView[]): SourceView[] {
       return byRank;
     }
 
-    return compareStrings(a.owner, b.owner);
+    if (a.owner !== b.owner) {
+      return compareStrings(a.owner, b.owner);
+    }
+
+    return compareStrings(a.advisory.product, b.advisory.product);
   });
 }
 
@@ -96,6 +100,51 @@ function winnerFirst(ordered: SourceView[], winner: SourceView): SourceView[] {
   });
 
   return [winner, ...rest];
+}
+
+function groupViews(views: SourceView[]): SourceView[][] {
+  const groups = new Map<string, SourceView[]>();
+  const keysByCve = new Map<string, string[]>();
+
+  function register(key: string, cveId: string, view: SourceView): void {
+    const members = groups.get(key) ?? [];
+
+    members.push(view);
+    groups.set(key, members);
+
+    const keys = keysByCve.get(cveId) ?? [];
+    if (!keys.includes(key)) {
+      keys.push(key);
+      keysByCve.set(cveId, keys);
+    }
+  }
+
+  for (const view of views) {
+    if (hasRanges(view)) {
+      register(advisoryKey(view.advisory.cveId, view.advisory.product), view.advisory.cveId, view);
+    }
+  }
+
+  const rangeless = orderByPrecedence(
+    views.filter((view) => {
+      return !hasRanges(view);
+    }),
+  );
+
+  for (const view of rangeless) {
+    const keys = keysByCve.get(view.advisory.cveId) ?? [];
+
+    if (keys.length === 0) {
+      register(advisoryKey(view.advisory.cveId, view.advisory.product), view.advisory.cveId, view);
+      continue;
+    }
+
+    for (const key of keys) {
+      groups.get(key)?.push(view);
+    }
+  }
+
+  return [...groups.values()];
 }
 
 function mergeProvenance(entries: SourceProvenance[]): SourceProvenance[] {
@@ -120,10 +169,7 @@ function mergeProvenance(entries: SourceProvenance[]): SourceProvenance[] {
 
 function mergeGroup(views: SourceView[]): Advisory {
   const ordered = orderByPrecedence(views);
-  const withRanges = ordered.find((view) => {
-    return view.advisory.affected.length > 0;
-  });
-  const winner = withRanges ?? ordered[0];
+  const winner = ordered.find(hasRanges) ?? ordered[0];
   const preference = winnerFirst(ordered, winner);
   const scorer = preference.find((view) => {
     return view.advisory.cvssScore !== undefined;
@@ -137,7 +183,7 @@ function mergeGroup(views: SourceView[]): Advisory {
 
   credits.push({ source: winner.owner, fields: ['severity'] });
 
-  if (winner.advisory.affected.length > 0) {
+  if (hasRanges(winner)) {
     credits.push({ source: winner.owner, fields: ['affected', 'confidence'] });
   }
 
@@ -150,6 +196,10 @@ function mergeGroup(views: SourceView[]): Advisory {
   }
 
   for (const view of ordered) {
+    if (view.advisory.knownExploited) {
+      credits.push({ source: view.owner, fields: ['knownExploited'] });
+    }
+
     if (view.advisory.aliases.length > 0) {
       credits.push({ source: view.owner, fields: ['aliases'] });
     }
@@ -171,7 +221,9 @@ function mergeGroup(views: SourceView[]): Advisory {
       }),
     ),
     product: winner.advisory.product,
-    affected: winner.advisory.affected,
+    affected: winner.advisory.affected.map((range) => {
+      return { ...range };
+    }),
     severity: winner.advisory.severity,
     ...(scorer?.advisory.cvssScore !== undefined ? { cvssScore: scorer.advisory.cvssScore } : {}),
     cwes: unique(
@@ -182,7 +234,7 @@ function mergeGroup(views: SourceView[]): Advisory {
     knownExploited: ordered.some((view) => {
       return view.advisory.knownExploited;
     }),
-    confidence: winner.advisory.affected.length > 0 ? winner.advisory.confidence : 'unversioned',
+    confidence: hasRanges(winner) ? winner.advisory.confidence : 'unversioned',
     sources: mergeProvenance(credits),
     summary: summarizer?.advisory.summary ?? '',
     references: unique(
@@ -274,20 +326,6 @@ function canonicalRanges(ranges: BranchRange[]): CanonicalRange[] {
     });
 }
 
-function canonicalStrings(values: string[]): string[] {
-  return [...values].sort(compareStrings);
-}
-
-function canonicalSources(sources: SourceProvenance[]): SourceProvenance[] {
-  return sources
-    .map((entry) => {
-      return { source: entry.source, fields: canonicalStrings(entry.fields) };
-    })
-    .sort((a, b) => {
-      return compareStrings(a.source, b.source);
-    });
-}
-
 export function computeDatasetVersion(advisories: Advisory[]): string {
   const canonical: CanonicalAdvisory[] = advisories
     .map((advisory) => {
@@ -299,10 +337,6 @@ export function computeDatasetVersion(advisories: Advisory[]): string {
         knownExploited: advisory.knownExploited,
         cvssScore: advisory.cvssScore ?? null,
         affected: canonicalRanges(advisory.affected),
-        aliases: canonicalStrings(advisory.aliases),
-        cwes: canonicalStrings(advisory.cwes),
-        references: canonicalStrings(advisory.references),
-        sources: canonicalSources(advisory.sources),
       };
     })
     .sort((a, b) => {
@@ -319,21 +353,14 @@ export function normalizeAdvisories(
   results: SourceFetchResult[],
   enrichment: EnrichmentResult[],
 ): NormalizedDataset {
-  const groups = new Map<string, SourceView[]>();
-
-  for (const result of results) {
-    for (const advisory of result.advisories) {
-      const key = advisoryKey(advisory.cveId, advisory.product);
-      const views = groups.get(key) ?? [];
-
-      views.push({ owner: result.source, advisory });
-      groups.set(key, views);
-    }
-  }
-
+  const views: SourceView[] = results.flatMap((result) => {
+    return result.advisories.map((advisory) => {
+      return { owner: result.source, advisory };
+    });
+  });
   const facts = collectEnrichment(enrichment);
-  const advisories = [...groups.values()].map((views) => {
-    return applyEnrichment(mergeGroup(views), facts);
+  const advisories = groupViews(views).map((group) => {
+    return applyEnrichment(mergeGroup(group), facts);
   });
 
   return { advisories, datasetVersion: computeDatasetVersion(advisories) };

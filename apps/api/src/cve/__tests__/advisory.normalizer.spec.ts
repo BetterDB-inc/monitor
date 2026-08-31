@@ -173,6 +173,115 @@ describe('normalizeAdvisories — one CVE affecting two products', () => {
       }),
     ).toEqual(expect.arrayContaining(['valkey', 'redis']));
   });
+
+  it('does not let the merged ranges alias the source advisory', () => {
+    const { advisories } = normalizeAdvisories([fetched('ghsa', [GHSA_VIEW])], []);
+
+    expect(advisories[0].affected).not.toBe(GHSA_VIEW.affected);
+    expect(advisories[0].affected[0]).not.toBe(GHSA_VIEW.affected[0]);
+    expect(advisories[0].affected).toEqual(GHSA_VIEW.affected);
+  });
+});
+
+// I1 guard: MitreSource guesses the product from the CNA name and can never emit a module
+// product, so a rangeless MITRE view must not form a product group of its own — it would
+// strand its summary and push a phantom UNKNOWN row onto every engine node.
+describe('normalizeAdvisories — rangeless views never manufacture a product', () => {
+  const BLOOM_VIEW: Advisory = {
+    cveId: 'CVE-2026-80001',
+    aliases: ['GHSA-bloom'],
+    product: 'valkey-bloom',
+    affected: [{ branch: '1.0', vulnerableAtOrBelow: '1.0.2', patchedAt: '1.0.3' }],
+    severity: 'high',
+    cvssScore: 7.5,
+    cwes: [],
+    knownExploited: false,
+    confidence: 'exact',
+    sources: [{ source: 'ghsa', fields: ['affected'] }],
+    summary: '',
+    references: ['https://ghsa.example/bloom'],
+  };
+  const MITRE_VIEW: Advisory = {
+    cveId: 'CVE-2026-80001',
+    aliases: [],
+    product: 'valkey',
+    affected: [],
+    severity: 'medium',
+    cwes: [],
+    knownExploited: false,
+    confidence: 'unversioned',
+    sources: [{ source: 'mitre', fields: ['summary'] }],
+    summary: 'Integer underflow in the bloom module',
+    references: ['https://cveawg.example/CVE-2026-80001'],
+  };
+
+  it('attaches a rangeless MITRE view to the ranged advisory instead of splitting it off', () => {
+    const { advisories } = normalizeAdvisories(
+      [fetched('ghsa', [BLOOM_VIEW]), fetched('mitre', [MITRE_VIEW])],
+      [],
+    );
+
+    expect(advisories).toHaveLength(1);
+    expect(advisories[0].product).toBe('valkey-bloom');
+    expect(advisories[0].confidence).toBe('exact');
+    expect(advisories[0].affected).toEqual(BLOOM_VIEW.affected);
+    expect(advisories[0].summary).toBe('Integer underflow in the bloom module');
+  });
+
+  it('never leaves a phantom rangeless advisory for the product MITRE guessed', () => {
+    const { advisories } = normalizeAdvisories(
+      [fetched('ghsa', [BLOOM_VIEW]), fetched('mitre', [MITRE_VIEW])],
+      [],
+    );
+    const phantom = advisories.find((advisory) => {
+      return advisory.product === 'valkey';
+    });
+
+    expect(phantom).toBeUndefined();
+  });
+
+  it('credits MITRE for the summary it donated to another product group', () => {
+    const { advisories } = normalizeAdvisories(
+      [fetched('ghsa', [BLOOM_VIEW]), fetched('mitre', [MITRE_VIEW])],
+      [],
+    );
+    const mitre = advisories[0].sources.find((entry) => {
+      return entry.source === 'mitre';
+    });
+    const ghsa = advisories[0].sources.find((entry) => {
+      return entry.source === 'ghsa';
+    });
+
+    expect(mitre?.fields).toContain('summary');
+    expect(mitre?.fields).not.toContain('affected');
+    expect(ghsa?.fields).toContain('affected');
+  });
+
+  it('attaches a rangeless view to every product group of the same CVE', () => {
+    const redisRanged: Advisory = { ...GHSA_VIEW, product: 'redis', summary: '' };
+    const valkeyRanged: Advisory = { ...GHSA_VIEW, summary: '' };
+    const mitreView: Advisory = { ...MITRE_VIEW, cveId: GHSA_VIEW.cveId, summary: 'shared text' };
+    const { advisories } = normalizeAdvisories(
+      [fetched('ghsa', [valkeyRanged, redisRanged]), fetched('mitre', [mitreView])],
+      [],
+    );
+
+    expect(advisories).toHaveLength(2);
+    expect(
+      advisories.every((advisory) => {
+        return advisory.summary === 'shared text';
+      }),
+    ).toBe(true);
+  });
+
+  it('lets a rangeless view stand alone when no other source reported the CVE', () => {
+    const { advisories } = normalizeAdvisories([fetched('mitre', [MITRE_VIEW])], []);
+
+    expect(advisories).toHaveLength(1);
+    expect(advisories[0].product).toBe('valkey');
+    expect(advisories[0].confidence).toBe('unversioned');
+    expect(advisories[0].affected).toEqual([]);
+  });
 });
 
 // Q2 guard: the range winner's missing optional fields must not blank a value a
@@ -228,12 +337,15 @@ describe('normalizeAdvisories — field-level fallback', () => {
     expect(advisories[0].severity).toBe('medium');
   });
 
-  it('takes the NVD ranges when the GHSA view is unversioned, and says so', () => {
+  it('takes the NVD ranges when the GHSA view is unversioned, and credits only NVD', () => {
     const unversioned: Advisory = { ...GHSA_VIEW, affected: [], confidence: 'unversioned' };
     const { advisories } = normalizeAdvisories(
       [fetched('ghsa', [unversioned]), fetched('nvd', [NVD_VIEW])],
       [],
     );
+    const ghsa = advisories[0].sources.find((entry) => {
+      return entry.source === 'ghsa';
+    });
     const nvd = advisories[0].sources.find((entry) => {
       return entry.source === 'nvd';
     });
@@ -241,6 +353,7 @@ describe('normalizeAdvisories — field-level fallback', () => {
     expect(advisories[0].affected).toEqual(NVD_VIEW.affected);
     expect(advisories[0].confidence).toBe('broad');
     expect(nvd?.fields).toContain('affected');
+    expect(ghsa?.fields).not.toContain('affected');
   });
 
   it('keeps an advisory no source could version instead of dropping it', () => {
@@ -250,6 +363,24 @@ describe('normalizeAdvisories — field-level fallback', () => {
     expect(advisories).toHaveLength(1);
     expect(advisories[0].confidence).toBe('unversioned');
     expect(advisories[0].affected).toEqual([]);
+  });
+
+  it('treats knownExploited as an OR across views and credits the source that said so', () => {
+    const exploited: Advisory = { ...NVD_VIEW, knownExploited: true };
+    const { advisories } = normalizeAdvisories(
+      [fetched('ghsa', [GHSA_VIEW]), fetched('nvd', [exploited])],
+      [],
+    );
+    const nvd = advisories[0].sources.find((entry) => {
+      return entry.source === 'nvd';
+    });
+    const ghsa = advisories[0].sources.find((entry) => {
+      return entry.source === 'ghsa';
+    });
+
+    expect(advisories[0].knownExploited).toBe(true);
+    expect(nvd?.fields).toContain('knownExploited');
+    expect(ghsa?.fields).not.toContain('knownExploited');
   });
 });
 
@@ -271,6 +402,19 @@ describe('normalizeAdvisories — provenance honesty', () => {
     expect(ghsa?.fields).toContain('affected');
     expect(nvd?.fields).not.toContain('affected');
     expect(nvd?.fields).toContain('references');
+  });
+
+  it('lists each source exactly once, however many fields it supplied', () => {
+    const { advisories } = normalizeAdvisories(
+      [fetched('nvd', [NVD_VIEW]), fetched('ghsa', [GHSA_VIEW])],
+      [],
+    );
+
+    expect(
+      advisories[0].sources.map((entry) => {
+        return entry.source;
+      }),
+    ).toEqual(['ghsa', 'nvd']);
   });
 
   it('credits KEV and EPSS for the fields they actually supplied', () => {
@@ -305,6 +449,7 @@ describe('normalizeAdvisories — provenance honesty', () => {
 
 // Q4 guard: the canonical form must not inherit source-arrival order, or an upstream
 // reshuffle churns the dataset version and forces a pointless rescan of every node.
+// It must also hash exactly what changes a verdict or its ranking — no more.
 describe('computeDatasetVersion — canonical ordering', () => {
   const MULTI: Advisory = {
     ...GHSA_VIEW,
@@ -322,28 +467,24 @@ describe('computeDatasetVersion — canonical ordering', () => {
     expect(forward).toBe(reversed);
   });
 
-  it('is unchanged when aliases, cwes, references and sources arrive in a different order', () => {
+  it('is unchanged when ranges sharing a branch arrive in a different order', () => {
     const forward = computeDatasetVersion([
       {
         ...MULTI,
-        aliases: ['GHSA-a', 'GHSA-b'],
-        cwes: ['CWE-122', 'CWE-787'],
-        references: ['https://a', 'https://b'],
-        sources: [
-          { source: 'ghsa', fields: ['affected', 'severity'] },
-          { source: 'nvd', fields: ['references'] },
+        affected: [
+          { branch: '8.0', vulnerableAtOrBelow: '8.0.9', patchedAt: '8.0.10' },
+          { branch: '8.0', vulnerableAtOrBelow: '8.0.4' },
+          { branch: '8.0', vulnerableAtOrBelow: '8.0.9', patchedAt: '8.0.11' },
         ],
       },
     ]);
     const shuffled = computeDatasetVersion([
       {
         ...MULTI,
-        aliases: ['GHSA-b', 'GHSA-a'],
-        cwes: ['CWE-787', 'CWE-122'],
-        references: ['https://b', 'https://a'],
-        sources: [
-          { source: 'nvd', fields: ['references'] },
-          { source: 'ghsa', fields: ['severity', 'affected'] },
+        affected: [
+          { branch: '8.0', vulnerableAtOrBelow: '8.0.9', patchedAt: '8.0.11' },
+          { branch: '8.0', vulnerableAtOrBelow: '8.0.9', patchedAt: '8.0.10' },
+          { branch: '8.0', vulnerableAtOrBelow: '8.0.4' },
         ],
       },
     ]);
@@ -358,16 +499,43 @@ describe('computeDatasetVersion — canonical ordering', () => {
     expect(computeDatasetVersion([valkey, redis])).toBe(computeDatasetVersion([redis, valkey]));
   });
 
-  it('changes when the two products carry different ranges', () => {
-    const valkey = MULTI;
-    const redis: Advisory = { ...MULTI, product: 'redis' };
-    const redisMoved: Advisory = {
-      ...redis,
-      affected: [{ branch: '7.4', vulnerableAtOrBelow: '7.4.2' }],
-    };
+  it('changes when only the product differs', () => {
+    const valkey = computeDatasetVersion([MULTI]);
+    const redis = computeDatasetVersion([{ ...MULTI, product: 'redis' }]);
 
-    expect(computeDatasetVersion([valkey, redis])).not.toBe(
-      computeDatasetVersion([valkey, redisMoved]),
-    );
+    expect(valkey).not.toBe(redis);
+  });
+
+  it('changes when any single verdict or ranking field changes', () => {
+    const base = computeDatasetVersion([MULTI]);
+
+    expect(computeDatasetVersion([{ ...MULTI, severity: 'critical' }])).not.toBe(base);
+    expect(computeDatasetVersion([{ ...MULTI, confidence: 'broad' }])).not.toBe(base);
+    expect(computeDatasetVersion([{ ...MULTI, knownExploited: true }])).not.toBe(base);
+    expect(computeDatasetVersion([{ ...MULTI, cvssScore: 9.1 }])).not.toBe(base);
+    expect(computeDatasetVersion([{ ...MULTI, cveId: 'CVE-2000-0002' }])).not.toBe(base);
+  });
+
+  it('does not change when only display fields change', () => {
+    const base = computeDatasetVersion([MULTI]);
+    const decorated = computeDatasetVersion([
+      {
+        ...MULTI,
+        aliases: ['GHSA-other', 'GHSA-more'],
+        cwes: ['CWE-787'],
+        references: ['https://elsewhere.example'],
+        sources: [{ source: 'nvd', fields: ['affected', 'summary'] }],
+        summary: 'a completely different summary',
+      },
+    ]);
+
+    expect(base).toBe(decorated);
+  });
+
+  it('does not change when only the EPSS score changes', () => {
+    const base = computeDatasetVersion([{ ...MULTI, epssScore: 0.01, epssPercentile: 0.5 }]);
+    const rescored = computeDatasetVersion([{ ...MULTI, epssScore: 0.99, epssPercentile: 0.99 }]);
+
+    expect(base).toBe(rescored);
   });
 });
