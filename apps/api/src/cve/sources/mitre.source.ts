@@ -37,12 +37,19 @@ export class MitreSource implements MitreLikeSource {
 
   async fetchByIds(
     cveIds: string[],
-    fallbackProduct: CveProduct = 'redis',
+    productHints: Partial<Record<string, CveProduct>> = {},
+    budgetMs: number = Number.POSITIVE_INFINITY,
   ): Promise<SourceFetchResult> {
     const advisories: Advisory[] = [];
     const failures: string[] = [];
+    const deadline = Date.now() + budgetMs;
 
     for (const cveId of cveIds) {
+      if (Date.now() >= deadline) {
+        failures.push(`${cveId}: skipped, mitre time budget exceeded`);
+        continue;
+      }
+
       try {
         const record = await fetchJson<MitreRecord>(
           this.fetchImpl,
@@ -56,7 +63,7 @@ export class MitreSource implements MitreLikeSource {
         advisories.push({
           cveId: record.cveMetadata?.cveId ?? cveId,
           aliases: [],
-          product: productOf(record, fallbackProduct),
+          product: productOf(record, productHints[cveId] ?? 'redis'),
           affected: [],
           severity: 'medium',
           cwes: [],

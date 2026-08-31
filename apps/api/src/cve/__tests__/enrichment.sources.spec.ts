@@ -88,6 +88,25 @@ describe('EpssSource', () => {
     expect(result.partialFailures).toHaveLength(1);
   });
 
+  it('keeps entries from a good batch when a later batch throws', async () => {
+    const ids = Array.from({ length: 150 }, (_, index) => {
+      return `CVE-2026-${String(index).padStart(5, '0')}`;
+    });
+    let call = 0;
+    const stub = jest.fn().mockImplementation(async () => {
+      call += 1;
+      if (call === 1) {
+        return { ok: true, status: 200, json: async () => EPSS_BODY };
+      }
+      throw new Error('network unreachable');
+    });
+    const result = await new EpssSource(stub).enrich(ids);
+
+    expect(result.entries.length).toBeGreaterThan(0);
+    expect(result.partialFailures).toHaveLength(1);
+    expect(result.partialFailures?.[0]).toContain('network unreachable');
+  });
+
   it('does not flag a batch as failed when the response has no total field at all', async () => {
     const stub = fetchStub(EPSS_BODY);
     const result = await new EpssSource(stub).enrich(['CVE-2022-0543', 'CVE-2026-21863']);

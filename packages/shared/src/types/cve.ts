@@ -109,6 +109,8 @@ export interface CveSourceSnapshot {
   status: CveSourceStatus;
   advisories: Advisory[];
   enrichment: Array<[string, EnrichmentEntry]>;
+  lastGoodAdvisories: Advisory[];
+  lastGoodEnrichment: Array<[string, EnrichmentEntry]>;
 }
 
 export interface StoredCveDataset {

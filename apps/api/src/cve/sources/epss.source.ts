@@ -29,7 +29,16 @@ export class EpssSource implements EnrichmentSource {
     for (let index = 0; index < cveIds.length; index += EPSS_BATCH_SIZE) {
       const batch = cveIds.slice(index, index + EPSS_BATCH_SIZE);
       const url = `https://api.first.org/data/v1/epss?cve=${batch.join(',')}`;
-      const payload = await fetchJson<EpssResponse>(this.fetchImpl, url);
+
+      let payload: EpssResponse;
+      try {
+        payload = await fetchJson<EpssResponse>(this.fetchImpl, url);
+      } catch (error) {
+        partialFailures.push(
+          `batch of ${batch.length} CVEs failed: ${error instanceof Error ? error.message : error}`,
+        );
+        continue;
+      }
 
       if (payload.total === 0) {
         partialFailures.push(`batch of ${batch.length} CVEs reported zero total`);
