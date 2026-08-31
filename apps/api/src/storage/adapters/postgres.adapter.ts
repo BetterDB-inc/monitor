@@ -1709,17 +1709,28 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_vis_timestamp ON vector_index_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_vis_connection_index ON vector_index_snapshots(connection_id, index_name);
 
+      -- Migrate a pre-singleton cve_advisories table (dataset_version as primary
+      -- key) to the new shape. Detection and the DROP are both driven off
+      -- current_schema() so they always resolve to the same table, and a guard
+      -- failure here must never abort the rest of schema creation.
       DO $$
       BEGIN
         IF EXISTS (
           SELECT 1 FROM information_schema.columns
-          WHERE table_name = 'cve_advisories' AND column_name = 'dataset_version'
+          WHERE table_schema = current_schema()
+            AND table_name = 'cve_advisories'
+            AND column_name = 'dataset_version'
         ) AND NOT EXISTS (
           SELECT 1 FROM information_schema.columns
-          WHERE table_name = 'cve_advisories' AND column_name = 'id'
+          WHERE table_schema = current_schema()
+            AND table_name = 'cve_advisories'
+            AND column_name = 'id'
         ) THEN
-          DROP TABLE cve_advisories;
+          EXECUTE 'DROP TABLE ' || current_schema() || '.cve_advisories';
         END IF;
+      EXCEPTION WHEN OTHERS THEN
+        -- Never let a migration-guard failure take down the rest of createSchema()
+        NULL;
       END $$;
 
       CREATE TABLE IF NOT EXISTS cve_advisories (
@@ -4161,6 +4172,14 @@ export class PostgresAdapter implements StoragePort {
       return this.stripNulCharacters(value) as unknown as T;
     }
 
+    if (
+      value !== null &&
+      typeof value === 'object' &&
+      typeof (value as { toJSON?: unknown }).toJSON === 'function'
+    ) {
+      return value;
+    }
+
     if (Array.isArray(value)) {
       return value.map((entry) => this.sanitizeNulBytes(entry)) as unknown as T;
     }
@@ -4188,7 +4207,7 @@ export class PostgresAdapter implements StoragePort {
          advisories = EXCLUDED.advisories,
          snapshots = EXCLUDED.snapshots`,
       [
-        dataset.datasetVersion,
+        this.stripNulCharacters(dataset.datasetVersion),
         dataset.refreshedAt,
         JSON.stringify(this.sanitizeNulBytes(dataset.advisories)),
         JSON.stringify(this.sanitizeNulBytes(dataset.snapshots)),
@@ -4227,15 +4246,17 @@ export class PostgresAdapter implements StoragePort {
   async saveCveScanResult(result: CveScanResult): Promise<void> {
     if (!this.pool) throw new Error('Database not initialized');
 
+    const connectionId = this.stripNulCharacters(result.connectionId);
+
     await this.pool.query(
       `INSERT INTO cve_scan_results
          (id, connection_id, fingerprint, dataset_version, scanned_at, last_checked_at, result)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
         randomUUID(),
-        result.connectionId,
-        result.fingerprint,
-        result.datasetVersion,
+        connectionId,
+        this.stripNulCharacters(result.fingerprint),
+        this.stripNulCharacters(result.datasetVersion),
         result.scannedAt,
         result.lastCheckedAt,
         JSON.stringify(this.sanitizeNulBytes(result)),
@@ -4249,7 +4270,7 @@ export class PostgresAdapter implements StoragePort {
            SELECT id FROM cve_scan_results WHERE connection_id = $2
            ORDER BY scanned_at DESC, seq DESC LIMIT 1
          )`,
-      [result.connectionId, result.connectionId],
+      [connectionId, connectionId],
     );
   }
 
