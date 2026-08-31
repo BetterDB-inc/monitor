@@ -1,5 +1,6 @@
 import type { Advisory, BranchRange, CveProduct, CveSeverity } from '@betterdb/shared';
 import { NVD_CPES } from '../cve.constants';
+import { branchOf } from '../matcher/version-range';
 import {
   fetchJson,
   type CveSource,
@@ -10,6 +11,7 @@ import {
 interface NvdCpeMatch {
   criteria: string;
   vulnerable: boolean;
+  versionStartIncluding?: string;
   versionEndExcluding?: string;
   versionEndIncluding?: string;
 }
@@ -45,12 +47,22 @@ function toSeverity(raw: string | undefined): CveSeverity {
   return known ?? 'medium';
 }
 
-function upperBound(match: NvdCpeMatch): string | null {
+function decrementPatch(version: string): string {
+  const [major, minor, patch] = version.split('.').map((part) => {
+    return parseInt(part, 10);
+  });
+
+  return `${major}.${minor}.${patch - 1}`;
+}
+
+function toRange(match: NvdCpeMatch): BranchRange | null {
+  const branch = match.versionStartIncluding ? branchOf(match.versionStartIncluding) : '*';
+
   if (match.versionEndExcluding) {
-    return match.versionEndExcluding;
+    return { branch, vulnerableAtOrBelow: decrementPatch(match.versionEndExcluding) };
   }
   if (match.versionEndIncluding) {
-    return match.versionEndIncluding;
+    return { branch, vulnerableAtOrBelow: match.versionEndIncluding };
   }
 
   return null;
@@ -66,16 +78,10 @@ function toRanges(cve: NvdCve, cpePrefix: string): BranchRange[] {
           continue;
         }
 
-        const bound = upperBound(match);
-        if (!bound) {
-          continue;
+        const range = toRange(match);
+        if (range) {
+          ranges.push(range);
         }
-
-        const exclusive = Boolean(match.versionEndExcluding);
-        ranges.push({
-          branch: '*',
-          vulnerableAtOrBelow: exclusive ? `${bound}-0` : bound,
-        });
       }
     }
   }

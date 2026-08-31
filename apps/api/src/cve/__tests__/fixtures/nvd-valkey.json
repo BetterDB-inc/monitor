@@ -1,5 +1,5 @@
 {
-  "totalResults": 3,
+  "totalResults": 4,
   "vulnerabilities": [
     {
       "cve": {
@@ -231,12 +231,12 @@
     },
     {
       "cve": {
-        "id": "CVE-2025-67733",
+        "id": "CVE-2026-21863",
         "vulnStatus": "Modified",
         "descriptions": [
           {
             "lang": "en",
-            "value": "Valkey is a distributed key-value database. Prior to versions 9.0.2, 8.1.6, 8.0.7, and 7.2.12, a malicious user can use scripting commands to inject arbitrary information into the response stream for the given client, potentially corrupting or returning tampered data to other users on the same connection. The error handling code for lua scripts does not properly handle null characters. Versions 9.0.2, 8.1.6, 8.0.7, and 7.2.12 fix the issue."
+            "value": "Valkey is a distributed key-value database. Prior to versions 9.0.2, 8.1.6, 8.0.7, and 7.2.12, a malicious actor with access to the Valkey clusterbus port can send an invalid packet that may cause an out bound read, which might result in the system crashing. The Valkey clusterbus packet processing code does not validate that a clusterbus ping extension packet is located within buffer of the clusterbus packet before attempting to read it. Versions 9.0.2, 8.1.6, 8.0.7, and 7.2.12 fix the issue. As an additional mitigation, don't expose the cluster bus connection directly to end users, and protect the connection with its own network ACLs."
           }
         ],
         "metrics": {
@@ -246,20 +246,20 @@
               "type": "Secondary",
               "cvssData": {
                 "version": "3.1",
-                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:H",
-                "baseScore": 8.5,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                "baseScore": 7.5,
                 "baseSeverity": "HIGH",
                 "attackVector": "NETWORK",
                 "attackComplexity": "LOW",
-                "privilegesRequired": "LOW",
+                "privilegesRequired": "NONE",
                 "userInteraction": "NONE",
-                "scope": "CHANGED",
+                "scope": "UNCHANGED",
                 "confidentialityImpact": "NONE",
-                "integrityImpact": "LOW",
+                "integrityImpact": "NONE",
                 "availabilityImpact": "HIGH"
               },
-              "exploitabilityScore": 3.1,
-              "impactScore": 4.7
+              "exploitabilityScore": 3.9,
+              "impactScore": 3.6
             }
           ]
         },
@@ -270,7 +270,7 @@
             "description": [
               {
                 "lang": "en",
-                "value": "CWE-74"
+                "value": "CWE-125"
               }
             ]
           },
@@ -280,14 +280,14 @@
             "description": [
               {
                 "lang": "en",
-                "value": "CWE-170"
+                "value": "CWE-125"
               }
             ]
           }
         ],
         "references": [
           {
-            "url": "https://github.com/valkey-io/valkey/security/advisories/GHSA-p876-p7q5-hv2m",
+            "url": "https://github.com/valkey-io/valkey/security/advisories/GHSA-c677-q3wr-gggq",
             "source": "security-advisories@github.com",
             "tags": [
               "Vendor Advisory"
@@ -306,15 +306,19 @@
             "source": "0b0ca135-0b70-47e7-9f44-1890c2a1c46c"
           },
           {
-            "url": "https://access.redhat.com/security/cve/CVE-2025-67733",
+            "url": "https://access.redhat.com/errata/RHSA-2026:8753",
             "source": "0b0ca135-0b70-47e7-9f44-1890c2a1c46c"
           },
           {
-            "url": "https://bugzilla.redhat.com/show_bug.cgi?id=2442025",
+            "url": "https://access.redhat.com/security/cve/CVE-2026-21863",
             "source": "0b0ca135-0b70-47e7-9f44-1890c2a1c46c"
           },
           {
-            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2025/cve-2025-67733.json",
+            "url": "https://bugzilla.redhat.com/show_bug.cgi?id=2442026",
+            "source": "0b0ca135-0b70-47e7-9f44-1890c2a1c46c"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2026/cve-2026-21863.json",
             "source": "0b0ca135-0b70-47e7-9f44-1890c2a1c46c"
           }
         ],
@@ -351,6 +355,305 @@
                     "versionStartIncluding": "9.0.0",
                     "versionEndExcluding": "9.0.2",
                     "matchCriteriaId": "315880B4-E0D2-4366-8E7B-2B97D82BA92E"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2021-32687",
+        "vulnStatus": "Modified",
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Redis is an open source, in-memory database that persists on disk. An integer overflow bug affecting all versions of Redis can be exploited to corrupt the heap and potentially be used to leak arbitrary contents of the heap or trigger remote code execution. The vulnerability involves changing the default set-max-intset-entries configuration parameter to a very large value and constructing specially crafted commands to manipulate sets. The problem is fixed in Redis versions 6.2.6, 6.0.16 and 5.0.14. An additional workaround to mitigate the problem without patching the redis-server executable is to prevent users from modifying the set-max-intset-entries configuration parameter. This can be done using ACL to restrict unprivileged users from using the CONFIG SET command."
+          }
+        ],
+        "metrics": {
+          "cvssMetricV31": [
+            {
+              "source": "security-advisories@github.com",
+              "type": "Secondary",
+              "cvssData": {
+                "version": "3.1",
+                "vectorString": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H",
+                "baseScore": 7.5,
+                "baseSeverity": "HIGH",
+                "attackVector": "NETWORK",
+                "attackComplexity": "HIGH",
+                "privilegesRequired": "LOW",
+                "userInteraction": "NONE",
+                "scope": "UNCHANGED",
+                "confidentialityImpact": "HIGH",
+                "integrityImpact": "HIGH",
+                "availabilityImpact": "HIGH"
+              },
+              "exploitabilityScore": 1.6,
+              "impactScore": 5.9
+            }
+          ]
+        },
+        "weaknesses": [
+          {
+            "source": "security-advisories@github.com",
+            "type": "Secondary",
+            "description": [
+              {
+                "lang": "en",
+                "value": "CWE-190"
+              },
+              {
+                "lang": "en",
+                "value": "CWE-680"
+              }
+            ]
+          },
+          {
+            "source": "nvd@nist.gov",
+            "type": "Primary",
+            "description": [
+              {
+                "lang": "en",
+                "value": "CWE-190"
+              }
+            ]
+          }
+        ],
+        "references": [
+          {
+            "url": "https://github.com/redis/redis/commit/a30d367a71b7017581cf1ca104242a3c644dec0f",
+            "source": "security-advisories@github.com",
+            "tags": [
+              "Patch",
+              "Third Party Advisory"
+            ]
+          },
+          {
+            "url": "https://github.com/redis/redis/security/advisories/GHSA-m3mf-8x9w-r27q",
+            "source": "security-advisories@github.com",
+            "tags": [
+              "Third Party Advisory"
+            ]
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/HTYQ5ZF37HNGTZWVNJD3VXP7I6MEEF42/",
+            "source": "security-advisories@github.com"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/VL5KXFN3ATM7IIM7Q4O4PWTSRGZ5744Z/",
+            "source": "security-advisories@github.com"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/WR5WKJWXD4D6S3DJCZ56V74ESLTDQRAB/",
+            "source": "security-advisories@github.com"
+          },
+          {
+            "url": "https://security.gentoo.org/glsa/202209-17",
+            "source": "security-advisories@github.com",
+            "tags": [
+              "Third Party Advisory"
+            ]
+          },
+          {
+            "url": "https://security.netapp.com/advisory/ntap-20211104-0003/",
+            "source": "security-advisories@github.com",
+            "tags": [
+              "Third Party Advisory"
+            ]
+          },
+          {
+            "url": "https://www.debian.org/security/2021/dsa-5001",
+            "source": "security-advisories@github.com",
+            "tags": [
+              "Third Party Advisory"
+            ]
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpuapr2022.html",
+            "source": "security-advisories@github.com",
+            "tags": [
+              "Patch",
+              "Third Party Advisory"
+            ]
+          },
+          {
+            "url": "https://github.com/redis/redis/commit/a30d367a71b7017581cf1ca104242a3c644dec0f",
+            "source": "af854a3a-2127-422b-91ae-364da2661108",
+            "tags": [
+              "Patch",
+              "Third Party Advisory"
+            ]
+          },
+          {
+            "url": "https://github.com/redis/redis/security/advisories/GHSA-m3mf-8x9w-r27q",
+            "source": "af854a3a-2127-422b-91ae-364da2661108",
+            "tags": [
+              "Third Party Advisory"
+            ]
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/HTYQ5ZF37HNGTZWVNJD3VXP7I6MEEF42/",
+            "source": "af854a3a-2127-422b-91ae-364da2661108"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/VL5KXFN3ATM7IIM7Q4O4PWTSRGZ5744Z/",
+            "source": "af854a3a-2127-422b-91ae-364da2661108"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/WR5WKJWXD4D6S3DJCZ56V74ESLTDQRAB/",
+            "source": "af854a3a-2127-422b-91ae-364da2661108"
+          },
+          {
+            "url": "https://security.gentoo.org/glsa/202209-17",
+            "source": "af854a3a-2127-422b-91ae-364da2661108",
+            "tags": [
+              "Third Party Advisory"
+            ]
+          },
+          {
+            "url": "https://security.netapp.com/advisory/ntap-20211104-0003/",
+            "source": "af854a3a-2127-422b-91ae-364da2661108",
+            "tags": [
+              "Third Party Advisory"
+            ]
+          },
+          {
+            "url": "https://www.debian.org/security/2021/dsa-5001",
+            "source": "af854a3a-2127-422b-91ae-364da2661108",
+            "tags": [
+              "Third Party Advisory"
+            ]
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpuapr2022.html",
+            "source": "af854a3a-2127-422b-91ae-364da2661108",
+            "tags": [
+              "Patch",
+              "Third Party Advisory"
+            ]
+          }
+        ],
+        "configurations": [
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "5.0.0",
+                    "versionEndExcluding": "5.0.14",
+                    "matchCriteriaId": "D5D64A76-B253-4A64-8AA2-DD8815CB3CF8"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "6.0.0",
+                    "versionEndExcluding": "6.0.16",
+                    "matchCriteriaId": "02DF8086-645E-4D42-93D3-A4B11D289C7C"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "6.2.0",
+                    "versionEndExcluding": "6.2.6",
+                    "matchCriteriaId": "4686800E-16BA-42CE-B691-011D1D5D0CC2"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:o:fedoraproject:fedora:33:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "E460AA51-FCDA-46B9-AE97-E6676AA5E194"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:o:fedoraproject:fedora:34:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "A930E247-0B43-43CB-98FF-6CE7B8189835"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:o:fedoraproject:fedora:35:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "80E516C0-98A4-4ADE-B69F-66A772E2BAAA"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:o:debian:debian_linux:10.0:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "07B237A9-69A3-4A9C-9DA0-4E06BD37AE73"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:o:debian:debian_linux:11.0:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "FA6FEEC2-9F11-4643-8827-749718254FED"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:netapp:management_services_for_element_software:-:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "86B51137-28D9-41F2-AFA2-3CC22B4954D1"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:netapp:management_services_for_netapp_hci:-:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "4455CF3A-CC91-4BE4-A7AB-929AC82E34F5"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:oracle:communications_operations_monitor:4.3:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "CBE1A019-7BB6-4226-8AC4-9D6927ADAEFA"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:oracle:communications_operations_monitor:4.4:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "B98BAEB2-A540-4E8A-A946-C4331B913AFD"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:oracle:communications_operations_monitor:5.0:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "B8FBE260-E306-4215-80C0-D2D27CA43E0F"
                   }
                 ]
               }
