@@ -59,3 +59,11 @@ export function matchRanges(version: string, ranges: BranchRange[]): VersionMatc
 
   return { vulnerable: false };
 }
+
+export function parseModuleVersion(raw: number): string {
+  const major = Math.floor(raw / 10000);
+  const minor = Math.floor((raw % 10000) / 100);
+  const patch = raw % 100;
+
+  return `${major}.${minor}.${patch}`;
+}
