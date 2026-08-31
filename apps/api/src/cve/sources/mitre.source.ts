@@ -1,5 +1,10 @@
 import type { Advisory, CveProduct } from '@betterdb/shared';
-import { fetchJson, type FetchLike, type SourceFetchResult } from './cve-source.interface';
+import {
+  fetchJson,
+  type FetchLike,
+  type MitreLikeSource,
+  type SourceFetchResult,
+} from './cve-source.interface';
 
 interface MitreRecord {
   cveMetadata?: { cveId?: string };
@@ -25,7 +30,7 @@ function productOf(record: MitreRecord, fallback: CveProduct): CveProduct {
   return fallback;
 }
 
-export class MitreSource {
+export class MitreSource implements MitreLikeSource {
   readonly id = 'mitre' as const;
 
   constructor(private readonly fetchImpl: FetchLike = fetch) {}
@@ -35,6 +40,7 @@ export class MitreSource {
     fallbackProduct: CveProduct = 'redis',
   ): Promise<SourceFetchResult> {
     const advisories: Advisory[] = [];
+    const failures: string[] = [];
 
     for (const cveId of cveIds) {
       try {
@@ -62,8 +68,8 @@ export class MitreSource {
             return reference.url;
           }),
         });
-      } catch {
-        continue;
+      } catch (error) {
+        failures.push(`${cveId}: ${error instanceof Error ? error.message : error}`);
       }
     }
 
@@ -73,6 +79,7 @@ export class MitreSource {
       recordCount: advisories.length,
       query: `cveawg.mitre.org/api/cve/{${cveIds.length} ids}`,
       fetchedAt: Date.now(),
+      ...(failures.length > 0 ? { partialFailures: failures } : {}),
     };
   }
 }

@@ -33,4 +33,16 @@ describe('MitreSource', () => {
     expect(stub).not.toHaveBeenCalled();
     expect(result.recordCount).toBe(0);
   });
+
+  it('reports ids it could not fetch as partial failures instead of discarding them', async () => {
+    const stub = jest
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 404, json: async () => ({}) })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => mitreRecord });
+    const result = await new MitreSource(stub).fetchByIds(['CVE-0000-0000', 'CVE-2025-49112']);
+
+    expect(result.partialFailures).toBeDefined();
+    expect(result.partialFailures).toHaveLength(1);
+    expect(result.partialFailures?.[0]).toContain('CVE-0000-0000');
+  });
 });

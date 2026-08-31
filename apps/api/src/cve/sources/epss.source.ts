@@ -31,7 +31,7 @@ export class EpssSource implements EnrichmentSource {
       const url = `https://api.first.org/data/v1/epss?cve=${batch.join(',')}`;
       const payload = await fetchJson<EpssResponse>(this.fetchImpl, url);
 
-      if (payload.total === 0 && batch.length > 0) {
+      if (payload.total === 0) {
         partialFailures.push(`batch of ${batch.length} CVEs reported zero total`);
         continue;
       }
