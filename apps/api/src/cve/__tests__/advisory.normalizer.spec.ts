@@ -284,6 +284,122 @@ describe('normalizeAdvisories — rangeless views never manufacture a product', 
   });
 });
 
+// I1 counterpart: only MITRE guesses its product. A rangeless GHSA or NVD view names a product
+// on authority — the GHSA advisory's own repo, the matched NVD CPE — so it must keep an advisory
+// row of its own instead of overwriting another product's verdict fields.
+describe('normalizeAdvisories — rangeless authoritative views keep their own product', () => {
+  const NVD_REDIS_RANGELESS: Advisory = {
+    cveId: GHSA_VIEW.cveId,
+    aliases: [],
+    product: 'redis',
+    affected: [],
+    severity: 'critical',
+    cvssScore: 9.8,
+    cwes: ['CWE-999'],
+    knownExploited: false,
+    confidence: 'unversioned',
+    sources: [{ source: 'nvd', fields: ['summary'] }],
+    summary: 'Redis-only: auth bypass in the redis fork',
+    references: ['https://nvd.example/redis-only'],
+  };
+
+  it('never folds a rangeless NVD redis view into the ranged valkey advisory', () => {
+    const { advisories } = normalizeAdvisories(
+      [fetched('ghsa', [GHSA_VIEW]), fetched('nvd', [NVD_REDIS_RANGELESS])],
+      [],
+    );
+    const valkey = advisories.find((advisory) => {
+      return advisory.product === 'valkey';
+    });
+    const redis = advisories.find((advisory) => {
+      return advisory.product === 'redis';
+    });
+
+    expect(advisories).toHaveLength(2);
+    expect(valkey?.cvssScore).toBe(8.8);
+    expect(valkey?.summary).toBe(GHSA_VIEW.summary);
+    expect(valkey?.affected).toEqual(GHSA_VIEW.affected);
+    expect(valkey?.cwes).not.toContain('CWE-999');
+    expect(valkey?.references).not.toContain('https://nvd.example/redis-only');
+    expect(redis?.confidence).toBe('unversioned');
+    expect(redis?.summary).toBe(NVD_REDIS_RANGELESS.summary);
+  });
+
+  it('keeps a rangeless GHSA view and a rangeless NVD view of one CVE as two products', () => {
+    const ghsaRangeless: Advisory = { ...GHSA_VIEW, affected: [], confidence: 'unversioned' };
+    const { advisories } = normalizeAdvisories(
+      [fetched('ghsa', [ghsaRangeless]), fetched('nvd', [NVD_REDIS_RANGELESS])],
+      [],
+    );
+
+    expect(advisories).toHaveLength(2);
+    expect(
+      advisories.map((advisory) => {
+        return advisory.product;
+      }),
+    ).toEqual(expect.arrayContaining(['valkey', 'redis']));
+  });
+
+  it('still merges a same-product rangeless view into its ranged group', () => {
+    const nvdRangeless: Advisory = { ...NVD_VIEW, affected: [], confidence: 'unversioned' };
+    const { advisories } = normalizeAdvisories(
+      [fetched('ghsa', [GHSA_VIEW]), fetched('nvd', [nvdRangeless])],
+      [],
+    );
+
+    expect(advisories).toHaveLength(1);
+    expect(advisories[0].product).toBe('valkey');
+    expect(advisories[0].confidence).toBe('exact');
+    expect(advisories[0].affected).toEqual(GHSA_VIEW.affected);
+  });
+
+  it('attaches a rangeless MITRE view to a group only a rangeless NVD view created', () => {
+    const ghsaRedisRanged: Advisory = { ...GHSA_VIEW, product: 'redis' };
+    const nvdValkeyRangeless: Advisory = {
+      ...NVD_VIEW,
+      affected: [],
+      confidence: 'unversioned',
+      summary: '',
+    };
+    const mitreView: Advisory = {
+      cveId: GHSA_VIEW.cveId,
+      aliases: [],
+      product: 'valkey',
+      affected: [],
+      severity: 'medium',
+      cwes: [],
+      knownExploited: false,
+      confidence: 'unversioned',
+      sources: [{ source: 'mitre', fields: ['summary'] }],
+      summary: 'shared mitre text',
+      references: [],
+    };
+    const { advisories } = normalizeAdvisories(
+      [
+        fetched('ghsa', [ghsaRedisRanged]),
+        fetched('nvd', [nvdValkeyRangeless]),
+        fetched('mitre', [mitreView]),
+      ],
+      [],
+    );
+    const valkey = advisories.find((advisory) => {
+      return advisory.product === 'valkey';
+    });
+    const redis = advisories.find((advisory) => {
+      return advisory.product === 'redis';
+    });
+
+    expect(advisories).toHaveLength(2);
+    expect(valkey?.summary).toBe('shared mitre text');
+    expect(valkey?.confidence).toBe('unversioned');
+    expect(
+      redis?.sources.map((entry) => {
+        return entry.source;
+      }),
+    ).toContain('mitre');
+  });
+});
+
 // Q2 guard: the range winner's missing optional fields must not blank a value a
 // lower-precedence source supplied. severity stays winner-only by ruling.
 describe('normalizeAdvisories — field-level fallback', () => {

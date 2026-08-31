@@ -18,6 +18,8 @@ export interface NormalizedDataset {
 
 const RANGE_PRECEDENCE: CveSourceId[] = ['ghsa', 'nvd', 'mitre'];
 
+const GUESSED_PRODUCT_SOURCES: CveSourceId[] = ['mitre'];
+
 const DATASET_VERSION_LENGTH = 16;
 
 interface SourceView {
@@ -79,6 +81,10 @@ function hasRanges(view: SourceView): boolean {
   return view.advisory.affected.length > 0;
 }
 
+function hasGuessedProduct(view: SourceView): boolean {
+  return GUESSED_PRODUCT_SOURCES.includes(view.owner);
+}
+
 function orderByPrecedence(views: SourceView[]): SourceView[] {
   return [...views].sort((a, b) => {
     const byRank = rankOf(a.owner) - rankOf(b.owner);
@@ -131,7 +137,18 @@ function groupViews(views: SourceView[]): SourceView[][] {
     }),
   );
 
-  for (const view of rangeless) {
+  const authoritative = rangeless.filter((view) => {
+    return hasGuessedProduct(view) === false;
+  });
+  const guessed = rangeless.filter((view) => {
+    return hasGuessedProduct(view) === true;
+  });
+
+  for (const view of authoritative) {
+    register(advisoryKey(view.advisory.cveId, view.advisory.product), view.advisory.cveId, view);
+  }
+
+  for (const view of guessed) {
     const keys = keysByCve.get(view.advisory.cveId) ?? [];
 
     if (keys.length === 0) {
