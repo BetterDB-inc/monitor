@@ -1,0 +1,30 @@
+[
+  {
+    "ghsa_id": "GHSA-jqcm-9gh4-2vgv",
+    "cve_id": "CVE-2026-63639",
+    "summary": "Heap overflow in the Valkey server",
+    "severity": "high",
+    "cvss": { "score": 8.8 },
+    "cwe_ids": ["CWE-122"],
+    "html_url": "https://github.com/valkey-io/valkey/security/advisories/GHSA-jqcm-9gh4-2vgv",
+    "vulnerabilities": [
+      { "vulnerable_version_range": "<= 9.1.0", "patched_versions": "9.1.1" },
+      { "vulnerable_version_range": "<= 9.0.4", "patched_versions": "9.0.5" },
+      { "vulnerable_version_range": "<= 8.1.8", "patched_versions": "8.1.9" },
+      { "vulnerable_version_range": "<= 8.0.9", "patched_versions": "8.0.10" },
+      { "vulnerable_version_range": "<= 7.2.13", "patched_versions": "7.2.14" }
+    ]
+  },
+  {
+    "ghsa_id": "GHSA-9rfg-jx7v-52p6",
+    "cve_id": "CVE-2025-49844",
+    "summary": "Use-after-free reachable from a scripted command",
+    "severity": "critical",
+    "cvss": { "score": 9.9 },
+    "cwe_ids": ["CWE-416"],
+    "html_url": "https://github.com/valkey-io/valkey/security/advisories/GHSA-9rfg-jx7v-52p6",
+    "vulnerabilities": [
+      { "vulnerable_version_range": "<= 8.0.8", "patched_versions": "8.0.9" }
+    ]
+  }
+]
