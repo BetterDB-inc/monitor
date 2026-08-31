@@ -109,6 +109,42 @@ export const BLOOM_MODULE: Advisory = {
   references: [],
 };
 
+// Illustrative pair: EPSS and CVSS disagree in rank direction, to prove the ranker
+// sorts by EPSS before CVSS rather than the reverse.
+export const HIGH_EPSS_LOW_CVSS: Advisory = {
+  cveId: 'CVE-2026-70002',
+  aliases: [],
+  product: 'valkey',
+  affected: [{ branch: '*', vulnerableAtOrBelow: '9.9.9' }],
+  severity: 'medium',
+  cvssScore: 4.0,
+  cwes: [],
+  knownExploited: false,
+  epssScore: 0.05,
+  epssPercentile: 0.6,
+  confidence: 'broad',
+  sources: [{ source: 'nvd', fields: ['affected', 'severity'] }],
+  summary: 'Illustrative: lower CVSS but higher EPSS than CVE-2026-70001',
+  references: [],
+};
+
+export const LOW_EPSS_HIGH_CVSS: Advisory = {
+  cveId: 'CVE-2026-70001',
+  aliases: [],
+  product: 'valkey',
+  affected: [{ branch: '*', vulnerableAtOrBelow: '9.9.9' }],
+  severity: 'high',
+  cvssScore: 9.0,
+  cwes: [],
+  knownExploited: false,
+  epssScore: 0.002,
+  epssPercentile: 0.2,
+  confidence: 'broad',
+  sources: [{ source: 'nvd', fields: ['affected', 'severity'] }],
+  summary: 'Illustrative: higher CVSS but lower EPSS than CVE-2026-70002',
+  references: [],
+};
+
 export const ALL_ADVISORIES: Advisory[] = [
   VALKEY_BRANCH_AWARE,
   VALKEY_KNOWN_EXPLOITED,

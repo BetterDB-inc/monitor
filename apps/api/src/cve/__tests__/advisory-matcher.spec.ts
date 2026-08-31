@@ -3,6 +3,8 @@ import { parseModuleVersion } from '../matcher/version-range';
 import {
   ALL_ADVISORIES,
   BLOOM_MODULE,
+  HIGH_EPSS_LOW_CVSS,
+  LOW_EPSS_HIGH_CVSS,
   UNVERSIONED,
   VALKEY_BRANCH_AWARE,
   VALKEY_KNOWN_EXPLOITED,
@@ -74,6 +76,19 @@ describe('matchAdvisories', () => {
 
     expect(ids[0]).toBe(VALKEY_KNOWN_EXPLOITED.cveId);
     expect(ids.indexOf('CVE-2026-63639')).toBeLessThan(ids.indexOf('CVE-2026-21863'));
+  });
+
+  it('ranks a lower-CVSS advisory above a higher-CVSS one when its EPSS is higher', () => {
+    const result = matchAdvisories({ product: 'valkey', engineVersion: '5.0.0', modules: [] }, [
+      LOW_EPSS_HIGH_CVSS,
+      HIGH_EPSS_LOW_CVSS,
+    ]);
+    const ids = result.findings.map((finding) => {
+      return finding.advisory.cveId;
+    });
+
+    expect(ids[0]).toBe(HIGH_EPSS_LOW_CVSS.cveId);
+    expect(ids[1]).toBe(LOW_EPSS_HIGH_CVSS.cveId);
   });
 });
 
