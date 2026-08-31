@@ -60,6 +60,8 @@ import type {
   VectorIndexSnapshotQueryOptions,
   MetricForecastSettings,
   MetricKind,
+  StoredCveDataset,
+  CveScanResult,
   StoredCacheProposal,
   StoredCacheProposalAudit,
   CreateCacheProposalInput,
@@ -110,6 +112,8 @@ export class MemoryAdapter implements StoragePort {
   private latencyHistograms: StoredLatencyHistogram[] = [];
   private memorySnapshots: StoredMemorySnapshot[] = [];
   private vectorIndexSnapshots: VectorIndexSnapshot[] = [];
+  private cveDataset: StoredCveDataset | null = null;
+  private cveScanResults: CveScanResult[] = [];
   private metricForecastSettings: Map<string, MetricForecastSettings> = new Map();
   private settings: AppSettings | null = null;
   private readonly MAX_DELIVERIES_PER_WEBHOOK = 1000;
@@ -1421,6 +1425,33 @@ export class MemoryAdapter implements StoragePort {
       );
     }
     return before - this.vectorIndexSnapshots.length;
+  }
+
+  // CVE Inspection Methods
+  async saveCveDataset(dataset: StoredCveDataset): Promise<void> {
+    this.cveDataset = dataset;
+  }
+
+  async getCveDataset(): Promise<StoredCveDataset | null> {
+    return this.cveDataset;
+  }
+
+  async saveCveScanResult(result: CveScanResult): Promise<void> {
+    this.cveScanResults.push(result);
+  }
+
+  async getCveScanResult(connectionId: string): Promise<CveScanResult | null> {
+    const forConnection = this.cveScanResults.filter((entry) => {
+      return entry.connectionId === connectionId;
+    });
+
+    if (forConnection.length === 0) {
+      return null;
+    }
+
+    return forConnection.reduce((newest, entry) => {
+      return entry.scannedAt >= newest.scannedAt ? entry : newest;
+    });
   }
 
   // Connection Management Methods (in-memory storage)

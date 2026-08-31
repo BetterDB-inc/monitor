@@ -35,6 +35,7 @@ export type {
   OtelTraceQueryOptions,
 } from '@betterdb/shared';
 export type { MetricForecastSettings, MetricKind } from '@betterdb/shared';
+export type { StoredCveDataset, CveScanResult } from '@betterdb/shared';
 export type {
   CacheType,
   ProposalType,
@@ -90,6 +91,8 @@ import type {
   StoredClientSnapshot,
   MetricForecastSettings,
   MetricKind,
+  StoredCveDataset,
+  CveScanResult,
   VectorIndexSnapshot,
   VectorIndexSnapshotQueryOptions,
   StoredAiCacheSample,
@@ -602,6 +605,12 @@ export interface StoragePort {
   saveVectorIndexSnapshots(snapshots: VectorIndexSnapshot[], connectionId: string): Promise<number>;
   getVectorIndexSnapshots(options: VectorIndexSnapshotQueryOptions): Promise<VectorIndexSnapshot[]>;
   pruneOldVectorIndexSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  // CVE Inspection Methods
+  saveCveDataset(dataset: StoredCveDataset): Promise<void>;
+  getCveDataset(): Promise<StoredCveDataset | null>;
+  saveCveScanResult(result: CveScanResult): Promise<void>;
+  getCveScanResult(connectionId: string): Promise<CveScanResult | null>;
 
   // Monitor Capture Session Methods - connectionId required for writes, optional filter for reads
   saveCaptureSession(session: StoredCaptureSession, connectionId: string): Promise<string>;

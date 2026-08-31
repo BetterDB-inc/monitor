@@ -64,6 +64,8 @@ import type {
   VectorIndexSnapshotQueryOptions,
   MetricForecastSettings,
   MetricKind,
+  StoredCveDataset,
+  CveScanResult,
   StoredCacheProposal,
   StoredCacheProposalAudit,
   CreateCacheProposalInput,
@@ -1625,6 +1627,26 @@ export class SqliteAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_vis_timestamp ON vector_index_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_vis_connection_index ON vector_index_snapshots(connection_id, index_name);
+
+      CREATE TABLE IF NOT EXISTS cve_advisories (
+        dataset_version TEXT PRIMARY KEY,
+        refreshed_at INTEGER NOT NULL,
+        advisories TEXT NOT NULL,
+        snapshots TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS cve_scan_results (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        dataset_version TEXT NOT NULL,
+        scanned_at INTEGER NOT NULL,
+        last_checked_at INTEGER NOT NULL,
+        result TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cve_scan_connection
+        ON cve_scan_results(connection_id, scanned_at DESC);
 
       CREATE TABLE IF NOT EXISTS cache_proposals (
         id TEXT PRIMARY KEY,
@@ -3856,6 +3878,99 @@ export class SqliteAdapter implements StoragePort {
       .prepare('DELETE FROM vector_index_snapshots WHERE timestamp < ?')
       .run(cutoffTimestamp);
     return result.changes;
+  }
+
+  // CVE Inspection Methods
+  async saveCveDataset(dataset: StoredCveDataset): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    this.db.prepare('DELETE FROM cve_advisories').run();
+    this.db
+      .prepare(
+        `INSERT INTO cve_advisories (dataset_version, refreshed_at, advisories, snapshots)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(
+        dataset.datasetVersion,
+        dataset.refreshedAt,
+        JSON.stringify(dataset.advisories),
+        JSON.stringify(dataset.snapshots),
+      );
+  }
+
+  async getCveDataset(): Promise<StoredCveDataset | null> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const row = this.db
+      .prepare(
+        `SELECT dataset_version, refreshed_at, advisories, snapshots
+         FROM cve_advisories
+         ORDER BY refreshed_at DESC
+         LIMIT 1`,
+      )
+      .get() as
+      | { dataset_version: string; refreshed_at: number; advisories: string; snapshots: string }
+      | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    return {
+      datasetVersion: row.dataset_version,
+      refreshedAt: row.refreshed_at,
+      advisories: JSON.parse(row.advisories) as StoredCveDataset['advisories'],
+      snapshots: JSON.parse(row.snapshots) as StoredCveDataset['snapshots'],
+    };
+  }
+
+  async saveCveScanResult(result: CveScanResult): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    this.db
+      .prepare(
+        `INSERT INTO cve_scan_results
+           (id, connection_id, fingerprint, dataset_version, scanned_at, last_checked_at, result)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        result.connectionId,
+        result.fingerprint,
+        result.datasetVersion,
+        result.scannedAt,
+        result.lastCheckedAt,
+        JSON.stringify(result),
+      );
+
+    this.db
+      .prepare(
+        `DELETE FROM cve_scan_results
+         WHERE connection_id = ?
+           AND id NOT IN (
+             SELECT id FROM cve_scan_results WHERE connection_id = ?
+             ORDER BY scanned_at DESC, rowid DESC LIMIT 1
+           )`,
+      )
+      .run(result.connectionId, result.connectionId);
+  }
+
+  async getCveScanResult(connectionId: string): Promise<CveScanResult | null> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const row = this.db
+      .prepare(
+        `SELECT result FROM cve_scan_results
+         WHERE connection_id = ?
+         ORDER BY scanned_at DESC, rowid DESC LIMIT 1`,
+      )
+      .get(connectionId) as { result: string } | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    return JSON.parse(row.result) as CveScanResult;
   }
 
   // Connection Management Methods
