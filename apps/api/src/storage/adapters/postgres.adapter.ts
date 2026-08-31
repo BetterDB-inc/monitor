@@ -1726,11 +1726,12 @@ export class PostgresAdapter implements StoragePort {
             AND table_name = 'cve_advisories'
             AND column_name = 'id'
         ) THEN
-          EXECUTE 'DROP TABLE ' || current_schema() || '.cve_advisories';
+          EXECUTE format('DROP TABLE %I.%I', current_schema(), 'cve_advisories');
         END IF;
       EXCEPTION WHEN OTHERS THEN
-        -- Never let a migration-guard failure take down the rest of createSchema()
-        NULL;
+        -- Never let a migration-guard failure take down the rest of createSchema(),
+        -- but never let it pass unnoticed either
+        RAISE WARNING 'cve_advisories migration guard failed: % (%)', SQLERRM, SQLSTATE;
       END $$;
 
       CREATE TABLE IF NOT EXISTS cve_advisories (
@@ -4177,7 +4178,8 @@ export class PostgresAdapter implements StoragePort {
       typeof value === 'object' &&
       typeof (value as { toJSON?: unknown }).toJSON === 'function'
     ) {
-      return value;
+      const serialized = (value as unknown as { toJSON: () => unknown }).toJSON();
+      return this.sanitizeNulBytes(serialized) as unknown as T;
     }
 
     if (Array.isArray(value)) {
@@ -4281,7 +4283,7 @@ export class PostgresAdapter implements StoragePort {
       `SELECT result FROM cve_scan_results
        WHERE connection_id = $1
        ORDER BY scanned_at DESC, seq DESC LIMIT 1`,
-      [connectionId],
+      [this.stripNulCharacters(connectionId)],
     );
     const row = result.rows[0] as { result: unknown } | undefined;
 
