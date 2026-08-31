@@ -18,6 +18,7 @@ interface MockClient {
   scan: ReturnType<typeof vi.fn>;
   pipeline: ReturnType<typeof vi.fn>;
   hset: ReturnType<typeof vi.fn>;
+  hdel: ReturnType<typeof vi.fn>;
   hget: ReturnType<typeof vi.fn>;
   hgetall: ReturnType<typeof vi.fn>;
   hincrby: ReturnType<typeof vi.fn>;
@@ -74,6 +75,7 @@ function makeMockClient(scannedKeys: string[], searchKeys: string[] = []): MockC
       return stub;
     }),
     hset: vi.fn(async () => 1),
+    hdel: vi.fn(async () => 1),
     hget: vi.fn(async () => null),
     hgetall: vi.fn(async () => ({})),
     hincrby: vi.fn(async () => 0),
