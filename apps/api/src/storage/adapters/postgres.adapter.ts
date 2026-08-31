@@ -1713,8 +1713,11 @@ export class PostgresAdapter implements StoragePort {
         dataset_version TEXT PRIMARY KEY,
         refreshed_at BIGINT NOT NULL,
         advisories JSONB NOT NULL,
-        snapshots JSONB NOT NULL
+        snapshots JSONB NOT NULL,
+        seq BIGSERIAL NOT NULL
       );
+
+      ALTER TABLE cve_advisories ADD COLUMN IF NOT EXISTS seq BIGSERIAL NOT NULL;
 
       CREATE TABLE IF NOT EXISTS cve_scan_results (
         id TEXT PRIMARY KEY,
@@ -4138,18 +4141,29 @@ export class PostgresAdapter implements StoragePort {
   }
 
   // CVE Inspection Methods
+  private stripNulEscapes(json: string): string {
+    return json.replace(/\\u0000/g, '');
+  }
+
   async saveCveDataset(dataset: StoredCveDataset): Promise<void> {
     if (!this.pool) throw new Error('Database not initialized');
 
-    await this.pool.query('DELETE FROM cve_advisories');
     await this.pool.query(
-      `INSERT INTO cve_advisories (dataset_version, refreshed_at, advisories, snapshots)
-       VALUES ($1, $2, $3, $4)`,
+      `WITH upsert AS (
+         INSERT INTO cve_advisories (dataset_version, refreshed_at, advisories, snapshots)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (dataset_version) DO UPDATE SET
+           refreshed_at = EXCLUDED.refreshed_at,
+           advisories = EXCLUDED.advisories,
+           snapshots = EXCLUDED.snapshots
+         RETURNING dataset_version
+       )
+       DELETE FROM cve_advisories WHERE dataset_version <> (SELECT dataset_version FROM upsert)`,
       [
         dataset.datasetVersion,
         dataset.refreshedAt,
-        JSON.stringify(dataset.advisories),
-        JSON.stringify(dataset.snapshots),
+        this.stripNulEscapes(JSON.stringify(dataset.advisories)),
+        this.stripNulEscapes(JSON.stringify(dataset.snapshots)),
       ],
     );
   }
@@ -4160,7 +4174,7 @@ export class PostgresAdapter implements StoragePort {
     const result = await this.pool.query(
       `SELECT dataset_version, refreshed_at, advisories, snapshots
        FROM cve_advisories
-       ORDER BY refreshed_at DESC
+       ORDER BY refreshed_at DESC, seq DESC
        LIMIT 1`,
     );
     const row = result.rows[0] as
@@ -4197,7 +4211,7 @@ export class PostgresAdapter implements StoragePort {
         result.datasetVersion,
         result.scannedAt,
         result.lastCheckedAt,
-        JSON.stringify(result),
+        this.stripNulEscapes(JSON.stringify(result)),
       ],
     );
 

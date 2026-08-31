@@ -1429,15 +1429,31 @@ export class MemoryAdapter implements StoragePort {
 
   // CVE Inspection Methods
   async saveCveDataset(dataset: StoredCveDataset): Promise<void> {
-    this.cveDataset = dataset;
+    this.cveDataset = structuredClone(dataset);
   }
 
   async getCveDataset(): Promise<StoredCveDataset | null> {
-    return this.cveDataset;
+    if (!this.cveDataset) {
+      return null;
+    }
+
+    return structuredClone(this.cveDataset);
   }
 
   async saveCveScanResult(result: CveScanResult): Promise<void> {
-    this.cveScanResults.push(result);
+    const otherConnections = this.cveScanResults.filter((entry) => {
+      return entry.connectionId !== result.connectionId;
+    });
+    const forConnection = this.cveScanResults.filter((entry) => {
+      return entry.connectionId === result.connectionId;
+    });
+    forConnection.push(structuredClone(result));
+
+    const newest = forConnection.reduce((current, entry) => {
+      return entry.scannedAt >= current.scannedAt ? entry : current;
+    });
+
+    this.cveScanResults = [...otherConnections, newest];
   }
 
   async getCveScanResult(connectionId: string): Promise<CveScanResult | null> {
@@ -1449,9 +1465,11 @@ export class MemoryAdapter implements StoragePort {
       return null;
     }
 
-    return forConnection.reduce((newest, entry) => {
-      return entry.scannedAt >= newest.scannedAt ? entry : newest;
+    const newest = forConnection.reduce((current, entry) => {
+      return entry.scannedAt >= current.scannedAt ? entry : current;
     });
+
+    return structuredClone(newest);
   }
 
   // Connection Management Methods (in-memory storage)

@@ -3905,7 +3905,6 @@ export class SqliteAdapter implements StoragePort {
       .prepare(
         `SELECT dataset_version, refreshed_at, advisories, snapshots
          FROM cve_advisories
-         ORDER BY refreshed_at DESC
          LIMIT 1`,
       )
       .get() as
