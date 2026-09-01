@@ -98,6 +98,29 @@ describe('Security page - incomplete scans must never read as an all-clear', () 
     expect(caveat).not.toHaveTextContent('json');
   });
 
+  it('keeps the all-clear when the only unreadable modules carry no advisories of their own', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({
+        nodes: [
+          node('1', '9.0.0', [], [], {
+            modules: [
+              { name: 'lua', version: null },
+              { name: 'vectorset', version: null },
+            ],
+          }),
+        ],
+      }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('verdict-headline')).toHaveTextContent(
+      'No known vulnerabilities found',
+    );
+    expect(screen.queryByTestId('scan-caveat-undecoded-modules')).not.toBeInTheDocument();
+  });
+
   it('refuses the all-clear headline when the modules on a node could not be enumerated', async () => {
     mocks.scan.mockResolvedValue(
       scanResult({

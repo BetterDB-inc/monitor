@@ -47,18 +47,6 @@ export const NVD_CPES: Array<{ cpe: string; product: CveProduct }> = [
   { cpe: 'cpe:2.3:a:lfprojects:valkey-bloom', product: 'valkey-bloom' },
 ];
 
-export const MODULE_PRODUCTS: Partial<Record<CveProduct, Record<string, CveProduct>>> = {
-  valkey: {
-    bf: 'valkey-bloom',
-    json: 'valkey-json',
-    search: 'valkey-search',
-  },
-  redis: {
-    search: 'redisearch',
-    searchlight: 'redisearch',
-  },
-};
-
 export type ModuleVersionEncoding = 'decimal' | 'byte-triplet' | 'byte-quad-stage';
 
 export const MODULE_VERSION_ENCODINGS: Partial<

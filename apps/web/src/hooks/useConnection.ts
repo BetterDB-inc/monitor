@@ -64,14 +64,21 @@ export function useConnectionState(): ConnectionContextValue {
       const data: Connection[] = responseData.connections || [];
       setConnections(data);
 
-      // If no current connection is set, select the first connected one or use currentId from response
-      if (!currentConnection && data.length > 0) {
+      const stillListed =
+        currentConnection !== null &&
+        data.some((c) => {
+          return c.id === currentConnection.id;
+        });
+
+      // Select a default when nothing is selected, or when the selection was removed elsewhere
+      if (stillListed === false) {
         const defaultConnection =
-          (responseData.currentId && data.find(c => c.id === responseData.currentId)) ||
-          data.find(c => c.isConnected) ||
-          data[0];
+          (responseData.currentId && data.find((c) => c.id === responseData.currentId)) ||
+          data.find((c) => c.isConnected) ||
+          data[0] ||
+          null;
         setCurrentConnection(defaultConnection);
-        setCurrentConnectionId(defaultConnection.id);
+        setCurrentConnectionId(defaultConnection?.id ?? null);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch connections');

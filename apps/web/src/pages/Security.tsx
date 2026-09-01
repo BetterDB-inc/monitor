@@ -13,6 +13,7 @@ import { VerdictCard } from '../components/pages/security/VerdictCard';
 import { groupFindings, type NodeGroups } from '../components/pages/security/drift-groups';
 import { datasetAgeLabel, scanAgeLabel } from '../components/pages/security/header-labels';
 import { datasetCaveats, scanCompleteness } from '../components/pages/security/scan-completeness';
+import { scanErrorMessage } from '../components/pages/security/scan-error';
 import { useCveDataset, useCveScan, useRefreshCveScan } from '../hooks/useCveScan';
 
 const PRODUCT_LABEL: Record<string, string> = { valkey: 'Valkey', redis: 'Redis' };
@@ -39,7 +40,9 @@ export function Security() {
   const refresh = useRefreshCveScan();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
-  const refreshError = refresh.isError ? refresh.error.message : null;
+  const refreshError = refresh.isError
+    ? scanErrorMessage(refresh.error, SCAN_FAILED_MESSAGE)
+    : null;
 
   if (scan.isPending) {
     return <p className="text-muted-foreground p-8 text-sm">Scanning this connection…</p>;
@@ -59,7 +62,7 @@ export function Security() {
           }}
         />
         <p data-testid="scan-error" className="text-destructive text-sm">
-          {scan.error?.message ?? SCAN_FAILED_MESSAGE}
+          {scanErrorMessage(scan.error, SCAN_FAILED_MESSAGE)}
         </p>
       </div>
     );

@@ -1,4 +1,5 @@
 import type { CveDatasetStatus, CveScanResult, ScannedNode } from '@betterdb/shared';
+import { moduleProductOf } from '@betterdb/shared';
 
 export type ScanCaveatId =
   | 'not-scanned'
@@ -32,9 +33,15 @@ function undecodedModuleNames(nodes: ScannedNode[]): string[] {
 
   for (const entry of nodes) {
     for (const loaded of entry.modules) {
-      if (loaded.version === null) {
-        names.add(loaded.name);
+      if (loaded.version !== null) {
+        continue;
       }
+
+      if (moduleProductOf(entry.product, loaded.name) === undefined) {
+        continue;
+      }
+
+      names.add(loaded.name);
     }
   }
 

@@ -1,5 +1,5 @@
 import type { Advisory, CveFinding, CveProduct, CveSeverity, LoadedModule } from '@betterdb/shared';
-import { MODULE_PRODUCTS } from '../cve.constants';
+import { isModuleProductOf, moduleProductOf } from '@betterdb/shared';
 import { matchRanges } from './version-range';
 
 export interface MatchInput {
@@ -22,28 +22,10 @@ const EMPTY_COUNTS: Record<CveSeverity, number> = {
   low: 0,
 };
 
-export function moduleProductOf(product: CveProduct, name: string): CveProduct | undefined {
-  const table = MODULE_PRODUCTS[product];
-  if (table === undefined) {
-    return undefined;
-  }
-
-  return table[name.toLowerCase()];
-}
-
 function moduleFor(input: MatchInput, product: CveProduct): LoadedModule | undefined {
   return input.modules.find((loaded) => {
     return moduleProductOf(input.product, loaded.name) === product;
   });
-}
-
-export function isModuleProductOf(engineProduct: CveProduct, product: CveProduct): boolean {
-  const table = MODULE_PRODUCTS[engineProduct];
-  if (table === undefined) {
-    return false;
-  }
-
-  return Object.values(table).includes(product);
 }
 
 export function rankFindings(findings: CveFinding[]): CveFinding[] {

@@ -1,4 +1,5 @@
 import type { BranchRange, CveProduct } from '@betterdb/shared';
+import { MODULE_PRODUCTS } from '@betterdb/shared';
 import {
   branchOf,
   compareVersions,
@@ -6,7 +7,6 @@ import {
   moduleVersionEncoding,
   parseModuleVersion,
 } from '../matcher/version-range';
-import { MODULE_PRODUCTS } from '../cve.constants';
 
 // GHSA-jqcm-9gh4-2vgv / CVE-2026-63639, captured 2026-08-31
 const CVE_2026_63639: BranchRange[] = [
