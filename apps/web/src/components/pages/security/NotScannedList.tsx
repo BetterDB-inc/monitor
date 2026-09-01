@@ -10,7 +10,7 @@ export function NotScannedList({ nodes }: NotScannedListProps) {
   }
 
   return (
-    <details className="rounded-lg border p-4" open>
+    <details data-testid="not-scanned-list" className="rounded-lg border p-4" open>
       <summary className="cursor-pointer text-sm font-medium">
         {nodes.length} {nodes.length === 1 ? 'node' : 'nodes'} not scanned
       </summary>

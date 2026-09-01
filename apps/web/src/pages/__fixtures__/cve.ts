@@ -7,6 +7,8 @@ import type {
   ScannedNode,
 } from '@betterdb/shared';
 
+const HOUR_MS = 3_600_000;
+
 export function advisory(cveId: string, overrides: Partial<Advisory> = {}): Advisory {
   return {
     cveId,
@@ -52,6 +54,7 @@ export function node(
   engineVersion: string,
   findings: CveFinding[],
   unversioned: Advisory[] = [],
+  overrides: Partial<ScannedNode> = {},
 ): ScannedNode {
   return {
     nodeId,
@@ -63,6 +66,7 @@ export function node(
     findings,
     unversioned,
     severityCounts: { low: 0, medium: 0, high: findings.length, critical: 0 },
+    ...overrides,
   };
 }
 
@@ -75,8 +79,8 @@ export function scanResult(overrides: Partial<CveScanResult> = {}): CveScanResul
     connectionId: 'conn-1',
     fingerprint: 'fp-1',
     datasetVersion: 'ds-1',
-    scannedAt: 1,
-    lastCheckedAt: 1,
+    scannedAt: Date.now() - 2 * HOUR_MS,
+    lastCheckedAt: Date.now() - 2 * HOUR_MS,
     topology: 'standalone',
     notScanned: [],
     drift: false,
@@ -98,7 +102,7 @@ const SOURCE_IDS: CveSourceId[] = ['ghsa', 'nvd', 'mitre', 'kev', 'epss'];
 
 export const HEALTHY_DATASET: CveDatasetStatus = {
   datasetVersion: 'ds-1',
-  refreshedAt: 1,
+  refreshedAt: Date.now() - HOUR_MS,
   advisoryCount: 12,
   sources: SOURCE_IDS.map((source) => {
     return {

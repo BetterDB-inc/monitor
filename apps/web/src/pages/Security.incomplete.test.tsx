@@ -1,0 +1,228 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import Security from './Security';
+import {
+  HEALTHY_DATASET,
+  finding,
+  node,
+  scanResult,
+  unversionedAdvisory,
+} from './__fixtures__/cve';
+
+const mocks = vi.hoisted(() => {
+  return { scan: vi.fn(), dataset: vi.fn(), refresh: vi.fn() };
+});
+
+vi.mock('../api/cve', () => {
+  return {
+    fetchCveScan: mocks.scan,
+    fetchCveDataset: mocks.dataset,
+    refreshCveScan: mocks.refresh,
+  };
+});
+
+vi.mock('../hooks/useConnection', () => {
+  return {
+    useConnection: () => {
+      return {
+        currentConnection: {
+          id: 'conn-1',
+          name: 'local',
+          host: '127.0.0.1',
+          port: 6379,
+          isConnected: true,
+        },
+        connections: [],
+        loading: false,
+        error: null,
+        setConnection: vi.fn(),
+        refreshConnections: vi.fn(),
+        hasNoConnections: false,
+      };
+    },
+  };
+});
+
+function renderPage() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+  return render(
+    <QueryClientProvider client={client}>
+      <Security />
+    </QueryClientProvider>,
+  );
+}
+
+function precedes(first: Element, second: Element): boolean {
+  return (first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+}
+
+describe('Security page — incomplete scans must never read as an all-clear', () => {
+  it('refuses the all-clear headline when the server marked the scan partial', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({ nodes: [node('1', '8.0.10', [])], partial: true, missingSources: [] }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('verdict-count')).toHaveTextContent('0');
+    expect(screen.getByTestId('verdict-headline')).not.toHaveTextContent(
+      '0 known CVEs affect this instance',
+    );
+    expect(screen.getByTestId('verdict-headline')).toHaveTextContent(/this scan is incomplete/i);
+    expect(screen.getByTestId('scan-caveat-partial')).toBeInTheDocument();
+  });
+
+  it('names the module whose version could not be read as the reason a scan is partial', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({
+        nodes: [
+          node('1', '8.0.10', [], [], {
+            modules: [
+              { name: 'search', version: null },
+              { name: 'json', version: '1.0.0' },
+            ],
+          }),
+        ],
+        partial: true,
+      }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    const caveat = await screen.findByTestId('scan-caveat-undecoded-modules');
+
+    expect(caveat).toHaveTextContent('search');
+    expect(caveat).not.toHaveTextContent('json');
+  });
+
+  it('counts unversioned advisories in the verdict rather than headlining zero', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({
+        nodes: [
+          node(
+            '1',
+            '8.0.10',
+            [],
+            [unversionedAdvisory('CVE-2025-49112'), unversionedAdvisory('CVE-2025-49113')],
+          ),
+        ],
+      }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('verdict-count')).toHaveTextContent('0');
+    expect(screen.getByTestId('verdict-unchecked-count')).toHaveTextContent('2');
+    expect(screen.getByTestId('verdict-headline')).not.toHaveTextContent(
+      '0 known CVEs affect this instance',
+    );
+  });
+
+  it('caveats the verdict for unreachable nodes, above the findings, not below them', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({
+        topology: 'cluster',
+        nodes: [node('1', '8.0.10', [])],
+        notScanned: [{ nodeId: '2', address: '10.0.0.2:6379', reason: 'auth failed' }],
+        partial: true,
+      }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    const caveats = await screen.findByTestId('scan-caveats');
+    const caveat = screen.getByTestId('scan-caveat-not-scanned');
+
+    expect(caveat).toHaveTextContent('10.0.0.2:6379');
+    expect(caveat).toHaveTextContent('auth failed');
+    expect(screen.getByTestId('verdict-headline')).not.toHaveTextContent(
+      '0 known CVEs affect this instance',
+    );
+    expect(precedes(caveats, screen.getByTestId('verdict-headline'))).toBe(true);
+    expect(precedes(caveats, screen.getByTestId('findings-empty'))).toBe(true);
+  });
+
+  it('names the skipped source in the verdict caveat, not only in the source strip', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({ nodes: [node('1', '8.0.10', [])], partial: true, missingSources: ['nvd'] }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('scan-caveat-missing-sources')).toHaveTextContent('NVD');
+    expect(screen.getByTestId('verdict-headline')).not.toHaveTextContent(
+      '0 known CVEs affect this instance',
+    );
+  });
+
+  it('keeps the plain all-clear when the scan really is complete', async () => {
+    mocks.scan.mockResolvedValue(scanResult({ nodes: [node('1', '8.0.10', [])] }));
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('verdict-headline')).toHaveTextContent(
+      '0 known CVEs affect this instance',
+    );
+    expect(screen.queryByTestId('scan-caveats')).not.toBeInTheDocument();
+  });
+
+  it('keeps every per-node reason when the whole cluster was unreachable', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({
+        topology: 'cluster',
+        nodes: [],
+        notScanned: [
+          { nodeId: '1', address: '10.0.0.1:6379', reason: 'auth failed' },
+          { nodeId: '2', address: '10.0.0.2:6379', reason: 'unreachable' },
+        ],
+        partial: true,
+      }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    const list = await screen.findByTestId('not-scanned-list');
+
+    expect(list).toHaveTextContent('10.0.0.1:6379');
+    expect(list).toHaveTextContent('auth failed');
+    expect(list).toHaveTextContent('10.0.0.2:6379');
+    expect(list).toHaveTextContent('unreachable');
+    expect(screen.getByRole('button', { name: 'Rescan' })).toBeInTheDocument();
+  });
+
+  it('shows the server message and a retry when the scan request fails', async () => {
+    mocks.scan.mockRejectedValue(new Error('CVE dataset is still being built'));
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('scan-error')).toHaveTextContent(
+      'CVE dataset is still being built',
+    );
+    expect(screen.getByRole('button', { name: 'Rescan' })).toBeInTheDocument();
+    expect(screen.queryByTestId('verdict-count')).not.toBeInTheDocument();
+  });
+
+  it('does not claim the advisory dataset is empty when its request failed', async () => {
+    mocks.scan.mockResolvedValue(scanResult());
+    mocks.dataset.mockRejectedValue(new Error('dataset unavailable'));
+
+    renderPage();
+
+    await screen.findByTestId('verdict-count');
+
+    const banner = await screen.findByTestId('source-banner');
+
+    expect(banner).not.toHaveTextContent(/no advisory data/i);
+    expect(banner).toHaveTextContent(/source health could not be loaded/i);
+  });
+});

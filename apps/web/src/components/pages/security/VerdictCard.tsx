@@ -5,6 +5,8 @@ interface VerdictCardProps {
   version: string;
   severityCounts: CveSeverityCounts;
   findings: CveFinding[];
+  uncheckedCount: number;
+  incomplete: boolean;
 }
 
 interface UpgradeTarget {
@@ -34,18 +36,41 @@ function bestUpgrade(findings: CveFinding[]): UpgradeTarget | null {
   return { version, clears };
 }
 
-export function VerdictCard({ version, severityCounts, findings }: VerdictCardProps) {
+export function VerdictCard({
+  version,
+  severityCounts,
+  findings,
+  uncheckedCount,
+  incomplete,
+}: VerdictCardProps) {
   const total =
     severityCounts.critical + severityCounts.high + severityCounts.medium + severityCounts.low;
   const upgrade = bestUpgrade(findings);
+  const noun = total === 1 ? 'CVE' : 'CVEs';
 
   return (
     <Card>
-      <CardHeader>
-        <CardTitle>
-          <span data-testid="verdict-count">{total}</span> known{' '}
-          {total === 1 ? 'CVE affects' : 'CVEs affect'} this instance
+      <CardHeader className="space-y-2">
+        <CardTitle data-testid="verdict-headline">
+          {incomplete ? (
+            <span>
+              <span data-testid="verdict-count">{total}</span> known {noun} matched — this scan is
+              incomplete
+            </span>
+          ) : (
+            <span>
+              <span data-testid="verdict-count">{total}</span> known{' '}
+              {total === 1 ? 'CVE affects' : 'CVEs affect'} this instance
+            </span>
+          )}
         </CardTitle>
+        {uncheckedCount > 0 ? (
+          <p data-testid="verdict-unchecked" className="text-foreground text-sm font-medium">
+            <span data-testid="verdict-unchecked-count">{uncheckedCount}</span> further{' '}
+            {uncheckedCount === 1 ? 'advisory' : 'advisories'} could not be checked against{' '}
+            {version} — unknown, not safe.
+          </p>
+        ) : null}
       </CardHeader>
       <CardContent className="space-y-3">
         <p className="text-muted-foreground text-sm">
