@@ -133,4 +133,5 @@ export interface CveDatasetStatus {
   advisoryCount: number;
   sources: CveSourceStatus[];
   healthy: boolean;
+  ghsaAuthenticated: boolean;
 }

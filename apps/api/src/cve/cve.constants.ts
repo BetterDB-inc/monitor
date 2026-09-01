@@ -22,6 +22,16 @@ export function isCveEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.NODE_ENV !== 'test';
 }
 
+export function ghsaToken(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = env.CVE_GITHUB_TOKEN?.trim();
+
+  if (raw === undefined || raw.length === 0) {
+    return undefined;
+  }
+
+  return raw;
+}
+
 export const GHSA_REPOS: Array<{ owner: string; repo: string; product: CveProduct }> = [
   { owner: 'redis', repo: 'redis', product: 'redis' },
   { owner: 'valkey-io', repo: 'valkey', product: 'valkey' },

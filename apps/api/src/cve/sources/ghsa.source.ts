@@ -144,7 +144,21 @@ function toAdvisory(raw: GhsaAdvisory, product: CveProduct): Advisory | null {
 export class GhsaSource implements CveSource {
   readonly id = 'ghsa' as const;
 
-  constructor(private readonly fetchImpl: FetchLike = fetch) {}
+  constructor(
+    private readonly fetchImpl: FetchLike = fetch,
+    private readonly token?: string,
+  ) {}
+
+  private headers(): Record<string, string> {
+    if (this.token === undefined) {
+      return { accept: 'application/vnd.github+json' };
+    }
+
+    return {
+      accept: 'application/vnd.github+json',
+      authorization: `Bearer ${this.token}`,
+    };
+  }
 
   async fetchAdvisories(): Promise<SourceFetchResult> {
     const advisories: Advisory[] = [];
@@ -154,9 +168,7 @@ export class GhsaSource implements CveSource {
       const url = `https://api.github.com/repos/${repo.owner}/${repo.repo}/security-advisories`;
 
       try {
-        const payload = await fetchJson<GhsaAdvisory[]>(this.fetchImpl, url, {
-          accept: 'application/vnd.github+json',
-        });
+        const payload = await fetchJson<GhsaAdvisory[]>(this.fetchImpl, url, this.headers());
 
         for (const raw of payload) {
           const advisory = toAdvisory(raw, repo.product);

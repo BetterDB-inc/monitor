@@ -116,4 +116,5 @@ export const HEALTHY_DATASET: CveDatasetStatus = {
     };
   }),
   healthy: true,
+  ghsaAuthenticated: true,
 };

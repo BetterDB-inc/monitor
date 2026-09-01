@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ClusterModule } from '../cluster/cluster.module';
 import { StorageModule } from '../storage/storage.module';
-import { CVE_ENRICHMENT_SOURCES, CVE_MITRE_SOURCE, CVE_SOURCES } from './cve.constants';
+import { CVE_ENRICHMENT_SOURCES, CVE_MITRE_SOURCE, CVE_SOURCES, ghsaToken } from './cve.constants';
 import { CveController } from './cve.controller';
 import { CveRefreshService } from './cve-refresh.service';
 import { CveScanService } from './cve-scan.service';
@@ -32,7 +32,7 @@ const httpFetch: FetchLike = (input, init) => {
     {
       provide: CVE_SOURCES,
       useFactory: (): CveSource[] => {
-        return [new GhsaSource(httpFetch), new NvdSource(httpFetch)];
+        return [new GhsaSource(httpFetch, ghsaToken()), new NvdSource(httpFetch)];
       },
     },
     {

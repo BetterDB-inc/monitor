@@ -1,5 +1,6 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import type { CveDatasetStatus, CveScanResult, CveSourceStatus } from '@betterdb/shared';
+import { ghsaToken } from './cve.constants';
 import { CveRefreshService } from './cve-refresh.service';
 import { CveDatasetUnavailableError, CveScanService } from './cve-scan.service';
 
@@ -10,6 +11,7 @@ function absentDatasetStatus(): CveDatasetStatus {
     advisoryCount: 0,
     sources: [],
     healthy: false,
+    ghsaAuthenticated: ghsaToken() !== undefined,
   };
 }
 
@@ -52,6 +54,7 @@ export class CveService {
       advisoryCount: dataset.advisories.length,
       sources,
       healthy: sources.length > 0 && allOk,
+      ghsaAuthenticated: ghsaToken() !== undefined,
     };
   }
 
