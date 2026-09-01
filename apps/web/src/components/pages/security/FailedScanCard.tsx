@@ -12,6 +12,7 @@ interface FailedScanCardProps {
   guidance: string;
   nodes: FailedNode[];
   sources: CveSourceStatus[];
+  connectionAtFault: boolean;
   retrying: boolean;
   onRetry: () => void;
 }
@@ -39,10 +40,11 @@ export function FailedScanCard({
   guidance,
   nodes,
   sources,
+  connectionAtFault,
   retrying,
   onRetry,
 }: FailedScanCardProps) {
-  const caption = sourceCaption(sources);
+  const caption = connectionAtFault ? sourceCaption(sources) : null;
 
   return (
     <section

@@ -464,6 +464,55 @@ describe('Security page - incomplete scans must never read as an all-clear', () 
     expect(screen.getByTestId('scan-caveat-dataset-empty')).toBeInTheDocument();
   });
 
+  it('refuses the all-clear on a zero-finding scan when the dataset request failed', async () => {
+    mocks.scan.mockResolvedValue(scanResult({ nodes: [node('1', '8.0.10', [])] }));
+    mocks.dataset.mockRejectedValue(new Error('dataset unavailable'));
+
+    renderPage();
+
+    expect(await screen.findByTestId('verdict-headline')).not.toHaveTextContent(
+      'No known vulnerabilities found',
+    );
+    expect(screen.getByTestId('scan-caveat-dataset-empty')).toHaveTextContent(
+      /source health is unknown/i,
+    );
+  });
+
+  it('carries a degraded corpus into the findings verdict, not only into the empty state', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({ nodes: [node('1', '8.0.9', [finding('CVE-2026-63639')])] }),
+    );
+    mocks.dataset.mockResolvedValue({
+      ...HEALTHY_DATASET,
+      healthy: false,
+      sources: HEALTHY_DATASET.sources.map((source) => {
+        if (source.source !== 'nvd') {
+          return source;
+        }
+
+        return { ...source, state: 'quiet' as const };
+      }),
+    });
+
+    renderPage();
+
+    expect(await screen.findByTestId('scan-caveat-dataset-degraded')).toHaveTextContent('NVD');
+    expect(screen.getByTestId('verdict-headline')).toHaveTextContent(/this scan is incomplete/i);
+  });
+
+  it('blames the missing corpus, not the instance, when there is nothing to scan against', async () => {
+    mocks.scan.mockRejectedValue(new Error('CVE dataset is not available yet'));
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('verdict-headline')).toHaveTextContent(
+      'There is no advisory corpus to scan against',
+    );
+    expect(screen.getByTestId('scan-failure-reason')).not.toHaveTextContent(/INFO and MODULE LIST/);
+    expect(screen.queryByTestId('failed-scan-sources')).not.toBeInTheDocument();
+  });
+
   it('does not claim the advisory dataset is empty when its request failed', async () => {
     mocks.scan.mockResolvedValue(scanResult());
     mocks.dataset.mockRejectedValue(new Error('dataset unavailable'));

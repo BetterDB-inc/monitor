@@ -133,6 +133,50 @@ describe('NvdSource', () => {
     expect(matchRanges('6.2.1', advisory?.affected ?? []).vulnerable).toBe(false);
   });
 
+  it('keeps the inclusive ceiling when two CPE matches share it with different inclusivity', () => {
+    const equalCeilingPayload = {
+      totalResults: 1,
+      vulnerabilities: [
+        {
+          cve: {
+            id: 'CVE-9999-00002',
+            descriptions: [{ lang: 'en', value: 'synthetic equal-ceiling case' }],
+            configurations: [
+              {
+                nodes: [
+                  {
+                    cpeMatch: [
+                      {
+                        vulnerable: true,
+                        criteria: 'cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*',
+                        versionEndExcluding: '6.2.0',
+                      },
+                      {
+                        vulnerable: true,
+                        criteria: 'cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*',
+                        versionEndIncluding: '6.2.0',
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    return new NvdSource(fetchStub(equalCeilingPayload)).fetchAdvisories().then((result) => {
+      const advisory = result.advisories.find((entry) => {
+        return entry.cveId === 'CVE-9999-00002' && entry.product === 'redis';
+      });
+
+      expect(advisory?.affected).toEqual([{ branch: '*', vulnerableAtOrBelow: '6.2.0' }]);
+      expect(matchRanges('6.2.0', advisory?.affected ?? []).vulnerable).toBe(true);
+      expect(matchRanges('6.2.1', advisory?.affected ?? []).vulnerable).toBe(false);
+    });
+  });
+
   it('does not produce a NaN segment for a two-segment exclusive upper bound', () => {
     const twoSegmentPayload = {
       totalResults: 1,

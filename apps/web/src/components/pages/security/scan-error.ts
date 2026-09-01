@@ -5,6 +5,8 @@ const UNREACHABLE_PREFIX = 'No node in this connection could be scanned: ';
 export const MISSING_CONNECTION_MESSAGE =
   'This connection no longer exists. Choose another connection to scan.';
 
+export const DATASET_UNAVAILABLE_MESSAGE = 'CVE dataset is not available yet';
+
 export interface FailedNode {
   address: string;
   reason: string;

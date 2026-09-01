@@ -51,23 +51,6 @@ function toSeverity(raw: string | undefined): CveSeverity {
   return known ?? 'medium';
 }
 
-function decrementPatch(version: string): string | null {
-  const parts = version.split('.');
-  if (parts.length !== 3) {
-    return null;
-  }
-
-  const [major, minor, patch] = parts.map((part) => {
-    return parseInt(part, 10);
-  });
-
-  if (!Number.isInteger(patch) || patch <= 0) {
-    return null;
-  }
-
-  return `${major}.${minor}.${patch - 1}`;
-}
-
 function upperBoundOf(match: NvdCpeMatch): { raw: string; inclusive: boolean } | null {
   if (match.versionEndExcluding) {
     return { raw: match.versionEndExcluding, inclusive: false };
@@ -124,6 +107,20 @@ function ceilingOf(range: BranchRange): string {
   return range.vulnerableBelow ?? range.vulnerableAtOrBelow ?? '0';
 }
 
+function widestCeiling(current: BranchRange, range: BranchRange): BranchRange {
+  const comparison = compareVersions(ceilingOf(range), ceilingOf(current));
+
+  if (comparison > 0) {
+    return range;
+  }
+
+  if (comparison < 0) {
+    return current;
+  }
+
+  return range.vulnerableBelow === undefined ? range : current;
+}
+
 function matchesProduct(criteria: string, cpePrefix: string): boolean {
   if (criteria.startsWith(`${cpePrefix}:`)) {
     return true;
@@ -142,7 +139,7 @@ function collapseByBranch(ranges: BranchRange[]): BranchRange[] {
       continue;
     }
 
-    const highest = compareVersions(ceilingOf(range), ceilingOf(current)) > 0 ? range : current;
+    const highest = widestCeiling(current, range);
     const vulnerableFrom = widestLowerBound(current, range);
 
     highestByBranch.set(range.branch, {

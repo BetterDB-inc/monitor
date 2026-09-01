@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { node, scanResult, unversionedAdvisory } from '../../../pages/__fixtures__/cve';
 import { scanCompleteness } from './scan-completeness';
+import { moduleProductOf } from '@betterdb/shared';
 
 function idsOf(result: ReturnType<typeof scanCompleteness>): string[] {
   return result.caveats.map((entry) => {
@@ -134,5 +135,34 @@ describe('scanCompleteness', () => {
     );
 
     expect(idsOf(result)).toEqual(['not-scanned', 'missing-sources', 'unversioned']);
+  });
+
+  it('refuses to call a scan complete when the topology could not be read', () => {
+    const result = scanCompleteness(
+      scanResult({ nodes: [node('1', '8.0.10', [])], topologyUnknown: true, partial: true }),
+    );
+
+    expect(result.complete).toBe(false);
+    expect(idsOf(result)).toEqual(['topology-unknown']);
+    expect(result.caveats[0].text).toMatch(/never checked/i);
+  });
+
+  it('does not read a module name off the prototype chain', () => {
+    const result = scanCompleteness(
+      scanResult({
+        nodes: [
+          node('1', '8.0.10', [], [], {
+            modules: [
+              { name: 'constructor', version: null },
+              { name: '__proto__', version: null },
+            ],
+          }),
+        ],
+      }),
+    );
+
+    expect(moduleProductOf('valkey', 'constructor')).toBeUndefined();
+    expect(moduleProductOf('valkey', '__proto__')).toBeUndefined();
+    expect(idsOf(result)).toEqual([]);
   });
 });

@@ -85,6 +85,7 @@ export interface CveScanResult {
   scannedAt: number;
   lastCheckedAt: number;
   topology: CveTopology;
+  topologyUnknown?: boolean;
   nodes: ScannedNode[];
   notScanned: NotScannedNode[];
   drift: boolean;

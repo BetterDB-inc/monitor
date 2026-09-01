@@ -7,6 +7,7 @@ export type ScanCaveatId =
   | 'unversioned'
   | 'undecoded-modules'
   | 'modules-unknown'
+  | 'topology-unknown'
   | 'partial'
   | 'dataset-empty'
   | 'dataset-degraded';
@@ -178,6 +179,13 @@ export function scanCompleteness(result: CveScanResult): ScanCompleteness {
 
   if (unlisted.length > 0) {
     caveats.push(modulesUnknownCaveat(unlisted));
+  }
+
+  if (result.topologyUnknown === true) {
+    caveats.push({
+      id: 'topology-unknown',
+      text: 'This instance did not report whether it belongs to a cluster, so it was scanned as a single node - any other node in that cluster was never checked.',
+    });
   }
 
   if (result.partial === true && caveats.length === 0) {

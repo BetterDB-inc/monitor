@@ -75,6 +75,7 @@ export function Security() {
           guidance={copy.guidance}
           nodes={failure.nodes}
           sources={dataset.data?.sources ?? []}
+          connectionAtFault={copy.connectionAtFault}
           retrying={scan.isFetching}
           onRetry={() => {
             void scan.refetch();
@@ -114,6 +115,7 @@ export function Security() {
           guidance={copy.guidance}
           nodes={nodes}
           sources={dataset.data?.sources ?? []}
+          connectionAtFault={copy.connectionAtFault}
           retrying={refresh.isPending}
           onRetry={onRefresh}
         />
@@ -135,7 +137,7 @@ export function Security() {
     datasetAgeLabel(dataset.data?.refreshedAt),
   ].join(' · ');
 
-  const datasetUnreadable = dataset.isError || dataset.isPending;
+  const caveats = [...completeness.caveats, ...datasetCaveats(dataset.data)];
   const ghsaTokenMissing =
     dataset.data?.ghsaAuthenticated === false &&
     (result.missingSources.includes('ghsa') ||
@@ -144,7 +146,6 @@ export function Security() {
       }));
   const nothingToList =
     drifted === false &&
-    datasetUnreadable === false &&
     result.nodes.every((entry) => {
       return entry.findings.length === 0 && entry.unversioned.length === 0;
     });
@@ -166,7 +167,7 @@ export function Security() {
         {header}
         <EmptyScanCard
           engineLabel={`${PRODUCT_LABEL[selected.product] ?? selected.product} ${selected.engineVersion}`}
-          caveats={[...completeness.caveats, ...datasetCaveats(dataset.data)]}
+          caveats={caveats}
           sources={dataset.data?.sources ?? []}
           advisoryCount={dataset.data?.advisoryCount ?? 0}
           ghsaTokenMissing={ghsaTokenMissing}
@@ -179,7 +180,7 @@ export function Security() {
   return (
     <div className="space-y-6">
       {header}
-      <ScanCaveats caveats={completeness.caveats} />
+      <ScanCaveats caveats={caveats} />
       {drifted ? (
         <>
           <DriftBanner versions={result.distinctVersions} nodeCount={result.nodes.length} />
@@ -202,7 +203,7 @@ export function Security() {
             severityCounts={selected.severityCounts}
             findings={selected.findings}
             uncheckedCount={selected.unversioned.length}
-            incomplete={completeness.complete === false}
+            incomplete={caveats.length > 0}
           />
           <FindingsTable
             findings={selected.findings}
