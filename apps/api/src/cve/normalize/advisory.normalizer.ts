@@ -2,9 +2,7 @@ import { createHash } from 'crypto';
 import type {
   Advisory,
   BranchRange,
-  CveConfidence,
   CveProduct,
-  CveSeverity,
   CveSourceId,
   EnrichmentEntry,
   SourceProvenance,
@@ -38,14 +36,13 @@ interface CanonicalRange {
   patchedAt: string | null;
 }
 
-interface CanonicalAdvisory {
-  cveId: string;
-  product: CveProduct;
-  severity: CveSeverity;
-  confidence: CveConfidence;
-  knownExploited: boolean;
-  cvssScore: number | null;
+type OptionalAdvisoryNumber = 'cvssScore' | 'epssScore' | 'epssPercentile';
+
+interface CanonicalAdvisory extends Omit<Required<Advisory>, 'affected' | OptionalAdvisoryNumber> {
   affected: CanonicalRange[];
+  cvssScore: number | null;
+  epssScore: number | null;
+  epssPercentile: number | null;
 }
 
 function compareStrings(a: string, b: string): number {
@@ -348,12 +345,19 @@ export function computeDatasetVersion(advisories: Advisory[]): string {
     .map((advisory) => {
       return {
         cveId: advisory.cveId,
+        aliases: advisory.aliases,
         product: advisory.product,
-        severity: advisory.severity,
-        confidence: advisory.confidence,
-        knownExploited: advisory.knownExploited,
-        cvssScore: advisory.cvssScore ?? null,
         affected: canonicalRanges(advisory.affected),
+        severity: advisory.severity,
+        cvssScore: advisory.cvssScore ?? null,
+        cwes: advisory.cwes,
+        knownExploited: advisory.knownExploited,
+        epssScore: advisory.epssScore ?? null,
+        epssPercentile: advisory.epssPercentile ?? null,
+        confidence: advisory.confidence,
+        sources: advisory.sources,
+        summary: advisory.summary,
+        references: advisory.references,
       };
     })
     .sort((a, b) => {
