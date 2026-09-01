@@ -14,6 +14,14 @@ export const CVE_REFRESH_DEADLINE_MS = 5 * 60 * 1000;
 
 export const CVE_MITRE_TIME_BUDGET_MS = 90 * 1000;
 
+export function isCveEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.CVE_ENABLED !== undefined) {
+    return env.CVE_ENABLED !== 'false';
+  }
+
+  return env.NODE_ENV !== 'test';
+}
+
 export const GHSA_REPOS: Array<{ owner: string; repo: string; product: CveProduct }> = [
   { owner: 'redis', repo: 'redis', product: 'redis' },
   { owner: 'valkey-io', repo: 'valkey', product: 'valkey' },

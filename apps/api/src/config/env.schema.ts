@@ -50,6 +50,12 @@ export const envSchema = z
     LANCEDB_PATH: z.string().default('./data/lancedb'),
     VALKEY_DOCS_PATH: z.string().default('./data/valkey-docs'),
 
+    // CVE inspection (advisory refresh + per-connection scanning)
+    CVE_ENABLED: z
+      .string()
+      .default('true')
+      .transform((v) => v !== 'false'),
+
     // Anomaly detection
     ANOMALY_DETECTION_ENABLED: z
       .string()
