@@ -5,6 +5,7 @@ import { FindingsTable } from '../components/pages/security/FindingsTable';
 import { HeaderStrip } from '../components/pages/security/HeaderStrip';
 import { NodeList } from '../components/pages/security/NodeList';
 import { NotScannedList } from '../components/pages/security/NotScannedList';
+import { SourceStrip } from '../components/pages/security/SourceStrip';
 import { VerdictCard } from '../components/pages/security/VerdictCard';
 import { groupFindings, type NodeGroups } from '../components/pages/security/drift-groups';
 import { useCveDataset, useCveScan, useRefreshCveScan } from '../hooks/useCveScan';
@@ -75,6 +76,7 @@ export function Security() {
           />
         </>
       )}
+      <SourceStrip sources={dataset.data?.sources ?? []} missingSources={result.missingSources} />
       <NotScannedList nodes={result.notScanned} />
     </div>
   );

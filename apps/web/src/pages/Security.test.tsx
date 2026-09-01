@@ -113,6 +113,18 @@ describe('Security page', () => {
     expect(screen.queryByTestId('upgrade-banner')).not.toBeInTheDocument();
   });
 
+  it('refuses to read as an all-clear when the scan skipped a source', async () => {
+    mocks.scan.mockResolvedValue(scanResult({ partial: true, missingSources: ['nvd'] }));
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    const banner = await screen.findByTestId('source-banner');
+
+    expect(banner).toHaveTextContent(/incomplete/i);
+    expect(banner).toHaveTextContent('NVD');
+  });
+
   it('lists unreachable nodes with their reason', async () => {
     mocks.scan.mockResolvedValue(
       scanResult({
