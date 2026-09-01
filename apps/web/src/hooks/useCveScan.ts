@@ -6,8 +6,8 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query';
 import type { CveDatasetStatus, CveScanResult } from '@betterdb/shared';
-import { getCurrentConnectionId } from '../api/client';
 import { fetchCveDataset, fetchCveScan, refreshCveScan } from '../api/cve';
+import { useConnection } from './useConnection';
 
 const SCAN_STALE_MS = 5 * 60 * 1000;
 
@@ -17,30 +17,37 @@ const queryKeys = {
 };
 
 export function useCveScan(): UseQueryResult<CveScanResult, Error> {
+  const { currentConnection } = useConnection();
+  const connectionId = currentConnection?.id ?? null;
+
   return useQuery<CveScanResult, Error>({
-    queryKey: queryKeys.scan(getCurrentConnectionId()),
+    queryKey: queryKeys.scan(connectionId),
     queryFn: fetchCveScan,
     staleTime: SCAN_STALE_MS,
+    enabled: !!connectionId,
   });
 }
 
 export function useCveDataset(): UseQueryResult<CveDatasetStatus, Error> {
+  const { currentConnection } = useConnection();
+  const connectionId = currentConnection?.id ?? null;
+
   return useQuery<CveDatasetStatus, Error>({
-    queryKey: queryKeys.dataset(getCurrentConnectionId()),
+    queryKey: queryKeys.dataset(connectionId),
     queryFn: fetchCveDataset,
     staleTime: SCAN_STALE_MS,
+    enabled: !!connectionId,
   });
 }
 
 export function useRefreshCveScan(): UseMutationResult<CveScanResult, Error, void> {
   const queryClient = useQueryClient();
-  const connectionId = getCurrentConnectionId();
 
   return useMutation<CveScanResult, Error, void>({
     mutationFn: refreshCveScan,
     onSuccess: (result) => {
-      queryClient.setQueryData(queryKeys.scan(connectionId), result);
-      void queryClient.invalidateQueries({ queryKey: queryKeys.dataset(connectionId) });
+      queryClient.setQueryData(queryKeys.scan(result.connectionId), result);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.dataset(result.connectionId) });
     },
   });
 }
