@@ -47,8 +47,9 @@ function toSeverity(raw: string): CveSeverity {
 }
 
 const VERSION_PATTERN = /\d+\.\d+\.\d+/g;
-const BARE_UPPER_BOUND_PATTERN = /^<=\s*(\d+\.\d+\.\d+)$/;
 const LOWER_BOUND_PATTERN = /(?:^|,)\s*>=\s*(\d+\.\d+\.\d+)/;
+const AT_OR_BELOW_PATTERN = /(?:^|,)\s*<=\s*(\d+\.\d+\.\d+)/;
+const BELOW_PATTERN = /(?:^|,)\s*<\s*(\d+\.\d+\.\d+)/;
 
 function lowerBoundFor(vulnerableVersionRange: string | undefined, branch: string): string | null {
   if (vulnerableVersionRange === undefined) {
@@ -89,16 +90,42 @@ function exactRangesFromPatchedVersions(
   return ranges;
 }
 
-function broadRangeFromVulnerableVersionRange(vulnerableVersionRange: string): BranchRange | null {
-  const match = vulnerableVersionRange.trim().match(BARE_UPPER_BOUND_PATTERN);
-  if (!match) {
+function upperBoundOf(
+  vulnerableVersionRange: string,
+): Pick<BranchRange, 'vulnerableAtOrBelow' | 'vulnerableBelow'> | null {
+  const atOrBelow = vulnerableVersionRange.match(AT_OR_BELOW_PATTERN);
+  if (atOrBelow) {
+    return { vulnerableAtOrBelow: atOrBelow[1] };
+  }
+
+  const below = vulnerableVersionRange.match(BELOW_PATTERN);
+  if (below) {
+    return { vulnerableBelow: below[1] };
+  }
+
+  return null;
+}
+
+function unpatchedRangeFrom(vulnerableVersionRange: string): BranchRange | null {
+  const upper = upperBoundOf(vulnerableVersionRange);
+  if (upper === null) {
     return null;
   }
 
-  return {
-    branch: '*',
-    vulnerableAtOrBelow: match[1],
-  };
+  const ceiling = upper.vulnerableAtOrBelow ?? upper.vulnerableBelow ?? '';
+  const lower = vulnerableVersionRange.match(LOWER_BOUND_PATTERN);
+
+  if (!lower) {
+    return { branch: '*', ...upper };
+  }
+
+  const branch = branchOf(lower[1]);
+
+  if (branch !== branchOf(ceiling)) {
+    return { branch: '*', ...upper, vulnerableFrom: lower[1] };
+  }
+
+  return { branch, ...upper, vulnerableFrom: lower[1] };
 }
 
 interface AffectedRanges {
@@ -108,33 +135,33 @@ interface AffectedRanges {
 
 function toAffectedRanges(vulnerabilities: GhsaVulnerability[]): AffectedRanges {
   const exact: BranchRange[] = [];
+  const unpatched: BranchRange[] = [];
 
   for (const vulnerability of vulnerabilities) {
     const patchedVersions = vulnerability.patched_versions?.trim();
+    const vulnerableVersionRange = vulnerability.vulnerable_version_range?.trim();
+
     if (patchedVersions) {
-      exact.push(
-        ...exactRangesFromPatchedVersions(
-          patchedVersions,
-          vulnerability.vulnerable_version_range?.trim(),
-        ),
-      );
+      exact.push(...exactRangesFromPatchedVersions(patchedVersions, vulnerableVersionRange));
+      continue;
+    }
+
+    if (vulnerableVersionRange === undefined || vulnerableVersionRange.length === 0) {
+      continue;
+    }
+
+    const range = unpatchedRangeFrom(vulnerableVersionRange);
+    if (range) {
+      unpatched.push(range);
     }
   }
 
   if (exact.length > 0) {
-    return { affected: exact, confidence: 'exact' };
+    return { affected: [...exact, ...unpatched], confidence: 'exact' };
   }
 
-  for (const vulnerability of vulnerabilities) {
-    const vulnerableVersionRange = vulnerability.vulnerable_version_range?.trim();
-    if (!vulnerableVersionRange) {
-      continue;
-    }
-
-    const broad = broadRangeFromVulnerableVersionRange(vulnerableVersionRange);
-    if (broad) {
-      return { affected: [broad], confidence: 'broad' };
-    }
+  if (unpatched.length > 0) {
+    return { affected: unpatched, confidence: 'broad' };
   }
 
   return { affected: [], confidence: 'unversioned' };

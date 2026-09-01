@@ -9,11 +9,55 @@ export interface VersionMatch {
 
 const WILDCARD_BRANCH = '*';
 
+function coreOf(version: string): string {
+  const separator = version.indexOf('-');
+
+  if (separator < 0) {
+    return version;
+  }
+
+  return version.slice(0, separator);
+}
+
+function prereleaseOf(version: string): string | null {
+  const separator = version.indexOf('-');
+
+  if (separator < 0) {
+    return null;
+  }
+
+  const tag = version.slice(separator + 1);
+
+  if (tag.length === 0) {
+    return null;
+  }
+
+  return tag;
+}
+
 function segments(version: string): number[] {
-  return version.split('.').map((part) => {
-    const numeric = parseInt(part, 10);
-    return Number.isNaN(numeric) ? 0 : numeric;
-  });
+  return coreOf(version)
+    .split('.')
+    .map((part) => {
+      const numeric = parseInt(part, 10);
+      return Number.isNaN(numeric) ? 0 : numeric;
+    });
+}
+
+function comparePrerelease(left: string | null, right: string | null): number {
+  if (left === right) {
+    return 0;
+  }
+
+  if (left === null) {
+    return 1;
+  }
+
+  if (right === null) {
+    return -1;
+  }
+
+  return left < right ? -1 : 1;
 }
 
 export function compareVersions(a: string, b: string): number {
@@ -28,7 +72,7 @@ export function compareVersions(a: string, b: string): number {
     }
   }
 
-  return 0;
+  return comparePrerelease(prereleaseOf(a), prereleaseOf(b));
 }
 
 export function branchOf(version: string): string {
@@ -152,7 +196,12 @@ export function moduleVersionEncoding(
     return undefined;
   }
 
-  return table[name.toLowerCase()];
+  const key = name.toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(table, key) === false) {
+    return undefined;
+  }
+
+  return table[key];
 }
 
 export function parseModuleVersion(product: CveProduct, name: string, raw: number): string | null {

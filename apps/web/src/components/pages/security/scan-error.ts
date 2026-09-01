@@ -7,6 +7,8 @@ export const MISSING_CONNECTION_MESSAGE =
 
 export const DATASET_UNAVAILABLE_MESSAGE = 'CVE dataset is not available yet';
 
+export const CVE_DISABLED_MESSAGE = 'CVE inspection is turned off on this install';
+
 export interface FailedNode {
   address: string;
   reason: string;

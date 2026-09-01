@@ -183,4 +183,74 @@ describe('CveController', () => {
 
     expect(status.healthy).toBe(false);
   });
+
+  it('serves the stored result instead of rescanning when refresh is hammered', async () => {
+    scanService.scan.mockResolvedValue(SCAN);
+    scanService.getLatest.mockResolvedValue(SCAN);
+
+    const first = await controller.refreshScan('conn-1');
+    const second = await controller.refreshScan('conn-1');
+
+    expect(first).toEqual(SCAN);
+    expect(second).toEqual(SCAN);
+    expect(scanService.scan).toHaveBeenCalledTimes(1);
+  });
+
+  it('rescans anyway when the throttle window has nothing stored to serve', async () => {
+    scanService.scan.mockResolvedValue(SCAN);
+    scanService.getLatest.mockResolvedValue(null);
+
+    await controller.refreshScan('conn-1');
+    await controller.refreshScan('conn-1');
+
+    expect(scanService.scan).toHaveBeenCalledTimes(2);
+  });
+
+  it('throttles each connection on its own clock', async () => {
+    scanService.scan.mockResolvedValue(SCAN);
+    scanService.getLatest.mockResolvedValue(SCAN);
+    connectionRegistry.get.mockReturnValue({});
+
+    await controller.refreshScan('conn-1');
+    await controller.refreshScan('conn-2');
+
+    expect(scanService.scan).toHaveBeenCalledTimes(2);
+  });
+
+  describe('when CVE_ENABLED is false', () => {
+    beforeEach(() => {
+      process.env.CVE_ENABLED = 'false';
+    });
+
+    afterEach(() => {
+      delete process.env.CVE_ENABLED;
+    });
+
+    it('answers 503 on a scan rather than returning a stale stored result', async () => {
+      scanService.getLatest.mockResolvedValue(SCAN);
+
+      await expect(controller.getScan('conn-1')).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+      expect(scanService.getLatest).not.toHaveBeenCalled();
+    });
+
+    it('answers 503 on a forced rescan instead of reaching the instance', async () => {
+      await expect(controller.refreshScan('conn-1')).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+      expect(scanService.scan).not.toHaveBeenCalled();
+    });
+
+    it('reports an empty corpus rather than a dataset it will never refresh', async () => {
+      refreshService.getDataset.mockResolvedValue(DATASET);
+
+      const status = await controller.getDataset();
+
+      expect(status.datasetVersion).toBeNull();
+      expect(status.advisoryCount).toBe(0);
+      expect(status.sources).toEqual([]);
+      expect(status.healthy).toBe(false);
+    });
+  });
 });

@@ -1,6 +1,18 @@
 import type { BranchRange } from '@betterdb/shared';
 
-export function affectedRangeLabel(range: BranchRange): string {
+export function affectedRangeLabel(range: BranchRange): string | null {
+  if (range.vulnerableBelow !== undefined) {
+    if (range.vulnerableFrom === undefined) {
+      return `< ${range.vulnerableBelow}`;
+    }
+
+    return `≥ ${range.vulnerableFrom}, < ${range.vulnerableBelow}`;
+  }
+
+  if (range.vulnerableAtOrBelow === undefined) {
+    return null;
+  }
+
   if (range.vulnerableFrom === undefined) {
     return `≤ ${range.vulnerableAtOrBelow}`;
   }
@@ -9,13 +21,17 @@ export function affectedRangeLabel(range: BranchRange): string {
 }
 
 export function affectedRangesLabel(ranges: BranchRange[]): string | null {
-  if (ranges.length === 0) {
-    return null;
-  }
-
-  return ranges
+  const labels = ranges
     .map((entry) => {
       return affectedRangeLabel(entry);
     })
-    .join(', ');
+    .filter((label): label is string => {
+      return label !== null;
+    });
+
+  if (labels.length === 0) {
+    return null;
+  }
+
+  return labels.join(', ');
 }

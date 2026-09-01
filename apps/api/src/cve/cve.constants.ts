@@ -6,6 +6,8 @@ export const CVE_SCAN_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export const CVE_SCAN_RETRY_INTERVAL_MS = 60 * 1000;
 
+export const CVE_SCAN_MIN_FORCE_INTERVAL_MS = 10 * 1000;
+
 export const CVE_SOURCES = 'CVE_SOURCES';
 export const CVE_ENRICHMENT_SOURCES = 'CVE_ENRICHMENT_SOURCES';
 export const CVE_MITRE_SOURCE = 'CVE_MITRE_SOURCE';
@@ -20,6 +22,10 @@ export function isCveEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   }
 
   return env.NODE_ENV !== 'test';
+}
+
+export function cveDisabledByConfig(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CVE_ENABLED === 'false';
 }
 
 export function ghsaToken(env: NodeJS.ProcessEnv = process.env): string | undefined {

@@ -141,6 +141,53 @@ describe('GhsaSource', () => {
     expect(advisory.affected).toEqual([{ branch: '*', vulnerableAtOrBelow: '9.1.0' }]);
   });
 
+  it('keeps an unpatched branch that a sibling entry with a fix would otherwise hide', async () => {
+    const fixture = [
+      {
+        ghsa_id: 'GHSA-CVE-9999-00010',
+        cve_id: 'CVE-9999-00010',
+        summary: 'one branch fixed, an end-of-life branch never fixed',
+        severity: 'high',
+        cvss: { score: 7.5 },
+        cwe_ids: [],
+        html_url: 'https://github.com/valkey-io/valkey/security/advisories/GHSA-CVE-9999-00010',
+        vulnerabilities: [
+          { vulnerable_version_range: '>= 8.0.0, < 8.0.10', patched_versions: '8.0.10' },
+          { vulnerable_version_range: '<= 6.2.14', patched_versions: null },
+        ],
+      },
+    ];
+    const source = new GhsaSource(fetchStub(fixture));
+    const result = await source.fetchAdvisories();
+    const advisory = result.advisories[0];
+
+    expect(advisory.confidence).toBe('exact');
+    expect(advisory.affected).toContainEqual({ branch: '*', vulnerableAtOrBelow: '6.2.14' });
+    expect(matchRanges('6.2.14', advisory.affected).vulnerable).toBe(true);
+    expect(matchRanges('8.0.9', advisory.affected).vulnerable).toBe(true);
+    expect(matchRanges('8.0.10', advisory.affected).vulnerable).toBe(false);
+  });
+
+  it('pins an unpatched range to its branch when the bounds agree on one', async () => {
+    const fixture = [
+      ghsaAdvisory({
+        cve_id: 'CVE-9999-00011',
+        vulnerable_version_range: '>= 7.0.0, < 7.0.13',
+        patched_versions: null,
+      }),
+    ];
+    const source = new GhsaSource(fetchStub(fixture));
+    const result = await source.fetchAdvisories();
+    const advisory = result.advisories[0];
+
+    expect(advisory.confidence).toBe('broad');
+    expect(advisory.affected).toEqual([
+      { branch: '7.0', vulnerableBelow: '7.0.13', vulnerableFrom: '7.0.0' },
+    ]);
+    expect(matchRanges('7.0.12', advisory.affected).vulnerable).toBe(true);
+    expect(matchRanges('7.0.13', advisory.affected).vulnerable).toBe(false);
+  });
+
   it('reports unversioned when neither field yields a parseable version', async () => {
     const fixture = [
       ghsaAdvisory({

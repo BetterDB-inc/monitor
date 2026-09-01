@@ -168,6 +168,32 @@ describe('Security page', () => {
     expect(screen.getByTestId('finding-scope-CVE-ENG')).toHaveTextContent('engine');
   });
 
+  it('keeps both rows distinct when one CVE matches the engine and a module', async () => {
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mocks.scan.mockResolvedValue(
+      scanResult({
+        nodes: [
+          node('1', '8.0.9', [
+            finding('CVE-BOTH'),
+            finding('CVE-BOTH', { matchedOn: 'module', moduleName: 'search' }),
+          ]),
+        ],
+      }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findAllByTestId('finding-row-CVE-BOTH')).toHaveLength(2);
+    expect(
+      warn.mock.calls.some((call) => {
+        return String(call[0]).includes('same key');
+      }),
+    ).toBe(false);
+
+    warn.mockRestore();
+  });
+
   it('states the lower bound of an affected range instead of only its ceiling', async () => {
     mocks.scan.mockResolvedValue(
       scanResult({

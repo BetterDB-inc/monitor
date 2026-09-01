@@ -54,6 +54,39 @@ describe('normalizeAdvisories', () => {
     expect(advisories[0].confidence).toBe('exact');
   });
 
+  it('keeps an NVD branch that the winning GHSA ranges never mention', () => {
+    const nvdWithOlderBranch: Advisory = {
+      ...NVD_VIEW,
+      affected: [
+        { branch: '8.0', vulnerableBelow: '8.0.5' },
+        { branch: '7.2', vulnerableBelow: '7.2.9' },
+      ],
+    };
+    const { advisories } = normalizeAdvisories(
+      [fetched('nvd', [nvdWithOlderBranch]), fetched('ghsa', [GHSA_VIEW])],
+      [],
+    );
+    const nvd = advisories[0].sources.find((entry) => {
+      return entry.source === 'nvd';
+    });
+
+    expect(advisories[0].affected).toEqual([
+      { branch: '8.0', vulnerableAtOrBelow: '8.0.9', patchedAt: '8.0.10' },
+      { branch: '7.2', vulnerableBelow: '7.2.9' },
+    ]);
+    expect(advisories[0].confidence).toBe('exact');
+    expect(nvd?.fields).toContain('affected');
+  });
+
+  it('refuses to widen a branch-specific winner with a broad wildcard range', () => {
+    const { advisories } = normalizeAdvisories(
+      [fetched('nvd', [NVD_VIEW]), fetched('ghsa', [GHSA_VIEW])],
+      [],
+    );
+
+    expect(advisories[0].affected).toEqual(GHSA_VIEW.affected);
+  });
+
   it('keeps the NVD range when GHSA has no opinion', () => {
     const { advisories } = normalizeAdvisories([fetched('nvd', [NVD_VIEW])], []);
 

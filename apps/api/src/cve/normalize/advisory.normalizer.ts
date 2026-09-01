@@ -183,6 +183,59 @@ function mergeProvenance(entries: SourceProvenance[]): SourceProvenance[] {
   });
 }
 
+const WILDCARD_BRANCH = '*';
+
+interface MergedRanges {
+  affected: BranchRange[];
+  contributors: CveSourceId[];
+}
+
+function branchesOf(ranges: BranchRange[]): Set<string> {
+  return new Set(
+    ranges.map((range) => {
+      return range.branch;
+    }),
+  );
+}
+
+function mergeAffected(ordered: SourceView[], winner: SourceView): MergedRanges {
+  const affected = winner.advisory.affected.map((range) => {
+    return { ...range };
+  });
+  const covered = branchesOf(affected);
+  const winnerPinsBranches = [...covered].some((branch) => {
+    return branch !== WILDCARD_BRANCH;
+  });
+  const contributors: CveSourceId[] = [];
+
+  for (const view of ordered) {
+    if (view === winner || hasRanges(view) === false) {
+      continue;
+    }
+
+    const additions = view.advisory.affected.filter((range) => {
+      if (covered.has(range.branch)) {
+        return false;
+      }
+
+      return range.branch !== WILDCARD_BRANCH || winnerPinsBranches === false;
+    });
+
+    if (additions.length === 0) {
+      continue;
+    }
+
+    for (const range of additions) {
+      affected.push({ ...range });
+      covered.add(range.branch);
+    }
+
+    contributors.push(view.owner);
+  }
+
+  return { affected, contributors };
+}
+
 function mergeGroup(views: SourceView[]): Advisory {
   const ordered = orderByPrecedence(views);
   const winner = ordered.find(hasRanges) ?? ordered[0];
@@ -199,8 +252,14 @@ function mergeGroup(views: SourceView[]): Advisory {
 
   credits.push({ source: winner.owner, fields: ['severity'] });
 
+  const ranges = mergeAffected(ordered, winner);
+
   if (hasRanges(winner)) {
     credits.push({ source: winner.owner, fields: ['affected', 'confidence'] });
+  }
+
+  for (const contributor of ranges.contributors) {
+    credits.push({ source: contributor, fields: ['affected'] });
   }
 
   if (scorer) {
@@ -237,9 +296,7 @@ function mergeGroup(views: SourceView[]): Advisory {
       }),
     ),
     product: winner.advisory.product,
-    affected: winner.advisory.affected.map((range) => {
-      return { ...range };
-    }),
+    affected: ranges.affected,
     severity: winner.advisory.severity,
     ...(scorer?.advisory.cvssScore !== undefined ? { cvssScore: scorer.advisory.cvssScore } : {}),
     cwes: unique(

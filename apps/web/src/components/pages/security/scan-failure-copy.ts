@@ -1,4 +1,5 @@
 import {
+  CVE_DISABLED_MESSAGE,
   DATASET_UNAVAILABLE_MESSAGE,
   MISSING_CONNECTION_MESSAGE,
   type FailedNode,
@@ -19,6 +20,9 @@ const CLUSTER_GUIDANCE =
 
 const DATASET_GUIDANCE =
   'The monitor fetches advisories from GHSA, NVD, MITRE, KEV and EPSS. Check outbound network access to those feeds, then refresh the dataset from Settings.';
+
+const DISABLED_GUIDANCE =
+  'Set CVE_ENABLED=true and restart the monitor to fetch advisories and scan again. It is off by default on egress restricted installs.';
 
 const UNKNOWN_GUIDANCE =
   'The message above is what the server reported. Retry, and if it keeps failing check the monitor logs for the request that failed.';
@@ -42,6 +46,16 @@ export function scanFailureCopy(summary: string, nodes: FailedNode[]): ScanFailu
       detail:
         'The instance was never matched, because the monitor has not fetched any advisories yet. Nothing here says this instance is clean — it says nothing at all.',
       guidance: DATASET_GUIDANCE,
+      connectionAtFault: false,
+    };
+  }
+
+  if (summary.startsWith(CVE_DISABLED_MESSAGE)) {
+    return {
+      headline: 'CVE inspection is turned off here',
+      detail:
+        'Nothing was fetched and nothing was matched, because this install has CVE inspection disabled. This screen is a blank, not an all-clear.',
+      guidance: DISABLED_GUIDANCE,
       connectionAtFault: false,
     };
   }

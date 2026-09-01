@@ -30,6 +30,14 @@ describe('compareVersions', () => {
     expect(compareVersions('8.0', '8.0.0')).toBe(0);
     expect(compareVersions('8.1', '8.0.9')).toBeGreaterThan(0);
   });
+
+  it('orders a pre-release below the release it precedes, so an rc is not read as patched', () => {
+    expect(compareVersions('7.2.0-rc1', '7.2.0')).toBeLessThan(0);
+    expect(compareVersions('7.2.0', '7.2.0-rc1')).toBeGreaterThan(0);
+    expect(compareVersions('7.2.0-rc1', '7.2.0-rc2')).toBeLessThan(0);
+    expect(compareVersions('7.2.0-rc1', '7.2.0-rc1')).toBe(0);
+    expect(compareVersions('7.2.0-rc1', '7.1.9')).toBeGreaterThan(0);
+  });
 });
 
 describe('branchOf', () => {
@@ -37,9 +45,20 @@ describe('branchOf', () => {
     expect(branchOf('8.0.9')).toBe('8.0');
     expect(branchOf('9.1.1')).toBe('9.1');
   });
+
+  it('reads the branch of a pre-release from its release core', () => {
+    expect(branchOf('7.2.0-rc1')).toBe('7.2');
+  });
 });
 
 describe('matchRanges', () => {
+  it('flags a release candidate that precedes the patched version', () => {
+    expect(
+      matchRanges('8.0.10-rc1', [{ branch: '8.0', vulnerableBelow: '8.0.10', patchedAt: '8.0.10' }])
+        .vulnerable,
+    ).toBe(true);
+  });
+
   it('clears a patched maintenance release', () => {
     expect(matchRanges('8.0.10', CVE_2026_63639)).toEqual({ vulnerable: false, fixedIn: '8.0.10' });
   });
@@ -144,6 +163,11 @@ describe('parseModuleVersion', () => {
 });
 
 describe('moduleVersionEncoding', () => {
+  it('does not read an encoding off the prototype chain', () => {
+    expect(moduleVersionEncoding('valkey', 'constructor')).toBeUndefined();
+    expect(moduleVersionEncoding('valkey', '__proto__')).toBeUndefined();
+  });
+
   it('declares an encoding for every module mapped to a CVE product', () => {
     const missing: string[] = [];
 

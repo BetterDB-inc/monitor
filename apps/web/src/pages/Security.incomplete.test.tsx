@@ -513,6 +513,23 @@ describe('Security page - incomplete scans must never read as an all-clear', () 
     expect(screen.queryByTestId('failed-scan-sources')).not.toBeInTheDocument();
   });
 
+  it('says the feature is switched off rather than blaming the instance', async () => {
+    mocks.scan.mockRejectedValue(
+      new Error(
+        'CVE inspection is turned off on this install (CVE_ENABLED=false), so nothing was scanned.',
+      ),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('verdict-headline')).toHaveTextContent(
+      'CVE inspection is turned off here',
+    );
+    expect(screen.getByTestId('scan-failure-reason')).toHaveTextContent(/CVE_ENABLED=true/);
+    expect(screen.queryByTestId('failed-scan-sources')).not.toBeInTheDocument();
+  });
+
   it('does not claim the advisory dataset is empty when its request failed', async () => {
     mocks.scan.mockResolvedValue(scanResult());
     mocks.dataset.mockRejectedValue(new Error('dataset unavailable'));

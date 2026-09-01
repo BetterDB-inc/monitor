@@ -21,6 +21,20 @@ describe('affectedRangeLabel', () => {
     expect(label).toBe('7.2.4 – 7.2.9, ≤ 8.0.9');
   });
 
+  it('names an exclusive ceiling as the patched version it excludes, not as undefined', () => {
+    expect(affectedRangeLabel({ branch: '7.2', vulnerableBelow: '7.2.13' })).toBe('< 7.2.13');
+    expect(
+      affectedRangeLabel({ branch: '7.2', vulnerableFrom: '7.2.4', vulnerableBelow: '7.2.13' }),
+    ).toBe('≥ 7.2.4, < 7.2.13');
+  });
+
+  it('skips a range that carries no upper bound at all rather than printing undefined', () => {
+    expect(affectedRangeLabel({ branch: '7.2' })).toBeNull();
+    expect(
+      affectedRangesLabel([{ branch: '7.2' }, { branch: '8.0', vulnerableBelow: '8.0.10' }]),
+    ).toBe('< 8.0.10');
+  });
+
   it('renders nothing when the advisory has no affected range at all', () => {
     expect(affectedRangesLabel([])).toBeNull();
   });

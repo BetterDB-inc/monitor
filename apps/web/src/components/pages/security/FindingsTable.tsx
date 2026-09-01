@@ -89,7 +89,7 @@ export function FindingsTable({ findings, unversioned, showChips = false }: Find
 
             return (
               <TableRow
-                key={`matched-${entry.advisory.cveId}`}
+                key={`matched-${entry.advisory.cveId}-${entry.matchedOn}-${entry.moduleName ?? ''}`}
                 data-testid={`finding-row-${entry.advisory.cveId}`}
               >
                 <TableCell>
