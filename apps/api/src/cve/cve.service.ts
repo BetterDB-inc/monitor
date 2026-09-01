@@ -1,7 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import type { CveDatasetStatus, CveScanResult, CveSourceStatus } from '@betterdb/shared';
 import { CveRefreshService } from './cve-refresh.service';
-import { CveScanService } from './cve-scan.service';
+import { CveDatasetUnavailableError, CveScanService } from './cve-scan.service';
 
 const ABSENT_DATASET: CveDatasetStatus = {
   datasetVersion: null,
@@ -24,11 +24,11 @@ export class CveService {
       return stored;
     }
 
-    return this.scanService.scan(connectionId);
+    return this.runScan(connectionId, false);
   }
 
   async refreshScan(connectionId: string): Promise<CveScanResult> {
-    return this.scanService.scan(connectionId, true);
+    return this.runScan(connectionId, true);
   }
 
   async getDataset(): Promise<CveDatasetStatus> {
@@ -51,5 +51,21 @@ export class CveService {
       sources,
       healthy: sources.length > 0 && allOk,
     };
+  }
+
+  private async runScan(connectionId: string, force: boolean): Promise<CveScanResult> {
+    try {
+      if (force === true) {
+        return await this.scanService.scan(connectionId, true);
+      }
+
+      return await this.scanService.scan(connectionId);
+    } catch (error: unknown) {
+      if (error instanceof CveDatasetUnavailableError) {
+        throw new ServiceUnavailableException(error.message);
+      }
+
+      throw error;
+    }
   }
 }

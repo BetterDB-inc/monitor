@@ -1,9 +1,10 @@
+import { ServiceUnavailableException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import type { CveScanResult, StoredCveDataset } from '@betterdb/shared';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { CveController } from '../cve.controller';
 import { CveRefreshService } from '../cve-refresh.service';
-import { CveScanService } from '../cve-scan.service';
+import { CveDatasetUnavailableError, CveScanService } from '../cve-scan.service';
 import { CveService } from '../cve.service';
 
 const SCAN: CveScanResult = {
@@ -113,6 +114,25 @@ describe('CveController', () => {
     await expect(controller.refreshScan(undefined)).rejects.toThrow(/No connection available/);
     expect(scanService.scan).not.toHaveBeenCalled();
     expect(scanService.getLatest).not.toHaveBeenCalled();
+  });
+
+  it('answers 503 while the advisory dataset has not been fetched yet', async () => {
+    scanService.getLatest.mockResolvedValue(null);
+    scanService.scan.mockRejectedValue(new CveDatasetUnavailableError());
+
+    await expect(controller.getScan('conn-1')).rejects.toBeInstanceOf(ServiceUnavailableException);
+    await expect(controller.refreshScan('conn-1')).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
+
+  it('does not mask an unrelated scan failure as unavailable', async () => {
+    scanService.getLatest.mockResolvedValue(null);
+    scanService.scan.mockRejectedValue(new Error('No node in this connection could be scanned'));
+
+    await expect(controller.getScan('conn-1')).rejects.toThrow(
+      'No node in this connection could be scanned',
+    );
   });
 
   it('reports dataset age and per-source health', async () => {
