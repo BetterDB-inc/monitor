@@ -18,7 +18,7 @@ export function NotScannedList({ nodes }: NotScannedListProps) {
         {nodes.map((entry) => {
           return (
             <li key={entry.nodeId} className="text-muted-foreground">
-              <span>{entry.address}</span> — <span>{entry.reason}</span>
+              <span>{entry.address}</span> - <span>{entry.reason}</span>
             </li>
           );
         })}

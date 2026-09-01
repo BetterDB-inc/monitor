@@ -133,7 +133,7 @@ describe('computeDatasetVersion', () => {
 // Q5 guard: both source families emit one advisory per product for the same CVE.
 // Keying the merge on cveId alone kept whichever product Map order yielded and dropped
 // the other product's ranges, hiding a live CVE from every node of that product.
-describe('normalizeAdvisories — one CVE affecting two products', () => {
+describe('normalizeAdvisories - one CVE affecting two products', () => {
   it('keeps CVE-2025-21605 as both a redis and a valkey advisory with their own ranges', async () => {
     const result = await new NvdSource(fetchStub(nvdValkey)).fetchAdvisories();
     const { advisories } = normalizeAdvisories([result], []);
@@ -204,9 +204,9 @@ describe('normalizeAdvisories — one CVE affecting two products', () => {
 });
 
 // I1 guard: MitreSource guesses the product from the CNA name and can never emit a module
-// product, so a rangeless MITRE view must not form a product group of its own — it would
+// product, so a rangeless MITRE view must not form a product group of its own - it would
 // strand its summary and push a phantom UNKNOWN row onto every engine node.
-describe('normalizeAdvisories — rangeless views never manufacture a product', () => {
+describe('normalizeAdvisories - rangeless views never manufacture a product', () => {
   const BLOOM_VIEW: Advisory = {
     cveId: 'CVE-2026-80001',
     aliases: ['GHSA-bloom'],
@@ -305,9 +305,9 @@ describe('normalizeAdvisories — rangeless views never manufacture a product', 
 });
 
 // I1 counterpart: only MITRE guesses its product. A rangeless GHSA or NVD view names a product
-// on authority — the GHSA advisory's own repo, the matched NVD CPE — so it must keep an advisory
+// on authority - the GHSA advisory's own repo, the matched NVD CPE - so it must keep an advisory
 // row of its own instead of overwriting another product's verdict fields.
-describe('normalizeAdvisories — rangeless authoritative views keep their own product', () => {
+describe('normalizeAdvisories - rangeless authoritative views keep their own product', () => {
   const NVD_REDIS_RANGELESS: Advisory = {
     cveId: GHSA_VIEW.cveId,
     aliases: [],
@@ -422,7 +422,7 @@ describe('normalizeAdvisories — rangeless authoritative views keep their own p
 
 // Q2 guard: the range winner's missing optional fields must not blank a value a
 // lower-precedence source supplied. severity stays winner-only by ruling.
-describe('normalizeAdvisories — field-level fallback', () => {
+describe('normalizeAdvisories - field-level fallback', () => {
   const GHSA_UNSCORED: Advisory = {
     cveId: 'CVE-2026-70001',
     aliases: ['GHSA-unscored'],
@@ -522,7 +522,7 @@ describe('normalizeAdvisories — field-level fallback', () => {
 
 // Q3 guard: sources exists so the UI can say which source supplied which field.
 // Crediting NVD with `affected` after GHSA won the ranges is a falsehood on screen.
-describe('normalizeAdvisories — provenance honesty', () => {
+describe('normalizeAdvisories - provenance honesty', () => {
   it('credits GHSA and not NVD for the ranges GHSA won', () => {
     const { advisories } = normalizeAdvisories(
       [fetched('nvd', [NVD_VIEW]), fetched('ghsa', [GHSA_VIEW])],
@@ -585,8 +585,8 @@ describe('normalizeAdvisories — provenance honesty', () => {
 
 // Q4 guard: the canonical form must not inherit source-arrival order, or an upstream
 // reshuffle churns the dataset version and forces a pointless rescan of every node.
-// It must also hash exactly what changes a verdict or its ranking — no more.
-describe('computeDatasetVersion — canonical ordering', () => {
+// It must also hash exactly what changes a verdict or its ranking - no more.
+describe('computeDatasetVersion - canonical ordering', () => {
   const MULTI: Advisory = {
     ...GHSA_VIEW,
     affected: [

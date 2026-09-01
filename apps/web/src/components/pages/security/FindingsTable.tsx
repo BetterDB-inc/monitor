@@ -14,7 +14,7 @@ const COLUMN_COUNT = 6;
 
 function epssLabel(entry: Advisory): string {
   if (entry.epssPercentile === undefined) {
-    return '—';
+    return '-';
   }
 
   return `${(entry.epssPercentile * 100).toFixed(1)} pct`;
@@ -80,7 +80,7 @@ export function FindingsTable({ findings, unversioned, showChips = false }: Find
                 colSpan={COLUMN_COUNT}
                 className="text-muted-foreground text-sm"
               >
-                Nothing here — no advisory matched this group.
+                Nothing here - no advisory matched this group.
               </TableCell>
             </TableRow>
           ) : null}
@@ -124,7 +124,7 @@ export function FindingsTable({ findings, unversioned, showChips = false }: Find
                   )}
                 </TableCell>
                 <TableCell>{epssLabel(entry.advisory)}</TableCell>
-                <TableCell>{entry.fixedIn ?? '—'}</TableCell>
+                <TableCell>{entry.fixedIn ?? '-'}</TableCell>
                 <TableCell>{entry.advisory.confidence}</TableCell>
               </TableRow>
             );
@@ -142,8 +142,8 @@ export function FindingsTable({ findings, unversioned, showChips = false }: Find
                 <TableCell>
                   <Badge variant="outline">UNKNOWN</Badge>
                 </TableCell>
-                <TableCell>—</TableCell>
-                <TableCell>—</TableCell>
+                <TableCell>-</TableCell>
+                <TableCell>-</TableCell>
                 <TableCell>review</TableCell>
               </TableRow>
             );

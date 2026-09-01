@@ -17,7 +17,7 @@ export function ScanCaveats({ caveats }: ScanCaveatsProps) {
       className="border-chart-warning text-foreground space-y-2 rounded-lg border p-4 text-sm"
     >
       <p className="font-medium">
-        This scan is incomplete — the counts below are a floor, not an all-clear.
+        This scan is incomplete - the counts below are a floor, not an all-clear.
       </p>
       <ul className="list-disc space-y-1 pl-5">
         {caveats.map((entry) => {

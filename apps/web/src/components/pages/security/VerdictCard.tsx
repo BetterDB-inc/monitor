@@ -54,7 +54,7 @@ export function VerdictCard({
         <CardTitle data-testid="verdict-headline">
           {incomplete ? (
             <span>
-              <span data-testid="verdict-count">{total}</span> known {noun} matched — this scan is
+              <span data-testid="verdict-count">{total}</span> known {noun} matched - this scan is
               incomplete
             </span>
           ) : (
@@ -68,7 +68,7 @@ export function VerdictCard({
           <p data-testid="verdict-unchecked" className="text-foreground text-sm font-medium">
             <span data-testid="verdict-unchecked-count">{uncheckedCount}</span> further{' '}
             {uncheckedCount === 1 ? 'advisory' : 'advisories'} could not be checked against{' '}
-            {version} — unknown, not safe.
+            {version} - unknown, not safe.
           </p>
         ) : null}
       </CardHeader>

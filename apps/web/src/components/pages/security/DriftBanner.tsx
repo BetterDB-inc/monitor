@@ -14,7 +14,7 @@ export function DriftBanner({ versions, nodeCount }: DriftBannerProps) {
       className="border-chart-warning text-foreground rounded-lg border p-4 text-sm"
     >
       {word} versions across {nodeCount} nodes: {versions.join(', ')}. A mixed-version cluster
-      usually means a rolling upgrade stalled — each node is matched against its own version below.
+      usually means a rolling upgrade stalled - each node is matched against its own version below.
     </p>
   );
 }

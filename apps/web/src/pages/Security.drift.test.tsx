@@ -59,7 +59,7 @@ function renderPage() {
   );
 }
 
-describe('Security page — drift state', () => {
+describe('Security page - drift state', () => {
   it('shows the node list when the cluster reports more than one version', async () => {
     mocks.scan.mockResolvedValue(driftResult());
     mocks.dataset.mockResolvedValue(HEALTHY_DATASET);

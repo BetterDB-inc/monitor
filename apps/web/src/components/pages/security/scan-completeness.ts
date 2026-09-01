@@ -82,7 +82,7 @@ function unversionedCaveat(count: number): ScanCaveat {
 
   return {
     id: 'unversioned',
-    text: `${count} ${noun} could not be matched to a version — unknown, not safe.`,
+    text: `${count} ${noun} could not be matched to a version - unknown, not safe.`,
   };
 }
 
