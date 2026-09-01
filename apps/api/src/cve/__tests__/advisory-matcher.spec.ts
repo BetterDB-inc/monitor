@@ -56,6 +56,29 @@ describe('matchAdvisories', () => {
     ]);
 
     expect(result.findings).toHaveLength(0);
+    expect(result.unversioned).toHaveLength(0);
+  });
+
+  it('reports module advisories as unversioned when the module inventory is unknown', () => {
+    const result = matchAdvisories(
+      { product: 'valkey', engineVersion: '9.1.1', modules: [], modulesUnknown: true },
+      [BLOOM_MODULE],
+    );
+
+    expect(result.findings).toHaveLength(0);
+    expect(result.unversioned).toEqual([BLOOM_MODULE]);
+  });
+
+  it('does not report a foreign product as unversioned just because modules are unknown', () => {
+    const redisOnly = ALL_ADVISORIES.filter((advisory) => {
+      return advisory.product === 'redis';
+    });
+    const result = matchAdvisories(
+      { product: 'valkey', engineVersion: '9.1.1', modules: [], modulesUnknown: true },
+      redisOnly,
+    );
+
+    expect(result.unversioned).toHaveLength(0);
   });
 
   it('routes an unversioned advisory out of findings and out of the counts', () => {

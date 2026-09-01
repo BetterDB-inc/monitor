@@ -6,6 +6,7 @@ export interface MatchInput {
   product: CveProduct;
   engineVersion: string;
   modules: LoadedModule[];
+  modulesUnknown?: boolean;
 }
 
 export interface MatchOutput {
@@ -34,6 +35,15 @@ function moduleFor(input: MatchInput, product: CveProduct): LoadedModule | undef
   return input.modules.find((loaded) => {
     return moduleProductOf(input.product, loaded.name) === product;
   });
+}
+
+export function isModuleProductOf(engineProduct: CveProduct, product: CveProduct): boolean {
+  const table = MODULE_PRODUCTS[engineProduct];
+  if (table === undefined) {
+    return false;
+  }
+
+  return Object.values(table).includes(product);
 }
 
 export function rankFindings(findings: CveFinding[]): CveFinding[] {
@@ -66,6 +76,10 @@ export function matchAdvisories(input: MatchInput, advisories: Advisory[]): Matc
     const loadedModule = isEngine ? undefined : moduleFor(input, advisory.product);
 
     if (isEngine === false && loadedModule === undefined) {
+      if (input.modulesUnknown === true && isModuleProductOf(input.product, advisory.product)) {
+        unversioned.push(advisory);
+      }
+
       continue;
     }
 
