@@ -165,6 +165,42 @@ describe('Security page', () => {
     expect(screen.getByTestId('finding-scope-CVE-ENG')).toHaveTextContent('engine');
   });
 
+  it('states the lower bound of an affected range instead of only its ceiling', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({
+        nodes: [
+          node('1', '7.2.5', [
+            finding('CVE-RANGE', {
+              matchedVersion: '7.2.5',
+              advisory: advisory('CVE-RANGE', {
+                affected: [
+                  { branch: '7.2', vulnerableFrom: '7.2.4', vulnerableAtOrBelow: '7.2.9' },
+                ],
+              }),
+            }),
+          ]),
+        ],
+      }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    const range = await screen.findByTestId('finding-range-CVE-RANGE');
+
+    expect(range).toHaveTextContent('7.2.4 – 7.2.9');
+    expect(range).not.toHaveTextContent('≤ 7.2.9');
+  });
+
+  it('keeps the at-or-below range when the advisory states no lower bound', async () => {
+    mocks.scan.mockResolvedValue(scanResult());
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('finding-range-CVE-2026-63639')).toHaveTextContent('≤ 8.0.9');
+  });
+
   it('links each advisory out to its published reference', async () => {
     mocks.scan.mockResolvedValue(
       scanResult({

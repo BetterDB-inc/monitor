@@ -2,6 +2,7 @@ import type { Advisory, CveFinding } from '@betterdb/shared';
 import { Badge } from '../../ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../ui/table';
 import { AdvisoryCell } from './AdvisoryCell';
+import { affectedRangesLabel } from './affected-range';
 
 interface FindingsTableProps {
   findings: CveFinding[];
@@ -84,6 +85,8 @@ export function FindingsTable({ findings, unversioned, showChips = false }: Find
             </TableRow>
           ) : null}
           {findings.map((entry) => {
+            const range = affectedRangesLabel(entry.advisory.affected);
+
             return (
               <TableRow
                 key={`matched-${entry.advisory.cveId}`}
@@ -93,7 +96,15 @@ export function FindingsTable({ findings, unversioned, showChips = false }: Find
                   <AdvisoryCell entry={entry.advisory} />
                 </TableCell>
                 <TableCell data-testid={`finding-scope-${entry.advisory.cveId}`}>
-                  {scopeLabel(entry)}
+                  <span className="block">{scopeLabel(entry)}</span>
+                  {range === null ? null : (
+                    <span
+                      data-testid={`finding-range-${entry.advisory.cveId}`}
+                      className="text-muted-foreground block text-xs"
+                    >
+                      {range}
+                    </span>
+                  )}
                 </TableCell>
                 <TableCell className="space-y-1">
                   <span className="flex flex-wrap items-center gap-2">
