@@ -4,6 +4,8 @@ export const CVE_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export const CVE_SCAN_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
+export const CVE_SCAN_RETRY_INTERVAL_MS = 60 * 1000;
+
 export const CVE_SOURCES = 'CVE_SOURCES';
 export const CVE_ENRICHMENT_SOURCES = 'CVE_ENRICHMENT_SOURCES';
 export const CVE_MITRE_SOURCE = 'CVE_MITRE_SOURCE';
