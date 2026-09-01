@@ -112,6 +112,9 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
               Inference Latency
             </NavItem>
           )}
+          <NavItem to="/security" active={location.pathname === '/security'}>
+            Security
+          </NavItem>
           <NavItem to="/audit" active={location.pathname === '/audit'}>
             Audit Trail
           </NavItem>
