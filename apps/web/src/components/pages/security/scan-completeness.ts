@@ -5,6 +5,7 @@ export type ScanCaveatId =
   | 'missing-sources'
   | 'unversioned'
   | 'undecoded-modules'
+  | 'modules-unknown'
   | 'partial';
 
 export interface ScanCaveat {
@@ -36,6 +37,16 @@ function undecodedModuleNames(nodes: ScannedNode[]): string[] {
   }
 
   return [...names];
+}
+
+function unlistedModuleAddresses(nodes: ScannedNode[]): string[] {
+  return nodes
+    .filter((entry) => {
+      return entry.modulesUnknown === true;
+    })
+    .map((entry) => {
+      return entry.address;
+    });
 }
 
 function notScannedCaveat(result: CveScanResult): ScanCaveat {
@@ -82,6 +93,15 @@ function undecodedModulesCaveat(names: string[]): ScanCaveat {
   };
 }
 
+function modulesUnknownCaveat(addresses: string[]): ScanCaveat {
+  const noun = addresses.length === 1 ? 'node' : 'nodes';
+
+  return {
+    id: 'modules-unknown',
+    text: `The modules loaded on ${addresses.length} ${noun} could not be enumerated (${addresses.join(', ')}), so module advisories there are unknown, not absent.`,
+  };
+}
+
 export function scanCompleteness(result: CveScanResult): ScanCompleteness {
   const caveats: ScanCaveat[] = [];
   const unversionedCount = unversionedTotal(result.nodes);
@@ -102,6 +122,12 @@ export function scanCompleteness(result: CveScanResult): ScanCompleteness {
 
   if (undecoded.length > 0) {
     caveats.push(undecodedModulesCaveat(undecoded));
+  }
+
+  const unlisted = unlistedModuleAddresses(result.nodes);
+
+  if (unlisted.length > 0) {
+    caveats.push(modulesUnknownCaveat(unlisted));
   }
 
   if (result.partial === true && caveats.length === 0) {

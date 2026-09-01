@@ -45,6 +45,44 @@ describe('scanCompleteness', () => {
     expect(result.caveats[0].text).not.toContain('json');
   });
 
+  it('refuses to call a scan complete when the modules on a node could not be enumerated', () => {
+    const result = scanCompleteness(
+      scanResult({
+        nodes: [node('1', '8.0.10', [], [], { modules: [], modulesUnknown: true })],
+        partial: false,
+      }),
+    );
+
+    expect(result.complete).toBe(false);
+    expect(idsOf(result)).toEqual(['modules-unknown']);
+    expect(result.caveats[0].text).toContain('10.0.0.1:6379');
+    expect(result.caveats[0].text).toMatch(/unknown, not absent/i);
+  });
+
+  it('leaves a node whose modules were enumerated as empty free of the caveat', () => {
+    const result = scanCompleteness(
+      scanResult({ nodes: [node('1', '8.0.10', [], [], { modules: [] })], partial: false }),
+    );
+
+    expect(result.complete).toBe(true);
+    expect(idsOf(result)).toEqual([]);
+  });
+
+  it('names every node whose modules could not be enumerated, not only the first', () => {
+    const result = scanCompleteness(
+      scanResult({
+        nodes: [
+          node('1', '8.0.10', [], [], { modulesUnknown: true }),
+          node('2', '8.0.10', [], [], { modulesUnknown: true }),
+        ],
+      }),
+    );
+
+    expect(result.caveats[0].text).toContain('10.0.0.1:6379');
+    expect(result.caveats[0].text).toContain('10.0.0.2:6379');
+    expect(result.caveats[0].text).toContain('2 nodes');
+  });
+
   it('treats unversioned advisories as unknown, not safe', () => {
     const result = scanCompleteness(
       scanResult({

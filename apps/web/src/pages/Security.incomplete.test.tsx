@@ -99,6 +99,43 @@ describe('Security page — incomplete scans must never read as an all-clear', (
     expect(caveat).not.toHaveTextContent('json');
   });
 
+  it('refuses the all-clear headline when the modules on a node could not be enumerated', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({
+        nodes: [node('1', '8.0.10', [], [], { modules: [], modulesUnknown: true })],
+        partial: false,
+      }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('verdict-count')).toHaveTextContent('0');
+    expect(screen.getByTestId('verdict-headline')).not.toHaveTextContent(
+      '0 known CVEs affect this instance',
+    );
+    expect(screen.getByTestId('verdict-headline')).toHaveTextContent(/this scan is incomplete/i);
+
+    const caveat = screen.getByTestId('scan-caveat-modules-unknown');
+
+    expect(caveat).toHaveTextContent('10.0.0.1:6379');
+    expect(caveat).toHaveTextContent(/unknown, not absent/i);
+  });
+
+  it('keeps the all-clear when an empty module list was actually enumerated', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({ nodes: [node('1', '8.0.10', [], [], { modules: [] })] }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('verdict-headline')).toHaveTextContent(
+      '0 known CVEs affect this instance',
+    );
+    expect(screen.queryByTestId('scan-caveat-modules-unknown')).not.toBeInTheDocument();
+  });
+
   it('counts unversioned advisories in the verdict rather than headlining zero', async () => {
     mocks.scan.mockResolvedValue(
       scanResult({
