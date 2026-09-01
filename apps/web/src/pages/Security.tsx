@@ -12,7 +12,7 @@ import { SourceStrip } from '../components/pages/security/SourceStrip';
 import { VerdictCard } from '../components/pages/security/VerdictCard';
 import { groupFindings, type NodeGroups } from '../components/pages/security/drift-groups';
 import { datasetAgeLabel, scanAgeLabel } from '../components/pages/security/header-labels';
-import { scanCompleteness } from '../components/pages/security/scan-completeness';
+import { datasetCaveats, scanCompleteness } from '../components/pages/security/scan-completeness';
 import { useCveDataset, useCveScan, useRefreshCveScan } from '../hooks/useCveScan';
 
 const PRODUCT_LABEL: Record<string, string> = { valkey: 'Valkey', redis: 'Redis' };
@@ -108,17 +108,16 @@ export function Security() {
     datasetAgeLabel(dataset.data?.refreshedAt),
   ].join(' · ');
 
-  const datasetDegraded =
-    dataset.isError ||
-    dataset.isPending ||
-    (dataset.data?.sources ?? []).some((source) => {
-      return source.state === 'empty';
-    });
+  const datasetUnreadable = dataset.isError || dataset.isPending;
   const ghsaTokenMissing =
-    dataset.data?.ghsaAuthenticated === false && result.missingSources.includes('ghsa');
+    dataset.data?.ghsaAuthenticated === false &&
+    (result.missingSources.includes('ghsa') ||
+      (dataset.data?.sources ?? []).some((source) => {
+        return source.source === 'ghsa' && source.state !== 'ok';
+      }));
   const nothingToList =
     drifted === false &&
-    datasetDegraded === false &&
+    datasetUnreadable === false &&
     result.nodes.every((entry) => {
       return entry.findings.length === 0 && entry.unversioned.length === 0;
     });
@@ -140,7 +139,7 @@ export function Security() {
         {header}
         <EmptyScanCard
           engineLabel={`${PRODUCT_LABEL[selected.product] ?? selected.product} ${selected.engineVersion}`}
-          caveats={completeness.caveats}
+          caveats={[...completeness.caveats, ...datasetCaveats(dataset.data)]}
           sources={dataset.data?.sources ?? []}
           advisoryCount={dataset.data?.advisoryCount ?? 0}
           ghsaTokenMissing={ghsaTokenMissing}

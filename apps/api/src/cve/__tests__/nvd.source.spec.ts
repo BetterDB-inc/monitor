@@ -31,26 +31,26 @@ describe('NvdSource', () => {
     const advisory = await advisoryFor('CVE-2026-21863', 'valkey');
 
     expect(advisory?.confidence).toBe('broad');
-    expect(advisory?.affected).toContainEqual({ branch: '*', vulnerableAtOrBelow: '7.2.11' });
+    expect(advisory?.affected).toContainEqual({ branch: '*', vulnerableBelow: '7.2.12' });
   });
 
-  it('splits a multi-branch NVD entry into one range per branch with exact decremented bounds', async () => {
+  it('splits a multi-branch NVD entry into one range per branch with exclusive upper bounds', async () => {
     const advisory = await advisoryFor('CVE-2026-21863', 'valkey');
 
     expect(advisory?.confidence).toBe('broad');
     expect(advisory?.affected).toContainEqual({
       branch: '8.0',
-      vulnerableAtOrBelow: '8.0.6',
+      vulnerableBelow: '8.0.7',
       vulnerableFrom: '8.0.0',
     });
     expect(advisory?.affected).toContainEqual({
       branch: '8.1',
-      vulnerableAtOrBelow: '8.1.5',
+      vulnerableBelow: '8.1.6',
       vulnerableFrom: '8.1.0',
     });
     expect(advisory?.affected).toContainEqual({
       branch: '9.0',
-      vulnerableAtOrBelow: '9.0.1',
+      vulnerableBelow: '9.0.2',
       vulnerableFrom: '9.0.0',
     });
     expect(advisory?.affected).toHaveLength(4);
@@ -106,7 +106,7 @@ describe('NvdSource', () => {
 
     expect(advisory?.affected).toContainEqual({
       branch: '7.4',
-      vulnerableAtOrBelow: '7.4.2',
+      vulnerableBelow: '7.4.3',
       vulnerableFrom: '7.4.0',
     });
   });
@@ -118,17 +118,18 @@ describe('NvdSource', () => {
     expect(wildcards).toHaveLength(1);
     expect(wildcards[0]).toEqual({
       branch: '*',
-      vulnerableAtOrBelow: '7.2.7',
+      vulnerableBelow: '7.2.8',
       vulnerableFrom: '2.6.0',
     });
     expect(matchRanges('6.5.0', advisory?.affected ?? []).vulnerable).toBe(true);
   });
 
-  it('uses a .0 exclusive upper bound inclusively instead of producing a malformed decrement', async () => {
+  it('keeps a .0 exclusive upper bound exclusive, so the first patched release is not a finding', async () => {
     const advisory = await advisoryFor('CVE-2021-31294', 'redis');
 
-    expect(advisory?.affected).toContainEqual({ branch: '*', vulnerableAtOrBelow: '6.2.0' });
-    expect(matchRanges('6.2.0', advisory?.affected ?? []).vulnerable).toBe(true);
+    expect(advisory?.affected).toContainEqual({ branch: '*', vulnerableBelow: '6.2.0' });
+    expect(matchRanges('6.1.9', advisory?.affected ?? []).vulnerable).toBe(true);
+    expect(matchRanges('6.2.0', advisory?.affected ?? []).vulnerable).toBe(false);
     expect(matchRanges('6.2.1', advisory?.affected ?? []).vulnerable).toBe(false);
   });
 
@@ -165,11 +166,14 @@ describe('NvdSource', () => {
         return entry.cveId === 'CVE-9999-00001' && entry.product === 'redis';
       });
 
-      expect(advisory?.affected).toContainEqual({ branch: '*', vulnerableAtOrBelow: '8.0' });
-      expect(advisory?.affected.some((range) => range.vulnerableAtOrBelow.includes('NaN'))).toBe(
-        false,
-      );
+      expect(advisory?.affected).toContainEqual({ branch: '*', vulnerableBelow: '8.0' });
+      expect(
+        advisory?.affected.some((range) => {
+          return `${range.vulnerableBelow ?? range.vulnerableAtOrBelow ?? ''}`.includes('NaN');
+        }),
+      ).toBe(false);
       expect(matchRanges('7.9.9', advisory?.affected ?? []).vulnerable).toBe(true);
+      expect(matchRanges('8.0.0', advisory?.affected ?? []).vulnerable).toBe(false);
       expect(matchRanges('8.1.0', advisory?.affected ?? []).vulnerable).toBe(false);
     });
   });

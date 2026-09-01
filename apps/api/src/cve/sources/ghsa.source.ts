@@ -8,7 +8,8 @@ import type {
 import { GHSA_REPOS } from '../cve.constants';
 import { branchOf } from '../matcher/version-range';
 import {
-  fetchJson,
+  fetchLinkedJson,
+  type LinkedJson,
   type CveSource,
   type FetchLike,
   type SourceFetchResult,
@@ -32,6 +33,10 @@ interface GhsaAdvisory {
 
 const SEVERITIES: CveSeverity[] = ['low', 'medium', 'high', 'critical'];
 
+const GHSA_PAGE_SIZE = 100;
+
+const GHSA_MAX_PAGES = 10;
+
 function toSeverity(raw: string): CveSeverity {
   const lowered = raw.toLowerCase();
   const known = SEVERITIES.find((severity) => {
@@ -43,29 +48,41 @@ function toSeverity(raw: string): CveSeverity {
 
 const VERSION_PATTERN = /\d+\.\d+\.\d+/g;
 const BARE_UPPER_BOUND_PATTERN = /^<=\s*(\d+\.\d+\.\d+)$/;
+const LOWER_BOUND_PATTERN = /(?:^|,)\s*>=\s*(\d+\.\d+\.\d+)/;
 
-function decrementPatch(version: string): string {
-  const [major, minor, patch] = version.split('.').map((part) => {
-    return parseInt(part, 10);
-  });
+function lowerBoundFor(vulnerableVersionRange: string | undefined, branch: string): string | null {
+  if (vulnerableVersionRange === undefined) {
+    return null;
+  }
 
-  return `${major}.${minor}.${patch - 1}`;
+  const match = vulnerableVersionRange.match(LOWER_BOUND_PATTERN);
+  if (!match) {
+    return null;
+  }
+
+  if (branchOf(match[1]) !== branch) {
+    return null;
+  }
+
+  return match[1];
 }
 
-function exactRangesFromPatchedVersions(patchedVersions: string): BranchRange[] {
+function exactRangesFromPatchedVersions(
+  patchedVersions: string,
+  vulnerableVersionRange: string | undefined,
+): BranchRange[] {
   const versions = patchedVersions.match(VERSION_PATTERN) ?? [];
   const ranges: BranchRange[] = [];
 
   for (const version of versions) {
-    const patchSegment = parseInt(version.split('.')[2], 10);
-    if (patchSegment === 0) {
-      continue;
-    }
+    const branch = branchOf(version);
+    const vulnerableFrom = lowerBoundFor(vulnerableVersionRange, branch);
 
     ranges.push({
-      branch: branchOf(version),
-      vulnerableAtOrBelow: decrementPatch(version),
+      branch,
+      vulnerableBelow: version,
       patchedAt: version,
+      ...(vulnerableFrom === null ? {} : { vulnerableFrom }),
     });
   }
 
@@ -95,7 +112,12 @@ function toAffectedRanges(vulnerabilities: GhsaVulnerability[]): AffectedRanges 
   for (const vulnerability of vulnerabilities) {
     const patchedVersions = vulnerability.patched_versions?.trim();
     if (patchedVersions) {
-      exact.push(...exactRangesFromPatchedVersions(patchedVersions));
+      exact.push(
+        ...exactRangesFromPatchedVersions(
+          patchedVersions,
+          vulnerability.vulnerable_version_range?.trim(),
+        ),
+      );
     }
   }
 
@@ -160,17 +182,33 @@ export class GhsaSource implements CveSource {
     };
   }
 
+  private async fetchRepoAdvisories(firstUrl: string): Promise<GhsaAdvisory[]> {
+    const collected: GhsaAdvisory[] = [];
+    let url: string | null = firstUrl;
+
+    for (let page = 0; page < GHSA_MAX_PAGES && url !== null; page++) {
+      const response: LinkedJson<GhsaAdvisory[]> = await fetchLinkedJson<GhsaAdvisory[]>(
+        this.fetchImpl,
+        url,
+        this.headers(),
+      );
+
+      collected.push(...response.body);
+      url = response.nextUrl;
+    }
+
+    return collected;
+  }
+
   async fetchAdvisories(): Promise<SourceFetchResult> {
     const advisories: Advisory[] = [];
     const failures: string[] = [];
 
     for (const repo of GHSA_REPOS) {
-      const url = `https://api.github.com/repos/${repo.owner}/${repo.repo}/security-advisories`;
+      const url = `https://api.github.com/repos/${repo.owner}/${repo.repo}/security-advisories?per_page=${GHSA_PAGE_SIZE}`;
 
       try {
-        const payload = await fetchJson<GhsaAdvisory[]>(this.fetchImpl, url, this.headers());
-
-        for (const raw of payload) {
+        for (const raw of await this.fetchRepoAdvisories(url)) {
           const advisory = toAdvisory(raw, repo.product);
           if (advisory) {
             advisories.push(advisory);

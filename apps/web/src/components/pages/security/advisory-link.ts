@@ -1,6 +1,6 @@
 import type { Advisory } from '@betterdb/shared';
 
-const SAFE_SCHEMES = ['https://', 'http://'];
+const SAFE_SCHEMES = ['https://'];
 const CVE_ID = /^CVE-\d{4}-\d{4,}$/;
 
 export function advisoryHref(entry: Advisory): string | null {

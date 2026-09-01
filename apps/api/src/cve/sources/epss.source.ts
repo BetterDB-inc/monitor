@@ -15,8 +15,14 @@ interface EpssResponse {
   data?: Array<{ cve: string; epss: string; percentile: string }>;
 }
 
-function round(raw: string): number {
-  return Number(Number(raw).toFixed(4));
+function round(raw: string): number | null {
+  const parsed = Number(raw);
+
+  if (Number.isFinite(parsed) === false) {
+    return null;
+  }
+
+  return Number(parsed.toFixed(4));
 }
 
 export class EpssSource implements EnrichmentSource {
@@ -58,10 +64,15 @@ export class EpssSource implements EnrichmentSource {
       }
 
       for (const row of payload.data ?? []) {
-        entries.push([
-          row.cve,
-          { epssScore: round(row.epss), epssPercentile: round(row.percentile) },
-        ]);
+        const epssScore = round(row.epss);
+        const epssPercentile = round(row.percentile);
+
+        if (epssScore === null || epssPercentile === null) {
+          partialFailures.push(`${row.cve} reported an unreadable EPSS score`);
+          continue;
+        }
+
+        entries.push([row.cve, { epssScore, epssPercentile }]);
       }
     }
 

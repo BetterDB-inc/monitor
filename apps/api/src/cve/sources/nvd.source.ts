@@ -99,13 +99,13 @@ function toRange(match: NvdCpeMatch): BranchRange | null {
   }
 
   const branch = branchFor(match, upperBound.raw);
-  const vulnerableAtOrBelow = upperBound.inclusive
-    ? upperBound.raw
-    : (decrementPatch(upperBound.raw) ?? upperBound.raw);
+  const bound = upperBound.inclusive
+    ? { vulnerableAtOrBelow: upperBound.raw }
+    : { vulnerableBelow: upperBound.raw };
 
   return {
     branch,
-    vulnerableAtOrBelow,
+    ...bound,
     ...(match.versionStartIncluding ? { vulnerableFrom: match.versionStartIncluding } : {}),
   };
 }
@@ -120,6 +120,18 @@ function widestLowerBound(a: BranchRange, b: BranchRange): string | undefined {
     : b.vulnerableFrom;
 }
 
+function ceilingOf(range: BranchRange): string {
+  return range.vulnerableBelow ?? range.vulnerableAtOrBelow ?? '0';
+}
+
+function matchesProduct(criteria: string, cpePrefix: string): boolean {
+  if (criteria.startsWith(`${cpePrefix}:`)) {
+    return true;
+  }
+
+  return criteria === cpePrefix;
+}
+
 function collapseByBranch(ranges: BranchRange[]): BranchRange[] {
   const highestByBranch = new Map<string, BranchRange>();
 
@@ -130,13 +142,14 @@ function collapseByBranch(ranges: BranchRange[]): BranchRange[] {
       continue;
     }
 
-    const highest =
-      compareVersions(range.vulnerableAtOrBelow, current.vulnerableAtOrBelow) > 0 ? range : current;
+    const highest = compareVersions(ceilingOf(range), ceilingOf(current)) > 0 ? range : current;
     const vulnerableFrom = widestLowerBound(current, range);
 
     highestByBranch.set(range.branch, {
       branch: highest.branch,
-      vulnerableAtOrBelow: highest.vulnerableAtOrBelow,
+      ...(highest.vulnerableBelow === undefined
+        ? { vulnerableAtOrBelow: highest.vulnerableAtOrBelow }
+        : { vulnerableBelow: highest.vulnerableBelow }),
       ...(vulnerableFrom === undefined ? {} : { vulnerableFrom }),
       ...(highest.patchedAt ? { patchedAt: highest.patchedAt } : {}),
     });
@@ -151,7 +164,7 @@ function toRanges(cve: NvdCve, cpePrefix: string): BranchRange[] {
   for (const configuration of cve.configurations ?? []) {
     for (const node of configuration.nodes) {
       for (const match of node.cpeMatch ?? []) {
-        if (!match.vulnerable || !match.criteria.startsWith(cpePrefix)) {
+        if (!match.vulnerable || matchesProduct(match.criteria, cpePrefix) === false) {
           continue;
         }
 

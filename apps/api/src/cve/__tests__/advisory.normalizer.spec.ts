@@ -152,31 +152,31 @@ describe('normalizeAdvisories - one CVE affecting two products', () => {
     expect(redis?.affected).toHaveLength(2);
     expect(redis?.affected).toContainEqual({
       branch: '*',
-      vulnerableAtOrBelow: '7.2.7',
+      vulnerableBelow: '7.2.8',
       vulnerableFrom: '2.6.0',
     });
     expect(redis?.affected).toContainEqual({
       branch: '7.4',
-      vulnerableAtOrBelow: '7.4.2',
+      vulnerableBelow: '7.4.3',
       vulnerableFrom: '7.4.0',
     });
     expect(valkey?.affected).toHaveLength(3);
     expect(valkey?.affected).toContainEqual({
       branch: '7.2',
-      vulnerableAtOrBelow: '7.2.8',
+      vulnerableBelow: '7.2.9',
       vulnerableFrom: '7.2.4',
     });
     expect(valkey?.affected).toContainEqual({
       branch: '8.0',
-      vulnerableAtOrBelow: '8.0.2',
+      vulnerableBelow: '8.0.3',
       vulnerableFrom: '8.0.0',
     });
     expect(valkey?.affected).toContainEqual({
       branch: '8.1',
-      vulnerableAtOrBelow: '8.1.0',
+      vulnerableBelow: '8.1.1',
       vulnerableFrom: '8.1.0',
     });
-    expect(redis?.affected).not.toContainEqual({ branch: '8.0', vulnerableAtOrBelow: '8.0.2' });
+    expect(redis?.affected).not.toContainEqual({ branch: '8.0', vulnerableBelow: '8.0.3' });
   });
 
   it('merges the same product across sources but never merges across products', () => {

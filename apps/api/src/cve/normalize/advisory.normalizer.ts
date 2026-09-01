@@ -32,7 +32,9 @@ interface EnrichmentFact {
 
 interface CanonicalRange {
   branch: string;
-  vulnerableAtOrBelow: string;
+  vulnerableAtOrBelow: string | null;
+  vulnerableBelow: string | null;
+  vulnerableFrom: string | null;
   patchedAt: string | null;
 }
 
@@ -321,7 +323,9 @@ function canonicalRanges(ranges: BranchRange[]): CanonicalRange[] {
     .map((range) => {
       return {
         branch: range.branch,
-        vulnerableAtOrBelow: range.vulnerableAtOrBelow,
+        vulnerableAtOrBelow: range.vulnerableAtOrBelow ?? null,
+        vulnerableBelow: range.vulnerableBelow ?? null,
+        vulnerableFrom: range.vulnerableFrom ?? null,
         patchedAt: range.patchedAt ?? null,
       };
     })
@@ -331,7 +335,10 @@ function canonicalRanges(ranges: BranchRange[]): CanonicalRange[] {
         return byBranch;
       }
 
-      const byBound = compareStrings(a.vulnerableAtOrBelow, b.vulnerableAtOrBelow);
+      const byBound = compareStrings(
+        `${a.vulnerableAtOrBelow ?? ''}|${a.vulnerableBelow ?? ''}|${a.vulnerableFrom ?? ''}`,
+        `${b.vulnerableAtOrBelow ?? ''}|${b.vulnerableBelow ?? ''}|${b.vulnerableFrom ?? ''}`,
+      );
       if (byBound !== 0) {
         return byBound;
       }

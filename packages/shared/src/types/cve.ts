@@ -14,7 +14,8 @@ export type CveConfidence = 'exact' | 'broad' | 'unversioned';
 
 export interface BranchRange {
   branch: string;
-  vulnerableAtOrBelow: string;
+  vulnerableAtOrBelow?: string;
+  vulnerableBelow?: string;
   vulnerableFrom?: string;
   patchedAt?: string;
 }

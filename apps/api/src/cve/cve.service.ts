@@ -2,7 +2,11 @@ import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import type { CveDatasetStatus, CveScanResult, CveSourceStatus } from '@betterdb/shared';
 import { ghsaToken } from './cve.constants';
 import { CveRefreshService } from './cve-refresh.service';
-import { CveDatasetUnavailableError, CveScanService } from './cve-scan.service';
+import {
+  CveConnectionUnreachableError,
+  CveDatasetUnavailableError,
+  CveScanService,
+} from './cve-scan.service';
 
 function absentDatasetStatus(): CveDatasetStatus {
   return {
@@ -67,6 +71,10 @@ export class CveService {
       return await this.scanService.scan(connectionId);
     } catch (error: unknown) {
       if (error instanceof CveDatasetUnavailableError) {
+        throw new ServiceUnavailableException(error.message);
+      }
+
+      if (error instanceof CveConnectionUnreachableError) {
         throw new ServiceUnavailableException(error.message);
       }
 

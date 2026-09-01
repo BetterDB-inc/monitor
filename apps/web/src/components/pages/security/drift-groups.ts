@@ -11,7 +11,14 @@ export function groupFindings(nodes: ScannedNode[]): Map<string, NodeGroups> {
   const presence = new Map<string, number>();
 
   for (const entry of nodes) {
+    const seen = new Set<string>();
+
     for (const item of entry.findings) {
+      if (seen.has(item.advisory.cveId)) {
+        continue;
+      }
+
+      seen.add(item.advisory.cveId);
       presence.set(item.advisory.cveId, (presence.get(item.advisory.cveId) ?? 0) + 1);
     }
   }

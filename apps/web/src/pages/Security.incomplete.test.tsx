@@ -294,6 +294,41 @@ describe('Security page - incomplete scans must never read as an all-clear', () 
     expect(screen.queryByTestId('verdict-count')).not.toBeInTheDocument();
   });
 
+  it('refuses the all-clear when a source went quiet on the last corpus refresh', async () => {
+    mocks.scan.mockResolvedValue(scanResult({ nodes: [node('1', '8.0.10', [])] }));
+    mocks.dataset.mockResolvedValue({
+      ...HEALTHY_DATASET,
+      healthy: false,
+      sources: HEALTHY_DATASET.sources.map((source) => {
+        if (source.source !== 'nvd') {
+          return source;
+        }
+
+        return { ...source, state: 'quiet' as const, recordCount: 0 };
+      }),
+    });
+
+    renderPage();
+
+    expect(await screen.findByTestId('verdict-headline')).not.toHaveTextContent(
+      'No known vulnerabilities found',
+    );
+    expect(screen.getByTestId('verdict-headline')).toHaveTextContent(/this scan is incomplete/i);
+    expect(screen.getByTestId('scan-caveat-dataset-degraded')).toHaveTextContent('NVD');
+  });
+
+  it('refuses the all-clear when the corpus holds no advisories at all', async () => {
+    mocks.scan.mockResolvedValue(scanResult({ nodes: [node('1', '8.0.10', [])] }));
+    mocks.dataset.mockResolvedValue({ ...HEALTHY_DATASET, advisoryCount: 0, healthy: false });
+
+    renderPage();
+
+    expect(await screen.findByTestId('verdict-headline')).not.toHaveTextContent(
+      'No known vulnerabilities found',
+    );
+    expect(screen.getByTestId('scan-caveat-dataset-empty')).toBeInTheDocument();
+  });
+
   it('does not claim the advisory dataset is empty when its request failed', async () => {
     mocks.scan.mockResolvedValue(scanResult());
     mocks.dataset.mockRejectedValue(new Error('dataset unavailable'));

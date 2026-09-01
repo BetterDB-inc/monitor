@@ -18,6 +18,10 @@ function bestUpgrade(findings: CveFinding[]): UpgradeTarget | null {
   const tally = new Map<string, number>();
 
   for (const entry of findings) {
+    if (entry.matchedOn !== 'engine') {
+      continue;
+    }
+
     if (!entry.fixedIn) {
       continue;
     }

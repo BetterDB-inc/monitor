@@ -35,49 +35,74 @@ export function branchOf(version: string): string {
   return segments(version).slice(0, 2).join('.');
 }
 
+function belowUpperBoundOf(version: string, range: BranchRange): boolean {
+  if (range.vulnerableBelow !== undefined) {
+    return compareVersions(version, range.vulnerableBelow) < 0;
+  }
+
+  if (range.vulnerableAtOrBelow !== undefined) {
+    return compareVersions(version, range.vulnerableAtOrBelow) <= 0;
+  }
+
+  return false;
+}
+
 function matchRange(version: string, range: BranchRange): VersionMatch {
   const aboveLowerBound =
     range.vulnerableFrom === undefined || compareVersions(version, range.vulnerableFrom) >= 0;
-  const belowUpperBound = compareVersions(version, range.vulnerableAtOrBelow) <= 0;
 
   return {
-    vulnerable: aboveLowerBound && belowUpperBound,
+    vulnerable: aboveLowerBound && belowUpperBoundOf(version, range),
     ...(range.patchedAt ? { fixedIn: range.patchedAt } : {}),
   };
 }
 
+function firstVulnerable(version: string, ranges: BranchRange[]): VersionMatch | null {
+  for (const range of ranges) {
+    const match = matchRange(version, range);
+    if (match.vulnerable === true) {
+      return match;
+    }
+  }
+
+  return null;
+}
+
+function lowestPatchedAt(ranges: BranchRange[]): string | undefined {
+  const patched = ranges
+    .map((range) => {
+      return range.patchedAt;
+    })
+    .filter((value): value is string => {
+      return value !== undefined;
+    });
+
+  if (patched.length === 0) {
+    return undefined;
+  }
+
+  return patched.reduce((lowest, candidate) => {
+    return compareVersions(candidate, lowest) < 0 ? candidate : lowest;
+  });
+}
+
 export function matchRanges(version: string, ranges: BranchRange[]): VersionMatch {
   const branch = branchOf(version);
-  const onBranch = ranges.find((range) => {
+  const onBranch = ranges.filter((range) => {
     return range.branch === branch;
   });
-  const wildcard = ranges.find((range) => {
+  const wildcard = ranges.filter((range) => {
     return range.branch === WILDCARD_BRANCH;
   });
 
-  if (onBranch) {
-    const match = matchRange(version, onBranch);
-    if (match.vulnerable === true) {
-      return match;
-    }
+  const vulnerable = firstVulnerable(version, onBranch) ?? firstVulnerable(version, wildcard);
+  if (vulnerable !== null) {
+    return vulnerable;
   }
 
-  if (wildcard) {
-    const match = matchRange(version, wildcard);
-    if (match.vulnerable === true) {
-      return match;
-    }
-  }
+  const fixedIn = lowestPatchedAt(onBranch) ?? lowestPatchedAt(wildcard);
 
-  if (onBranch) {
-    return { vulnerable: false, ...(onBranch.patchedAt ? { fixedIn: onBranch.patchedAt } : {}) };
-  }
-
-  if (wildcard) {
-    return { vulnerable: false, ...(wildcard.patchedAt ? { fixedIn: wildcard.patchedAt } : {}) };
-  }
-
-  return { vulnerable: false };
+  return { vulnerable: false, ...(fixedIn ? { fixedIn } : {}) };
 }
 
 const MAX_ENCODED_VERSION = 0xffffffff;

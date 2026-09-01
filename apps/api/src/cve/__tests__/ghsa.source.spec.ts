@@ -1,3 +1,4 @@
+import { matchRanges } from '../matcher/version-range';
 import { GhsaSource } from '../sources/ghsa.source';
 import ghsaValkey from './fixtures/ghsa-valkey.json';
 
@@ -43,7 +44,7 @@ describe('GhsaSource', () => {
     expect(advisory?.confidence).toBe('exact');
     expect(advisory?.affected).toContainEqual({
       branch: '8.0',
-      vulnerableAtOrBelow: '8.0.9',
+      vulnerableBelow: '8.0.10',
       patchedAt: '8.0.10',
     });
     expect(advisory?.affected).toHaveLength(5);
@@ -61,12 +62,12 @@ describe('GhsaSource', () => {
     expect(advisory?.affected).toHaveLength(4);
     expect(advisory?.affected).toContainEqual({
       branch: '8.1',
-      vulnerableAtOrBelow: '8.1.5',
+      vulnerableBelow: '8.1.6',
       patchedAt: '8.1.6',
     });
     expect(advisory?.affected).toContainEqual({
       branch: '7.2',
-      vulnerableAtOrBelow: '7.2.11',
+      vulnerableBelow: '7.2.12',
       patchedAt: '7.2.12',
     });
   });
@@ -83,12 +84,12 @@ describe('GhsaSource', () => {
     expect(advisory?.affected).toHaveLength(3);
     expect(advisory?.affected).toContainEqual({
       branch: '8.1',
-      vulnerableAtOrBelow: '8.1.3',
+      vulnerableBelow: '8.1.4',
       patchedAt: '8.1.4',
     });
   });
 
-  it('decrements a patch-1 patched version down to the branch minor release', async () => {
+  it('bounds a patch-1 patched version exclusively, leaving the branch minor release vulnerable', async () => {
     const source = new GhsaSource(fetchStub(ghsaValkey));
     const result = await source.fetchAdvisories();
     const advisory = result.advisories.find((a) => {
@@ -98,12 +99,12 @@ describe('GhsaSource', () => {
     expect(advisory).toBeDefined();
     expect(advisory?.affected).toContainEqual({
       branch: '8.1',
-      vulnerableAtOrBelow: '8.1.0',
+      vulnerableBelow: '8.1.1',
       patchedAt: '8.1.1',
     });
   });
 
-  it('skips a patched version whose patch segment is 0, since nothing on that branch is vulnerable', async () => {
+  it('leaves nothing vulnerable on a branch whose patched version is the .0 release', async () => {
     const fixture = [
       ghsaAdvisory({
         cve_id: 'CVE-9999-00001',
@@ -117,8 +118,11 @@ describe('GhsaSource', () => {
 
     expect(advisory.confidence).toBe('exact');
     expect(advisory.affected).toEqual([
-      { branch: '8.0', vulnerableAtOrBelow: '8.0.4', patchedAt: '8.0.5' },
+      { branch: '9.0', vulnerableBelow: '9.0.0', patchedAt: '9.0.0' },
+      { branch: '8.0', vulnerableBelow: '8.0.5', patchedAt: '8.0.5' },
     ]);
+    expect(matchRanges('9.0.0', advisory.affected).vulnerable).toBe(false);
+    expect(matchRanges('9.0.4', advisory.affected).vulnerable).toBe(false);
   });
 
   it('falls back to a broad wildcard range when only a bare upper bound is available', async () => {
@@ -206,6 +210,57 @@ describe('GhsaSource', () => {
     expect(result.partialFailures).toBeDefined();
     expect(result.partialFailures).toHaveLength(1);
     expect(result.partialFailures?.[0]).toContain('redis/redis');
+  });
+
+  it('follows the Link header so advisories past the first page are not lost', async () => {
+    const secondPageUrl =
+      'https://api.github.com/repos/valkey-io/valkey/security-advisories?per_page=100&page=2';
+    const paged = jest.fn().mockImplementation(async (url: string) => {
+      if (url.includes('valkey-io/valkey/') === false) {
+        return { ok: true, status: 200, headers: new Headers(), json: async () => [] };
+      }
+
+      if (url === secondPageUrl) {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: async () => {
+            return [
+              ghsaAdvisory({
+                cve_id: 'CVE-2026-00002',
+                vulnerable_version_range: '< 8.0.5',
+                patched_versions: '8.0.5',
+              }),
+            ];
+          },
+        };
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ link: `<${secondPageUrl}>; rel="next"` }),
+        json: async () => {
+          return [
+            ghsaAdvisory({
+              cve_id: 'CVE-2026-00001',
+              vulnerable_version_range: '< 8.0.4',
+              patched_versions: '8.0.4',
+            }),
+          ];
+        },
+      };
+    });
+    const source = new GhsaSource(paged);
+    const result = await source.fetchAdvisories();
+    const cveIds = result.advisories.map((advisory) => {
+      return advisory.cveId;
+    });
+
+    expect(paged).toHaveBeenCalledWith(secondPageUrl, expect.anything());
+    expect(cveIds).toContain('CVE-2026-00001');
+    expect(cveIds).toContain('CVE-2026-00002');
   });
 
   it('throws when every repo fails, so the refresh keeps the previous dataset', async () => {

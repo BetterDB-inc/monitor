@@ -1,4 +1,4 @@
-import type { CveScanResult, ScannedNode } from '@betterdb/shared';
+import type { CveDatasetStatus, CveScanResult, ScannedNode } from '@betterdb/shared';
 
 export type ScanCaveatId =
   | 'not-scanned'
@@ -6,7 +6,9 @@ export type ScanCaveatId =
   | 'unversioned'
   | 'undecoded-modules'
   | 'modules-unknown'
-  | 'partial';
+  | 'partial'
+  | 'dataset-empty'
+  | 'dataset-degraded';
 
 export interface ScanCaveat {
   id: ScanCaveatId;
@@ -100,6 +102,47 @@ function modulesUnknownCaveat(addresses: string[]): ScanCaveat {
     id: 'modules-unknown',
     text: `The modules loaded on ${addresses.length} ${noun} could not be enumerated (${addresses.join(', ')}), so module advisories there are unknown, not absent.`,
   };
+}
+
+export function datasetCaveats(dataset: CveDatasetStatus | undefined): ScanCaveat[] {
+  if (dataset === undefined) {
+    return [
+      {
+        id: 'dataset-empty',
+        text: 'Advisory source health is unknown, so nothing here can be called an all-clear.',
+      },
+    ];
+  }
+
+  if (dataset.sources.length === 0 || dataset.advisoryCount === 0) {
+    return [
+      {
+        id: 'dataset-empty',
+        text: 'No advisories have been fetched yet, so this instance was never matched against anything.',
+      },
+    ];
+  }
+
+  const unhealthy = dataset.sources.filter((source) => {
+    return source.state !== 'ok';
+  });
+
+  if (unhealthy.length === 0) {
+    return [];
+  }
+
+  const names = unhealthy
+    .map((source) => {
+      return source.source.toUpperCase();
+    })
+    .join(', ');
+
+  return [
+    {
+      id: 'dataset-degraded',
+      text: `${names} did not answer on the last refresh, so the corpus behind this scan is incomplete.`,
+    },
+  ];
 }
 
 export function scanCompleteness(result: CveScanResult): ScanCompleteness {

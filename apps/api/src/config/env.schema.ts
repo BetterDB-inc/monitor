@@ -55,7 +55,18 @@ export const envSchema = z
       .string()
       .default('true')
       .transform((v) => v !== 'false'),
-    CVE_GITHUB_TOKEN: z.string().min(1).optional(),
+    CVE_GITHUB_TOKEN: z
+      .string()
+      .optional()
+      .transform((value) => {
+        const trimmed = value?.trim();
+
+        if (trimmed === undefined || trimmed.length === 0) {
+          return undefined;
+        }
+
+        return trimmed;
+      }),
 
     // Anomaly detection
     ANOMALY_DETECTION_ENABLED: z
