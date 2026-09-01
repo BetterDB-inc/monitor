@@ -3,13 +3,15 @@ import type { CveDatasetStatus, CveScanResult, CveSourceStatus } from '@betterdb
 import { CveRefreshService } from './cve-refresh.service';
 import { CveDatasetUnavailableError, CveScanService } from './cve-scan.service';
 
-const ABSENT_DATASET: CveDatasetStatus = {
-  datasetVersion: null,
-  refreshedAt: null,
-  advisoryCount: 0,
-  sources: [],
-  healthy: false,
-};
+function absentDatasetStatus(): CveDatasetStatus {
+  return {
+    datasetVersion: null,
+    refreshedAt: null,
+    advisoryCount: 0,
+    sources: [],
+    healthy: false,
+  };
+}
 
 @Injectable()
 export class CveService {
@@ -34,7 +36,7 @@ export class CveService {
   async getDataset(): Promise<CveDatasetStatus> {
     const dataset = await this.refreshService.getDataset();
     if (dataset === null) {
-      return { ...ABSENT_DATASET };
+      return absentDatasetStatus();
     }
 
     const sources: CveSourceStatus[] = dataset.snapshots.map((snapshot) => {
