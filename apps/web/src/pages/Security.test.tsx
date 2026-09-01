@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import Security from './Security';
 import {
@@ -50,7 +51,9 @@ function renderPage() {
 
   return render(
     <QueryClientProvider client={client}>
-      <Security />
+      <MemoryRouter>
+        <Security />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }

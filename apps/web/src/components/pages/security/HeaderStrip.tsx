@@ -2,9 +2,12 @@ import type { CveSeverityCounts } from '@betterdb/shared';
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 
+const SEVERITY_LABELS = ['critical', 'high', 'medium', 'low'];
+
 interface HeaderStripProps {
   subtitle: string;
   severityCounts: CveSeverityCounts | null;
+  severityUnknown?: boolean;
   scopeLabel: string | null;
   refreshing: boolean;
   refreshError: string | null;
@@ -14,6 +17,7 @@ interface HeaderStripProps {
 export function HeaderStrip({
   subtitle,
   severityCounts,
+  severityUnknown = false,
   scopeLabel,
   refreshing,
   refreshError,
@@ -34,6 +38,20 @@ export function HeaderStrip({
               {scopeLabel}
             </span>
           ) : null}
+          {severityUnknown === true
+            ? SEVERITY_LABELS.map((label) => {
+                return (
+                  <Badge
+                    key={label}
+                    data-testid={`severity-badge-${label}`}
+                    variant="outline"
+                    className="text-muted-foreground border-dashed"
+                  >
+                    &mdash; {label}
+                  </Badge>
+                );
+              })
+            : null}
           {severityCounts ? (
             <>
               <Badge

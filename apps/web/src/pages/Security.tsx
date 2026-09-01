@@ -3,6 +3,7 @@ import type { CveSeverityCounts, ScannedNode } from '@betterdb/shared';
 import { DriftBanner } from '../components/pages/security/DriftBanner';
 import { DriftFindingsCard } from '../components/pages/security/DriftFindingsCard';
 import { EmptyScanCard } from '../components/pages/security/EmptyScanCard';
+import { FailedScanCard } from '../components/pages/security/FailedScanCard';
 import { FindingsTable } from '../components/pages/security/FindingsTable';
 import { HeaderStrip } from '../components/pages/security/HeaderStrip';
 import { NodeList } from '../components/pages/security/NodeList';
@@ -13,12 +14,14 @@ import { VerdictCard } from '../components/pages/security/VerdictCard';
 import { groupFindings, type NodeGroups } from '../components/pages/security/drift-groups';
 import { datasetAgeLabel, scanAgeLabel } from '../components/pages/security/header-labels';
 import { datasetCaveats, scanCompleteness } from '../components/pages/security/scan-completeness';
-import { scanErrorMessage } from '../components/pages/security/scan-error';
+import { parseScanFailure, scanErrorMessage } from '../components/pages/security/scan-error';
+import { scanFailureCopy } from '../components/pages/security/scan-failure-copy';
 import { useCveDataset, useCveScan, useRefreshCveScan } from '../hooks/useCveScan';
 
 const PRODUCT_LABEL: Record<string, string> = { valkey: 'Valkey', redis: 'Redis' };
 const EMPTY_GROUPS: NodeGroups = { unique: [], shared: [], unversioned: [], badge: 0 };
 const SCAN_FAILED_MESSAGE = 'The server did not return a scan for this connection.';
+const NO_NODE_MESSAGE = 'No node in this connection could be scanned.';
 
 function clusterSeverity(nodes: ScannedNode[]): CveSeverityCounts {
   return nodes.reduce<CveSeverityCounts>(
@@ -49,11 +52,15 @@ export function Security() {
   }
 
   if (scan.isError || scan.data === undefined) {
+    const failure = parseScanFailure(scan.error, SCAN_FAILED_MESSAGE);
+    const copy = scanFailureCopy(failure.summary, failure.nodes);
+
     return (
-      <div className="space-y-6">
+      <div className="flex min-h-full flex-col gap-6">
         <HeaderStrip
           subtitle="Could not scan this connection for CVEs."
           severityCounts={null}
+          severityUnknown
           scopeLabel={null}
           refreshing={scan.isFetching}
           refreshError={refreshError}
@@ -61,9 +68,18 @@ export function Security() {
             void scan.refetch();
           }}
         />
-        <p data-testid="scan-error" className="text-destructive text-sm">
-          {scanErrorMessage(scan.error, SCAN_FAILED_MESSAGE)}
-        </p>
+        <FailedScanCard
+          headline={copy.headline}
+          detail={copy.detail}
+          summary={failure.summary}
+          guidance={copy.guidance}
+          nodes={failure.nodes}
+          sources={dataset.data?.sources ?? []}
+          retrying={scan.isFetching}
+          onRetry={() => {
+            void scan.refetch();
+          }}
+        />
       </div>
     );
   }
@@ -75,23 +91,31 @@ export function Security() {
   };
 
   if (result.nodes.length === 0) {
+    const nodes = result.notScanned.map((entry) => {
+      return { address: entry.address, reason: entry.reason };
+    });
+    const copy = scanFailureCopy(NO_NODE_MESSAGE, nodes);
+
     return (
-      <div className="space-y-6">
+      <div className="flex min-h-full flex-col gap-6">
         <HeaderStrip
           subtitle="No node in this connection could be scanned."
           severityCounts={null}
+          severityUnknown
           scopeLabel={null}
           refreshing={refresh.isPending}
           refreshError={refreshError}
           onRefresh={onRefresh}
         />
-        <ScanCaveats caveats={completeness.caveats} />
-        <NotScannedList nodes={result.notScanned} />
-        <SourceStrip
+        <FailedScanCard
+          headline={copy.headline}
+          detail={copy.detail}
+          summary={NO_NODE_MESSAGE}
+          guidance={copy.guidance}
+          nodes={nodes}
           sources={dataset.data?.sources ?? []}
-          missingSources={result.missingSources}
-          loading={dataset.isPending}
-          failed={dataset.isError}
+          retrying={refresh.isPending}
+          onRetry={onRefresh}
         />
       </div>
     );

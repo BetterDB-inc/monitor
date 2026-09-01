@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import Security from './Security';
 import { HEALTHY_DATASET, finding, node, scanResult } from './__fixtures__/cve';
@@ -54,7 +55,9 @@ function renderPage() {
 
   return render(
     <QueryClientProvider client={client}>
-      <Security />
+      <MemoryRouter>
+        <Security />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }

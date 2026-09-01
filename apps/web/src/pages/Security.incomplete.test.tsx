@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import Security from './Security';
 import {
@@ -49,7 +50,9 @@ function renderPage() {
 
   return render(
     <QueryClientProvider client={client}>
-      <Security />
+      <MemoryRouter>
+        <Security />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -302,6 +305,115 @@ describe('Security page - incomplete scans must never read as an all-clear', () 
     expect(list).toHaveTextContent('10.0.0.2:6379');
     expect(list).toHaveTextContent('unreachable');
     expect(screen.getByRole('button', { name: 'Rescan' })).toBeInTheDocument();
+  });
+
+  it('reads a failed scan as a blank rather than as zero findings', async () => {
+    mocks.scan.mockRejectedValue(
+      new Error(
+        "No node in this connection could be scanned: localhost:6395: Stream isn't writeable",
+      ),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('verdict-headline')).toHaveTextContent(
+      'This connection could not be scanned',
+    );
+    expect(screen.getByTestId('severity-badge-critical')).not.toHaveTextContent('0');
+    expect(screen.getByTestId('severity-badge-critical')).toHaveTextContent('critical');
+    expect(screen.queryByTestId('verdict-count')).not.toBeInTheDocument();
+  });
+
+  it('names the node and keeps the raw client error as the reason', async () => {
+    mocks.scan.mockRejectedValue(
+      new Error(
+        "No node in this connection could be scanned: localhost:6395: Stream isn't writeable",
+      ),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    const reason = await screen.findByTestId('scan-failure-reason');
+
+    expect(reason).toHaveTextContent('localhost:6395');
+    expect(reason).toHaveTextContent("Stream isn't writeable");
+    expect(reason).toHaveTextContent(/INFO and MODULE LIST/);
+  });
+
+  it('gives a cluster one reason per node instead of a blanket message', async () => {
+    mocks.scan.mockRejectedValue(
+      new Error(
+        'No node in this connection could be scanned: 127.0.0.1:7401: Connection refused; 127.0.0.1:7402: NOAUTH Authentication required',
+      ),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('verdict-headline')).toHaveTextContent(
+      'No node in this cluster could be scanned',
+    );
+
+    const list = screen.getByTestId('not-scanned-list');
+
+    expect(list).toHaveTextContent('127.0.0.1:7401');
+    expect(list).toHaveTextContent('Connection refused');
+    expect(list).toHaveTextContent('127.0.0.1:7402');
+    expect(list).toHaveTextContent('NOAUTH Authentication required');
+  });
+
+  it('says the feeds are healthy so the failure is not read as stale data', async () => {
+    mocks.scan.mockRejectedValue(
+      new Error('No node in this connection could be scanned: db:6379: down'),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('failed-scan-sources')).toHaveTextContent(
+      /failure is on this connection, not on the data/i,
+    );
+  });
+
+  it('does not blame the connection for the feeds when a source is down', async () => {
+    mocks.scan.mockRejectedValue(
+      new Error('No node in this connection could be scanned: db:6379: down'),
+    );
+    mocks.dataset.mockResolvedValue({
+      ...HEALTHY_DATASET,
+      healthy: false,
+      sources: HEALTHY_DATASET.sources.map((source) => {
+        if (source.source !== 'nvd') {
+          return source;
+        }
+
+        return { ...source, state: 'quiet' as const };
+      }),
+    });
+
+    renderPage();
+
+    await screen.findByTestId('failed-scan');
+
+    expect(screen.queryByTestId('failed-scan-sources')).not.toBeInTheDocument();
+  });
+
+  it('tells the reader the connection is gone rather than showing a client error', async () => {
+    mocks.scan.mockRejectedValue(
+      new Error(
+        "Connection 'conn-9' not found. Use GET /connections to list available connections.",
+      ),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('verdict-headline')).toHaveTextContent(
+      'This connection no longer exists',
+    );
+    expect(screen.getByTestId('scan-error')).not.toHaveTextContent('GET /connections');
   });
 
   it('shows the server message and a retry when the scan request fails', async () => {
