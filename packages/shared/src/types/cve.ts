@@ -37,7 +37,7 @@ export interface Advisory {
 
 export interface LoadedModule {
   name: string;
-  version: string;
+  version: string | null;
 }
 
 export interface CveFinding {

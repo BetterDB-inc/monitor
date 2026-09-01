@@ -5,12 +5,17 @@ import {
   BLOOM_MODULE,
   HIGH_EPSS_LOW_CVSS,
   LOW_EPSS_HIGH_CVSS,
+  SEARCH_MODULE,
   UNVERSIONED,
   VALKEY_BRANCH_AWARE,
   VALKEY_KNOWN_EXPLOITED,
 } from './fixtures/advisories';
 
 const valkey809 = { product: 'valkey' as const, engineVersion: '8.0.9', modules: [] };
+
+// Read off `MODULE LIST` on valkey/valkey-bundle:9.1-alpine, which builds
+// valkey-search 1.2.1: 66049 === 0x010201.
+const BUNDLE_SEARCH_VER = 66049;
 
 describe('matchAdvisories', () => {
   it('clears a patched maintenance release but flags the one before it', () => {
@@ -92,10 +97,61 @@ describe('matchAdvisories', () => {
   });
 });
 
-describe('parseModuleVersion', () => {
-  it('expands the packed integer MODULE LIST reports', () => {
-    expect(parseModuleVersion(10002)).toBe('1.0.2');
-    expect(parseModuleVersion(20811)).toBe('2.8.11');
-    expect(parseModuleVersion(999)).toBe('0.9.99');
+describe('matchAdvisories on a real valkey-bundle node', () => {
+  it('flags a valkey-search advisory against the integer MODULE LIST reports', () => {
+    const modules = [
+      { name: 'search', version: parseModuleVersion('valkey', 'search', BUNDLE_SEARCH_VER) },
+    ];
+    const result = matchAdvisories({ product: 'valkey', engineVersion: '9.1.1', modules }, [
+      SEARCH_MODULE,
+    ]);
+
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0].matchedOn).toBe('module');
+    expect(result.findings[0].moduleName).toBe('search');
+    expect(result.findings[0].matchedVersion).toBe('1.2.1');
+    expect(result.findings[0].fixedIn).toBe('1.2.2');
+    expect(result.severityCounts.critical).toBe(1);
+  });
+
+  it('clears the same advisory once the module is patched', () => {
+    const modules = [{ name: 'search', version: parseModuleVersion('valkey', 'search', 0x010202) }];
+    const result = matchAdvisories({ product: 'valkey', engineVersion: '9.1.1', modules }, [
+      SEARCH_MODULE,
+    ]);
+
+    expect(modules[0].version).toBe('1.2.2');
+    expect(result.findings).toHaveLength(0);
+    expect(result.unversioned).toEqual([]);
+  });
+});
+
+describe('matchAdvisories with an undecodable module version', () => {
+  it('reports the advisory as unversioned instead of clearing it', () => {
+    const result = matchAdvisories(
+      { product: 'valkey', engineVersion: '9.1.1', modules: [{ name: 'search', version: null }] },
+      [SEARCH_MODULE],
+    );
+
+    expect(result.findings).toEqual([]);
+    expect(result.unversioned).toEqual([SEARCH_MODULE]);
+    expect(result.severityCounts.critical).toBe(0);
+  });
+
+  it('leaves advisories for other products untouched', () => {
+    const result = matchAdvisories(
+      {
+        product: 'valkey',
+        engineVersion: '8.0.9',
+        modules: [{ name: 'search', version: null }],
+      },
+      [SEARCH_MODULE, VALKEY_BRANCH_AWARE],
+    );
+    const ids = result.findings.map((finding) => {
+      return finding.advisory.cveId;
+    });
+
+    expect(ids).toEqual([VALKEY_BRANCH_AWARE.cveId]);
+    expect(result.unversioned).toEqual([SEARCH_MODULE]);
   });
 });

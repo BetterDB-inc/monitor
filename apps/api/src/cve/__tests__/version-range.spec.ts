@@ -1,5 +1,12 @@
-import type { BranchRange } from '@betterdb/shared';
-import { branchOf, compareVersions, matchRanges } from '../matcher/version-range';
+import type { BranchRange, CveProduct } from '@betterdb/shared';
+import {
+  branchOf,
+  compareVersions,
+  matchRanges,
+  moduleVersionEncoding,
+  parseModuleVersion,
+} from '../matcher/version-range';
+import { MODULE_PRODUCTS } from '../cve.constants';
 
 // GHSA-jqcm-9gh4-2vgv / CVE-2026-63639, captured 2026-08-31
 const CVE_2026_63639: BranchRange[] = [
@@ -51,5 +58,75 @@ describe('matchRanges', () => {
 
   it('reports not vulnerable for an empty range list', () => {
     expect(matchRanges('8.0.9', [])).toEqual({ vulnerable: false });
+  });
+});
+
+// Every integer below was read off a live engine with `MODULE LIST` on 2026-09-01
+// and cross-checked against the module version each project's source encodes:
+//
+//   valkey/valkey-bundle:9.1-alpine (built from valkey-json 1.0.2, valkey-bloom
+//   1.0.1, valkey-search 1.2.1, valkey-ldap 1.1.1):
+//     json 10002, bf 10001, search 66049, ldap 16843263
+//   redis:8-alpine reporting redis_version 8.6.2:
+//     search 80600, bf 80600, ReJSON 80600, timeseries 80600
+describe('parseModuleVersion', () => {
+  it('decodes the decimal modules valkey-bundle reports', () => {
+    expect(parseModuleVersion('valkey', 'json', 10002)).toBe('1.0.2');
+    expect(parseModuleVersion('valkey', 'bf', 10001)).toBe('1.0.1');
+  });
+
+  it('decodes valkey-search as packed bytes, not as decimal digits', () => {
+    expect(parseModuleVersion('valkey', 'search', 66049)).toBe('1.2.1');
+  });
+
+  it('decodes valkey-ldap as packed bytes and drops the release-stage byte', () => {
+    expect(parseModuleVersion('valkey', 'ldap', 16843263)).toBe('1.1.1');
+    expect(parseModuleVersion('valkey', 'ldap', 0x01010102)).toBe('1.1.1');
+  });
+
+  it('decodes the decimal modules redis 8 bundles', () => {
+    expect(parseModuleVersion('redis', 'search', 80600)).toBe('8.6.0');
+    expect(parseModuleVersion('redis', 'timeseries', 80600)).toBe('8.6.0');
+  });
+
+  it('looks the encoding up case-insensitively', () => {
+    expect(parseModuleVersion('redis', 'ReJSON', 80600)).toBe('8.6.0');
+  });
+
+  it('keys the encoding on the module, not on the integer', () => {
+    expect(parseModuleVersion('valkey', 'search', 66049)).toBe('1.2.1');
+    expect(parseModuleVersion('redis', 'search', 66049)).toBe('6.60.49');
+    expect(parseModuleVersion('valkey', 'search', 80600)).toBe('1.58.216');
+    expect(parseModuleVersion('redis', 'search', 80600)).toBe('8.6.0');
+  });
+
+  it('returns null for a module with no declared encoding', () => {
+    expect(parseModuleVersion('valkey', 'lua', 1)).toBeNull();
+    expect(parseModuleVersion('redis', 'vectorset', 1)).toBeNull();
+    expect(parseModuleVersion('valkey', 'timeseries', 80600)).toBeNull();
+    expect(parseModuleVersion('valkey-search', 'search', 66049)).toBeNull();
+  });
+
+  it('returns null for an integer that cannot be a packed version', () => {
+    expect(parseModuleVersion('valkey', 'search', -1)).toBeNull();
+    expect(parseModuleVersion('valkey', 'search', 1.5)).toBeNull();
+    expect(parseModuleVersion('valkey', 'search', 2 ** 33)).toBeNull();
+    expect(parseModuleVersion('valkey', 'search', Number.NaN)).toBeNull();
+  });
+});
+
+describe('moduleVersionEncoding', () => {
+  it('declares an encoding for every module mapped to a CVE product', () => {
+    const missing: string[] = [];
+
+    for (const [product, table] of Object.entries(MODULE_PRODUCTS)) {
+      for (const name of Object.keys(table)) {
+        if (moduleVersionEncoding(product as CveProduct, name) === undefined) {
+          missing.push(`${product}/${name}`);
+        }
+      }
+    }
+
+    expect(missing).toEqual([]);
   });
 });

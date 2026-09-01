@@ -109,6 +109,25 @@ export const BLOOM_MODULE: Advisory = {
   references: [],
 };
 
+// The 1.2 branch is the one valkey-bundle:9.1-alpine ships (valkey-search 1.2.1,
+// reported by MODULE LIST as the byte-packed integer 66049).
+export const SEARCH_MODULE: Advisory = {
+  cveId: 'CVE-2026-22222',
+  aliases: ['GHSA-srch-0000-0000'],
+  product: 'valkey-search',
+  affected: [{ branch: '1.2', vulnerableAtOrBelow: '1.2.1', patchedAt: '1.2.2' }],
+  severity: 'critical',
+  cvssScore: 9.1,
+  cwes: ['CWE-787'],
+  knownExploited: false,
+  epssScore: 0.02,
+  epssPercentile: 0.85,
+  confidence: 'exact',
+  sources: [{ source: 'ghsa', fields: ['affected'] }],
+  summary: 'Out-of-bounds write in the valkey-search query planner',
+  references: [],
+};
+
 // Illustrative pair: EPSS and CVSS disagree in rank direction, to prove the ranker
 // sorts by EPSS before CVSS rather than the reverse.
 export const HIGH_EPSS_LOW_CVSS: Advisory = {

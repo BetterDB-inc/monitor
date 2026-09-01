@@ -40,3 +40,23 @@ export const MODULE_PRODUCTS: Partial<Record<CveProduct, Record<string, CveProdu
     searchlight: 'redisearch',
   },
 };
+
+export type ModuleVersionEncoding = 'decimal' | 'byte-triplet' | 'byte-quad-stage';
+
+export const MODULE_VERSION_ENCODINGS: Partial<
+  Record<CveProduct, Record<string, ModuleVersionEncoding>>
+> = {
+  valkey: {
+    bf: 'decimal',
+    json: 'decimal',
+    ldap: 'byte-quad-stage',
+    search: 'byte-triplet',
+  },
+  redis: {
+    bf: 'decimal',
+    rejson: 'decimal',
+    search: 'decimal',
+    searchlight: 'decimal',
+    timeseries: 'decimal',
+  },
+};

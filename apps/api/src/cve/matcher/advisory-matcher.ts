@@ -21,14 +21,18 @@ const EMPTY_COUNTS: Record<CveSeverity, number> = {
   low: 0,
 };
 
-function moduleFor(input: MatchInput, product: CveProduct): LoadedModule | undefined {
-  const table = MODULE_PRODUCTS[input.product];
-  if (!table) {
+export function moduleProductOf(product: CveProduct, name: string): CveProduct | undefined {
+  const table = MODULE_PRODUCTS[product];
+  if (table === undefined) {
     return undefined;
   }
 
+  return table[name.toLowerCase()];
+}
+
+function moduleFor(input: MatchInput, product: CveProduct): LoadedModule | undefined {
   return input.modules.find((loaded) => {
-    return table[loaded.name.toLowerCase()] === product;
+    return moduleProductOf(input.product, loaded.name) === product;
   });
 }
 
@@ -61,16 +65,17 @@ export function matchAdvisories(input: MatchInput, advisories: Advisory[]): Matc
     const isEngine = advisory.product === input.product;
     const loadedModule = isEngine ? undefined : moduleFor(input, advisory.product);
 
-    if (!isEngine && !loadedModule) {
-      continue;
-    }
-
-    if (advisory.affected.length === 0) {
-      unversioned.push(advisory);
+    if (isEngine === false && loadedModule === undefined) {
       continue;
     }
 
     const version = isEngine ? input.engineVersion : (loadedModule as LoadedModule).version;
+
+    if (version === null || advisory.affected.length === 0) {
+      unversioned.push(advisory);
+      continue;
+    }
+
     const match = matchRanges(version, advisory.affected);
 
     if (!match.vulnerable) {

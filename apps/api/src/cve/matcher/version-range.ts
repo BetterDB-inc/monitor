@@ -1,4 +1,6 @@
-import type { BranchRange } from '@betterdb/shared';
+import type { BranchRange, CveProduct } from '@betterdb/shared';
+import type { ModuleVersionEncoding } from '../cve.constants';
+import { MODULE_VERSION_ENCODINGS } from '../cve.constants';
 
 export interface VersionMatch {
   vulnerable: boolean;
@@ -60,10 +62,65 @@ export function matchRanges(version: string, ranges: BranchRange[]): VersionMatc
   return { vulnerable: false };
 }
 
-export function parseModuleVersion(raw: number): string {
+const MAX_ENCODED_VERSION = 0xffffffff;
+
+function decodeDecimal(raw: number): string {
   const major = Math.floor(raw / 10000);
   const minor = Math.floor((raw % 10000) / 100);
   const patch = raw % 100;
 
   return `${major}.${minor}.${patch}`;
+}
+
+function decodeByteTriplet(raw: number): string {
+  const major = Math.floor(raw / 0x10000);
+  const minor = Math.floor(raw / 0x100) % 0x100;
+  const patch = raw % 0x100;
+
+  return `${major}.${minor}.${patch}`;
+}
+
+function decodeByteQuadStage(raw: number): string {
+  const major = Math.floor(raw / 0x1000000) % 0x100;
+  const minor = Math.floor(raw / 0x10000) % 0x100;
+  const patch = Math.floor(raw / 0x100) % 0x100;
+
+  return `${major}.${minor}.${patch}`;
+}
+
+function decodeWith(encoding: ModuleVersionEncoding, raw: number): string {
+  if (encoding === 'decimal') {
+    return decodeDecimal(raw);
+  }
+
+  if (encoding === 'byte-triplet') {
+    return decodeByteTriplet(raw);
+  }
+
+  return decodeByteQuadStage(raw);
+}
+
+export function moduleVersionEncoding(
+  product: CveProduct,
+  name: string,
+): ModuleVersionEncoding | undefined {
+  const table = MODULE_VERSION_ENCODINGS[product];
+  if (table === undefined) {
+    return undefined;
+  }
+
+  return table[name.toLowerCase()];
+}
+
+export function parseModuleVersion(product: CveProduct, name: string, raw: number): string | null {
+  const encoding = moduleVersionEncoding(product, name);
+  if (encoding === undefined) {
+    return null;
+  }
+
+  if (Number.isInteger(raw) === false || raw < 0 || raw > MAX_ENCODED_VERSION) {
+    return null;
+  }
+
+  return decodeWith(encoding, raw);
 }
