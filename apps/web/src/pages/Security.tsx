@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { CveSeverityCounts, ScannedNode } from '@betterdb/shared';
 import { DriftBanner } from '../components/pages/security/DriftBanner';
 import { DriftFindingsCard } from '../components/pages/security/DriftFindingsCard';
+import { EmptyScanCard } from '../components/pages/security/EmptyScanCard';
 import { FindingsTable } from '../components/pages/security/FindingsTable';
 import { HeaderStrip } from '../components/pages/security/HeaderStrip';
 import { NodeList } from '../components/pages/security/NodeList';
@@ -107,16 +108,51 @@ export function Security() {
     datasetAgeLabel(dataset.data?.refreshedAt),
   ].join(' · ');
 
+  const datasetDegraded =
+    dataset.isError ||
+    dataset.isPending ||
+    (dataset.data?.sources ?? []).some((source) => {
+      return source.state === 'empty';
+    });
+  const ghsaTokenMissing =
+    dataset.data?.ghsaAuthenticated === false && result.missingSources.includes('ghsa');
+  const nothingToList =
+    drifted === false &&
+    datasetDegraded === false &&
+    result.nodes.every((entry) => {
+      return entry.findings.length === 0 && entry.unversioned.length === 0;
+    });
+
+  const header = (
+    <HeaderStrip
+      subtitle={subtitle}
+      severityCounts={clusterSeverity(result.nodes)}
+      scopeLabel={result.nodes.length > 1 ? `across ${result.nodes.length} nodes` : null}
+      refreshing={refresh.isPending}
+      refreshError={refreshError}
+      onRefresh={onRefresh}
+    />
+  );
+
+  if (nothingToList) {
+    return (
+      <div className="flex flex-1 flex-col space-y-6">
+        {header}
+        <EmptyScanCard
+          engineLabel={`${PRODUCT_LABEL[selected.product] ?? selected.product} ${selected.engineVersion}`}
+          caveats={completeness.caveats}
+          sources={dataset.data?.sources ?? []}
+          advisoryCount={dataset.data?.advisoryCount ?? 0}
+          ghsaTokenMissing={ghsaTokenMissing}
+        />
+        <NotScannedList nodes={result.notScanned} />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
-      <HeaderStrip
-        subtitle={subtitle}
-        severityCounts={clusterSeverity(result.nodes)}
-        scopeLabel={result.nodes.length > 1 ? `across ${result.nodes.length} nodes` : null}
-        refreshing={refresh.isPending}
-        refreshError={refreshError}
-        onRefresh={onRefresh}
-      />
+      {header}
       <ScanCaveats caveats={completeness.caveats} />
       {drifted ? (
         <>

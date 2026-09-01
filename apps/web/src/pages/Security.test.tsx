@@ -238,13 +238,15 @@ describe('Security page', () => {
     expect(screen.getByTestId('filter-chip-all')).toHaveTextContent('All 1');
   });
 
-  it('says the table is empty instead of rendering a bare header row', async () => {
+  it('replaces the findings table with a plain empty state when nothing matched', async () => {
     mocks.scan.mockResolvedValue(scanResult({ nodes: [node('1', '8.0.10', [])] }));
     mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
 
     renderPage();
 
-    expect(await screen.findByTestId('findings-empty')).toBeInTheDocument();
+    expect(await screen.findByTestId('empty-scan')).toBeInTheDocument();
+    expect(screen.queryByTestId('filter-chip-all')).not.toBeInTheDocument();
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
   });
 
   it('keeps the ranking the API returned, flagging the known-exploited finding', async () => {
@@ -279,7 +281,9 @@ describe('Security page', () => {
 
     renderPage();
 
-    expect(await screen.findByTestId('verdict-count')).toHaveTextContent('0');
+    expect(await screen.findByTestId('verdict-headline')).toHaveTextContent(
+      'No known vulnerabilities found',
+    );
     expect(screen.queryByTestId('upgrade-banner')).not.toBeInTheDocument();
   });
 

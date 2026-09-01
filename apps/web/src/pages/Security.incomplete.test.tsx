@@ -58,7 +58,7 @@ function precedes(first: Element, second: Element): boolean {
   return (first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
 }
 
-describe('Security page — incomplete scans must never read as an all-clear', () => {
+describe('Security page - incomplete scans must never read as an all-clear', () => {
   it('refuses the all-clear headline when the server marked the scan partial', async () => {
     mocks.scan.mockResolvedValue(
       scanResult({ nodes: [node('1', '8.0.10', [])], partial: true, missingSources: [] }),
@@ -67,9 +67,8 @@ describe('Security page — incomplete scans must never read as an all-clear', (
 
     renderPage();
 
-    expect(await screen.findByTestId('verdict-count')).toHaveTextContent('0');
-    expect(screen.getByTestId('verdict-headline')).not.toHaveTextContent(
-      '0 known CVEs affect this instance',
+    expect(await screen.findByTestId('verdict-headline')).not.toHaveTextContent(
+      'No known vulnerabilities found',
     );
     expect(screen.getByTestId('verdict-headline')).toHaveTextContent(/this scan is incomplete/i);
     expect(screen.getByTestId('scan-caveat-partial')).toBeInTheDocument();
@@ -110,9 +109,8 @@ describe('Security page — incomplete scans must never read as an all-clear', (
 
     renderPage();
 
-    expect(await screen.findByTestId('verdict-count')).toHaveTextContent('0');
-    expect(screen.getByTestId('verdict-headline')).not.toHaveTextContent(
-      '0 known CVEs affect this instance',
+    expect(await screen.findByTestId('verdict-headline')).not.toHaveTextContent(
+      'No known vulnerabilities found',
     );
     expect(screen.getByTestId('verdict-headline')).toHaveTextContent(/this scan is incomplete/i);
 
@@ -131,7 +129,7 @@ describe('Security page — incomplete scans must never read as an all-clear', (
     renderPage();
 
     expect(await screen.findByTestId('verdict-headline')).toHaveTextContent(
-      '0 known CVEs affect this instance',
+      'No known vulnerabilities found',
     );
     expect(screen.queryByTestId('scan-caveat-modules-unknown')).not.toBeInTheDocument();
   });
@@ -160,7 +158,7 @@ describe('Security page — incomplete scans must never read as an all-clear', (
     );
   });
 
-  it('caveats the verdict for unreachable nodes, above the findings, not below them', async () => {
+  it('caveats the verdict for unreachable nodes inside the verdict card, not below the fold', async () => {
     mocks.scan.mockResolvedValue(
       scanResult({
         topology: 'cluster',
@@ -179,10 +177,11 @@ describe('Security page — incomplete scans must never read as an all-clear', (
     expect(caveat).toHaveTextContent('10.0.0.2:6379');
     expect(caveat).toHaveTextContent('auth failed');
     expect(screen.getByTestId('verdict-headline')).not.toHaveTextContent(
-      '0 known CVEs affect this instance',
+      'No known vulnerabilities found',
     );
-    expect(precedes(caveats, screen.getByTestId('verdict-headline'))).toBe(true);
-    expect(precedes(caveats, screen.getByTestId('findings-empty'))).toBe(true);
+    expect(screen.getByTestId('empty-scan')).toContainElement(caveats);
+    expect(precedes(screen.getByTestId('verdict-headline'), caveats)).toBe(true);
+    expect(precedes(caveats, screen.getByTestId('source-dot-ghsa'))).toBe(true);
   });
 
   it('names the skipped source in the verdict caveat, not only in the source strip', async () => {
@@ -206,9 +205,55 @@ describe('Security page — incomplete scans must never read as an all-clear', (
     renderPage();
 
     expect(await screen.findByTestId('verdict-headline')).toHaveTextContent(
-      '0 known CVEs affect this instance',
+      'No known vulnerabilities found',
     );
     expect(screen.queryByTestId('scan-caveats')).not.toBeInTheDocument();
+  });
+
+  it('points at the missing GitHub token when GHSA is the source that dropped out', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({ nodes: [node('1', '8.0.10', [])], partial: true, missingSources: ['ghsa'] }),
+    );
+    mocks.dataset.mockResolvedValue({ ...HEALTHY_DATASET, ghsaAuthenticated: false });
+
+    renderPage();
+
+    expect(await screen.findByTestId('ghsa-token-notice')).toHaveTextContent('CVE_GITHUB_TOKEN');
+  });
+
+  it('does not blame the token when GHSA dropped out with one configured', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({ nodes: [node('1', '8.0.10', [])], partial: true, missingSources: ['ghsa'] }),
+    );
+    mocks.dataset.mockResolvedValue({ ...HEALTHY_DATASET, ghsaAuthenticated: true });
+
+    renderPage();
+
+    await screen.findByTestId('scan-caveat-missing-sources');
+
+    expect(screen.queryByTestId('ghsa-token-notice')).not.toBeInTheDocument();
+  });
+
+  it('does not blame the token when a source other than GHSA dropped out', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({ nodes: [node('1', '8.0.10', [])], partial: true, missingSources: ['nvd'] }),
+    );
+    mocks.dataset.mockResolvedValue({ ...HEALTHY_DATASET, ghsaAuthenticated: false });
+
+    renderPage();
+
+    await screen.findByTestId('scan-caveat-missing-sources');
+
+    expect(screen.queryByTestId('ghsa-token-notice')).not.toBeInTheDocument();
+  });
+
+  it('names the engine product beside the version in the empty state', async () => {
+    mocks.scan.mockResolvedValue(scanResult({ nodes: [node('1', '8.0.10', [])] }));
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('empty-scan')).toHaveTextContent('Valkey 8.0.10 was checked');
   });
 
   it('keeps every per-node reason when the whole cluster was unreachable', async () => {
@@ -255,7 +300,7 @@ describe('Security page — incomplete scans must never read as an all-clear', (
 
     renderPage();
 
-    await screen.findByTestId('verdict-count');
+    await screen.findByTestId('verdict-headline');
 
     const banner = await screen.findByTestId('source-banner');
 
