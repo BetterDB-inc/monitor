@@ -632,26 +632,40 @@ describe('computeDatasetVersion — canonical ordering', () => {
     expect(computeDatasetVersion([{ ...MULTI, cveId: 'CVE-2000-0002' }])).not.toBe(base);
   });
 
-  it('does not change when only display fields change', () => {
+  it('changes when any single rendered field changes', () => {
     const base = computeDatasetVersion([MULTI]);
-    const decorated = computeDatasetVersion([
-      {
-        ...MULTI,
-        aliases: ['GHSA-other', 'GHSA-more'],
-        cwes: ['CWE-787'],
-        references: ['https://elsewhere.example'],
-        sources: [{ source: 'nvd', fields: ['affected', 'summary'] }],
-        summary: 'a completely different summary',
-      },
-    ]);
 
-    expect(base).toBe(decorated);
+    expect(computeDatasetVersion([{ ...MULTI, aliases: ['GHSA-other'] }])).not.toBe(base);
+    expect(computeDatasetVersion([{ ...MULTI, cwes: ['CWE-787'] }])).not.toBe(base);
+    expect(
+      computeDatasetVersion([{ ...MULTI, references: ['https://elsewhere.example'] }]),
+    ).not.toBe(base);
+    expect(
+      computeDatasetVersion([
+        { ...MULTI, sources: [{ source: 'nvd', fields: ['affected', 'summary'] }] },
+      ]),
+    ).not.toBe(base);
+    expect(
+      computeDatasetVersion([{ ...MULTI, summary: 'a completely different summary' }]),
+    ).not.toBe(base);
   });
 
-  it('does not change when only the EPSS score changes', () => {
+  it('changes when only the EPSS score or percentile changes', () => {
     const base = computeDatasetVersion([{ ...MULTI, epssScore: 0.01, epssPercentile: 0.5 }]);
-    const rescored = computeDatasetVersion([{ ...MULTI, epssScore: 0.99, epssPercentile: 0.99 }]);
+    const rescored = computeDatasetVersion([{ ...MULTI, epssScore: 0.99, epssPercentile: 0.5 }]);
+    const repositioned = computeDatasetVersion([
+      { ...MULTI, epssScore: 0.01, epssPercentile: 0.99 },
+    ]);
 
-    expect(base).toBe(rescored);
+    expect(rescored).not.toBe(base);
+    expect(repositioned).not.toBe(base);
+    expect(rescored).not.toBe(repositioned);
+  });
+
+  it('distinguishes an absent optional number from an explicit zero', () => {
+    const absent = computeDatasetVersion([MULTI]);
+    const zeroed = computeDatasetVersion([{ ...MULTI, epssScore: 0 }]);
+
+    expect(absent).not.toBe(zeroed);
   });
 });
