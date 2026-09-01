@@ -93,6 +93,11 @@ const PAGE_STATES: Record<string, PageEmptyState> = {
     description:
       'Connect a database to track end-to-end inference timings across your AI pipeline.',
   },
+  '/security': {
+    headline: 'Know which CVEs reach you.',
+    description:
+      'Connect a Valkey or Redis instance to match its engine and module versions against published advisories - with the gaps named, never hidden.',
+  },
   '/audit': {
     headline: 'Audit every ACL event.',
     description:

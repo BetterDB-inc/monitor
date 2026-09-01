@@ -16,6 +16,28 @@ vi.mock('../api/cve', () => {
   };
 });
 
+vi.mock('../hooks/useConnection', () => {
+  return {
+    useConnection: () => {
+      return {
+        currentConnection: {
+          id: 'conn-1',
+          name: 'local',
+          host: '127.0.0.1',
+          port: 6379,
+          isConnected: true,
+        },
+        connections: [],
+        loading: false,
+        error: null,
+        setConnection: vi.fn(),
+        refreshConnections: vi.fn(),
+        hasNoConnections: false,
+      };
+    },
+  };
+});
+
 function driftResult() {
   return scanResult({
     topology: 'cluster',
@@ -98,6 +120,50 @@ describe('Security page — drift state', () => {
 
     expect(await screen.findByTestId('verdict-count')).toBeInTheDocument();
     expect(screen.queryByTestId('node-list')).not.toBeInTheDocument();
+  });
+
+  it('trusts the drift flag the API returned over counting versions itself', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({
+        topology: 'standalone',
+        drift: false,
+        nodes: [node('1', '8.0.9', [finding('CVE-A')]), node('2', '8.0.4', [finding('CVE-A')])],
+      }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('verdict-count')).toBeInTheDocument();
+    expect(screen.queryByTestId('node-list')).not.toBeInTheDocument();
+  });
+
+  it('enters the drift state on the API flag even when one version is reported', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({
+        topology: 'cluster',
+        drift: true,
+        nodes: [node('1', '8.0.9', [finding('CVE-A')]), node('2', '8.0.9', [finding('CVE-A')])],
+      }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('node-list')).toBeInTheDocument();
+    expect(screen.queryByTestId('verdict-count')).not.toBeInTheDocument();
+  });
+
+  it('marks the selected node as pressed, not by background colour alone', async () => {
+    mocks.scan.mockResolvedValue(driftResult());
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId('node-row-2'));
+
+    expect(screen.getByTestId('node-row-2')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('node-row-1')).toHaveAttribute('aria-pressed', 'false');
   });
 
   it('does not enter the drift state because a node was unreachable', async () => {

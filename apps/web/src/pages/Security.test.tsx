@@ -1,8 +1,15 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import Security from './Security';
-import { HEALTHY_DATASET, finding, node, scanResult } from './__fixtures__/cve';
+import {
+  HEALTHY_DATASET,
+  advisory,
+  finding,
+  node,
+  scanResult,
+  unversionedAdvisory,
+} from './__fixtures__/cve';
 
 const mocks = vi.hoisted(() => {
   return { scan: vi.fn(), dataset: vi.fn(), refresh: vi.fn() };
@@ -13,6 +20,28 @@ vi.mock('../api/cve', () => {
     fetchCveScan: mocks.scan,
     fetchCveDataset: mocks.dataset,
     refreshCveScan: mocks.refresh,
+  };
+});
+
+vi.mock('../hooks/useConnection', () => {
+  return {
+    useConnection: () => {
+      return {
+        currentConnection: {
+          id: 'conn-1',
+          name: 'local',
+          host: '127.0.0.1',
+          port: 6379,
+          isConnected: true,
+        },
+        connections: [],
+        loading: false,
+        error: null,
+        setConnection: vi.fn(),
+        refreshConnections: vi.fn(),
+        hasNoConnections: false,
+      };
+    },
   };
 });
 
@@ -68,13 +97,118 @@ describe('Security page', () => {
     expect(screen.getByTestId('verdict-count')).toHaveTextContent('1');
   });
 
-  it('names the upgrade that clears the most findings', async () => {
+  it('names the upgrade that clears the most findings, not the one that clears fewest', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({
+        nodes: [
+          node('1', '8.0.9', [
+            finding('CVE-A', { fixedIn: '8.0.11' }),
+            finding('CVE-B', { fixedIn: '8.0.11' }),
+            finding('CVE-C', { fixedIn: '8.0.12' }),
+          ]),
+        ],
+      }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    const banner = await screen.findByTestId('upgrade-banner');
+
+    expect(banner).toHaveTextContent('Upgrading to 8.0.11 clears 2 of them.');
+    expect(banner).not.toHaveTextContent('8.0.12');
+  });
+
+  it('reports the severity counts the API returned, not the number of rows', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({
+        nodes: [
+          node('1', '8.0.9', [finding('CVE-A'), finding('CVE-B'), finding('CVE-C')], [], {
+            severityCounts: { low: 0, medium: 1, high: 1, critical: 0 },
+          }),
+        ],
+      }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('verdict-count')).toHaveTextContent('2');
+    expect(screen.getAllByTestId(/finding-row-/)).toHaveLength(3);
+  });
+
+  it('states the exploit probability rather than a dash when EPSS is known', async () => {
     mocks.scan.mockResolvedValue(scanResult());
     mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
 
     renderPage();
 
-    expect(await screen.findByTestId('upgrade-banner')).toHaveTextContent('8.0.10');
+    expect(await screen.findByTestId('finding-row-CVE-2026-63639')).toHaveTextContent('52.8 pct');
+  });
+
+  it('names the module a finding came from so it cannot be read as an engine CVE', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({
+        nodes: [
+          node('1', '8.0.9', [
+            finding('CVE-MOD', { matchedOn: 'module', moduleName: 'search' }),
+            finding('CVE-ENG'),
+          ]),
+        ],
+      }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('finding-scope-CVE-MOD')).toHaveTextContent('module search');
+    expect(screen.getByTestId('finding-scope-CVE-ENG')).toHaveTextContent('engine');
+  });
+
+  it('links each advisory out to its published reference', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({
+        nodes: [
+          node('1', '8.0.9', [
+            finding('CVE-2026-63639', {
+              advisory: advisory('CVE-2026-63639', {
+                references: ['javascript:alert(1)', 'https://github.com/advisories/GHSA-x'],
+              }),
+            }),
+          ]),
+        ],
+      }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    const link = await screen.findByRole('link', { name: 'CVE-2026-63639' });
+
+    expect(link).toHaveAttribute('href', 'https://github.com/advisories/GHSA-x');
+  });
+
+  it('shows one row when a CVE is reported both matched and unversioned', async () => {
+    mocks.scan.mockResolvedValue(
+      scanResult({
+        nodes: [node('1', '8.0.9', [finding('CVE-DUP')], [unversionedAdvisory('CVE-DUP')])],
+      }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findAllByTestId('finding-row-CVE-DUP')).toHaveLength(1);
+    expect(screen.getByTestId('filter-chip-all')).toHaveTextContent('All 1');
+  });
+
+  it('says the table is empty instead of rendering a bare header row', async () => {
+    mocks.scan.mockResolvedValue(scanResult({ nodes: [node('1', '8.0.10', [])] }));
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('findings-empty')).toBeInTheDocument();
   });
 
   it('keeps the ranking the API returned, flagging the known-exploited finding', async () => {
@@ -125,6 +259,65 @@ describe('Security page', () => {
     expect(banner).toHaveTextContent('NVD');
   });
 
+  it('states how old the stored scan is, separately from the advisory dataset age', async () => {
+    const hour = 3_600_000;
+    mocks.scan.mockResolvedValue(
+      scanResult({ scannedAt: Date.now() - 3 * hour, lastCheckedAt: Date.now() - 3 * hour }),
+    );
+    mocks.dataset.mockResolvedValue({ ...HEALTHY_DATASET, refreshedAt: Date.now() - hour });
+
+    renderPage();
+
+    const subtitle = await screen.findByTestId('header-subtitle');
+
+    expect(subtitle).toHaveTextContent('scanned 3h ago');
+    expect(subtitle).toHaveTextContent('advisories refreshed 1h ago');
+  });
+
+  it('distinguishes when a stored scan was produced from when it was last confirmed', async () => {
+    const hour = 3_600_000;
+    mocks.scan.mockResolvedValue(
+      scanResult({ scannedAt: Date.now() - 9 * hour, lastCheckedAt: Date.now() - 2 * hour }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('header-subtitle')).toHaveTextContent(
+      'scanned 9h ago, rechecked 2h ago',
+    );
+  });
+
+  it('says a rescan failed instead of quietly re-enabling the button over stale data', async () => {
+    mocks.scan.mockResolvedValue(scanResult());
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+    mocks.refresh.mockRejectedValue(new Error('connection refused'));
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Rescan' }));
+
+    expect(await screen.findByTestId('rescan-error')).toHaveTextContent('connection refused');
+    expect(screen.getByTestId('verdict-count')).toHaveTextContent('1');
+  });
+
+  it('shows the rescanned result when the rescan succeeds', async () => {
+    mocks.scan.mockResolvedValue(scanResult());
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+    mocks.refresh.mockResolvedValue(
+      scanResult({ nodes: [node('1', '8.0.10', [finding('CVE-A'), finding('CVE-B')])] }),
+    );
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Rescan' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('verdict-count')).toHaveTextContent('2');
+    });
+    expect(screen.queryByTestId('rescan-error')).not.toBeInTheDocument();
+  });
+
   it('lists unreachable nodes with their reason', async () => {
     mocks.scan.mockResolvedValue(
       scanResult({
@@ -137,7 +330,9 @@ describe('Security page', () => {
 
     renderPage();
 
-    expect(await screen.findByText('10.0.0.4:6379')).toBeInTheDocument();
-    expect(screen.getByText(/unreachable/i)).toBeInTheDocument();
+    const list = await screen.findByTestId('not-scanned-list');
+
+    expect(within(list).getByText('10.0.0.4:6379')).toBeInTheDocument();
+    expect(within(list).getByText(/unreachable/i)).toBeInTheDocument();
   });
 });

@@ -11,16 +11,17 @@ interface NodeListProps {
 
 export function NodeList({ nodes, groups, selectedNodeId, onSelect }: NodeListProps) {
   return (
-    <ul data-testid="node-list" className="divide-y rounded-lg border">
+    <ul data-testid="node-list" aria-label="Scanned nodes" className="divide-y rounded-lg border">
       {nodes.map((entry) => {
         const group = groups.get(entry.nodeId);
         const selected = entry.nodeId === selectedNodeId;
 
         return (
-          <li key={entry.nodeId}>
+          <li key={entry.nodeId} aria-current={selected ? 'true' : undefined}>
             <button
               type="button"
               data-testid={`node-row-${entry.nodeId}`}
+              aria-pressed={selected}
               onClick={() => {
                 onSelect(entry.nodeId);
               }}
