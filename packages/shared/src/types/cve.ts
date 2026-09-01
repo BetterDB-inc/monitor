@@ -1,5 +1,10 @@
 export type CveProduct =
-  'redis' | 'valkey' | 'valkey-bloom' | 'valkey-json' | 'valkey-search' | 'redisearch';
+  | 'redis'
+  | 'valkey'
+  | 'valkey-bloom'
+  | 'valkey-json'
+  | 'valkey-search'
+  | 'redisearch';
 
 export type CveSourceId = 'ghsa' | 'nvd' | 'mitre' | 'kev' | 'epss';
 
@@ -10,6 +15,7 @@ export type CveConfidence = 'exact' | 'broad' | 'unversioned';
 export interface BranchRange {
   branch: string;
   vulnerableAtOrBelow: string;
+  vulnerableFrom?: string;
   patchedAt?: string;
 }
 
@@ -55,6 +61,7 @@ export interface ScannedNode {
   product: CveProduct;
   engineVersion: string;
   modules: LoadedModule[];
+  modulesUnknown?: boolean;
   findings: CveFinding[];
   unversioned: Advisory[];
   severityCounts: CveSeverityCounts;

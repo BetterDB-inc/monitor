@@ -38,6 +38,10 @@ interface NvdResponse {
 
 const SEVERITIES: CveSeverity[] = ['low', 'medium', 'high', 'critical'];
 
+const NVD_PAGE_SIZE = 200;
+
+const NVD_MAX_PAGES = 25;
+
 function toSeverity(raw: string | undefined): CveSeverity {
   const lowered = (raw ?? '').toLowerCase();
   const known = SEVERITIES.find((severity) => {
@@ -99,7 +103,21 @@ function toRange(match: NvdCpeMatch): BranchRange | null {
     ? upperBound.raw
     : (decrementPatch(upperBound.raw) ?? upperBound.raw);
 
-  return { branch, vulnerableAtOrBelow };
+  return {
+    branch,
+    vulnerableAtOrBelow,
+    ...(match.versionStartIncluding ? { vulnerableFrom: match.versionStartIncluding } : {}),
+  };
+}
+
+function widestLowerBound(a: BranchRange, b: BranchRange): string | undefined {
+  if (a.vulnerableFrom === undefined || b.vulnerableFrom === undefined) {
+    return undefined;
+  }
+
+  return compareVersions(a.vulnerableFrom, b.vulnerableFrom) <= 0
+    ? a.vulnerableFrom
+    : b.vulnerableFrom;
 }
 
 function collapseByBranch(ranges: BranchRange[]): BranchRange[] {
@@ -107,9 +125,21 @@ function collapseByBranch(ranges: BranchRange[]): BranchRange[] {
 
   for (const range of ranges) {
     const current = highestByBranch.get(range.branch);
-    if (!current || compareVersions(range.vulnerableAtOrBelow, current.vulnerableAtOrBelow) > 0) {
+    if (!current) {
       highestByBranch.set(range.branch, range);
+      continue;
     }
+
+    const highest =
+      compareVersions(range.vulnerableAtOrBelow, current.vulnerableAtOrBelow) > 0 ? range : current;
+    const vulnerableFrom = widestLowerBound(current, range);
+
+    highestByBranch.set(range.branch, {
+      branch: highest.branch,
+      vulnerableAtOrBelow: highest.vulnerableAtOrBelow,
+      ...(vulnerableFrom === undefined ? {} : { vulnerableFrom }),
+      ...(highest.patchedAt ? { patchedAt: highest.patchedAt } : {}),
+    });
   }
 
   return Array.from(highestByBranch.values());
@@ -172,15 +202,14 @@ export class NvdSource implements CveSource {
 
   async fetchAdvisories(): Promise<SourceFetchResult> {
     const advisories: Advisory[] = [];
+    const partialFailures: string[] = [];
 
     for (const entry of NVD_CPES) {
-      const url =
-        'https://services.nvd.nist.gov/rest/json/cves/2.0' +
-        `?virtualMatchString=${entry.cpe}&resultsPerPage=200`;
-      const payload = await fetchJson<NvdResponse>(this.fetchImpl, url);
-
-      for (const item of payload.vulnerabilities ?? []) {
-        advisories.push(toAdvisory(item.cve, entry.product, entry.cpe));
+      const fetched = await this.fetchCpe(entry.cpe, entry.product, advisories);
+      if (fetched.fetchedCount < fetched.totalResults) {
+        partialFailures.push(
+          `${entry.cpe}: fetched ${fetched.fetchedCount} of ${fetched.totalResults} results`,
+        );
       }
     }
 
@@ -192,6 +221,39 @@ export class NvdSource implements CveSource {
         return entry.cpe;
       }).join(', '),
       fetchedAt: Date.now(),
+      ...(partialFailures.length > 0 ? { partialFailures } : {}),
     };
+  }
+
+  private async fetchCpe(
+    cpe: string,
+    product: CveProduct,
+    into: Advisory[],
+  ): Promise<{ fetchedCount: number; totalResults: number }> {
+    let fetchedCount = 0;
+    let totalResults = 0;
+    let pages = 0;
+
+    while (pages < NVD_MAX_PAGES) {
+      const url =
+        'https://services.nvd.nist.gov/rest/json/cves/2.0' +
+        `?virtualMatchString=${cpe}&resultsPerPage=${NVD_PAGE_SIZE}&startIndex=${fetchedCount}`;
+      const payload = await fetchJson<NvdResponse>(this.fetchImpl, url);
+      const page = payload.vulnerabilities ?? [];
+
+      for (const item of page) {
+        into.push(toAdvisory(item.cve, product, cpe));
+      }
+
+      pages += 1;
+      fetchedCount += page.length;
+      totalResults = typeof payload.totalResults === 'number' ? payload.totalResults : fetchedCount;
+
+      if (page.length === 0 || fetchedCount >= totalResults) {
+        break;
+      }
+    }
+
+    return { fetchedCount, totalResults };
   }
 }

@@ -1,12 +1,17 @@
 import { EpssSource } from '../sources/epss.source';
 import { KevSource } from '../sources/kev.source';
 
-const KEV_BODY = {
-  vulnerabilities: [
-    { cveID: 'CVE-2022-0543', vendorProject: 'Redis', product: 'Redis' },
-    { cveID: 'CVE-2025-49844', vendorProject: 'Valkey', product: 'Valkey' },
-  ],
-};
+function kevCatalogue(size: number): { vulnerabilities: Array<{ cveID: string }> } {
+  const filler = Array.from({ length: Math.max(size - 2, 0) }, (_unused, index) => {
+    return { cveID: `CVE-2020-${String(index).padStart(5, '0')}` };
+  });
+
+  return {
+    vulnerabilities: [{ cveID: 'CVE-2022-0543' }, { cveID: 'CVE-2025-49844' }, ...filler],
+  };
+}
+
+const KEV_BODY = kevCatalogue(1500);
 
 const EPSS_BODY = {
   data: [
@@ -29,6 +34,36 @@ describe('KevSource', () => {
 
     expect(entries.get('CVE-2022-0543')).toEqual({ knownExploited: true });
     expect(entries.has('CVE-2026-63639')).toBe(false);
+  });
+
+  it('reports recordCount as matched entries, in the same unit the blanking guard measures', async () => {
+    const result = await new KevSource(fetchStub(KEV_BODY)).enrich([
+      'CVE-2022-0543',
+      'CVE-2026-63639',
+    ]);
+
+    expect(result.entries).toHaveLength(1);
+    expect(result.recordCount).toBe(1);
+  });
+
+  it('rejects a truncated catalogue as a partial failure instead of demoting knownExploited', async () => {
+    const result = await new KevSource(fetchStub(kevCatalogue(3))).enrich([
+      'CVE-2022-0543',
+      'CVE-2025-49844',
+    ]);
+
+    expect(result.entries).toEqual([]);
+    expect(result.recordCount).toBe(0);
+    expect(result.partialFailures).toHaveLength(1);
+    expect(result.partialFailures?.[0]).toContain('sanity floor');
+  });
+
+  it('rejects an entirely empty catalogue rather than grading it ok', async () => {
+    const result = await new KevSource(fetchStub({ vulnerabilities: [] })).enrich([
+      'CVE-2022-0543',
+    ]);
+
+    expect(result.partialFailures).toHaveLength(1);
   });
 });
 
@@ -112,5 +147,33 @@ describe('EpssSource', () => {
     const result = await new EpssSource(stub).enrich(['CVE-2022-0543', 'CVE-2026-21863']);
 
     expect(result.partialFailures).toBeUndefined();
+  });
+
+  it('never lets a malformed id truncate the query string for the rest of its batch', async () => {
+    const stub = fetchStub(EPSS_BODY);
+    await new EpssSource(stub).enrich(['CVE-2022-0543', 'CVE-2026-21863#anchor', 'CVE-2026-21864']);
+    const url = String(stub.mock.calls[0][0]);
+
+    expect(stub).toHaveBeenCalledTimes(1);
+    expect(url).toContain('CVE-2022-0543');
+    expect(url).toContain('CVE-2026-21864');
+    expect(url).not.toContain('#');
+    expect(url).not.toContain('21863');
+  });
+
+  it('records the dropped ids as a partial failure rather than reporting a clean batch', async () => {
+    const stub = fetchStub(EPSS_BODY);
+    const result = await new EpssSource(stub).enrich(['CVE-2022-0543', 'not-a-cve']);
+
+    expect(result.partialFailures).toHaveLength(1);
+    expect(result.partialFailures?.[0]).toContain('malformed CVE id');
+  });
+
+  it('makes no request at all when every id is malformed', async () => {
+    const stub = fetchStub(EPSS_BODY);
+    const result = await new EpssSource(stub).enrich(['../../etc/passwd', 'CVE-20-1']);
+
+    expect(stub).not.toHaveBeenCalled();
+    expect(result.partialFailures).toHaveLength(1);
   });
 });

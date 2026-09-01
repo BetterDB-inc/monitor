@@ -59,6 +59,34 @@ describe('matchRanges', () => {
   it('reports not vulnerable for an empty range list', () => {
     expect(matchRanges('8.0.9', [])).toEqual({ vulnerable: false });
   });
+
+  it('clears a release below the range lower bound', () => {
+    const lowerBounded: BranchRange[] = [
+      { branch: '7.2', vulnerableAtOrBelow: '7.2.8', vulnerableFrom: '7.2.4' },
+    ];
+
+    expect(matchRanges('7.2.3', lowerBounded).vulnerable).toBe(false);
+    expect(matchRanges('7.2.4', lowerBounded).vulnerable).toBe(true);
+    expect(matchRanges('7.2.8', lowerBounded).vulnerable).toBe(true);
+    expect(matchRanges('7.2.9', lowerBounded).vulnerable).toBe(false);
+  });
+
+  it('treats a range with no lower bound as vulnerable all the way down', () => {
+    const openBelow: BranchRange[] = [{ branch: '7.2', vulnerableAtOrBelow: '7.2.8' }];
+
+    expect(matchRanges('7.0.0', openBelow).vulnerable).toBe(false);
+    expect(matchRanges('7.2.0', openBelow).vulnerable).toBe(true);
+  });
+
+  it('still consults the wildcard range when the branch range excludes the version', () => {
+    const mixed: BranchRange[] = [
+      { branch: '8.0', vulnerableAtOrBelow: '8.0.9', vulnerableFrom: '8.0.5' },
+      { branch: '*', vulnerableAtOrBelow: '9.9.9' },
+    ];
+
+    expect(matchRanges('8.0.1', mixed).vulnerable).toBe(true);
+    expect(matchRanges('8.0.7', mixed).vulnerable).toBe(true);
+  });
 });
 
 // Every integer below was read off a live engine with `MODULE LIST` on 2026-09-01

@@ -1,6 +1,8 @@
 import type { EnrichmentEntry } from '@betterdb/shared';
 import {
+  describeRejectedIds,
   fetchJson,
+  partitionCveIds,
   type EnrichmentResult,
   type EnrichmentSource,
   type FetchLike,
@@ -25,10 +27,20 @@ export class EpssSource implements EnrichmentSource {
   async enrich(cveIds: string[]): Promise<EnrichmentResult> {
     const entries: Array<[string, EnrichmentEntry]> = [];
     const partialFailures: string[] = [];
+    const { valid, rejected } = partitionCveIds(cveIds);
 
-    for (let index = 0; index < cveIds.length; index += EPSS_BATCH_SIZE) {
-      const batch = cveIds.slice(index, index + EPSS_BATCH_SIZE);
-      const url = `https://api.first.org/data/v1/epss?cve=${batch.join(',')}`;
+    if (rejected.length > 0) {
+      partialFailures.push(describeRejectedIds(rejected));
+    }
+
+    for (let index = 0; index < valid.length; index += EPSS_BATCH_SIZE) {
+      const batch = valid.slice(index, index + EPSS_BATCH_SIZE);
+      const query = batch
+        .map((cveId) => {
+          return encodeURIComponent(cveId);
+        })
+        .join(',');
+      const url = `https://api.first.org/data/v1/epss?cve=${query}`;
 
       let payload: EpssResponse;
       try {

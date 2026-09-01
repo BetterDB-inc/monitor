@@ -1,6 +1,8 @@
 import type { Advisory, CveProduct } from '@betterdb/shared';
 import {
+  describeRejectedIds,
   fetchJson,
+  partitionCveIds,
   type FetchLike,
   type MitreLikeSource,
   type SourceFetchResult,
@@ -43,8 +45,13 @@ export class MitreSource implements MitreLikeSource {
     const advisories: Advisory[] = [];
     const failures: string[] = [];
     const deadline = Date.now() + budgetMs;
+    const { valid, rejected } = partitionCveIds(cveIds);
 
-    for (const cveId of cveIds) {
+    if (rejected.length > 0) {
+      failures.push(describeRejectedIds(rejected));
+    }
+
+    for (const cveId of valid) {
       if (Date.now() >= deadline) {
         failures.push(`${cveId}: skipped, mitre time budget exceeded`);
         continue;
@@ -53,7 +60,7 @@ export class MitreSource implements MitreLikeSource {
       try {
         const record = await fetchJson<MitreRecord>(
           this.fetchImpl,
-          `https://cveawg.mitre.org/api/cve/${cveId}`,
+          `https://cveawg.mitre.org/api/cve/${encodeURIComponent(cveId)}`,
         );
         const cna = record.containers?.cna;
         const description = cna?.descriptions?.find((entry) => {

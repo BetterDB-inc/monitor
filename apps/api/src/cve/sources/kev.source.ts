@@ -9,6 +9,8 @@ import {
 const KEV_URL =
   'https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json';
 
+const KEV_MIN_CATALOGUE_SIZE = 500;
+
 interface KevResponse {
   vulnerabilities?: Array<{ cveID: string }>;
 }
@@ -25,6 +27,20 @@ export class KevSource implements EnrichmentSource {
         return entry.cveID;
       }),
     );
+
+    if (catalogue.size < KEV_MIN_CATALOGUE_SIZE) {
+      return {
+        source: this.id,
+        entries: [],
+        recordCount: 0,
+        query: KEV_URL,
+        fetchedAt: Date.now(),
+        partialFailures: [
+          `catalogue of ${catalogue.size} entries is below the ${KEV_MIN_CATALOGUE_SIZE} sanity floor`,
+        ],
+      };
+    }
+
     const entries: Array<[string, EnrichmentEntry]> = [];
 
     for (const cveId of cveIds) {
@@ -36,7 +52,7 @@ export class KevSource implements EnrichmentSource {
     return {
       source: this.id,
       entries,
-      recordCount: catalogue.size,
+      recordCount: entries.length,
       query: KEV_URL,
       fetchedAt: Date.now(),
     };

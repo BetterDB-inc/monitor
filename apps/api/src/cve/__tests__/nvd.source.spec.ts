@@ -38,9 +38,21 @@ describe('NvdSource', () => {
     const advisory = await advisoryFor('CVE-2026-21863', 'valkey');
 
     expect(advisory?.confidence).toBe('broad');
-    expect(advisory?.affected).toContainEqual({ branch: '8.0', vulnerableAtOrBelow: '8.0.6' });
-    expect(advisory?.affected).toContainEqual({ branch: '8.1', vulnerableAtOrBelow: '8.1.5' });
-    expect(advisory?.affected).toContainEqual({ branch: '9.0', vulnerableAtOrBelow: '9.0.1' });
+    expect(advisory?.affected).toContainEqual({
+      branch: '8.0',
+      vulnerableAtOrBelow: '8.0.6',
+      vulnerableFrom: '8.0.0',
+    });
+    expect(advisory?.affected).toContainEqual({
+      branch: '8.1',
+      vulnerableAtOrBelow: '8.1.5',
+      vulnerableFrom: '8.1.0',
+    });
+    expect(advisory?.affected).toContainEqual({
+      branch: '9.0',
+      vulnerableAtOrBelow: '9.0.1',
+      vulnerableFrom: '9.0.0',
+    });
     expect(advisory?.affected).toHaveLength(4);
   });
 
@@ -92,7 +104,11 @@ describe('NvdSource', () => {
   it('pins a same-branch interval to its branch rather than leaving it wildcarded', async () => {
     const advisory = await advisoryFor('CVE-2025-21605', 'redis');
 
-    expect(advisory?.affected).toContainEqual({ branch: '7.4', vulnerableAtOrBelow: '7.4.2' });
+    expect(advisory?.affected).toContainEqual({
+      branch: '7.4',
+      vulnerableAtOrBelow: '7.4.2',
+      vulnerableFrom: '7.4.0',
+    });
   });
 
   it('collapses multiple wildcard ranges for one advisory to the single highest bound', async () => {
@@ -100,7 +116,11 @@ describe('NvdSource', () => {
     const wildcards = advisory?.affected.filter((range) => range.branch === '*') ?? [];
 
     expect(wildcards).toHaveLength(1);
-    expect(wildcards[0]).toEqual({ branch: '*', vulnerableAtOrBelow: '7.2.7' });
+    expect(wildcards[0]).toEqual({
+      branch: '*',
+      vulnerableAtOrBelow: '7.2.7',
+      vulnerableFrom: '2.6.0',
+    });
     expect(matchRanges('6.5.0', advisory?.affected ?? []).vulnerable).toBe(true);
   });
 
@@ -165,5 +185,71 @@ describe('NvdSource', () => {
     const advisory = await advisoryFor('CVE-2025-49844', 'redis');
 
     expect(matchRanges('7.2.4', advisory?.affected ?? []).vulnerable).toBe(true);
+  });
+
+  it('keeps versionStartIncluding so a release below the interval is not flagged', async () => {
+    const advisory = await advisoryFor('CVE-2025-21605', 'valkey');
+    const onBranch = advisory?.affected.find((range) => {
+      return range.branch === '7.2';
+    });
+
+    expect(onBranch?.vulnerableFrom).toBe('7.2.4');
+    expect(matchRanges('7.2.3', advisory?.affected ?? []).vulnerable).toBe(false);
+    expect(matchRanges('7.2.0', advisory?.affected ?? []).vulnerable).toBe(false);
+    expect(matchRanges('7.2.4', advisory?.affected ?? []).vulnerable).toBe(true);
+    expect(matchRanges('7.2.8', advisory?.affected ?? []).vulnerable).toBe(true);
+    expect(matchRanges('7.2.9', advisory?.affected ?? []).vulnerable).toBe(false);
+  });
+
+  it('paginates past the first page instead of dropping the rest of a CPE result set', async () => {
+    const page = (startIndex: number): unknown => {
+      return {
+        totalResults: 3,
+        vulnerabilities: [
+          {
+            cve: {
+              id: `CVE-9999-1000${startIndex}`,
+              descriptions: [{ lang: 'en', value: 'paged' }],
+            },
+          },
+        ],
+      };
+    };
+    const stub = jest.fn().mockImplementation(async (url: string) => {
+      const match = /startIndex=(\d+)/.exec(url);
+
+      return { ok: true, status: 200, json: async () => page(Number(match?.[1] ?? 0)) };
+    });
+    const result = await new NvdSource(stub).fetchAdvisories();
+    const redisIds = result.advisories
+      .filter((advisory) => {
+        return advisory.product === 'redis';
+      })
+      .map((advisory) => {
+        return advisory.cveId;
+      });
+
+    expect(redisIds).toEqual(['CVE-9999-10000', 'CVE-9999-10001', 'CVE-9999-10002']);
+    expect(result.partialFailures).toBeUndefined();
+  });
+
+  it('reports a partial failure rather than ok when a page cannot be fetched', async () => {
+    const stub = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => {
+        return { totalResults: 500, vulnerabilities: [] };
+      },
+    });
+    const result = await new NvdSource(stub).fetchAdvisories();
+
+    expect(result.partialFailures).toBeDefined();
+    expect(result.partialFailures?.[0]).toContain('fetched 0 of 500 results');
+  });
+
+  it('does not report a partial failure when every page was fetched', async () => {
+    const result = await new NvdSource(fetchStub(nvdValkey)).fetchAdvisories();
+
+    expect(result.partialFailures).toBeUndefined();
   });
 });

@@ -35,28 +35,46 @@ export function branchOf(version: string): string {
   return segments(version).slice(0, 2).join('.');
 }
 
+function matchRange(version: string, range: BranchRange): VersionMatch {
+  const aboveLowerBound =
+    range.vulnerableFrom === undefined || compareVersions(version, range.vulnerableFrom) >= 0;
+  const belowUpperBound = compareVersions(version, range.vulnerableAtOrBelow) <= 0;
+
+  return {
+    vulnerable: aboveLowerBound && belowUpperBound,
+    ...(range.patchedAt ? { fixedIn: range.patchedAt } : {}),
+  };
+}
+
 export function matchRanges(version: string, ranges: BranchRange[]): VersionMatch {
   const branch = branchOf(version);
   const onBranch = ranges.find((range) => {
     return range.branch === branch;
   });
-
-  if (onBranch) {
-    return {
-      vulnerable: compareVersions(version, onBranch.vulnerableAtOrBelow) <= 0,
-      ...(onBranch.patchedAt ? { fixedIn: onBranch.patchedAt } : {}),
-    };
-  }
-
   const wildcard = ranges.find((range) => {
     return range.branch === WILDCARD_BRANCH;
   });
 
+  if (onBranch) {
+    const match = matchRange(version, onBranch);
+    if (match.vulnerable === true) {
+      return match;
+    }
+  }
+
   if (wildcard) {
-    return {
-      vulnerable: compareVersions(version, wildcard.vulnerableAtOrBelow) <= 0,
-      ...(wildcard.patchedAt ? { fixedIn: wildcard.patchedAt } : {}),
-    };
+    const match = matchRange(version, wildcard);
+    if (match.vulnerable === true) {
+      return match;
+    }
+  }
+
+  if (onBranch) {
+    return { vulnerable: false, ...(onBranch.patchedAt ? { fixedIn: onBranch.patchedAt } : {}) };
+  }
+
+  if (wildcard) {
+    return { vulnerable: false, ...(wildcard.patchedAt ? { fixedIn: wildcard.patchedAt } : {}) };
   }
 
   return { vulnerable: false };

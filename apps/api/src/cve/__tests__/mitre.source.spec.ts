@@ -100,4 +100,20 @@ describe('MitreSource', () => {
 
     expect(result.advisories[0].product).toBe('redis');
   });
+
+  it('never lets a malformed id rewrite the request path, and says so', async () => {
+    const stub = fetchStub(UNRECOGNIZED_PRODUCT_RECORD);
+    const result = await new MitreSource(stub).fetchByIds([
+      '../../../etc/passwd',
+      'CVE-2025-90000',
+    ]);
+    const urls = stub.mock.calls.map((call) => {
+      return String(call[0]);
+    });
+
+    expect(stub).toHaveBeenCalledTimes(1);
+    expect(urls[0]).toBe('https://cveawg.mitre.org/api/cve/CVE-2025-90000');
+    expect(result.partialFailures).toHaveLength(1);
+    expect(result.partialFailures?.[0]).toContain('malformed CVE id');
+  });
 });

@@ -150,12 +150,32 @@ describe('normalizeAdvisories — one CVE affecting two products', () => {
     expect(redis).toBeDefined();
     expect(valkey).toBeDefined();
     expect(redis?.affected).toHaveLength(2);
-    expect(redis?.affected).toContainEqual({ branch: '*', vulnerableAtOrBelow: '7.2.7' });
-    expect(redis?.affected).toContainEqual({ branch: '7.4', vulnerableAtOrBelow: '7.4.2' });
+    expect(redis?.affected).toContainEqual({
+      branch: '*',
+      vulnerableAtOrBelow: '7.2.7',
+      vulnerableFrom: '2.6.0',
+    });
+    expect(redis?.affected).toContainEqual({
+      branch: '7.4',
+      vulnerableAtOrBelow: '7.4.2',
+      vulnerableFrom: '7.4.0',
+    });
     expect(valkey?.affected).toHaveLength(3);
-    expect(valkey?.affected).toContainEqual({ branch: '7.2', vulnerableAtOrBelow: '7.2.8' });
-    expect(valkey?.affected).toContainEqual({ branch: '8.0', vulnerableAtOrBelow: '8.0.2' });
-    expect(valkey?.affected).toContainEqual({ branch: '8.1', vulnerableAtOrBelow: '8.1.0' });
+    expect(valkey?.affected).toContainEqual({
+      branch: '7.2',
+      vulnerableAtOrBelow: '7.2.8',
+      vulnerableFrom: '7.2.4',
+    });
+    expect(valkey?.affected).toContainEqual({
+      branch: '8.0',
+      vulnerableAtOrBelow: '8.0.2',
+      vulnerableFrom: '8.0.0',
+    });
+    expect(valkey?.affected).toContainEqual({
+      branch: '8.1',
+      vulnerableAtOrBelow: '8.1.0',
+      vulnerableFrom: '8.1.0',
+    });
     expect(redis?.affected).not.toContainEqual({ branch: '8.0', vulnerableAtOrBelow: '8.0.2' });
   });
 
