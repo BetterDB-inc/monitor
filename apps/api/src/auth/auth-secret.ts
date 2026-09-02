@@ -27,7 +27,7 @@ export function resolveAuthSecret(env: NodeJS.ProcessEnv, dataDir: string): stri
   }
   mkdirSync(dataDir, { recursive: true });
   const generated = randomBytes(MIN_SECRET_LENGTH).toString('base64url');
-  writeFileSync(file, generated);
+  writeFileSync(file, generated, { mode: 0o600 });
   chmodSync(file, 0o600);
   logger.log(`Generated a new auth secret at ${file}`);
   return generated;
