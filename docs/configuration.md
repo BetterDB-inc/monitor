@@ -173,6 +173,10 @@ This means:
 |----------|----------|---------|-------------|
 | `ENCRYPTION_KEY` | No | - | Master key for encrypting stored connection passwords **and SSH tunnel secrets** (min 16 characters) |
 | `ENCRYPTION_KEK_SALT` | No | `betterdb-kek-salt-v1` | Salt used for key derivation (customize for additional security) |
+| `WORKSPACE_DISABLED` | No | `false` | Run without user control: no login, no roles, no Team page. Existing installs upgrading with the default see a register screen on first load |
+| `AUTH_SECRET` | No | generated | Session signing secret, at least 32 characters. Generated once and stored in `BETTERDB_DATA_DIR/auth-secret` when unset; set it explicitly when running more than one replica |
+| `AUTH_PUBLIC_URL` | No | inferred | Public origin used for session cookies and CSRF origin checks, e.g. `https://monitor.example.com` |
+| `AUTH_BROKER_URL` | No | `https://betterdb.com` | Origin of the BetterDB sign-in broker (used from phase 5) |
 
 **Password Encryption**: When `ENCRYPTION_KEY` is set, all connection passwords are encrypted at rest using envelope encryption (AES-256-GCM). Each password gets a unique encryption key (DEK) that is itself encrypted with a master key (KEK) derived from your `ENCRYPTION_KEY`. The same encryption covers SSH tunnel secrets (SSH password, key passphrase, and inline private keys).
 
