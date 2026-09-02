@@ -29,31 +29,40 @@ function createEsmImport(): EsmImport {
 
 let cached: Promise<BetterAuthModules> | null = null;
 
-export function loadBetterAuthModules(): Promise<BetterAuthModules> {
-  if (cached !== null) {
-    return cached;
-  }
+async function importBetterAuthModules(): Promise<BetterAuthModules> {
   const esmImport = createEsmImport();
-  cached = Promise.all([
+  const [core, memory, migration, api, kysely] = await Promise.all([
     esmImport('better-auth'),
     esmImport('better-auth/adapters/memory'),
     esmImport('better-auth/db/migration'),
     esmImport('better-auth/api'),
     esmImport('kysely'),
-  ]).then(([core, memory, migration, api, kysely]) => {
-    const coreModule = core as BetterAuthCore;
-    const memoryModule = memory as BetterAuthMemory;
-    const migrationModule = migration as BetterAuthMigration;
-    const apiModule = api as BetterAuthApi;
-    const kyselyModule = kysely as KyselyModule;
-    return {
-      betterAuth: coreModule.betterAuth,
-      memoryAdapter: memoryModule.memoryAdapter,
-      getMigrations: migrationModule.getMigrations,
-      createAuthMiddleware: apiModule.createAuthMiddleware,
-      APIError: apiModule.APIError,
-      SqliteDialect: kyselyModule.SqliteDialect,
-    };
+  ]);
+  const coreModule = core as BetterAuthCore;
+  const memoryModule = memory as BetterAuthMemory;
+  const migrationModule = migration as BetterAuthMigration;
+  const apiModule = api as BetterAuthApi;
+  const kyselyModule = kysely as KyselyModule;
+  return {
+    betterAuth: coreModule.betterAuth,
+    memoryAdapter: memoryModule.memoryAdapter,
+    getMigrations: migrationModule.getMigrations,
+    createAuthMiddleware: apiModule.createAuthMiddleware,
+    APIError: apiModule.APIError,
+    SqliteDialect: kyselyModule.SqliteDialect,
+  };
+}
+
+export function loadBetterAuthModules(): Promise<BetterAuthModules> {
+  if (cached !== null) {
+    return cached;
+  }
+  const pending = importBetterAuthModules().catch((error: unknown) => {
+    if (cached === pending) {
+      cached = null;
+    }
+    throw error;
   });
+  cached = pending;
   return cached;
 }
