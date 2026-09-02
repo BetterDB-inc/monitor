@@ -41,6 +41,35 @@ async function build(handle: RawDatabaseHandle): Promise<BetterAuthInstance> {
   return auth;
 }
 
+async function signUpAt(publicOrigin: string | undefined, requestOrigin: string): Promise<string> {
+  const env: NodeJS.ProcessEnv = {};
+  if (publicOrigin !== undefined) {
+    env.AUTH_PUBLIC_URL = publicOrigin;
+  }
+  const auth = await createBetterAuth({
+    handle: { kind: 'memory' },
+    secret: SECRET,
+    config: resolveWorkspaceConfig(env),
+  });
+  const response = await auth.handler(
+    new Request(`${requestOrigin}/auth/sign-up/email`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: requestOrigin,
+        [CLIENT_IP_HEADER]: '10.2.0.1',
+      },
+      body: JSON.stringify({
+        email: 'owner@example.com',
+        password: 'correct horse battery',
+        name: 'Someone',
+      }),
+    }),
+  );
+  expect(response.status).toBe(200);
+  return response.headers.getSetCookie().join('\n');
+}
+
 describe('createBetterAuth', () => {
   it('makes the first sign-up an admin owner and closes sign-up afterwards (memory)', async () => {
     const auth = await build({ kind: 'memory' });
@@ -57,6 +86,19 @@ describe('createBetterAuth', () => {
     const second = await signUp(auth, 'second@example.com', '10.0.0.1');
     expect(second.status).toBe(403);
     expect(await countUsers(auth)).toBe(1);
+  });
+
+  it('leaves the session cookie insecure when no https public url is configured', async () => {
+    const cookies = await signUpAt(undefined, 'http://localhost:5173');
+    expect(cookies).toContain('better-auth.session_token');
+    expect(cookies).not.toContain('__Secure-');
+    expect(cookies).not.toContain('Secure');
+  });
+
+  it('marks the session cookie Secure for an https public url', async () => {
+    const cookies = await signUpAt('https://monitor.example.com', 'https://monitor.example.com');
+    expect(cookies).toContain('better-auth.session_token');
+    expect(cookies).toContain('Secure');
   });
 
   it('rejects an origin that is not trusted even under NODE_ENV=test', async () => {
