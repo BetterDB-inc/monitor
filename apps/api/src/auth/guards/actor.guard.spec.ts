@@ -1,4 +1,8 @@
-import { ExecutionContext, UnauthorizedException } from '@nestjs/common';
+import {
+  ExecutionContext,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import type { Actor } from '@betterdb/shared';
 import type { BetterAuthInstance } from '../better-auth.factory';
 import { CLIENT_IP_HEADER, createBetterAuth } from '../better-auth.factory';
@@ -63,6 +67,7 @@ describe('isPublicPath', () => {
       '/ingest/e',
       '/v1/traces',
       '/version',
+      '/health/live',
     ]) {
       expect(isPublicPath(path)).toBe(true);
     }
@@ -73,14 +78,22 @@ describe('isPublicPath', () => {
       expect(isPublicPath(path)).toBe(false);
     }
   });
+
+  it('does not treat a longer path sharing a prefix string as public', () => {
+    for (const path of ['/healthz-private', '/docsite', '/prometheus-internal', '/versioning']) {
+      expect(isPublicPath(path)).toBe(false);
+    }
+  });
 });
 
 describe('ActorGuard', () => {
   const config: WorkspaceConfig = resolveWorkspaceConfig({ AUTH_PUBLIC_URL: ORIGIN });
   let auth: BetterAuthInstance;
+  let cookie: string;
 
   beforeAll(async () => {
     auth = await createBetterAuth({ handle: { kind: 'memory' }, secret: SECRET, config });
+    cookie = await signedInCookie(auth);
   });
 
   it('allows everything with a null actor when the workspace is disabled', async () => {
@@ -104,9 +117,32 @@ describe('ActorGuard', () => {
     ).rejects.toBeInstanceOf(UnauthorizedException);
   });
 
+  it('fails closed when the workspace is enabled but no auth instance is wired', async () => {
+    const guard = new ActorGuard(config, null);
+    await expect(
+      guard.canActivate(contextFor({ url: '/connections', headers: {} })),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+
+    const publicRequest: FakeRequest = { url: '/auth/sign-in/email', headers: {} };
+    expect(await guard.canActivate(contextFor(publicRequest))).toBe(true);
+    expect(publicRequest.actor).toBeNull();
+  });
+
+  it('treats a malformed session cookie as signed out', async () => {
+    const guard = new ActorGuard(config, auth);
+    const cookieName = cookie.split('=')[0];
+    const request: FakeRequest = {
+      url: '/connections',
+      headers: { cookie: `${cookieName}=garbage.value` },
+    };
+    await expect(guard.canActivate(contextFor(request))).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+    expect(request.actor).toBeNull();
+  });
+
   it('resolves the actor from a session cookie', async () => {
     const guard = new ActorGuard(config, auth);
-    const cookie = await signedInCookie(auth);
     const request: FakeRequest = { url: '/api/connections', headers: { cookie } };
     expect(await guard.canActivate(contextFor(request))).toBe(true);
     expect(request.actor).toEqual(

@@ -4,6 +4,7 @@ import {
   Inject,
   Injectable,
   Optional,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { FastifyRequest } from 'fastify';
@@ -36,15 +37,18 @@ export class ActorGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<RequestWithActor>();
     request.actor = null;
-    if (this.config.enabled === false || this.auth === null) {
+    if (this.config.enabled === false) {
       return true;
+    }
+    if (isPublicPath(request.url)) {
+      return true;
+    }
+    if (this.auth === null) {
+      throw new ServiceUnavailableException('Workspace auth is not initialised');
     }
     const actor = await this.resolveSessionActor(request);
     if (actor !== null) {
       request.actor = actor;
-      return true;
-    }
-    if (isPublicPath(request.url)) {
       return true;
     }
     throw new UnauthorizedException('Sign in required');
