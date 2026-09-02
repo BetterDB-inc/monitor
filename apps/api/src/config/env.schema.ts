@@ -85,6 +85,26 @@ export const envSchema = z
         return trimmed;
       }),
 
+    // Self-hosted user control (workspace auth)
+    WORKSPACE_DISABLED: z
+      .string()
+      .default('false')
+      .transform((value) => {
+        return value === 'true';
+      }),
+    AUTH_SECRET: z.string().min(32).optional(),
+    AUTH_PUBLIC_URL: z
+      .string()
+      .url()
+      .optional()
+      .transform((value) => {
+        if (value === undefined) {
+          return undefined;
+        }
+        return value.replace(/\/+$/, '');
+      }),
+    AUTH_BROKER_URL: z.string().url().default('https://betterdb.com'),
+
     // Anomaly detection
     ANOMALY_DETECTION_ENABLED: z
       .string()
