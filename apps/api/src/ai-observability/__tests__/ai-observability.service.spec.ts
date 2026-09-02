@@ -32,7 +32,8 @@ function makeService(opts: {
     discoverWithClient: jest.fn(async () => opts.instances),
   } as unknown as DiscoveryReaderService;
 
-  const svc = new AiObservabilityService(registry, storage, discovery);
+  const retentionPolicy = { getRetentionMs: () => 7 * 24 * 60 * 60 * 1000 } as any;
+  const svc = new AiObservabilityService(registry, storage, discovery, retentionPolicy);
   const ctx = { connectionId: 'c1', connectionName: 'c1', client, host: 'h', port: 6379 } as any;
   return { svc, ctx, saved, storage };
 }

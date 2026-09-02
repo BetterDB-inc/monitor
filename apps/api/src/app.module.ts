@@ -15,6 +15,7 @@ import { PrometheusModule } from './prometheus/prometheus.module';
 import { OtelTelemetryModule } from './otel-telemetry/otel-telemetry.module';
 import { OtelEventsModule } from './otel-telemetry/otel-events.module';
 import { SettingsModule } from './settings/settings.module';
+import { RetentionModule } from './retention/retention.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { TelemetryModule } from './telemetry/telemetry.module';
 import { VectorSearchModule } from './vector-search/vector-search.module';
@@ -173,6 +174,7 @@ const baseImports = [
   OtelTelemetryModule,
   OtelEventsModule,
   SettingsModule,
+  RetentionModule,
   WebhooksModule,
   McpModule,
   VectorSearchModule,

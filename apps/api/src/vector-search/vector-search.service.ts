@@ -16,6 +16,7 @@ import {
   ConnectionContext,
 } from '../common/services/multi-connection-poller';
 import { PrometheusService } from '../prometheus/prometheus.service';
+import { RetentionPolicyService } from '../retention/retention-policy.service';
 import type { VectorIndexSnapshot } from '@betterdb/shared';
 
 @Injectable()
@@ -31,6 +32,7 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
     connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
     private prometheusService: PrometheusService,
+    private retentionPolicy: RetentionPolicyService,
   ) {
     super(connectionRegistry);
   }
@@ -115,7 +117,7 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
       if (now - lastPrune > this.PRUNE_INTERVAL_MS) {
         this.lastPruneByConnection.set(ctx.connectionId, now);
         await this.storage.pruneOldVectorIndexSnapshots(
-          now - 7 * 24 * 60 * 60 * 1000,
+          now - this.retentionPolicy.getRetentionMs(),
           ctx.connectionId,
         );
       }

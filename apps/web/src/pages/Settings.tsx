@@ -9,7 +9,7 @@ import { AppSettings, SettingsUpdateRequest } from '@betterdb/shared';
 import { Card } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { useQueryClient } from '@tanstack/react-query';
-type SettingsCategory = 'license' | 'audit' | 'clientAnalytics' | 'anomaly' | 'mcpTokens';
+type SettingsCategory = 'license' | 'audit' | 'clientAnalytics' | 'anomaly' | 'dataRetention' | 'mcpTokens';
 
 export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const { currentConnection } = useConnection();
@@ -277,6 +277,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     { id: 'audit', label: 'Audit Trail' },
     { id: 'clientAnalytics', label: 'Client Analytics' },
     { id: 'anomaly', label: 'Anomaly Detection' },
+    ...(!isCloudMode ? [{ id: 'dataRetention' as const, label: 'Data Retention' }] : []),
     ...(isCloudMode ? [{ id: 'mcpTokens' as const, label: 'MCP Tokens' }] : []),
   ];
 
@@ -558,6 +559,44 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                     onChange={(e) => handleInputChange('anomalyPrometheusIntervalMs', parseInt(e.target.value))}
                     className="w-full px-3 py-2 border rounded-md"
                   />
+                </div>
+              </div>
+            )}
+
+            {activeCategory === 'dataRetention' && (
+              <div className="space-y-4">
+                <h2 className="text-xl font-semibold mb-4">Data Retention</h2>
+                <p className="text-sm text-muted-foreground">
+                  Stored monitoring history (slow log and command log entries, client, latency and
+                  memory snapshots, anomaly events, webhook deliveries, monitor captures, AI
+                  observability samples) is kept indefinitely by default. Set a retention window to
+                  have a daily sweep delete history older than that many days and keep the database
+                  from growing forever.
+                </p>
+
+                <div>
+                  <label className="block text-sm font-medium mb-1">Retention window (days)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={formData.localRetentionDays ?? ''}
+                    placeholder="Keep forever"
+                    onChange={(e) => {
+                      const parsed = parseInt(e.target.value, 10);
+                      handleInputChange(
+                        'localRetentionDays',
+                        Number.isFinite(parsed) && parsed >= 1 ? parsed : null,
+                      );
+                    }}
+                    className="w-full px-3 py-2 border rounded-md"
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Leave empty to keep history indefinitely. Can also be seeded with the{' '}
+                    <code className="font-mono">LOCAL_RETENTION_DAYS</code> environment variable.
+                    High-volume stat samples (command/latency stats, vector index snapshots, AI
+                    samples) are always trimmed to this window when set, or to your license tier's
+                    default otherwise.
+                  </p>
                 </div>
               </div>
             )}

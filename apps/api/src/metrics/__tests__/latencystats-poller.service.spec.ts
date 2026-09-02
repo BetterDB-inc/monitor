@@ -2,6 +2,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { LatencystatsPollerService } from '../latencystats-poller.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
+import { RetentionPolicyService } from '../../retention/retention-policy.service';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { ConnectionContext } from '../../common/services/multi-connection-poller';
 
@@ -35,6 +36,10 @@ describe('LatencystatsPollerService', () => {
         {
           provide: ConnectionRegistry,
           useValue: { list: jest.fn().mockReturnValue([]) },
+        },
+        {
+          provide: RetentionPolicyService,
+          useValue: { getRetentionMs: () => 7 * 24 * 60 * 60 * 1000 },
         },
       ],
     }).compile();

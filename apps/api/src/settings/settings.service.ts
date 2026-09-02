@@ -1,4 +1,11 @@
-import { Injectable, Inject, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Inject,
+  OnModuleInit,
+  OnModuleDestroy,
+  Logger,
+  BadRequestException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppSettings, SettingsUpdateRequest, SettingsResponse } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
@@ -74,9 +81,17 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
         10,
       ),
       inferenceSlaConfig: {},
+      localRetentionDays: this.parseLocalRetentionDays(
+        this.configService.get('LOCAL_RETENTION_DAYS'),
+      ),
       createdAt: now,
       updatedAt: now,
     };
+  }
+
+  private parseLocalRetentionDays(raw: string | undefined): number | null {
+    const parsed = parseInt(raw ?? '', 10);
+    return Number.isFinite(parsed) && parsed >= 1 ? parsed : null;
   }
 
   private async initializeFromEnv(): Promise<void> {
@@ -102,6 +117,15 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async updateSettings(updates: SettingsUpdateRequest): Promise<SettingsResponse> {
+    if (updates.localRetentionDays !== undefined && updates.localRetentionDays !== null) {
+      const days = updates.localRetentionDays;
+      if (!Number.isInteger(days) || days < 1) {
+        throw new BadRequestException(
+          'localRetentionDays must be null or a positive integer number of days',
+        );
+      }
+    }
+
     const current = await this.storageClient.getSettings();
 
     if (!current) {

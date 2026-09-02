@@ -166,5 +166,32 @@ describe('Full Flow E2E Test', () => {
       expect(response.body).toHaveProperty('settings');
       expect(response.body.settings).not.toHaveProperty('invalidField');
     });
+
+    it('should persist localRetentionDays and allow clearing it back to keep-forever', async () => {
+      const set = await request(app.getHttpServer())
+        .put('/settings')
+        .set('Content-Type', 'application/json')
+        .send({ localRetentionDays: 30 })
+        .expect(200);
+      expect(set.body.settings.localRetentionDays).toBe(30);
+
+      const get = await request(app.getHttpServer()).get('/settings').expect(200);
+      expect(get.body.settings.localRetentionDays).toBe(30);
+
+      const cleared = await request(app.getHttpServer())
+        .put('/settings')
+        .set('Content-Type', 'application/json')
+        .send({ localRetentionDays: null })
+        .expect(200);
+      expect(cleared.body.settings.localRetentionDays).toBeNull();
+    });
+
+    it('should reject a non-positive localRetentionDays', async () => {
+      await request(app.getHttpServer())
+        .put('/settings')
+        .set('Content-Type', 'application/json')
+        .send({ localRetentionDays: 0 })
+        .expect(400);
+    });
   });
 });

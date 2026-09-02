@@ -832,6 +832,9 @@ export class MemoryAdapter implements StoragePort {
     if (updates.inferenceSlaConfig !== undefined) {
       validUpdates.inferenceSlaConfig = updates.inferenceSlaConfig;
     }
+    if (updates.localRetentionDays !== undefined) {
+      validUpdates.localRetentionDays = updates.localRetentionDays;
+    }
 
     this.settings = {
       ...this.settings,

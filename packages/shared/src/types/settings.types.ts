@@ -17,6 +17,14 @@ export interface AppSettings {
 
   inferenceSlaConfig: InferenceSlaConfig;
 
+  /**
+   * Self-hosted only: age (in days) beyond which stored monitoring history is
+   * deleted by the daily local retention sweep. null disables the sweep and
+   * keeps history indefinitely. Ignored in cloud mode, where the tier-based
+   * retention sweep owns the policy.
+   */
+  localRetentionDays: number | null;
+
   updatedAt: number;
   createdAt: number;
 }

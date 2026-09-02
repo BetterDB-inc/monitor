@@ -228,13 +228,17 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 
 ### Data Retention
 
-Self-hosted BetterDB has **no artificial data retention limits**. Your data retention is determined by:
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `LOCAL_RETENTION_DAYS` | No | - | Self-hosted only: delete stored monitoring history older than this many days (daily sweep). Unset = keep forever |
 
-- Your storage backend capacity (PostgreSQL, SQLite, etc.)
-- Any cleanup jobs or policies you configure on your database
-- Available disk space
+Self-hosted BetterDB keeps stored monitoring history (slow log and command log entries, client/latency/memory snapshots, anomaly events, webhook deliveries, monitor captures, AI observability samples) **indefinitely by default**, bounded only by your storage backend's capacity and disk space.
 
-**BetterDB Cloud** (launching Q1 2026) will offer managed retention policies by tier.
+To keep the database from growing forever, set a retention window — either via `LOCAL_RETENTION_DAYS` or from **Settings → Data Retention** in the UI (the settings page value wins once saved). A daily sweep then deletes history older than the window.
+
+Independently of the sweep, a few high-volume sample stores (command/latency stats samples, vector index snapshots, AI cache samples, OTel spans) are always trimmed automatically — to your configured window if set, otherwise to your license tier's default (Community 7 days, Pro 90, Enterprise 365).
+
+**BetterDB Cloud** applies the tier-based retention policy automatically; the local retention setting has no effect there.
 
 ### License Configuration
 

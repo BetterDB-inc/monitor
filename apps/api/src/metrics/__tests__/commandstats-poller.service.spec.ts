@@ -2,6 +2,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { CommandstatsPollerService } from '../commandstats-poller.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
+import { RetentionPolicyService } from '../../retention/retention-policy.service';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { ConnectionContext } from '../../common/services/multi-connection-poller';
 import { PrometheusService } from '../../prometheus/prometheus.service';
@@ -40,6 +41,10 @@ describe('CommandstatsPollerService', () => {
           useValue: { list: jest.fn().mockReturnValue([]) },
         },
         { provide: PrometheusService, useValue: prometheus },
+        {
+          provide: RetentionPolicyService,
+          useValue: { getRetentionMs: () => 7 * 24 * 60 * 60 * 1000 },
+        },
       ],
     }).compile();
 

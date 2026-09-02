@@ -1,14 +1,9 @@
 import { Injectable, Logger, Inject } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { LicenseService } from '@proprietary/licenses/license.service';
-import { Tier } from '@proprietary/licenses/types';
+import { TIER_RETENTION_DAYS } from '@proprietary/licenses/types';
 import { StoragePort } from '@app/common/interfaces/storage-port.interface';
-
-const RETENTION_DAYS: Record<Tier, number> = {
-  [Tier.community]: 7,
-  [Tier.pro]: 90,
-  [Tier.enterprise]: 365,
-};
+import { runRetentionSweep, totalPruned } from '@app/retention/retention-sweep';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -38,43 +33,13 @@ export class DataRetentionService {
     }
 
     const tier = this.licenseService.getLicenseTier();
-    const retentionDays = RETENTION_DAYS[tier];
+    const retentionDays = TIER_RETENTION_DAYS[tier];
     const cutoff = Date.now() - retentionDays * MS_PER_DAY;
 
     this.logger.log(`Running data retention: tier=${tier}, retentionDays=${retentionDays}, cutoff=${new Date(cutoff).toISOString()}`);
 
-    const results: Record<string, number> = {};
+    const results = await runRetentionSweep(this.storage, cutoff, this.logger);
 
-    const pruneOps: Array<{ name: string; fn: () => Promise<number> }> = [
-      { name: 'slowlog', fn: () => this.storage.pruneOldSlowLogEntries(cutoff) },
-      { name: 'commandlog', fn: () => this.storage.pruneOldCommandLogEntries(cutoff) },
-      { name: 'client_snapshots', fn: () => this.storage.pruneOldClientSnapshots(cutoff) },
-      { name: 'anomaly_events', fn: () => this.storage.pruneOldAnomalyEvents(cutoff) },
-      { name: 'correlated_groups', fn: () => this.storage.pruneOldCorrelatedGroups(cutoff) },
-      { name: 'key_patterns', fn: () => this.storage.pruneOldKeyPatternSnapshots(cutoff) },
-      { name: 'acl_entries', fn: () => this.storage.pruneOldEntries(cutoff) },
-      { name: 'webhook_deliveries', fn: () => this.storage.pruneOldDeliveries(cutoff) },
-      { name: 'latency_snapshots', fn: () => this.storage.pruneOldLatencySnapshots(cutoff) },
-      { name: 'latency_histograms', fn: () => this.storage.pruneOldLatencyHistograms(cutoff) },
-      { name: 'memory_snapshots', fn: () => this.storage.pruneOldMemorySnapshots(cutoff) },
-      { name: 'capture_chunks', fn: () => this.storage.pruneOldCaptureChunks(cutoff) },
-      { name: 'capture_sessions', fn: () => this.storage.pruneOldCaptureSessions(cutoff) },
-      { name: 'capture_triggers', fn: () => this.storage.pruneOldCaptureTriggers(cutoff) },
-      { name: 'scheduled_captures', fn: () => this.storage.pruneOldScheduledCaptures(cutoff) },
-      { name: 'ai_cache_samples', fn: () => this.storage.pruneOldAiCacheSamples(cutoff) },
-      { name: 'otel_spans', fn: () => this.storage.pruneOldOtelSpans(cutoff) },
-    ];
-
-    for (const op of pruneOps) {
-      try {
-        results[op.name] = await op.fn();
-      } catch (err) {
-        this.logger.error(`Failed to prune ${op.name}:`, err);
-        results[op.name] = -1;
-      }
-    }
-
-    const total = Object.values(results).filter(v => v > 0).reduce((a, b) => a + b, 0);
-    this.logger.log(`Retention complete: ${total} total rows pruned — ${JSON.stringify(results)}`);
+    this.logger.log(`Retention complete: ${totalPruned(results)} total rows pruned — ${JSON.stringify(results)}`);
   }
 }
