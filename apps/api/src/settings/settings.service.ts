@@ -52,6 +52,16 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     return this.cachedSettings || this.buildSettingsFromEnv();
   }
 
+  /**
+   * The cached persisted settings, or null before the first cache load.
+   * Unlike getCachedSettings() this never falls back to the env-derived
+   * defaults — callers that must not act on unconfirmed values (e.g. data
+   * deletion) use this and treat null as "not yet known".
+   */
+  getLoadedSettings(): AppSettings | null {
+    return this.cachedSettings;
+  }
+
   private buildSettingsFromEnv(): AppSettings {
     const now = Date.now();
     return {

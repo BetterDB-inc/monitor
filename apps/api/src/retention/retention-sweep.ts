@@ -31,6 +31,12 @@ export async function runRetentionSweep(
     { name: 'scheduled_captures', fn: () => storage.pruneOldScheduledCaptures(cutoff) },
     { name: 'ai_cache_samples', fn: () => storage.pruneOldAiCacheSamples(cutoff) },
     { name: 'otel_spans', fn: () => storage.pruneOldOtelSpans(cutoff) },
+    // The sample stores are also trimmed hourly by their pollers, but only for
+    // connections that are registered and reachable — the sweep is what
+    // reclaims rows left behind by removed or unreachable connections.
+    { name: 'command_stats_samples', fn: () => storage.pruneOldCommandStatsSamples(cutoff) },
+    { name: 'latency_stats_samples', fn: () => storage.pruneOldLatencyStatsSamples(cutoff) },
+    { name: 'vector_index_snapshots', fn: () => storage.pruneOldVectorIndexSnapshots(cutoff) },
   ];
 
   const results: Record<string, number> = {};

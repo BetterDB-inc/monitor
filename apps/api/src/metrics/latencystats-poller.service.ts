@@ -128,7 +128,7 @@ export class LatencystatsPollerService extends MultiConnectionPoller implements 
       capturedAt: now,
     });
 
-    const retentionMs = this.retentionPolicy.getRetentionMs();
+    const retentionMs = this.retentionPolicy.getSampleRetentionMs();
     const lastPrune = this.lastPruneByConnection.get(ctx.connectionId) ?? 0;
     if (retentionMs !== null && now - lastPrune > this.PRUNE_INTERVAL_MS) {
       this.lastPruneByConnection.set(ctx.connectionId, now);

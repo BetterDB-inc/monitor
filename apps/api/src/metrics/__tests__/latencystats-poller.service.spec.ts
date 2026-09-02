@@ -39,7 +39,7 @@ describe('LatencystatsPollerService', () => {
         },
         {
           provide: RetentionPolicyService,
-          useValue: { getRetentionMs: () => 7 * 24 * 60 * 60 * 1000 },
+          useValue: { getSampleRetentionMs: () => 7 * 24 * 60 * 60 * 1000 },
         },
       ],
     }).compile();

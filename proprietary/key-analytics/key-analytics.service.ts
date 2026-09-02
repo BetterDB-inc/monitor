@@ -11,7 +11,7 @@ import {
 } from '@app/common/services/multi-connection-poller';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { LicenseService } from '@proprietary/licenses/license.service';
-import { Tier } from '@proprietary/licenses/types';
+import { RetentionPolicyService } from '@app/retention/retention-policy.service';
 import { KeySizeDistribution, parseKeySizeDistribution, KEY_DETAILS_TOP_N } from '@betterdb/shared';
 import { rankCompositeKeys } from './composite-key-ranker';
 import { randomUUID } from 'crypto';
@@ -46,13 +46,6 @@ function dedupeByKeyMaxMemory(entries: HotKeyEntry[]): HotKeyEntry[] {
   return Array.from(byKey.values());
 }
 
-/** Retention in days per tier. null = keep indefinitely. */
-const TIER_RETENTION_DAYS: Record<Tier, number | null> = {
-  [Tier.community]: 7,
-  [Tier.pro]: 30,
-  [Tier.enterprise]: null,
-};
-
 @Injectable()
 export class KeyAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(KeyAnalyticsService.name);
@@ -67,6 +60,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly license: LicenseService,
+    private readonly retentionPolicy: RetentionPolicyService,
   ) {
     super(connectionRegistry);
     this.sampleSize = parseInt(process.env.KEY_ANALYTICS_SAMPLE_SIZE || '10000', 10);
@@ -96,18 +90,20 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
 
   private async pruneOldData(): Promise<void> {
     try {
-      const retentionDays = TIER_RETENTION_DAYS[this.license.getLicenseTier()];
-      if (retentionDays === null) {
-        this.logger.debug('Key Analytics prune skipped: unlimited retention (enterprise tier)');
+      // Same policy as everything else: tier window in cloud, the operator's
+      // configured window (or nothing) on self-hosted.
+      const retentionMs = this.retentionPolicy.getRetentionMs();
+      if (retentionMs === null) {
+        this.logger.debug('Key Analytics prune skipped: no retention window configured');
         return;
       }
-      const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+      const cutoff = Date.now() - retentionMs;
       const [deletedSnapshots, deletedHotKeys] = await Promise.all([
         this.storage.pruneOldKeyPatternSnapshots(cutoff),
         this.storage.pruneOldHotKeys(cutoff),
       ]);
       this.logger.log(
-        `Key Analytics prune (${this.license.getLicenseTier()} tier, ${retentionDays}d retention): removed ${deletedSnapshots} pattern snapshots, ${deletedHotKeys} hot key entries older than ${new Date(cutoff).toISOString()}`,
+        `Key Analytics prune (${this.license.getLicenseTier()} tier, ${retentionMs / (24 * 60 * 60 * 1000)}d retention): removed ${deletedSnapshots} pattern snapshots, ${deletedHotKeys} hot key entries older than ${new Date(cutoff).toISOString()}`,
       );
     } catch (err) {
       this.logger.error(`Key Analytics prune failed: ${err instanceof Error ? err.message : err}`);

@@ -134,7 +134,7 @@ describe('OTLP pipeline (integration, MemoryAdapter)', () => {
       fakeRegistry(),
       storage,
       {} as any,
-      { getRetentionMs: () => 7 * 24 * 60 * 60 * 1000 } as any,
+      { getSampleRetentionMs: () => 7 * 24 * 60 * 60 * 1000 } as any,
     );
     const traces = await storage.getOtelTraces({});
     expect(traces).toHaveLength(1);

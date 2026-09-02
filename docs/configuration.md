@@ -230,11 +230,11 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `LOCAL_RETENTION_DAYS` | No | - | Self-hosted only: delete stored monitoring history older than this many days (daily sweep). Unset = keep forever |
+| `LOCAL_RETENTION_DAYS` | No | - | Self-hosted only: days of monitoring history to keep (daily sweep). Seeds the setting when the settings row is first created; unset = keep forever |
 
 Self-hosted BetterDB keeps stored monitoring history (slow log and command log entries, client/latency/memory snapshots, anomaly events, webhook deliveries, monitor captures, AI observability samples) **indefinitely by default**, bounded only by your storage backend's capacity and disk space.
 
-To keep the database from growing forever, set a retention window — either via `LOCAL_RETENTION_DAYS` or from **Settings → Data Retention** in the UI (the settings page value wins once saved). A daily sweep then deletes history older than the window, and the high-volume sample stores (command/latency stats samples, vector index snapshots, AI cache samples, OTel spans) are additionally trimmed to the same window on an hourly cycle. Nothing is deleted while the window is unset.
+To keep the database from growing forever, set a retention window from **Settings → Data Retention** in the UI. On a fresh install the window can also be seeded with `LOCAL_RETENTION_DAYS` — the env var applies only when the settings row is first created; after that the settings page owns the value, so clearing it there sticks even if the env var stays set. A daily sweep then deletes history older than the window, and the high-volume sample stores (command/latency stats samples, vector index snapshots, AI cache samples, OTel spans) are additionally trimmed to the same window on an hourly cycle. Nothing is deleted while the window is unset.
 
 **BetterDB Cloud** applies the tier-based retention policy (Community 7 days, Pro 90, Enterprise 365) automatically; the local retention setting has no effect there.
 

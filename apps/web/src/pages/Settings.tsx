@@ -24,6 +24,11 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const [formData, setFormData] = useState<Partial<AppSettings>>({});
   const [hasChanges, setHasChanges] = useState(false);
 
+  // Raw text of the retention input so invalid entries stay visible with an
+  // error instead of silently collapsing to "keep forever".
+  const [retentionInput, setRetentionInput] = useState('');
+  const [retentionError, setRetentionError] = useState<string | null>(null);
+
   // License state
   const [activateKey, setActivateKey] = useState('');
   const [activating, setActivating] = useState(false);
@@ -60,6 +65,8 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
       setHasChanges(false);
+      setRetentionInput(response.settings.localRetentionDays?.toString() ?? '');
+      setRetentionError(null);
     } catch (error) {
       console.error('Failed to load settings:', error);
     } finally {
@@ -92,6 +99,8 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
       setHasChanges(false);
+      setRetentionInput(response.settings.localRetentionDays?.toString() ?? '');
+      setRetentionError(null);
     } catch (error) {
       console.error('Failed to save settings:', error);
       alert('Failed to save settings. Please try again.');
@@ -104,6 +113,8 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     if (settings) {
       setFormData(settings);
       setHasChanges(false);
+      setRetentionInput(settings.localRetentionDays?.toString() ?? '');
+      setRetentionError(null);
     }
   };
 
@@ -120,6 +131,8 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
       setHasChanges(false);
+      setRetentionInput(response.settings.localRetentionDays?.toString() ?? '');
+      setRetentionError(null);
     } catch (error) {
       console.error('Failed to reset settings:', error);
       alert('Failed to reset settings. Please try again.');
@@ -579,24 +592,39 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                   <input
                     type="number"
                     min={1}
-                    value={formData.localRetentionDays ?? ''}
+                    value={retentionInput}
                     placeholder="Keep forever"
                     onChange={(e) => {
+                      const raw = e.target.value;
+                      setRetentionInput(raw);
+                      if (raw.trim() === '') {
+                        setRetentionError(null);
+                        handleInputChange('localRetentionDays', null);
+                        return;
+                      }
                       // valueAsNumber understands everything a number input
                       // accepts (e.g. "1e2" is 100, not parseInt's 1).
                       const parsed = e.currentTarget.valueAsNumber;
-                      handleInputChange(
-                        'localRetentionDays',
-                        Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : null,
-                      );
+                      if (Number.isFinite(parsed) && parsed >= 1) {
+                        setRetentionError(null);
+                        handleInputChange('localRetentionDays', Math.floor(parsed));
+                      } else {
+                        setRetentionError(
+                          'Enter a whole number of days (1 or more), or leave empty to keep history forever.',
+                        );
+                      }
                     }}
                     className="w-full px-3 py-2 border rounded-md"
                   />
+                  {retentionError && (
+                    <p className="text-sm text-destructive mt-1">{retentionError}</p>
+                  )}
                   <p className="text-xs text-muted-foreground mt-1">
-                    Leave empty to keep history indefinitely. Can also be seeded with the{' '}
-                    <code className="font-mono">LOCAL_RETENTION_DAYS</code> environment variable.
-                    High-volume stat samples (command/latency stats, vector index snapshots, AI
-                    samples) are additionally trimmed to this window on an hourly cycle.
+                    Leave empty to keep history indefinitely. On a fresh install the{' '}
+                    <code className="font-mono">LOCAL_RETENTION_DAYS</code> environment variable
+                    seeds this value; afterwards this page owns it. High-volume stat samples
+                    (command/latency stats, vector index snapshots, AI samples) are additionally
+                    trimmed to this window on an hourly cycle.
                   </p>
                 </div>
               </div>
@@ -738,7 +766,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
               <div className="flex items-center gap-3 mt-6 pt-6 border-t">
                 <button
                   onClick={handleSave}
-                  disabled={!hasChanges || saving}
+                  disabled={!hasChanges || saving || retentionError !== null}
                   className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed"
                 >
                   {saving ? 'Saving...' : 'Save Changes'}

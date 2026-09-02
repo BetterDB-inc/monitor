@@ -5,6 +5,12 @@ import { SettingsService } from '../settings/settings.service';
 
 export const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
+// Hard cap for the high-volume sample stores (command/latency stats samples,
+// vector index snapshots, AI samples) in cloud deployments. These tables gain
+// rows per connection per poll tick, so they keep the tight window they have
+// always had instead of the tier's analytics-history window.
+const CLOUD_SAMPLE_RETENTION_DAYS = 7;
+
 /**
  * Resolves the effective retention window for stored monitoring history.
  *
@@ -26,7 +32,13 @@ export class RetentionPolicyService {
    */
   getLocalRetentionDays(): number | null {
     if (process.env.CLOUD_MODE === 'true') return null;
-    const days = this.settingsService.getCachedSettings().localRetentionDays;
+    // Only the persisted settings count. The env-fallback view that
+    // getCachedSettings() serves before the first cache load could resurrect
+    // a window the operator explicitly cleared in the UI; until real settings
+    // are loaded we simply don't prune.
+    const settings = this.settingsService.getLoadedSettings();
+    if (!settings) return null;
+    const days = settings.localRetentionDays;
     return typeof days === 'number' && Number.isFinite(days) && days >= 1
       ? Math.floor(days)
       : null;
@@ -47,5 +59,17 @@ export class RetentionPolicyService {
   getRetentionMs(): number | null {
     const days = this.getRetentionDays();
     return days === null ? null : days * MS_PER_DAY;
+  }
+
+  /**
+   * Window for the high-volume sample stores. Cloud keeps its longstanding
+   * 7-day cap regardless of tier; self-hosted follows the operator's window
+   * (null = keep forever, like everything else).
+   */
+  getSampleRetentionMs(): number | null {
+    if (process.env.CLOUD_MODE === 'true') {
+      return CLOUD_SAMPLE_RETENTION_DAYS * MS_PER_DAY;
+    }
+    return this.getRetentionMs();
   }
 }

@@ -95,7 +95,7 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
   /** Local prune for self-hosted, only when a window is configured (cloud uses the tier-based sweep). */
   private async maybePruneLocally(now: number): Promise<void> {
     if (process.env.CLOUD_MODE === 'true') return;
-    const retentionMs = this.retentionPolicy.getRetentionMs();
+    const retentionMs = this.retentionPolicy.getSampleRetentionMs();
     if (retentionMs === null) return;
     if (now - this.lastPruneAt <= this.PRUNE_INTERVAL_MS) return;
     this.lastPruneAt = now;

@@ -29,6 +29,9 @@ describe('LocalRetentionService', () => {
       pruneOldScheduledCaptures: jest.fn().mockResolvedValue(0),
       pruneOldAiCacheSamples: jest.fn().mockResolvedValue(0),
       pruneOldOtelSpans: jest.fn().mockResolvedValue(0),
+      pruneOldCommandStatsSamples: jest.fn().mockResolvedValue(0),
+      pruneOldLatencyStatsSamples: jest.fn().mockResolvedValue(0),
+      pruneOldVectorIndexSnapshots: jest.fn().mockResolvedValue(0),
     };
 
     jest.spyOn(Date, 'now').mockReturnValue(NOW);

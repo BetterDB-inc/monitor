@@ -43,7 +43,7 @@ describe('CommandstatsPollerService', () => {
         { provide: PrometheusService, useValue: prometheus },
         {
           provide: RetentionPolicyService,
-          useValue: { getRetentionMs: () => 7 * 24 * 60 * 60 * 1000 },
+          useValue: { getSampleRetentionMs: () => 7 * 24 * 60 * 60 * 1000 },
         },
       ],
     }).compile();
@@ -62,7 +62,7 @@ describe('CommandstatsPollerService', () => {
   });
 
   it('does not prune when no retention window applies', async () => {
-    (service as any).retentionPolicy = { getRetentionMs: () => null };
+    (service as any).retentionPolicy = { getSampleRetentionMs: () => null };
 
     const client = clientWithCommandstats({
       'cmdstat_get': 'calls=100,usec=500',

@@ -13,6 +13,7 @@ describe('KeyAnalyticsService.getLargestKeys', () => {
       { list: jest.fn().mockReturnValue([]) } as unknown as ConnectionRegistry,
       storage as unknown as StoragePort,
       { hasFeature: jest.fn().mockReturnValue(true) } as unknown as LicenseService,
+      { getRetentionMs: jest.fn().mockReturnValue(null) } as any,
     );
   }
 
