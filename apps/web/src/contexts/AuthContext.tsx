@@ -13,6 +13,7 @@ import { CurrentUser, workspaceApi } from '../api/workspace';
 
 export interface AuthState {
   loading: boolean;
+  unavailable: boolean;
   mode: WorkspaceMode;
   bootstrapped: boolean;
   user: CurrentUser | null;
@@ -27,6 +28,7 @@ const noop = async (): Promise<void> => {
 
 const AuthContext = createContext<AuthState>({
   loading: true,
+  unavailable: false,
   mode: 'disabled',
   bootstrapped: false,
   user: null,
@@ -37,13 +39,16 @@ const AuthContext = createContext<AuthState>({
 
 export function AuthProvider({ children }: { children: ReactNode }): ReactElement {
   const [loading, setLoading] = useState(true);
+  const [unavailable, setUnavailable] = useState(false);
   const [mode, setMode] = useState<WorkspaceMode>('disabled');
   const [bootstrapped, setBootstrapped] = useState(false);
   const [user, setUser] = useState<CurrentUser | null>(null);
 
   const refresh = useCallback(async (): Promise<void> => {
+    setLoading(true);
     try {
       const status = await workspaceApi.getStatus();
+      setUnavailable(false);
       setMode(status.mode);
       setBootstrapped(status.bootstrapped);
       if (status.enabled === false || status.bootstrapped === false) {
@@ -56,8 +61,7 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
         setUser(null);
       }
     } catch {
-      setMode('disabled');
-      setBootstrapped(false);
+      setUnavailable(true);
       setUser(null);
     } finally {
       setLoading(false);
@@ -77,8 +81,17 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
   }, [refresh]);
 
   const value = useMemo<AuthState>(() => {
-    return { loading, mode, bootstrapped, user, isCloud: mode === 'cloud', refresh, signOut };
-  }, [loading, mode, bootstrapped, user, refresh, signOut]);
+    return {
+      loading,
+      unavailable,
+      mode,
+      bootstrapped,
+      user,
+      isCloud: mode === 'cloud',
+      refresh,
+      signOut,
+    };
+  }, [loading, unavailable, mode, bootstrapped, user, refresh, signOut]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
