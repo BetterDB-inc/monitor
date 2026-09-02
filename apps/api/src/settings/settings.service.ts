@@ -90,8 +90,12 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private parseLocalRetentionDays(raw: string | undefined): number | null {
-    const parsed = parseInt(raw ?? '', 10);
-    return Number.isFinite(parsed) && parsed >= 1 ? parsed : null;
+    // Strict whole-token match: parseInt would accept "30days" or truncate
+    // "1.5", silently activating a sweep window the operator never asked for.
+    const value = raw?.trim() ?? '';
+    if (!/^\d+$/.test(value)) return null;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : null;
   }
 
   private async initializeFromEnv(): Promise<void> {

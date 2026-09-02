@@ -234,11 +234,9 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 
 Self-hosted BetterDB keeps stored monitoring history (slow log and command log entries, client/latency/memory snapshots, anomaly events, webhook deliveries, monitor captures, AI observability samples) **indefinitely by default**, bounded only by your storage backend's capacity and disk space.
 
-To keep the database from growing forever, set a retention window — either via `LOCAL_RETENTION_DAYS` or from **Settings → Data Retention** in the UI (the settings page value wins once saved). A daily sweep then deletes history older than the window.
+To keep the database from growing forever, set a retention window — either via `LOCAL_RETENTION_DAYS` or from **Settings → Data Retention** in the UI (the settings page value wins once saved). A daily sweep then deletes history older than the window, and the high-volume sample stores (command/latency stats samples, vector index snapshots, AI cache samples, OTel spans) are additionally trimmed to the same window on an hourly cycle. Nothing is deleted while the window is unset.
 
-Independently of the sweep, a few high-volume sample stores (command/latency stats samples, vector index snapshots, AI cache samples, OTel spans) are always trimmed automatically — to your configured window if set, otherwise to your license tier's default (Community 7 days, Pro 90, Enterprise 365).
-
-**BetterDB Cloud** applies the tier-based retention policy automatically; the local retention setting has no effect there.
+**BetterDB Cloud** applies the tier-based retention policy (Community 7 days, Pro 90, Enterprise 365) automatically; the local retention setting has no effect there.
 
 ### License Configuration
 

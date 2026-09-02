@@ -31,9 +31,10 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
   private readonly pollIntervalMs: number;
 
   // Self-hosted deployments have no cloud retention cron, so the poller trims
-  // its own history locally at the effective retention window (operator
-  // override, else the license tier's default). In CLOUD_MODE the tier-based
-  // data-retention sweep owns retention, so the local prune is skipped there.
+  // its own history locally when (and only when) the operator has configured
+  // a retention window — unset means keep forever. In CLOUD_MODE the
+  // tier-based data-retention sweep owns retention, so the local prune is
+  // skipped there.
   private readonly PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
   private lastPruneAt = 0;
 
@@ -91,12 +92,14 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
     }
   }
 
-  /** Local prune for self-hosted at the effective window (cloud uses the tier-based sweep). */
+  /** Local prune for self-hosted, only when a window is configured (cloud uses the tier-based sweep). */
   private async maybePruneLocally(now: number): Promise<void> {
     if (process.env.CLOUD_MODE === 'true') return;
+    const retentionMs = this.retentionPolicy.getRetentionMs();
+    if (retentionMs === null) return;
     if (now - this.lastPruneAt <= this.PRUNE_INTERVAL_MS) return;
     this.lastPruneAt = now;
-    const cutoff = now - this.retentionPolicy.getRetentionMs();
+    const cutoff = now - retentionMs;
     try {
       await this.storage.pruneOldAiCacheSamples(cutoff);
     } catch (err) {

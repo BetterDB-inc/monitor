@@ -76,9 +76,10 @@ export const TIER_FEATURES: Record<Tier, Feature[]> = {
 
 /**
  * Canonical per-tier retention window for stored monitoring history, in days.
- * The cloud retention sweep and self-hosted feature-level pruning both derive
- * their cutoffs from this map; self-hosted operators can override the window
- * via the `localRetentionDays` app setting (or `LOCAL_RETENTION_DAYS` env var).
+ * Applies to cloud deployments only (the nightly sweep and feature-level
+ * pruning derive their cutoffs from it). Self-hosted retention is governed
+ * solely by the `localRetentionDays` app setting (or `LOCAL_RETENTION_DAYS`
+ * env var) — unset means keep forever.
  */
 export const TIER_RETENTION_DAYS: Record<Tier, number> = {
   [Tier.community]: 7,

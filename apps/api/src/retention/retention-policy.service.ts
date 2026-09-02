@@ -8,10 +8,10 @@ export const MS_PER_DAY = 24 * 60 * 60 * 1000;
 /**
  * Resolves the effective retention window for stored monitoring history.
  *
- * Self-hosted: the operator-configured `localRetentionDays` setting (seeded
- * from the LOCAL_RETENTION_DAYS env var) wins when set; otherwise the license
- * tier's default window applies. Cloud: always the tier default — operators
- * cannot override the managed policy.
+ * Cloud: always the license tier's window (7/90/365) — the managed policy,
+ * operators cannot override it. Self-hosted: the operator-configured
+ * `localRetentionDays` setting (seeded from the LOCAL_RETENTION_DAYS env var)
+ * when set, otherwise null — nothing is deleted by default.
  */
 @Injectable()
 export class RetentionPolicyService {
@@ -32,15 +32,20 @@ export class RetentionPolicyService {
       : null;
   }
 
-  /** Effective window for feature-level pruning: operator override, else the license tier's default. */
-  getRetentionDays(): number {
-    const local = this.getLocalRetentionDays();
-    if (local !== null) return local;
-    const tier = this.licenseService?.getLicenseTier() ?? Tier.community;
-    return TIER_RETENTION_DAYS[tier];
+  /**
+   * Effective window for feature-level pruning, or null when nothing should
+   * be pruned (self-hosted with no window configured).
+   */
+  getRetentionDays(): number | null {
+    if (process.env.CLOUD_MODE === 'true') {
+      const tier = this.licenseService?.getLicenseTier() ?? Tier.community;
+      return TIER_RETENTION_DAYS[tier];
+    }
+    return this.getLocalRetentionDays();
   }
 
-  getRetentionMs(): number {
-    return this.getRetentionDays() * MS_PER_DAY;
+  getRetentionMs(): number | null {
+    const days = this.getRetentionDays();
+    return days === null ? null : days * MS_PER_DAY;
   }
 }

@@ -113,13 +113,11 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
       );
 
       const now = Date.now();
+      const retentionMs = this.retentionPolicy.getRetentionMs();
       const lastPrune = this.lastPruneByConnection.get(ctx.connectionId) ?? 0;
-      if (now - lastPrune > this.PRUNE_INTERVAL_MS) {
+      if (retentionMs !== null && now - lastPrune > this.PRUNE_INTERVAL_MS) {
         this.lastPruneByConnection.set(ctx.connectionId, now);
-        await this.storage.pruneOldVectorIndexSnapshots(
-          now - this.retentionPolicy.getRetentionMs(),
-          ctx.connectionId,
-        );
+        await this.storage.pruneOldVectorIndexSnapshots(now - retentionMs, ctx.connectionId);
       }
     } catch (error) {
       this.logger.error(

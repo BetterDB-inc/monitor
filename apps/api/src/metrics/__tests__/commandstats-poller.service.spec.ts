@@ -61,6 +61,25 @@ describe('CommandstatsPollerService', () => {
     expect(storage.saveCommandStatsSamples).not.toHaveBeenCalled();
   });
 
+  it('does not prune when no retention window applies', async () => {
+    (service as any).retentionPolicy = { getRetentionMs: () => null };
+
+    const client = clientWithCommandstats({
+      'cmdstat_get': 'calls=100,usec=500',
+    });
+
+    await (service as any).pollConnection(makeCtx(client));
+
+    client.getInfo.mockResolvedValueOnce({
+      commandstats: { 'cmdstat_get': 'calls=150,usec=800' },
+    });
+
+    await (service as any).pollConnection(makeCtx(client));
+
+    expect(storage.saveCommandStatsSamples).toHaveBeenCalledTimes(1);
+    expect(storage.pruneOldCommandStatsSamples).not.toHaveBeenCalled();
+  });
+
   it('persists deltas on the second poll', async () => {
     const client = clientWithCommandstats({
       'cmdstat_get': 'calls=100,usec=500',

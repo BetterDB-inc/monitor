@@ -582,10 +582,12 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                     value={formData.localRetentionDays ?? ''}
                     placeholder="Keep forever"
                     onChange={(e) => {
-                      const parsed = parseInt(e.target.value, 10);
+                      // valueAsNumber understands everything a number input
+                      // accepts (e.g. "1e2" is 100, not parseInt's 1).
+                      const parsed = e.currentTarget.valueAsNumber;
                       handleInputChange(
                         'localRetentionDays',
-                        Number.isFinite(parsed) && parsed >= 1 ? parsed : null,
+                        Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : null,
                       );
                     }}
                     className="w-full px-3 py-2 border rounded-md"
@@ -594,8 +596,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                     Leave empty to keep history indefinitely. Can also be seeded with the{' '}
                     <code className="font-mono">LOCAL_RETENTION_DAYS</code> environment variable.
                     High-volume stat samples (command/latency stats, vector index snapshots, AI
-                    samples) are always trimmed to this window when set, or to your license tier's
-                    default otherwise.
+                    samples) are additionally trimmed to this window on an hourly cycle.
                   </p>
                 </div>
               </div>

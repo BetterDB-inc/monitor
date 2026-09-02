@@ -27,35 +27,48 @@ describe('RetentionPolicyService', () => {
     return new RetentionPolicyService(settingsService, licenseService);
   };
 
-  it('falls back to the community window when no license service is available', () => {
-    expect(makeService(null).getRetentionDays()).toBe(7);
+  describe('self-hosted', () => {
+    it('returns null when no local window is configured — keep forever', () => {
+      expect(makeService(null).getRetentionDays()).toBeNull();
+      expect(makeService(null, Tier.pro).getRetentionDays()).toBeNull();
+      expect(makeService(null, Tier.enterprise).getRetentionMs()).toBeNull();
+    });
+
+    it('uses the operator-configured window regardless of tier', () => {
+      expect(makeService(14, Tier.pro).getRetentionDays()).toBe(14);
+      expect(makeService(500).getRetentionDays()).toBe(500);
+    });
+
+    it('treats invalid local windows as unset', () => {
+      expect(makeService(0, Tier.pro).getRetentionDays()).toBeNull();
+      expect(makeService(-3).getRetentionDays()).toBeNull();
+      expect(makeService(NaN).getRetentionDays()).toBeNull();
+    });
+
+    it('converts days to milliseconds', () => {
+      expect(makeService(14).getRetentionMs()).toBe(14 * MS_PER_DAY);
+    });
   });
 
-  it('uses the license tier default when no local override is set', () => {
-    expect(makeService(null, Tier.community).getRetentionDays()).toBe(7);
-    expect(makeService(null, Tier.pro).getRetentionDays()).toBe(90);
-    expect(makeService(null, Tier.enterprise).getRetentionDays()).toBe(365);
-  });
+  describe('cloud mode', () => {
+    beforeEach(() => {
+      process.env.CLOUD_MODE = 'true';
+    });
 
-  it('prefers the operator-configured local window over the tier default', () => {
-    expect(makeService(14, Tier.pro).getRetentionDays()).toBe(14);
-    expect(makeService(500, Tier.community).getRetentionDays()).toBe(500);
-  });
+    it('uses the license tier window', () => {
+      expect(makeService(null, Tier.community).getRetentionDays()).toBe(7);
+      expect(makeService(null, Tier.pro).getRetentionDays()).toBe(90);
+      expect(makeService(null, Tier.enterprise).getRetentionDays()).toBe(365);
+    });
 
-  it('ignores invalid local windows', () => {
-    expect(makeService(0, Tier.pro).getRetentionDays()).toBe(90);
-    expect(makeService(-3, Tier.pro).getRetentionDays()).toBe(90);
-    expect(makeService(NaN, Tier.pro).getRetentionDays()).toBe(90);
-  });
+    it('falls back to the community window without a license service', () => {
+      expect(makeService(null).getRetentionDays()).toBe(7);
+    });
 
-  it('ignores the local override in cloud mode', () => {
-    process.env.CLOUD_MODE = 'true';
-    const service = makeService(14, Tier.pro);
-    expect(service.getLocalRetentionDays()).toBeNull();
-    expect(service.getRetentionDays()).toBe(90);
-  });
-
-  it('converts days to milliseconds', () => {
-    expect(makeService(14, Tier.pro).getRetentionMs()).toBe(14 * MS_PER_DAY);
+    it('ignores the local override', () => {
+      const service = makeService(14, Tier.pro);
+      expect(service.getLocalRetentionDays()).toBeNull();
+      expect(service.getRetentionDays()).toBe(90);
+    });
   });
 });
