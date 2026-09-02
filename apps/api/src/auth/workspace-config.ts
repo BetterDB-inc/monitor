@@ -3,6 +3,7 @@ import type { WorkspaceMode } from '@betterdb/shared';
 export const WORKSPACE_CONFIG = 'WORKSPACE_CONFIG';
 
 const VITE_DEV_ORIGIN = 'http://localhost:5173';
+const DEFAULT_BROKER_URL = 'https://betterdb.com';
 
 export interface WorkspaceConfig {
   enabled: boolean;
@@ -23,10 +24,22 @@ function resolveMode(env: NodeJS.ProcessEnv): WorkspaceMode {
   return 'self-hosted';
 }
 
+function resolveOptionalUrl(value: string | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim().replace(/\/+$/, '');
+  if (trimmed === '') {
+    return null;
+  }
+  return trimmed;
+}
+
 export function resolveWorkspaceConfig(env: NodeJS.ProcessEnv): WorkspaceConfig {
   const mode = resolveMode(env);
   const isProduction = env.NODE_ENV === 'production';
-  const publicUrl = env.AUTH_PUBLIC_URL ? env.AUTH_PUBLIC_URL.replace(/\/+$/, '') : null;
+  const publicUrl = resolveOptionalUrl(env.AUTH_PUBLIC_URL);
+  const brokerUrl = resolveOptionalUrl(env.AUTH_BROKER_URL);
   const trustedOrigins: string[] = [];
   if (publicUrl !== null) {
     trustedOrigins.push(publicUrl);
@@ -39,7 +52,7 @@ export function resolveWorkspaceConfig(env: NodeJS.ProcessEnv): WorkspaceConfig 
     mode,
     publicUrl,
     basePath: isProduction ? '/api/auth' : '/auth',
-    brokerUrl: env.AUTH_BROKER_URL ?? 'https://betterdb.com',
+    brokerUrl: brokerUrl ?? DEFAULT_BROKER_URL,
     trustedOrigins,
   };
 }

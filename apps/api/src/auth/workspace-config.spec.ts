@@ -40,4 +40,11 @@ describe('resolveWorkspaceConfig', () => {
     });
     expect(prod.trustedOrigins).toEqual(['https://mon.example.com']);
   });
+
+  it('treats empty auth urls as unset', () => {
+    const config = resolveWorkspaceConfig({ AUTH_PUBLIC_URL: '', AUTH_BROKER_URL: '' });
+    expect(config.publicUrl).toBeNull();
+    expect(config.brokerUrl).toBe('https://betterdb.com');
+    expect(config.trustedOrigins).toEqual(['http://localhost:5173']);
+  });
 });

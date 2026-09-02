@@ -6,6 +6,13 @@ import { isCloudModeValue } from '../common/utils/cloud-mode';
  * Environment variable validation schema
  * Validates all environment variables at application startup
  */
+function emptyStringToUndefined(value: unknown): unknown {
+  if (typeof value === 'string' && value.trim() === '') {
+    return undefined;
+  }
+  return value;
+}
+
 export const envSchema = z
   .object({
     // Application
@@ -93,17 +100,23 @@ export const envSchema = z
         return value === 'true';
       }),
     AUTH_SECRET: z.string().min(32).optional(),
-    AUTH_PUBLIC_URL: z
-      .string()
-      .url()
-      .optional()
-      .transform((value) => {
-        if (value === undefined) {
-          return undefined;
-        }
-        return value.replace(/\/+$/, '');
-      }),
-    AUTH_BROKER_URL: z.string().url().default('https://betterdb.com'),
+    AUTH_PUBLIC_URL: z.preprocess(
+      emptyStringToUndefined,
+      z
+        .string()
+        .url()
+        .optional()
+        .transform((value) => {
+          if (value === undefined) {
+            return undefined;
+          }
+          return value.replace(/\/+$/, '');
+        }),
+    ),
+    AUTH_BROKER_URL: z.preprocess(
+      emptyStringToUndefined,
+      z.string().url().default('https://betterdb.com'),
+    ),
 
     // Anomaly detection
     ANOMALY_DETECTION_ENABLED: z
