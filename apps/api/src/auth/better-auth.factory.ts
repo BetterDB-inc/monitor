@@ -1,5 +1,6 @@
 import type { RawDatabaseHandle } from '../storage/raw-database-handle';
-import { BetterAuthModules, loadBetterAuthModules } from './better-auth-esm';
+import type { BetterAuthModules } from './better-auth-esm';
+import { loadBetterAuthModules } from './better-auth-esm';
 import type { WorkspaceConfig } from './workspace-config';
 
 export const BETTER_AUTH = 'BETTER_AUTH';
@@ -7,6 +8,8 @@ export const BETTER_AUTH = 'BETTER_AUTH';
 const SESSION_SECONDS = 7 * 24 * 60 * 60;
 const SIGN_UP_PATH = '/sign-up/email';
 const REGISTRATION_CLOSED = 'Registration is closed. Ask a workspace admin for an invite.';
+
+export const CLIENT_IP_HEADER = 'x-betterdb-client-ip';
 
 export interface CreateBetterAuthOptions {
   handle: RawDatabaseHandle;
@@ -34,6 +37,7 @@ function databaseFor(handle: RawDatabaseHandle, modules: BetterAuthModules): unk
 export async function createBetterAuth(options: CreateBetterAuthOptions) {
   const modules = await loadBetterAuthModules();
   const { config } = options;
+  let bootstrapPending = false;
   return modules.betterAuth({
     secret: options.secret,
     baseURL: config.publicUrl ?? undefined,
@@ -43,7 +47,10 @@ export async function createBetterAuth(options: CreateBetterAuthOptions) {
     emailAndPassword: { enabled: true, requireEmailVerification: false },
     session: { expiresIn: SESSION_SECONDS },
     rateLimit: { enabled: true },
-    advanced: { disableOriginCheck: false },
+    advanced: {
+      disableOriginCheck: false,
+      ipAddress: { ipAddressHeaders: [CLIENT_IP_HEADER] },
+    },
     user: {
       additionalFields: {
         role: { type: 'string', defaultValue: 'member', input: false },
@@ -59,6 +66,7 @@ export async function createBetterAuth(options: CreateBetterAuthOptions) {
         if (existing > 0) {
           throw new modules.APIError('FORBIDDEN', { message: REGISTRATION_CLOSED });
         }
+        bootstrapPending = true;
       }),
     },
     databaseHooks: {
@@ -71,6 +79,10 @@ export async function createBetterAuth(options: CreateBetterAuthOptions) {
             if (ctx.path !== SIGN_UP_PATH) {
               return { data: user };
             }
+            if (bootstrapPending === false) {
+              return { data: user };
+            }
+            bootstrapPending = false;
             return { data: { ...user, role: 'admin', isOwner: true } };
           },
         },
