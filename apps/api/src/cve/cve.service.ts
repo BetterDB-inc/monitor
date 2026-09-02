@@ -54,9 +54,10 @@ export class CveService {
       return throttled;
     }
 
+    const result = await this.runScan(connectionId, true);
     this.lastRefreshAt.set(connectionId, Date.now());
 
-    return this.runScan(connectionId, true);
+    return result;
   }
 
   async getDataset(): Promise<CveDatasetStatus> {

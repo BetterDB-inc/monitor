@@ -206,6 +206,27 @@ describe('CveController', () => {
     expect(scanService.scan).toHaveBeenCalledTimes(2);
   });
 
+  it('does not serve a stale row to a rescan clicked while the previous one is still running', async () => {
+    const stale = { ...SCAN, scannedAt: 1, lastCheckedAt: 1 };
+    const fresh = { ...SCAN, scannedAt: 900, lastCheckedAt: 900 };
+    let release: (result: CveScanResult) => void = () => {};
+    const pending = new Promise<CveScanResult>((resolve) => {
+      release = resolve;
+    });
+
+    scanService.getLatest.mockResolvedValue(stale);
+    scanService.scan.mockReturnValue(pending);
+
+    const first = controller.refreshScan('conn-1');
+    const second = controller.refreshScan('conn-1');
+
+    release(fresh);
+
+    expect(await first).toEqual(fresh);
+    expect(await second).toEqual(fresh);
+    expect(scanService.scan).toHaveBeenCalledTimes(2);
+  });
+
   it('throttles each connection on its own clock', async () => {
     scanService.scan.mockResolvedValue(SCAN);
     scanService.getLatest.mockResolvedValue(SCAN);
