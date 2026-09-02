@@ -1,7 +1,7 @@
 const PUBLIC_PREFIXES = [
   '/auth/',
   '/invite/',
-  '/system/',
+  '/system/workspace',
   '/health',
   '/docs',
   '/telemetry/',
