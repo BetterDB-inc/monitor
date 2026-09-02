@@ -6,6 +6,7 @@ import { ConnectionSelector } from '../ConnectionSelector';
 import { ModeToggle } from '../ModeToggle';
 import { CloudUser } from '../../api/workspace';
 import { NavItem } from './NavItem';
+import { SidebarUserMenu } from './SidebarUserMenu';
 import {
   Sidebar,
   SidebarContent,
@@ -179,7 +180,9 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
             className="flex w-full items-center justify-between rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted"
           >
             <span>Keyboard shortcuts</span>
-            <kbd className="text-xs font-mono font-bold text-muted-foreground shadow-lg px-1">{formatForDisplay('shift+?')}</kbd>
+            <kbd className="text-xs font-mono font-bold text-muted-foreground shadow-lg px-1">
+              {formatForDisplay('shift+?')}
+            </kbd>
           </button>
           {cloudUser && (
             <NavItem
@@ -193,6 +196,7 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
           <NavItem to="/settings" active={location.pathname === '/settings'} demoLocked={isDemo}>
             Settings
           </NavItem>
+          <SidebarUserMenu />
         </div>
       </SidebarFooter>
     </Sidebar>
