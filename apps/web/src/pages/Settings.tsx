@@ -11,6 +11,10 @@ import { Badge } from '../components/ui/badge';
 import { useQueryClient } from '@tanstack/react-query';
 type SettingsCategory = 'license' | 'audit' | 'clientAnalytics' | 'anomaly' | 'dataRetention' | 'mcpTokens';
 
+// Mirrors the server-side cap (PostgreSQL INTEGER max) so invalid values get
+// an inline error instead of a 400 and the generic failure alert.
+const MAX_RETENTION_DAYS = 2_147_483_647;
+
 export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const { currentConnection } = useConnection();
   const { tier, license } = useLicense();
@@ -592,6 +596,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                   <input
                     type="number"
                     min={1}
+                    max={MAX_RETENTION_DAYS}
                     step={1}
                     value={retentionInput}
                     placeholder="Keep forever"
@@ -608,12 +613,12 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                       // numbers only — flooring "1.5" would delete history
                       // earlier than the user asked for.
                       const parsed = e.currentTarget.valueAsNumber;
-                      if (Number.isInteger(parsed) && parsed >= 1) {
+                      if (Number.isInteger(parsed) && parsed >= 1 && parsed <= MAX_RETENTION_DAYS) {
                         setRetentionError(null);
                         handleInputChange('localRetentionDays', parsed);
                       } else {
                         setRetentionError(
-                          'Enter a whole number of days (1 or more), or leave empty to keep history forever.',
+                          `Enter a whole number of days between 1 and ${MAX_RETENTION_DAYS}, or leave empty to keep history forever.`,
                         );
                       }
                     }}
