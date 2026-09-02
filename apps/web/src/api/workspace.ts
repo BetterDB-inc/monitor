@@ -1,12 +1,12 @@
+import type { WorkspaceMe, WorkspaceStatus } from '@betterdb/shared';
 import { fetchApi } from './client';
 
-export interface CloudUser {
-  userId: string;
-  email: string;
-  tenantId: string;
-  subdomain: string;
+export type CurrentUser = Omit<WorkspaceMe, 'role'> & {
   role: string;
-}
+  tenantId?: string;
+  subdomain?: string;
+};
+export type CloudUser = CurrentUser;
 
 export interface Member {
   id: string;
@@ -28,7 +28,13 @@ export interface Invitation {
 }
 
 export const workspaceApi = {
-  getMe: () => fetchApi<CloudUser>('/workspace/me'),
+  getStatus: () => fetchApi<WorkspaceStatus>('/system/workspace', { skipAuthRedirect: true }),
+  getMe: () => fetchApi<CurrentUser>('/workspace/me', { skipAuthRedirect: true }),
+  signUp: (body: { email: string; password: string; name: string }) =>
+    fetchApi<unknown>('/auth/sign-up/email', { method: 'POST', body: JSON.stringify(body) }),
+  signIn: (body: { email: string; password: string }) =>
+    fetchApi<unknown>('/auth/sign-in/email', { method: 'POST', body: JSON.stringify(body) }),
+  signOut: () => fetchApi<unknown>('/auth/sign-out', { method: 'POST', body: '{}' }),
   getMembers: () => fetchApi<Member[]>('/workspace/members'),
   getInvitations: () => fetchApi<Invitation[]>('/workspace/invitations'),
   invite: (data: { email: string; role: string }) =>
