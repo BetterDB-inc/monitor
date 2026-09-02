@@ -152,6 +152,8 @@ This means:
 | `STORAGE_AUTH_TOKEN` | Conditional | - | Turso auth token (startup requires it when `STORAGE_URL` uses `libsql://`, and rejects it when `STORAGE_URL` uses `http://`; a hosted `https://` endpoint needs it too but is not checked at startup - see below) |
 | `STORAGE_SQLITE_FILEPATH` | No | `./data/audit.db` | SQLite database file path (only for `STORAGE_TYPE=sqlite`) |
 
+**Warning**: `memory` is for development and testing only. Users and sessions live in the process, so a restart loses them, the instance returns to the register screen, and the next visitor claims the owner account. Use `sqlite` or `postgres` for anything other people can reach.
+
 **Note**: `sqlite` writes to a local file through the `better-sqlite3` native module, which is stripped from the `latest` (no-AI) Docker image - use it for local development, or pick `postgres`, `turso`, or `memory` for Docker deployments.
 
 **Note**: `turso` reuses the SQLite adapter over the libSQL wire protocol, so it needs no native module and works in every Docker image. It is opt-in: set `STORAGE_TYPE=turso` plus `STORAGE_URL` (and `STORAGE_AUTH_TOKEN` for `libsql://` URLs), exactly like the `postgres` backend.
@@ -175,7 +177,7 @@ This means:
 | `ENCRYPTION_KEK_SALT` | No | `betterdb-kek-salt-v1` | Salt used for key derivation (customize for additional security) |
 | `WORKSPACE_DISABLED` | No | `false` | Run without user control: no login, no roles, no Team page. Existing installs upgrading with the default see a register screen on first load |
 | `AUTH_SECRET` | No | generated | Session signing secret, at least 32 characters. Generated once and stored in `BETTERDB_DATA_DIR/auth-secret` when unset; set it explicitly when running more than one replica |
-| `AUTH_PUBLIC_URL` | No | inferred | Public origin used for session cookies and CSRF origin checks, e.g. `https://monitor.example.com` |
+| `AUTH_PUBLIC_URL` | No | inferred | Public origin used for session cookies and CSRF origin checks, e.g. `https://monitor.example.com`. Session cookies are marked `Secure` only when this starts with `https://`, so installs served over HTTPS (including behind a TLS-terminating proxy) should set it and keep session cookies off plain HTTP |
 | `AUTH_BROKER_URL` | No | `https://betterdb.com` | Origin of the BetterDB sign-in broker (used from phase 5) |
 
 **Password Encryption**: When `ENCRYPTION_KEY` is set, all connection passwords are encrypted at rest using envelope encryption (AES-256-GCM). Each password gets a unique encryption key (DEK) that is itself encrypted with a master key (KEK) derived from your `ENCRYPTION_KEY`. The same encryption covers SSH tunnel secrets (SSH password, key passphrase, and inline private keys).
@@ -380,6 +382,8 @@ docker run -d \
   betterdb/monitor
 ```
 
+**Note**: `STORAGE_TYPE=memory` loses users and sessions on every restart, so the instance returns to the register screen and the next visitor claims the owner account. Use `sqlite` or `postgres` once other people can reach it.
+
 #### PostgreSQL Storage
 
 ```bash
@@ -428,6 +432,8 @@ docker run -d \
   betterdb/monitor
 ```
 
+**Note**: `STORAGE_TYPE=memory` loses users and sessions on every restart, so the instance returns to the register screen and the next visitor claims the owner account. Use `sqlite` or `postgres` once other people can reach it.
+
 **Important**: When not using `--network host`, the `-p` flag port mapping must match the `PORT` environment variable (e.g., `-p 8080:8080 -e PORT=8080`).
 
 #### Host Network Mode
@@ -471,6 +477,8 @@ docker run -d \
   -e STORAGE_TYPE=memory \
   betterdb/monitor
 ```
+
+**Note**: `STORAGE_TYPE=memory` loses users and sessions on every restart, so the instance returns to the register screen and the next visitor claims the owner account. Use `sqlite` or `postgres` once other people can reach it.
 
 No `BETTERDB_LICENSE_KEY` is set, so the monitor runs **fully offline** — no
 outbound requests, telemetry disabled. Verify with `GET /api/license/status`
