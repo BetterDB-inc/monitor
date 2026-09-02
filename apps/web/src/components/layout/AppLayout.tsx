@@ -36,6 +36,7 @@ import { CacheProposals } from '../../pages/CacheProposals';
 import { Monitor } from '../../pages/Monitor';
 import { MonitorSession } from '../../pages/MonitorSession';
 import { Members } from '../../pages/Members';
+import { Security } from '../../pages/Security';
 
 import { CloudUser } from '../../api/workspace';
 import { AppSidebar } from './AppSidebar.tsx';
@@ -252,6 +253,14 @@ function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
                 element={
                   <NoConnectionsGuard>
                     <MetricForecasting />
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/security"
+                element={
+                  <NoConnectionsGuard>
+                    <Security />
                   </NoConnectionsGuard>
                 }
               />

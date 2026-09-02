@@ -63,6 +63,7 @@ import type {
   AppliedResult,
   CacheType,
   CreateCacheProposalInput,
+  CveScanResult,
   ListCacheProposalsOptions,
   MetricForecastSettings,
   MetricKind,
@@ -72,6 +73,7 @@ import type {
   ProposalType,
   StoredCacheProposal,
   StoredCacheProposalAudit,
+  StoredCveDataset,
   UpdateProposalStatusInput,
   VectorIndexSnapshot,
   VectorIndexSnapshotQueryOptions,
@@ -1706,6 +1708,53 @@ export class PostgresAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_vis_timestamp ON vector_index_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_vis_connection_index ON vector_index_snapshots(connection_id, index_name);
+
+      -- Migrate a pre-singleton cve_advisories table (dataset_version as primary
+      -- key) to the new shape. Detection and the DROP are both driven off
+      -- current_schema() so they always resolve to the same table, and a guard
+      -- failure here must never abort the rest of schema creation.
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'cve_advisories'
+            AND column_name = 'dataset_version'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'cve_advisories'
+            AND column_name = 'id'
+        ) THEN
+          EXECUTE format('DROP TABLE %I.%I', current_schema(), 'cve_advisories');
+        END IF;
+      EXCEPTION WHEN OTHERS THEN
+        -- Never let a migration-guard failure take down the rest of createSchema(),
+        -- but never let it pass unnoticed either
+        RAISE WARNING 'cve_advisories migration guard failed: % (%)', SQLERRM, SQLSTATE;
+      END $$;
+
+      CREATE TABLE IF NOT EXISTS cve_advisories (
+        id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+        dataset_version TEXT NOT NULL,
+        refreshed_at BIGINT NOT NULL,
+        advisories JSONB NOT NULL,
+        snapshots JSONB NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS cve_scan_results (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        dataset_version TEXT NOT NULL,
+        scanned_at BIGINT NOT NULL,
+        last_checked_at BIGINT NOT NULL,
+        result JSONB NOT NULL,
+        seq BIGSERIAL NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cve_scan_connection
+        ON cve_scan_results(connection_id, scanned_at DESC);
 
       ALTER TABLE vector_index_snapshots ADD COLUMN IF NOT EXISTS num_records INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE vector_index_snapshots ADD COLUMN IF NOT EXISTS num_deleted_docs INTEGER NOT NULL DEFAULT 0;
@@ -4112,6 +4161,137 @@ export class PostgresAdapter implements StoragePort {
       [cutoffTimestamp],
     );
     return result.rowCount ?? 0;
+  }
+
+  // CVE Inspection Methods
+  private stripNulCharacters(text: string): string {
+    return text.split('\u0000').join('');
+  }
+
+  private sanitizeNulBytes<T>(value: T): T {
+    if (typeof value === 'string') {
+      return this.stripNulCharacters(value) as unknown as T;
+    }
+
+    if (
+      value !== null &&
+      typeof value === 'object' &&
+      typeof (value as { toJSON?: unknown }).toJSON === 'function'
+    ) {
+      const serialized = (value as unknown as { toJSON: () => unknown }).toJSON();
+      return this.sanitizeNulBytes(serialized) as unknown as T;
+    }
+
+    if (Array.isArray(value)) {
+      return value.map((entry) => this.sanitizeNulBytes(entry)) as unknown as T;
+    }
+
+    if (value !== null && typeof value === 'object') {
+      const sanitized: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+        sanitized[this.stripNulCharacters(key)] = this.sanitizeNulBytes(entry);
+      }
+      return sanitized as unknown as T;
+    }
+
+    return value;
+  }
+
+  async saveCveDataset(dataset: StoredCveDataset): Promise<void> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    await this.pool.query(
+      `INSERT INTO cve_advisories (id, dataset_version, refreshed_at, advisories, snapshots)
+       VALUES (1, $1, $2, $3, $4)
+       ON CONFLICT (id) DO UPDATE SET
+         dataset_version = EXCLUDED.dataset_version,
+         refreshed_at = EXCLUDED.refreshed_at,
+         advisories = EXCLUDED.advisories,
+         snapshots = EXCLUDED.snapshots`,
+      [
+        this.stripNulCharacters(dataset.datasetVersion),
+        dataset.refreshedAt,
+        JSON.stringify(this.sanitizeNulBytes(dataset.advisories)),
+        JSON.stringify(this.sanitizeNulBytes(dataset.snapshots)),
+      ],
+    );
+  }
+
+  async getCveDataset(): Promise<StoredCveDataset | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query(
+      `SELECT dataset_version, refreshed_at, advisories, snapshots
+       FROM cve_advisories
+       WHERE id = 1`,
+    );
+    const row = result.rows[0] as
+      | { dataset_version: string; refreshed_at: string; advisories: unknown; snapshots: unknown }
+      | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    return {
+      datasetVersion: row.dataset_version,
+      refreshedAt: Number(row.refreshed_at),
+      advisories: (typeof row.advisories === 'string'
+        ? JSON.parse(row.advisories)
+        : row.advisories) as StoredCveDataset['advisories'],
+      snapshots: (typeof row.snapshots === 'string'
+        ? JSON.parse(row.snapshots)
+        : row.snapshots) as StoredCveDataset['snapshots'],
+    };
+  }
+
+  async saveCveScanResult(result: CveScanResult): Promise<void> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const connectionId = this.stripNulCharacters(result.connectionId);
+
+    await this.pool.query(
+      `INSERT INTO cve_scan_results
+         (id, connection_id, fingerprint, dataset_version, scanned_at, last_checked_at, result)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        randomUUID(),
+        connectionId,
+        this.stripNulCharacters(result.fingerprint),
+        this.stripNulCharacters(result.datasetVersion),
+        result.scannedAt,
+        result.lastCheckedAt,
+        JSON.stringify(this.sanitizeNulBytes(result)),
+      ],
+    );
+
+    await this.pool.query(
+      `DELETE FROM cve_scan_results
+       WHERE connection_id = $1
+         AND id NOT IN (
+           SELECT id FROM cve_scan_results WHERE connection_id = $2
+           ORDER BY scanned_at DESC, seq DESC LIMIT 1
+         )`,
+      [connectionId, connectionId],
+    );
+  }
+
+  async getCveScanResult(connectionId: string): Promise<CveScanResult | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query(
+      `SELECT result FROM cve_scan_results
+       WHERE connection_id = $1
+       ORDER BY scanned_at DESC, seq DESC LIMIT 1`,
+      [this.stripNulCharacters(connectionId)],
+    );
+    const row = result.rows[0] as { result: unknown } | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    return (typeof row.result === 'string' ? JSON.parse(row.result) : row.result) as CveScanResult;
   }
 
   // Connection Management Methods

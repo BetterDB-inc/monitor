@@ -28,6 +28,7 @@ import { CliModule } from './cli/cli.module';
 import { PosthogProxyModule } from './posthog-proxy/posthog-proxy.module';
 import { SystemModule } from './system/system.module';
 import { MonitorModule } from './monitor/monitor.module';
+import { CveModule } from './cve/cve.module';
 
 let AiModule: any = null;
 let LicenseModule: any = null;
@@ -155,10 +156,12 @@ if (process.env.CLOUD_MODE) {
 
 const baseImports = [
   ConfigModule,
-  ThrottlerModule.forRoot([{
-    ttl: 60000, // 60 seconds
-    limit: 10000, // Very high default - endpoint-specific limits provide actual rate limiting
-  }]),
+  ThrottlerModule.forRoot([
+    {
+      ttl: 60000, // 60 seconds
+      limit: 10000, // Very high default - endpoint-specific limits provide actual rate limiting
+    },
+  ]),
   CloudAuthModuleToUse, // Cloud auth (no-op for self-hosted, proprietary for cloud)
   ConnectionsModule, // Must come early - provides ConnectionRegistry globally
   HealthModule,
@@ -184,6 +187,7 @@ const baseImports = [
   PosthogProxyModule,
   SystemModule,
   MonitorModule,
+  CveModule,
 ];
 
 const proprietaryImports = [
@@ -210,4 +214,4 @@ const proprietaryImports = [
     },
   ],
 })
-export class AppModule { }
+export class AppModule {}
