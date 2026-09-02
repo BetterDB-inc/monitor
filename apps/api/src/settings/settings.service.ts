@@ -10,12 +10,20 @@ import { ConfigService } from '@nestjs/config';
 import { AppSettings, SettingsUpdateRequest, SettingsResponse } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 
+// app_settings.local_retention_days is an INTEGER column on PostgreSQL;
+// anything above this would fail the insert there.
+const MAX_RETENTION_DAYS = 2_147_483_647;
+
 @Injectable()
 export class SettingsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SettingsService.name);
   private cachedSettings: AppSettings | null = null;
   private cacheRefreshInterval: NodeJS.Timeout | null = null;
   private readonly CACHE_REFRESH_MS = 30000;
+  // Bumped on every direct cache write (update/reset). An in-flight periodic
+  // refresh that started before the write would otherwise clobber the fresh
+  // value with the older database snapshot it read.
+  private cacheGeneration = 0;
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
@@ -44,7 +52,9 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async refreshCache(): Promise<void> {
+    const generation = this.cacheGeneration;
     const dbSettings = await this.storageClient.getSettings();
+    if (generation !== this.cacheGeneration) return; // a direct write won the race
     this.cachedSettings = dbSettings || this.buildSettingsFromEnv();
   }
 
@@ -105,7 +115,9 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     const value = raw?.trim() ?? '';
     if (!/^\d+$/.test(value)) return null;
     const parsed = Number(value);
-    return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : null;
+    return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= MAX_RETENTION_DAYS
+      ? parsed
+      : null;
   }
 
   private async initializeFromEnv(): Promise<void> {
@@ -133,9 +145,9 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
   async updateSettings(updates: SettingsUpdateRequest): Promise<SettingsResponse> {
     if (updates.localRetentionDays !== undefined && updates.localRetentionDays !== null) {
       const days = updates.localRetentionDays;
-      if (!Number.isInteger(days) || days < 1) {
+      if (!Number.isInteger(days) || days < 1 || days > MAX_RETENTION_DAYS) {
         throw new BadRequestException(
-          'localRetentionDays must be null or a positive integer number of days',
+          `localRetentionDays must be null or an integer between 1 and ${MAX_RETENTION_DAYS}`,
         );
       }
     }
@@ -155,6 +167,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     // leave consumers of getCachedSettings() reading stale data for up to
     // half a minute — notably InferenceLatencyService, whose SLA evaluation
     // runs on a 60s tick and depends on fresh inferenceSlaConfig.
+    this.cacheGeneration++;
     this.cachedSettings = updated;
 
     return {
@@ -172,6 +185,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
       throw new Error('Failed to reset settings');
     }
 
+    this.cacheGeneration++;
     this.cachedSettings = settings;
 
     return {

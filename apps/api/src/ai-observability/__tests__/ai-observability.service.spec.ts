@@ -20,6 +20,7 @@ function makeService(opts: {
     }),
     getAiCacheHistory: jest.fn(async () => []),
     pruneOldAiCacheSamples: jest.fn(async () => 0),
+    pruneOldOtelSpans: jest.fn(async () => 0),
   } as unknown as StoragePort;
 
   const client = {
@@ -139,8 +140,15 @@ describe('AiObservabilityService.pollConnection', () => {
     expect(prune).not.toHaveBeenCalled(); // cloud sweep owns retention
 
     delete process.env.CLOUD_MODE;
+    const before = Date.now();
     await (svc as any).pollConnection(ctx);
     expect(prune).toHaveBeenCalledTimes(1); // self-hosted trims locally
+    const otelPrune = storage.pruneOldOtelSpans as jest.Mock;
+    expect(otelPrune).toHaveBeenCalledTimes(1); // spans age out on the same cycle
+    const cutoff = otelPrune.mock.calls[0][0];
+    const window = 7 * 24 * 60 * 60 * 1000;
+    expect(cutoff).toBeGreaterThanOrEqual(before - window);
+    expect(cutoff).toBeLessThanOrEqual(Date.now() - window);
     if (prev !== undefined) process.env.CLOUD_MODE = prev;
   });
 

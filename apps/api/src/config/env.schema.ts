@@ -39,7 +39,8 @@ export const envSchema = z
     // Self-hosted data retention: days of monitoring history to keep. Seeds
     // the localRetentionDays app setting when the settings row is first
     // created; unset means keep forever. Ignored in cloud mode.
-    LOCAL_RETENTION_DAYS: z.coerce.number().int().min(1).optional(),
+    // Max matches the PostgreSQL INTEGER column that stores the value.
+    LOCAL_RETENTION_DAYS: z.coerce.number().int().min(1).max(2147483647).optional(),
 
     // AI configuration
     AI_ENABLED: z

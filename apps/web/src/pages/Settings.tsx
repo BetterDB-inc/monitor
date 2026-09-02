@@ -592,6 +592,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                   <input
                     type="number"
                     min={1}
+                    step={1}
                     value={retentionInput}
                     placeholder="Keep forever"
                     onChange={(e) => {
@@ -603,11 +604,13 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                         return;
                       }
                       // valueAsNumber understands everything a number input
-                      // accepts (e.g. "1e2" is 100, not parseInt's 1).
+                      // accepts (e.g. "1e2" is 100, not parseInt's 1). Whole
+                      // numbers only — flooring "1.5" would delete history
+                      // earlier than the user asked for.
                       const parsed = e.currentTarget.valueAsNumber;
-                      if (Number.isFinite(parsed) && parsed >= 1) {
+                      if (Number.isInteger(parsed) && parsed >= 1) {
                         setRetentionError(null);
-                        handleInputChange('localRetentionDays', Math.floor(parsed));
+                        handleInputChange('localRetentionDays', parsed);
                       } else {
                         setRetentionError(
                           'Enter a whole number of days (1 or more), or leave empty to keep history forever.',
