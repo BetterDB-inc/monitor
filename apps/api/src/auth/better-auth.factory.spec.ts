@@ -6,11 +6,12 @@ import { openLibsqlDatabase } from '../storage/adapters/libsql-driver';
 import type { RawDatabaseHandle } from '../storage/raw-database-handle';
 import { resolveWorkspaceConfig } from './workspace-config';
 import {
-  BetterAuthInstance,
+  CLIENT_IP_HEADER,
   countUsers,
   createBetterAuth,
   runBetterAuthMigrations,
 } from './better-auth.factory';
+import type { BetterAuthInstance } from './better-auth.factory';
 
 const SECRET = 's'.repeat(40);
 const ORIGIN = 'http://localhost:3001';
@@ -24,7 +25,7 @@ function signUp(
   return auth.handler(
     new Request(`${ORIGIN}/auth/sign-up/email`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', origin, 'x-forwarded-for': ip },
+      headers: { 'content-type': 'application/json', origin, [CLIENT_IP_HEADER]: ip },
       body: JSON.stringify({ email, password: 'correct horse battery', name: 'Someone' }),
     }),
   );
@@ -68,6 +69,32 @@ describe('createBetterAuth', () => {
     const auth = await build({ kind: 'memory' });
     const response = await signUp(auth, 'owner@example.com', '10.0.0.3', 'http://localhost:5173');
     expect(response.status).toBe(200);
+  });
+
+  it('leaves a later sign-up creation unpromoted once the bootstrap slot is spent', async () => {
+    const auth = await build({ kind: 'memory' });
+    const first = await signUp(auth, 'owner@example.com', '10.0.0.6');
+    expect(first.status).toBe(200);
+
+    const promote = auth.options.databaseHooks.user.create.before;
+    const context = await auth.$context;
+    const endpointContext = { path: '/sign-up/email', context } as unknown as Parameters<
+      typeof promote
+    >[1];
+    const candidate = {
+      email: 'second@example.com',
+      name: 'Second',
+      emailVerified: false,
+    } as unknown as Parameters<typeof promote>[0];
+
+    const hooked = await promote(candidate, endpointContext);
+    const created = await context.adapter.create({
+      model: 'user',
+      data: (hooked as { data: Record<string, unknown> }).data,
+    });
+
+    expect((created as { role: unknown }).role).toBe('member');
+    expect((created as { isOwner: unknown }).isOwner).toBe(false);
   });
 
   it('runs migrations idempotently and round-trips on better-sqlite3', async () => {
