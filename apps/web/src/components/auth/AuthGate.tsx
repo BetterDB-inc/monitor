@@ -1,14 +1,19 @@
 import { ReactElement, ReactNode } from 'react';
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import { Login } from '../../pages/Login';
 import { Register } from '../../pages/Register';
 
-export function AuthGate({ children }: { children: ReactNode }): ReactElement | null {
+export function AuthGate({ children }: { children: ReactNode }): ReactElement {
   const { loading, mode, bootstrapped, user } = useAuth();
+  const location = useLocation();
 
   if (loading) {
-    return null;
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <p className="text-sm text-muted-foreground">Loading...</p>
+      </div>
+    );
   }
   if (mode === 'disabled') {
     return <>{children}</>;
@@ -21,11 +26,16 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement | 
       </Routes>
     );
   }
+  if (mode === 'cloud') {
+    return <>{children}</>;
+  }
   if (user === null) {
+    const loginTarget =
+      location.pathname === '/' ? '/login' : `/login?next=${encodeURIComponent(location.pathname)}`;
     return (
       <Routes>
         <Route path="/login" element={<Login />} />
-        <Route path="*" element={<Navigate to="/login" replace />} />
+        <Route path="*" element={<Navigate to={loginTarget} replace />} />
       </Routes>
     );
   }

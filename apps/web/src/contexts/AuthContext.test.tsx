@@ -80,4 +80,12 @@ describe('AuthGate routing', () => {
     renderAt('/');
     await waitFor(() => expect(screen.getByText('APP')).toBeInTheDocument());
   });
+
+  it('renders the app for cloud even when getMe fails', async () => {
+    getStatus.mockResolvedValue({ mode: 'cloud', enabled: true, bootstrapped: true });
+    getMe.mockRejectedValue(new Error('502'));
+    renderAt('/connections');
+    await waitFor(() => expect(screen.getByText('APP')).toBeInTheDocument());
+    expect(screen.queryByRole('heading', { name: /sign in/i })).not.toBeInTheDocument();
+  });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { UnauthorizedError } from '../api/client';
 import { Login } from './Login';
 
 const signIn = vi.fn();
@@ -32,7 +33,7 @@ describe('Login', () => {
   });
 
   it('shows the API error on failure', async () => {
-    signIn.mockRejectedValue(new Error('Invalid email or password'));
+    signIn.mockRejectedValue(new UnauthorizedError());
     render(
       <MemoryRouter initialEntries={['/login']}>
         <Login />
