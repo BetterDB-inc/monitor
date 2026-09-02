@@ -3,9 +3,10 @@ import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import { Login } from '../../pages/Login';
 import { Register } from '../../pages/Register';
+import { AuthUnavailable } from './AuthUnavailable';
 
 export function AuthGate({ children }: { children: ReactNode }): ReactElement {
-  const { loading, mode, bootstrapped, user } = useAuth();
+  const { loading, unavailable, mode, bootstrapped, user, refresh } = useAuth();
   const location = useLocation();
 
   if (loading) {
@@ -13,6 +14,15 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
       <div className="flex min-h-screen items-center justify-center">
         <p className="text-sm text-muted-foreground">Loading...</p>
       </div>
+    );
+  }
+  if (unavailable) {
+    return (
+      <AuthUnavailable
+        onRetry={() => {
+          refresh();
+        }}
+      />
     );
   }
   if (mode === 'disabled') {
@@ -30,8 +40,9 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
     return <>{children}</>;
   }
   if (user === null) {
+    const target = `${location.pathname}${location.search}`;
     const loginTarget =
-      location.pathname === '/' ? '/login' : `/login?next=${encodeURIComponent(location.pathname)}`;
+      location.pathname === '/' ? '/login' : `/login?next=${encodeURIComponent(target)}`;
     return (
       <Routes>
         <Route path="/login" element={<Login />} />
