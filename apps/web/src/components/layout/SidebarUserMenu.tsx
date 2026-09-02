@@ -15,9 +15,13 @@ export function SidebarUserMenu(): ReactElement | null {
       <button
         type="button"
         onClick={() => {
-          signOut().then(() => {
-            window.location.assign('/login');
-          });
+          signOut()
+            .then(() => {
+              window.location.assign('/login');
+            })
+            .catch(() => {
+              window.location.assign('/login');
+            });
         }}
         className="text-muted-foreground hover:text-foreground"
       >
