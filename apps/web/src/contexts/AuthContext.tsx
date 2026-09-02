@@ -45,7 +45,6 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
   const [user, setUser] = useState<CurrentUser | null>(null);
 
   const refresh = useCallback(async (): Promise<void> => {
-    setLoading(true);
     try {
       const status = await workspaceApi.getStatus();
       setUnavailable(false);

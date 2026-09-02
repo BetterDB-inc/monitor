@@ -54,7 +54,11 @@ describe('WorkspaceAuthModule', () => {
     const previous = process.env.BETTERDB_DATA_DIR;
     process.env.BETTERDB_DATA_DIR = '';
     try {
-      const app = await boot({ WORKSPACE_DISABLED: undefined, STORAGE_TYPE: 'memory' });
+      const app = await boot({
+        WORKSPACE_DISABLED: undefined,
+        STORAGE_TYPE: 'memory',
+        AUTH_SECRET: undefined,
+      });
       expect((await app.inject({ method: 'GET', url: '/auth/get-session' })).statusCode).toBe(200);
       await app.close();
     } finally {
