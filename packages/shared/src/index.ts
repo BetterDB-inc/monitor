@@ -28,3 +28,4 @@ export * from './types/ai-observability';
 export * from './types/otel-traces';
 export * from './types/cve';
 export * from './utils/cve-modules';
+export * from './types/workspace';
