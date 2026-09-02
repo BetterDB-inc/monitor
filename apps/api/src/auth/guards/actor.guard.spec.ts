@@ -16,6 +16,7 @@ const ORIGIN = 'http://localhost:3001';
 interface FakeRequest {
   url: string;
   headers: Record<string, string>;
+  ip?: string;
   actor?: Actor | null;
 }
 
@@ -57,7 +58,7 @@ describe('isPublicPath', () => {
       '/api/auth/get-session',
       '/invite/abc',
       '/system/workspace',
-      '/system/demo',
+      '/api/system/workspace',
       '/health',
       '/api/health',
       '/docs',
@@ -75,6 +76,17 @@ describe('isPublicPath', () => {
 
   it('protects everything else', () => {
     for (const path of ['/connections', '/api/connections', '/workspace/me', '/settings', '/']) {
+      expect(isPublicPath(path)).toBe(false);
+    }
+  });
+
+  it('keeps the rest of /system behind the guard', () => {
+    for (const path of [
+      '/system/connect-defaults',
+      '/api/system/connect-defaults',
+      '/system/demo',
+      '/api/system/demo',
+    ]) {
       expect(isPublicPath(path)).toBe(false);
     }
   });
@@ -154,5 +166,33 @@ describe('ActorGuard', () => {
         tokenId: null,
       }),
     );
+  });
+
+  it('rejects /system/connect-defaults without a session', async () => {
+    const guard = new ActorGuard(config, auth);
+    await expect(
+      guard.canActivate(contextFor({ url: '/api/system/connect-defaults', headers: {} })),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('allows /system/workspace without a session', async () => {
+    const guard = new ActorGuard(config, auth);
+    const request: FakeRequest = { url: '/api/system/workspace', headers: {} };
+    expect(await guard.canActivate(contextFor(request))).toBe(true);
+    expect(request.actor).toBeNull();
+  });
+
+  it('overrides a client-supplied ip header with the socket address', async () => {
+    const guard = new ActorGuard(config, auth);
+    const getSession = jest.spyOn(auth.api, 'getSession');
+    const request: FakeRequest = {
+      url: '/api/connections',
+      headers: { cookie, [CLIENT_IP_HEADER]: '203.0.113.9' },
+      ip: '10.1.8.1',
+    };
+    await guard.canActivate(contextFor(request));
+    const passed = getSession.mock.calls[0][0] as { headers: Headers };
+    expect(passed.headers.get(CLIENT_IP_HEADER)).toBe('10.1.8.1');
+    getSession.mockRestore();
   });
 });

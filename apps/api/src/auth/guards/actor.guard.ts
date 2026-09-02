@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { FastifyRequest } from 'fastify';
 import type { Actor, WorkspaceRole } from '@betterdb/shared';
-import { BETTER_AUTH, type BetterAuthInstance } from '../better-auth.factory';
+import { BETTER_AUTH, CLIENT_IP_HEADER, type BetterAuthInstance } from '../better-auth.factory';
 import { toWebHeaders } from '../web-headers';
 import { WORKSPACE_CONFIG, type WorkspaceConfig } from '../workspace-config';
 import { isPublicPath } from './public-paths';
@@ -58,7 +58,9 @@ export class ActorGuard implements CanActivate {
     if (this.auth === null) {
       return null;
     }
-    const session = await this.auth.api.getSession({ headers: toWebHeaders(request.headers) });
+    const headers = toWebHeaders(request.headers);
+    headers.set(CLIENT_IP_HEADER, request.ip);
+    const session = await this.auth.api.getSession({ headers });
     if (session === null) {
       return null;
     }
