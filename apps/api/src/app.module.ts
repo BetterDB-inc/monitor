@@ -21,7 +21,7 @@ import { TelemetryModule } from './telemetry/telemetry.module';
 import { VectorSearchModule } from './vector-search/vector-search.module';
 import { AiObservabilityModule } from './ai-observability/ai-observability.module';
 import { MigrationModule } from './migration/migration.module';
-import { CloudAuthModule } from './auth/cloud-auth.module';
+import { WorkspaceAuthModule } from './auth/workspace-auth.module';
 import { McpModule } from './mcp/mcp.module';
 import { MetricForecastingModule } from './metric-forecasting/metric-forecasting.module';
 import { InferenceLatencyModule } from './inference-latency/inference-latency.module';
@@ -145,7 +145,7 @@ if (isCloudMode()) {
 }
 
 // Cloud auth module - uses proprietary implementation in cloud mode
-let CloudAuthModuleToUse: any = CloudAuthModule;
+let CloudAuthModuleToUse: any = WorkspaceAuthModule.forRoot();
 if (isCloudMode()) {
   try {
     const proprietaryCloudAuth = require('../../../proprietary/cloud-auth/cloud-auth.module');
