@@ -19,6 +19,7 @@ describe('WebhookAnomalyIntegrationService', () => {
 
     storageClient = {
       getAnomalyEvents: jest.fn(),
+      pruneOldOtelSpans: jest.fn().mockResolvedValue(0),
     } as any;
 
     configService = {

@@ -34,6 +34,7 @@ describe('DataRetentionService', () => {
       pruneOldCaptureTriggers: jest.fn().mockResolvedValue(14),
       pruneOldScheduledCaptures: jest.fn().mockResolvedValue(15),
       pruneOldAiCacheSamples: jest.fn().mockResolvedValue(16),
+      pruneOldOtelSpans: jest.fn().mockResolvedValue(16),
     } as any;
 
     licenseService = {
