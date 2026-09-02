@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { StorageModule } from '../storage/storage.module';
@@ -47,5 +48,38 @@ describe('WorkspaceAuthModule', () => {
     const status = await app.inject({ method: 'GET', url: '/system/workspace' });
     expect(status.json()).toEqual({ mode: 'self-hosted', enabled: true, bootstrapped: false });
     await app.close();
+  });
+
+  it('boots when BETTERDB_DATA_DIR is set to an empty string', async () => {
+    const previous = process.env.BETTERDB_DATA_DIR;
+    process.env.BETTERDB_DATA_DIR = '';
+    try {
+      const app = await boot({ WORKSPACE_DISABLED: undefined, STORAGE_TYPE: 'memory' });
+      expect((await app.inject({ method: 'GET', url: '/auth/get-session' })).statusCode).toBe(200);
+      await app.close();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.BETTERDB_DATA_DIR;
+      } else {
+        process.env.BETTERDB_DATA_DIR = previous;
+      }
+    }
+  });
+
+  it('warns once that memory storage loses users and sessions on restart', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {
+      return undefined;
+    });
+    try {
+      const app = await boot({
+        WORKSPACE_DISABLED: undefined,
+        STORAGE_TYPE: 'memory',
+        AUTH_SECRET: 's'.repeat(40),
+      });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('STORAGE_TYPE=memory'));
+      await app.close();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

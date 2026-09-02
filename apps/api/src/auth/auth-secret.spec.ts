@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -5,13 +6,23 @@ import { resolveAuthSecret } from './auth-secret';
 
 describe('resolveAuthSecret', () => {
   let dataDir: string;
+  let logSpy: jest.SpyInstance;
+  let warnSpy: jest.SpyInstance;
 
   beforeEach(() => {
     dataDir = mkdtempSync(join(tmpdir(), 'auth-secret-'));
+    logSpy = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => {
+      return undefined;
+    });
+    warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {
+      return undefined;
+    });
   });
 
   afterEach(() => {
     rmSync(dataDir, { recursive: true, force: true });
+    logSpy.mockRestore();
+    warnSpy.mockRestore();
   });
 
   it('prefers AUTH_SECRET from the environment', () => {
@@ -41,5 +52,24 @@ describe('resolveAuthSecret', () => {
     expect(result).toHaveLength(43);
     expect(readFileSync(file, 'utf8')).toBe(result);
     expect(statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  it('rejects an empty data dir instead of writing to the process root', () => {
+    expect(() => {
+      return resolveAuthSecret({}, '');
+    }).toThrow('BETTERDB_DATA_DIR must not be empty');
+  });
+
+  it('logs the path of a freshly generated secret', () => {
+    resolveAuthSecret({}, dataDir);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`Generated a new auth secret at ${join(dataDir, 'auth-secret')}`),
+    );
+  });
+
+  it('warns that sessions are invalidated when a stored secret is too short', () => {
+    writeFileSync(join(dataDir, 'auth-secret'), 'short');
+    resolveAuthSecret({}, dataDir);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('invalidates all sessions'));
   });
 });

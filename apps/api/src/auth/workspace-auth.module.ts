@@ -1,4 +1,4 @@
-import { DynamicModule, Module, Provider, Type } from '@nestjs/common';
+import { DynamicModule, Logger, Module, Provider, Type } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { join } from 'path';
 import type { StoragePort } from '../common/interfaces/storage-port.interface';
@@ -19,6 +19,11 @@ import { resolveWorkspaceConfig, WORKSPACE_CONFIG, WorkspaceConfig } from './wor
 
 const DEFAULT_DATA_DIR = join(process.cwd(), 'data');
 
+const MEMORY_STORAGE_WARNING =
+  'STORAGE_TYPE=memory: users and sessions are lost on restart; every restart returns to the register screen';
+
+const logger = new Logger('WorkspaceAuth');
+
 async function buildBetterAuth(
   storage: StoragePort,
   config: WorkspaceConfig,
@@ -27,7 +32,10 @@ async function buildBetterAuth(
     throw new Error('Storage adapter does not expose a raw database handle');
   }
   const handle = storage.getRawDatabaseHandle();
-  const secret = resolveAuthSecret(process.env, process.env.BETTERDB_DATA_DIR ?? DEFAULT_DATA_DIR);
+  if (handle.kind === 'memory') {
+    logger.warn(MEMORY_STORAGE_WARNING);
+  }
+  const secret = resolveAuthSecret(process.env, process.env.BETTERDB_DATA_DIR || DEFAULT_DATA_DIR);
   const auth = await createBetterAuth({ handle, secret, config });
   await runBetterAuthMigrations(auth, handle);
   return auth;
@@ -43,7 +51,7 @@ export class WorkspaceAuthModule {
     ];
     const controllers: Type<unknown>[] = [];
     const exports: string[] = [WORKSPACE_CONFIG];
-    if (config.enabled) {
+    if (config.enabled === true) {
       providers.push({
         provide: BETTER_AUTH,
         useFactory: (storage: StoragePort) => {
