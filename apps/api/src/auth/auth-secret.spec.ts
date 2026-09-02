@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { resolveAuthSecret } from './auth-secret';
@@ -31,5 +31,15 @@ describe('resolveAuthSecret', () => {
   it('creates the data directory when missing', () => {
     const nested = join(dataDir, 'nested', 'dir');
     expect(resolveAuthSecret({}, nested)).toHaveLength(43);
+  });
+
+  it('enforces 0600 when overwriting a pre-existing file with loose permissions', () => {
+    const file = join(dataDir, 'auth-secret');
+    const shortSecret = 'short';
+    writeFileSync(file, shortSecret, { mode: 0o644 });
+    const result = resolveAuthSecret({}, dataDir);
+    expect(result).toHaveLength(43);
+    expect(readFileSync(file, 'utf8')).toBe(result);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
   });
 });

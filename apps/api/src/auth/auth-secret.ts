@@ -1,5 +1,5 @@
 import { randomBytes } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
 const SECRET_FILE = 'auth-secret';
@@ -18,5 +18,6 @@ export function resolveAuthSecret(env: NodeJS.ProcessEnv, dataDir: string): stri
   mkdirSync(dataDir, { recursive: true });
   const generated = randomBytes(32).toString('base64url');
   writeFileSync(file, generated, { mode: 0o600 });
+  chmodSync(file, 0o600);
   return generated;
 }
