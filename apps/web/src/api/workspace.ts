@@ -1,12 +1,8 @@
 import type { WorkspaceMe, WorkspaceStatus } from '@betterdb/shared';
 import { fetchApi } from './client';
 
-export type CurrentUser = Omit<WorkspaceMe, 'role'> & {
-  role: string;
-  tenantId?: string;
-  subdomain?: string;
-};
-export type CloudUser = CurrentUser;
+export type CurrentUser = WorkspaceMe & { tenantId?: string; subdomain?: string };
+export type CloudUser = Omit<CurrentUser, 'role'> & { role: string };
 
 export interface Member {
   id: string;
