@@ -17,6 +17,12 @@ describe('workspace env vars', () => {
     expect(envSchema.safeParse({ AUTH_SECRET: 'short' }).success).toBe(false);
   });
 
+  it('treats the empty auth URLs shipped in .env.example as unset', () => {
+    const parsed = envSchema.parse({ AUTH_PUBLIC_URL: '', AUTH_BROKER_URL: '' });
+    expect(parsed.AUTH_PUBLIC_URL).toBeUndefined();
+    expect(parsed.AUTH_BROKER_URL).toBe('https://betterdb.com');
+  });
+
   it('rejects a non-URL AUTH_PUBLIC_URL and strips a trailing slash', () => {
     expect(envSchema.safeParse({ AUTH_PUBLIC_URL: 'not a url' }).success).toBe(false);
     expect(envSchema.parse({ AUTH_PUBLIC_URL: 'https://mon.example.com/' }).AUTH_PUBLIC_URL).toBe(
