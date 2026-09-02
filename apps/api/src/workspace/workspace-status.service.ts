@@ -7,13 +7,22 @@ export const WORKSPACE_STATUS = 'WORKSPACE_STATUS';
 
 @Injectable()
 export class WorkspaceStatusService {
+  private bootstrapped = false;
+
   constructor(
     @Inject(WORKSPACE_CONFIG) private readonly config: WorkspaceConfig,
     @Inject(BETTER_AUTH) private readonly auth: BetterAuthInstance,
   ) {}
 
   async getStatus(): Promise<WorkspaceStatus> {
+    const { mode, enabled } = this.config;
+    if (this.bootstrapped === true) {
+      return { mode, enabled, bootstrapped: true };
+    }
     const users = await countUsers(this.auth);
-    return { mode: this.config.mode, enabled: this.config.enabled, bootstrapped: users > 0 };
+    if (users > 0) {
+      this.bootstrapped = true;
+    }
+    return { mode, enabled, bootstrapped: this.bootstrapped };
   }
 }
