@@ -2,6 +2,7 @@ import { Pool, PoolConfig } from 'pg';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
 import { randomUUID } from 'crypto';
 import { parseSshTunnel } from '@betterdb/shared';
+import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
   AnomalyQueryOptions,
   AnomalyStats,
@@ -170,7 +171,7 @@ interface MemoryProposalAuditRow {
   actor_source: ActorSource;
 }
 
-export class PostgresAdapter implements StoragePort {
+export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   private pool: Pool | null = null;
   private ready: boolean = false;
   private readonly mappers = new RowMappers(PostgresDialect);
@@ -341,6 +342,13 @@ export class PostgresAdapter implements StoragePort {
         `Failed to initialize PostgreSQL: ${error instanceof Error ? error.message : 'Unknown error'}`,
       );
     }
+  }
+
+  getRawDatabaseHandle(): RawDatabaseHandle {
+    if (this.pool === null) {
+      throw new Error('PostgreSQL storage is not initialized');
+    }
+    return { kind: 'postgres', pool: this.pool };
   }
 
   /**

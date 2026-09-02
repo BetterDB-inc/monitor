@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
 import { parseSshTunnel } from '@betterdb/shared';
+import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
   StoragePort,
   StoredAclEntry,
@@ -333,7 +334,7 @@ interface MemoryProposalAuditRow {
   actor_source: ActorSource;
 }
 
-export class SqliteAdapter implements StoragePort {
+export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   private db: Database.Database | null = null;
   private ready: boolean = false;
   private readonly mappers = new RowMappers(SqliteDialect);
@@ -359,6 +360,16 @@ export class SqliteAdapter implements StoragePort {
         `Failed to initialize SQLite: ${error instanceof Error ? error.message : 'Unknown error'}`,
       );
     }
+  }
+
+  getRawDatabaseHandle(): RawDatabaseHandle {
+    if (this.db === null) {
+      throw new Error('SQLite storage is not initialized');
+    }
+    if (this.config.url !== undefined) {
+      return { kind: 'libsql', db: this.db };
+    }
+    return { kind: 'sqlite', db: this.db };
   }
 
   private async openDatabase(): Promise<Database.Database> {
