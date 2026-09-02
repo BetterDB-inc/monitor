@@ -37,6 +37,7 @@ function databaseFor(handle: RawDatabaseHandle, modules: BetterAuthModules): unk
 export async function createBetterAuth(options: CreateBetterAuthOptions) {
   const modules = await loadBetterAuthModules();
   const { config } = options;
+  const secureCookies = config.publicUrl?.startsWith('https://') === true;
   let bootstrapPending = false;
   return modules.betterAuth({
     secret: options.secret,
@@ -49,6 +50,7 @@ export async function createBetterAuth(options: CreateBetterAuthOptions) {
     rateLimit: { enabled: true },
     advanced: {
       disableOriginCheck: false,
+      useSecureCookies: secureCookies,
       ipAddress: { ipAddressHeaders: [CLIENT_IP_HEADER] },
     },
     user: {
