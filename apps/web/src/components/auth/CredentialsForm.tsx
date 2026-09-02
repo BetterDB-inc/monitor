@@ -48,7 +48,9 @@ export function CredentialsForm({
           <Input
             placeholder="Name"
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => {
+              setName(e.target.value);
+            }}
             required
           />
         )}
@@ -56,14 +58,18 @@ export function CredentialsForm({
           type="email"
           placeholder="Email"
           value={email}
-          onChange={(e) => setEmail(e.target.value)}
+          onChange={(e) => {
+            setEmail(e.target.value);
+          }}
           required
         />
         <Input
           type="password"
           placeholder="Password"
           value={password}
-          onChange={(e) => setPassword(e.target.value)}
+          onChange={(e) => {
+            setPassword(e.target.value);
+          }}
           minLength={8}
           required
         />
