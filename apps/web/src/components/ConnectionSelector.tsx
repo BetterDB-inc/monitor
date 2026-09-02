@@ -1164,7 +1164,7 @@ function ValkeyInstancesTab({
     loadData();
     workspaceApi
       .getMe()
-      .then((me) => setIsAdminOrOwner(me.role === 'admin' || me.role === 'owner'))
+      .then((me) => setIsAdminOrOwner(me.role === 'admin' || me.isOwner))
       .catch(() => {});
   }, []);
 
