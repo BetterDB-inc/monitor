@@ -81,6 +81,9 @@ describe('AuthGate routing', () => {
         screen.getByRole('heading', { name: /create the owner account/i }),
       ).toBeInTheDocument(),
     );
+    expect(screen.getByLabelText('Name')).toBeInTheDocument();
+    expect(screen.getByLabelText('Email')).toBeInTheDocument();
+    expect(screen.getByLabelText('Password')).toBeInTheDocument();
   });
 
   it('renders login when bootstrapped and signed out', async () => {
