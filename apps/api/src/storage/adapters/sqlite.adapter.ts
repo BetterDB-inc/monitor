@@ -3699,13 +3699,30 @@ export class SqliteAdapter implements StoragePort {
     // Prune whole traces (by trace-level start), not individual spans, so a long
     // trace never loses its root/early spans while later ones survive.
     // "MIN(start_time_ms) < c" is equivalent to "any span < c", so the
-    // index-driven DISTINCT form replaces the full GROUP BY aggregate scan.
-    return chunkedSqliteDelete(
-      this.db,
-      'otel_spans',
-      'trace_id IN (SELECT DISTINCT trace_id FROM otel_spans WHERE start_time_ms < ?)',
-      [cutoffTimestamp],
+    // index-driven DISTINCT probe replaces the full GROUP BY aggregate scan.
+    //
+    // Batched per TRACE, not per row: a generic rowid-chunked delete would
+    // re-evaluate the "which traces are old" probe after a chunk removed a
+    // trace's old spans, letting its newer spans survive as orphans. Selecting
+    // a batch of trace ids and deleting all their spans in one statement keeps
+    // every trace atomic while still yielding between batches.
+    const TRACE_BATCH = 1_000;
+    const selectBatch = this.db.prepare(
+      'SELECT DISTINCT trace_id FROM otel_spans WHERE start_time_ms < ? LIMIT ?',
     );
+    let total = 0;
+    for (;;) {
+      const rows = selectBatch.all(cutoffTimestamp, TRACE_BATCH) as { trace_id: string }[];
+      if (rows.length === 0) break;
+      const placeholders = rows.map(() => '?').join(',');
+      const result = this.db
+        .prepare(`DELETE FROM otel_spans WHERE trace_id IN (${placeholders})`)
+        .run(...rows.map((r) => r.trace_id));
+      total += result.changes;
+      if (rows.length < TRACE_BATCH) break;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    return total;
   }
 
   // Vector Index Snapshot Methods
