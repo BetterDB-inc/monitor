@@ -10,7 +10,7 @@ import {
   useState,
 } from 'react';
 import type { WorkspaceMode } from '@betterdb/shared';
-import { setAuthRedirectEnabled } from '../api/client';
+import { setAuthRedirectEnabled, UnauthorizedError } from '../api/client';
 import { CurrentUser, workspaceApi } from '../api/workspace';
 
 export interface AuthState {
@@ -69,11 +69,19 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
           return;
         }
         setUser(me);
-      } catch {
+      } catch (error) {
         if (seq !== refreshSeq.current) {
           return;
         }
-        setUser(null);
+        if (error instanceof UnauthorizedError) {
+          setUser(null);
+          return;
+        }
+        if (status.mode === 'cloud') {
+          setUser(null);
+          return;
+        }
+        setUnavailable(true);
       }
     } catch {
       setAuthRedirectEnabled(false);
