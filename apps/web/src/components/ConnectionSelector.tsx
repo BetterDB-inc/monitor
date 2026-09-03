@@ -293,7 +293,12 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       <div className="px-3 py-2">
         <div className="text-sm text-destructive mb-2">{error}</div>
         <button
-          onClick={() => !locked && setShowAddDialog(true)}
+          onClick={() => {
+            if (locked === true) {
+              return;
+            }
+            setShowAddDialog(true);
+          }}
           disabled={locked}
           className={`text-xs text-primary ${locked ? 'opacity-30 cursor-not-allowed' : 'hover:underline'}`}
         >
