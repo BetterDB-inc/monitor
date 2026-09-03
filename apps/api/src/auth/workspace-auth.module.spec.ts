@@ -2,6 +2,8 @@ import { Logger } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { StorageModule } from '../storage/storage.module';
+import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
+import { TelemetryModule } from '../telemetry/telemetry.module';
 import { ActorResolver } from './actor-resolver';
 import { WorkspaceAuthModule } from './workspace-auth.module';
 import { SystemModule } from '../system/system.module';
@@ -15,8 +17,15 @@ async function boot(env: Record<string, string | undefined>): Promise<NestFastif
     }
   }
   const moduleRef = await Test.createTestingModule({
-    imports: [StorageModule, WorkspaceAuthModule.forRoot(), SystemModule],
-  }).compile();
+    imports: [StorageModule, WorkspaceAuthModule.forRoot(), SystemModule, TelemetryModule],
+  })
+    .overrideProvider(UsageTelemetryService)
+    .useValue({
+      trackUserInvited: jest.fn(),
+      trackInviteAccepted: jest.fn(),
+      trackAppStart: jest.fn(),
+    })
+    .compile();
   const app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
   await app.init();
   await app.getHttpAdapter().getInstance().ready();
