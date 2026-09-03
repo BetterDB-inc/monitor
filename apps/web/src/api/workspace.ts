@@ -23,6 +23,14 @@ export interface Invitation {
   expiresAt: string;
 }
 
+export type InviteCreated = Invitation & { url?: string };
+
+export interface InvitePreview {
+  email: string;
+  role: string;
+  expired: boolean;
+}
+
 export const workspaceApi = {
   getStatus: () => fetchApi<WorkspaceStatus>('/system/workspace', { skipAuthRedirect: true }),
   getMe: () => fetchApi<CurrentUser>('/workspace/me', { skipAuthRedirect: true }),
@@ -34,12 +42,30 @@ export const workspaceApi = {
   getMembers: () => fetchApi<Member[]>('/workspace/members'),
   getInvitations: () => fetchApi<Invitation[]>('/workspace/invitations'),
   invite: (data: { email: string; role: string }) =>
-    fetchApi<Invitation>('/workspace/invite', {
+    fetchApi<InviteCreated>('/workspace/invite', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
   revokeInvitation: (id: string) =>
-    fetchApi<void>(`/workspace/invitations/${id}`, { method: 'DELETE' }),
+    fetchApi<void>(`/workspace/invitations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   removeMember: (userId: string) =>
-    fetchApi<void>(`/workspace/members/${userId}`, { method: 'DELETE' }),
+    fetchApi<void>(`/workspace/members/${encodeURIComponent(userId)}`, { method: 'DELETE' }),
+  updateMemberRole: (userId: string, role: string) =>
+    fetchApi<Member>(`/workspace/members/${encodeURIComponent(userId)}/role`, {
+      method: 'PATCH',
+      body: JSON.stringify({ role }),
+    }),
+  transferOwnership: (userId: string) =>
+    fetchApi<void>('/workspace/ownership/transfer', {
+      method: 'POST',
+      body: JSON.stringify({ userId }),
+    }),
+  getInvite: (token: string) =>
+    fetchApi<InvitePreview>(`/invite/${encodeURIComponent(token)}`, { skipAuthRedirect: true }),
+  acceptInvite: (token: string, body: { name: string; password: string }) =>
+    fetchApi<CurrentUser>(`/invite/${encodeURIComponent(token)}/accept`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+      skipAuthRedirect: true,
+    }),
 };
