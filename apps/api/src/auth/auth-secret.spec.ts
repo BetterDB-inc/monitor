@@ -4,6 +4,26 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { resolveAuthSecret } from './auth-secret';
 
+type WriteFileSyncArgs = Parameters<typeof import('fs').writeFileSync>;
+
+let mockWriteFileSyncOnce: ((...args: WriteFileSyncArgs) => void) | null = null;
+
+jest.mock('fs', () => {
+  const actual = jest.requireActual<typeof import('fs')>('fs');
+  return {
+    ...actual,
+    writeFileSync: (...args: WriteFileSyncArgs): void => {
+      const override = mockWriteFileSyncOnce;
+      if (override === null) {
+        actual.writeFileSync(...args);
+        return;
+      }
+      mockWriteFileSyncOnce = null;
+      override(...args);
+    },
+  };
+});
+
 describe('resolveAuthSecret', () => {
   let dataDir: string;
   let logSpy: jest.SpyInstance;
@@ -20,6 +40,7 @@ describe('resolveAuthSecret', () => {
   });
 
   afterEach(() => {
+    mockWriteFileSyncOnce = null;
     rmSync(dataDir, { recursive: true, force: true });
     logSpy.mockRestore();
     warnSpy.mockRestore();
@@ -79,5 +100,32 @@ describe('resolveAuthSecret', () => {
     writeFileSync(file, secret, { mode: 0o644 });
     expect(resolveAuthSecret({}, dataDir)).toBe(secret);
     expect(statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  it('reuses the secret a racing process wrote instead of overwriting it', () => {
+    const file = join(dataDir, 'auth-secret');
+    const racedSecret = 'y'.repeat(43);
+    mockWriteFileSyncOnce = () => {
+      writeFileSync(file, racedSecret, { mode: 0o644 });
+      const error = new Error('EEXIST: file already exists') as NodeJS.ErrnoException;
+      error.code = 'EEXIST';
+      throw error;
+    };
+
+    expect(resolveAuthSecret({}, dataDir)).toBe(racedSecret);
+    expect(readFileSync(file, 'utf8')).toBe(racedSecret);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  it('rethrows a write failure that is not a lost race', () => {
+    mockWriteFileSyncOnce = () => {
+      const error = new Error('EACCES: permission denied') as NodeJS.ErrnoException;
+      error.code = 'EACCES';
+      throw error;
+    };
+
+    expect(() => {
+      return resolveAuthSecret({}, dataDir);
+    }).toThrow('EACCES');
   });
 });
