@@ -1,21 +1,27 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 
 const mockRefreshConnections = vi.fn().mockResolvedValue(undefined);
 const mockSetConnection = vi.fn();
 
+const twoConnections = [
+  { id: '1', name: 'Prod', host: 'localhost', port: 6379, isConnected: true },
+  { id: '2', name: 'Staging', host: 'localhost', port: 6380, isConnected: true },
+];
+
+const connectionState = vi.hoisted(() => {
+  return { connections: [] as Array<Record<string, unknown>>, error: null as string | null };
+});
+
 vi.mock('../hooks/useConnection', () => ({
   useConnection: () => ({
     currentConnection: null,
-    connections: [
-      { id: '1', name: 'Prod', host: 'localhost', port: 6379, isConnected: true },
-      { id: '2', name: 'Staging', host: 'localhost', port: 6380, isConnected: true },
-    ],
+    connections: connectionState.connections,
     loading: false,
-    error: null,
+    error: connectionState.error,
     setConnection: mockSetConnection,
     refreshConnections: mockRefreshConnections,
-    hasNoConnections: false,
+    hasNoConnections: connectionState.connections.length === 0,
   }),
 }));
 
@@ -64,6 +70,8 @@ import { ConnectionSelector } from './ConnectionSelector';
 describe('ConnectionSelector - read-only member', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    connectionState.connections = twoConnections;
+    connectionState.error = null;
   });
 
   afterEach(() => {
@@ -78,5 +86,30 @@ describe('ConnectionSelector - read-only member', () => {
 
     expect(addButton).toBeDisabled();
     expect(manageButton).toBeDisabled();
+  });
+
+  it('shows a placeholder instead of the first-connection call to action', () => {
+    connectionState.connections = [];
+    render(<ConnectionSelector />);
+
+    expect(screen.queryByText('+ Add your first connection')).toBeNull();
+    expect(screen.getByText('No connections yet')).toBeInTheDocument();
+  });
+
+  it('disables the Add Connection button in the error state', () => {
+    connectionState.error = 'Failed to load connections';
+    render(<ConnectionSelector />);
+
+    expect(screen.getByText('+ Add Connection', { selector: 'button' })).toBeDisabled();
+  });
+
+  it('ignores the open-add-connection window event', () => {
+    render(<ConnectionSelector />);
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('betterdb:open-add-connection'));
+    });
+
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });
