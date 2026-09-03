@@ -103,6 +103,8 @@ import type {
 import { PostgresDialect, RowMappers } from './base-sql.adapter';
 import { WebhookPostgresRepository } from './repositories/webhook.postgres.repository';
 import { SlowLogPostgresRepository } from './repositories/slowlog.postgres.repository';
+import { InvitationPostgresRepository } from './repositories/invitation.postgres.repository';
+import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
 
 // Domain-specific repositories (webhooks, slowlog extracted). Remaining domains to extract:
 // ACL, anomaly, commandlog, latency, memory, hotkeys, settings,
@@ -177,6 +179,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   private readonly mappers = new RowMappers(PostgresDialect);
   private webhookRepo!: WebhookPostgresRepository;
   private slowlogRepo!: SlowLogPostgresRepository;
+  private invitationRepo!: InvitationPostgresRepository;
 
   constructor(private config: PostgresAdapterConfig) {}
 
@@ -319,6 +322,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
       this.webhookRepo = new WebhookPostgresRepository(this.pool, this.mappers);
       this.slowlogRepo = new SlowLogPostgresRepository(this.pool, this.mappers);
+      this.invitationRepo = new InvitationPostgresRepository(this.pool);
 
       // Test connection (will have correct search_path if schema is set)
       const testClient = await this.pool.connect();
@@ -2055,6 +2059,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       -- Idempotent migration for deployments that ran the PR 19 schema
       ALTER TABLE scheduled_captures
         ADD COLUMN IF NOT EXISTS cron_expression TEXT;
+
+      CREATE TABLE IF NOT EXISTS invitations (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        role VARCHAR(20) NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        invited_by TEXT NOT NULL,
+        status VARCHAR(20) NOT NULL CHECK (status IN ('pending', 'accepted', 'revoked')),
+        created_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL
+      );
     `);
   }
 
@@ -5501,6 +5516,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       lastTs: toNumber(row.last_ts),
       nodeId: (row.node_id as string | null) ?? undefined,
     }));
+  }
+
+  getInvitationRepository(): InvitationRepository {
+    return this.invitationRepo;
   }
 }
 

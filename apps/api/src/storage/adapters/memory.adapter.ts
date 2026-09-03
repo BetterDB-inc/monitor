@@ -84,6 +84,8 @@ import {
 } from '@betterdb/shared';
 import { WebhookMemoryRepository } from './repositories/webhook.memory.repository';
 import { SlowLogMemoryRepository } from './repositories/slowlog.memory.repository';
+import { InvitationMemoryRepository } from './repositories/invitation.memory.repository';
+import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
 
 const NULL_SUB_DISCRIMINATOR = '__betterdb_null__';
 
@@ -120,6 +122,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   private readonly MAX_DELIVERIES_PER_WEBHOOK = 1000;
   private readonly webhookRepo = new WebhookMemoryRepository(this.MAX_DELIVERIES_PER_WEBHOOK);
   private readonly slowlogRepo = new SlowLogMemoryRepository();
+  private readonly invitationRepo = new InvitationMemoryRepository();
   private idCounter = 1;
   private ready: boolean = false;
 
@@ -2154,5 +2157,9 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       }
     }
     return pruned;
+  }
+
+  getInvitationRepository(): InvitationRepository {
+    return this.invitationRepo;
   }
 }
