@@ -1,4 +1,13 @@
-import { Body, Controller, Get, Param, Post, Req, Res } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  Req,
+  Res,
+  UnauthorizedException,
+} from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { WorkspaceMe } from '@betterdb/shared';
 import { toWebHeaders } from '../auth/web-headers';
@@ -6,6 +15,8 @@ import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { AcceptInviteDto } from './dto/accept-invite.dto';
 import { InvitationPreview, InvitationService } from './invitation.service';
 import { MemberService } from './member.service';
+
+export const SIGN_IN_FAILED_MESSAGE = 'Sign-in failed';
 
 @Controller('invite')
 export class InviteController {
@@ -45,6 +56,9 @@ export class InviteController {
         isOwner: member.isOwner,
       };
       session = await this.members.signIn(member.email, body.password, toWebHeaders(req.headers));
+      if (session.ok === false) {
+        throw new UnauthorizedException(SIGN_IN_FAILED_MESSAGE);
+      }
     } catch (error) {
       await this.invitations.release(invitation.id);
       throw error;
