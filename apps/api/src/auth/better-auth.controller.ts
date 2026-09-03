@@ -4,14 +4,18 @@ import { BETTER_AUTH, CLIENT_IP_HEADER, type BetterAuthInstance } from './better
 import { toWebHeaders } from './web-headers';
 
 const BODYLESS_METHODS = new Set(['GET', 'HEAD']);
+const SIGN_UP_SUFFIX = '/sign-up/email';
 
 @Controller('auth')
 export class BetterAuthController {
+  private signUpQueue: Promise<void> = Promise.resolve();
+
   constructor(@Inject(BETTER_AUTH) private readonly auth: BetterAuthInstance) {}
 
   @All('*')
   async bridge(@Req() req: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
-    const response = await this.auth.handler(this.toWebRequest(req));
+    const request = this.toWebRequest(req);
+    const response = await this.dispatch(req.method, request);
     reply.status(response.status);
     response.headers.forEach((value, key) => {
       if (key.toLowerCase() !== 'set-cookie') {
@@ -23,6 +27,31 @@ export class BetterAuthController {
       reply.header('set-cookie', cookies);
     }
     reply.send(await response.text());
+  }
+
+  private dispatch(method: string, request: Request): Promise<Response> {
+    if (this.isSignUp(method, request) === false) {
+      return this.auth.handler(request);
+    }
+    const pending = this.signUpQueue.then(() => {
+      return this.auth.handler(request);
+    });
+    this.signUpQueue = pending.then(
+      () => {
+        return undefined;
+      },
+      () => {
+        return undefined;
+      },
+    );
+    return pending;
+  }
+
+  private isSignUp(method: string, request: Request): boolean {
+    if (method !== 'POST') {
+      return false;
+    }
+    return new URL(request.url).pathname.endsWith(SIGN_UP_SUFFIX);
   }
 
   private toWebRequest(req: FastifyRequest): Request {
