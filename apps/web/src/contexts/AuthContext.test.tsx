@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { ReactElement, ReactNode } from 'react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
+import { UnauthorizedError } from '../api/client';
 import { AuthProvider, useAuth } from './AuthContext';
 import { AuthGate } from '../components/auth/AuthGate';
 
@@ -84,7 +85,7 @@ describe('AuthGate routing', () => {
 
   it('renders login when bootstrapped and signed out', async () => {
     getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: true });
-    getMe.mockRejectedValue(new Error('401'));
+    getMe.mockRejectedValue(new UnauthorizedError());
     renderAt('/connections');
     await waitFor(() =>
       expect(screen.getByRole('heading', { name: /sign in/i })).toBeInTheDocument(),
@@ -121,7 +122,7 @@ describe('AuthGate routing', () => {
 
   it('keeps the query string in the login redirect target', async () => {
     getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: true });
-    getMe.mockRejectedValue(new Error('401'));
+    getMe.mockRejectedValue(new UnauthorizedError());
     const { result } = renderHook(() => useLocation(), {
       wrapper: gateWrapperFor('/latency?window=24h&range=1'),
     });
@@ -279,5 +280,48 @@ describe('sign-out versus an in-flight refresh', () => {
       await pendingRefresh;
     });
     expect(result.current.user).toBeNull();
+  });
+});
+
+describe('getMe failure handling', () => {
+  beforeEach(() => {
+    getStatus.mockReset();
+    getMe.mockReset();
+    setAuthRedirectEnabledMock.mockReset();
+  });
+
+  function wrapper({ children }: { children: ReactNode }): ReactElement {
+    return (
+      <MemoryRouter>
+        <AuthProvider>{children}</AuthProvider>
+      </MemoryRouter>
+    );
+  }
+
+  it('signs the visitor out on a 401', async () => {
+    getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: true });
+    getMe.mockRejectedValue(new UnauthorizedError());
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.user).toBeNull();
+    expect(result.current.unavailable).toBe(false);
+  });
+
+  it('keeps the session and reports the server unavailable on a 5xx', async () => {
+    getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: true });
+    getMe.mockRejectedValue(new Error('502'));
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.unavailable).toBe(true);
+    expect(result.current.mode).toBe('self-hosted');
+    expect(result.current.bootstrapped).toBe(true);
+  });
+
+  it('shows the unavailable screen instead of login when getMe fails with a 5xx', async () => {
+    getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: true });
+    getMe.mockRejectedValue(new Error('502'));
+    renderAt('/connections');
+    await waitFor(() => expect(screen.getByText('Cannot reach the server')).toBeInTheDocument());
+    expect(screen.queryByRole('heading', { name: /sign in/i })).not.toBeInTheDocument();
   });
 });
