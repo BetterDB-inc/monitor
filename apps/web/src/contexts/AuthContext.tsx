@@ -52,14 +52,14 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
     const seq = refreshSeq.current;
     try {
       const status = await workspaceApi.getStatus();
-      setAuthRedirectEnabled(status.mode === 'self-hosted' && status.enabled === true);
       if (seq !== refreshSeq.current) {
         return;
       }
-      setUnavailable(false);
+      setAuthRedirectEnabled(status.mode === 'self-hosted' && status.enabled === true);
       setMode(status.mode);
       setBootstrapped(status.bootstrapped);
       if (status.enabled === false || status.bootstrapped === false) {
+        setUnavailable(false);
         setUser(null);
         return;
       }
@@ -68,26 +68,29 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
         if (seq !== refreshSeq.current) {
           return;
         }
+        setUnavailable(false);
         setUser(me);
       } catch (error) {
         if (seq !== refreshSeq.current) {
           return;
         }
         if (error instanceof UnauthorizedError) {
+          setUnavailable(false);
           setUser(null);
           return;
         }
         if (status.mode === 'cloud') {
+          setUnavailable(false);
           setUser(null);
           return;
         }
         setUnavailable(true);
       }
     } catch {
-      setAuthRedirectEnabled(false);
       if (seq !== refreshSeq.current) {
         return;
       }
+      setAuthRedirectEnabled(false);
       setUnavailable(true);
       setUser(null);
     } finally {
