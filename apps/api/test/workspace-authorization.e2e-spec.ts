@@ -182,8 +182,11 @@ describe('Workspace authorization (E2E)', () => {
 
   afterAll(async () => {
     for (const socket of openSockets) {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.close();
+      socket.on('error', () => {
+        return undefined;
+      });
+      if (socket.readyState !== WebSocket.CLOSED) {
+        socket.terminate();
       }
     }
     if (app !== undefined) {
@@ -237,14 +240,14 @@ describe('Workspace authorization (E2E)', () => {
     expect(response.statusCode).toBe(201);
   });
 
-  it('exempts vector-search from the mutation guard for members', async () => {
+  it('lets member vector-search requests reach validation instead of the mutation guard', async () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/vector-search/indexes/x/search',
       headers: { cookie: memberCookie, 'content-type': 'application/json' },
       payload: {},
     });
-    expect(response.statusCode).not.toBe(403);
+    expect(response.statusCode).toBe(400);
   });
 
   it('rejects a CLI socket upgrade without a session', async () => {

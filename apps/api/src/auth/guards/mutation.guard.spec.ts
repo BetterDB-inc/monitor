@@ -83,11 +83,16 @@ describe('MutationGuard', () => {
     }
   });
 
-  it('exempts public paths and /workspace/me', () => {
+  it('exempts public paths', () => {
     expect(guard.canActivate(contextFor(member, 'POST', '/auth/sign-out'))).toBe(true);
     expect(guard.canActivate(contextFor(member, 'POST', '/api/auth/sign-out'))).toBe(true);
     expect(guard.canActivate(contextFor(null, 'POST', '/api/telemetry/event'))).toBe(true);
-    expect(guard.canActivate(contextFor(member, 'PATCH', '/api/workspace/me?tab=1'))).toBe(true);
+  });
+
+  it('does not exempt writes to /workspace/me for members', () => {
+    expect(() => {
+      guard.canActivate(contextFor(member, 'PATCH', '/api/workspace/me?tab=1'));
+    }).toThrow(new ForbiddenException(READ_ONLY_MESSAGE));
   });
 
   it('exempts routes marked @AllowMembers()', () => {

@@ -27,7 +27,12 @@ export class RolesGuard implements CanActivate {
       return true;
     }
     const targets = [context.getHandler(), context.getClass()];
-    const roles = this.reflector.getAllAndOverride<WorkspaceRole[] | undefined>(ROLES_KEY, targets);
+    const declaredRoles = this.reflector.getAllAndOverride<WorkspaceRole[] | undefined>(
+      ROLES_KEY,
+      targets,
+    );
+    const roles =
+      declaredRoles === undefined || declaredRoles.length === 0 ? undefined : declaredRoles;
     const ownerOnly = this.reflector.getAllAndOverride<boolean | undefined>(
       OWNER_ONLY_KEY,
       targets,
