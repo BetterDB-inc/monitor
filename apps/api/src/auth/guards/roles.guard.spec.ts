@@ -15,6 +15,9 @@ class Fixture {
   @Roles('admin', 'member')
   anyRole(): void {}
 
+  @Roles()
+  unconstrained(): void {}
+
   open(): void {}
 }
 
@@ -55,6 +58,11 @@ describe('RolesGuard', () => {
   it('allows routes without role metadata for any actor', () => {
     expect(guard.canActivate(contextFor(actorOf('member', false), 'open'))).toBe(true);
     expect(guard.canActivate(contextFor(null, 'open'))).toBe(true);
+  });
+
+  it('treats an empty @Roles() list as no constraint', () => {
+    expect(guard.canActivate(contextFor(actorOf('member', false), 'unconstrained'))).toBe(true);
+    expect(guard.canActivate(contextFor(null, 'unconstrained'))).toBe(true);
   });
 
   it('allows admins and owners on admin routes', () => {

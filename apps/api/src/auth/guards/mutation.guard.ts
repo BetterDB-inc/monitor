@@ -9,13 +9,12 @@ import {
 import { Reflector } from '@nestjs/core';
 import { WORKSPACE_CONFIG, WorkspaceConfig } from '../workspace-config';
 import { RequestWithActor } from './actor.guard';
-import { isPublicPath, normalizePath } from './public-paths';
+import { isPublicPath } from './public-paths';
 import { ALLOW_MEMBERS_KEY } from './roles.decorator';
 
 export const READ_ONLY_MESSAGE = 'Read-only members cannot make changes. Ask a workspace admin.';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
-const SELF_SERVICE_PATHS = new Set(['/workspace/me']);
 
 @Injectable()
 export class MutationGuard implements CanActivate {
@@ -33,9 +32,6 @@ export class MutationGuard implements CanActivate {
       return true;
     }
     if (isPublicPath(request.url, request.method) === true) {
-      return true;
-    }
-    if (SELF_SERVICE_PATHS.has(normalizePath(request.url)) === true) {
       return true;
     }
     const actor = request.actor ?? null;
