@@ -9,6 +9,7 @@ import {
   useState,
 } from 'react';
 import type { WorkspaceMode } from '@betterdb/shared';
+import { setAuthRedirectEnabled } from '../api/client';
 import { CurrentUser, workspaceApi } from '../api/workspace';
 
 export interface AuthState {
@@ -47,6 +48,7 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
   const refresh = useCallback(async (): Promise<void> => {
     try {
       const status = await workspaceApi.getStatus();
+      setAuthRedirectEnabled(status.mode === 'self-hosted' && status.enabled === true);
       setUnavailable(false);
       setMode(status.mode);
       setBootstrapped(status.bootstrapped);
@@ -60,6 +62,7 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
         setUser(null);
       }
     } catch {
+      setAuthRedirectEnabled(false);
       setUnavailable(true);
       setUser(null);
     } finally {

@@ -3,6 +3,7 @@ import {
   fetchApi,
   PaymentRequiredError,
   UnauthorizedError,
+  setAuthRedirectEnabled,
   setCurrentConnectionId,
 } from './client';
 
@@ -77,6 +78,7 @@ describe('fetchApi 401 handling', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    setAuthRedirectEnabled(true);
     Object.defineProperty(window, 'location', {
       configurable: true,
       value: { ...originalLocation, pathname: '/connections', search: '', assign: vi.fn() },
@@ -84,6 +86,7 @@ describe('fetchApi 401 handling', () => {
   });
 
   afterEach(() => {
+    setAuthRedirectEnabled(false);
     Object.defineProperty(window, 'location', { configurable: true, value: originalLocation });
   });
 
@@ -117,5 +120,12 @@ describe('fetchApi 401 handling', () => {
       .mockResolvedValue(new Response('{}', { status: 200 }));
     await fetchApi('/health');
     expect(spy.mock.calls[0][1]).toEqual(expect.objectContaining({ credentials: 'include' }));
+  });
+
+  it('does not redirect when the redirect is disabled', async () => {
+    setAuthRedirectEnabled(false);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401 }));
+    await expect(fetchApi('/connections')).rejects.toBeInstanceOf(UnauthorizedError);
+    expect(window.location.assign).not.toHaveBeenCalled();
   });
 });

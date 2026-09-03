@@ -54,6 +54,12 @@ export class UnauthorizedError extends Error {
 
 export const AUTH_ROUTES = ['/login', '/register', '/invite'];
 
+let authRedirectEnabled = false;
+
+export function setAuthRedirectEnabled(enabled: boolean): void {
+  authRedirectEnabled = enabled;
+}
+
 export interface FetchApiOptions extends RequestInit {
   skipAuthRedirect?: boolean;
 }
@@ -65,6 +71,9 @@ function isOnAuthRoute(): boolean {
 }
 
 function redirectToLogin(): void {
+  if (authRedirectEnabled === false) {
+    return;
+  }
   if (isOnAuthRoute()) {
     return;
   }
@@ -175,7 +184,7 @@ export async function fetchApi<T>(endpoint: string, options?: FetchApiOptions): 
 
   if (!response.ok) {
     if (response.status === 401) {
-      if (skipAuthRedirect !== true) {
+      if (skipAuthRedirect !== true && authRedirectEnabled === true) {
         redirectToLogin();
       }
       throw new UnauthorizedError();
