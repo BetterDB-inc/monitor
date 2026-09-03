@@ -48,7 +48,7 @@ export class CliGateway implements OnModuleDestroy {
   ): Promise<void> {
     let actor: Actor | null = null;
     if (this.actorResolver.isEnabled() === true) {
-      actor = await this.resolveActor(request);
+      actor = await this.actorResolver.resolveFromUpgrade(request);
       if (actor === null) {
         rejectUpgrade(socket, 401);
         return;
@@ -57,20 +57,6 @@ export class CliGateway implements OnModuleDestroy {
     this.wss.handleUpgrade(request, socket, head, (ws) => {
       this.attach(ws, actor);
     });
-  }
-
-  private async resolveActor(request: IncomingMessage): Promise<Actor | null> {
-    if (this.actorResolver.isReady() === false) {
-      return null;
-    }
-    try {
-      return await this.actorResolver.resolveFromHeaders(
-        request.headers,
-        request.socket.remoteAddress ?? '',
-      );
-    } catch {
-      return null;
-    }
   }
 
   private attach(ws: WebSocket, actor: Actor | null): void {
@@ -142,7 +128,9 @@ export class CliGateway implements OnModuleDestroy {
 
   private consumeToken(ws: WebSocket): boolean {
     const state = this.connections.get(ws);
-    if (!state) return false;
+    if (state === undefined) {
+      return false;
+    }
 
     const now = Date.now();
     const elapsed = (now - state.lastRefill) / 1000;
@@ -152,7 +140,9 @@ export class CliGateway implements OnModuleDestroy {
     );
     state.lastRefill = now;
 
-    if (state.tokens < 1) return false;
+    if (state.tokens < 1) {
+      return false;
+    }
     state.tokens -= 1;
     return true;
   }

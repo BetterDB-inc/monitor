@@ -47,7 +47,7 @@ function resolverWith(enabled: boolean, actor: Actor | null): ActorResolver {
     isReady: () => {
       return true;
     },
-    resolveFromHeaders: jest.fn().mockResolvedValue(actor),
+    resolveFromUpgrade: jest.fn().mockResolvedValue(actor),
   } as unknown as ActorResolver;
 }
 
@@ -129,7 +129,7 @@ describe('TailGateway.handleUpgrade', () => {
       Buffer.alloc(0),
     );
     await flush();
-    expect(resolver.resolveFromHeaders).not.toHaveBeenCalled();
+    expect(resolver.resolveFromUpgrade).not.toHaveBeenCalled();
     expect(wss.handleUpgrade).toHaveBeenCalledTimes(1);
     expect(socket.destroyed).toBe(false);
   });
