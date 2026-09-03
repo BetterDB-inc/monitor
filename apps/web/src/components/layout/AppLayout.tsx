@@ -295,7 +295,7 @@ function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
                 element={
                   <NoConnectionsGuard>
                     <MigrationPlanProvider>
-                      <MigrationPage />
+                      <MigrationPage isCloudMode={!!cloudUser} />
                     </MigrationPlanProvider>
                   </NoConnectionsGuard>
                 }

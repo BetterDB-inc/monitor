@@ -49,7 +49,7 @@ function LockIcon() {
 
 // ── Main page ──
 
-export function MigrationPage() {
+export function MigrationPage({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [analysisId, setAnalysisId] = useState<string | null>(null);
   const [executionId, setExecutionId] = useState<string | null>(null);
@@ -202,6 +202,7 @@ export function MigrationPage() {
 
       {phase === 'idle' && (
         <AnalysisForm
+          isCloudMode={isCloudMode}
           onStart={(id) => {
             setAnalysisId(id);
             setPhase('analyzing');

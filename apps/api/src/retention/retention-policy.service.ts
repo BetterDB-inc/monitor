@@ -26,9 +26,11 @@ const CLOUD_SAMPLE_RETENTION_DAYS = 7;
 @Injectable()
 export class RetentionPolicyService {
   private readonly logger = new Logger(RetentionPolicyService.name);
-  // Remember the last invalid stored value we warned about so the per-poll
-  // reads don't repeat the warning every tick.
-  private warnedInvalidStoredValue: unknown;
+  // String key of the invalid stored value we already warned about, so the
+  // per-poll reads don't repeat the warning every tick. Stringified (identity
+  // comparison would never dedup a non-primitive like a blob) and cleared
+  // when the value recovers, so each invalid EPISODE warns exactly once.
+  private warnedInvalidStoredValue?: string;
 
   constructor(
     private readonly settingsService: SettingsService,
@@ -54,11 +56,16 @@ export class RetentionPolicyService {
     // from the logs.
     const stored = settings.localRetentionDays;
     const normalized = normalizeRetentionDays(stored);
-    if (stored != null && normalized === null && this.warnedInvalidStoredValue !== stored) {
-      this.warnedInvalidStoredValue = stored;
-      this.logger.warn(
-        `Ignoring invalid stored localRetentionDays=${String(stored)} — retention is treated as unset (keep forever)`,
-      );
+    if (stored == null || normalized !== null) {
+      this.warnedInvalidStoredValue = undefined; // episode over — warn again next time
+    } else {
+      const key = String(stored);
+      if (this.warnedInvalidStoredValue !== key) {
+        this.warnedInvalidStoredValue = key;
+        this.logger.warn(
+          `Ignoring invalid stored localRetentionDays=${key} — retention is treated as unset (keep forever)`,
+        );
+      }
     }
     return normalized;
   }

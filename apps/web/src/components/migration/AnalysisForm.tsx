@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import { isCloudModeValue } from '@betterdb/shared';
 import { useConnection } from '../../hooks/useConnection';
 import type { Connection } from '../../hooks/useConnection';
 import { useMigrationPlan } from '../../hooks/useMigrationPlan';
@@ -22,11 +21,15 @@ import {
 
 interface Props {
   onStart: (analysisId: string) => void;
+  // Runtime cloud signal threaded from App's cloudUser, the same source every
+  // other component uses — NOT a build-time env var, which is set nowhere and
+  // would split-brain this form from the rest of the UI.
+  isCloudMode?: boolean;
 }
 
 const SAMPLE_SIZES = [1000, 5000, 10000, 25000] as const;
 
-export function AnalysisForm({ onStart }: Props) {
+export function AnalysisForm({ onStart, isCloudMode = false }: Props) {
   const { connections, currentConnection } = useConnection();
   const {
     sourceId,
@@ -43,7 +46,6 @@ export function AnalysisForm({ onStart }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const isCloudMode = isCloudModeValue(import.meta.env.VITE_CLOUD_MODE);
 
   if (connections.length < 2) {
     return <NoConnectionsState connections={connections} />;
