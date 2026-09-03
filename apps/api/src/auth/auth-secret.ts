@@ -8,6 +8,15 @@ const MIN_SECRET_LENGTH = 32;
 
 const logger = new Logger('WorkspaceAuth');
 
+function readStoredSecret(file: string): string | null {
+  const stored = readFileSync(file, 'utf8').trim();
+  if (stored.length < MIN_SECRET_LENGTH) {
+    return null;
+  }
+  chmodSync(file, 0o600);
+  return stored;
+}
+
 export function resolveAuthSecret(env: NodeJS.ProcessEnv, dataDir: string): string {
   if (env.AUTH_SECRET !== undefined && env.AUTH_SECRET.length >= MIN_SECRET_LENGTH) {
     return env.AUTH_SECRET;
@@ -17,8 +26,8 @@ export function resolveAuthSecret(env: NodeJS.ProcessEnv, dataDir: string): stri
   }
   const file = join(dataDir, SECRET_FILE);
   if (existsSync(file)) {
-    const stored = readFileSync(file, 'utf8').trim();
-    if (stored.length >= MIN_SECRET_LENGTH) {
+    const stored = readStoredSecret(file);
+    if (stored !== null) {
       return stored;
     }
     logger.warn(
