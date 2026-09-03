@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { checkBlocked, checkSafeMode } from '@betterdb/shared';
+import { checkBlocked, checkMemberReadOnly, checkSafeMode } from '@betterdb/shared';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { parseCommandLine } from './command-parser';
 import { CliResultMessage, CliErrorMessage } from './cli.types';
@@ -58,7 +58,7 @@ export class CliService {
     }
 
     if (options.readOnly === true) {
-      const memberError = checkSafeMode(command, subCommand);
+      const memberError = checkMemberReadOnly(command, subCommand);
       if (memberError !== null) {
         return { type: 'error', error: MEMBER_READ_ONLY_MESSAGE };
       }
