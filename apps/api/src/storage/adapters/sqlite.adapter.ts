@@ -1459,6 +1459,7 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook_id ON webhook_deliveries(webhook_id);
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_retry ON webhook_deliveries(next_retry_at) WHERE status = 'retrying';
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_connection_id ON webhook_deliveries(connection_id);
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_created_at ON webhook_deliveries(created_at);
 
       CREATE TABLE IF NOT EXISTS slow_log_entries (
         pk INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1800,6 +1801,7 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_started_at ON capture_sessions(started_at DESC);
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_status ON capture_sessions(status, started_at DESC);
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_source ON capture_sessions(source, started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_capture_sessions_ended_at ON capture_sessions(ended_at);
 
       -- Monitor Capture Chunks Table (one row per batched MONITOR-line chunk; populated by CaptureWriter in a later PR)
       CREATE TABLE IF NOT EXISTS capture_chunks (
@@ -1814,6 +1816,7 @@ export class SqliteAdapter implements StoragePort {
       );
 
       CREATE INDEX IF NOT EXISTS idx_capture_chunks_session ON capture_chunks(session_id, chunk_index);
+      CREATE INDEX IF NOT EXISTS idx_capture_chunks_last_ts ON capture_chunks(last_ts);
 
       -- Pro+ Capture Triggers Table (PR 15)
       CREATE TABLE IF NOT EXISTS capture_triggers (
@@ -3748,23 +3751,22 @@ export class SqliteAdapter implements StoragePort {
     //
     // Batched per TRACE, not per row: a generic rowid-chunked delete would
     // re-evaluate the "which traces are old" probe after a chunk removed a
-    // trace's old spans, letting its newer spans survive as orphans. Selecting
-    // a batch of trace ids and deleting all their spans in one statement keeps
-    // every trace atomic while still yielding between batches.
+    // trace's old spans, letting its newer spans survive as orphans. One
+    // statement per batch selects up to TRACE_BATCH old trace ids and deletes
+    // ALL their spans atomically, so no trace is ever split; terminate on an
+    // empty batch (row counts count spans, not traces, so a short batch
+    // proves nothing).
     const TRACE_BATCH = 1_000;
-    const selectBatch = this.db.prepare(
-      'SELECT DISTINCT trace_id FROM otel_spans WHERE start_time_ms < ? LIMIT ?',
+    const deleteBatch = this.db.prepare(
+      `DELETE FROM otel_spans WHERE trace_id IN (
+         SELECT DISTINCT trace_id FROM otel_spans WHERE start_time_ms < ? LIMIT ?
+       )`,
     );
     let total = 0;
     for (;;) {
-      const rows = selectBatch.all(cutoffTimestamp, TRACE_BATCH) as { trace_id: string }[];
-      if (rows.length === 0) break;
-      const placeholders = rows.map(() => '?').join(',');
-      const result = this.db
-        .prepare(`DELETE FROM otel_spans WHERE trace_id IN (${placeholders})`)
-        .run(...rows.map((r) => r.trace_id));
-      total += result.changes;
-      if (rows.length < TRACE_BATCH) break;
+      const { changes } = deleteBatch.run(cutoffTimestamp, TRACE_BATCH);
+      if (changes === 0) break;
+      total += changes;
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
     return total;

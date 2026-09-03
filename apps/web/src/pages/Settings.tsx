@@ -5,7 +5,12 @@ import { licenseApi } from '../api/license';
 import { useMcpTokens } from '../hooks/useMcpTokens';
 import { useConnection } from '../hooks/useConnection';
 import { useLicense } from '../hooks/useLicense';
-import { AppSettings, SettingsUpdateRequest, MAX_RETENTION_DAYS } from '@betterdb/shared';
+import {
+  AppSettings,
+  SettingsUpdateRequest,
+  MAX_RETENTION_DAYS,
+  normalizeRetentionDays,
+} from '@betterdb/shared';
 import { Card } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { useQueryClient } from '@tanstack/react-query';
@@ -28,6 +33,14 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   // error instead of silently collapsing to "keep forever".
   const [retentionInput, setRetentionInput] = useState('');
   const [retentionError, setRetentionError] = useState<string | null>(null);
+
+  // Single sync point for the retention draft: every path that commits or
+  // reloads settings resets the input to the stored value and clears any
+  // pending error, so the pair can never drift between call sites.
+  const syncRetentionFrom = (days: number | null | undefined) => {
+    setRetentionInput(days != null ? String(days) : '');
+    setRetentionError(null);
+  };
 
   // License state
   const [activateKey, setActivateKey] = useState('');
@@ -65,8 +78,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
       setHasChanges(false);
-      setRetentionInput(response.settings.localRetentionDays?.toString() ?? '');
-      setRetentionError(null);
+      syncRetentionFrom(response.settings.localRetentionDays);
     } catch (error) {
       console.error('Failed to load settings:', error);
     } finally {
@@ -99,8 +111,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
       setHasChanges(false);
-      setRetentionInput(response.settings.localRetentionDays?.toString() ?? '');
-      setRetentionError(null);
+      syncRetentionFrom(response.settings.localRetentionDays);
     } catch (error) {
       console.error('Failed to save settings:', error);
       alert('Failed to save settings. Please try again.');
@@ -113,8 +124,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     if (settings) {
       setFormData(settings);
       setHasChanges(false);
-      setRetentionInput(settings.localRetentionDays?.toString() ?? '');
-      setRetentionError(null);
+      syncRetentionFrom(settings.localRetentionDays);
     }
   };
 
@@ -131,8 +141,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
       setHasChanges(false);
-      setRetentionInput(response.settings.localRetentionDays?.toString() ?? '');
-      setRetentionError(null);
+      syncRetentionFrom(response.settings.localRetentionDays);
     } catch (error) {
       console.error('Failed to reset settings:', error);
       alert('Failed to reset settings. Please try again.');
@@ -320,12 +329,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                 // (formData was never updated with it) so other tabs aren't
                 // blocked by an error they can't see.
                 if (category.id !== 'dataRetention' && retentionError) {
-                  setRetentionError(null);
-                  setRetentionInput(
-                    formData.localRetentionDays != null
-                      ? String(formData.localRetentionDays)
-                      : '',
-                  );
+                  syncRetentionFrom(formData.localRetentionDays);
                 }
               }}
               className={`w-full text-left px-4 py-3 rounded-lg transition-colors ${
@@ -634,8 +638,8 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                       // accepts (e.g. "1e2" is 100, not parseInt's 1). Whole
                       // numbers only — flooring "1.5" would delete history
                       // earlier than the user asked for.
-                      const parsed = e.currentTarget.valueAsNumber;
-                      if (Number.isInteger(parsed) && parsed >= 1 && parsed <= MAX_RETENTION_DAYS) {
+                      const parsed = normalizeRetentionDays(e.currentTarget.valueAsNumber);
+                      if (parsed !== null) {
                         setRetentionError(null);
                         handleInputChange('localRetentionDays', parsed);
                       } else {

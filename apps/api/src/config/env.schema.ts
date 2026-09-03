@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { MAX_RETENTION_DAYS, parseRetentionDaysToken } from '@betterdb/shared';
+import { isCloudModeValue } from '../common/utils/cloud-mode';
 
 /**
  * Environment variable validation schema
@@ -258,7 +259,7 @@ export const envSchema = z
     // In cloud mode the OTLP ingest path is allowlisted past session auth, so the
     // bearer token is the only credential guarding it. Require it rather than
     // leaving a tenant's span store open to anonymous writes.
-    if (data.CLOUD_MODE === 'true' && !data.OTEL_INGEST_TOKEN) {
+    if (isCloudModeValue(data.CLOUD_MODE) && !data.OTEL_INGEST_TOKEN) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message:

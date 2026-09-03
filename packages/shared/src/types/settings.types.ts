@@ -1,11 +1,13 @@
 import type { InferenceSlaConfig } from './inference-latency';
 
 /**
- * Upper bound for `localRetentionDays` — the PostgreSQL INTEGER column that
- * stores it cannot hold more. Shared by the env schema, the API validation
- * and the settings UI so the limits can't drift.
+ * Upper bound for `localRetentionDays` — 100 years. Shared by the env schema,
+ * the API validation and the settings UI so the limits can't drift. The bound
+ * must stay far below ~100,000,000 (the JS Date range in days) or a stored
+ * value makes `new Date(now - days * MS_PER_DAY)` throw; it is also
+ * comfortably inside the PostgreSQL INTEGER column that stores it.
  */
-export const MAX_RETENTION_DAYS = 2_147_483_647;
+export const MAX_RETENTION_DAYS = 36_500;
 
 /**
  * The single validator for retention-days tokens (env var or raw input).
@@ -16,9 +18,21 @@ export const MAX_RETENTION_DAYS = 2_147_483_647;
 export function parseRetentionDaysToken(raw: string | undefined | null): number | null {
   const value = raw?.trim() ?? '';
   if (!/^\d+$/.test(value)) return null;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= MAX_RETENTION_DAYS
-    ? parsed
+  return normalizeRetentionDays(Number(value));
+}
+
+/**
+ * The single numeric validator for a retention window: a whole number of
+ * days in [1, MAX_RETENTION_DAYS], anything else is null (treated as unset).
+ * Every layer — env parsing, API validation, the UI, and the policy reading
+ * a persisted value — must funnel through this so they can never disagree.
+ */
+export function normalizeRetentionDays(value: unknown): number | null {
+  return typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 1 &&
+    value <= MAX_RETENTION_DAYS
+    ? value
     : null;
 }
 

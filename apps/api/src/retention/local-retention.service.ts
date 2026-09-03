@@ -53,6 +53,11 @@ export class LocalRetentionService implements OnModuleInit, OnModuleDestroy {
     this.sweepTimer = setTimeout(async () => {
       try {
         await this.runSweep();
+      } catch (err) {
+        // Never let a sweep failure escape the timer callback: an unhandled
+        // rejection here reaches main.ts's process-level handler, which
+        // exits the process. Log, skip this pass, and try again next cycle.
+        this.logger.error('Local retention sweep failed unexpectedly:', err);
       } finally {
         this.schedule(this.SWEEP_INTERVAL_MS);
       }

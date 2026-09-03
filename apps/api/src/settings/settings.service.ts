@@ -12,6 +12,7 @@ import {
   SettingsUpdateRequest,
   SettingsResponse,
   MAX_RETENTION_DAYS,
+  normalizeRetentionDays,
   parseRetentionDaysToken,
 } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
@@ -145,8 +146,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
 
   async updateSettings(updates: SettingsUpdateRequest): Promise<SettingsResponse> {
     if (updates.localRetentionDays !== undefined && updates.localRetentionDays !== null) {
-      const days = updates.localRetentionDays;
-      if (!Number.isInteger(days) || days < 1 || days > MAX_RETENTION_DAYS) {
+      if (normalizeRetentionDays(updates.localRetentionDays) === null) {
         throw new BadRequestException(
           `localRetentionDays must be null or an integer between 1 and ${MAX_RETENTION_DAYS}`,
         );

@@ -1435,6 +1435,7 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook_id ON webhook_deliveries(webhook_id);
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_retry ON webhook_deliveries(status, next_retry_at) WHERE status = 'retrying';
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_connection_id ON webhook_deliveries(connection_id);
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_created_at ON webhook_deliveries(created_at);
 
       -- Slow Log Entries Table
       CREATE TABLE IF NOT EXISTS slow_log_entries (
@@ -1979,6 +1980,7 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_started_at ON capture_sessions(started_at DESC);
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_status ON capture_sessions(status, started_at DESC);
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_source ON capture_sessions(source, started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_capture_sessions_ended_at ON capture_sessions(ended_at);
 
       -- Monitor Capture Chunks Table (one row per batched MONITOR-line chunk; populated by CaptureWriter in a later PR)
       CREATE TABLE IF NOT EXISTS capture_chunks (
@@ -1995,6 +1997,7 @@ export class PostgresAdapter implements StoragePort {
       ALTER TABLE capture_chunks ADD COLUMN IF NOT EXISTS node_id TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_capture_chunks_session ON capture_chunks(session_id, chunk_index);
+      CREATE INDEX IF NOT EXISTS idx_capture_chunks_last_ts ON capture_chunks(last_ts);
 
       -- Pro+ Capture Triggers Table (PR 15)
       CREATE TABLE IF NOT EXISTS capture_triggers (
@@ -3972,23 +3975,25 @@ export class PostgresAdapter implements StoragePort {
 
   async pruneOldOtelSpans(cutoffTimestamp: number): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
-    // Prune whole traces (by trace-level start), not individual spans, so a long
-    // trace never loses its root/early spans while later ones survive.
-    // Batched per TRACE (select ids, delete all their spans in one statement)
-    // so each transaction stays small without ever splitting a trace.
+    // Prune whole traces (by trace-level start), not individual spans, so a
+    // long trace never loses its root/early spans while later ones survive.
+    // One statement per batch: the uncorrelated LIMIT subquery is evaluated
+    // once under the statement's snapshot and the outer DELETE removes ALL
+    // spans of the selected traces, so no trace is ever split and each
+    // transaction stays small. Terminate on an empty batch (row counts count
+    // spans, not traces, so a short batch proves nothing).
     const TRACE_BATCH = 1_000;
     let total = 0;
     for (;;) {
-      const batch = await this.pool.query(
-        'SELECT DISTINCT trace_id FROM otel_spans WHERE start_time_ms < $1 LIMIT $2',
+      const result = await this.pool.query(
+        `DELETE FROM otel_spans WHERE trace_id IN (
+           SELECT DISTINCT trace_id FROM otel_spans WHERE start_time_ms < $1 LIMIT $2
+         )`,
         [cutoffTimestamp, TRACE_BATCH],
       );
-      if (batch.rows.length === 0) break;
-      const result = await this.pool.query('DELETE FROM otel_spans WHERE trace_id = ANY($1)', [
-        batch.rows.map((r: { trace_id: string }) => r.trace_id),
-      ]);
-      total += result.rowCount ?? 0;
-      if (batch.rows.length < TRACE_BATCH) break;
+      const changes = result.rowCount ?? 0;
+      if (changes === 0) break;
+      total += changes;
     }
     return total;
   }

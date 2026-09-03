@@ -31,6 +31,9 @@ export async function chunkedSqliteDelete(
   for (;;) {
     const { changes } = stmt.run(...params);
     total += changes;
+    // Unlike the postgres twin, `changes < CHUNK_SIZE` is a sound exit here:
+    // the statement is atomic and SQLite serializes writers, so a short batch
+    // proves fewer than CHUNK_SIZE matching rows existed — all now deleted.
     if (changes < CHUNK_SIZE) break;
     await new Promise<void>((resolve) => setImmediate(resolve));
   }

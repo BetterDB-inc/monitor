@@ -1,5 +1,5 @@
 import { Injectable, Optional } from '@nestjs/common';
-import { Tier, TIER_RETENTION_DAYS } from '@betterdb/shared';
+import { Tier, TIER_RETENTION_DAYS, normalizeRetentionDays } from '@betterdb/shared';
 import { LicenseService } from '@proprietary/licenses';
 import { SettingsService } from '../settings/settings.service';
 import { isCloudMode } from '../common/utils/cloud-mode';
@@ -42,10 +42,10 @@ export class RetentionPolicyService {
     // are loaded we simply don't prune.
     const settings = this.settingsService.getLoadedSettings();
     if (!settings) return null;
-    const days = settings.localRetentionDays;
-    return typeof days === 'number' && Number.isFinite(days) && days >= 1
-      ? Math.floor(days)
-      : null;
+    // Same strict validator as every write path — a malformed persisted value
+    // (older version, direct DB edit) is treated as unset, never coerced into
+    // a deletion window the operator did not ask for.
+    return normalizeRetentionDays(settings.localRetentionDays);
   }
 
   /**
