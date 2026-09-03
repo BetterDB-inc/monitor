@@ -23,8 +23,8 @@ describe('Login', () => {
         </Routes>
       </MemoryRouter>,
     );
-    fireEvent.change(screen.getByPlaceholderText('Email'), { target: { value: 'o@example.com' } });
-    fireEvent.change(screen.getByPlaceholderText('Password'), {
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'o@example.com' } });
+    fireEvent.change(screen.getByLabelText('Password'), {
       target: { value: 'correct horse' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
@@ -39,8 +39,8 @@ describe('Login', () => {
         <Login />
       </MemoryRouter>,
     );
-    fireEvent.change(screen.getByPlaceholderText('Email'), { target: { value: 'o@example.com' } });
-    fireEvent.change(screen.getByPlaceholderText('Password'), {
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'o@example.com' } });
+    fireEvent.change(screen.getByLabelText('Password'), {
       target: { value: 'nope nope nope' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));

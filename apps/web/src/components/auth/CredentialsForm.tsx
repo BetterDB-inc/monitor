@@ -46,6 +46,7 @@ export function CredentialsForm({
         <h1 className="text-2xl font-semibold">{title}</h1>
         {askName && (
           <Input
+            aria-label="Name"
             placeholder="Name"
             value={name}
             onChange={(e) => {
@@ -55,6 +56,7 @@ export function CredentialsForm({
           />
         )}
         <Input
+          aria-label="Email"
           type="email"
           placeholder="Email"
           value={email}
@@ -64,6 +66,7 @@ export function CredentialsForm({
           required
         />
         <Input
+          aria-label="Password"
           type="password"
           placeholder="Password"
           value={password}
