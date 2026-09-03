@@ -63,6 +63,9 @@ describe('CommandstatsPollerService', () => {
 
   it('does not prune when no retention window applies', async () => {
     (service as any).retentionPolicy = { getSampleRetentionMs: () => null };
+    // Pretend the first-interval deferral has already elapsed so this test
+    // exercises the null-window branch, not the seeding branch.
+    (service as any).lastPruneByConnection.set('conn-1', 0);
 
     const client = clientWithCommandstats({
       'cmdstat_get': 'calls=100,usec=500',

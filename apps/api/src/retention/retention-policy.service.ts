@@ -82,6 +82,13 @@ export class RetentionPolicyService {
     return this.getLocalRetentionDays();
   }
 
+  /**
+   * Millisecond form of getRetentionDays() — the ANALYTICS-HISTORY window.
+   * High-volume sample stores (per-tick tables) must use
+   * getSampleRetentionMs() instead: this method returns the full tier window
+   * in cloud (up to 365 days), not the 7-day sample cap, and the difference
+   * is invisible in self-hosted tests where both return the same value.
+   */
   getRetentionMs(): number | null {
     const days = this.getRetentionDays();
     return days === null ? null : days * MS_PER_DAY;

@@ -331,7 +331,16 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                 // (formData was never updated with it) so other tabs aren't
                 // blocked by an error they can't see.
                 if (category.id !== 'dataRetention' && retentionError) {
-                  syncRetentionFrom(formData.localRetentionDays);
+                  // Discard the WHOLE draft, including any valid prefix that
+                  // was committed to formData while typing (e.g. "3" en route
+                  // to "3650") — reverting only the visible input would let a
+                  // hidden partial value ride along with a save made from
+                  // another tab and silently shrink the retention window.
+                  setFormData((prev) => ({
+                    ...prev,
+                    localRetentionDays: settings?.localRetentionDays ?? null,
+                  }));
+                  syncRetentionFrom(settings?.localRetentionDays);
                 }
               }}
               className={`w-full text-left px-4 py-3 rounded-lg transition-colors ${
@@ -655,7 +664,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                     Leave empty to keep history indefinitely. On a fresh install the{' '}
                     <code className="font-mono">LOCAL_RETENTION_DAYS</code> environment variable
                     seeds this value; afterwards this page owns it. High-volume stat samples
-                    (command/latency stats, vector index snapshots, AI samples) are additionally
+                    (command/latency stats, vector index snapshots, AI samples, OTel spans) are additionally
                     trimmed to this window on an hourly cycle.
                   </p>
                 </div>

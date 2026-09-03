@@ -1,7 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { DataRetentionService } from '../data-retention.service';
 import { LicenseService } from '@proprietary/licenses/license.service';
-import { Tier, TIER_RETENTION_DAYS } from '@proprietary/licenses/types';
+import { Tier } from '@proprietary/licenses/types';
+import { TIER_RETENTION_DAYS } from '@betterdb/shared';
 import { RetentionPolicyService } from '@app/retention/retention-policy.service';
 import { StoragePort } from '@app/common/interfaces/storage-port.interface';
 

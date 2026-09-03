@@ -37,7 +37,11 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
   // tier-based data-retention sweep owns retention, so the local prune is
   // skipped there.
   private readonly PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-  private lastPruneAt = 0;
+  // Seeded at construction so the first trim lands one interval AFTER boot:
+  // enabling a retention window over a large backlog must not start a mass
+  // delete during the boot burst (the startup-delayed daily sweep owns
+  // backlog reclamation).
+  private lastPruneAt = Date.now();
 
   constructor(
     connectionRegistry: ConnectionRegistry,

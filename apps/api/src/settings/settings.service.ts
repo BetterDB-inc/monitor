@@ -110,16 +110,10 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
         10,
       ),
       inferenceSlaConfig: {},
-      localRetentionDays: this.parseLocalRetentionDays(
-        this.configService.get('LOCAL_RETENTION_DAYS'),
-      ),
+      localRetentionDays: parseRetentionDaysToken(this.configService.get('LOCAL_RETENTION_DAYS')),
       createdAt: now,
       updatedAt: now,
     };
-  }
-
-  private parseLocalRetentionDays(raw: string | undefined): number | null {
-    return parseRetentionDaysToken(raw);
   }
 
   private async initializeFromEnv(): Promise<void> {

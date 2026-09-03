@@ -110,8 +110,12 @@ those payloads are sensitive.
 
 ## Data retention
 
-Capture rows respect the existing tier-based retention sweep
-(community 7 d, Pro 90 d, enterprise 365 d). Sessions and chunks are
+Capture rows follow the standard retention policy: BetterDB Cloud
+prunes them at the tier window (community 7 d, Pro 90 d, enterprise
+365 d); self-hosted installs keep them indefinitely unless a retention
+window is configured (see the Data Retention section in
+configuration.md), in which case the daily sweep prunes at the
+operator's window. Sessions and chunks are
 pruned by `ended_at` / `last_ts`; triggers are only pruned in terminal
 states (`fired` / `skipped` / `expired` / `cancelled`); schedules are
 only pruned when `disabled`. Configured triggers and enabled schedules

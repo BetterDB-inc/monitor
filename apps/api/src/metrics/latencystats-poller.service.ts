@@ -128,11 +128,20 @@ export class LatencystatsPollerService extends MultiConnectionPoller implements 
       capturedAt: now,
     });
 
-    const retentionMs = this.retentionPolicy.getSampleRetentionMs();
-    const lastPrune = this.lastPruneByConnection.get(ctx.connectionId) ?? 0;
-    if (retentionMs !== null && now - lastPrune > this.PRUNE_INTERVAL_MS) {
+    const lastPrune = this.lastPruneByConnection.get(ctx.connectionId);
+    if (lastPrune === undefined) {
+      // First tick for this connection: seed the clock and defer the initial
+      // trim by one interval, so enabling a retention window over a large
+      // backlog doesn't start a mass delete during the boot burst — the
+      // daily sweep, which is startup-delayed for the same reason, owns
+      // backlog reclamation.
       this.lastPruneByConnection.set(ctx.connectionId, now);
-      await this.storage.pruneOldLatencyStatsSamples(now - retentionMs, ctx.connectionId);
+    } else if (now - lastPrune > this.PRUNE_INTERVAL_MS) {
+      const retentionMs = this.retentionPolicy.getSampleRetentionMs();
+      if (retentionMs !== null) {
+        this.lastPruneByConnection.set(ctx.connectionId, now);
+        await this.storage.pruneOldLatencyStatsSamples(now - retentionMs, ctx.connectionId);
+      }
     }
   }
 }

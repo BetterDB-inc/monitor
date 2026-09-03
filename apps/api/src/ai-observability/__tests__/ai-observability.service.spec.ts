@@ -133,6 +133,9 @@ describe('AiObservabilityService.pollConnection', () => {
       call: (cmd) => (cmd === 'HGETALL' ? ['llm:hits', '1', 'llm:misses', '0'] : []),
     });
     const prune = storage.pruneOldAiCacheSamples as jest.Mock;
+    // The first prune is deferred by one interval after boot; simulate that
+    // interval having elapsed.
+    (svc as any).lastPruneAt = 0;
 
     const prev = process.env.CLOUD_MODE;
     process.env.CLOUD_MODE = 'true';
@@ -170,6 +173,7 @@ describe('AiObservabilityService.pollConnection', () => {
     const prev = process.env.CLOUD_MODE;
     delete process.env.CLOUD_MODE;
     const { svc, ctx, storage } = makeService({ instances: [], call: () => [] });
+    (svc as any).lastPruneAt = 0; // deferred first interval elapsed
     await (svc as any).pollConnection(ctx);
     expect(storage.saveAiCacheSamples).not.toHaveBeenCalled();
     // Prune runs before the early return, so removed libraries' samples still age out.
