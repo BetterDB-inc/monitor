@@ -1,5 +1,6 @@
 import { useLocation } from 'react-router-dom';
 import { useIsDemo } from '../../contexts/DemoContext';
+import { useCanMutate } from '../../hooks/useCanMutate';
 import { useCapabilities } from '../../hooks/useCapabilities';
 import { useCacheProposalsUnread } from '../../hooks/useCacheProposals';
 import { ConnectionSelector } from '../ConnectionSelector';
@@ -29,6 +30,7 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
   const { hasVectorSearch } = useCapabilities();
   const { unreadCount: cacheProposalsUnread } = useCacheProposalsUnread();
   const isDemo = useIsDemo();
+  const canMutate = useCanMutate();
 
   return (
     <Sidebar className="bg-card">
@@ -89,6 +91,8 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
             active={location.pathname === '/bulk-delete'}
             requiredFeature={Feature.BULK_DELETE}
             demoLocked={isDemo}
+            locked={canMutate === false}
+            lockedReason="Admins only"
           >
             Bulk Delete
           </NavItem>
@@ -122,7 +126,13 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
           <NavItem to="/monitor" active={location.pathname === '/monitor'}>
             MONITOR
           </NavItem>
-          <NavItem to="/webhooks" active={location.pathname === '/webhooks'} demoLocked={isDemo}>
+          <NavItem
+            to="/webhooks"
+            active={location.pathname === '/webhooks'}
+            demoLocked={isDemo}
+            locked={canMutate === false}
+            lockedReason="Admins only"
+          >
             Webhooks
           </NavItem>
           <NavItem to="/migration" active={location.pathname === '/migration'}>
@@ -189,11 +199,19 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
               to="/workspace/members"
               active={location.pathname === '/workspace/members'}
               demoLocked={isDemo}
+              locked={canMutate === false}
+              lockedReason="Admins only"
             >
               Team
             </NavItem>
           )}
-          <NavItem to="/settings" active={location.pathname === '/settings'} demoLocked={isDemo}>
+          <NavItem
+            to="/settings"
+            active={location.pathname === '/settings'}
+            demoLocked={isDemo}
+            locked={canMutate === false}
+            lockedReason="Admins only"
+          >
             Settings
           </NavItem>
           <SidebarUserMenu />

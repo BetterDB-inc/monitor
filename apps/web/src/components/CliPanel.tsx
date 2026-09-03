@@ -3,6 +3,7 @@ import { Terminal, ChevronUp, ChevronDown } from 'lucide-react';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Separator } from '@/components/ui/separator';
 import { cn } from '@/lib/utils';
+import { useCanMutate } from '@/hooks/useCanMutate';
 import { useCliHistory } from '@/hooks/useCliHistory';
 import { useCliWebSocket, type CliServerMessage } from '@/hooks/useCliWebSocket';
 import { useConnection } from '@/hooks/useConnection';
@@ -71,6 +72,7 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
 
   const { currentConnection } = useConnection();
   const cliHistory = useCliHistory();
+  const canMutate = useCanMutate();
 
   const addSystemMessage = useCallback((message: string) => {
     setEntries((prev) => {
@@ -287,6 +289,11 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
 
         <CollapsibleContent>
           <div className="flex flex-col" style={{ height: panelHeight }}>
+            {canMutate === false && (
+              <div className="px-3 py-1 text-xs text-muted-foreground">
+                Read-only member: only read commands are allowed.
+              </div>
+            )}
             {/* Output */}
             <div
               ref={scrollRef}
