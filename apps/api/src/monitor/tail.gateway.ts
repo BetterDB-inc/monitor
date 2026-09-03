@@ -2,7 +2,6 @@ import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { IncomingMessage } from 'http';
 import { Socket } from 'net';
 import { WebSocket, WebSocketServer } from 'ws';
-import { Actor } from '@betterdb/shared';
 import { ActorResolver } from '../auth/actor-resolver';
 import { rejectUpgrade } from '../auth/upgrade-response';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
@@ -90,7 +89,7 @@ export class TailGateway implements OnModuleDestroy {
     sessionId: string,
   ): Promise<void> {
     if (this.actorResolver.isEnabled() === true) {
-      const actor = await this.resolveActor(request);
+      const actor = await this.actorResolver.resolveFromUpgrade(request);
       if (actor === null) {
         rejectUpgrade(socket, 401);
         return;
@@ -103,20 +102,6 @@ export class TailGateway implements OnModuleDestroy {
         ws.close();
       });
     });
-  }
-
-  private async resolveActor(request: IncomingMessage): Promise<Actor | null> {
-    if (this.actorResolver.isReady() === false) {
-      return null;
-    }
-    try {
-      return await this.actorResolver.resolveFromHeaders(
-        request.headers,
-        request.socket.remoteAddress ?? '',
-      );
-    } catch {
-      return null;
-    }
   }
 
   /**

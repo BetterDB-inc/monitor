@@ -60,7 +60,7 @@ function resolverWith(enabled: boolean, actor: Actor | null): ActorResolver {
     isReady: () => {
       return true;
     },
-    resolveFromHeaders: jest.fn().mockResolvedValue(actor),
+    resolveFromUpgrade: jest.fn().mockResolvedValue(actor),
   } as unknown as ActorResolver;
 }
 
@@ -79,7 +79,7 @@ describe('CliGateway.handleUpgrade', () => {
     const socket = new FakeSocket();
     gateway.handleUpgrade(makeRequest(), socket as unknown as Socket, Buffer.alloc(0));
     await flush();
-    expect(resolver.resolveFromHeaders).not.toHaveBeenCalled();
+    expect(resolver.resolveFromUpgrade).not.toHaveBeenCalled();
     expect(wss.handleUpgrade).toHaveBeenCalledTimes(1);
     expect(socket.destroyed).toBe(false);
   });
@@ -96,18 +96,16 @@ describe('CliGateway.handleUpgrade', () => {
     expect(wss.handleUpgrade).not.toHaveBeenCalled();
   });
 
-  it('completes the handshake when a session resolves and passes the socket address as client ip', async () => {
+  it('completes the handshake when a session resolves', async () => {
     const resolver = resolverWith(true, admin);
     const gateway = new CliGateway({} as CliService, resolver);
     const wss = (gateway as unknown as { wss: { handleUpgrade: jest.Mock } }).wss;
     wss.handleUpgrade = jest.fn();
     const socket = new FakeSocket();
-    gateway.handleUpgrade(makeRequest('c=1'), socket as unknown as Socket, Buffer.alloc(0));
+    const request = makeRequest('c=1');
+    gateway.handleUpgrade(request, socket as unknown as Socket, Buffer.alloc(0));
     await flush();
-    expect(resolver.resolveFromHeaders).toHaveBeenCalledWith(
-      expect.objectContaining({ cookie: 'c=1' }),
-      '10.0.0.5',
-    );
+    expect(resolver.resolveFromUpgrade).toHaveBeenCalledWith(request);
     expect(wss.handleUpgrade).toHaveBeenCalledTimes(1);
     expect(socket.destroyed).toBe(false);
   });

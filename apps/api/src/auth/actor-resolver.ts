@@ -1,5 +1,5 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
-import type { IncomingHttpHeaders } from 'http';
+import type { IncomingHttpHeaders, IncomingMessage } from 'http';
 import { Actor, WorkspaceRole } from '@betterdb/shared';
 import { BETTER_AUTH, CLIENT_IP_HEADER, type BetterAuthInstance } from './better-auth.factory';
 import { toWebHeaders } from './web-headers';
@@ -51,5 +51,16 @@ export class ActorResolver {
       via: 'session',
       tokenId: null,
     };
+  }
+
+  async resolveFromUpgrade(request: IncomingMessage): Promise<Actor | null> {
+    if (this.isReady() === false) {
+      return null;
+    }
+    try {
+      return await this.resolveFromHeaders(request.headers, request.socket.remoteAddress ?? '');
+    } catch {
+      return null;
+    }
   }
 }

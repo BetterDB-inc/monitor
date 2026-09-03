@@ -1,7 +1,15 @@
+import type { IncomingMessage } from 'http';
 import type { BetterAuthInstance } from './better-auth.factory';
 import { CLIENT_IP_HEADER, createBetterAuth } from './better-auth.factory';
 import { resolveWorkspaceConfig, WorkspaceConfig } from './workspace-config';
 import { ActorResolver } from './actor-resolver';
+
+function makeUpgradeRequest(cookie: string | undefined, remoteAddress: string): IncomingMessage {
+  return {
+    headers: { cookie },
+    socket: { remoteAddress },
+  } as unknown as IncomingMessage;
+}
 
 const SECRET = 's'.repeat(40);
 const ORIGIN = 'http://localhost:3001';
@@ -93,5 +101,46 @@ describe('ActorResolver', () => {
   it('is ready when constructed with an auth instance', () => {
     const resolver = new ActorResolver(config, auth);
     expect(resolver.isReady()).toBe(true);
+  });
+
+  describe('resolveFromUpgrade', () => {
+    it('resolves the owner from an upgrade request carrying the cookie and remote address', async () => {
+      const resolver = new ActorResolver(config, auth);
+      const getSession = jest.spyOn(auth.api, 'getSession');
+      const actor = await resolver.resolveFromUpgrade(makeUpgradeRequest(cookie, '10.1.8.1'));
+      expect(actor).toEqual({
+        userId: expect.any(String),
+        email: 'owner@example.com',
+        role: 'admin',
+        isOwner: true,
+        via: 'session',
+        tokenId: null,
+      });
+      const passed = getSession.mock.calls[0][0] as { headers: Headers };
+      expect(passed.headers.get(CLIENT_IP_HEADER)).toBe('10.1.8.1');
+      getSession.mockRestore();
+    });
+
+    it('returns null without a cookie', async () => {
+      const resolver = new ActorResolver(config, auth);
+      const actor = await resolver.resolveFromUpgrade(makeUpgradeRequest(undefined, '10.0.0.1'));
+      expect(actor).toBeNull();
+    });
+
+    it('returns null without throwing when getSession rejects', async () => {
+      const resolver = new ActorResolver(config, auth);
+      const getSession = jest
+        .spyOn(auth.api, 'getSession')
+        .mockRejectedValueOnce(new Error('boom'));
+      const actor = await resolver.resolveFromUpgrade(makeUpgradeRequest(cookie, '10.1.8.1'));
+      expect(actor).toBeNull();
+      getSession.mockRestore();
+    });
+
+    it('returns null when constructed without an auth instance', async () => {
+      const resolver = new ActorResolver(config, null);
+      const actor = await resolver.resolveFromUpgrade(makeUpgradeRequest(cookie, '10.1.8.1'));
+      expect(actor).toBeNull();
+    });
   });
 });
