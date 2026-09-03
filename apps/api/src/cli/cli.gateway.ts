@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { Socket } from 'net';
@@ -32,7 +32,9 @@ export class CliGateway implements OnModuleDestroy {
 
   constructor(
     private readonly cliService: CliService,
-    @Optional() private readonly actorResolver: ActorResolver | null = null,
+    @Optional()
+    @Inject(ActorResolver)
+    private readonly actorResolver: ActorResolver | null = null,
   ) {
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 }); // 1 MiB
     this.logger.log('CLI WebSocket gateway initialized');
