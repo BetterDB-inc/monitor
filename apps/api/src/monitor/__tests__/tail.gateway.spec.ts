@@ -57,7 +57,7 @@ async function flush(): Promise<void> {
   });
 }
 
-function makeGateway(actorResolver: ActorResolver = resolverWith(false, null)) {
+function makeGateway(actorResolver: ActorResolver | null = resolverWith(false, null)) {
   const captureService = {
     getSession: jest.fn(),
     getActiveWriter: jest.fn(),
@@ -148,6 +148,52 @@ describe('TailGateway.handleUpgrade', () => {
     expect(socket.written[0].startsWith('HTTP/1.1 401 Unauthorized')).toBe(true);
     expect(socket.destroyed).toBe(true);
     expect(wss.handleUpgrade).not.toHaveBeenCalled();
+  });
+
+  it('passes through when no resolver is provided at all', async () => {
+    const { gateway } = makeGateway(null);
+    const wss = (gateway as unknown as { wss: { handleUpgrade: jest.Mock } }).wss;
+    wss.handleUpgrade = jest.fn();
+    const socket = new FakeSocket();
+    gateway.handleUpgrade(
+      makeRequest(`/monitor/ws?sessionId=${SESSION_ID}`),
+      socket as unknown as Socket,
+      Buffer.alloc(0),
+    );
+    await flush();
+    expect(wss.handleUpgrade).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(false);
+  });
+
+  it('destroys the socket when the resolver throws during the upgrade', async () => {
+    const resolver = resolverWith(true, admin);
+    (resolver.resolveFromUpgrade as jest.Mock).mockRejectedValue(new Error('boom'));
+    const { gateway } = makeGateway(resolver);
+    const wss = (gateway as unknown as { wss: { handleUpgrade: jest.Mock } }).wss;
+    wss.handleUpgrade = jest.fn();
+    const socket = new FakeSocket();
+    gateway.handleUpgrade(
+      makeRequest(`/monitor/ws?sessionId=${SESSION_ID}`),
+      socket as unknown as Socket,
+      Buffer.alloc(0),
+    );
+    await flush();
+    expect(socket.destroyed).toBe(true);
+    expect(wss.handleUpgrade).not.toHaveBeenCalled();
+  });
+
+  it('destroys the socket on a socket error while the upgrade is pending', () => {
+    const { gateway } = makeGateway(resolverWith(true, admin));
+    const wss = (gateway as unknown as { wss: { handleUpgrade: jest.Mock } }).wss;
+    wss.handleUpgrade = jest.fn();
+    const socket = new FakeSocket();
+    gateway.handleUpgrade(
+      makeRequest(`/monitor/ws?sessionId=${SESSION_ID}`),
+      socket as unknown as Socket,
+      Buffer.alloc(0),
+    );
+    socket.emit('error', new Error('reset'));
+    expect(socket.destroyed).toBe(true);
   });
 
   it('completes the handshake when a session resolves', async () => {

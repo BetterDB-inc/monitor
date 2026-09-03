@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import { IncomingMessage } from 'http';
 import { Socket } from 'net';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -38,7 +38,7 @@ export class TailGateway implements OnModuleDestroy {
     private readonly captureService: MonitorCaptureService,
     @Inject('STORAGE_CLIENT')
     private readonly storage: StoragePort,
-    private readonly actorResolver: ActorResolver,
+    @Optional() private readonly actorResolver: ActorResolver | null = null,
   ) {
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
     this.logger.log('Monitor tail WebSocket gateway initialized');
@@ -58,6 +58,9 @@ export class TailGateway implements OnModuleDestroy {
    * enforce the demo-host restriction here.
    */
   handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer): void {
+    socket.on('error', () => {
+      socket.destroy();
+    });
     const host = request.headers.host || '';
     if (process.env.DEMO_HOSTNAME && host === process.env.DEMO_HOSTNAME) {
       this.logger.debug(`Tail upgrade rejected: demo host ${host}`);
@@ -79,7 +82,21 @@ export class TailGateway implements OnModuleDestroy {
       return;
     }
 
-    void this.authorizeUpgrade(request, socket, head, sessionId);
+    this.authorizeUpgrade(request, socket, head, sessionId).catch(() => {
+      socket.destroy();
+    });
+  }
+
+  private isAuthEnabled(): boolean {
+    return this.actorResolver !== null && this.actorResolver.isEnabled() === true;
+  }
+
+  private async hasSession(request: IncomingMessage): Promise<boolean> {
+    if (this.actorResolver === null) {
+      return false;
+    }
+    const actor = await this.actorResolver.resolveFromUpgrade(request);
+    return actor !== null;
   }
 
   private async authorizeUpgrade(
@@ -88,9 +105,9 @@ export class TailGateway implements OnModuleDestroy {
     head: Buffer,
     sessionId: string,
   ): Promise<void> {
-    if (this.actorResolver.isEnabled() === true) {
-      const actor = await this.actorResolver.resolveFromUpgrade(request);
-      if (actor === null) {
+    if (this.isAuthEnabled() === true) {
+      const authenticated = await this.hasSession(request);
+      if (authenticated === false) {
         rejectUpgrade(socket, 401);
         return;
       }

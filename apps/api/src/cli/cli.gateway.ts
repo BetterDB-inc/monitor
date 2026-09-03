@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { Socket } from 'net';
@@ -9,11 +9,19 @@ import { CliService } from './cli.service';
 import { CliExecuteMessage, CliServerMessage } from './cli.types';
 
 const MAX_COMMANDS_PER_SECOND = 50;
+const SESSION_EXPIRED_CLOSE_CODE = 4401;
+const SESSION_EXPIRED_CLOSE_REASON = 'Session expired';
+export const SESSION_EXPIRED_MESSAGE = 'Session expired. Sign in again.';
 
 interface CliConnectionState {
-  actor: Actor | null;
+  request: IncomingMessage;
   tokens: number;
   lastRefill: number;
+}
+
+interface CommandAccess {
+  sessionValid: boolean;
+  readOnly: boolean;
 }
 
 @Injectable()
@@ -24,7 +32,7 @@ export class CliGateway implements OnModuleDestroy {
 
   constructor(
     private readonly cliService: CliService,
-    private readonly actorResolver: ActorResolver,
+    @Optional() private readonly actorResolver: ActorResolver | null = null,
   ) {
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 }); // 1 MiB
     this.logger.log('CLI WebSocket gateway initialized');
@@ -38,7 +46,23 @@ export class CliGateway implements OnModuleDestroy {
   }
 
   handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer): void {
-    void this.authorizeUpgrade(request, socket, head);
+    socket.on('error', () => {
+      socket.destroy();
+    });
+    this.authorizeUpgrade(request, socket, head).catch(() => {
+      socket.destroy();
+    });
+  }
+
+  private isAuthEnabled(): boolean {
+    return this.actorResolver !== null && this.actorResolver.isEnabled() === true;
+  }
+
+  private async resolveActor(request: IncomingMessage): Promise<Actor | null> {
+    if (this.actorResolver === null) {
+      return null;
+    }
+    return this.actorResolver.resolveFromUpgrade(request);
   }
 
   private async authorizeUpgrade(
@@ -46,23 +70,45 @@ export class CliGateway implements OnModuleDestroy {
     socket: Socket,
     head: Buffer,
   ): Promise<void> {
-    let actor: Actor | null = null;
-    if (this.actorResolver.isEnabled() === true) {
-      actor = await this.actorResolver.resolveFromUpgrade(request);
+    if (this.isAuthEnabled() === true) {
+      const actor = await this.resolveActor(request);
       if (actor === null) {
         rejectUpgrade(socket, 401);
         return;
       }
     }
     this.wss.handleUpgrade(request, socket, head, (ws) => {
-      this.attach(ws, actor);
+      this.attach(ws, request);
     });
   }
 
-  private attach(ws: WebSocket, actor: Actor | null): void {
+  private attach(ws: WebSocket, request: IncomingMessage): void {
     this.logger.log('CLI WebSocket client connected');
-    this.connections.set(ws, { actor, tokens: MAX_COMMANDS_PER_SECOND, lastRefill: Date.now() });
+    this.connections.set(ws, { request, tokens: MAX_COMMANDS_PER_SECOND, lastRefill: Date.now() });
     this.handleConnection(ws);
+  }
+
+  private async resolveAccess(ws: WebSocket): Promise<CommandAccess> {
+    const state = this.connections.get(ws);
+    if (state === undefined) {
+      return { sessionValid: true, readOnly: true };
+    }
+    if (this.isAuthEnabled() === false) {
+      return { sessionValid: true, readOnly: false };
+    }
+    const actor = await this.resolveActor(state.request);
+    if (actor === null) {
+      return { sessionValid: false, readOnly: true };
+    }
+    return { sessionValid: true, readOnly: actor.role === 'member' };
+  }
+
+  private expireSession(ws: WebSocket): void {
+    const errorMsg: CliServerMessage = { type: 'error', error: SESSION_EXPIRED_MESSAGE };
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(errorMsg));
+    }
+    ws.close(SESSION_EXPIRED_CLOSE_CODE, SESSION_EXPIRED_CLOSE_REASON);
   }
 
   private handleConnection(ws: WebSocket): void {
@@ -101,11 +147,13 @@ export class CliGateway implements OnModuleDestroy {
 
       execChain = execChain
         .then(async () => {
-          const state = this.connections.get(ws);
-          const readOnly =
-            state !== undefined && state.actor !== null && state.actor.role === 'member';
+          const access = await this.resolveAccess(ws);
+          if (access.sessionValid === false) {
+            this.expireSession(ws);
+            return;
+          }
           const result = await this.cliService.execute(message.command, message.connectionId, {
-            readOnly,
+            readOnly: access.readOnly,
           });
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify(result));
