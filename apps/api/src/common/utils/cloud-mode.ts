@@ -4,10 +4,9 @@
  * like `CLOUD_MODE=1` loaded the cloud retention cron while the pollers took
  * the self-hosted branch. Any non-empty value except 'false'/'0' is cloud.
  */
-export function isCloudModeValue(value: string | undefined): boolean {
-  const v = value?.trim().toLowerCase();
-  return !!v && v !== 'false' && v !== '0';
-}
+import { isCloudModeValue } from '@betterdb/shared';
+
+export { isCloudModeValue };
 
 export function isCloudMode(): boolean {
   return isCloudModeValue(process.env.CLOUD_MODE);

@@ -54,10 +54,11 @@ export class LocalRetentionService implements OnModuleInit, OnModuleDestroy {
       try {
         await this.runSweep();
       } catch (err) {
-        // Never let a sweep failure escape the timer callback: an unhandled
-        // rejection here reaches main.ts's process-level handler, which
-        // exits the process. Log, skip this pass, and try again next cycle.
-        this.logger.error('Local retention sweep failed unexpectedly:', err);
+        // The single failure handler for the sweep. Never let a rejection
+        // escape the timer callback: it would reach main.ts's process-level
+        // handler, which exits the process. Log, skip this pass, and try
+        // again next cycle.
+        this.logger.error('Local retention sweep failed:', err);
       } finally {
         this.schedule(this.SWEEP_INTERVAL_MS);
       }
@@ -78,13 +79,12 @@ export class LocalRetentionService implements OnModuleInit, OnModuleDestroy {
       `Running local retention sweep: retentionDays=${days}, cutoff=${new Date(cutoff).toISOString()}`,
     );
 
-    try {
-      const results = await runRetentionSweep(this.storage, cutoff, this.logger);
-      this.logger.log(
-        `Local retention sweep complete: ${totalPruned(results)} total rows pruned — ${JSON.stringify(results)}`,
-      );
-    } catch (err) {
-      this.logger.error('Local retention sweep failed:', err);
-    }
+    // No local try/catch: the timer callback in schedule() is the single
+    // failure handler (it logs and re-arms), and letting errors propagate
+    // keeps them observable to direct callers such as tests.
+    const results = await runRetentionSweep(this.storage, cutoff, this.logger);
+    this.logger.log(
+      `Local retention sweep complete: ${totalPruned(results)} total rows pruned — ${JSON.stringify(results)}`,
+    );
   }
 }

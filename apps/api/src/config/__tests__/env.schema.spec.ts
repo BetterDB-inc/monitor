@@ -283,6 +283,20 @@ describe('envSchema', () => {
       expect(result.success).toBe(true);
     });
 
+    it('requires the token for ANY truthy CLOUD_MODE value, not just "true"', () => {
+      // Regression guard: the boot check and the runtime ingest guard must
+      // share isCloudModeValue semantics — CLOUD_MODE=1 once passed boot
+      // validation and then 401ed every /v1/traces request at runtime.
+      for (const value of ['1', 'yes', 'TRUE']) {
+        const result = envSchema.safeParse({ CLOUD_MODE: value });
+        expect(result.success).toBe(false);
+        if (!result.success) {
+          expect(result.error.issues.some((i) => i.path.includes('OTEL_INGEST_TOKEN'))).toBe(true);
+        }
+      }
+      expect(envSchema.safeParse({ CLOUD_MODE: '0' }).success).toBe(true);
+    });
+
     it('defaults OTEL_INGEST_ENABLED to true', () => {
       const result = envSchema.safeParse({});
       expect(result.success && result.data.OTEL_INGEST_ENABLED).toBe(true);

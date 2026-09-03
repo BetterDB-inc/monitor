@@ -1,4 +1,4 @@
-import { Injectable, Optional } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Tier, TIER_RETENTION_DAYS, normalizeRetentionDays } from '@betterdb/shared';
 import { LicenseService } from '@proprietary/licenses';
 import { SettingsService } from '../settings/settings.service';
@@ -25,6 +25,11 @@ const CLOUD_SAMPLE_RETENTION_DAYS = 7;
  */
 @Injectable()
 export class RetentionPolicyService {
+  private readonly logger = new Logger(RetentionPolicyService.name);
+  // Remember the last invalid stored value we warned about so the per-poll
+  // reads don't repeat the warning every tick.
+  private warnedInvalidStoredValue: unknown;
+
   constructor(
     private readonly settingsService: SettingsService,
     @Optional() private readonly licenseService?: LicenseService,
@@ -43,9 +48,19 @@ export class RetentionPolicyService {
     const settings = this.settingsService.getLoadedSettings();
     if (!settings) return null;
     // Same strict validator as every write path — a malformed persisted value
-    // (older version, direct DB edit) is treated as unset, never coerced into
-    // a deletion window the operator did not ask for.
-    return normalizeRetentionDays(settings.localRetentionDays);
+    // (e.g. a direct DB edit) is treated as unset, never coerced into a
+    // deletion window the operator did not ask for. Warn once per distinct
+    // bad value so the "why isn't retention running" question is answerable
+    // from the logs.
+    const stored = settings.localRetentionDays;
+    const normalized = normalizeRetentionDays(stored);
+    if (stored != null && normalized === null && this.warnedInvalidStoredValue !== stored) {
+      this.warnedInvalidStoredValue = stored;
+      this.logger.warn(
+        `Ignoring invalid stored localRetentionDays=${String(stored)} — retention is treated as unset (keep forever)`,
+      );
+    }
+    return normalized;
   }
 
   /**

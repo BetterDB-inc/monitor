@@ -28,11 +28,14 @@ export async function chunkedPostgresDelete(
     );
     const changes = result.rowCount ?? 0;
     total += changes;
-    // Terminate only on a fully-empty batch. Under READ COMMITTED a
-    // concurrent prune/UPDATE can shrink a batch's rowCount below CHUNK_SIZE
-    // (deleted tuples are skipped, updated tuples move to new ctids) while
-    // matching rows remain — `changes < CHUNK_SIZE` would exit early and
-    // leave them behind. The cost is one extra confirming round-trip.
+    // Terminate on an empty batch. Under READ COMMITTED a concurrent
+    // prune/UPDATE can shrink a batch's rowCount below CHUNK_SIZE (deleted
+    // tuples are skipped, updated tuples move to new ctids) while matching
+    // rows remain — `changes < CHUNK_SIZE` would exit early and leave them
+    // behind. The cost is one extra confirming round-trip. (In the extreme
+    // case where a concurrent writer invalidates EVERY ctid in a batch the
+    // loop can still end with matching rows left; the next sweep picks them
+    // up, so we accept that rather than re-probing.)
     if (changes === 0) break;
   }
   return total;

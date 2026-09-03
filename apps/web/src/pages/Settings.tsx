@@ -16,6 +16,8 @@ import { Badge } from '../components/ui/badge';
 import { useQueryClient } from '@tanstack/react-query';
 type SettingsCategory = 'license' | 'audit' | 'clientAnalytics' | 'anomaly' | 'dataRetention' | 'mcpTokens';
 
+const RETENTION_INPUT_ERROR = `Enter a whole number of days between 1 and ${MAX_RETENTION_DAYS}, or leave empty to keep history forever.`;
+
 export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const { currentConnection } = useConnection();
   const { tier, license } = useLicense();
@@ -624,9 +626,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                       // the user clearing the field, so keep the error state
                       // instead of committing "keep forever".
                       if (e.currentTarget.validity.badInput) {
-                        setRetentionError(
-                          `Enter a whole number of days between 1 and ${MAX_RETENTION_DAYS}, or leave empty to keep history forever.`,
-                        );
+                        setRetentionError(RETENTION_INPUT_ERROR);
                         return;
                       }
                       if (raw.trim() === '') {
@@ -643,9 +643,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                         setRetentionError(null);
                         handleInputChange('localRetentionDays', parsed);
                       } else {
-                        setRetentionError(
-                          `Enter a whole number of days between 1 and ${MAX_RETENTION_DAYS}, or leave empty to keep history forever.`,
-                        );
+                        setRetentionError(RETENTION_INPUT_ERROR);
                       }
                     }}
                     className="w-full px-3 py-2 border rounded-md"

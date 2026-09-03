@@ -31,10 +31,11 @@ export async function chunkedSqliteDelete(
   for (;;) {
     const { changes } = stmt.run(...params);
     total += changes;
-    // Unlike the postgres twin, `changes < CHUNK_SIZE` is a sound exit here:
-    // the statement is atomic and SQLite serializes writers, so a short batch
-    // proves fewer than CHUNK_SIZE matching rows existed — all now deleted.
-    if (changes < CHUNK_SIZE) break;
+    // Terminate only on a fully-empty batch, matching the postgres twin. A
+    // short-batch exit would also be sound here (SQLite serializes writers),
+    // but keeping both helpers on the same condition means a future refactor
+    // can't accidentally port the laxer form to the dialect where it's a bug.
+    if (changes === 0) break;
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
   return total;

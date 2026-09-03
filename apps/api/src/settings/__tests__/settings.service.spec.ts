@@ -92,6 +92,26 @@ describe('SettingsService', () => {
     expect(storage.saveSettings.mock.calls[0][0].localRetentionDays).toBeNull();
   });
 
+  it('pins the MAX_RETENTION_DAYS boundary at 36,500 days', async () => {
+    // The cap exists to keep days * MS_PER_DAY inside the JS Date range —
+    // restoring a larger bound would make the sweep's cutoff formatting
+    // throw for validation-legal values.
+    const storage = {
+      getSettings: jest.fn().mockResolvedValue(buildSettings()),
+      updateSettings: jest
+        .fn()
+        .mockImplementation(async (updates) => buildSettings(updates)),
+    } as any;
+    const service = new SettingsService(storage, configStub);
+
+    const accepted = await service.updateSettings({ localRetentionDays: 36_500 });
+    expect(accepted.settings.localRetentionDays).toBe(36_500);
+
+    await expect(service.updateSettings({ localRetentionDays: 36_501 })).rejects.toThrow(
+      BadRequestException,
+    );
+  });
+
   it('rejects localRetentionDays outside the storable integer range', async () => {
     const storage = {
       getSettings: jest.fn().mockResolvedValue(buildSettings()),

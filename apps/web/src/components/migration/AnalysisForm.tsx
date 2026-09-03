@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { isCloudModeValue } from '@betterdb/shared';
 import { useConnection } from '../../hooks/useConnection';
 import type { Connection } from '../../hooks/useConnection';
 import { useMigrationPlan } from '../../hooks/useMigrationPlan';
@@ -42,7 +43,7 @@ export function AnalysisForm({ onStart }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const isCloudMode = import.meta.env.VITE_CLOUD_MODE === 'true';
+  const isCloudMode = isCloudModeValue(import.meta.env.VITE_CLOUD_MODE);
 
   if (connections.length < 2) {
     return <NoConnectionsState connections={connections} />;
