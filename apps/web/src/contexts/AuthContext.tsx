@@ -6,6 +6,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import type { WorkspaceMode } from '@betterdb/shared';
@@ -44,11 +45,17 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
   const [mode, setMode] = useState<WorkspaceMode>('disabled');
   const [bootstrapped, setBootstrapped] = useState(false);
   const [user, setUser] = useState<CurrentUser | null>(null);
+  const refreshSeq = useRef(0);
 
   const refresh = useCallback(async (): Promise<void> => {
+    refreshSeq.current += 1;
+    const seq = refreshSeq.current;
     try {
       const status = await workspaceApi.getStatus();
       setAuthRedirectEnabled(status.mode === 'self-hosted' && status.enabled === true);
+      if (seq !== refreshSeq.current) {
+        return;
+      }
       setUnavailable(false);
       setMode(status.mode);
       setBootstrapped(status.bootstrapped);
@@ -57,20 +64,33 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
         return;
       }
       try {
-        setUser(await workspaceApi.getMe());
+        const me = await workspaceApi.getMe();
+        if (seq !== refreshSeq.current) {
+          return;
+        }
+        setUser(me);
       } catch {
+        if (seq !== refreshSeq.current) {
+          return;
+        }
         setUser(null);
       }
     } catch {
       setAuthRedirectEnabled(false);
+      if (seq !== refreshSeq.current) {
+        return;
+      }
       setUnavailable(true);
       setUser(null);
     } finally {
-      setLoading(false);
+      if (seq === refreshSeq.current) {
+        setLoading(false);
+      }
     }
   }, []);
 
   const signOut = useCallback(async (): Promise<void> => {
+    refreshSeq.current += 1;
     try {
       await workspaceApi.signOut();
     } finally {
