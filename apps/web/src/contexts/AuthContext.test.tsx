@@ -227,6 +227,39 @@ describe('login redirect wiring', () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(setAuthRedirectEnabledMock).toHaveBeenCalledWith(false);
   });
+
+  it('ignores a stale getStatus rejection that resolves after a newer refresh succeeded', async () => {
+    let rejectFirstGetStatus: ((reason: unknown) => void) | null = null;
+    const firstGetStatus = new Promise((_resolve, reject) => {
+      rejectFirstGetStatus = reject;
+    });
+    firstGetStatus.catch(() => undefined);
+    getStatus.mockImplementationOnce(() => firstGetStatus);
+    getStatus.mockResolvedValueOnce({ mode: 'self-hosted', enabled: true, bootstrapped: true });
+    getMe.mockResolvedValue({
+      userId: 'u1',
+      email: 'o@example.com',
+      name: 'O',
+      role: 'admin',
+      isOwner: true,
+    });
+
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(rejectFirstGetStatus).not.toBeNull());
+
+    await act(async () => {
+      await result.current.refresh();
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(setAuthRedirectEnabledMock).toHaveBeenLastCalledWith(true);
+
+    await act(async () => {
+      (rejectFirstGetStatus as (reason: unknown) => void)(new Error('500'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(setAuthRedirectEnabledMock).toHaveBeenLastCalledWith(true);
+  });
 });
 
 describe('sign-out versus an in-flight refresh', () => {
@@ -326,5 +359,36 @@ describe('getMe failure handling', () => {
     renderAt('/connections');
     await waitFor(() => expect(screen.getByText('Cannot reach the server')).toBeInTheDocument());
     expect(screen.queryByRole('heading', { name: /sign in/i })).not.toBeInTheDocument();
+  });
+
+  it('keeps the unavailable screen through a retry until getMe settles', async () => {
+    getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: true });
+    getMe.mockRejectedValueOnce(new Error('502'));
+    renderAt('/connections');
+    await waitFor(() => expect(screen.getByText('Cannot reach the server')).toBeInTheDocument());
+
+    let resolveGetMe: ((value: unknown) => void) | null = null;
+    getMe.mockImplementationOnce(() => {
+      return new Promise((resolve) => {
+        resolveGetMe = resolve;
+      });
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(getStatus).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole('heading', { name: /sign in/i })).not.toBeInTheDocument();
+    expect(screen.getByText('Cannot reach the server')).toBeInTheDocument();
+
+    await act(async () => {
+      (resolveGetMe as unknown as (value: unknown) => void)({
+        userId: 'u1',
+        email: 'o@example.com',
+        name: 'O',
+        role: 'admin',
+        isOwner: true,
+      });
+    });
+
+    await waitFor(() => expect(screen.getByText('APP')).toBeInTheDocument());
   });
 });
