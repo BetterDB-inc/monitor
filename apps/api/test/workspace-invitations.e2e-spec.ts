@@ -31,6 +31,12 @@ function extractSessionCookie(setCookie: string | string[] | undefined): string 
   return first;
 }
 
+function expectNoInvitationSecrets(item: unknown): void {
+  expect(item).not.toHaveProperty('token');
+  expect(item).not.toHaveProperty('tokenHash');
+  expect(item).not.toHaveProperty('url');
+}
+
 function jsonHeaders(cookie?: string): Record<string, string> {
   const headers: Record<string, string> = {
     'content-type': 'application/json',
@@ -137,6 +143,9 @@ describe('Workspace invitations (E2E)', () => {
     });
     expect(list.statusCode).toBe(200);
     expect(JSON.stringify(list.json())).not.toContain(inviteToken);
+    for (const item of list.json() as unknown[]) {
+      expectNoInvitationSecrets(item);
+    }
   });
 
   it('previews the invitation without a session', async () => {
@@ -199,6 +208,9 @@ describe('Workspace invitations (E2E)', () => {
     expect(list.json()).toEqual([
       expect.objectContaining({ id: invitationId, status: 'accepted' }),
     ]);
+    for (const item of list.json() as unknown[]) {
+      expectNoInvitationSecrets(item);
+    }
   });
 
   it('keeps public registration closed after the invite flow', async () => {
