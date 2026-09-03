@@ -72,4 +72,12 @@ describe('resolveAuthSecret', () => {
     resolveAuthSecret({}, dataDir);
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('invalidates all sessions'));
   });
+
+  it('forces 0600 on a reused secret stored with loose permissions', () => {
+    const file = join(dataDir, 'auth-secret');
+    const secret = 'z'.repeat(40);
+    writeFileSync(file, secret, { mode: 0o644 });
+    expect(resolveAuthSecret({}, dataDir)).toBe(secret);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+  });
 });
