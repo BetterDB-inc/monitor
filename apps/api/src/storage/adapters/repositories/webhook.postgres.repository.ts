@@ -1,4 +1,5 @@
 import { Pool } from 'pg';
+import { chunkedPostgresDelete } from '../postgres-chunked-delete';
 import {
   Webhook,
   WebhookDelivery,
@@ -281,19 +282,19 @@ export class WebhookPostgresRepository {
   }
 
   async pruneOldDeliveries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    // created_at < to_timestamp(...) is sargable (can use an index on
+    // created_at); wrapping the column in EXTRACT() forced a full scan.
     if (connectionId) {
-      const result = await this.pool.query(
-        'DELETE FROM webhook_deliveries WHERE EXTRACT(EPOCH FROM created_at) * 1000 < $1 AND connection_id = $2',
+      return chunkedPostgresDelete(
+        this.pool,
+        'webhook_deliveries',
+        'created_at < to_timestamp($1 / 1000.0) AND connection_id = $2',
         [cutoffTimestamp, connectionId],
       );
-      return result.rowCount ?? 0;
     }
 
-    const result = await this.pool.query(
-      'DELETE FROM webhook_deliveries WHERE EXTRACT(EPOCH FROM created_at) * 1000 < $1',
-      [cutoffTimestamp],
-    );
-
-    return result.rowCount ?? 0;
+    return chunkedPostgresDelete(this.pool, 'webhook_deliveries', 'created_at < to_timestamp($1 / 1000.0)', [
+      cutoffTimestamp,
+    ]);
   }
 }

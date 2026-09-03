@@ -312,7 +312,22 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
           {categories.map((category) => (
             <button
               key={category.id}
-              onClick={() => setActiveCategory(category.id)}
+              onClick={() => {
+                setActiveCategory(category.id);
+                // A pending invalid retention entry gates the shared Save
+                // button but its message only renders inside the Data
+                // Retention tab — leaving the tab discards the invalid text
+                // (formData was never updated with it) so other tabs aren't
+                // blocked by an error they can't see.
+                if (category.id !== 'dataRetention' && retentionError) {
+                  setRetentionError(null);
+                  setRetentionInput(
+                    formData.localRetentionDays != null
+                      ? String(formData.localRetentionDays)
+                      : '',
+                  );
+                }
+              }}
               className={`w-full text-left px-4 py-3 rounded-lg transition-colors ${
                 activeCategory === category.id
                   ? 'bg-primary/10 text-primary font-medium'

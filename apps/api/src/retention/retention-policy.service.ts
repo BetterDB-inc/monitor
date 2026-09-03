@@ -7,9 +7,12 @@ import { isCloudMode } from '../common/utils/cloud-mode';
 export const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 // Hard cap for the high-volume sample stores (command/latency stats samples,
-// vector index snapshots, AI samples) in cloud deployments. These tables gain
-// rows per connection per poll tick, so they keep the tight window they have
-// always had instead of the tier's analytics-history window.
+// vector index snapshots) in cloud deployments. These tables gain rows per
+// connection per poll tick, so they keep the tight window they have always
+// had instead of the tier's analytics-history window. AI cache samples and
+// OTel spans are NOT capped this way in cloud: the tier-based sweep has
+// always owned them there at the full tier window (this method still governs
+// them self-hosted, where the poller prunes locally).
 const CLOUD_SAMPLE_RETENTION_DAYS = 7;
 
 /**

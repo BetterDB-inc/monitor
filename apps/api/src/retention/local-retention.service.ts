@@ -25,8 +25,8 @@ export class LocalRetentionService implements OnModuleInit, OnModuleDestroy {
   // and the initial poller burst.
   private readonly STARTUP_DELAY_MS = 5 * 60 * 1000;
 
-  private startupTimer: NodeJS.Timeout | null = null;
   private sweepTimer: NodeJS.Timeout | null = null;
+  private destroyed = false;
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -35,18 +35,28 @@ export class LocalRetentionService implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit(): void {
     if (isCloudMode()) return;
-
-    this.startupTimer = setTimeout(() => {
-      void this.runSweep();
-      this.sweepTimer = setInterval(() => void this.runSweep(), this.SWEEP_INTERVAL_MS);
-    }, this.STARTUP_DELAY_MS);
+    this.schedule(this.STARTUP_DELAY_MS);
   }
 
   onModuleDestroy(): void {
-    if (this.startupTimer) clearTimeout(this.startupTimer);
-    if (this.sweepTimer) clearInterval(this.sweepTimer);
-    this.startupTimer = null;
+    this.destroyed = true;
+    if (this.sweepTimer) clearTimeout(this.sweepTimer);
     this.sweepTimer = null;
+  }
+
+  // Re-arm AFTER the sweep completes (like MultiConnectionPoller) instead of
+  // a fixed setInterval: a first sweep over years of keep-forever history can
+  // outlive the interval, and an overlapping second sweep would contend on
+  // the same tables for no benefit.
+  private schedule(delayMs: number): void {
+    if (this.destroyed) return;
+    this.sweepTimer = setTimeout(async () => {
+      try {
+        await this.runSweep();
+      } finally {
+        this.schedule(this.SWEEP_INTERVAL_MS);
+      }
+    }, delayMs);
   }
 
   async runSweep(): Promise<void> {
