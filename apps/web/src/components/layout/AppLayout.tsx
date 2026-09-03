@@ -60,7 +60,7 @@ export function AppLayout(): ReactElement {
  * Split out so the keybindings can reach `useSidebar`, which only exists
  * inside `SidebarProvider`.
  */
-function AppLayoutInner() {
+function AppLayoutInner(): ReactElement {
   const { user, isCloud, mode } = useAuth();
   const cloudUser = isCloud ? user : null;
   const showTeam = isCloud === true || mode === 'self-hosted';
@@ -103,6 +103,7 @@ function AppLayoutInner() {
       <div className="min-h-screen bg-background w-full">
         <AppSidebar
           cloudUser={cloudUser}
+          showTeam={showTeam}
           onFeedbackClick={() => setShowFeedback(true)}
           onShortcutsClick={() => setShowShortcuts(true)}
         />

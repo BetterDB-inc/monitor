@@ -1,5 +1,4 @@
 import { useLocation } from 'react-router-dom';
-import { useAuth } from '../../contexts/AuthContext';
 import { useIsDemo } from '../../contexts/DemoContext';
 import { useCanMutate } from '../../hooks/useCanMutate';
 import { useCapabilities } from '../../hooks/useCapabilities';
@@ -22,18 +21,22 @@ import { formatForDisplay } from '@tanstack/hotkeys';
 
 interface SidebarProps {
   cloudUser: CloudUser | null;
+  showTeam: boolean;
   onFeedbackClick: () => void;
   onShortcutsClick: () => void;
 }
 
-export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: SidebarProps) {
+export function AppSidebar({
+  cloudUser,
+  showTeam,
+  onFeedbackClick,
+  onShortcutsClick,
+}: SidebarProps) {
   const location = useLocation();
   const { hasVectorSearch } = useCapabilities();
   const { unreadCount: cacheProposalsUnread } = useCacheProposalsUnread();
   const isDemo = useIsDemo();
   const canMutate = useCanMutate();
-  const { mode } = useAuth();
-  const showTeam = cloudUser !== null || mode === 'self-hosted';
 
   return (
     <Sidebar className="bg-card">
