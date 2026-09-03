@@ -6,6 +6,12 @@ import { parseCommandLine } from './command-parser';
 import { CliResultMessage, CliErrorMessage } from './cli.types';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 
+export interface CliExecuteOptions {
+  readOnly: boolean;
+}
+
+export const MEMBER_READ_ONLY_MESSAGE = 'Read-only members can only run read commands.';
+
 @Injectable()
 export class CliService {
   private readonly logger = new Logger(CliService.name);
@@ -25,6 +31,7 @@ export class CliService {
   async execute(
     commandLine: string,
     connectionId?: string,
+    options: CliExecuteOptions = { readOnly: false },
   ): Promise<CliResultMessage | CliErrorMessage> {
     const args = parseCommandLine(commandLine.trim());
     if (args.length === 0) {
@@ -47,6 +54,13 @@ export class CliService {
           type: 'error',
           error: safeError + ' Set BETTERDB_UNSAFE_CLI=true to enable all commands.',
         };
+      }
+    }
+
+    if (options.readOnly === true) {
+      const memberError = checkSafeMode(command, subCommand);
+      if (memberError !== null) {
+        return { type: 'error', error: MEMBER_READ_ONLY_MESSAGE };
       }
     }
 
