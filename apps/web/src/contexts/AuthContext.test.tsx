@@ -8,6 +8,20 @@ import { AuthGate } from '../components/auth/AuthGate';
 const getStatus = vi.fn();
 const getMe = vi.fn();
 
+const { setAuthRedirectEnabledMock } = vi.hoisted(() => {
+  return { setAuthRedirectEnabledMock: vi.fn() };
+});
+
+vi.mock('../api/client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../api/client')>();
+  return {
+    ...actual,
+    setAuthRedirectEnabled: (enabled: boolean): void => {
+      setAuthRedirectEnabledMock(enabled);
+    },
+  };
+});
+
 vi.mock('../api/workspace', () => ({
   workspaceApi: {
     getStatus: () => getStatus(),
@@ -162,5 +176,51 @@ describe('AuthProvider state', () => {
     await result.current.refresh();
     await waitFor(() => expect(result.current.unavailable).toBe(false));
     expect(result.current.mode).toBe('disabled');
+  });
+});
+
+describe('login redirect wiring', () => {
+  beforeEach(() => {
+    getStatus.mockReset();
+    getMe.mockReset();
+    setAuthRedirectEnabledMock.mockReset();
+  });
+
+  function wrapper({ children }: { children: ReactNode }): ReactElement {
+    return (
+      <MemoryRouter>
+        <AuthProvider>{children}</AuthProvider>
+      </MemoryRouter>
+    );
+  }
+
+  it('enables the login redirect for an enabled self-hosted workspace', async () => {
+    getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: true });
+    getMe.mockResolvedValue({
+      userId: 'u1',
+      email: 'o@example.com',
+      name: 'O',
+      role: 'admin',
+      isOwner: true,
+    });
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(setAuthRedirectEnabledMock).toHaveBeenCalledWith(true);
+  });
+
+  it('leaves the login redirect off in cloud mode', async () => {
+    getStatus.mockResolvedValue({ mode: 'cloud', enabled: true, bootstrapped: true });
+    getMe.mockResolvedValue({ userId: 'u1', email: 'o@example.com', role: 'owner', tenantId: 't' });
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(setAuthRedirectEnabledMock).toHaveBeenCalledWith(false);
+    expect(setAuthRedirectEnabledMock).not.toHaveBeenCalledWith(true);
+  });
+
+  it('leaves the login redirect off when the status call fails', async () => {
+    getStatus.mockRejectedValue(new Error('500'));
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(setAuthRedirectEnabledMock).toHaveBeenCalledWith(false);
   });
 });

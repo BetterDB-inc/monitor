@@ -73,6 +73,12 @@ export class UnauthorizedError extends Error {
 
 export const AUTH_ROUTES = ['/login', '/register', '/invite'];
 
+let authRedirectEnabled = false;
+
+export function setAuthRedirectEnabled(enabled: boolean): void {
+  authRedirectEnabled = enabled;
+}
+
 function isOnAuthRoute(): boolean {
   return AUTH_ROUTES.some((route) => {
     return window.location.pathname.startsWith(route);
@@ -80,6 +86,9 @@ function isOnAuthRoute(): boolean {
 }
 
 function redirectToLogin(): void {
+  if (authRedirectEnabled === false) {
+    return;
+  }
   if (isOnAuthRoute()) {
     return;
   }
@@ -289,7 +298,7 @@ export async function fetchApi<T>(
 
     if (!response.ok) {
       if (response.status === 401) {
-        if (skipAuthRedirect !== true) {
+        if (skipAuthRedirect !== true && authRedirectEnabled === true) {
           redirectToLogin();
         }
         throw new UnauthorizedError();
