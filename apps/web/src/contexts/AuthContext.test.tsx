@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { ReactElement, ReactNode } from 'react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './AuthContext';
@@ -222,5 +222,62 @@ describe('login redirect wiring', () => {
     const { result } = renderHook(() => useAuth(), { wrapper });
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(setAuthRedirectEnabledMock).toHaveBeenCalledWith(false);
+  });
+});
+
+describe('sign-out versus an in-flight refresh', () => {
+  beforeEach(() => {
+    getStatus.mockReset();
+    getMe.mockReset();
+    setAuthRedirectEnabledMock.mockReset();
+  });
+
+  function wrapper({ children }: { children: ReactNode }): ReactElement {
+    return (
+      <MemoryRouter>
+        <AuthProvider>{children}</AuthProvider>
+      </MemoryRouter>
+    );
+  }
+
+  it('discards a refresh that resolves after sign-out', async () => {
+    const signedIn = {
+      userId: 'u1',
+      email: 'o@example.com',
+      name: 'O',
+      role: 'admin',
+      isOwner: true,
+    };
+    getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: true });
+    getMe.mockResolvedValue(signedIn);
+
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.user).toEqual(signedIn));
+
+    let releaseGetMe: (() => void) | null = null;
+    getMe.mockImplementation(() => {
+      return new Promise((resolve) => {
+        releaseGetMe = () => {
+          resolve(signedIn);
+        };
+      });
+    });
+
+    let pendingRefresh: Promise<void> = Promise.resolve();
+    act(() => {
+      pendingRefresh = result.current.refresh();
+    });
+    await waitFor(() => expect(releaseGetMe).not.toBeNull());
+
+    await act(async () => {
+      await result.current.signOut();
+    });
+    expect(result.current.user).toBeNull();
+
+    await act(async () => {
+      (releaseGetMe as unknown as () => void)();
+      await pendingRefresh;
+    });
+    expect(result.current.user).toBeNull();
   });
 });
