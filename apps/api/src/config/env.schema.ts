@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MAX_RETENTION_DAYS, parseRetentionDaysToken } from '@betterdb/shared';
 
 /**
  * Environment variable validation schema
@@ -39,8 +40,15 @@ export const envSchema = z
     // Self-hosted data retention: days of monitoring history to keep. Seeds
     // the localRetentionDays app setting when the settings row is first
     // created; unset means keep forever. Ignored in cloud mode.
-    // Max matches the PostgreSQL INTEGER column that stores the value.
-    LOCAL_RETENTION_DAYS: z.coerce.number().int().min(1).max(2147483647).optional(),
+    // Uses the same strict validator as the runtime seeding path, so a value
+    // like "1e2" fails at boot instead of passing here and silently seeding
+    // null later.
+    LOCAL_RETENTION_DAYS: z
+      .string()
+      .optional()
+      .refine((v) => v === undefined || parseRetentionDaysToken(v) !== null, {
+        message: `LOCAL_RETENTION_DAYS must be a whole number of days between 1 and ${MAX_RETENTION_DAYS}`,
+      }),
 
     // AI configuration
     AI_ENABLED: z

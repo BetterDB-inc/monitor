@@ -7,12 +7,14 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { AppSettings, SettingsUpdateRequest, SettingsResponse } from '@betterdb/shared';
+import {
+  AppSettings,
+  SettingsUpdateRequest,
+  SettingsResponse,
+  MAX_RETENTION_DAYS,
+  parseRetentionDaysToken,
+} from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
-
-// app_settings.local_retention_days is an INTEGER column on PostgreSQL;
-// anything above this would fail the insert there.
-const MAX_RETENTION_DAYS = 2_147_483_647;
 
 @Injectable()
 export class SettingsService implements OnModuleInit, OnModuleDestroy {
@@ -55,7 +57,13 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     const generation = this.cacheGeneration;
     const dbSettings = await this.storageClient.getSettings();
     if (generation !== this.cacheGeneration) return; // a direct write won the race
-    this.cachedSettings = dbSettings || this.buildSettingsFromEnv();
+    // Only ever cache persisted settings. Substituting env-derived defaults
+    // here (e.g. after a DB wipe mid-run) would let getLoadedSettings() hand
+    // out values that were never saved — and an unsaved LOCAL_RETENTION_DAYS
+    // must not be able to trigger deletion.
+    if (dbSettings) {
+      this.cachedSettings = dbSettings;
+    }
   }
 
   getCachedSettings(): AppSettings {
@@ -110,14 +118,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private parseLocalRetentionDays(raw: string | undefined): number | null {
-    // Strict whole-token match: parseInt would accept "30days" or truncate
-    // "1.5", silently activating a sweep window the operator never asked for.
-    const value = raw?.trim() ?? '';
-    if (!/^\d+$/.test(value)) return null;
-    const parsed = Number(value);
-    return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= MAX_RETENTION_DAYS
-      ? parsed
-      : null;
+    return parseRetentionDaysToken(raw);
   }
 
   private async initializeFromEnv(): Promise<void> {
@@ -178,7 +179,16 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async resetToDefaults(): Promise<SettingsResponse> {
-    await this.initializeFromEnv();
+    // The retention window survives a reset. Re-seeding it from
+    // LOCAL_RETENTION_DAYS would re-arm data deletion for an operator who
+    // explicitly cleared it in the UI and is resetting something unrelated —
+    // the docs promise that clearing the window sticks.
+    const current = await this.storageClient.getSettings();
+    const defaults = this.buildSettingsFromEnv();
+    if (current) {
+      defaults.localRetentionDays = current.localRetentionDays;
+    }
+    await this.storageClient.saveSettings(defaults);
     const settings = await this.storageClient.getSettings();
 
     if (!settings) {

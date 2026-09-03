@@ -2,6 +2,7 @@ import { Injectable, Optional } from '@nestjs/common';
 import { Tier, TIER_RETENTION_DAYS } from '@betterdb/shared';
 import { LicenseService } from '@proprietary/licenses';
 import { SettingsService } from '../settings/settings.service';
+import { isCloudMode } from '../common/utils/cloud-mode';
 
 export const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -31,7 +32,7 @@ export class RetentionPolicyService {
    * when unset (or when running in cloud mode).
    */
   getLocalRetentionDays(): number | null {
-    if (process.env.CLOUD_MODE === 'true') return null;
+    if (isCloudMode()) return null;
     // Only the persisted settings count. The env-fallback view that
     // getCachedSettings() serves before the first cache load could resurrect
     // a window the operator explicitly cleared in the UI; until real settings
@@ -49,7 +50,7 @@ export class RetentionPolicyService {
    * be pruned (self-hosted with no window configured).
    */
   getRetentionDays(): number | null {
-    if (process.env.CLOUD_MODE === 'true') {
+    if (isCloudMode()) {
       const tier = this.licenseService?.getLicenseTier() ?? Tier.community;
       return TIER_RETENTION_DAYS[tier];
     }
@@ -67,7 +68,7 @@ export class RetentionPolicyService {
    * (null = keep forever, like everything else).
    */
   getSampleRetentionMs(): number | null {
-    if (process.env.CLOUD_MODE === 'true') {
+    if (isCloudMode()) {
       return CLOUD_SAMPLE_RETENTION_DAYS * MS_PER_DAY;
     }
     return this.getRetentionMs();

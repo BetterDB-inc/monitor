@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { chunkedSqliteDelete } from '../sqlite-chunked-delete';
 import { randomUUID } from 'crypto';
 import {
   Webhook,
@@ -321,15 +322,12 @@ export class WebhookSqliteRepository {
 
   async pruneOldDeliveries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (connectionId) {
-      const result = this.db
-        .prepare('DELETE FROM webhook_deliveries WHERE created_at < ? AND connection_id = ?')
-        .run(cutoffTimestamp, connectionId);
-      return result.changes;
+      return chunkedSqliteDelete(this.db, 'webhook_deliveries', 'created_at < ? AND connection_id = ?', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = this.db
-      .prepare('DELETE FROM webhook_deliveries WHERE created_at < ?')
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'webhook_deliveries', 'created_at < ?', [cutoffTimestamp]);
   }
 }

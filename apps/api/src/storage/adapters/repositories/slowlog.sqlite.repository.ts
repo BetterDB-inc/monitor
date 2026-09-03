@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { chunkedSqliteDelete } from '../sqlite-chunked-delete';
 import {
   SlowLogQueryOptions,
   StoredSlowLogEntry,
@@ -113,15 +114,12 @@ export class SlowLogSqliteRepository {
 
   async pruneOldSlowLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (connectionId) {
-      const result = this.db
-        .prepare('DELETE FROM slow_log_entries WHERE captured_at < ? AND connection_id = ?')
-        .run(cutoffTimestamp, connectionId);
-      return result.changes;
+      return chunkedSqliteDelete(this.db, 'slow_log_entries', 'captured_at < ? AND connection_id = ?', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = this.db
-      .prepare('DELETE FROM slow_log_entries WHERE captured_at < ?')
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'slow_log_entries', 'captured_at < ?', [cutoffTimestamp]);
   }
 }

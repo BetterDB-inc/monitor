@@ -29,6 +29,7 @@ import { CliModule } from './cli/cli.module';
 import { PosthogProxyModule } from './posthog-proxy/posthog-proxy.module';
 import { SystemModule } from './system/system.module';
 import { MonitorModule } from './monitor/monitor.module';
+import { isCloudMode } from './common/utils/cloud-mode';
 
 let AiModule: any = null;
 let LicenseModule: any = null;
@@ -124,7 +125,7 @@ try {
   // Proprietary module not available
 }
 
-if (process.env.CLOUD_MODE) {
+if (isCloudMode()) {
   try {
     const agentModule = require('../../../proprietary/agent/agent.module');
     AgentModule = agentModule.AgentModule;
@@ -144,7 +145,7 @@ if (process.env.CLOUD_MODE) {
 
 // Cloud auth module - uses proprietary implementation in cloud mode
 let CloudAuthModuleToUse: any = CloudAuthModule;
-if (process.env.CLOUD_MODE) {
+if (isCloudMode()) {
   try {
     const proprietaryCloudAuth = require('../../../proprietary/cloud-auth/cloud-auth.module');
     CloudAuthModuleToUse = proprietaryCloudAuth.ProprietaryCloudAuthModule;

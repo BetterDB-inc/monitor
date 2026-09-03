@@ -56,6 +56,42 @@ describe('SettingsService', () => {
     expect(service.getLoadedSettings()?.localRetentionDays).toBeNull();
   });
 
+  it('keeps the previous cache when a runtime refresh finds no settings row', async () => {
+    const saved = buildSettings({ localRetentionDays: 30 });
+    const storage = {
+      getSettings: jest
+        .fn()
+        .mockResolvedValueOnce(saved) // first refresh: row exists
+        .mockResolvedValue(null), // later refresh: DB wiped mid-run
+    } as any;
+    const service = new SettingsService(storage, configStub);
+
+    await (service as any).refreshCache();
+    expect(service.getLoadedSettings()?.localRetentionDays).toBe(30);
+
+    // The env-derived fallback must never be presented as persisted settings.
+    await (service as any).refreshCache();
+    expect(service.getLoadedSettings()?.localRetentionDays).toBe(30);
+  });
+
+  it('resetToDefaults preserves the retention window instead of re-seeding it from env', async () => {
+    const current = buildSettings({ localRetentionDays: null });
+    const storage = {
+      getSettings: jest.fn().mockResolvedValue(current),
+      saveSettings: jest.fn().mockResolvedValue(current),
+    } as any;
+    // Env var set: a reset must NOT re-arm deletion the operator cleared.
+    const config = {
+      get: jest.fn((key: string, def?: string) => (key === 'LOCAL_RETENTION_DAYS' ? '7' : def)),
+    } as any;
+    const service = new SettingsService(storage, config);
+
+    await service.resetToDefaults();
+
+    expect(storage.saveSettings).toHaveBeenCalledTimes(1);
+    expect(storage.saveSettings.mock.calls[0][0].localRetentionDays).toBeNull();
+  });
+
   it('rejects localRetentionDays outside the storable integer range', async () => {
     const storage = {
       getSettings: jest.fn().mockResolvedValue(buildSettings()),

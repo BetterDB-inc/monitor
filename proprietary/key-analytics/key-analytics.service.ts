@@ -11,7 +11,6 @@ import {
 } from '@app/common/services/multi-connection-poller';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { LicenseService } from '@proprietary/licenses/license.service';
-import { RetentionPolicyService } from '@app/retention/retention-policy.service';
 import { KeySizeDistribution, parseKeySizeDistribution, KEY_DETAILS_TOP_N } from '@betterdb/shared';
 import { rankCompositeKeys } from './composite-key-ranker';
 import { randomUUID } from 'crypto';
@@ -50,7 +49,6 @@ function dedupeByKeyMaxMemory(entries: HotKeyEntry[]): HotKeyEntry[] {
 export class KeyAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(KeyAnalyticsService.name);
   private isRunning = new Map<string, boolean>();
-  private pruneHandle: NodeJS.Timeout | null = null;
 
   private readonly sampleSize: number;
   private readonly scanBatchSize: number;
@@ -60,7 +58,6 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly license: LicenseService,
-    private readonly retentionPolicy: RetentionPolicyService,
   ) {
     super(connectionRegistry);
     this.sampleSize = parseInt(process.env.KEY_ANALYTICS_SAMPLE_SIZE || '10000', 10);
@@ -83,43 +80,15 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     );
 
     this.start();
-
-    const pruneIntervalMs = 24 * 60 * 60 * 1000;
-    this.pruneHandle = setInterval(() => this.pruneOldData(), pruneIntervalMs);
-  }
-
-  private async pruneOldData(): Promise<void> {
-    try {
-      // Same policy as everything else: tier window in cloud, the operator's
-      // configured window (or nothing) on self-hosted.
-      const retentionMs = this.retentionPolicy.getRetentionMs();
-      if (retentionMs === null) {
-        this.logger.debug('Key Analytics prune skipped: no retention window configured');
-        return;
-      }
-      const cutoff = Date.now() - retentionMs;
-      const [deletedSnapshots, deletedHotKeys] = await Promise.all([
-        this.storage.pruneOldKeyPatternSnapshots(cutoff),
-        this.storage.pruneOldHotKeys(cutoff),
-      ]);
-      this.logger.log(
-        `Key Analytics prune (${this.license.getLicenseTier()} tier, ${retentionMs / (24 * 60 * 60 * 1000)}d retention): removed ${deletedSnapshots} pattern snapshots, ${deletedHotKeys} hot key entries older than ${new Date(cutoff).toISOString()}`,
-      );
-    } catch (err) {
-      this.logger.error(`Key Analytics prune failed: ${err instanceof Error ? err.message : err}`);
-    }
+    // Retention for key_pattern_snapshots and hot_key_stats is owned by the
+    // shared sweeps (cloud DataRetentionService / self-hosted
+    // LocalRetentionService via runRetentionSweep) — no service-local pruner.
+    // The old private timer here never fired within 24h of a restart and did
+    // not run at all when the feature was unlicensed.
   }
 
   protected onConnectionRemoved(connectionId: string): void {
     this.isRunning.delete(connectionId);
-  }
-
-  async onModuleDestroy(): Promise<void> {
-    if (this.pruneHandle) {
-      clearInterval(this.pruneHandle);
-      this.pruneHandle = null;
-    }
-    await super.onModuleDestroy();
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {

@@ -13,6 +13,7 @@ import {
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import type { DatabasePort } from '../common/interfaces/database-port.interface';
 import { RetentionPolicyService } from '../retention/retention-policy.service';
+import { isCloudMode } from '../common/utils/cloud-mode';
 import { DiscoveryReaderService } from './discovery-reader.service';
 
 /** An instance plus its most recent polled sample (for the API). */
@@ -94,7 +95,7 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
 
   /** Local prune for self-hosted, only when a window is configured (cloud uses the tier-based sweep). */
   private async maybePruneLocally(now: number): Promise<void> {
-    if (process.env.CLOUD_MODE === 'true') return;
+    if (isCloudMode()) return;
     const retentionMs = this.retentionPolicy.getSampleRetentionMs();
     if (retentionMs === null) return;
     if (now - this.lastPruneAt <= this.PRUNE_INTERVAL_MS) return;

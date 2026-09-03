@@ -5,15 +5,11 @@ import { licenseApi } from '../api/license';
 import { useMcpTokens } from '../hooks/useMcpTokens';
 import { useConnection } from '../hooks/useConnection';
 import { useLicense } from '../hooks/useLicense';
-import { AppSettings, SettingsUpdateRequest } from '@betterdb/shared';
+import { AppSettings, SettingsUpdateRequest, MAX_RETENTION_DAYS } from '@betterdb/shared';
 import { Card } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { useQueryClient } from '@tanstack/react-query';
 type SettingsCategory = 'license' | 'audit' | 'clientAnalytics' | 'anomaly' | 'dataRetention' | 'mcpTokens';
-
-// Mirrors the server-side cap (PostgreSQL INTEGER max) so invalid values get
-// an inline error instead of a 400 and the generic failure alert.
-const MAX_RETENTION_DAYS = 2_147_483_647;
 
 export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const { currentConnection } = useConnection();
@@ -584,11 +580,12 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
               <div className="space-y-4">
                 <h2 className="text-xl font-semibold mb-4">Data Retention</h2>
                 <p className="text-sm text-muted-foreground">
-                  Stored monitoring history (slow log and command log entries, client, latency and
-                  memory snapshots, anomaly events, webhook deliveries, monitor captures, AI
-                  observability samples) is kept indefinitely by default. Set a retention window to
-                  have a daily sweep delete history older than that many days and keep the database
-                  from growing forever.
+                  Stored monitoring history is kept indefinitely by default. Set a retention window
+                  to have a daily sweep delete rows older than that many days from every store: slow
+                  log and command log entries, client/latency/memory snapshots, latency histograms,
+                  anomaly events and correlated groups, <strong>ACL audit entries</strong>, key
+                  pattern snapshots and hot keys, webhook deliveries, monitor captures, AI cache
+                  samples, OTel spans, command/latency stats samples, and vector index snapshots.
                 </p>
 
                 <div>
@@ -603,6 +600,16 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                     onChange={(e) => {
                       const raw = e.target.value;
                       setRetentionInput(raw);
+                      // Number inputs report invalid text (e.g. "30e") as an
+                      // empty value with validity.badInput set — that is NOT
+                      // the user clearing the field, so keep the error state
+                      // instead of committing "keep forever".
+                      if (e.currentTarget.validity.badInput) {
+                        setRetentionError(
+                          `Enter a whole number of days between 1 and ${MAX_RETENTION_DAYS}, or leave empty to keep history forever.`,
+                        );
+                        return;
+                      }
                       if (raw.trim() === '') {
                         setRetentionError(null);
                         handleInputChange('localRetentionDays', null);

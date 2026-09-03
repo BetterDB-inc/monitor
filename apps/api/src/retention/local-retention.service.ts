@@ -8,6 +8,7 @@ import {
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { MS_PER_DAY, RetentionPolicyService } from './retention-policy.service';
 import { runRetentionSweep, totalPruned } from './retention-sweep';
+import { isCloudMode } from '../common/utils/cloud-mode';
 
 /**
  * Daily retention sweep for self-hosted deployments. Disabled entirely in
@@ -33,7 +34,7 @@ export class LocalRetentionService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit(): void {
-    if (process.env.CLOUD_MODE === 'true') return;
+    if (isCloudMode()) return;
 
     this.startupTimer = setTimeout(() => {
       void this.runSweep();
@@ -49,7 +50,7 @@ export class LocalRetentionService implements OnModuleInit, OnModuleDestroy {
   }
 
   async runSweep(): Promise<void> {
-    if (process.env.CLOUD_MODE === 'true') return;
+    if (isCloudMode()) return;
 
     const days = this.retentionPolicy.getLocalRetentionDays();
     if (days === null) {

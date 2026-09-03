@@ -232,7 +232,7 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 |----------|----------|---------|-------------|
 | `LOCAL_RETENTION_DAYS` | No | - | Self-hosted only: days of monitoring history to keep (daily sweep). Seeds the setting when the settings row is first created; unset = keep forever |
 
-Self-hosted BetterDB keeps stored monitoring history (slow log and command log entries, client/latency/memory snapshots, anomaly events, webhook deliveries, monitor captures, AI observability samples) **indefinitely by default**, bounded only by your storage backend's capacity and disk space.
+Self-hosted BetterDB keeps stored monitoring history **indefinitely by default**, bounded only by your storage backend's capacity and disk space. The retention window, once set, covers every store: slow log and command log entries, client/latency/memory snapshots, latency histograms, anomaly events and correlated groups, **ACL audit entries**, key pattern snapshots and hot keys, webhook deliveries, monitor captures (sessions, chunks, triggers, scheduled), AI cache samples, OTel spans, command/latency stats samples, and vector index snapshots.
 
 To keep the database from growing forever, set a retention window from **Settings → Data Retention** in the UI. On a fresh install the window can also be seeded with `LOCAL_RETENTION_DAYS` — the env var applies only when the settings row is first created; after that the settings page owns the value, so clearing it there sticks even if the env var stays set. A daily sweep then deletes history older than the window, and the high-volume sample stores (command/latency stats samples, vector index snapshots, AI cache samples, OTel spans) are additionally trimmed to the same window on an hourly cycle. Nothing is deleted while the window is unset.
 
@@ -328,7 +328,7 @@ BetterDB Monitor automatically checks for new versions and displays an update ba
 | `KEY_ANALYTICS_SCAN_BATCH_SIZE` | No | `1000` | Batch size for key scanning operations |
 | `KEY_ANALYTICS_INTERVAL_MS` | No | `300000` | Key analytics collection interval (milliseconds) |
 
-Data retention is determined by your license tier: Community keeps 7 days, Pro keeps 30 days, Enterprise keeps data indefinitely.
+Key analytics history follows the standard retention policy (see [Data Retention](#data-retention)): self-hosted installs keep it until a retention window is configured; BetterDB Cloud prunes it at the tier window (Community 7 days, Pro 90, Enterprise 365).
 
 **Note**: Key analytics features require a Pro tier license.
 

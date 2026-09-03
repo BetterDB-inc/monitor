@@ -23,9 +23,7 @@ function makeService(getHotKeys: jest.Mock): KeyAnalyticsService {
     hasFeature: () => true,
     getLicenseTier: () => 'pro',
   } as unknown as LicenseService;
-  return new KeyAnalyticsService(registry, storage, license, {
-    getRetentionMs: jest.fn().mockReturnValue(null),
-  } as any);
+  return new KeyAnalyticsService(registry, storage, license);
 }
 
 const isCompositeOnly = (opts: HotKeyQueryOptions) =>
@@ -119,12 +117,7 @@ describe('KeyAnalyticsService.collect composite persistence', () => {
       hasFeature: () => true,
       getLicenseTier: () => 'pro',
     } as unknown as LicenseService;
-    return {
-      service: new KeyAnalyticsService(registry, storage, license, {
-        getRetentionMs: jest.fn().mockReturnValue(null),
-      } as any),
-      client,
-    };
+    return { service: new KeyAnalyticsService(registry, storage, license), client };
   }
 
   async function runCollect(service: KeyAnalyticsService, client: unknown): Promise<void> {

@@ -1359,6 +1359,8 @@ export class PostgresAdapter implements StoragePort {
       );
       ALTER TABLE hot_key_stats ADD COLUMN IF NOT EXISTS cardinality BIGINT;
       ALTER TABLE hot_key_stats ADD COLUMN IF NOT EXISTS key_type TEXT;
+      CREATE INDEX IF NOT EXISTS idx_hot_key_captured_at_global
+        ON hot_key_stats(captured_at);
 
       CREATE INDEX IF NOT EXISTS idx_hks_connection_captured
         ON hot_key_stats(connection_id, captured_at DESC);
@@ -1628,6 +1630,8 @@ export class PostgresAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at
         ON command_stats_samples(connection_id, command, captured_at);
+      CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at_global
+        ON command_stats_samples(captured_at);
 
       CREATE TABLE IF NOT EXISTS latency_stats_samples (
         id UUID PRIMARY KEY,
@@ -1644,6 +1648,8 @@ export class PostgresAdapter implements StoragePort {
         ON latency_stats_samples(connection_id, command, captured_at);
       CREATE INDEX IF NOT EXISTS idx_latstat_captured_at
         ON latency_stats_samples(connection_id, captured_at);
+      CREATE INDEX IF NOT EXISTS idx_latstat_captured_at_global
+        ON latency_stats_samples(captured_at);
 
       CREATE TABLE IF NOT EXISTS ai_cache_samples (
         id UUID PRIMARY KEY,
@@ -1667,6 +1673,8 @@ export class PostgresAdapter implements StoragePort {
         ON ai_cache_samples(connection_id, instance_field, timestamp);
       CREATE INDEX IF NOT EXISTS idx_aicache_ts
         ON ai_cache_samples(connection_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_aicache_ts_global
+        ON ai_cache_samples(timestamp);
 
       CREATE TABLE IF NOT EXISTS otel_spans (
         trace_id TEXT NOT NULL,
@@ -3978,9 +3986,11 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
     // Prune whole traces (by trace-level start), not individual spans, so a long
     // trace never loses its root/early spans while later ones survive.
+    // "MIN(start_time_ms) < c" is equivalent to "any span < c", so the
+    // index-driven DISTINCT form replaces the full GROUP BY aggregate scan.
     const result = await this.pool.query(
       `DELETE FROM otel_spans WHERE trace_id IN (
-         SELECT trace_id FROM otel_spans GROUP BY trace_id HAVING MIN(start_time_ms) < $1
+         SELECT DISTINCT trace_id FROM otel_spans WHERE start_time_ms < $1
        )`,
       [cutoffTimestamp],
     );

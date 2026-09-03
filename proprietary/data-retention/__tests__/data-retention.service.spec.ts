@@ -1,7 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { DataRetentionService } from '../data-retention.service';
 import { LicenseService } from '@proprietary/licenses/license.service';
-import { Tier } from '@proprietary/licenses/types';
+import { Tier, TIER_RETENTION_DAYS } from '@proprietary/licenses/types';
+import { RetentionPolicyService } from '@app/retention/retention-policy.service';
 import { StoragePort } from '@app/common/interfaces/storage-port.interface';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -24,6 +25,7 @@ describe('DataRetentionService', () => {
       pruneOldAnomalyEvents: jest.fn().mockResolvedValue(4),
       pruneOldCorrelatedGroups: jest.fn().mockResolvedValue(5),
       pruneOldKeyPatternSnapshots: jest.fn().mockResolvedValue(6),
+      pruneOldHotKeys: jest.fn().mockResolvedValue(21),
       pruneOldEntries: jest.fn().mockResolvedValue(7),
       pruneOldDeliveries: jest.fn().mockResolvedValue(8),
       pruneOldLatencySnapshots: jest.fn().mockResolvedValue(9),
@@ -49,6 +51,12 @@ describe('DataRetentionService', () => {
         DataRetentionService,
         { provide: 'STORAGE_CLIENT', useValue: storage },
         { provide: LicenseService, useValue: licenseService },
+        {
+          provide: RetentionPolicyService,
+          useValue: {
+            getRetentionDays: jest.fn(() => TIER_RETENTION_DAYS[licenseService.getLicenseTier()]),
+          },
+        },
       ],
     }).compile();
 
@@ -73,6 +81,7 @@ describe('DataRetentionService', () => {
     'pruneOldAnomalyEvents',
     'pruneOldCorrelatedGroups',
     'pruneOldKeyPatternSnapshots',
+    'pruneOldHotKeys',
     'pruneOldEntries',
     'pruneOldDeliveries',
     'pruneOldLatencySnapshots',

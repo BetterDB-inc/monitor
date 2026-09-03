@@ -1,11 +1,10 @@
 import { Injectable, Logger, Inject } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { LicenseService } from '@proprietary/licenses/license.service';
-import { TIER_RETENTION_DAYS } from '@proprietary/licenses/types';
 import { StoragePort } from '@app/common/interfaces/storage-port.interface';
+import { RetentionPolicyService, MS_PER_DAY } from '@app/retention/retention-policy.service';
 import { runRetentionSweep, totalPruned } from '@app/retention/retention-sweep';
-
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
+import { isCloudMode } from '@app/common/utils/cloud-mode';
 
 @Injectable()
 export class DataRetentionService {
@@ -14,11 +13,12 @@ export class DataRetentionService {
   constructor(
     private readonly licenseService: LicenseService,
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
+    private readonly retentionPolicy: RetentionPolicyService,
   ) {}
 
   @Cron('0 3 * * *')
   async handleRetentionCron(): Promise<void> {
-    if (process.env.CLOUD_MODE !== 'true') {
+    if (!isCloudMode()) {
       this.logger.debug('Data retention skipped (not in CLOUD_MODE)');
       return;
     }
@@ -27,13 +27,14 @@ export class DataRetentionService {
   }
 
   async runRetention(): Promise<void> {
-    if (process.env.CLOUD_MODE !== 'true') {
+    if (!isCloudMode()) {
       this.logger.log('Skipping retention: not in CLOUD_MODE');
       return;
     }
 
     const tier = this.licenseService.getLicenseTier();
-    const retentionDays = TIER_RETENTION_DAYS[tier];
+    // In cloud mode the policy always resolves to the tier window, never null.
+    const retentionDays = this.retentionPolicy.getRetentionDays()!;
     const cutoff = Date.now() - retentionDays * MS_PER_DAY;
 
     this.logger.log(`Running data retention: tier=${tier}, retentionDays=${retentionDays}, cutoff=${new Date(cutoff).toISOString()}`);
