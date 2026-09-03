@@ -11,8 +11,13 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { resolveWorkspaceConfig, WORKSPACE_CONFIG } from '../auth/workspace-config';
 import { MemoryAdapter } from '../storage/adapters/memory.adapter';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
-import { INVITATION_NOT_FOUND_MESSAGE, InvitationService } from './invitation.service';
-import { InviteController } from './invite.controller';
+import {
+  INVITATION_EXPIRED_MESSAGE,
+  INVITATION_NOT_FOUND_MESSAGE,
+  INVITATION_TTL_MS,
+  InvitationService,
+} from './invitation.service';
+import { InviteController, SIGN_IN_FAILED_MESSAGE } from './invite.controller';
 import { MemberService } from './member.service';
 import { WorkspaceController } from './workspace.controller';
 
@@ -21,8 +26,10 @@ const ORIGIN = 'http://localhost';
 describe('InviteController', () => {
   let app: NestFastifyApplication;
   let invitations: InvitationService;
+  let members: MemberService;
   let telemetry: { trackUserInvited: jest.Mock; trackInviteAccepted: jest.Mock };
   let ownerId: string;
+  let currentTime = Date.now();
 
   beforeAll(async () => {
     const config = resolveWorkspaceConfig({ AUTH_PUBLIC_URL: ORIGIN });
@@ -41,6 +48,12 @@ describe('InviteController', () => {
         { provide: WORKSPACE_CONFIG, useValue: config },
         { provide: 'STORAGE_CLIENT', useValue: storage },
         { provide: UsageTelemetryService, useValue: telemetry },
+        {
+          provide: 'INVITATION_CLOCK',
+          useValue: (): number => {
+            return currentTime;
+          },
+        },
         ActorResolver,
         MemberService,
         InvitationService,
@@ -54,6 +67,7 @@ describe('InviteController', () => {
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
     invitations = app.get(InvitationService);
+    members = app.get(MemberService);
 
     const signUp = await app.inject({
       method: 'POST',
@@ -169,5 +183,83 @@ describe('InviteController', () => {
       remoteAddress: '10.1.9.3',
     });
     expect(response.statusCode).toBe(403);
+  });
+
+  it('rejects accepting an expired invitation and leaves it pending', async () => {
+    const { token, invitation } = await invitations.create({
+      email: 'expired@example.com',
+      role: 'member',
+      invitedBy: ownerId,
+    });
+    const before = currentTime;
+    currentTime = before + INVITATION_TTL_MS + 1000;
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/invite/${token}/accept`,
+        headers: { 'content-type': 'application/json', origin: ORIGIN },
+        payload: { name: 'Late', password: 'late horse battery' },
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual(
+        expect.objectContaining({ message: INVITATION_EXPIRED_MESSAGE }),
+      );
+      const list = await invitations.list();
+      expect(list.find((item) => item.id === invitation.id)?.status).toBe('pending');
+    } finally {
+      currentTime = before;
+    }
+  });
+
+  it('rejects accepting a revoked invitation', async () => {
+    const { token, invitation } = await invitations.create({
+      email: 'revoked@example.com',
+      role: 'member',
+      invitedBy: ownerId,
+    });
+    await invitations.revoke(invitation.id);
+    const response = await app.inject({
+      method: 'POST',
+      url: `/invite/${token}/accept`,
+      headers: { 'content-type': 'application/json', origin: ORIGIN },
+      payload: { name: 'Gone', password: 'gone horse battery' },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual(expect.objectContaining({ message: 'Invitation is revoked' }));
+  });
+
+  it('releases the invitation and answers 401 without a cookie when sign-in fails after account creation', async () => {
+    const signInSpy = jest
+      .spyOn(members, 'signIn')
+      .mockResolvedValueOnce(new Response(null, { status: 401 }));
+    try {
+      const { token, invitation } = await invitations.create({
+        email: 'failed-signin@example.com',
+        role: 'member',
+        invitedBy: ownerId,
+      });
+      const accept = await app.inject({
+        method: 'POST',
+        url: `/invite/${token}/accept`,
+        headers: { 'content-type': 'application/json', origin: ORIGIN },
+        payload: { name: 'Failed', password: 'failed horse battery' },
+      });
+      expect(accept.statusCode).toBe(401);
+      expect(accept.json()).toEqual(expect.objectContaining({ message: SIGN_IN_FAILED_MESSAGE }));
+      expect(accept.headers['set-cookie']).toBeUndefined();
+
+      const preview = await app.inject({ method: 'GET', url: `/invite/${token}` });
+      expect(preview.statusCode).toBe(200);
+      expect(preview.json()).toEqual({
+        email: 'failed-signin@example.com',
+        role: 'member',
+        expired: false,
+      });
+
+      const list = await invitations.list();
+      expect(list.find((item) => item.id === invitation.id)?.status).toBe('pending');
+    } finally {
+      signInSpy.mockRestore();
+    }
   });
 });
