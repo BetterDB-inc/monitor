@@ -1,4 +1,4 @@
-import { ReactElement, useEffect, useState } from 'react';
+import { ReactElement, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -17,17 +17,33 @@ interface InviteLinkDialogProps {
 
 export function InviteLinkDialog({ url, onClose }: InviteLinkDialogProps): ReactElement {
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
+  const [trackedUrl, setTrackedUrl] = useState(url);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
-  useEffect(() => {
+  if (url !== trackedUrl) {
+    setTrackedUrl(url);
     setCopied(false);
-  }, [url]);
+    setCopyFailed(false);
+  }
 
   const copy = async (): Promise<void> => {
     if (url === null) {
       return;
     }
-    await navigator.clipboard.writeText(url);
-    setCopied(true);
+    if (navigator.clipboard === undefined) {
+      inputRef.current?.select();
+      setCopyFailed(true);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setCopyFailed(false);
+    } catch {
+      inputRef.current?.select();
+      setCopyFailed(true);
+    }
   };
 
   return (
@@ -47,12 +63,17 @@ export function InviteLinkDialog({ url, onClose }: InviteLinkDialogProps): React
             again.
           </DialogDescription>
         </DialogHeader>
-        <Input aria-label="Invite link" readOnly value={url ?? ''} />
+        <Input ref={inputRef} aria-label="Invite link" readOnly value={url ?? ''} />
+        {copyFailed === true && (
+          <p className="text-sm text-destructive">
+            Copy failed. Select the link and copy it manually.
+          </p>
+        )}
         <DialogFooter>
           <Button
             type="button"
             onClick={() => {
-              copy();
+              void copy();
             }}
           >
             {copied ? 'Copied' : 'Copy link'}
