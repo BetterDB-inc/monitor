@@ -51,8 +51,8 @@ export class RetentionPolicyService {
     if (!settings) return null;
     // Same strict validator as every write path — a malformed persisted value
     // (e.g. a direct DB edit) is treated as unset, never coerced into a
-    // deletion window the operator did not ask for. Warn once per distinct
-    // bad value so the "why isn't retention running" question is answerable
+    // deletion window the operator did not ask for. Warn once per invalid
+    // episode so the "why isn't retention running" question is answerable
     // from the logs.
     const stored = settings.localRetentionDays;
     const normalized = normalizeRetentionDays(stored);

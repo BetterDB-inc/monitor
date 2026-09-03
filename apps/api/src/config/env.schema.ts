@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { MAX_RETENTION_DAYS, parseRetentionDaysToken, isCloudModeValue } from '@betterdb/shared';
+import { MAX_RETENTION_DAYS, parseRetentionDaysToken } from '@betterdb/shared';
+import { isCloudModeValue } from '../common/utils/cloud-mode';
 
 /**
  * Environment variable validation schema

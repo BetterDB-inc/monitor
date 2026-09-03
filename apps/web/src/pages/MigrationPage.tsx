@@ -49,7 +49,7 @@ function LockIcon() {
 
 // ── Main page ──
 
-export function MigrationPage({ isCloudMode = false }: { isCloudMode?: boolean }) {
+export function MigrationPage({ isCloudMode }: { isCloudMode: boolean }) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [analysisId, setAnalysisId] = useState<string | null>(null);
   const [executionId, setExecutionId] = useState<string | null>(null);

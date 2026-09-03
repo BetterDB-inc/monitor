@@ -53,7 +53,7 @@ function setConnections(connections: Connection[], current: Connection | null = 
 function renderForm(onStart: (analysisId: string) => void = vi.fn()) {
   return render(
     <MigrationPlanProvider>
-      <AnalysisForm onStart={onStart} />
+      <AnalysisForm onStart={onStart} isCloudMode={false} />
     </MigrationPlanProvider>,
   );
 }

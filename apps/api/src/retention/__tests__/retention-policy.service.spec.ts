@@ -60,6 +60,29 @@ describe('RetentionPolicyService', () => {
     it('converts days to milliseconds', () => {
       expect(makeService(14).getRetentionMs()).toBe(14 * MS_PER_DAY);
     });
+
+    it('warns once per invalid-value episode, and again after recovery', () => {
+      let stored: unknown = 'abc';
+      const settingsService = {
+        getLoadedSettings: jest.fn(() => ({ localRetentionDays: stored })),
+      } as any;
+      const service = new RetentionPolicyService(settingsService);
+      const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+
+      // Repeated reads of the same bad value: exactly one warning.
+      expect(service.getLocalRetentionDays()).toBeNull();
+      expect(service.getLocalRetentionDays()).toBeNull();
+      expect(warn).toHaveBeenCalledTimes(1);
+
+      // Recovery clears the episode…
+      stored = 30;
+      expect(service.getLocalRetentionDays()).toBe(30);
+
+      // …so a recurrence of the SAME bad value warns again.
+      stored = 'abc';
+      expect(service.getLocalRetentionDays()).toBeNull();
+      expect(warn).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('cloud mode', () => {
