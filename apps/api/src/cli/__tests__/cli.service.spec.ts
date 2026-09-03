@@ -229,6 +229,15 @@ describe('CliService (unsafe mode)', () => {
       expect(mockConnectionRegistry.get).not.toHaveBeenCalled();
     });
 
+    it.each([['CONFIG GET requirepass'], ['ACL LIST'], ['CLIENT LIST']])(
+      'rejects %s for read-only members although safe mode allows it',
+      async (command) => {
+        const result = await unsafeService.execute(command, 'c1', { readOnly: true });
+        expect(result).toEqual({ type: 'error', error: MEMBER_READ_ONLY_MESSAGE });
+        expect(mockConnectionRegistry.get).not.toHaveBeenCalled();
+      },
+    );
+
     it('proceeds to the adapter for read-only-safe commands', async () => {
       mockCall.mockResolvedValueOnce('# Server\r\nredis_version:7.0.0');
       const result = await unsafeService.execute('INFO', 'c1', { readOnly: true });
