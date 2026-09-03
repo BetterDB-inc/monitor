@@ -2,6 +2,9 @@ import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { IncomingMessage } from 'http';
 import { Socket } from 'net';
 import { WebSocket, WebSocketServer } from 'ws';
+import { Actor } from '@betterdb/shared';
+import { ActorResolver } from '../auth/actor-resolver';
+import { rejectUpgrade } from '../auth/upgrade-response';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { CaptureWriter } from './capture-writer';
 import { MonitorCaptureService } from './monitor-capture.service';
@@ -36,6 +39,7 @@ export class TailGateway implements OnModuleDestroy {
     private readonly captureService: MonitorCaptureService,
     @Inject('STORAGE_CLIENT')
     private readonly storage: StoragePort,
+    private readonly actorResolver: ActorResolver,
   ) {
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
     this.logger.log('Monitor tail WebSocket gateway initialized');
@@ -76,14 +80,43 @@ export class TailGateway implements OnModuleDestroy {
       return;
     }
 
-    const requestedSessionId = sessionId;
+    void this.authorizeUpgrade(request, socket, head, sessionId);
+  }
+
+  private async authorizeUpgrade(
+    request: IncomingMessage,
+    socket: Socket,
+    head: Buffer,
+    sessionId: string,
+  ): Promise<void> {
+    if (this.actorResolver.isEnabled() === true) {
+      const actor = await this.resolveActor(request);
+      if (actor === null) {
+        rejectUpgrade(socket, 401);
+        return;
+      }
+    }
     this.wss.handleUpgrade(request, socket, head, (ws) => {
-      this.handleConnection(ws, requestedSessionId).catch((err: Error) => {
+      this.handleConnection(ws, sessionId).catch((err: Error) => {
         this.logger.error(`Tail connection setup failed: ${err.message}`);
         send(ws, { type: 'error', error: err.message });
         ws.close();
       });
     });
+  }
+
+  private async resolveActor(request: IncomingMessage): Promise<Actor | null> {
+    if (this.actorResolver.isReady() === false) {
+      return null;
+    }
+    try {
+      return await this.actorResolver.resolveFromHeaders(
+        request.headers,
+        request.socket.remoteAddress ?? '',
+      );
+    } catch {
+      return null;
+    }
   }
 
   /**

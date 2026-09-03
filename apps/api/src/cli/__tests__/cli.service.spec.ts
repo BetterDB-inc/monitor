@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { NotFoundException } from '@nestjs/common';
-import { CliService } from '../cli.service';
+import { CliService, MEMBER_READ_ONLY_MESSAGE } from '../cli.service';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 
 const mockCall = jest.fn();
@@ -221,4 +221,19 @@ describe('CliService (unsafe mode)', () => {
       expect((result as { error: string }).error).toContain('blocked');
     },
   );
+
+  describe('member read-only mode', () => {
+    it('rejects unsafe commands for read-only members even with BETTERDB_UNSAFE_CLI=true', async () => {
+      const result = await unsafeService.execute('SET a b', 'c1', { readOnly: true });
+      expect(result).toEqual({ type: 'error', error: MEMBER_READ_ONLY_MESSAGE });
+      expect(mockConnectionRegistry.get).not.toHaveBeenCalled();
+    });
+
+    it('proceeds to the adapter for read-only-safe commands', async () => {
+      mockCall.mockResolvedValueOnce('# Server\r\nredis_version:7.0.0');
+      const result = await unsafeService.execute('INFO', 'c1', { readOnly: true });
+      expect(result.type).toBe('result');
+      expect(mockConnectionRegistry.get).toHaveBeenCalledWith('c1');
+    });
+  });
 });
