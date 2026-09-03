@@ -38,7 +38,9 @@ export class TailGateway implements OnModuleDestroy {
     private readonly captureService: MonitorCaptureService,
     @Inject('STORAGE_CLIENT')
     private readonly storage: StoragePort,
-    @Optional() private readonly actorResolver: ActorResolver | null = null,
+    @Optional()
+    @Inject(ActorResolver)
+    private readonly actorResolver: ActorResolver | null = null,
   ) {
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
     this.logger.log('Monitor tail WebSocket gateway initialized');
