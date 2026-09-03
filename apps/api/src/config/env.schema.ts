@@ -43,10 +43,12 @@ export const envSchema = z
     // Uses the same strict validator as the runtime seeding path, so a value
     // like "1e2" fails at boot instead of passing here and silently seeding
     // null later.
+    // A present-but-blank value (LOCAL_RETENTION_DAYS= in an .env file) means
+    // unset/keep-forever, not a validation failure.
     LOCAL_RETENTION_DAYS: z
       .string()
       .optional()
-      .refine((v) => v === undefined || parseRetentionDaysToken(v) !== null, {
+      .refine((v) => v === undefined || v.trim() === '' || parseRetentionDaysToken(v) !== null, {
         message: `LOCAL_RETENTION_DAYS must be a whole number of days between 1 and ${MAX_RETENTION_DAYS}`,
       }),
 

@@ -6,12 +6,18 @@ import { StoragePort } from '../common/interfaces/storage-port.interface';
  * by a stable name for logging. Shared by the cloud tier-based sweep and the
  * self-hosted local sweep so the two never drift on which tables are covered.
  *
+ * `sampleCutoff` applies to the high-volume sample stores (command/latency
+ * stats samples, vector index snapshots), which in cloud keep a tighter 7-day
+ * cap than the tier's analytics window. Self-hosted passes one cutoff for
+ * everything, so it defaults to `cutoff`.
+ *
  * A store that fails to prune is reported as -1 and does not stop the sweep.
  */
 export async function runRetentionSweep(
   storage: StoragePort,
   cutoff: number,
   logger: Logger,
+  sampleCutoff: number = cutoff,
 ): Promise<Record<string, number>> {
   const pruneOps: Array<{ name: string; fn: () => Promise<number> }> = [
     { name: 'slowlog', fn: () => storage.pruneOldSlowLogEntries(cutoff) },
@@ -35,9 +41,12 @@ export async function runRetentionSweep(
     // The sample stores are also trimmed hourly by their pollers, but only for
     // connections that are registered and reachable — the sweep is what
     // reclaims rows left behind by removed or unreachable connections.
-    { name: 'command_stats_samples', fn: () => storage.pruneOldCommandStatsSamples(cutoff) },
-    { name: 'latency_stats_samples', fn: () => storage.pruneOldLatencyStatsSamples(cutoff) },
-    { name: 'vector_index_snapshots', fn: () => storage.pruneOldVectorIndexSnapshots(cutoff) },
+    { name: 'command_stats_samples', fn: () => storage.pruneOldCommandStatsSamples(sampleCutoff) },
+    { name: 'latency_stats_samples', fn: () => storage.pruneOldLatencyStatsSamples(sampleCutoff) },
+    {
+      name: 'vector_index_snapshots',
+      fn: () => storage.pruneOldVectorIndexSnapshots(sampleCutoff),
+    },
   ];
 
   const results: Record<string, number> = {};

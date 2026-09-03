@@ -36,10 +36,13 @@ export class DataRetentionService {
     // In cloud mode the policy always resolves to the tier window, never null.
     const retentionDays = this.retentionPolicy.getRetentionDays()!;
     const cutoff = Date.now() - retentionDays * MS_PER_DAY;
+    // The sample stores keep their tighter cloud cap even in the sweep — it
+    // is the only pruner that reaches removed/unreachable connections' rows.
+    const sampleCutoff = Date.now() - this.retentionPolicy.getSampleRetentionMs()!;
 
     this.logger.log(`Running data retention: tier=${tier}, retentionDays=${retentionDays}, cutoff=${new Date(cutoff).toISOString()}`);
 
-    const results = await runRetentionSweep(this.storage, cutoff, this.logger);
+    const results = await runRetentionSweep(this.storage, cutoff, this.logger, sampleCutoff);
 
     this.logger.log(`Retention complete: ${totalPruned(results)} total rows pruned — ${JSON.stringify(results)}`);
   }

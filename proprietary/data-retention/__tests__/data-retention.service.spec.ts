@@ -55,6 +55,7 @@ describe('DataRetentionService', () => {
           provide: RetentionPolicyService,
           useValue: {
             getRetentionDays: jest.fn(() => TIER_RETENTION_DAYS[licenseService.getLicenseTier()]),
+            getSampleRetentionMs: jest.fn(() => 7 * MS_PER_DAY),
           },
         },
       ],
@@ -93,6 +94,11 @@ describe('DataRetentionService', () => {
     'pruneOldScheduledCaptures',
     'pruneOldAiCacheSamples',
     'pruneOldOtelSpans',
+  ] as const;
+
+  // The high-volume sample stores are swept at the tighter cloud sample cap,
+  // not the tier window.
+  const samplePruneMethods = [
     'pruneOldCommandStatsSamples',
     'pruneOldLatencyStatsSamples',
     'pruneOldVectorIndexSnapshots',
@@ -108,9 +114,13 @@ describe('DataRetentionService', () => {
       expect(storage[method]).toHaveBeenCalledTimes(1);
       expect(storage[method]).toHaveBeenCalledWith(expectedCutoff);
     }
+    for (const method of samplePruneMethods) {
+      expect(storage[method]).toHaveBeenCalledTimes(1);
+      expect(storage[method]).toHaveBeenCalledWith(NOW - 7 * MS_PER_DAY);
+    }
   });
 
-  it('pro tier uses 90-day cutoff', async () => {
+  it('pro tier uses 90-day cutoff, sample stores stay at the 7-day cap', async () => {
     licenseService.getLicenseTier.mockReturnValue(Tier.pro);
     const expectedCutoff = NOW - 90 * MS_PER_DAY;
 
@@ -119,9 +129,12 @@ describe('DataRetentionService', () => {
     for (const method of allPruneMethods) {
       expect(storage[method]).toHaveBeenCalledWith(expectedCutoff);
     }
+    for (const method of samplePruneMethods) {
+      expect(storage[method]).toHaveBeenCalledWith(NOW - 7 * MS_PER_DAY);
+    }
   });
 
-  it('enterprise tier uses 365-day cutoff', async () => {
+  it('enterprise tier uses 365-day cutoff, sample stores stay at the 7-day cap', async () => {
     licenseService.getLicenseTier.mockReturnValue(Tier.enterprise);
     const expectedCutoff = NOW - 365 * MS_PER_DAY;
 
@@ -129,6 +142,9 @@ describe('DataRetentionService', () => {
 
     for (const method of allPruneMethods) {
       expect(storage[method]).toHaveBeenCalledWith(expectedCutoff);
+    }
+    for (const method of samplePruneMethods) {
+      expect(storage[method]).toHaveBeenCalledWith(NOW - 7 * MS_PER_DAY);
     }
   });
 
