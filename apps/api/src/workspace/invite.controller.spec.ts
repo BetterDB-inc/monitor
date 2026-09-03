@@ -258,6 +258,44 @@ describe('InviteController', () => {
 
       const list = await invitations.list();
       expect(list.find((item) => item.id === invitation.id)?.status).toBe('pending');
+
+      expect(await members.findByEmail('failed-signin@example.com')).toBeNull();
+
+      const retry = await app.inject({
+        method: 'POST',
+        url: `/invite/${token}/accept`,
+        headers: { 'content-type': 'application/json', origin: ORIGIN },
+        payload: { name: 'Failed', password: 'failed horse battery' },
+      });
+      expect(retry.statusCode).toBe(201);
+    } finally {
+      signInSpy.mockRestore();
+    }
+  });
+
+  it('forwards the request IP rather than a client-supplied one to sign-in', async () => {
+    const signInSpy = jest.spyOn(members, 'signIn');
+    try {
+      const { token } = await invitations.create({
+        email: 'ip-check@example.com',
+        role: 'member',
+        invitedBy: ownerId,
+      });
+      const accept = await app.inject({
+        method: 'POST',
+        url: `/invite/${token}/accept`,
+        headers: {
+          'content-type': 'application/json',
+          origin: ORIGIN,
+          'x-betterdb-client-ip': '203.0.113.9',
+        },
+        payload: { name: 'IP Check', password: 'ip check horse battery' },
+      });
+      expect(accept.statusCode).toBe(201);
+      expect(signInSpy).toHaveBeenCalledTimes(1);
+      const headers = signInSpy.mock.calls[0][2];
+      expect(headers.get('x-betterdb-client-ip')).toBe('127.0.0.1');
+      expect(headers.get('x-betterdb-client-ip')).not.toBe('203.0.113.9');
     } finally {
       signInSpy.mockRestore();
     }

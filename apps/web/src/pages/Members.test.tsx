@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Members } from './Members';
 
-const { api, authState } = vi.hoisted(() => {
+const { api, authState, refreshMock } = vi.hoisted(() => {
   return {
     api: {
       getMembers: vi.fn(),
@@ -16,12 +16,13 @@ const { api, authState } = vi.hoisted(() => {
     authState: {
       user: null as null | { userId: string; email: string; role: string; isOwner: boolean },
     },
+    refreshMock: vi.fn(),
   };
 });
 
 vi.mock('../api/workspace', () => ({ workspaceApi: api }));
 vi.mock('../contexts/AuthContext', () => ({
-  useAuth: () => ({ user: authState.user }),
+  useAuth: () => ({ user: authState.user, refresh: refreshMock }),
 }));
 
 const OWNER = {
@@ -55,6 +56,7 @@ describe('Members', () => {
     for (const fn of Object.values(api)) {
       fn.mockReset();
     }
+    refreshMock.mockReset();
     api.getMembers.mockResolvedValue([OWNER, MEMBER]);
     api.getInvitations.mockResolvedValue([INVITATION]);
     Object.defineProperty(navigator, 'clipboard', {
@@ -104,6 +106,20 @@ describe('Members', () => {
     expect(screen.queryByRole('button', { name: 'Invite' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
     expect(api.getInvitations).not.toHaveBeenCalled();
+  });
+
+  it('refreshes the current user after transferring ownership', async () => {
+    authState.user = { userId: 'u1', email: OWNER.email, role: 'admin', isOwner: true };
+    api.transferOwnership.mockResolvedValue(undefined);
+    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
+    render(<Members />);
+    const row = (await screen.findByText('member@example.com')).closest(
+      'tr',
+    ) as HTMLTableRowElement;
+    fireEvent.click(within(row).getByRole('button', { name: 'Make owner' }));
+    await waitFor(() => expect(api.transferOwnership).toHaveBeenCalledWith('u2'));
+    await waitFor(() => expect(refreshMock).toHaveBeenCalled());
+    vi.unstubAllGlobals();
   });
 
   it('falls back to a sent banner when the backend emails the invite (cloud)', async () => {

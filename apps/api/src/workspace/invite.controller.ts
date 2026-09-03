@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { WorkspaceMe } from '@betterdb/shared';
+import { CLIENT_IP_HEADER } from '../auth/better-auth.factory';
 import { toWebHeaders } from '../auth/web-headers';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { AcceptInviteDto } from './dto/accept-invite.dto';
@@ -41,6 +42,7 @@ export class InviteController {
     const invitation = await this.invitations.claim(token);
     let created: WorkspaceMe;
     let session: Response;
+    let createdId: string | null = null;
     try {
       const member = await this.members.create({
         email: invitation.email,
@@ -48,6 +50,7 @@ export class InviteController {
         password: body.password,
         role: invitation.role,
       });
+      createdId = member.id;
       created = {
         userId: member.id,
         email: member.email,
@@ -55,11 +58,20 @@ export class InviteController {
         role: member.role,
         isOwner: member.isOwner,
       };
-      session = await this.members.signIn(member.email, body.password, toWebHeaders(req.headers));
+      const headers = toWebHeaders(req.headers);
+      headers.set(CLIENT_IP_HEADER, req.ip);
+      session = await this.members.signIn(member.email, body.password, headers);
       if (session.ok === false) {
         throw new UnauthorizedException(SIGN_IN_FAILED_MESSAGE);
       }
     } catch (error) {
+      if (createdId !== null) {
+        try {
+          await this.members.remove(createdId);
+        } catch (rollbackError) {
+          void rollbackError;
+        }
+      }
       await this.invitations.release(invitation.id);
       throw error;
     }

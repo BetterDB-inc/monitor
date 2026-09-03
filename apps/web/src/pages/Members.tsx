@@ -14,7 +14,7 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 export function Members(): ReactElement {
-  const { user } = useAuth();
+  const { user, refresh } = useAuth();
   const [members, setMembers] = useState<Member[]>([]);
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [loading, setLoading] = useState(true);
@@ -69,14 +69,14 @@ export function Members(): ReactElement {
   };
 
   const handleRevoke = (invitation: Invitation): void => {
-    run(async () => {
+    void run(async () => {
       await workspaceApi.revokeInvitation(invitation.id);
       setSuccess('Invitation revoked');
     }, 'Failed to revoke the invitation');
   };
 
   const handleChangeRole = (member: Member, nextRole: string): void => {
-    run(async () => {
+    void run(async () => {
       await workspaceApi.updateMemberRole(member.id, nextRole);
       setSuccess(`${member.email} is now ${nextRole}`);
     }, 'Failed to change the role');
@@ -89,8 +89,9 @@ export function Members(): ReactElement {
     ) {
       return;
     }
-    run(async () => {
+    void run(async () => {
       await workspaceApi.transferOwnership(member.id);
+      await refresh();
       setSuccess(`${member.email} is now the owner`);
     }, 'Failed to transfer ownership');
   };
@@ -99,7 +100,7 @@ export function Members(): ReactElement {
     if (window.confirm(`Remove ${member.email} from this workspace?`) === false) {
       return;
     }
-    run(async () => {
+    void run(async () => {
       await workspaceApi.removeMember(member.id);
       setSuccess(`${member.email} has been removed`);
     }, 'Failed to remove the member');
