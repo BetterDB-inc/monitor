@@ -103,6 +103,9 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
 
   useEffect(() => {
     const handler = (e: Event) => {
+      if (locked === true) {
+        return;
+      }
       const detail = (
         e as CustomEvent<
           | { prefill?: Partial<ConnectionFormData>; tab?: AddTab; valkeyMaxmemory?: string }
@@ -126,7 +129,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
     };
     window.addEventListener('betterdb:open-add-connection', handler);
     return () => window.removeEventListener('betterdb:open-add-connection', handler);
-  }, [isCloudMode]);
+  }, [isCloudMode, locked]);
   const [showManageDialog, setShowManageDialog] = useState(false);
   const [formData, setFormData] = useState<ConnectionFormData>(emptyFormData);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
@@ -290,8 +293,9 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       <div className="px-3 py-2">
         <div className="text-sm text-destructive mb-2">{error}</div>
         <button
-          onClick={() => setShowAddDialog(true)}
-          className="text-xs text-primary hover:underline"
+          onClick={() => !locked && setShowAddDialog(true)}
+          disabled={locked}
+          className={`text-xs text-primary ${locked ? 'opacity-30 cursor-not-allowed' : 'hover:underline'}`}
         >
           + Add Connection
         </button>
@@ -343,8 +347,10 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
         </div>
 
         {connections.length === 0 ? (
-          isDemo ? (
-            <div className="px-2 py-1.5 text-sm text-muted-foreground">Demo workspace</div>
+          locked ? (
+            <div className="px-2 py-1.5 text-sm text-muted-foreground">
+              {isDemo ? 'Demo workspace' : 'No connections yet'}
+            </div>
           ) : (
             <button
               onClick={() => setShowAddDialog(true)}
