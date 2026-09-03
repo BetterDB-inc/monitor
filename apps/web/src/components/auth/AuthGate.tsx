@@ -1,6 +1,7 @@
 import { ReactElement, ReactNode } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
+import { AcceptInvite } from '../../pages/AcceptInvite';
 import { Login } from '../../pages/Login';
 import { Register } from '../../pages/Register';
 import { AuthUnavailable } from './AuthUnavailable';
@@ -45,6 +46,7 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
       location.pathname === '/' ? '/login' : `/login?next=${encodeURIComponent(target)}`;
     return (
       <Routes>
+        <Route path="/invite/:token" element={<AcceptInvite />} />
         <Route path="/login" element={<Login />} />
         <Route path="*" element={<Navigate to={loginTarget} replace />} />
       </Routes>
@@ -54,6 +56,7 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
     <Routes>
       <Route path="/login" element={<Navigate to="/" replace />} />
       <Route path="/register" element={<Navigate to="/" replace />} />
+      <Route path="/invite/:token" element={<Navigate to="/" replace />} />
       <Route path="*" element={<>{children}</>} />
     </Routes>
   );

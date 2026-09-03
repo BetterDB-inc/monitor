@@ -14,7 +14,7 @@ import { UpgradePrompt } from './components/UpgradePrompt';
 import { ServerStartupGuard } from './components/ServerStartupGuard';
 import { AppLayout } from './components/layout/AppLayout';
 import { DemoProvider } from './contexts/DemoContext';
-import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { AuthProvider } from './contexts/AuthContext';
 import { AuthGate } from './components/auth/AuthGate';
 
 function App() {
@@ -49,8 +49,6 @@ function AppContent() {
   const connectionState = useConnectionState();
   const versionCheckState = useVersionCheckState();
   const currentConnectionId = connectionState.currentConnection?.id;
-  const { user, isCloud } = useAuth();
-  const cloudUser = isCloud ? user : null;
 
   const refreshCapabilities = useCallback(async (): Promise<void> => {
     try {
@@ -98,7 +96,7 @@ function AppContent() {
             <LicenseContext.Provider value={license}>
               <CapabilitiesContext.Provider value={capabilitiesState}>
                 <VersionCheckContext.Provider value={versionCheckState}>
-                  <AppLayout cloudUser={cloudUser} />
+                  <AppLayout />
                   <Tooltip id="license-tooltip" />
                   <Tooltip
                     id="info-tip"

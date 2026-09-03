@@ -1,40 +1,34 @@
-import { useState, useEffect } from 'react';
-import { workspaceApi, CloudUser, Member, Invitation } from '../api/workspace';
-import { Card } from '../components/ui/card';
-import { Badge } from '../components/ui/badge';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '../components/ui/table';
+import { ReactElement, useCallback, useEffect, useState } from 'react';
+import { Invitation, Member, workspaceApi } from '../api/workspace';
+import { useAuth } from '../contexts/AuthContext';
+import { InvitationsTable } from '../components/members/InvitationsTable';
+import { InviteForm } from '../components/members/InviteForm';
+import { InviteLinkDialog } from '../components/members/InviteLinkDialog';
+import { MembersTable } from '../components/members/MembersTable';
 
-interface MembersProps {
-  cloudUser: CloudUser;
+function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.length > 0) {
+    return error.message;
+  }
+  return fallback;
 }
 
-export function Members({ cloudUser }: MembersProps) {
+export function Members(): ReactElement {
+  const { user } = useAuth();
   const [members, setMembers] = useState<Member[]>([]);
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [loading, setLoading] = useState(true);
-  const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteRole, setInviteRole] = useState('member');
-  const [inviting, setInviting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [inviteLink, setInviteLink] = useState<string | null>(null);
 
-  const isAdminOrOwner = cloudUser.role === 'admin' || cloudUser.role === 'owner';
-  const isOwner = cloudUser.role === 'owner';
+  const role: string = user?.role ?? 'member';
+  const isOwner = user?.isOwner === true || role === 'owner';
+  const isAdminOrOwner = isOwner === true || role === 'admin';
+  const currentUserId = user?.userId ?? null;
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  const loadData = async () => {
+  const loadData = useCallback(async (): Promise<void> => {
     try {
-      setLoading(true);
       const [membersData, invitationsData] = await Promise.all([
         workspaceApi.getMembers(),
         isAdminOrOwner ? workspaceApi.getInvitations() : Promise.resolve([]),
@@ -42,57 +36,76 @@ export function Members({ cloudUser }: MembersProps) {
       setMembers(membersData);
       setInvitations(invitationsData);
     } catch (err) {
-      console.error('Failed to load workspace data:', err);
+      setError(errorMessage(err, 'Failed to load the team'));
     } finally {
       setLoading(false);
     }
-  };
+  }, [isAdminOrOwner]);
 
-  const handleInvite = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inviteEmail.trim()) return;
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
+  const run = async (action: () => Promise<void>, fallback: string): Promise<void> => {
+    setError(null);
+    setSuccess(null);
     try {
-      setInviting(true);
-      setError(null);
-      setSuccess(null);
-      await workspaceApi.invite({ email: inviteEmail.trim(), role: inviteRole });
-      setSuccess(`Invitation sent to ${inviteEmail}`);
-      setInviteEmail('');
-      setInviteRole('member');
+      await action();
       await loadData();
-    } catch (err: any) {
-      setError(err.message || 'Failed to send invitation');
-    } finally {
-      setInviting(false);
+    } catch (err) {
+      setError(errorMessage(err, fallback));
     }
   };
 
-  const handleRevoke = async (id: string) => {
-    try {
-      setError(null);
-      await workspaceApi.revokeInvitation(id);
+  const handleInvite = async (email: string, inviteRole: string): Promise<void> => {
+    await run(async () => {
+      const created = await workspaceApi.invite({ email, role: inviteRole });
+      if (created.url !== undefined) {
+        setInviteLink(created.url);
+        return;
+      }
+      setSuccess(`Invitation sent to ${email}`);
+    }, 'Failed to create the invitation');
+  };
+
+  const handleRevoke = (invitation: Invitation): void => {
+    run(async () => {
+      await workspaceApi.revokeInvitation(invitation.id);
       setSuccess('Invitation revoked');
-      await loadData();
-    } catch (err: any) {
-      setError(err.message || 'Failed to revoke invitation');
-    }
+    }, 'Failed to revoke the invitation');
   };
 
-  const handleRemoveMember = async (userId: string, email: string) => {
-    if (!confirm(`Remove ${email} from this workspace?`)) return;
-
-    try {
-      setError(null);
-      await workspaceApi.removeMember(userId);
-      setSuccess(`${email} has been removed`);
-      await loadData();
-    } catch (err: any) {
-      setError(err.message || 'Failed to remove member');
-    }
+  const handleChangeRole = (member: Member, nextRole: string): void => {
+    run(async () => {
+      await workspaceApi.updateMemberRole(member.id, nextRole);
+      setSuccess(`${member.email} is now ${nextRole}`);
+    }, 'Failed to change the role');
   };
 
-  if (loading) {
+  const handleTransfer = (member: Member): void => {
+    if (
+      window.confirm(`Make ${member.email} the workspace owner? You will become an admin.`) ===
+      false
+    ) {
+      return;
+    }
+    run(async () => {
+      await workspaceApi.transferOwnership(member.id);
+      setSuccess(`${member.email} is now the owner`);
+    }, 'Failed to transfer ownership');
+  };
+
+  const handleRemove = (member: Member): void => {
+    if (window.confirm(`Remove ${member.email} from this workspace?`) === false) {
+      return;
+    }
+    run(async () => {
+      await workspaceApi.removeMember(member.id);
+      setSuccess(`${member.email} has been removed`);
+    }, 'Failed to remove the member');
+  };
+
+  if (loading === true) {
     return (
       <div className="space-y-6">
         <h1 className="text-3xl font-bold">Team</h1>
@@ -104,158 +117,34 @@ export function Members({ cloudUser }: MembersProps) {
   return (
     <div className="space-y-6">
       <h1 className="text-3xl font-bold">Team</h1>
-
-      {error && (
+      {error !== null && (
         <div className="p-3 rounded-md bg-destructive/5 text-destructive border border-destructive/20 text-sm">
           {error}
         </div>
       )}
-      {success && (
+      {success !== null && (
         <div className="p-3 rounded-md bg-green-50 text-green-700 border border-green-200 text-sm">
           {success}
         </div>
       )}
-
-      {isAdminOrOwner && (
-        <Card className="p-6">
-          <h2 className="text-lg font-semibold mb-4">Invite Member</h2>
-          <form onSubmit={handleInvite} className="flex items-end gap-3">
-            <div className="flex-1">
-              <label className="block text-sm font-medium text-muted-foreground mb-1">
-                Email
-              </label>
-              <input
-                type="email"
-                value={inviteEmail}
-                onChange={(e) => setInviteEmail(e.target.value)}
-                placeholder="colleague@example.com"
-                required
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-muted-foreground mb-1">
-                Role
-              </label>
-              <select
-                value={inviteRole}
-                onChange={(e) => setInviteRole(e.target.value)}
-                className="rounded-md border border-input bg-background px-3 py-2 text-sm"
-              >
-                <option value="member">Member</option>
-                <option value="admin">Admin</option>
-              </select>
-            </div>
-            <button
-              type="submit"
-              disabled={inviting || !inviteEmail.trim()}
-              className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:cursor-not-allowed text-sm"
-            >
-              {inviting ? 'Sending...' : 'Invite'}
-            </button>
-          </form>
-        </Card>
-      )}
-
-      <Card className="p-6">
-        <h2 className="text-lg font-semibold mb-4">Members</h2>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Email</TableHead>
-              <TableHead>Name</TableHead>
-              <TableHead>Role</TableHead>
-              <TableHead>Joined</TableHead>
-              {isOwner && <TableHead className="text-right">Actions</TableHead>}
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {members.map((member) => (
-              <TableRow key={member.id}>
-                <TableCell className="font-medium">{member.email}</TableCell>
-                <TableCell>{member.name || '-'}</TableCell>
-                <TableCell>
-                  <Badge variant={member.isOwner ? 'default' : member.role === 'admin' ? 'secondary' : 'outline'}>
-                    {member.isOwner ? 'owner' : member.role}
-                  </Badge>
-                </TableCell>
-                <TableCell className="text-muted-foreground">
-                  {new Date(member.createdAt).toLocaleDateString()}
-                </TableCell>
-                {isOwner && (
-                  <TableCell className="text-right">
-                    {member.id !== cloudUser.userId && !member.isOwner && (
-                      <button
-                        onClick={() => handleRemoveMember(member.id, member.email)}
-                        className="text-sm text-destructive hover:text-destructive/80"
-                      >
-                        Remove
-                      </button>
-                    )}
-                  </TableCell>
-                )}
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </Card>
-
+      {isAdminOrOwner && <InviteForm onInvite={handleInvite} />}
+      <MembersTable
+        members={members}
+        currentUserId={currentUserId}
+        isOwner={isOwner}
+        onChangeRole={handleChangeRole}
+        onTransfer={handleTransfer}
+        onRemove={handleRemove}
+      />
       {isAdminOrOwner && invitations.length > 0 && (
-        <Card className="p-6">
-          <h2 className="text-lg font-semibold mb-4">Pending Invitations</h2>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Email</TableHead>
-                <TableHead>Role</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Invited</TableHead>
-                <TableHead>Expires</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {invitations.map((invitation) => (
-                <TableRow key={invitation.id}>
-                  <TableCell className="font-medium">{invitation.email}</TableCell>
-                  <TableCell>
-                    <Badge variant="outline">{invitation.role}</Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Badge
-                      variant={
-                        invitation.status === 'pending'
-                          ? 'warning'
-                          : invitation.status === 'accepted'
-                            ? 'success'
-                            : 'secondary'
-                      }
-                    >
-                      {invitation.status}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">
-                    {new Date(invitation.createdAt).toLocaleDateString()}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">
-                    {new Date(invitation.expiresAt).toLocaleDateString()}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    {invitation.status === 'pending' && (
-                      <button
-                        onClick={() => handleRevoke(invitation.id)}
-                        className="text-sm text-destructive hover:text-destructive/80"
-                      >
-                        Revoke
-                      </button>
-                    )}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Card>
+        <InvitationsTable invitations={invitations} onRevoke={handleRevoke} />
       )}
+      <InviteLinkDialog
+        url={inviteLink}
+        onClose={() => {
+          setInviteLink(null);
+        }}
+      />
     </div>
   );
 }

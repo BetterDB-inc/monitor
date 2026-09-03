@@ -12,6 +12,8 @@ interface CredentialsFormProps {
   title: string;
   submitLabel: string;
   askName: boolean;
+  lockedEmail?: string;
+  description?: string;
   onSubmit: (values: CredentialsFormValues) => Promise<void>;
 }
 
@@ -19,9 +21,11 @@ export function CredentialsForm({
   title,
   submitLabel,
   askName,
+  lockedEmail,
+  description,
   onSubmit,
 }: CredentialsFormProps): ReactElement {
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState(lockedEmail ?? '');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -32,7 +36,7 @@ export function CredentialsForm({
     setBusy(true);
     setError(null);
     try {
-      await onSubmit({ email, password, name });
+      await onSubmit({ email: lockedEmail ?? email, password, name });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong');
     } finally {
@@ -44,6 +48,9 @@ export function CredentialsForm({
     <div className="min-h-screen flex items-center justify-center bg-background p-8">
       <form onSubmit={handleSubmit} className="w-full max-w-sm space-y-4">
         <h1 className="text-2xl font-semibold">{title}</h1>
+        {description !== undefined && (
+          <p className="text-sm text-muted-foreground">{description}</p>
+        )}
         {askName && (
           <Input
             aria-label="Name"
@@ -63,6 +70,7 @@ export function CredentialsForm({
           onChange={(e) => {
             setEmail(e.target.value);
           }}
+          readOnly={lockedEmail !== undefined}
           required
         />
         <Input

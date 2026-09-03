@@ -1,4 +1,5 @@
 import { useLocation } from 'react-router-dom';
+import { useAuth } from '../../contexts/AuthContext';
 import { useIsDemo } from '../../contexts/DemoContext';
 import { useCanMutate } from '../../hooks/useCanMutate';
 import { useCapabilities } from '../../hooks/useCapabilities';
@@ -31,6 +32,8 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
   const { unreadCount: cacheProposalsUnread } = useCacheProposalsUnread();
   const isDemo = useIsDemo();
   const canMutate = useCanMutate();
+  const { mode } = useAuth();
+  const showTeam = cloudUser !== null || mode === 'self-hosted';
 
   return (
     <Sidebar className="bg-card">
@@ -194,13 +197,11 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
               {formatForDisplay('shift+?')}
             </kbd>
           </button>
-          {cloudUser && (
+          {showTeam && (
             <NavItem
               to="/workspace/members"
               active={location.pathname === '/workspace/members'}
               demoLocked={isDemo}
-              locked={canMutate === false}
-              lockedReason="Admins only"
             >
               Team
             </NavItem>
