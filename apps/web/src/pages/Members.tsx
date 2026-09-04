@@ -1,10 +1,12 @@
 import { ReactElement, useCallback, useEffect, useState } from 'react';
 import { Invitation, Member, workspaceApi } from '../api/workspace';
 import { useAuth } from '../contexts/AuthContext';
+import { ActivityTab } from '../components/members/ActivityTab';
 import { InvitationsTable } from '../components/members/InvitationsTable';
 import { InviteForm } from '../components/members/InviteForm';
 import { InviteLinkDialog } from '../components/members/InviteLinkDialog';
 import { MembersTable } from '../components/members/MembersTable';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
 function errorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.length > 0) {
@@ -117,6 +119,23 @@ export function Members(): ReactElement {
     );
   }
 
+  const team = (
+    <div className="space-y-6">
+      {isAdminOrOwner && <InviteForm onInvite={handleInvite} />}
+      <MembersTable
+        members={members}
+        currentUserId={currentUserId}
+        isOwner={isOwner}
+        onChangeRole={handleChangeRole}
+        onTransfer={handleTransfer}
+        onRemove={handleRemove}
+      />
+      {isAdminOrOwner && invitations.length > 0 && (
+        <InvitationsTable invitations={invitations} onRevoke={handleRevoke} />
+      )}
+    </div>
+  );
+
   return (
     <div className="space-y-6">
       <h1 className="text-3xl font-bold">Team</h1>
@@ -130,17 +149,20 @@ export function Members(): ReactElement {
           {success}
         </div>
       )}
-      {isAdminOrOwner && <InviteForm onInvite={handleInvite} />}
-      <MembersTable
-        members={members}
-        currentUserId={currentUserId}
-        isOwner={isOwner}
-        onChangeRole={handleChangeRole}
-        onTransfer={handleTransfer}
-        onRemove={handleRemove}
-      />
-      {isAdminOrOwner && invitations.length > 0 && (
-        <InvitationsTable invitations={invitations} onRevoke={handleRevoke} />
+      {isAdminOrOwner === false && team}
+      {isAdminOrOwner && (
+        <Tabs defaultValue="team">
+          <TabsList>
+            <TabsTrigger value="team">Members</TabsTrigger>
+            <TabsTrigger value="activity">Activity</TabsTrigger>
+          </TabsList>
+          <TabsContent value="team" className="mt-6">
+            {team}
+          </TabsContent>
+          <TabsContent value="activity" className="mt-6">
+            <ActivityTab members={members} />
+          </TabsContent>
+        </Tabs>
       )}
       <InviteLinkDialog
         url={inviteLink}

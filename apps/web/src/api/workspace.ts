@@ -31,6 +31,45 @@ export interface InvitePreview {
   expired: boolean;
 }
 
+export interface ActivityEntry {
+  id: string;
+  occurredAt: string;
+  actor: { userId: string; email: string; via: string; tokenId: string | null };
+  action: string;
+  target: { type: string; id: string } | null;
+  connectionId: string | null;
+  statusCode: number;
+  ip: string;
+  details: Record<string, unknown>;
+}
+
+export interface ActivityPage {
+  items: ActivityEntry[];
+  nextCursor: string | null;
+}
+
+export interface ActivityQuery {
+  actor?: string;
+  from?: string;
+  to?: string;
+  action?: string;
+  cursor?: string;
+}
+
+function activityQueryString(params: ActivityQuery): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value === 'string' && value.length > 0) {
+      search.set(key, value);
+    }
+  }
+  const encoded = search.toString();
+  if (encoded.length === 0) {
+    return '';
+  }
+  return `?${encoded}`;
+}
+
 export const workspaceApi = {
   getStatus: () => fetchApi<WorkspaceStatus>('/system/workspace', { skipAuthRedirect: true }),
   getMe: () => fetchApi<CurrentUser>('/workspace/me', { skipAuthRedirect: true }),
@@ -41,6 +80,8 @@ export const workspaceApi = {
   signOut: () => fetchApi<unknown>('/auth/sign-out', { method: 'POST', body: '{}' }),
   getMembers: () => fetchApi<Member[]>('/workspace/members'),
   getInvitations: () => fetchApi<Invitation[]>('/workspace/invitations'),
+  getActivity: (params: ActivityQuery) =>
+    fetchApi<ActivityPage>(`/workspace/activity${activityQueryString(params)}`),
   invite: (data: { email: string; role: string }) =>
     fetchApi<InviteCreated>('/workspace/invite', {
       method: 'POST',
