@@ -64,6 +64,10 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     // must not be able to trigger deletion.
     if (dbSettings) {
       this.cachedSettings = dbSettings;
+    } else if (this.cachedSettings) {
+      this.logger.warn(
+        'Settings row missing on cache refresh; keeping the previously loaded settings',
+      );
     }
   }
 

@@ -1,6 +1,10 @@
+const NEGATIVE_VALUES = new Set(['false', '0', 'no', 'off']);
+
 /**
  * Single source of truth for the deployment mode: any non-empty CLOUD_MODE
- * value except 'false'/'0' is cloud. Parts of the codebase used to disagree
+ * value outside the negative set is cloud. The negative set matches the
+ * BETTERDB_TELEMETRY parser so the two flags read the same spellings the
+ * same way. Parts of the codebase used to disagree
  * (`if (process.env.CLOUD_MODE)` vs `=== 'true'`), splitting a deployment
  * into half-cloud behavior for values like CLOUD_MODE=1.
  *
@@ -9,7 +13,7 @@
  */
 export function isCloudModeValue(value: string | undefined): boolean {
   const v = value?.trim().toLowerCase();
-  return !!v && v !== 'false' && v !== '0';
+  return !!v && !NEGATIVE_VALUES.has(v);
 }
 
 export function isCloudMode(): boolean {
