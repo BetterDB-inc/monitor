@@ -110,16 +110,27 @@ export function checkSafeMode(command: string, subCommand?: string): string | nu
 
 const MEMBER_DENIED_COMMANDS: ReadonlySet<string> = new Set(['CONFIG', 'ACL', 'DEBUG', 'CLIENT']);
 
+const MEMBER_DENIED_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> = {
+  SLOWLOG: new Set(['RESET']),
+  COMMANDLOG: new Set(['RESET']),
+  LATENCY: new Set(['RESET']),
+};
+
 export const MEMBER_DENIED_MESSAGE = 'Command not available to read-only members.';
 
 /**
  * Check if a command may run for a read-only workspace member.
  * Members get the safe-mode allowlist minus commands that expose
- * server configuration, credentials or client details.
+ * server configuration, credentials or client details, and minus the
+ * RESET sub-commands that clear diagnostic state.
  * Returns an error message string, or null if allowed.
  */
 export function checkMemberReadOnly(command: string, subCommand?: string): string | null {
   if (MEMBER_DENIED_COMMANDS.has(command)) {
+    return MEMBER_DENIED_MESSAGE;
+  }
+  const deniedSubs = MEMBER_DENIED_SUBCOMMANDS[command];
+  if (deniedSubs !== undefined && subCommand !== undefined && deniedSubs.has(subCommand)) {
     return MEMBER_DENIED_MESSAGE;
   }
   return checkSafeMode(command, subCommand);
