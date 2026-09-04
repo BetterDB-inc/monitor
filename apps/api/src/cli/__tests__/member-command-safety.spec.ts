@@ -11,10 +11,20 @@ describe('checkMemberReadOnly', () => {
     expect(checkMemberReadOnly(command, subCommand)).toBe(MEMBER_DENIED_MESSAGE);
   });
 
+  it.each([
+    ['SLOWLOG', 'RESET'],
+    ['COMMANDLOG', 'RESET'],
+    ['LATENCY', 'RESET'],
+  ])('denies %s %s because it clears diagnostic state', (command, subCommand) => {
+    expect(checkMemberReadOnly(command, subCommand)).toBe(MEMBER_DENIED_MESSAGE);
+  });
+
   it('allows plain read commands', () => {
     expect(checkMemberReadOnly('INFO')).toBeNull();
     expect(checkMemberReadOnly('PING')).toBeNull();
     expect(checkMemberReadOnly('SLOWLOG', 'GET')).toBeNull();
+    expect(checkMemberReadOnly('COMMANDLOG', 'LEN')).toBeNull();
+    expect(checkMemberReadOnly('LATENCY', 'LATEST')).toBeNull();
   });
 
   it('falls back to the safe-mode message for write commands', () => {
