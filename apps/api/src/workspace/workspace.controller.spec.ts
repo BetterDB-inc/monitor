@@ -459,6 +459,16 @@ describe('WorkspaceController', () => {
       expect(badTime.statusCode).toBe(400);
     });
 
+    it('rejects an ISO-8601 date form that Date.parse cannot read', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/workspace/activity?from=20260904',
+        headers: { cookie: ownerCookie },
+      });
+      expect(response.statusCode).toBe(400);
+      expect((response.json() as { message: string }).message).toBe('Invalid date');
+    });
+
     it('rejects a malformed cursor', async () => {
       const response = await app.inject({
         method: 'GET',
