@@ -10,8 +10,8 @@ export class ActivityPruneJob implements OnApplicationBootstrap, OnModuleDestroy
 
   constructor(private readonly activity: ActivityService) {}
 
-  async onApplicationBootstrap(): Promise<void> {
-    await this.runOnce();
+  onApplicationBootstrap(): void {
+    void this.runOnce();
     this.timer = setInterval(() => {
       void this.runOnce();
     }, PRUNE_INTERVAL_MS);

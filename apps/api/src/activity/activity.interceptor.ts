@@ -5,11 +5,13 @@ import {
   Injectable,
   NestInterceptor,
 } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import type { FastifyReply } from 'fastify';
 import { Observable, tap } from 'rxjs';
 import type { Actor } from '@betterdb/shared';
 import type { RequestWithActor } from '../auth/guards/actor.guard';
 import { isPublicPath, normalizePath } from '../auth/guards/public-paths';
+import { ALLOW_MEMBERS_KEY } from '../auth/guards/roles.decorator';
 import { CONNECTION_ID_HEADER } from '../common/decorators/connection-id.decorator';
 import { actionFor, targetFor } from './activity-actions';
 import { ActivityService, toActivityActor } from './activity.service';
@@ -24,7 +26,7 @@ function errorStatus(error: unknown): number {
 }
 
 function headerValue(value: string | string[] | undefined): string | null {
-  if (Array.isArray(value)) {
+  if (Array.isArray(value) === true) {
     return value[0] ?? null;
   }
   if (value === undefined || value.length === 0) {
@@ -35,7 +37,10 @@ function headerValue(value: string | string[] | undefined): string | null {
 
 @Injectable()
 export class ActivityInterceptor implements NestInterceptor {
-  constructor(private readonly activity: ActivityService) {}
+  constructor(
+    private readonly activity: ActivityService,
+    private readonly reflector: Reflector,
+  ) {}
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     if (context.getType() !== 'http') {
@@ -51,6 +56,13 @@ export class ActivityInterceptor implements NestInterceptor {
       return next.handle();
     }
     if (isPublicPath(request.url) === true) {
+      return next.handle();
+    }
+    const allowMembers = this.reflector.getAllAndOverride<boolean | undefined>(ALLOW_MEMBERS_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (allowMembers === true) {
       return next.handle();
     }
     const reply = context.switchToHttp().getResponse<FastifyReply>();

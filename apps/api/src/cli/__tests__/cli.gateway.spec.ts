@@ -256,7 +256,7 @@ describe('CliGateway command execution', () => {
         resolveAccess: (ws: WebSocket) => Promise<{ sessionValid: boolean; readOnly: boolean }>;
       }
     ).resolveAccess(new FakeWebSocket() as unknown as WebSocket);
-    expect(access).toEqual({ sessionValid: true, readOnly: true, actor: null });
+    expect(access).toEqual({ sessionValid: true, readOnly: true, actor: null, ip: '' });
   });
 });
 
@@ -403,6 +403,38 @@ describe('CliGateway activity recording', () => {
     expect(details.args).toHaveLength(16);
     expect(details.args[5]).toHaveLength(128);
     expect(details.argCount).toBe(20);
+  });
+
+  it('records the command even when the socket closes before the result arrives', async () => {
+    let resolveExecute: (value: {
+      type: 'result';
+      result: string;
+      resultType: string;
+      durationMs: number;
+    }) => void = () => {};
+    const execute = jest.fn().mockReturnValue(
+      new Promise((resolve) => {
+        resolveExecute = resolve;
+      }),
+    );
+    const activity = activityWith();
+    const gateway = new CliGateway(
+      { execute } as unknown as CliService,
+      resolverWith(true, admin),
+      activity.service,
+    );
+    const ws = connect(gateway);
+    send(ws, 'GET a');
+    await flush();
+    ws.emit('close');
+    resolveExecute({ type: 'result', result: 'b', resultType: 'string', durationMs: 1 });
+    await flush();
+    expect(activity.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ip: '10.0.0.5',
+        details: { command: 'GET', argCount: 1, args: ['a'] },
+      }),
+    );
   });
 
   it('records nothing when no actor resolves', async () => {
