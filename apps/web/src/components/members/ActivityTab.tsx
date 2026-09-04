@@ -1,4 +1,4 @@
-import { FormEvent, ReactElement, useCallback, useEffect, useState } from 'react';
+import { FormEvent, ReactElement, useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityEntry, ActivityQuery, Member, workspaceApi } from '@/api/workspace';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -55,17 +55,26 @@ export function ActivityTab({ members }: ActivityTabProps): ReactElement {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestId = useRef<number>(0);
 
   const load = useCallback(
     async (cursor: string | null): Promise<void> => {
+      requestId.current += 1;
+      const currentRequestId = requestId.current;
       setLoading(true);
       setError(null);
+      if (cursor === null) {
+        setNextCursor(null);
+      }
       try {
         const query = buildQuery(actor, action, range);
         if (cursor !== null) {
           query.cursor = cursor;
         }
         const page = await workspaceApi.getActivity(query);
+        if (requestId.current !== currentRequestId) {
+          return;
+        }
         setItems((current) => {
           if (cursor === null) {
             return page.items;
@@ -74,9 +83,14 @@ export function ActivityTab({ members }: ActivityTabProps): ReactElement {
         });
         setNextCursor(page.nextCursor);
       } catch (err) {
+        if (requestId.current !== currentRequestId) {
+          return;
+        }
         setError(errorMessage(err));
       } finally {
-        setLoading(false);
+        if (requestId.current === currentRequestId) {
+          setLoading(false);
+        }
       }
     },
     [actor, action, range],

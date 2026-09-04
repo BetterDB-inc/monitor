@@ -86,4 +86,40 @@ describe('ActivityTab', () => {
     render(<ActivityTab members={MEMBERS} />);
     expect(await screen.findByText('boom')).toBeInTheDocument();
   });
+
+  it('does not let a slower first request overwrite a faster second one', async () => {
+    let resolveFirst: (value: {
+      items: ActivityEntry[];
+      nextCursor: string | null;
+    }) => void = () => {};
+    const firstPage = new Promise<{ items: ActivityEntry[]; nextCursor: string | null }>(
+      (resolve) => {
+        resolveFirst = resolve;
+      },
+    );
+    api.getActivity.mockReturnValueOnce(firstPage);
+    api.getActivity.mockResolvedValueOnce({
+      items: [entry({ id: 'e2', action: 'cli.command', target: null })],
+      nextCursor: null,
+    });
+    render(<ActivityTab members={MEMBERS} />);
+    fireEvent.change(screen.getByLabelText('Actor'), { target: { value: 'u2' } });
+    expect(await screen.findByText('cli.command')).toBeInTheDocument();
+    resolveFirst({ items: [entry()], nextCursor: 'c1' });
+    await waitFor(() => {
+      expect(api.getActivity).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.getByText('cli.command')).toBeInTheDocument();
+    expect(screen.queryByText('member.invite')).toBeNull();
+  });
+
+  it('leaves no Load more button when a fresh load fails', async () => {
+    api.getActivity.mockResolvedValueOnce({ items: [entry()], nextCursor: 'c1' });
+    render(<ActivityTab members={MEMBERS} />);
+    expect(await screen.findByRole('button', { name: 'Load more' })).toBeInTheDocument();
+    api.getActivity.mockRejectedValueOnce(new Error('boom'));
+    fireEvent.change(screen.getByLabelText('Actor'), { target: { value: 'u2' } });
+    expect(await screen.findByText('boom')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
+  });
 });
