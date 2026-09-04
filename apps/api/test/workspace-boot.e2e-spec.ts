@@ -79,6 +79,7 @@ describe('Workspace boot smoke (E2E)', () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/auth/sign-up/email',
+      remoteAddress: '198.51.100.80',
       headers: { 'content-type': 'application/json' },
       payload: OWNER,
     });
