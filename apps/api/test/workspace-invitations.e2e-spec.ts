@@ -89,6 +89,7 @@ describe('Workspace invitations (E2E)', () => {
     const signUp = await app.inject({
       method: 'POST',
       url: '/api/auth/sign-up/email',
+      remoteAddress: '198.51.100.100',
       headers: jsonHeaders(),
       payload: OWNER,
     });
@@ -217,6 +218,7 @@ describe('Workspace invitations (E2E)', () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/auth/sign-up/email',
+      remoteAddress: '198.51.100.101',
       headers: jsonHeaders(),
       payload: { email: 'walkin@example.com', password: 'walkin horse battery', name: 'Walk-in' },
     });
@@ -299,6 +301,7 @@ describe('Workspace invitations (E2E)', () => {
     const signIn = await app.inject({
       method: 'POST',
       url: '/api/auth/sign-in/email',
+      remoteAddress: '198.51.100.102',
       headers: jsonHeaders(),
       payload: { email: 'invitee@example.com', password: INVITEE.password },
     });
