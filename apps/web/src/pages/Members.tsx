@@ -46,19 +46,21 @@ export function Members(): ReactElement {
     loadData();
   }, [loadData]);
 
-  const run = async (action: () => Promise<void>, fallback: string): Promise<void> => {
+  const run = async (action: () => Promise<void>, fallback: string): Promise<boolean> => {
     setError(null);
     setSuccess(null);
     try {
       await action();
       await loadData();
+      return true;
     } catch (err) {
       setError(errorMessage(err, fallback));
+      return false;
     }
   };
 
-  const handleInvite = async (email: string, inviteRole: string): Promise<void> => {
-    await run(async () => {
+  const handleInvite = async (email: string, inviteRole: string): Promise<boolean> => {
+    return run(async () => {
       const created = await workspaceApi.invite({ email, role: inviteRole });
       if (created.url !== undefined) {
         setInviteLink(created.url);
