@@ -33,6 +33,7 @@ import { MonitorModule } from './monitor/monitor.module';
 import { isCloudMode } from './common/utils/cloud-mode';
 import { requireCloudAuth } from './common/utils/cloud-auth-loader';
 import { CveModule } from './cve/cve.module';
+import { ActivityModule } from './activity/activity.module';
 
 let AiModule: any = null;
 let LicenseModule: any = null;
@@ -192,6 +193,7 @@ const baseImports = [
   SystemModule,
   MonitorModule,
   CveModule,
+  ActivityModule,
 ];
 
 const proprietaryImports = [
