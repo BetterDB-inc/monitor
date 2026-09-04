@@ -1,9 +1,10 @@
 import { ValidationPipe } from '@nestjs/common';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import { ACTIVITY_CONFIG } from '../activity/activity-config';
-import { ActivityService } from '../activity/activity.service';
+import { ActivityInterceptor } from '../activity/activity.interceptor';
+import { ActivityService, INVALID_CURSOR_MESSAGE } from '../activity/activity.service';
 import { ActorResolver } from '../auth/actor-resolver';
 import { BetterAuthController } from '../auth/better-auth.controller';
 import { BETTER_AUTH, createBetterAuth } from '../auth/better-auth.factory';
@@ -67,10 +68,13 @@ describe('WorkspaceController', () => {
         { provide: APP_GUARD, useClass: ActorGuard },
         { provide: APP_GUARD, useClass: RolesGuard },
         { provide: APP_GUARD, useClass: MutationGuard },
+        { provide: APP_INTERCEPTOR, useClass: ActivityInterceptor },
       ],
     }).compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true }));
+    app.useGlobalPipes(
+      new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
+    );
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
     members = app.get(MemberService);
@@ -339,6 +343,139 @@ describe('WorkspaceController', () => {
         headers: { cookie: ownerCookie },
       });
       expect(removeOwner.statusCode).toBe(403);
+    });
+  });
+
+  describe('activity', () => {
+    interface PageBody {
+      items: Array<{
+        id: string;
+        occurredAt: string;
+        actor: { userId: string; email: string; via: string; tokenId: string | null };
+        action: string;
+        target: { type: string; id: string } | null;
+        statusCode: number;
+        details: Record<string, unknown>;
+      }>;
+      nextCursor: string | null;
+    }
+
+    let readerCookie: string;
+
+    beforeAll(async () => {
+      await members.create({
+        email: 'reader@example.com',
+        name: 'Reader',
+        password: 'reader horse battery',
+        role: 'member',
+      });
+      const response = await app.inject({
+        method: 'POST',
+        url: '/auth/sign-in/email',
+        headers: { 'content-type': 'application/json', origin: ORIGIN },
+        payload: { email: 'reader@example.com', password: 'reader horse battery' },
+        remoteAddress: '10.1.9.3',
+      });
+      expect(response.statusCode).toBe(200);
+      readerCookie = String(response.headers['set-cookie']).split(';')[0];
+    });
+
+    it('lists recorded mutations newest first for admins', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/workspace/activity',
+        headers: { cookie: ownerCookie },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json() as PageBody;
+      expect(body.items.length).toBeGreaterThan(1);
+      const invite = body.items.find((item) => {
+        return item.action === 'member.invite' && item.statusCode === 201;
+      });
+      expect(invite).toBeDefined();
+      const rejected = body.items.find((item) => {
+        return item.action === 'member.invite' && item.statusCode === 400;
+      });
+      expect(rejected?.target).toBeNull();
+      expect(invite?.statusCode).toBe(201);
+      expect(invite?.target?.type).toBe('invitation');
+      expect(invite?.actor.email).toBe(OWNER.email);
+      expect(invite?.details).toEqual({ method: 'POST', path: '/workspace/invite' });
+      for (let i = 1; i < body.items.length; i += 1) {
+        expect(Date.parse(body.items[i - 1].occurredAt)).toBeGreaterThanOrEqual(
+          Date.parse(body.items[i].occurredAt),
+        );
+      }
+    });
+
+    it('pages with the cursor and rejects an oversized limit', async () => {
+      const first = await app.inject({
+        method: 'GET',
+        url: '/workspace/activity?limit=1',
+        headers: { cookie: ownerCookie },
+      });
+      const firstBody = first.json() as PageBody;
+      expect(firstBody.items).toHaveLength(1);
+      expect(typeof firstBody.nextCursor).toBe('string');
+      const second = await app.inject({
+        method: 'GET',
+        url: `/workspace/activity?limit=1&cursor=${encodeURIComponent(firstBody.nextCursor ?? '')}`,
+        headers: { cookie: ownerCookie },
+      });
+      const secondBody = second.json() as PageBody;
+      expect(secondBody.items).toHaveLength(1);
+      expect(secondBody.items[0].id).not.toBe(firstBody.items[0].id);
+      const tooBig = await app.inject({
+        method: 'GET',
+        url: '/workspace/activity?limit=1000',
+        headers: { cookie: ownerCookie },
+      });
+      expect(tooBig.statusCode).toBe(400);
+    });
+
+    it('filters by actor, action and time window', async () => {
+      const byAction = await app.inject({
+        method: 'GET',
+        url: '/workspace/activity?action=member.invite',
+        headers: { cookie: ownerCookie },
+      });
+      const actions = (byAction.json() as PageBody).items.map((item) => {
+        return item.action;
+      });
+      expect(actions.length).toBeGreaterThan(0);
+      expect(new Set(actions)).toEqual(new Set(['member.invite']));
+      const future = new Date(Date.now() + 60_000).toISOString();
+      const none = await app.inject({
+        method: 'GET',
+        url: `/workspace/activity?from=${encodeURIComponent(future)}`,
+        headers: { cookie: ownerCookie },
+      });
+      expect((none.json() as PageBody).items).toEqual([]);
+      const badTime = await app.inject({
+        method: 'GET',
+        url: '/workspace/activity?from=yesterday',
+        headers: { cookie: ownerCookie },
+      });
+      expect(badTime.statusCode).toBe(400);
+    });
+
+    it('rejects a malformed cursor', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/workspace/activity?cursor=%21%21',
+        headers: { cookie: ownerCookie },
+      });
+      expect(response.statusCode).toBe(400);
+      expect((response.json() as { message: string }).message).toBe(INVALID_CURSOR_MESSAGE);
+    });
+
+    it('is admin-only', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/workspace/activity',
+        headers: { cookie: readerCookie },
+      });
+      expect(response.statusCode).toBe(403);
     });
   });
 });

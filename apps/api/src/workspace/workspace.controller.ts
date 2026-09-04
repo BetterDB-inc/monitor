@@ -9,13 +9,17 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Req,
 } from '@nestjs/common';
 import type { FastifyRequest } from 'fastify';
 import type { Actor, WorkspaceMe } from '@betterdb/shared';
+import { ActivityService } from '../activity/activity.service';
 import { CurrentUser } from '../auth/guards/current-user.decorator';
 import { OwnerOnly, Roles } from '../auth/guards/roles.decorator';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
+import { ActivityPageView, parseIsoTime, toActivityView } from './activity-views';
+import { ActivityQueryDto } from './dto/activity-query.dto';
 import { InviteMemberDto } from './dto/invite-member.dto';
 import { TransferOwnershipDto } from './dto/transfer-ownership.dto';
 import { UpdateMemberRoleDto } from './dto/update-member-role.dto';
@@ -52,6 +56,7 @@ export class WorkspaceController {
     private readonly members: MemberService,
     private readonly invitations: InvitationService,
     private readonly telemetry: UsageTelemetryService,
+    private readonly activity: ActivityService,
   ) {}
 
   @Get('me')
@@ -77,6 +82,20 @@ export class WorkspaceController {
   async listInvitations(): Promise<InvitationView[]> {
     const invitations = await this.invitations.list();
     return invitations.map(toInvitationView);
+  }
+
+  @Get('activity')
+  @Roles('admin')
+  async listActivity(@Query() query: ActivityQueryDto): Promise<ActivityPageView> {
+    const page = await this.activity.list({
+      actorUserId: query.actor,
+      from: parseIsoTime(query.from),
+      to: parseIsoTime(query.to),
+      action: query.action,
+      cursor: query.cursor,
+      limit: query.limit,
+    });
+    return { items: page.items.map(toActivityView), nextCursor: page.nextCursor };
   }
 
   @Post('invite')
