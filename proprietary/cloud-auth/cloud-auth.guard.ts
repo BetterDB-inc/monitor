@@ -2,6 +2,10 @@ import { Injectable, CanActivate, ExecutionContext } from '@nestjs/common';
 import { isCloudMode } from '@app/common/utils/cloud-mode';
 import { FastifyRequest, FastifyReply } from 'fastify';
 import * as jwt from 'jsonwebtoken';
+import type { Actor } from '@betterdb/shared';
+import { cloudActor, CloudSessionPayload } from './cloud-actor';
+
+type CloudRequest = FastifyRequest & { cloudUser?: CloudSessionPayload; actor: Actor | null };
 
 @Injectable()
 export class CloudAuthGuardImpl implements CanActivate {
@@ -21,7 +25,8 @@ export class CloudAuthGuardImpl implements CanActivate {
     // self-hosted here and everywhere else, not as an ambiguous cloud state.
     if (!isCloudMode()) return true;
 
-    const request = context.switchToHttp().getRequest<FastifyRequest>();
+    const request = context.switchToHttp().getRequest<CloudRequest>();
+    request.actor = null;
     const reply = context.switchToHttp().getResponse<FastifyReply>();
     const path = (request.url || '').split('?')[0];
 
@@ -48,7 +53,7 @@ export class CloudAuthGuardImpl implements CanActivate {
       try {
         const payload = jwt.verify(sessionToken, this.sessionSecret, {
           algorithms: ['HS256'],
-        }) as any;
+        }) as jwt.JwtPayload & CloudSessionPayload;
 
         // Verify tenant matches (skip on demo hostname — any valid session is accepted)
         const isDemoHost = !!process.env.DEMO_HOSTNAME && (request.headers.host || '') === process.env.DEMO_HOSTNAME;
@@ -59,7 +64,8 @@ export class CloudAuthGuardImpl implements CanActivate {
         }
 
         // Attach user to request
-        (request as any).cloudUser = payload;
+        request.cloudUser = payload;
+        request.actor = cloudActor(payload);
         return true;
       } catch {
         // Invalid/expired cookie — fall through to redirect
