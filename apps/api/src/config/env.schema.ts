@@ -42,6 +42,7 @@ export const envSchema = z
     AUDIT_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(60000),
     CLIENT_ANALYTICS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(60000),
     AI_OBS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(15000),
+    ACTIVITY_RETENTION_DAYS: z.coerce.number().int().min(1).default(90),
 
     // Self-hosted data retention: days of monitoring history to keep. Seeds
     // the localRetentionDays app setting when the settings row is first
