@@ -5,8 +5,13 @@ import { Socket } from 'net';
 import { Actor } from '@betterdb/shared';
 import { ActorResolver } from '../auth/actor-resolver';
 import { rejectUpgrade } from '../auth/upgrade-response';
+import { isReadCommand } from '../cluster/write-commands';
+import { ActivityService } from '../activity/activity.service';
+import { parseCommandLine } from './command-parser';
 import { CliService } from './cli.service';
 import { CliExecuteMessage, CliServerMessage } from './cli.types';
+
+const SECRET_COMMANDS = new Set(['AUTH', 'HELLO']);
 
 const MAX_COMMANDS_PER_SECOND = 50;
 const SESSION_EXPIRED_CLOSE_CODE = 4401;
@@ -22,6 +27,7 @@ interface CliConnectionState {
 interface CommandAccess {
   sessionValid: boolean;
   readOnly: boolean;
+  actor: Actor | null;
 }
 
 @Injectable()
@@ -35,6 +41,9 @@ export class CliGateway implements OnModuleDestroy {
     @Optional()
     @Inject(ActorResolver)
     private readonly actorResolver: ActorResolver | null = null,
+    @Optional()
+    @Inject(ActivityService)
+    private readonly activity: ActivityService | null = null,
   ) {
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 }); // 1 MiB
     this.logger.log('CLI WebSocket gateway initialized');
@@ -93,16 +102,49 @@ export class CliGateway implements OnModuleDestroy {
   private async resolveAccess(ws: WebSocket): Promise<CommandAccess> {
     const state = this.connections.get(ws);
     if (state === undefined) {
-      return { sessionValid: true, readOnly: true };
+      return { sessionValid: true, readOnly: true, actor: null };
     }
     if (this.isAuthEnabled() === false) {
-      return { sessionValid: true, readOnly: false };
+      return { sessionValid: true, readOnly: false, actor: null };
     }
     const actor = await this.resolveActor(state.request);
     if (actor === null) {
-      return { sessionValid: false, readOnly: true };
+      return { sessionValid: false, readOnly: true, actor: null };
     }
-    return { sessionValid: true, readOnly: actor.role === 'member' };
+    return { sessionValid: true, readOnly: actor.role === 'member', actor };
+  }
+
+  private recordCommand(
+    ws: WebSocket,
+    actor: Actor | null,
+    message: CliExecuteMessage,
+    result: CliServerMessage,
+  ): void {
+    if (this.activity === null || actor === null) {
+      return;
+    }
+    const state = this.connections.get(ws);
+    if (state === undefined) {
+      return;
+    }
+    const args = parseCommandLine(message.command.trim());
+    if (args.length === 0) {
+      return;
+    }
+    const command = args[0].toUpperCase();
+    const rest = args.slice(1);
+    const details: Record<string, unknown> = { command, argCount: rest.length };
+    if (SECRET_COMMANDS.has(command) === false && isReadCommand(command) === true) {
+      details.args = rest;
+    }
+    void this.activity.record({
+      actor: { userId: actor.userId, email: actor.email, via: 'cli', tokenId: actor.tokenId },
+      action: 'cli.command',
+      statusCode: result.type === 'error' ? 400 : 200,
+      ip: state.request.socket.remoteAddress ?? '',
+      connectionId: message.connectionId ?? null,
+      details,
+    });
   }
 
   private expireSession(ws: WebSocket): void {
@@ -157,6 +199,7 @@ export class CliGateway implements OnModuleDestroy {
           const result = await this.cliService.execute(message.command, message.connectionId, {
             readOnly: access.readOnly,
           });
+          this.recordCommand(ws, access.actor, message, result);
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify(result));
           }
