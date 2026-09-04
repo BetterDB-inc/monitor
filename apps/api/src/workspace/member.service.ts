@@ -22,6 +22,8 @@ export interface CreateMemberInput {
   role: WorkspaceRole;
 }
 
+type AuthContext = Awaited<BetterAuthInstance['$context']>;
+
 interface StoredUser {
   id: string;
   email: string;
@@ -93,14 +95,27 @@ export class MemberService {
       },
       { method: 'email-password' } as never,
     )) as StoredUser;
-    await context.internalAdapter.linkAccount({
-      userId: user.id,
-      providerId: CREDENTIAL_PROVIDER,
-      issuer: LOCAL_CREDENTIAL_ISSUER,
-      accountId: user.id,
-      password: hashedPassword,
-    });
+    try {
+      await context.internalAdapter.linkAccount({
+        userId: user.id,
+        providerId: CREDENTIAL_PROVIDER,
+        issuer: LOCAL_CREDENTIAL_ISSUER,
+        accountId: user.id,
+        password: hashedPassword,
+      });
+    } catch (error) {
+      await this.discardUser(context, user.id);
+      throw error;
+    }
     return toMember(user);
+  }
+
+  private async discardUser(context: AuthContext, userId: string): Promise<void> {
+    try {
+      await context.internalAdapter.deleteUser(userId);
+    } catch {
+      return;
+    }
   }
 
   async setRole(id: string, role: WorkspaceRole): Promise<void> {

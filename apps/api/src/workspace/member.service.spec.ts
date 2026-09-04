@@ -4,9 +4,10 @@ import { MemberService } from './member.service';
 
 describe('MemberService', () => {
   let service: MemberService;
+  let auth: Awaited<ReturnType<typeof createBetterAuth>>;
 
   beforeEach(async () => {
-    const auth = await createBetterAuth({
+    auth = await createBetterAuth({
       handle: { kind: 'memory' },
       secret: 's'.repeat(40),
       config: resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' }),
@@ -33,6 +34,27 @@ describe('MemberService', () => {
     expect(await service.findById(created.id)).toEqual(created);
     expect(await service.findByEmail('nobody@example.com')).toBeNull();
     expect(await service.findById('nope')).toBeNull();
+  });
+
+  it('removes the user again when linking the credential fails', async () => {
+    const context = await auth.$context;
+    jest.spyOn(context.internalAdapter, 'linkAccount').mockRejectedValueOnce(new Error('boom'));
+    await expect(
+      service.create({
+        email: 'orphan@example.com',
+        name: 'Orphan',
+        password: 'correct horse battery',
+        role: 'member',
+      }),
+    ).rejects.toThrow('boom');
+    expect(await service.findByEmail('orphan@example.com')).toBeNull();
+    const retried = await service.create({
+      email: 'orphan@example.com',
+      name: 'Orphan',
+      password: 'correct horse battery',
+      role: 'member',
+    });
+    expect(retried.email).toBe('orphan@example.com');
   });
 
   it('lists members oldest first', async () => {
