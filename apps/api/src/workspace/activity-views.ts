@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import type { ActorVia } from '@betterdb/shared';
 import type { ActivityRecord } from '../common/interfaces/activity-repository.interface';
 
@@ -60,5 +61,9 @@ export function parseIsoTime(value: string | undefined): number | undefined {
   if (value === undefined) {
     return undefined;
   }
-  return Date.parse(value);
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed) === true) {
+    throw new BadRequestException('Invalid date');
+  }
+  return parsed;
 }
