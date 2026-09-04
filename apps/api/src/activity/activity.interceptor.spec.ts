@@ -17,6 +17,7 @@ import { Test } from '@nestjs/testing';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Actor } from '@betterdb/shared';
 import type { RequestWithActor } from '../auth/guards/actor.guard';
+import { AllowMembers } from '../auth/guards/roles.decorator';
 import { ActivityInterceptor } from './activity.interceptor';
 import { ActivityService } from './activity.service';
 
@@ -64,6 +65,12 @@ class ConnectionsStubController {
   @Get()
   list(): string[] {
     return [];
+  }
+
+  @Post('query')
+  @AllowMembers()
+  query(): { ok: true } {
+    return { ok: true };
   }
 }
 
@@ -190,6 +197,18 @@ describe('ActivityInterceptor', () => {
       headers: { 'x-test-actor': 'admin' },
       payload: {},
     });
+    await settle();
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it('skips routes decorated @AllowMembers()', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/connections/query',
+      headers: { 'x-test-actor': 'admin' },
+      payload: {},
+    });
+    expect(response.statusCode).toBe(201);
     await settle();
     expect(record).not.toHaveBeenCalled();
   });

@@ -29,6 +29,7 @@ interface CommandAccess {
   sessionValid: boolean;
   readOnly: boolean;
   actor: Actor | null;
+  ip: string;
 }
 
 interface CachedAccess {
@@ -120,10 +121,11 @@ export class CliGateway implements OnModuleDestroy {
   private async resolveAccess(ws: WebSocket): Promise<CommandAccess> {
     const state = this.connections.get(ws);
     if (state === undefined) {
-      return { sessionValid: true, readOnly: true, actor: null };
+      return { sessionValid: true, readOnly: true, actor: null, ip: '' };
     }
+    const ip = state.request.socket.remoteAddress ?? '';
     if (this.isAuthEnabled() === false) {
-      return { sessionValid: true, readOnly: false, actor: null };
+      return { sessionValid: true, readOnly: false, actor: null, ip };
     }
     const now = Date.now();
     if (state.access !== null && state.access.expiresAt > now) {
@@ -132,9 +134,14 @@ export class CliGateway implements OnModuleDestroy {
     state.access = null;
     const actor = await this.resolveActor(state.request);
     if (actor === null) {
-      return { sessionValid: false, readOnly: true, actor: null };
+      return { sessionValid: false, readOnly: true, actor: null, ip };
     }
-    const result: CommandAccess = { sessionValid: true, readOnly: this.isReadOnly(actor), actor };
+    const result: CommandAccess = {
+      sessionValid: true,
+      readOnly: this.isReadOnly(actor),
+      actor,
+      ip,
+    };
     state.access = { result, expiresAt: now + ACCESS_CACHE_TTL_MS };
     return result;
   }
@@ -147,16 +154,12 @@ export class CliGateway implements OnModuleDestroy {
   }
 
   private recordCommand(
-    ws: WebSocket,
     actor: Actor | null,
+    ip: string,
     message: CliExecuteMessage,
     result: CliServerMessage,
   ): void {
     if (this.activity === null || actor === null) {
-      return;
-    }
-    const state = this.connections.get(ws);
-    if (state === undefined) {
       return;
     }
     const args = parseCommandLine(message.command.trim());
@@ -173,7 +176,7 @@ export class CliGateway implements OnModuleDestroy {
       actor: { userId: actor.userId, email: actor.email, via: 'cli', tokenId: actor.tokenId },
       action: 'cli.command',
       statusCode: result.type === 'error' ? 400 : 200,
-      ip: state.request.socket.remoteAddress ?? '',
+      ip,
       connectionId: message.connectionId ?? null,
       details,
     });
@@ -231,7 +234,7 @@ export class CliGateway implements OnModuleDestroy {
           const result = await this.cliService.execute(message.command, message.connectionId, {
             readOnly: access.readOnly,
           });
-          this.recordCommand(ws, access.actor, message, result);
+          this.recordCommand(access.actor, access.ip, message, result);
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify(result));
           }

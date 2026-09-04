@@ -6,6 +6,11 @@ function serviceWith(prune: jest.Mock): ActivityService {
   return { prune } as unknown as ActivityService;
 }
 
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 describe('ActivityPruneJob', () => {
   beforeEach(() => {
     jest.useFakeTimers();
@@ -15,10 +20,11 @@ describe('ActivityPruneJob', () => {
     jest.useRealTimers();
   });
 
-  it('prunes once at bootstrap and then every 24 hours', async () => {
+  it('prunes once at bootstrap without blocking it, then every 24 hours', async () => {
     const prune = jest.fn().mockResolvedValue(0);
     const job = new ActivityPruneJob(serviceWith(prune));
-    await job.onApplicationBootstrap();
+    job.onApplicationBootstrap();
+    await flushMicrotasks();
     expect(prune).toHaveBeenCalledTimes(1);
     await jest.advanceTimersByTimeAsync(PRUNE_INTERVAL_MS);
     expect(prune).toHaveBeenCalledTimes(2);
@@ -33,7 +39,8 @@ describe('ActivityPruneJob', () => {
     });
     const prune = jest.fn().mockRejectedValueOnce(new Error('locked')).mockResolvedValue(1);
     const job = new ActivityPruneJob(serviceWith(prune));
-    await expect(job.onApplicationBootstrap()).resolves.toBeUndefined();
+    job.onApplicationBootstrap();
+    await flushMicrotasks();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('locked'));
     await jest.advanceTimersByTimeAsync(PRUNE_INTERVAL_MS);
     expect(prune).toHaveBeenCalledTimes(2);
