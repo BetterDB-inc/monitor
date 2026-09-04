@@ -331,7 +331,7 @@ describe('CliGateway activity recording', () => {
     );
   });
 
-  it('never stores AUTH or HELLO arguments', async () => {
+  it('never stores AUTH, HELLO, CONFIG, ACL or MIGRATE arguments', async () => {
     const execute = jest.fn().mockResolvedValue({ type: 'error', error: 'nope' });
     const activity = activityWith();
     const gateway = new CliGateway(
@@ -346,9 +346,23 @@ describe('CliGateway activity recording', () => {
       expect.objectContaining({ details: { command: 'AUTH', argCount: 1 } }),
     );
     expect(JSON.stringify(activity.record.mock.calls[0][0])).not.toContain('hunter2');
+
+    send(ws, 'CONFIG SET requirepass hunter2');
+    await flush();
+    const configCall = activity.record.mock.calls[1][0];
+    expect(configCall).toEqual(
+      expect.objectContaining({ details: { command: 'CONFIG', argCount: 3 } }),
+    );
+    expect(JSON.stringify(configCall)).not.toContain('hunter2');
+
+    send(ws, 'ACL SETUSER alice on >hunter2 ~* +@all');
+    await flush();
+    const aclCall = activity.record.mock.calls[2][0];
+    expect(aclCall).toEqual(expect.objectContaining({ details: { command: 'ACL', argCount: 6 } }));
+    expect(JSON.stringify(aclCall)).not.toContain('hunter2');
   });
 
-  it('keeps arguments for read commands members may not run', async () => {
+  it('keeps arguments for a non-secret container read', async () => {
     const execute = jest.fn().mockResolvedValue({ type: 'error', error: 'nope' });
     const activity = activityWith();
     const gateway = new CliGateway(
@@ -357,14 +371,38 @@ describe('CliGateway activity recording', () => {
       activity.service,
     );
     const ws = connect(gateway);
-    send(ws, 'CONFIG GET dir');
+    send(ws, 'CLIENT LIST');
     await flush();
     expect(activity.record).toHaveBeenCalledWith(
       expect.objectContaining({
         statusCode: 400,
-        details: { command: 'CONFIG', argCount: 2, args: ['GET', 'dir'] },
+        details: { command: 'CLIENT', argCount: 1, args: ['LIST'] },
       }),
     );
+  });
+
+  it('caps recorded arguments', async () => {
+    const execute = jest
+      .fn()
+      .mockResolvedValue({ type: 'result', result: '', resultType: 'string', durationMs: 1 });
+    const activity = activityWith();
+    const gateway = new CliGateway(
+      { execute } as unknown as CliService,
+      resolverWith(true, admin),
+      activity.service,
+    );
+    const ws = connect(gateway);
+    const longKey = 'k'.repeat(300);
+    const keys = Array.from({ length: 20 }, (_, i) => {
+      return i === 5 ? longKey : `key${i}`;
+    });
+    send(ws, `MGET ${keys.join(' ')}`);
+    await flush();
+    const [call] = activity.record.mock.calls;
+    const details = call[0].details as { command: string; argCount: number; args: string[] };
+    expect(details.args).toHaveLength(16);
+    expect(details.args[5]).toHaveLength(128);
+    expect(details.argCount).toBe(20);
   });
 
   it('records nothing when no actor resolves', async () => {

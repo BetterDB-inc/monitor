@@ -11,12 +11,18 @@ import { parseCommandLine } from './command-parser';
 import { CliService } from './cli.service';
 import { CliExecuteMessage, CliServerMessage } from './cli.types';
 
-const SECRET_COMMANDS = new Set(['AUTH', 'HELLO']);
+const SECRET_COMMANDS = new Set(['AUTH', 'HELLO', 'CONFIG', 'ACL', 'MIGRATE']);
+const MAX_RECORDED_ARGS = 16;
+const MAX_RECORDED_ARG_LENGTH = 128;
 
 const MAX_COMMANDS_PER_SECOND = 50;
 const SESSION_EXPIRED_CLOSE_CODE = 4401;
 const SESSION_EXPIRED_CLOSE_REASON = 'Session expired';
 export const SESSION_EXPIRED_MESSAGE = 'Session expired. Sign in again.';
+
+function recordedArgs(rest: string[]): string[] {
+  return rest.slice(0, MAX_RECORDED_ARGS).map((value) => value.slice(0, MAX_RECORDED_ARG_LENGTH));
+}
 
 interface CliConnectionState {
   request: IncomingMessage;
@@ -135,7 +141,7 @@ export class CliGateway implements OnModuleDestroy {
     const rest = args.slice(1);
     const details: Record<string, unknown> = { command, argCount: rest.length };
     if (SECRET_COMMANDS.has(command) === false && isReadCommand(command) === true) {
-      details.args = rest;
+      details.args = recordedArgs(rest);
     }
     void this.activity.record({
       actor: { userId: actor.userId, email: actor.email, via: 'cli', tokenId: actor.tokenId },
