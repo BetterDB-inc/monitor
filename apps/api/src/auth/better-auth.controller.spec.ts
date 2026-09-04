@@ -1,21 +1,37 @@
 import { Test } from '@nestjs/testing';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+import { MemoryAdapter } from '../storage/adapters/memory.adapter';
+import { ACTIVITY_CONFIG } from '../activity/activity-config';
+import { ActivityService } from '../activity/activity.service';
+import { ActorResolver } from './actor-resolver';
+import { WORKSPACE_CONFIG } from './workspace-config';
 import { BETTER_AUTH, countUsers, createBetterAuth } from './better-auth.factory';
 import { BetterAuthController } from './better-auth.controller';
 import { resolveWorkspaceConfig } from './workspace-config';
 
 describe('BetterAuthController', () => {
   let app: NestFastifyApplication;
+  let storage: MemoryAdapter;
 
   beforeAll(async () => {
+    const config = resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' });
     const auth = await createBetterAuth({
       handle: { kind: 'memory' },
       secret: 's'.repeat(40),
-      config: resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' }),
+      config,
     });
+    storage = new MemoryAdapter();
+    await storage.initialize();
     const moduleRef = await Test.createTestingModule({
       controllers: [BetterAuthController],
-      providers: [{ provide: BETTER_AUTH, useValue: auth }],
+      providers: [
+        { provide: BETTER_AUTH, useValue: auth },
+        { provide: WORKSPACE_CONFIG, useValue: config },
+        { provide: 'STORAGE_CLIENT', useValue: storage },
+        { provide: ACTIVITY_CONFIG, useValue: { retentionDays: 90 } },
+        ActivityService,
+        ActorResolver,
+      ],
     }).compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
     await app.init();
@@ -24,6 +40,7 @@ describe('BetterAuthController', () => {
 
   afterAll(async () => {
     await app.close();
+    await storage.close();
   });
 
   it('forwards sign-up and returns the session cookie', async () => {
@@ -76,16 +93,27 @@ describe('BetterAuthController', () => {
 describe('BetterAuthController sign-up serialisation', () => {
   let app: NestFastifyApplication;
   let auth: Awaited<ReturnType<typeof createBetterAuth>>;
+  let storage: MemoryAdapter;
 
   beforeAll(async () => {
+    const config = resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' });
     auth = await createBetterAuth({
       handle: { kind: 'memory' },
       secret: 'r'.repeat(40),
-      config: resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' }),
+      config,
     });
+    storage = new MemoryAdapter();
+    await storage.initialize();
     const moduleRef = await Test.createTestingModule({
       controllers: [BetterAuthController],
-      providers: [{ provide: BETTER_AUTH, useValue: auth }],
+      providers: [
+        { provide: BETTER_AUTH, useValue: auth },
+        { provide: WORKSPACE_CONFIG, useValue: config },
+        { provide: 'STORAGE_CLIENT', useValue: storage },
+        { provide: ACTIVITY_CONFIG, useValue: { retentionDays: 90 } },
+        ActivityService,
+        ActorResolver,
+      ],
     }).compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
     await app.init();
@@ -94,6 +122,7 @@ describe('BetterAuthController sign-up serialisation', () => {
 
   afterAll(async () => {
     await app.close();
+    await storage.close();
   });
 
   it('promotes exactly one owner when two sign-ups arrive concurrently', async () => {
@@ -170,5 +199,110 @@ describe('BetterAuthController behind a TLS proxy', () => {
       payload: { email: 'owner@example.com', password: 'correct horse battery', name: 'Owner' },
     });
     expect(response.statusCode).toBe(200);
+  });
+});
+
+describe('BetterAuthController activity events', () => {
+  const EMAIL = 'owner@example.com';
+  const PASSWORD = 'correct horse battery';
+  const headers = { 'content-type': 'application/json', origin: 'http://localhost' };
+  let app: NestFastifyApplication;
+  let storage: MemoryAdapter;
+  let sessionCookie: string;
+
+  beforeAll(async () => {
+    const config = resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' });
+    const auth = await createBetterAuth({
+      handle: { kind: 'memory' },
+      secret: 's'.repeat(40),
+      config,
+    });
+    storage = new MemoryAdapter();
+    await storage.initialize();
+    const moduleRef = await Test.createTestingModule({
+      controllers: [BetterAuthController],
+      providers: [
+        { provide: BETTER_AUTH, useValue: auth },
+        { provide: WORKSPACE_CONFIG, useValue: config },
+        { provide: 'STORAGE_CLIENT', useValue: storage },
+        { provide: ACTIVITY_CONFIG, useValue: { retentionDays: 90 } },
+        ActivityService,
+        ActorResolver,
+      ],
+    }).compile();
+    app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
+    await app.init();
+    await app.getHttpAdapter().getInstance().ready();
+    const signUp = await app.inject({
+      method: 'POST',
+      url: '/auth/sign-up/email',
+      headers,
+      payload: { email: EMAIL, password: PASSWORD, name: 'Owner' },
+      remoteAddress: '198.51.100.31',
+    });
+    expect(signUp.statusCode).toBe(200);
+  });
+
+  afterAll(async () => {
+    await app.close();
+    await storage.close();
+  });
+
+  async function logins(): Promise<Array<Record<string, unknown>>> {
+    const page = await storage.getActivityRepository().list({ limit: 50, action: 'auth.login' });
+    return page.items.map((item) => {
+      return item.details;
+    });
+  }
+
+  it('records the registration as auth.login with method register', async () => {
+    expect(await logins()).toEqual([{ method: 'register' }]);
+  });
+
+  it('records nothing for a failed sign-in', async () => {
+    const failed = await app.inject({
+      method: 'POST',
+      url: '/auth/sign-in/email',
+      headers,
+      payload: { email: EMAIL, password: 'wrong password here' },
+      remoteAddress: '198.51.100.32',
+    });
+    expect(failed.statusCode).toBe(401);
+    expect(await logins()).toEqual([{ method: 'register' }]);
+  });
+
+  it('records auth.login for a successful sign-in', async () => {
+    const ok = await app.inject({
+      method: 'POST',
+      url: '/auth/sign-in/email',
+      headers,
+      payload: { email: EMAIL, password: PASSWORD },
+      remoteAddress: '198.51.100.33',
+    });
+    expect(ok.statusCode).toBe(200);
+    sessionCookie = String(ok.headers['set-cookie']).split(';')[0];
+    const page = await storage.getActivityRepository().list({ limit: 50, action: 'auth.login' });
+    expect(page.items).toHaveLength(2);
+    expect(page.items[0].actorEmail).toBe(EMAIL);
+    expect(page.items[0].actorVia).toBe('session');
+    expect(page.items[0].tokenId).toBeNull();
+    expect(page.items[0].statusCode).toBe(200);
+    expect(page.items[0].ip).toBe('198.51.100.33');
+    expect(page.items[0].details).toEqual({ method: 'password' });
+  });
+
+  it('records auth.logout with the actor that signed out', async () => {
+    const signOut = await app.inject({
+      method: 'POST',
+      url: '/auth/sign-out',
+      headers: { ...headers, cookie: sessionCookie },
+      payload: {},
+      remoteAddress: '198.51.100.34',
+    });
+    expect(signOut.statusCode).toBe(200);
+    const page = await storage.getActivityRepository().list({ limit: 50, action: 'auth.logout' });
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0].actorEmail).toBe(EMAIL);
+    expect(page.items[0].details).toEqual({});
   });
 });

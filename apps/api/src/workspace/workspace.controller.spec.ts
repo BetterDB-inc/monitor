@@ -2,6 +2,8 @@ import { ValidationPipe } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
+import { ACTIVITY_CONFIG } from '../activity/activity-config';
+import { ActivityService } from '../activity/activity.service';
 import { ActorResolver } from '../auth/actor-resolver';
 import { BetterAuthController } from '../auth/better-auth.controller';
 import { BETTER_AUTH, createBetterAuth } from '../auth/better-auth.factory';
@@ -57,6 +59,8 @@ describe('WorkspaceController', () => {
         { provide: WORKSPACE_CONFIG, useValue: config },
         { provide: 'STORAGE_CLIENT', useValue: storage },
         { provide: UsageTelemetryService, useValue: telemetry },
+        { provide: ACTIVITY_CONFIG, useValue: { retentionDays: 90 } },
+        ActivityService,
         ActorResolver,
         MemberService,
         InvitationService,
