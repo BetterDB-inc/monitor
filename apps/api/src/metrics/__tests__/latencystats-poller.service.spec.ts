@@ -2,6 +2,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { LatencystatsPollerService } from '../latencystats-poller.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
+import { RetentionPolicyService } from '../../retention/retention-policy.service';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { ConnectionContext } from '../../common/services/multi-connection-poller';
 
@@ -35,6 +36,10 @@ describe('LatencystatsPollerService', () => {
         {
           provide: ConnectionRegistry,
           useValue: { list: jest.fn().mockReturnValue([]) },
+        },
+        {
+          provide: RetentionPolicyService,
+          useValue: { getSampleRetentionMs: () => 7 * 24 * 60 * 60 * 1000 },
         },
       ],
     }).compile();
@@ -107,28 +112,35 @@ describe('LatencystatsPollerService', () => {
     expect(service.getSnapshot('conn-1')).toEqual([]);
   });
 
-  it('prunes old samples at most once per hour per connection', async () => {
+  it('defers the first prune by one interval, then prunes at most once per hour', async () => {
     const client = clientWith({
       server: { valkey_version: '8.1.0' },
       latencystats: { latency_percentiles_usec_get: 'p99=10' },
     });
 
+    // First tick only seeds the prune clock — enabling a retention window
+    // over a large backlog must not start a mass delete during boot.
     jest.spyOn(Date, 'now').mockReturnValue(10_000_000);
     await (service as any).pollConnection(makeCtx(client));
-    expect(storage.pruneOldLatencyStatsSamples).toHaveBeenCalledTimes(1);
+    expect(storage.pruneOldLatencyStatsSamples).not.toHaveBeenCalled();
 
-    // 1 minute later: no prune
+    // 1 minute later: still within the interval, no prune
     (Date.now as jest.Mock).mockReturnValue(10_060_000);
     await (service as any).pollConnection(makeCtx(client));
-    expect(storage.pruneOldLatencyStatsSamples).toHaveBeenCalledTimes(1);
+    expect(storage.pruneOldLatencyStatsSamples).not.toHaveBeenCalled();
 
-    // >1 hour later: prunes again with 7d retention cutoff
+    // >1 hour later: first prune, with the 7d retention cutoff
     (Date.now as jest.Mock).mockReturnValue(10_000_000 + 61 * 60 * 1000);
     await (service as any).pollConnection(makeCtx(client));
-    expect(storage.pruneOldLatencyStatsSamples).toHaveBeenCalledTimes(2);
-    const [cutoff, connId] = storage.pruneOldLatencyStatsSamples.mock.calls[1];
+    expect(storage.pruneOldLatencyStatsSamples).toHaveBeenCalledTimes(1);
+    const [cutoff, connId] = storage.pruneOldLatencyStatsSamples.mock.calls[0];
     expect(cutoff).toBe(10_000_000 + 61 * 60 * 1000 - 7 * 24 * 60 * 60 * 1000);
     expect(connId).toBe('conn-1');
+
+    // Another hour: prunes again
+    (Date.now as jest.Mock).mockReturnValue(10_000_000 + 122 * 60 * 1000);
+    await (service as any).pollConnection(makeCtx(client));
+    expect(storage.pruneOldLatencyStatsSamples).toHaveBeenCalledTimes(2);
   });
 
   it('exposes the latest snapshot via getSnapshot()', async () => {

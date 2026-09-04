@@ -91,8 +91,8 @@ The tab is a thin consumer of three backend pieces:
 |---|---|---|
 | Index list | `GET /vector-search/indexes` | `VectorSearchService`, 30 s |
 | Per-index live info | `GET /vector-search/indexes/:name` | Same |
-| Historical snapshots | `GET /vector-search/indexes/:name/snapshots` | Persisted to `vector_index_snapshots` every 30 s, retained 7 days |
-| Command workload | `GET /metrics/commandstats/:command/history` | `CommandstatsPollerService`, 15 s, persisted to `command_stats_samples`, retained 7 days |
+| Historical snapshots | `GET /vector-search/indexes/:name/snapshots` | Persisted to `vector_index_snapshots` every 30 s, retained per the retention policy (self-hosted: the configured window, unset = kept indefinitely; cloud: 7 days) |
+| Command workload | `GET /metrics/commandstats/:command/history` | `CommandstatsPollerService`, 15 s, persisted to `command_stats_samples`, retained per the same policy |
 
 Prometheus scraping is supported via `/api/prometheus/metrics` with these gauges, labelled by `connection` and `index`:
 

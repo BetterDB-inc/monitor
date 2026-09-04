@@ -142,6 +142,30 @@ describe.each([
     expect(await storage.getOtelTraceSpans('keep')).toHaveLength(1);
   });
 
+  it('keeps traces whole across prune batches (no orphaned late spans)', async () => {
+    // Regression: a rowid-chunked delete re-evaluated the "old traces" probe
+    // per batch, so once a trace's old spans were removed its newer spans no
+    // longer matched and survived as orphans. Force multiple batches (the
+    // sqlite path selects 1000 trace ids per round) with a mixed-age trace in
+    // the pool and assert it is deleted atomically.
+    const singles: StoredOtelSpan[] = [];
+    for (let i = 0; i < 1_100; i++) {
+      singles.push(span({ traceId: `old-${i}`, spanId: 'r', startTimeMs: 1000 + i }));
+    }
+    await storage.saveOtelSpans([
+      ...singles,
+      span({ traceId: 'mixed', spanId: 'root', parentSpanId: null, startTimeMs: 1000 }),
+      span({ traceId: 'mixed', spanId: 'late', parentSpanId: 'root', startTimeMs: 9000 }),
+      span({ traceId: 'keep', spanId: 'r', parentSpanId: null, startTimeMs: 8000 }),
+    ]);
+
+    const removed = await storage.pruneOldOtelSpans(5000);
+
+    expect(removed).toBe(1_100 + 2); // every old single plus BOTH spans of 'mixed'
+    expect(await storage.getOtelTraceSpans('mixed')).toHaveLength(0);
+    expect(await storage.getOtelTraceSpans('keep')).toHaveLength(1);
+  });
+
   it('prunes spans older than a cutoff (by start time)', async () => {
     await storage.saveOtelSpans([
       span({ traceId: 'old', spanId: 'r', startTimeMs: 1000 }),

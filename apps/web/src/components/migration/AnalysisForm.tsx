@@ -21,11 +21,16 @@ import {
 
 interface Props {
   onStart: (analysisId: string) => void;
+  // Runtime cloud signal threaded from App's cloudUser, the same source every
+  // other component uses — NOT a build-time env var, which is set nowhere and
+  // would split-brain this form from the rest of the UI. Required so a new
+  // render site can't silently omit it and default to self-hosted.
+  isCloudMode: boolean;
 }
 
 const SAMPLE_SIZES = [1000, 5000, 10000, 25000] as const;
 
-export function AnalysisForm({ onStart }: Props) {
+export function AnalysisForm({ onStart, isCloudMode }: Props) {
   const { connections, currentConnection } = useConnection();
   const {
     sourceId,
@@ -41,8 +46,6 @@ export function AnalysisForm({ onStart }: Props) {
   const [picking, setPicking] = useState<EndpointRole | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const isCloudMode = import.meta.env.VITE_CLOUD_MODE === 'true';
 
   if (connections.length < 2) {
     return <NoConnectionsState connections={connections} />;

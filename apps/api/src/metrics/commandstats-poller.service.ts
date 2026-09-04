@@ -6,6 +6,7 @@ import {
 } from '../common/services/multi-connection-poller';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { PrometheusService } from '../prometheus/prometheus.service';
+import { RetentionPolicyService } from '../retention/retention-policy.service';
 import { parseCommandStatsSection, CommandStatsSample } from './commandstats-parser';
 
 interface ConnectionBaseline {
@@ -29,7 +30,6 @@ export class CommandstatsPollerService extends MultiConnectionPoller implements 
 
   private readonly POLL_INTERVAL_MS = 60_000; // 60 seconds
   private readonly PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-  private readonly RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
   private lastPruneByConnection = new Map<string, number>();
   private baselines = new Map<string, ConnectionBaseline>();
 
@@ -37,6 +37,7 @@ export class CommandstatsPollerService extends MultiConnectionPoller implements 
     connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
     private prometheusService: PrometheusService,
+    private retentionPolicy: RetentionPolicyService,
   ) {
     super(connectionRegistry);
   }
@@ -164,10 +165,20 @@ export class CommandstatsPollerService extends MultiConnectionPoller implements 
 
     await this.storage.saveCommandStatsSamples(batch, ctx.connectionId);
 
-    const lastPrune = this.lastPruneByConnection.get(ctx.connectionId) ?? 0;
-    if (now - lastPrune > this.PRUNE_INTERVAL_MS) {
+    const lastPrune = this.lastPruneByConnection.get(ctx.connectionId);
+    if (lastPrune === undefined) {
+      // First tick for this connection: seed the clock and defer the initial
+      // trim by one interval, so enabling a retention window over a large
+      // backlog doesn't start a mass delete during the boot burst — the
+      // daily sweep, which is startup-delayed for the same reason, owns
+      // backlog reclamation.
       this.lastPruneByConnection.set(ctx.connectionId, now);
-      await this.storage.pruneOldCommandStatsSamples(now - this.RETENTION_MS, ctx.connectionId);
+    } else if (now - lastPrune > this.PRUNE_INTERVAL_MS) {
+      const retentionMs = this.retentionPolicy.getSampleRetentionMs();
+      if (retentionMs !== null) {
+        this.lastPruneByConnection.set(ctx.connectionId, now);
+        await this.storage.pruneOldCommandStatsSamples(now - retentionMs, ctx.connectionId);
+      }
     }
   }
 }

@@ -16,6 +16,7 @@ import {
   ConnectionContext,
 } from '../common/services/multi-connection-poller';
 import { PrometheusService } from '../prometheus/prometheus.service';
+import { RetentionPolicyService } from '../retention/retention-policy.service';
 import type { VectorIndexSnapshot } from '@betterdb/shared';
 
 @Injectable()
@@ -31,6 +32,7 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
     connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
     private prometheusService: PrometheusService,
+    private retentionPolicy: RetentionPolicyService,
   ) {
     super(connectionRegistry);
   }
@@ -111,13 +113,20 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
       );
 
       const now = Date.now();
-      const lastPrune = this.lastPruneByConnection.get(ctx.connectionId) ?? 0;
-      if (now - lastPrune > this.PRUNE_INTERVAL_MS) {
+      const lastPrune = this.lastPruneByConnection.get(ctx.connectionId);
+      if (lastPrune === undefined) {
+        // First tick for this connection: seed the clock and defer the initial
+        // trim by one interval, so enabling a retention window over a large
+        // backlog doesn't start a mass delete during the boot burst — the
+        // daily sweep, which is startup-delayed for the same reason, owns
+        // backlog reclamation.
         this.lastPruneByConnection.set(ctx.connectionId, now);
-        await this.storage.pruneOldVectorIndexSnapshots(
-          now - 7 * 24 * 60 * 60 * 1000,
-          ctx.connectionId,
-        );
+      } else if (now - lastPrune > this.PRUNE_INTERVAL_MS) {
+        const retentionMs = this.retentionPolicy.getSampleRetentionMs();
+        if (retentionMs !== null) {
+          this.lastPruneByConnection.set(ctx.connectionId, now);
+          await this.storage.pruneOldVectorIndexSnapshots(now - retentionMs, ctx.connectionId);
+        }
       }
     } catch (error) {
       this.logger.error(

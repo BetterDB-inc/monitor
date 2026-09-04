@@ -9,6 +9,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
+import { isCloudMode } from '../common/utils/cloud-mode';
 import { ApiTags, ApiOperation, ApiExcludeEndpoint } from '@nestjs/swagger';
 import { OtelIngestService, OtlpTraceRequest } from './otel-ingest.service';
 import { decodeOtlpTraceProtobuf } from './otlp-protobuf';
@@ -48,7 +49,7 @@ export class OtelIngestController {
     // In cloud mode /v1/traces bypasses session auth (allowlisted), so a bearer
     // token is the only credential. Fail closed when it isn't configured instead
     // of leaving the tenant's span store open to anyone who can reach the host.
-    if (process.env.CLOUD_MODE === 'true' && !token) {
+    if (isCloudMode() && !token) {
       throw new HttpException(
         'OTLP ingestion requires OTEL_INGEST_TOKEN in cloud mode',
         HttpStatus.UNAUTHORIZED,

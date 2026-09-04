@@ -130,7 +130,12 @@ describe('OTLP pipeline (integration, MemoryAdapter)', () => {
     expect(res.stored).toBe(4);
 
     // Traces query aggregates the summary
-    const obs = new AiObservabilityService(fakeRegistry(), storage, {} as any);
+    const obs = new AiObservabilityService(
+      fakeRegistry(),
+      storage,
+      {} as any,
+      { getSampleRetentionMs: () => 7 * 24 * 60 * 60 * 1000 } as any,
+    );
     const traces = await storage.getOtelTraces({});
     expect(traces).toHaveLength(1);
     expect(traces[0].rootName).toBe('chat.turn');

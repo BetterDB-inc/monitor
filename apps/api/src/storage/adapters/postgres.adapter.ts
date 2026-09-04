@@ -1,4 +1,5 @@
 import { Pool, PoolConfig } from 'pg';
+import { chunkedPostgresDelete } from './postgres-chunked-delete';
 import { randomUUID } from 'crypto';
 import { parseSshTunnel } from '@betterdb/shared';
 import {
@@ -584,18 +585,13 @@ export class PostgresAdapter implements StoragePort {
     }
 
     if (connectionId) {
-      const result = await this.pool.query(
-        'DELETE FROM acl_audit WHERE captured_at < $1 AND connection_id = $2',
-        [olderThanTimestamp, connectionId],
-      );
-      return result.rowCount || 0;
+      return chunkedPostgresDelete(this.pool, 'acl_audit', 'captured_at < $1 AND connection_id = $2', [
+        olderThanTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = await this.pool.query('DELETE FROM acl_audit WHERE captured_at < $1', [
-      olderThanTimestamp,
-    ]);
-
-    return result.rowCount || 0;
+    return chunkedPostgresDelete(this.pool, 'acl_audit', 'captured_at < $1', [olderThanTimestamp]);
   }
 
   async saveClientSnapshot(clients: StoredClientSnapshot[], connectionId: string): Promise<number> {
@@ -1075,18 +1071,13 @@ export class PostgresAdapter implements StoragePort {
     }
 
     if (connectionId) {
-      const result = await this.pool.query(
-        'DELETE FROM client_snapshots WHERE captured_at < $1 AND connection_id = $2',
-        [olderThanTimestamp, connectionId],
-      );
-      return result.rowCount || 0;
+      return chunkedPostgresDelete(this.pool, 'client_snapshots', 'captured_at < $1 AND connection_id = $2', [
+        olderThanTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = await this.pool.query('DELETE FROM client_snapshots WHERE captured_at < $1', [
-      olderThanTimestamp,
-    ]);
-
-    return result.rowCount || 0;
+    return chunkedPostgresDelete(this.pool, 'client_snapshots', 'captured_at < $1', [olderThanTimestamp]);
   }
 
   /**
@@ -1361,6 +1352,8 @@ export class PostgresAdapter implements StoragePort {
       );
       ALTER TABLE hot_key_stats ADD COLUMN IF NOT EXISTS cardinality BIGINT;
       ALTER TABLE hot_key_stats ADD COLUMN IF NOT EXISTS key_type TEXT;
+      CREATE INDEX IF NOT EXISTS idx_hot_key_captured_at_global
+        ON hot_key_stats(captured_at);
 
       CREATE INDEX IF NOT EXISTS idx_hks_connection_captured
         ON hot_key_stats(connection_id, captured_at DESC);
@@ -1376,6 +1369,7 @@ export class PostgresAdapter implements StoragePort {
         throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
         throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
         inference_sla_config JSONB NOT NULL DEFAULT '{}'::JSONB,
+        local_retention_days INTEGER,
         updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
         created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
       );
@@ -1385,6 +1379,7 @@ export class PostgresAdapter implements StoragePort {
       ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000;
       ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000;
       ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS inference_sla_config JSONB NOT NULL DEFAULT '{}'::JSONB;
+      ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS local_retention_days INTEGER;
 
       CREATE TABLE IF NOT EXISTS metric_forecast_settings (
         connection_id TEXT NOT NULL,
@@ -1440,6 +1435,7 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook_id ON webhook_deliveries(webhook_id);
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_retry ON webhook_deliveries(status, next_retry_at) WHERE status = 'retrying';
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_connection_id ON webhook_deliveries(connection_id);
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_created_at ON webhook_deliveries(created_at);
 
       -- Slow Log Entries Table
       CREATE TABLE IF NOT EXISTS slow_log_entries (
@@ -1628,6 +1624,8 @@ export class PostgresAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at
         ON command_stats_samples(connection_id, command, captured_at);
+      CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at_global
+        ON command_stats_samples(captured_at);
 
       CREATE TABLE IF NOT EXISTS latency_stats_samples (
         id UUID PRIMARY KEY,
@@ -1644,6 +1642,8 @@ export class PostgresAdapter implements StoragePort {
         ON latency_stats_samples(connection_id, command, captured_at);
       CREATE INDEX IF NOT EXISTS idx_latstat_captured_at
         ON latency_stats_samples(connection_id, captured_at);
+      CREATE INDEX IF NOT EXISTS idx_latstat_captured_at_global
+        ON latency_stats_samples(captured_at);
 
       CREATE TABLE IF NOT EXISTS ai_cache_samples (
         id UUID PRIMARY KEY,
@@ -1667,6 +1667,8 @@ export class PostgresAdapter implements StoragePort {
         ON ai_cache_samples(connection_id, instance_field, timestamp);
       CREATE INDEX IF NOT EXISTS idx_aicache_ts
         ON ai_cache_samples(connection_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_aicache_ts_global
+        ON ai_cache_samples(timestamp);
 
       CREATE TABLE IF NOT EXISTS otel_spans (
         trace_id TEXT NOT NULL,
@@ -1978,6 +1980,7 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_started_at ON capture_sessions(started_at DESC);
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_status ON capture_sessions(status, started_at DESC);
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_source ON capture_sessions(source, started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_capture_sessions_ended_at ON capture_sessions(ended_at);
 
       -- Monitor Capture Chunks Table (one row per batched MONITOR-line chunk; populated by CaptureWriter in a later PR)
       CREATE TABLE IF NOT EXISTS capture_chunks (
@@ -1994,6 +1997,7 @@ export class PostgresAdapter implements StoragePort {
       ALTER TABLE capture_chunks ADD COLUMN IF NOT EXISTS node_id TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_capture_chunks_session ON capture_chunks(session_id, chunk_index);
+      CREATE INDEX IF NOT EXISTS idx_capture_chunks_last_ts ON capture_chunks(last_ts);
 
       -- Pro+ Capture Triggers Table (PR 15)
       CREATE TABLE IF NOT EXISTS capture_triggers (
@@ -2398,18 +2402,13 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = await this.pool.query(
-        'DELETE FROM anomaly_events WHERE timestamp < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId],
-      );
-      return result.rowCount ?? 0;
+      return chunkedPostgresDelete(this.pool, 'anomaly_events', 'timestamp < $1 AND connection_id = $2', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = await this.pool.query('DELETE FROM anomaly_events WHERE timestamp < $1', [
-      cutoffTimestamp,
-    ]);
-
-    return result.rowCount ?? 0;
+    return chunkedPostgresDelete(this.pool, 'anomaly_events', 'timestamp < $1', [cutoffTimestamp]);
   }
 
   async saveCorrelatedGroup(group: StoredCorrelatedGroup, connectionId: string): Promise<string> {
@@ -2494,19 +2493,13 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = await this.pool.query(
-        'DELETE FROM correlated_anomaly_groups WHERE timestamp < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId],
-      );
-      return result.rowCount ?? 0;
+      return chunkedPostgresDelete(this.pool, 'correlated_anomaly_groups', 'timestamp < $1 AND connection_id = $2', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = await this.pool.query(
-      'DELETE FROM correlated_anomaly_groups WHERE timestamp < $1',
-      [cutoffTimestamp],
-    );
-
-    return result.rowCount ?? 0;
+    return chunkedPostgresDelete(this.pool, 'correlated_anomaly_groups', 'timestamp < $1', [cutoffTimestamp]);
   }
 
   async saveKeyPatternSnapshots(
@@ -2772,18 +2765,13 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = await this.pool.query(
-        'DELETE FROM key_pattern_snapshots WHERE timestamp < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId],
-      );
-      return result.rowCount ?? 0;
+      return chunkedPostgresDelete(this.pool, 'key_pattern_snapshots', 'timestamp < $1 AND connection_id = $2', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = await this.pool.query('DELETE FROM key_pattern_snapshots WHERE timestamp < $1', [
-      cutoffTimestamp,
-    ]);
-
-    return result.rowCount ?? 0;
+    return chunkedPostgresDelete(this.pool, 'key_pattern_snapshots', 'timestamp < $1', [cutoffTimestamp]);
   }
 
   async saveHotKeys(entries: HotKeyEntry[], connectionId: string): Promise<number> {
@@ -2908,17 +2896,13 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = await this.pool.query(
-        'DELETE FROM hot_key_stats WHERE captured_at < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId],
-      );
-      return result.rowCount ?? 0;
+      return chunkedPostgresDelete(this.pool, 'hot_key_stats', 'captured_at < $1 AND connection_id = $2', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = await this.pool.query('DELETE FROM hot_key_stats WHERE captured_at < $1', [
-      cutoffTimestamp,
-    ]);
-    return result.rowCount ?? 0;
+    return chunkedPostgresDelete(this.pool, 'hot_key_stats', 'captured_at < $1', [cutoffTimestamp]);
   }
 
   async getSettings(): Promise<AppSettings | null> {
@@ -2942,9 +2926,9 @@ export class PostgresAdapter implements StoragePort {
         id, audit_poll_interval_ms, client_analytics_poll_interval_ms,
         anomaly_poll_interval_ms, anomaly_cache_ttl_ms, anomaly_prometheus_interval_ms,
         throughput_forecasting_enabled, throughput_forecasting_default_rolling_window_ms, throughput_forecasting_default_alert_threshold_ms,
-        inference_sla_config,
+        inference_sla_config, local_retention_days,
         updated_at, created_at
-      ) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      ) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       ON CONFLICT(id) DO UPDATE SET
         audit_poll_interval_ms = EXCLUDED.audit_poll_interval_ms,
         client_analytics_poll_interval_ms = EXCLUDED.client_analytics_poll_interval_ms,
@@ -2955,6 +2939,7 @@ export class PostgresAdapter implements StoragePort {
         throughput_forecasting_default_rolling_window_ms = EXCLUDED.throughput_forecasting_default_rolling_window_ms,
         throughput_forecasting_default_alert_threshold_ms = EXCLUDED.throughput_forecasting_default_alert_threshold_ms,
         inference_sla_config = EXCLUDED.inference_sla_config,
+        local_retention_days = EXCLUDED.local_retention_days,
         updated_at = EXCLUDED.updated_at`,
       [
         settings.auditPollIntervalMs,
@@ -2966,6 +2951,7 @@ export class PostgresAdapter implements StoragePort {
         settings.metricForecastingDefaultRollingWindowMs,
         settings.metricForecastingDefaultAlertThresholdMs,
         JSON.stringify(settings.inferenceSlaConfig ?? {}),
+        settings.localRetentionDays ?? null,
         now,
         settings.createdAt || now,
       ],
@@ -3222,18 +3208,13 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = await this.pool.query(
-        'DELETE FROM command_log_entries WHERE captured_at < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId],
-      );
-      return result.rowCount ?? 0;
+      return chunkedPostgresDelete(this.pool, 'command_log_entries', 'captured_at < $1 AND connection_id = $2', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = await this.pool.query('DELETE FROM command_log_entries WHERE captured_at < $1', [
-      cutoffTimestamp,
-    ]);
-
-    return result.rowCount ?? 0;
+    return chunkedPostgresDelete(this.pool, 'command_log_entries', 'captured_at < $1', [cutoffTimestamp]);
   }
 
   // Latency Snapshot Methods
@@ -3321,17 +3302,13 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = await this.pool.query(
-        'DELETE FROM latency_snapshots WHERE timestamp < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId],
-      );
-      return result.rowCount ?? 0;
+      return chunkedPostgresDelete(this.pool, 'latency_snapshots', 'timestamp < $1 AND connection_id = $2', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = await this.pool.query('DELETE FROM latency_snapshots WHERE timestamp < $1', [
-      cutoffTimestamp,
-    ]);
-    return result.rowCount ?? 0;
+    return chunkedPostgresDelete(this.pool, 'latency_snapshots', 'timestamp < $1', [cutoffTimestamp]);
   }
 
   // Latency Histogram Methods
@@ -3399,17 +3376,13 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = await this.pool.query(
-        'DELETE FROM latency_histograms WHERE timestamp < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId],
-      );
-      return result.rowCount ?? 0;
+      return chunkedPostgresDelete(this.pool, 'latency_histograms', 'timestamp < $1 AND connection_id = $2', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = await this.pool.query('DELETE FROM latency_histograms WHERE timestamp < $1', [
-      cutoffTimestamp,
-    ]);
-    return result.rowCount ?? 0;
+    return chunkedPostgresDelete(this.pool, 'latency_histograms', 'timestamp < $1', [cutoffTimestamp]);
   }
 
   // Memory Snapshot Methods
@@ -3520,17 +3493,13 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = await this.pool.query(
-        'DELETE FROM memory_snapshots WHERE timestamp < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId],
-      );
-      return result.rowCount ?? 0;
+      return chunkedPostgresDelete(this.pool, 'memory_snapshots', 'timestamp < $1 AND connection_id = $2', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = await this.pool.query('DELETE FROM memory_snapshots WHERE timestamp < $1', [
-      cutoffTimestamp,
-    ]);
-    return result.rowCount ?? 0;
+    return chunkedPostgresDelete(this.pool, 'memory_snapshots', 'timestamp < $1', [cutoffTimestamp]);
   }
 
   // Command Stats Sample Methods
@@ -3622,18 +3591,13 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = await this.pool.query(
-        'DELETE FROM command_stats_samples WHERE captured_at < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId],
-      );
-      return result.rowCount ?? 0;
+      return chunkedPostgresDelete(this.pool, 'command_stats_samples', 'captured_at < $1 AND connection_id = $2', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = await this.pool.query(
-      'DELETE FROM command_stats_samples WHERE captured_at < $1',
-      [cutoffTimestamp],
-    );
-    return result.rowCount ?? 0;
+    return chunkedPostgresDelete(this.pool, 'command_stats_samples', 'captured_at < $1', [cutoffTimestamp]);
   }
 
   // Latency Stats Sample Methods (INFO latencystats)
@@ -3725,18 +3689,13 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = await this.pool.query(
-        'DELETE FROM latency_stats_samples WHERE captured_at < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId],
-      );
-      return result.rowCount ?? 0;
+      return chunkedPostgresDelete(this.pool, 'latency_stats_samples', 'captured_at < $1 AND connection_id = $2', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = await this.pool.query(
-      'DELETE FROM latency_stats_samples WHERE captured_at < $1',
-      [cutoffTimestamp],
-    );
-    return result.rowCount ?? 0;
+    return chunkedPostgresDelete(this.pool, 'latency_stats_samples', 'captured_at < $1', [cutoffTimestamp]);
   }
 
   // AI Cache/Memory Sample Methods
@@ -3856,18 +3815,13 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = await this.pool.query(
-        'DELETE FROM ai_cache_samples WHERE timestamp < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId],
-      );
-      return result.rowCount ?? 0;
+      return chunkedPostgresDelete(this.pool, 'ai_cache_samples', 'timestamp < $1 AND connection_id = $2', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = await this.pool.query(
-      'DELETE FROM ai_cache_samples WHERE timestamp < $1',
-      [cutoffTimestamp],
-    );
-    return result.rowCount ?? 0;
+    return chunkedPostgresDelete(this.pool, 'ai_cache_samples', 'timestamp < $1', [cutoffTimestamp]);
   }
 
   // OTLP Trace Methods
@@ -4021,15 +3975,27 @@ export class PostgresAdapter implements StoragePort {
 
   async pruneOldOtelSpans(cutoffTimestamp: number): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
-    // Prune whole traces (by trace-level start), not individual spans, so a long
-    // trace never loses its root/early spans while later ones survive.
-    const result = await this.pool.query(
-      `DELETE FROM otel_spans WHERE trace_id IN (
-         SELECT trace_id FROM otel_spans GROUP BY trace_id HAVING MIN(start_time_ms) < $1
-       )`,
-      [cutoffTimestamp],
-    );
-    return result.rowCount ?? 0;
+    // Prune whole traces (by trace-level start), not individual spans, so a
+    // long trace never loses its root/early spans while later ones survive.
+    // One statement per batch: the uncorrelated LIMIT subquery is evaluated
+    // once under the statement's snapshot and the outer DELETE removes ALL
+    // spans of the selected traces, so no trace is ever split and each
+    // transaction stays small. Terminate on an empty batch (row counts count
+    // spans, not traces, so a short batch proves nothing).
+    const TRACE_BATCH = 1_000;
+    let total = 0;
+    for (;;) {
+      const result = await this.pool.query(
+        `DELETE FROM otel_spans WHERE trace_id IN (
+           SELECT DISTINCT trace_id FROM otel_spans WHERE start_time_ms < $1 LIMIT $2
+         )`,
+        [cutoffTimestamp, TRACE_BATCH],
+      );
+      const changes = result.rowCount ?? 0;
+      if (changes === 0) break;
+      total += changes;
+    }
+    return total;
   }
 
   // Vector Index Snapshot Methods
@@ -4149,18 +4115,13 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = await this.pool.query(
-        'DELETE FROM vector_index_snapshots WHERE timestamp < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId],
-      );
-      return result.rowCount ?? 0;
+      return chunkedPostgresDelete(this.pool, 'vector_index_snapshots', 'timestamp < $1 AND connection_id = $2', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = await this.pool.query(
-      'DELETE FROM vector_index_snapshots WHERE timestamp < $1',
-      [cutoffTimestamp],
-    );
-    return result.rowCount ?? 0;
+    return chunkedPostgresDelete(this.pool, 'vector_index_snapshots', 'timestamp < $1', [cutoffTimestamp]);
   }
 
   // CVE Inspection Methods
@@ -5458,40 +5419,37 @@ export class PostgresAdapter implements StoragePort {
 
   async pruneOldCaptureSessions(cutoffTimestamp: number): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
-    const result = await this.pool.query(
-      "DELETE FROM capture_sessions WHERE ended_at IS NOT NULL AND ended_at < $1 AND status != 'running'",
+    return chunkedPostgresDelete(
+      this.pool,
+      'capture_sessions',
+      "ended_at IS NOT NULL AND ended_at < $1 AND status != 'running'",
       [cutoffTimestamp],
     );
-    return result.rowCount ?? 0;
   }
 
   async pruneOldCaptureChunks(cutoffTimestamp: number): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
-    const result = await this.pool.query(
-      'DELETE FROM capture_chunks WHERE last_ts < $1',
-      [cutoffTimestamp],
-    );
-    return result.rowCount ?? 0;
+    return chunkedPostgresDelete(this.pool, 'capture_chunks', 'last_ts < $1', [cutoffTimestamp]);
   }
 
   async pruneOldCaptureTriggers(cutoffTimestamp: number): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
-    const result = await this.pool.query(
-      `DELETE FROM capture_triggers
-       WHERE created_at < $1
-         AND status IN ('fired','skipped','expired','cancelled')`,
+    return chunkedPostgresDelete(
+      this.pool,
+      'capture_triggers',
+      "created_at < $1 AND status IN ('fired','skipped','expired','cancelled')",
       [cutoffTimestamp],
     );
-    return result.rowCount ?? 0;
   }
 
   async pruneOldScheduledCaptures(cutoffTimestamp: number): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
-    const result = await this.pool.query(
-      "DELETE FROM scheduled_captures WHERE created_at < $1 AND status = 'disabled'",
+    return chunkedPostgresDelete(
+      this.pool,
+      'scheduled_captures',
+      "created_at < $1 AND status = 'disabled'",
       [cutoffTimestamp],
     );
-    return result.rowCount ?? 0;
   }
 
   private mapScheduledCaptureRow(row: Record<string, unknown>): StoredScheduledCapture {

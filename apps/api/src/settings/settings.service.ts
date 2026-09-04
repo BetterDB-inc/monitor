@@ -1,6 +1,20 @@
-import { Injectable, Inject, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Inject,
+  OnModuleInit,
+  OnModuleDestroy,
+  Logger,
+  BadRequestException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { AppSettings, SettingsUpdateRequest, SettingsResponse } from '@betterdb/shared';
+import {
+  AppSettings,
+  SettingsUpdateRequest,
+  SettingsResponse,
+  MAX_RETENTION_DAYS,
+  normalizeRetentionDays,
+  parseRetentionDaysToken,
+} from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 
 @Injectable()
@@ -9,6 +23,10 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
   private cachedSettings: AppSettings | null = null;
   private cacheRefreshInterval: NodeJS.Timeout | null = null;
   private readonly CACHE_REFRESH_MS = 30000;
+  // Bumped on every direct cache write (update/reset). An in-flight periodic
+  // refresh that started before the write would otherwise clobber the fresh
+  // value with the older database snapshot it read.
+  private cacheGeneration = 0;
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
@@ -37,12 +55,30 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async refreshCache(): Promise<void> {
+    const generation = this.cacheGeneration;
     const dbSettings = await this.storageClient.getSettings();
-    this.cachedSettings = dbSettings || this.buildSettingsFromEnv();
+    if (generation !== this.cacheGeneration) return; // a direct write won the race
+    // Only ever cache persisted settings. Substituting env-derived defaults
+    // here (e.g. after a DB wipe mid-run) would let getLoadedSettings() hand
+    // out values that were never saved — and an unsaved LOCAL_RETENTION_DAYS
+    // must not be able to trigger deletion.
+    if (dbSettings) {
+      this.cachedSettings = dbSettings;
+    }
   }
 
   getCachedSettings(): AppSettings {
     return this.cachedSettings || this.buildSettingsFromEnv();
+  }
+
+  /**
+   * The cached persisted settings, or null before the first cache load.
+   * Unlike getCachedSettings() this never falls back to the env-derived
+   * defaults — callers that must not act on unconfirmed values (e.g. data
+   * deletion) use this and treat null as "not yet known".
+   */
+  getLoadedSettings(): AppSettings | null {
+    return this.cachedSettings;
   }
 
   private buildSettingsFromEnv(): AppSettings {
@@ -74,6 +110,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
         10,
       ),
       inferenceSlaConfig: {},
+      localRetentionDays: parseRetentionDaysToken(this.configService.get('LOCAL_RETENTION_DAYS')),
       createdAt: now,
       updatedAt: now,
     };
@@ -102,6 +139,14 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async updateSettings(updates: SettingsUpdateRequest): Promise<SettingsResponse> {
+    if (updates.localRetentionDays !== undefined && updates.localRetentionDays !== null) {
+      if (normalizeRetentionDays(updates.localRetentionDays) === null) {
+        throw new BadRequestException(
+          `localRetentionDays must be null or an integer between 1 and ${MAX_RETENTION_DAYS}`,
+        );
+      }
+    }
+
     const current = await this.storageClient.getSettings();
 
     if (!current) {
@@ -117,6 +162,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     // leave consumers of getCachedSettings() reading stale data for up to
     // half a minute — notably InferenceLatencyService, whose SLA evaluation
     // runs on a 60s tick and depends on fresh inferenceSlaConfig.
+    this.cacheGeneration++;
     this.cachedSettings = updated;
 
     return {
@@ -127,13 +173,23 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async resetToDefaults(): Promise<SettingsResponse> {
-    await this.initializeFromEnv();
+    // The retention window survives a reset. Re-seeding it from
+    // LOCAL_RETENTION_DAYS would re-arm data deletion for an operator who
+    // explicitly cleared it in the UI and is resetting something unrelated —
+    // the docs promise that clearing the window sticks.
+    const current = await this.storageClient.getSettings();
+    const defaults = this.buildSettingsFromEnv();
+    if (current) {
+      defaults.localRetentionDays = current.localRetentionDays;
+    }
+    await this.storageClient.saveSettings(defaults);
     const settings = await this.storageClient.getSettings();
 
     if (!settings) {
       throw new Error('Failed to reset settings');
     }
 
+    this.cacheGeneration++;
     this.cachedSettings = settings;
 
     return {

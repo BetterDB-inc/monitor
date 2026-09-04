@@ -12,6 +12,8 @@ import {
 } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import type { DatabasePort } from '../common/interfaces/database-port.interface';
+import { RetentionPolicyService } from '../retention/retention-policy.service';
+import { isCloudMode } from '../common/utils/cloud-mode';
 import { DiscoveryReaderService } from './discovery-reader.service';
 
 /** An instance plus its most recent polled sample (for the API). */
@@ -29,18 +31,23 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
   protected readonly logger = new Logger(AiObservabilityService.name);
   private readonly pollIntervalMs: number;
 
-  // Self-hosted deployments have no cloud retention cron, so the poller trims its
-  // own history locally at the community window. In CLOUD_MODE the tier-based
-  // data-retention sweep owns retention (and keeps longer for pro/enterprise),
-  // so the local prune is skipped there.
+  // Self-hosted deployments have no cloud retention cron, so the poller trims
+  // its own history locally when (and only when) the operator has configured
+  // a retention window — unset means keep forever. In CLOUD_MODE the
+  // tier-based data-retention sweep owns retention, so the local prune is
+  // skipped there.
   private readonly PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-  private readonly LOCAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-  private lastPruneAt = 0;
+  // Seeded at construction so the first trim lands one interval AFTER boot:
+  // enabling a retention window over a large backlog must not start a mass
+  // delete during the boot burst (the startup-delayed daily sweep owns
+  // backlog reclamation).
+  private lastPruneAt = Date.now();
 
   constructor(
     connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly discovery: DiscoveryReaderService,
+    private readonly retentionPolicy: RetentionPolicyService,
   ) {
     super(connectionRegistry);
     // Validate the env override: an empty, zero, negative, or non-numeric value
@@ -90,12 +97,14 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
     }
   }
 
-  /** Local, community-window prune for self-hosted (cloud uses the tier-based sweep). */
+  /** Local prune for self-hosted, only when a window is configured (cloud uses the tier-based sweep). */
   private async maybePruneLocally(now: number): Promise<void> {
-    if (process.env.CLOUD_MODE === 'true') return;
+    if (isCloudMode()) return;
+    const retentionMs = this.retentionPolicy.getSampleRetentionMs();
+    if (retentionMs === null) return;
     if (now - this.lastPruneAt <= this.PRUNE_INTERVAL_MS) return;
     this.lastPruneAt = now;
-    const cutoff = now - this.LOCAL_RETENTION_MS;
+    const cutoff = now - retentionMs;
     try {
       await this.storage.pruneOldAiCacheSamples(cutoff);
     } catch (err) {

@@ -5,11 +5,18 @@ import { licenseApi } from '../api/license';
 import { useMcpTokens } from '../hooks/useMcpTokens';
 import { useConnection } from '../hooks/useConnection';
 import { useLicense } from '../hooks/useLicense';
-import { AppSettings, SettingsUpdateRequest } from '@betterdb/shared';
+import {
+  AppSettings,
+  SettingsUpdateRequest,
+  MAX_RETENTION_DAYS,
+  normalizeRetentionDays,
+} from '@betterdb/shared';
 import { Card } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { useQueryClient } from '@tanstack/react-query';
-type SettingsCategory = 'license' | 'audit' | 'clientAnalytics' | 'anomaly' | 'mcpTokens';
+type SettingsCategory = 'license' | 'audit' | 'clientAnalytics' | 'anomaly' | 'dataRetention' | 'mcpTokens';
+
+const RETENTION_INPUT_ERROR = `Enter a whole number of days between 1 and ${MAX_RETENTION_DAYS}, or leave empty to keep history forever.`;
 
 export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const { currentConnection } = useConnection();
@@ -23,6 +30,19 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>('license');
   const [formData, setFormData] = useState<Partial<AppSettings>>({});
   const [hasChanges, setHasChanges] = useState(false);
+
+  // Raw text of the retention input so invalid entries stay visible with an
+  // error instead of silently collapsing to "keep forever".
+  const [retentionInput, setRetentionInput] = useState('');
+  const [retentionError, setRetentionError] = useState<string | null>(null);
+
+  // Single sync point for the retention draft: every path that commits or
+  // reloads settings resets the input to the stored value and clears any
+  // pending error, so the pair can never drift between call sites.
+  const syncRetentionFrom = (days: number | null | undefined) => {
+    setRetentionInput(days != null ? String(days) : '');
+    setRetentionError(null);
+  };
 
   // License state
   const [activateKey, setActivateKey] = useState('');
@@ -60,6 +80,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
       setHasChanges(false);
+      syncRetentionFrom(response.settings.localRetentionDays);
     } catch (error) {
       console.error('Failed to load settings:', error);
     } finally {
@@ -92,6 +113,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
       setHasChanges(false);
+      syncRetentionFrom(response.settings.localRetentionDays);
     } catch (error) {
       console.error('Failed to save settings:', error);
       alert('Failed to save settings. Please try again.');
@@ -104,6 +126,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     if (settings) {
       setFormData(settings);
       setHasChanges(false);
+      syncRetentionFrom(settings.localRetentionDays);
     }
   };
 
@@ -120,6 +143,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
       setHasChanges(false);
+      syncRetentionFrom(response.settings.localRetentionDays);
     } catch (error) {
       console.error('Failed to reset settings:', error);
       alert('Failed to reset settings. Please try again.');
@@ -277,6 +301,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     { id: 'audit', label: 'Audit Trail' },
     { id: 'clientAnalytics', label: 'Client Analytics' },
     { id: 'anomaly', label: 'Anomaly Detection' },
+    ...(!isCloudMode ? [{ id: 'dataRetention' as const, label: 'Data Retention' }] : []),
     ...(isCloudMode ? [{ id: 'mcpTokens' as const, label: 'MCP Tokens' }] : []),
   ];
 
@@ -298,7 +323,26 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
           {categories.map((category) => (
             <button
               key={category.id}
-              onClick={() => setActiveCategory(category.id)}
+              onClick={() => {
+                setActiveCategory(category.id);
+                // A pending invalid retention entry gates the shared Save
+                // button but its message only renders inside the Data
+                // Retention tab — leaving the tab discards the invalid text
+                // (formData was never updated with it) so other tabs aren't
+                // blocked by an error they can't see.
+                if (category.id !== 'dataRetention' && retentionError) {
+                  // Discard the WHOLE draft, including any valid prefix that
+                  // was committed to formData while typing (e.g. "3" en route
+                  // to "3650") — reverting only the visible input would let a
+                  // hidden partial value ride along with a save made from
+                  // another tab and silently shrink the retention window.
+                  setFormData((prev) => ({
+                    ...prev,
+                    localRetentionDays: settings?.localRetentionDays ?? null,
+                  }));
+                  syncRetentionFrom(settings?.localRetentionDays);
+                }
+              }}
               className={`w-full text-left px-4 py-3 rounded-lg transition-colors ${
                 activeCategory === category.id
                   ? 'bg-primary/10 text-primary font-medium'
@@ -562,6 +606,71 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
               </div>
             )}
 
+            {activeCategory === 'dataRetention' && (
+              <div className="space-y-4">
+                <h2 className="text-xl font-semibold mb-4">Data Retention</h2>
+                <p className="text-sm text-muted-foreground">
+                  Stored monitoring history is kept indefinitely by default. Set a retention window
+                  to have a daily sweep delete rows older than that many days from every store: slow
+                  log and command log entries, client/latency/memory snapshots, latency histograms,
+                  anomaly events and correlated groups, <strong>ACL audit entries</strong>, key
+                  pattern snapshots and hot keys, webhook deliveries, monitor captures, AI cache
+                  samples, OTel spans, command/latency stats samples, and vector index snapshots.
+                </p>
+
+                <div>
+                  <label className="block text-sm font-medium mb-1">Retention window (days)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={MAX_RETENTION_DAYS}
+                    step={1}
+                    value={retentionInput}
+                    placeholder="Keep forever"
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      setRetentionInput(raw);
+                      // Number inputs report invalid text (e.g. "30e") as an
+                      // empty value with validity.badInput set — that is NOT
+                      // the user clearing the field, so keep the error state
+                      // instead of committing "keep forever".
+                      if (e.currentTarget.validity.badInput) {
+                        setRetentionError(RETENTION_INPUT_ERROR);
+                        return;
+                      }
+                      if (raw.trim() === '') {
+                        setRetentionError(null);
+                        handleInputChange('localRetentionDays', null);
+                        return;
+                      }
+                      // valueAsNumber understands everything a number input
+                      // accepts (e.g. "1e2" is 100, not parseInt's 1). Whole
+                      // numbers only — flooring "1.5" would delete history
+                      // earlier than the user asked for.
+                      const parsed = normalizeRetentionDays(e.currentTarget.valueAsNumber);
+                      if (parsed !== null) {
+                        setRetentionError(null);
+                        handleInputChange('localRetentionDays', parsed);
+                      } else {
+                        setRetentionError(RETENTION_INPUT_ERROR);
+                      }
+                    }}
+                    className="w-full px-3 py-2 border rounded-md"
+                  />
+                  {retentionError && (
+                    <p className="text-sm text-destructive mt-1">{retentionError}</p>
+                  )}
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Leave empty to keep history indefinitely. On a fresh install the{' '}
+                    <code className="font-mono">LOCAL_RETENTION_DAYS</code> environment variable
+                    seeds this value; afterwards this page owns it. High-volume stat samples
+                    (command/latency stats, vector index snapshots, AI samples, OTel spans) are additionally
+                    trimmed to this window on an hourly cycle.
+                  </p>
+                </div>
+              </div>
+            )}
+
             {activeCategory === 'mcpTokens' && (
               <div className="space-y-4">
                 <h2 className="text-xl font-semibold mb-4">MCP Tokens</h2>
@@ -698,7 +807,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
               <div className="flex items-center gap-3 mt-6 pt-6 border-t">
                 <button
                   onClick={handleSave}
-                  disabled={!hasChanges || saving}
+                  disabled={!hasChanges || saving || retentionError !== null}
                   className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed"
                 >
                   {saving ? 'Saving...' : 'Save Changes'}

@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { chunkedSqliteDelete } from './sqlite-chunked-delete';
 import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
@@ -419,6 +420,7 @@ export class SqliteAdapter implements StoragePort {
         type: 'INTEGER NOT NULL DEFAULT 7200000',
       },
       { name: 'inference_sla_config', type: "TEXT NOT NULL DEFAULT '{}'" },
+      { name: 'local_retention_days', type: 'INTEGER' },
     ];
     for (const col of appSettingsMigrations) {
       if (!settingsColumns.has(col.name)) {
@@ -685,17 +687,13 @@ export class SqliteAdapter implements StoragePort {
     }
 
     if (connectionId) {
-      const result = this.db
-        .prepare('DELETE FROM acl_audit WHERE captured_at < ? AND connection_id = ?')
-        .run(olderThanTimestamp, connectionId);
-      return result.changes;
+      return chunkedSqliteDelete(this.db, 'acl_audit', 'captured_at < ? AND connection_id = ?', [
+        olderThanTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = this.db
-      .prepare('DELETE FROM acl_audit WHERE captured_at < ?')
-      .run(olderThanTimestamp);
-
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'acl_audit', 'captured_at < ?', [olderThanTimestamp]);
   }
 
   async saveClientSnapshot(clients: StoredClientSnapshot[], connectionId: string): Promise<number> {
@@ -1174,17 +1172,13 @@ export class SqliteAdapter implements StoragePort {
     }
 
     if (connectionId) {
-      const result = this.db
-        .prepare('DELETE FROM client_snapshots WHERE captured_at < ? AND connection_id = ?')
-        .run(olderThanTimestamp, connectionId);
-      return result.changes;
+      return chunkedSqliteDelete(this.db, 'client_snapshots', 'captured_at < ? AND connection_id = ?', [
+        olderThanTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = this.db
-      .prepare('DELETE FROM client_snapshots WHERE captured_at < ?')
-      .run(olderThanTimestamp);
-
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'client_snapshots', 'captured_at < ?', [olderThanTimestamp]);
   }
 
   private migrateCveAdvisoriesTable(): void {
@@ -1397,6 +1391,8 @@ export class SqliteAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_hks_connection_captured
         ON hot_key_stats(connection_id, captured_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_hot_key_captured_at_global
+        ON hot_key_stats(captured_at);
 
       CREATE TABLE IF NOT EXISTS app_settings (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1409,6 +1405,7 @@ export class SqliteAdapter implements StoragePort {
         throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
         throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
         inference_sla_config TEXT NOT NULL DEFAULT '{}',
+        local_retention_days INTEGER,
         updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
         created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
       );
@@ -1462,6 +1459,7 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook_id ON webhook_deliveries(webhook_id);
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_retry ON webhook_deliveries(next_retry_at) WHERE status = 'retrying';
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_connection_id ON webhook_deliveries(connection_id);
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_created_at ON webhook_deliveries(created_at);
 
       CREATE TABLE IF NOT EXISTS slow_log_entries (
         pk INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1569,6 +1567,8 @@ export class SqliteAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at
         ON command_stats_samples(connection_id, command, captured_at);
+      CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at_global
+        ON command_stats_samples(captured_at);
 
       CREATE TABLE IF NOT EXISTS latency_stats_samples (
         id TEXT PRIMARY KEY,
@@ -1585,6 +1585,8 @@ export class SqliteAdapter implements StoragePort {
         ON latency_stats_samples(connection_id, command, captured_at);
       CREATE INDEX IF NOT EXISTS idx_latstat_captured_at
         ON latency_stats_samples(connection_id, captured_at);
+      CREATE INDEX IF NOT EXISTS idx_latstat_captured_at_global
+        ON latency_stats_samples(captured_at);
 
       CREATE TABLE IF NOT EXISTS ai_cache_samples (
         id TEXT PRIMARY KEY,
@@ -1608,6 +1610,8 @@ export class SqliteAdapter implements StoragePort {
         ON ai_cache_samples(connection_id, instance_field, timestamp);
       CREATE INDEX IF NOT EXISTS idx_aicache_ts
         ON ai_cache_samples(connection_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_aicache_ts_global
+        ON ai_cache_samples(timestamp);
 
       CREATE TABLE IF NOT EXISTS otel_spans (
         trace_id TEXT NOT NULL,
@@ -1797,6 +1801,7 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_started_at ON capture_sessions(started_at DESC);
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_status ON capture_sessions(status, started_at DESC);
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_source ON capture_sessions(source, started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_capture_sessions_ended_at ON capture_sessions(ended_at);
 
       -- Monitor Capture Chunks Table (one row per batched MONITOR-line chunk; populated by CaptureWriter in a later PR)
       CREATE TABLE IF NOT EXISTS capture_chunks (
@@ -1811,6 +1816,7 @@ export class SqliteAdapter implements StoragePort {
       );
 
       CREATE INDEX IF NOT EXISTS idx_capture_chunks_session ON capture_chunks(session_id, chunk_index);
+      CREATE INDEX IF NOT EXISTS idx_capture_chunks_last_ts ON capture_chunks(last_ts);
 
       -- Pro+ Capture Triggers Table (PR 15)
       CREATE TABLE IF NOT EXISTS capture_triggers (
@@ -2231,16 +2237,13 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db
-        .prepare('DELETE FROM anomaly_events WHERE timestamp < ? AND connection_id = ?')
-        .run(cutoffTimestamp, connectionId);
-      return result.changes;
+      return chunkedSqliteDelete(this.db, 'anomaly_events', 'timestamp < ? AND connection_id = ?', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = this.db
-      .prepare('DELETE FROM anomaly_events WHERE timestamp < ?')
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'anomaly_events', 'timestamp < ?', [cutoffTimestamp]);
   }
 
   async saveCorrelatedGroup(group: StoredCorrelatedGroup, connectionId: string): Promise<string> {
@@ -2324,16 +2327,13 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db
-        .prepare('DELETE FROM correlated_anomaly_groups WHERE timestamp < ? AND connection_id = ?')
-        .run(cutoffTimestamp, connectionId);
-      return result.changes;
+      return chunkedSqliteDelete(this.db, 'correlated_anomaly_groups', 'timestamp < ? AND connection_id = ?', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = this.db
-      .prepare('DELETE FROM correlated_anomaly_groups WHERE timestamp < ?')
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'correlated_anomaly_groups', 'timestamp < ?', [cutoffTimestamp]);
   }
 
   async saveKeyPatternSnapshots(
@@ -2597,16 +2597,13 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db
-        .prepare('DELETE FROM key_pattern_snapshots WHERE timestamp < ? AND connection_id = ?')
-        .run(cutoffTimestamp, connectionId);
-      return result.changes;
+      return chunkedSqliteDelete(this.db, 'key_pattern_snapshots', 'timestamp < ? AND connection_id = ?', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = this.db
-      .prepare('DELETE FROM key_pattern_snapshots WHERE timestamp < ?')
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'key_pattern_snapshots', 'timestamp < ?', [cutoffTimestamp]);
   }
 
   async saveHotKeys(entries: HotKeyEntry[], connectionId: string): Promise<number> {
@@ -2725,16 +2722,13 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db
-        .prepare('DELETE FROM hot_key_stats WHERE captured_at < ? AND connection_id = ?')
-        .run(cutoffTimestamp, connectionId);
-      return result.changes;
+      return chunkedSqliteDelete(this.db, 'hot_key_stats', 'captured_at < ? AND connection_id = ?', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = this.db
-      .prepare('DELETE FROM hot_key_stats WHERE captured_at < ?')
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'hot_key_stats', 'captured_at < ?', [cutoffTimestamp]);
   }
 
   async getSettings(): Promise<AppSettings | null> {
@@ -2758,9 +2752,9 @@ export class SqliteAdapter implements StoragePort {
         id, audit_poll_interval_ms, client_analytics_poll_interval_ms,
         anomaly_poll_interval_ms, anomaly_cache_ttl_ms, anomaly_prometheus_interval_ms,
         throughput_forecasting_enabled, throughput_forecasting_default_rolling_window_ms, throughput_forecasting_default_alert_threshold_ms,
-        inference_sla_config,
+        inference_sla_config, local_retention_days,
         updated_at, created_at
-      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         audit_poll_interval_ms = excluded.audit_poll_interval_ms,
         client_analytics_poll_interval_ms = excluded.client_analytics_poll_interval_ms,
@@ -2771,6 +2765,7 @@ export class SqliteAdapter implements StoragePort {
         throughput_forecasting_default_rolling_window_ms = excluded.throughput_forecasting_default_rolling_window_ms,
         throughput_forecasting_default_alert_threshold_ms = excluded.throughput_forecasting_default_alert_threshold_ms,
         inference_sla_config = excluded.inference_sla_config,
+        local_retention_days = excluded.local_retention_days,
         updated_at = excluded.updated_at
     `);
 
@@ -2784,6 +2779,7 @@ export class SqliteAdapter implements StoragePort {
       settings.metricForecastingDefaultRollingWindowMs,
       settings.metricForecastingDefaultAlertThresholdMs,
       JSON.stringify(settings.inferenceSlaConfig ?? {}),
+      settings.localRetentionDays ?? null,
       now,
       settings.createdAt || now,
     );
@@ -3030,16 +3026,13 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db
-        .prepare('DELETE FROM command_log_entries WHERE captured_at < ? AND connection_id = ?')
-        .run(cutoffTimestamp, connectionId);
-      return result.changes;
+      return chunkedSqliteDelete(this.db, 'command_log_entries', 'captured_at < ? AND connection_id = ?', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = this.db
-      .prepare('DELETE FROM command_log_entries WHERE captured_at < ?')
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'command_log_entries', 'captured_at < ?', [cutoffTimestamp]);
   }
 
   // Latency Snapshot Methods
@@ -3122,16 +3115,13 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db
-        .prepare('DELETE FROM latency_snapshots WHERE timestamp < ? AND connection_id = ?')
-        .run(cutoffTimestamp, connectionId);
-      return result.changes;
+      return chunkedSqliteDelete(this.db, 'latency_snapshots', 'timestamp < ? AND connection_id = ?', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = this.db
-      .prepare('DELETE FROM latency_snapshots WHERE timestamp < ?')
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'latency_snapshots', 'timestamp < ?', [cutoffTimestamp]);
   }
 
   // Latency Histogram Methods
@@ -3196,16 +3186,13 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db
-        .prepare('DELETE FROM latency_histograms WHERE timestamp < ? AND connection_id = ?')
-        .run(cutoffTimestamp, connectionId);
-      return result.changes;
+      return chunkedSqliteDelete(this.db, 'latency_histograms', 'timestamp < ? AND connection_id = ?', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = this.db
-      .prepare('DELETE FROM latency_histograms WHERE timestamp < ?')
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'latency_histograms', 'timestamp < ?', [cutoffTimestamp]);
   }
 
   // Memory Snapshot Methods
@@ -3309,16 +3296,13 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db
-        .prepare('DELETE FROM memory_snapshots WHERE timestamp < ? AND connection_id = ?')
-        .run(cutoffTimestamp, connectionId);
-      return result.changes;
+      return chunkedSqliteDelete(this.db, 'memory_snapshots', 'timestamp < ? AND connection_id = ?', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = this.db
-      .prepare('DELETE FROM memory_snapshots WHERE timestamp < ?')
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'memory_snapshots', 'timestamp < ?', [cutoffTimestamp]);
   }
 
   // Command Stats Sample Methods
@@ -3407,16 +3391,13 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db
-        .prepare('DELETE FROM command_stats_samples WHERE captured_at < ? AND connection_id = ?')
-        .run(cutoffTimestamp, connectionId);
-      return result.changes;
+      return chunkedSqliteDelete(this.db, 'command_stats_samples', 'captured_at < ? AND connection_id = ?', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = this.db
-      .prepare('DELETE FROM command_stats_samples WHERE captured_at < ?')
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'command_stats_samples', 'captured_at < ?', [cutoffTimestamp]);
   }
 
   // Latency Stats Sample Methods (INFO latencystats)
@@ -3501,16 +3482,13 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db
-        .prepare('DELETE FROM latency_stats_samples WHERE captured_at < ? AND connection_id = ?')
-        .run(cutoffTimestamp, connectionId);
-      return result.changes;
+      return chunkedSqliteDelete(this.db, 'latency_stats_samples', 'captured_at < ? AND connection_id = ?', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = this.db
-      .prepare('DELETE FROM latency_stats_samples WHERE captured_at < ?')
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'latency_stats_samples', 'captured_at < ?', [cutoffTimestamp]);
   }
 
   // AI Cache/Memory Sample Methods
@@ -3628,16 +3606,13 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db
-        .prepare('DELETE FROM ai_cache_samples WHERE timestamp < ? AND connection_id = ?')
-        .run(cutoffTimestamp, connectionId);
-      return result.changes;
+      return chunkedSqliteDelete(this.db, 'ai_cache_samples', 'timestamp < ? AND connection_id = ?', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = this.db
-      .prepare('DELETE FROM ai_cache_samples WHERE timestamp < ?')
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'ai_cache_samples', 'timestamp < ?', [cutoffTimestamp]);
   }
 
   // OTLP Trace Methods
@@ -3771,14 +3746,30 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
     // Prune whole traces (by trace-level start), not individual spans, so a long
     // trace never loses its root/early spans while later ones survive.
-    const result = this.db
-      .prepare(
-        `DELETE FROM otel_spans WHERE trace_id IN (
-           SELECT trace_id FROM otel_spans GROUP BY trace_id HAVING MIN(start_time_ms) < ?
-         )`,
-      )
-      .run(cutoffTimestamp);
-    return result.changes;
+    // "MIN(start_time_ms) < c" is equivalent to "any span < c", so the
+    // index-driven DISTINCT probe replaces the full GROUP BY aggregate scan.
+    //
+    // Batched per TRACE, not per row: a generic rowid-chunked delete would
+    // re-evaluate the "which traces are old" probe after a chunk removed a
+    // trace's old spans, letting its newer spans survive as orphans. One
+    // statement per batch selects up to TRACE_BATCH old trace ids and deletes
+    // ALL their spans atomically, so no trace is ever split; terminate on an
+    // empty batch (row counts count spans, not traces, so a short batch
+    // proves nothing).
+    const TRACE_BATCH = 1_000;
+    const deleteBatch = this.db.prepare(
+      `DELETE FROM otel_spans WHERE trace_id IN (
+         SELECT DISTINCT trace_id FROM otel_spans WHERE start_time_ms < ? LIMIT ?
+       )`,
+    );
+    let total = 0;
+    for (;;) {
+      const { changes } = deleteBatch.run(cutoffTimestamp, TRACE_BATCH);
+      if (changes === 0) break;
+      total += changes;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    return total;
   }
 
   // Vector Index Snapshot Methods
@@ -3891,16 +3882,13 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db
-        .prepare('DELETE FROM vector_index_snapshots WHERE timestamp < ? AND connection_id = ?')
-        .run(cutoffTimestamp, connectionId);
-      return result.changes;
+      return chunkedSqliteDelete(this.db, 'vector_index_snapshots', 'timestamp < ? AND connection_id = ?', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = this.db
-      .prepare('DELETE FROM vector_index_snapshots WHERE timestamp < ?')
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'vector_index_snapshots', 'timestamp < ?', [cutoffTimestamp]);
   }
 
   // CVE Inspection Methods
@@ -5231,42 +5219,37 @@ export class SqliteAdapter implements StoragePort {
 
   async pruneOldCaptureSessions(cutoffTimestamp: number): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
-    const result = this.db
-      .prepare(
-        "DELETE FROM capture_sessions WHERE ended_at IS NOT NULL AND ended_at < ? AND status != 'running'",
-      )
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(
+      this.db,
+      'capture_sessions',
+      "ended_at IS NOT NULL AND ended_at < ? AND status != 'running'",
+      [cutoffTimestamp],
+    );
   }
 
   async pruneOldCaptureChunks(cutoffTimestamp: number): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
-    const result = this.db
-      .prepare('DELETE FROM capture_chunks WHERE last_ts < ?')
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'capture_chunks', 'last_ts < ?', [cutoffTimestamp]);
   }
 
   async pruneOldCaptureTriggers(cutoffTimestamp: number): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
-    const result = this.db
-      .prepare(
-        `DELETE FROM capture_triggers
-         WHERE created_at < ?
-           AND status IN ('fired','skipped','expired','cancelled')`,
-      )
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(
+      this.db,
+      'capture_triggers',
+      "created_at < ? AND status IN ('fired','skipped','expired','cancelled')",
+      [cutoffTimestamp],
+    );
   }
 
   async pruneOldScheduledCaptures(cutoffTimestamp: number): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
-    const result = this.db
-      .prepare(
-        "DELETE FROM scheduled_captures WHERE created_at < ? AND status = 'disabled'",
-      )
-      .run(cutoffTimestamp);
-    return result.changes;
+    return chunkedSqliteDelete(
+      this.db,
+      'scheduled_captures',
+      "created_at < ? AND status = 'disabled'",
+      [cutoffTimestamp],
+    );
   }
 
   private mapScheduledCaptureRow(row: Record<string, unknown>): StoredScheduledCapture {

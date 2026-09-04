@@ -74,6 +74,19 @@ export const TIER_FEATURES: Record<Tier, Feature[]> = {
   [Tier.enterprise]: Object.values(Feature),
 };
 
+/**
+ * Canonical per-tier retention window for stored monitoring history, in days.
+ * Applies to cloud deployments only (the nightly sweep and feature-level
+ * pruning derive their cutoffs from it). Self-hosted retention is governed
+ * solely by the `localRetentionDays` app setting (or `LOCAL_RETENTION_DAYS`
+ * env var) — unset means keep forever.
+ */
+export const TIER_RETENTION_DAYS: Record<Tier, number> = {
+  [Tier.community]: 7,
+  [Tier.pro]: 90,
+  [Tier.enterprise]: 365,
+};
+
 export interface EntitlementResponse {
   valid: boolean;
   tier: Tier;

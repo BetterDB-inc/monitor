@@ -20,6 +20,7 @@ function makeService(opts: {
     }),
     getAiCacheHistory: jest.fn(async () => []),
     pruneOldAiCacheSamples: jest.fn(async () => 0),
+    pruneOldOtelSpans: jest.fn(async () => 0),
   } as unknown as StoragePort;
 
   const client = {
@@ -32,7 +33,8 @@ function makeService(opts: {
     discoverWithClient: jest.fn(async () => opts.instances),
   } as unknown as DiscoveryReaderService;
 
-  const svc = new AiObservabilityService(registry, storage, discovery);
+  const retentionPolicy = { getSampleRetentionMs: () => 7 * 24 * 60 * 60 * 1000 } as any;
+  const svc = new AiObservabilityService(registry, storage, discovery, retentionPolicy);
   const ctx = { connectionId: 'c1', connectionName: 'c1', client, host: 'h', port: 6379 } as any;
   return { svc, ctx, saved, storage };
 }
@@ -131,6 +133,9 @@ describe('AiObservabilityService.pollConnection', () => {
       call: (cmd) => (cmd === 'HGETALL' ? ['llm:hits', '1', 'llm:misses', '0'] : []),
     });
     const prune = storage.pruneOldAiCacheSamples as jest.Mock;
+    // The first prune is deferred by one interval after boot; simulate that
+    // interval having elapsed.
+    (svc as any).lastPruneAt = 0;
 
     const prev = process.env.CLOUD_MODE;
     process.env.CLOUD_MODE = 'true';
@@ -138,8 +143,15 @@ describe('AiObservabilityService.pollConnection', () => {
     expect(prune).not.toHaveBeenCalled(); // cloud sweep owns retention
 
     delete process.env.CLOUD_MODE;
+    const before = Date.now();
     await (svc as any).pollConnection(ctx);
     expect(prune).toHaveBeenCalledTimes(1); // self-hosted trims locally
+    const otelPrune = storage.pruneOldOtelSpans as jest.Mock;
+    expect(otelPrune).toHaveBeenCalledTimes(1); // spans age out on the same cycle
+    const cutoff = otelPrune.mock.calls[0][0];
+    const window = 7 * 24 * 60 * 60 * 1000;
+    expect(cutoff).toBeGreaterThanOrEqual(before - window);
+    expect(cutoff).toBeLessThanOrEqual(Date.now() - window);
     if (prev !== undefined) process.env.CLOUD_MODE = prev;
   });
 
@@ -161,6 +173,7 @@ describe('AiObservabilityService.pollConnection', () => {
     const prev = process.env.CLOUD_MODE;
     delete process.env.CLOUD_MODE;
     const { svc, ctx, storage } = makeService({ instances: [], call: () => [] });
+    (svc as any).lastPruneAt = 0; // deferred first interval elapsed
     await (svc as any).pollConnection(ctx);
     expect(storage.saveAiCacheSamples).not.toHaveBeenCalled();
     // Prune runs before the early return, so removed libraries' samples still age out.

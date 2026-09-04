@@ -1,4 +1,5 @@
 import { Logger, Provider, Type } from '@nestjs/common';
+import { isCloudMode } from '../utils/cloud-mode';
 import { MCP_TOKEN_SERVICE } from './agent-token.guard';
 
 interface AgentTokensModule {
@@ -9,7 +10,7 @@ export function createAgentTokenProviders(
   logger: Logger,
   loadModule: () => AgentTokensModule,
 ): Provider[] {
-  if (process.env.CLOUD_MODE !== 'true') {
+  if (!isCloudMode()) {
     return [];
   }
   try {

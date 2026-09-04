@@ -1,4 +1,5 @@
 import { Injectable, CanActivate, ExecutionContext, UnauthorizedException, Optional, Inject, Logger } from '@nestjs/common';
+import { isCloudMode } from '../utils/cloud-mode';
 import { FastifyRequest } from 'fastify';
 
 export const MCP_TOKEN_SERVICE = 'MCP_TOKEN_SERVICE';
@@ -14,7 +15,7 @@ export class AgentTokenGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     if (!this.tokenService) {
       // In cloud mode, auth is mandatory — a missing token service means broken config
-      if (process.env.CLOUD_MODE === 'true') {
+      if (isCloudMode()) {
         this.logger.warn('Token service unavailable in cloud mode — rejecting request');
         throw new UnauthorizedException('Authentication service unavailable');
       }

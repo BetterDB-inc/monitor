@@ -1,4 +1,5 @@
 import { Injectable, CanActivate, ExecutionContext } from '@nestjs/common';
+import { isCloudMode } from '@app/common/utils/cloud-mode';
 import { FastifyRequest, FastifyReply } from 'fastify';
 import * as jwt from 'jsonwebtoken';
 
@@ -16,9 +17,9 @@ export class CloudAuthGuardImpl implements CanActivate {
 
   canActivate(context: ExecutionContext): boolean {
     // Not in cloud mode — allow everything. Match the codebase convention
-    // (CLOUD_MODE === 'true') so a value like "false"/"0" is treated as
+    // (isCloudMode()) so a value like "false"/"0" is treated as
     // self-hosted here and everywhere else, not as an ambiguous cloud state.
-    if (process.env.CLOUD_MODE !== 'true') return true;
+    if (!isCloudMode()) return true;
 
     const request = context.switchToHttp().getRequest<FastifyRequest>();
     const reply = context.switchToHttp().getResponse<FastifyReply>();

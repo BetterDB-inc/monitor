@@ -5,6 +5,7 @@ import {
   ConnectionContext,
 } from '../common/services/multi-connection-poller';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
+import { RetentionPolicyService } from '../retention/retention-policy.service';
 import { parseLatencyStatsSection } from './latencystats-parser';
 
 export interface LatencyStatsSnapshotEntry {
@@ -33,7 +34,6 @@ export class LatencystatsPollerService extends MultiConnectionPoller implements 
 
   private readonly POLL_INTERVAL_MS = 60_000; // 60 seconds
   private readonly PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-  private readonly RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
   private lastPruneByConnection = new Map<string, number>();
   private snapshots = new Map<string, ConnectionSnapshot>();
   private sectionAbsentLogged = new Set<string>();
@@ -41,6 +41,7 @@ export class LatencystatsPollerService extends MultiConnectionPoller implements 
   constructor(
     connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
+    private retentionPolicy: RetentionPolicyService,
   ) {
     super(connectionRegistry);
   }
@@ -127,10 +128,20 @@ export class LatencystatsPollerService extends MultiConnectionPoller implements 
       capturedAt: now,
     });
 
-    const lastPrune = this.lastPruneByConnection.get(ctx.connectionId) ?? 0;
-    if (now - lastPrune > this.PRUNE_INTERVAL_MS) {
+    const lastPrune = this.lastPruneByConnection.get(ctx.connectionId);
+    if (lastPrune === undefined) {
+      // First tick for this connection: seed the clock and defer the initial
+      // trim by one interval, so enabling a retention window over a large
+      // backlog doesn't start a mass delete during the boot burst — the
+      // daily sweep, which is startup-delayed for the same reason, owns
+      // backlog reclamation.
       this.lastPruneByConnection.set(ctx.connectionId, now);
-      await this.storage.pruneOldLatencyStatsSamples(now - this.RETENTION_MS, ctx.connectionId);
+    } else if (now - lastPrune > this.PRUNE_INTERVAL_MS) {
+      const retentionMs = this.retentionPolicy.getSampleRetentionMs();
+      if (retentionMs !== null) {
+        this.lastPruneByConnection.set(ctx.connectionId, now);
+        await this.storage.pruneOldLatencyStatsSamples(now - retentionMs, ctx.connectionId);
+      }
     }
   }
 }

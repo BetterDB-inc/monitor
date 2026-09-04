@@ -1,4 +1,5 @@
 import { Injectable, Optional, Inject, OnModuleInit } from '@nestjs/common';
+import { isCloudMode } from '../common/utils/cloud-mode';
 import { ConfigService } from '@nestjs/config';
 import { LicenseService } from '@proprietary/licenses';
 import { TelemetryPort } from '../common/interfaces/telemetry-port.interface';
@@ -22,7 +23,7 @@ export class UsageTelemetryService implements OnModuleInit {
       this.configService.get<string>('npm_package_version') ||
       'unknown';
     this.deploymentMode =
-      this.configService.get<string>('CLOUD_MODE') === 'true' ? 'cloud' : 'self-hosted';
+      isCloudMode() ? 'cloud' : 'self-hosted';
     this.workspaceName = this.configService.get<string>('TENANT_ID') || undefined;
     const dbSchema = this.configService.get<string>('DB_SCHEMA');
     this.subdomain = dbSchema?.startsWith('tenant_')

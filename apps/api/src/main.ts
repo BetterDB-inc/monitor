@@ -1,4 +1,5 @@
 import { INestApplication, Logger, RequestMethod, ValidationPipe } from '@nestjs/common';
+import { isCloudMode } from './common/utils/cloud-mode';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
@@ -83,7 +84,7 @@ async function bootstrap(): Promise<void> {
 
   // Register cloud auth middleware at Fastify level BEFORE any other middleware
   // This ensures it runs before static file serving
-  if (process.env.CLOUD_MODE) {
+  if (isCloudMode()) {
     try {
       const {
         CloudAuthMiddleware,
@@ -205,7 +206,7 @@ async function bootstrap(): Promise<void> {
     const tailGateway = app.get(TailGateway);
     const httpServer = app.getHttpServer();
 
-    const agentGateway = process.env.CLOUD_MODE
+    const agentGateway = isCloudMode()
       ? (() => {
           try {
             const { AgentGateway } = require('../../../proprietary/agent/agent-gateway');

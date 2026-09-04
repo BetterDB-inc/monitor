@@ -2,6 +2,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { VectorSearchService } from '../vector-search.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
+import { RetentionPolicyService } from '../../retention/retention-policy.service';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { ConnectionContext } from '../../common/services/multi-connection-poller';
 import { PrometheusService } from '../../prometheus/prometheus.service';
@@ -68,6 +69,10 @@ describe('VectorSearchService.pollConnection — extended snapshot fields', () =
         {
           provide: ConnectionRegistry,
           useValue: { getDefaultId: jest.fn(), list: jest.fn().mockReturnValue([]) },
+        },
+        {
+          provide: RetentionPolicyService,
+          useValue: { getSampleRetentionMs: () => 7 * 24 * 60 * 60 * 1000 },
         },
       ],
     }).compile();

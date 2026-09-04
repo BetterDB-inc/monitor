@@ -1,4 +1,5 @@
 import { Pool } from 'pg';
+import { chunkedPostgresDelete } from '../postgres-chunked-delete';
 import {
   SlowLogQueryOptions,
   StoredSlowLogEntry,
@@ -122,17 +123,12 @@ export class SlowLogPostgresRepository {
 
   async pruneOldSlowLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (connectionId) {
-      const result = await this.pool.query(
-        'DELETE FROM slow_log_entries WHERE captured_at < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId],
-      );
-      return result.rowCount ?? 0;
+      return chunkedPostgresDelete(this.pool, 'slow_log_entries', 'captured_at < $1 AND connection_id = $2', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
     }
 
-    const result = await this.pool.query('DELETE FROM slow_log_entries WHERE captured_at < $1', [
-      cutoffTimestamp,
-    ]);
-
-    return result.rowCount ?? 0;
+    return chunkedPostgresDelete(this.pool, 'slow_log_entries', 'captured_at < $1', [cutoffTimestamp]);
   }
 }

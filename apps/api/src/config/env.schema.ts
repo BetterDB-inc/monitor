@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { MAX_RETENTION_DAYS, parseRetentionDaysToken } from '@betterdb/shared';
+import { isCloudModeValue } from '../common/utils/cloud-mode';
 
 /**
  * Environment variable validation schema
@@ -35,6 +37,21 @@ export const envSchema = z
     AUDIT_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(60000),
     CLIENT_ANALYTICS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(60000),
     AI_OBS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(15000),
+
+    // Self-hosted data retention: days of monitoring history to keep. Seeds
+    // the localRetentionDays app setting when the settings row is first
+    // created; unset means keep forever. Ignored in cloud mode.
+    // Uses the same strict validator as the runtime seeding path, so a value
+    // like "1e2" fails at boot instead of passing here and silently seeding
+    // null later.
+    // A present-but-blank value (LOCAL_RETENTION_DAYS= in an .env file) means
+    // unset/keep-forever, not a validation failure.
+    LOCAL_RETENTION_DAYS: z
+      .string()
+      .optional()
+      .refine((v) => v === undefined || v.trim() === '' || parseRetentionDaysToken(v) !== null, {
+        message: `LOCAL_RETENTION_DAYS must be a whole number of days between 1 and ${MAX_RETENTION_DAYS}`,
+      }),
 
     // AI configuration
     AI_ENABLED: z
@@ -242,7 +259,7 @@ export const envSchema = z
     // In cloud mode the OTLP ingest path is allowlisted past session auth, so the
     // bearer token is the only credential guarding it. Require it rather than
     // leaving a tenant's span store open to anonymous writes.
-    if (data.CLOUD_MODE === 'true' && !data.OTEL_INGEST_TOKEN) {
+    if (isCloudModeValue(data.CLOUD_MODE) && !data.OTEL_INGEST_TOKEN) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message:

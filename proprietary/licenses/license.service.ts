@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional } from '@nestjs/common';
+import { isCloudMode } from '@app/common/utils/cloud-mode';
 import { ConfigService } from '@nestjs/config';
 import { createHash, randomUUID } from 'crypto';
 import { compare, valid as validSemver } from 'semver';
@@ -602,7 +603,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async checkOnline(licenseKeyOverride?: string | null): Promise<EntitlementResponse> {
-    const isCloud = process.env.CLOUD_MODE === 'true';
+    const isCloud = isCloudMode();
     const payload: EntitlementRequest = {
       licenseKey: licenseKeyOverride ?? this.licenseKey ?? '', // Empty string for keyless instances
       instanceId: this.instanceId,
@@ -721,7 +722,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
    */
   private instanceCredential(): string | null {
     if (this.licenseKey) return this.licenseKey;
-    if (process.env.CLOUD_MODE === 'true' && process.env.DB_SCHEMA) {
+    if (isCloudMode() && process.env.DB_SCHEMA) {
       return `cloud:${process.env.DB_SCHEMA}`;
     }
     return null;
@@ -811,7 +812,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
         properties: {
           tier: this.getLicenseTier(),
           deploymentMode:
-            process.env.CLOUD_MODE === 'true' ? 'cloud' : 'self-hosted',
+            isCloudMode() ? 'cloud' : 'self-hosted',
           licenseKey,
           ...data,
         },
@@ -1344,7 +1345,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
       eventType: 'startup_error',
       errorMessage: errorMessage.slice(0, 500),
       errorCategory,
-      deploymentMode: process.env.CLOUD_MODE === 'true' ? 'cloud' as const : 'self-hosted' as const,
+      deploymentMode: isCloudMode() ? ('cloud' as const) : ('self-hosted' as const),
       version: process.env.APP_VERSION || process.env.npm_package_version || 'unknown',
       nodeVersion: process.version,
       platform: process.platform,

@@ -770,7 +770,10 @@ export class MemoryAdapter implements StoragePort {
     _cutoffTimestamp: number,
     _connectionId?: string,
   ): Promise<number> {
-    throw new Error('Key analytics not supported in memory adapter');
+    // Nothing is ever stored here, so there is nothing to prune. Returning 0
+    // (instead of throwing like the read/write paths) keeps the retention
+    // sweep from logging an error on every pass with the memory backend.
+    return 0;
   }
 
   async saveHotKeys(_entries: HotKeyEntry[], _connectionId: string): Promise<number> {
@@ -782,7 +785,10 @@ export class MemoryAdapter implements StoragePort {
   }
 
   async pruneOldHotKeys(_cutoffTimestamp: number, _connectionId?: string): Promise<number> {
-    throw new Error('Hot key stats not supported in memory adapter');
+    // Nothing is ever stored here, so there is nothing to prune. Returning 0
+    // (instead of throwing like the read/write paths) keeps the retention
+    // sweep from logging an error on every pass with the memory backend.
+    return 0;
   }
 
   async getSettings(): Promise<AppSettings | null> {
@@ -835,6 +841,9 @@ export class MemoryAdapter implements StoragePort {
     }
     if (updates.inferenceSlaConfig !== undefined) {
       validUpdates.inferenceSlaConfig = updates.inferenceSlaConfig;
+    }
+    if (updates.localRetentionDays !== undefined) {
+      validUpdates.localRetentionDays = updates.localRetentionDays;
     }
 
     this.settings = {
