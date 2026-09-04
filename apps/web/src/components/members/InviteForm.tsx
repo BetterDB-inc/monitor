@@ -4,7 +4,7 @@ import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 
 interface InviteFormProps {
-  onInvite: (email: string, role: string) => Promise<void>;
+  onInvite: (email: string, role: string) => Promise<boolean>;
 }
 
 export function InviteForm({ onInvite }: InviteFormProps): ReactElement {
@@ -20,7 +20,10 @@ export function InviteForm({ onInvite }: InviteFormProps): ReactElement {
     }
     setBusy(true);
     try {
-      await onInvite(trimmed, role);
+      const invited = await onInvite(trimmed, role);
+      if (invited === false) {
+        return;
+      }
       setEmail('');
       setRole('member');
     } finally {

@@ -85,6 +85,19 @@ describe('Members', () => {
     );
   });
 
+  it('keeps the typed email when the invite fails', async () => {
+    authState.user = { userId: 'u1', email: OWNER.email, role: 'admin', isOwner: true };
+    api.invite.mockRejectedValue(new Error('A pending invitation already exists for this email'));
+    render(<Members />);
+    await screen.findByText('member@example.com');
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'dupe@example.com' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Invite' }));
+    expect(
+      await screen.findByText('A pending invitation already exists for this email'),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Email')).toHaveValue('dupe@example.com');
+  });
+
   it('shows owner actions on other members only', async () => {
     authState.user = { userId: 'u1', email: OWNER.email, role: 'admin', isOwner: true };
     api.updateMemberRole.mockResolvedValue({ ...MEMBER, role: 'admin' });
