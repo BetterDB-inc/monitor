@@ -1,18 +1,16 @@
 import { z } from 'zod';
 import { MAX_RETENTION_DAYS, parseRetentionDaysToken } from '@betterdb/shared';
 import { isCloudModeValue } from '../common/utils/cloud-mode';
+import { DEFAULT_AUTH_BROKER_URL, isTrueFlag, normalizeOptionalUrl } from './env-normalize';
+
+function optionalUrl(value: unknown): unknown {
+  return normalizeOptionalUrl(value) ?? undefined;
+}
 
 /**
  * Environment variable validation schema
  * Validates all environment variables at application startup
  */
-function emptyStringToUndefined(value: unknown): unknown {
-  if (typeof value === 'string' && value.trim() === '') {
-    return undefined;
-  }
-  return value;
-}
-
 export const envSchema = z
   .object({
     // Application
@@ -93,30 +91,10 @@ export const envSchema = z
       }),
 
     // Self-hosted user control (workspace auth)
-    WORKSPACE_DISABLED: z
-      .string()
-      .default('false')
-      .transform((value) => {
-        return value === 'true';
-      }),
+    WORKSPACE_DISABLED: z.string().default('false').transform(isTrueFlag),
     AUTH_SECRET: z.string().min(32).optional(),
-    AUTH_PUBLIC_URL: z.preprocess(
-      emptyStringToUndefined,
-      z
-        .string()
-        .url()
-        .optional()
-        .transform((value) => {
-          if (value === undefined) {
-            return undefined;
-          }
-          return value.replace(/\/+$/, '');
-        }),
-    ),
-    AUTH_BROKER_URL: z.preprocess(
-      emptyStringToUndefined,
-      z.string().url().default('https://betterdb.com'),
-    ),
+    AUTH_PUBLIC_URL: z.preprocess(optionalUrl, z.string().url().optional()),
+    AUTH_BROKER_URL: z.preprocess(optionalUrl, z.string().url().default(DEFAULT_AUTH_BROKER_URL)),
     TRUST_PROXY: z.string().optional(),
 
     // Anomaly detection
