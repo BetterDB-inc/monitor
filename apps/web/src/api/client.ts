@@ -71,6 +71,16 @@ export class UnauthorizedError extends Error {
   }
 }
 
+export class ApiError extends Error {
+  public readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 export const AUTH_ROUTES = ['/login', '/register', '/invite'];
 
 let authRedirectEnabled = false;
@@ -313,7 +323,10 @@ export async function fetchApi<T>(
       }
 
       const errorMessage = getErrorMessageFromPayload(errorPayload);
-      throw new Error(errorMessage || `API error: ${response.status} ${response.statusText}`);
+      throw new ApiError(
+        errorMessage || `API error: ${response.status} ${response.statusText}`,
+        response.status,
+      );
     }
 
     return await parseSuccessPayload<T>(response);
