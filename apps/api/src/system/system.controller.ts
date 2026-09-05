@@ -1,6 +1,9 @@
 import { Controller, Get, Inject, Optional, Req } from '@nestjs/common';
 import { FastifyRequest } from 'fastify';
+import type { WorkspaceStatus } from '@betterdb/shared';
 import { TelemetryPort } from '../common/interfaces/telemetry-port.interface';
+import { isCloudMode } from '../common/utils/cloud-mode';
+import { WORKSPACE_STATUS, WorkspaceStatusService } from '../workspace/workspace-status.service';
 import {
   DefaultDbHost,
   isContainerized,
@@ -10,10 +13,29 @@ import {
 
 @Controller('system')
 export class SystemController {
+  private readonly workspaceStatus: WorkspaceStatusService | null;
+
   constructor(
-    @Inject('TELEMETRY_CLIENT') @Optional()
+    @Inject('TELEMETRY_CLIENT')
+    @Optional()
     private readonly telemetry: TelemetryPort | null,
-  ) {}
+    @Inject(WORKSPACE_STATUS)
+    @Optional()
+    workspaceStatus?: WorkspaceStatusService | null,
+  ) {
+    this.workspaceStatus = workspaceStatus ?? null;
+  }
+
+  @Get('workspace')
+  async getWorkspaceStatus(): Promise<WorkspaceStatus> {
+    if (this.workspaceStatus !== null) {
+      return this.workspaceStatus.getStatus();
+    }
+    if (isCloudMode()) {
+      return { mode: 'cloud', enabled: true, bootstrapped: true };
+    }
+    return { mode: 'disabled', enabled: false, bootstrapped: false };
+  }
 
   /**
    * Host to pre-fill for a one-click LOCAL connection, resolved for how the

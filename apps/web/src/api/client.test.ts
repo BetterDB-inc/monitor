@@ -1,5 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fetchApi, PaymentRequiredError, setCurrentConnectionId } from './client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  fetchApi,
+  PaymentRequiredError,
+  UnauthorizedError,
+  setAuthRedirectEnabled,
+  setCurrentConnectionId,
+} from './client';
 
 describe('fetchApi error handling', () => {
   beforeEach(() => {
@@ -64,5 +70,62 @@ describe('fetchApi error handling', () => {
     );
 
     await expect(fetchApi('/license/activate')).rejects.toThrow('API error: 400 Bad Request');
+  });
+});
+
+describe('fetchApi 401 handling', () => {
+  const originalLocation = window.location;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    setAuthRedirectEnabled(true);
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...originalLocation, pathname: '/connections', search: '', assign: vi.fn() },
+    });
+  });
+
+  afterEach(() => {
+    setAuthRedirectEnabled(false);
+    Object.defineProperty(window, 'location', { configurable: true, value: originalLocation });
+  });
+
+  it('throws UnauthorizedError and redirects to /login with next on 401', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401 }));
+    await expect(fetchApi('/connections')).rejects.toBeInstanceOf(UnauthorizedError);
+    expect(window.location.assign).toHaveBeenCalledWith('/login?next=%2Fconnections');
+  });
+
+  it('does not redirect when skipAuthRedirect is set', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401 }));
+    await expect(fetchApi('/workspace/me', { skipAuthRedirect: true })).rejects.toBeInstanceOf(
+      UnauthorizedError,
+    );
+    expect(window.location.assign).not.toHaveBeenCalled();
+  });
+
+  it('does not redirect when already on an auth route', async () => {
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...originalLocation, pathname: '/login', search: '', assign: vi.fn() },
+    });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401 }));
+    await expect(fetchApi('/connections')).rejects.toBeInstanceOf(UnauthorizedError);
+    expect(window.location.assign).not.toHaveBeenCalled();
+  });
+
+  it('sends credentials with every request', async () => {
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    await fetchApi('/health');
+    expect(spy.mock.calls[0][1]).toEqual(expect.objectContaining({ credentials: 'include' }));
+  });
+
+  it('does not redirect when the redirect is disabled', async () => {
+    setAuthRedirectEnabled(false);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401 }));
+    await expect(fetchApi('/connections')).rejects.toBeInstanceOf(UnauthorizedError);
+    expect(window.location.assign).not.toHaveBeenCalled();
   });
 });

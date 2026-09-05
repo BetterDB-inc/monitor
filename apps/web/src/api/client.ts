@@ -1,8 +1,6 @@
 // In production, API is served from same origin with /api prefix
 // In development, API is on localhost:3001 without prefix
-const API_BASE = import.meta.env.PROD
-  ? '/api'
-  : 'http://localhost:3001';
+const API_BASE = import.meta.env.PROD ? '/api' : 'http://localhost:3001';
 
 // Connection ID header name (must match backend CONNECTION_ID_HEADER)
 const CONNECTION_ID_HEADER = 'x-connection-id';
@@ -45,6 +43,52 @@ export class PaymentRequiredError extends Error {
     this.requiredTier = data.requiredTier;
     this.upgradeUrl = data.upgradeUrl;
   }
+}
+
+export class UnauthorizedError extends Error {
+  constructor() {
+    super('Sign in required');
+    this.name = 'UnauthorizedError';
+  }
+}
+
+export class ApiError extends Error {
+  public readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+export const AUTH_ROUTES = ['/login', '/register', '/invite'];
+
+let authRedirectEnabled = false;
+
+export function setAuthRedirectEnabled(enabled: boolean): void {
+  authRedirectEnabled = enabled;
+}
+
+export interface FetchApiOptions extends RequestInit {
+  skipAuthRedirect?: boolean;
+}
+
+function isOnAuthRoute(): boolean {
+  return AUTH_ROUTES.some((route) => {
+    return window.location.pathname.startsWith(route);
+  });
+}
+
+function redirectToLogin(): void {
+  if (authRedirectEnabled === false) {
+    return;
+  }
+  if (isOnAuthRoute()) {
+    return;
+  }
+  const next = encodeURIComponent(`${window.location.pathname}${window.location.search}`);
+  window.location.assign(`/login?next=${next}`);
 }
 
 function getErrorMessageFromPayload(payload: unknown): string | null {
@@ -125,15 +169,14 @@ async function parseErrorPayload(response: Response): Promise<unknown> {
   }
 }
 
-export async function fetchApi<T>(
-  endpoint: string,
-  options?: RequestInit
-): Promise<T> {
+export async function fetchApi<T>(endpoint: string, options?: FetchApiOptions): Promise<T> {
+  const { skipAuthRedirect, ...requestInit } = options ?? {};
+
   const headers: Record<string, string> = {
-    ...options?.headers as Record<string, string>,
+    ...(requestInit.headers as Record<string, string>),
   };
 
-  if (options?.body) {
+  if (requestInit.body) {
     headers['Content-Type'] = 'application/json';
   }
 
@@ -143,12 +186,20 @@ export async function fetchApi<T>(
   }
 
   const response = await fetch(`${API_BASE}${endpoint}`, {
-    ...options,
+    ...requestInit,
     headers,
-    signal: options?.signal,
+    credentials: 'include',
+    signal: requestInit.signal,
   });
 
   if (!response.ok) {
+    if (response.status === 401) {
+      if (skipAuthRedirect !== true && authRedirectEnabled === true) {
+        redirectToLogin();
+      }
+      throw new UnauthorizedError();
+    }
+
     const errorPayload = await parseErrorPayload(response);
 
     if (response.status === 402) {
@@ -158,7 +209,10 @@ export async function fetchApi<T>(
     }
 
     const errorMessage = getErrorMessageFromPayload(errorPayload);
-    throw new Error(errorMessage || `API error: ${response.status} ${response.statusText}`);
+    throw new ApiError(
+      errorMessage || `API error: ${response.status} ${response.statusText}`,
+      response.status,
+    );
   }
 
   return response.json();
