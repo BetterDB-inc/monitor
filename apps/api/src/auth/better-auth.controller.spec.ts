@@ -161,16 +161,27 @@ describe('BetterAuthController sign-up serialisation', () => {
 
 describe('BetterAuthController behind a TLS proxy', () => {
   let app: NestFastifyApplication;
+  let storage: MemoryAdapter;
 
   beforeAll(async () => {
+    const config = resolveWorkspaceConfig({ TRUST_PROXY: 'true' });
     const auth = await createBetterAuth({
       handle: { kind: 'memory' },
       secret: 'p'.repeat(40),
-      config: resolveWorkspaceConfig({ TRUST_PROXY: 'true' }),
+      config,
     });
+    storage = new MemoryAdapter();
+    await storage.initialize();
     const moduleRef = await Test.createTestingModule({
       controllers: [BetterAuthController],
-      providers: [{ provide: BETTER_AUTH, useValue: auth }],
+      providers: [
+        { provide: BETTER_AUTH, useValue: auth },
+        { provide: WORKSPACE_CONFIG, useValue: config },
+        { provide: 'STORAGE_CLIENT', useValue: storage },
+        { provide: ACTIVITY_CONFIG, useValue: { retentionDays: 90 } },
+        ActivityService,
+        ActorResolver,
+      ],
     }).compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(
       new FastifyAdapter({ trustProxy: true }),
@@ -181,6 +192,7 @@ describe('BetterAuthController behind a TLS proxy', () => {
 
   afterAll(async () => {
     await app.close();
+    await storage.close();
   });
 
   it('accepts the https origin the browser sends through the proxy', async () => {

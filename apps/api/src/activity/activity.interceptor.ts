@@ -55,7 +55,7 @@ export class ActivityInterceptor implements NestInterceptor {
     if (READ_METHODS.has(method) === true) {
       return next.handle();
     }
-    if (isPublicPath(request.url) === true) {
+    if (isPublicPath(request.url, method) === true) {
       return next.handle();
     }
     const allowMembers = this.reflector.getAllAndOverride<boolean | undefined>(ALLOW_MEMBERS_KEY, [
