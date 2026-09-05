@@ -129,3 +129,46 @@ describe('BetterAuthController sign-up serialisation', () => {
     expect(users[0].isOwner).toBe(true);
   });
 });
+
+describe('BetterAuthController behind a TLS proxy', () => {
+  let app: NestFastifyApplication;
+
+  beforeAll(async () => {
+    const auth = await createBetterAuth({
+      handle: { kind: 'memory' },
+      secret: 'p'.repeat(40),
+      config: resolveWorkspaceConfig({ TRUST_PROXY: 'true' }),
+    });
+    const moduleRef = await Test.createTestingModule({
+      controllers: [BetterAuthController],
+      providers: [{ provide: BETTER_AUTH, useValue: auth }],
+    }).compile();
+    app = moduleRef.createNestApplication<NestFastifyApplication>(
+      new FastifyAdapter({ trustProxy: true }),
+    );
+    await app.init();
+    await app.getHttpAdapter().getInstance().ready();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('accepts the https origin the browser sends through the proxy', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/auth/sign-up/email',
+      remoteAddress: '198.51.100.20',
+      headers: {
+        'content-type': 'application/json',
+        host: 'monitor.internal',
+        origin: 'https://monitor.example.com',
+        'x-forwarded-host': 'monitor.example.com',
+        'x-forwarded-proto': 'https',
+        'x-forwarded-for': '203.0.113.9',
+      },
+      payload: { email: 'owner@example.com', password: 'correct horse battery', name: 'Owner' },
+    });
+    expect(response.statusCode).toBe(200);
+  });
+});

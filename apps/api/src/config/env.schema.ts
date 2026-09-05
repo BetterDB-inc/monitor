@@ -117,6 +117,7 @@ export const envSchema = z
       emptyStringToUndefined,
       z.string().url().default('https://betterdb.com'),
     ),
+    TRUST_PROXY: z.string().optional(),
 
     // Anomaly detection
     ANOMALY_DETECTION_ENABLED: z
