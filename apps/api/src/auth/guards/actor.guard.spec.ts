@@ -222,7 +222,7 @@ describe('ActorGuard', () => {
   });
 
   it('rejects an mcp proposal approval without a session', async () => {
-    const guard = new ActorGuard(config, auth);
+    const guard = new ActorGuard(new ActorResolver(config, auth));
     await expect(
       guard.canActivate(
         contextFor({ url: '/api/mcp/cache-proposals/p1/approve', headers: {}, method: 'POST' }),
@@ -231,7 +231,7 @@ describe('ActorGuard', () => {
   });
 
   it('still serves mcp reads without a session', async () => {
-    const guard = new ActorGuard(config, auth);
+    const guard = new ActorGuard(new ActorResolver(config, auth));
     const request: FakeRequest = { url: '/api/mcp/instances', headers: {}, method: 'GET' };
     expect(await guard.canActivate(contextFor(request))).toBe(true);
     expect(request.actor).toBeNull();

@@ -27,6 +27,7 @@ const enabledConfig: WorkspaceConfig = {
   publicUrl: null,
   basePath: '/auth',
   brokerUrl: 'https://betterdb.com',
+  trustProxy: false,
   trustedOrigins: [],
 };
 
