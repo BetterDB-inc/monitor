@@ -206,6 +206,11 @@ describe('createBetterAuth', () => {
     expect(response.status).toBe(200);
   });
 
+  it('caches the session in a signed cookie so reads skip the database', async () => {
+    const cookies = await signUpAt(undefined, 'http://localhost:5173');
+    expect(cookies).toContain('better-auth.session_data');
+  });
+
   it('rejects an origin that is not trusted even under NODE_ENV=test', async () => {
     const auth = await build({ kind: 'memory' });
     const response = await signUp(auth, 'owner@example.com', '10.0.0.2', 'http://evil.example');
