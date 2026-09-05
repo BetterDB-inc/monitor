@@ -61,19 +61,14 @@ function databaseFor(handle: RawDatabaseHandle, modules: BetterAuthModules): unk
 }
 
 /**
- * `undefined` leaves better-auth's own default in place, which marks cookies
- * Secure in production. We only override it when the deployment tells us the
- * scheme: an explicit public URL, or a direct install with no declared proxy,
- * which is the plain-HTTP case that Secure cookies would lock out.
+ * AUTH_PUBLIC_URL is the only configuration that states the scheme the browser
+ * actually uses. TRUST_PROXY says forwarded headers are trusted, which is not
+ * the same claim: a plain-HTTP reverse proxy sets it too. Guessing HTTPS from
+ * it would mark cookies Secure on such an install and drop every session, so
+ * an unset public URL keeps cookies unmarked and warns at boot instead.
  */
-export function secureCookiesFor(config: WorkspaceConfig): boolean | undefined {
-  if (config.publicUrl !== null) {
-    return config.publicUrl.startsWith('https://');
-  }
-  if (config.trustProxy === true) {
-    return undefined;
-  }
-  return false;
+export function secureCookiesFor(config: WorkspaceConfig): boolean {
+  return config.publicUrl?.startsWith('https://') === true;
 }
 
 export async function createBetterAuth(options: CreateBetterAuthOptions) {

@@ -298,11 +298,8 @@ describe('secureCookiesFor', () => {
     expect(secureCookiesFor(configWith('http://monitor.internal', true))).toBe(false);
   });
 
-  it('keeps cookies insecure for a direct install with no declared proxy', () => {
+  it('does not infer https from a declared proxy', () => {
     expect(secureCookiesFor(configWith(null, false))).toBe(false);
-  });
-
-  it('defers to better-auth behind a declared proxy so production keeps Secure', () => {
-    expect(secureCookiesFor(configWith(null, true))).toBeUndefined();
+    expect(secureCookiesFor(configWith(null, true))).toBe(false);
   });
 });
