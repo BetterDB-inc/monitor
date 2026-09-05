@@ -16,11 +16,15 @@ const ORIGIN = 'http://localhost:3001';
 interface FakeRequest {
   url: string;
   headers: Record<string, string>;
+  method?: string;
   ip?: string;
   actor?: Actor | null;
 }
 
 function contextFor(request: FakeRequest): ExecutionContext {
+  if (request.method === undefined) {
+    request.method = 'GET';
+  }
   return {
     switchToHttp: () => {
       return {
@@ -70,13 +74,34 @@ describe('isPublicPath', () => {
       '/version',
       '/health/live',
     ]) {
-      expect(isPublicPath(path)).toBe(true);
+      expect(isPublicPath(path, 'GET')).toBe(true);
     }
+  });
+
+  it('keeps reads and the non-mutating writes of the mcp surface public', () => {
+    expect(isPublicPath('/mcp/instances', 'GET')).toBe(true);
+    expect(isPublicPath('/api/mcp/instance/local/cache-proposals/pending', 'GET')).toBe(true);
+    expect(isPublicPath('/mcp/telemetry', 'POST')).toBe(true);
+    expect(isPublicPath('/api/mcp/instance/local/memory/agent/recall', 'POST')).toBe(true);
+  });
+
+  it('requires a session for mcp writes that apply changes', () => {
+    for (const path of [
+      '/mcp/instance/local/cache-proposals/invalidate',
+      '/api/mcp/cache-proposals/p1/approve',
+      '/mcp/cache-proposals/p1/edit-and-approve',
+      '/mcp/instance/local/memory-proposals/forget',
+      '/api/mcp/memory-proposals/p1/approve',
+      '/mcp/memory-proposals/p1/reject',
+    ]) {
+      expect(isPublicPath(path, 'POST')).toBe(false);
+    }
+    expect(isPublicPath('/mcp/instances', 'DELETE')).toBe(false);
   });
 
   it('protects everything else', () => {
     for (const path of ['/connections', '/api/connections', '/workspace/me', '/settings', '/']) {
-      expect(isPublicPath(path)).toBe(false);
+      expect(isPublicPath(path, 'GET')).toBe(false);
     }
   });
 
@@ -87,13 +112,13 @@ describe('isPublicPath', () => {
       '/system/demo',
       '/api/system/demo',
     ]) {
-      expect(isPublicPath(path)).toBe(false);
+      expect(isPublicPath(path, 'GET')).toBe(false);
     }
   });
 
   it('does not treat a longer path sharing a prefix string as public', () => {
     for (const path of ['/healthz-private', '/docsite', '/prometheus-internal', '/versioning']) {
-      expect(isPublicPath(path)).toBe(false);
+      expect(isPublicPath(path, 'GET')).toBe(false);
     }
   });
 });
@@ -178,6 +203,22 @@ describe('ActorGuard', () => {
   it('allows /system/workspace without a session', async () => {
     const guard = new ActorGuard(config, auth);
     const request: FakeRequest = { url: '/api/system/workspace', headers: {} };
+    expect(await guard.canActivate(contextFor(request))).toBe(true);
+    expect(request.actor).toBeNull();
+  });
+
+  it('rejects an mcp proposal approval without a session', async () => {
+    const guard = new ActorGuard(config, auth);
+    await expect(
+      guard.canActivate(
+        contextFor({ url: '/api/mcp/cache-proposals/p1/approve', headers: {}, method: 'POST' }),
+      ),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('still serves mcp reads without a session', async () => {
+    const guard = new ActorGuard(config, auth);
+    const request: FakeRequest = { url: '/api/mcp/instances', headers: {}, method: 'GET' };
     expect(await guard.canActivate(contextFor(request))).toBe(true);
     expect(request.actor).toBeNull();
   });

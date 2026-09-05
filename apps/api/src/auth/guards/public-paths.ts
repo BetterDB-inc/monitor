@@ -5,12 +5,20 @@ const PUBLIC_PREFIXES = [
   '/health',
   '/docs',
   '/telemetry/',
-  '/mcp/',
   '/prometheus',
   '/ingest/',
   '/v1/traces',
   '/version',
 ];
+
+const READ_ONLY_PUBLIC_PREFIXES = ['/mcp/'];
+
+const PUBLIC_WRITE_PATHS = [
+  /^\/mcp\/telemetry$/,
+  /^\/mcp\/instance\/[^/]+\/memory\/[^/]+\/recall$/,
+];
+
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 export function stripApiPrefix(path: string): string {
   if (path.startsWith('/api/')) {
@@ -27,9 +35,24 @@ function matchesPrefix(path: string, prefix: string): boolean {
   return path.startsWith(`${base}/`);
 }
 
-export function isPublicPath(rawPath: string): boolean {
-  const path = stripApiPrefix(rawPath.split('?')[0]);
-  return PUBLIC_PREFIXES.some((prefix) => {
+function matchesAnyPrefix(path: string, prefixes: string[]): boolean {
+  return prefixes.some((prefix) => {
     return matchesPrefix(path, prefix);
+  });
+}
+
+export function isPublicPath(rawPath: string, method: string): boolean {
+  const path = stripApiPrefix(rawPath.split('?')[0]);
+  if (matchesAnyPrefix(path, PUBLIC_PREFIXES)) {
+    return true;
+  }
+  if (matchesAnyPrefix(path, READ_ONLY_PUBLIC_PREFIXES) === false) {
+    return false;
+  }
+  if (SAFE_METHODS.has(method.toUpperCase())) {
+    return true;
+  }
+  return PUBLIC_WRITE_PATHS.some((pattern) => {
+    return pattern.test(path);
   });
 }
