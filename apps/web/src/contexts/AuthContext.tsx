@@ -154,6 +154,7 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
   useEffect(() => {
     refresh();
     return () => {
+      refreshSeq.current += 1;
       cancelRetry();
     };
   }, [refresh, cancelRetry]);

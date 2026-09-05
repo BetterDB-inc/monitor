@@ -2,12 +2,13 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { ReactElement, ReactNode } from 'react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
-import { UnauthorizedError } from '../api/client';
+import { ApiError, UnauthorizedError } from '../api/client';
 import { AuthProvider, useAuth } from './AuthContext';
 import { AuthGate } from '../components/auth/AuthGate';
 
 const getStatus = vi.fn();
 const getMe = vi.fn();
+const signUp = vi.fn();
 
 const { setAuthRedirectEnabledMock } = vi.hoisted(() => {
   return { setAuthRedirectEnabledMock: vi.fn() };
@@ -28,7 +29,7 @@ vi.mock('../api/workspace', () => ({
     getStatus: () => getStatus(),
     getMe: () => getMe(),
     signIn: vi.fn(),
-    signUp: vi.fn(),
+    signUp: (body: unknown) => signUp(body),
     signOut: vi.fn(),
   },
 }));
@@ -84,6 +85,29 @@ describe('AuthGate routing', () => {
     expect(screen.getByLabelText('Name')).toBeInTheDocument();
     expect(screen.getByLabelText('Email')).toBeInTheDocument();
     expect(screen.getByLabelText('Password')).toBeInTheDocument();
+  });
+
+  it('leaves the register screen when the owner account already exists', async () => {
+    getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: false });
+    renderAt('/connections');
+    await waitFor(() =>
+      expect(
+        screen.getByRole('heading', { name: /create the owner account/i }),
+      ).toBeInTheDocument(),
+    );
+
+    signUp.mockRejectedValue(new ApiError('Registration is closed.', 403));
+    getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: true });
+    getMe.mockRejectedValue(new UnauthorizedError());
+
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'O' } });
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'o@example.com' } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'correct horse' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create account' }));
+
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: /sign in/i })).toBeInTheDocument(),
+    );
   });
 
   it('renders login when bootstrapped and signed out', async () => {
@@ -402,6 +426,37 @@ describe('getMe failure handling', () => {
       });
       expect(result.current.unavailable).toBe(false);
       expect(result.current.user).toEqual(signedIn);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops retrying once the provider unmounts', async () => {
+    vi.useFakeTimers();
+    try {
+      getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: true });
+      let rejectGetMe: ((reason: Error) => void) | null = null;
+      getMe.mockImplementation(() => {
+        return new Promise((_resolve, reject) => {
+          rejectGetMe = reject;
+        });
+      });
+
+      const { unmount } = renderHook(() => useAuth(), { wrapper });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(rejectGetMe).not.toBeNull();
+
+      unmount();
+      const callsAtUnmount = getMe.mock.calls.length;
+
+      await act(async () => {
+        (rejectGetMe as unknown as (reason: Error) => void)(new Error('502'));
+        await vi.advanceTimersByTimeAsync(60000);
+      });
+
+      expect(getMe).toHaveBeenCalledTimes(callsAtUnmount);
     } finally {
       vi.useRealTimers();
     }
