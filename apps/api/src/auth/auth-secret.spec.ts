@@ -191,14 +191,11 @@ describe('resolveAuthSecret', () => {
     );
   });
 
-  it('keeps booting with an in-memory secret when a read-only file cannot be read', () => {
+  it('keeps booting with an in-memory secret when a stored file cannot be read', () => {
     const file = join(dataDir, 'auth-secret');
     writeFileSync(file, 'w'.repeat(40), { mode: 0o600 });
     overrides.readFileSync = () => {
       throw failWith('EACCES', 'permission denied');
-    };
-    overrides.writeFileSync = () => {
-      throw failWith('EROFS', 'read-only file system');
     };
 
     expect(resolveAuthSecret({}, dataDir)).toHaveLength(43);
@@ -206,5 +203,18 @@ describe('resolveAuthSecret', () => {
       expect.stringContaining('Could not read the auth secret stored at'),
     );
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('in-memory secret'));
+  });
+
+  it('leaves an unreadable secret on disk so a later boot can recover it', () => {
+    const file = join(dataDir, 'auth-secret');
+    const secret = 'w'.repeat(40);
+    writeFileSync(file, secret, { mode: 0o600 });
+    overrides.readFileSync = () => {
+      throw failWith('EACCES', 'permission denied');
+    };
+
+    expect(resolveAuthSecret({}, dataDir)).not.toBe(secret);
+    expect(readFileSync(file, 'utf8')).toBe(secret);
+    expect(resolveAuthSecret({}, dataDir)).toBe(secret);
   });
 });

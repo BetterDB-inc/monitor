@@ -27,27 +27,32 @@ function restrictPermissions(file: string): void {
   }
 }
 
-function readStoredSecret(file: string): string | null {
+type StoredSecret =
+  | { kind: 'usable'; secret: string }
+  | { kind: 'unreadable'; error: unknown }
+  | { kind: 'tooShort' };
+
+function readStoredSecret(file: string): StoredSecret {
   let stored: string;
   try {
     stored = readFileSync(file, 'utf8').trim();
   } catch (error) {
-    logger.warn(`Could not read the auth secret stored at ${file}: ${describeError(error)}`);
-    return null;
+    return { kind: 'unreadable', error };
   }
   if (stored.length < MIN_SECRET_LENGTH) {
-    return null;
+    return { kind: 'tooShort' };
   }
   restrictPermissions(file);
-  return stored;
+  return { kind: 'usable', secret: stored };
 }
 
-function ephemeralSecret(file: string, error: unknown): string {
-  logger.warn(
-    `Could not persist an auth secret at ${file}: ${describeError(error)}. Continuing with an ` +
-      'in-memory secret: sessions are invalidated on every restart and are not shared between ' +
-      'processes. Set AUTH_SECRET to a value of at least 32 characters to keep sessions stable.',
-  );
+const EPHEMERAL_NOTE =
+  'Continuing with an in-memory secret: sessions are invalidated on every restart and are not ' +
+  'shared between processes. Set AUTH_SECRET to a value of at least 32 characters to keep ' +
+  'sessions stable.';
+
+function ephemeralSecret(reason: string): string {
+  logger.warn(`${reason} ${EPHEMERAL_NOTE}`);
   return generateSecret();
 }
 
@@ -61,23 +66,31 @@ export function resolveAuthSecret(env: NodeJS.ProcessEnv, dataDir: string): stri
   const file = join(dataDir, SECRET_FILE);
   if (existsSync(file)) {
     const stored = readStoredSecret(file);
-    if (stored !== null) {
-      return stored;
+    if (stored.kind === 'usable') {
+      return stored.secret;
+    }
+    if (stored.kind === 'unreadable') {
+      return ephemeralSecret(
+        `Could not read the auth secret stored at ${file}: ${describeError(stored.error)}. ` +
+          'Leaving the file in place so a later boot can still use it.',
+      );
     }
     logger.warn(
-      `The auth secret stored at ${file} could not be read or is shorter than ` +
-        `${MIN_SECRET_LENGTH} characters; replacing it invalidates all sessions`,
+      `The auth secret stored at ${file} is shorter than ${MIN_SECRET_LENGTH} characters; ` +
+        'replacing it invalidates all sessions',
     );
     try {
       rmSync(file, { force: true });
     } catch (error) {
-      return ephemeralSecret(file, error);
+      return ephemeralSecret(
+        `Could not replace the auth secret at ${file}: ${describeError(error)}.`,
+      );
     }
   }
   try {
     mkdirSync(dataDir, { recursive: true });
   } catch (error) {
-    return ephemeralSecret(file, error);
+    return ephemeralSecret(`Could not persist an auth secret at ${file}: ${describeError(error)}.`);
   }
   const generated = generateSecret();
   try {
@@ -85,12 +98,12 @@ export function resolveAuthSecret(env: NodeJS.ProcessEnv, dataDir: string): stri
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
       const raced = readStoredSecret(file);
-      if (raced !== null) {
+      if (raced.kind === 'usable') {
         logger.log(`Reusing the auth secret another process wrote at ${file}`);
-        return raced;
+        return raced.secret;
       }
     }
-    return ephemeralSecret(file, error);
+    return ephemeralSecret(`Could not persist an auth secret at ${file}: ${describeError(error)}.`);
   }
   restrictPermissions(file);
   logger.log(`Generated a new auth secret at ${file}`);
