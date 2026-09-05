@@ -139,6 +139,7 @@ describe('Workspace authorization (E2E)', () => {
     const signUp = await app.inject({
       method: 'POST',
       url: '/api/auth/sign-up/email',
+      remoteAddress: '198.51.100.90',
       headers: { 'content-type': 'application/json', origin: TRUSTED_ORIGIN },
       payload: OWNER,
     });
@@ -171,6 +172,7 @@ describe('Workspace authorization (E2E)', () => {
     const signIn = await app.inject({
       method: 'POST',
       url: '/api/auth/sign-in/email',
+      remoteAddress: '198.51.100.91',
       headers: { 'content-type': 'application/json', origin: TRUSTED_ORIGIN },
       payload: { email: MEMBER_EMAIL, password: MEMBER_PASSWORD },
     });

@@ -7,6 +7,7 @@ const { api, authState, refreshMock } = vi.hoisted(() => {
     api: {
       getMembers: vi.fn(),
       getInvitations: vi.fn(),
+      getActivity: vi.fn(),
       invite: vi.fn(),
       revokeInvitation: vi.fn(),
       removeMember: vi.fn(),
@@ -59,6 +60,7 @@ describe('Members', () => {
     refreshMock.mockReset();
     api.getMembers.mockResolvedValue([OWNER, MEMBER]);
     api.getInvitations.mockResolvedValue([INVITATION]);
+    api.getActivity.mockResolvedValue({ items: [], nextCursor: null });
     Object.defineProperty(navigator, 'clipboard', {
       value: { writeText: vi.fn().mockResolvedValue(undefined) },
       configurable: true,
@@ -144,5 +146,19 @@ describe('Members', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Invite' }));
     expect(await screen.findByText('Invitation sent to cloud@example.com')).toBeInTheDocument();
     expect(screen.queryByDisplayValue(/invite/)).toBeNull();
+  });
+
+  it('shows the Activity tab to admins and hides it from members', async () => {
+    authState.user = { userId: 'u1', email: OWNER.email, role: 'admin', isOwner: true };
+    const { unmount } = render(<Members />);
+    expect(await screen.findByRole('tab', { name: 'Activity' })).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'Activity' }), { button: 0 });
+    expect(await screen.findByLabelText('Actor')).toBeInTheDocument();
+    unmount();
+
+    authState.user = { userId: 'u2', email: MEMBER.email, role: 'member', isOwner: false };
+    render(<Members />);
+    expect(await screen.findByText(MEMBER.email)).toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Activity' })).toBeNull();
   });
 });

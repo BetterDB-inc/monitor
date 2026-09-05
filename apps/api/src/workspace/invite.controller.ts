@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { WorkspaceMe } from '@betterdb/shared';
+import { ActivityService } from '../activity/activity.service';
 import { CLIENT_IP_HEADER } from '../auth/better-auth.factory';
 import { toWebHeaders } from '../auth/web-headers';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
@@ -25,6 +26,7 @@ export class InviteController {
     private readonly invitations: InvitationService,
     private readonly members: MemberService,
     private readonly telemetry: UsageTelemetryService,
+    private readonly activity: ActivityService,
   ) {}
 
   @Get(':token')
@@ -76,6 +78,13 @@ export class InviteController {
       throw error;
     }
     await this.telemetry.trackInviteAccepted({ role: invitation.role, method: 'password' });
+    void this.activity.record({
+      actor: { userId: created.userId, email: created.email, via: 'session', tokenId: null },
+      action: 'auth.login',
+      statusCode: 201,
+      ip: req.ip,
+      details: { method: 'invite' },
+    });
     const cookies = session.headers.getSetCookie();
     if (cookies.length > 0) {
       reply.header('set-cookie', cookies);

@@ -1,6 +1,7 @@
 import { DynamicModule, Logger, Module, Provider, Type } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { join } from 'path';
+import { ActivityModule } from '../activity/activity.module';
 import type { StoragePort } from '../common/interfaces/storage-port.interface';
 import { hasRawDatabaseHandle } from '../storage/raw-database-handle';
 import { StorageModule } from '../storage/storage.module';
@@ -94,7 +95,7 @@ export class WorkspaceAuthModule {
     return {
       module: WorkspaceAuthModule,
       global: true,
-      imports: [StorageModule],
+      imports: [StorageModule, ActivityModule],
       providers,
       controllers,
       exports,

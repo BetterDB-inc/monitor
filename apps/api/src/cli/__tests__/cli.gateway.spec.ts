@@ -4,8 +4,14 @@ import type { Socket } from 'net';
 import type { WebSocket } from 'ws';
 import { Actor } from '@betterdb/shared';
 import { ActorResolver } from '../../auth/actor-resolver';
+import type { ActivityService } from '../../activity/activity.service';
 import { CliGateway, SESSION_EXPIRED_MESSAGE } from '../cli.gateway';
 import { CliService } from '../cli.service';
+
+function activityWith(): { service: ActivityService; record: jest.Mock } {
+  const record = jest.fn().mockResolvedValue(undefined);
+  return { service: { record } as unknown as ActivityService, record };
+}
 
 class FakeSocket extends EventEmitter {
   written: string[] = [];
@@ -152,19 +158,19 @@ describe('CliGateway.handleUpgrade', () => {
   });
 });
 
-describe('CliGateway command execution', () => {
-  function connect(
-    gateway: CliGateway,
-    request: IncomingMessage = makeRequest('c=1'),
-  ): FakeWebSocket {
-    const ws = new FakeWebSocket();
-    (gateway as unknown as { attach: (ws: unknown, request: IncomingMessage) => void }).attach(
-      ws,
-      request,
-    );
-    return ws;
-  }
+function connect(
+  gateway: CliGateway,
+  request: IncomingMessage = makeRequest('c=1'),
+): FakeWebSocket {
+  const ws = new FakeWebSocket();
+  (gateway as unknown as { attach: (ws: unknown, request: IncomingMessage) => void }).attach(
+    ws,
+    request,
+  );
+  return ws;
+}
 
+describe('CliGateway command execution', () => {
   function sendExecute(ws: FakeWebSocket): void {
     ws.emit(
       'message',
@@ -250,6 +256,231 @@ describe('CliGateway command execution', () => {
         resolveAccess: (ws: WebSocket) => Promise<{ sessionValid: boolean; readOnly: boolean }>;
       }
     ).resolveAccess(new FakeWebSocket() as unknown as WebSocket);
-    expect(access).toEqual({ sessionValid: true, readOnly: true });
+    expect(access).toEqual({ sessionValid: true, readOnly: true, actor: null, ip: '' });
+  });
+});
+
+describe('CliGateway activity recording', () => {
+  function send(ws: FakeWebSocket, command: string): void {
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'execute', command, connectionId: 'c1' })),
+    );
+  }
+
+  it('records read commands with their arguments', async () => {
+    const execute = jest
+      .fn()
+      .mockResolvedValue({ type: 'result', result: 'b', resultType: 'string', durationMs: 1 });
+    const activity = activityWith();
+    const gateway = new CliGateway(
+      { execute } as unknown as CliService,
+      resolverWith(true, admin),
+      activity.service,
+    );
+    const ws = connect(gateway);
+    send(ws, 'GET a');
+    await flush();
+    expect(activity.record).toHaveBeenCalledWith({
+      actor: { userId: 'a', email: 'a@x', via: 'cli', tokenId: null },
+      action: 'cli.command',
+      statusCode: 200,
+      ip: '10.0.0.5',
+      connectionId: 'c1',
+      details: { command: 'GET', argCount: 1, args: ['a'] },
+    });
+  });
+
+  it('records write commands without argument values', async () => {
+    const execute = jest
+      .fn()
+      .mockResolvedValue({ type: 'result', result: 'OK', resultType: 'string', durationMs: 1 });
+    const activity = activityWith();
+    const gateway = new CliGateway(
+      { execute } as unknown as CliService,
+      resolverWith(true, admin),
+      activity.service,
+    );
+    const ws = connect(gateway);
+    send(ws, 'SET secret "p@ss word"');
+    await flush();
+    expect(activity.record).toHaveBeenCalledWith(
+      expect.objectContaining({ details: { command: 'SET', argCount: 2 } }),
+    );
+    const [call] = activity.record.mock.calls;
+    expect(JSON.stringify(call[0])).not.toContain('p@ss');
+  });
+
+  it('records a refused or failed command with status 400', async () => {
+    const execute = jest.fn().mockResolvedValue({ type: 'error', error: 'nope' });
+    const activity = activityWith();
+    const gateway = new CliGateway(
+      { execute } as unknown as CliService,
+      resolverWith(true, member),
+      activity.service,
+    );
+    const ws = connect(gateway);
+    send(ws, 'DEL secretkey');
+    await flush();
+    expect(activity.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actor: expect.objectContaining({ userId: 'm', via: 'cli' }),
+        statusCode: 400,
+        details: { command: 'DEL', argCount: 1 },
+      }),
+    );
+  });
+
+  it('never stores AUTH, HELLO, CONFIG, ACL or MIGRATE arguments', async () => {
+    const execute = jest.fn().mockResolvedValue({ type: 'error', error: 'nope' });
+    const activity = activityWith();
+    const gateway = new CliGateway(
+      { execute } as unknown as CliService,
+      resolverWith(true, member),
+      activity.service,
+    );
+    const ws = connect(gateway);
+    send(ws, 'AUTH hunter2');
+    await flush();
+    expect(activity.record).toHaveBeenCalledWith(
+      expect.objectContaining({ details: { command: 'AUTH', argCount: 1 } }),
+    );
+    expect(JSON.stringify(activity.record.mock.calls[0][0])).not.toContain('hunter2');
+
+    send(ws, 'CONFIG SET requirepass hunter2');
+    await flush();
+    const configCall = activity.record.mock.calls[1][0];
+    expect(configCall).toEqual(
+      expect.objectContaining({ details: { command: 'CONFIG', argCount: 3 } }),
+    );
+    expect(JSON.stringify(configCall)).not.toContain('hunter2');
+
+    send(ws, 'ACL SETUSER alice on >hunter2 ~* +@all');
+    await flush();
+    const aclCall = activity.record.mock.calls[2][0];
+    expect(aclCall).toEqual(expect.objectContaining({ details: { command: 'ACL', argCount: 6 } }));
+    expect(JSON.stringify(aclCall)).not.toContain('hunter2');
+  });
+
+  it('keeps arguments for a non-secret container read', async () => {
+    const execute = jest.fn().mockResolvedValue({ type: 'error', error: 'nope' });
+    const activity = activityWith();
+    const gateway = new CliGateway(
+      { execute } as unknown as CliService,
+      resolverWith(true, member),
+      activity.service,
+    );
+    const ws = connect(gateway);
+    send(ws, 'CLIENT LIST');
+    await flush();
+    expect(activity.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusCode: 400,
+        details: { command: 'CLIENT', argCount: 1, args: ['LIST'] },
+      }),
+    );
+  });
+
+  it('drops arguments for read commands that carry a caller-supplied body', async () => {
+    const execute = jest
+      .fn()
+      .mockResolvedValue({ type: 'result', result: '', resultType: 'string', durationMs: 1 });
+    const activity = activityWith();
+    const gateway = new CliGateway(
+      { execute } as unknown as CliService,
+      resolverWith(true, admin),
+      activity.service,
+    );
+    const ws = connect(gateway);
+    const payloads = [
+      'PUBLISH alerts hunter2',
+      'SPUBLISH alerts hunter2',
+      'ECHO hunter2',
+      "EVAL_RO 'return hunter2' 0",
+      'EVALSHA_RO abc123 0 hunter2',
+      'FCALL_RO fn 0 hunter2',
+    ];
+    for (const command of payloads) {
+      send(ws, command);
+      await flush();
+    }
+    expect(activity.record).toHaveBeenCalledTimes(payloads.length);
+    for (const [call] of activity.record.mock.calls) {
+      expect(call.details).not.toHaveProperty('args');
+      expect(JSON.stringify(call)).not.toContain('hunter2');
+    }
+  });
+
+  it('caps recorded arguments', async () => {
+    const execute = jest
+      .fn()
+      .mockResolvedValue({ type: 'result', result: '', resultType: 'string', durationMs: 1 });
+    const activity = activityWith();
+    const gateway = new CliGateway(
+      { execute } as unknown as CliService,
+      resolverWith(true, admin),
+      activity.service,
+    );
+    const ws = connect(gateway);
+    const longKey = 'k'.repeat(300);
+    const keys = Array.from({ length: 20 }, (_, i) => {
+      return i === 5 ? longKey : `key${i}`;
+    });
+    send(ws, `MGET ${keys.join(' ')}`);
+    await flush();
+    const [call] = activity.record.mock.calls;
+    const details = call[0].details as { command: string; argCount: number; args: string[] };
+    expect(details.args).toHaveLength(16);
+    expect(details.args[5]).toHaveLength(128);
+    expect(details.argCount).toBe(20);
+  });
+
+  it('records the command even when the socket closes before the result arrives', async () => {
+    let resolveExecute: (value: {
+      type: 'result';
+      result: string;
+      resultType: string;
+      durationMs: number;
+    }) => void = () => {};
+    const execute = jest.fn().mockReturnValue(
+      new Promise((resolve) => {
+        resolveExecute = resolve;
+      }),
+    );
+    const activity = activityWith();
+    const gateway = new CliGateway(
+      { execute } as unknown as CliService,
+      resolverWith(true, admin),
+      activity.service,
+    );
+    const ws = connect(gateway);
+    send(ws, 'GET a');
+    await flush();
+    ws.emit('close');
+    resolveExecute({ type: 'result', result: 'b', resultType: 'string', durationMs: 1 });
+    await flush();
+    expect(activity.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ip: '10.0.0.5',
+        details: { command: 'GET', argCount: 1, args: ['a'] },
+      }),
+    );
+  });
+
+  it('records nothing when no actor resolves', async () => {
+    const execute = jest
+      .fn()
+      .mockResolvedValue({ type: 'result', result: 'PONG', resultType: 'string', durationMs: 1 });
+    const activity = activityWith();
+    const gateway = new CliGateway(
+      { execute } as unknown as CliService,
+      resolverWith(false, null),
+      activity.service,
+    );
+    const ws = connect(gateway);
+    send(ws, 'PING');
+    await flush();
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(activity.record).not.toHaveBeenCalled();
   });
 });
