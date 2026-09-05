@@ -60,10 +60,25 @@ function databaseFor(handle: RawDatabaseHandle, modules: BetterAuthModules): unk
   return modules.memoryAdapter(emptyMemoryDb());
 }
 
+/**
+ * `undefined` leaves better-auth's own default in place, which marks cookies
+ * Secure in production. We only override it when the deployment tells us the
+ * scheme: an explicit public URL, or a direct install with no declared proxy,
+ * which is the plain-HTTP case that Secure cookies would lock out.
+ */
+export function secureCookiesFor(config: WorkspaceConfig): boolean | undefined {
+  if (config.publicUrl !== null) {
+    return config.publicUrl.startsWith('https://');
+  }
+  if (config.trustProxy === true) {
+    return undefined;
+  }
+  return false;
+}
+
 export async function createBetterAuth(options: CreateBetterAuthOptions) {
   const modules = await loadBetterAuthModules();
   const { config } = options;
-  const secureCookies = config.publicUrl?.startsWith('https://') === true;
   let bootstrapPending = false;
   return modules.betterAuth({
     secret: options.secret,
@@ -80,7 +95,7 @@ export async function createBetterAuth(options: CreateBetterAuthOptions) {
     advanced: {
       disableOriginCheck: false,
       trustedProxyHeaders: config.trustProxy,
-      useSecureCookies: secureCookies,
+      useSecureCookies: secureCookiesFor(config),
       ipAddress: { ipAddressHeaders: [CLIENT_IP_HEADER] },
     },
     user: {

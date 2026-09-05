@@ -5,11 +5,13 @@ import { loadBetterSqlite3 } from '../storage/adapters/better-sqlite3-driver';
 import { openLibsqlDatabase } from '../storage/adapters/libsql-driver';
 import type { RawDatabaseHandle } from '../storage/raw-database-handle';
 import { resolveWorkspaceConfig } from './workspace-config';
+import type { WorkspaceConfig } from './workspace-config';
 import {
   CLIENT_IP_HEADER,
   countUsers,
   createBetterAuth,
   runBetterAuthMigrations,
+  secureCookiesFor,
 } from './better-auth.factory';
 import type { BetterAuthInstance } from './better-auth.factory';
 
@@ -278,5 +280,29 @@ describe('createBetterAuth', () => {
     expect(await countUsers(auth)).toBe(1);
     db.close();
     unlinkSync(path);
+  });
+});
+
+describe('secureCookiesFor', () => {
+  function configWith(publicUrl: string | null, trustProxy: boolean): WorkspaceConfig {
+    return {
+      ...resolveWorkspaceConfig({}),
+      publicUrl,
+      trustProxy,
+    };
+  }
+
+  it('follows the scheme of an explicit public url', () => {
+    expect(secureCookiesFor(configWith('https://monitor.example.com', false))).toBe(true);
+    expect(secureCookiesFor(configWith('http://monitor.internal', false))).toBe(false);
+    expect(secureCookiesFor(configWith('http://monitor.internal', true))).toBe(false);
+  });
+
+  it('keeps cookies insecure for a direct install with no declared proxy', () => {
+    expect(secureCookiesFor(configWith(null, false))).toBe(false);
+  });
+
+  it('defers to better-auth behind a declared proxy so production keeps Secure', () => {
+    expect(secureCookiesFor(configWith(null, true))).toBeUndefined();
   });
 });
