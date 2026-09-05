@@ -40,7 +40,7 @@ export class ActorGuard implements CanActivate {
     if (this.config.enabled === false) {
       return true;
     }
-    if (isPublicPath(request.url)) {
+    if (isPublicPath(request.url, request.method)) {
       return true;
     }
     if (this.auth === null) {
