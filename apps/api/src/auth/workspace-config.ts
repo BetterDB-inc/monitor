@@ -1,4 +1,5 @@
 import type { WorkspaceMode } from '@betterdb/shared';
+import { isCloudModeValue } from '../common/utils/cloud-mode';
 import { DEFAULT_AUTH_BROKER_URL, isTrueFlag, normalizeOptionalUrl } from '../config/env-normalize';
 import { trustsProxyHeaders } from '../config/trust-proxy';
 
@@ -17,7 +18,7 @@ export interface WorkspaceConfig {
 }
 
 function resolveMode(env: NodeJS.ProcessEnv): WorkspaceMode {
-  if (isTrueFlag(env.CLOUD_MODE)) {
+  if (isCloudModeValue(env.CLOUD_MODE)) {
     return 'cloud';
   }
   if (isTrueFlag(env.WORKSPACE_DISABLED)) {
