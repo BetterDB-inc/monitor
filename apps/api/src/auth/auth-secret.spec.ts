@@ -4,25 +4,66 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { resolveAuthSecret } from './auth-secret';
 
-type WriteFileSyncArgs = Parameters<typeof import('fs').writeFileSync>;
+type FsModule = typeof import('fs');
+type WriteFileSyncArgs = Parameters<FsModule['writeFileSync']>;
+type MkdirSyncArgs = Parameters<FsModule['mkdirSync']>;
+type ChmodSyncArgs = Parameters<FsModule['chmodSync']>;
+type ReadFileSyncArgs = Parameters<FsModule['readFileSync']>;
 
-let mockWriteFileSyncOnce: ((...args: WriteFileSyncArgs) => void) | null = null;
+const overrides: {
+  writeFileSync: ((...args: WriteFileSyncArgs) => void) | null;
+  mkdirSync: ((...args: MkdirSyncArgs) => void) | null;
+  chmodSync: ((...args: ChmodSyncArgs) => void) | null;
+  readFileSync: ((...args: ReadFileSyncArgs) => string) | null;
+} = { writeFileSync: null, mkdirSync: null, chmodSync: null, readFileSync: null };
 
 jest.mock('fs', () => {
-  const actual = jest.requireActual<typeof import('fs')>('fs');
+  const actual = jest.requireActual<FsModule>('fs');
   return {
     ...actual,
     writeFileSync: (...args: WriteFileSyncArgs): void => {
-      const override = mockWriteFileSyncOnce;
+      const override = overrides.writeFileSync;
       if (override === null) {
         actual.writeFileSync(...args);
         return;
       }
-      mockWriteFileSyncOnce = null;
+      overrides.writeFileSync = null;
       override(...args);
+    },
+    mkdirSync: (...args: MkdirSyncArgs): void => {
+      const override = overrides.mkdirSync;
+      if (override === null) {
+        actual.mkdirSync(...args);
+        return;
+      }
+      overrides.mkdirSync = null;
+      override(...args);
+    },
+    chmodSync: (...args: ChmodSyncArgs): void => {
+      const override = overrides.chmodSync;
+      if (override === null) {
+        actual.chmodSync(...args);
+        return;
+      }
+      overrides.chmodSync = null;
+      override(...args);
+    },
+    readFileSync: (...args: ReadFileSyncArgs): string => {
+      const override = overrides.readFileSync;
+      if (override === null) {
+        return actual.readFileSync(...args) as string;
+      }
+      overrides.readFileSync = null;
+      return override(...args);
     },
   };
 });
+
+function failWith(code: string, message: string): NodeJS.ErrnoException {
+  const error = new Error(`${code}: ${message}`) as NodeJS.ErrnoException;
+  error.code = code;
+  return error;
+}
 
 describe('resolveAuthSecret', () => {
   let dataDir: string;
@@ -40,7 +81,10 @@ describe('resolveAuthSecret', () => {
   });
 
   afterEach(() => {
-    mockWriteFileSyncOnce = null;
+    overrides.writeFileSync = null;
+    overrides.mkdirSync = null;
+    overrides.chmodSync = null;
+    overrides.readFileSync = null;
     rmSync(dataDir, { recursive: true, force: true });
     logSpy.mockRestore();
     warnSpy.mockRestore();
@@ -105,11 +149,9 @@ describe('resolveAuthSecret', () => {
   it('reuses the secret a racing process wrote instead of overwriting it', () => {
     const file = join(dataDir, 'auth-secret');
     const racedSecret = 'y'.repeat(43);
-    mockWriteFileSyncOnce = () => {
+    overrides.writeFileSync = () => {
       writeFileSync(file, racedSecret, { mode: 0o644 });
-      const error = new Error('EEXIST: file already exists') as NodeJS.ErrnoException;
-      error.code = 'EEXIST';
-      throw error;
+      throw failWith('EEXIST', 'file already exists');
     };
 
     expect(resolveAuthSecret({}, dataDir)).toBe(racedSecret);
@@ -117,15 +159,52 @@ describe('resolveAuthSecret', () => {
     expect(statSync(file).mode & 0o777).toBe(0o600);
   });
 
-  it('rethrows a write failure that is not a lost race', () => {
-    mockWriteFileSyncOnce = () => {
-      const error = new Error('EACCES: permission denied') as NodeJS.ErrnoException;
-      error.code = 'EACCES';
-      throw error;
+  it('keeps booting with an in-memory secret when the file cannot be written', () => {
+    overrides.writeFileSync = () => {
+      throw failWith('EROFS', 'read-only file system');
     };
 
-    expect(() => {
-      return resolveAuthSecret({}, dataDir);
-    }).toThrow('EACCES');
+    expect(resolveAuthSecret({}, dataDir)).toHaveLength(43);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('in-memory secret'));
+  });
+
+  it('keeps booting with an in-memory secret when the data directory cannot be created', () => {
+    overrides.mkdirSync = () => {
+      throw failWith('EACCES', 'permission denied');
+    };
+
+    expect(resolveAuthSecret({}, join(dataDir, 'nested'))).toHaveLength(43);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('in-memory secret'));
+  });
+
+  it('reuses a pre-seeded secret whose permissions cannot be tightened', () => {
+    const file = join(dataDir, 'auth-secret');
+    const secret = 'q'.repeat(40);
+    writeFileSync(file, secret, { mode: 0o644 });
+    overrides.chmodSync = () => {
+      throw failWith('EPERM', 'operation not permitted');
+    };
+
+    expect(resolveAuthSecret({}, dataDir)).toBe(secret);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Could not restrict the permissions'),
+    );
+  });
+
+  it('keeps booting with an in-memory secret when a read-only file cannot be read', () => {
+    const file = join(dataDir, 'auth-secret');
+    writeFileSync(file, 'w'.repeat(40), { mode: 0o600 });
+    overrides.readFileSync = () => {
+      throw failWith('EACCES', 'permission denied');
+    };
+    overrides.writeFileSync = () => {
+      throw failWith('EROFS', 'read-only file system');
+    };
+
+    expect(resolveAuthSecret({}, dataDir)).toHaveLength(43);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Could not read the auth secret stored at'),
+    );
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('in-memory secret'));
   });
 });
