@@ -1,19 +1,41 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { Socket } from 'net';
+import { Actor } from '@betterdb/shared';
+import { ActorResolver } from '../auth/actor-resolver';
+import { rejectUpgrade } from '../auth/upgrade-response';
 import { CliService } from './cli.service';
 import { CliExecuteMessage, CliServerMessage } from './cli.types';
 
 const MAX_COMMANDS_PER_SECOND = 50;
+const SESSION_EXPIRED_CLOSE_CODE = 4401;
+const SESSION_EXPIRED_CLOSE_REASON = 'Session expired';
+export const SESSION_EXPIRED_MESSAGE = 'Session expired. Sign in again.';
+
+interface CliConnectionState {
+  request: IncomingMessage;
+  tokens: number;
+  lastRefill: number;
+}
+
+interface CommandAccess {
+  sessionValid: boolean;
+  readOnly: boolean;
+}
 
 @Injectable()
 export class CliGateway implements OnModuleDestroy {
   private readonly logger = new Logger(CliGateway.name);
   private readonly wss: WebSocketServer;
-  private readonly rateLimiters = new Map<WebSocket, { tokens: number; lastRefill: number }>();
+  private readonly connections = new Map<WebSocket, CliConnectionState>();
 
-  constructor(private readonly cliService: CliService) {
+  constructor(
+    private readonly cliService: CliService,
+    @Optional()
+    @Inject(ActorResolver)
+    private readonly actorResolver: ActorResolver | null = null,
+  ) {
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 }); // 1 MiB
     this.logger.log('CLI WebSocket gateway initialized');
   }
@@ -26,11 +48,69 @@ export class CliGateway implements OnModuleDestroy {
   }
 
   handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer): void {
-    this.wss.handleUpgrade(request, socket, head, (ws) => {
-      this.logger.log('CLI WebSocket client connected');
-      this.rateLimiters.set(ws, { tokens: MAX_COMMANDS_PER_SECOND, lastRefill: Date.now() });
-      this.handleConnection(ws);
+    socket.on('error', () => {
+      socket.destroy();
     });
+    this.authorizeUpgrade(request, socket, head).catch(() => {
+      socket.destroy();
+    });
+  }
+
+  private isAuthEnabled(): boolean {
+    return this.actorResolver !== null && this.actorResolver.isEnabled() === true;
+  }
+
+  private async resolveActor(request: IncomingMessage): Promise<Actor | null> {
+    if (this.actorResolver === null) {
+      return null;
+    }
+    return this.actorResolver.resolveFromUpgrade(request);
+  }
+
+  private async authorizeUpgrade(
+    request: IncomingMessage,
+    socket: Socket,
+    head: Buffer,
+  ): Promise<void> {
+    if (this.isAuthEnabled() === true) {
+      const actor = await this.resolveActor(request);
+      if (actor === null) {
+        rejectUpgrade(socket, 401);
+        return;
+      }
+    }
+    this.wss.handleUpgrade(request, socket, head, (ws) => {
+      this.attach(ws, request);
+    });
+  }
+
+  private attach(ws: WebSocket, request: IncomingMessage): void {
+    this.logger.log('CLI WebSocket client connected');
+    this.connections.set(ws, { request, tokens: MAX_COMMANDS_PER_SECOND, lastRefill: Date.now() });
+    this.handleConnection(ws);
+  }
+
+  private async resolveAccess(ws: WebSocket): Promise<CommandAccess> {
+    const state = this.connections.get(ws);
+    if (state === undefined) {
+      return { sessionValid: true, readOnly: true };
+    }
+    if (this.isAuthEnabled() === false) {
+      return { sessionValid: true, readOnly: false };
+    }
+    const actor = await this.resolveActor(state.request);
+    if (actor === null) {
+      return { sessionValid: false, readOnly: true };
+    }
+    return { sessionValid: true, readOnly: actor.role === 'member' };
+  }
+
+  private expireSession(ws: WebSocket): void {
+    const errorMsg: CliServerMessage = { type: 'error', error: SESSION_EXPIRED_MESSAGE };
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(errorMsg));
+    }
+    ws.close(SESSION_EXPIRED_CLOSE_CODE, SESSION_EXPIRED_CLOSE_REASON);
   }
 
   private handleConnection(ws: WebSocket): void {
@@ -67,18 +147,27 @@ export class CliGateway implements OnModuleDestroy {
         return;
       }
 
-      execChain = execChain.then(async () => {
-        const result = await this.cliService.execute(message.command, message.connectionId);
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify(result));
-        }
-      }).catch(() => {
-        // Ensure chain never rejects — errors are handled inside execute()
-      });
+      execChain = execChain
+        .then(async () => {
+          const access = await this.resolveAccess(ws);
+          if (access.sessionValid === false) {
+            this.expireSession(ws);
+            return;
+          }
+          const result = await this.cliService.execute(message.command, message.connectionId, {
+            readOnly: access.readOnly,
+          });
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(result));
+          }
+        })
+        .catch(() => {
+          // Ensure chain never rejects — errors are handled inside execute()
+        });
     });
 
     ws.on('close', () => {
-      this.rateLimiters.delete(ws);
+      this.connections.delete(ws);
       this.logger.log('CLI WebSocket client disconnected');
     });
 
@@ -88,16 +177,23 @@ export class CliGateway implements OnModuleDestroy {
   }
 
   private consumeToken(ws: WebSocket): boolean {
-    const bucket = this.rateLimiters.get(ws);
-    if (!bucket) return false;
+    const state = this.connections.get(ws);
+    if (state === undefined) {
+      return false;
+    }
 
     const now = Date.now();
-    const elapsed = (now - bucket.lastRefill) / 1000;
-    bucket.tokens = Math.min(MAX_COMMANDS_PER_SECOND, bucket.tokens + elapsed * MAX_COMMANDS_PER_SECOND);
-    bucket.lastRefill = now;
+    const elapsed = (now - state.lastRefill) / 1000;
+    state.tokens = Math.min(
+      MAX_COMMANDS_PER_SECOND,
+      state.tokens + elapsed * MAX_COMMANDS_PER_SECOND,
+    );
+    state.lastRefill = now;
 
-    if (bucket.tokens < 1) return false;
-    bucket.tokens -= 1;
+    if (state.tokens < 1) {
+      return false;
+    }
+    state.tokens -= 1;
     return true;
   }
 }

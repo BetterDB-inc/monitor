@@ -1,6 +1,5 @@
-import { useMemo, useState, ReactNode } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
-import { useDemoState } from '../../contexts/DemoContext';
+import { useMemo, useState } from 'react';
+import { Routes, Route } from 'react-router-dom';
 import { DemoBanner } from '../DemoBanner';
 import { useIdleTracker } from '../../hooks/useIdleTracker';
 import { useNavigationTracker } from '../../hooks/useNavigationTracker';
@@ -41,18 +40,12 @@ import { Security } from '../../pages/Security';
 import { CloudUser } from '../../api/workspace';
 import { AppSidebar } from './AppSidebar.tsx';
 import { FeedbackModal } from './FeedbackModal';
+import { RestrictedRoute } from './RestrictedRoute';
 import { ShortcutsOverlay } from '@/components/layout/ShortcutsOverlay';
 import { useAppKeybindings } from '@/keybindings/useAppKeybindings';
 import { ConnectionSwitcherOpenContext } from '@/components/connection-selector/switcher-open-context';
 import { useSidebar } from '@/components/ui/sidebar';
 import { SidebarProvider } from '@/components/ui/sidebar.tsx';
-
-function DemoGuardedRoute({ children }: { children: ReactNode }) {
-  const { isDemo, loading } = useDemoState();
-  if (loading) return null;
-  if (isDemo) return <Navigate to="/" replace />;
-  return <>{children}</>;
-}
 
 export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
   return (
@@ -185,9 +178,11 @@ function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
               <Route
                 path="/bulk-delete"
                 element={
-                  <NoConnectionsGuard>
-                    <BulkDelete />
-                  </NoConnectionsGuard>
+                  <RestrictedRoute>
+                    <NoConnectionsGuard>
+                      <BulkDelete />
+                    </NoConnectionsGuard>
+                  </RestrictedRoute>
                 }
               />
               <Route
@@ -283,11 +278,11 @@ function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
               <Route
                 path="/webhooks"
                 element={
-                  <DemoGuardedRoute>
+                  <RestrictedRoute>
                     <NoConnectionsGuard>
                       <Webhooks />
                     </NoConnectionsGuard>
-                  </DemoGuardedRoute>
+                  </RestrictedRoute>
                 }
               />
               <Route
@@ -328,18 +323,18 @@ function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
                 <Route
                   path="/workspace/members"
                   element={
-                    <DemoGuardedRoute>
+                    <RestrictedRoute>
                       <Members cloudUser={cloudUser} />
-                    </DemoGuardedRoute>
+                    </RestrictedRoute>
                   }
                 />
               )}
               <Route
                 path="/settings"
                 element={
-                  <DemoGuardedRoute>
+                  <RestrictedRoute>
                     <Settings isCloudMode={!!cloudUser} />
-                  </DemoGuardedRoute>
+                  </RestrictedRoute>
                 }
               />
             </Routes>

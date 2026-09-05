@@ -16,11 +16,16 @@ import { FastifyReply } from 'fastify';
 import { Feature, StoredCaptureTrigger, StoredScheduledCapture } from '@betterdb/shared';
 import { LicenseGuard } from '@proprietary/licenses';
 import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
+import { AllowMembers } from '../auth/guards/roles.decorator';
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
 import { StoragePort, StoredCaptureSession } from '../common/interfaces/storage-port.interface';
 import { CaptureScheduler } from './capture-scheduler';
 import { CaptureTriggerRegistry } from './capture-trigger-registry';
-import { BaselineWindow, CrossReferenceEngine, CrossReferenceResult } from './cross-reference.engine';
+import {
+  BaselineWindow,
+  CrossReferenceEngine,
+  CrossReferenceResult,
+} from './cross-reference.engine';
 import { HealthGateResult } from './health-gate';
 import { HealthGateService } from './health-gate.service';
 import {
@@ -118,6 +123,7 @@ export class MonitorController {
     return this.monitorSupportProbe.probe(connectionId);
   }
 
+  @AllowMembers()
   @Post('sessions/preflight')
   async preflight(@Body() body: PreflightRequestBody): Promise<PreflightResult> {
     if (!body?.connectionId) {
@@ -388,16 +394,12 @@ export class MonitorController {
   @Post('schedules')
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.MONITOR_SCHEDULED_CAPTURES)
-  async createSchedule(
-    @Body() body: CreateScheduleRequestBody,
-  ): Promise<StoredScheduledCapture> {
+  async createSchedule(@Body() body: CreateScheduleRequestBody): Promise<StoredScheduledCapture> {
     if (!body?.connectionId) {
       throw new BadRequestException('connectionId is required');
     }
     if (body.intervalSeconds === undefined && !body.cronExpression) {
-      throw new BadRequestException(
-        'Either intervalSeconds or cronExpression is required',
-      );
+      throw new BadRequestException('Either intervalSeconds or cronExpression is required');
     }
     if (body.durationMs === undefined) {
       throw new BadRequestException('durationMs is required');

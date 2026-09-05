@@ -12,6 +12,7 @@ import {
 import { ApiTags, ApiOperation, ApiHeader } from '@nestjs/swagger';
 import { VectorSearchService } from './vector-search.service';
 import { VectorSearchDto } from './dto/vector-search.dto';
+import { AllowMembers } from '../auth/guards/roles.decorator';
 import { ConnectionId } from '../common/decorators';
 import {
   VectorIndexInfo,
@@ -95,6 +96,7 @@ export class VectorSearchController {
     }
   }
 
+  @AllowMembers()
   @Post('indexes/:name/text-search')
   @ApiOperation({ summary: 'Full-text search' })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
@@ -154,6 +156,7 @@ export class VectorSearchController {
     }
   }
 
+  @AllowMembers()
   @Post('indexes/:name/profile')
   @ApiOperation({ summary: 'Profile a search query' })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
@@ -175,6 +178,7 @@ export class VectorSearchController {
     }
   }
 
+  @AllowMembers()
   @Post('indexes/:name/search')
   @ApiOperation({
     summary: 'Similarity search',

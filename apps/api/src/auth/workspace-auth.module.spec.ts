@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { StorageModule } from '../storage/storage.module';
+import { ActorResolver } from './actor-resolver';
 import { WorkspaceAuthModule } from './workspace-auth.module';
 import { SystemModule } from '../system/system.module';
 
@@ -85,5 +86,43 @@ describe('WorkspaceAuthModule', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it('signs out through the public auth path and then rejects workspace/me', async () => {
+    const app = await boot({
+      WORKSPACE_DISABLED: undefined,
+      STORAGE_TYPE: 'memory',
+      AUTH_SECRET: 's'.repeat(40),
+    });
+    const signUp = await app.inject({
+      method: 'POST',
+      url: '/auth/sign-up/email',
+      headers: { 'content-type': 'application/json', origin: 'http://localhost:5173' },
+      payload: { email: 'owner@example.com', password: 'correct horse battery', name: 'Owner' },
+    });
+    expect(signUp.statusCode).toBe(200);
+    const cookie = signUp.headers['set-cookie'];
+    const cookieHeader = Array.isArray(cookie) ? cookie[0].split(';')[0] : cookie?.split(';')[0];
+
+    const signOut = await app.inject({
+      method: 'POST',
+      url: '/auth/sign-out',
+      headers: { cookie: cookieHeader ?? '', origin: 'http://localhost:5173' },
+    });
+    expect(signOut.statusCode).toBe(200);
+
+    const me = await app.inject({
+      method: 'GET',
+      url: '/workspace/me',
+      headers: { cookie: cookieHeader ?? '' },
+    });
+    expect(me.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('provides ActorResolver from the module when disabled', async () => {
+    const app = await boot({ WORKSPACE_DISABLED: 'true', STORAGE_TYPE: 'memory' });
+    expect(app.get(ActorResolver).isEnabled()).toBe(false);
+    await app.close();
   });
 });
