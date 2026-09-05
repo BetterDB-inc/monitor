@@ -525,8 +525,10 @@ MONITOR_PERSISTENCE_CRIT_SEC=600
 
 You can adjust these settings without restarting via the `/settings` API:
 
+> **Note**: API calls need a signed-in session when user control is enabled — see [Authenticating API Requests](configuration.md#authenticating-api-requests).
+
 ```bash
-curl -X PUT http://localhost:3001/settings \
+curl -b cookies.txt -X PUT http://localhost:3001/settings \
   -H "Content-Type: application/json" \
   -d '{
     "anomalyPollIntervalMs": 500,

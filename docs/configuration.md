@@ -14,6 +14,7 @@ This document provides comprehensive configuration information for BetterDB Moni
   - [Data Retention](#data-retention)
 - [Docker Usage](#docker-usage)
 - [HTTP Endpoints](#http-endpoints)
+  - [Authenticating API Requests](#authenticating-api-requests)
 - [Runtime Settings](#runtime-settings)
 - [Container Management](#container-management)
 
@@ -482,8 +483,10 @@ docker run -d \
 **Note**: `STORAGE_TYPE=memory` loses users and sessions on every restart, so the instance returns to the register screen and the next visitor claims the owner account. Use `sqlite` or `postgres` once other people can reach it.
 
 No `BETTERDB_LICENSE_KEY` is set, so the monitor runs **fully offline** — no
-outbound requests, telemetry disabled. Verify with `GET /api/license/status`
-(`source: offline-token`, `mode: offline`, `airGapped: true`).
+outbound requests, telemetry disabled. Verify with
+`curl -b cookies.txt http://localhost:3001/api/license/status`
+(`source: offline-token`, `mode: offline`, `airGapped: true`); see
+[Authenticating API Requests](#authenticating-api-requests) for the cookie.
 
 ### Accessing the Application
 
@@ -503,6 +506,33 @@ Once running, access the web interface at:
 | `/api/prometheus/metrics` | Prometheus metrics endpoint |
 
 All API endpoints are prefixed with `/api` when accessed through the web server.
+
+### Authenticating API Requests
+
+With user control enabled (the default on self-hosted installs), every API endpoint below
+requires a signed-in session; without one the API answers `401`. The `curl` examples
+throughout the docs assume a session cookie obtained once:
+
+```bash
+# Sign in and store the session cookie
+curl -c cookies.txt -X POST http://localhost:3001/api/auth/sign-in/email \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "your-password"}'
+
+# Reuse it on every later call
+curl -b cookies.txt http://localhost:3001/api/connections
+```
+
+These routes stay open without a session: `/api/health`, `/api/version`,
+`/api/system/workspace`, `/api/prometheus/metrics`, `/api/docs`, the `/api/auth` and
+`/api/invite` routes, and reads under `/api/mcp`. Writes under `/api/mcp` that apply
+changes — approving or rejecting cache and memory proposals — need a session too.
+
+Set `WORKSPACE_DISABLED=true` to run without user control, in which case every endpoint
+is reachable without signing in.
+
+Sessions are cached in a signed cookie for 30 seconds, so a role change or a removed
+member takes effect within that window rather than on the next request.
 
 ### Health
 
