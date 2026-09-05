@@ -21,6 +21,31 @@ function emptyMemoryDb(): Record<string, unknown[]> {
   return { user: [], session: [], account: [], verification: [] };
 }
 
+function sameHostOrigins(request: Request | undefined): string[] {
+  if (request === undefined) {
+    return [];
+  }
+  let host: string;
+  try {
+    host = new URL(request.url).host;
+  } catch {
+    return [];
+  }
+  if (host === '') {
+    return [];
+  }
+  return [`http://${host}`, `https://${host}`];
+}
+
+function trustedOriginsFor(config: WorkspaceConfig): (request: Request | undefined) => string[] {
+  return (request) => {
+    if (config.publicUrl !== null) {
+      return config.trustedOrigins;
+    }
+    return [...config.trustedOrigins, ...sameHostOrigins(request)];
+  };
+}
+
 function databaseFor(handle: RawDatabaseHandle, modules: BetterAuthModules): unknown {
   if (handle.kind === 'sqlite') {
     return handle.db;
@@ -43,13 +68,14 @@ export async function createBetterAuth(options: CreateBetterAuthOptions) {
     secret: options.secret,
     baseURL: config.publicUrl ?? undefined,
     basePath: config.basePath,
-    trustedOrigins: config.trustedOrigins,
+    trustedOrigins: trustedOriginsFor(config),
     database: databaseFor(options.handle, modules) as never,
     emailAndPassword: { enabled: true, requireEmailVerification: false },
     session: { expiresIn: SESSION_SECONDS },
     rateLimit: { enabled: true },
     advanced: {
       disableOriginCheck: false,
+      trustedProxyHeaders: config.trustProxy,
       useSecureCookies: secureCookies,
       ipAddress: { ipAddressHeaders: [CLIENT_IP_HEADER] },
     },

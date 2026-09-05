@@ -101,6 +101,111 @@ describe('createBetterAuth', () => {
     expect(cookies).toContain('Secure');
   });
 
+  it('accepts an https origin for the request host when no public url is configured', async () => {
+    const auth = await createBetterAuth({
+      handle: { kind: 'memory' },
+      secret: SECRET,
+      config: resolveWorkspaceConfig({ NODE_ENV: 'production' }),
+    });
+    const response = await auth.handler(
+      new Request('http://monitor.example.com/api/auth/sign-up/email', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          origin: 'https://monitor.example.com',
+          cookie: 'seen=1',
+          [CLIENT_IP_HEADER]: '10.3.0.1',
+        },
+        body: JSON.stringify({
+          email: 'owner@example.com',
+          password: 'correct horse battery',
+          name: 'Someone',
+        }),
+      }),
+    );
+    expect(response.status).toBe(200);
+  });
+
+  it('still rejects a foreign origin when no public url is configured', async () => {
+    const auth = await createBetterAuth({
+      handle: { kind: 'memory' },
+      secret: SECRET,
+      config: resolveWorkspaceConfig({ NODE_ENV: 'production' }),
+    });
+    const response = await auth.handler(
+      new Request('http://monitor.example.com/api/auth/sign-up/email', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          origin: 'https://evil.example',
+          cookie: 'seen=1',
+          [CLIENT_IP_HEADER]: '10.3.0.2',
+        },
+        body: JSON.stringify({
+          email: 'owner@example.com',
+          password: 'correct horse battery',
+          name: 'Someone',
+        }),
+      }),
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it('pins the origin to the public url when one is configured', async () => {
+    const auth = await createBetterAuth({
+      handle: { kind: 'memory' },
+      secret: SECRET,
+      config: resolveWorkspaceConfig({
+        NODE_ENV: 'production',
+        AUTH_PUBLIC_URL: 'https://monitor.example.com',
+      }),
+    });
+    const response = await auth.handler(
+      new Request('http://internal.local/api/auth/sign-up/email', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          origin: 'https://internal.local',
+          cookie: 'seen=1',
+          [CLIENT_IP_HEADER]: '10.3.0.3',
+        },
+        body: JSON.stringify({
+          email: 'owner@example.com',
+          password: 'correct horse battery',
+          name: 'Someone',
+        }),
+      }),
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it('derives the origin from the forwarded host when TRUST_PROXY is set', async () => {
+    const auth = await createBetterAuth({
+      handle: { kind: 'memory' },
+      secret: SECRET,
+      config: resolveWorkspaceConfig({ NODE_ENV: 'production', TRUST_PROXY: 'true' }),
+    });
+    const response = await auth.handler(
+      new Request('http://internal.local/api/auth/sign-up/email', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          origin: 'https://monitor.example.com',
+          cookie: 'seen=1',
+          'x-forwarded-host': 'monitor.example.com',
+          'x-forwarded-proto': 'https',
+          [CLIENT_IP_HEADER]: '10.3.0.4',
+        },
+        body: JSON.stringify({
+          email: 'owner@example.com',
+          password: 'correct horse battery',
+          name: 'Someone',
+        }),
+      }),
+    );
+    expect(response.status).toBe(200);
+  });
+
   it('rejects an origin that is not trusted even under NODE_ENV=test', async () => {
     const auth = await build({ kind: 'memory' });
     const response = await signUp(auth, 'owner@example.com', '10.0.0.2', 'http://evil.example');

@@ -22,7 +22,22 @@ const DEFAULT_DATA_DIR = join(process.cwd(), 'data');
 const MEMORY_STORAGE_WARNING =
   'STORAGE_TYPE=memory: users and sessions are lost on restart; every restart returns to the register screen';
 
+const PROXY_WARNING =
+  'Running in production without AUTH_PUBLIC_URL: sign-in is rejected with 403 when a reverse ' +
+  'proxy rewrites the Host header. Set AUTH_PUBLIC_URL to the browser-facing URL, or set ' +
+  'TRUST_PROXY=true when the proxy forwards X-Forwarded-Host and X-Forwarded-Proto.';
+
 const logger = new Logger('WorkspaceAuth');
+
+function warnAboutProxySetup(config: WorkspaceConfig): void {
+  if (config.publicUrl !== null || config.trustProxy === true) {
+    return;
+  }
+  if (process.env.NODE_ENV !== 'production') {
+    return;
+  }
+  logger.warn(PROXY_WARNING);
+}
 
 async function buildBetterAuth(
   storage: StoragePort,
@@ -35,6 +50,7 @@ async function buildBetterAuth(
   if (handle.kind === 'memory') {
     logger.warn(MEMORY_STORAGE_WARNING);
   }
+  warnAboutProxySetup(config);
   const secret = resolveAuthSecret(process.env, process.env.BETTERDB_DATA_DIR || DEFAULT_DATA_DIR);
   const auth = await createBetterAuth({ handle, secret, config });
   await runBetterAuthMigrations(auth, handle);

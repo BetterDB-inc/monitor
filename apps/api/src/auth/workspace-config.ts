@@ -1,4 +1,5 @@
 import type { WorkspaceMode } from '@betterdb/shared';
+import { trustsProxyHeaders } from '../config/trust-proxy';
 
 export const WORKSPACE_CONFIG = 'WORKSPACE_CONFIG';
 
@@ -12,6 +13,7 @@ export interface WorkspaceConfig {
   basePath: string;
   brokerUrl: string;
   trustedOrigins: string[];
+  trustProxy: boolean;
 }
 
 function resolveMode(env: NodeJS.ProcessEnv): WorkspaceMode {
@@ -54,5 +56,6 @@ export function resolveWorkspaceConfig(env: NodeJS.ProcessEnv): WorkspaceConfig 
     basePath: isProduction ? '/api/auth' : '/auth',
     brokerUrl: brokerUrl ?? DEFAULT_BROKER_URL,
     trustedOrigins,
+    trustProxy: trustsProxyHeaders(env),
   };
 }

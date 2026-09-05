@@ -55,7 +55,7 @@ export class BetterAuthController {
   }
 
   private toWebRequest(req: FastifyRequest): Request {
-    const host = req.headers.host ?? 'localhost';
+    const host = req.host === '' ? 'localhost' : req.host;
     const url = new URL(req.url, `${req.protocol}://${host}`);
     const hasBody = BODYLESS_METHODS.has(req.method) === false && req.body !== undefined;
     const headers = toWebHeaders(req.headers);
