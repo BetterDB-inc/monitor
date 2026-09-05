@@ -41,7 +41,7 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
       </SidebarHeader>
       <SidebarSeparator className="mb-2 mx-0" />
       <SidebarContent>
-        <nav className="space-y-1 px-3 flex-1">
+        <nav className="space-y-1 px-3 flex-1" aria-label="Primary">
           <NavItem to="/" active={location.pathname === '/'}>
             Dashboard
           </NavItem>
