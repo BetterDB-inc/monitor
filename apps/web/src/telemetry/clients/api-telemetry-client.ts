@@ -9,7 +9,9 @@ export class ApiTelemetryClient implements TelemetryClient {
         eventType: event,
         payload: properties ?? {},
       }),
-    }).catch(() => {});
+    }).catch((err) => {
+      console.debug('[telemetry] failed to capture event:', err);
+    });
   }
 
   identify(_distinctId: string, _properties: Record<string, unknown>): void {}

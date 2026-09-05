@@ -460,12 +460,13 @@ export const metricsApi = {
       method: 'POST',
       body: JSON.stringify(params),
     }),
-  getVectorIndexSnapshots: (name: string, hours?: number) => {
+  getVectorIndexSnapshots: (name: string, hours?: number, signal?: AbortSignal) => {
     const q = new URLSearchParams();
     if (hours) q.set('hours', hours.toString());
     const qs = q.toString();
     return fetchApi<{ snapshots: VectorIndexSnapshot[] }>(
       `/vector-search/indexes/${encodeURIComponent(name)}/snapshots${qs ? `?${qs}` : ''}`,
+      { signal },
     );
   },
   textSearch: (indexName: string, params: { query: string; offset?: number; limit?: number }) =>
