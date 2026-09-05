@@ -32,7 +32,13 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
   return (
     <Sidebar className="bg-card">
       <SidebarHeader>
-        <div className="p-4 pb-2">
+        <div className="p-4 pb-2 flex items-center gap-2">
+          <img
+            src="/symbol-white.svg"
+            alt=""
+            aria-hidden="true"
+            className="h-8 w-8 shrink-0 rounded-md bg-primary p-1"
+          />
           <h2 className="text-lg font-semibold">BetterDB Monitor</h2>
         </div>
         <div className=" mb-1">
