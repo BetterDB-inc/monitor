@@ -2,6 +2,7 @@ import { Controller, Get, Inject, Optional, Req } from '@nestjs/common';
 import { FastifyRequest } from 'fastify';
 import type { WorkspaceStatus } from '@betterdb/shared';
 import { TelemetryPort } from '../common/interfaces/telemetry-port.interface';
+import { isCloudMode } from '../common/utils/cloud-mode';
 import { WORKSPACE_STATUS, WorkspaceStatusService } from '../workspace/workspace-status.service';
 import {
   DefaultDbHost,
@@ -30,7 +31,7 @@ export class SystemController {
     if (this.workspaceStatus !== null) {
       return this.workspaceStatus.getStatus();
     }
-    if (process.env.CLOUD_MODE === 'true') {
+    if (isCloudMode()) {
       return { mode: 'cloud', enabled: true, bootstrapped: true };
     }
     return { mode: 'disabled', enabled: false, bootstrapped: false };

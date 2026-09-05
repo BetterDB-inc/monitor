@@ -22,6 +22,12 @@ describe('resolveWorkspaceConfig', () => {
     expect(config.mode).toBe('cloud');
   });
 
+  it('reads CLOUD_MODE the same way the module loader does', () => {
+    expect(resolveWorkspaceConfig({ CLOUD_MODE: '1' }).mode).toBe('cloud');
+    expect(resolveWorkspaceConfig({ CLOUD_MODE: 'TRUE' }).mode).toBe('cloud');
+    expect(resolveWorkspaceConfig({ CLOUD_MODE: '0' }).mode).toBe('self-hosted');
+  });
+
   it('treats CLOUD_MODE=false as self-hosted', () => {
     expect(resolveWorkspaceConfig({ CLOUD_MODE: 'false' }).mode).toBe('self-hosted');
   });
