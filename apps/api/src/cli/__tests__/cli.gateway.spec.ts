@@ -381,6 +381,36 @@ describe('CliGateway activity recording', () => {
     );
   });
 
+  it('drops arguments for read commands that carry a caller-supplied body', async () => {
+    const execute = jest
+      .fn()
+      .mockResolvedValue({ type: 'result', result: '', resultType: 'string', durationMs: 1 });
+    const activity = activityWith();
+    const gateway = new CliGateway(
+      { execute } as unknown as CliService,
+      resolverWith(true, admin),
+      activity.service,
+    );
+    const ws = connect(gateway);
+    const payloads = [
+      'PUBLISH alerts hunter2',
+      'SPUBLISH alerts hunter2',
+      'ECHO hunter2',
+      "EVAL_RO 'return hunter2' 0",
+      'EVALSHA_RO abc123 0 hunter2',
+      'FCALL_RO fn 0 hunter2',
+    ];
+    for (const command of payloads) {
+      send(ws, command);
+      await flush();
+    }
+    expect(activity.record).toHaveBeenCalledTimes(payloads.length);
+    for (const [call] of activity.record.mock.calls) {
+      expect(call.details).not.toHaveProperty('args');
+      expect(JSON.stringify(call)).not.toContain('hunter2');
+    }
+  });
+
   it('caps recorded arguments', async () => {
     const execute = jest
       .fn()
