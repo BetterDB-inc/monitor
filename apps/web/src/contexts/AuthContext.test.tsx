@@ -361,6 +361,76 @@ describe('getMe failure handling', () => {
     expect(screen.queryByRole('heading', { name: /sign in/i })).not.toBeInTheDocument();
   });
 
+  const signedIn = {
+    userId: 'u1',
+    email: 'o@example.com',
+    name: 'O',
+    role: 'admin',
+    isOwner: true,
+  };
+
+  it('keeps a signed-in user rendered when a later getMe fails', async () => {
+    getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: true });
+    getMe.mockResolvedValueOnce(signedIn);
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.user).toEqual(signedIn));
+
+    getMe.mockRejectedValue(new Error('502'));
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    expect(result.current.unavailable).toBe(false);
+    expect(result.current.user).toEqual(signedIn);
+  });
+
+  it('retries in the background until the server recovers', async () => {
+    vi.useFakeTimers();
+    try {
+      getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: true });
+      getMe.mockRejectedValueOnce(new Error('502'));
+      getMe.mockResolvedValue(signedIn);
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.unavailable).toBe(true);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(result.current.unavailable).toBe(false);
+      expect(result.current.user).toEqual(signedIn);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries the cloud user lookup after a 5xx', async () => {
+    vi.useFakeTimers();
+    try {
+      const cloudUser = { userId: 'u1', email: 'o@example.com', role: 'owner', tenantId: 't' };
+      getStatus.mockResolvedValue({ mode: 'cloud', enabled: true, bootstrapped: true });
+      getMe.mockRejectedValueOnce(new Error('502'));
+      getMe.mockResolvedValue(cloudUser);
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.user).toBeNull();
+      expect(result.current.unavailable).toBe(false);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(result.current.user).toEqual(cloudUser);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps the unavailable screen through a retry until getMe settles', async () => {
     getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: true });
     getMe.mockRejectedValueOnce(new Error('502'));

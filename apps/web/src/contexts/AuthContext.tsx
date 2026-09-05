@@ -28,6 +28,9 @@ const noop = async (): Promise<void> => {
   return undefined;
 };
 
+const RETRY_BASE_MS = 2000;
+const RETRY_MAX_MS = 30000;
+
 const AuthContext = createContext<AuthState>({
   loading: true,
   unavailable: false,
@@ -46,10 +49,40 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
   const [bootstrapped, setBootstrapped] = useState(false);
   const [user, setUser] = useState<CurrentUser | null>(null);
   const refreshSeq = useRef(0);
+  const currentUser = useRef<CurrentUser | null>(null);
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryDelay = useRef(RETRY_BASE_MS);
+  const refreshRef = useRef<() => Promise<void>>(noop);
+
+  const rememberUser = useCallback((next: CurrentUser | null): void => {
+    currentUser.current = next;
+    setUser(next);
+  }, []);
+
+  const cancelRetry = useCallback((): void => {
+    if (retryTimer.current === null) {
+      return;
+    }
+    clearTimeout(retryTimer.current);
+    retryTimer.current = null;
+  }, []);
+
+  const scheduleRetry = useCallback((): void => {
+    if (retryTimer.current !== null) {
+      return;
+    }
+    const delay = retryDelay.current;
+    retryDelay.current = Math.min(delay * 2, RETRY_MAX_MS);
+    retryTimer.current = setTimeout(() => {
+      retryTimer.current = null;
+      void refreshRef.current();
+    }, delay);
+  }, []);
 
   const refresh = useCallback(async (): Promise<void> => {
     refreshSeq.current += 1;
     const seq = refreshSeq.current;
+    cancelRetry();
     try {
       const status = await workspaceApi.getStatus();
       if (seq !== refreshSeq.current) {
@@ -59,8 +92,9 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
       setMode(status.mode);
       setBootstrapped(status.bootstrapped);
       if (status.enabled === false || status.bootstrapped === false) {
+        retryDelay.current = RETRY_BASE_MS;
         setUnavailable(false);
-        setUser(null);
+        rememberUser(null);
         return;
       }
       try {
@@ -68,20 +102,22 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
         if (seq !== refreshSeq.current) {
           return;
         }
+        retryDelay.current = RETRY_BASE_MS;
         setUnavailable(false);
-        setUser(me);
+        rememberUser(me);
       } catch (error) {
         if (seq !== refreshSeq.current) {
           return;
         }
         if (error instanceof UnauthorizedError) {
+          retryDelay.current = RETRY_BASE_MS;
           setUnavailable(false);
-          setUser(null);
+          rememberUser(null);
           return;
         }
-        if (status.mode === 'cloud') {
+        scheduleRetry();
+        if (status.mode === 'cloud' || currentUser.current !== null) {
           setUnavailable(false);
-          setUser(null);
           return;
         }
         setUnavailable(true);
@@ -92,26 +128,35 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
       }
       setAuthRedirectEnabled(false);
       setUnavailable(true);
-      setUser(null);
+      scheduleRetry();
     } finally {
       if (seq === refreshSeq.current) {
         setLoading(false);
       }
     }
-  }, []);
+  }, [cancelRetry, rememberUser, scheduleRetry]);
 
   const signOut = useCallback(async (): Promise<void> => {
     refreshSeq.current += 1;
+    cancelRetry();
+    retryDelay.current = RETRY_BASE_MS;
     try {
       await workspaceApi.signOut();
     } finally {
-      setUser(null);
+      rememberUser(null);
     }
-  }, []);
+  }, [cancelRetry, rememberUser]);
+
+  useEffect(() => {
+    refreshRef.current = refresh;
+  }, [refresh]);
 
   useEffect(() => {
     refresh();
-  }, [refresh]);
+    return () => {
+      cancelRetry();
+    };
+  }, [refresh, cancelRetry]);
 
   const value = useMemo<AuthState>(() => {
     return {
