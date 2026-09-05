@@ -21,11 +21,17 @@ import { formatForDisplay } from '@tanstack/hotkeys';
 
 interface SidebarProps {
   cloudUser: CloudUser | null;
+  showTeam: boolean;
   onFeedbackClick: () => void;
   onShortcutsClick: () => void;
 }
 
-export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: SidebarProps) {
+export function AppSidebar({
+  cloudUser,
+  showTeam,
+  onFeedbackClick,
+  onShortcutsClick,
+}: SidebarProps) {
   const location = useLocation();
   const { hasVectorSearch } = useCapabilities();
   const { unreadCount: cacheProposalsUnread } = useCacheProposalsUnread();
@@ -194,13 +200,11 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
               {formatForDisplay('shift+?')}
             </kbd>
           </button>
-          {cloudUser && (
+          {showTeam && (
             <NavItem
               to="/workspace/members"
               active={location.pathname === '/workspace/members'}
               demoLocked={isDemo}
-              locked={canMutate === false}
-              lockedReason="Admins only"
             >
               Team
             </NavItem>

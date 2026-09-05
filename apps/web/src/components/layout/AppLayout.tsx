@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { ReactElement, useMemo, useState } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { DemoBanner } from '../DemoBanner';
 import { useIdleTracker } from '../../hooks/useIdleTracker';
@@ -37,7 +37,7 @@ import { MonitorSession } from '../../pages/MonitorSession';
 import { Members } from '../../pages/Members';
 import { Security } from '../../pages/Security';
 
-import { CloudUser } from '../../api/workspace';
+import { useAuth } from '../../contexts/AuthContext';
 import { AppSidebar } from './AppSidebar.tsx';
 import { FeedbackModal } from './FeedbackModal';
 import { RestrictedRoute } from './RestrictedRoute';
@@ -47,10 +47,10 @@ import { ConnectionSwitcherOpenContext } from '@/components/connection-selector/
 import { useSidebar } from '@/components/ui/sidebar';
 import { SidebarProvider } from '@/components/ui/sidebar.tsx';
 
-export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
+export function AppLayout(): ReactElement {
   return (
     <SidebarProvider>
-      <AppLayoutInner cloudUser={cloudUser} />
+      <AppLayoutInner />
     </SidebarProvider>
   );
 }
@@ -59,7 +59,10 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
  * Split out so the keybindings can reach `useSidebar`, which only exists
  * inside `SidebarProvider`.
  */
-function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
+function AppLayoutInner(): ReactElement {
+  const { user, isCloud, mode } = useAuth();
+  const cloudUser = isCloud ? user : null;
+  const showTeam = isCloud === true || mode === 'self-hosted';
   const [showFeedback, setShowFeedback] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -99,6 +102,7 @@ function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
       <div className="min-h-screen bg-background w-full">
         <AppSidebar
           cloudUser={cloudUser}
+          showTeam={showTeam}
           onFeedbackClick={() => setShowFeedback(true)}
           onShortcutsClick={() => setShowShortcuts(true)}
         />
@@ -319,16 +323,7 @@ function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
                   </NoConnectionsGuard>
                 }
               />
-              {cloudUser && (
-                <Route
-                  path="/workspace/members"
-                  element={
-                    <RestrictedRoute>
-                      <Members cloudUser={cloudUser} />
-                    </RestrictedRoute>
-                  }
-                />
-              )}
+              {showTeam && <Route path="/workspace/members" element={<Members />} />}
               <Route
                 path="/settings"
                 element={

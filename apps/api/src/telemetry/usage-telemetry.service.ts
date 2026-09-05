@@ -2,6 +2,7 @@ import { Injectable, Optional, Inject, OnModuleInit } from '@nestjs/common';
 import { isCloudMode } from '../common/utils/cloud-mode';
 import { ConfigService } from '@nestjs/config';
 import { LicenseService } from '@proprietary/licenses';
+import type { WorkspaceRole } from '@betterdb/shared';
 import { TelemetryPort } from '../common/interfaces/telemetry-port.interface';
 
 @Injectable()
@@ -103,6 +104,14 @@ export class UsageTelemetryService implements OnModuleInit {
 
   async trackAppStart(): Promise<void> {
     this.sendEvent('app_start');
+  }
+
+  async trackUserInvited(opts: { role: WorkspaceRole }): Promise<void> {
+    this.sendEvent('user_invited', opts);
+  }
+
+  async trackInviteAccepted(opts: { role: WorkspaceRole; method: 'password' }): Promise<void> {
+    this.sendEvent('invite_accepted', opts);
   }
 
   async trackInteractionAfterIdle(idleDurationMs: number): Promise<void> {
