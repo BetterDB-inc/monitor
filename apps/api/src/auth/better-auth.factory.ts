@@ -6,6 +6,7 @@ import type { WorkspaceConfig } from './workspace-config';
 export const BETTER_AUTH = 'BETTER_AUTH';
 
 const SESSION_SECONDS = 7 * 24 * 60 * 60;
+const SESSION_CACHE_SECONDS = 30;
 const SIGN_UP_PATH = '/sign-up/email';
 const REGISTRATION_CLOSED = 'Registration is closed. Ask a workspace admin for an invite.';
 
@@ -71,7 +72,10 @@ export async function createBetterAuth(options: CreateBetterAuthOptions) {
     trustedOrigins: trustedOriginsFor(config),
     database: databaseFor(options.handle, modules) as never,
     emailAndPassword: { enabled: true, requireEmailVerification: false },
-    session: { expiresIn: SESSION_SECONDS },
+    session: {
+      expiresIn: SESSION_SECONDS,
+      cookieCache: { enabled: true, maxAge: SESSION_CACHE_SECONDS },
+    },
     rateLimit: { enabled: true },
     advanced: {
       disableOriginCheck: false,
