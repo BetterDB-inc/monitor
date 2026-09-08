@@ -6,9 +6,9 @@
     "start": "tsx index.ts"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^3.0.0",
+    "@ai-sdk/openai": "^3.0.109",
     "@betterdb/agent-cache": "^0.2.0",
-    "ai": "^6.0.135",
+    "ai": "^6.0.277",
     "iovalkey": "^0.3.0"
   },
   "devDependencies": {
