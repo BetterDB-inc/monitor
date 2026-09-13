@@ -66,7 +66,10 @@ export class PersonalTokensController {
     @Req() req: FastifyRequest,
   ): Promise<RevokedResponse> {
     requireSession(actor);
-    const token = await this.tokens.revoke(id, actor);
+    const { token, changed } = await this.tokens.revoke(id, actor);
+    if (changed === false) {
+      return { revoked: true };
+    }
     void this.activity.record({
       actor: toActivityActor(actor),
       action: 'token.revoke',

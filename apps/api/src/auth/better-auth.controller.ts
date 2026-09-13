@@ -72,7 +72,8 @@ export class BetterAuthController {
 
   private async currentActor(req: FastifyRequest): Promise<Actor | null> {
     try {
-      return await this.actors.resolveFromHeaders(req.headers, req.ip);
+      const { actor } = await this.actors.resolveSessionFromHeaders(req.headers, req.ip);
+      return actor;
     } catch {
       return null;
     }

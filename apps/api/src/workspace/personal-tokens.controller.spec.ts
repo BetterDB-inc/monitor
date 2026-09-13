@@ -433,4 +433,28 @@ describe('PersonalTokensController', () => {
       });
     expect([...actions].sort()).toEqual(['token.create', 'token.revoke']);
   });
+
+  it('records only one token.revoke row when a token is revoked twice', async () => {
+    const created = await createToken(memberCookie, 'revoked-twice');
+    const firstRevoke = await app.inject({
+      method: 'DELETE',
+      url: `/agent-tokens/${created.id}`,
+      headers: { cookie: memberCookie, origin: ORIGIN },
+    });
+    expect(firstRevoke.statusCode).toBe(200);
+    expect(firstRevoke.json()).toEqual({ revoked: true });
+
+    const secondRevoke = await app.inject({
+      method: 'DELETE',
+      url: `/agent-tokens/${created.id}`,
+      headers: { cookie: memberCookie, origin: ORIGIN },
+    });
+    expect(secondRevoke.statusCode).toBe(200);
+    expect(secondRevoke.json()).toEqual({ revoked: true });
+
+    const revokeRows = (await activity()).items.filter((item) => {
+      return item.action === 'token.revoke' && item.target?.id === created.id;
+    });
+    expect(revokeRows).toHaveLength(1);
+  });
 });

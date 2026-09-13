@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { createHash, randomBytes, randomUUID } from 'crypto';
 import type { Actor, AgentToken, TokenType } from '@betterdb/shared';
 import type { StoragePort } from '../common/interfaces/storage-port.interface';
@@ -13,6 +13,11 @@ const TOKEN_BYTES = 32;
 export interface GeneratedPersonalToken {
   token: string;
   metadata: AgentToken;
+}
+
+export interface RevokePersonalTokenResult {
+  token: AgentToken;
+  changed: boolean;
 }
 
 export interface PersonalTokenView {
@@ -47,6 +52,8 @@ function toPersonalTokenView(token: AgentToken, emails: Map<string, string>): Pe
 
 @Injectable()
 export class PersonalTokenService {
+  private readonly logger = new Logger(PersonalTokenService.name);
+
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly members: MemberService,
@@ -81,7 +88,7 @@ export class PersonalTokenService {
     });
   }
 
-  async revoke(id: string, actor: Actor): Promise<AgentToken> {
+  async revoke(id: string, actor: Actor): Promise<RevokePersonalTokenResult> {
     const tokens = await this.storage.getAgentTokens('mcp');
     const token = tokens.find((candidate) => {
       return candidate.id === id;
@@ -89,10 +96,11 @@ export class PersonalTokenService {
     if (token === undefined || this.canManage(actor, token) === false) {
       throw new NotFoundException(TOKEN_NOT_FOUND_MESSAGE);
     }
-    if (token.revokedAt === null) {
-      await this.storage.revokeAgentToken(id);
+    if (token.revokedAt !== null) {
+      return { token, changed: false };
     }
-    return token;
+    await this.storage.revokeAgentToken(id);
+    return { token, changed: true };
   }
 
   async resolveActor(raw: string): Promise<Actor | null> {
@@ -110,7 +118,11 @@ export class PersonalTokenService {
     if (owner === null) {
       return null;
     }
-    await this.storage.updateAgentTokenLastUsed(token.id);
+    try {
+      await this.storage.updateAgentTokenLastUsed(token.id);
+    } catch (error) {
+      this.logger.warn(`Failed to update lastUsedAt for token ${token.id}: ${String(error)}`);
+    }
     return {
       userId: owner.id,
       email: owner.email,

@@ -96,9 +96,24 @@ describe('PersonalTokenService', () => {
     expect(stored?.lastUsedAt).toEqual(expect.any(Number));
   });
 
+  it('still resolves the actor when the lastUsedAt write fails', async () => {
+    const { token, metadata } = await service.generate('laptop', actorFor(member));
+    jest.spyOn(storage, 'updateAgentTokenLastUsed').mockRejectedValueOnce(new Error('busy'));
+    const actor = await service.resolveActor(token);
+    expect(actor).toEqual({
+      userId: member.id,
+      email: member.email,
+      role: 'member',
+      isOwner: false,
+      via: 'token',
+      tokenId: metadata.id,
+    });
+  });
+
   it('resolves nothing for revoked, expired, unknown, ownerless or foreign-format tokens', async () => {
     const revoked = await service.generate('revoked', actorFor(member));
-    await service.revoke(revoked.metadata.id, actorFor(member));
+    const revokeResult = await service.revoke(revoked.metadata.id, actorFor(member));
+    expect(revokeResult.changed).toBe(true);
     expect(await service.resolveActor(revoked.token)).toBeNull();
 
     const expiredRaw = `${PERSONAL_TOKEN_PREFIX}expired`;
@@ -185,8 +200,13 @@ describe('PersonalTokenService', () => {
       NotFoundException,
     );
 
-    await service.revoke(memberToken.metadata.id, actorFor(admin));
+    const firstRevoke = await service.revoke(memberToken.metadata.id, actorFor(admin));
+    expect(firstRevoke.changed).toBe(true);
     const stored = await storage.getAgentTokenByHash(memberToken.metadata.tokenHash);
     expect(stored?.revokedAt).toEqual(expect.any(Number));
+
+    const secondRevoke = await service.revoke(memberToken.metadata.id, actorFor(admin));
+    expect(secondRevoke.changed).toBe(false);
+    expect(secondRevoke.token.revokedAt).toEqual(expect.any(Number));
   });
 });

@@ -3,6 +3,8 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 import { MemoryAdapter } from '../storage/adapters/memory.adapter';
 import { ACTIVITY_CONFIG } from '../activity/activity-config';
 import { ActivityService } from '../activity/activity.service';
+import { MemberService } from '../workspace/member.service';
+import { PersonalTokenService } from '../workspace/personal-token.service';
 import { ActorResolver } from './actor-resolver';
 import { WORKSPACE_CONFIG } from './workspace-config';
 import { BETTER_AUTH, countUsers, createBetterAuth } from './better-auth.factory';
@@ -274,6 +276,8 @@ describe('BetterAuthController activity events', () => {
   let app: NestFastifyApplication;
   let storage: MemoryAdapter;
   let sessionCookie: string;
+  let personalTokens: PersonalTokenService;
+  let ownerBearerToken: string;
 
   beforeAll(async () => {
     const config = resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' });
@@ -294,6 +298,8 @@ describe('BetterAuthController activity events', () => {
         { provide: UsageTelemetryService, useValue: telemetryStub() },
         ActivityService,
         ActorResolver,
+        MemberService,
+        PersonalTokenService,
       ],
     }).compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
@@ -307,6 +313,18 @@ describe('BetterAuthController activity events', () => {
       remoteAddress: '198.51.100.31',
     });
     expect(signUp.statusCode).toBe(200);
+    const ownerId = (signUp.json() as { user: { id: string } }).user.id;
+
+    personalTokens = moduleRef.get(PersonalTokenService);
+    const generated = await personalTokens.generate('ci', {
+      userId: ownerId,
+      email: EMAIL,
+      role: 'admin',
+      isOwner: true,
+      via: 'session',
+      tokenId: null,
+    });
+    ownerBearerToken = generated.token;
   });
 
   afterAll(async () => {
@@ -319,6 +337,11 @@ describe('BetterAuthController activity events', () => {
     return page.items.map((item) => {
       return item.details;
     });
+  }
+
+  async function logoutCount(): Promise<number> {
+    const page = await storage.getActivityRepository().list({ limit: 50, action: 'auth.logout' });
+    return page.items.length;
   }
 
   it('records the registration as auth.login with method register', async () => {
@@ -370,6 +393,29 @@ describe('BetterAuthController activity events', () => {
     expect(page.items).toHaveLength(1);
     expect(page.items[0].actorEmail).toBe(EMAIL);
     expect(page.items[0].details).toEqual({});
+  });
+
+  it('does not attribute auth.logout to a bearer-only sign-out with no session cookie', async () => {
+    const before = await logoutCount();
+    const signOut = await app.inject({
+      method: 'POST',
+      url: '/auth/sign-out',
+      headers: { ...headers, authorization: `Bearer ${ownerBearerToken}` },
+      payload: {},
+      remoteAddress: '198.51.100.35',
+    });
+    expect(signOut.statusCode).toBe(200);
+    expect(await logoutCount()).toBe(before);
+  });
+
+  it('has no session for a bearer-only get-session, since better-auth has no bearer plugin', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/auth/get-session',
+      headers: { authorization: `Bearer ${ownerBearerToken}` },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe('null');
   });
 });
 
