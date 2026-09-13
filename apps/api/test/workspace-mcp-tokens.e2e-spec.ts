@@ -4,6 +4,7 @@ import { Test } from '@nestjs/testing';
 import { rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { SESSION_REQUIRED_MESSAGE } from '../src/auth/guards/require-session';
 
 const OWNER = { email: 'owner@example.com', password: 'correct horse battery', name: 'Owner' };
 const TRUSTED_ORIGIN = 'http://localhost:5173';
@@ -32,6 +33,10 @@ interface ListedToken {
   userId: string | null;
   ownerEmail: string | null;
   lastUsedAt: number | null;
+}
+
+interface ListedInvitation {
+  email: string;
 }
 
 function extractSessionCookie(setCookie: string | string[] | undefined): string {
@@ -164,6 +169,18 @@ describe('Workspace MCP tokens (E2E)', () => {
       payload: { email: 'token-invite@example.com', role: 'admin' },
     });
     expect(invite.statusCode).toBe(403);
+    expect((invite.json() as { message: string }).message).toBe(SESSION_REQUIRED_MESSAGE);
+
+    const invitations = await app.inject({
+      method: 'GET',
+      url: '/api/workspace/invitations',
+      headers: { cookie: ownerCookie },
+    });
+    expect(invitations.statusCode).toBe(200);
+    const invitationEmails = (invitations.json() as ListedInvitation[]).map((item) => {
+      return item.email;
+    });
+    expect(invitationEmails).not.toContain('token-invite@example.com');
 
     const updateEntry = (await activity()).find((item) => {
       return item.action === 'PUT /settings';
