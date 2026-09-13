@@ -24,6 +24,9 @@ async function boot(env: Record<string, string | undefined>): Promise<NestFastif
       trackUserInvited: jest.fn(),
       trackInviteAccepted: jest.fn(),
       trackAppStart: jest.fn(),
+      trackUserLogin: jest.fn(),
+      trackWorkspaceFirstRegister: jest.fn(),
+      trackMemberRemoved: jest.fn(),
     })
     .compile();
   const app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());

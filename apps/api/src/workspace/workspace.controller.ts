@@ -150,6 +150,7 @@ export class WorkspaceController {
     }
     await this.invitations.retire(member.email);
     await this.members.remove(userId);
+    void this.telemetry.trackMemberRemoved();
     return { ok: true };
   }
 

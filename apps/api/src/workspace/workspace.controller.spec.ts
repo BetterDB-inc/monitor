@@ -55,7 +55,13 @@ function holdLookups(
 describe('WorkspaceController', () => {
   let app: NestFastifyApplication;
   let members: MemberService;
-  let telemetry: { trackUserInvited: jest.Mock; trackInviteAccepted: jest.Mock };
+  let telemetry: {
+    trackUserInvited: jest.Mock;
+    trackInviteAccepted: jest.Mock;
+    trackUserLogin: jest.Mock;
+    trackWorkspaceFirstRegister: jest.Mock;
+    trackMemberRemoved: jest.Mock;
+  };
   let ownerCookie: string;
 
   async function signIn(email: string, password: string): Promise<string> {
@@ -78,7 +84,13 @@ describe('WorkspaceController', () => {
     });
     const storage = new MemoryAdapter();
     await storage.initialize();
-    telemetry = { trackUserInvited: jest.fn(), trackInviteAccepted: jest.fn() };
+    telemetry = {
+      trackUserInvited: jest.fn(),
+      trackInviteAccepted: jest.fn(),
+      trackUserLogin: jest.fn(),
+      trackWorkspaceFirstRegister: jest.fn(),
+      trackMemberRemoved: jest.fn(),
+    };
     const moduleRef = await Test.createTestingModule({
       controllers: [BetterAuthController, WorkspaceController, InviteController],
       providers: [
@@ -437,6 +449,24 @@ describe('WorkspaceController', () => {
       });
       expect(invite.statusCode).toBe(403);
       expect([ROLE_REQUIRED_MESSAGE, READ_ONLY_MESSAGE]).toContain(invite.json().message);
+    });
+
+    it('reports member_removed telemetry without identifying data', async () => {
+      const doomed = await members.create({
+        email: 'doomed@example.com',
+        name: 'Doomed',
+        password: 'doomed horse battery',
+        role: 'member',
+      });
+      telemetry.trackMemberRemoved.mockClear();
+      const response = await app.inject({
+        method: 'DELETE',
+        url: `/workspace/members/${doomed.id}`,
+        headers: { cookie: ownerCookie, origin: ORIGIN },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(telemetry.trackMemberRemoved).toHaveBeenCalledTimes(1);
+      expect(telemetry.trackMemberRemoved).toHaveBeenCalledWith();
     });
 
     it('lets only the owner change roles, transfer ownership and remove members', async () => {

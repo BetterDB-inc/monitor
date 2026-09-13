@@ -29,7 +29,13 @@ describe('InviteController', () => {
   let app: NestFastifyApplication;
   let invitations: InvitationService;
   let members: MemberService;
-  let telemetry: { trackUserInvited: jest.Mock; trackInviteAccepted: jest.Mock };
+  let telemetry: {
+    trackUserInvited: jest.Mock;
+    trackInviteAccepted: jest.Mock;
+    trackUserLogin: jest.Mock;
+    trackWorkspaceFirstRegister: jest.Mock;
+    trackMemberRemoved: jest.Mock;
+  };
   let ownerId: string;
   let ownerCookie: string;
   let currentTime = Date.now();
@@ -44,7 +50,13 @@ describe('InviteController', () => {
     });
     storage = new MemoryAdapter();
     await storage.initialize();
-    telemetry = { trackUserInvited: jest.fn(), trackInviteAccepted: jest.fn() };
+    telemetry = {
+      trackUserInvited: jest.fn(),
+      trackInviteAccepted: jest.fn(),
+      trackUserLogin: jest.fn(),
+      trackWorkspaceFirstRegister: jest.fn(),
+      trackMemberRemoved: jest.fn(),
+    };
     const moduleRef = await Test.createTestingModule({
       controllers: [BetterAuthController, WorkspaceController, InviteController],
       providers: [

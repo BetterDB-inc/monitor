@@ -2,6 +2,7 @@ import { All, Controller, Inject, Req, Res } from '@nestjs/common';
 import { FastifyReply, FastifyRequest } from 'fastify';
 import type { Actor } from '@betterdb/shared';
 import { ActivityService, toActivityActor } from '../activity/activity.service';
+import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { ActorResolver } from './actor-resolver';
 import { BETTER_AUTH, CLIENT_IP_HEADER, type BetterAuthInstance } from './better-auth.factory';
 import { toWebHeaders } from './web-headers';
@@ -44,6 +45,7 @@ export class BetterAuthController {
     @Inject(BETTER_AUTH) private readonly auth: BetterAuthInstance,
     private readonly activity: ActivityService,
     private readonly actors: ActorResolver,
+    private readonly telemetry: UsageTelemetryService,
   ) {}
 
   @All('*')
@@ -99,6 +101,7 @@ export class BetterAuthController {
         ip: req.ip,
         details: { method },
       });
+      this.trackLogin(method);
       return;
     }
     if (pathname.endsWith(SIGN_OUT_SUFFIX) === true && actorBefore !== null) {
@@ -109,6 +112,14 @@ export class BetterAuthController {
         ip: req.ip,
       });
     }
+  }
+
+  private trackLogin(method: 'password' | 'register'): void {
+    if (method === 'register') {
+      void this.telemetry.trackWorkspaceFirstRegister({ method: 'password' });
+      return;
+    }
+    void this.telemetry.trackUserLogin({ method: 'password' });
   }
 
   private loginMethod(pathname: string): 'password' | 'register' | null {
