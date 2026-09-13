@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent, ReactElement } from 'react';
 import { agentTokensApi, type GeneratedToken, type TokenListItem } from '../../../api/agent-tokens';
 import { useAuth } from '../../../contexts/AuthContext';
@@ -23,12 +23,6 @@ function tokenStatus(token: TokenListItem, now: number): TokenStatus {
     return 'expired';
   }
   return 'active';
-}
-
-function yieldToPendingFetch(): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, 0);
-  });
 }
 
 function clientConfig(token: string): string {
@@ -58,8 +52,17 @@ export function McpTokensPanel(): ReactElement {
   const [copyFailed, setCopyFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const tokenInputRef = useRef<HTMLInputElement | null>(null);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const trimmedName = name.trim();
   const now = Date.now();
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimerRef.current !== null) {
+        clearTimeout(copiedTimerRef.current);
+      }
+    };
+  }, []);
 
   const handleGenerate = async (): Promise<void> => {
     if (trimmedName.length === 0) {
@@ -73,7 +76,6 @@ export function McpTokensPanel(): ReactElement {
       setCopied(false);
       setCopyFailed(false);
       setName('');
-      await yieldToPendingFetch();
       await invalidate();
     } catch (err) {
       setError(errorMessage(err, 'Failed to generate token'));
@@ -93,8 +95,13 @@ export function McpTokensPanel(): ReactElement {
   };
 
   const handleCopy = async (text: string): Promise<void> => {
+    if (copiedTimerRef.current !== null) {
+      clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = null;
+    }
     if (navigator.clipboard === undefined) {
       tokenInputRef.current?.select();
+      setCopied(false);
       setCopyFailed(true);
       return;
     }
@@ -102,11 +109,13 @@ export function McpTokensPanel(): ReactElement {
       await navigator.clipboard.writeText(text);
       setCopyFailed(false);
       setCopied(true);
-      setTimeout(() => {
+      copiedTimerRef.current = setTimeout(() => {
         setCopied(false);
+        copiedTimerRef.current = null;
       }, COPIED_RESET_MS);
     } catch {
       tokenInputRef.current?.select();
+      setCopied(false);
       setCopyFailed(true);
     }
   };
@@ -118,13 +127,16 @@ export function McpTokensPanel(): ReactElement {
   };
 
   const ownerLabel = (token: TokenListItem): string | null => {
-    if (token.ownerEmail === undefined || token.ownerEmail === null) {
+    if (token.userId === undefined || token.userId === null) {
       return null;
     }
-    if (user !== null && token.ownerEmail === user.email) {
+    if (user !== null && token.userId === user.userId) {
       return null;
     }
-    return `Owner: ${token.ownerEmail}`;
+    if (typeof token.ownerEmail === 'string') {
+      return `Owner: ${token.ownerEmail}`;
+    }
+    return 'Owner: removed member';
   };
 
   return (

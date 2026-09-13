@@ -18,6 +18,20 @@ type SettingsCategory = 'license' | 'audit' | 'clientAnalytics' | 'anomaly' | 'd
 
 const RETENTION_INPUT_ERROR = `Enter a whole number of days between 1 and ${MAX_RETENTION_DAYS}, or leave empty to keep history forever.`;
 
+function isUpdatableSettingsKey(
+  key: keyof AppSettings,
+): key is keyof AppSettings & keyof SettingsUpdateRequest {
+  return key !== 'id' && key !== 'createdAt' && key !== 'updatedAt';
+}
+
+function copySettingsKey<K extends keyof AppSettings & keyof SettingsUpdateRequest>(
+  updates: SettingsUpdateRequest,
+  formData: Partial<AppSettings>,
+  key: K,
+): void {
+  updates[key] = formData[key];
+}
+
 export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const { currentConnection } = useConnection();
   const { tier, license } = useLicense();
@@ -81,7 +95,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     }
   };
 
-  const handleInputChange = (key: keyof AppSettings, value: any) => {
+  const handleInputChange = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     setFormData((prev) => ({ ...prev, [key]: value }));
     setHasChanges(true);
   };
@@ -95,8 +109,8 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
 
       // Only include changed fields
       (Object.keys(formData) as Array<keyof AppSettings>).forEach((key) => {
-        if (formData[key] !== settings[key] && key !== 'id' && key !== 'createdAt' && key !== 'updatedAt') {
-          (updates as any)[key] = formData[key];
+        if (formData[key] !== settings[key] && isUpdatableSettingsKey(key)) {
+          copySettingsKey(updates, formData, key);
         }
       });
 

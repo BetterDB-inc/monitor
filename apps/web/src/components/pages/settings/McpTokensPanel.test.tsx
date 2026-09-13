@@ -36,6 +36,7 @@ const OWN = {
   ownerEmail: 'member@example.com',
 };
 const OTHER = { ...OWN, id: 't2', name: 'ci', userId: 'u1', ownerEmail: 'owner@example.com' };
+const REMOVED_MEMBER = { ...OWN, id: 't5', name: 'orphaned', userId: 'u9', ownerEmail: null };
 
 describe('McpTokensPanel', () => {
   beforeEach(() => {
@@ -57,6 +58,13 @@ describe('McpTokensPanel', () => {
     expect(api.list).toHaveBeenCalledWith('mcp');
   });
 
+  it("labels a removed member's token instead of hiding it", async () => {
+    authState.user = { userId: 'u1', email: 'owner@example.com', role: 'admin', isOwner: true };
+    api.list.mockResolvedValue([REMOVED_MEMBER]);
+    renderWithQuery(<McpTokensPanel />);
+    expect(await screen.findByText('Owner: removed member')).toBeInTheDocument();
+  });
+
   it('generates a token, shows it once with the client config, and refreshes the list', async () => {
     api.list.mockResolvedValue([]);
     api.generate.mockResolvedValue({
@@ -67,6 +75,9 @@ describe('McpTokensPanel', () => {
       expiresAt: Date.now() + DAY_MS,
     });
     renderWithQuery(<McpTokensPanel />);
+    await waitFor(() => {
+      expect(api.list).toHaveBeenCalledTimes(1);
+    });
     fireEvent.change(screen.getByPlaceholderText('Token name (e.g., claude-code)'), {
       target: { value: '  laptop  ' },
     });
@@ -113,6 +124,9 @@ describe('McpTokensPanel', () => {
       expiresAt: Date.now() + DAY_MS,
     });
     renderWithQuery(<McpTokensPanel />);
+    await waitFor(() => {
+      expect(api.list).toHaveBeenCalledTimes(1);
+    });
     fireEvent.change(screen.getByPlaceholderText('Token name (e.g., claude-code)'), {
       target: { value: 'laptop' },
     });
