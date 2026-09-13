@@ -101,6 +101,8 @@ import type {
   UpdateMemoryProposalStatusInput,
   AppendMemoryProposalAuditInput,
   MemoryForgetPayload,
+  AgentToken,
+  TokenType,
 } from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
 import { openLibsqlDatabase } from './libsql-driver';
@@ -336,6 +338,32 @@ interface MemoryProposalAuditRow {
   event_at: number;
   actor: string | null;
   actor_source: ActorSource;
+}
+
+interface AgentTokenRow {
+  id: string;
+  name: string;
+  type: string | null;
+  token_hash: string;
+  created_at: number;
+  expires_at: number;
+  revoked_at: number | null;
+  last_used_at: number | null;
+  user_id: string | null;
+}
+
+function toAgentToken(row: AgentTokenRow): AgentToken {
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.type === 'mcp' ? 'mcp' : 'agent',
+    tokenHash: row.token_hash,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    revokedAt: row.revoked_at,
+    lastUsedAt: row.last_used_at,
+    userId: row.user_id,
+  };
 }
 
 export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
@@ -1958,6 +1986,32 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     addColumnIfMissing('command_stats_samples', 'failed_calls', 'INTEGER', '0');
     addCaptureSessionsTargetNodeColumn(this.db!);
     addMemoryProposalIntegrityColumns(this.db!);
+
+    // Agent Tokens Table (cloud-only, but created in all environments for interface compliance)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_tokens (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL DEFAULT 'agent',
+        token_hash TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        revoked_at INTEGER,
+        last_used_at INTEGER,
+        user_id TEXT
+      )
+    `);
+
+    const atCols = this.db.prepare('PRAGMA table_info(agent_tokens)').all() as { name: string }[];
+    if (!atCols.some((c) => c.name === 'type')) {
+      this.db.exec("ALTER TABLE agent_tokens ADD COLUMN type TEXT NOT NULL DEFAULT 'agent'");
+    }
+    const hasUserId = atCols.some((c) => {
+      return c.name === 'user_id';
+    });
+    if (hasUserId === false) {
+      this.db.exec('ALTER TABLE agent_tokens ADD COLUMN user_id TEXT');
+    }
   }
 
   async saveBulkDeleteAudit(record: StoredBulkDeleteAudit): Promise<string> {
@@ -4073,26 +4127,6 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       this.db.exec('ALTER TABLE connections ADD COLUMN ssh_tunnel TEXT');
     }
 
-    // Agent Tokens Table (cloud-only, but created in all environments for interface compliance)
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS agent_tokens (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        type TEXT NOT NULL DEFAULT 'agent',
-        token_hash TEXT NOT NULL UNIQUE,
-        created_at INTEGER NOT NULL,
-        expires_at INTEGER NOT NULL,
-        revoked_at INTEGER,
-        last_used_at INTEGER
-      )
-    `);
-
-    // Migration: add type column to existing agent_tokens tables
-    const atCols = this.db.prepare('PRAGMA table_info(agent_tokens)').all() as { name: string }[];
-    if (!atCols.some((c) => c.name === 'type')) {
-      this.db.exec("ALTER TABLE agent_tokens ADD COLUMN type TEXT NOT NULL DEFAULT 'agent'");
-    }
-
     const stmt = this.db.prepare(`
       INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, ssh_tunnel, is_default, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -4241,21 +4275,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   // Agent Token Methods
 
-  async saveAgentToken(token: {
-    id: string;
-    name: string;
-    type: 'agent' | 'mcp';
-    tokenHash: string;
-    createdAt: number;
-    expiresAt: number;
-    revokedAt: number | null;
-    lastUsedAt: number | null;
-  }): Promise<void> {
+  async saveAgentToken(token: AgentToken): Promise<void> {
     if (!this.db) throw new Error('Database not initialized');
     this.db
       .prepare(
-        `INSERT OR REPLACE INTO agent_tokens (id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR REPLACE INTO agent_tokens (id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at, user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         token.id,
@@ -4266,61 +4291,33 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         token.expiresAt,
         token.revokedAt,
         token.lastUsedAt,
+        token.userId,
       );
   }
 
-  async getAgentTokens(type?: 'agent' | 'mcp'): Promise<
-    Array<{
-      id: string;
-      name: string;
-      type: 'agent' | 'mcp';
-      tokenHash: string;
-      createdAt: number;
-      expiresAt: number;
-      revokedAt: number | null;
-      lastUsedAt: number | null;
-    }>
-  > {
+  async getAgentTokens(type?: TokenType): Promise<AgentToken[]> {
     if (!this.db) throw new Error('Database not initialized');
-    const query = type
-      ? 'SELECT * FROM agent_tokens WHERE type = ? ORDER BY created_at DESC'
-      : 'SELECT * FROM agent_tokens ORDER BY created_at DESC';
-    const rows = (type ? this.db.prepare(query).all(type) : this.db.prepare(query).all()) as any[];
-    return rows.map((row: any) => ({
-      id: row.id,
-      name: row.name,
-      type: row.type || 'agent',
-      tokenHash: row.token_hash,
-      createdAt: row.created_at,
-      expiresAt: row.expires_at,
-      revokedAt: row.revoked_at,
-      lastUsedAt: row.last_used_at,
-    }));
+    if (type === undefined) {
+      const rows = this.db
+        .prepare('SELECT * FROM agent_tokens ORDER BY created_at DESC')
+        .all() as AgentTokenRow[];
+      return rows.map(toAgentToken);
+    }
+    const rows = this.db
+      .prepare('SELECT * FROM agent_tokens WHERE type = ? ORDER BY created_at DESC')
+      .all(type) as AgentTokenRow[];
+    return rows.map(toAgentToken);
   }
 
-  async getAgentTokenByHash(hash: string): Promise<{
-    id: string;
-    name: string;
-    type: 'agent' | 'mcp';
-    tokenHash: string;
-    createdAt: number;
-    expiresAt: number;
-    revokedAt: number | null;
-    lastUsedAt: number | null;
-  } | null> {
+  async getAgentTokenByHash(hash: string): Promise<AgentToken | null> {
     if (!this.db) throw new Error('Database not initialized');
-    const row = this.db.prepare('SELECT * FROM agent_tokens WHERE token_hash = ?').get(hash) as any;
-    if (!row) return null;
-    return {
-      id: row.id,
-      name: row.name,
-      type: row.type || 'agent',
-      tokenHash: row.token_hash,
-      createdAt: row.created_at,
-      expiresAt: row.expires_at,
-      revokedAt: row.revoked_at,
-      lastUsedAt: row.last_used_at,
-    };
+    const row = this.db.prepare('SELECT * FROM agent_tokens WHERE token_hash = ?').get(hash) as
+      | AgentTokenRow
+      | undefined;
+    if (row === undefined) {
+      return null;
+    }
+    return toAgentToken(row);
   }
 
   async revokeAgentToken(id: string): Promise<void> {

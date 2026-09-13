@@ -99,6 +99,8 @@ import type {
   ListMemoryProposalsOptions,
   UpdateMemoryProposalStatusInput,
   AppendMemoryProposalAuditInput,
+  AgentToken,
+  TokenType,
 } from '@betterdb/shared';
 import { PostgresDialect, RowMappers } from './base-sql.adapter';
 import { WebhookPostgresRepository } from './repositories/webhook.postgres.repository';
@@ -173,6 +175,32 @@ interface MemoryProposalAuditRow {
   event_at: PgNumeric;
   actor: string | null;
   actor_source: ActorSource;
+}
+
+interface AgentTokenPgRow {
+  id: string;
+  name: string;
+  type: string | null;
+  token_hash: string;
+  created_at: PgNumeric;
+  expires_at: PgNumeric;
+  revoked_at: PgNumeric | null;
+  last_used_at: PgNumeric | null;
+  user_id: string | null;
+}
+
+function toAgentToken(row: AgentTokenPgRow): AgentToken {
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.type === 'mcp' ? 'mcp' : 'agent',
+    tokenHash: row.token_hash,
+    createdAt: Number(row.created_at),
+    expiresAt: Number(row.expires_at),
+    revokedAt: row.revoked_at === null ? null : Number(row.revoked_at),
+    lastUsedAt: row.last_used_at === null ? null : Number(row.last_used_at),
+    userId: row.user_id,
+  };
 }
 
 export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
@@ -1829,12 +1857,14 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         created_at BIGINT NOT NULL,
         expires_at BIGINT NOT NULL,
         revoked_at BIGINT,
-        last_used_at BIGINT
+        last_used_at BIGINT,
+        user_id TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_agent_tokens_hash ON agent_tokens(token_hash);
 
       ALTER TABLE agent_tokens ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'agent';
+      ALTER TABLE agent_tokens ADD COLUMN IF NOT EXISTS user_id TEXT;
 
       CREATE TABLE IF NOT EXISTS cache_proposals (
         id TEXT PRIMARY KEY,
@@ -4449,27 +4479,19 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   // Agent Token Methods
 
-  async saveAgentToken(token: {
-    id: string;
-    name: string;
-    type: 'agent' | 'mcp';
-    tokenHash: string;
-    createdAt: number;
-    expiresAt: number;
-    revokedAt: number | null;
-    lastUsedAt: number | null;
-  }): Promise<void> {
+  async saveAgentToken(token: AgentToken): Promise<void> {
     if (!this.pool) throw new Error('Database not initialized');
     await this.pool.query(
-      `INSERT INTO agent_tokens (id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO agent_tokens (id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at, user_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          type = EXCLUDED.type,
          token_hash = EXCLUDED.token_hash,
          expires_at = EXCLUDED.expires_at,
          revoked_at = EXCLUDED.revoked_at,
-         last_used_at = EXCLUDED.last_used_at`,
+         last_used_at = EXCLUDED.last_used_at,
+         user_id = EXCLUDED.user_id`,
       [
         token.id,
         token.name,
@@ -4479,69 +4501,40 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         token.expiresAt,
         token.revokedAt,
         token.lastUsedAt,
+        token.userId,
       ],
     );
   }
 
-  async getAgentTokens(type?: 'agent' | 'mcp'): Promise<
-    Array<{
-      id: string;
-      name: string;
-      type: 'agent' | 'mcp';
-      tokenHash: string;
-      createdAt: number;
-      expiresAt: number;
-      revokedAt: number | null;
-      lastUsedAt: number | null;
-    }>
-  > {
+  async getAgentTokens(type?: TokenType): Promise<AgentToken[]> {
     if (!this.pool) throw new Error('Database not initialized');
-    const query = type
-      ? `SELECT id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at
-         FROM agent_tokens WHERE type = $1 ORDER BY created_at DESC`
-      : `SELECT id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at
-         FROM agent_tokens ORDER BY created_at DESC`;
-    const result = type ? await this.pool.query(query, [type]) : await this.pool.query(query);
-    return result.rows.map((row: any) => ({
-      id: row.id,
-      name: row.name,
-      type: row.type || 'agent',
-      tokenHash: row.token_hash,
-      createdAt: Number(row.created_at),
-      expiresAt: Number(row.expires_at),
-      revokedAt: row.revoked_at ? Number(row.revoked_at) : null,
-      lastUsedAt: row.last_used_at ? Number(row.last_used_at) : null,
-    }));
+    const columns =
+      'id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at, user_id';
+    if (type === undefined) {
+      const result = await this.pool.query(
+        `SELECT ${columns} FROM agent_tokens ORDER BY created_at DESC`,
+      );
+      return (result.rows as AgentTokenPgRow[]).map(toAgentToken);
+    }
+    const result = await this.pool.query(
+      `SELECT ${columns} FROM agent_tokens WHERE type = $1 ORDER BY created_at DESC`,
+      [type],
+    );
+    return (result.rows as AgentTokenPgRow[]).map(toAgentToken);
   }
 
-  async getAgentTokenByHash(hash: string): Promise<{
-    id: string;
-    name: string;
-    type: 'agent' | 'mcp';
-    tokenHash: string;
-    createdAt: number;
-    expiresAt: number;
-    revokedAt: number | null;
-    lastUsedAt: number | null;
-  } | null> {
+  async getAgentTokenByHash(hash: string): Promise<AgentToken | null> {
     if (!this.pool) throw new Error('Database not initialized');
     const result = await this.pool.query(
-      `SELECT id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at
+      `SELECT id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at, user_id
        FROM agent_tokens WHERE token_hash = $1`,
       [hash],
     );
-    if (result.rows.length === 0) return null;
-    const row = result.rows[0];
-    return {
-      id: row.id,
-      name: row.name,
-      type: row.type || 'agent',
-      tokenHash: row.token_hash,
-      createdAt: Number(row.created_at),
-      expiresAt: Number(row.expires_at),
-      revokedAt: row.revoked_at ? Number(row.revoked_at) : null,
-      lastUsedAt: row.last_used_at ? Number(row.last_used_at) : null,
-    };
+    const rows = result.rows as AgentTokenPgRow[];
+    if (rows.length === 0) {
+      return null;
+    }
+    return toAgentToken(rows[0]);
   }
 
   async revokeAgentToken(id: string): Promise<void> {

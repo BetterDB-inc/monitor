@@ -57,6 +57,8 @@ import {
   ScheduledCapturePatch,
 } from '../../common/interfaces/storage-port.interface';
 import type {
+  AgentToken,
+  TokenType,
   VectorIndexSnapshot,
   VectorIndexSnapshotQueryOptions,
   MetricForecastSettings,
@@ -1518,64 +1520,30 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
   }
 
-  // Agent Token Methods (no-op for non-cloud deployments)
+  private agentTokens = new Map<string, AgentToken>();
 
-  private agentTokens = new Map<
-    string,
-    {
-      id: string;
-      name: string;
-      type: 'agent' | 'mcp';
-      tokenHash: string;
-      createdAt: number;
-      expiresAt: number;
-      revokedAt: number | null;
-      lastUsedAt: number | null;
-    }
-  >();
-
-  async saveAgentToken(token: {
-    id: string;
-    name: string;
-    type: 'agent' | 'mcp';
-    tokenHash: string;
-    createdAt: number;
-    expiresAt: number;
-    revokedAt: number | null;
-    lastUsedAt: number | null;
-  }): Promise<void> {
-    this.agentTokens.set(token.id, token);
+  async saveAgentToken(token: AgentToken): Promise<void> {
+    this.agentTokens.set(token.id, { ...token });
   }
 
-  async getAgentTokens(type?: 'agent' | 'mcp'): Promise<
-    Array<{
-      id: string;
-      name: string;
-      type: 'agent' | 'mcp';
-      tokenHash: string;
-      createdAt: number;
-      expiresAt: number;
-      revokedAt: number | null;
-      lastUsedAt: number | null;
-    }>
-  > {
-    let tokens = Array.from(this.agentTokens.values());
-    if (type) tokens = tokens.filter((t) => t.type === type);
-    return tokens.sort((a, b) => b.createdAt - a.createdAt);
+  async getAgentTokens(type?: TokenType): Promise<AgentToken[]> {
+    const tokens = Array.from(this.agentTokens.values()).filter((token) => {
+      return type === undefined || token.type === type;
+    });
+    return tokens
+      .map((token) => {
+        return { ...token };
+      })
+      .sort((a, b) => {
+        return b.createdAt - a.createdAt;
+      });
   }
 
-  async getAgentTokenByHash(hash: string): Promise<{
-    id: string;
-    name: string;
-    type: 'agent' | 'mcp';
-    tokenHash: string;
-    createdAt: number;
-    expiresAt: number;
-    revokedAt: number | null;
-    lastUsedAt: number | null;
-  } | null> {
+  async getAgentTokenByHash(hash: string): Promise<AgentToken | null> {
     for (const token of this.agentTokens.values()) {
-      if (token.tokenHash === hash) return token;
+      if (token.tokenHash === hash) {
+        return { ...token };
+      }
     }
     return null;
   }
