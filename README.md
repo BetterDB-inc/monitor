@@ -127,7 +127,7 @@ Requires Node.js >= 20.0.0 and a Valkey or Redis instance to monitor. For SQLite
 | Interface | Details |
 |-----------|---------|
 | Web UI | `http://localhost:3001` |
-| MCP server | `npx @betterdb/mcp` (stdio) - create a token under Settings → MCP Tokens |
+| MCP server | `npx @betterdb/mcp` (stdio) - create a token under Settings → MCP Tokens (required on cloud, optional on self-hosted) |
 | Prometheus | `http://localhost:3001/api/prometheus/metrics` |
 | REST API (OpenAPI) | `http://localhost:3001/docs` |
 | Health check | `http://localhost:3001/api/health` |
