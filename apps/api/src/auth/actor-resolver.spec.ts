@@ -1,8 +1,10 @@
 import type { IncomingMessage } from 'http';
+import type { Actor } from '@betterdb/shared';
+import type { PersonalTokenService } from '../workspace/personal-token.service';
 import type { BetterAuthInstance } from './better-auth.factory';
 import { CLIENT_IP_HEADER, createBetterAuth } from './better-auth.factory';
 import { resolveWorkspaceConfig, WorkspaceConfig } from './workspace-config';
-import { ActorResolver } from './actor-resolver';
+import { ActorResolver, bearerToken } from './actor-resolver';
 
 function makeUpgradeRequest(cookie: string | undefined, remoteAddress: string): IncomingMessage {
   return {
@@ -194,5 +196,100 @@ describe('ActorResolver', () => {
       const actor = await resolver.resolveFromUpgrade(makeUpgradeRequest(cookie, '10.1.8.1'));
       expect(actor).toBeNull();
     });
+  });
+});
+
+const TOKEN_ACTOR: Actor = {
+  userId: 'u-token',
+  email: 'bot@example.com',
+  role: 'member',
+  isOwner: false,
+  via: 'token',
+  tokenId: 't-1',
+};
+
+function tokenStub(actor: Actor | null): {
+  service: PersonalTokenService;
+  resolveActor: jest.Mock;
+} {
+  const resolveActor = jest.fn().mockResolvedValue(actor);
+  return { service: { resolveActor } as unknown as PersonalTokenService, resolveActor };
+}
+
+describe('bearerToken', () => {
+  it('reads the token from a Bearer header in any case', () => {
+    expect(bearerToken({ authorization: 'Bearer abc' })).toBe('abc');
+    expect(bearerToken({ authorization: 'bearer abc ' })).toBe('abc');
+  });
+
+  it('ignores missing, empty and non-bearer headers', () => {
+    expect(bearerToken({})).toBeNull();
+    expect(bearerToken({ authorization: 'Bearer ' })).toBeNull();
+    expect(bearerToken({ authorization: 'Basic abc' })).toBeNull();
+  });
+});
+
+describe('ActorResolver bearer tokens', () => {
+  const config: WorkspaceConfig = resolveWorkspaceConfig({ AUTH_PUBLIC_URL: ORIGIN });
+  let auth: BetterAuthInstance;
+  let cookie: string;
+
+  beforeAll(async () => {
+    auth = await createBetterAuth({ handle: { kind: 'memory' }, secret: SECRET, config });
+    cookie = await signedInCookie(auth);
+  });
+
+  it('prefers the session cookie over a bearer token', async () => {
+    const tokens = tokenStub(TOKEN_ACTOR);
+    const resolver = new ActorResolver(config, auth, tokens.service);
+    const actor = await resolver.resolveFromHeaders(
+      { cookie, authorization: 'Bearer bdb_mcp_x' },
+      '10.0.0.1',
+    );
+    expect(actor?.via).toBe('session');
+    expect(tokens.resolveActor).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the bearer token when there is no session', async () => {
+    const tokens = tokenStub(TOKEN_ACTOR);
+    const resolver = new ActorResolver(config, auth, tokens.service);
+    const actor = await resolver.resolveFromHeaders(
+      { authorization: 'Bearer bdb_mcp_x' },
+      '10.0.0.1',
+    );
+    expect(actor).toEqual(TOKEN_ACTOR);
+    expect(tokens.resolveActor).toHaveBeenCalledWith('bdb_mcp_x');
+  });
+
+  it('does not look up tokens for other authorization schemes', async () => {
+    const tokens = tokenStub(TOKEN_ACTOR);
+    const resolver = new ActorResolver(config, auth, tokens.service);
+    expect(
+      await resolver.resolveFromHeaders({ authorization: 'Basic abc' }, '10.0.0.1'),
+    ).toBeNull();
+    expect(tokens.resolveActor).not.toHaveBeenCalled();
+  });
+
+  it('resolves nothing from a bearer token without a token service', async () => {
+    const resolver = new ActorResolver(config, auth);
+    expect(await resolver.resolveBearer({ authorization: 'Bearer bdb_mcp_x' })).toBeNull();
+  });
+
+  it('keeps WebSocket upgrades session-only', async () => {
+    const tokens = tokenStub(TOKEN_ACTOR);
+    const resolver = new ActorResolver(config, auth, tokens.service);
+    const bearerOnly = {
+      headers: { authorization: 'Bearer bdb_mcp_x' },
+      socket: { remoteAddress: '10.0.0.1' },
+    } as unknown as IncomingMessage;
+    expect(await resolver.resolveFromUpgrade(bearerOnly)).toBeNull();
+    expect(tokens.resolveActor).not.toHaveBeenCalled();
+
+    const withSession = {
+      headers: { cookie, authorization: 'Bearer bdb_mcp_x' },
+      socket: { remoteAddress: '10.0.0.1' },
+    } as unknown as IncomingMessage;
+    const actor = await resolver.resolveFromUpgrade(withSession);
+    expect(actor?.via).toBe('session');
   });
 });

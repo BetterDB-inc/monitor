@@ -4,6 +4,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import type { Actor } from '@betterdb/shared';
+import type { PersonalTokenService } from '../../workspace/personal-token.service';
 import { ActorResolver } from '../actor-resolver';
 import type { BetterAuthInstance } from '../better-auth.factory';
 import { CLIENT_IP_HEADER, createBetterAuth } from '../better-auth.factory';
@@ -280,5 +281,126 @@ describe('ActorGuard', () => {
     await guard.canActivate(contextFor(request, reply));
     expect(reply.header).not.toHaveBeenCalled();
     getSession.mockRestore();
+  });
+});
+
+describe('ActorGuard bearer tokens', () => {
+  const config: WorkspaceConfig = resolveWorkspaceConfig({ AUTH_PUBLIC_URL: ORIGIN });
+  const tokenActor: Actor = {
+    userId: 'u-token',
+    email: 'bot@example.com',
+    role: 'admin',
+    isOwner: false,
+    via: 'token',
+    tokenId: 't-1',
+  };
+  let auth: BetterAuthInstance;
+
+  beforeAll(async () => {
+    auth = await createBetterAuth({ handle: { kind: 'memory' }, secret: SECRET, config });
+  });
+
+  function guardWith(resolveActor: jest.Mock): ActorGuard {
+    const tokens = { resolveActor } as unknown as PersonalTokenService;
+    return new ActorGuard(new ActorResolver(config, auth, tokens));
+  }
+
+  function bearerRequest(url: string, method = 'GET'): FakeRequest {
+    return { url, method, headers: { authorization: 'Bearer bdb_mcp_x' }, ip: '10.0.0.1' };
+  }
+
+  it('attaches the token owner on a protected path', async () => {
+    const request = bearerRequest('/workspace/me');
+    const guard = guardWith(jest.fn().mockResolvedValue(tokenActor));
+    await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+    expect(request.actor).toEqual(tokenActor);
+  });
+
+  it('rejects an unknown bearer token on a protected path', async () => {
+    const request = bearerRequest('/workspace/me', 'POST');
+    const guard = guardWith(jest.fn().mockResolvedValue(null));
+    await expect(guard.canActivate(contextFor(request))).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+  });
+
+  it('attaches the token owner on a public MCP read', async () => {
+    const request = bearerRequest('/api/mcp/instances');
+    const guard = guardWith(jest.fn().mockResolvedValue(tokenActor));
+    await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+    expect(request.actor).toEqual(tokenActor);
+  });
+
+  it('lets a public MCP read through anonymously when the token is rejected', async () => {
+    const request = bearerRequest('/api/mcp/instances');
+    const guard = guardWith(jest.fn().mockResolvedValue(null));
+    await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+    expect(request.actor).toBeNull();
+  });
+
+  it('lets a public MCP read through anonymously when the token lookup fails', async () => {
+    const request = bearerRequest('/api/mcp/instances');
+    const guard = guardWith(jest.fn().mockRejectedValue(new Error('storage down')));
+    await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+    expect(request.actor).toBeNull();
+  });
+
+  it('skips resolution on a public path without a cookie or Authorization header', async () => {
+    const resolveActor = jest.fn();
+    const request: FakeRequest = { url: '/api/mcp/instances', headers: {}, ip: '10.0.0.1' };
+    await expect(guardWith(resolveActor).canActivate(contextFor(request))).resolves.toBe(true);
+    expect(resolveActor).not.toHaveBeenCalled();
+    expect(request.actor).toBeNull();
+  });
+
+  function stubResolver(resolveFromHeaders: jest.Mock, resolveBearer: jest.Mock): ActorResolver {
+    return {
+      isEnabled: () => {
+        return true;
+      },
+      isReady: () => {
+        return true;
+      },
+      resolveFromHeaders,
+      resolveBearer,
+    } as unknown as ActorResolver;
+  }
+
+  const sessionActor: Actor = {
+    userId: 'u-session',
+    email: 'person@example.com',
+    role: 'member',
+    isOwner: false,
+    via: 'session',
+    tokenId: null,
+  };
+
+  it('resolves a public call with both credentials session-first', async () => {
+    const resolveFromHeaders = jest.fn().mockResolvedValue(sessionActor);
+    const resolveBearer = jest.fn();
+    const request: FakeRequest = {
+      url: '/api/mcp/instances',
+      method: 'GET',
+      headers: { cookie: 'better-auth.session_token=abc', authorization: 'Bearer bdb_mcp_x' },
+      ip: '10.0.0.1',
+    };
+    const guard = new ActorGuard(stubResolver(resolveFromHeaders, resolveBearer));
+    await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+    expect(request.actor).toEqual(sessionActor);
+    expect(resolveFromHeaders).toHaveBeenCalledWith(request.headers, '10.0.0.1');
+    expect(resolveBearer).not.toHaveBeenCalled();
+  });
+
+  it('attaches the session actor to a session-only public call', async () => {
+    const resolveFromHeaders = jest.fn().mockResolvedValue(sessionActor);
+    const request: FakeRequest = {
+      url: '/api/mcp/instances',
+      method: 'GET',
+      headers: { cookie: 'better-auth.session_token=abc' },
+      ip: '10.0.0.1',
+    };
+    const guard = new ActorGuard(stubResolver(resolveFromHeaders, jest.fn()));
+    await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+    expect(request.actor).toEqual(sessionActor);
   });
 });
