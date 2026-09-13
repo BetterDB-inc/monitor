@@ -294,6 +294,7 @@ describe('PersonalTokensController', () => {
       headers: { authorization: `Bearer ${created.token}`, origin: ORIGIN },
     });
     expect(revoke.statusCode).toBe(403);
+    expect(revoke.json().message).toBe(SESSION_REQUIRED_MESSAGE);
   });
 
   it('keeps identity and access changes session-only, so a token cannot plant a new account', async () => {
@@ -325,6 +326,7 @@ describe('PersonalTokensController', () => {
       payload: { role: 'admin' },
     });
     expect(role.statusCode).toBe(403);
+    expect(role.json().message).toBe(SESSION_REQUIRED_MESSAGE);
 
     const transfer = await app.inject({
       method: 'POST',
@@ -333,6 +335,7 @@ describe('PersonalTokensController', () => {
       payload: { userId: memberId },
     });
     expect(transfer.statusCode).toBe(403);
+    expect(transfer.json().message).toBe(SESSION_REQUIRED_MESSAGE);
 
     const remove = await app.inject({
       method: 'DELETE',
@@ -340,6 +343,7 @@ describe('PersonalTokensController', () => {
       headers: { ...bearer, origin: ORIGIN },
     });
     expect(remove.statusCode).toBe(403);
+    expect(remove.json().message).toBe(SESSION_REQUIRED_MESSAGE);
 
     const memberAfter = await app.inject({
       method: 'GET',
@@ -349,6 +353,31 @@ describe('PersonalTokensController', () => {
     expect(memberAfter.json()).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: memberId, role: 'member' })]),
     );
+
+    const invited = await app.inject({
+      method: 'POST',
+      url: '/workspace/invite',
+      headers: jsonHeaders({ cookie: ownerCookie }),
+      payload: { email: 'pending@example.com', role: 'member' },
+    });
+    expect(invited.statusCode).toBe(201);
+    const invitationId = (invited.json() as { id: string }).id;
+
+    const revokeInvite = await app.inject({
+      method: 'DELETE',
+      url: `/workspace/invitations/${invitationId}`,
+      headers: { ...bearer, origin: ORIGIN },
+    });
+    expect(revokeInvite.statusCode).toBe(403);
+    expect(revokeInvite.json().message).toBe(SESSION_REQUIRED_MESSAGE);
+
+    const invitationsAfter = await app.inject({
+      method: 'GET',
+      url: '/workspace/invitations',
+      headers: { cookie: ownerCookie },
+    });
+    expect(invitationsAfter.statusCode).toBe(200);
+    expect(JSON.stringify(invitationsAfter.json())).toContain('pending@example.com');
   });
 
   it("applies the owner's current role to an already-issued token", async () => {

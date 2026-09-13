@@ -37,6 +37,7 @@ const OWN = {
 };
 const OTHER = { ...OWN, id: 't2', name: 'ci', userId: 'u1', ownerEmail: 'owner@example.com' };
 const REMOVED_MEMBER = { ...OWN, id: 't5', name: 'orphaned', userId: 'u9', ownerEmail: null };
+const OWNERLESS = { ...OWN, id: 't6', name: 'cloud-key', userId: null, ownerEmail: null };
 
 describe('McpTokensPanel', () => {
   beforeEach(() => {
@@ -63,6 +64,13 @@ describe('McpTokensPanel', () => {
     api.list.mockResolvedValue([REMOVED_MEMBER]);
     renderWithQuery(<McpTokensPanel />);
     expect(await screen.findByText('Owner: removed member')).toBeInTheDocument();
+  });
+
+  it('labels an ownerless token as owned by no one, not the viewing admin', async () => {
+    authState.user = { userId: 'u1', email: 'owner@example.com', role: 'admin', isOwner: true };
+    api.list.mockResolvedValue([OWNERLESS]);
+    renderWithQuery(<McpTokensPanel />);
+    expect(await screen.findByText('Owner: none')).toBeInTheDocument();
   });
 
   it('generates a token, shows it once with the client config, and refreshes the list', async () => {

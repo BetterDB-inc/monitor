@@ -2003,7 +2003,10 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     `);
 
     const atCols = this.db.prepare('PRAGMA table_info(agent_tokens)').all() as { name: string }[];
-    if (!atCols.some((c) => c.name === 'type')) {
+    const hasType = atCols.some((c) => {
+      return c.name === 'type';
+    });
+    if (hasType === false) {
       this.db.exec("ALTER TABLE agent_tokens ADD COLUMN type TEXT NOT NULL DEFAULT 'agent'");
     }
     const hasUserId = atCols.some((c) => {

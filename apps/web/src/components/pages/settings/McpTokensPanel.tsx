@@ -127,8 +127,11 @@ export function McpTokensPanel(): ReactElement {
   };
 
   const ownerLabel = (token: TokenListItem): string | null => {
-    if (token.userId === undefined || token.userId === null) {
+    if (token.userId === undefined) {
       return null;
+    }
+    if (token.userId === null) {
+      return 'Owner: none';
     }
     if (user !== null && token.userId === user.userId) {
       return null;
