@@ -16,6 +16,7 @@ import type { FastifyRequest } from 'fastify';
 import type { Actor, WorkspaceMe } from '@betterdb/shared';
 import { ActivityService } from '../activity/activity.service';
 import { CurrentUser } from '../auth/guards/current-user.decorator';
+import { requireSession } from '../auth/guards/require-session';
 import { OwnerOnly, Roles } from '../auth/guards/roles.decorator';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { ActivityPageView, parseIsoTime, toActivityView } from './activity-views';
@@ -116,6 +117,7 @@ export class WorkspaceController {
     @CurrentUser() actor: Actor,
     @Req() req: FastifyRequest,
   ): Promise<InvitationView & { url: string }> {
+    requireSession(actor);
     const { invitation, token } = await this.invitations.create({
       email: body.email,
       role: body.role,
@@ -130,7 +132,11 @@ export class WorkspaceController {
 
   @Delete('invitations/:id')
   @Roles('admin')
-  async revokeInvitation(@Param('id') id: string): Promise<OkResponse> {
+  async revokeInvitation(
+    @Param('id') id: string,
+    @CurrentUser() actor: Actor,
+  ): Promise<OkResponse> {
+    requireSession(actor);
     await this.invitations.revoke(id);
     return { ok: true };
   }
@@ -141,6 +147,7 @@ export class WorkspaceController {
     @Param('userId') userId: string,
     @CurrentUser() actor: Actor,
   ): Promise<OkResponse> {
+    requireSession(actor);
     if (userId === actor.userId) {
       throw new BadRequestException(CANNOT_REMOVE_SELF_MESSAGE);
     }
@@ -161,6 +168,7 @@ export class WorkspaceController {
     @Body() body: UpdateMemberRoleDto,
     @CurrentUser() actor: Actor,
   ): Promise<MemberView> {
+    requireSession(actor);
     if (userId === actor.userId) {
       throw new BadRequestException(CANNOT_CHANGE_OWN_ROLE_MESSAGE);
     }
@@ -178,6 +186,7 @@ export class WorkspaceController {
     @Body() body: TransferOwnershipDto,
     @CurrentUser() actor: Actor,
   ): Promise<OkResponse> {
+    requireSession(actor);
     if (body.userId === actor.userId) {
       throw new BadRequestException(ALREADY_OWNER_MESSAGE);
     }
