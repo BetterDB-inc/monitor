@@ -12,6 +12,7 @@ export interface BrokerStateRecord {
   appOrigin: string;
   next: string;
   inviteTokenHash: string | null;
+  nonceHash: string | null;
 }
 
 function parseRecord(value: string): BrokerStateRecord | null {
@@ -29,11 +30,13 @@ function parseRecord(value: string): BrokerStateRecord | null {
     }
     const inviteTokenHash =
       typeof record.inviteTokenHash === 'string' ? record.inviteTokenHash : null;
+    const nonceHash = typeof record.nonceHash === 'string' ? record.nonceHash : null;
     return {
       origin: record.origin,
       appOrigin: record.appOrigin,
       next: record.next,
       inviteTokenHash,
+      nonceHash,
     };
   } catch {
     return null;

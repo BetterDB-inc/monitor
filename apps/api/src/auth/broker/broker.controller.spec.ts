@@ -1,7 +1,8 @@
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { generateKeyPairSync } from 'crypto';
 import * as jwt from 'jsonwebtoken';
 import { ACTIVITY_CONFIG } from '../../activity/activity-config';
@@ -20,6 +21,7 @@ import { ActorGuard } from '../guards/actor.guard';
 import { MutationGuard } from '../guards/mutation.guard';
 import { RolesGuard } from '../guards/roles.guard';
 import { resolveWorkspaceConfig, WORKSPACE_CONFIG, WorkspaceConfig } from '../workspace-config';
+import { BROKER_NONCE_COOKIE } from './broker-nonce';
 import { BrokerStateStore } from './broker-state.store';
 import { BrokerController } from './broker.controller';
 
@@ -35,6 +37,17 @@ interface BuiltApp {
   app: NestFastifyApplication;
   storage: MemoryAdapter;
   telemetry: TelemetryStub;
+}
+
+interface BuildOptions {
+  throttled?: boolean;
+}
+
+interface CallbackResult {
+  status: number;
+  location: string;
+  cookie: string;
+  setCookies: string[];
 }
 
 const { publicKey, privateKey } = generateKeyPairSync('rsa', {
@@ -56,11 +69,36 @@ const BASE_ENV: NodeJS.ProcessEnv = {
   AUTH_BROKER_KEY_ID: 'brk-test',
 };
 
+const SESSION_COOKIE = 'better-auth.session_token=';
+const CLEARED_NONCE = `${BROKER_NONCE_COOKIE}=; Path=/auth; Max-Age=0; HttpOnly; SameSite=Lax`;
+
 let ipCounter = 0;
 
 function nextIp(): string {
   ipCounter += 1;
   return `198.51.100.${ipCounter}`;
+}
+
+function allCookies(setCookie: unknown): string[] {
+  if (Array.isArray(setCookie) === true) {
+    return (setCookie as unknown[]).map((value) => {
+      return String(value);
+    });
+  }
+  if (setCookie === undefined) {
+    return [];
+  }
+  return [String(setCookie)];
+}
+
+function cookieNamed(setCookie: unknown, prefix: string): string {
+  const match = allCookies(setCookie).find((value) => {
+    return value.startsWith(prefix);
+  });
+  if (match === undefined) {
+    return '';
+  }
+  return match.split(';')[0];
 }
 
 function tokenFor(
@@ -91,7 +129,7 @@ function tokenFor(
   );
 }
 
-async function buildApp(config: WorkspaceConfig): Promise<BuiltApp> {
+async function buildApp(config: WorkspaceConfig, options: BuildOptions = {}): Promise<BuiltApp> {
   const auth = await createBetterAuth({
     handle: { kind: 'memory' },
     secret: 's'.repeat(40),
@@ -106,7 +144,9 @@ async function buildApp(config: WorkspaceConfig): Promise<BuiltApp> {
     trackWorkspaceFirstRegister: jest.fn(),
     trackMemberRemoved: jest.fn(),
   };
+  const throttled = options.throttled === true;
   const moduleRef = await Test.createTestingModule({
+    imports: throttled ? [ThrottlerModule.forRoot([{ ttl: 60_000, limit: 10_000 }])] : [],
     controllers: [BrokerController, BetterAuthController, WorkspaceController],
     providers: [
       { provide: BETTER_AUTH, useValue: auth },
@@ -121,6 +161,7 @@ async function buildApp(config: WorkspaceConfig): Promise<BuiltApp> {
       InvitationService,
       BrokerStateStore,
       BrokerUserResolver,
+      ...(throttled ? [{ provide: APP_GUARD, useClass: ThrottlerGuard }] : []),
       { provide: APP_GUARD, useClass: ActorGuard },
       { provide: APP_GUARD, useClass: RolesGuard },
       { provide: APP_GUARD, useClass: MutationGuard },
@@ -138,6 +179,7 @@ describe('BrokerController', () => {
   let app: NestFastifyApplication;
   let members: MemberService;
   let ownerToken = '';
+  let ownerNonce = '';
   let ownerId = '';
 
   beforeAll(async () => {
@@ -151,25 +193,36 @@ describe('BrokerController', () => {
     await built.storage.close();
   });
 
-  async function start(query: string): Promise<{ state: string; location: URL }> {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  async function start(
+    query: string,
+  ): Promise<{ state: string; location: URL; nonce: string; setCookies: string[] }> {
     const response = await app.inject({ method: 'GET', url: `/auth/broker/start${query}` });
     expect(response.statusCode).toBe(302);
     const location = new URL(String(response.headers.location));
-    return { state: String(location.searchParams.get('state')), location };
+    return {
+      state: String(location.searchParams.get('state')),
+      location,
+      nonce: cookieNamed(response.headers['set-cookie'], `${BROKER_NONCE_COOKIE}=`),
+      setCookies: allCookies(response.headers['set-cookie']),
+    };
   }
 
-  async function callback(
-    token: string,
-  ): Promise<{ status: number; location: string; cookie: string }> {
+  async function callback(token: string, nonce = ''): Promise<CallbackResult> {
     const response = await app.inject({
       method: 'GET',
       url: `/auth/broker/callback?token=${encodeURIComponent(token)}`,
       remoteAddress: nextIp(),
+      headers: nonce === '' ? {} : { cookie: nonce },
     });
     return {
       status: response.statusCode,
       location: String(response.headers.location),
-      cookie: String(response.headers['set-cookie'] ?? '').split(';')[0],
+      cookie: cookieNamed(response.headers['set-cookie'], SESSION_COOKIE),
+      setCookies: allCookies(response.headers['set-cookie']),
     };
   }
 
@@ -182,13 +235,21 @@ describe('BrokerController', () => {
   }
 
   it('redirects start to the broker sign-in page with a callback, state and provider', async () => {
-    const { state, location } = await start('?provider=google&next=%2Fsettings');
+    const { state, location, nonce } = await start('?provider=google&next=%2Fsettings');
     expect(location.origin).toBe('https://broker.example');
     expect(location.pathname).toBe('/self-hosted/sign-in');
     expect(location.searchParams.get('redirect')).toBe('http://localhost/auth/broker/callback');
     expect(location.searchParams.get('provider')).toBe('google');
     expect(state).toHaveLength(43);
     ownerToken = tokenFor(state);
+    ownerNonce = nonce;
+  });
+
+  it('binds start to the browser with a short-lived HttpOnly nonce cookie', async () => {
+    const { setCookies, nonce } = await start('');
+    expect(setCookies).toHaveLength(1);
+    expect(nonce).toMatch(new RegExp(`^${BROKER_NONCE_COOKIE.replace('.', '\\.')}=[\\w-]{43}$`));
+    expect(setCookies[0]).toBe(`${nonce}; Path=/auth; Max-Age=600; HttpOnly; SameSite=Lax`);
   });
 
   it('omits an unknown provider from the broker redirect', async () => {
@@ -197,10 +258,11 @@ describe('BrokerController', () => {
   });
 
   it('registers the first broker user as owner and signs them in', async () => {
-    const result = await callback(ownerToken);
+    const result = await callback(ownerToken, ownerNonce);
     expect(result.status).toBe(302);
     expect(result.location).toBe('http://localhost/settings');
-    expect(result.cookie).toContain('better-auth.session_token=');
+    expect(result.cookie).toContain(SESSION_COOKIE);
+    expect(result.setCookies).toContain(CLEARED_NONCE);
 
     const me = await app.inject({
       method: 'GET',
@@ -223,14 +285,15 @@ describe('BrokerController', () => {
   });
 
   it('rejects a replayed token as expired', async () => {
-    const result = await callback(ownerToken);
+    const result = await callback(ownerToken, ownerNonce);
     expect(result.status).toBe(302);
     expect(result.location).toBe('http://localhost/login?error=expired');
     expect(result.cookie).toBe('');
+    expect(result.setCookies).toEqual([CLEARED_NONCE]);
   });
 
   it('sends a handoff token past its expiry to the expired error', async () => {
-    const { state } = await start('');
+    const { state, nonce } = await start('');
     const expired = jwt.sign(
       {
         typ: 'self-hosted-broker',
@@ -250,21 +313,21 @@ describe('BrokerController', () => {
         expiresIn: -10,
       },
     );
-    const result = await callback(expired);
+    const result = await callback(expired, nonce);
     expect(result.location).toBe('http://localhost/login?error=expired');
     expect(result.cookie).toBe('');
   });
 
   it('rejects a token issued for another audience', async () => {
-    const { state } = await start('');
-    const result = await callback(tokenFor(state, {}, 'http://evil.example'));
+    const { state, nonce } = await start('');
+    const result = await callback(tokenFor(state, {}, 'http://evil.example'), nonce);
     expect(result.location).toBe('http://localhost/login?error=invalid');
     expect(result.cookie).toBe('');
   });
 
   it('rejects a token signed by an untrusted key and a missing token', async () => {
-    const { state } = await start('');
-    const forged = await callback(tokenFor(state, {}, 'http://localhost', foreignKey));
+    const { state, nonce } = await start('');
+    const forged = await callback(tokenFor(state, {}, 'http://localhost', foreignKey), nonce);
     expect(forged.location).toBe('http://localhost/login?error=invalid');
 
     const missing = await app.inject({
@@ -276,10 +339,28 @@ describe('BrokerController', () => {
     expect(String(missing.headers.location)).toBe('http://localhost/login?error=invalid');
   });
 
-  it('refuses a stranger without an invitation', async () => {
+  it('refuses a callback that arrives without the nonce cookie from start', async () => {
     const { state } = await start('');
+    const result = await callback(tokenFor(state));
+    expect(result.status).toBe(302);
+    expect(result.location).toBe('http://localhost/login?error=invalid');
+    expect(result.cookie).toBe('');
+    expect(result.setCookies).toEqual([CLEARED_NONCE]);
+  });
+
+  it("refuses a callback carrying another browser's nonce cookie", async () => {
+    const attacker = await start('');
+    const victim = await start('');
+    const result = await callback(tokenFor(attacker.state), victim.nonce);
+    expect(result.location).toBe('http://localhost/login?error=invalid');
+    expect(result.cookie).toBe('');
+  });
+
+  it('refuses a stranger without an invitation', async () => {
+    const { state, nonce } = await start('');
     const result = await callback(
       tokenFor(state, { email: 'stranger@example.com', providerId: 'g-stranger' }),
+      nonce,
     );
     expect(result.location).toBe('http://localhost/login?error=not_invited');
     expect(result.cookie).toBe('');
@@ -292,16 +373,17 @@ describe('BrokerController', () => {
       role: 'admin',
       invitedBy: ownerId,
     });
-    const { state } = await start(`?invite=${encodeURIComponent(token)}`);
+    const { state, nonce } = await start(`?invite=${encodeURIComponent(token)}`);
     const result = await callback(
       tokenFor(state, {
         email: 'invitee@example.com',
         name: 'Invitee',
         providerId: 'g-invitee',
       }),
+      nonce,
     );
     expect(result.location).toBe('http://localhost/');
-    expect(result.cookie).toContain('better-auth.session_token=');
+    expect(result.cookie).toContain(SESSION_COOKIE);
     const invitee = await members.findByEmail('invitee@example.com');
     expect(invitee?.role).toBe('admin');
     expect(invitee?.isOwner).toBe(false);
@@ -312,15 +394,39 @@ describe('BrokerController', () => {
   });
 
   it('signs a returning member in and drops an off-site next', async () => {
-    const { state } = await start('?next=%2F%2Fevil.example');
-    const result = await callback(tokenFor(state));
+    const { state, nonce } = await start('?next=%2F%2Fevil.example');
+    const result = await callback(tokenFor(state), nonce);
     expect(result.location).toBe('http://localhost/');
-    expect(result.cookie).toContain('better-auth.session_token=');
+    expect(result.cookie).toContain(SESSION_COOKIE);
     expect(built.telemetry.trackUserLogin).toHaveBeenCalledWith({ method: 'broker' });
     expect(await latestLogin()).toEqual({
       actorEmail: 'owner@example.com',
       details: { method: 'google', provider: 'google' },
     });
+  });
+
+  it('drops a next carrying CR/LF instead of failing on the Location header', async () => {
+    const { state, nonce } = await start('?next=%2F%0D%0Aset-cookie%3A%20x%3D1');
+    const result = await callback(tokenFor(state), nonce);
+    expect(result.status).toBe(302);
+    expect(result.location).toBe('http://localhost/');
+    expect(result.cookie).toContain(SESSION_COOKIE);
+  });
+
+  it('ends an unexpected callback failure on the invalid error, not a 500', async () => {
+    const errorLog = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {
+      return undefined;
+    });
+    jest
+      .spyOn(app.get(BrokerUserResolver), 'resolve')
+      .mockRejectedValueOnce(new Error('database unavailable'));
+    const { state, nonce } = await start('');
+    const result = await callback(tokenFor(state), nonce);
+    expect(result.status).toBe(302);
+    expect(result.location).toBe('http://localhost/login?error=invalid');
+    expect(result.cookie).toBe('');
+    expect(result.setCookies).toEqual([CLEARED_NONCE]);
+    expect(errorLog).toHaveBeenCalled();
   });
 
   it('signs in when the request host carries an explicit default port', async () => {
@@ -340,38 +446,39 @@ describe('BrokerController', () => {
       const location = new URL(String(startResponse.headers.location));
       const redirect = new URL(String(location.searchParams.get('redirect')));
       const state = String(location.searchParams.get('state'));
-      const token = jwt.sign(
-        {
-          typ: 'self-hosted-broker',
-          email: 'owner@example.com',
-          name: 'Owner',
-          avatarUrl: null,
-          provider: 'google',
-          providerId: 'g-owner',
-          state,
-        },
-        privateKey,
-        {
-          algorithm: 'RS256',
-          keyid: 'brk-test',
-          issuer: 'betterdb-entitlement',
-          audience: redirect.origin,
-          expiresIn: 300,
-        },
-      );
+      const nonce = cookieNamed(startResponse.headers['set-cookie'], `${BROKER_NONCE_COOKIE}=`);
       const callbackResponse = await withDefaultPort.app.inject({
         method: 'GET',
-        url: `/auth/broker/callback?token=${encodeURIComponent(token)}`,
-        headers: { host: 'localhost:80' },
+        url: `/auth/broker/callback?token=${encodeURIComponent(tokenFor(state, {}, redirect.origin))}`,
+        headers: { host: 'localhost:80', cookie: nonce },
         remoteAddress: nextIp(),
       });
       expect(callbackResponse.statusCode).toBe(302);
-      expect(String(callbackResponse.headers['set-cookie'] ?? '')).toContain(
-        'better-auth.session_token=',
+      expect(cookieNamed(callbackResponse.headers['set-cookie'], SESSION_COOKIE)).toContain(
+        SESSION_COOKIE,
       );
     } finally {
       await withDefaultPort.app.close();
       await withDefaultPort.storage.close();
+    }
+  });
+
+  it('marks the nonce cookie Secure and scopes it to the production auth path', async () => {
+    const secure = await buildApp(
+      resolveWorkspaceConfig({
+        ...BASE_ENV,
+        NODE_ENV: 'production',
+        AUTH_PUBLIC_URL: 'https://monitor.example',
+      }),
+    );
+    try {
+      const response = await secure.app.inject({ method: 'GET', url: '/auth/broker/start' });
+      expect(response.statusCode).toBe(302);
+      const [cookie] = allCookies(response.headers['set-cookie']);
+      expect(cookie).toMatch(/; Path=\/api\/auth; Max-Age=600; HttpOnly; SameSite=Lax; Secure$/);
+    } finally {
+      await secure.app.close();
+      await secure.storage.close();
     }
   });
 
@@ -454,6 +561,45 @@ describe('BrokerController', () => {
   });
 });
 
+describe('BrokerController throttling', () => {
+  it('limits start and callback to 20 requests a minute per client', async () => {
+    const throttled = await buildApp(resolveWorkspaceConfig(BASE_ENV), { throttled: true });
+    try {
+      const startStatuses: number[] = [];
+      const callbackStatuses: number[] = [];
+      for (let attempt = 0; attempt < 21; attempt++) {
+        const startResponse = await throttled.app.inject({
+          method: 'GET',
+          url: '/auth/broker/start',
+          remoteAddress: '203.0.113.7',
+        });
+        startStatuses.push(startResponse.statusCode);
+        const callbackResponse = await throttled.app.inject({
+          method: 'GET',
+          url: '/auth/broker/callback',
+          remoteAddress: '203.0.113.8',
+        });
+        callbackStatuses.push(callbackResponse.statusCode);
+      }
+      expect(
+        startStatuses.slice(0, 20).every((status) => {
+          return status === 302;
+        }),
+      ).toBe(true);
+      expect(startStatuses[20]).toBe(429);
+      expect(
+        callbackStatuses.slice(0, 20).every((status) => {
+          return status === 302;
+        }),
+      ).toBe(true);
+      expect(callbackStatuses[20]).toBe(429);
+    } finally {
+      await throttled.app.close();
+      await throttled.storage.close();
+    }
+  });
+});
+
 describe('BrokerController first owner versus password sign-up', () => {
   it('leaves exactly one owner when both reach an empty workspace at once', async () => {
     const racing = await buildApp(resolveWorkspaceConfig(BASE_ENV));
@@ -466,6 +612,7 @@ describe('BrokerController first owner versus password sign-up', () => {
       const state = String(
         new URL(String(startResponse.headers.location)).searchParams.get('state'),
       );
+      const nonce = cookieNamed(startResponse.headers['set-cookie'], `${BROKER_NONCE_COOKIE}=`);
       const memberService = racing.app.get(MemberService);
       const realCount = memberService.count.bind(memberService);
       let brokerCounted: () => void = () => {
@@ -491,6 +638,7 @@ describe('BrokerController first owner versus password sign-up', () => {
         method: 'GET',
         url: `/auth/broker/callback?token=${encodeURIComponent(tokenFor(state))}`,
         remoteAddress: nextIp(),
+        headers: { cookie: nonce },
       });
       await counted;
       const signUp = racing.app.inject({

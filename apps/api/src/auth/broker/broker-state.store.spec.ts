@@ -7,6 +7,7 @@ const RECORD: BrokerStateRecord = {
   appOrigin: 'http://localhost',
   next: '/settings',
   inviteTokenHash: 'hash-1',
+  nonceHash: 'nonce-hash-1',
 };
 
 describe('BrokerStateStore', () => {

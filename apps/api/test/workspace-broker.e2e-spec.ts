@@ -47,10 +47,16 @@ interface ActivityItem {
   details: { method?: string; provider?: string };
 }
 
-function extractSessionCookie(setCookie: string | string[] | undefined): string {
-  const cookies = ([] as string[]).concat(setCookie ?? []).join('\n');
-  const [first] = cookies.split(';');
-  return first;
+const NONCE_COOKIE = 'betterdb.broker_nonce=';
+
+function cookieNamed(setCookie: string | string[] | undefined, marker: string): string {
+  const match = ([] as string[]).concat(setCookie ?? []).find((cookie) => {
+    return cookie.includes(marker);
+  });
+  if (match === undefined) {
+    return '';
+  }
+  return match.split(';')[0];
 }
 
 let ipCounter = 0;
@@ -92,7 +98,7 @@ describe('Workspace broker sign-in (E2E)', () => {
     );
   }
 
-  async function start(query: string): Promise<{ state: string; audience: string }> {
+  async function start(query: string): Promise<{ state: string; audience: string; nonce: string }> {
     const response = await app.inject({
       method: 'GET',
       url: `/api/auth/broker/start${query}`,
@@ -101,21 +107,29 @@ describe('Workspace broker sign-in (E2E)', () => {
     expect(response.statusCode).toBe(302);
     const location = new URL(String(response.headers.location));
     const redirect = new URL(String(location.searchParams.get('redirect')));
-    return { state: String(location.searchParams.get('state')), audience: redirect.origin };
+    const nonce = cookieNamed(response.headers['set-cookie'], NONCE_COOKIE);
+    expect(nonce).not.toBe('');
+    return {
+      state: String(location.searchParams.get('state')),
+      audience: redirect.origin,
+      nonce,
+    };
   }
 
   async function callback(
     token: string,
+    nonce: string,
   ): Promise<{ status: number; location: string; cookie: string }> {
     const response = await app.inject({
       method: 'GET',
       url: `/api/auth/broker/callback?token=${encodeURIComponent(token)}`,
       remoteAddress: nextIp(),
+      headers: { cookie: nonce },
     });
     return {
       status: response.statusCode,
       location: String(response.headers.location),
-      cookie: extractSessionCookie(response.headers['set-cookie']),
+      cookie: cookieNamed(response.headers['set-cookie'], 'session_token='),
     };
   }
 
@@ -183,8 +197,8 @@ describe('Workspace broker sign-in (E2E)', () => {
   });
 
   it('registers the first broker sign-in as the workspace owner', async () => {
-    const { state, audience } = await start('?provider=github');
-    const result = await callback(tokenFor(state, audience));
+    const { state, audience, nonce } = await start('?provider=github');
+    const result = await callback(tokenFor(state, audience), nonce);
     expect(result.status).toBe(302);
     expect(result.cookie).toContain('session_token=');
 
@@ -194,8 +208,8 @@ describe('Workspace broker sign-in (E2E)', () => {
   });
 
   it('admits an invited member with the invited role', async () => {
-    const { state: ownerState, audience } = await start('?provider=github');
-    const ownerCallback = await callback(tokenFor(ownerState, audience));
+    const { state: ownerState, audience, nonce: ownerNonce } = await start('?provider=github');
+    const ownerCallback = await callback(tokenFor(ownerState, audience), ownerNonce);
     const ownerCookie = ownerCallback.cookie;
 
     const invite = await app.inject({
@@ -211,13 +225,16 @@ describe('Workspace broker sign-in (E2E)', () => {
     expect(invite.statusCode).toBe(201);
     const inviteToken = (invite.json() as { url: string }).url.split('/invite/')[1];
 
-    const { state: memberState } = await start(`?invite=${encodeURIComponent(inviteToken)}`);
+    const { state: memberState, nonce: memberNonce } = await start(
+      `?invite=${encodeURIComponent(inviteToken)}`,
+    );
     const memberCallback = await callback(
       tokenFor(memberState, audience, {
         email: MEMBER_EMAIL,
         name: 'Member',
         providerId: 'gh-member',
       }),
+      memberNonce,
     );
     expect(memberCallback.status).toBe(302);
     expect(memberCallback.cookie).toContain('session_token=');
@@ -228,9 +245,10 @@ describe('Workspace broker sign-in (E2E)', () => {
   });
 
   it('refuses a stranger without a pending invitation', async () => {
-    const { state, audience } = await start('');
+    const { state, audience, nonce } = await start('');
     const result = await callback(
       tokenFor(state, audience, { email: STRANGER_EMAIL, providerId: 'gh-stranger' }),
+      nonce,
     );
     expect(result.status).toBe(302);
     expect(result.location).toBe(`${TRUSTED_ORIGIN}/login?error=not_invited`);
@@ -238,8 +256,8 @@ describe('Workspace broker sign-in (E2E)', () => {
   });
 
   it('lists the broker logins with their provider in the activity feed', async () => {
-    const { state, audience } = await start('?provider=github');
-    const ownerCallback = await callback(tokenFor(state, audience));
+    const { state, audience, nonce } = await start('?provider=github');
+    const ownerCallback = await callback(tokenFor(state, audience), nonce);
 
     const response = await app.inject({
       method: 'GET',
