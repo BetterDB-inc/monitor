@@ -7,7 +7,9 @@ describe('loadBetterAuthModules', () => {
     expect(typeof modules.memoryAdapter).toBe('function');
     expect(typeof modules.getMigrations).toBe('function');
     expect(typeof modules.createAuthMiddleware).toBe('function');
+    expect(typeof modules.createAuthEndpoint).toBe('function');
     expect(typeof modules.APIError).toBe('function');
+    expect(typeof modules.setSessionCookie).toBe('function');
     expect(typeof modules.SqliteDialect).toBe('function');
   });
 

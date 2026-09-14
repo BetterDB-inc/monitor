@@ -5,6 +5,7 @@ import { ActivityModule } from '../activity/activity.module';
 import type { StoragePort } from '../common/interfaces/storage-port.interface';
 import { hasRawDatabaseHandle } from '../storage/raw-database-handle';
 import { StorageModule } from '../storage/storage.module';
+import { BrokerUserResolver } from '../workspace/broker-user-resolver.service';
 import { InvitationService } from '../workspace/invitation.service';
 import { InviteController } from '../workspace/invite.controller';
 import { MemberService } from '../workspace/member.service';
@@ -15,6 +16,8 @@ import { WORKSPACE_STATUS, WorkspaceStatusService } from '../workspace/workspace
 import { ActorResolver } from './actor-resolver';
 import { resolveAuthSecret } from './auth-secret';
 import { BetterAuthController } from './better-auth.controller';
+import { BrokerStateStore } from './broker/broker-state.store';
+import { BrokerController } from './broker/broker.controller';
 import {
   BETTER_AUTH,
   BetterAuthInstance,
@@ -90,8 +93,15 @@ export class WorkspaceAuthModule {
         inject: ['STORAGE_CLIENT'],
       });
       providers.push({ provide: WORKSPACE_STATUS, useClass: WorkspaceStatusService });
-      providers.push(MemberService, InvitationService, PersonalTokenService);
+      providers.push(
+        MemberService,
+        InvitationService,
+        PersonalTokenService,
+        BrokerStateStore,
+        BrokerUserResolver,
+      );
       controllers.push(
+        BrokerController,
         BetterAuthController,
         WorkspaceController,
         InviteController,

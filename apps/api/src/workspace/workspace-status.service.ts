@@ -15,14 +15,14 @@ export class WorkspaceStatusService {
   ) {}
 
   async getStatus(): Promise<WorkspaceStatus> {
-    const { mode, enabled } = this.config;
+    const { mode, enabled, brokerEnabled } = this.config;
     if (this.bootstrapped === true) {
-      return { mode, enabled, bootstrapped: true };
+      return { mode, enabled, bootstrapped: true, broker: brokerEnabled };
     }
     const users = await countUsers(this.auth);
     if (users > 0) {
       this.bootstrapped = true;
     }
-    return { mode, enabled, bootstrapped: this.bootstrapped };
+    return { mode, enabled, bootstrapped: this.bootstrapped, broker: brokerEnabled };
   }
 }

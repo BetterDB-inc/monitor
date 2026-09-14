@@ -362,4 +362,8 @@ export class MemberService {
       asResponse: true,
     });
   }
+
+  startSession(userId: string, headers: Headers): Promise<Response> {
+    return this.auth.api.brokerSession({ body: { userId }, headers, asResponse: true });
+  }
 }

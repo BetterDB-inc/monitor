@@ -2,7 +2,7 @@ import { Injectable, Optional, Inject, OnModuleInit } from '@nestjs/common';
 import { isCloudMode } from '../common/utils/cloud-mode';
 import { ConfigService } from '@nestjs/config';
 import { LicenseService } from '@proprietary/licenses';
-import type { WorkspaceRole } from '@betterdb/shared';
+import type { BrokerProvider, WorkspaceRole } from '@betterdb/shared';
 import { TelemetryPort } from '../common/interfaces/telemetry-port.interface';
 
 @Injectable()
@@ -23,8 +23,7 @@ export class UsageTelemetryService implements OnModuleInit {
       this.configService.get<string>('APP_VERSION') ||
       this.configService.get<string>('npm_package_version') ||
       'unknown';
-    this.deploymentMode =
-      isCloudMode() ? 'cloud' : 'self-hosted';
+    this.deploymentMode = isCloudMode() ? 'cloud' : 'self-hosted';
     this.workspaceName = this.configService.get<string>('TENANT_ID') || undefined;
     const dbSchema = this.configService.get<string>('DB_SCHEMA');
     this.subdomain = dbSchema?.startsWith('tenant_')
@@ -110,15 +109,18 @@ export class UsageTelemetryService implements OnModuleInit {
     this.sendEvent('user_invited', opts);
   }
 
-  async trackInviteAccepted(opts: { role: WorkspaceRole; method: 'password' }): Promise<void> {
+  async trackInviteAccepted(opts: {
+    role: WorkspaceRole;
+    method: 'password' | BrokerProvider;
+  }): Promise<void> {
     this.sendEvent('invite_accepted', opts);
   }
 
-  async trackWorkspaceFirstRegister(opts: { method: 'password' }): Promise<void> {
+  async trackWorkspaceFirstRegister(opts: { method: 'password' | BrokerProvider }): Promise<void> {
     this.sendEvent('workspace_first_register', opts);
   }
 
-  async trackUserLogin(opts: { method: 'password' }): Promise<void> {
+  async trackUserLogin(opts: { method: 'password' | BrokerProvider }): Promise<void> {
     this.sendEvent('user_login', opts);
   }
 

@@ -32,9 +32,9 @@ export class SystemController {
       return this.workspaceStatus.getStatus();
     }
     if (isCloudMode()) {
-      return { mode: 'cloud', enabled: true, bootstrapped: true };
+      return { mode: 'cloud', enabled: true, bootstrapped: true, broker: false };
     }
-    return { mode: 'disabled', enabled: false, bootstrapped: false };
+    return { mode: 'disabled', enabled: false, bootstrapped: false, broker: false };
   }
 
   /**

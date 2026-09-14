@@ -11,7 +11,12 @@ describe('GET /system/workspace', () => {
     delete process.env.CLOUD_MODE;
     const status: WorkspaceStatus = await controller.getWorkspaceStatus();
     process.env.CLOUD_MODE = previous;
-    expect(status).toEqual({ mode: 'disabled', enabled: false, bootstrapped: false });
+    expect(status).toEqual({
+      mode: 'disabled',
+      enabled: false,
+      bootstrapped: false,
+      broker: false,
+    });
   });
 
   it('reports cloud when CLOUD_MODE=true and no status service is provided', async () => {
@@ -20,7 +25,7 @@ describe('GET /system/workspace', () => {
     process.env.CLOUD_MODE = 'true';
     const status = await controller.getWorkspaceStatus();
     process.env.CLOUD_MODE = previous;
-    expect(status).toEqual({ mode: 'cloud', enabled: true, bootstrapped: true });
+    expect(status).toEqual({ mode: 'cloud', enabled: true, bootstrapped: true, broker: false });
   });
 
   it('reports self-hosted with bootstrapped from the user count', async () => {
@@ -36,6 +41,7 @@ describe('GET /system/workspace', () => {
       mode: 'self-hosted',
       enabled: true,
       bootstrapped: false,
+      broker: false,
     });
     await auth.api.signUpEmail({
       body: { email: 'owner@example.com', password: 'correct horse battery', name: 'O' },

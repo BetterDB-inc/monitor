@@ -251,6 +251,35 @@ describe('createBetterAuth', () => {
     expect((created as { isOwner: unknown }).isOwner).toBe(false);
   });
 
+  it('mints a broker session only through the server api, never over http', async () => {
+    const auth = await build({ kind: 'memory' });
+    const context = await auth.$context;
+    const user = await context.internalAdapter.createUser(
+      { email: 'broker@example.com', name: 'Broker', emailVerified: true },
+      { method: 'social' } as never,
+    );
+
+    const routed = await auth.handler(
+      new Request(`${ORIGIN}/auth/broker/session`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          origin: ORIGIN,
+          [CLIENT_IP_HEADER]: '10.0.0.7',
+        },
+        body: JSON.stringify({ userId: user.id }),
+      }),
+    );
+    expect(routed.status).toBe(404);
+
+    const minted = await auth.api.brokerSession({ body: { userId: user.id }, asResponse: true });
+    expect(minted.status).toBe(200);
+    const cookie = minted.headers.getSetCookie()[0].split(';')[0];
+    expect(cookie).toContain('better-auth.session_token=');
+    const session = await auth.api.getSession({ headers: new Headers({ cookie }) });
+    expect(session?.user.id).toBe(user.id);
+  });
+
   it('runs migrations idempotently and round-trips on better-sqlite3', async () => {
     const path = join(tmpdir(), `factory-${Date.now()}-${Math.random()}.db`);
     const Database = await loadBetterSqlite3();
