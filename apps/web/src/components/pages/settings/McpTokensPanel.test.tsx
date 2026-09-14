@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, screen, waitFor } from '@testing-library/react';
 import { renderWithQuery } from '../../../test/test-utils';
 import { McpTokensPanel } from './McpTokensPanel';
@@ -180,5 +180,36 @@ describe('McpTokensPanel', () => {
     api.list.mockResolvedValue([]);
     renderWithQuery(<McpTokensPanel />);
     expect(await screen.findByText(/acts as you/)).toBeInTheDocument();
+  });
+
+  describe('generated client config origin', () => {
+    const originalLocation = window.location;
+
+    afterEach(() => {
+      Object.defineProperty(window, 'location', { configurable: true, value: originalLocation });
+      vi.unstubAllEnvs();
+    });
+
+    it('points BETTERDB_URL at the API port in dev, not the Vite origin', async () => {
+      vi.stubEnv('PROD', false);
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: { ...originalLocation, origin: 'http://localhost:5173' },
+      });
+      await showGeneratedToken();
+      expect(screen.getByText(/"BETTERDB_URL": "http:\/\/localhost:3001"/)).toBeInTheDocument();
+    });
+
+    it('points BETTERDB_URL at the browser origin in production', async () => {
+      vi.stubEnv('PROD', true);
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: { ...originalLocation, origin: 'https://monitor.example.com' },
+      });
+      await showGeneratedToken();
+      expect(
+        screen.getByText(/"BETTERDB_URL": "https:\/\/monitor\.example\.com"/),
+      ).toBeInTheDocument();
+    });
   });
 });

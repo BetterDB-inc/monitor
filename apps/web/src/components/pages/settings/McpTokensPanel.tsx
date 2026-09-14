@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent, ReactElement } from 'react';
 import { agentTokensApi, type GeneratedToken, type TokenListItem } from '../../../api/agent-tokens';
+import { apiOrigin } from '../../../api/client';
 import { useAuth } from '../../../contexts/AuthContext';
 import { useMcpTokens } from '../../../hooks/useMcpTokens';
 
@@ -33,7 +34,7 @@ function clientConfig(token: string): string {
           type: 'stdio',
           command: 'npx',
           args: ['@betterdb/mcp'],
-          env: { BETTERDB_URL: window.location.origin, BETTERDB_TOKEN: token },
+          env: { BETTERDB_URL: apiOrigin(), BETTERDB_TOKEN: token },
         },
       },
     },

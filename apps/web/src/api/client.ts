@@ -2,6 +2,13 @@
 // In development, API is on localhost:3001 without prefix
 const API_BASE = import.meta.env.PROD ? '/api' : 'http://localhost:3001';
 
+export function apiOrigin(): string {
+  if (import.meta.env.PROD) {
+    return window.location.origin;
+  }
+  return new URL(API_BASE, window.location.origin).origin;
+}
+
 // Connection ID header name (must match backend CONNECTION_ID_HEADER)
 const CONNECTION_ID_HEADER = 'x-connection-id';
 
@@ -229,7 +236,10 @@ async function parseSuccessPayload<T>(response: Response): Promise<T> {
   }
 }
 
-function combineSignals(callerSignal?: AbortSignal | null, timeoutMs?: number): {
+function combineSignals(
+  callerSignal?: AbortSignal | null,
+  timeoutMs?: number,
+): {
   signal: AbortSignal | undefined;
   cleanup: () => void;
 } {
@@ -261,7 +271,8 @@ function combineSignals(callerSignal?: AbortSignal | null, timeoutMs?: number): 
 
   // Fallback for runtimes without AbortSignal.any.
   const combined = new AbortController();
-  const onAbort = () => combined.abort(callerSignal.aborted ? callerSignal.reason : timeoutController.signal.reason);
+  const onAbort = () =>
+    combined.abort(callerSignal.aborted ? callerSignal.reason : timeoutController.signal.reason);
   if (callerSignal.aborted || timeoutController.signal.aborted) {
     onAbort();
   } else {
@@ -278,13 +289,10 @@ function combineSignals(callerSignal?: AbortSignal | null, timeoutMs?: number): 
   };
 }
 
-export async function fetchApi<T>(
-  endpoint: string,
-  options?: FetchApiOptions
-): Promise<T> {
+export async function fetchApi<T>(endpoint: string, options?: FetchApiOptions): Promise<T> {
   const { timeoutMs, skipAuthRedirect, ...init } = options ?? {};
   const headers: Record<string, string> = {
-    ...init?.headers as Record<string, string>,
+    ...(init?.headers as Record<string, string>),
   };
 
   if (init?.body) {
