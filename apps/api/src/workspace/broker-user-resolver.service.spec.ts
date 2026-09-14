@@ -1,4 +1,5 @@
 import { Test } from '@nestjs/testing';
+import { BootstrapLock } from '../auth/bootstrap-lock';
 import { BETTER_AUTH, createBetterAuth } from '../auth/better-auth.factory';
 import { resolveWorkspaceConfig, WORKSPACE_CONFIG } from '../auth/workspace-config';
 import { MemoryAdapter } from '../storage/adapters/memory.adapter';
@@ -43,6 +44,7 @@ describe('BrokerUserResolver', () => {
             return currentTime;
           },
         },
+        BootstrapLock,
         MemberService,
         InvitationService,
         BrokerUserResolver,
@@ -165,5 +167,21 @@ describe('BrokerUserResolver', () => {
       return member.isOwner === true;
     });
     expect(owners).toHaveLength(1);
+  });
+
+  it('still serves a later sign-in after an earlier one was rejected', async () => {
+    await resolver.resolve(identity('owner@example.com'), null);
+    const [rejected, served] = await Promise.allSettled([
+      resolver.resolve(identity('stranger@example.com'), null),
+      resolver.resolve(identity('owner@example.com'), null),
+    ]);
+    expect(rejected.status).toBe('rejected');
+    if (rejected.status === 'rejected') {
+      expect(rejected.reason).toBeInstanceOf(BrokerNotInvitedError);
+    }
+    expect(served.status).toBe('fulfilled');
+    if (served.status === 'fulfilled') {
+      expect(served.value.entrance).toBe('login');
+    }
   });
 });

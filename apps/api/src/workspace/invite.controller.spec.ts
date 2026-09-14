@@ -5,6 +5,7 @@ import { Test } from '@nestjs/testing';
 import { ACTIVITY_CONFIG } from '../activity/activity-config';
 import { ActivityService } from '../activity/activity.service';
 import { ActorResolver } from '../auth/actor-resolver';
+import { BootstrapLock } from '../auth/bootstrap-lock';
 import { BetterAuthController } from '../auth/better-auth.controller';
 import { BETTER_AUTH, createBetterAuth } from '../auth/better-auth.factory';
 import { ActorGuard } from '../auth/guards/actor.guard';
@@ -73,6 +74,7 @@ describe('InviteController', () => {
           },
         },
         ActorResolver,
+        BootstrapLock,
         MemberService,
         InvitationService,
         { provide: APP_GUARD, useClass: ActorGuard },

@@ -15,6 +15,7 @@ import { WorkspaceController } from '../workspace/workspace.controller';
 import { WORKSPACE_STATUS, WorkspaceStatusService } from '../workspace/workspace-status.service';
 import { ActorResolver } from './actor-resolver';
 import { resolveAuthSecret } from './auth-secret';
+import { BootstrapLock } from './bootstrap-lock';
 import { BetterAuthController } from './better-auth.controller';
 import { BrokerStateStore } from './broker/broker-state.store';
 import { BrokerController } from './broker/broker.controller';
@@ -94,6 +95,7 @@ export class WorkspaceAuthModule {
       });
       providers.push({ provide: WORKSPACE_STATUS, useClass: WorkspaceStatusService });
       providers.push(
+        BootstrapLock,
         MemberService,
         InvitationService,
         PersonalTokenService,

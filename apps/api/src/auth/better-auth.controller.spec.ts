@@ -6,6 +6,7 @@ import { ActivityService } from '../activity/activity.service';
 import { MemberService } from '../workspace/member.service';
 import { PersonalTokenService } from '../workspace/personal-token.service';
 import { ActorResolver } from './actor-resolver';
+import { BootstrapLock } from './bootstrap-lock';
 import { WORKSPACE_CONFIG } from './workspace-config';
 import { BETTER_AUTH, countUsers, createBetterAuth } from './better-auth.factory';
 import { BetterAuthController } from './better-auth.controller';
@@ -39,6 +40,7 @@ describe('BetterAuthController', () => {
         { provide: UsageTelemetryService, useValue: telemetryStub() },
         ActivityService,
         ActorResolver,
+        BootstrapLock,
       ],
     }).compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
@@ -168,6 +170,7 @@ describe('BetterAuthController sign-up serialisation', () => {
         { provide: UsageTelemetryService, useValue: telemetryStub() },
         ActivityService,
         ActorResolver,
+        BootstrapLock,
       ],
     }).compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
@@ -237,6 +240,7 @@ describe('BetterAuthController behind a TLS proxy', () => {
         { provide: UsageTelemetryService, useValue: telemetryStub() },
         ActivityService,
         ActorResolver,
+        BootstrapLock,
       ],
     }).compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(
@@ -299,6 +303,7 @@ describe('BetterAuthController activity events', () => {
         { provide: UsageTelemetryService, useValue: telemetryStub() },
         ActivityService,
         ActorResolver,
+        BootstrapLock,
         MemberService,
         PersonalTokenService,
       ],
@@ -459,6 +464,7 @@ describe('BetterAuthController telemetry', () => {
         { provide: UsageTelemetryService, useValue: telemetry },
         ActivityService,
         ActorResolver,
+        BootstrapLock,
       ],
     }).compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());

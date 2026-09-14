@@ -13,6 +13,7 @@ import { InvitationService } from '../../workspace/invitation.service';
 import { MemberService } from '../../workspace/member.service';
 import { WorkspaceController } from '../../workspace/workspace.controller';
 import { ActorResolver } from '../actor-resolver';
+import { BootstrapLock } from '../bootstrap-lock';
 import { BetterAuthController } from '../better-auth.controller';
 import { BETTER_AUTH, createBetterAuth } from '../better-auth.factory';
 import { ActorGuard } from '../guards/actor.guard';
@@ -62,6 +63,34 @@ function nextIp(): string {
   return `198.51.100.${ipCounter}`;
 }
 
+function tokenFor(
+  state: string,
+  overrides: Record<string, unknown> = {},
+  audience = 'http://localhost',
+  key: string = privateKey,
+): string {
+  return jwt.sign(
+    {
+      typ: 'self-hosted-broker',
+      email: 'owner@example.com',
+      name: 'Owner',
+      avatarUrl: null,
+      provider: 'google',
+      providerId: 'g-owner',
+      state,
+      ...overrides,
+    },
+    key,
+    {
+      algorithm: 'RS256',
+      keyid: 'brk-test',
+      issuer: 'betterdb-entitlement',
+      audience,
+      expiresIn: 300,
+    },
+  );
+}
+
 async function buildApp(config: WorkspaceConfig): Promise<BuiltApp> {
   const auth = await createBetterAuth({
     handle: { kind: 'memory' },
@@ -87,6 +116,7 @@ async function buildApp(config: WorkspaceConfig): Promise<BuiltApp> {
       { provide: ACTIVITY_CONFIG, useValue: { retentionDays: 90 } },
       ActivityService,
       ActorResolver,
+      BootstrapLock,
       MemberService,
       InvitationService,
       BrokerStateStore,
@@ -126,34 +156,6 @@ describe('BrokerController', () => {
     expect(response.statusCode).toBe(302);
     const location = new URL(String(response.headers.location));
     return { state: String(location.searchParams.get('state')), location };
-  }
-
-  function tokenFor(
-    state: string,
-    overrides: Record<string, unknown> = {},
-    audience = 'http://localhost',
-    key: string = privateKey,
-  ): string {
-    return jwt.sign(
-      {
-        typ: 'self-hosted-broker',
-        email: 'owner@example.com',
-        name: 'Owner',
-        avatarUrl: null,
-        provider: 'google',
-        providerId: 'g-owner',
-        state,
-        ...overrides,
-      },
-      key,
-      {
-        algorithm: 'RS256',
-        keyid: 'brk-test',
-        issuer: 'betterdb-entitlement',
-        audience,
-        expiresIn: 300,
-      },
-    );
   }
 
   async function callback(
@@ -448,6 +450,78 @@ describe('BrokerController', () => {
     } finally {
       await disabled.app.close();
       await disabled.storage.close();
+    }
+  });
+});
+
+describe('BrokerController first owner versus password sign-up', () => {
+  it('leaves exactly one owner when both reach an empty workspace at once', async () => {
+    const racing = await buildApp(resolveWorkspaceConfig(BASE_ENV));
+    try {
+      const startResponse = await racing.app.inject({
+        method: 'GET',
+        url: '/auth/broker/start',
+        remoteAddress: nextIp(),
+      });
+      const state = String(
+        new URL(String(startResponse.headers.location)).searchParams.get('state'),
+      );
+      const memberService = racing.app.get(MemberService);
+      const realCount = memberService.count.bind(memberService);
+      let brokerCounted: () => void = () => {
+        return undefined;
+      };
+      const counted = new Promise<void>((resolve) => {
+        brokerCounted = resolve;
+      });
+      let releaseBroker: () => void = () => {
+        return undefined;
+      };
+      const brokerGate = new Promise<void>((resolve) => {
+        releaseBroker = resolve;
+      });
+      jest.spyOn(memberService, 'count').mockImplementationOnce(async () => {
+        const total = await realCount();
+        brokerCounted();
+        await brokerGate;
+        return total;
+      });
+
+      const brokerCallback = racing.app.inject({
+        method: 'GET',
+        url: `/auth/broker/callback?token=${encodeURIComponent(tokenFor(state))}`,
+        remoteAddress: nextIp(),
+      });
+      await counted;
+      const signUp = racing.app.inject({
+        method: 'POST',
+        url: '/auth/sign-up/email',
+        remoteAddress: nextIp(),
+        headers: { 'content-type': 'application/json', origin: 'http://localhost' },
+        payload: {
+          email: 'password@example.com',
+          password: 'correct horse battery',
+          name: 'Password',
+        },
+      });
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 100);
+      });
+      releaseBroker();
+      const [signUpResponse, callbackResponse] = await Promise.all([signUp, brokerCallback]);
+
+      const everyone = await memberService.list();
+      const owners = everyone.filter((member) => {
+        return member.isOwner === true;
+      });
+      expect(owners).toHaveLength(1);
+      expect(everyone).toHaveLength(1);
+      expect(everyone[0].email).toBe('owner@example.com');
+      expect(signUpResponse.statusCode).toBe(403);
+      expect(String(callbackResponse.headers.location)).toBe('http://localhost/');
+    } finally {
+      await racing.app.close();
+      await racing.storage.close();
     }
   });
 });

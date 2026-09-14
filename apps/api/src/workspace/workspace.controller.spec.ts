@@ -6,6 +6,7 @@ import { ACTIVITY_CONFIG } from '../activity/activity-config';
 import { ActivityInterceptor } from '../activity/activity.interceptor';
 import { ActivityService, INVALID_CURSOR_MESSAGE } from '../activity/activity.service';
 import { ActorResolver } from '../auth/actor-resolver';
+import { BootstrapLock } from '../auth/bootstrap-lock';
 import { BetterAuthController } from '../auth/better-auth.controller';
 import { BETTER_AUTH, createBetterAuth } from '../auth/better-auth.factory';
 import { ActorGuard } from '../auth/guards/actor.guard';
@@ -101,6 +102,7 @@ describe('WorkspaceController', () => {
         { provide: ACTIVITY_CONFIG, useValue: { retentionDays: 90 } },
         ActivityService,
         ActorResolver,
+        BootstrapLock,
         MemberService,
         InvitationService,
         { provide: APP_GUARD, useClass: ActorGuard },

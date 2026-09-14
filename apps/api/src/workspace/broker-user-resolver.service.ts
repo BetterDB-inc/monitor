@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type { BrokerProvider } from '@betterdb/shared';
+import { BootstrapLock } from '../auth/bootstrap-lock';
 import { InvitationService } from './invitation.service';
 import { MemberRecord, MemberService } from './member.service';
 
@@ -22,26 +23,16 @@ export class BrokerNotInvitedError extends Error {}
 
 @Injectable()
 export class BrokerUserResolver {
-  private queue: Promise<void> = Promise.resolve();
-
   constructor(
     private readonly members: MemberService,
     private readonly invitations: InvitationService,
+    private readonly bootstrapLock: BootstrapLock,
   ) {}
 
   resolve(identity: BrokerIdentity, inviteTokenHash: string | null): Promise<ResolvedBrokerUser> {
-    const pending = this.queue.then(() => {
+    return this.bootstrapLock.run(() => {
       return this.resolveNow(identity, inviteTokenHash);
     });
-    this.queue = pending.then(
-      () => {
-        return undefined;
-      },
-      () => {
-        return undefined;
-      },
-    );
-    return pending;
   }
 
   private async resolveNow(
