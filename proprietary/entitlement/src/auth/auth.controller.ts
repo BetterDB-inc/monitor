@@ -10,6 +10,8 @@ import { AuthService } from './auth.service';
 import { UserService } from '../user/user.service';
 import { AdminGuard } from '../admin/admin.guard';
 import { GenerateWorkspaceTokenDto } from './dto/generate-workspace-token.dto';
+import { BrokerSigningService } from './broker-signing.service';
+import { BrokerTokenDto } from './dto/broker-token.dto';
 
 @Controller('auth')
 @UseGuards(AdminGuard)
@@ -17,6 +19,7 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly userService: UserService,
+    private readonly brokerSigning: BrokerSigningService,
   ) {}
 
   @Post('workspace-token')
@@ -37,5 +40,12 @@ export class AuthController {
     });
 
     return { token, subdomain: user.tenant.subdomain };
+  }
+
+  @Post('broker-token')
+  generateBrokerToken(@Body(new ValidationPipe({ whitelist: true })) dto: BrokerTokenDto): {
+    token: string;
+  } {
+    return { token: this.brokerSigning.sign(dto) };
   }
 }
