@@ -4,6 +4,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { Login } from '../../pages/Login';
 import { Register } from '../../pages/Register';
 import { AuthUnavailable } from './AuthUnavailable';
+import { resolveNext } from './resolve-next';
 
 export function AuthGate({ children }: { children: ReactNode }): ReactElement {
   const { loading, unavailable, mode, bootstrapped, user, refresh } = useAuth();
@@ -50,9 +51,10 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
       </Routes>
     );
   }
+  const signedInNext = resolveNext(new URLSearchParams(location.search).get('next'));
   return (
     <Routes>
-      <Route path="/login" element={<Navigate to="/" replace />} />
+      <Route path="/login" element={<Navigate to={signedInNext} replace />} />
       <Route path="/register" element={<Navigate to="/" replace />} />
       <Route path="*" element={<>{children}</>} />
     </Routes>

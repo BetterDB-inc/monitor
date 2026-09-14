@@ -4,19 +4,7 @@ import { UnauthorizedError } from '../api/client';
 import { workspaceApi } from '../api/workspace';
 import { useAuth } from '../contexts/AuthContext';
 import { CredentialsForm } from '../components/auth/CredentialsForm';
-
-function resolveNext(next: string | null): string {
-  if (next === null) {
-    return '/';
-  }
-  if (next.startsWith('/') === false) {
-    return '/';
-  }
-  if (next.startsWith('//') === true) {
-    return '/';
-  }
-  return next;
-}
+import { resolveNext } from '../components/auth/resolve-next';
 
 export function Login(): ReactElement {
   const navigate = useNavigate();
