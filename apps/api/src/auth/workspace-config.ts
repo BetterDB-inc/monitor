@@ -2,6 +2,7 @@ import type { WorkspaceMode } from '@betterdb/shared';
 import { isCloudModeValue } from '../common/utils/cloud-mode';
 import { DEFAULT_AUTH_BROKER_URL, isTrueFlag, normalizeOptionalUrl } from '../config/env-normalize';
 import { trustsProxyHeaders } from '../config/trust-proxy';
+import { resolveBrokerKeys } from './broker/broker-keys';
 
 export const WORKSPACE_CONFIG = 'WORKSPACE_CONFIG';
 
@@ -15,6 +16,9 @@ export interface WorkspaceConfig {
   brokerUrl: string;
   trustedOrigins: string[];
   trustProxy: boolean;
+  brokerKeys: Record<string, string>;
+  brokerEnabled: boolean;
+  devAppOrigin: string | null;
 }
 
 function resolveMode(env: NodeJS.ProcessEnv): WorkspaceMode {
@@ -39,6 +43,11 @@ export function resolveWorkspaceConfig(env: NodeJS.ProcessEnv): WorkspaceConfig 
   if (isProduction === false) {
     trustedOrigins.push(VITE_DEV_ORIGIN);
   }
+  const brokerKeys = resolveBrokerKeys(env);
+  const brokerEnabled =
+    mode === 'self-hosted' &&
+    isTrueFlag(env.AUTH_BROKER_DISABLED) === false &&
+    Object.keys(brokerKeys).length > 0;
   return {
     enabled: mode === 'self-hosted',
     mode,
@@ -47,5 +56,8 @@ export function resolveWorkspaceConfig(env: NodeJS.ProcessEnv): WorkspaceConfig 
     brokerUrl: brokerUrl ?? DEFAULT_AUTH_BROKER_URL,
     trustedOrigins,
     trustProxy: trustsProxyHeaders(env),
+    brokerKeys,
+    brokerEnabled,
+    devAppOrigin: isProduction ? null : VITE_DEV_ORIGIN,
   };
 }

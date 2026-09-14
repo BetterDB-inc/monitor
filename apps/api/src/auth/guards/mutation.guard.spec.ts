@@ -20,6 +20,9 @@ const enabledConfig: WorkspaceConfig = {
   brokerUrl: 'https://betterdb.com',
   trustProxy: false,
   trustedOrigins: [],
+  brokerKeys: {},
+  brokerEnabled: false,
+  devAppOrigin: null,
 };
 
 const admin: Actor = {
