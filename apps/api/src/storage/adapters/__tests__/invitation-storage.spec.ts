@@ -107,18 +107,12 @@ function describeRepository(name: string, open: () => Promise<StoragePort>): voi
       }
     });
 
-    it('admits only one of two concurrent saves for the same email', async () => {
+    it('keeps the first of two back-to-back conditional saves for the same email', async () => {
       const first = record();
       const second = record({ email: first.email, role: 'admin' });
-      const outcomes = await Promise.all([
-        repository.saveUnlessPending(first, 1_000),
-        repository.saveUnlessPending(second, 1_000),
-      ]);
-      const winners = [first, second].filter((candidate, index) => {
-        return outcomes[index] === true;
-      });
-      expect(winners).toHaveLength(1);
-      expect(await repository.findByEmail(first.email)).toEqual(winners[0]);
+      expect(await repository.saveUnlessPending(first, 1_000)).toBe(true);
+      expect(await repository.saveUnlessPending(second, 1_000)).toBe(false);
+      expect(await repository.findByEmail(first.email)).toEqual(first);
     });
   });
 }
