@@ -52,6 +52,7 @@ export class ActorResolver {
     const { headers: authHeaders, response: session } = await this.auth.api.getSession({
       headers: webHeaders,
       returnHeaders: true,
+      query: { disableCookieCache: true },
     });
     const setCookies = authHeaders.getSetCookie();
     if (session === null) {

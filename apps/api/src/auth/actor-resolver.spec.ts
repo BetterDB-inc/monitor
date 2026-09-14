@@ -117,7 +117,9 @@ describe('ActorResolver', () => {
         response: { user: { id: 'u1', email: 'owner@example.com', role: 'admin', isOwner: true } },
       } as unknown as Awaited<ReturnType<typeof auth.api.getSession>>);
       const resolution = await resolver.resolveSessionFromHeaders({ cookie }, '10.1.8.1');
-      expect(getSession.mock.calls[0][0]).toEqual(expect.objectContaining({ returnHeaders: true }));
+      expect(getSession.mock.calls[0][0]).toEqual(
+        expect.objectContaining({ returnHeaders: true, query: { disableCookieCache: true } }),
+      );
       expect(resolution).toEqual({
         actor: expect.objectContaining({ userId: 'u1', role: 'admin', via: 'session' }),
         setCookies: ['better-auth.session_token=x; Max-Age=604800'],
