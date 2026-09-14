@@ -49,18 +49,30 @@ export class FleetService {
   private async collect(): Promise<FleetSummaryResponse> {
     const listed = this.connectionRegistry.list();
 
+    const listedIds = new Set(listed.map((conn) => conn.id));
+    for (const id of this.lastSeenUp.keys()) {
+      if (!listedIds.has(id)) {
+        this.lastSeenUp.delete(id);
+      }
+    }
+
     if (listed.length === 0) {
       return { overallStatus: 'waiting', instances: [], timestamp: Date.now() };
     }
 
     const settled = await Promise.allSettled(
-      listed.map((conn) =>
-        this.withTimeout(
-          this.collectOne(conn.id, conn.name, conn.host, conn.port),
+      listed.map((conn) => {
+        const gate = { cancelled: false };
+        const result = this.withTimeout(
+          this.collectOne(conn.id, conn.name, conn.host, conn.port, () => gate.cancelled),
           FleetService.PER_INSTANCE_TIMEOUT_MS,
           `Timed out collecting fleet stats for ${conn.name}`,
-        ),
-      ),
+        );
+        result.catch(() => {
+          gate.cancelled = true;
+        });
+        return result;
+      }),
     );
 
     const instances: FleetInstanceSummary[] = settled.map((result, index) => {
@@ -102,6 +114,7 @@ export class FleetService {
     name: string,
     host: string,
     port: number,
+    isCancelled: () => boolean = () => false,
   ): Promise<FleetInstanceSummary> {
     const [healthResult, infoResult] = await Promise.allSettled([
       this.healthService.getHealth(connectionId),
@@ -131,7 +144,9 @@ export class FleetService {
     }
 
     const now = Date.now();
-    this.lastSeenUp.set(connectionId, now);
+    if (!isCancelled()) {
+      this.lastSeenUp.set(connectionId, now);
+    }
 
     const info: InfoResponse | null =
       infoResult.status === 'fulfilled' ? infoResult.value : null;

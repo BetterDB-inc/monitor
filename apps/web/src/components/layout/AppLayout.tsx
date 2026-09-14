@@ -131,7 +131,7 @@ function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
                 path="/fleet"
                 element={
                   <NoConnectionsGuard>
-                    <Fleet isCloudMode={!!cloudUser} />
+                    <Fleet />
                   </NoConnectionsGuard>
                 }
               />

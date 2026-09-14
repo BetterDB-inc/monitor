@@ -121,6 +121,20 @@ describe('FleetService', () => {
     expect(summary.overallStatus).toBe('degraded');
   }, 15000);
 
+  it('prunes last-seen entries for removed connections', async () => {
+    const lastSeenUp = (service as unknown as { lastSeenUp: Map<string, number> }).lastSeenUp;
+    registry.list.mockReturnValue([{ id: 'c1', name: 'One', host: 'h1', port: 6379 }]);
+    health.getHealth.mockResolvedValue({ status: 'connected', database: { type: 'valkey', version: '8.0', host: 'h1', port: 6379 } });
+    metrics.getInfoParsed.mockResolvedValue(infoFixture());
+
+    await service.collectUncached();
+    expect(lastSeenUp.size).toBe(1);
+
+    registry.list.mockReturnValue([]);
+    await service.collectUncached();
+    expect(lastSeenUp.size).toBe(0);
+  });
+
   it('caches the summary for subsequent calls', async () => {
     registry.list.mockReturnValue([{ id: 'c1', name: 'One', host: 'h1', port: 6379 }]);
     health.getHealth.mockResolvedValue({ status: 'connected', database: { type: 'valkey', version: '8.0', host: 'h1', port: 6379 } });
@@ -132,5 +146,37 @@ describe('FleetService', () => {
 
     expect(second).toBe(first);
     expect(second.instances[0].status).toBe('up');
+  });
+
+  it('ignores a late probe result after its timeout won the race', async () => {
+    jest.useFakeTimers();
+    try {
+      registry.list.mockReturnValue([{ id: 'c1', name: 'One', host: 'h1', port: 6379 }]);
+      let resolveHealth!: (value: unknown) => void;
+      let resolveInfo!: (value: unknown) => void;
+      health.getHealth.mockReturnValue(new Promise((resolve) => { resolveHealth = resolve; }));
+      metrics.getInfoParsed.mockReturnValue(new Promise((resolve) => { resolveInfo = resolve; }));
+
+      const pending = service.collectUncached();
+      await jest.advanceTimersByTimeAsync(5000);
+      const timedOut = await pending;
+      expect(timedOut.instances[0].status).toBe('unknown');
+
+      // The orphaned probe settles late with a healthy result.
+      resolveHealth({ status: 'connected', database: { type: 'valkey', version: '8.0', host: 'h1', port: 6379 } });
+      resolveInfo(infoFixture());
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // A later collection while the instance is down must not see the
+      // orphaned probe's timestamp as a last-seen value.
+      health.getHealth.mockResolvedValue({ status: 'error', database: { type: 'unknown', version: null, host: 'h1', port: 6379 }, error: 'down' });
+      metrics.getInfoParsed.mockResolvedValue(infoFixture());
+      const later = await service.collectUncached();
+      expect(later.instances[0].status).toBe('down');
+      expect(later.instances[0].lastSeen).toBeNull();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

@@ -1,9 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { FleetInstanceSummary, FleetOverallStatus } from '@betterdb/shared';
-import { Tier } from '@betterdb/shared';
 import { fleetApi } from '../api/fleet';
-import { licenseApi } from '../api/license';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { Badge } from '../components/ui/badge';
@@ -56,7 +54,7 @@ function formatUptime(uptimeSec: number | null): string {
   return `${Math.floor(uptimeSec / 60)}m`;
 }
 
-export function Fleet({ isCloudMode = false }: { isCloudMode?: boolean }) {
+export function Fleet() {
   const navigate = useNavigate();
   const { setConnection } = useConnection();
   const { data, error, loading, refresh } = usePolling({
@@ -67,22 +65,6 @@ export function Fleet({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('name');
-  const [tier, setTier] = useState<Tier | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    licenseApi
-      .getStatus()
-      .then((license) => {
-        if (!cancelled) setTier(license.tier);
-      })
-      .catch(() => {
-        if (!cancelled) setTier(Tier.community);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const instances = useMemo(() => {
     const rows = data?.instances ?? [];
@@ -125,7 +107,7 @@ export function Fleet({ isCloudMode = false }: { isCloudMode?: boolean }) {
     );
   }
 
-  if (error) {
+  if (error && !data) {
     return (
       <div className="space-y-6">
         <h1 className="text-3xl font-bold">Fleet</h1>
@@ -145,7 +127,6 @@ export function Fleet({ isCloudMode = false }: { isCloudMode?: boolean }) {
   }
 
   const overallStatus: FleetOverallStatus = data?.overallStatus ?? 'waiting';
-  const showTierNudge = (data?.instances.length ?? 0) > 3;
 
   return (
     <div className="space-y-6">
@@ -154,20 +135,13 @@ export function Fleet({ isCloudMode = false }: { isCloudMode?: boolean }) {
         <Badge variant={OVERALL_BADGE[overallStatus]}>{overallStatus}</Badge>
       </div>
 
-      {showTierNudge && (
-        <Card className="p-4 flex flex-wrap items-center justify-between gap-3 bg-primary/5 border-primary/20">
-          <p className="text-sm">
-            You’re monitoring {data?.instances.length} instances
-            {tier ? ` on the ${tier} plan` : ''} — Pro multi-instance packs add per-instance
-            billing and workspace seats.
-          </p>
-          <button
-            onClick={() => navigate(isCloudMode ? '/workspace/members' : '/settings')}
-            className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
-          >
-            View upgrade options
+      {error && (
+        <p className="text-xs text-muted-foreground">
+          Last update failed, retrying…{' '}
+          <button onClick={() => refresh()} className="underline hover:text-foreground">
+            Retry now
           </button>
-        </Card>
+        </p>
       )}
 
       <div className="flex flex-wrap items-center gap-3">
@@ -245,7 +219,17 @@ export function Fleet({ isCloudMode = false }: { isCloudMode?: boolean }) {
                   </span>
                 </TableCell>
                 <TableCell>
-                  <div className="font-medium">{row.name}</div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleSelect(row.connectionId);
+                    }}
+                    className="font-medium text-left cursor-pointer hover:underline"
+                    aria-label={`Open ${row.name} in Dashboard`}
+                    title={`Open ${row.name} in Dashboard`}
+                  >
+                    {row.name}
+                  </button>
                   <div className="text-xs text-muted-foreground">
                     {row.host}:{row.port}
                   </div>
@@ -270,7 +254,7 @@ export function Fleet({ isCloudMode = false }: { isCloudMode?: boolean }) {
                     </span>
                   )}
                 </TableCell>
-                <TableCell>{row.opsPerSec ?? '—'}</TableCell>
+                <TableCell>{row.opsPerSec?.toLocaleString() ?? '—'}</TableCell>
                 <TableCell>{row.connectedClients ?? '—'}</TableCell>
                 <TableCell>{row.replicationRole ?? '—'}</TableCell>
                 <TableCell>{formatUptime(row.uptimeSec)}</TableCell>
