@@ -2,7 +2,11 @@ import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { createHash, generateKeyPairSync } from 'crypto';
 import * as jwt from 'jsonwebtoken';
 import { Logger, ServiceUnavailableException } from '@nestjs/common';
-import { BROKER_TOKEN_ISSUER, BROKER_TOKEN_TYPE } from '@betterdb/shared';
+import {
+  BROKER_SIGNING_PUBLIC_KEYS,
+  BROKER_TOKEN_ISSUER,
+  BROKER_TOKEN_TYPE,
+} from '@betterdb/shared';
 import { BrokerSigningService } from '../broker-signing.service';
 
 const { publicKey, privateKey } = generateKeyPairSync('rsa', {
@@ -137,5 +141,74 @@ describe('BrokerSigningService', () => {
     expect(line).toContain(`email=${expectedHash}`);
     expect(line).not.toContain(INPUT.email);
     expect(line).not.toContain(INPUT.email.toLowerCase());
+  });
+
+  describe('key size', () => {
+    const { privateKey: smallPrivateKey } = generateKeyPairSync('rsa', {
+      modulusLength: 1024,
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    });
+    const originalNodeEnv = process.env.NODE_ENV;
+
+    afterEach(() => {
+      process.env.NODE_ENV = originalNodeEnv;
+    });
+
+    it('marks an RSA key below 2048 bits unusable outside production', () => {
+      process.env.BROKER_SIGNING_PRIVATE_KEY = smallPrivateKey.replace(/\n/g, '\\n');
+      process.env.BROKER_SIGNING_KID = 'brk-test';
+      const service = new BrokerSigningService();
+      expect(service.isConfigured()).toBe(false);
+      expect(() => {
+        service.sign(INPUT);
+      }).toThrow(ServiceUnavailableException);
+    });
+
+    it('refuses to boot in production with an RSA key below 2048 bits', () => {
+      process.env.NODE_ENV = 'production';
+      process.env.BROKER_SIGNING_PRIVATE_KEY = smallPrivateKey.replace(/\n/g, '\\n');
+      process.env.BROKER_SIGNING_KID = 'brk-test';
+      expect(() => {
+        return new BrokerSigningService();
+      }).toThrow(/at least 2048 bits/);
+    });
+  });
+
+  describe('trusted public keys', () => {
+    const { publicKey: otherPublicKey } = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    });
+
+    afterEach(() => {
+      for (const kid of Object.keys(BROKER_SIGNING_PUBLIC_KEYS)) {
+        delete BROKER_SIGNING_PUBLIC_KEYS[kid];
+      }
+    });
+
+    it('accepts any kid while no public key is trusted yet', () => {
+      expect(configured().isConfigured()).toBe(true);
+    });
+
+    it('accepts a kid whose trusted public key matches the private key', () => {
+      BROKER_SIGNING_PUBLIC_KEYS['brk-test'] = publicKey;
+      expect(configured().isConfigured()).toBe(true);
+    });
+
+    it('rejects a kid that is missing from a non-empty trust map', () => {
+      BROKER_SIGNING_PUBLIC_KEYS['brk-other'] = publicKey;
+      const service = configured();
+      expect(service.isConfigured()).toBe(false);
+      expect(() => {
+        service.sign(INPUT);
+      }).toThrow(ServiceUnavailableException);
+    });
+
+    it('rejects a private key that does not match the public key trusted for its kid', () => {
+      BROKER_SIGNING_PUBLIC_KEYS['brk-test'] = otherPublicKey;
+      expect(configured().isConfigured()).toBe(false);
+    });
   });
 });

@@ -24,6 +24,7 @@ export interface BrokerTokenInput {
 }
 
 const TOKEN_LIFETIME = '5m';
+const MIN_RSA_MODULUS_BITS = 2048;
 
 function originOf(value: string): string | null {
   try {
@@ -61,8 +62,17 @@ export class BrokerSigningService {
       if (privateKeyObject.asymmetricKeyType !== 'rsa') {
         throw new Error('BROKER_SIGNING_PRIVATE_KEY must be an RSA key');
       }
+      const modulusLength = privateKeyObject.asymmetricKeyDetails?.modulusLength ?? 0;
+      if (modulusLength < MIN_RSA_MODULUS_BITS) {
+        throw new Error(
+          `BROKER_SIGNING_PRIVATE_KEY must be at least ${MIN_RSA_MODULUS_BITS} bits, got ${modulusLength}`,
+        );
+      }
 
       const expectedPublicKey = BROKER_SIGNING_PUBLIC_KEYS[this.kid];
+      if (expectedPublicKey === undefined && Object.keys(BROKER_SIGNING_PUBLIC_KEYS).length > 0) {
+        throw new Error(`kid "${this.kid}" is not in BROKER_SIGNING_PUBLIC_KEYS`);
+      }
       if (expectedPublicKey !== undefined) {
         const derivedPublicKey = normalizePem(
           createPublicKey(this.privateKey).export({ type: 'spki', format: 'pem' }).toString(),

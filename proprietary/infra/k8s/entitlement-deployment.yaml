@@ -127,11 +127,13 @@ spec:
                 secretKeyRef:
                   name: entitlement-config
                   key: BROKER_SIGNING_PRIVATE_KEY
+                  optional: true
             - name: BROKER_SIGNING_KID
               valueFrom:
                 secretKeyRef:
                   name: entitlement-config
                   key: BROKER_SIGNING_KID
+                  optional: true
           resources:
             requests:
               cpu: "250m"
