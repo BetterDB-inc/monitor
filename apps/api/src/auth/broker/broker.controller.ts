@@ -1,4 +1,4 @@
-import { Controller, Get, Inject, Query, Req, Res } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Inject, Query, Req, Res } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import {
   BROKER_SIGN_IN_PATH,
@@ -55,11 +55,15 @@ export class BrokerController {
       return;
     }
     const origin = this.callbackOrigin(req);
+    const appOrigin = this.appOrigin(req);
+    if (origin === null || appOrigin === null) {
+      throw new BadRequestException();
+    }
     const inviteTokenHash =
       typeof invite === 'string' && invite.length > 0 ? hashInvitationToken(invite) : null;
     const state = await this.states.create({
       origin,
-      appOrigin: this.appOrigin(req),
+      appOrigin,
       next: safeNext(next),
       inviteTokenHash,
     });
@@ -169,23 +173,29 @@ export class BrokerController {
     void this.telemetry.trackUserLogin({ method: provider });
   }
 
-  private fail(reply: FastifyReply, appOrigin: string, code: BrokerErrorCode): void {
-    reply.redirect(`${appOrigin}/login?error=${code}`, 302);
+  private fail(reply: FastifyReply, appOrigin: string | null, code: BrokerErrorCode): void {
+    const location =
+      appOrigin === null ? `/login?error=${code}` : `${appOrigin}/login?error=${code}`;
+    reply.redirect(location, 302);
   }
 
-  private requestOrigin(req: FastifyRequest): string {
+  private requestOrigin(req: FastifyRequest): string | null {
     const host = req.host === '' ? 'localhost' : req.host;
-    return new URL(`${req.protocol}://${host}`).origin;
+    try {
+      return new URL(`${req.protocol}://${host}`).origin;
+    } catch {
+      return null;
+    }
   }
 
-  private callbackOrigin(req: FastifyRequest): string {
+  private callbackOrigin(req: FastifyRequest): string | null {
     if (this.config.publicUrl !== null) {
       return new URL(this.config.publicUrl).origin;
     }
     return this.requestOrigin(req);
   }
 
-  private appOrigin(req: FastifyRequest): string {
+  private appOrigin(req: FastifyRequest): string | null {
     if (this.config.publicUrl !== null) {
       return trimTrailingSlash(this.config.publicUrl);
     }

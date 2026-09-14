@@ -347,6 +347,62 @@ describe('BrokerController', () => {
     }
   });
 
+  it('rejects start with a malformed Host header and creates no state', async () => {
+    const devConfig = resolveWorkspaceConfig({
+      AUTH_BROKER_URL: 'https://broker.example',
+      AUTH_BROKER_PUBLIC_KEY: publicKey,
+      AUTH_BROKER_KEY_ID: 'brk-test',
+    });
+    const withBadHost = await buildApp(devConfig);
+    try {
+      const states = withBadHost.app.get(BrokerStateStore);
+      const createSpy = jest.spyOn(states, 'create');
+      const response = await withBadHost.app.inject({
+        method: 'GET',
+        url: '/auth/broker/start',
+        headers: { host: 'bad host' },
+      });
+      expect(response.statusCode).toBe(400);
+      expect(createSpy).not.toHaveBeenCalled();
+    } finally {
+      await withBadHost.app.close();
+      await withBadHost.storage.close();
+    }
+  });
+
+  it('redirects callback to the invalid-error location on a malformed Host header', async () => {
+    const devConfig = resolveWorkspaceConfig({
+      AUTH_BROKER_URL: 'https://broker.example',
+      AUTH_BROKER_PUBLIC_KEY: publicKey,
+      AUTH_BROKER_KEY_ID: 'brk-test',
+    });
+    const withBadHost = await buildApp(devConfig);
+    try {
+      const response = await withBadHost.app.inject({
+        method: 'GET',
+        url: '/auth/broker/callback?token=anything',
+        headers: { host: 'bad host' },
+        remoteAddress: nextIp(),
+      });
+      expect(response.statusCode).toBe(302);
+      expect(String(response.headers.location)).toBe('http://localhost:5173/login?error=invalid');
+    } finally {
+      await withBadHost.app.close();
+      await withBadHost.storage.close();
+    }
+  });
+
+  it('ignores a malformed Host header when a public URL is configured', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/auth/broker/start',
+      headers: { host: 'bad host' },
+    });
+    expect(response.statusCode).toBe(302);
+    const location = new URL(String(response.headers.location));
+    expect(location.searchParams.get('redirect')).toBe('http://localhost/auth/broker/callback');
+  });
+
   it('answers 404 on both routes when the broker is disabled', async () => {
     const disabled = await buildApp(
       resolveWorkspaceConfig({ ...BASE_ENV, AUTH_BROKER_DISABLED: 'true' }),
