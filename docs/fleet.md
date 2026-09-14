@@ -17,8 +17,10 @@ The route is global (no `X-Connection-Id` header) and cached in-memory for
 tenant connections. `memPct` is `null` when `maxmemory` is 0 (no limit).
 
 The `/fleet` page polls every 15s (pauses when the tab is hidden), filters by
-status, searches by name/host, and opens an instance in the Dashboard on
-click. More than 3 instances shows a non-blocking Pro multi-instance nudge.
+status, searches by name/host, and sorts by name, memory %, or ops/sec.
+Clicking a row — or Tabbing to an instance name and pressing Enter — opens it
+in the Dashboard. A failed background poll keeps the last good data on screen
+with a retry note instead of replacing the table.
 
 No new `betterdb_fleet_*` Prometheus metrics in v1; per-connection
 `betterdb_memory_used_bytes`, `betterdb_connected_clients`, and
