@@ -4,6 +4,8 @@ import { BETTER_AUTH, type BetterAuthInstance } from '../auth/better-auth.factor
 
 export const OWNERSHIP_CHANGED_MESSAGE =
   'Ownership changed while this request was running. Reload and try again.';
+export const MEMBER_CHANGED_MESSAGE =
+  'This member changed while the request was running. Reload and try again.';
 
 const LOCAL_CREDENTIAL_ISSUER = 'local:credential';
 const CREDENTIAL_PROVIDER = 'credential';
@@ -101,6 +103,22 @@ async function moveOwnership(adapter: UserWriter, fromId: string, toId: string):
   }
 }
 
+function nonOwnerWhere(userId: string): Array<{ field: string; value: string | boolean }> {
+  return [
+    { field: 'id', value: userId },
+    { field: 'isOwner', value: false },
+  ];
+}
+
+async function deleteNonOwner(adapter: UserWriter, userId: string): Promise<void> {
+  const deleted = await adapter.deleteMany({ model: 'user', where: nonOwnerWhere(userId) });
+  if (deleted !== 1) {
+    throw new ConflictException(MEMBER_CHANGED_MESSAGE);
+  }
+  await adapter.deleteMany({ model: 'session', where: [{ field: 'userId', value: userId }] });
+  await adapter.deleteMany({ model: 'account', where: [{ field: 'userId', value: userId }] });
+}
+
 function describeError(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
@@ -179,7 +197,14 @@ export class MemberService {
 
   async setRole(id: string, role: WorkspaceRole): Promise<void> {
     const context = await this.auth.$context;
-    await context.internalAdapter.updateUser(id, { role });
+    const updated = await context.adapter.updateMany({
+      model: 'user',
+      where: nonOwnerWhere(id),
+      update: { role },
+    });
+    if (updated !== 1) {
+      throw new ConflictException(MEMBER_CHANGED_MESSAGE);
+    }
   }
 
   async transferOwnership(fromId: string, toId: string): Promise<void> {
@@ -226,7 +251,13 @@ export class MemberService {
 
   async remove(id: string): Promise<void> {
     const context = await this.auth.$context;
-    await context.internalAdapter.deleteUser(id);
+    if (hasRealTransactions(context) === true) {
+      await context.adapter.transaction(async (trx) => {
+        await deleteNonOwner(trx, id);
+      });
+      return;
+    }
+    await deleteNonOwner(context.adapter, id);
   }
 
   async signIn(email: string, password: string, headers: Headers): Promise<Response> {

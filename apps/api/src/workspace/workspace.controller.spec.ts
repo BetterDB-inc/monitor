@@ -17,11 +17,37 @@ import { MemoryAdapter } from '../storage/adapters/memory.adapter';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { InvitationService, PENDING_EXISTS_MESSAGE } from './invitation.service';
 import { InviteController } from './invite.controller';
-import { MemberService, OWNERSHIP_CHANGED_MESSAGE } from './member.service';
+import { MEMBER_CHANGED_MESSAGE, MemberService, OWNERSHIP_CHANGED_MESSAGE } from './member.service';
 import { WorkspaceController } from './workspace.controller';
 
 const ORIGIN = 'http://localhost';
 const OWNER = { email: 'owner@example.com', password: 'correct horse battery', name: 'Owner' };
+
+function holdLookups(
+  members: MemberService,
+  held: Set<string>,
+  expected: number,
+): jest.SpyInstance {
+  const lookup = members.findById.bind(members);
+  let arrived = 0;
+  let openGate: () => void = () => {
+    return;
+  };
+  const gate = new Promise<void>((resolve) => {
+    openGate = resolve;
+  });
+  return jest.spyOn(members, 'findById').mockImplementation(async (id) => {
+    const found = await lookup(id);
+    if (held.has(id) === true) {
+      arrived += 1;
+      if (arrived === expected) {
+        openGate();
+      }
+      await gate;
+    }
+    return found;
+  });
+}
 
 describe('WorkspaceController', () => {
   let app: NestFastifyApplication;
@@ -351,24 +377,7 @@ describe('WorkspaceController', () => {
         role: 'member',
       });
       const targets = new Set([first.id, second.id]);
-      const lookup = members.findById.bind(members);
-      let arrived = 0;
-      let openGate: () => void = () => {
-        return;
-      };
-      const gate = new Promise<void>((resolve) => {
-        openGate = resolve;
-      });
-      const spy = jest.spyOn(members, 'findById').mockImplementation(async (id) => {
-        if (targets.has(id) === true) {
-          arrived += 1;
-          if (arrived === targets.size) {
-            openGate();
-          }
-          await gate;
-        }
-        return lookup(id);
-      });
+      const spy = holdLookups(members, targets, targets.size);
       const responses = await Promise.all(
         [first.id, second.id].map((userId) => {
           return app.inject({
@@ -397,6 +406,48 @@ describe('WorkspaceController', () => {
       });
       expect(owners).toHaveLength(1);
       expect(targets.has(owners[0].id)).toBe(true);
+    });
+
+    it('leaves exactly one owner when a removal races a transfer', async () => {
+      const currentOwner = (await members.list()).find((member) => {
+        return member.isOwner === true;
+      });
+      const ownerSession = await signIn(String(currentOwner?.email), 'race horse battery');
+      const contested = await members.create({
+        email: 'contested@example.com',
+        name: 'Contested',
+        password: 'race horse battery',
+        role: 'member',
+      });
+      const spy = holdLookups(members, new Set([contested.id]), 2);
+      const [removal, transfer] = await Promise.all([
+        app.inject({
+          method: 'DELETE',
+          url: `/workspace/members/${contested.id}`,
+          headers: { cookie: ownerSession },
+        }),
+        app.inject({
+          method: 'POST',
+          url: '/workspace/ownership/transfer',
+          headers: { cookie: ownerSession, 'content-type': 'application/json', origin: ORIGIN },
+          payload: { userId: contested.id },
+        }),
+      ]);
+      spy.mockRestore();
+      const conflicts = [removal, transfer].filter((response) => {
+        return response.statusCode === 409;
+      });
+      expect(conflicts).toHaveLength(1);
+      expect([MEMBER_CHANGED_MESSAGE, OWNERSHIP_CHANGED_MESSAGE]).toContain(
+        conflicts[0].json().message,
+      );
+      expect([removal.statusCode, transfer.statusCode]).toContain(
+        removal.statusCode === 409 ? 201 : 200,
+      );
+      const owners = (await members.list()).filter((member) => {
+        return member.isOwner === true;
+      });
+      expect(owners).toHaveLength(1);
     });
   });
 });

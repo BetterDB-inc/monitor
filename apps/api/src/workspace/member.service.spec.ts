@@ -11,7 +11,7 @@ import {
 import { resolveWorkspaceConfig } from '../auth/workspace-config';
 import { loadBetterSqlite3 } from '../storage/adapters/better-sqlite3-driver';
 import type { RawDatabaseHandle } from '../storage/raw-database-handle';
-import { MemberService, OWNERSHIP_CHANGED_MESSAGE } from './member.service';
+import { MEMBER_CHANGED_MESSAGE, MemberService, OWNERSHIP_CHANGED_MESSAGE } from './member.service';
 
 describe('MemberService', () => {
   let service: MemberService;
@@ -228,7 +228,7 @@ function describeOwnershipTransfer(
   transactional: boolean,
   open: () => Promise<RawDatabaseHandle>,
 ): void {
-  describe(`MemberService.transferOwnership (${name})`, () => {
+  describe(`MemberService owner guards (${name})`, () => {
     let auth: BetterAuthInstance;
     let service: MemberService;
     let ownerId: string;
@@ -302,6 +302,65 @@ function describeOwnershipTransfer(
       expect(await service.findById(target)).toEqual(
         expect.objectContaining({ role: 'member', isOwner: false }),
       );
+    });
+
+    it('removes a non-owner together with their credentials', async () => {
+      const leaver = await addMemberNamed('leaver@example.com');
+      await service.remove(leaver);
+      expect(await service.findById(leaver)).toBeNull();
+      const response = await service.signIn(
+        'leaver@example.com',
+        'correct horse battery',
+        new Headers(),
+      );
+      expect(response.status).toBe(401);
+    });
+
+    it('refuses to remove a member who became the owner', async () => {
+      const heir = await addMemberNamed('heir@example.com');
+      await service.transferOwnership(ownerId, heir);
+      await expect(service.remove(heir)).rejects.toThrow(
+        new ConflictException(MEMBER_CHANGED_MESSAGE),
+      );
+      expect(await ownerIds(service)).toEqual([heir]);
+    });
+
+    it('leaves exactly one owner when a removal races a transfer', async () => {
+      const contested = await addMemberNamed('contested@example.com');
+      const results = await Promise.allSettled([
+        service.transferOwnership(ownerId, contested),
+        service.remove(contested),
+      ]);
+      const rejected = results.filter((result): result is PromiseRejectedResult => {
+        return result.status === 'rejected';
+      });
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason).toBeInstanceOf(ConflictException);
+      expect(await ownerIds(service)).toHaveLength(1);
+    });
+
+    it('refuses a role change for a member who became the owner', async () => {
+      const crowned = await addMemberNamed('crowned@example.com');
+      await service.transferOwnership(ownerId, crowned);
+      await expect(service.setRole(crowned, 'member')).rejects.toThrow(
+        new ConflictException(MEMBER_CHANGED_MESSAGE),
+      );
+      expect(await service.findById(crowned)).toEqual(
+        expect.objectContaining({ role: 'admin', isOwner: true }),
+      );
+    });
+
+    it('keeps the owner an admin when a role change races a transfer', async () => {
+      const raced = await addMemberNamed('raced@example.com');
+      await Promise.allSettled([
+        service.transferOwnership(ownerId, raced),
+        service.setRole(raced, 'member'),
+      ]);
+      const owners = (await service.list()).filter((member) => {
+        return member.isOwner === true;
+      });
+      expect(owners).toHaveLength(1);
+      expect(owners[0].role).toBe('admin');
     });
   });
 }
