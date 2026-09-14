@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { ConflictException, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { existsSync, unlinkSync } from 'fs';
 import { tmpdir } from 'os';
@@ -139,50 +139,121 @@ describe('MemberService', () => {
   });
 });
 
-function describeOwnershipTransfer(name: string, open: () => Promise<RawDatabaseHandle>): void {
+type AuthAdapter = Awaited<BetterAuthInstance['$context']>['adapter'];
+type UpdateMany = AuthAdapter['updateMany'];
+
+interface Workspace {
+  auth: BetterAuthInstance;
+  service: MemberService;
+  ownerId: string;
+}
+
+async function addMember(service: MemberService, email: string): Promise<string> {
+  const member = await service.create({
+    email,
+    name: email,
+    password: 'correct horse battery',
+    role: 'member',
+  });
+  return member.id;
+}
+
+async function ownerIds(service: MemberService): Promise<string[]> {
+  const members = await service.list();
+  return members
+    .filter((member) => {
+      return member.isOwner === true;
+    })
+    .map((member) => {
+      return member.id;
+    });
+}
+
+async function openWorkspace(handle: RawDatabaseHandle): Promise<Workspace> {
+  const auth = await createBetterAuth({
+    handle,
+    secret: 's'.repeat(40),
+    config: resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' }),
+  });
+  await runBetterAuthMigrations(auth, handle);
+  const service = new MemberService(auth);
+  const ownerId = await addMember(service, 'owner@example.com');
+  const context = await auth.$context;
+  await context.internalAdapter.updateUser(ownerId, { role: 'admin', isOwner: true });
+  return { auth, service, ownerId };
+}
+
+interface InjectedFailures {
+  transaction: jest.SpyInstance;
+  restore: () => void;
+}
+
+async function failUserUpdates(
+  auth: BetterAuthInstance,
+  failures: Map<number, string>,
+): Promise<InjectedFailures> {
+  const context = await auth.$context;
+  let calls = 0;
+  function failing(original: UpdateMany): UpdateMany {
+    return (data) => {
+      calls += 1;
+      const message = failures.get(calls);
+      if (message !== undefined) {
+        return Promise.reject(new Error(message));
+      }
+      return original(data);
+    };
+  }
+  const originalUpdate = failing(context.adapter.updateMany.bind(context.adapter));
+  const runTransaction = context.adapter.transaction.bind(context.adapter);
+  const updates = jest.spyOn(context.adapter, 'updateMany').mockImplementation(originalUpdate);
+  const transaction = jest.spyOn(context.adapter, 'transaction').mockImplementation(((
+    callback: (trx: AuthAdapter) => Promise<unknown>,
+  ) => {
+    return runTransaction((trx) => {
+      return callback({ ...trx, updateMany: failing(trx.updateMany.bind(trx)) } as AuthAdapter);
+    });
+  }) as AuthAdapter['transaction']);
+  return {
+    transaction,
+    restore: () => {
+      updates.mockRestore();
+      transaction.mockRestore();
+    },
+  };
+}
+
+function describeOwnershipTransfer(
+  name: string,
+  transactional: boolean,
+  open: () => Promise<RawDatabaseHandle>,
+): void {
   describe(`MemberService.transferOwnership (${name})`, () => {
     let auth: BetterAuthInstance;
     let service: MemberService;
     let ownerId: string;
 
-    async function addMember(email: string): Promise<string> {
-      const member = await service.create({
-        email,
-        name: email,
-        password: 'correct horse battery',
-        role: 'member',
-      });
-      return member.id;
-    }
-
-    async function ownerIds(): Promise<string[]> {
-      const members = await service.list();
-      return members
-        .filter((member) => {
-          return member.isOwner === true;
-        })
-        .map((member) => {
-          return member.id;
-        });
+    function addMemberNamed(email: string): Promise<string> {
+      return addMember(service, email);
     }
 
     beforeEach(async () => {
-      const handle = await open();
-      auth = await createBetterAuth({
-        handle,
-        secret: 's'.repeat(40),
-        config: resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' }),
-      });
-      await runBetterAuthMigrations(auth, handle);
-      service = new MemberService(auth);
-      ownerId = await addMember('owner@example.com');
-      const context = await auth.$context;
-      await context.internalAdapter.updateUser(ownerId, { role: 'admin', isOwner: true });
+      ({ auth, service, ownerId } = await openWorkspace(await open()));
+    });
+
+    it(`runs ${transactional ? 'inside one transaction' : 'without a transaction'}`, async () => {
+      const target = await addMemberNamed('tx@example.com');
+      const injected = await failUserUpdates(auth, new Map());
+      await service.transferOwnership(ownerId, target);
+      const transactionCalls = injected.transaction.mock.calls.length;
+      injected.restore();
+      expect(transactionCalls).toBe(transactional ? 1 : 0);
+      expect(await ownerIds(service)).toEqual([target]);
     });
 
     it('leaves exactly one owner when two transfers race', async () => {
-      const first = await addMember('first@example.com');
-      const second = await addMember('second@example.com');
+      const first = await addMemberNamed('first@example.com');
+      const second = await addMemberNamed('second@example.com');
       const results = await Promise.allSettled([
         service.transferOwnership(ownerId, first),
         service.transferOwnership(ownerId, second),
@@ -196,7 +267,7 @@ function describeOwnershipTransfer(name: string, open: () => Promise<RawDatabase
       expect(fulfilled).toHaveLength(1);
       expect(rejected).toHaveLength(1);
       expect(rejected[0].reason).toEqual(new ConflictException(OWNERSHIP_CHANGED_MESSAGE));
-      const owners = await ownerIds();
+      const owners = await ownerIds(service);
       expect(owners).toHaveLength(1);
       expect([first, second]).toContain(owners[0]);
       expect(await service.findById(ownerId)).toEqual(
@@ -205,38 +276,29 @@ function describeOwnershipTransfer(name: string, open: () => Promise<RawDatabase
     });
 
     it('refuses a transfer from a user who is no longer the owner', async () => {
-      const target = await addMember('target@example.com');
-      const bystander = await addMember('bystander@example.com');
+      const target = await addMemberNamed('target@example.com');
+      const bystander = await addMemberNamed('bystander@example.com');
       await service.transferOwnership(ownerId, target);
       await expect(service.transferOwnership(ownerId, bystander)).rejects.toThrow(
         new ConflictException(OWNERSHIP_CHANGED_MESSAGE),
       );
-      expect(await ownerIds()).toEqual([target]);
+      expect(await ownerIds(service)).toEqual([target]);
       expect((await service.findById(bystander))?.role).toBe('member');
     });
 
-    it('restores the owner when the target vanished before promotion', async () => {
+    it('keeps the owner when the target vanished before promotion', async () => {
       await expect(service.transferOwnership(ownerId, 'missing-user')).rejects.toThrow(
         new ConflictException(OWNERSHIP_CHANGED_MESSAGE),
       );
-      expect(await ownerIds()).toEqual([ownerId]);
+      expect(await ownerIds(service)).toEqual([ownerId]);
     });
 
-    it('restores the owner when promoting the target fails', async () => {
-      const target = await addMember('broken@example.com');
-      const context = await auth.$context;
-      const original = context.adapter.updateMany.bind(context.adapter);
-      let calls = 0;
-      const spy = jest.spyOn(context.adapter, 'updateMany').mockImplementation((data) => {
-        calls += 1;
-        if (calls === 2) {
-          return Promise.reject(new Error('write failed'));
-        }
-        return original(data);
-      });
+    it('keeps the owner when promoting the target fails', async () => {
+      const target = await addMemberNamed('broken@example.com');
+      const injected = await failUserUpdates(auth, new Map([[2, 'write failed']]));
       await expect(service.transferOwnership(ownerId, target)).rejects.toThrow('write failed');
-      spy.mockRestore();
-      expect(await ownerIds()).toEqual([ownerId]);
+      injected.restore();
+      expect(await ownerIds(service)).toEqual([ownerId]);
       expect(await service.findById(target)).toEqual(
         expect.objectContaining({ role: 'member', isOwner: false }),
       );
@@ -244,13 +306,53 @@ function describeOwnershipTransfer(name: string, open: () => Promise<RawDatabase
   });
 }
 
-describeOwnershipTransfer('memory', async () => {
+describe('MemberService.transferOwnership compensation (memory)', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('logs both errors and rethrows the original when restoring the owner fails', async () => {
+    const { auth, service, ownerId } = await openWorkspace({ kind: 'memory' });
+    const target = await addMember(service, 'stuck@example.com');
+    const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {
+      return undefined;
+    });
+    const injected = await failUserUpdates(
+      auth,
+      new Map([
+        [2, 'promotion failed'],
+        [3, 'restore failed'],
+      ]),
+    );
+    await expect(service.transferOwnership(ownerId, target)).rejects.toThrow('promotion failed');
+    injected.restore();
+    expect(logged).toHaveBeenCalledTimes(1);
+    const message = String(logged.mock.calls[0][0]);
+    expect(message).toContain('promotion failed');
+    expect(message).toContain('restore failed');
+  });
+
+  it('logs the conflict and rethrows it when restoring after a vanished target fails', async () => {
+    const { auth, service, ownerId } = await openWorkspace({ kind: 'memory' });
+    const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {
+      return undefined;
+    });
+    const injected = await failUserUpdates(auth, new Map([[3, 'restore failed']]));
+    await expect(service.transferOwnership(ownerId, 'missing-user')).rejects.toThrow(
+      new ConflictException(OWNERSHIP_CHANGED_MESSAGE),
+    );
+    injected.restore();
+    expect(String(logged.mock.calls[0][0])).toContain('restore failed');
+  });
+});
+
+describeOwnershipTransfer('memory', false, async () => {
   return { kind: 'memory' };
 });
 
 const sqliteFiles: string[] = [];
 
-describeOwnershipTransfer('sqlite', async () => {
+describeOwnershipTransfer('sqlite', true, async () => {
   const filepath = join(tmpdir(), `member-service-${randomUUID()}.db`);
   sqliteFiles.push(filepath);
   const Database = await loadBetterSqlite3();
