@@ -47,7 +47,8 @@ export function resolveWorkspaceConfig(env: NodeJS.ProcessEnv): WorkspaceConfig 
   const brokerEnabled =
     mode === 'self-hosted' &&
     isTrueFlag(env.AUTH_BROKER_DISABLED) === false &&
-    Object.keys(brokerKeys).length > 0;
+    Object.keys(brokerKeys).length > 0 &&
+    (isProduction === false || publicUrl !== null);
   return {
     enabled: mode === 'self-hosted',
     mode,
