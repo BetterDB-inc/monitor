@@ -17,7 +17,7 @@ import { MemoryAdapter } from '../storage/adapters/memory.adapter';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { InvitationService, PENDING_EXISTS_MESSAGE } from './invitation.service';
 import { InviteController } from './invite.controller';
-import { MemberService } from './member.service';
+import { MemberService, OWNERSHIP_CHANGED_MESSAGE } from './member.service';
 import { WorkspaceController } from './workspace.controller';
 
 const ORIGIN = 'http://localhost';
@@ -335,6 +335,68 @@ describe('WorkspaceController', () => {
         headers: { cookie: ownerCookie },
       });
       expect(removeOwner.statusCode).toBe(403);
+    });
+
+    it('answers 409 to the losing request when two ownership transfers race', async () => {
+      const first = await members.create({
+        email: 'race-one@example.com',
+        name: 'Race One',
+        password: 'race horse battery',
+        role: 'member',
+      });
+      const second = await members.create({
+        email: 'race-two@example.com',
+        name: 'Race Two',
+        password: 'race horse battery',
+        role: 'member',
+      });
+      const targets = new Set([first.id, second.id]);
+      const lookup = members.findById.bind(members);
+      let arrived = 0;
+      let openGate: () => void = () => {
+        return;
+      };
+      const gate = new Promise<void>((resolve) => {
+        openGate = resolve;
+      });
+      const spy = jest.spyOn(members, 'findById').mockImplementation(async (id) => {
+        if (targets.has(id) === true) {
+          arrived += 1;
+          if (arrived === targets.size) {
+            openGate();
+          }
+          await gate;
+        }
+        return lookup(id);
+      });
+      const responses = await Promise.all(
+        [first.id, second.id].map((userId) => {
+          return app.inject({
+            method: 'POST',
+            url: '/workspace/ownership/transfer',
+            headers: { cookie: memberCookie, 'content-type': 'application/json', origin: ORIGIN },
+            payload: { userId },
+          });
+        }),
+      );
+      spy.mockRestore();
+      const statuses = responses
+        .map((response) => {
+          return response.statusCode;
+        })
+        .sort();
+      expect(statuses).toEqual([201, 409]);
+      const conflict = responses.find((response) => {
+        return response.statusCode === 409;
+      });
+      expect(conflict?.json()).toEqual(
+        expect.objectContaining({ message: OWNERSHIP_CHANGED_MESSAGE }),
+      );
+      const owners = (await members.list()).filter((member) => {
+        return member.isOwner === true;
+      });
+      expect(owners).toHaveLength(1);
+      expect(targets.has(owners[0].id)).toBe(true);
     });
   });
 });

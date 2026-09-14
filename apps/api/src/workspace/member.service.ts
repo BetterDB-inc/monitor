@@ -1,6 +1,9 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { ConflictException, Inject, Injectable } from '@nestjs/common';
 import type { WorkspaceRole } from '@betterdb/shared';
 import { BETTER_AUTH, type BetterAuthInstance } from '../auth/better-auth.factory';
+
+export const OWNERSHIP_CHANGED_MESSAGE =
+  'Ownership changed while this request was running. Reload and try again.';
 
 const LOCAL_CREDENTIAL_ISSUER = 'local:credential';
 const CREDENTIAL_PROVIDER = 'credential';
@@ -125,8 +128,37 @@ export class MemberService {
 
   async transferOwnership(fromId: string, toId: string): Promise<void> {
     const context = await this.auth.$context;
-    await context.internalAdapter.updateUser(toId, { role: 'admin', isOwner: true });
-    await context.internalAdapter.updateUser(fromId, { isOwner: false });
+    const released = await this.setOwnerIf(context, fromId, true, { isOwner: false });
+    if (released !== 1) {
+      throw new ConflictException(OWNERSHIP_CHANGED_MESSAGE);
+    }
+    let promoted: number;
+    try {
+      promoted = await this.setOwnerIf(context, toId, false, { role: 'admin', isOwner: true });
+    } catch (error) {
+      await this.setOwnerIf(context, fromId, false, { isOwner: true });
+      throw error;
+    }
+    if (promoted !== 1) {
+      await this.setOwnerIf(context, fromId, false, { isOwner: true });
+      throw new ConflictException(OWNERSHIP_CHANGED_MESSAGE);
+    }
+  }
+
+  private setOwnerIf(
+    context: AuthContext,
+    userId: string,
+    currentlyOwner: boolean,
+    update: { isOwner: boolean; role?: WorkspaceRole },
+  ): Promise<number> {
+    return context.adapter.updateMany({
+      model: 'user',
+      where: [
+        { field: 'id', value: userId },
+        { field: 'isOwner', value: currentlyOwner },
+      ],
+      update,
+    });
   }
 
   async remove(id: string): Promise<void> {
