@@ -31,10 +31,13 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
     return <>{children}</>;
   }
   if (mode === 'self-hosted' && bootstrapped === false) {
+    const error = new URLSearchParams(location.search).get('error');
+    const registerTarget =
+      error === null ? '/register' : `/register?error=${encodeURIComponent(error)}`;
     return (
       <Routes>
         <Route path="/register" element={<Register />} />
-        <Route path="*" element={<Navigate to="/register" replace />} />
+        <Route path="*" element={<Navigate to={registerTarget} replace />} />
       </Routes>
     );
   }

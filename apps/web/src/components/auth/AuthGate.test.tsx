@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { AuthGate } from './AuthGate';
@@ -28,9 +28,12 @@ vi.mock('../../pages/AcceptInvite', () => ({
 vi.mock('../../pages/Login', () => ({
   Login: () => <div>LOGIN</div>,
 }));
-vi.mock('../../pages/Register', () => ({
-  Register: () => <div>REGISTER</div>,
-}));
+vi.mock('../../pages/Register', async () => {
+  const router = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
+  return {
+    Register: () => <div>REGISTER {router.useLocation().search}</div>,
+  };
+});
 
 function renderAt(path: string) {
   return render(
@@ -71,6 +74,36 @@ describe('AuthGate signed-in /login redirect', () => {
 });
 
 describe('AuthGate', () => {
+  afterEach(() => {
+    authState.bootstrapped = true;
+  });
+
+  it('keeps a broker error when an empty workspace forwards login to register', () => {
+    authState.bootstrapped = false;
+    authState.user = null;
+    render(
+      <MemoryRouter initialEntries={['/login?error=expired&next=%2Fsettings']}>
+        <AuthGate>
+          <div>APP</div>
+        </AuthGate>
+      </MemoryRouter>,
+    );
+    expect(screen.getByText('REGISTER ?error=expired')).toBeInTheDocument();
+  });
+
+  it('forwards to a bare register page when there is no broker error', () => {
+    authState.bootstrapped = false;
+    authState.user = null;
+    render(
+      <MemoryRouter initialEntries={['/settings']}>
+        <AuthGate>
+          <div>APP</div>
+        </AuthGate>
+      </MemoryRouter>,
+    );
+    expect(screen.getByText('REGISTER')).toBeInTheDocument();
+  });
+
   it('serves /invite/:token to signed-out visitors', () => {
     authState.user = null;
     render(
