@@ -11,6 +11,7 @@ import { NoConnectionsGuard } from '../NoConnectionsGuard';
 import { VectorSearchGuard } from '../VectorSearchGuard';
 import { CliPanel } from '../CliPanel';
 import { Dashboard } from '../../pages/Dashboard';
+import { Fleet } from '../../pages/Fleet';
 import { SlowLog } from '../../pages/SlowLog';
 import { Latency } from '../../pages/Latency';
 import { Clients } from '../../pages/Clients';
@@ -123,6 +124,14 @@ function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
                 element={
                   <NoConnectionsGuard>
                     <Dashboard />
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/fleet"
+                element={
+                  <NoConnectionsGuard>
+                    <Fleet />
                   </NoConnectionsGuard>
                 }
               />

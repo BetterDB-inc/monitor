@@ -18,6 +18,11 @@ const DEFAULT_PAGE_STATE: PageEmptyState = {
 };
 
 const PAGE_STATES: Record<string, PageEmptyState> = {
+  '/fleet': {
+    headline: 'See every instance at a glance.',
+    description:
+      'Connect your Valkey or Redis instances to get a fleet-wide health overview - status, memory, throughput, and clients in one view.',
+  },
   '/slowlog': {
     headline: 'Find your slowest queries.',
     description:

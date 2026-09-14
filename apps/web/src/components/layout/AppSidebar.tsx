@@ -51,6 +51,9 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
           <NavItem to="/" active={location.pathname === '/'}>
             Dashboard
           </NavItem>
+          <NavItem to="/fleet" active={location.pathname === '/fleet'}>
+            Fleet
+          </NavItem>
           <NavItem to="/slowlog" active={location.pathname === '/slowlog'}>
             Slow Log
           </NavItem>
