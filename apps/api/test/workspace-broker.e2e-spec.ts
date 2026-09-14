@@ -251,11 +251,11 @@ describe('Workspace broker sign-in (E2E)', () => {
     const brokerLogins = items.filter((item) => {
       return item.action === 'auth.login' && item.details.provider !== undefined;
     });
-    expect(brokerLogins).toHaveLength(3);
+    expect(brokerLogins).toHaveLength(4);
     const methods = brokerLogins.map((item) => {
       return item.details.method;
     });
-    expect([...methods].sort()).toEqual(['github', 'invite', 'register']);
+    expect([...methods].sort()).toEqual(['github', 'github', 'invite', 'register']);
     for (const item of brokerLogins) {
       expect(item.details.provider).toBe('github');
     }

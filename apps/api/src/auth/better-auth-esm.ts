@@ -73,3 +73,27 @@ export function loadBetterAuthModules(): Promise<BetterAuthModules> {
   cached = pending;
   return cached;
 }
+
+let cachedDateConstructor: Promise<DateConstructor> | null = null;
+
+async function loadBetterAuthDateConstructor(): Promise<DateConstructor> {
+  const esmImport = createEsmImport();
+  const module = (await esmImport('data:text/javascript,export default Date;')) as {
+    default: DateConstructor;
+  };
+  return module.default;
+}
+
+export function loadBetterAuthDate(): Promise<DateConstructor> {
+  if (cachedDateConstructor !== null) {
+    return cachedDateConstructor;
+  }
+  const pending = loadBetterAuthDateConstructor().catch((error: unknown) => {
+    if (cachedDateConstructor === pending) {
+      cachedDateConstructor = null;
+    }
+    throw error;
+  });
+  cachedDateConstructor = pending;
+  return cachedDateConstructor;
+}

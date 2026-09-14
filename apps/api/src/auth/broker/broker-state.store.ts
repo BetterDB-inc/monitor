@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { randomBytes } from 'crypto';
+import { loadBetterAuthDate } from '../better-auth-esm';
 import { BETTER_AUTH, type BetterAuthInstance } from '../better-auth.factory';
 
 export const BROKER_STATE_TTL_MS = 10 * 60 * 1000;
@@ -46,10 +47,11 @@ export class BrokerStateStore {
   async create(record: BrokerStateRecord): Promise<string> {
     const state = randomBytes(STATE_BYTES).toString('base64url');
     const context = await this.auth.$context;
+    const BetterAuthDate = await loadBetterAuthDate();
     await context.internalAdapter.createVerificationValue({
       identifier: `${STATE_PREFIX}${state}`,
       value: JSON.stringify(record),
-      expiresAt: new Date(Date.now() + BROKER_STATE_TTL_MS),
+      expiresAt: new BetterAuthDate(Date.now() + BROKER_STATE_TTL_MS),
     });
     return state;
   }

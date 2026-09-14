@@ -4,6 +4,7 @@ import { join } from 'path';
 import { loadBetterSqlite3 } from '../storage/adapters/better-sqlite3-driver';
 import { openLibsqlDatabase } from '../storage/adapters/libsql-driver';
 import type { RawDatabaseHandle } from '../storage/raw-database-handle';
+import { loadBetterAuthDate } from './better-auth-esm';
 import { resolveWorkspaceConfig } from './workspace-config';
 import type { WorkspaceConfig } from './workspace-config';
 import {
@@ -295,6 +296,31 @@ describe('createBetterAuth', () => {
     };
     expect(row.role).toBe('admin');
     expect(row.isOwner).toBe(1);
+    db.close();
+    unlinkSync(path);
+  });
+
+  it('writes a caller-constructed verification row on better-sqlite3', async () => {
+    const path = join(tmpdir(), `factory-verification-${Date.now()}-${Math.random()}.db`);
+    const Database = await loadBetterSqlite3();
+    const db = new Database(path);
+    const handle: RawDatabaseHandle = { kind: 'sqlite', db };
+    const auth = await build(handle);
+    const context = await auth.$context;
+    const BetterAuthDate = await loadBetterAuthDate();
+
+    await context.internalAdapter.createVerificationValue({
+      identifier: 'diag:verification-round-trip',
+      value: 'hello',
+      expiresAt: new BetterAuthDate(Date.now() + 60_000),
+    });
+
+    const row = db
+      .prepare('SELECT expiresAt, typeof(expiresAt) as t FROM verification LIMIT 1')
+      .get() as { expiresAt: string; t: string };
+    expect(row.t).toBe('text');
+    expect(Number.isNaN(new Date(row.expiresAt).getTime())).toBe(false);
+
     db.close();
     unlinkSync(path);
   });
