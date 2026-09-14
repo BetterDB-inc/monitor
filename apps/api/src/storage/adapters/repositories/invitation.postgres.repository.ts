@@ -18,6 +18,30 @@ interface InvitationRow {
 
 const SELECT = 'SELECT * FROM invitations';
 
+const UPSERT = `INSERT INTO invitations (id, email, role, token_hash, invited_by, status, created_at, expires_at)
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+  ON CONFLICT (email) DO UPDATE SET
+    id = EXCLUDED.id,
+    role = EXCLUDED.role,
+    token_hash = EXCLUDED.token_hash,
+    invited_by = EXCLUDED.invited_by,
+    status = EXCLUDED.status,
+    created_at = EXCLUDED.created_at,
+    expires_at = EXCLUDED.expires_at`;
+
+function upsertValues(record: InvitationRecord): Array<string | number> {
+  return [
+    record.id,
+    record.email,
+    record.role,
+    record.tokenHash,
+    record.invitedBy,
+    record.status,
+    record.createdAt,
+    record.expiresAt,
+  ];
+}
+
 function mapRow(row: InvitationRow): InvitationRecord {
   return {
     id: row.id,
@@ -52,28 +76,16 @@ export class InvitationPostgresRepository implements InvitationRepository {
   }
 
   async save(record: InvitationRecord): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO invitations (id, email, role, token_hash, invited_by, status, created_at, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT (email) DO UPDATE SET
-         id = EXCLUDED.id,
-         role = EXCLUDED.role,
-         token_hash = EXCLUDED.token_hash,
-         invited_by = EXCLUDED.invited_by,
-         status = EXCLUDED.status,
-         created_at = EXCLUDED.created_at,
-         expires_at = EXCLUDED.expires_at`,
-      [
-        record.id,
-        record.email,
-        record.role,
-        record.tokenHash,
-        record.invitedBy,
-        record.status,
-        record.createdAt,
-        record.expiresAt,
-      ],
+    await this.pool.query(UPSERT, upsertValues(record));
+  }
+
+  async saveUnlessPending(record: InvitationRecord, now: number): Promise<boolean> {
+    const result = await this.pool.query(
+      `${UPSERT}
+       WHERE invitations.status <> 'pending' OR invitations.expires_at <= $9`,
+      [...upsertValues(record), now],
     );
+    return result.rowCount === 1;
   }
 
   async updateStatus(id: string, from: InvitationStatus, to: InvitationStatus): Promise<boolean> {

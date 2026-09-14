@@ -18,6 +18,30 @@ interface InvitationRow {
 
 const SELECT = 'SELECT * FROM invitations';
 
+const UPSERT = `INSERT INTO invitations (id, email, role, token_hash, invited_by, status, created_at, expires_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(email) DO UPDATE SET
+    id = excluded.id,
+    role = excluded.role,
+    token_hash = excluded.token_hash,
+    invited_by = excluded.invited_by,
+    status = excluded.status,
+    created_at = excluded.created_at,
+    expires_at = excluded.expires_at`;
+
+function upsertValues(record: InvitationRecord): Array<string | number> {
+  return [
+    record.id,
+    record.email,
+    record.role,
+    record.tokenHash,
+    record.invitedBy,
+    record.status,
+    record.createdAt,
+    record.expiresAt,
+  ];
+}
+
 function mapRow(row: InvitationRow): InvitationRecord {
   return {
     id: row.id,
@@ -52,29 +76,17 @@ export class InvitationSqliteRepository implements InvitationRepository {
   }
 
   async save(record: InvitationRecord): Promise<void> {
-    this.db
+    this.db.prepare(UPSERT).run(...upsertValues(record));
+  }
+
+  async saveUnlessPending(record: InvitationRecord, now: number): Promise<boolean> {
+    const result = this.db
       .prepare(
-        `INSERT INTO invitations (id, email, role, token_hash, invited_by, status, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(email) DO UPDATE SET
-           id = excluded.id,
-           role = excluded.role,
-           token_hash = excluded.token_hash,
-           invited_by = excluded.invited_by,
-           status = excluded.status,
-           created_at = excluded.created_at,
-           expires_at = excluded.expires_at`,
+        `${UPSERT}
+         WHERE invitations.status <> 'pending' OR invitations.expires_at <= ?`,
       )
-      .run(
-        record.id,
-        record.email,
-        record.role,
-        record.tokenHash,
-        record.invitedBy,
-        record.status,
-        record.createdAt,
-        record.expiresAt,
-      );
+      .run(...upsertValues(record), now);
+    return result.changes === 1;
   }
 
   async updateStatus(id: string, from: InvitationStatus, to: InvitationStatus): Promise<boolean> {

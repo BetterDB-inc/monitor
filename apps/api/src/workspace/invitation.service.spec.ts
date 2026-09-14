@@ -6,6 +6,7 @@ import type { StoragePort } from '../common/interfaces/storage-port.interface';
 import { InvitationMemoryRepository } from '../storage/adapters/repositories/invitation.memory.repository';
 import {
   ALREADY_MEMBER_MESSAGE,
+  type CreatedInvitation,
   hashInvitationToken,
   INVITATION_EXPIRED_MESSAGE,
   INVITATION_NOT_FOUND_MESSAGE,
@@ -86,6 +87,31 @@ describe('InvitationService', () => {
     await expect(
       service.create({ email: 'dup@example.com', role: 'admin', invitedBy: 'owner-id' }),
     ).rejects.toThrow(new ConflictException(PENDING_EXISTS_MESSAGE));
+  });
+
+  it('lets only one of two concurrent invitations for the same email win', async () => {
+    const results = await Promise.allSettled([
+      service.create({ email: 'race@example.com', role: 'member', invitedBy: 'owner-id' }),
+      service.create({ email: 'race@example.com', role: 'admin', invitedBy: 'owner-id' }),
+    ]);
+    const fulfilled = results.filter(
+      (result): result is PromiseFulfilledResult<CreatedInvitation> => {
+        return result.status === 'fulfilled';
+      },
+    );
+    const rejected = results.filter((result): result is PromiseRejectedResult => {
+      return result.status === 'rejected';
+    });
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toEqual(new ConflictException(PENDING_EXISTS_MESSAGE));
+    const winner = fulfilled[0].value;
+    expect(await service.preview(winner.token)).toEqual({
+      email: 'race@example.com',
+      role: winner.invitation.role,
+      expired: false,
+    });
+    expect(await repository.list()).toEqual([winner.invitation]);
   });
 
   it('re-issues an invitation whose previous one was revoked, accepted or expired', async () => {

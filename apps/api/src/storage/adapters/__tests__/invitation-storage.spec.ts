@@ -85,6 +85,41 @@ function describeRepository(name: string, open: () => Promise<StoragePort>): voi
       expect(await repository.updateStatus('missing', 'pending', 'revoked')).toBe(false);
       expect(await repository.findById(saved.id)).toEqual({ ...saved, status: 'accepted' });
     });
+
+    it('keeps an unexpired pending invitation instead of replacing it', async () => {
+      const pending = record({ expiresAt: 2_000 });
+      expect(await repository.saveUnlessPending(pending, 1_000)).toBe(true);
+      const rival = record({ email: pending.email, role: 'admin', createdAt: 1_500 });
+      expect(await repository.saveUnlessPending(rival, 1_500)).toBe(false);
+      expect(await repository.findByEmail(pending.email)).toEqual(pending);
+      expect(await repository.findByTokenHash(rival.tokenHash)).toBeNull();
+    });
+
+    it('replaces a revoked, accepted or expired invitation for the same email', async () => {
+      const revoked = record({ email: 'revoked@example.com', status: 'revoked' });
+      const accepted = record({ email: 'accepted@example.com', status: 'accepted' });
+      const expired = record({ email: 'expired@example.com', expiresAt: 2_000 });
+      for (const previous of [revoked, accepted, expired]) {
+        await repository.save(previous);
+        const next = record({ email: previous.email, createdAt: 2_000, expiresAt: 9_000 });
+        expect(await repository.saveUnlessPending(next, 2_000)).toBe(true);
+        expect(await repository.findByEmail(previous.email)).toEqual(next);
+      }
+    });
+
+    it('admits only one of two concurrent saves for the same email', async () => {
+      const first = record();
+      const second = record({ email: first.email, role: 'admin' });
+      const outcomes = await Promise.all([
+        repository.saveUnlessPending(first, 1_000),
+        repository.saveUnlessPending(second, 1_000),
+      ]);
+      const winners = [first, second].filter((candidate, index) => {
+        return outcomes[index] === true;
+      });
+      expect(winners).toHaveLength(1);
+      expect(await repository.findByEmail(first.email)).toEqual(winners[0]);
+    });
   });
 }
 

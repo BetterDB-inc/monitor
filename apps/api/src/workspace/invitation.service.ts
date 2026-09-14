@@ -83,11 +83,7 @@ export class InvitationService {
     if (member !== null) {
       throw new ConflictException(ALREADY_MEMBER_MESSAGE);
     }
-    const existing = await this.repository.findByEmail(email);
     const now = this.now();
-    if (existing !== null && existing.status === 'pending' && existing.expiresAt > now) {
-      throw new ConflictException(PENDING_EXISTS_MESSAGE);
-    }
     const token = randomBytes(TOKEN_BYTES).toString('base64url');
     const invitation: InvitationRecord = {
       id: randomUUID(),
@@ -99,7 +95,10 @@ export class InvitationService {
       createdAt: now,
       expiresAt: now + INVITATION_TTL_MS,
     };
-    await this.repository.save(invitation);
+    const saved = await this.repository.saveUnlessPending(invitation, now);
+    if (saved === false) {
+      throw new ConflictException(PENDING_EXISTS_MESSAGE);
+    }
     return { invitation, token };
   }
 

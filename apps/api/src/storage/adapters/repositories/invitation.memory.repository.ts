@@ -45,6 +45,15 @@ export class InvitationMemoryRepository implements InvitationRepository {
     this.byEmail.set(record.email, { ...record });
   }
 
+  async saveUnlessPending(record: InvitationRecord, now: number): Promise<boolean> {
+    const existing = this.byEmail.get(record.email);
+    if (existing !== undefined && existing.status === 'pending' && existing.expiresAt > now) {
+      return false;
+    }
+    this.byEmail.set(record.email, { ...record });
+    return true;
+  }
+
   async updateStatus(id: string, from: InvitationStatus, to: InvitationStatus): Promise<boolean> {
     const record = this.find((candidate) => {
       return candidate.id === id;
