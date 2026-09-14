@@ -7,7 +7,7 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { FastifyRequest } from 'fastify';
+import { FastifyReply, FastifyRequest } from 'fastify';
 import type { Actor, WorkspaceRole } from '@betterdb/shared';
 import { BETTER_AUTH, CLIENT_IP_HEADER, type BetterAuthInstance } from '../better-auth.factory';
 import { toWebHeaders } from '../web-headers';
@@ -46,7 +46,8 @@ export class ActorGuard implements CanActivate {
     if (this.auth === null) {
       throw new ServiceUnavailableException('Workspace auth is not initialised');
     }
-    const actor = await this.resolveSessionActor(request);
+    const reply = context.switchToHttp().getResponse<FastifyReply>();
+    const actor = await this.resolveSessionActor(request, reply);
     if (actor !== null) {
       request.actor = actor;
       return true;
@@ -54,13 +55,20 @@ export class ActorGuard implements CanActivate {
     throw new UnauthorizedException('Sign in required');
   }
 
-  private async resolveSessionActor(request: FastifyRequest): Promise<Actor | null> {
+  private async resolveSessionActor(
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<Actor | null> {
     if (this.auth === null) {
       return null;
     }
     const headers = toWebHeaders(request.headers);
     headers.set(CLIENT_IP_HEADER, request.ip);
-    const session = await this.auth.api.getSession({ headers });
+    const { headers: authHeaders, response: session } = await this.auth.api.getSession({
+      headers,
+      returnHeaders: true,
+    });
+    this.forwardSetCookies(authHeaders, reply);
     if (session === null) {
       return null;
     }
@@ -73,5 +81,13 @@ export class ActorGuard implements CanActivate {
       via: 'session',
       tokenId: null,
     };
+  }
+
+  private forwardSetCookies(authHeaders: Headers, reply: FastifyReply): void {
+    const cookies = authHeaders.getSetCookie();
+    if (cookies.length === 0) {
+      return;
+    }
+    reply.header('set-cookie', cookies);
   }
 }

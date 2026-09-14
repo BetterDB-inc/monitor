@@ -21,7 +21,15 @@ interface FakeRequest {
   actor?: Actor | null;
 }
 
-function contextFor(request: FakeRequest): ExecutionContext {
+interface FakeReply {
+  header: jest.Mock;
+}
+
+function fakeReply(): FakeReply {
+  return { header: jest.fn() };
+}
+
+function contextFor(request: FakeRequest, reply: FakeReply = fakeReply()): ExecutionContext {
   if (request.method === undefined) {
     request.method = 'GET';
   }
@@ -30,6 +38,9 @@ function contextFor(request: FakeRequest): ExecutionContext {
       return {
         getRequest: () => {
           return request;
+        },
+        getResponse: () => {
+          return reply;
         },
       };
     },
@@ -234,6 +245,37 @@ describe('ActorGuard', () => {
     await guard.canActivate(contextFor(request));
     const passed = getSession.mock.calls[0][0] as { headers: Headers };
     expect(passed.headers.get(CLIENT_IP_HEADER)).toBe('10.1.8.1');
+    getSession.mockRestore();
+  });
+
+  it('forwards a renewed session cookie to the reply', async () => {
+    const guard = new ActorGuard(config, auth);
+    const getSession = jest.spyOn(auth.api, 'getSession');
+    getSession.mockResolvedValueOnce({
+      headers: new Headers([['set-cookie', 'better-auth.session_token=x; Max-Age=604800']]),
+      response: { user: { id: 'u1', email: 'owner@example.com', role: 'admin', isOwner: true } },
+    } as unknown as Awaited<ReturnType<typeof auth.api.getSession>>);
+    const reply = fakeReply();
+    const request: FakeRequest = { url: '/api/connections', headers: { cookie } };
+    await guard.canActivate(contextFor(request, reply));
+    expect(getSession.mock.calls[0][0]).toEqual(expect.objectContaining({ returnHeaders: true }));
+    expect(reply.header).toHaveBeenCalledWith('set-cookie', [
+      'better-auth.session_token=x; Max-Age=604800',
+    ]);
+    getSession.mockRestore();
+  });
+
+  it('leaves the reply untouched when the session carries no set-cookie', async () => {
+    const guard = new ActorGuard(config, auth);
+    const getSession = jest.spyOn(auth.api, 'getSession');
+    getSession.mockResolvedValueOnce({
+      headers: new Headers(),
+      response: { user: { id: 'u1', email: 'owner@example.com', role: 'admin', isOwner: true } },
+    } as unknown as Awaited<ReturnType<typeof auth.api.getSession>>);
+    const reply = fakeReply();
+    const request: FakeRequest = { url: '/api/connections', headers: { cookie } };
+    await guard.canActivate(contextFor(request, reply));
+    expect(reply.header).not.toHaveBeenCalled();
     getSession.mockRestore();
   });
 });
