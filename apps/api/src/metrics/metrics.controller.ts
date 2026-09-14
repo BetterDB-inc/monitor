@@ -1,8 +1,15 @@
-import { Controller, Get, Post, Delete, Query, Param, HttpException, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Delete, Query, Param, HttpException, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam, ApiHeader } from '@nestjs/swagger';
 import { MetricsService } from './metrics.service';
 import { ClusterDiscoveryService, DiscoveredNode } from '../cluster/cluster-discovery.service';
-import { ClusterMetricsService, NodeStats, ClusterSlowlogEntry, ClusterClientEntry, ClusterCommandlogEntry, SlotMigration } from '../cluster/cluster-metrics.service';
+import {
+  ClusterMetricsService,
+  NodeStats,
+  ClusterSlowlogEntry,
+  ClusterClientEntry,
+  ClusterCommandlogEntry,
+  SlotMigration,
+} from '../cluster/cluster-metrics.service';
 import { ConnectionId } from '../common/decorators';
 import { Roles } from '../auth/guards/roles.decorator';
 import {
@@ -28,13 +35,11 @@ import {
   CommandLogEntryDto,
   LatencyEventDto,
   LatencyHistoryEntryDto,
-  LatencyHistogramDto,
   MemoryStatsDto,
   ClientInfoDto,
   AclLogEntryDto,
   RoleInfoDto,
   ClusterNodeDto,
-  SlotStatsMetricDto,
   GenericSuccessDto,
   LengthResponseDto,
   ReportResponseDto,
@@ -60,10 +65,22 @@ export class MetricsController {
   ) {}
 
   @Get('info')
-  @ApiOperation({ summary: 'Get parsed INFO response', description: 'Retrieve parsed Valkey/Redis INFO command output, optionally filtered by sections' })
+  @ApiOperation({
+    summary: 'Get parsed INFO response',
+    description:
+      'Retrieve parsed Valkey/Redis INFO command output, optionally filtered by sections',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiQuery({ name: 'sections', required: false, description: 'Comma-separated list of INFO sections (server,clients,memory,etc.)' })
-  @ApiResponse({ status: 200, description: 'INFO response retrieved successfully', schema: { type: 'object' } })
+  @ApiQuery({
+    name: 'sections',
+    required: false,
+    description: 'Comma-separated list of INFO sections (server,clients,memory,etc.)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'INFO response retrieved successfully',
+    schema: { type: 'object' },
+  })
   @ApiResponse({ status: 500, description: 'Failed to get info' })
   async getInfo(
     @Query('sections') sections?: string,
@@ -81,13 +98,32 @@ export class MetricsController {
   }
 
   @Get('slowlog')
-  @ApiOperation({ summary: 'Get slowlog entries', description: 'Retrieve slowlog entries from Valkey/Redis' })
+  @ApiOperation({
+    summary: 'Get slowlog entries',
+    description: 'Retrieve slowlog entries from Valkey/Redis',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiQuery({ name: 'count', required: false, description: 'Number of entries to return' })
-  @ApiQuery({ name: 'excludeMonitor', required: false, description: 'Set to true to exclude BetterDB-Monitor commands' })
-  @ApiQuery({ name: 'startTime', required: false, description: 'Filter entries after this Unix timestamp (seconds)' })
-  @ApiQuery({ name: 'endTime', required: false, description: 'Filter entries before this Unix timestamp (seconds)' })
-  @ApiResponse({ status: 200, description: 'Slowlog entries retrieved successfully', type: [SlowLogEntryDto] })
+  @ApiQuery({
+    name: 'excludeMonitor',
+    required: false,
+    description: 'Set to true to exclude BetterDB-Monitor commands',
+  })
+  @ApiQuery({
+    name: 'startTime',
+    required: false,
+    description: 'Filter entries after this Unix timestamp (seconds)',
+  })
+  @ApiQuery({
+    name: 'endTime',
+    required: false,
+    description: 'Filter entries before this Unix timestamp (seconds)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Slowlog entries retrieved successfully',
+    type: [SlowLogEntryDto],
+  })
   @ApiResponse({ status: 500, description: 'Failed to get slowlog' })
   async getSlowLog(
     @Query('count') count?: string,
@@ -101,7 +137,13 @@ export class MetricsController {
       const excludeClientName = excludeMonitor === 'true' ? 'BetterDB-Monitor' : undefined;
       const parsedStartTime = startTime ? parseInt(startTime, 10) : undefined;
       const parsedEndTime = endTime ? parseInt(endTime, 10) : undefined;
-      return await this.metricsService.getSlowLog(parsedCount, excludeClientName, parsedStartTime, parsedEndTime, connectionId);
+      return await this.metricsService.getSlowLog(
+        parsedCount,
+        excludeClientName,
+        parsedStartTime,
+        parsedEndTime,
+        connectionId,
+      );
     } catch (error) {
       throw new HttpException(
         `Failed to get slowlog: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -111,9 +153,16 @@ export class MetricsController {
   }
 
   @Get('slowlog/length')
-  @ApiOperation({ summary: 'Get slowlog length', description: 'Get the current number of entries in the slowlog' })
+  @ApiOperation({
+    summary: 'Get slowlog length',
+    description: 'Get the current number of entries in the slowlog',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiResponse({ status: 200, description: 'Slowlog length retrieved successfully', type: LengthResponseDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Slowlog length retrieved successfully',
+    type: LengthResponseDto,
+  })
   @ApiResponse({ status: 500, description: 'Failed to get slowlog length' })
   async getSlowLogLength(@ConnectionId() connectionId?: string): Promise<{ length: number }> {
     try {
@@ -145,10 +194,17 @@ export class MetricsController {
   }
 
   @Get('slowlog/patterns')
-  @ApiOperation({ summary: 'Analyze slowlog patterns', description: 'Get aggregated analysis of slowlog command patterns' })
+  @ApiOperation({
+    summary: 'Analyze slowlog patterns',
+    description: 'Get aggregated analysis of slowlog command patterns',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiQuery({ name: 'count', required: false, description: 'Number of slowlog entries to analyze' })
-  @ApiResponse({ status: 200, description: 'Slowlog pattern analysis retrieved successfully', schema: { type: 'object' } })
+  @ApiResponse({
+    status: 200,
+    description: 'Slowlog pattern analysis retrieved successfully',
+    schema: { type: 'object' },
+  })
   @ApiResponse({ status: 500, description: 'Failed to analyze slowlog patterns' })
   async getSlowLogPatternAnalysis(
     @Query('count') count?: string,
@@ -166,11 +222,23 @@ export class MetricsController {
   }
 
   @Get('commandlog')
-  @ApiOperation({ summary: 'Get commandlog entries (Valkey 8.1+)', description: 'Retrieve commandlog entries from Valkey 8.1+' })
+  @ApiOperation({
+    summary: 'Get commandlog entries (Valkey 8.1+)',
+    description: 'Retrieve commandlog entries from Valkey 8.1+',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiQuery({ name: 'count', required: false, description: 'Number of entries to return' })
-  @ApiQuery({ name: 'type', required: false, enum: ['slow', 'large-request', 'large-reply'], description: 'Filter by commandlog type' })
-  @ApiResponse({ status: 200, description: 'Commandlog entries retrieved successfully', type: [CommandLogEntryDto] })
+  @ApiQuery({
+    name: 'type',
+    required: false,
+    enum: ['slow', 'large-request', 'large-reply'],
+    description: 'Filter by commandlog type',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Commandlog entries retrieved successfully',
+    type: [CommandLogEntryDto],
+  })
   @ApiResponse({ status: 501, description: 'Commandlog not supported on this server version' })
   @ApiResponse({ status: 500, description: 'Failed to get commandlog' })
   async getCommandLog(
@@ -183,9 +251,10 @@ export class MetricsController {
       const parsedType = type as CommandLogType | undefined;
       return await this.metricsService.getCommandLog(parsedCount, parsedType, connectionId);
     } catch (error) {
-      const status = error instanceof Error && error.message.includes('not supported')
-        ? HttpStatus.NOT_IMPLEMENTED
-        : HttpStatus.INTERNAL_SERVER_ERROR;
+      const status =
+        error instanceof Error && error.message.includes('not supported')
+          ? HttpStatus.NOT_IMPLEMENTED
+          : HttpStatus.INTERNAL_SERVER_ERROR;
       throw new HttpException(
         `Failed to get commandlog: ${error instanceof Error ? error.message : 'Unknown error'}`,
         status,
@@ -194,10 +263,22 @@ export class MetricsController {
   }
 
   @Get('commandlog/length')
-  @ApiOperation({ summary: 'Get commandlog length (Valkey 8.1+)', description: 'Get the number of entries in commandlog' })
+  @ApiOperation({
+    summary: 'Get commandlog length (Valkey 8.1+)',
+    description: 'Get the number of entries in commandlog',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiQuery({ name: 'type', required: false, enum: ['slow', 'large-request', 'large-reply'], description: 'Filter by commandlog type' })
-  @ApiResponse({ status: 200, description: 'Commandlog length retrieved successfully', type: LengthResponseDto })
+  @ApiQuery({
+    name: 'type',
+    required: false,
+    enum: ['slow', 'large-request', 'large-reply'],
+    description: 'Filter by commandlog type',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Commandlog length retrieved successfully',
+    type: LengthResponseDto,
+  })
   @ApiResponse({ status: 501, description: 'Commandlog not supported' })
   @ApiResponse({ status: 500, description: 'Failed to get commandlog length' })
   async getCommandLogLength(
@@ -209,9 +290,10 @@ export class MetricsController {
       const length = await this.metricsService.getCommandLogLength(parsedType, connectionId);
       return { length };
     } catch (error) {
-      const status = error instanceof Error && error.message.includes('not supported')
-        ? HttpStatus.NOT_IMPLEMENTED
-        : HttpStatus.INTERNAL_SERVER_ERROR;
+      const status =
+        error instanceof Error && error.message.includes('not supported')
+          ? HttpStatus.NOT_IMPLEMENTED
+          : HttpStatus.INTERNAL_SERVER_ERROR;
       throw new HttpException(
         `Failed to get commandlog length: ${error instanceof Error ? error.message : 'Unknown error'}`,
         status,
@@ -220,10 +302,22 @@ export class MetricsController {
   }
 
   @Delete('commandlog')
-  @ApiOperation({ summary: 'Reset commandlog (Valkey 8.1+)', description: 'Clear all commandlog entries' })
+  @ApiOperation({
+    summary: 'Reset commandlog (Valkey 8.1+)',
+    description: 'Clear all commandlog entries',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiQuery({ name: 'type', required: false, enum: ['slow', 'large-request', 'large-reply'], description: 'Filter by commandlog type' })
-  @ApiResponse({ status: 200, description: 'Commandlog reset successfully', type: GenericSuccessDto })
+  @ApiQuery({
+    name: 'type',
+    required: false,
+    enum: ['slow', 'large-request', 'large-reply'],
+    description: 'Filter by commandlog type',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Commandlog reset successfully',
+    type: GenericSuccessDto,
+  })
   @ApiResponse({ status: 501, description: 'Commandlog not supported' })
   @ApiResponse({ status: 500, description: 'Failed to reset commandlog' })
   async resetCommandLog(
@@ -235,9 +329,10 @@ export class MetricsController {
       await this.metricsService.resetCommandLog(parsedType, connectionId);
       return { success: true };
     } catch (error) {
-      const status = error instanceof Error && error.message.includes('not supported')
-        ? HttpStatus.NOT_IMPLEMENTED
-        : HttpStatus.INTERNAL_SERVER_ERROR;
+      const status =
+        error instanceof Error && error.message.includes('not supported')
+          ? HttpStatus.NOT_IMPLEMENTED
+          : HttpStatus.INTERNAL_SERVER_ERROR;
       throw new HttpException(
         `Failed to reset commandlog: ${error instanceof Error ? error.message : 'Unknown error'}`,
         status,
@@ -246,11 +341,27 @@ export class MetricsController {
   }
 
   @Get('commandlog/patterns')
-  @ApiOperation({ summary: 'Analyze commandlog patterns (Valkey 8.1+)', description: 'Get aggregated analysis of commandlog patterns' })
+  @ApiOperation({
+    summary: 'Analyze commandlog patterns (Valkey 8.1+)',
+    description: 'Get aggregated analysis of commandlog patterns',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiQuery({ name: 'count', required: false, description: 'Number of commandlog entries to analyze' })
-  @ApiQuery({ name: 'type', required: false, enum: ['slow', 'large-request', 'large-reply'], description: 'Filter by commandlog type' })
-  @ApiResponse({ status: 200, description: 'Commandlog pattern analysis retrieved successfully', schema: { type: 'object' } })
+  @ApiQuery({
+    name: 'count',
+    required: false,
+    description: 'Number of commandlog entries to analyze',
+  })
+  @ApiQuery({
+    name: 'type',
+    required: false,
+    enum: ['slow', 'large-request', 'large-reply'],
+    description: 'Filter by commandlog type',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Commandlog pattern analysis retrieved successfully',
+    schema: { type: 'object' },
+  })
   @ApiResponse({ status: 501, description: 'Commandlog not supported' })
   @ApiResponse({ status: 500, description: 'Failed to analyze commandlog patterns' })
   async getCommandLogPatternAnalysis(
@@ -279,9 +390,16 @@ export class MetricsController {
   }
 
   @Get('latency/latest')
-  @ApiOperation({ summary: 'Get latest latency events', description: 'Retrieve latest latency monitoring events' })
+  @ApiOperation({
+    summary: 'Get latest latency events',
+    description: 'Retrieve latest latency monitoring events',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiResponse({ status: 200, description: 'Latest latency events retrieved successfully', type: [LatencyEventDto] })
+  @ApiResponse({
+    status: 200,
+    description: 'Latest latency events retrieved successfully',
+    type: [LatencyEventDto],
+  })
   @ApiResponse({ status: 500, description: 'Failed to get latest latency events' })
   async getLatestLatencyEvents(@ConnectionId() connectionId?: string): Promise<LatencyEvent[]> {
     try {
@@ -295,10 +413,17 @@ export class MetricsController {
   }
 
   @Get('latency/history/:eventName')
-  @ApiOperation({ summary: 'Get latency history for event', description: 'Retrieve historical latency data for a specific event' })
+  @ApiOperation({
+    summary: 'Get latency history for event',
+    description: 'Retrieve historical latency data for a specific event',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiParam({ name: 'eventName', description: 'Name of the latency event' })
-  @ApiResponse({ status: 200, description: 'Latency history retrieved successfully', type: [LatencyHistoryEntryDto] })
+  @ApiResponse({
+    status: 200,
+    description: 'Latency history retrieved successfully',
+    type: [LatencyHistoryEntryDto],
+  })
   @ApiResponse({ status: 500, description: 'Failed to get latency history' })
   async getLatencyHistory(
     @Param('eventName') eventName: string,
@@ -315,10 +440,17 @@ export class MetricsController {
   }
 
   @Get('latency/histogram')
-  @ApiOperation({ summary: 'Get latency histogram', description: 'Retrieve latency histogram for specified commands' })
+  @ApiOperation({
+    summary: 'Get latency histogram',
+    description: 'Retrieve latency histogram for specified commands',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiQuery({ name: 'commands', required: false, description: 'Comma-separated list of commands' })
-  @ApiResponse({ status: 200, description: 'Latency histogram retrieved successfully', schema: { type: 'object' } })
+  @ApiResponse({
+    status: 200,
+    description: 'Latency histogram retrieved successfully',
+    schema: { type: 'object' },
+  })
   @ApiResponse({ status: 500, description: 'Failed to get latency histogram' })
   async getLatencyHistogram(
     @Query('commands') commands?: string,
@@ -336,9 +468,16 @@ export class MetricsController {
   }
 
   @Get('latency/doctor')
-  @ApiOperation({ summary: 'Get LATENCY DOCTOR report', description: 'Retrieve automated latency analysis and recommendations' })
+  @ApiOperation({
+    summary: 'Get LATENCY DOCTOR report',
+    description: 'Retrieve automated latency analysis and recommendations',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiResponse({ status: 200, description: 'Latency doctor report retrieved successfully', type: ReportResponseDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Latency doctor report retrieved successfully',
+    type: ReportResponseDto,
+  })
   @ApiResponse({ status: 500, description: 'Failed to get latency doctor report' })
   async getLatencyDoctor(@ConnectionId() connectionId?: string): Promise<{ report: string }> {
     try {
@@ -353,10 +492,21 @@ export class MetricsController {
   }
 
   @Delete('latency')
-  @ApiOperation({ summary: 'Reset latency events', description: 'Reset latency monitoring data for all or specific event' })
+  @ApiOperation({
+    summary: 'Reset latency events',
+    description: 'Reset latency monitoring data for all or specific event',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiQuery({ name: 'eventName', required: false, description: 'Event name to reset (omit for all)' })
-  @ApiResponse({ status: 200, description: 'Latency events reset successfully', type: GenericSuccessDto })
+  @ApiQuery({
+    name: 'eventName',
+    required: false,
+    description: 'Event name to reset (omit for all)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Latency events reset successfully',
+    type: GenericSuccessDto,
+  })
   @ApiResponse({ status: 500, description: 'Failed to reset latency events' })
   async resetLatencyEvents(
     @Query('eventName') eventName?: string,
@@ -374,9 +524,16 @@ export class MetricsController {
   }
 
   @Get('memory/stats')
-  @ApiOperation({ summary: 'Get memory statistics', description: 'Retrieve detailed memory usage statistics' })
+  @ApiOperation({
+    summary: 'Get memory statistics',
+    description: 'Retrieve detailed memory usage statistics',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiResponse({ status: 200, description: 'Memory statistics retrieved successfully', type: MemoryStatsDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Memory statistics retrieved successfully',
+    type: MemoryStatsDto,
+  })
   @ApiResponse({ status: 500, description: 'Failed to get memory stats' })
   async getMemoryStats(@ConnectionId() connectionId?: string): Promise<MemoryStats> {
     try {
@@ -390,9 +547,16 @@ export class MetricsController {
   }
 
   @Get('memory/doctor')
-  @ApiOperation({ summary: 'Get MEMORY DOCTOR report', description: 'Retrieve automated memory analysis and recommendations' })
+  @ApiOperation({
+    summary: 'Get MEMORY DOCTOR report',
+    description: 'Retrieve automated memory analysis and recommendations',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiResponse({ status: 200, description: 'Memory doctor report retrieved successfully', type: ReportResponseDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Memory doctor report retrieved successfully',
+    type: ReportResponseDto,
+  })
   @ApiResponse({ status: 500, description: 'Failed to get memory doctor report' })
   async getMemoryDoctor(@ConnectionId() connectionId?: string): Promise<{ report: string }> {
     try {
@@ -407,11 +571,23 @@ export class MetricsController {
   }
 
   @Get('clients')
-  @ApiOperation({ summary: 'Get connected clients', description: 'Retrieve list of currently connected clients' })
+  @ApiOperation({
+    summary: 'Get connected clients',
+    description: 'Retrieve list of currently connected clients',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiQuery({ name: 'type', required: false, enum: ['normal', 'master', 'replica', 'pubsub'], description: 'Filter by client type' })
+  @ApiQuery({
+    name: 'type',
+    required: false,
+    enum: ['normal', 'master', 'replica', 'pubsub'],
+    description: 'Filter by client type',
+  })
   @ApiQuery({ name: 'id', required: false, description: 'Comma-separated list of client IDs' })
-  @ApiResponse({ status: 200, description: 'Clients retrieved successfully', type: [ClientInfoDto] })
+  @ApiResponse({
+    status: 200,
+    description: 'Clients retrieved successfully',
+    type: [ClientInfoDto],
+  })
   @ApiResponse({ status: 500, description: 'Failed to get clients' })
   async getClients(
     @Query('type') type?: string,
@@ -432,7 +608,10 @@ export class MetricsController {
   }
 
   @Get('clients/:id')
-  @ApiOperation({ summary: 'Get client by ID', description: 'Retrieve information about a specific client' })
+  @ApiOperation({
+    summary: 'Get client by ID',
+    description: 'Retrieve information about a specific client',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiParam({ name: 'id', description: 'Client ID' })
   @ApiResponse({ status: 200, description: 'Client retrieved successfully', type: ClientInfoDto })
@@ -458,9 +637,17 @@ export class MetricsController {
   }
 
   @Delete('clients')
-  @ApiOperation({ summary: 'Kill client connections', description: 'Terminate one or more client connections' })
+  @ApiOperation({
+    summary: 'Kill client connections',
+    description: 'Terminate one or more client connections',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiQuery({ name: 'type', required: false, enum: ['normal', 'master', 'replica', 'pubsub'], description: 'Filter by client type' })
+  @ApiQuery({
+    name: 'type',
+    required: false,
+    enum: ['normal', 'master', 'replica', 'pubsub'],
+    description: 'Filter by client type',
+  })
   @ApiQuery({ name: 'id', required: false, description: 'Comma-separated list of client IDs' })
   @ApiResponse({ status: 200, description: 'Clients killed successfully', type: KilledResponseDto })
   @ApiResponse({ status: 500, description: 'Failed to kill client' })
@@ -484,10 +671,17 @@ export class MetricsController {
   }
 
   @Get('acl/log')
-  @ApiOperation({ summary: 'Get ACL log entries', description: 'Retrieve ACL security log entries' })
+  @ApiOperation({
+    summary: 'Get ACL log entries',
+    description: 'Retrieve ACL security log entries',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiQuery({ name: 'count', required: false, description: 'Number of entries to return' })
-  @ApiResponse({ status: 200, description: 'ACL log entries retrieved successfully', type: [AclLogEntryDto] })
+  @ApiResponse({
+    status: 200,
+    description: 'ACL log entries retrieved successfully',
+    type: [AclLogEntryDto],
+  })
   @ApiResponse({ status: 501, description: 'ACL not supported' })
   @ApiResponse({ status: 500, description: 'Failed to get ACL log' })
   async getAclLog(
@@ -498,9 +692,10 @@ export class MetricsController {
       const parsedCount = count ? parseInt(count, 10) : undefined;
       return await this.metricsService.getAclLog(parsedCount, connectionId);
     } catch (error) {
-      const status = error instanceof Error && error.message.includes('not supported')
-        ? HttpStatus.NOT_IMPLEMENTED
-        : HttpStatus.INTERNAL_SERVER_ERROR;
+      const status =
+        error instanceof Error && error.message.includes('not supported')
+          ? HttpStatus.NOT_IMPLEMENTED
+          : HttpStatus.INTERNAL_SERVER_ERROR;
       throw new HttpException(
         `Failed to get ACL log: ${error instanceof Error ? error.message : 'Unknown error'}`,
         status,
@@ -519,9 +714,10 @@ export class MetricsController {
       await this.metricsService.resetAclLog(connectionId);
       return { success: true };
     } catch (error) {
-      const status = error instanceof Error && error.message.includes('not supported')
-        ? HttpStatus.NOT_IMPLEMENTED
-        : HttpStatus.INTERNAL_SERVER_ERROR;
+      const status =
+        error instanceof Error && error.message.includes('not supported')
+          ? HttpStatus.NOT_IMPLEMENTED
+          : HttpStatus.INTERNAL_SERVER_ERROR;
       throw new HttpException(
         `Failed to reset ACL log: ${error instanceof Error ? error.message : 'Unknown error'}`,
         status,
@@ -530,9 +726,16 @@ export class MetricsController {
   }
 
   @Get('role')
-  @ApiOperation({ summary: 'Get replication role', description: 'Retrieve replication role and status information' })
+  @ApiOperation({
+    summary: 'Get replication role',
+    description: 'Retrieve replication role and status information',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiResponse({ status: 200, description: 'Role information retrieved successfully', type: RoleInfoDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Role information retrieved successfully',
+    type: RoleInfoDto,
+  })
   @ApiResponse({ status: 500, description: 'Failed to get role' })
   async getRole(@ConnectionId() connectionId?: string): Promise<RoleInfo> {
     try {
@@ -546,9 +749,16 @@ export class MetricsController {
   }
 
   @Get('cluster/info')
-  @ApiOperation({ summary: 'Get cluster info', description: 'Retrieve cluster information and status' })
+  @ApiOperation({
+    summary: 'Get cluster info',
+    description: 'Retrieve cluster information and status',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiResponse({ status: 200, description: 'Cluster info retrieved successfully', schema: { type: 'object' } })
+  @ApiResponse({
+    status: 200,
+    description: 'Cluster info retrieved successfully',
+    schema: { type: 'object' },
+  })
   @ApiResponse({ status: 500, description: 'Failed to get cluster info' })
   async getClusterInfo(@ConnectionId() connectionId?: string): Promise<Record<string, string>> {
     try {
@@ -562,9 +772,16 @@ export class MetricsController {
   }
 
   @Get('cluster/nodes')
-  @ApiOperation({ summary: 'Get cluster nodes', description: 'Retrieve information about all cluster nodes' })
+  @ApiOperation({
+    summary: 'Get cluster nodes',
+    description: 'Retrieve information about all cluster nodes',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiResponse({ status: 200, description: 'Cluster nodes retrieved successfully', type: [ClusterNodeDto] })
+  @ApiResponse({
+    status: 200,
+    description: 'Cluster nodes retrieved successfully',
+    type: [ClusterNodeDto],
+  })
   @ApiResponse({ status: 500, description: 'Failed to get cluster nodes' })
   async getClusterNodes(@ConnectionId() connectionId?: string): Promise<ClusterNode[]> {
     try {
@@ -578,11 +795,23 @@ export class MetricsController {
   }
 
   @Get('cluster/slot-stats')
-  @ApiOperation({ summary: 'Get cluster slot statistics', description: 'Retrieve per-slot statistics for cluster' })
+  @ApiOperation({
+    summary: 'Get cluster slot statistics',
+    description: 'Retrieve per-slot statistics for cluster',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiQuery({ name: 'orderBy', required: false, enum: ['key-count', 'cpu-usec'], description: 'Sort order' })
+  @ApiQuery({
+    name: 'orderBy',
+    required: false,
+    enum: ['key-count', 'cpu-usec'],
+    description: 'Sort order',
+  })
   @ApiQuery({ name: 'limit', required: false, description: 'Maximum number of slots to return' })
-  @ApiResponse({ status: 200, description: 'Cluster slot stats retrieved successfully', schema: { type: 'object' } })
+  @ApiResponse({
+    status: 200,
+    description: 'Cluster slot stats retrieved successfully',
+    schema: { type: 'object' },
+  })
   @ApiResponse({ status: 501, description: 'Cluster slot stats not supported' })
   @ApiResponse({ status: 500, description: 'Failed to get cluster slot stats' })
   async getClusterSlotStats(
@@ -593,11 +822,16 @@ export class MetricsController {
     try {
       const parsedOrderBy = orderBy as 'key-count' | 'cpu-usec' | undefined;
       const parsedLimit = limit ? parseInt(limit, 10) : undefined;
-      return await this.metricsService.getClusterSlotStats(parsedOrderBy, parsedLimit, connectionId);
+      return await this.metricsService.getClusterSlotStats(
+        parsedOrderBy,
+        parsedLimit,
+        connectionId,
+      );
     } catch (error) {
-      const status = error instanceof Error && error.message.includes('not supported')
-        ? HttpStatus.NOT_IMPLEMENTED
-        : HttpStatus.INTERNAL_SERVER_ERROR;
+      const status =
+        error instanceof Error && error.message.includes('not supported')
+          ? HttpStatus.NOT_IMPLEMENTED
+          : HttpStatus.INTERNAL_SERVER_ERROR;
       throw new HttpException(
         `Failed to get cluster slot stats: ${error instanceof Error ? error.message : 'Unknown error'}`,
         status,
@@ -607,10 +841,17 @@ export class MetricsController {
 
   @Get('config/:parameter')
   @Roles('admin')
-  @ApiOperation({ summary: 'Get config parameter', description: 'Retrieve value of a specific configuration parameter' })
+  @ApiOperation({
+    summary: 'Get config parameter',
+    description: 'Retrieve value of a specific configuration parameter',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiParam({ name: 'parameter', description: 'Configuration parameter name' })
-  @ApiResponse({ status: 200, description: 'Config value retrieved successfully', type: ConfigValueResponseDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Config value retrieved successfully',
+    type: ConfigValueResponseDto,
+  })
   @ApiResponse({ status: 500, description: 'Failed to get config value' })
   async getConfigValue(
     @Param('parameter') parameter: string,
@@ -629,10 +870,21 @@ export class MetricsController {
 
   @Get('config')
   @Roles('admin')
-  @ApiOperation({ summary: 'Get config values', description: 'Retrieve configuration values matching pattern' })
+  @ApiOperation({
+    summary: 'Get config values',
+    description: 'Retrieve configuration values matching pattern',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiQuery({ name: 'pattern', required: false, description: 'Glob pattern for config keys (default: *)' })
-  @ApiResponse({ status: 200, description: 'Config values retrieved successfully', schema: { type: 'object' } })
+  @ApiQuery({
+    name: 'pattern',
+    required: false,
+    description: 'Glob pattern for config keys (default: *)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Config values retrieved successfully',
+    schema: { type: 'object' },
+  })
   @ApiResponse({ status: 500, description: 'Failed to get config values' })
   async getConfigValues(
     @Query('pattern') pattern: string = '*',
@@ -649,9 +901,16 @@ export class MetricsController {
   }
 
   @Get('dbsize')
-  @ApiOperation({ summary: 'Get database size', description: 'Retrieve the number of keys in the current database' })
+  @ApiOperation({
+    summary: 'Get database size',
+    description: 'Retrieve the number of keys in the current database',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiResponse({ status: 200, description: 'Database size retrieved successfully', type: DbSizeResponseDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Database size retrieved successfully',
+    type: DbSizeResponseDto,
+  })
   @ApiResponse({ status: 500, description: 'Failed to get database size' })
   async getDbSize(@ConnectionId() connectionId?: string): Promise<{ size: number }> {
     try {
@@ -666,9 +925,16 @@ export class MetricsController {
   }
 
   @Get('lastsave')
-  @ApiOperation({ summary: 'Get last save time', description: 'Retrieve Unix timestamp of last successful RDB save' })
+  @ApiOperation({
+    summary: 'Get last save time',
+    description: 'Retrieve Unix timestamp of last successful RDB save',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiResponse({ status: 200, description: 'Last save time retrieved successfully', type: LastSaveResponseDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Last save time retrieved successfully',
+    type: LastSaveResponseDto,
+  })
   @ApiResponse({ status: 500, description: 'Failed to get last save time' })
   async getLastSaveTime(@ConnectionId() connectionId?: string): Promise<{ timestamp: number }> {
     try {
@@ -685,9 +951,16 @@ export class MetricsController {
   // New cluster endpoints
 
   @Get('cluster/nodes/discover')
-  @ApiOperation({ summary: 'Discover cluster nodes', description: 'Discover and return all nodes in the cluster' })
+  @ApiOperation({
+    summary: 'Discover cluster nodes',
+    description: 'Discover and return all nodes in the cluster',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiResponse({ status: 200, description: 'Cluster nodes discovered successfully', type: [DiscoveredNodeDto] })
+  @ApiResponse({
+    status: 200,
+    description: 'Cluster nodes discovered successfully',
+    type: [DiscoveredNodeDto],
+  })
   @ApiResponse({ status: 500, description: 'Failed to discover cluster nodes' })
   async discoverClusterNodes(@ConnectionId() connectionId?: string): Promise<DiscoveredNode[]> {
     try {
@@ -701,15 +974,19 @@ export class MetricsController {
   }
 
   @Get('cluster/nodes/:nodeId/info')
-  @ApiOperation({ summary: 'Get INFO from specific node', description: 'Retrieve INFO command output from a specific cluster node' })
+  @ApiOperation({
+    summary: 'Get INFO from specific node',
+    description: 'Retrieve INFO command output from a specific cluster node',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiParam({ name: 'nodeId', description: 'Node ID' })
-  @ApiResponse({ status: 200, description: 'Node INFO retrieved successfully', schema: { type: 'object' } })
+  @ApiResponse({
+    status: 200,
+    description: 'Node INFO retrieved successfully',
+    schema: { type: 'object' },
+  })
   @ApiResponse({ status: 500, description: 'Failed to get node info' })
-  async getNodeInfo(
-    @Param('nodeId') nodeId: string,
-    @ConnectionId() connectionId?: string,
-  ): Promise<Record<string, unknown>> {
+  async getNodeInfo(@Param('nodeId') nodeId: string): Promise<Record<string, unknown>> {
     try {
       return await this.clusterMetricsService.getNodeInfo(nodeId);
     } catch (error) {
@@ -721,11 +998,18 @@ export class MetricsController {
   }
 
   @Get('cluster/node-stats')
-  @ApiOperation({ summary: 'Get comparative stats for all nodes', description: 'Retrieve performance and resource metrics for all cluster nodes' })
+  @ApiOperation({
+    summary: 'Get comparative stats for all nodes',
+    description: 'Retrieve performance and resource metrics for all cluster nodes',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiResponse({ status: 200, description: 'Cluster node stats retrieved successfully', type: [NodeStatsDto] })
+  @ApiResponse({
+    status: 200,
+    description: 'Cluster node stats retrieved successfully',
+    type: [NodeStatsDto],
+  })
   @ApiResponse({ status: 500, description: 'Failed to get cluster node stats' })
-  async getClusterNodeStats(@ConnectionId() connectionId?: string): Promise<NodeStats[]> {
+  async getClusterNodeStats(): Promise<NodeStats[]> {
     try {
       return await this.clusterMetricsService.getClusterNodeStats();
     } catch (error) {
@@ -737,16 +1021,24 @@ export class MetricsController {
   }
 
   @Get('cluster/slowlog')
-  @ApiOperation({ summary: 'Get slowlog aggregated from all cluster nodes', description: 'Retrieve slowlog entries from all nodes, merged and sorted' })
+  @ApiOperation({
+    summary: 'Get slowlog aggregated from all cluster nodes',
+    description: 'Retrieve slowlog entries from all nodes, merged and sorted',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiQuery({ name: 'limit', required: false, description: 'Maximum number of entries to return (1-10000, default: 100)' })
-  @ApiResponse({ status: 200, description: 'Cluster slowlog retrieved successfully', type: [ClusterSlowlogEntryDto] })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    description: 'Maximum number of entries to return (1-10000, default: 100)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Cluster slowlog retrieved successfully',
+    type: [ClusterSlowlogEntryDto],
+  })
   @ApiResponse({ status: 400, description: 'Invalid limit parameter' })
   @ApiResponse({ status: 500, description: 'Failed to get cluster slowlog' })
-  async getClusterSlowlog(
-    @Query('limit') limit?: string,
-    @ConnectionId() connectionId?: string,
-  ): Promise<ClusterSlowlogEntry[]> {
+  async getClusterSlowlog(@Query('limit') limit?: string): Promise<ClusterSlowlogEntry[]> {
     try {
       const parsedLimit = limit ? parseInt(limit, 10) : 100;
 
@@ -770,11 +1062,18 @@ export class MetricsController {
   }
 
   @Get('cluster/clients')
-  @ApiOperation({ summary: 'Get client list from all cluster nodes', description: 'Retrieve connected clients from all nodes' })
+  @ApiOperation({
+    summary: 'Get client list from all cluster nodes',
+    description: 'Retrieve connected clients from all nodes',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiResponse({ status: 200, description: 'Cluster clients retrieved successfully', type: [ClusterClientEntryDto] })
+  @ApiResponse({
+    status: 200,
+    description: 'Cluster clients retrieved successfully',
+    type: [ClusterClientEntryDto],
+  })
   @ApiResponse({ status: 500, description: 'Failed to get cluster clients' })
-  async getClusterClients(@ConnectionId() connectionId?: string): Promise<ClusterClientEntry[]> {
+  async getClusterClients(): Promise<ClusterClientEntry[]> {
     try {
       return await this.clusterMetricsService.getClusterClients();
     } catch (error) {
@@ -786,17 +1085,32 @@ export class MetricsController {
   }
 
   @Get('cluster/commandlog')
-  @ApiOperation({ summary: 'Get commandlog from all cluster nodes (Valkey 8.1+)', description: 'Retrieve commandlog entries from all nodes, merged and sorted' })
+  @ApiOperation({
+    summary: 'Get commandlog from all cluster nodes (Valkey 8.1+)',
+    description: 'Retrieve commandlog entries from all nodes, merged and sorted',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiQuery({ name: 'type', required: false, enum: ['slow', 'large-request', 'large-reply'], description: 'Filter by commandlog type' })
-  @ApiQuery({ name: 'limit', required: false, description: 'Maximum number of entries to return (1-10000, default: 100)' })
-  @ApiResponse({ status: 200, description: 'Cluster commandlog retrieved successfully', type: [ClusterCommandlogEntryDto] })
+  @ApiQuery({
+    name: 'type',
+    required: false,
+    enum: ['slow', 'large-request', 'large-reply'],
+    description: 'Filter by commandlog type',
+  })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    description: 'Maximum number of entries to return (1-10000, default: 100)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Cluster commandlog retrieved successfully',
+    type: [ClusterCommandlogEntryDto],
+  })
   @ApiResponse({ status: 400, description: 'Invalid parameters' })
   @ApiResponse({ status: 500, description: 'Failed to get cluster commandlog' })
   async getClusterCommandlog(
     @Query('type') type?: string,
     @Query('limit') limit?: string,
-    @ConnectionId() connectionId?: string,
   ): Promise<ClusterCommandlogEntry[]> {
     try {
       const validTypes = ['slow', 'large-request', 'large-reply'];
@@ -831,11 +1145,18 @@ export class MetricsController {
   }
 
   @Get('cluster/migrations')
-  @ApiOperation({ summary: 'Get active slot migrations', description: 'Retrieve information about ongoing slot migrations in the cluster' })
+  @ApiOperation({
+    summary: 'Get active slot migrations',
+    description: 'Retrieve information about ongoing slot migrations in the cluster',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  @ApiResponse({ status: 200, description: 'Slot migrations retrieved successfully', type: [SlotMigrationDto] })
+  @ApiResponse({
+    status: 200,
+    description: 'Slot migrations retrieved successfully',
+    type: [SlotMigrationDto],
+  })
   @ApiResponse({ status: 500, description: 'Failed to get slot migrations' })
-  async getSlotMigrations(@ConnectionId() connectionId?: string): Promise<SlotMigration[]> {
+  async getSlotMigrations(): Promise<SlotMigration[]> {
     try {
       return await this.clusterMetricsService.getSlotMigrations();
     } catch (error) {
