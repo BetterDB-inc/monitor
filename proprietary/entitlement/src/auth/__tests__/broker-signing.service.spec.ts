@@ -1,7 +1,7 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { generateKeyPairSync } from 'crypto';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+import { createHash, generateKeyPairSync } from 'crypto';
 import * as jwt from 'jsonwebtoken';
-import { ServiceUnavailableException } from '@nestjs/common';
+import { Logger, ServiceUnavailableException } from '@nestjs/common';
 import { BROKER_TOKEN_ISSUER, BROKER_TOKEN_TYPE } from '@betterdb/shared';
 import { BrokerSigningService } from '../broker-signing.service';
 
@@ -28,6 +28,11 @@ describe('BrokerSigningService', () => {
     kid: process.env.BROKER_SIGNING_KID,
   };
 
+  beforeEach(() => {
+    vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+  });
+
   afterEach(() => {
     process.env.BROKER_SIGNING_PRIVATE_KEY = original.key;
     process.env.BROKER_SIGNING_KID = original.kid;
@@ -37,6 +42,7 @@ describe('BrokerSigningService', () => {
     if (original.kid === undefined) {
       delete process.env.BROKER_SIGNING_KID;
     }
+    vi.restoreAllMocks();
   });
 
   function configured(): BrokerSigningService {
@@ -87,5 +93,49 @@ describe('BrokerSigningService', () => {
     expect(() => {
       configured().sign({ ...INPUT, aud: 'http://10.0.0.5:3001/api' });
     }).toThrow(/origin/);
+  });
+
+  it('marks a malformed private key unusable outside production', () => {
+    process.env.BROKER_SIGNING_PRIVATE_KEY =
+      '-----BEGIN PRIVATE KEY-----\ngarbage\n-----END PRIVATE KEY-----';
+    process.env.BROKER_SIGNING_KID = 'brk-test';
+    const service = new BrokerSigningService();
+    expect(service.isConfigured()).toBe(false);
+    expect(() => {
+      service.sign(INPUT);
+    }).toThrow(ServiceUnavailableException);
+  });
+
+  it('marks a non-RSA private key unusable outside production', () => {
+    const { privateKey: ed25519PrivateKey } = generateKeyPairSync('ed25519', {
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    });
+    process.env.BROKER_SIGNING_PRIVATE_KEY = ed25519PrivateKey.replace(/\n/g, '\\n');
+    process.env.BROKER_SIGNING_KID = 'brk-test';
+    const service = new BrokerSigningService();
+    expect(service.isConfigured()).toBe(false);
+    expect(() => {
+      service.sign(INPUT);
+    }).toThrow(ServiceUnavailableException);
+  });
+
+  it('logs an audit line with a truncated email hash and never the raw email', () => {
+    const logSpy = vi.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    configured().sign(INPUT);
+
+    const expectedHash = createHash('sha256')
+      .update(INPUT.email.trim().toLowerCase())
+      .digest('hex')
+      .slice(0, 12);
+
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    const [line] = logSpy.mock.calls[0] as [string];
+    expect(line).toContain(`aud=${INPUT.aud}`);
+    expect(line).toContain(`provider=${INPUT.provider}`);
+    expect(line).toContain('kid=brk-test');
+    expect(line).toContain(`email=${expectedHash}`);
+    expect(line).not.toContain(INPUT.email);
+    expect(line).not.toContain(INPUT.email.toLowerCase());
   });
 });
