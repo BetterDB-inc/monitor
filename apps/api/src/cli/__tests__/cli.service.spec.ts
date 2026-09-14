@@ -63,6 +63,14 @@ describe('CliService', () => {
       },
     );
 
+    it.each([['SET foo bar'], ['DEL foo'], ['CONFIG SET maxmemory 100mb']])(
+      'tells a read-only member that %s is not allowed instead of suggesting unsafe mode',
+      async (command) => {
+        const result = await service.execute(command, 'c1', { readOnly: true });
+        expect(result).toEqual({ type: 'error', error: MEMBER_READ_ONLY_MESSAGE });
+      },
+    );
+
     it.each([
       ['PING', 'PONG'],
       ['INFO', '# Server\r\nredis_version:7.0.0'],

@@ -47,6 +47,13 @@ export class CliService {
       return { type: 'error', error: blockError };
     }
 
+    if (options.readOnly === true) {
+      const memberError = checkMemberReadOnly(command, subCommand);
+      if (memberError !== null) {
+        return { type: 'error', error: MEMBER_READ_ONLY_MESSAGE };
+      }
+    }
+
     if (!this.unsafeMode) {
       const safeError = checkSafeMode(command, subCommand);
       if (safeError) {
@@ -54,13 +61,6 @@ export class CliService {
           type: 'error',
           error: safeError + ' Set BETTERDB_UNSAFE_CLI=true to enable all commands.',
         };
-      }
-    }
-
-    if (options.readOnly === true) {
-      const memberError = checkMemberReadOnly(command, subCommand);
-      if (memberError !== null) {
-        return { type: 'error', error: MEMBER_READ_ONLY_MESSAGE };
       }
     }
 
