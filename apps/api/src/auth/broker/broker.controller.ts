@@ -130,6 +130,40 @@ export class BrokerController {
     }
   }
 
+  @Get('cancel')
+  @Throttle(BROKER_ROUTE_THROTTLE)
+  async cancel(
+    @Query('state') state: unknown,
+    @Req() req: FastifyRequest,
+    @Res() reply: FastifyReply,
+  ): Promise<void> {
+    if (this.config.brokerEnabled === false) {
+      reply.status(404).send();
+      return;
+    }
+    const appOrigin = await this.cancelledAppOrigin(state, req);
+    reply.header('set-cookie', this.nonceCookie('', 0));
+    reply.redirect(appOrigin === null ? '/login' : `${appOrigin}/login`, 302);
+  }
+
+  private async cancelledAppOrigin(state: unknown, req: FastifyRequest): Promise<string | null> {
+    const fallback = this.appOrigin(req);
+    const nonce = readBrokerNonce(req.headers.cookie);
+    if (typeof state !== 'string' || state.length === 0 || nonce === null) {
+      return fallback;
+    }
+    try {
+      const record = await this.states.consume(state);
+      if (record === null || brokerNonceMatches(nonce, record.nonceHash) === false) {
+        return fallback;
+      }
+      return record.appOrigin;
+    } catch (error) {
+      logger.error('Broker sign-in cancel failed unexpectedly', describeError(error));
+      return fallback;
+    }
+  }
+
   private async completeSignIn(
     token: unknown,
     req: FastifyRequest,

@@ -538,7 +538,72 @@ describe('BrokerController', () => {
     expect(location.searchParams.get('redirect')).toBe('http://localhost/auth/broker/callback');
   });
 
-  it('answers 404 on both routes when the broker is disabled', async () => {
+  it('returns a cancelled sign-in to the app origin stored with its state', async () => {
+    const devConfig = resolveWorkspaceConfig({
+      AUTH_BROKER_URL: 'https://broker.example',
+      AUTH_BROKER_PUBLIC_KEY: publicKey,
+      AUTH_BROKER_KEY_ID: 'brk-test',
+    });
+    const dev = await buildApp(devConfig);
+    try {
+      const started = await dev.app.inject({
+        method: 'GET',
+        url: '/auth/broker/start',
+        headers: { host: 'localhost:3001' },
+      });
+      const location = new URL(String(started.headers.location));
+      expect(location.searchParams.get('redirect')).toBe(
+        'http://localhost:3001/auth/broker/callback',
+      );
+      const state = String(location.searchParams.get('state'));
+      const nonce = cookieNamed(started.headers['set-cookie'], `${BROKER_NONCE_COOKIE}=`);
+      const stateSpy = jest.spyOn(dev.app.get(BrokerStateStore), 'consume');
+
+      const cancelled = await dev.app.inject({
+        method: 'GET',
+        url: `/auth/broker/cancel?state=${state}`,
+        headers: { host: 'localhost:3001', cookie: nonce },
+        remoteAddress: nextIp(),
+      });
+      expect(cancelled.statusCode).toBe(302);
+      expect(String(cancelled.headers.location)).toBe('http://localhost:5173/login');
+      expect(allCookies(cancelled.headers['set-cookie'])).toEqual([CLEARED_NONCE]);
+      expect(stateSpy).toHaveBeenCalledWith(state);
+      expect(await stateSpy.mock.results[0].value).not.toBeNull();
+      expect(await dev.app.get(BrokerStateStore).consume(state)).toBeNull();
+    } finally {
+      await dev.app.close();
+      await dev.storage.close();
+    }
+  });
+
+  it('keeps the state of a cancel that arrives without its nonce cookie', async () => {
+    const { state } = await start('');
+    const stateSpy = jest.spyOn(app.get(BrokerStateStore), 'consume');
+    const cancelled = await app.inject({
+      method: 'GET',
+      url: `/auth/broker/cancel?state=${state}`,
+      remoteAddress: nextIp(),
+    });
+    expect(cancelled.statusCode).toBe(302);
+    expect(String(cancelled.headers.location)).toBe('http://localhost/login');
+    expect(stateSpy).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the configured login page for another browser's cancel", async () => {
+    const attacker = await start('');
+    const victim = await start('');
+    const cancelled = await app.inject({
+      method: 'GET',
+      url: `/auth/broker/cancel?state=${attacker.state}`,
+      headers: { cookie: victim.nonce },
+      remoteAddress: nextIp(),
+    });
+    expect(cancelled.statusCode).toBe(302);
+    expect(String(cancelled.headers.location)).toBe('http://localhost/login');
+  });
+
+  it('answers 404 on every route when the broker is disabled', async () => {
     const disabled = await buildApp(
       resolveWorkspaceConfig({ ...BASE_ENV, AUTH_BROKER_DISABLED: 'true' }),
     );
@@ -554,6 +619,12 @@ describe('BrokerController', () => {
         remoteAddress: nextIp(),
       });
       expect(callbackResponse.statusCode).toBe(404);
+      const cancelResponse = await disabled.app.inject({
+        method: 'GET',
+        url: '/auth/broker/cancel',
+        remoteAddress: nextIp(),
+      });
+      expect(cancelResponse.statusCode).toBe(404);
     } finally {
       await disabled.app.close();
       await disabled.storage.close();
