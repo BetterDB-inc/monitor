@@ -227,6 +227,32 @@ describe('BrokerController', () => {
     expect(result.cookie).toBe('');
   });
 
+  it('sends a handoff token past its expiry to the expired error', async () => {
+    const { state } = await start('');
+    const expired = jwt.sign(
+      {
+        typ: 'self-hosted-broker',
+        email: 'owner@example.com',
+        name: 'Owner',
+        avatarUrl: null,
+        provider: 'google',
+        providerId: 'g-owner',
+        state,
+      },
+      privateKey,
+      {
+        algorithm: 'RS256',
+        keyid: 'brk-test',
+        issuer: 'betterdb-entitlement',
+        audience: 'http://localhost',
+        expiresIn: -10,
+      },
+    );
+    const result = await callback(expired);
+    expect(result.location).toBe('http://localhost/login?error=expired');
+    expect(result.cookie).toBe('');
+  });
+
   it('rejects a token issued for another audience', async () => {
     const { state } = await start('');
     const result = await callback(tokenFor(state, {}, 'http://evil.example'));

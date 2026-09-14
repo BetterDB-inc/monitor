@@ -96,7 +96,7 @@ export class BrokerController {
       claims = verifyBrokerToken(token, this.config.brokerKeys);
     } catch (error) {
       if (error instanceof BrokerTokenError) {
-        this.fail(reply, fallbackApp, 'invalid');
+        this.fail(reply, fallbackApp, error.reason);
         return;
       }
       throw error;

@@ -8,7 +8,17 @@ import {
 
 const MAX_TOKEN_AGE = '10m';
 
-export class BrokerTokenError extends Error {}
+export type BrokerTokenFailure = 'invalid' | 'expired';
+
+export class BrokerTokenError extends Error {
+  constructor(
+    message: string,
+    readonly reason: BrokerTokenFailure = 'invalid',
+  ) {
+    super(message);
+    this.name = 'BrokerTokenError';
+  }
+}
 
 function requireString(payload: jwt.JwtPayload, key: string): string {
   const value: unknown = payload[key];
@@ -35,8 +45,11 @@ function keyFor(token: string, keys: Record<string, string>): string {
   if (typeof kid !== 'string') {
     throw new BrokerTokenError('Broker token has no key id');
   }
-  const key = keys[kid];
-  if (key === undefined) {
+  if (Object.hasOwn(keys, kid) === false) {
+    throw new BrokerTokenError('Broker token key is not trusted');
+  }
+  const key: unknown = keys[kid];
+  if (typeof key !== 'string') {
     throw new BrokerTokenError('Broker token key is not trusted');
   }
   return key;
@@ -51,7 +64,10 @@ export function verifyBrokerToken(token: string, keys: Record<string, string>): 
       issuer: BROKER_TOKEN_ISSUER,
       maxAge: MAX_TOKEN_AGE,
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof jwt.TokenExpiredError) {
+      throw new BrokerTokenError('Broker token expired', 'expired');
+    }
     throw new BrokerTokenError('Broker token failed verification');
   }
   if (typeof payload === 'string') {
