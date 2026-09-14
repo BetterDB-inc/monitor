@@ -294,7 +294,9 @@ describe('envSchema', () => {
           expect(result.error.issues.some((i) => i.path.includes('OTEL_INGEST_TOKEN'))).toBe(true);
         }
       }
-      expect(envSchema.safeParse({ CLOUD_MODE: '0' }).success).toBe(true);
+      for (const negative of ['0', 'no', 'off', 'False']) {
+        expect(envSchema.safeParse({ CLOUD_MODE: negative }).success).toBe(true);
+      }
     });
 
     it('defaults OTEL_INGEST_ENABLED to true', () => {

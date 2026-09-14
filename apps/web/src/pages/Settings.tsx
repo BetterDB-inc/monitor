@@ -333,13 +333,27 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                 if (category.id !== 'dataRetention' && retentionError) {
                   // Discard the WHOLE draft, including any valid prefix that
                   // was committed to formData while typing (e.g. "3" en route
-                  // to "3650") — reverting only the visible input would let a
+                  // to "3650"): reverting only the visible input would let a
                   // hidden partial value ride along with a save made from
                   // another tab and silently shrink the retention window.
-                  setFormData((prev) => ({
-                    ...prev,
+                  // Recompute hasChanges from the reverted form so Save is
+                  // not left enabled by a draft that no longer exists.
+                  const reverted = {
+                    ...formData,
                     localRetentionDays: settings?.localRetentionDays ?? null,
-                  }));
+                  };
+                  setFormData(reverted);
+                  setHasChanges(
+                    settings
+                      ? (Object.keys(reverted) as Array<keyof AppSettings>).some(
+                          (key) =>
+                            key !== 'id' &&
+                            key !== 'createdAt' &&
+                            key !== 'updatedAt' &&
+                            reverted[key] !== settings[key],
+                        )
+                      : false,
+                  );
                   syncRetentionFrom(settings?.localRetentionDays);
                 }
               }}
