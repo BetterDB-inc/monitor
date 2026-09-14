@@ -10,6 +10,7 @@ import WebSocket from 'ws';
 import type { CliServerMessage } from '../src/cli/cli.types';
 import { BETTER_AUTH, BetterAuthInstance } from '../src/auth/better-auth.factory';
 import { READ_ONLY_MESSAGE } from '../src/auth/guards/mutation.guard';
+import { ROLE_REQUIRED_MESSAGE } from '../src/auth/guards/roles.guard';
 import { CliGateway } from '../src/cli/cli.gateway';
 import { MEMBER_READ_ONLY_MESSAGE } from '../src/cli/cli.service';
 import { TailGateway } from '../src/monitor/tail.gateway';
@@ -238,6 +239,54 @@ describe('Workspace authorization (E2E)', () => {
       headers: { cookie: ownerCookie },
     });
     expect(response.statusCode).toBe(201);
+  });
+
+  it('blocks a member from reading a single config parameter', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/metrics/config/maxmemory',
+      headers: { cookie: memberCookie },
+    });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual(expect.objectContaining({ message: ROLE_REQUIRED_MESSAGE }));
+  });
+
+  it('blocks a member from reading config values by pattern', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/metrics/config?pattern=*',
+      headers: { cookie: memberCookie },
+    });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual(expect.objectContaining({ message: ROLE_REQUIRED_MESSAGE }));
+  });
+
+  it('blocks a member from reading config values with a narrower pattern', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/metrics/config?pattern=require*',
+      headers: { cookie: memberCookie },
+    });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual(expect.objectContaining({ message: ROLE_REQUIRED_MESSAGE }));
+  });
+
+  it('lets the owner read a single config parameter', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/metrics/config/maxmemory',
+      headers: { cookie: ownerCookie },
+    });
+    expect(response.statusCode).toBe(200);
+  });
+
+  it('lets the owner read config values by pattern', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/metrics/config?pattern=maxmemory',
+      headers: { cookie: ownerCookie },
+    });
+    expect(response.statusCode).toBe(200);
   });
 
   it('lets member vector-search requests reach validation instead of the mutation guard', async () => {
