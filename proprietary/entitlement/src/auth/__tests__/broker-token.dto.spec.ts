@@ -31,4 +31,19 @@ describe('BrokerTokenDto', () => {
     expect(await errorsFor({ ...VALID, aud: 'ftp://host' })).toEqual(['aud']);
     expect(await errorsFor({ ...VALID, email: 'nope' })).toEqual(['email']);
   });
+
+  it('rejects an http-scheme avatarUrl', async () => {
+    expect(await errorsFor({ ...VALID, avatarUrl: 'http://a.example/x.png' })).toEqual([
+      'avatarUrl',
+    ]);
+  });
+
+  it('rejects an empty providerId and a providerId over 200 chars', async () => {
+    expect(await errorsFor({ ...VALID, providerId: '' })).toEqual(['providerId']);
+    expect(await errorsFor({ ...VALID, providerId: 'a'.repeat(201) })).toEqual(['providerId']);
+  });
+
+  it('rejects a name over 200 chars', async () => {
+    expect(await errorsFor({ ...VALID, name: 'a'.repeat(201) })).toEqual(['name']);
+  });
 });
