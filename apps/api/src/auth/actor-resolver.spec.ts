@@ -103,7 +103,52 @@ describe('ActorResolver', () => {
     expect(resolver.isReady()).toBe(true);
   });
 
+  describe('resolveSessionFromHeaders', () => {
+    it('returns the renewed session cookies alongside the actor', async () => {
+      const resolver = new ActorResolver(config, auth);
+      const getSession = jest.spyOn(auth.api, 'getSession');
+      getSession.mockResolvedValueOnce({
+        headers: new Headers([['set-cookie', 'better-auth.session_token=x; Max-Age=604800']]),
+        response: { user: { id: 'u1', email: 'owner@example.com', role: 'admin', isOwner: true } },
+      } as unknown as Awaited<ReturnType<typeof auth.api.getSession>>);
+      const resolution = await resolver.resolveSessionFromHeaders({ cookie }, '10.1.8.1');
+      expect(getSession.mock.calls[0][0]).toEqual(expect.objectContaining({ returnHeaders: true }));
+      expect(resolution).toEqual({
+        actor: expect.objectContaining({ userId: 'u1', role: 'admin', via: 'session' }),
+        setCookies: ['better-auth.session_token=x; Max-Age=604800'],
+      });
+      getSession.mockRestore();
+    });
+
+    it('returns no actor and no cookies without an auth instance', async () => {
+      const resolver = new ActorResolver(config, null);
+      await expect(resolver.resolveSessionFromHeaders({ cookie }, '10.0.0.1')).resolves.toEqual({
+        actor: null,
+        setCookies: [],
+      });
+    });
+  });
+
   describe('resolveFromUpgrade', () => {
+    it('returns only the actor when the session renewal carries a set-cookie', async () => {
+      const resolver = new ActorResolver(config, auth);
+      const getSession = jest.spyOn(auth.api, 'getSession');
+      getSession.mockResolvedValueOnce({
+        headers: new Headers([['set-cookie', 'better-auth.session_token=x; Max-Age=604800']]),
+        response: { user: { id: 'u1', email: 'owner@example.com', role: 'member' } },
+      } as unknown as Awaited<ReturnType<typeof auth.api.getSession>>);
+      const actor = await resolver.resolveFromUpgrade(makeUpgradeRequest(cookie, '10.1.8.1'));
+      expect(actor).toEqual({
+        userId: 'u1',
+        email: 'owner@example.com',
+        role: 'member',
+        isOwner: false,
+        via: 'session',
+        tokenId: null,
+      });
+      getSession.mockRestore();
+    });
+
     it('resolves the owner from an upgrade request carrying the cookie and remote address', async () => {
       const resolver = new ActorResolver(config, auth);
       const getSession = jest.spyOn(auth.api, 'getSession');

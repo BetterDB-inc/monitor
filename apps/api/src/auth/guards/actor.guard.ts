@@ -5,7 +5,7 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { FastifyRequest } from 'fastify';
+import { FastifyReply, FastifyRequest } from 'fastify';
 import type { Actor } from '@betterdb/shared';
 import { ActorResolver } from '../actor-resolver';
 import { isPublicPath } from './public-paths';
@@ -28,11 +28,23 @@ export class ActorGuard implements CanActivate {
     if (this.resolver.isReady() === false) {
       throw new ServiceUnavailableException('Workspace auth is not initialised');
     }
-    const actor = await this.resolver.resolveFromHeaders(request.headers, request.ip);
+    const reply = context.switchToHttp().getResponse<FastifyReply>();
+    const { actor, setCookies } = await this.resolver.resolveSessionFromHeaders(
+      request.headers,
+      request.ip,
+    );
+    this.forwardSetCookies(setCookies, reply);
     if (actor !== null) {
       request.actor = actor;
       return true;
     }
     throw new UnauthorizedException('Sign in required');
+  }
+
+  private forwardSetCookies(cookies: string[], reply: FastifyReply): void {
+    if (cookies.length === 0) {
+      return;
+    }
+    reply.header('set-cookie', cookies);
   }
 }

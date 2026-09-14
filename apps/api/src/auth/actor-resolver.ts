@@ -12,6 +12,11 @@ interface SessionUserShape {
   isOwner?: unknown;
 }
 
+export interface SessionResolution {
+  actor: Actor | null;
+  setCookies: string[];
+}
+
 @Injectable()
 export class ActorResolver {
   private readonly auth: BetterAuthInstance | null;
@@ -31,26 +36,29 @@ export class ActorResolver {
     return this.auth !== null;
   }
 
-  async resolveFromHeaders(headers: IncomingHttpHeaders, clientIp: string): Promise<Actor | null> {
+  async resolveSessionFromHeaders(
+    headers: IncomingHttpHeaders,
+    clientIp: string,
+  ): Promise<SessionResolution> {
     if (this.auth === null) {
-      return null;
+      return { actor: null, setCookies: [] };
     }
     const webHeaders = toWebHeaders(headers);
     webHeaders.set(CLIENT_IP_HEADER, clientIp);
-    const session = await this.auth.api.getSession({ headers: webHeaders });
+    const { headers: authHeaders, response: session } = await this.auth.api.getSession({
+      headers: webHeaders,
+      returnHeaders: true,
+    });
+    const setCookies = authHeaders.getSetCookie();
     if (session === null) {
-      return null;
+      return { actor: null, setCookies };
     }
-    const user = session.user as SessionUserShape;
-    const role: WorkspaceRole = user.role === 'admin' ? 'admin' : 'member';
-    return {
-      userId: user.id,
-      email: user.email,
-      role,
-      isOwner: user.isOwner === true,
-      via: 'session',
-      tokenId: null,
-    };
+    return { actor: this.toActor(session.user as SessionUserShape), setCookies };
+  }
+
+  async resolveFromHeaders(headers: IncomingHttpHeaders, clientIp: string): Promise<Actor | null> {
+    const { actor } = await this.resolveSessionFromHeaders(headers, clientIp);
+    return actor;
   }
 
   async resolveFromUpgrade(request: IncomingMessage): Promise<Actor | null> {
@@ -62,5 +70,17 @@ export class ActorResolver {
     } catch {
       return null;
     }
+  }
+
+  private toActor(user: SessionUserShape): Actor {
+    const role: WorkspaceRole = user.role === 'admin' ? 'admin' : 'member';
+    return {
+      userId: user.id,
+      email: user.email,
+      role,
+      isOwner: user.isOwner === true,
+      via: 'session',
+      tokenId: null,
+    };
   }
 }
