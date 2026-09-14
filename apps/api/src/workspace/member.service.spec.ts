@@ -177,6 +177,44 @@ describe('MemberService', () => {
     const response = await service.signIn('r@example.com', 'correct horse battery', new Headers());
     expect(response.status).toBe(401);
   });
+
+  it('creates a social member, counts users, and links a provider once', async () => {
+    expect(await service.count()).toBe(0);
+    const created = await service.createSocial({
+      email: 'Social@Example.com',
+      name: 'Social',
+      image: 'https://example.com/avatar.png',
+      role: 'admin',
+      isOwner: true,
+      provider: 'google',
+      providerAccountId: 'google-social@example.com',
+    });
+    expect(created).toEqual({
+      id: expect.any(String),
+      email: 'social@example.com',
+      name: 'Social',
+      role: 'admin',
+      isOwner: true,
+      createdAt: expect.any(Number),
+    });
+    expect(await service.count()).toBe(1);
+
+    await service.ensureProviderLink(created.id, 'github', 'github-social@example.com');
+    await service.ensureProviderLink(created.id, 'github', 'github-social@example.com');
+
+    const context = await auth.$context;
+    const accounts = await context.internalAdapter.findAccountByUserId(created.id);
+    expect(
+      accounts.filter((account) => {
+        return account.providerId === 'github';
+      }),
+    ).toHaveLength(1);
+    expect(
+      accounts.map((account) => {
+        return account.providerId;
+      }),
+    ).toEqual(expect.arrayContaining(['google', 'github']));
+  });
 });
 
 type AuthAdapter = Awaited<BetterAuthInstance['$context']>['adapter'];

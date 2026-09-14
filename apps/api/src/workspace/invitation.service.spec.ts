@@ -332,6 +332,33 @@ describe('InvitationService', () => {
     expect(await service.release(invitation.id)).toBe(false);
   });
 
+  it('claims a pending invitation by email when the token matches, and refuses otherwise', async () => {
+    const { invitation, token } = await service.create({
+      email: 'claim@example.com',
+      role: 'admin',
+      invitedBy: 'owner-id',
+    });
+    expect(await service.claimForEmail('unknown@example.com', null)).toBeNull();
+    expect(
+      await service.claimForEmail('Claim@Example.com', hashInvitationToken('wrong-token')),
+    ).toBeNull();
+    expect((await repository.findById(invitation.id))?.status).toBe('pending');
+    expect(await service.claimForEmail('Claim@Example.com', hashInvitationToken(token))).toEqual({
+      ...invitation,
+      status: 'accepted',
+    });
+    expect((await repository.findById(invitation.id))?.status).toBe('accepted');
+
+    const { invitation: expiring } = await service.create({
+      email: 'expiring@example.com',
+      role: 'member',
+      invitedBy: 'owner-id',
+    });
+    await repository.save({ ...expiring, expiresAt: now });
+    expect(await service.claimForEmail('expiring@example.com', null)).toBeNull();
+    expect((await repository.findById(expiring.id))?.status).toBe('pending');
+  });
+
   it('builds the invite link from the public URL, else from the request origin', () => {
     expect(service.inviteUrl('tok', 'http://request.local')).toBe(
       'https://monitor.example.com/invite/tok',

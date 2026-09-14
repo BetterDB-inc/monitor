@@ -1,6 +1,6 @@
 import { ConflictException, Inject, Injectable, Logger } from '@nestjs/common';
-import type { WorkspaceRole } from '@betterdb/shared';
-import { BETTER_AUTH, type BetterAuthInstance } from '../auth/better-auth.factory';
+import type { BrokerProvider, WorkspaceRole } from '@betterdb/shared';
+import { BETTER_AUTH, type BetterAuthInstance, countUsers } from '../auth/better-auth.factory';
 
 export const OWNERSHIP_CHANGED_MESSAGE =
   'Ownership changed while this request was running. Reload and try again.';
@@ -10,6 +10,10 @@ export const MEMBER_CHANGED_MESSAGE =
 const LOCAL_CREDENTIAL_ISSUER = 'local:credential';
 const CREDENTIAL_PROVIDER = 'credential';
 export const LIST_LIMIT = 1000;
+
+function brokerAccountIssuer(provider: BrokerProvider): string {
+  return `local:oauth:${provider}`;
+}
 
 export interface MemberRecord {
   id: string;
@@ -25,6 +29,16 @@ export interface CreateMemberInput {
   name: string;
   password: string;
   role: WorkspaceRole;
+}
+
+export interface CreateSocialMemberInput {
+  email: string;
+  name: string | null;
+  image: string | null;
+  role: WorkspaceRole;
+  isOwner: boolean;
+  provider: BrokerProvider;
+  providerAccountId: string;
 }
 
 type AuthContext = Awaited<BetterAuthInstance['$context']>;
@@ -218,6 +232,59 @@ export class MemberService {
     } catch {
       return;
     }
+  }
+
+  async count(): Promise<number> {
+    return countUsers(this.auth);
+  }
+
+  async createSocial(input: CreateSocialMemberInput): Promise<MemberRecord> {
+    const context = await this.auth.$context;
+    const email = input.email.trim().toLowerCase();
+    const user = (await context.internalAdapter.createUser(
+      {
+        email,
+        name: input.name ?? email,
+        image: input.image,
+        emailVerified: true,
+        role: input.role,
+        isOwner: input.isOwner,
+      },
+      { method: 'social' } as never,
+    )) as StoredUser;
+    try {
+      await context.internalAdapter.linkAccount({
+        userId: user.id,
+        providerId: input.provider,
+        issuer: brokerAccountIssuer(input.provider),
+        accountId: input.providerAccountId,
+      });
+    } catch (error) {
+      await this.discardUser(context, user.id);
+      throw error;
+    }
+    return toMember(user);
+  }
+
+  async ensureProviderLink(
+    userId: string,
+    provider: BrokerProvider,
+    providerAccountId: string,
+  ): Promise<void> {
+    const context = await this.auth.$context;
+    const accounts = await context.internalAdapter.findAccountByUserId(userId);
+    const linked = accounts.some((account) => {
+      return account.providerId === provider;
+    });
+    if (linked === true) {
+      return;
+    }
+    await context.internalAdapter.linkAccount({
+      userId,
+      providerId: provider,
+      issuer: brokerAccountIssuer(provider),
+      accountId: providerAccountId,
+    });
   }
 
   async setRole(id: string, role: WorkspaceRole): Promise<void> {
