@@ -12,7 +12,19 @@
       "persistent": true
     },
     "lint": {
-      "dependsOn": ["^lint"]
+      "cache": false,
+      "outputs": [],
+      "inputs": [
+        "src/**",
+        "test/**",
+        "**/*.ts",
+        "**/*.tsx",
+        "**/*.js",
+        "**/*.mjs",
+        "**/*.cjs",
+        "eslint.config.mjs",
+        "package.json"
+      ]
     },
     "clean": {
       "cache": false
