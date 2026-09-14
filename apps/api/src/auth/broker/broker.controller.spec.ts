@@ -218,7 +218,7 @@ describe('BrokerController', () => {
       details: { method: 'register', provider: 'google' },
     });
     expect(built.telemetry.trackWorkspaceFirstRegister).toHaveBeenCalledWith({
-      method: 'google',
+      method: 'broker',
     });
   });
 
@@ -307,7 +307,7 @@ describe('BrokerController', () => {
     expect(invitee?.isOwner).toBe(false);
     expect(built.telemetry.trackInviteAccepted).toHaveBeenCalledWith({
       role: 'admin',
-      method: 'google',
+      method: 'broker',
     });
   });
 
@@ -316,7 +316,7 @@ describe('BrokerController', () => {
     const result = await callback(tokenFor(state));
     expect(result.location).toBe('http://localhost/');
     expect(result.cookie).toContain('better-auth.session_token=');
-    expect(built.telemetry.trackUserLogin).toHaveBeenCalledWith({ method: 'google' });
+    expect(built.telemetry.trackUserLogin).toHaveBeenCalledWith({ method: 'broker' });
     expect(await latestLogin()).toEqual({
       actorEmail: 'owner@example.com',
       details: { method: 'google', provider: 'google' },

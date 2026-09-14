@@ -2,8 +2,10 @@ import { Injectable, Optional, Inject, OnModuleInit } from '@nestjs/common';
 import { isCloudMode } from '../common/utils/cloud-mode';
 import { ConfigService } from '@nestjs/config';
 import { LicenseService } from '@proprietary/licenses';
-import type { BrokerProvider, WorkspaceRole } from '@betterdb/shared';
+import type { WorkspaceRole } from '@betterdb/shared';
 import { TelemetryPort } from '../common/interfaces/telemetry-port.interface';
+
+export type AuthMethod = 'password' | 'broker';
 
 @Injectable()
 export class UsageTelemetryService implements OnModuleInit {
@@ -109,18 +111,15 @@ export class UsageTelemetryService implements OnModuleInit {
     this.sendEvent('user_invited', opts);
   }
 
-  async trackInviteAccepted(opts: {
-    role: WorkspaceRole;
-    method: 'password' | BrokerProvider;
-  }): Promise<void> {
+  async trackInviteAccepted(opts: { role: WorkspaceRole; method: AuthMethod }): Promise<void> {
     this.sendEvent('invite_accepted', opts);
   }
 
-  async trackWorkspaceFirstRegister(opts: { method: 'password' | BrokerProvider }): Promise<void> {
+  async trackWorkspaceFirstRegister(opts: { method: AuthMethod }): Promise<void> {
     this.sendEvent('workspace_first_register', opts);
   }
 
-  async trackUserLogin(opts: { method: 'password' | BrokerProvider }): Promise<void> {
+  async trackUserLogin(opts: { method: AuthMethod }): Promise<void> {
     this.sendEvent('user_login', opts);
   }
 

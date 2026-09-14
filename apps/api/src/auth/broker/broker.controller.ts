@@ -163,14 +163,14 @@ export class BrokerController {
       details: { method, provider },
     });
     if (resolved.entrance === 'register') {
-      void this.telemetry.trackWorkspaceFirstRegister({ method: provider });
+      void this.telemetry.trackWorkspaceFirstRegister({ method: 'broker' });
       return;
     }
     if (resolved.entrance === 'invite') {
-      void this.telemetry.trackInviteAccepted({ role: resolved.member.role, method: provider });
+      void this.telemetry.trackInviteAccepted({ role: resolved.member.role, method: 'broker' });
       return;
     }
-    void this.telemetry.trackUserLogin({ method: provider });
+    void this.telemetry.trackUserLogin({ method: 'broker' });
   }
 
   private fail(reply: FastifyReply, appOrigin: string | null, code: BrokerErrorCode): void {
