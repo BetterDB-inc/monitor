@@ -175,7 +175,7 @@ export class BrokerController {
 
   private requestOrigin(req: FastifyRequest): string {
     const host = req.host === '' ? 'localhost' : req.host;
-    return `${req.protocol}://${host}`;
+    return new URL(`${req.protocol}://${host}`).origin;
   }
 
   private callbackOrigin(req: FastifyRequest): string {

@@ -295,6 +295,58 @@ describe('BrokerController', () => {
     });
   });
 
+  it('signs in when the request host carries an explicit default port', async () => {
+    const devConfig = resolveWorkspaceConfig({
+      AUTH_BROKER_URL: 'https://broker.example',
+      AUTH_BROKER_PUBLIC_KEY: publicKey,
+      AUTH_BROKER_KEY_ID: 'brk-test',
+    });
+    const withDefaultPort = await buildApp(devConfig);
+    try {
+      const startResponse = await withDefaultPort.app.inject({
+        method: 'GET',
+        url: '/auth/broker/start',
+        headers: { host: 'localhost:80' },
+      });
+      expect(startResponse.statusCode).toBe(302);
+      const location = new URL(String(startResponse.headers.location));
+      const redirect = new URL(String(location.searchParams.get('redirect')));
+      const state = String(location.searchParams.get('state'));
+      const token = jwt.sign(
+        {
+          typ: 'self-hosted-broker',
+          email: 'owner@example.com',
+          name: 'Owner',
+          avatarUrl: null,
+          provider: 'google',
+          providerId: 'g-owner',
+          state,
+        },
+        privateKey,
+        {
+          algorithm: 'RS256',
+          keyid: 'brk-test',
+          issuer: 'betterdb-entitlement',
+          audience: redirect.origin,
+          expiresIn: 300,
+        },
+      );
+      const callbackResponse = await withDefaultPort.app.inject({
+        method: 'GET',
+        url: `/auth/broker/callback?token=${encodeURIComponent(token)}`,
+        headers: { host: 'localhost:80' },
+        remoteAddress: nextIp(),
+      });
+      expect(callbackResponse.statusCode).toBe(302);
+      expect(String(callbackResponse.headers['set-cookie'] ?? '')).toContain(
+        'better-auth.session_token=',
+      );
+    } finally {
+      await withDefaultPort.app.close();
+      await withDefaultPort.storage.close();
+    }
+  });
+
   it('answers 404 on both routes when the broker is disabled', async () => {
     const disabled = await buildApp(
       resolveWorkspaceConfig({ ...BASE_ENV, AUTH_BROKER_DISABLED: 'true' }),
