@@ -54,10 +54,10 @@ const admin: Actor = {
   tokenId: null,
 };
 
-function makeRequest(cookie?: string): IncomingMessage {
+function makeRequest(cookie?: string, forwardedFor?: string): IncomingMessage {
   return {
     url: '/cli/ws',
-    headers: { host: 'localhost', cookie },
+    headers: { host: 'localhost', cookie, 'x-forwarded-for': forwardedFor },
     socket: { remoteAddress: '10.0.0.5' },
   } as unknown as IncomingMessage;
 }
@@ -79,6 +79,14 @@ function resolverWith(
     },
     resolveFromUpgrade: jest.fn().mockResolvedValue(actor),
   } as unknown as ActorResolver;
+}
+
+function restoreTrustProxyEnv(value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env.TRUST_PROXY;
+    return;
+  }
+  process.env.TRUST_PROXY = value;
 }
 
 async function flush(): Promise<void> {
@@ -547,6 +555,52 @@ describe('CliGateway activity recording', () => {
         details: { command: 'GET', argCount: 1, args: ['a'] },
       }),
     );
+  });
+
+  it('records the forwarded address when trust proxy is enabled', async () => {
+    const originalTrustProxy = process.env.TRUST_PROXY;
+    process.env.TRUST_PROXY = 'true';
+    try {
+      const execute = jest
+        .fn()
+        .mockResolvedValue({ type: 'result', result: 'PONG', resultType: 'string', durationMs: 1 });
+      const activity = activityWith();
+      const gateway = new CliGateway(
+        { execute } as unknown as CliService,
+        resolverWith(true, admin),
+        activity.service,
+      );
+      const request = makeRequest('c=1', '203.0.113.9');
+      const ws = connect(gateway, request);
+      send(ws, 'PING');
+      await flush();
+      expect(activity.record).toHaveBeenCalledWith(expect.objectContaining({ ip: '203.0.113.9' }));
+    } finally {
+      restoreTrustProxyEnv(originalTrustProxy);
+    }
+  });
+
+  it('records the socket address when trust proxy is disabled, even with a forwarded header', async () => {
+    const originalTrustProxy = process.env.TRUST_PROXY;
+    delete process.env.TRUST_PROXY;
+    try {
+      const execute = jest
+        .fn()
+        .mockResolvedValue({ type: 'result', result: 'PONG', resultType: 'string', durationMs: 1 });
+      const activity = activityWith();
+      const gateway = new CliGateway(
+        { execute } as unknown as CliService,
+        resolverWith(true, admin),
+        activity.service,
+      );
+      const request = makeRequest('c=1', '203.0.113.9');
+      const ws = connect(gateway, request);
+      send(ws, 'PING');
+      await flush();
+      expect(activity.record).toHaveBeenCalledWith(expect.objectContaining({ ip: '10.0.0.5' }));
+    } finally {
+      restoreTrustProxyEnv(originalTrustProxy);
+    }
   });
 
   it('records nothing when no actor resolves', async () => {

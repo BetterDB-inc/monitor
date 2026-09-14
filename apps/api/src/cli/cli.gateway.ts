@@ -7,6 +7,8 @@ import { ActorResolver } from '../auth/actor-resolver';
 import { rejectUpgrade } from '../auth/upgrade-response';
 import { isReadCommand } from '../cluster/write-commands';
 import { ActivityService } from '../activity/activity.service';
+import { upgradeClientIp } from '../config/client-ip';
+import { resolveTrustProxy, TrustProxySetting } from '../config/trust-proxy';
 import { parseCommandLine } from './command-parser';
 import { CliService } from './cli.service';
 import { CliExecuteMessage, CliServerMessage } from './cli.types';
@@ -64,6 +66,7 @@ interface CachedAccess {
 
 interface CliConnectionState {
   request: IncomingMessage;
+  ip: string;
   tokens: number;
   lastRefill: number;
   access: CachedAccess | null;
@@ -74,6 +77,7 @@ export class CliGateway implements OnModuleDestroy {
   private readonly logger = new Logger(CliGateway.name);
   private readonly wss: WebSocketServer;
   private readonly connections = new Map<WebSocket, CliConnectionState>();
+  private readonly trustProxy: TrustProxySetting = resolveTrustProxy(process.env);
 
   constructor(
     private readonly cliService: CliService,
@@ -134,8 +138,10 @@ export class CliGateway implements OnModuleDestroy {
 
   private attach(ws: WebSocket, request: IncomingMessage): void {
     this.logger.log('CLI WebSocket client connected');
+    const ip = upgradeClientIp(request, this.trustProxy);
     this.connections.set(ws, {
       request,
+      ip,
       tokens: MAX_COMMANDS_PER_SECOND,
       lastRefill: Date.now(),
       access: null,
@@ -148,7 +154,7 @@ export class CliGateway implements OnModuleDestroy {
     if (state === undefined) {
       return { sessionValid: true, readOnly: true, actor: null, ip: '' };
     }
-    const ip = state.request.socket.remoteAddress ?? '';
+    const ip = state.ip;
     if (this.isAuthEnabled() === false) {
       return { sessionValid: true, readOnly: false, actor: null, ip };
     }
