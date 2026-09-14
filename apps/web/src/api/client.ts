@@ -9,6 +9,10 @@ export function apiOrigin(): string {
   return new URL(API_BASE, window.location.origin).origin;
 }
 
+export function apiUrl(path: string): string {
+  return `${API_BASE}${path}`;
+}
+
 // Connection ID header name (must match backend CONNECTION_ID_HEADER)
 const CONNECTION_ID_HEADER = 'x-connection-id';
 

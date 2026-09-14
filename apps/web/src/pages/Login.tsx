@@ -3,6 +3,8 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { UnauthorizedError } from '../api/client';
 import { workspaceApi } from '../api/workspace';
 import { useAuth } from '../contexts/AuthContext';
+import { BrokerButtons } from '../components/auth/BrokerButtons';
+import { brokerErrorMessage } from '../components/auth/broker-errors';
 import { CredentialsForm } from '../components/auth/CredentialsForm';
 import { resolveNext } from '../components/auth/resolve-next';
 
@@ -16,6 +18,8 @@ export function Login(): ReactElement {
       title="Sign in"
       submitLabel="Sign in"
       askName={false}
+      notice={brokerErrorMessage(params.get('error'))}
+      footer={<BrokerButtons next={resolveNext(params.get('next'))} />}
       onSubmit={async ({ email, password }) => {
         try {
           await workspaceApi.signIn({ email, password });

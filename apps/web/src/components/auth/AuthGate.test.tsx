@@ -12,6 +12,7 @@ const { authState } = vi.hoisted(() => {
       bootstrapped: true,
       user: null as null | { userId: string },
       isCloud: false,
+      brokerEnabled: false,
       refresh: vi.fn(),
       signOut: vi.fn(),
     },

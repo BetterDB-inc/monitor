@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { workspaceApi } from '../api/workspace';
 import { useAuth } from '../contexts/AuthContext';
+import { BrokerButtons } from '../components/auth/BrokerButtons';
 import { CredentialsForm } from '../components/auth/CredentialsForm';
 
 export function Register(): ReactElement {
@@ -14,6 +15,7 @@ export function Register(): ReactElement {
       title="Create the owner account"
       submitLabel="Create account"
       askName
+      footer={<BrokerButtons />}
       onSubmit={async ({ email, password, name }) => {
         try {
           await workspaceApi.signUp({ email, password, name });

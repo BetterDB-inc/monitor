@@ -15,7 +15,7 @@ vi.mock('../api/workspace', () => ({
   },
 }));
 vi.mock('../contexts/AuthContext', () => ({
-  useAuth: () => ({ refresh }),
+  useAuth: () => ({ refresh, brokerEnabled: false }),
 }));
 
 function renderAt(token: string): void {
