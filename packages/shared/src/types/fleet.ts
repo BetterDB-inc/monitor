@@ -10,6 +10,14 @@
 
 export type FleetInstanceStatus = 'up' | 'down' | 'unknown';
 
+export interface FleetCveSummary {
+  critical: number;
+  kev: number;
+  fingerprint: string;
+  /** True when the scan is partial or the dataset is stale/empty. */
+  stale: boolean;
+}
+
 export interface FleetInstanceSummary {
   connectionId: string;
   name: string;
@@ -29,6 +37,8 @@ export interface FleetInstanceSummary {
   lastSeen: number | null;
   /** Present when the instance is down/unknown (ping failed, timeout, ...). */
   error?: string;
+  /** Latest CVE rollup for this connection. Absent when never scanned. */
+  cve?: FleetCveSummary | null;
 }
 
 export type FleetOverallStatus = 'healthy' | 'degraded' | 'unhealthy' | 'waiting';

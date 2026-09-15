@@ -23,6 +23,8 @@ export enum WebhookEventType {
   COMPLIANCE_ALERT = 'compliance.alert',
   METRIC_FORECAST_LIMIT = 'metric_forecast.limit',
   INFERENCE_SLA_BREACH = 'inference.sla.breach',
+  CVE_CRITICAL_DETECTED = 'cve.critical_detected',
+  CVE_KEV_DETECTED = 'cve.kev_detected',
   MONITOR_SESSION_STARTED = 'monitor.session.started',
   MONITOR_SESSION_COMPLETED = 'monitor.session.completed',
   MONITOR_SESSION_TRUNCATED = 'monitor.session.truncated',
@@ -63,6 +65,7 @@ export const PRO_EVENTS: WebhookEventType[] = [
   WebhookEventType.LATENCY_REGRESSION_DETECTED,
   WebhookEventType.INFERENCE_SLA_BREACH,
   WebhookEventType.MONITOR_TRIGGER_CREATED,
+  WebhookEventType.CVE_CRITICAL_DETECTED,
 ];
 
 export const ENTERPRISE_EVENTS: WebhookEventType[] = [
@@ -72,6 +75,7 @@ export const ENTERPRISE_EVENTS: WebhookEventType[] = [
   WebhookEventType.ACL_VIOLATION,
   WebhookEventType.ACL_MODIFIED,
   WebhookEventType.CONFIG_CHANGED,
+  WebhookEventType.CVE_KEV_DETECTED,
 ];
 
 // ============================================================================
@@ -113,6 +117,7 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.LATENCY_REGRESSION_DETECTED]: Tier.pro,
   [WebhookEventType.INFERENCE_SLA_BREACH]: Tier.pro,
   [WebhookEventType.MONITOR_TRIGGER_CREATED]: Tier.pro,
+  [WebhookEventType.CVE_CRITICAL_DETECTED]: Tier.pro,
 
   // Enterprise tier events
   [WebhookEventType.AUDIT_POLICY_VIOLATION]: Tier.enterprise,
@@ -120,6 +125,7 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.ACL_VIOLATION]: Tier.enterprise,
   [WebhookEventType.ACL_MODIFIED]: Tier.enterprise,
   [WebhookEventType.CONFIG_CHANGED]: Tier.enterprise,
+  [WebhookEventType.CVE_KEV_DETECTED]: Tier.enterprise,
 };
 
 /**
@@ -507,6 +513,55 @@ export interface IWebhookEventsProService {
     instance: WebhookInstanceInfo;
     connectionId?: string;
   }): Promise<void>;
+
+  dispatchCveCriticalDetected(data: CveCriticalDetectedData): Promise<void>;
+}
+
+/**
+ * Shared CVE webhook finding summary (top 3 to keep payload bounded).
+ */
+export interface CveWebhookFinding {
+  cveId: string;
+  severity: string;
+  knownExploited: boolean;
+  fixedIn?: string;
+}
+
+/**
+ * Payload for cve.critical_detected (Pro).
+ * Dispatched only when new critical findings appear vs the previous scan.
+ */
+export interface CveCriticalDetectedData {
+  criticalCount: number;
+  kevCount: number;
+  fingerprint: string;
+  datasetVersion: string;
+  topFindings: CveWebhookFinding[];
+  drift: boolean;
+  partial: boolean;
+  message: string;
+  timestamp: number;
+  instance: WebhookInstanceInfo;
+  connectionId?: string;
+}
+
+/**
+ * Payload for cve.kev_detected (Enterprise).
+ * Dispatched only when new KEV-exploited findings appear vs the previous scan,
+ * even when severity is below critical.
+ */
+export interface CveKevDetectedData {
+  kevCount: number;
+  criticalCount: number;
+  fingerprint: string;
+  datasetVersion: string;
+  topFindings: CveWebhookFinding[];
+  drift: boolean;
+  partial: boolean;
+  message: string;
+  timestamp: number;
+  instance: WebhookInstanceInfo;
+  connectionId?: string;
 }
 
 /**
@@ -566,4 +621,6 @@ export interface IWebhookEventsEnterpriseService {
     instance: WebhookInstanceInfo;
     connectionId?: string;
   }): Promise<void>;
+
+  dispatchCveKevDetected(data: CveKevDetectedData): Promise<void>;
 }
