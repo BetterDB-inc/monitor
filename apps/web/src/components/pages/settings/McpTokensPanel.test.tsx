@@ -100,6 +100,34 @@ describe('McpTokensPanel', () => {
     });
   });
 
+  it('generates only one token when Enter is pressed again while generating', async () => {
+    api.list.mockResolvedValue([]);
+    let resolveGenerate: (value: unknown) => void = () => {};
+    api.generate.mockReturnValue(
+      new Promise((resolve) => {
+        resolveGenerate = resolve;
+      }),
+    );
+    renderWithQuery(<McpTokensPanel />);
+    await waitFor(() => {
+      expect(api.list).toHaveBeenCalledTimes(1);
+    });
+    const input = screen.getByPlaceholderText('Token name (e.g., claude-code)');
+    fireEvent.change(input, { target: { value: 'laptop' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(input).toBeDisabled();
+    resolveGenerate({
+      token: 'bdb_mcp_secret',
+      id: 't3',
+      name: 'laptop',
+      type: 'mcp',
+      expiresAt: Date.now() + DAY_MS,
+    });
+    expect(await screen.findByLabelText('MCP token')).toHaveValue('bdb_mcp_secret');
+    expect(api.generate).toHaveBeenCalledTimes(1);
+  });
+
   it('revokes a token and shows server errors', async () => {
     api.list.mockResolvedValue([OWN]);
     api.revoke.mockRejectedValue(new Error('Token not found'));

@@ -48,6 +48,7 @@ export function McpTokensPanel(): ReactElement {
   const { tokens, invalidate } = useMcpTokens(true);
   const [name, setName] = useState('');
   const [generating, setGenerating] = useState(false);
+  const generatingRef = useRef(false);
   const [generated, setGenerated] = useState<GeneratedToken | null>(null);
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
@@ -66,9 +67,10 @@ export function McpTokensPanel(): ReactElement {
   }, []);
 
   const handleGenerate = async (): Promise<void> => {
-    if (trimmedName.length === 0) {
+    if (trimmedName.length === 0 || generatingRef.current === true) {
       return;
     }
+    generatingRef.current = true;
     setGenerating(true);
     setError(null);
     try {
@@ -81,6 +83,7 @@ export function McpTokensPanel(): ReactElement {
     } catch (err) {
       setError(errorMessage(err, 'Failed to generate token'));
     } finally {
+      generatingRef.current = false;
       setGenerating(false);
     }
   };
@@ -177,6 +180,7 @@ export function McpTokensPanel(): ReactElement {
               placeholder="Token name (e.g., claude-code)"
               className="flex-1 px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
               onKeyDown={handleNameKeyDown}
+              disabled={generating === true}
             />
             <button
               onClick={() => {
