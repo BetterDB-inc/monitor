@@ -3,6 +3,7 @@ import type { RawDatabaseHandle } from '../storage/raw-database-handle';
 import type { BetterAuthModules } from './better-auth-esm';
 import { loadBetterAuthModules } from './better-auth-esm';
 import { brokerSessionPlugin } from './broker/broker-session.plugin';
+import { originsForHost } from './trusted-origins';
 import type { WorkspaceConfig } from './workspace-config';
 
 export const BETTER_AUTH = 'BETTER_AUTH';
@@ -28,16 +29,11 @@ function sameHostOrigins(request: Request | undefined): string[] {
   if (request === undefined) {
     return [];
   }
-  let host: string;
   try {
-    host = new URL(request.url).host;
+    return originsForHost(new URL(request.url).host);
   } catch {
     return [];
   }
-  if (host === '') {
-    return [];
-  }
-  return [`http://${host}`, `https://${host}`];
 }
 
 function trustedOriginsFor(config: WorkspaceConfig): (request: Request | undefined) => string[] {
