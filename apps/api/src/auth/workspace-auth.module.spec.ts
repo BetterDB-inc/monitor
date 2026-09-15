@@ -24,6 +24,9 @@ async function boot(env: Record<string, string | undefined>): Promise<NestFastif
       trackUserInvited: jest.fn(),
       trackInviteAccepted: jest.fn(),
       trackAppStart: jest.fn(),
+      trackUserLogin: jest.fn(),
+      trackWorkspaceFirstRegister: jest.fn(),
+      trackMemberRemoved: jest.fn(),
     })
     .compile();
   const app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
@@ -42,6 +45,7 @@ describe('WorkspaceAuthModule', () => {
     const app = await boot({ WORKSPACE_DISABLED: 'true', STORAGE_TYPE: 'memory' });
     expect((await app.inject({ method: 'GET', url: '/auth/get-session' })).statusCode).toBe(404);
     expect((await app.inject({ method: 'GET', url: '/workspace/me' })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'GET', url: '/agent-tokens' })).statusCode).toBe(404);
     const status = await app.inject({ method: 'GET', url: '/system/workspace' });
     expect(status.json()).toEqual({ mode: 'disabled', enabled: false, bootstrapped: false });
     await app.close();
@@ -55,6 +59,7 @@ describe('WorkspaceAuthModule', () => {
     });
     expect((await app.inject({ method: 'GET', url: '/auth/get-session' })).statusCode).toBe(200);
     expect((await app.inject({ method: 'GET', url: '/workspace/me' })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'GET', url: '/agent-tokens' })).statusCode).toBe(401);
     const status = await app.inject({ method: 'GET', url: '/system/workspace' });
     expect(status.json()).toEqual({ mode: 'self-hosted', enabled: true, bootstrapped: false });
     await app.close();

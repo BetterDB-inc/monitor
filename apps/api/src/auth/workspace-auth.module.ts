@@ -8,6 +8,8 @@ import { StorageModule } from '../storage/storage.module';
 import { InvitationService } from '../workspace/invitation.service';
 import { InviteController } from '../workspace/invite.controller';
 import { MemberService } from '../workspace/member.service';
+import { PersonalTokenService } from '../workspace/personal-token.service';
+import { PersonalTokensController } from '../workspace/personal-tokens.controller';
 import { WorkspaceController } from '../workspace/workspace.controller';
 import { WORKSPACE_STATUS, WorkspaceStatusService } from '../workspace/workspace-status.service';
 import { ActorResolver } from './actor-resolver';
@@ -88,8 +90,13 @@ export class WorkspaceAuthModule {
         inject: ['STORAGE_CLIENT'],
       });
       providers.push({ provide: WORKSPACE_STATUS, useClass: WorkspaceStatusService });
-      providers.push(MemberService, InvitationService);
-      controllers.push(BetterAuthController, WorkspaceController, InviteController);
+      providers.push(MemberService, InvitationService, PersonalTokenService);
+      controllers.push(
+        BetterAuthController,
+        WorkspaceController,
+        InviteController,
+        PersonalTokensController,
+      );
       exports.push(BETTER_AUTH, WORKSPACE_STATUS);
     }
     return {

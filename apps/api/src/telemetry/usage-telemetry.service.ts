@@ -114,6 +114,18 @@ export class UsageTelemetryService implements OnModuleInit {
     this.sendEvent('invite_accepted', opts);
   }
 
+  async trackWorkspaceFirstRegister(opts: { method: 'password' }): Promise<void> {
+    this.sendEvent('workspace_first_register', opts);
+  }
+
+  async trackUserLogin(opts: { method: 'password' }): Promise<void> {
+    this.sendEvent('user_login', opts);
+  }
+
+  async trackMemberRemoved(): Promise<void> {
+    this.sendEvent('member_removed', {});
+  }
+
   async trackInteractionAfterIdle(idleDurationMs: number): Promise<void> {
     this.sendEvent('interaction_after_idle', { idleDurationMs });
   }

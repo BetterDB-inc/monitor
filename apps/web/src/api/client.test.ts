@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  apiOrigin,
   fetchApi,
   PaymentRequiredError,
   UnauthorizedError,
@@ -268,5 +269,34 @@ describe('fetchApi 401 handling', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401 }));
     await expect(fetchApi('/connections')).rejects.toBeInstanceOf(UnauthorizedError);
     expect(window.location.assign).not.toHaveBeenCalled();
+  });
+});
+
+describe('apiOrigin', () => {
+  const originalLocation = window.location;
+
+  afterEach(() => {
+    Object.defineProperty(window, 'location', { configurable: true, value: originalLocation });
+    vi.unstubAllEnvs();
+  });
+
+  it('points at the API port in dev, not the Vite origin', () => {
+    vi.stubEnv('PROD', false);
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...originalLocation, origin: 'http://localhost:5173' },
+    });
+
+    expect(apiOrigin()).toBe('http://localhost:3001');
+  });
+
+  it('matches the browser origin in production', () => {
+    vi.stubEnv('PROD', true);
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...originalLocation, origin: 'https://monitor.example.com' },
+    });
+
+    expect(apiOrigin()).toBe('https://monitor.example.com');
   });
 });

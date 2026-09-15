@@ -8,7 +8,7 @@ import {
 import { FastifyReply, FastifyRequest } from 'fastify';
 import type { Actor } from '@betterdb/shared';
 import { ActorResolver } from '../actor-resolver';
-import { isPublicPath } from './public-paths';
+import { isActorOptionalPath, isPublicPath } from './public-paths';
 
 export type RequestWithActor = FastifyRequest & { actor: Actor | null };
 
@@ -23,6 +23,9 @@ export class ActorGuard implements CanActivate {
       return true;
     }
     if (isPublicPath(request.url, request.method) === true) {
+      if (isActorOptionalPath(request.url) === true) {
+        request.actor = await this.optionalActor(request);
+      }
       return true;
     }
     if (this.resolver.isReady() === false) {
@@ -38,6 +41,11 @@ export class ActorGuard implements CanActivate {
       request.actor = actor;
       return true;
     }
+    const bearerActor = await this.resolver.resolveBearer(request.headers);
+    if (bearerActor !== null) {
+      request.actor = bearerActor;
+      return true;
+    }
     throw new UnauthorizedException('Sign in required');
   }
 
@@ -46,5 +54,18 @@ export class ActorGuard implements CanActivate {
       return;
     }
     reply.header('set-cookie', cookies);
+  }
+
+  private async optionalActor(request: RequestWithActor): Promise<Actor | null> {
+    const hasCookie = typeof request.headers.cookie === 'string';
+    const hasAuthorization = typeof request.headers.authorization === 'string';
+    if (hasCookie === false && hasAuthorization === false) {
+      return null;
+    }
+    try {
+      return await this.resolver.resolveFromHeaders(request.headers, request.ip);
+    } catch {
+      return null;
+    }
   }
 }

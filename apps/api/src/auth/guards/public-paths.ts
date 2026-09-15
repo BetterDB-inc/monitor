@@ -13,6 +13,8 @@ const PUBLIC_PREFIXES = [
 
 const READ_ONLY_PUBLIC_PREFIXES = ['/mcp/'];
 
+const ACTOR_OPTIONAL_PREFIX = '/mcp/';
+
 const PUBLIC_WRITE_PATHS = [
   /^\/mcp\/telemetry$/,
   /^\/mcp\/instance\/[^/]+\/memory\/[^/]+\/recall$/,
@@ -45,6 +47,10 @@ export function normalizePath(rawPath: string): string {
   const queryIndex = rawPath.indexOf('?');
   const path = queryIndex === -1 ? rawPath : rawPath.slice(0, queryIndex);
   return stripApiPrefix(path);
+}
+
+export function isActorOptionalPath(rawPath: string): boolean {
+  return matchesPrefix(normalizePath(rawPath), ACTOR_OPTIONAL_PREFIX);
 }
 
 export function isPublicPath(rawPath: string, method: string): boolean {

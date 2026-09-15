@@ -3,11 +3,18 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 import { MemoryAdapter } from '../storage/adapters/memory.adapter';
 import { ACTIVITY_CONFIG } from '../activity/activity-config';
 import { ActivityService } from '../activity/activity.service';
+import { MemberService } from '../workspace/member.service';
+import { PersonalTokenService } from '../workspace/personal-token.service';
 import { ActorResolver } from './actor-resolver';
 import { WORKSPACE_CONFIG } from './workspace-config';
 import { BETTER_AUTH, countUsers, createBetterAuth } from './better-auth.factory';
 import { BetterAuthController } from './better-auth.controller';
 import { resolveWorkspaceConfig } from './workspace-config';
+import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
+
+function telemetryStub(): { trackUserLogin: jest.Mock; trackWorkspaceFirstRegister: jest.Mock } {
+  return { trackUserLogin: jest.fn(), trackWorkspaceFirstRegister: jest.fn() };
+}
 
 describe('BetterAuthController', () => {
   let app: NestFastifyApplication;
@@ -29,6 +36,7 @@ describe('BetterAuthController', () => {
         { provide: WORKSPACE_CONFIG, useValue: config },
         { provide: 'STORAGE_CLIENT', useValue: storage },
         { provide: ACTIVITY_CONFIG, useValue: { retentionDays: 90 } },
+        { provide: UsageTelemetryService, useValue: telemetryStub() },
         ActivityService,
         ActorResolver,
       ],
@@ -106,6 +114,7 @@ describe('BetterAuthController origin check', () => {
         { provide: BETTER_AUTH, useValue: auth },
         { provide: WORKSPACE_CONFIG, useValue: config },
         { provide: ActivityService, useValue: { record: jest.fn() } },
+        { provide: UsageTelemetryService, useValue: telemetryStub() },
         ActorResolver,
       ],
     }).compile();
@@ -156,6 +165,7 @@ describe('BetterAuthController sign-up serialisation', () => {
         { provide: WORKSPACE_CONFIG, useValue: config },
         { provide: 'STORAGE_CLIENT', useValue: storage },
         { provide: ACTIVITY_CONFIG, useValue: { retentionDays: 90 } },
+        { provide: UsageTelemetryService, useValue: telemetryStub() },
         ActivityService,
         ActorResolver,
       ],
@@ -224,6 +234,7 @@ describe('BetterAuthController behind a TLS proxy', () => {
         { provide: WORKSPACE_CONFIG, useValue: config },
         { provide: 'STORAGE_CLIENT', useValue: storage },
         { provide: ACTIVITY_CONFIG, useValue: { retentionDays: 90 } },
+        { provide: UsageTelemetryService, useValue: telemetryStub() },
         ActivityService,
         ActorResolver,
       ],
@@ -266,6 +277,8 @@ describe('BetterAuthController activity events', () => {
   let app: NestFastifyApplication;
   let storage: MemoryAdapter;
   let sessionCookie: string;
+  let personalTokens: PersonalTokenService;
+  let ownerBearerToken: string;
 
   beforeAll(async () => {
     const config = resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' });
@@ -283,8 +296,11 @@ describe('BetterAuthController activity events', () => {
         { provide: WORKSPACE_CONFIG, useValue: config },
         { provide: 'STORAGE_CLIENT', useValue: storage },
         { provide: ACTIVITY_CONFIG, useValue: { retentionDays: 90 } },
+        { provide: UsageTelemetryService, useValue: telemetryStub() },
         ActivityService,
         ActorResolver,
+        MemberService,
+        PersonalTokenService,
       ],
     }).compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
@@ -298,6 +314,18 @@ describe('BetterAuthController activity events', () => {
       remoteAddress: '198.51.100.31',
     });
     expect(signUp.statusCode).toBe(200);
+    const ownerId = (signUp.json() as { user: { id: string } }).user.id;
+
+    personalTokens = moduleRef.get(PersonalTokenService);
+    const generated = await personalTokens.generate('ci', {
+      userId: ownerId,
+      email: EMAIL,
+      role: 'admin',
+      isOwner: true,
+      via: 'session',
+      tokenId: null,
+    });
+    ownerBearerToken = generated.token;
   });
 
   afterAll(async () => {
@@ -310,6 +338,11 @@ describe('BetterAuthController activity events', () => {
     return page.items.map((item) => {
       return item.details;
     });
+  }
+
+  async function logoutCount(): Promise<number> {
+    const page = await storage.getActivityRepository().list({ limit: 50, action: 'auth.logout' });
+    return page.items.length;
   }
 
   it('records the registration as auth.login with method register', async () => {
@@ -361,5 +394,113 @@ describe('BetterAuthController activity events', () => {
     expect(page.items).toHaveLength(1);
     expect(page.items[0].actorEmail).toBe(EMAIL);
     expect(page.items[0].details).toEqual({});
+  });
+
+  it('does not attribute auth.logout to a bearer-only sign-out with no session cookie', async () => {
+    const before = await logoutCount();
+    const signOut = await app.inject({
+      method: 'POST',
+      url: '/auth/sign-out',
+      headers: { ...headers, authorization: `Bearer ${ownerBearerToken}` },
+      payload: {},
+      remoteAddress: '198.51.100.35',
+    });
+    expect(signOut.statusCode).toBe(200);
+    expect(await logoutCount()).toBe(before);
+  });
+
+  it('has no session for a bearer-only get-session, since better-auth has no bearer plugin', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/auth/get-session',
+      headers: { authorization: `Bearer ${ownerBearerToken}` },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe('null');
+  });
+});
+
+describe('BetterAuthController telemetry', () => {
+  const owner = { email: 'owner@example.com', password: 'correct horse battery', name: 'Owner' };
+  let app: NestFastifyApplication;
+  let storage: MemoryAdapter;
+  const telemetry = telemetryStub();
+
+  async function post(
+    url: string,
+    payload: Record<string, string>,
+    remoteAddress: string,
+  ): Promise<{ statusCode: number }> {
+    return app.inject({
+      method: 'POST',
+      url,
+      headers: { 'content-type': 'application/json', origin: 'http://localhost' },
+      payload,
+      remoteAddress,
+    });
+  }
+
+  beforeAll(async () => {
+    const config = resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' });
+    const auth = await createBetterAuth({
+      handle: { kind: 'memory' },
+      secret: 's'.repeat(40),
+      config,
+    });
+    storage = new MemoryAdapter();
+    await storage.initialize();
+    const moduleRef = await Test.createTestingModule({
+      controllers: [BetterAuthController],
+      providers: [
+        { provide: BETTER_AUTH, useValue: auth },
+        { provide: WORKSPACE_CONFIG, useValue: config },
+        { provide: 'STORAGE_CLIENT', useValue: storage },
+        { provide: ACTIVITY_CONFIG, useValue: { retentionDays: 90 } },
+        { provide: UsageTelemetryService, useValue: telemetry },
+        ActivityService,
+        ActorResolver,
+      ],
+    }).compile();
+    app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
+    await app.init();
+    await app.getHttpAdapter().getInstance().ready();
+  });
+
+  afterAll(async () => {
+    await app.close();
+    await storage.close();
+  });
+
+  it('reports the first registration and password sign-ins, and nothing for failures', async () => {
+    const signUp = await post('/auth/sign-up/email', owner, '10.1.11.1');
+    expect(signUp.statusCode).toBe(200);
+    expect(telemetry.trackWorkspaceFirstRegister).toHaveBeenCalledTimes(1);
+    expect(telemetry.trackWorkspaceFirstRegister).toHaveBeenCalledWith({ method: 'password' });
+    expect(telemetry.trackUserLogin).not.toHaveBeenCalled();
+
+    const closed = await post(
+      '/auth/sign-up/email',
+      { email: 'second@example.com', password: 'second horse battery', name: 'Second' },
+      '10.1.11.2',
+    );
+    expect(closed.statusCode).toBe(403);
+    expect(telemetry.trackWorkspaceFirstRegister).toHaveBeenCalledTimes(1);
+
+    const wrong = await post(
+      '/auth/sign-in/email',
+      { email: owner.email, password: 'not the right password' },
+      '10.1.11.3',
+    );
+    expect(wrong.statusCode).toBe(401);
+    expect(telemetry.trackUserLogin).not.toHaveBeenCalled();
+
+    const signIn = await post(
+      '/auth/sign-in/email',
+      { email: owner.email, password: owner.password },
+      '10.1.11.4',
+    );
+    expect(signIn.statusCode).toBe(200);
+    expect(telemetry.trackUserLogin).toHaveBeenCalledTimes(1);
+    expect(telemetry.trackUserLogin).toHaveBeenCalledWith({ method: 'password' });
   });
 });

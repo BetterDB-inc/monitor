@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react';
 import { settingsApi } from '../api/settings';
-import { agentTokensApi, GeneratedToken } from '../api/agent-tokens';
 import { licenseApi } from '../api/license';
-import { useMcpTokens } from '../hooks/useMcpTokens';
 import { useConnection } from '../hooks/useConnection';
 import { useLicense } from '../hooks/useLicense';
+import { useAuth } from '../contexts/AuthContext';
+import { McpTokensPanel } from '../components/pages/settings/McpTokensPanel';
 import {
   AppSettings,
   SettingsUpdateRequest,
@@ -17,6 +17,20 @@ import { useQueryClient } from '@tanstack/react-query';
 type SettingsCategory = 'license' | 'audit' | 'clientAnalytics' | 'anomaly' | 'dataRetention' | 'mcpTokens';
 
 const RETENTION_INPUT_ERROR = `Enter a whole number of days between 1 and ${MAX_RETENTION_DAYS}, or leave empty to keep history forever.`;
+
+function isUpdatableSettingsKey(
+  key: keyof AppSettings,
+): key is keyof AppSettings & keyof SettingsUpdateRequest {
+  return key !== 'id' && key !== 'createdAt' && key !== 'updatedAt';
+}
+
+function copySettingsKey<K extends keyof AppSettings & keyof SettingsUpdateRequest>(
+  updates: SettingsUpdateRequest,
+  formData: Partial<AppSettings>,
+  key: K,
+): void {
+  updates[key] = formData[key];
+}
 
 export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const { currentConnection } = useConnection();
@@ -57,15 +71,8 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const [offlineNotice, setOfflineNotice] = useState<string | null>(null);
   const [showOffline, setShowOffline] = useState(false);
 
-  // MCP Tokens state (must be before any early returns)
-  const { tokens: mcpTokens, invalidate: invalidateMcpTokens } = useMcpTokens(
-    isCloudMode && activeCategory === 'mcpTokens',
-  );
-  const [mcpTokenName, setMcpTokenName] = useState('');
-  const [mcpGenerating, setMcpGenerating] = useState(false);
-  const [mcpGeneratedToken, setMcpGeneratedToken] = useState<GeneratedToken | null>(null);
-  const [mcpCopied, setMcpCopied] = useState(false);
-  const [mcpError, setMcpError] = useState<string | null>(null);
+  const { mode } = useAuth();
+  const showMcpTokens = isCloudMode === true || mode === 'self-hosted';
 
   useEffect(() => {
     loadSettings();
@@ -88,7 +95,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     }
   };
 
-  const handleInputChange = (key: keyof AppSettings, value: any) => {
+  const handleInputChange = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     setFormData((prev) => ({ ...prev, [key]: value }));
     setHasChanges(true);
   };
@@ -102,8 +109,8 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
 
       // Only include changed fields
       (Object.keys(formData) as Array<keyof AppSettings>).forEach((key) => {
-        if (formData[key] !== settings[key] && key !== 'id' && key !== 'createdAt' && key !== 'updatedAt') {
-          (updates as any)[key] = formData[key];
+        if (formData[key] !== settings[key] && isUpdatableSettingsKey(key)) {
+          copySettingsKey(updates, formData, key);
         }
       });
 
@@ -159,37 +166,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       </div>
     );
   }
-
-  const handleMcpGenerate = async () => {
-    if (!mcpTokenName.trim()) return;
-    setMcpGenerating(true);
-    setMcpError(null);
-    try {
-      const result = await agentTokensApi.generate(mcpTokenName.trim(), 'mcp');
-      setMcpGeneratedToken(result);
-      setMcpTokenName('');
-      await invalidateMcpTokens();
-    } catch (err) {
-      setMcpError(err instanceof Error ? err.message : 'Failed to generate token');
-    } finally {
-      setMcpGenerating(false);
-    }
-  };
-
-  const handleMcpRevoke = async (id: string) => {
-    try {
-      await agentTokensApi.revoke(id);
-      await invalidateMcpTokens();
-    } catch (err) {
-      setMcpError(err instanceof Error ? err.message : 'Failed to revoke token');
-    }
-  };
-
-  const copyMcpToken = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setMcpCopied(true);
-    setTimeout(() => setMcpCopied(false), 2000);
-  };
 
   const handleActivate = async () => {
     if (!activateKey.trim()) return;
@@ -302,7 +278,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     { id: 'clientAnalytics', label: 'Client Analytics' },
     { id: 'anomaly', label: 'Anomaly Detection' },
     ...(!isCloudMode ? [{ id: 'dataRetention' as const, label: 'Data Retention' }] : []),
-    ...(isCloudMode ? [{ id: 'mcpTokens' as const, label: 'MCP Tokens' }] : []),
+    ...(showMcpTokens ? [{ id: 'mcpTokens' as const, label: 'MCP Tokens' }] : []),
   ];
 
   return (
@@ -671,137 +647,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
               </div>
             )}
 
-            {activeCategory === 'mcpTokens' && (
-              <div className="space-y-4">
-                <h2 className="text-xl font-semibold mb-4">MCP Tokens</h2>
-                <p className="text-sm text-muted-foreground">
-                  Generate tokens for MCP (Model Context Protocol) clients like Claude Code to access your database observability data.
-                </p>
-
-                {mcpError && (
-                  <div className="text-sm text-destructive bg-destructive/5 border border-destructive/20 rounded-md p-2">
-                    {mcpError}
-                  </div>
-                )}
-
-                {/* Generate Token */}
-                {!mcpGeneratedToken && (
-                  <div>
-                    <label className="block text-sm font-medium mb-1">Generate MCP Token</label>
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        value={mcpTokenName}
-                        onChange={(e) => setMcpTokenName(e.target.value)}
-                        placeholder="Token name (e.g., claude-code)"
-                        className="flex-1 px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                        onKeyDown={(e) => e.key === 'Enter' && handleMcpGenerate()}
-                      />
-                      <button
-                        onClick={handleMcpGenerate}
-                        disabled={mcpGenerating || !mcpTokenName.trim()}
-                        className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed"
-                      >
-                        {mcpGenerating ? 'Generating...' : 'Generate'}
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Show Generated Token */}
-                {mcpGeneratedToken && (
-                  <div className="border rounded-md p-3 bg-amber-50 border-amber-300">
-                    <h3 className="text-sm font-medium text-amber-700 mb-2">
-                      Save this token - it won't be shown again
-                    </h3>
-                    <div className="flex gap-2 mb-3">
-                      <code className="flex-1 text-xs bg-white dark:text-gray-900 p-2 rounded border font-mono break-all select-all">
-                        {mcpGeneratedToken.token}
-                      </code>
-                      <button
-                        onClick={() => copyMcpToken(mcpGeneratedToken.token)}
-                        className="px-3 py-1 text-xs border rounded hover:bg-muted flex-shrink-0"
-                      >
-                        {mcpCopied ? 'Copied!' : 'Copy'}
-                      </button>
-                    </div>
-
-                    <h4 className="text-xs font-medium mb-1">Add to your Claude Code MCP config:</h4>
-                    <pre className="text-xs bg-white dark:text-gray-900 p-2 rounded border overflow-x-auto">
-{`{
-  "mcpServers": {
-    "betterdb": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["@betterdb/mcp"],
-      "env": {
-        "BETTERDB_URL": "${window.location.origin}",
-        "BETTERDB_TOKEN": "${mcpGeneratedToken.token}"
-      }
-    }
-  }
-}`}
-                    </pre>
-
-                    <button
-                      onClick={() => setMcpGeneratedToken(null)}
-                      className="mt-3 text-xs text-primary hover:underline"
-                    >
-                      I've saved the token
-                    </button>
-                  </div>
-                )}
-
-                {/* Existing Tokens */}
-                {mcpTokens.length > 0 && (
-                  <div>
-                    <h3 className="text-sm font-medium mb-2">Existing Tokens</h3>
-                    <div className="space-y-1">
-                      {mcpTokens.map((token) => {
-                        const isActive = !token.revokedAt && token.expiresAt > Date.now();
-                        return (
-                          <div
-                            key={token.id}
-                            className="flex items-center justify-between p-2 border rounded-md text-sm"
-                          >
-                            <div className="min-w-0">
-                              <div className="font-medium truncate">{token.name}</div>
-                              <div className="text-xs text-muted-foreground">
-                                Created {new Date(token.createdAt).toLocaleDateString()}
-                                {token.lastUsedAt && ` · Last used ${new Date(token.lastUsedAt).toLocaleDateString()}`}
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-2 flex-shrink-0">
-                              {token.revokedAt ? (
-                                <span className="text-xs px-1.5 py-0.5 bg-destructive/10 text-destructive rounded">
-                                  Revoked
-                                </span>
-                              ) : !isActive ? (
-                                <span className="text-xs px-1.5 py-0.5 bg-yellow-100 text-yellow-700 rounded">
-                                  Expired
-                                </span>
-                              ) : (
-                                <>
-                                  <span className="text-xs px-1.5 py-0.5 bg-green-100 text-green-700 rounded">
-                                    Active
-                                  </span>
-                                  <button
-                                    onClick={() => handleMcpRevoke(token.id)}
-                                    className="text-xs px-2 py-1 border border-destructive/20 text-destructive rounded hover:bg-destructive/10"
-                                  >
-                                    Revoke
-                                  </button>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
+            {activeCategory === 'mcpTokens' && <McpTokensPanel />}
 
             {activeCategory !== 'mcpTokens' && activeCategory !== 'license' && (
               <div className="flex items-center gap-3 mt-6 pt-6 border-t">

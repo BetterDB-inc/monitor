@@ -41,6 +41,7 @@ export class AgentTokensService {
       expiresAt,
       revokedAt: null,
       lastUsedAt: null,
+      userId: null,
     };
 
     await this.storage.saveAgentToken(metadata);

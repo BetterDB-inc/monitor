@@ -25,6 +25,7 @@ import { KeyAnalytics } from '../../pages/KeyAnalytics';
 import { BulkDelete } from '../../pages/BulkDelete';
 import { ClusterDashboard } from '../../pages/ClusterDashboard';
 import { Settings } from '../../pages/Settings';
+import { AccountMcpTokens } from '../../pages/AccountMcpTokens';
 import { Webhooks } from '../../pages/Webhooks';
 import { MigrationPage } from '../../pages/MigrationPage';
 import { MigrationPlanProvider } from '../migration/MigrationPlanProvider';
@@ -64,6 +65,7 @@ function AppLayoutInner(): ReactElement {
   const { user, isCloud, mode } = useAuth();
   const cloudUser = isCloud ? user : null;
   const showTeam = isCloud === true || mode === 'self-hosted';
+  const showMcpTokens = isCloud === true || mode === 'self-hosted';
   const [showFeedback, setShowFeedback] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -333,6 +335,7 @@ function AppLayoutInner(): ReactElement {
                 }
               />
               {showTeam && <Route path="/workspace/members" element={<Members />} />}
+              {showMcpTokens && <Route path="/account/mcp-tokens" element={<AccountMcpTokens />} />}
               <Route
                 path="/settings"
                 element={
