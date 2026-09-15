@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { BrokerProvider } from '@betterdb/shared';
 import { BootstrapLock } from '../auth/bootstrap-lock';
+import type { InvitationRecord } from '../common/interfaces/invitation-repository.interface';
 import { InvitationService } from './invitation.service';
 import { MemberRecord, MemberService } from './member.service';
 
@@ -17,7 +18,7 @@ export interface BrokerIdentity {
 export interface ResolvedBrokerUser {
   member: MemberRecord;
   entrance: BrokerEntrance;
-  invitationId: string | null;
+  invitation: InvitationRecord | null;
 }
 
 export interface BrokerSignIn {
@@ -65,9 +66,27 @@ export class BrokerUserResolver {
       return { resolved, session: await this.startOrRevert(resolved, startSession) };
     });
     if (created.session !== null) {
+      if (created.session.ok !== false) {
+        await this.revokeRacedReinvite(created.resolved);
+      }
       return { resolved: created.resolved, session: created.session };
     }
     return { resolved: created.resolved, session: await startSession(created.resolved.member) };
+  }
+
+  private async revokeRacedReinvite(resolved: ResolvedBrokerUser): Promise<void> {
+    const invitation = resolved.invitation;
+    if (invitation === null) {
+      return;
+    }
+    try {
+      await this.invitations.revokeRacedReinvite(invitation);
+    } catch (error) {
+      this.logger.error(
+        `Failed to revoke a re-invite that raced acceptance of invitation ${invitation.id}: ` +
+          `${describeError(error)}. An admin can revoke it from the invitations list.`,
+      );
+    }
   }
 
   private async startOrRevert(
@@ -104,12 +123,12 @@ export class BrokerUserResolver {
       await this.members.discardBootstrapOwner(resolved.member.id);
       return;
     }
-    const invitationId = resolved.invitationId;
-    if (resolved.entrance !== 'invite' || invitationId === null) {
+    const invitation = resolved.invitation;
+    if (resolved.entrance !== 'invite' || invitation === null) {
       return;
     }
     await this.members.remove(resolved.member.id);
-    await this.releaseClaim(invitationId);
+    await this.releaseClaim(invitation.id);
   }
 
   private async releaseClaim(invitationId: string): Promise<void> {
@@ -134,11 +153,11 @@ export class BrokerUserResolver {
     const existing = await this.members.findByEmail(identity.email);
     if (existing !== null) {
       await this.members.ensureProviderLink(existing.id, identity.provider, identity.providerId);
-      return { member: existing, entrance: 'login', invitationId: null };
+      return { member: existing, entrance: 'login', invitation: null };
     }
     if ((await this.members.count()) === 0) {
       const owner = await this.createMember(identity, 'admin', true);
-      return { member: owner, entrance: 'register', invitationId: null };
+      return { member: owner, entrance: 'register', invitation: null };
     }
     const invitation = await this.invitations.claimForEmail(identity.email, inviteTokenHash);
     if (invitation === null) {
@@ -146,7 +165,7 @@ export class BrokerUserResolver {
     }
     try {
       const member = await this.createMember(identity, invitation.role, false);
-      return { member, entrance: 'invite', invitationId: invitation.id };
+      return { member, entrance: 'invite', invitation };
     } catch (error) {
       await this.releaseClaim(invitation.id);
       throw error;

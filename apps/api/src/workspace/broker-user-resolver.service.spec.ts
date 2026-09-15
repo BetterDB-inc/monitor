@@ -134,6 +134,80 @@ describe('BrokerUserResolver', () => {
     );
   });
 
+  async function startedSession(): Promise<Response> {
+    return new Response(null, { status: 200 });
+  }
+
+  async function refusedSession(): Promise<Response> {
+    return new Response(null, { status: 500 });
+  }
+
+  async function raceReinvite(email: string): Promise<() => string> {
+    const invited = await invite(email);
+    const owner = await members.findByEmail('owner@example.com');
+    const createSocial = members.createSocial.bind(members);
+    let racedToken = '';
+    jest.spyOn(members, 'createSocial').mockImplementationOnce(async (input) => {
+      await invitations.revoke(invited.id);
+      const raced = await invitations.create({
+        email,
+        role: 'member',
+        invitedBy: String(owner?.id),
+      });
+      racedToken = raced.token;
+      return createSocial(input);
+    });
+    return () => {
+      return racedToken;
+    };
+  }
+
+  async function rowsFor(email: string): Promise<string[]> {
+    return (await invitations.list())
+      .filter((row) => {
+        return row.email === email;
+      })
+      .map((row) => {
+        return row.status;
+      });
+  }
+
+  it('revokes a re-invite that raced a broker invite sign-in', async () => {
+    await raceReinvite('raced@example.com');
+    const signedIn = await resolver.signIn(identity('raced@example.com'), null, startedSession);
+    expect(signedIn.resolved.entrance).toBe('invite');
+    expect(signedIn.session.ok).toBe(true);
+    expect(await members.findByEmail('raced@example.com')).not.toBeNull();
+    expect(await rowsFor('raced@example.com')).not.toContain('pending');
+  });
+
+  it('still signs the invitee in and logs when revoking a raced re-invite fails', async () => {
+    await invite('invitee@example.com');
+    const errorLog = silenceErrors();
+    jest.spyOn(invitations, 'revokeRacedReinvite').mockRejectedValueOnce(new Error('disk full'));
+    const signedIn = await resolver.signIn(identity('invitee@example.com'), null, startedSession);
+    expect(signedIn.session.ok).toBe(true);
+    expect(await members.findByEmail('invitee@example.com')).not.toBeNull();
+    expect(errorLog).toHaveBeenCalledWith(expect.stringContaining('disk full'));
+  });
+
+  it('keeps a re-invite that raced a broker invite sign-in which then rolled back', async () => {
+    const racedToken = await raceReinvite('raced@example.com');
+    silenceErrors();
+    const failed = await resolver.signIn(identity('raced@example.com'), null, refusedSession);
+    expect(failed.session.ok).toBe(false);
+    expect(await members.findByEmail('raced@example.com')).toBeNull();
+    expect(await rowsFor('raced@example.com')).toEqual(['pending']);
+
+    const retried = await resolver.signIn(
+      identity('raced@example.com'),
+      hashInvitationToken(racedToken()),
+      startedSession,
+    );
+    expect(retried.resolved.entrance).toBe('invite');
+    expect(await members.findByEmail('raced@example.com')).not.toBeNull();
+  });
+
   it('makes the first broker user the owner', async () => {
     const result = await resolver.resolve(identity('owner@example.com'), null);
     expect(result.entrance).toBe('register');
@@ -176,7 +250,7 @@ describe('BrokerUserResolver', () => {
     });
     const result = await resolver.resolve(identity('invitee@example.com'), null);
     expect(result.entrance).toBe('invite');
-    expect(result.invitationId).toBe(invitation.id);
+    expect(result.invitation?.id).toBe(invitation.id);
     expect(result.member).toMatchObject({ role: 'admin', isOwner: false });
     const stored = (await invitations.list()).find((row) => {
       return row.id === invitation.id;
