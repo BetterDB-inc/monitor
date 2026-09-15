@@ -83,8 +83,7 @@ describe('FleetService CVE rollup', () => {
     });
   });
 
-  it('returns null CVE when never scanned and does not fail when storage throws', async () => {
-    const registry = { list: jest.fn().mockReturnValue([{ id: 'c1', name: 'One', host: 'h1', port: 6379 }]) };
+  it('returns null CVE when never scanned and does not fail when storage throws', async () => {    const registry = { list: jest.fn().mockReturnValue([{ id: 'c1', name: 'One', host: 'h1', port: 6379 }]) };
     const health = {
       getHealth: jest.fn().mockResolvedValue({ status: 'connected', database: { type: 'valkey', version: '8.0', host: 'h1', port: 6379 } }),
     };
@@ -102,5 +101,31 @@ describe('FleetService CVE rollup', () => {
     const summary = await service.collectUncached();
 
     expect(summary.instances[0].cve).toBeNull();
+  });
+
+  it('handles legacy scans without missingSources (no crash, not stale)', async () => {
+    const registry = { list: jest.fn().mockReturnValue([{ id: 'c1', name: 'One', host: 'h1', port: 6379 }]) };
+    const health = {
+      getHealth: jest.fn().mockResolvedValue({ status: 'connected', database: { type: 'valkey', version: '8.0', host: 'h1', port: 6379 } }),
+    };
+    const metrics = { getInfoParsed: jest.fn().mockResolvedValue(infoFixture()) };
+    const legacy = scanFixture() as Record<string, unknown>;
+    delete legacy.missingSources;
+    const storage = { getCveScanResult: jest.fn().mockResolvedValue(legacy) };
+    const service = new FleetService(
+      registry as never,
+      health as never,
+      metrics as never,
+      storage as never,
+    );
+
+    const summary = await service.collectUncached();
+
+    expect(summary.instances[0].cve).toEqual({
+      critical: 1,
+      kev: 1,
+      fingerprint: 'fp1',
+      stale: false,
+    });
   });
 });

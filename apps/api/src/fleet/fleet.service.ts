@@ -221,7 +221,7 @@ export class FleetService {
         critical,
         kev,
         fingerprint: scan.fingerprint,
-        stale: scan.partial || scan.missingSources.length > 0,
+        stale: scan.partial || (scan.missingSources?.length ?? 0) > 0,
       };
     } catch (error: unknown) {
       const reason = error instanceof Error ? error.message : String(error);
