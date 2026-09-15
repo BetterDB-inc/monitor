@@ -1,4 +1,12 @@
-import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  OnApplicationBootstrap,
+  OnModuleDestroy,
+  Optional,
+} from '@nestjs/common';
+import { WORKSPACE_CONFIG, type WorkspaceConfig } from '../auth/workspace-config';
 import { ActivityService } from './activity.service';
 
 export const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -8,9 +16,15 @@ export class ActivityPruneJob implements OnApplicationBootstrap, OnModuleDestroy
   private readonly logger = new Logger(ActivityPruneJob.name);
   private timer: NodeJS.Timeout | null = null;
 
-  constructor(private readonly activity: ActivityService) {}
+  constructor(
+    private readonly activity: ActivityService,
+    @Optional() @Inject(WORKSPACE_CONFIG) private readonly config: WorkspaceConfig | null = null,
+  ) {}
 
   onApplicationBootstrap(): void {
+    if (this.config?.mode === 'disabled') {
+      return;
+    }
     void this.runOnce();
     this.timer = setInterval(() => {
       void this.runOnce();
