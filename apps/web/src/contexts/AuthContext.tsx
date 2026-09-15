@@ -10,7 +10,7 @@ import {
   useState,
 } from 'react';
 import type { WorkspaceMode } from '@betterdb/shared';
-import { setAuthRedirectEnabled, UnauthorizedError } from '../api/client';
+import { ApiError, setAuthRedirectEnabled, UnauthorizedError } from '../api/client';
 import { CurrentUser, workspaceApi } from '../api/workspace';
 
 export interface AuthState {
@@ -30,6 +30,13 @@ const noop = async (): Promise<void> => {
 
 const RETRY_BASE_MS = 2000;
 const RETRY_MAX_MS = 30000;
+
+function isSignedOutError(error: unknown): boolean {
+  if (error instanceof UnauthorizedError) {
+    return true;
+  }
+  return error instanceof ApiError && error.status >= 400 && error.status < 500;
+}
 
 const AuthContext = createContext<AuthState>({
   loading: true,
@@ -109,7 +116,7 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
         if (seq !== refreshSeq.current) {
           return;
         }
-        if (error instanceof UnauthorizedError) {
+        if (isSignedOutError(error)) {
           retryDelay.current = RETRY_BASE_MS;
           setUnavailable(false);
           rememberUser(null);

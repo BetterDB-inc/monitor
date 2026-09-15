@@ -556,4 +556,25 @@ describe('getMe failure handling', () => {
       vi.useRealTimers();
     }
   });
+
+  it('falls back to login without retrying on a 403', async () => {
+    vi.useFakeTimers();
+    try {
+      getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: true });
+      getMe.mockRejectedValue(new ApiError('Forbidden', 403));
+      renderAt('/connections');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByRole('heading', { name: /sign in/i })).toBeInTheDocument();
+      expect(screen.queryByText('Cannot reach the server')).not.toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60000);
+      });
+      expect(getMe).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
