@@ -1,6 +1,7 @@
 import type { WorkspaceStatus } from '@betterdb/shared';
 import { SystemController } from './system.controller';
 import { WorkspaceStatusService } from '../workspace/workspace-status.service';
+import { BootstrapLock } from '../auth/bootstrap-lock';
 import { createBetterAuth } from '../auth/better-auth.factory';
 import { resolveWorkspaceConfig } from '../auth/workspace-config';
 
@@ -35,7 +36,7 @@ describe('GET /system/workspace', () => {
       secret: 's'.repeat(40),
       config,
     });
-    const service = new WorkspaceStatusService(config, auth);
+    const service = new WorkspaceStatusService(config, auth, new BootstrapLock());
     const controller = new SystemController(null, service);
     expect(await controller.getWorkspaceStatus()).toEqual({
       mode: 'self-hosted',
