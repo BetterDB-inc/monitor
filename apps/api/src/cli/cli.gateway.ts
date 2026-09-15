@@ -158,7 +158,7 @@ export class CliGateway implements OnModuleDestroy {
   private async resolveAccess(ws: WebSocket): Promise<CommandAccess> {
     const state = this.connections.get(ws);
     if (state === undefined) {
-      return { sessionValid: true, readOnly: true, actor: null, ip: '' };
+      return { sessionValid: false, readOnly: true, actor: null, ip: '' };
     }
     const ip = state.ip;
     if (this.isAuthEnabled() === false) {
