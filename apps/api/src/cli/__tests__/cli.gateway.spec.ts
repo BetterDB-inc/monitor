@@ -303,6 +303,7 @@ describe('CliGateway command execution', () => {
       sessionValid: true,
       readOnly: false,
       actor: admin,
+      ip: '10.0.0.5',
     });
     expect(resolver.resolveFromUpgrade).toHaveBeenCalledTimes(2);
   });

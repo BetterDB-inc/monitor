@@ -94,14 +94,20 @@ describe('BetterAuthController origin check', () => {
   let app: NestFastifyApplication;
 
   beforeAll(async () => {
+    const config = resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' });
     const auth = await createBetterAuth({
       handle: { kind: 'memory' },
       secret: 'o'.repeat(40),
-      config: resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' }),
+      config,
     });
     const moduleRef = await Test.createTestingModule({
       controllers: [BetterAuthController],
-      providers: [{ provide: BETTER_AUTH, useValue: auth }],
+      providers: [
+        { provide: BETTER_AUTH, useValue: auth },
+        { provide: WORKSPACE_CONFIG, useValue: config },
+        { provide: ActivityService, useValue: { record: jest.fn() } },
+        ActorResolver,
+      ],
     }).compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
     await app.init();
