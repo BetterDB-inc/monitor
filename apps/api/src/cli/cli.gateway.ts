@@ -15,6 +15,7 @@ import { CliExecuteMessage, CliServerMessage } from './cli.types';
 
 const SECRET_COMMANDS = new Set(['AUTH', 'HELLO', 'CONFIG', 'ACL', 'MIGRATE']);
 const PAYLOAD_COMMANDS = new Set([
+  'COMMAND',
   'ECHO',
   'EVAL',
   'EVALSHA',

@@ -509,6 +509,8 @@ describe('CliGateway activity recording', () => {
       "EVAL_RO 'return hunter2' 0",
       'EVALSHA_RO abc123 0 hunter2',
       'FCALL_RO fn 0 hunter2',
+      'COMMAND GETKEYS SET k hunter2',
+      'COMMAND GETKEYSANDFLAGS AUTH admin hunter2',
     ];
     for (const command of payloads) {
       send(ws, command);
