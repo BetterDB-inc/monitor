@@ -6,6 +6,7 @@ import { MemoryAdapter } from '../storage/adapters/memory.adapter';
 import { MemberRecord, MemberService } from './member.service';
 import {
   hashPersonalToken,
+  LAST_USED_STAMP_INTERVAL_MS,
   PERSONAL_TOKEN_PREFIX,
   PERSONAL_TOKEN_TTL_MS,
   PersonalTokenService,
@@ -94,6 +95,29 @@ describe('PersonalTokenService', () => {
     });
     const stored = await storage.getAgentTokenByHash(metadata.tokenHash);
     expect(stored?.lastUsedAt).toEqual(expect.any(Number));
+  });
+
+  it('stamps last use at most once per interval', async () => {
+    const start = Date.now();
+    const now = jest.spyOn(Date, 'now').mockReturnValue(start);
+    const stamp = jest.spyOn(storage, 'updateAgentTokenLastUsed');
+    try {
+      const { token } = await service.generate('laptop', actorFor(member));
+
+      await service.resolveActor(token);
+      expect(stamp).toHaveBeenCalledTimes(1);
+
+      now.mockReturnValue(start + LAST_USED_STAMP_INTERVAL_MS - 1);
+      expect(await service.resolveActor(token)).not.toBeNull();
+      expect(stamp).toHaveBeenCalledTimes(1);
+
+      now.mockReturnValue(start + LAST_USED_STAMP_INTERVAL_MS);
+      await service.resolveActor(token);
+      expect(stamp).toHaveBeenCalledTimes(2);
+    } finally {
+      now.mockRestore();
+      stamp.mockRestore();
+    }
   });
 
   it('still resolves the actor when the lastUsedAt write fails', async () => {

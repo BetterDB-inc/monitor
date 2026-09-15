@@ -7,6 +7,7 @@ import { MemberService } from './member.service';
 export const PERSONAL_TOKEN_PREFIX = 'bdb_mcp_';
 export const PERSONAL_TOKEN_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 export const TOKEN_NOT_FOUND_MESSAGE = 'Token not found';
+export const LAST_USED_STAMP_INTERVAL_MS = 60_000;
 
 const TOKEN_BYTES = 32;
 
@@ -111,18 +112,15 @@ export class PersonalTokenService {
     if (token === null || token.type !== 'mcp' || token.userId === null) {
       return null;
     }
-    if (token.revokedAt !== null || token.expiresAt <= Date.now()) {
+    const now = Date.now();
+    if (token.revokedAt !== null || token.expiresAt <= now) {
       return null;
     }
     const owner = await this.members.findById(token.userId);
     if (owner === null) {
       return null;
     }
-    try {
-      await this.storage.updateAgentTokenLastUsed(token.id);
-    } catch (error) {
-      this.logger.warn(`Failed to update lastUsedAt for token ${token.id}: ${String(error)}`);
-    }
+    await this.stampLastUsed(token, now);
     return {
       userId: owner.id,
       email: owner.email,
@@ -131,6 +129,17 @@ export class PersonalTokenService {
       via: 'token',
       tokenId: token.id,
     };
+  }
+
+  private async stampLastUsed(token: AgentToken, now: number): Promise<void> {
+    if (token.lastUsedAt !== null && now - token.lastUsedAt < LAST_USED_STAMP_INTERVAL_MS) {
+      return;
+    }
+    try {
+      await this.storage.updateAgentTokenLastUsed(token.id);
+    } catch (error) {
+      this.logger.warn(`Failed to update lastUsedAt for token ${token.id}: ${String(error)}`);
+    }
   }
 
   private canManage(actor: Actor, token: AgentToken): boolean {
