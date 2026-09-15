@@ -578,7 +578,7 @@ describe('getMe failure handling', () => {
     }
   });
 
-  it.each([408, 429])('keeps retrying on a transient %i', async (status) => {
+  it.each([404, 408, 429])('keeps retrying on a retryable %i', async (status) => {
     vi.useFakeTimers();
     try {
       getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: true });
