@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
   StoragePort,
   StoredAclEntry,
@@ -101,7 +102,7 @@ function pendingProposalSubDiscriminator(
   return null;
 }
 
-export class MemoryAdapter implements StoragePort {
+export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   private aclEntries: StoredAclEntry[] = [];
   private clientSnapshots: StoredClientSnapshot[] = [];
   private anomalyEvents: StoredAnomalyEvent[] = [];
@@ -124,6 +125,10 @@ export class MemoryAdapter implements StoragePort {
 
   async initialize(): Promise<void> {
     this.ready = true;
+  }
+
+  getRawDatabaseHandle(): RawDatabaseHandle {
+    return { kind: 'memory' };
   }
 
   async close(): Promise<void> {

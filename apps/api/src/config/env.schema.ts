@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import { MAX_RETENTION_DAYS, parseRetentionDaysToken } from '@betterdb/shared';
 import { isCloudModeValue } from '../common/utils/cloud-mode';
+import { DEFAULT_AUTH_BROKER_URL, isTrueFlag, normalizeOptionalUrl } from './env-normalize';
+
+function optionalUrl(value: unknown): unknown {
+  return normalizeOptionalUrl(value) ?? undefined;
+}
 
 /**
  * Environment variable validation schema
@@ -84,6 +89,13 @@ export const envSchema = z
 
         return trimmed;
       }),
+
+    // Self-hosted user control (workspace auth)
+    WORKSPACE_DISABLED: z.string().default('false').transform(isTrueFlag),
+    AUTH_SECRET: z.string().min(32).optional(),
+    AUTH_PUBLIC_URL: z.preprocess(optionalUrl, z.string().url().optional()),
+    AUTH_BROKER_URL: z.preprocess(optionalUrl, z.string().url().default(DEFAULT_AUTH_BROKER_URL)),
+    TRUST_PROXY: z.string().optional(),
 
     // Anomaly detection
     ANOMALY_DETECTION_ENABLED: z

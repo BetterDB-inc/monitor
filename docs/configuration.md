@@ -14,6 +14,7 @@ This document provides comprehensive configuration information for BetterDB Moni
   - [Data Retention](#data-retention)
 - [Docker Usage](#docker-usage)
 - [HTTP Endpoints](#http-endpoints)
+  - [Authenticating API Requests](#authenticating-api-requests)
 - [Runtime Settings](#runtime-settings)
 - [Container Management](#container-management)
 
@@ -152,6 +153,8 @@ This means:
 | `STORAGE_AUTH_TOKEN` | Conditional | - | Turso auth token (startup requires it when `STORAGE_URL` uses `libsql://`, and rejects it when `STORAGE_URL` uses `http://`; a hosted `https://` endpoint needs it too but is not checked at startup - see below) |
 | `STORAGE_SQLITE_FILEPATH` | No | `./data/audit.db` | SQLite database file path (only for `STORAGE_TYPE=sqlite`) |
 
+**Warning**: `memory` is for development and testing only. Users and sessions live in the process, so a restart loses them, the instance returns to the register screen, and the next visitor claims the owner account. Use `sqlite` or `postgres` for anything other people can reach.
+
 **Note**: `sqlite` writes to a local file through the `better-sqlite3` native module, which is stripped from the `latest` (no-AI) Docker image - use it for local development, or pick `postgres`, `turso`, or `memory` for Docker deployments.
 
 **Note**: `turso` reuses the SQLite adapter over the libSQL wire protocol, so it needs no native module and works in every Docker image. It is opt-in: set `STORAGE_TYPE=turso` plus `STORAGE_URL` (and `STORAGE_AUTH_TOKEN` for `libsql://` URLs), exactly like the `postgres` backend.
@@ -173,6 +176,11 @@ This means:
 |----------|----------|---------|-------------|
 | `ENCRYPTION_KEY` | No | - | Master key for encrypting stored connection passwords **and SSH tunnel secrets** (min 16 characters) |
 | `ENCRYPTION_KEK_SALT` | No | `betterdb-kek-salt-v1` | Salt used for key derivation (customize for additional security) |
+| `WORKSPACE_DISABLED` | No | `false` | Run without user control: no login, no roles, no Team page. Existing installs upgrading with the default see a register screen on first load |
+| `AUTH_SECRET` | No | generated | Session signing secret, at least 32 characters. Generated once and stored in `BETTERDB_DATA_DIR/auth-secret` when unset; set it explicitly when running more than one replica. When the data directory is read-only the API keeps booting with an in-memory secret and logs a warning: sessions are then invalidated on every restart |
+| `AUTH_PUBLIC_URL` | No | inferred | Public origin used for session cookies and CSRF origin checks, e.g. `https://monitor.example.com`. When unset, the origin check accepts the host the request carries under either scheme; setting it pins the check to this origin. Session cookies are marked `Secure` only when this starts with `https://`, so installs served over HTTPS (including behind a TLS-terminating proxy) should set it and keep session cookies off plain HTTP |
+| `TRUST_PROXY` | No | `false` | Trust `X-Forwarded-For`, `X-Forwarded-Host` and `X-Forwarded-Proto`. Set to a comma-separated list of proxy addresses/CIDRs (`10.0.0.0/8,127.0.0.1`) so client IPs, rate limits and the CSRF origin check see the browser-facing host, or to `true` when the API is only reachable through the proxy. A hop count (`1`) is refused with a warning: Fastify's hop-count matching ignores the connecting address, so anyone who reaches the API directly can spoof the headers. Leave unset when the API is reachable directly |
+| `AUTH_BROKER_URL` | No | `https://betterdb.com` | Origin of the BetterDB sign-in broker (used from phase 5) |
 
 **Password Encryption**: When `ENCRYPTION_KEY` is set, all connection passwords are encrypted at rest using envelope encryption (AES-256-GCM). Each password gets a unique encryption key (DEK) that is itself encrypted with a master key (KEK) derived from your `ENCRYPTION_KEY`. The same encryption covers SSH tunnel secrets (SSH password, key passphrase, and inline private keys).
 
@@ -376,6 +384,8 @@ docker run -d \
   betterdb/monitor
 ```
 
+**Note**: `STORAGE_TYPE=memory` loses users and sessions on every restart, so the instance returns to the register screen and the next visitor claims the owner account. Use `sqlite` or `postgres` once other people can reach it.
+
 #### PostgreSQL Storage
 
 ```bash
@@ -424,6 +434,8 @@ docker run -d \
   betterdb/monitor
 ```
 
+**Note**: `STORAGE_TYPE=memory` loses users and sessions on every restart, so the instance returns to the register screen and the next visitor claims the owner account. Use `sqlite` or `postgres` once other people can reach it.
+
 **Important**: When not using `--network host`, the `-p` flag port mapping must match the `PORT` environment variable (e.g., `-p 8080:8080 -e PORT=8080`).
 
 #### Host Network Mode
@@ -468,9 +480,13 @@ docker run -d \
   betterdb/monitor
 ```
 
+**Note**: `STORAGE_TYPE=memory` loses users and sessions on every restart, so the instance returns to the register screen and the next visitor claims the owner account. Use `sqlite` or `postgres` once other people can reach it.
+
 No `BETTERDB_LICENSE_KEY` is set, so the monitor runs **fully offline** — no
-outbound requests, telemetry disabled. Verify with `GET /api/license/status`
-(`source: offline-token`, `mode: offline`, `airGapped: true`).
+outbound requests, telemetry disabled. Verify with
+`curl -b cookies.txt http://localhost:3001/api/license/status`
+(`source: offline-token`, `mode: offline`, `airGapped: true`); see
+[Authenticating API Requests](#authenticating-api-requests) for the cookie.
 
 ### Accessing the Application
 
@@ -490,6 +506,33 @@ Once running, access the web interface at:
 | `/api/prometheus/metrics` | Prometheus metrics endpoint |
 
 All API endpoints are prefixed with `/api` when accessed through the web server.
+
+### Authenticating API Requests
+
+With user control enabled (the default on self-hosted installs), every API endpoint below
+requires a signed-in session; without one the API answers `401`. The `curl` examples
+throughout the docs assume a session cookie obtained once:
+
+```bash
+# Sign in and store the session cookie
+curl -c cookies.txt -X POST http://localhost:3001/api/auth/sign-in/email \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "your-password"}'
+
+# Reuse it on every later call
+curl -b cookies.txt http://localhost:3001/api/connections
+```
+
+These routes stay open without a session: `/api/health`, `/api/version`,
+`/api/system/workspace`, `/api/prometheus/metrics`, `/api/docs`, the `/api/auth` and
+`/api/invite` routes, and reads under `/api/mcp`. Writes under `/api/mcp` that apply
+changes — approving or rejecting cache and memory proposals — need a session too.
+
+Set `WORKSPACE_DISABLED=true` to run without user control, in which case every endpoint
+is reachable without signing in.
+
+Sessions are cached in a signed cookie for 30 seconds, so a role change or a removed
+member takes effect within that window rather than on the next request.
 
 ### Health
 

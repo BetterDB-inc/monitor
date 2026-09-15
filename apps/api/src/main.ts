@@ -1,5 +1,6 @@
 import { INestApplication, Logger, RequestMethod, ValidationPipe } from '@nestjs/common';
 import { isCloudMode } from './common/utils/cloud-mode';
+import { requireCloudAuth } from './common/utils/cloud-auth-loader';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
@@ -10,6 +11,7 @@ import { readFileSync } from 'fs';
 import fastifyStatic from '@fastify/static';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { validateEnv } from './config/env.schema';
+import { resolveTrustProxy } from './config/trust-proxy';
 import { categorizeError } from './common/utils/error-categorizer';
 import { CliGateway } from './cli/cli.gateway';
 import { TailGateway } from './monitor/tail.gateway';
@@ -27,7 +29,7 @@ async function bootstrap(): Promise<void> {
 
   const isProduction = process.env.NODE_ENV === 'production';
 
-  const fastifyAdapter = new FastifyAdapter();
+  const fastifyAdapter = new FastifyAdapter({ trustProxy: resolveTrustProxy(process.env) });
 
   // Compute publicPath once to avoid divergence between SPA fallback and static file serving
   const publicPath = isProduction
@@ -85,16 +87,12 @@ async function bootstrap(): Promise<void> {
   // Register cloud auth middleware at Fastify level BEFORE any other middleware
   // This ensures it runs before static file serving
   if (isCloudMode()) {
-    try {
-      const {
-        CloudAuthMiddleware,
-      } = require('../../../proprietary/cloud-auth/cloud-auth.middleware');
-      const middleware = new CloudAuthMiddleware();
-      app.use((req: any, res: any, next: () => void) => middleware.use(req, res, next));
-      console.log('[CloudAuth] Middleware registered at Fastify level');
-    } catch {
-      console.warn('[CloudAuth] Failed to register middleware — proprietary module not found');
-    }
+    const { CloudAuthMiddleware } = requireCloudAuth(() =>
+      require('../../../proprietary/cloud-auth/cloud-auth.middleware'),
+    );
+    const middleware = new CloudAuthMiddleware();
+    app.use((req: any, res: any, next: () => void) => middleware.use(req, res, next));
+    console.log('[CloudAuth] Middleware registered at Fastify level');
   }
 
   // Register startup error handlers — report fatal errors within the first 60s

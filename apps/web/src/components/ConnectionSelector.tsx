@@ -5,7 +5,7 @@ import { fetchApi } from '../api/client';
 import { parseConnectionUrl, looksLikeConnectionUrl } from '../utils/connectionUrl';
 import { agentTokensApi, GeneratedToken, TokenListItem } from '../api/agent-tokens';
 import { databasesApi, Database, DatabaseStatus, DatabaseCredentials } from '../api/databases';
-import { workspaceApi } from '../api/workspace';
+import { workspaceApi, CloudUser } from '../api/workspace';
 import type { Connection } from '../hooks/useConnection';
 import type { AgentConnectionInfo } from '@betterdb/shared';
 import { ConnectionSwitcher } from './connection-selector/ConnectionSwitcher';
@@ -1164,7 +1164,9 @@ function ValkeyInstancesTab({
     loadData();
     workspaceApi
       .getMe()
-      .then((me) => setIsAdminOrOwner(me.role === 'admin' || me.role === 'owner'))
+      .then((me: CloudUser) => {
+        setIsAdminOrOwner(me.role === 'admin' || me.role === 'owner' || me.isOwner === true);
+      })
       .catch(() => {});
   }, []);
 
