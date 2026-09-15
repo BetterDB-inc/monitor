@@ -392,6 +392,12 @@ function describeOwnershipTransfer(
         new ConflictException(MEMBER_CHANGED_MESSAGE),
       );
       expect(await ownerIds(service)).toEqual([heir]);
+      const response = await service.signIn(
+        'heir@example.com',
+        'correct horse battery',
+        new Headers(),
+      );
+      expect(response.status).toBe(200);
     });
 
     it('leaves exactly one owner when a removal races a transfer', async () => {
@@ -405,7 +411,16 @@ function describeOwnershipTransfer(
       });
       expect(rejected).toHaveLength(1);
       expect(rejected[0].reason).toBeInstanceOf(ConflictException);
-      expect(await ownerIds(service)).toHaveLength(1);
+      const owners = (await service.list()).filter((member) => {
+        return member.isOwner === true;
+      });
+      expect(owners).toHaveLength(1);
+      const response = await service.signIn(
+        owners[0].email,
+        'correct horse battery',
+        new Headers(),
+      );
+      expect(response.status).toBe(200);
     });
 
     it('refuses a role change for a member who became the owner', async () => {
@@ -498,6 +513,37 @@ describe('MemberService.transferOwnership compensation (memory)', () => {
     expect(injected.updatedIds).not.toContain(ownerId);
     expect(await ownerIds(service)).toEqual([ownerId]);
   });
+});
+
+describe('MemberService.remove without transactions (memory)', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it.each(['session', 'account'])(
+    'keeps the user when deleting their %s rows fails, so a retry completes',
+    async (model) => {
+      const { auth, service } = await openWorkspace({ kind: 'memory' });
+      const email = `${model}-cleanup@example.com`;
+      const leaver = await addMember(service, email);
+      const context = await auth.$context;
+      const deleteMany = context.adapter.deleteMany.bind(context.adapter);
+      const failing = jest.spyOn(context.adapter, 'deleteMany').mockImplementation((data) => {
+        if (data.model === model) {
+          return Promise.reject(new Error(`${model} cleanup failed`));
+        }
+        return deleteMany(data);
+      });
+      await expect(service.remove(leaver)).rejects.toThrow(`${model} cleanup failed`);
+      failing.mockRestore();
+      expect(await service.findById(leaver)).not.toBeNull();
+
+      await service.remove(leaver);
+      expect(await service.findById(leaver)).toBeNull();
+      const response = await service.signIn(email, 'correct horse battery', new Headers());
+      expect(response.status).toBe(401);
+    },
+  );
 });
 
 describeOwnershipTransfer('memory', false, async () => {

@@ -120,12 +120,16 @@ function nonOwnerWhere(userId: string): Array<{ field: string; value: string | b
 }
 
 async function deleteNonOwner(adapter: UserWriter, userId: string): Promise<void> {
-  const deleted = await adapter.deleteMany({ model: 'user', where: nonOwnerWhere(userId) });
-  if (deleted !== 1) {
+  const target = await adapter.findOne<StoredUser>({ model: 'user', where: nonOwnerWhere(userId) });
+  if (target === null) {
     throw new ConflictException(MEMBER_CHANGED_MESSAGE);
   }
   await adapter.deleteMany({ model: 'session', where: [{ field: 'userId', value: userId }] });
   await adapter.deleteMany({ model: 'account', where: [{ field: 'userId', value: userId }] });
+  const deleted = await adapter.deleteMany({ model: 'user', where: nonOwnerWhere(userId) });
+  if (deleted !== 1) {
+    throw new ConflictException(MEMBER_CHANGED_MESSAGE);
+  }
 }
 
 function describeError(error: unknown): string {
@@ -138,8 +142,17 @@ function describeError(error: unknown): string {
 @Injectable()
 export class MemberService {
   private readonly logger = new Logger(MemberService.name);
+  private membershipQueue: Promise<unknown> = Promise.resolve();
 
   constructor(@Inject(BETTER_AUTH) private readonly auth: BetterAuthInstance) {}
+
+  private serializeMembershipChange<T>(change: () => Promise<T>): Promise<T> {
+    const run = this.membershipQueue.then(change);
+    this.membershipQueue = run.catch(() => {
+      return undefined;
+    });
+    return run;
+  }
 
   async list(): Promise<MemberRecord[]> {
     const context = await this.auth.$context;
@@ -227,7 +240,9 @@ export class MemberService {
       });
       return;
     }
-    await this.moveOwnershipWithCompensation(context.adapter, fromId, toId);
+    await this.serializeMembershipChange(() => {
+      return this.moveOwnershipWithCompensation(context.adapter, fromId, toId);
+    });
   }
 
   private async moveOwnershipWithCompensation(
@@ -268,7 +283,9 @@ export class MemberService {
       });
       return;
     }
-    await deleteNonOwner(context.adapter, id);
+    await this.serializeMembershipChange(() => {
+      return deleteNonOwner(context.adapter, id);
+    });
   }
 
   async signIn(email: string, password: string, headers: Headers): Promise<Response> {
