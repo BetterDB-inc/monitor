@@ -1,7 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { NotFoundException } from '@nestjs/common';
-import { CliService, MEMBER_READ_ONLY_MESSAGE } from '../cli.service';
+import { MEMBER_DENIED_MESSAGE } from '@betterdb/shared';
+import { CliService } from '../cli.service';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 
 const mockCall = jest.fn();
@@ -63,11 +64,15 @@ describe('CliService', () => {
       },
     );
 
-    it.each([['SET foo bar'], ['DEL foo'], ['CONFIG SET maxmemory 100mb']])(
-      'tells a read-only member that %s is not allowed instead of suggesting unsafe mode',
-      async (command) => {
+    it.each([
+      ['SET foo bar', 'Command SET is not allowed in safe mode.'],
+      ['DEL foo', 'Command DEL is not allowed in safe mode.'],
+      ['CONFIG SET maxmemory 100mb', MEMBER_DENIED_MESSAGE],
+    ])(
+      'tells a read-only member why %s is refused instead of suggesting unsafe mode',
+      async (command, error) => {
         const result = await service.execute(command, 'c1', { readOnly: true });
-        expect(result).toEqual({ type: 'error', error: MEMBER_READ_ONLY_MESSAGE });
+        expect(result).toEqual({ type: 'error', error });
       },
     );
 
@@ -233,7 +238,7 @@ describe('CliService (unsafe mode)', () => {
   describe('member read-only mode', () => {
     it('rejects unsafe commands for read-only members even with BETTERDB_UNSAFE_CLI=true', async () => {
       const result = await unsafeService.execute('SET a b', 'c1', { readOnly: true });
-      expect(result).toEqual({ type: 'error', error: MEMBER_READ_ONLY_MESSAGE });
+      expect(result).toEqual({ type: 'error', error: 'Command SET is not allowed in safe mode.' });
       expect(mockConnectionRegistry.get).not.toHaveBeenCalled();
     });
 
@@ -241,7 +246,7 @@ describe('CliService (unsafe mode)', () => {
       'rejects %s for read-only members although safe mode allows it',
       async (command) => {
         const result = await unsafeService.execute(command, 'c1', { readOnly: true });
-        expect(result).toEqual({ type: 'error', error: MEMBER_READ_ONLY_MESSAGE });
+        expect(result).toEqual({ type: 'error', error: MEMBER_DENIED_MESSAGE });
         expect(mockConnectionRegistry.get).not.toHaveBeenCalled();
       },
     );

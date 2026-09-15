@@ -12,7 +12,6 @@ import { BETTER_AUTH, BetterAuthInstance } from '../src/auth/better-auth.factory
 import { READ_ONLY_MESSAGE } from '../src/auth/guards/mutation.guard';
 import { ROLE_REQUIRED_MESSAGE } from '../src/auth/guards/roles.guard';
 import { CliGateway } from '../src/cli/cli.gateway';
-import { MEMBER_READ_ONLY_MESSAGE } from '../src/cli/cli.service';
 import { TailGateway } from '../src/monitor/tail.gateway';
 
 const OWNER = { email: 'owner@example.com', password: 'correct horse battery', name: 'Owner' };
@@ -325,7 +324,7 @@ describe('Workspace authorization (E2E)', () => {
     if (message.type !== 'error') {
       throw new Error(`Expected an error message, got: ${JSON.stringify(message)}`);
     }
-    expect(message.error).toContain(MEMBER_READ_ONLY_MESSAGE);
+    expect(message.error).toBe('Command SET is not allowed in safe mode.');
   });
 
   it('does not read-only-restrict the owner over the CLI socket', async () => {
@@ -340,6 +339,6 @@ describe('Workspace authorization (E2E)', () => {
     if (message.type !== 'error') {
       throw new Error(`Expected an error message, got: ${JSON.stringify(message)}`);
     }
-    expect(message.error).not.toContain(MEMBER_READ_ONLY_MESSAGE);
+    expect(message.error).not.toContain('not allowed in safe mode');
   });
 });

@@ -10,8 +10,6 @@ export interface CliExecuteOptions {
   readOnly: boolean;
 }
 
-export const MEMBER_READ_ONLY_MESSAGE = 'Read-only members can only run read commands.';
-
 @Injectable()
 export class CliService {
   private readonly logger = new Logger(CliService.name);
@@ -50,7 +48,7 @@ export class CliService {
     if (options.readOnly === true) {
       const memberError = checkMemberReadOnly(command, subCommand);
       if (memberError !== null) {
-        return { type: 'error', error: MEMBER_READ_ONLY_MESSAGE };
+        return { type: 'error', error: memberError };
       }
     }
 
