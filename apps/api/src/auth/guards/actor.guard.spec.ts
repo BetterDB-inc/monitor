@@ -10,7 +10,7 @@ import type { BetterAuthInstance } from '../better-auth.factory';
 import { CLIENT_IP_HEADER, createBetterAuth } from '../better-auth.factory';
 import { resolveWorkspaceConfig, WorkspaceConfig } from '../workspace-config';
 import { ActorGuard } from './actor.guard';
-import { isPublicPath } from './public-paths';
+import { isActorOptionalPath, isPublicPath } from './public-paths';
 
 const SECRET = 's'.repeat(40);
 const ORIGIN = 'http://localhost:3001';
@@ -132,6 +132,36 @@ describe('isPublicPath', () => {
   it('does not treat a longer path sharing a prefix string as public', () => {
     for (const path of ['/healthz-private', '/docsite', '/prometheus-internal', '/versioning']) {
       expect(isPublicPath(path, 'GET')).toBe(false);
+    }
+  });
+});
+
+describe('isActorOptionalPath', () => {
+  it('matches the mcp surface with or without the /api prefix', () => {
+    for (const path of [
+      '/mcp',
+      '/mcp/instances',
+      '/api/mcp/instances',
+      '/api/mcp/instance/local/memory/agent/recall?limit=5',
+    ]) {
+      expect(isActorOptionalPath(path)).toBe(true);
+    }
+  });
+
+  it('does not match other public paths', () => {
+    for (const path of [
+      '/ingest/e',
+      '/api/ingest/x',
+      '/v1/traces',
+      '/api/v1/traces',
+      '/auth/sign-in/email',
+      '/api/auth/get-session',
+      '/prometheus',
+      '/telemetry/event',
+      '/mcp-internal',
+      '/api/mcpx/tools',
+    ]) {
+      expect(isActorOptionalPath(path)).toBe(false);
     }
   });
 });
@@ -389,6 +419,40 @@ describe('ActorGuard bearer tokens', () => {
     expect(request.actor).toEqual(sessionActor);
     expect(resolveFromHeaders).toHaveBeenCalledWith(request.headers, '10.0.0.1');
     expect(resolveBearer).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['/api/ingest/x', 'POST'],
+    ['/v1/traces', 'POST'],
+    ['/auth/sign-in/email', 'POST'],
+  ])('skips actor resolution on non-mcp public path %s', async (url, method) => {
+    const resolveFromHeaders = jest.fn().mockResolvedValue(sessionActor);
+    const resolveBearer = jest.fn().mockResolvedValue(tokenActor);
+    const request: FakeRequest = {
+      url,
+      method,
+      headers: { cookie: 'better-auth.session_token=abc', authorization: 'Bearer bdb_mcp_x' },
+      ip: '10.0.0.1',
+    };
+    const guard = new ActorGuard(stubResolver(resolveFromHeaders, resolveBearer));
+    await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+    expect(request.actor).toBeNull();
+    expect(resolveFromHeaders).not.toHaveBeenCalled();
+    expect(resolveBearer).not.toHaveBeenCalled();
+  });
+
+  it('resolves a bearer token on an mcp public path', async () => {
+    const resolveFromHeaders = jest.fn().mockResolvedValue(tokenActor);
+    const request: FakeRequest = {
+      url: '/api/mcp/instance/local/memory/agent/recall',
+      method: 'POST',
+      headers: { authorization: 'Bearer bdb_mcp_x' },
+      ip: '10.0.0.1',
+    };
+    const guard = new ActorGuard(stubResolver(resolveFromHeaders, jest.fn()));
+    await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+    expect(resolveFromHeaders).toHaveBeenCalledWith(request.headers, '10.0.0.1');
+    expect(request.actor).toEqual(tokenActor);
   });
 
   it('attaches the session actor to a session-only public call', async () => {

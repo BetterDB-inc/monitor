@@ -8,7 +8,7 @@ import {
 import { FastifyReply, FastifyRequest } from 'fastify';
 import type { Actor } from '@betterdb/shared';
 import { ActorResolver } from '../actor-resolver';
-import { isPublicPath } from './public-paths';
+import { isActorOptionalPath, isPublicPath } from './public-paths';
 
 export type RequestWithActor = FastifyRequest & { actor: Actor | null };
 
@@ -23,7 +23,9 @@ export class ActorGuard implements CanActivate {
       return true;
     }
     if (isPublicPath(request.url, request.method) === true) {
-      request.actor = await this.optionalActor(request);
+      if (isActorOptionalPath(request.url) === true) {
+        request.actor = await this.optionalActor(request);
+      }
       return true;
     }
     if (this.resolver.isReady() === false) {
