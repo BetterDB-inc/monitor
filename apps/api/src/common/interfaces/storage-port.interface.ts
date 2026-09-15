@@ -73,6 +73,7 @@ export type {
   ScheduledCaptureQueryOptions,
   ScheduledCapturePatch,
 } from '@betterdb/shared';
+import type { InvitationRepository } from './invitation-repository.interface';
 import type {
   AppSettings,
   AuditQueryOptions,
@@ -728,4 +729,6 @@ export interface StoragePort {
     store_name: string;
     target_discriminator: string;
   }): Promise<number>;
+
+  getInvitationRepository(): InvitationRepository;
 }

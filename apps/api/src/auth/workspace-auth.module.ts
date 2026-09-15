@@ -4,6 +4,9 @@ import { join } from 'path';
 import type { StoragePort } from '../common/interfaces/storage-port.interface';
 import { hasRawDatabaseHandle } from '../storage/raw-database-handle';
 import { StorageModule } from '../storage/storage.module';
+import { InvitationService } from '../workspace/invitation.service';
+import { InviteController } from '../workspace/invite.controller';
+import { MemberService } from '../workspace/member.service';
 import { WorkspaceController } from '../workspace/workspace.controller';
 import { WORKSPACE_STATUS, WorkspaceStatusService } from '../workspace/workspace-status.service';
 import { ActorResolver } from './actor-resolver';
@@ -84,7 +87,8 @@ export class WorkspaceAuthModule {
         inject: ['STORAGE_CLIENT'],
       });
       providers.push({ provide: WORKSPACE_STATUS, useClass: WorkspaceStatusService });
-      controllers.push(BetterAuthController, WorkspaceController);
+      providers.push(MemberService, InvitationService);
+      controllers.push(BetterAuthController, WorkspaceController, InviteController);
       exports.push(BETTER_AUTH, WORKSPACE_STATUS);
     }
     return {

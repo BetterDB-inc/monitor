@@ -107,6 +107,8 @@ import { openLibsqlDatabase } from './libsql-driver';
 import { loadBetterSqlite3 } from './better-sqlite3-driver';
 import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repository';
 import { SlowLogSqliteRepository } from './repositories/slowlog.sqlite.repository';
+import { InvitationSqliteRepository } from './repositories/invitation.sqlite.repository';
+import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
 
 /**
  * Idempotent migration for the memory_proposals columns added with the
@@ -340,6 +342,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   private readonly mappers = new RowMappers(SqliteDialect);
   private webhookRepo!: WebhookSqliteRepository;
   private slowlogRepo!: SlowLogSqliteRepository;
+  private invitationRepo!: InvitationSqliteRepository;
 
   constructor(private config: SqliteAdapterConfig) {}
 
@@ -353,6 +356,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       this.runMigrations();
       this.webhookRepo = new WebhookSqliteRepository(this.db, this.mappers);
       this.slowlogRepo = new SlowLogSqliteRepository(this.db, this.mappers);
+      this.invitationRepo = new InvitationSqliteRepository(this.db);
       this.ready = true;
     } catch (error) {
       this.ready = false;
@@ -1871,6 +1875,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
       CREATE INDEX IF NOT EXISTS idx_scheduled_captures_conn_status
         ON scheduled_captures(connection_id, status);
+
+      CREATE TABLE IF NOT EXISTS invitations (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        role TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        invited_by TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'revoked')),
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
     `);
 
     // Idempotent migration for deployments that ran the PR 19 schema before
@@ -5277,6 +5292,10 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       lastFiredSessionId: (row.last_fired_session_id as string | null) ?? undefined,
       lastSkipReason: (row.last_skip_reason as string | null) ?? undefined,
     };
+  }
+
+  getInvitationRepository(): InvitationRepository {
+    return this.invitationRepo;
   }
 }
 
