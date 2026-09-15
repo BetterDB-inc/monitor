@@ -168,4 +168,20 @@ export class SpikeDetector {
   getConfig(): Required<SpikeDetectorConfig> {
     return { ...this.config };
   }
+
+  /**
+ * Hot-reloads detector thresholds without resetting the circular buffer.
+ * Callers pass a fully-resolved config (produced via
+ * `toSpikeDetectorConfig(resolveDetectorConfig(...))`), so this method
+ * requires the `Required<>` variant — that keeps `DETECTOR_DEFAULTS` in
+ * `apps/api/src/anomaly/anomaly.types.ts` as the single source of truth for
+ * defaults. `detectDrops` is preserved from the current config because the
+ * API surface does not expose it.
+ */
+updateConfig(config: Required<SpikeDetectorConfig>): void {
+  this.config = {
+    ...config,
+    detectDrops: config.detectDrops ?? this.config.detectDrops,
+  };
+}
 }

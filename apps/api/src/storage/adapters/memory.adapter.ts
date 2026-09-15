@@ -853,6 +853,8 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (updates.inferenceSlaConfig !== undefined) {
       validUpdates.inferenceSlaConfig = updates.inferenceSlaConfig;
     }
+    if (updates.anomalyDetectorConfig !== undefined) {
+      validUpdates.anomalyDetectorConfig = updates.anomalyDetectorConfig;
     if (updates.localRetentionDays !== undefined) {
       validUpdates.localRetentionDays = updates.localRetentionDays;
     }
