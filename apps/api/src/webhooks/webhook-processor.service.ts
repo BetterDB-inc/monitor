@@ -1,4 +1,4 @@
-import { Injectable, Inject, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Inject, Logger, NotFoundException, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import type { WebhookDelivery } from '@betterdb/shared';
 import { DeliveryStatus } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
@@ -208,7 +208,7 @@ export class WebhookProcessorService implements OnModuleInit, OnModuleDestroy {
     const delivery = await this.storageClient.getDelivery(deliveryId);
 
     if (!delivery) {
-      throw new Error(`Delivery ${deliveryId} not found`);
+      throw new NotFoundException(`Delivery ${deliveryId} not found`);
     }
 
     if (delivery.status === DeliveryStatus.SUCCESS) {

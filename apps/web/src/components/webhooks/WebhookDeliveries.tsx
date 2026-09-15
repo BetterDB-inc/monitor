@@ -83,7 +83,9 @@ export function WebhookDeliveries({ webhook, onClose }: WebhookDeliveriesProps) 
       <div className="flex items-center justify-between mb-4">
         <div>
           <h2 className="text-xl font-semibold">Delivery History: {webhook.name}</h2>
-          <p className="text-sm text-muted-foreground mt-1">Showing last 100 deliveries</p>
+          <p className="text-sm text-muted-foreground mt-1">
+            Showing last 100 deliveries · <span className="capitalize">{webhook.payloadFormat ?? 'generic'}</span> format
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <button

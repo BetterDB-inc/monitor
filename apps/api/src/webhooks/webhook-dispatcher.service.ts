@@ -8,6 +8,7 @@ import type {
   WebhookEventType,
   WebhookThresholds,
 } from '@betterdb/shared';
+import { WebhookPayloadFormat } from '@betterdb/shared';
 import {
   DeliveryStatus,
   getDeliveryConfig,
@@ -19,6 +20,7 @@ import {
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { WebhooksService } from './webhooks.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { formatWebhookBody } from './webhook-payload-formatter';
 
 interface AlertState {
   fired: boolean;
@@ -74,6 +76,7 @@ export class WebhookDispatcherService {
   // Instance context
   private readonly sourceHost: string;
   private readonly sourcePort: number;
+  private readonly appBaseUrl?: string;
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
@@ -87,6 +90,7 @@ export class WebhookDispatcherService {
     );
     this.sourceHost = this.configService.get<string>('database.host', 'localhost');
     this.sourcePort = this.configService.get<number>('database.port', 6379);
+    this.appBaseUrl = this.configService.get<string>('FRONTEND_URL');
   }
 
   /**
@@ -383,8 +387,8 @@ export class WebhookDispatcherService {
     const maxResponseBodyBytes = deliveryConfig.maxResponseBodyBytes;
 
     try {
-      // Prepare request
-      const payloadString = JSON.stringify(payload);
+      // Prepare request (body rendered per webhook.payloadFormat)
+      const payloadString = formatWebhookBody(webhook, payload, this.appBaseUrl);
       const timestamp = payload.timestamp;
       const signature = this.generateSignatureWithTimestamp(
         payloadString,
@@ -539,12 +543,16 @@ export class WebhookDispatcherService {
     responseBody?: string;
     error?: string;
     durationMs: number;
+    payloadFormat?: WebhookPayloadFormat;
+    renderedPayload?: Record<string, unknown>;
   }> {
     const startTime = Date.now();
 
     // Get per-webhook delivery config
     const deliveryConfig = getDeliveryConfig(webhook);
     const timeoutMs = deliveryConfig.timeoutMs;
+
+    let renderedPayload: Record<string, unknown> | undefined;
 
     try {
       // Use first subscribed event for testing, or instance.down as fallback
@@ -569,7 +577,8 @@ export class WebhookDispatcherService {
         },
       };
 
-      const payloadString = JSON.stringify(testPayload);
+      const payloadString = formatWebhookBody(webhook, testPayload, this.appBaseUrl);
+      renderedPayload = JSON.parse(payloadString) as Record<string, unknown>;
       const timestamp = testPayload.timestamp;
       const signature = this.generateSignatureWithTimestamp(
         payloadString,
@@ -611,6 +620,8 @@ export class WebhookDispatcherService {
         statusCode: response.status,
         responseBody: responseBody.substring(0, this.MAX_TEST_RESPONSE_PREVIEW_BYTES),
         durationMs,
+        payloadFormat: webhook.payloadFormat ?? WebhookPayloadFormat.GENERIC,
+        renderedPayload,
       };
     } catch (error) {
       const durationMs = Date.now() - startTime;
@@ -618,6 +629,8 @@ export class WebhookDispatcherService {
         success: false,
         error: error instanceof Error && error.message ? error.message : 'Unknown error',
         durationMs,
+        payloadFormat: webhook.payloadFormat ?? WebhookPayloadFormat.GENERIC,
+        renderedPayload,
       };
     }
   }

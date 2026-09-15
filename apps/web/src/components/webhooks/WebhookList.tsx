@@ -33,6 +33,9 @@ export function WebhookList({ webhooks, onEdit, onDelete, onTest, onViewDeliveri
                 <Badge variant={webhook.enabled ? 'success' : 'secondary'}>
                   {webhook.enabled ? 'Enabled' : 'Disabled'}
                 </Badge>
+                <Badge variant="outline" className="text-xs capitalize">
+                  {webhook.payloadFormat ?? 'generic'}
+                </Badge>
               </div>
 
               <div className="space-y-2 text-sm text-muted-foreground">

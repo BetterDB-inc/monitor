@@ -243,9 +243,30 @@ export interface Webhook {
   deliveryConfig?: WebhookDeliveryConfig;
   alertConfig?: WebhookAlertConfig;
   thresholds?: WebhookThresholds;
+  /** Payload rendering format. Defaults to 'generic' for backward compat. */
+  payloadFormat?: WebhookPayloadFormat;
   connectionId?: string;
   createdAt: number;
   updatedAt: number;
+}
+
+/** Payload rendering format for webhook deliveries. */
+export enum WebhookPayloadFormat {
+  GENERIC = 'generic',
+  SLACK = 'slack',
+  DISCORD = 'discord',
+}
+
+/**
+ * Guess the intended payload format from a webhook URL, for UI auto-suggest.
+ * Returns undefined when the URL doesn't match a known chat endpoint.
+ */
+export function suggestPayloadFormatForUrl(url: string): WebhookPayloadFormat | undefined {
+  if (url.includes('hooks.slack.com')) return WebhookPayloadFormat.SLACK;
+  if (url.includes('discord.com/api/webhooks') || url.includes('discordapp.com/api/webhooks')) {
+    return WebhookPayloadFormat.DISCORD;
+  }
+  return undefined;
 }
 
 export interface WebhookDelivery {
