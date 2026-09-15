@@ -57,6 +57,8 @@ export class BrokerSigningService {
       return;
     }
 
+    const isProduction = process.env.NODE_ENV === 'production';
+
     try {
       const privateKeyObject = createPrivateKey(this.privateKey);
       if (privateKeyObject.asymmetricKeyType !== 'rsa') {
@@ -70,7 +72,8 @@ export class BrokerSigningService {
       }
 
       const expectedPublicKey = BROKER_SIGNING_PUBLIC_KEYS[this.kid];
-      if (expectedPublicKey === undefined && Object.keys(BROKER_SIGNING_PUBLIC_KEYS).length > 0) {
+      const trustMapPopulated = Object.keys(BROKER_SIGNING_PUBLIC_KEYS).length > 0;
+      if (expectedPublicKey === undefined && (trustMapPopulated || isProduction)) {
         throw new Error(`kid "${this.kid}" is not in BROKER_SIGNING_PUBLIC_KEYS`);
       }
       if (expectedPublicKey !== undefined) {
@@ -87,7 +90,7 @@ export class BrokerSigningService {
       this.keyUsable = true;
     } catch (error) {
       const message = `BROKER signing key check failed: ${(error as Error).message}`;
-      if (process.env.NODE_ENV === 'production') {
+      if (isProduction) {
         throw new Error(message);
       }
       this.logger.warn(message);

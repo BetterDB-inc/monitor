@@ -182,14 +182,32 @@ describe('BrokerSigningService', () => {
       privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
     });
 
+    const originalNodeEnv = process.env.NODE_ENV;
+
     afterEach(() => {
+      process.env.NODE_ENV = originalNodeEnv;
       for (const kid of Object.keys(BROKER_SIGNING_PUBLIC_KEYS)) {
         delete BROKER_SIGNING_PUBLIC_KEYS[kid];
       }
     });
 
-    it('accepts any kid while no public key is trusted yet', () => {
+    it('accepts any kid outside production while no public key is trusted yet', () => {
+      process.env.NODE_ENV = 'development';
       expect(configured().isConfigured()).toBe(true);
+    });
+
+    it('refuses to boot in production when the kid is missing from an empty trust map', () => {
+      process.env.NODE_ENV = 'production';
+      expect(() => {
+        return configured();
+      }).toThrow(/kid "brk-test" is not in BROKER_SIGNING_PUBLIC_KEYS/);
+    });
+
+    it('boots in production without a signing key even though the trust map is empty', () => {
+      process.env.NODE_ENV = 'production';
+      delete process.env.BROKER_SIGNING_PRIVATE_KEY;
+      delete process.env.BROKER_SIGNING_KID;
+      expect(new BrokerSigningService().isConfigured()).toBe(false);
     });
 
     it('accepts a kid whose trusted public key matches the private key', () => {
