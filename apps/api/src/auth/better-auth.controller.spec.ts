@@ -114,6 +114,7 @@ describe('BetterAuthController origin check', () => {
         { provide: BETTER_AUTH, useValue: auth },
         { provide: WORKSPACE_CONFIG, useValue: config },
         { provide: ActivityService, useValue: { record: jest.fn() } },
+        { provide: UsageTelemetryService, useValue: telemetryStub() },
         ActorResolver,
       ],
     }).compile();
