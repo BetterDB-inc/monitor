@@ -1,14 +1,45 @@
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
+import { Pool } from 'pg';
 import type {
   InvitationRecord,
   InvitationRepository,
 } from '../../../common/interfaces/invitation-repository.interface';
 import type { StoragePort } from '../../../common/interfaces/storage-port.interface';
 import { MemoryAdapter } from '../memory.adapter';
+import { PostgresAdapter } from '../postgres.adapter';
 import { SqliteAdapter } from '../sqlite.adapter';
+
+const POSTGRES_DSN =
+  process.env.INVITATION_POSTGRES_TEST_DSN ??
+  'postgres://betterdb:devpassword@localhost:5433/betterdb';
+
+function isReachable(connectionString: string): boolean {
+  const { hostname, port } = new URL(connectionString);
+  const probe = `
+    const socket = require('net').createConnection({
+      host: process.env.PROBE_HOST,
+      port: Number(process.env.PROBE_PORT),
+    });
+    socket.setTimeout(1500);
+    socket.on('connect', () => { socket.destroy(); process.exit(0); });
+    socket.on('timeout', () => { socket.destroy(); process.exit(1); });
+    socket.on('error', () => { process.exit(1); });
+  `;
+  try {
+    execFileSync(process.execPath, ['-e', probe], {
+      stdio: 'ignore',
+      timeout: 3000,
+      env: { ...process.env, PROBE_HOST: hostname, PROBE_PORT: port || '5432' },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function record(overrides: Partial<InvitationRecord> = {}): InvitationRecord {
   return {
@@ -24,8 +55,12 @@ function record(overrides: Partial<InvitationRecord> = {}): InvitationRecord {
   };
 }
 
-function describeRepository(name: string, open: () => Promise<StoragePort>): void {
-  describe(`InvitationRepository (${name})`, () => {
+function describeRepository(
+  name: string,
+  open: () => Promise<StoragePort>,
+  describeFn: jest.Describe = describe,
+): void {
+  describeFn(`InvitationRepository (${name})`, () => {
     let storage: StoragePort;
     let repository: InvitationRepository;
 
@@ -141,10 +176,35 @@ describeRepository('sqlite', async () => {
   return adapter;
 });
 
-afterAll(() => {
+const postgresSchemas: string[] = [];
+
+describeRepository(
+  'postgres',
+  async () => {
+    const schema = `invitations_${randomUUID().replace(/-/g, '')}`;
+    postgresSchemas.push(schema);
+    const adapter = new PostgresAdapter({ connectionString: POSTGRES_DSN, schema });
+    await adapter.initialize();
+    return adapter;
+  },
+  isReachable(POSTGRES_DSN) ? describe : describe.skip,
+);
+
+afterAll(async () => {
   for (const filepath of sqliteFiles) {
     if (fs.existsSync(filepath)) {
       fs.unlinkSync(filepath);
     }
+  }
+  if (postgresSchemas.length === 0) {
+    return;
+  }
+  const pool = new Pool({ connectionString: POSTGRES_DSN });
+  try {
+    for (const schema of postgresSchemas) {
+      await pool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  } finally {
+    await pool.end();
   }
 });
