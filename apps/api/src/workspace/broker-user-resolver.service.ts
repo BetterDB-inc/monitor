@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import type { BrokerProvider } from '@betterdb/shared';
 import { BootstrapLock } from '../auth/bootstrap-lock';
 import { InvitationService } from './invitation.service';
@@ -20,10 +20,26 @@ export interface ResolvedBrokerUser {
   invitationId: string | null;
 }
 
+export interface BrokerSignIn {
+  resolved: ResolvedBrokerUser;
+  session: Response;
+}
+
+export type SessionStarter = (member: MemberRecord) => Promise<Response>;
+
 export class BrokerNotInvitedError extends Error {}
+
+function describeError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack ?? error.message;
+  }
+  return String(error);
+}
 
 @Injectable()
 export class BrokerUserResolver {
+  private readonly logger = new Logger(BrokerUserResolver.name);
+
   constructor(
     private readonly members: MemberService,
     private readonly invitations: InvitationService,
@@ -36,7 +52,54 @@ export class BrokerUserResolver {
     });
   }
 
-  async revert(resolved: ResolvedBrokerUser): Promise<void> {
+  async signIn(
+    identity: BrokerIdentity,
+    inviteTokenHash: string | null,
+    startSession: SessionStarter,
+  ): Promise<BrokerSignIn> {
+    const created = await this.bootstrapLock.run(async () => {
+      const resolved = await this.resolveNow(identity, inviteTokenHash);
+      if (resolved.entrance === 'login') {
+        return { resolved, session: null };
+      }
+      return { resolved, session: await this.startOrRevert(resolved, startSession) };
+    });
+    if (created.session !== null) {
+      return { resolved: created.resolved, session: created.session };
+    }
+    return { resolved: created.resolved, session: await startSession(created.resolved.member) };
+  }
+
+  private async startOrRevert(
+    resolved: ResolvedBrokerUser,
+    startSession: SessionStarter,
+  ): Promise<Response> {
+    let session: Response;
+    try {
+      session = await startSession(resolved.member);
+    } catch (error) {
+      await this.revertLogged(resolved);
+      throw error;
+    }
+    if (session.ok === false) {
+      await this.revertLogged(resolved);
+    }
+    return session;
+  }
+
+  private async revertLogged(resolved: ResolvedBrokerUser): Promise<void> {
+    try {
+      await this.revert(resolved);
+    } catch (error) {
+      this.logger.error(
+        `Could not undo the broker ${resolved.entrance} of ${resolved.member.email} ` +
+          'after the session failed to start',
+        describeError(error),
+      );
+    }
+  }
+
+  private async revert(resolved: ResolvedBrokerUser): Promise<void> {
     if (resolved.entrance === 'register') {
       await this.members.discardBootstrapOwner(resolved.member.id);
       return;

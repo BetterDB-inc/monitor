@@ -1,7 +1,6 @@
 import { ConflictException, Inject, Injectable, Logger } from '@nestjs/common';
 import type { BrokerProvider, WorkspaceRole } from '@betterdb/shared';
 import { BETTER_AUTH, type BetterAuthInstance, countUsers } from '../auth/better-auth.factory';
-import { BootstrapLock } from '../auth/bootstrap-lock';
 
 export const OWNERSHIP_CHANGED_MESSAGE =
   'Ownership changed while this request was running. Reload and try again.';
@@ -178,10 +177,7 @@ export class MemberService {
   private readonly logger = new Logger(MemberService.name);
   private membershipQueue: Promise<unknown> = Promise.resolve();
 
-  constructor(
-    @Inject(BETTER_AUTH) private readonly auth: BetterAuthInstance,
-    private readonly bootstrapLock: BootstrapLock,
-  ) {}
+  constructor(@Inject(BETTER_AUTH) private readonly auth: BetterAuthInstance) {}
 
   private serializeMembershipChange<T>(change: () => Promise<T>): Promise<T> {
     const run = this.membershipQueue.then(change);
@@ -378,16 +374,14 @@ export class MemberService {
     });
   }
 
-  discardBootstrapOwner(id: string): Promise<void> {
-    return this.bootstrapLock.run(async () => {
-      const context = await this.auth.$context;
-      const discarded = await this.deleteIfSoleOwner(context, id);
-      if (discarded === false) {
-        this.logger.warn(
-          `Kept user ${id} after a failed first sign-in: it is not the sole owner of the workspace`,
-        );
-      }
-    });
+  async discardBootstrapOwner(id: string): Promise<void> {
+    const context = await this.auth.$context;
+    const discarded = await this.deleteIfSoleOwner(context, id);
+    if (discarded === false) {
+      this.logger.warn(
+        `Kept user ${id} after a failed first sign-in: it is not the sole owner of the workspace`,
+      );
+    }
   }
 
   private async deleteIfSoleOwner(context: AuthContext, id: string): Promise<boolean> {

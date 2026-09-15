@@ -20,6 +20,7 @@ import { ActivityService } from '../../activity/activity.service';
 import { UsageTelemetryService } from '../../telemetry/usage-telemetry.service';
 import {
   BrokerNotInvitedError,
+  BrokerSignIn,
   BrokerUserResolver,
   ResolvedBrokerUser,
 } from '../../workspace/broker-user-resolver.service';
@@ -197,9 +198,11 @@ export class BrokerController {
       this.fail(reply, state.appOrigin, 'invalid');
       return;
     }
-    let resolved: ResolvedBrokerUser;
+    const headers = toWebHeaders(req.headers);
+    headers.set(CLIENT_IP_HEADER, req.ip);
+    let signedIn: BrokerSignIn;
     try {
-      resolved = await this.resolver.resolve(
+      signedIn = await this.resolver.signIn(
         {
           email: claims.email,
           name: claims.name,
@@ -208,6 +211,9 @@ export class BrokerController {
           providerId: claims.providerId,
         },
         state.inviteTokenHash,
+        (member) => {
+          return this.members.startSession(member.id, headers);
+        },
       );
     } catch (error) {
       if (error instanceof BrokerNotInvitedError) {
@@ -216,38 +222,14 @@ export class BrokerController {
       }
       throw error;
     }
-    let session: Response;
-    try {
-      const headers = toWebHeaders(req.headers);
-      headers.set(CLIENT_IP_HEADER, req.ip);
-      session = await this.members.startSession(resolved.member.id, headers);
-    } catch (error) {
-      await this.undo(resolved);
-      throw error;
-    }
+    const { resolved, session } = signedIn;
     if (session.ok === false) {
-      await this.undo(resolved);
       this.fail(reply, state.appOrigin, 'invalid');
       return;
     }
     this.record(req, resolved, claims.provider);
     reply.header('set-cookie', [...session.headers.getSetCookie(), this.nonceCookie('', 0)]);
     reply.redirect(`${state.appOrigin}${state.next}`, 302);
-  }
-
-  private async undo(resolved: ResolvedBrokerUser): Promise<void> {
-    if (resolved.entrance === 'login') {
-      return;
-    }
-    try {
-      await this.resolver.revert(resolved);
-    } catch (error) {
-      logger.error(
-        `Could not undo the broker ${resolved.entrance} of ${resolved.member.email} ` +
-          'after the session failed to start',
-        describeError(error),
-      );
-    }
   }
 
   private record(

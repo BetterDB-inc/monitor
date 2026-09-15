@@ -418,7 +418,7 @@ describe('BrokerController', () => {
       return undefined;
     });
     jest
-      .spyOn(app.get(BrokerUserResolver), 'resolve')
+      .spyOn(app.get(BrokerUserResolver), 'signIn')
       .mockRejectedValueOnce(new Error('database unavailable'));
     const { state, nonce } = await start('');
     const result = await callback(tokenFor(state), nonce);
@@ -845,6 +845,72 @@ describe('BrokerController when the session cannot be started', () => {
       expect.stringContaining(INVITEE_CLAIMS.email),
       expect.stringContaining('member vanished'),
     );
+  });
+
+  async function raceRetryAgainstFailedStart(
+    options: SignInOptions = {},
+  ): Promise<[CallbackResult, CallbackResult]> {
+    let entered: () => void = () => {
+      return undefined;
+    };
+    const startEntered = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let failStart: () => void = () => {
+      return undefined;
+    };
+    const failGate = new Promise<void>((resolve) => {
+      failStart = resolve;
+    });
+    jest.spyOn(members, 'startSession').mockImplementationOnce(async () => {
+      entered();
+      await failGate;
+      return new Response(null, { status: 500 });
+    });
+    const first = signInThrough(app, options);
+    await startEntered;
+    const retry = signInThrough(app, options);
+    await Promise.race([
+      retry,
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 100);
+      }),
+    ]);
+    failStart();
+    return Promise.all([first, retry]);
+  }
+
+  async function signedInEmail(cookie: string): Promise<string | null> {
+    const me = await app.inject({ method: 'GET', url: '/workspace/me', headers: { cookie } });
+    if (me.statusCode !== 200) {
+      return null;
+    }
+    return (me.json() as { email: string }).email;
+  }
+
+  it('keeps the owner a concurrent retry signed in when the first session fails', async () => {
+    const [failed, retried] = await raceRetryAgainstFailedStart();
+    expect(failed.location).toBe('http://localhost/login?error=invalid');
+    expect(failed.cookie).toBe('');
+    expect(retried.cookie).toContain(SESSION_COOKIE);
+    expect(await members.count()).toBe(1);
+    expect(await members.findByEmail('owner@example.com')).toMatchObject({ isOwner: true });
+    expect(await signedInEmail(retried.cookie)).toBe('owner@example.com');
+  });
+
+  it('keeps the invitee a concurrent retry signed in when the first session fails', async () => {
+    await signInThrough(app);
+    const invite = await inviteToken();
+    const [failed, retried] = await raceRetryAgainstFailedStart({
+      query: `?invite=${encodeURIComponent(invite.token)}`,
+      claims: INVITEE_CLAIMS,
+    });
+    expect(failed.location).toBe('http://localhost/login?error=invalid');
+    expect(failed.cookie).toBe('');
+    expect(retried.cookie).toContain(SESSION_COOKIE);
+    expect(await members.findByEmail(INVITEE_CLAIMS.email)).toMatchObject({ role: 'member' });
+    expect(await invitationStatus(invite.id)).toBe('accepted');
+    expect(await signedInEmail(retried.cookie)).toBe(INVITEE_CLAIMS.email);
   });
 });
 

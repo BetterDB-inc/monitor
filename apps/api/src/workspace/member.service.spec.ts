@@ -3,7 +3,6 @@ import { randomUUID } from 'crypto';
 import { existsSync, unlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { BootstrapLock } from '../auth/bootstrap-lock';
 import {
   createBetterAuth,
   runBetterAuthMigrations,
@@ -23,7 +22,6 @@ import {
 describe('MemberService', () => {
   let service: MemberService;
   let auth: Awaited<ReturnType<typeof createBetterAuth>>;
-  let bootstrapLock: BootstrapLock;
 
   beforeEach(async () => {
     auth = await createBetterAuth({
@@ -31,8 +29,7 @@ describe('MemberService', () => {
       secret: 's'.repeat(40),
       config: resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' }),
     });
-    bootstrapLock = new BootstrapLock();
-    service = new MemberService(auth, bootstrapLock);
+    service = new MemberService(auth);
   });
 
   afterEach(() => {
@@ -268,27 +265,6 @@ describe('MemberService', () => {
     await service.discardBootstrapOwner(member);
     expect(await service.findById(member)).not.toBeNull();
   });
-
-  it('waits for the bootstrap lock before discarding the owner', async () => {
-    const owner = await createSocialOwner();
-    let release: () => void = () => {
-      return undefined;
-    };
-    const held = bootstrapLock.run(() => {
-      return new Promise<void>((resolve) => {
-        release = resolve;
-      });
-    });
-    const discarded = service.discardBootstrapOwner(owner.id);
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, 20);
-    });
-    expect(await service.findById(owner.id)).not.toBeNull();
-    release();
-    await held;
-    await discarded;
-    expect(await service.findById(owner.id)).toBeNull();
-  });
 });
 
 type AuthAdapter = Awaited<BetterAuthInstance['$context']>['adapter'];
@@ -328,7 +304,7 @@ async function openWorkspace(handle: RawDatabaseHandle): Promise<Workspace> {
     config: resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' }),
   });
   await runBetterAuthMigrations(auth, handle);
-  const service = new MemberService(auth, new BootstrapLock());
+  const service = new MemberService(auth);
   const ownerId = await addMember(service, 'owner@example.com');
   const context = await auth.$context;
   await context.internalAdapter.updateUser(ownerId, { role: 'admin', isOwner: true });
