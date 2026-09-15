@@ -24,6 +24,7 @@ const PAYLOAD_COMMANDS = new Set([
   'FCALL',
   'FCALL_RO',
   'FUNCTION',
+  'PING',
   'PUBLISH',
   'SCRIPT',
   'SPUBLISH',
@@ -47,6 +48,10 @@ function recordsArgs(command: string): boolean {
     return false;
   }
   return isReadCommand(command);
+}
+
+function isFailure(result: CliServerMessage): boolean {
+  return result.type === 'error' || result.resultType === 'error';
 }
 
 function recordedArgs(rest: string[]): string[] {
@@ -207,7 +212,7 @@ export class CliGateway implements OnModuleDestroy {
     void this.activity.record({
       actor: { userId: actor.userId, email: actor.email, via: 'cli', tokenId: actor.tokenId },
       action: 'cli.command',
-      statusCode: result.type === 'error' ? 400 : 200,
+      statusCode: isFailure(result) ? 400 : 200,
       ip,
       connectionId: message.connectionId ?? null,
       details,

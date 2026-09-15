@@ -510,6 +510,7 @@ describe('CliGateway activity recording', () => {
       'EVALSHA_RO abc123 0 hunter2',
       'FCALL_RO fn 0 hunter2',
       'COMMAND GETKEYS SET k hunter2',
+      'PING hunter2',
       'COMMAND GETKEYSANDFLAGS AUTH admin hunter2',
     ];
     for (const command of payloads) {
@@ -521,6 +522,25 @@ describe('CliGateway activity recording', () => {
       expect(call.details).not.toHaveProperty('args');
       expect(JSON.stringify(call)).not.toContain('hunter2');
     }
+  });
+
+  it('records a command that returns an error result as a failure', async () => {
+    const execute = jest.fn().mockResolvedValue({
+      type: 'result',
+      result: 'ERR timeout',
+      resultType: 'error',
+      durationMs: 1,
+    });
+    const activity = activityWith();
+    const gateway = new CliGateway(
+      { execute } as unknown as CliService,
+      resolverWith(true, admin),
+      activity.service,
+    );
+    const ws = connect(gateway);
+    send(ws, 'GET a');
+    await flush();
+    expect(activity.record).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400 }));
   });
 
   it('caps recorded arguments', async () => {
