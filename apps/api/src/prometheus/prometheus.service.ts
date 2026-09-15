@@ -217,6 +217,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   // Metric Forecasting
   private metricForecastTimeToLimitSeconds: Gauge;
 
+  // CVE Detection (storage-based, per-connection)
+  private cveFindings: Gauge;
+  private cveKev: Gauge;
+  private cveDatasetStale: Gauge;
+
   constructor(
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
     connectionRegistry: ConnectionRegistry,
@@ -695,6 +700,21 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       'Projected seconds until metric reaches configured ceiling.',
       ['metric_kind'],
     );
+
+    // CVE Detection (storage-based, per-connection)
+    this.cveFindings = this.createGauge(
+      'cve_findings',
+      'Current CVE findings by severity from the latest scan',
+      ['severity'],
+    );
+    this.cveKev = this.createGauge(
+      'cve_kev',
+      'Current KEV-exploited CVE findings from the latest scan',
+    );
+    this.cveDatasetStale = this.createGauge(
+      'cve_dataset_stale',
+      'Whether the CVE scan is partial or sources are missing: 1 stale, 0 ok',
+    );
   }
 
   /**
@@ -729,6 +749,39 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     await this.updateSlowlogMetrics(connectionId, connLabel, state);
     await this.updateCommandlogMetrics(connectionId, connLabel, state);
     await this.updateMetricForecastMetrics(connectionId, connLabel);
+    await this.updateCveMetrics(connectionId, connLabel);
+  }
+
+  private async updateCveMetrics(connectionId: string, connLabel: string): Promise<void> {
+    try {
+      const scan = await this.storage.getCveScanResult(connectionId);
+      if (!scan) {
+        return;
+      }
+      const totals = { critical: 0, high: 0, medium: 0, low: 0 };
+      let kev = 0;
+      for (const node of scan.nodes) {
+        totals.critical += node.severityCounts.critical;
+        totals.high += node.severityCounts.high;
+        totals.medium += node.severityCounts.medium;
+        totals.low += node.severityCounts.low;
+        for (const finding of node.findings) {
+          if (finding.advisory.knownExploited === true) {
+            kev += 1;
+          }
+        }
+      }
+      for (const severity of ['critical', 'high', 'medium', 'low'] as const) {
+        this.cveFindings.labels(connLabel, severity).set(totals[severity]);
+      }
+      this.cveKev.labels(connLabel).set(kev);
+      this.cveDatasetStale
+        .labels(connLabel)
+        .set(scan.partial || scan.missingSources.length > 0 ? 1 : 0);
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.logger.debug(`CVE metrics scrape skipped for ${connectionId}: ${reason}`);
+    }
   }
 
   private async updateMetricForecastMetrics(
