@@ -56,7 +56,7 @@ function toMember(user: StoredUser): MemberRecord {
   };
 }
 
-type UserWriter = Pick<AuthContext['adapter'], 'updateMany' | 'deleteMany'>;
+type UserWriter = Pick<AuthContext['adapter'], 'findOne' | 'updateMany' | 'deleteMany'>;
 
 interface OwnerUpdate {
   isOwner?: boolean;
@@ -95,12 +95,21 @@ async function releaseOwnership(adapter: UserWriter, fromId: string): Promise<vo
   }
 }
 
-async function moveOwnership(adapter: UserWriter, fromId: string, toId: string): Promise<void> {
-  await releaseOwnership(adapter, fromId);
+async function promoteOwner(adapter: UserWriter, toId: string): Promise<WorkspaceRole> {
+  const target = await adapter.findOne<StoredUser>({ model: 'user', where: nonOwnerWhere(toId) });
+  if (target === null) {
+    throw new ConflictException(OWNERSHIP_CHANGED_MESSAGE);
+  }
   const promoted = await setOwnerIf(adapter, toId, false, { role: 'admin', isOwner: true });
   if (promoted !== 1) {
     throw new ConflictException(OWNERSHIP_CHANGED_MESSAGE);
   }
+  return toRole(target.role);
+}
+
+async function moveOwnership(adapter: UserWriter, fromId: string, toId: string): Promise<void> {
+  await promoteOwner(adapter, toId);
+  await releaseOwnership(adapter, fromId);
 }
 
 function nonOwnerWhere(userId: string): Array<{ field: string; value: string | boolean }> {
@@ -223,28 +232,27 @@ export class MemberService {
     fromId: string,
     toId: string,
   ): Promise<void> {
-    await releaseOwnership(adapter, fromId);
-    let promoted: number;
+    const previousRole = await promoteOwner(adapter, toId);
     try {
-      promoted = await setOwnerIf(adapter, toId, false, { role: 'admin', isOwner: true });
+      await releaseOwnership(adapter, fromId);
     } catch (error) {
-      await this.restoreOwner(adapter, fromId, error);
+      await this.demoteTarget(adapter, toId, previousRole, error);
       throw error;
-    }
-    if (promoted !== 1) {
-      const conflict = new ConflictException(OWNERSHIP_CHANGED_MESSAGE);
-      await this.restoreOwner(adapter, fromId, conflict);
-      throw conflict;
     }
   }
 
-  private async restoreOwner(adapter: UserWriter, fromId: string, cause: unknown): Promise<void> {
+  private async demoteTarget(
+    adapter: UserWriter,
+    toId: string,
+    previousRole: WorkspaceRole,
+    cause: unknown,
+  ): Promise<void> {
     try {
-      await setOwnerIf(adapter, fromId, false, { isOwner: true });
-    } catch (restoreError) {
+      await setOwnerIf(adapter, toId, true, { isOwner: false, role: previousRole });
+    } catch (demoteError) {
       this.logger.error(
-        `Could not restore owner ${fromId} after a failed ownership transfer. ` +
-          `Transfer error: ${describeError(cause)}. Restore error: ${describeError(restoreError)}`,
+        `Could not demote ${toId} after a failed ownership transfer. ` +
+          `Transfer error: ${describeError(cause)}. Demote error: ${describeError(demoteError)}`,
       );
     }
   }

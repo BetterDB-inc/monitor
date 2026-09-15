@@ -185,6 +185,7 @@ async function openWorkspace(handle: RawDatabaseHandle): Promise<Workspace> {
 
 interface InjectedFailures {
   transaction: jest.SpyInstance;
+  updatedIds: string[];
   restore: () => void;
 }
 
@@ -194,9 +195,14 @@ async function failUserUpdates(
 ): Promise<InjectedFailures> {
   const context = await auth.$context;
   let calls = 0;
+  const updatedIds: string[] = [];
   function failing(original: UpdateMany): UpdateMany {
     return (data) => {
       calls += 1;
+      const idClause = data.where.find((clause) => {
+        return clause.field === 'id';
+      });
+      updatedIds.push(String(idClause?.value));
       const message = failures.get(calls);
       if (message !== undefined) {
         return Promise.reject(new Error(message));
@@ -216,6 +222,7 @@ async function failUserUpdates(
   }) as AuthAdapter['transaction']);
   return {
     transaction,
+    updatedIds,
     restore: () => {
       updates.mockRestore();
       transaction.mockRestore();
@@ -283,7 +290,9 @@ function describeOwnershipTransfer(
         new ConflictException(OWNERSHIP_CHANGED_MESSAGE),
       );
       expect(await ownerIds(service)).toEqual([target]);
-      expect((await service.findById(bystander))?.role).toBe('member');
+      expect(await service.findById(bystander)).toEqual(
+        expect.objectContaining({ role: 'member', isOwner: false }),
+      );
     });
 
     it('keeps the owner when the target vanished before promotion', async () => {
@@ -293,9 +302,29 @@ function describeOwnershipTransfer(
       expect(await ownerIds(service)).toEqual([ownerId]);
     });
 
+    it('promotes the target before releasing the old owner', async () => {
+      const target = await addMemberNamed('order@example.com');
+      const injected = await failUserUpdates(auth, new Map());
+      await service.transferOwnership(ownerId, target);
+      injected.restore();
+      expect(injected.updatedIds).toEqual([target, ownerId]);
+    });
+
+    it('keeps the owner and restores the target role when releasing the owner fails', async () => {
+      const target = await addMemberNamed('heir-admin@example.com');
+      await service.setRole(target, 'admin');
+      const injected = await failUserUpdates(auth, new Map([[2, 'release failed']]));
+      await expect(service.transferOwnership(ownerId, target)).rejects.toThrow('release failed');
+      injected.restore();
+      expect(await ownerIds(service)).toEqual([ownerId]);
+      expect(await service.findById(target)).toEqual(
+        expect.objectContaining({ role: 'admin', isOwner: false }),
+      );
+    });
+
     it('keeps the owner when promoting the target fails', async () => {
       const target = await addMemberNamed('broken@example.com');
-      const injected = await failUserUpdates(auth, new Map([[2, 'write failed']]));
+      const injected = await failUserUpdates(auth, new Map([[1, 'write failed']]));
       await expect(service.transferOwnership(ownerId, target)).rejects.toThrow('write failed');
       injected.restore();
       expect(await ownerIds(service)).toEqual([ownerId]);
@@ -370,7 +399,20 @@ describe('MemberService.transferOwnership compensation (memory)', () => {
     jest.restoreAllMocks();
   });
 
-  it('logs both errors and rethrows the original when restoring the owner fails', async () => {
+  it('demotes the target back to its previous role when releasing the owner fails', async () => {
+    const { auth, service, ownerId } = await openWorkspace({ kind: 'memory' });
+    const target = await addMember(service, 'demoted@example.com');
+    const injected = await failUserUpdates(auth, new Map([[2, 'release failed']]));
+    await expect(service.transferOwnership(ownerId, target)).rejects.toThrow('release failed');
+    injected.restore();
+    expect(injected.updatedIds).toEqual([target, ownerId, target]);
+    expect(await ownerIds(service)).toEqual([ownerId]);
+    expect(await service.findById(target)).toEqual(
+      expect.objectContaining({ role: 'member', isOwner: false }),
+    );
+  });
+
+  it('logs both errors and rethrows the original when demoting the target fails', async () => {
     const { auth, service, ownerId } = await openWorkspace({ kind: 'memory' });
     const target = await addMember(service, 'stuck@example.com');
     const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {
@@ -379,29 +421,42 @@ describe('MemberService.transferOwnership compensation (memory)', () => {
     const injected = await failUserUpdates(
       auth,
       new Map([
-        [2, 'promotion failed'],
-        [3, 'restore failed'],
+        [2, 'release failed'],
+        [3, 'demote failed'],
       ]),
     );
-    await expect(service.transferOwnership(ownerId, target)).rejects.toThrow('promotion failed');
+    await expect(service.transferOwnership(ownerId, target)).rejects.toThrow('release failed');
     injected.restore();
     expect(logged).toHaveBeenCalledTimes(1);
     const message = String(logged.mock.calls[0][0]);
-    expect(message).toContain('promotion failed');
-    expect(message).toContain('restore failed');
+    expect(message).toContain('release failed');
+    expect(message).toContain('demote failed');
   });
 
-  it('logs the conflict and rethrows it when restoring after a vanished target fails', async () => {
-    const { auth, service, ownerId } = await openWorkspace({ kind: 'memory' });
+  it('logs the conflict and rethrows it when demoting after a lost ownership fails', async () => {
+    const { auth, service } = await openWorkspace({ kind: 'memory' });
+    const formerOwner = await addMember(service, 'former@example.com');
+    const target = await addMember(service, 'late@example.com');
     const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {
       return undefined;
     });
-    const injected = await failUserUpdates(auth, new Map([[3, 'restore failed']]));
+    const injected = await failUserUpdates(auth, new Map([[3, 'demote failed']]));
+    await expect(service.transferOwnership(formerOwner, target)).rejects.toThrow(
+      new ConflictException(OWNERSHIP_CHANGED_MESSAGE),
+    );
+    injected.restore();
+    expect(String(logged.mock.calls[0][0])).toContain('demote failed');
+  });
+
+  it('does not touch the owner when the target vanished before promotion', async () => {
+    const { auth, service, ownerId } = await openWorkspace({ kind: 'memory' });
+    const injected = await failUserUpdates(auth, new Map());
     await expect(service.transferOwnership(ownerId, 'missing-user')).rejects.toThrow(
       new ConflictException(OWNERSHIP_CHANGED_MESSAGE),
     );
     injected.restore();
-    expect(String(logged.mock.calls[0][0])).toContain('restore failed');
+    expect(injected.updatedIds).not.toContain(ownerId);
+    expect(await ownerIds(service)).toEqual([ownerId]);
   });
 });
 
