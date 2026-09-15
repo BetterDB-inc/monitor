@@ -112,10 +112,14 @@ describe('Members', () => {
     expect(screen.getByRole('button', { name: 'Revoke' })).toBeInTheDocument();
   });
 
-  it('shows members the list only', async () => {
+  it('shows members the list only, without emails', async () => {
     authState.user = { userId: 'u2', email: MEMBER.email, role: 'member', isOwner: false };
+    const withoutEmail = ({ email: _email, ...rest }: typeof OWNER) => rest;
+    api.getMembers.mockResolvedValue([withoutEmail(OWNER), withoutEmail(MEMBER)]);
     render(<Members />);
-    await screen.findByText('owner@example.com');
+    await screen.findByText('Owner');
+    expect(screen.getByText('Member')).toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: 'Email' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Invite' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
     expect(api.getInvitations).not.toHaveBeenCalled();

@@ -6,7 +6,7 @@ export type CloudUser = Omit<CurrentUser, 'role'> & { role: string };
 
 export interface Member {
   id: string;
-  email: string;
+  email?: string;
   name: string | null;
   role: string;
   isOwner: boolean;

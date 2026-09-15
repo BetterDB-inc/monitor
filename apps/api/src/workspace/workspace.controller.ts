@@ -67,9 +67,10 @@ export class WorkspaceController {
   }
 
   @Get('members')
-  async listMembers(): Promise<MemberView[]> {
+  async listMembers(@CurrentUser() actor: Actor): Promise<MemberView[]> {
     const members = await this.members.list();
-    return members.map(toMemberView);
+    const includeEmail = actor.role === 'admin';
+    return members.map((member) => toMemberView(member, includeEmail));
   }
 
   @Get('invitations')

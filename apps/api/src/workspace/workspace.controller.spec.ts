@@ -253,11 +253,11 @@ describe('WorkspaceController', () => {
       memberCookie = await signIn('member@example.com', 'member horse battery');
     });
 
-    it('lists members for everyone signed in, oldest first', async () => {
+    it('lists members with emails for admins, oldest first', async () => {
       const response = await app.inject({
         method: 'GET',
         url: '/workspace/members',
-        headers: { cookie: memberCookie },
+        headers: { cookie: ownerCookie },
       });
       expect(response.statusCode).toBe(200);
       expect(response.json()).toEqual([
@@ -270,6 +270,29 @@ describe('WorkspaceController', () => {
           createdAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
         }),
       ]);
+    });
+
+    it('lists members without emails for read-only members', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/workspace/members',
+        headers: { cookie: memberCookie },
+      });
+      expect(response.statusCode).toBe(200);
+      const listed = response.json() as Array<Record<string, unknown>>;
+      expect(listed).toEqual([
+        expect.objectContaining({ name: OWNER.name, role: 'admin', isOwner: true }),
+        expect.objectContaining({
+          id: memberId,
+          name: 'Member',
+          role: 'member',
+          isOwner: false,
+          createdAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+        }),
+      ]);
+      for (const entry of listed) {
+        expect(entry).not.toHaveProperty('email');
+      }
     });
 
     it('keeps members out of invitations and mutations', async () => {

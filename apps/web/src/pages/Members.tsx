@@ -13,6 +13,10 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function memberLabel(member: Member): string {
+  return member.email ?? member.name ?? 'This member';
+}
+
 export function Members(): ReactElement {
   const { user, refresh } = useAuth();
   const [members, setMembers] = useState<Member[]>([]);
@@ -80,31 +84,32 @@ export function Members(): ReactElement {
   const handleChangeRole = (member: Member, nextRole: string): void => {
     void run(async () => {
       await workspaceApi.updateMemberRole(member.id, nextRole);
-      setSuccess(`${member.email} is now ${nextRole}`);
+      setSuccess(`${memberLabel(member)} is now ${nextRole}`);
     }, 'Failed to change the role');
   };
 
   const handleTransfer = (member: Member): void => {
     if (
-      window.confirm(`Make ${member.email} the workspace owner? You will become an admin.`) ===
-      false
+      window.confirm(
+        `Make ${memberLabel(member)} the workspace owner? You will become an admin.`,
+      ) === false
     ) {
       return;
     }
     void run(async () => {
       await workspaceApi.transferOwnership(member.id);
       await refresh();
-      setSuccess(`${member.email} is now the owner`);
+      setSuccess(`${memberLabel(member)} is now the owner`);
     }, 'Failed to transfer ownership');
   };
 
   const handleRemove = (member: Member): void => {
-    if (window.confirm(`Remove ${member.email} from this workspace?`) === false) {
+    if (window.confirm(`Remove ${memberLabel(member)} from this workspace?`) === false) {
       return;
     }
     void run(async () => {
       await workspaceApi.removeMember(member.id);
-      setSuccess(`${member.email} has been removed`);
+      setSuccess(`${memberLabel(member)} has been removed`);
     }, 'Failed to remove the member');
   };
 

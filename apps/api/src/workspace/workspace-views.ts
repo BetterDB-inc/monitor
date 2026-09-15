@@ -7,7 +7,7 @@ import type { MemberRecord } from './member.service';
 
 export interface MemberView {
   id: string;
-  email: string;
+  email?: string;
   name: string | null;
   role: WorkspaceRole;
   isOwner: boolean;
@@ -24,10 +24,10 @@ export interface InvitationView {
   expiresAt: string;
 }
 
-export function toMemberView(member: MemberRecord): MemberView {
+export function toMemberView(member: MemberRecord, includeEmail = true): MemberView {
   return {
     id: member.id,
-    email: member.email,
+    ...(includeEmail === true ? { email: member.email } : {}),
     name: member.name,
     role: member.role,
     isOwner: member.isOwner,

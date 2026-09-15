@@ -46,13 +46,14 @@ export function MembersTable({
   onTransfer,
   onRemove,
 }: MembersTableProps): ReactElement {
+  const showEmail = members.some((member) => member.email !== undefined);
   return (
     <Card className="p-6">
       <h2 className="text-lg font-semibold mb-4">Members</h2>
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Email</TableHead>
+            {showEmail && <TableHead>Email</TableHead>}
             <TableHead>Name</TableHead>
             <TableHead>Role</TableHead>
             <TableHead>Joined</TableHead>
@@ -69,8 +70,12 @@ export function MembersTable({
             const nextRole = member.role === 'admin' ? 'member' : 'admin';
             return (
               <TableRow key={member.id}>
-                <TableCell className="font-medium">{member.email}</TableCell>
-                <TableCell>{member.name ?? '-'}</TableCell>
+                {showEmail && (
+                  <TableCell className="font-medium">{member.email ?? '-'}</TableCell>
+                )}
+                <TableCell className={showEmail ? undefined : 'font-medium'}>
+                  {member.name ?? '-'}
+                </TableCell>
                 <TableCell>
                   <Badge variant={roleBadgeVariant(member)}>{roleLabel(member)}</Badge>
                 </TableCell>
