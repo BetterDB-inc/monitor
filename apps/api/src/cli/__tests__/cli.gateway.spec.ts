@@ -342,15 +342,72 @@ describe('CliGateway command execution', () => {
     expect(ws.closeCalls).toEqual([[4401, 'Session expired']]);
   });
 
-  it('treats a socket without connection state as read-only', async () => {
+  it('treats a socket without connection state as an invalid session', async () => {
     const gateway = new CliGateway({} as CliService, resolverWith(true, admin));
     const access = await (
       gateway as unknown as {
         resolveAccess: (ws: WebSocket) => Promise<{ sessionValid: boolean; readOnly: boolean }>;
       }
     ).resolveAccess(new FakeWebSocket() as unknown as WebSocket);
-    expect(access).toEqual({ sessionValid: true, readOnly: true, actor: null, ip: '' });
+    expect(access).toEqual({ sessionValid: false, readOnly: true, actor: null, ip: '' });
   });
+
+  it('does not execute a command whose socket closed while the actor was resolving', async () => {
+    const execute = executeMock();
+    let resolveActor: (actor: Actor | null) => void = () => {};
+    const resolver = resolverWith(true, admin);
+    (resolver.resolveFromUpgrade as jest.Mock).mockReturnValue(
+      new Promise<Actor | null>((resolve) => {
+        resolveActor = resolve;
+      }),
+    );
+    const gateway = new CliGateway({ execute } as unknown as CliService, resolver);
+    const ws = connect(gateway);
+    sendExecute(ws);
+    await flush();
+    ws.readyState = 3;
+    ws.emit('close');
+    resolveActor(admin);
+    await flush();
+    expect(execute).not.toHaveBeenCalled();
+    expect(ws.sent).toEqual([]);
+  });
+
+  it.each([
+    ['enabled', true],
+    ['disabled', false],
+  ])(
+    'drops commands still queued when the socket closes with the workspace %s',
+    async (_label, enabled) => {
+      let release: () => void = () => {};
+      const execute = jest
+        .fn()
+        .mockImplementationOnce(() => {
+          return new Promise((resolve) => {
+            release = () => {
+              resolve({ type: 'result', result: 'OK', resultType: 'string', durationMs: 1 });
+            };
+          });
+        })
+        .mockResolvedValue({ type: 'result', result: 'OK', resultType: 'string', durationMs: 1 });
+      const gateway = new CliGateway(
+        { execute } as unknown as CliService,
+        resolverWith(enabled, admin),
+      );
+      const ws = connect(gateway);
+      sendExecute(ws);
+      sendExecute(ws);
+      sendExecute(ws);
+      await flush();
+      expect(execute).toHaveBeenCalledTimes(1);
+      ws.readyState = 3;
+      ws.emit('close');
+      release();
+      await flush();
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(ws.sent).toEqual([]);
+    },
+  );
 });
 
 describe('CliGateway activity recording', () => {
@@ -489,6 +546,39 @@ describe('CliGateway activity recording', () => {
         details: { command: 'CLIENT', argCount: 1, args: ['LIST'] },
       }),
     );
+  });
+
+  it('keeps CLIENT arguments only for metadata subcommands', async () => {
+    const execute = jest
+      .fn()
+      .mockResolvedValue({ type: 'result', result: '', resultType: 'string', durationMs: 1 });
+    const activity = activityWith();
+    const gateway = new CliGateway(
+      { execute } as unknown as CliService,
+      resolverWith(true, admin),
+      activity.service,
+    );
+    const ws = connect(gateway);
+    const commands = [
+      'CLIENT SETNAME hunter2',
+      'client setname hunter2',
+      'CLIENT KILL ID 7',
+      'client list TYPE normal',
+    ];
+    for (const command of commands) {
+      send(ws, command);
+      await flush();
+    }
+    const details = activity.record.mock.calls.map(([call]) => {
+      return call.details;
+    });
+    expect(details).toEqual([
+      { command: 'CLIENT', argCount: 2 },
+      { command: 'CLIENT', argCount: 2 },
+      { command: 'CLIENT', argCount: 3 },
+      { command: 'CLIENT', argCount: 3, args: ['list', 'TYPE', 'normal'] },
+    ]);
+    expect(JSON.stringify(activity.record.mock.calls)).not.toContain('hunter2');
   });
 
   it('drops arguments for read commands that carry a caller-supplied body', async () => {

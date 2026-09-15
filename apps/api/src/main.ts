@@ -15,6 +15,8 @@ import { resolveTrustProxy } from './config/trust-proxy';
 import { categorizeError } from './common/utils/error-categorizer';
 import { CliGateway } from './cli/cli.gateway';
 import { TailGateway } from './monitor/tail.gateway';
+import { createUpgradeRouter } from './common/websocket/upgrade-router';
+import { resolveWorkspaceConfig } from './auth/workspace-config';
 
 async function bootstrap(): Promise<void> {
   // Validate environment variables before anything else
@@ -220,21 +222,15 @@ async function bootstrap(): Promise<void> {
         })()
       : null;
 
-    httpServer.on('upgrade', (request: IncomingMessage, socket: Socket, head: Buffer) => {
-      const url = new URL(request.url || '', `http://${request.headers.host}`);
-      if (url.pathname === '/cli/ws' || url.pathname === '/api/cli/ws') {
-        cliGateway.handleUpgrade(request, socket, head);
-      } else if (url.pathname === '/monitor/ws' || url.pathname === '/api/monitor/ws') {
-        tailGateway.handleUpgrade(request, socket, head);
-      } else if (
-        agentGateway &&
-        (url.pathname === '/agent/ws' || url.pathname === '/api/agent/ws')
-      ) {
-        agentGateway.handleUpgrade(request, socket, head);
-      } else {
-        socket.destroy();
-      }
-    });
+    httpServer.on(
+      'upgrade',
+      createUpgradeRouter({
+        cli: cliGateway,
+        tail: tailGateway,
+        agent: agentGateway,
+        trustedOrigins: resolveWorkspaceConfig(process.env).trustedOrigins,
+      }),
+    );
 
     new Logger('CLI').log('WebSocket upgrade handler registered');
   }
