@@ -73,6 +73,45 @@ describe('BetterAuthController', () => {
   });
 });
 
+describe('BetterAuthController origin check', () => {
+  let app: NestFastifyApplication;
+
+  beforeAll(async () => {
+    const auth = await createBetterAuth({
+      handle: { kind: 'memory' },
+      secret: 'o'.repeat(40),
+      config: resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' }),
+    });
+    const moduleRef = await Test.createTestingModule({
+      controllers: [BetterAuthController],
+      providers: [{ provide: BETTER_AUTH, useValue: auth }],
+    }).compile();
+    app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
+    await app.init();
+    await app.getHttpAdapter().getInstance().ready();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('rejects a sign-in from an untrusted origin with 403', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/auth/sign-in/email',
+      remoteAddress: '198.51.100.30',
+      headers: {
+        'content-type': 'application/json',
+        cookie: 'better-auth.session_token=x',
+        origin: 'https://evil.example.com',
+      },
+      payload: { email: 'owner@example.com', password: 'correct horse battery' },
+    });
+    expect(response.statusCode).toBe(403);
+    expect(response.body).toMatch(/origin/i);
+  });
+});
+
 describe('BetterAuthController sign-up serialisation', () => {
   let app: NestFastifyApplication;
   let auth: Awaited<ReturnType<typeof createBetterAuth>>;
