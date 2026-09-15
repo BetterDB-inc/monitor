@@ -16,6 +16,21 @@ describe('originsForHost', () => {
   it('returns nothing for an empty host', () => {
     expect(originsForHost('')).toEqual([]);
   });
+
+  it('serializes each origin the way a browser does', () => {
+    expect(originsForHost('Monitor.Example.com:443')).toEqual([
+      'http://monitor.example.com:443',
+      'https://monitor.example.com',
+    ]);
+    expect(originsForHost('monitor.example.com:80')).toEqual([
+      'http://monitor.example.com',
+      'https://monitor.example.com:80',
+    ]);
+  });
+
+  it('returns nothing for a malformed host', () => {
+    expect(originsForHost('monitor example com')).toEqual([]);
+  });
 });
 
 describe('isTrustedUpgradeOrigin', () => {
@@ -71,6 +86,51 @@ describe('isTrustedUpgradeOrigin', () => {
 
   it('rejects an opaque null origin', () => {
     expect(isTrustedUpgradeOrigin(requestWith('monitor.example.com', 'null'), [])).toBe(false);
+  });
+
+  it('ignores the default https port carried by the host', () => {
+    expect(
+      isTrustedUpgradeOrigin(requestWith('example.com:443', 'https://example.com'), []),
+    ).toBe(true);
+  });
+
+  it('ignores the default http port carried by the host', () => {
+    expect(isTrustedUpgradeOrigin(requestWith('example.com:80', 'http://example.com'), [])).toBe(
+      true,
+    );
+  });
+
+  it('rejects a default-port origin when the host names a non-default port', () => {
+    expect(
+      isTrustedUpgradeOrigin(requestWith('example.com:8443', 'https://example.com'), []),
+    ).toBe(false);
+  });
+
+  it('rejects a malformed origin', () => {
+    expect(isTrustedUpgradeOrigin(requestWith('example.com', 'not a url'), [])).toBe(false);
+    expect(isTrustedUpgradeOrigin(requestWith('example.com', 'https://'), [])).toBe(false);
+  });
+
+  it('matches a trusted origin written with a trailing slash or default port', () => {
+    expect(
+      isTrustedUpgradeOrigin(requestWith('localhost:3001', 'https://mon.example.com'), [
+        'https://mon.example.com/',
+      ]),
+    ).toBe(true);
+    expect(
+      isTrustedUpgradeOrigin(requestWith('localhost:3001', 'https://mon.example.com'), [
+        'https://mon.example.com:443',
+      ]),
+    ).toBe(true);
+  });
+
+  it('skips a malformed trusted origin', () => {
+    expect(
+      isTrustedUpgradeOrigin(requestWith('localhost:3001', 'http://localhost:5173'), [
+        'not a url',
+        'http://localhost:5173',
+      ]),
+    ).toBe(true);
   });
 
   it('rejects an untrusted origin when the request carries no host', () => {
