@@ -5,6 +5,7 @@ import type {
   ActivityRecord,
   ActivityRepository,
 } from '../../../common/interfaces/activity-repository.interface';
+import { chunkedSqliteDelete } from '../sqlite-chunked-delete';
 import { cursorOf } from './activity-order';
 
 interface ActivityRow {
@@ -129,7 +130,6 @@ export class ActivitySqliteRepository implements ActivityRepository {
   }
 
   async prune(before: number): Promise<number> {
-    const result = this.db.prepare('DELETE FROM activity_events WHERE occurred_at < ?').run(before);
-    return result.changes;
+    return chunkedSqliteDelete(this.db, 'activity_events', 'occurred_at < ?', [before]);
   }
 }

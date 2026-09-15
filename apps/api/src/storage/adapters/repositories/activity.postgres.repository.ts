@@ -5,6 +5,7 @@ import type {
   ActivityRecord,
   ActivityRepository,
 } from '../../../common/interfaces/activity-repository.interface';
+import { chunkedPostgresDelete } from '../postgres-chunked-delete';
 import { cursorOf } from './activity-order';
 
 interface ActivityRow {
@@ -134,9 +135,6 @@ export class ActivityPostgresRepository implements ActivityRepository {
   }
 
   async prune(before: number): Promise<number> {
-    const result = await this.pool.query('DELETE FROM activity_events WHERE occurred_at < $1', [
-      before,
-    ]);
-    return result.rowCount ?? 0;
+    return chunkedPostgresDelete(this.pool, 'activity_events', 'occurred_at < $1', [before]);
   }
 }
