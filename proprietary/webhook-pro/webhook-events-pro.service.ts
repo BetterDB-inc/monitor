@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit, Inject } from '@nestjs/common';
 import { WebhookDispatcherService } from '@app/webhooks/webhook-dispatcher.service';
 import {
   WebhookEventType,
+  type CveCriticalDetectedData,
   type LatencyRegressionDetectedData,
   type MetricKind,
   type WebhookInstanceInfo,
@@ -547,6 +548,35 @@ export class WebhookEventsProService implements OnModuleInit {
         thresholdUs: data.thresholdUs,
         windowMs: data.windowMs,
         message: `Inference SLA breach on ${data.indexName}: p99 ${data.currentP99Us}µs > threshold ${data.thresholdUs}µs`,
+        timestamp: data.timestamp,
+        instance: data.instance,
+      },
+      data.connectionId,
+    );
+  }
+
+  /**
+   * Dispatch CVE critical event (PRO+)
+   * Called by CveScanService only when new critical findings appear
+   * vs the previous stored scan (fire on change, not every poll).
+   */
+  async dispatchCveCriticalDetected(data: CveCriticalDetectedData): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.debug('CVE critical detected event skipped - requires PRO license');
+      return;
+    }
+
+    await this.webhookDispatcher.dispatchEvent(
+      WebhookEventType.CVE_CRITICAL_DETECTED,
+      {
+        criticalCount: data.criticalCount,
+        kevCount: data.kevCount,
+        fingerprint: data.fingerprint,
+        datasetVersion: data.datasetVersion,
+        topFindings: data.topFindings,
+        drift: data.drift,
+        partial: data.partial,
+        message: data.message,
         timestamp: data.timestamp,
         instance: data.instance,
       },
