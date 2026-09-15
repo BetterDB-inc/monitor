@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import { existsSync, unlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { BootstrapLock } from '../auth/bootstrap-lock';
 import {
   createBetterAuth,
   runBetterAuthMigrations,
@@ -14,6 +15,7 @@ import type { RawDatabaseHandle } from '../storage/raw-database-handle';
 import {
   LIST_LIMIT,
   MEMBER_CHANGED_MESSAGE,
+  MemberRecord,
   MemberService,
   OWNERSHIP_CHANGED_MESSAGE,
 } from './member.service';
@@ -21,6 +23,7 @@ import {
 describe('MemberService', () => {
   let service: MemberService;
   let auth: Awaited<ReturnType<typeof createBetterAuth>>;
+  let bootstrapLock: BootstrapLock;
 
   beforeEach(async () => {
     auth = await createBetterAuth({
@@ -28,8 +31,25 @@ describe('MemberService', () => {
       secret: 's'.repeat(40),
       config: resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' }),
     });
-    service = new MemberService(auth);
+    bootstrapLock = new BootstrapLock();
+    service = new MemberService(auth, bootstrapLock);
   });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  function createSocialOwner(): Promise<MemberRecord> {
+    return service.createSocial({
+      email: 'first@example.com',
+      name: 'First',
+      image: null,
+      role: 'admin',
+      isOwner: true,
+      provider: 'google',
+      providerAccountId: 'g-first',
+    });
+  }
 
   it('creates a member with the given role and finds it by email and id', async () => {
     const created = await service.create({
@@ -215,6 +235,60 @@ describe('MemberService', () => {
       }),
     ).toEqual(expect.arrayContaining(['google', 'github']));
   });
+
+  it('discards the sole owner together with their accounts and sessions', async () => {
+    const owner = await createSocialOwner();
+    const context = await auth.$context;
+    await context.internalAdapter.createSession(owner.id);
+    await service.discardBootstrapOwner(owner.id);
+    expect(await service.count()).toBe(0);
+    expect(await context.internalAdapter.findAccountByUserId(owner.id)).toEqual([]);
+    expect(await context.internalAdapter.listSessions(owner.id)).toEqual([]);
+    const again = await createSocialOwner();
+    expect(again.isOwner).toBe(true);
+  });
+
+  it('keeps an owner who is no longer the only user and logs why', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {
+      return undefined;
+    });
+    const owner = await createSocialOwner();
+    await addMember(service, 'second@example.com');
+    await service.discardBootstrapOwner(owner.id);
+    expect(await service.findById(owner.id)).toEqual(owner);
+    expect(await service.count()).toBe(2);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(owner.id));
+  });
+
+  it('keeps a sole user who is not the owner', async () => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {
+      return undefined;
+    });
+    const member = await addMember(service, 'only@example.com');
+    await service.discardBootstrapOwner(member);
+    expect(await service.findById(member)).not.toBeNull();
+  });
+
+  it('waits for the bootstrap lock before discarding the owner', async () => {
+    const owner = await createSocialOwner();
+    let release: () => void = () => {
+      return undefined;
+    };
+    const held = bootstrapLock.run(() => {
+      return new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    });
+    const discarded = service.discardBootstrapOwner(owner.id);
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 20);
+    });
+    expect(await service.findById(owner.id)).not.toBeNull();
+    release();
+    await held;
+    await discarded;
+    expect(await service.findById(owner.id)).toBeNull();
+  });
 });
 
 type AuthAdapter = Awaited<BetterAuthInstance['$context']>['adapter'];
@@ -254,7 +328,7 @@ async function openWorkspace(handle: RawDatabaseHandle): Promise<Workspace> {
     config: resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' }),
   });
   await runBetterAuthMigrations(auth, handle);
-  const service = new MemberService(auth);
+  const service = new MemberService(auth, new BootstrapLock());
   const ownerId = await addMember(service, 'owner@example.com');
   const context = await auth.$context;
   await context.internalAdapter.updateUser(ownerId, { role: 'admin', isOwner: true });
@@ -398,6 +472,13 @@ function describeOwnershipTransfer(
       expect(await service.findById(target)).toEqual(
         expect.objectContaining({ role: 'admin', isOwner: false }),
       );
+    });
+
+    it('discards the sole owner together with their credentials', async () => {
+      await service.discardBootstrapOwner(ownerId);
+      expect(await service.count()).toBe(0);
+      const context = await auth.$context;
+      expect(await context.internalAdapter.findAccountByUserId(ownerId)).toEqual([]);
     });
 
     it('keeps the owner when promoting the target fails', async () => {

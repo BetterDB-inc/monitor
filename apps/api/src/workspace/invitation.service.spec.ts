@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import { BootstrapLock } from '../auth/bootstrap-lock';
 import { createBetterAuth } from '../auth/better-auth.factory';
 import { resolveWorkspaceConfig } from '../auth/workspace-config';
 import type { InvitationRepository } from '../common/interfaces/invitation-repository.interface';
@@ -39,7 +40,7 @@ describe('InvitationService', () => {
       secret: 's'.repeat(40),
       config: resolveWorkspaceConfig({ AUTH_PUBLIC_URL: 'http://localhost' }),
     });
-    members = new MemberService(auth);
+    members = new MemberService(auth, new BootstrapLock());
     service = build('https://monitor.example.com');
   });
 

@@ -17,6 +17,7 @@ export interface BrokerIdentity {
 export interface ResolvedBrokerUser {
   member: MemberRecord;
   entrance: BrokerEntrance;
+  invitationId: string | null;
 }
 
 export class BrokerNotInvitedError extends Error {}
@@ -35,6 +36,22 @@ export class BrokerUserResolver {
     });
   }
 
+  async revert(resolved: ResolvedBrokerUser): Promise<void> {
+    if (resolved.entrance === 'register') {
+      await this.members.discardBootstrapOwner(resolved.member.id);
+      return;
+    }
+    const invitationId = resolved.invitationId;
+    if (resolved.entrance !== 'invite' || invitationId === null) {
+      return;
+    }
+    try {
+      await this.members.remove(resolved.member.id);
+    } finally {
+      await this.invitations.release(invitationId);
+    }
+  }
+
   private async resolveNow(
     identity: BrokerIdentity,
     inviteTokenHash: string | null,
@@ -42,11 +59,11 @@ export class BrokerUserResolver {
     const existing = await this.members.findByEmail(identity.email);
     if (existing !== null) {
       await this.members.ensureProviderLink(existing.id, identity.provider, identity.providerId);
-      return { member: existing, entrance: 'login' };
+      return { member: existing, entrance: 'login', invitationId: null };
     }
     if ((await this.members.count()) === 0) {
       const owner = await this.createMember(identity, 'admin', true);
-      return { member: owner, entrance: 'register' };
+      return { member: owner, entrance: 'register', invitationId: null };
     }
     const invitation = await this.invitations.claimForEmail(identity.email, inviteTokenHash);
     if (invitation === null) {
@@ -54,7 +71,7 @@ export class BrokerUserResolver {
     }
     try {
       const member = await this.createMember(identity, invitation.role, false);
-      return { member, entrance: 'invite' };
+      return { member, entrance: 'invite', invitationId: invitation.id };
     } catch (error) {
       await this.invitations.release(invitation.id);
       throw error;

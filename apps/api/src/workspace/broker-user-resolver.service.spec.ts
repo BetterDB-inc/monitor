@@ -108,6 +108,7 @@ describe('BrokerUserResolver', () => {
     });
     const result = await resolver.resolve(identity('invitee@example.com'), null);
     expect(result.entrance).toBe('invite');
+    expect(result.invitationId).toBe(invitation.id);
     expect(result.member).toMatchObject({ role: 'admin', isOwner: false });
     const stored = (await invitations.list()).find((row) => {
       return row.id === invitation.id;

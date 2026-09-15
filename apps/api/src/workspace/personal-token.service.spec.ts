@@ -1,5 +1,6 @@
 import { NotFoundException } from '@nestjs/common';
 import type { Actor } from '@betterdb/shared';
+import { BootstrapLock } from '../auth/bootstrap-lock';
 import { createBetterAuth } from '../auth/better-auth.factory';
 import { resolveWorkspaceConfig } from '../auth/workspace-config';
 import { MemoryAdapter } from '../storage/adapters/memory.adapter';
@@ -38,7 +39,7 @@ describe('PersonalTokenService', () => {
       secret: 's'.repeat(40),
       config,
     });
-    members = new MemberService(auth);
+    members = new MemberService(auth, new BootstrapLock());
     admin = await members.create({
       email: 'admin@example.com',
       name: 'Admin',

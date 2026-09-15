@@ -216,16 +216,38 @@ export class BrokerController {
       }
       throw error;
     }
-    const headers = toWebHeaders(req.headers);
-    headers.set(CLIENT_IP_HEADER, req.ip);
-    const session = await this.members.startSession(resolved.member.id, headers);
+    let session: Response;
+    try {
+      const headers = toWebHeaders(req.headers);
+      headers.set(CLIENT_IP_HEADER, req.ip);
+      session = await this.members.startSession(resolved.member.id, headers);
+    } catch (error) {
+      await this.undo(resolved);
+      throw error;
+    }
     if (session.ok === false) {
+      await this.undo(resolved);
       this.fail(reply, state.appOrigin, 'invalid');
       return;
     }
     this.record(req, resolved, claims.provider);
     reply.header('set-cookie', [...session.headers.getSetCookie(), this.nonceCookie('', 0)]);
     reply.redirect(`${state.appOrigin}${state.next}`, 302);
+  }
+
+  private async undo(resolved: ResolvedBrokerUser): Promise<void> {
+    if (resolved.entrance === 'login') {
+      return;
+    }
+    try {
+      await this.resolver.revert(resolved);
+    } catch (error) {
+      logger.error(
+        `Could not undo the broker ${resolved.entrance} of ${resolved.member.email} ` +
+          'after the session failed to start',
+        describeError(error),
+      );
+    }
   }
 
   private record(

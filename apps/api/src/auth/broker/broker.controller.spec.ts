@@ -671,6 +671,183 @@ describe('BrokerController throttling', () => {
   });
 });
 
+interface SignInOptions {
+  query?: string;
+  claims?: Record<string, unknown>;
+  headers?: Record<string, string>;
+  cookie?: string;
+}
+
+async function signInThrough(
+  target: NestFastifyApplication,
+  options: SignInOptions = {},
+): Promise<CallbackResult> {
+  const started = await target.inject({
+    method: 'GET',
+    url: `/auth/broker/start${options.query ?? ''}`,
+  });
+  const state = String(new URL(String(started.headers.location)).searchParams.get('state'));
+  const nonce = cookieNamed(started.headers['set-cookie'], `${BROKER_NONCE_COOKIE}=`);
+  const cookie = options.cookie === undefined ? nonce : `${nonce}; ${options.cookie}`;
+  const response = await target.inject({
+    method: 'GET',
+    url: `/auth/broker/callback?token=${encodeURIComponent(tokenFor(state, options.claims))}`,
+    remoteAddress: nextIp(),
+    headers: { ...options.headers, cookie },
+  });
+  return {
+    status: response.statusCode,
+    location: String(response.headers.location),
+    cookie: cookieNamed(response.headers['set-cookie'], SESSION_COOKIE),
+    setCookies: allCookies(response.headers['set-cookie']),
+  };
+}
+
+const INVITEE_CLAIMS = { email: 'invitee@example.com', name: 'Invitee', providerId: 'g-invitee' };
+
+const SESSION_FAILURES: Array<[string, () => Promise<Response>]> = [
+  [
+    'answers with a failure',
+    () => {
+      return Promise.resolve(new Response(null, { status: 500 }));
+    },
+  ],
+  [
+    'throws',
+    () => {
+      return Promise.reject(new Error('session store unavailable'));
+    },
+  ],
+];
+
+describe('BrokerController when the session cannot be started', () => {
+  let built: BuiltApp;
+  let app: NestFastifyApplication;
+  let members: MemberService;
+  let invitations: InvitationService;
+  let errorLog: jest.SpyInstance;
+
+  beforeEach(async () => {
+    built = await buildApp(resolveWorkspaceConfig(BASE_ENV));
+    app = built.app;
+    members = app.get(MemberService);
+    invitations = app.get(InvitationService);
+    errorLog = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {
+      return undefined;
+    });
+  });
+
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    await app.close();
+    await built.storage.close();
+  });
+
+  async function invitationStatus(id: string): Promise<string | undefined> {
+    const rows = await invitations.list();
+    return rows.find((row) => {
+      return row.id === id;
+    })?.status;
+  }
+
+  async function inviteToken(): Promise<{ token: string; id: string }> {
+    const owner = await members.findByEmail('owner@example.com');
+    const created = await invitations.create({
+      email: INVITEE_CLAIMS.email,
+      role: 'member',
+      invitedBy: String(owner?.id),
+    });
+    return { token: created.token, id: created.invitation.id };
+  }
+
+  it.each(SESSION_FAILURES)(
+    'undoes the first owner when starting the session %s',
+    async (_label, failure) => {
+      jest.spyOn(members, 'startSession').mockImplementationOnce(failure);
+      const failed = await signInThrough(app);
+      expect(failed.status).toBe(302);
+      expect(failed.location).toBe('http://localhost/login?error=invalid');
+      expect(failed.cookie).toBe('');
+      expect(await members.count()).toBe(0);
+      expect(built.telemetry.trackWorkspaceFirstRegister).not.toHaveBeenCalled();
+
+      const retried = await signInThrough(app);
+      expect(retried.cookie).toContain(SESSION_COOKIE);
+      expect(await members.findByEmail('owner@example.com')).toMatchObject({ isOwner: true });
+      expect(built.telemetry.trackWorkspaceFirstRegister).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(SESSION_FAILURES)(
+    'undoes an invited member and reopens the invitation when starting the session %s',
+    async (_label, failure) => {
+      await signInThrough(app);
+      const invite = await inviteToken();
+      const query = `?invite=${encodeURIComponent(invite.token)}`;
+      jest.spyOn(members, 'startSession').mockImplementationOnce(failure);
+      const failed = await signInThrough(app, { query, claims: INVITEE_CLAIMS });
+      expect(failed.location).toBe('http://localhost/login?error=invalid');
+      expect(failed.cookie).toBe('');
+      expect(await members.findByEmail(INVITEE_CLAIMS.email)).toBeNull();
+      expect(await invitationStatus(invite.id)).toBe('pending');
+      expect(built.telemetry.trackInviteAccepted).not.toHaveBeenCalled();
+
+      const retried = await signInThrough(app, { query, claims: INVITEE_CLAIMS });
+      expect(retried.cookie).toContain(SESSION_COOKIE);
+      expect(await members.findByEmail(INVITEE_CLAIMS.email)).toMatchObject({ role: 'member' });
+      expect(await invitationStatus(invite.id)).toBe('accepted');
+      expect(built.telemetry.trackInviteAccepted).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(SESSION_FAILURES)(
+    'keeps a returning member when starting the session %s',
+    async (_label, failure) => {
+      await signInThrough(app);
+      const owner = await members.findByEmail('owner@example.com');
+      const remove = jest.spyOn(members, 'remove');
+      const discard = jest.spyOn(members, 'discardBootstrapOwner');
+      jest.spyOn(members, 'startSession').mockImplementationOnce(failure);
+      const failed = await signInThrough(app);
+      expect(failed.location).toBe('http://localhost/login?error=invalid');
+      expect(failed.cookie).toBe('');
+      expect(await members.findByEmail('owner@example.com')).toEqual(owner);
+      expect(remove).not.toHaveBeenCalled();
+      expect(discard).not.toHaveBeenCalled();
+    },
+  );
+
+  it('still redirects to the invalid error and logs when undoing the sign-in fails', async () => {
+    jest.spyOn(members, 'startSession').mockImplementationOnce(SESSION_FAILURES[0][1]);
+    jest.spyOn(members, 'discardBootstrapOwner').mockRejectedValueOnce(new Error('disk full'));
+    const failed = await signInThrough(app);
+    expect(failed.status).toBe(302);
+    expect(failed.location).toBe('http://localhost/login?error=invalid');
+    expect(failed.setCookies).toEqual([CLEARED_NONCE]);
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.stringContaining('owner@example.com'),
+      expect.stringContaining('disk full'),
+    );
+  });
+
+  it('reopens the invitation even when removing the invited member fails', async () => {
+    await signInThrough(app);
+    const invite = await inviteToken();
+    jest.spyOn(members, 'startSession').mockImplementationOnce(SESSION_FAILURES[0][1]);
+    jest.spyOn(members, 'remove').mockRejectedValueOnce(new Error('member vanished'));
+    const failed = await signInThrough(app, {
+      query: `?invite=${encodeURIComponent(invite.token)}`,
+      claims: INVITEE_CLAIMS,
+    });
+    expect(failed.location).toBe('http://localhost/login?error=invalid');
+    expect(await invitationStatus(invite.id)).toBe('pending');
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.stringContaining(INVITEE_CLAIMS.email),
+      expect.stringContaining('member vanished'),
+    );
+  });
+});
+
 describe('BrokerController first owner versus password sign-up', () => {
   it('leaves exactly one owner when both reach an empty workspace at once', async () => {
     const racing = await buildApp(resolveWorkspaceConfig(BASE_ENV));

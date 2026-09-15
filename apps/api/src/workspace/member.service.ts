@@ -1,6 +1,7 @@
 import { ConflictException, Inject, Injectable, Logger } from '@nestjs/common';
 import type { BrokerProvider, WorkspaceRole } from '@betterdb/shared';
 import { BETTER_AUTH, type BetterAuthInstance, countUsers } from '../auth/better-auth.factory';
+import { BootstrapLock } from '../auth/bootstrap-lock';
 
 export const OWNERSHIP_CHANGED_MESSAGE =
   'Ownership changed while this request was running. Reload and try again.';
@@ -133,17 +134,36 @@ function nonOwnerWhere(userId: string): Array<{ field: string; value: string | b
   ];
 }
 
+async function deleteSessionsAndAccounts(adapter: UserWriter, userId: string): Promise<void> {
+  await adapter.deleteMany({ model: 'session', where: [{ field: 'userId', value: userId }] });
+  await adapter.deleteMany({ model: 'account', where: [{ field: 'userId', value: userId }] });
+}
+
 async function deleteNonOwner(adapter: UserWriter, userId: string): Promise<void> {
   const target = await adapter.findOne<StoredUser>({ model: 'user', where: nonOwnerWhere(userId) });
   if (target === null) {
     throw new ConflictException(MEMBER_CHANGED_MESSAGE);
   }
-  await adapter.deleteMany({ model: 'session', where: [{ field: 'userId', value: userId }] });
-  await adapter.deleteMany({ model: 'account', where: [{ field: 'userId', value: userId }] });
+  await deleteSessionsAndAccounts(adapter, userId);
   const deleted = await adapter.deleteMany({ model: 'user', where: nonOwnerWhere(userId) });
   if (deleted !== 1) {
     throw new ConflictException(MEMBER_CHANGED_MESSAGE);
   }
+}
+
+async function deleteOwner(adapter: UserWriter, userId: string): Promise<boolean> {
+  const deleted = await adapter.deleteMany({
+    model: 'user',
+    where: [
+      { field: 'id', value: userId },
+      { field: 'isOwner', value: true },
+    ],
+  });
+  if (deleted !== 1) {
+    return false;
+  }
+  await deleteSessionsAndAccounts(adapter, userId);
+  return true;
 }
 
 function describeError(error: unknown): string {
@@ -158,7 +178,10 @@ export class MemberService {
   private readonly logger = new Logger(MemberService.name);
   private membershipQueue: Promise<unknown> = Promise.resolve();
 
-  constructor(@Inject(BETTER_AUTH) private readonly auth: BetterAuthInstance) {}
+  constructor(
+    @Inject(BETTER_AUTH) private readonly auth: BetterAuthInstance,
+    private readonly bootstrapLock: BootstrapLock,
+  ) {}
 
   private serializeMembershipChange<T>(change: () => Promise<T>): Promise<T> {
     const run = this.membershipQueue.then(change);
@@ -353,6 +376,30 @@ export class MemberService {
     await this.serializeMembershipChange(() => {
       return deleteNonOwner(context.adapter, id);
     });
+  }
+
+  discardBootstrapOwner(id: string): Promise<void> {
+    return this.bootstrapLock.run(async () => {
+      const context = await this.auth.$context;
+      const discarded = await this.deleteIfSoleOwner(context, id);
+      if (discarded === false) {
+        this.logger.warn(
+          `Kept user ${id} after a failed first sign-in: it is not the sole owner of the workspace`,
+        );
+      }
+    });
+  }
+
+  private async deleteIfSoleOwner(context: AuthContext, id: string): Promise<boolean> {
+    if ((await context.adapter.count({ model: 'user' })) !== 1) {
+      return false;
+    }
+    if (hasRealTransactions(context) === true) {
+      return context.adapter.transaction((trx) => {
+        return deleteOwner(trx, id);
+      });
+    }
+    return deleteOwner(context.adapter, id);
   }
 
   async signIn(email: string, password: string, headers: Headers): Promise<Response> {
