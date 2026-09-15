@@ -848,6 +848,60 @@ describe('BrokerController when the session cannot be started', () => {
   });
 });
 
+describe('BrokerController callback from a real browser', () => {
+  it('mints a session despite cross-site navigation headers and a stale session cookie', async () => {
+    const browser = await buildApp(resolveWorkspaceConfig(BASE_ENV));
+    try {
+      const first = await signInThrough(browser.app);
+      expect(first.cookie).toContain(SESSION_COOKIE);
+      const owner = await browser.app.get(MemberService).findByEmail('owner@example.com');
+      const auth = browser.app.get(BETTER_AUTH) as Awaited<ReturnType<typeof createBetterAuth>>;
+      const context = await auth.$context;
+      const sessions = await context.internalAdapter.listSessions(String(owner?.id));
+      await context.internalAdapter.deleteSessions(
+        sessions.map((session) => {
+          return session.token;
+        }),
+      );
+      const staleCheck = await browser.app.inject({
+        method: 'GET',
+        url: '/workspace/me',
+        headers: { cookie: first.cookie },
+      });
+      expect(staleCheck.statusCode).toBe(401);
+
+      const result = await signInThrough(browser.app, {
+        query: '?next=%2Fsettings',
+        cookie: first.cookie,
+        headers: {
+          referer: 'https://broker.example/self-hosted/sign-in',
+          origin: 'https://broker.example',
+          'sec-fetch-site': 'cross-site',
+          'sec-fetch-mode': 'navigate',
+          'sec-fetch-dest': 'document',
+          'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36',
+        },
+      });
+      expect(result.status).toBe(302);
+      expect(result.location).toBe('http://localhost/settings');
+      expect(result.cookie).toContain(SESSION_COOKIE);
+      expect(result.cookie).not.toBe(first.cookie);
+      expect(result.setCookies).toContain(CLEARED_NONCE);
+
+      const me = await browser.app.inject({
+        method: 'GET',
+        url: '/workspace/me',
+        headers: { cookie: result.cookie },
+      });
+      expect(me.statusCode).toBe(200);
+      expect((me.json() as { email: string }).email).toBe('owner@example.com');
+    } finally {
+      await browser.app.close();
+      await browser.storage.close();
+    }
+  });
+});
+
 describe('BrokerController first owner versus password sign-up', () => {
   it('leaves exactly one owner when both reach an empty workspace at once', async () => {
     const racing = await buildApp(resolveWorkspaceConfig(BASE_ENV));
