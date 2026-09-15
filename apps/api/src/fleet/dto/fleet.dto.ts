@@ -1,10 +1,25 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import type {
+  FleetCveSummary,
   FleetInstanceStatus,
   FleetInstanceSummary,
   FleetOverallStatus,
   FleetSummaryResponse,
 } from '@betterdb/shared';
+
+export class FleetCveSummaryDto implements FleetCveSummary {
+  @ApiProperty({ description: 'Total critical findings across scanned nodes', example: 2 })
+  critical: number;
+
+  @ApiProperty({ description: 'Total KEV-exploited findings across scanned nodes', example: 1 })
+  kev: number;
+
+  @ApiProperty({ description: 'Fingerprint of the scan this rollup came from', example: 'a1b2c3d4e5f60718' })
+  fingerprint: string;
+
+  @ApiProperty({ description: 'True when the scan is partial or sources are missing' })
+  stale: boolean;
+}
 
 export class FleetInstanceSummaryDto implements FleetInstanceSummary {
   @ApiProperty({ description: 'Connection ID', example: '550e8400-e29b-41d4-a716-446655440000' })
@@ -48,6 +63,13 @@ export class FleetInstanceSummaryDto implements FleetInstanceSummary {
 
   @ApiPropertyOptional({ description: 'Error when the instance is down/unknown', example: 'Not connected to database' })
   error?: string;
+
+  @ApiPropertyOptional({
+    description: 'Latest CVE rollup for this connection; null when never scanned',
+    type: FleetCveSummaryDto,
+    nullable: true,
+  })
+  cve?: FleetCveSummaryDto | null;
 }
 
 export class FleetSummaryResponseDto implements FleetSummaryResponse {
