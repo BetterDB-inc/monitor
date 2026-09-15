@@ -1,24 +1,14 @@
 import { Injectable, CanActivate, ExecutionContext } from '@nestjs/common';
 import { isCloudMode } from '@app/common/utils/cloud-mode';
 import { FastifyRequest, FastifyReply } from 'fastify';
-import * as jwt from 'jsonwebtoken';
 import type { Actor } from '@betterdb/shared';
 import { cloudActor, CloudSessionPayload } from './cloud-actor';
+import { readCloudSession } from './cloud-session';
 
 type CloudRequest = FastifyRequest & { cloudUser?: CloudSessionPayload; actor: Actor | null };
 
 @Injectable()
 export class CloudAuthGuardImpl implements CanActivate {
-  private publicKey: string;
-  private sessionSecret: string;
-  private tenantSchema: string;
-
-  constructor() {
-    this.publicKey = process.env.AUTH_PUBLIC_KEY || '';
-    this.sessionSecret = process.env.SESSION_SECRET || '';
-    this.tenantSchema = process.env.DB_SCHEMA || '';
-  }
-
   canActivate(context: ExecutionContext): boolean {
     // Not in cloud mode — allow everything. Match the codebase convention
     // (isCloudMode()) so a value like "false"/"0" is treated as
@@ -47,40 +37,17 @@ export class CloudAuthGuardImpl implements CanActivate {
       return true;
     }
 
-    // Check session cookie
-    const sessionToken = this.getCookie(request, 'betterdb_session');
-    if (sessionToken) {
-      try {
-        const payload = jwt.verify(sessionToken, this.sessionSecret, {
-          algorithms: ['HS256'],
-        }) as jwt.JwtPayload & CloudSessionPayload;
-
-        // Verify tenant matches (skip on demo hostname — any valid session is accepted)
-        const isDemoHost = !!process.env.DEMO_HOSTNAME && (request.headers.host || '') === process.env.DEMO_HOSTNAME;
-        const expectedSchema = `tenant_${payload.subdomain.replace(/-/g, '_')}`;
-        if (!isDemoHost && expectedSchema !== this.tenantSchema) {
-          this.redirectToLogin(reply, request);
-          return false;
-        }
-
-        // Attach user to request
-        request.cloudUser = payload;
-        request.actor = cloudActor(payload);
-        return true;
-      } catch {
-        // Invalid/expired cookie — fall through to redirect
-      }
+    // Check session cookie; tenant mismatch, invalid or expired sessions redirect to login
+    const payload = readCloudSession(request.headers.cookie, request.headers.host);
+    if (payload === null) {
+      this.redirectToLogin(reply, request);
+      return false;
     }
 
-    // No valid session — redirect to login
-    this.redirectToLogin(reply, request);
-    return false;
-  }
-
-  private getCookie(request: FastifyRequest, name: string): string | undefined {
-    const cookies = request.headers.cookie || '';
-    const match = cookies.split(';').find((c: string) => c.trim().startsWith(`${name}=`));
-    return match?.split('=')[1]?.trim();
+    // Attach user to request
+    request.cloudUser = payload;
+    request.actor = cloudActor(payload);
+    return true;
   }
 
   private redirectToLogin(reply: FastifyReply, request: FastifyRequest) {

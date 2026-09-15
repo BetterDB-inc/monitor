@@ -297,6 +297,7 @@ describe('CliGateway command execution', () => {
       sessionValid: false,
       readOnly: true,
       actor: null,
+      ip: '10.0.0.5',
     });
     await expect(accessOf(gateway, ws)).resolves.toEqual({
       sessionValid: true,
@@ -315,6 +316,7 @@ describe('CliGateway command execution', () => {
       sessionValid: true,
       readOnly: true,
       actor: member,
+      ip: '10.0.0.5',
     });
     expect(resolver.resolveFromUpgrade).toHaveBeenCalledTimes(1);
   });
@@ -357,6 +359,23 @@ describe('CliGateway activity recording', () => {
       Buffer.from(JSON.stringify({ type: 'execute', command, connectionId: 'c1' })),
     );
   }
+
+  it('records nothing while workspace auth is off and no actor is identified', async () => {
+    const execute = jest
+      .fn()
+      .mockResolvedValue({ type: 'result', result: 'b', resultType: 'string', durationMs: 1 });
+    const activity = activityWith();
+    const gateway = new CliGateway(
+      { execute } as unknown as CliService,
+      resolverWith(false, null),
+      activity.service,
+    );
+    const ws = connect(gateway);
+    send(ws, 'GET a');
+    await flush();
+    expect(execute).toHaveBeenCalledWith('GET a', 'c1', { readOnly: false });
+    expect(activity.record).not.toHaveBeenCalled();
+  });
 
   it('records read commands with their arguments', async () => {
     const execute = jest
