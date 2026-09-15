@@ -351,6 +351,42 @@ describe('CliGateway command execution', () => {
     ).resolveAccess(new FakeWebSocket() as unknown as WebSocket);
     expect(access).toEqual({ sessionValid: false, readOnly: true, actor: null, ip: '' });
   });
+
+  it.each([
+    ['enabled', true],
+    ['disabled', false],
+  ])(
+    'drops commands still queued when the socket closes with the workspace %s',
+    async (_label, enabled) => {
+      let release: () => void = () => {};
+      const execute = jest
+        .fn()
+        .mockImplementationOnce(() => {
+          return new Promise((resolve) => {
+            release = () => {
+              resolve({ type: 'result', result: 'OK', resultType: 'string', durationMs: 1 });
+            };
+          });
+        })
+        .mockResolvedValue({ type: 'result', result: 'OK', resultType: 'string', durationMs: 1 });
+      const gateway = new CliGateway(
+        { execute } as unknown as CliService,
+        resolverWith(enabled, admin),
+      );
+      const ws = connect(gateway);
+      sendExecute(ws);
+      sendExecute(ws);
+      sendExecute(ws);
+      await flush();
+      expect(execute).toHaveBeenCalledTimes(1);
+      ws.readyState = 3;
+      ws.emit('close');
+      release();
+      await flush();
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(ws.sent).toEqual([]);
+    },
+  );
 });
 
 describe('CliGateway activity recording', () => {
@@ -661,40 +697,4 @@ describe('CliGateway activity recording', () => {
     expect(execute).toHaveBeenCalledTimes(1);
     expect(activity.record).not.toHaveBeenCalled();
   });
-
-  it.each([
-    ['enabled', true],
-    ['disabled', false],
-  ])(
-    'drops commands still queued when the socket closes with the workspace %s',
-    async (_label, enabled) => {
-      let release: () => void = () => {};
-      const execute = jest
-        .fn()
-        .mockImplementationOnce(() => {
-          return new Promise((resolve) => {
-            release = () => {
-              resolve({ type: 'result', result: 'OK', resultType: 'string', durationMs: 1 });
-            };
-          });
-        })
-        .mockResolvedValue({ type: 'result', result: 'OK', resultType: 'string', durationMs: 1 });
-      const gateway = new CliGateway(
-        { execute } as unknown as CliService,
-        resolverWith(enabled, admin),
-      );
-      const ws = connect(gateway);
-      sendExecute(ws);
-      sendExecute(ws);
-      sendExecute(ws);
-      await flush();
-      expect(execute).toHaveBeenCalledTimes(1);
-      ws.readyState = 3;
-      ws.emit('close');
-      release();
-      await flush();
-      expect(execute).toHaveBeenCalledTimes(1);
-      expect(ws.sent).toEqual([]);
-    },
-  );
 });
