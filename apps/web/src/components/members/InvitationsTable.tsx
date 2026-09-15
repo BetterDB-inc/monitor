@@ -52,6 +52,15 @@ export function InvitationsTable({ invitations, onRevoke }: InvitationsTableProp
                 </TableCell>
                 <TableCell>
                   <Badge variant={statusVariant(invitation.status)}>{invitation.status}</Badge>
+                  {invitation.orphaned === true && (
+                    <Badge
+                      variant="outline"
+                      className="ml-2"
+                      title="The account for this invitation was never created. Revoke it to invite this email again."
+                    >
+                      No member
+                    </Badge>
+                  )}
                 </TableCell>
                 <TableCell className="text-muted-foreground">
                   {new Date(invitation.createdAt).toLocaleDateString()}
@@ -60,7 +69,7 @@ export function InvitationsTable({ invitations, onRevoke }: InvitationsTableProp
                   {new Date(invitation.expiresAt).toLocaleDateString()}
                 </TableCell>
                 <TableCell className="text-right">
-                  {invitation.status === 'pending' && (
+                  {(invitation.status === 'pending' || invitation.orphaned === true) && (
                     <Button
                       type="button"
                       variant="destructive"

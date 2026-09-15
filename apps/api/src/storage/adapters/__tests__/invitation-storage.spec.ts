@@ -121,6 +121,14 @@ function describeRepository(
       expect(await repository.findById(saved.id)).toEqual({ ...saved, status: 'accepted' });
     });
 
+    it('revokes an accepted invitation only while it is still accepted', async () => {
+      const saved = record({ status: 'accepted' });
+      await repository.save(saved);
+      expect(await repository.updateStatus(saved.id, 'accepted', 'revoked')).toBe(true);
+      expect(await repository.updateStatus(saved.id, 'accepted', 'revoked')).toBe(false);
+      expect(await repository.findById(saved.id)).toEqual({ ...saved, status: 'revoked' });
+    });
+
     it('keeps an unexpired pending invitation instead of replacing it', async () => {
       const pending = record({ expiresAt: 2_000 });
       expect(await repository.saveUnlessPending(pending, 1_000)).toBe(true);

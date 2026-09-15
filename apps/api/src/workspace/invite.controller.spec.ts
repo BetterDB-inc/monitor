@@ -29,6 +29,7 @@ describe('InviteController', () => {
   let members: MemberService;
   let telemetry: { trackUserInvited: jest.Mock; trackInviteAccepted: jest.Mock };
   let ownerId: string;
+  let ownerCookie: string;
   let currentTime = Date.now();
 
   beforeAll(async () => {
@@ -76,10 +77,11 @@ describe('InviteController', () => {
       payload: { email: 'owner@example.com', password: 'correct horse battery', name: 'Owner' },
       remoteAddress: '10.1.9.1',
     });
+    ownerCookie = String(signUp.headers['set-cookie']).split(';')[0];
     const me = await app.inject({
       method: 'GET',
       url: '/workspace/me',
-      headers: { cookie: String(signUp.headers['set-cookie']).split(';')[0] },
+      headers: { cookie: ownerCookie },
     });
     ownerId = (me.json() as { userId: string }).userId;
   });
@@ -316,6 +318,80 @@ describe('InviteController', () => {
       logSpy.mockRestore();
     }
   });
+
+  it.each([
+    {
+      outcome: 'throws',
+      email: 'orphan-throws@example.com',
+      release: (): Promise<boolean> => Promise.reject(new Error('release failed')),
+    },
+    {
+      outcome: 'changes nothing',
+      email: 'orphan-unchanged@example.com',
+      release: (): Promise<boolean> => Promise.resolve(false),
+    },
+  ])(
+    'answers the original error and leaves a revocable orphan when the release $outcome',
+    async ({ email, release }) => {
+      const signInSpy = jest
+        .spyOn(members, 'signIn')
+        .mockResolvedValueOnce(new Response(null, { status: 401 }));
+      const releaseSpy = jest.spyOn(invitations, 'release').mockImplementationOnce(release);
+      const logSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {
+        return;
+      });
+      try {
+        const { token, invitation } = await invitations.create({
+          email,
+          role: 'member',
+          invitedBy: ownerId,
+        });
+        const accept = await app.inject({
+          method: 'POST',
+          url: `/invite/${token}/accept`,
+          headers: { 'content-type': 'application/json', origin: ORIGIN },
+          payload: { name: 'Orphan', password: 'orphan horse battery' },
+        });
+        expect(accept.statusCode).toBe(401);
+        expect(accept.json()).toEqual(
+          expect.objectContaining({ message: SIGN_IN_FAILED_MESSAGE }),
+        );
+        expect(await members.findByEmail(email)).toBeNull();
+        expect(logSpy).toHaveBeenCalledWith(
+          expect.stringContaining(`Failed to release invitation ${invitation.id}`),
+        );
+
+        const listed = await app.inject({
+          method: 'GET',
+          url: '/workspace/invitations',
+          headers: { cookie: ownerCookie },
+        });
+        expect(listed.json()).toContainEqual(
+          expect.objectContaining({ id: invitation.id, status: 'accepted', orphaned: true }),
+        );
+
+        const revoke = await app.inject({
+          method: 'DELETE',
+          url: `/workspace/invitations/${invitation.id}`,
+          headers: { cookie: ownerCookie, origin: ORIGIN },
+        });
+        expect(revoke.statusCode).toBe(200);
+
+        const again = await invitations.create({ email, role: 'member', invitedBy: ownerId });
+        const retry = await app.inject({
+          method: 'POST',
+          url: `/invite/${again.token}/accept`,
+          headers: { 'content-type': 'application/json', origin: ORIGIN },
+          payload: { name: 'Orphan', password: 'orphan horse battery' },
+        });
+        expect(retry.statusCode).toBe(201);
+      } finally {
+        signInSpy.mockRestore();
+        releaseSpy.mockRestore();
+        logSpy.mockRestore();
+      }
+    },
+  );
 
   it('forwards the request IP rather than a client-supplied one to sign-in', async () => {
     const signInSpy = jest.spyOn(members, 'signIn');

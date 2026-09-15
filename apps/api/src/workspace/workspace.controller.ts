@@ -76,8 +76,18 @@ export class WorkspaceController {
   @Get('invitations')
   @Roles('admin')
   async listInvitations(): Promise<InvitationView[]> {
-    const invitations = await this.invitations.list();
-    return invitations.map(toInvitationView);
+    const [invitations, members] = await Promise.all([
+      this.invitations.list(),
+      this.members.list(),
+    ]);
+    const memberEmails = new Set(
+      members.map((member) => {
+        return member.email;
+      }),
+    );
+    return invitations.map((invitation) => {
+      return toInvitationView(invitation, memberEmails);
+    });
   }
 
   @Post('invite')

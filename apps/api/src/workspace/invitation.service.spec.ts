@@ -270,6 +270,48 @@ describe('InvitationService', () => {
     );
   });
 
+  it('revokes an accepted invitation only when its member is gone', async () => {
+    const orphan = await service.create({
+      email: 'orphan@example.com',
+      role: 'member',
+      invitedBy: 'owner-id',
+    });
+    await service.claim(orphan.token);
+    await service.revoke(orphan.invitation.id);
+    expect((await repository.findById(orphan.invitation.id))?.status).toBe('revoked');
+    await expect(
+      service.create({ email: 'orphan@example.com', role: 'member', invitedBy: 'owner-id' }),
+    ).resolves.toEqual(expect.objectContaining({ token: expect.any(String) }));
+
+    const joined = await service.create({
+      email: 'joined@example.com',
+      role: 'member',
+      invitedBy: 'owner-id',
+    });
+    await service.claim(joined.token);
+    await members.create({
+      email: 'joined@example.com',
+      name: 'Joined',
+      password: 'correct horse battery',
+      role: 'member',
+    });
+    await expect(service.revoke(joined.invitation.id)).rejects.toThrow(
+      new BadRequestException('Cannot revoke invitation with status accepted'),
+    );
+    expect((await repository.findById(joined.invitation.id))?.status).toBe('accepted');
+  });
+
+  it('reports whether a release reopened the invitation', async () => {
+    const { invitation, token } = await service.create({
+      email: 'release@example.com',
+      role: 'member',
+      invitedBy: 'owner-id',
+    });
+    await service.claim(token);
+    expect(await service.release(invitation.id)).toBe(true);
+    expect(await service.release(invitation.id)).toBe(false);
+  });
+
   it('builds the invite link from the public URL, else from the request origin', () => {
     expect(service.inviteUrl('tok', 'http://request.local')).toBe(
       'https://monitor.example.com/invite/tok',

@@ -22,6 +22,7 @@ export interface InvitationView {
   invitedBy: string;
   createdAt: string;
   expiresAt: string;
+  orphaned: boolean;
 }
 
 export function toMemberView(member: MemberRecord, includeEmail = true): MemberView {
@@ -35,7 +36,10 @@ export function toMemberView(member: MemberRecord, includeEmail = true): MemberV
   };
 }
 
-export function toInvitationView(invitation: InvitationRecord): InvitationView {
+export function toInvitationView(
+  invitation: InvitationRecord,
+  memberEmails: ReadonlySet<string> = new Set(),
+): InvitationView {
   return {
     id: invitation.id,
     email: invitation.email,
@@ -44,5 +48,6 @@ export function toInvitationView(invitation: InvitationRecord): InvitationView {
     invitedBy: invitation.invitedBy,
     createdAt: new Date(invitation.createdAt).toISOString(),
     expiresAt: new Date(invitation.expiresAt).toISOString(),
+    orphaned: invitation.status === 'accepted' && memberEmails.has(invitation.email) === false,
   };
 }

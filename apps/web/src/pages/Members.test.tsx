@@ -49,6 +49,7 @@ const INVITATION = {
   invitedBy: 'u1',
   createdAt: '2026-09-02T00:00:00.000Z',
   expiresAt: '2026-09-09T00:00:00.000Z',
+  orphaned: false,
 };
 
 describe('Members', () => {
@@ -110,6 +111,31 @@ describe('Members', () => {
     const ownerRow = screen.getByText('owner@example.com').closest('tr') as HTMLTableRowElement;
     expect(within(ownerRow).queryByRole('button')).toBeNull();
     expect(screen.getByRole('button', { name: 'Revoke' })).toBeInTheDocument();
+  });
+
+  it('offers revoke on an accepted invitation whose member is missing', async () => {
+    authState.user = { userId: 'u1', email: OWNER.email, role: 'admin', isOwner: true };
+    api.getInvitations.mockResolvedValue([
+      {
+        ...INVITATION,
+        id: 'i-orphan',
+        email: 'orphan@example.com',
+        status: 'accepted',
+        orphaned: true,
+      },
+      { ...INVITATION, id: 'i-joined', email: 'joined@example.com', status: 'accepted' },
+    ]);
+    api.revokeInvitation.mockResolvedValue(undefined);
+    render(<Members />);
+    const orphanRow = (await screen.findByText('orphan@example.com')).closest(
+      'tr',
+    ) as HTMLTableRowElement;
+    expect(within(orphanRow).getByText('No member')).toBeInTheDocument();
+    const joinedRow = screen.getByText('joined@example.com').closest('tr') as HTMLTableRowElement;
+    expect(within(joinedRow).queryByRole('button')).toBeNull();
+    expect(within(joinedRow).queryByText('No member')).toBeNull();
+    fireEvent.click(within(orphanRow).getByRole('button', { name: 'Revoke' }));
+    await waitFor(() => expect(api.revokeInvitation).toHaveBeenCalledWith('i-orphan'));
   });
 
   it('shows members the list only, without emails', async () => {

@@ -21,6 +21,7 @@ export interface Invitation {
   invitedBy: string;
   createdAt: string;
   expiresAt: string;
+  orphaned: boolean;
 }
 
 export type InviteCreated = Invitation & { url?: string };

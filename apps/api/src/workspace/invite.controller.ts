@@ -98,6 +98,21 @@ export class InviteController {
         return;
       }
     }
-    await this.invitations.release(invitationId);
+    await this.releaseClaim(invitationId);
+  }
+
+  private async releaseClaim(invitationId: string): Promise<void> {
+    let reason = 'it was no longer accepted';
+    try {
+      if ((await this.invitations.release(invitationId)) === true) {
+        return;
+      }
+    } catch (releaseError) {
+      reason = describeError(releaseError);
+    }
+    this.logger.error(
+      `Failed to release invitation ${invitationId} after a failed acceptance: ${reason}. ` +
+        'An admin can revoke it from the invitations list and invite again.',
+    );
   }
 }

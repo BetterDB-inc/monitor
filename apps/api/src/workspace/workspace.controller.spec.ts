@@ -176,6 +176,7 @@ describe('WorkspaceController', () => {
           id: created.id,
           status: 'pending',
           invitedBy: expect.any(String),
+          orphaned: false,
         }),
       ]);
       expect(JSON.stringify(list.json())).not.toContain('tokenHash');
@@ -205,6 +206,72 @@ describe('WorkspaceController', () => {
         payload: { email: 'not-an-email', role: 'owner' },
       });
       expect(response.statusCode).toBe(400);
+    });
+
+    it('flags accepted invitations without a member and lets an admin revoke only those', async () => {
+      const invitations = app.get(InvitationService);
+      const orphan = await invitations.create({
+        email: 'orphan@example.com',
+        role: 'member',
+        invitedBy: 'owner-id',
+      });
+      await invitations.claim(orphan.token);
+      const joined = await invitations.create({
+        email: 'joined@example.com',
+        role: 'member',
+        invitedBy: 'owner-id',
+      });
+      await invitations.claim(joined.token);
+      const member = await members.create({
+        email: 'joined@example.com',
+        name: 'Joined',
+        password: 'joined horse battery',
+        role: 'member',
+      });
+      try {
+        const list = await app.inject({
+          method: 'GET',
+          url: '/workspace/invitations',
+          headers: { cookie: ownerCookie },
+        });
+        expect(list.json()).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              id: orphan.invitation.id,
+              status: 'accepted',
+              orphaned: true,
+            }),
+            expect.objectContaining({
+              id: joined.invitation.id,
+              status: 'accepted',
+              orphaned: false,
+            }),
+          ]),
+        );
+
+        const refused = await app.inject({
+          method: 'DELETE',
+          url: `/workspace/invitations/${joined.invitation.id}`,
+          headers: { cookie: ownerCookie },
+        });
+        expect(refused.statusCode).toBe(400);
+        expect(refused.json()).toEqual(
+          expect.objectContaining({ message: 'Cannot revoke invitation with status accepted' }),
+        );
+
+        const revoked = await app.inject({
+          method: 'DELETE',
+          url: `/workspace/invitations/${orphan.invitation.id}`,
+          headers: { cookie: ownerCookie },
+        });
+        expect(revoked.statusCode).toBe(200);
+        const after = await invitations.list();
+        expect(after.find((item) => item.id === orphan.invitation.id)?.status).toBe('revoked');
+        expect(after.find((item) => item.id === joined.invitation.id)?.status).toBe('accepted');
+      } finally {
+        await invitations.retire('joined@example.com');
+        await members.remove(member.id);
+      }
     });
   });
 

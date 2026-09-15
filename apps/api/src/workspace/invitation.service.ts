@@ -127,8 +127,8 @@ export class InvitationService {
     return { ...invitation, status: 'accepted' };
   }
 
-  async release(id: string): Promise<void> {
-    await this.repository.updateStatus(id, 'accepted', 'pending');
+  release(id: string): Promise<boolean> {
+    return this.repository.updateStatus(id, 'accepted', 'pending');
   }
 
   async retire(email: string): Promise<void> {
@@ -144,13 +144,26 @@ export class InvitationService {
     if (invitation === null) {
       throw new NotFoundException(INVITATION_NOT_FOUND_MESSAGE);
     }
-    if (invitation.status !== 'pending') {
+    if ((await this.isRevocable(invitation)) === false) {
       throw new BadRequestException(`Cannot revoke invitation with status ${invitation.status}`);
     }
-    const revoked = await this.repository.updateStatus(id, 'pending', 'revoked');
+    const revoked = await this.repository.updateStatus(id, invitation.status, 'revoked');
     if (revoked === false) {
-      throw new BadRequestException('Cannot revoke invitation with status accepted');
+      const current = await this.repository.findById(id);
+      throw new BadRequestException(
+        `Cannot revoke invitation with status ${current?.status ?? 'revoked'}`,
+      );
     }
+  }
+
+  private async isRevocable(invitation: InvitationRecord): Promise<boolean> {
+    if (invitation.status === 'pending') {
+      return true;
+    }
+    if (invitation.status !== 'accepted') {
+      return false;
+    }
+    return (await this.members.findByEmail(invitation.email)) === null;
   }
 
   inviteUrl(token: string, requestOrigin: string | null): string {
