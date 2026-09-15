@@ -236,6 +236,56 @@ describe('WorkspaceController', () => {
       });
       expect(again.invitation.id).not.toBe(invitation.id);
     });
+
+    it('retires the invitation before removing the member so a failed removal stays re-invitable', async () => {
+      const invitations = app.get(InvitationService);
+      const { invitation, token } = await invitations.create({
+        email: 'half-removed@example.com',
+        role: 'member',
+        invitedBy: 'owner-id',
+      });
+      await invitations.claim(token);
+      const member = await members.create({
+        email: 'half-removed@example.com',
+        name: 'Half Removed',
+        password: 'half horse battery',
+        role: 'member',
+      });
+      const retireSpy = jest.spyOn(invitations, 'retire');
+      const removeSpy = jest
+        .spyOn(members, 'remove')
+        .mockRejectedValueOnce(new Error('storage unavailable'));
+      try {
+        const failed = await app.inject({
+          method: 'DELETE',
+          url: `/workspace/members/${member.id}`,
+          headers: { cookie: ownerCookie, origin: ORIGIN },
+        });
+        expect(failed.statusCode).toBe(500);
+        expect(retireSpy.mock.invocationCallOrder[0]).toBeLessThan(
+          removeSpy.mock.invocationCallOrder[0],
+        );
+        const listed = await invitations.list();
+        expect(listed.find((item) => item.id === invitation.id)?.status).toBe('revoked');
+        expect(await members.findByEmail('half-removed@example.com')).not.toBeNull();
+
+        const retry = await app.inject({
+          method: 'DELETE',
+          url: `/workspace/members/${member.id}`,
+          headers: { cookie: ownerCookie, origin: ORIGIN },
+        });
+        expect(retry.statusCode).toBe(200);
+        const again = await invitations.create({
+          email: 'half-removed@example.com',
+          role: 'member',
+          invitedBy: 'owner-id',
+        });
+        expect(again.invitation.id).not.toBe(invitation.id);
+      } finally {
+        retireSpy.mockRestore();
+        removeSpy.mockRestore();
+      }
+    });
   });
 
   describe('members', () => {

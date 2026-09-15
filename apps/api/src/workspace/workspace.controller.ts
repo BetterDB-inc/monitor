@@ -119,8 +119,8 @@ export class WorkspaceController {
     if (member.isOwner === true) {
       throw new ForbiddenException(CANNOT_REMOVE_OWNER_MESSAGE);
     }
-    await this.members.remove(userId);
     await this.invitations.retire(member.email);
+    await this.members.remove(userId);
     return { ok: true };
   }
 
