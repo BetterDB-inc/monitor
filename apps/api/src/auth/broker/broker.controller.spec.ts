@@ -284,12 +284,12 @@ describe('BrokerController', () => {
     });
   });
 
-  it('rejects a replayed token as expired', async () => {
+  it('rejects a replayed token as expired and leaves the nonce cookie alone', async () => {
     const result = await callback(ownerToken, ownerNonce);
     expect(result.status).toBe(302);
     expect(result.location).toBe('http://localhost/login?error=expired');
     expect(result.cookie).toBe('');
-    expect(result.setCookies).toEqual([CLEARED_NONCE]);
+    expect(result.setCookies).toEqual([]);
   });
 
   it('sends a handoff token past its expiry to the expired error', async () => {
@@ -316,6 +316,7 @@ describe('BrokerController', () => {
     const result = await callback(expired, nonce);
     expect(result.location).toBe('http://localhost/login?error=expired');
     expect(result.cookie).toBe('');
+    expect(result.setCookies).toEqual([]);
   });
 
   it('rejects a token issued for another audience without burning its state', async () => {
@@ -323,24 +324,59 @@ describe('BrokerController', () => {
     const result = await callback(tokenFor(state, {}, 'http://evil.example'), nonce);
     expect(result.location).toBe('http://localhost/login?error=invalid');
     expect(result.cookie).toBe('');
+    expect(result.setCookies).toEqual([]);
 
     const retried = await callback(tokenFor(state), nonce);
     expect(retried.location).toBe('http://localhost/');
     expect(retried.cookie).toContain(SESSION_COOKIE);
+    expect(retried.setCookies).toContain(CLEARED_NONCE);
   });
 
   it('rejects a token signed by an untrusted key and a missing token', async () => {
     const { state, nonce } = await start('');
     const forged = await callback(tokenFor(state, {}, 'http://localhost', foreignKey), nonce);
     expect(forged.location).toBe('http://localhost/login?error=invalid');
+    expect(forged.setCookies).toEqual([]);
 
     const missing = await app.inject({
       method: 'GET',
       url: '/auth/broker/callback',
       remoteAddress: nextIp(),
+      headers: { cookie: nonce },
     });
     expect(missing.statusCode).toBe(302);
     expect(String(missing.headers.location)).toBe('http://localhost/login?error=invalid');
+    expect(allCookies(missing.headers['set-cookie'])).toEqual([]);
+  });
+
+  it('keeps the newer nonce cookie when an older tab is rejected, so the newer tab signs in', async () => {
+    const olderTab = await start('?provider=google');
+    const newerTab = await start('?provider=github');
+    const browserCookie = newerTab.nonce;
+
+    const older = await callback(tokenFor(olderTab.state), browserCookie);
+    expect(older.location).toBe('http://localhost/login?error=invalid');
+    expect(older.cookie).toBe('');
+    expect(older.setCookies).toEqual([]);
+
+    const newer = await callback(tokenFor(newerTab.state), browserCookie);
+    expect(newer.location).toBe('http://localhost/');
+    expect(newer.cookie).toContain(SESSION_COOKIE);
+    expect(newer.setCookies).toContain(CLEARED_NONCE);
+  });
+
+  it('leaves the nonce cookie alone when the state lookup fails unexpectedly', async () => {
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {
+      return undefined;
+    });
+    jest
+      .spyOn(app.get(BrokerStateStore), 'consume')
+      .mockRejectedValueOnce(new Error('database unavailable'));
+    const { state, nonce } = await start('');
+    const result = await callback(tokenFor(state), nonce);
+    expect(result.status).toBe(302);
+    expect(result.location).toBe('http://localhost/login?error=invalid');
+    expect(result.setCookies).toEqual([]);
   });
 
   it('refuses a callback without the nonce cookie and keeps the state for the real browser', async () => {
@@ -349,7 +385,7 @@ describe('BrokerController', () => {
     expect(result.status).toBe(302);
     expect(result.location).toBe('http://localhost/login?error=invalid');
     expect(result.cookie).toBe('');
-    expect(result.setCookies).toEqual([CLEARED_NONCE]);
+    expect(result.setCookies).toEqual([]);
 
     const real = await callback(tokenFor(state), nonce);
     expect(real.location).toBe('http://localhost/');
@@ -366,6 +402,7 @@ describe('BrokerController', () => {
     const result = await callback(tokenFor(attacker.state), victim.nonce);
     expect(result.location).toBe('http://localhost/login?error=invalid');
     expect(result.cookie).toBe('');
+    expect(result.setCookies).toEqual([]);
 
     const own = await callback(tokenFor(attacker.state), attacker.nonce);
     expect(own.location).toBe('http://localhost/');
@@ -380,6 +417,7 @@ describe('BrokerController', () => {
     );
     expect(result.location).toBe('http://localhost/login?error=not_invited');
     expect(result.cookie).toBe('');
+    expect(result.setCookies).toEqual([CLEARED_NONCE]);
     expect(await members.findByEmail('stranger@example.com')).toBeNull();
   });
 
@@ -537,6 +575,7 @@ describe('BrokerController', () => {
       });
       expect(response.statusCode).toBe(302);
       expect(String(response.headers.location)).toBe('http://localhost:5173/login?error=invalid');
+      expect(allCookies(response.headers['set-cookie'])).toEqual([]);
     } finally {
       await withBadHost.app.close();
       await withBadHost.storage.close();
@@ -607,6 +646,7 @@ describe('BrokerController', () => {
     });
     expect(cancelled.statusCode).toBe(302);
     expect(String(cancelled.headers.location)).toBe('http://localhost/login');
+    expect(allCookies(cancelled.headers['set-cookie'])).toEqual([]);
     expect(stateSpy).not.toHaveBeenCalled();
   });
 
@@ -621,10 +661,26 @@ describe('BrokerController', () => {
     });
     expect(cancelled.statusCode).toBe(302);
     expect(String(cancelled.headers.location)).toBe('http://localhost/login');
+    expect(allCookies(cancelled.headers['set-cookie'])).toEqual([]);
 
     const own = await callback(tokenFor(attacker.state), attacker.nonce);
     expect(own.location).toBe('http://localhost/');
     expect(own.cookie).toContain(SESSION_COOKIE);
+  });
+
+  it('keeps the nonce cookie when cancelling a state that is already gone', async () => {
+    const { state, nonce } = await start('');
+    const signedIn = await callback(tokenFor(state), nonce);
+    expect(signedIn.cookie).toContain(SESSION_COOKIE);
+    const cancelled = await app.inject({
+      method: 'GET',
+      url: `/auth/broker/cancel?state=${state}`,
+      headers: { cookie: nonce },
+      remoteAddress: nextIp(),
+    });
+    expect(cancelled.statusCode).toBe(302);
+    expect(String(cancelled.headers.location)).toBe('http://localhost/login');
+    expect(allCookies(cancelled.headers['set-cookie'])).toEqual([]);
   });
 
   it('answers 404 on every route when the broker is disabled', async () => {

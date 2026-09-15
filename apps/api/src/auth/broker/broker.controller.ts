@@ -36,7 +36,11 @@ import {
   serializeBrokerNonceCookie,
 } from './broker-nonce';
 import { BrokerTokenError, verifyBrokerToken } from './broker-token.verifier';
-import { BROKER_STATE_TTL_MS, BrokerStateStore } from './broker-state.store';
+import {
+  BROKER_STATE_TTL_MS,
+  type BrokerStateRecord,
+  BrokerStateStore,
+} from './broker-state.store';
 import { safeNext } from './safe-next';
 
 type BrokerErrorCode = 'invalid' | 'expired' | 'not_invited';
@@ -142,13 +146,19 @@ export class BrokerController {
       reply.status(404).send();
       return;
     }
-    const appOrigin = await this.cancelledAppOrigin(state, req);
-    reply.header('set-cookie', this.nonceCookie('', 0));
+    const cancelled = await this.cancelState(state, req);
+    if (cancelled.consumed === true) {
+      reply.header('set-cookie', this.nonceCookie('', 0));
+    }
+    const appOrigin = cancelled.appOrigin;
     reply.redirect(appOrigin === null ? '/login' : `${appOrigin}/login`, 302);
   }
 
-  private async cancelledAppOrigin(state: unknown, req: FastifyRequest): Promise<string | null> {
-    const fallback = this.appOrigin(req);
+  private async cancelState(
+    state: unknown,
+    req: FastifyRequest,
+  ): Promise<{ appOrigin: string | null; consumed: boolean }> {
+    const fallback = { appOrigin: this.appOrigin(req), consumed: false };
     const nonce = readBrokerNonce(req.headers.cookie);
     if (typeof state !== 'string' || state.length === 0 || nonce === null) {
       return fallback;
@@ -160,7 +170,7 @@ export class BrokerController {
       if (claim.status !== 'consumed') {
         return fallback;
       }
-      return claim.record.appOrigin;
+      return { appOrigin: claim.record.appOrigin, consumed: true };
     } catch (error) {
       logger.error('Broker sign-in cancel failed unexpectedly', describeError(error));
       return fallback;
@@ -199,7 +209,23 @@ export class BrokerController {
       this.fail(reply, claim.record.appOrigin, 'invalid');
       return;
     }
-    const state = claim.record;
+    try {
+      await this.finishSignIn(claims, claim.record, req, reply);
+    } catch (error) {
+      logger.error('Broker sign-in failed unexpectedly', describeError(error));
+      if (reply.sent === true) {
+        return;
+      }
+      this.failConsumed(reply, fallbackApp, 'invalid');
+    }
+  }
+
+  private async finishSignIn(
+    claims: BrokerTokenClaims,
+    state: BrokerStateRecord,
+    req: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<void> {
     const headers = toWebHeaders(req.headers);
     headers.set(CLIENT_IP_HEADER, req.ip);
     let signedIn: BrokerSignIn;
@@ -219,14 +245,14 @@ export class BrokerController {
       );
     } catch (error) {
       if (error instanceof BrokerNotInvitedError) {
-        this.fail(reply, state.appOrigin, 'not_invited');
+        this.failConsumed(reply, state.appOrigin, 'not_invited');
         return;
       }
       throw error;
     }
     const { resolved, session } = signedIn;
     if (session.ok === false) {
-      this.fail(reply, state.appOrigin, 'invalid');
+      this.failConsumed(reply, state.appOrigin, 'invalid');
       return;
     }
     this.record(req, resolved, claims.provider);
@@ -266,8 +292,12 @@ export class BrokerController {
   private fail(reply: FastifyReply, appOrigin: string | null, code: BrokerErrorCode): void {
     const location =
       appOrigin === null ? `/login?error=${code}` : `${appOrigin}/login?error=${code}`;
-    reply.header('set-cookie', this.nonceCookie('', 0));
     reply.redirect(location, 302);
+  }
+
+  private failConsumed(reply: FastifyReply, appOrigin: string | null, code: BrokerErrorCode): void {
+    reply.header('set-cookie', this.nonceCookie('', 0));
+    this.fail(reply, appOrigin, code);
   }
 
   private nonceCookie(value: string, maxAgeSeconds: number): string {
