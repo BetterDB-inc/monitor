@@ -105,6 +105,8 @@ import { WebhookPostgresRepository } from './repositories/webhook.postgres.repos
 import { SlowLogPostgresRepository } from './repositories/slowlog.postgres.repository';
 import { InvitationPostgresRepository } from './repositories/invitation.postgres.repository';
 import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
+import { ActivityPostgresRepository } from './repositories/activity.postgres.repository';
+import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
 
 // Domain-specific repositories (webhooks, slowlog extracted). Remaining domains to extract:
 // ACL, anomaly, commandlog, latency, memory, hotkeys, settings,
@@ -180,6 +182,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   private webhookRepo!: WebhookPostgresRepository;
   private slowlogRepo!: SlowLogPostgresRepository;
   private invitationRepo!: InvitationPostgresRepository;
+  private activityRepo!: ActivityPostgresRepository;
 
   constructor(private config: PostgresAdapterConfig) {}
 
@@ -323,6 +326,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       this.webhookRepo = new WebhookPostgresRepository(this.pool, this.mappers);
       this.slowlogRepo = new SlowLogPostgresRepository(this.pool, this.mappers);
       this.invitationRepo = new InvitationPostgresRepository(this.pool);
+      this.activityRepo = new ActivityPostgresRepository(this.pool);
 
       // Test connection (will have correct search_path if schema is set)
       const testClient = await this.pool.connect();
@@ -2070,6 +2074,29 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         created_at BIGINT NOT NULL,
         expires_at BIGINT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS activity_events (
+        id TEXT PRIMARY KEY,
+        occurred_at BIGINT NOT NULL,
+        actor_user_id TEXT NOT NULL,
+        actor_email TEXT NOT NULL,
+        actor_via VARCHAR(20) NOT NULL CHECK (actor_via IN ('session', 'token', 'cli')),
+        token_id TEXT,
+        action TEXT NOT NULL,
+        target_type TEXT,
+        target_id TEXT,
+        connection_id TEXT,
+        status_code INTEGER NOT NULL,
+        ip TEXT NOT NULL,
+        details TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_activity_events_occurred
+        ON activity_events(occurred_at);
+      CREATE INDEX IF NOT EXISTS idx_activity_events_actor
+        ON activity_events(actor_user_id, occurred_at);
+      CREATE INDEX IF NOT EXISTS idx_activity_events_connection
+        ON activity_events(connection_id, occurred_at);
     `);
   }
 
@@ -5520,6 +5547,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   getInvitationRepository(): InvitationRepository {
     return this.invitationRepo;
+  }
+
+  getActivityRepository(): ActivityRepository {
+    return this.activityRepo;
   }
 }
 

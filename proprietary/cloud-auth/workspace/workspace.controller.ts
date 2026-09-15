@@ -5,18 +5,29 @@ import {
   Delete,
   Body,
   Param,
+  Query,
   Req,
   ForbiddenException,
   BadRequestException,
 } from '@nestjs/common';
 import { FastifyRequest } from 'fastify';
 import { EntitlementClientService } from './entitlement-client.service';
+import { ActivityService } from '../../../apps/api/src/activity/activity.service';
+import { ActivityQueryDto } from '../../../apps/api/src/workspace/dto/activity-query.dto';
+import {
+  ActivityPageView,
+  parseIsoTime,
+  toActivityView,
+} from '../../../apps/api/src/workspace/activity-views';
 
 @Controller('workspace')
 export class WorkspaceController {
   private readonly tenantId: string;
 
-  constructor(private readonly entitlementClient: EntitlementClientService) {
+  constructor(
+    private readonly entitlementClient: EntitlementClientService,
+    private readonly activity: ActivityService,
+  ) {
     this.tenantId = process.env.TENANT_ID || '';
   }
 
@@ -57,6 +68,24 @@ export class WorkspaceController {
     const cloudUser = this.getCloudUser(req);
     const tenantId = this.tenantId || cloudUser.tenantId;
     return this.entitlementClient.getMembers(tenantId);
+  }
+
+  @Get('activity')
+  async getActivity(
+    @Req() req: FastifyRequest,
+    @Query() query: ActivityQueryDto,
+  ): Promise<ActivityPageView> {
+    const cloudUser = this.getCloudUser(req);
+    this.requireAdminOrOwner(cloudUser);
+    const page = await this.activity.list({
+      actorUserId: query.actor,
+      from: parseIsoTime(query.from),
+      to: parseIsoTime(query.to),
+      action: query.action,
+      cursor: query.cursor,
+      limit: query.limit,
+    });
+    return { items: page.items.map(toActivityView), nextCursor: page.nextCursor };
   }
 
   @Post('invite')

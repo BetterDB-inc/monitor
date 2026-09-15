@@ -74,6 +74,7 @@ export type {
   ScheduledCapturePatch,
 } from '@betterdb/shared';
 import type { InvitationRepository } from './invitation-repository.interface';
+import type { ActivityRepository } from './activity-repository.interface';
 import type {
   AppSettings,
   AuditQueryOptions,
@@ -731,4 +732,6 @@ export interface StoragePort {
   }): Promise<number>;
 
   getInvitationRepository(): InvitationRepository;
+
+  getActivityRepository(): ActivityRepository;
 }

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { MAX_RETENTION_DAYS, parseRetentionDaysToken } from '@betterdb/shared';
+import { parseActivityRetentionDays } from '../activity/activity-config';
 import { isCloudModeValue } from '../common/utils/cloud-mode';
 import { DEFAULT_AUTH_BROKER_URL, isTrueFlag, normalizeOptionalUrl } from './env-normalize';
 
@@ -42,6 +43,12 @@ export const envSchema = z
     AUDIT_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(60000),
     CLIENT_ANALYTICS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(60000),
     AI_OBS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(15000),
+    ACTIVITY_RETENTION_DAYS: z
+      .string()
+      .optional()
+      .refine((v) => v === undefined || v.trim() === '' || parseActivityRetentionDays(v) !== null, {
+        message: 'ACTIVITY_RETENTION_DAYS must be a positive whole number of days',
+      }),
 
     // Self-hosted data retention: days of monitoring history to keep. Seeds
     // the localRetentionDays app setting when the settings row is first

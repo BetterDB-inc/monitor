@@ -86,6 +86,9 @@ importers:
       '@betterdb/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@fastify/proxy-addr':
+        specifier: ^5.1.0
+        version: 5.1.0
       '@fastify/static':
         specifier: '>=10.1.1 <11'
         version: 10.1.2

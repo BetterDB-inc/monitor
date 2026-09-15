@@ -109,6 +109,8 @@ import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repositor
 import { SlowLogSqliteRepository } from './repositories/slowlog.sqlite.repository';
 import { InvitationSqliteRepository } from './repositories/invitation.sqlite.repository';
 import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
+import { ActivitySqliteRepository } from './repositories/activity.sqlite.repository';
+import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
 
 /**
  * Idempotent migration for the memory_proposals columns added with the
@@ -343,6 +345,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   private webhookRepo!: WebhookSqliteRepository;
   private slowlogRepo!: SlowLogSqliteRepository;
   private invitationRepo!: InvitationSqliteRepository;
+  private activityRepo!: ActivitySqliteRepository;
 
   constructor(private config: SqliteAdapterConfig) {}
 
@@ -357,6 +360,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       this.webhookRepo = new WebhookSqliteRepository(this.db, this.mappers);
       this.slowlogRepo = new SlowLogSqliteRepository(this.db, this.mappers);
       this.invitationRepo = new InvitationSqliteRepository(this.db);
+      this.activityRepo = new ActivitySqliteRepository(this.db);
       this.ready = true;
     } catch (error) {
       this.ready = false;
@@ -1886,6 +1890,29 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         created_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS activity_events (
+        id TEXT PRIMARY KEY,
+        occurred_at INTEGER NOT NULL,
+        actor_user_id TEXT NOT NULL,
+        actor_email TEXT NOT NULL,
+        actor_via TEXT NOT NULL CHECK (actor_via IN ('session', 'token', 'cli')),
+        token_id TEXT,
+        action TEXT NOT NULL,
+        target_type TEXT,
+        target_id TEXT,
+        connection_id TEXT,
+        status_code INTEGER NOT NULL,
+        ip TEXT NOT NULL,
+        details TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_activity_events_occurred
+        ON activity_events(occurred_at);
+      CREATE INDEX IF NOT EXISTS idx_activity_events_actor
+        ON activity_events(actor_user_id, occurred_at);
+      CREATE INDEX IF NOT EXISTS idx_activity_events_connection
+        ON activity_events(connection_id, occurred_at);
     `);
 
     // Idempotent migration for deployments that ran the PR 19 schema before
@@ -5296,6 +5323,10 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   getInvitationRepository(): InvitationRepository {
     return this.invitationRepo;
+  }
+
+  getActivityRepository(): ActivityRepository {
+    return this.activityRepo;
   }
 }
 

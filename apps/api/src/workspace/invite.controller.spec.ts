@@ -2,6 +2,8 @@ import { Logger, ValidationPipe } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
+import { ACTIVITY_CONFIG } from '../activity/activity-config';
+import { ActivityService } from '../activity/activity.service';
 import { ActorResolver } from '../auth/actor-resolver';
 import { BetterAuthController } from '../auth/better-auth.controller';
 import { BETTER_AUTH, createBetterAuth } from '../auth/better-auth.factory';
@@ -31,6 +33,7 @@ describe('InviteController', () => {
   let ownerId: string;
   let ownerCookie: string;
   let currentTime = Date.now();
+  let storage: MemoryAdapter;
 
   beforeAll(async () => {
     const config = resolveWorkspaceConfig({ AUTH_PUBLIC_URL: ORIGIN });
@@ -39,7 +42,7 @@ describe('InviteController', () => {
       secret: 's'.repeat(40),
       config,
     });
-    const storage = new MemoryAdapter();
+    storage = new MemoryAdapter();
     await storage.initialize();
     telemetry = { trackUserInvited: jest.fn(), trackInviteAccepted: jest.fn() };
     const moduleRef = await Test.createTestingModule({
@@ -49,6 +52,8 @@ describe('InviteController', () => {
         { provide: WORKSPACE_CONFIG, useValue: config },
         { provide: 'STORAGE_CLIENT', useValue: storage },
         { provide: UsageTelemetryService, useValue: telemetry },
+        { provide: ACTIVITY_CONFIG, useValue: { retentionDays: 90 } },
+        ActivityService,
         {
           provide: 'INVITATION_CLOCK',
           useValue: (): number => {
@@ -88,6 +93,7 @@ describe('InviteController', () => {
 
   afterAll(async () => {
     await app.close();
+    await storage.close();
   });
 
   it('previews a pending invitation without a session', async () => {
@@ -157,6 +163,28 @@ describe('InviteController', () => {
 
     const list = await invitations.list();
     expect(list.find((item) => item.id === invitation.id)?.status).toBe('accepted');
+  });
+
+  it('records auth.login for the accepted invitation', async () => {
+    const { token } = await invitations.create({
+      email: 'login-record@example.com',
+      role: 'member',
+      invitedBy: ownerId,
+    });
+    const accept = await app.inject({
+      method: 'POST',
+      url: `/invite/${token}/accept`,
+      headers: { 'content-type': 'application/json', origin: ORIGIN },
+      payload: { name: 'Login Record', password: 'login record horse battery' },
+    });
+    expect(accept.statusCode).toBe(201);
+
+    const page = await storage.getActivityRepository().list({ limit: 50, action: 'auth.login' });
+    const login = page.items.find((item) => item.actorEmail === 'login-record@example.com');
+    expect(login).toBeDefined();
+    expect(login?.actorVia).toBe('session');
+    expect(login?.statusCode).toBe(201);
+    expect(login?.details).toEqual({ method: 'invite' });
   });
 
   it('rejects a weak password and leaves the invitation pending', async () => {
