@@ -342,14 +342,14 @@ describe('CliGateway command execution', () => {
     expect(ws.closeCalls).toEqual([[4401, 'Session expired']]);
   });
 
-  it('treats a socket without connection state as read-only', async () => {
+  it('treats a socket without connection state as an invalid session', async () => {
     const gateway = new CliGateway({} as CliService, resolverWith(true, admin));
     const access = await (
       gateway as unknown as {
         resolveAccess: (ws: WebSocket) => Promise<{ sessionValid: boolean; readOnly: boolean }>;
       }
     ).resolveAccess(new FakeWebSocket() as unknown as WebSocket);
-    expect(access).toEqual({ sessionValid: true, readOnly: true, actor: null, ip: '' });
+    expect(access).toEqual({ sessionValid: false, readOnly: true, actor: null, ip: '' });
   });
 });
 
@@ -661,4 +661,40 @@ describe('CliGateway activity recording', () => {
     expect(execute).toHaveBeenCalledTimes(1);
     expect(activity.record).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['enabled', true],
+    ['disabled', false],
+  ])(
+    'drops commands still queued when the socket closes with the workspace %s',
+    async (_label, enabled) => {
+      let release: () => void = () => {};
+      const execute = jest
+        .fn()
+        .mockImplementationOnce(() => {
+          return new Promise((resolve) => {
+            release = () => {
+              resolve({ type: 'result', result: 'OK', resultType: 'string', durationMs: 1 });
+            };
+          });
+        })
+        .mockResolvedValue({ type: 'result', result: 'OK', resultType: 'string', durationMs: 1 });
+      const gateway = new CliGateway(
+        { execute } as unknown as CliService,
+        resolverWith(enabled, admin),
+      );
+      const ws = connect(gateway);
+      sendExecute(ws);
+      sendExecute(ws);
+      sendExecute(ws);
+      await flush();
+      expect(execute).toHaveBeenCalledTimes(1);
+      ws.readyState = 3;
+      ws.emit('close');
+      release();
+      await flush();
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(ws.sent).toEqual([]);
+    },
+  );
 });
