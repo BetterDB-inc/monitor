@@ -9,7 +9,7 @@ export const MEMBER_CHANGED_MESSAGE =
 
 const LOCAL_CREDENTIAL_ISSUER = 'local:credential';
 const CREDENTIAL_PROVIDER = 'credential';
-const LIST_LIMIT = 1000;
+export const LIST_LIMIT = 1000;
 
 export interface MemberRecord {
   id: string;
@@ -147,6 +147,9 @@ export class MemberService {
       field: 'createdAt',
       direction: 'asc',
     })) as StoredUser[];
+    if (users.length === LIST_LIMIT) {
+      this.logger.warn(`Member list truncated at ${LIST_LIMIT} members`);
+    }
     return users.map(toMember);
   }
 

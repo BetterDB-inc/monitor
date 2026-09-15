@@ -11,7 +11,12 @@ import {
 import { resolveWorkspaceConfig } from '../auth/workspace-config';
 import { loadBetterSqlite3 } from '../storage/adapters/better-sqlite3-driver';
 import type { RawDatabaseHandle } from '../storage/raw-database-handle';
-import { MEMBER_CHANGED_MESSAGE, MemberService, OWNERSHIP_CHANGED_MESSAGE } from './member.service';
+import {
+  LIST_LIMIT,
+  MEMBER_CHANGED_MESSAGE,
+  MemberService,
+  OWNERSHIP_CHANGED_MESSAGE,
+} from './member.service';
 
 describe('MemberService', () => {
   let service: MemberService;
@@ -85,6 +90,41 @@ describe('MemberService', () => {
       return member.id;
     });
     expect(ids).toEqual([first.id, second.id]);
+  });
+
+  it('warns when the member list is truncated at the list limit', async () => {
+    const context = await auth.$context;
+    const users = Array.from({ length: LIST_LIMIT }, (_, index) => {
+      return { id: `u${index}`, email: `u${index}@example.com`, createdAt: 0 };
+    });
+    const listUsers = jest
+      .spyOn(context.internalAdapter, 'listUsers')
+      .mockResolvedValueOnce(users as never);
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {
+      return undefined;
+    });
+    const members = await service.list();
+    expect(members).toHaveLength(LIST_LIMIT);
+    expect(listUsers).toHaveBeenCalledWith(LIST_LIMIT, 0, expect.anything());
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain(String(LIST_LIMIT));
+    warn.mockRestore();
+    listUsers.mockRestore();
+  });
+
+  it('does not warn when the member list is below the list limit', async () => {
+    await service.create({
+      email: 'solo@example.com',
+      name: 'Solo',
+      password: 'correct horse battery',
+      role: 'member',
+    });
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {
+      return undefined;
+    });
+    await service.list();
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it('signs a created member in with a session cookie', async () => {
