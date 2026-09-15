@@ -205,6 +205,26 @@ describe('AuthProvider state', () => {
     await waitFor(() => expect(result.current.unavailable).toBe(false));
     expect(result.current.mode).toBe('disabled');
   });
+
+  it('defaults brokerEnabled to false when the status omits broker', async () => {
+    getStatus.mockResolvedValue({ mode: 'disabled', enabled: false, bootstrapped: false });
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.brokerEnabled).toBe(false);
+  });
+
+  it('sets brokerEnabled from the workspace status', async () => {
+    getStatus.mockResolvedValue({
+      mode: 'self-hosted',
+      enabled: true,
+      bootstrapped: true,
+      broker: true,
+    });
+    getMe.mockRejectedValue(new UnauthorizedError());
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.brokerEnabled).toBe(true);
+  });
 });
 
 describe('login redirect wiring', () => {

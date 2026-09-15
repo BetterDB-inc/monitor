@@ -14,6 +14,7 @@ import type { RawDatabaseHandle } from '../storage/raw-database-handle';
 import {
   LIST_LIMIT,
   MEMBER_CHANGED_MESSAGE,
+  MemberRecord,
   MemberService,
   OWNERSHIP_CHANGED_MESSAGE,
 } from './member.service';
@@ -30,6 +31,22 @@ describe('MemberService', () => {
     });
     service = new MemberService(auth);
   });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  function createSocialOwner(): Promise<MemberRecord> {
+    return service.createSocial({
+      email: 'first@example.com',
+      name: 'First',
+      image: null,
+      role: 'admin',
+      isOwner: true,
+      provider: 'google',
+      providerAccountId: 'g-first',
+    });
+  }
 
   it('creates a member with the given role and finds it by email and id', async () => {
     const created = await service.create({
@@ -176,6 +193,105 @@ describe('MemberService', () => {
     expect(await service.findById(member.id)).toBeNull();
     const response = await service.signIn('r@example.com', 'correct horse battery', new Headers());
     expect(response.status).toBe(401);
+  });
+
+  it('creates a social member, counts users, and links a provider once', async () => {
+    expect(await service.count()).toBe(0);
+    const created = await service.createSocial({
+      email: 'Social@Example.com',
+      name: 'Social',
+      image: 'https://example.com/avatar.png',
+      role: 'admin',
+      isOwner: true,
+      provider: 'google',
+      providerAccountId: 'google-social@example.com',
+    });
+    expect(created).toEqual({
+      id: expect.any(String),
+      email: 'social@example.com',
+      name: 'Social',
+      role: 'admin',
+      isOwner: true,
+      createdAt: expect.any(Number),
+    });
+    expect(await service.count()).toBe(1);
+
+    await service.ensureProviderLink(created.id, 'github', 'github-social@example.com');
+    await service.ensureProviderLink(created.id, 'github', 'github-social@example.com');
+
+    const context = await auth.$context;
+    const accounts = await context.internalAdapter.findAccountByUserId(created.id);
+    expect(
+      accounts.filter((account) => {
+        return account.providerId === 'github';
+      }),
+    ).toHaveLength(1);
+    expect(
+      accounts.map((account) => {
+        return account.providerId;
+      }),
+    ).toEqual(expect.arrayContaining(['google', 'github']));
+  });
+
+  it('discards the sole owner together with their accounts and sessions', async () => {
+    const owner = await createSocialOwner();
+    const context = await auth.$context;
+    await context.internalAdapter.createSession(owner.id);
+    await service.discardBootstrapOwner(owner.id);
+    expect(await service.count()).toBe(0);
+    expect(await context.internalAdapter.findAccountByUserId(owner.id)).toEqual([]);
+    expect(await context.internalAdapter.listSessions(owner.id)).toEqual([]);
+    const again = await createSocialOwner();
+    expect(again.isOwner).toBe(true);
+  });
+
+  it('keeps the sole owner for a retry when deleting their accounts fails', async () => {
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {
+      return undefined;
+    });
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {
+      return undefined;
+    });
+    const owner = await createSocialOwner();
+    const context = await auth.$context;
+    const deleteMany = context.adapter.deleteMany.bind(context.adapter);
+    const spy = jest.spyOn(context.adapter, 'deleteMany').mockImplementation((input) => {
+      if (input.model === 'account') {
+        return Promise.reject(new Error('account delete failed'));
+      }
+      return deleteMany(input);
+    });
+    await service.discardBootstrapOwner(owner.id).catch(() => {
+      return undefined;
+    });
+    spy.mockRestore();
+    expect(await service.findById(owner.id)).toEqual(owner);
+    await service.discardBootstrapOwner(owner.id);
+    expect(await service.count()).toBe(0);
+    expect(await context.internalAdapter.findAccountByUserId(owner.id)).toEqual([]);
+    const again = await createSocialOwner();
+    expect(again.isOwner).toBe(true);
+  });
+
+  it('keeps an owner who is no longer the only user and logs why', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {
+      return undefined;
+    });
+    const owner = await createSocialOwner();
+    await addMember(service, 'second@example.com');
+    await service.discardBootstrapOwner(owner.id);
+    expect(await service.findById(owner.id)).toEqual(owner);
+    expect(await service.count()).toBe(2);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(owner.id));
+  });
+
+  it('keeps a sole user who is not the owner', async () => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {
+      return undefined;
+    });
+    const member = await addMember(service, 'only@example.com');
+    await service.discardBootstrapOwner(member);
+    expect(await service.findById(member)).not.toBeNull();
   });
 });
 
@@ -360,6 +476,13 @@ function describeOwnershipTransfer(
       expect(await service.findById(target)).toEqual(
         expect.objectContaining({ role: 'admin', isOwner: false }),
       );
+    });
+
+    it('discards the sole owner together with their credentials', async () => {
+      await service.discardBootstrapOwner(ownerId);
+      expect(await service.count()).toBe(0);
+      const context = await auth.$context;
+      expect(await context.internalAdapter.findAccountByUserId(ownerId)).toEqual([]);
     });
 
     it('keeps the owner when promoting the target fails', async () => {

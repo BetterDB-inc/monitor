@@ -9,7 +9,7 @@ vi.mock('../api/workspace', () => ({
   workspaceApi: { signIn: (body: unknown) => signIn(body) },
 }));
 vi.mock('../contexts/AuthContext', () => ({
-  useAuth: () => ({ refresh: vi.fn().mockResolvedValue(undefined) }),
+  useAuth: () => ({ refresh: vi.fn().mockResolvedValue(undefined), brokerEnabled: false }),
 }));
 
 describe('Login', () => {
@@ -45,5 +45,25 @@ describe('Login', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
     await waitFor(() => expect(screen.getByText('Invalid email or password')).toBeInTheDocument());
+  });
+
+  it('shows a notice for a known broker error code', () => {
+    render(
+      <MemoryRouter initialEntries={['/login?error=not_invited']}>
+        <Login />
+      </MemoryRouter>,
+    );
+    expect(
+      screen.getByText('No invitation matches that account. Ask a workspace admin for an invite.'),
+    ).toBeInTheDocument();
+  });
+
+  it('shows no notice for an unknown broker error code', () => {
+    render(
+      <MemoryRouter initialEntries={['/login?error=bogus']}>
+        <Login />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByText(/ask a workspace admin/i)).not.toBeInTheDocument();
   });
 });

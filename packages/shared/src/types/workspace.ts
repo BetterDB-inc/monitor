@@ -17,6 +17,7 @@ export interface WorkspaceStatus {
   mode: WorkspaceMode;
   enabled: boolean;
   bootstrapped: boolean;
+  broker: boolean;
 }
 
 export interface WorkspaceMe {

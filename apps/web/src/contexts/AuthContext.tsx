@@ -20,6 +20,7 @@ export interface AuthState {
   bootstrapped: boolean;
   user: CurrentUser | null;
   isCloud: boolean;
+  brokerEnabled: boolean;
   refresh: () => Promise<void>;
   signOut: () => Promise<void>;
 }
@@ -51,6 +52,7 @@ const AuthContext = createContext<AuthState>({
   bootstrapped: false,
   user: null,
   isCloud: false,
+  brokerEnabled: false,
   refresh: noop,
   signOut: noop,
 });
@@ -61,6 +63,7 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
   const [mode, setMode] = useState<WorkspaceMode>('disabled');
   const [bootstrapped, setBootstrapped] = useState(false);
   const [user, setUser] = useState<CurrentUser | null>(null);
+  const [brokerEnabled, setBrokerEnabled] = useState(false);
   const refreshSeq = useRef(0);
   const currentUser = useRef<CurrentUser | null>(null);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -104,6 +107,7 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
       setAuthRedirectEnabled(status.mode === 'self-hosted' && status.enabled === true);
       setMode(status.mode);
       setBootstrapped(status.bootstrapped);
+      setBrokerEnabled(status.broker === true);
       if (status.enabled === false || status.bootstrapped === false) {
         retryDelay.current = RETRY_BASE_MS;
         setUnavailable(false);
@@ -184,10 +188,11 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
       bootstrapped,
       user,
       isCloud: mode === 'cloud',
+      brokerEnabled,
       refresh,
       signOut,
     };
-  }, [loading, unavailable, mode, bootstrapped, user, refresh, signOut]);
+  }, [loading, unavailable, mode, bootstrapped, user, brokerEnabled, refresh, signOut]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

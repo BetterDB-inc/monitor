@@ -102,6 +102,9 @@ export const envSchema = z
     AUTH_SECRET: z.string().min(32).optional(),
     AUTH_PUBLIC_URL: z.preprocess(optionalUrl, z.string().url().optional()),
     AUTH_BROKER_URL: z.preprocess(optionalUrl, z.string().url().default(DEFAULT_AUTH_BROKER_URL)),
+    AUTH_BROKER_DISABLED: z.string().default('false').transform(isTrueFlag),
+    AUTH_BROKER_PUBLIC_KEY: z.string().optional(),
+    AUTH_BROKER_KEY_ID: z.string().optional(),
     TRUST_PROXY: z.string().optional(),
 
     // Anomaly detection

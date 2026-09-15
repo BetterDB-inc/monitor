@@ -2,6 +2,7 @@ import type { BetterAuthOptions } from 'better-auth';
 import type { RawDatabaseHandle } from '../storage/raw-database-handle';
 import type { BetterAuthModules } from './better-auth-esm';
 import { loadBetterAuthModules } from './better-auth-esm';
+import { brokerSessionPlugin } from './broker/broker-session.plugin';
 import type { WorkspaceConfig } from './workspace-config';
 
 export const BETTER_AUTH = 'BETTER_AUTH';
@@ -91,6 +92,7 @@ export async function createBetterAuth(options: CreateBetterAuthOptions) {
       cookieCache: { enabled: true, maxAge: SESSION_CACHE_SECONDS },
     },
     rateLimit: { enabled: true },
+    plugins: [brokerSessionPlugin(modules)],
     advanced: {
       disableOriginCheck: false,
       trustedProxyHeaders: config.trustProxy,

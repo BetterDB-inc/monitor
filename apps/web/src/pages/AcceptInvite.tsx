@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { InvitePreview, workspaceApi } from '../api/workspace';
 import { useAuth } from '../contexts/AuthContext';
+import { BrokerButtons } from '../components/auth/BrokerButtons';
 import { CredentialsForm } from '../components/auth/CredentialsForm';
 import { InviteNotice } from '../components/accept-invite/InviteNotice';
 
@@ -91,6 +92,7 @@ export function AcceptInvite(): ReactElement {
       submitLabel="Create account"
       askName
       lockedEmail={state.preview.email}
+      footer={<BrokerButtons invite={token} />}
       onSubmit={async ({ name, password }) => {
         await workspaceApi.acceptInvite(token, { name, password });
         await refresh();

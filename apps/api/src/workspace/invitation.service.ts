@@ -147,6 +147,24 @@ export class InvitationService {
     await this.repository.updateStatus(current.id, 'pending', 'revoked');
   }
 
+  async claimForEmail(email: string, tokenHash: string | null): Promise<InvitationRecord | null> {
+    const invitation = await this.repository.findByEmail(normalizeEmail(email));
+    if (invitation === null || invitation.status !== 'pending') {
+      return null;
+    }
+    if (invitation.expiresAt <= this.now()) {
+      return null;
+    }
+    if (tokenHash !== null && invitation.tokenHash !== tokenHash) {
+      return null;
+    }
+    const claimed = await this.repository.updateStatus(invitation.id, 'pending', 'accepted');
+    if (claimed === false) {
+      return null;
+    }
+    return { ...invitation, status: 'accepted' };
+  }
+
   async revoke(id: string): Promise<void> {
     const invitation = await this.repository.findById(id);
     if (invitation === null) {

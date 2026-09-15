@@ -4,6 +4,7 @@ import type { Actor } from '@betterdb/shared';
 import { ActivityService, toActivityActor } from '../activity/activity.service';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { ActorResolver } from './actor-resolver';
+import { BootstrapLock } from './bootstrap-lock';
 import { BETTER_AUTH, CLIENT_IP_HEADER, type BetterAuthInstance } from './better-auth.factory';
 import { toWebHeaders } from './web-headers';
 
@@ -39,13 +40,12 @@ function parseSignedInUser(text: string): SignedInUser | null {
 
 @Controller('auth')
 export class BetterAuthController {
-  private signUpQueue: Promise<void> = Promise.resolve();
-
   constructor(
     @Inject(BETTER_AUTH) private readonly auth: BetterAuthInstance,
     private readonly activity: ActivityService,
     private readonly actors: ActorResolver,
     private readonly telemetry: UsageTelemetryService,
+    private readonly bootstrapLock: BootstrapLock,
   ) {}
 
   @All('*')
@@ -137,18 +137,9 @@ export class BetterAuthController {
     if (this.isSignUp(method, request) === false) {
       return this.auth.handler(request);
     }
-    const pending = this.signUpQueue.then(() => {
+    return this.bootstrapLock.run(() => {
       return this.auth.handler(request);
     });
-    this.signUpQueue = pending.then(
-      () => {
-        return undefined;
-      },
-      () => {
-        return undefined;
-      },
-    );
-    return pending;
   }
 
   private isSignUp(method: string, request: Request): boolean {

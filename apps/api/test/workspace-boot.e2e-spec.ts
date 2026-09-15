@@ -72,6 +72,7 @@ describe('Workspace boot smoke (E2E)', () => {
       mode: 'self-hosted',
       enabled: true,
       bootstrapped: false,
+      broker: false,
     });
   });
 

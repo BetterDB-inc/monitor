@@ -1,4 +1,4 @@
-import { FormEvent, ReactElement, useState } from 'react';
+import { FormEvent, ReactElement, ReactNode, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
@@ -14,6 +14,8 @@ interface CredentialsFormProps {
   askName: boolean;
   lockedEmail?: string;
   description?: string;
+  notice?: string | null;
+  footer?: ReactNode;
   onSubmit: (values: CredentialsFormValues) => Promise<void>;
 }
 
@@ -23,6 +25,8 @@ export function CredentialsForm({
   askName,
   lockedEmail,
   description,
+  notice,
+  footer,
   onSubmit,
 }: CredentialsFormProps): ReactElement {
   const [email, setEmail] = useState(lockedEmail ?? '');
@@ -50,6 +54,9 @@ export function CredentialsForm({
         <h1 className="text-2xl font-semibold">{title}</h1>
         {description !== undefined && (
           <p className="text-sm text-muted-foreground">{description}</p>
+        )}
+        {notice !== undefined && notice !== null && (
+          <p className="text-sm text-destructive">{notice}</p>
         )}
         {askName && (
           <Input
@@ -88,6 +95,7 @@ export function CredentialsForm({
         <Button type="submit" className="w-full" disabled={busy}>
           {submitLabel}
         </Button>
+        {footer}
       </form>
     </div>
   );

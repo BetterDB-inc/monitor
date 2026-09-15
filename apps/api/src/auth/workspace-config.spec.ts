@@ -53,4 +53,60 @@ describe('resolveWorkspaceConfig', () => {
     expect(config.brokerUrl).toBe('https://betterdb.com');
     expect(config.trustedOrigins).toEqual(['http://localhost:5173']);
   });
+
+  it('disables the broker when AUTH_BROKER_DISABLED=true', () => {
+    const config = resolveWorkspaceConfig({
+      AUTH_BROKER_DISABLED: 'true',
+      AUTH_BROKER_PUBLIC_KEY: 'pem',
+    });
+    expect(config.brokerEnabled).toBe(false);
+  });
+
+  it('disables the broker when there is no trusted key', () => {
+    const config = resolveWorkspaceConfig({});
+    expect(config.brokerKeys).toEqual({});
+    expect(config.brokerEnabled).toBe(false);
+  });
+
+  it('enables the broker with a trusted key in self-hosted mode', () => {
+    const config = resolveWorkspaceConfig({ AUTH_BROKER_PUBLIC_KEY: 'pem' });
+    expect(config.brokerKeys).toEqual({ 'brk-override': 'pem' });
+    expect(config.brokerEnabled).toBe(true);
+  });
+
+  it('disables the broker in production without a public url', () => {
+    const config = resolveWorkspaceConfig({
+      NODE_ENV: 'production',
+      AUTH_BROKER_PUBLIC_KEY: 'pem',
+    });
+    expect(config.brokerEnabled).toBe(false);
+  });
+
+  it('enables the broker in production with a public url', () => {
+    const config = resolveWorkspaceConfig({
+      NODE_ENV: 'production',
+      AUTH_BROKER_PUBLIC_KEY: 'pem',
+      AUTH_PUBLIC_URL: 'https://monitor.example.com',
+    });
+    expect(config.brokerEnabled).toBe(true);
+  });
+
+  it('enables the broker outside production without a public url', () => {
+    const config = resolveWorkspaceConfig({
+      NODE_ENV: 'development',
+      AUTH_BROKER_PUBLIC_KEY: 'pem',
+    });
+    expect(config.publicUrl).toBeNull();
+    expect(config.brokerEnabled).toBe(true);
+  });
+
+  it('disables the broker in cloud mode even with a trusted key', () => {
+    const config = resolveWorkspaceConfig({ CLOUD_MODE: 'true', AUTH_BROKER_PUBLIC_KEY: 'pem' });
+    expect(config.brokerEnabled).toBe(false);
+  });
+
+  it('has no dev app origin in production', () => {
+    const config = resolveWorkspaceConfig({ NODE_ENV: 'production' });
+    expect(config.devAppOrigin).toBeNull();
+  });
 });

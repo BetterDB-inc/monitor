@@ -4,6 +4,7 @@ import { join } from 'path';
 import { loadBetterSqlite3 } from '../storage/adapters/better-sqlite3-driver';
 import { openLibsqlDatabase } from '../storage/adapters/libsql-driver';
 import type { RawDatabaseHandle } from '../storage/raw-database-handle';
+import { loadBetterAuthDate } from './better-auth-esm';
 import { resolveWorkspaceConfig } from './workspace-config';
 import type { WorkspaceConfig } from './workspace-config';
 import {
@@ -251,6 +252,35 @@ describe('createBetterAuth', () => {
     expect((created as { isOwner: unknown }).isOwner).toBe(false);
   });
 
+  it('mints a broker session only through the server api, never over http', async () => {
+    const auth = await build({ kind: 'memory' });
+    const context = await auth.$context;
+    const user = await context.internalAdapter.createUser(
+      { email: 'broker@example.com', name: 'Broker', emailVerified: true },
+      { method: 'social' } as never,
+    );
+
+    const routed = await auth.handler(
+      new Request(`${ORIGIN}/auth/broker/session`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          origin: ORIGIN,
+          [CLIENT_IP_HEADER]: '10.0.0.7',
+        },
+        body: JSON.stringify({ userId: user.id }),
+      }),
+    );
+    expect(routed.status).toBe(404);
+
+    const minted = await auth.api.brokerSession({ body: { userId: user.id }, asResponse: true });
+    expect(minted.status).toBe(200);
+    const cookie = minted.headers.getSetCookie()[0].split(';')[0];
+    expect(cookie).toContain('better-auth.session_token=');
+    const session = await auth.api.getSession({ headers: new Headers({ cookie }) });
+    expect(session?.user.id).toBe(user.id);
+  });
+
   it('runs migrations idempotently and round-trips on better-sqlite3', async () => {
     const path = join(tmpdir(), `factory-${Date.now()}-${Math.random()}.db`);
     const Database = await loadBetterSqlite3();
@@ -266,6 +296,31 @@ describe('createBetterAuth', () => {
     };
     expect(row.role).toBe('admin');
     expect(row.isOwner).toBe(1);
+    db.close();
+    unlinkSync(path);
+  });
+
+  it('writes a caller-constructed verification row on better-sqlite3', async () => {
+    const path = join(tmpdir(), `factory-verification-${Date.now()}-${Math.random()}.db`);
+    const Database = await loadBetterSqlite3();
+    const db = new Database(path);
+    const handle: RawDatabaseHandle = { kind: 'sqlite', db };
+    const auth = await build(handle);
+    const context = await auth.$context;
+    const BetterAuthDate = await loadBetterAuthDate();
+
+    await context.internalAdapter.createVerificationValue({
+      identifier: 'diag:verification-round-trip',
+      value: 'hello',
+      expiresAt: new BetterAuthDate(Date.now() + 60_000),
+    });
+
+    const row = db
+      .prepare('SELECT expiresAt, typeof(expiresAt) as t FROM verification LIMIT 1')
+      .get() as { expiresAt: string; t: string };
+    expect(row.t).toBe('text');
+    expect(Number.isNaN(new Date(row.expiresAt).getTime())).toBe(false);
+
     db.close();
     unlinkSync(path);
   });
