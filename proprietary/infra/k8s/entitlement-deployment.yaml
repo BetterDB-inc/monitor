@@ -65,6 +65,11 @@ spec:
                 secretKeyRef:
                   name: entitlement-config
                   key: ADMIN_API_TOKEN
+            - name: BROKER_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: BROKER_API_TOKEN
             - name: RDS_HOST
               valueFrom:
                 secretKeyRef:
@@ -114,6 +119,21 @@ spec:
                 secretKeyRef:
                   name: entitlement-config
                   key: LICENSE_SIGNING_KID
+            # Broker token signing (dedicated keypair — kid must match a key
+            # in packages/shared's BROKER_SIGNING_PUBLIC_KEYS map). Both live
+            # in the secret so key + kid rotate atomically.
+            - name: BROKER_SIGNING_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: BROKER_SIGNING_PRIVATE_KEY
+                  optional: true
+            - name: BROKER_SIGNING_KID
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: BROKER_SIGNING_KID
+                  optional: true
           resources:
             requests:
               cpu: "250m"

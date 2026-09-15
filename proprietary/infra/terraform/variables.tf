@@ -46,6 +46,23 @@ variable "license_signing_kid" {
   type        = string
 }
 
+variable "broker_signing_private_key" {
+  description = "RS256 private key (PEM) for signing self-hosted broker sign-in handoff tokens; leave empty to keep broker sign-in unavailable"
+  sensitive   = true
+  default     = ""
+}
+
+variable "broker_signing_kid" {
+  description = "Key id for the broker signing key; must match a public key in packages/shared's BROKER_SIGNING_PUBLIC_KEYS map (e.g. brk-2026-01); leave empty to keep broker sign-in unavailable"
+  type        = string
+  default     = ""
+}
+
+variable "broker_api_token" {
+  description = "Bearer token for POST /auth/broker-token; held only by the website"
+  sensitive   = true
+}
+
 variable "nlb_ip_address" {
   description = "Internal NLB hostname for the entitlement service"
   sensitive   = true
