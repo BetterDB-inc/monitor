@@ -139,6 +139,14 @@ export class InvitationService {
     await this.repository.updateStatus(invitation.id, 'accepted', 'revoked');
   }
 
+  async revokeRacedReinvite(claimed: InvitationRecord): Promise<void> {
+    const current = await this.repository.findByEmail(claimed.email);
+    if (current === null || current.id === claimed.id || current.status !== 'pending') {
+      return;
+    }
+    await this.repository.updateStatus(current.id, 'pending', 'revoked');
+  }
+
   async revoke(id: string): Promise<void> {
     const invitation = await this.repository.findById(id);
     if (invitation === null) {

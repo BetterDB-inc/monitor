@@ -301,6 +301,26 @@ describe('InvitationService', () => {
     expect((await repository.findById(joined.invitation.id))?.status).toBe('accepted');
   });
 
+  it('revokes only a pending re-invite that replaced the claimed invitation', async () => {
+    const original = await service.create({
+      email: 'raced@example.com',
+      role: 'member',
+      invitedBy: 'owner-id',
+    });
+    const claimed = await service.claim(original.token);
+    await service.revokeRacedReinvite(claimed);
+    expect((await repository.findById(original.invitation.id))?.status).toBe('accepted');
+
+    await service.revoke(original.invitation.id);
+    const raced = await service.create({
+      email: 'raced@example.com',
+      role: 'admin',
+      invitedBy: 'owner-id',
+    });
+    await service.revokeRacedReinvite(claimed);
+    expect((await repository.findById(raced.invitation.id))?.status).toBe('revoked');
+  });
+
   it('reports whether a release reopened the invitation', async () => {
     const { invitation, token } = await service.create({
       email: 'release@example.com',

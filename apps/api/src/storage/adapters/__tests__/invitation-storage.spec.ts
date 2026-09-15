@@ -158,6 +158,21 @@ function describeRepository(
       expect(await repository.findByEmail(accepted.email)).toEqual(accepted);
     });
 
+    it('matches a status change only against the row that replaced a revoked claim', async () => {
+      const claimed = record({ status: 'accepted', expiresAt: 9_000 });
+      await repository.save(claimed);
+      expect(await repository.updateStatus(claimed.id, 'accepted', 'revoked')).toBe(true);
+      const reinvite = record({ email: claimed.email, createdAt: 2_000, expiresAt: 9_000 });
+      expect(await repository.saveUnlessPending(reinvite, 2_000)).toBe(true);
+      expect(await repository.updateStatus(claimed.id, 'accepted', 'pending')).toBe(false);
+      expect(await repository.findByEmail(claimed.email)).toEqual(reinvite);
+      expect(await repository.updateStatus(reinvite.id, 'pending', 'revoked')).toBe(true);
+      expect(await repository.findByEmail(claimed.email)).toEqual({
+        ...reinvite,
+        status: 'revoked',
+      });
+    });
+
     it('keeps the first of two back-to-back conditional saves for the same email', async () => {
       const first = record();
       const second = record({ email: first.email, role: 'admin' });

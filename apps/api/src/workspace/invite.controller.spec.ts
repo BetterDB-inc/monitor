@@ -393,6 +393,92 @@ describe('InviteController', () => {
     },
   );
 
+  it('revokes a re-invite that raced an in-flight acceptance once the member exists', async () => {
+    const email = 'raced@example.com';
+    const { token, invitation } = await invitations.create({
+      email,
+      role: 'member',
+      invitedBy: ownerId,
+    });
+    const createMember = members.create.bind(members);
+    let racedToken = '';
+    const createSpy = jest.spyOn(members, 'create').mockImplementationOnce(async (input) => {
+      await invitations.revoke(invitation.id);
+      const raced = await invitations.create({ email, role: 'admin', invitedBy: ownerId });
+      racedToken = raced.token;
+      return createMember(input);
+    });
+    try {
+      const accept = await app.inject({
+        method: 'POST',
+        url: `/invite/${token}/accept`,
+        headers: { 'content-type': 'application/json', origin: ORIGIN },
+        payload: { name: 'Raced', password: 'raced horse battery' },
+      });
+      expect(accept.statusCode).toBe(201);
+      expect(await members.findByEmail(email)).not.toBeNull();
+      const list = await invitations.list();
+      expect(list.filter((item) => item.email === email && item.status === 'pending')).toEqual([]);
+
+      const preview = await app.inject({ method: 'GET', url: `/invite/${racedToken}` });
+      expect(preview.statusCode).toBe(400);
+      expect(preview.json()).toEqual(
+        expect.objectContaining({ message: 'Invitation is revoked' }),
+      );
+    } finally {
+      createSpy.mockRestore();
+    }
+  });
+
+  it('keeps a re-invite that raced an acceptance which then rolled back', async () => {
+    const email = 'raced-rollback@example.com';
+    const { token, invitation } = await invitations.create({
+      email,
+      role: 'member',
+      invitedBy: ownerId,
+    });
+    const createMember = members.create.bind(members);
+    let racedToken = '';
+    const createSpy = jest.spyOn(members, 'create').mockImplementationOnce(async (input) => {
+      await invitations.revoke(invitation.id);
+      const raced = await invitations.create({ email, role: 'member', invitedBy: ownerId });
+      racedToken = raced.token;
+      return createMember(input);
+    });
+    const signInSpy = jest
+      .spyOn(members, 'signIn')
+      .mockResolvedValueOnce(new Response(null, { status: 401 }));
+    const logSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {
+      return;
+    });
+    try {
+      const accept = await app.inject({
+        method: 'POST',
+        url: `/invite/${token}/accept`,
+        headers: { 'content-type': 'application/json', origin: ORIGIN },
+        payload: { name: 'Raced', password: 'raced horse battery' },
+      });
+      expect(accept.statusCode).toBe(401);
+      expect(await members.findByEmail(email)).toBeNull();
+      const list = await invitations.list();
+      expect(list.filter((item) => item.email === email)).toEqual([
+        expect.objectContaining({ status: 'pending' }),
+      ]);
+
+      const retry = await app.inject({
+        method: 'POST',
+        url: `/invite/${racedToken}/accept`,
+        headers: { 'content-type': 'application/json', origin: ORIGIN },
+        payload: { name: 'Raced', password: 'raced horse battery' },
+      });
+      expect(retry.statusCode).toBe(201);
+    } finally {
+      createSpy.mockRestore();
+      signInSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
+
   it('forwards the request IP rather than a client-supplied one to sign-in', async () => {
     const signInSpy = jest.spyOn(members, 'signIn');
     try {

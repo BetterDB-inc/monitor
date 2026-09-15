@@ -13,6 +13,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { WorkspaceMe } from '@betterdb/shared';
 import { CLIENT_IP_HEADER } from '../auth/better-auth.factory';
 import { toWebHeaders } from '../auth/web-headers';
+import type { InvitationRecord } from '../common/interfaces/invitation-repository.interface';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { AcceptInviteDto } from './dto/accept-invite.dto';
 import { InvitationPreview, InvitationService } from './invitation.service';
@@ -78,12 +79,24 @@ export class InviteController {
       await this.rollBack(invitation.id, createdId);
       throw error;
     }
+    await this.revokeRacedReinvite(invitation);
     await this.telemetry.trackInviteAccepted({ role: invitation.role, method: 'password' });
     const cookies = session.headers.getSetCookie();
     if (cookies.length > 0) {
       reply.header('set-cookie', cookies);
     }
     reply.status(201).send(created);
+  }
+
+  private async revokeRacedReinvite(invitation: InvitationRecord): Promise<void> {
+    try {
+      await this.invitations.revokeRacedReinvite(invitation);
+    } catch (error) {
+      this.logger.error(
+        `Failed to revoke a re-invite that raced acceptance of invitation ${invitation.id}: ` +
+          `${describeError(error)}. An admin can revoke it from the invitations list.`,
+      );
+    }
   }
 
   private async rollBack(invitationId: string, createdId: string | null): Promise<void> {
