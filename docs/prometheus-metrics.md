@@ -306,9 +306,9 @@ Latest CVE scan rollup per connection. Updated on storage-based poll.
 
 | Metric | Type | Labels | Description | Example |
 |--------|------|--------|-------------|---------|
-| `betterdb_cve_findings` | gauge | `severity` | Current CVE findings by severity from the latest scan | `2` |
-| `betterdb_cve_kev` | gauge | - | Current KEV-exploited CVE findings from the latest scan | `1` |
-| `betterdb_cve_dataset_stale` | gauge | - | Whether the CVE scan is partial or sources are missing: 1 stale, 0 ok | `0` |
+| `betterdb_cve_findings` | gauge | `connection`, `severity` | Current CVE findings by severity from the latest scan | `2` |
+| `betterdb_cve_kev` | gauge | `connection` | Current KEV-exploited CVE findings from the latest scan | `1` |
+| `betterdb_cve_dataset_stale` | gauge | `connection` | Whether the CVE scan is partial or sources are missing: 1 stale, 0 ok | `0` |
 
 ### Internal Metrics
 

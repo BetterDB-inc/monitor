@@ -1,5 +1,5 @@
 import { ShieldAlert } from 'lucide-react';
-import type { CveScanResult } from '@betterdb/shared';
+import type { CveFinding, CveScanResult } from '@betterdb/shared';
 import { Alert, AlertDescription, AlertTitle } from '../../ui/alert';
 import { Badge } from '../../ui/badge';
 
@@ -7,30 +7,20 @@ interface CveAlertBannerProps {
   result: CveScanResult;
 }
 
-function countKev(result: CveScanResult): number {
-  let kev = 0;
-  for (const node of result.nodes) {
-    for (const finding of node.findings) {
-      if (finding.advisory.knownExploited === true) {
-        kev += 1;
-      }
-    }
-  }
-  return kev;
-}
-
-function countCritical(result: CveScanResult): number {
-  return result.nodes.reduce((total, node) => total + node.severityCounts.critical, 0);
+function allFindings(result: CveScanResult): CveFinding[] {
+  return result.nodes.flatMap((node) => node.findings);
 }
 
 /**
  * Action banner for CVE detection → action.
  * Shown when the current scan contains critical or KEV-exploited findings.
+ * Counts and badges derive from the same findings list so they always agree.
  * Mirrors DataLossAlertBanner styling (destructive for critical).
  */
 export function CveAlertBanner({ result }: CveAlertBannerProps) {
-  const critical = countCritical(result);
-  const kev = countKev(result);
+  const findings = allFindings(result);
+  const critical = findings.filter((finding) => finding.advisory.severity === 'critical').length;
+  const kev = findings.filter((finding) => finding.advisory.knownExploited === true).length;
 
   if (critical === 0 && kev === 0) {
     return null;
@@ -38,9 +28,14 @@ export function CveAlertBanner({ result }: CveAlertBannerProps) {
 
   const isCritical = critical > 0;
   const title = isCritical ? 'Critical CVEs detected' : 'Exploited (KEV) CVEs detected';
-  const topIds = result.nodes
-    .flatMap((node) => node.findings)
-    .filter((finding) => (isCritical ? finding.advisory.severity === 'critical' : finding.advisory.knownExploited))
+  // Critical first, then KEV, then the rest — so the badge row always covers
+  // what the count line advertises, in either mode.
+  const topIds = [...findings]
+    .sort((a, b) => {
+      const rank = (finding: CveFinding) =>
+        finding.advisory.severity === 'critical' ? 0 : finding.advisory.knownExploited === true ? 1 : 2;
+      return rank(a) - rank(b);
+    })
     .slice(0, 3)
     .map((finding) => finding.advisory.cveId);
 

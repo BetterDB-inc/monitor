@@ -233,6 +233,15 @@ X-Webhook-Event: <event-type>
 Fired only when a CVE scan finds new critical findings vs the previous stored
 scan (fire on change — dataset refresh alone does not spam).
 
+Notes:
+- The first scan after enabling CVE (or upgrading) only establishes the
+  baseline and does not fire.
+- Partial scans (unreachable nodes, missing sources) never fire; the next
+  full-vs-full cycle re-arms.
+- A single finding that is both critical and KEV-exploited emits both
+  `cve.critical_detected` (Pro) and `cve.kev_detected` (Enterprise) plus one
+  OTel event each, so subscribe accordingly.
+
 ```json
 {
   "criticalCount": 2,
