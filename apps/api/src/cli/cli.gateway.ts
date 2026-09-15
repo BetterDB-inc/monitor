@@ -31,6 +31,15 @@ const PAYLOAD_COMMANDS = new Set([
 ]);
 const MAX_RECORDED_ARGS = 16;
 const MAX_RECORDED_ARG_LENGTH = 128;
+const CLIENT_METADATA_SUBCOMMANDS = new Set([
+  'GETNAME',
+  'GETREDIR',
+  'HELP',
+  'ID',
+  'INFO',
+  'LIST',
+  'TRACKINGINFO',
+]);
 
 const MAX_COMMANDS_PER_SECOND = 50;
 const ACCESS_CACHE_TTL_MS = 30_000;
@@ -43,9 +52,12 @@ export const SESSION_EXPIRED_MESSAGE = 'Session expired. Sign in again.';
  * sufficient: several read-classified commands carry a caller-supplied body -
  * a published message, a Lua script - that has no place in an audit row.
  */
-function recordsArgs(command: string): boolean {
+function recordsArgs(command: string, rest: string[]): boolean {
   if (SECRET_COMMANDS.has(command) === true || PAYLOAD_COMMANDS.has(command) === true) {
     return false;
+  }
+  if (command === 'CLIENT') {
+    return CLIENT_METADATA_SUBCOMMANDS.has((rest[0] ?? '').toUpperCase());
   }
   return isReadCommand(command);
 }
@@ -209,7 +221,7 @@ export class CliGateway implements OnModuleDestroy {
     const command = args[0].toUpperCase();
     const rest = args.slice(1);
     const details: Record<string, unknown> = { command, argCount: rest.length };
-    if (recordsArgs(command) === true) {
+    if (recordsArgs(command, rest) === true) {
       details.args = recordedArgs(rest);
     }
     void this.activity.record({

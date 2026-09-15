@@ -548,6 +548,39 @@ describe('CliGateway activity recording', () => {
     );
   });
 
+  it('keeps CLIENT arguments only for metadata subcommands', async () => {
+    const execute = jest
+      .fn()
+      .mockResolvedValue({ type: 'result', result: '', resultType: 'string', durationMs: 1 });
+    const activity = activityWith();
+    const gateway = new CliGateway(
+      { execute } as unknown as CliService,
+      resolverWith(true, admin),
+      activity.service,
+    );
+    const ws = connect(gateway);
+    const commands = [
+      'CLIENT SETNAME hunter2',
+      'client setname hunter2',
+      'CLIENT KILL ID 7',
+      'client list TYPE normal',
+    ];
+    for (const command of commands) {
+      send(ws, command);
+      await flush();
+    }
+    const details = activity.record.mock.calls.map(([call]) => {
+      return call.details;
+    });
+    expect(details).toEqual([
+      { command: 'CLIENT', argCount: 2 },
+      { command: 'CLIENT', argCount: 2 },
+      { command: 'CLIENT', argCount: 3 },
+      { command: 'CLIENT', argCount: 3, args: ['list', 'TYPE', 'normal'] },
+    ]);
+    expect(JSON.stringify(activity.record.mock.calls)).not.toContain('hunter2');
+  });
+
   it('drops arguments for read commands that carry a caller-supplied body', async () => {
     const execute = jest
       .fn()
