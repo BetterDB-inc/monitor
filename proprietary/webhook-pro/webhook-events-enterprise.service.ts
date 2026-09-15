@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { WebhookDispatcherService } from '@app/webhooks/webhook-dispatcher.service';
-import { WebhookEventType } from '@betterdb/shared';
+import { WebhookEventType, type CveKevDetectedData } from '@betterdb/shared';
 import { LicenseService } from '@proprietary/licenses';
 
 /**
@@ -213,6 +213,35 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
         newValue: data.newValue,
         modifiedBy: data.modifiedBy,
         message: `Configuration changed: ${data.configKey} = ${data.newValue}${data.oldValue ? ` (was: ${data.oldValue})` : ''}`,
+        timestamp: data.timestamp,
+        instance: data.instance,
+      },
+      data.connectionId,
+    );
+  }
+
+  /**
+   * Dispatch CVE KEV event (ENTERPRISE)
+   * Called by CveScanService only when new KEV-exploited findings appear
+   * vs the previous stored scan — even when severity is below critical.
+   */
+  async dispatchCveKevDetected(data: CveKevDetectedData): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.debug('CVE KEV detected event skipped - requires ENTERPRISE license');
+      return;
+    }
+
+    await this.webhookDispatcher.dispatchEvent(
+      WebhookEventType.CVE_KEV_DETECTED,
+      {
+        kevCount: data.kevCount,
+        criticalCount: data.criticalCount,
+        fingerprint: data.fingerprint,
+        datasetVersion: data.datasetVersion,
+        topFindings: data.topFindings,
+        drift: data.drift,
+        partial: data.partial,
+        message: data.message,
         timestamp: data.timestamp,
         instance: data.instance,
       },

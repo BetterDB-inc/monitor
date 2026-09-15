@@ -74,6 +74,7 @@ Advanced monitoring events for anomaly detection and performance tracking:
 | `anomaly.detected` | Anomaly detected | Z-score analysis detects unusual patterns |
 | `latency.spike` | Latency spike detected | Command latency spikes above baseline |
 | `connection.spike` | Connection spike detected | Connection count spikes above baseline |
+| `cve.critical_detected` | New critical CVEs | CVE scan finds new critical findings vs previous scan |
 
 ### Enterprise Tier
 
@@ -86,6 +87,7 @@ Compliance and audit events for regulated environments:
 | `acl.violation` | ACL access violation | Runtime ACL access denied |
 | `acl.modified` | ACL configuration changed | User added/removed or permissions changed |
 | `config.changed` | Database configuration changed | CONFIG SET command executed |
+| `cve.kev_detected` | New KEV-exploited CVEs | CVE scan finds new CISA KEV findings vs previous scan |
 
 ## Payload Format
 
@@ -222,6 +224,57 @@ X-Webhook-Event: <event-type>
   "zScore": 4.2,
   "threshold": 3.0,
   "message": "Unusual spike in ops_per_sec: 50000 (baseline: 10000, z-score: 4.2)",
+  "timestamp": 1706457600000
+}
+```
+
+#### cve.critical_detected (Pro)
+
+Fired only when a CVE scan finds new critical findings vs the previous stored
+scan (fire on change — dataset refresh alone does not spam).
+
+Notes:
+- The first scan after enabling CVE (or upgrading) only establishes the
+  baseline and does not fire.
+- Partial scans (unreachable nodes, missing sources) never fire; the next
+  full-vs-full cycle re-arms.
+- A single finding that is both critical and KEV-exploited emits both
+  `cve.critical_detected` (Pro) and `cve.kev_detected` (Enterprise) plus one
+  OTel event each, so subscribe accordingly.
+
+```json
+{
+  "criticalCount": 2,
+  "kevCount": 1,
+  "fingerprint": "a1b2c3d4e5f60718",
+  "datasetVersion": "2026-09-15T00:00:00Z",
+  "topFindings": [
+    { "cveId": "CVE-2026-12345", "severity": "critical", "knownExploited": true, "fixedIn": "8.0.10" }
+  ],
+  "drift": false,
+  "partial": false,
+  "message": "New critical CVEs detected (2 critical, 1 exploited (KEV)) on connection conn-1",
+  "timestamp": 1706457600000
+}
+```
+
+#### cve.kev_detected (Enterprise)
+
+Fired only when a CVE scan finds new CISA KEV-exploited findings vs the
+previous stored scan, even when severity is below critical.
+
+```json
+{
+  "kevCount": 1,
+  "criticalCount": 0,
+  "fingerprint": "a1b2c3d4e5f60718",
+  "datasetVersion": "2026-09-15T00:00:00Z",
+  "topFindings": [
+    { "cveId": "CVE-2026-54321", "severity": "high", "knownExploited": true, "fixedIn": "8.0.10" }
+  ],
+  "drift": false,
+  "partial": false,
+  "message": "New exploited (KEV) CVEs detected (1 KEV) on connection conn-1",
   "timestamp": 1706457600000
 }
 ```
