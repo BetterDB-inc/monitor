@@ -170,6 +170,9 @@ export class CliGateway implements OnModuleDestroy {
     }
     state.access = null;
     const actor = await this.resolveActor(state.request);
+    if (this.connections.get(ws) !== state) {
+      return { sessionValid: false, readOnly: true, actor: null, ip: '' };
+    }
     if (actor === null) {
       return { sessionValid: false, readOnly: true, actor: null, ip };
     }

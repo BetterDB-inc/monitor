@@ -352,6 +352,27 @@ describe('CliGateway command execution', () => {
     expect(access).toEqual({ sessionValid: false, readOnly: true, actor: null, ip: '' });
   });
 
+  it('does not execute a command whose socket closed while the actor was resolving', async () => {
+    const execute = executeMock();
+    let resolveActor: (actor: Actor | null) => void = () => {};
+    const resolver = resolverWith(true, admin);
+    (resolver.resolveFromUpgrade as jest.Mock).mockReturnValue(
+      new Promise<Actor | null>((resolve) => {
+        resolveActor = resolve;
+      }),
+    );
+    const gateway = new CliGateway({ execute } as unknown as CliService, resolver);
+    const ws = connect(gateway);
+    sendExecute(ws);
+    await flush();
+    ws.readyState = 3;
+    ws.emit('close');
+    resolveActor(admin);
+    await flush();
+    expect(execute).not.toHaveBeenCalled();
+    expect(ws.sent).toEqual([]);
+  });
+
   it.each([
     ['enabled', true],
     ['disabled', false],
