@@ -1,3 +1,4 @@
+import type { BetterAuthOptions } from 'better-auth';
 import type { RawDatabaseHandle } from '../storage/raw-database-handle';
 import type { BetterAuthModules } from './better-auth-esm';
 import { loadBetterAuthModules } from './better-auth-esm';
@@ -47,7 +48,10 @@ function trustedOriginsFor(config: WorkspaceConfig): (request: Request | undefin
   };
 }
 
-function databaseFor(handle: RawDatabaseHandle, modules: BetterAuthModules): unknown {
+function databaseFor(
+  handle: RawDatabaseHandle,
+  modules: BetterAuthModules,
+): BetterAuthOptions['database'] {
   if (handle.kind === 'sqlite') {
     return handle.db;
   }
@@ -80,7 +84,7 @@ export async function createBetterAuth(options: CreateBetterAuthOptions) {
     baseURL: config.publicUrl ?? undefined,
     basePath: config.basePath,
     trustedOrigins: trustedOriginsFor(config),
-    database: databaseFor(options.handle, modules) as never,
+    database: databaseFor(options.handle, modules),
     emailAndPassword: { enabled: true, requireEmailVerification: false },
     session: {
       expiresIn: SESSION_SECONDS,
