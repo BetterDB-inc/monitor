@@ -131,6 +131,14 @@ export class InvitationService {
     await this.repository.updateStatus(id, 'accepted', 'pending');
   }
 
+  async retire(email: string): Promise<void> {
+    const invitation = await this.repository.findByEmail(normalizeEmail(email));
+    if (invitation === null || invitation.status !== 'accepted') {
+      return;
+    }
+    await this.repository.updateStatus(invitation.id, 'accepted', 'revoked');
+  }
+
   async revoke(id: string): Promise<void> {
     const invitation = await this.repository.findById(id);
     if (invitation === null) {

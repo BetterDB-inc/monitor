@@ -199,6 +199,42 @@ describe('InvitationService', () => {
     expect(await service.claim(token)).toEqual({ ...invitation, status: 'accepted' });
   });
 
+  it('refuses a re-invite while an invitation is being accepted', async () => {
+    const { token } = await service.create({
+      email: 'race@example.com',
+      role: 'member',
+      invitedBy: 'owner-id',
+    });
+    await service.claim(token);
+    await expect(
+      service.create({ email: 'race@example.com', role: 'admin', invitedBy: 'owner-id' }),
+    ).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('retires an accepted invitation so the email can be invited again', async () => {
+    const { invitation, token } = await service.create({
+      email: 'Rejoin@example.com',
+      role: 'member',
+      invitedBy: 'owner-id',
+    });
+    await service.claim(token);
+    await service.retire('rejoin@example.com');
+    expect((await repository.findById(invitation.id))?.status).toBe('revoked');
+    await expect(
+      service.create({ email: 'rejoin@example.com', role: 'member', invitedBy: 'owner-id' }),
+    ).resolves.toEqual(expect.objectContaining({ token: expect.any(String) }));
+  });
+
+  it('leaves a pending invitation alone when retiring an email', async () => {
+    const { invitation } = await service.create({
+      email: 'pending@example.com',
+      role: 'member',
+      invitedBy: 'owner-id',
+    });
+    await service.retire('pending@example.com');
+    expect((await repository.findById(invitation.id))?.status).toBe('pending');
+  });
+
   it('refuses to claim an unknown, expired or revoked invitation', async () => {
     await expect(service.claim('unknown')).rejects.toThrow(
       new NotFoundException(INVITATION_NOT_FOUND_MESSAGE),

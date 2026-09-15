@@ -83,7 +83,7 @@ export class InvitationSqliteRepository implements InvitationRepository {
     const result = this.db
       .prepare(
         `${UPSERT}
-         WHERE invitations.status <> 'pending' OR invitations.expires_at <= ?`,
+         WHERE invitations.status = 'revoked' OR invitations.expires_at <= ?`,
       )
       .run(...upsertValues(record), now);
     return result.changes === 1;

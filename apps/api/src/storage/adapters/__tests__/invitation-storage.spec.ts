@@ -95,9 +95,9 @@ function describeRepository(name: string, open: () => Promise<StoragePort>): voi
       expect(await repository.findByTokenHash(rival.tokenHash)).toBeNull();
     });
 
-    it('replaces a revoked, accepted or expired invitation for the same email', async () => {
-      const revoked = record({ email: 'revoked@example.com', status: 'revoked' });
-      const accepted = record({ email: 'accepted@example.com', status: 'accepted' });
+    it('replaces a revoked or expired invitation for the same email', async () => {
+      const revoked = record({ email: 'revoked@example.com', status: 'revoked', expiresAt: 9_000 });
+      const accepted = record({ email: 'accepted@example.com', status: 'accepted', expiresAt: 2_000 });
       const expired = record({ email: 'expired@example.com', expiresAt: 2_000 });
       for (const previous of [revoked, accepted, expired]) {
         await repository.save(previous);
@@ -105,6 +105,14 @@ function describeRepository(name: string, open: () => Promise<StoragePort>): voi
         expect(await repository.saveUnlessPending(next, 2_000)).toBe(true);
         expect(await repository.findByEmail(previous.email)).toEqual(next);
       }
+    });
+
+    it('keeps an unexpired accepted invitation that is still being accepted', async () => {
+      const accepted = record({ status: 'accepted', expiresAt: 9_000 });
+      await repository.save(accepted);
+      const rival = record({ email: accepted.email, createdAt: 2_000, expiresAt: 9_000 });
+      expect(await repository.saveUnlessPending(rival, 2_000)).toBe(false);
+      expect(await repository.findByEmail(accepted.email)).toEqual(accepted);
     });
 
     it('keeps the first of two back-to-back conditional saves for the same email', async () => {

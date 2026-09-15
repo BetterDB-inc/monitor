@@ -82,7 +82,7 @@ export class InvitationPostgresRepository implements InvitationRepository {
   async saveUnlessPending(record: InvitationRecord, now: number): Promise<boolean> {
     const result = await this.pool.query(
       `${UPSERT}
-       WHERE invitations.status <> 'pending' OR invitations.expires_at <= $9`,
+       WHERE invitations.status = 'revoked' OR invitations.expires_at <= $9`,
       [...upsertValues(record), now],
     );
     return result.rowCount === 1;

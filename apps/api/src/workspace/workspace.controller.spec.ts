@@ -208,6 +208,36 @@ describe('WorkspaceController', () => {
     });
   });
 
+  describe('re-inviting a removed member', () => {
+    it('retires the accepted invitation when the owner removes the member', async () => {
+      const invitations = app.get(InvitationService);
+      const { invitation, token } = await invitations.create({
+        email: 'rejoin@example.com',
+        role: 'member',
+        invitedBy: 'owner-id',
+      });
+      await invitations.claim(token);
+      const member = await members.create({
+        email: 'rejoin@example.com',
+        name: 'Rejoin',
+        password: 'rejoin horse battery',
+        role: 'member',
+      });
+      const response = await app.inject({
+        method: 'DELETE',
+        url: `/workspace/members/${member.id}`,
+        headers: { cookie: ownerCookie, origin: ORIGIN },
+      });
+      expect(response.statusCode).toBe(200);
+      const again = await invitations.create({
+        email: 'rejoin@example.com',
+        role: 'member',
+        invitedBy: 'owner-id',
+      });
+      expect(again.invitation.id).not.toBe(invitation.id);
+    });
+  });
+
   describe('members', () => {
     let memberCookie: string;
     let memberId: string;
