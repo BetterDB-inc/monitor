@@ -137,3 +137,25 @@ export interface CveDatasetStatus {
   healthy: boolean;
   ghsaAuthenticated: boolean;
 }
+
+/**
+ * Bounded webhook payload for CVE detection → action.
+ * `topFindings` is capped at 3 by the dispatcher to keep deliveries small.
+ */
+export interface CveWebhookFindingSummary {
+  cveId: string;
+  severity: CveSeverity;
+  knownExploited: boolean;
+  fixedIn?: string;
+}
+
+export interface CveWebhookData {
+  connectionId: string;
+  fingerprint: string;
+  datasetVersion: string;
+  criticalCount: number;
+  kevCount: number;
+  topFindings: CveWebhookFindingSummary[];
+  drift: boolean;
+  partial: boolean;
+}
