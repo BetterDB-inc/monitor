@@ -154,11 +154,13 @@ export class BrokerController {
       return fallback;
     }
     try {
-      const record = await this.states.consume(state);
-      if (record === null || brokerNonceMatches(nonce, record.nonceHash) === false) {
+      const claim = await this.states.consume(state, (record) => {
+        return brokerNonceMatches(nonce, record.nonceHash);
+      });
+      if (claim.status !== 'consumed') {
         return fallback;
       }
-      return record.appOrigin;
+      return claim.record.appOrigin;
     } catch (error) {
       logger.error('Broker sign-in cancel failed unexpectedly', describeError(error));
       return fallback;
@@ -185,19 +187,19 @@ export class BrokerController {
       }
       throw error;
     }
-    const state = await this.states.consume(claims.state);
-    if (state === null) {
+    const nonce = readBrokerNonce(req.headers.cookie);
+    const claim = await this.states.consume(claims.state, (record) => {
+      return claims.aud === record.origin && brokerNonceMatches(nonce, record.nonceHash);
+    });
+    if (claim.status === 'missing') {
       this.fail(reply, fallbackApp, 'expired');
       return;
     }
-    if (claims.aud !== state.origin) {
-      this.fail(reply, state.appOrigin, 'invalid');
+    if (claim.status === 'rejected') {
+      this.fail(reply, claim.record.appOrigin, 'invalid');
       return;
     }
-    if (brokerNonceMatches(readBrokerNonce(req.headers.cookie), state.nonceHash) === false) {
-      this.fail(reply, state.appOrigin, 'invalid');
-      return;
-    }
+    const state = claim.record;
     const headers = toWebHeaders(req.headers);
     headers.set(CLIENT_IP_HEADER, req.ip);
     let signedIn: BrokerSignIn;

@@ -15,6 +15,11 @@ export interface BrokerStateRecord {
   nonceHash: string | null;
 }
 
+export type BrokerStateClaim =
+  | { status: 'missing' }
+  | { status: 'rejected'; record: BrokerStateRecord }
+  | { status: 'consumed'; record: BrokerStateRecord };
+
 function parseRecord(value: string): BrokerStateRecord | null {
   try {
     const parsed: unknown = JSON.parse(value);
@@ -43,6 +48,16 @@ function parseRecord(value: string): BrokerStateRecord | null {
   }
 }
 
+function liveRecord(row: { value: string; expiresAt: Date | string } | null): BrokerStateRecord | null {
+  if (row === null) {
+    return null;
+  }
+  if (new Date(row.expiresAt).getTime() <= Date.now()) {
+    return null;
+  }
+  return parseRecord(row.value);
+}
+
 @Injectable()
 export class BrokerStateStore {
   constructor(@Inject(BETTER_AUTH) private readonly auth: BetterAuthInstance) {}
@@ -59,15 +74,23 @@ export class BrokerStateStore {
     return state;
   }
 
-  async consume(state: string): Promise<BrokerStateRecord | null> {
+  async consume(
+    state: string,
+    accept: (record: BrokerStateRecord) => boolean,
+  ): Promise<BrokerStateClaim> {
     const context = await this.auth.$context;
-    const row = await context.internalAdapter.consumeVerificationValue(`${STATE_PREFIX}${state}`);
-    if (row === null) {
-      return null;
+    const identifier = `${STATE_PREFIX}${state}`;
+    const found = liveRecord(await context.internalAdapter.findVerificationValue(identifier));
+    if (found === null) {
+      return { status: 'missing' };
     }
-    if (new Date(row.expiresAt).getTime() <= Date.now()) {
-      return null;
+    if (accept(found) === false) {
+      return { status: 'rejected', record: found };
     }
-    return parseRecord(row.value);
+    const consumed = liveRecord(await context.internalAdapter.consumeVerificationValue(identifier));
+    if (consumed === null) {
+      return { status: 'missing' };
+    }
+    return { status: 'consumed', record: consumed };
   }
 }
