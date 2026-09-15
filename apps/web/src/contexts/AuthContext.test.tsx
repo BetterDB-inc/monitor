@@ -516,4 +516,44 @@ describe('getMe failure handling', () => {
 
     await waitFor(() => expect(screen.getByText('APP')).toBeInTheDocument());
   });
+
+  it('keeps a signed-in user rendered when the status call fails on a retry', async () => {
+    vi.useFakeTimers();
+    try {
+      getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: true });
+      getMe.mockResolvedValueOnce(signedIn);
+      const { result } = renderHook(() => useAuth(), {
+        wrapper: gateWrapperFor('/connections'),
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByText('APP')).toBeInTheDocument();
+
+      getMe.mockRejectedValueOnce(new Error('502'));
+      await act(async () => {
+        await result.current.refresh();
+      });
+
+      getStatus.mockRejectedValueOnce(new Error('500'));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(getStatus).toHaveBeenCalledTimes(3);
+      expect(screen.getByText('APP')).toBeInTheDocument();
+      expect(screen.queryByText('Cannot reach the server')).not.toBeInTheDocument();
+      expect(result.current.unavailable).toBe(false);
+      expect(result.current.user).toEqual(signedIn);
+      expect(setAuthRedirectEnabledMock).toHaveBeenLastCalledWith(true);
+
+      getMe.mockResolvedValue(signedIn);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4000);
+      });
+      expect(getStatus).toHaveBeenCalledTimes(4);
+      expect(result.current.user).toEqual(signedIn);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

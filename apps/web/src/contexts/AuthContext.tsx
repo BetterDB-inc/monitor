@@ -126,9 +126,12 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
       if (seq !== refreshSeq.current) {
         return;
       }
+      scheduleRetry();
+      if (currentUser.current !== null) {
+        return;
+      }
       setAuthRedirectEnabled(false);
       setUnavailable(true);
-      scheduleRetry();
     } finally {
       if (seq === refreshSeq.current) {
         setLoading(false);
