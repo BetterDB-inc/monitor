@@ -118,6 +118,7 @@ describe('BetterAuthController origin check', () => {
         { provide: ActivityService, useValue: { record: jest.fn() } },
         { provide: UsageTelemetryService, useValue: telemetryStub() },
         ActorResolver,
+        BootstrapLock,
       ],
     }).compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
