@@ -577,4 +577,24 @@ describe('getMe failure handling', () => {
       vi.useRealTimers();
     }
   });
+
+  it.each([408, 429])('keeps retrying on a transient %i', async (status) => {
+    vi.useFakeTimers();
+    try {
+      getStatus.mockResolvedValue({ mode: 'self-hosted', enabled: true, bootstrapped: true });
+      getMe.mockRejectedValue(new ApiError('Transient', status));
+      renderAt('/connections');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByText('Cannot reach the server')).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(getMe).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

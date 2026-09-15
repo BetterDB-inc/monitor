@@ -30,12 +30,18 @@ const noop = async (): Promise<void> => {
 
 const RETRY_BASE_MS = 2000;
 const RETRY_MAX_MS = 30000;
+const TRANSIENT_CLIENT_STATUSES = new Set([408, 429]);
 
 function isSignedOutError(error: unknown): boolean {
   if (error instanceof UnauthorizedError) {
     return true;
   }
-  return error instanceof ApiError && error.status >= 400 && error.status < 500;
+  return (
+    error instanceof ApiError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    !TRANSIENT_CLIENT_STATUSES.has(error.status)
+  );
 }
 
 const AuthContext = createContext<AuthState>({
