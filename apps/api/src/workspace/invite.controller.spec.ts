@@ -273,13 +273,14 @@ describe('InviteController', () => {
     }
   });
 
-  it('logs a failed member rollback and still releases the invitation', async () => {
+  it('keeps the invitation accepted and answers the original error when the member rollback fails', async () => {
     const signInSpy = jest
       .spyOn(members, 'signIn')
       .mockResolvedValueOnce(new Response(null, { status: 401 }));
     const removeSpy = jest
       .spyOn(members, 'remove')
       .mockRejectedValueOnce(new Error('storage unavailable'));
+    const releaseSpy = jest.spyOn(invitations, 'release');
     const logSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {
       return;
     });
@@ -296,18 +297,22 @@ describe('InviteController', () => {
         payload: { name: 'Stuck', password: 'stuck horse battery' },
       });
       expect(accept.statusCode).toBe(401);
+      expect(accept.json()).toEqual(expect.objectContaining({ message: SIGN_IN_FAILED_MESSAGE }));
       const created = await members.findByEmail('rollback-fails@example.com');
+      expect(created).not.toBeNull();
       expect(logSpy).toHaveBeenCalledWith(
         expect.stringContaining(
           `Failed to roll back member ${created?.id} after a failed invitation acceptance`,
         ),
       );
       expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('storage unavailable'));
+      expect(releaseSpy).not.toHaveBeenCalled();
       const list = await invitations.list();
-      expect(list.find((item) => item.id === invitation.id)?.status).toBe('pending');
+      expect(list.find((item) => item.id === invitation.id)?.status).toBe('accepted');
     } finally {
       signInSpy.mockRestore();
       removeSpy.mockRestore();
+      releaseSpy.mockRestore();
       logSpy.mockRestore();
     }
   });

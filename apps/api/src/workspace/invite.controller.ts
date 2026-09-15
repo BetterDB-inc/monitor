@@ -20,6 +20,13 @@ import { MemberService } from './member.service';
 
 export const SIGN_IN_FAILED_MESSAGE = 'Sign-in failed';
 
+function describeError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
 @Controller('invite')
 export class InviteController {
   private readonly logger = new Logger(InviteController.name);
@@ -68,18 +75,7 @@ export class InviteController {
         throw new UnauthorizedException(SIGN_IN_FAILED_MESSAGE);
       }
     } catch (error) {
-      if (createdId !== null) {
-        try {
-          await this.members.remove(createdId);
-        } catch (rollbackError) {
-          const reason =
-            rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
-          this.logger.error(
-            `Failed to roll back member ${createdId} after a failed invitation acceptance: ${reason}`,
-          );
-        }
-      }
-      await this.invitations.release(invitation.id);
+      await this.rollBack(invitation.id, createdId);
       throw error;
     }
     await this.telemetry.trackInviteAccepted({ role: invitation.role, method: 'password' });
@@ -88,5 +84,20 @@ export class InviteController {
       reply.header('set-cookie', cookies);
     }
     reply.status(201).send(created);
+  }
+
+  private async rollBack(invitationId: string, createdId: string | null): Promise<void> {
+    if (createdId !== null) {
+      try {
+        await this.members.remove(createdId);
+      } catch (rollbackError) {
+        this.logger.error(
+          `Failed to roll back member ${createdId} after a failed invitation acceptance: ` +
+            `${describeError(rollbackError)}. Invitation ${invitationId} stays accepted.`,
+        );
+        return;
+      }
+    }
+    await this.invitations.release(invitationId);
   }
 }
