@@ -1,4 +1,4 @@
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
@@ -270,6 +270,45 @@ describe('InviteController', () => {
       expect(retry.statusCode).toBe(201);
     } finally {
       signInSpy.mockRestore();
+    }
+  });
+
+  it('logs a failed member rollback and still releases the invitation', async () => {
+    const signInSpy = jest
+      .spyOn(members, 'signIn')
+      .mockResolvedValueOnce(new Response(null, { status: 401 }));
+    const removeSpy = jest
+      .spyOn(members, 'remove')
+      .mockRejectedValueOnce(new Error('storage unavailable'));
+    const logSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {
+      return;
+    });
+    try {
+      const { token, invitation } = await invitations.create({
+        email: 'rollback-fails@example.com',
+        role: 'member',
+        invitedBy: ownerId,
+      });
+      const accept = await app.inject({
+        method: 'POST',
+        url: `/invite/${token}/accept`,
+        headers: { 'content-type': 'application/json', origin: ORIGIN },
+        payload: { name: 'Stuck', password: 'stuck horse battery' },
+      });
+      expect(accept.statusCode).toBe(401);
+      const created = await members.findByEmail('rollback-fails@example.com');
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `Failed to roll back member ${created?.id} after a failed invitation acceptance`,
+        ),
+      );
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('storage unavailable'));
+      const list = await invitations.list();
+      expect(list.find((item) => item.id === invitation.id)?.status).toBe('pending');
+    } finally {
+      signInSpy.mockRestore();
+      removeSpy.mockRestore();
+      logSpy.mockRestore();
     }
   });
 

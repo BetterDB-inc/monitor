@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Logger,
   Param,
   Post,
   Req,
@@ -21,6 +22,8 @@ export const SIGN_IN_FAILED_MESSAGE = 'Sign-in failed';
 
 @Controller('invite')
 export class InviteController {
+  private readonly logger = new Logger(InviteController.name);
+
   constructor(
     private readonly invitations: InvitationService,
     private readonly members: MemberService,
@@ -69,7 +72,11 @@ export class InviteController {
         try {
           await this.members.remove(createdId);
         } catch (rollbackError) {
-          void rollbackError;
+          const reason =
+            rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+          this.logger.error(
+            `Failed to roll back member ${createdId} after a failed invitation acceptance: ${reason}`,
+          );
         }
       }
       await this.invitations.release(invitation.id);
