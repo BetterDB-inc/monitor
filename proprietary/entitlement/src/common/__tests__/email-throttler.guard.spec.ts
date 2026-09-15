@@ -24,6 +24,7 @@ describe('EmailThrottlerGuard', () => {
         '/tenants',
         '/users/by-email/x@y.com',
         '/auth/workspace-token',
+        '/auth/broker-token',
         '/tenants/abc/provision',
         '/v1/entitlements',
         '/admin/licenses/1/offline-file',
