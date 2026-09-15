@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { BootstrapLock } from '../auth/bootstrap-lock';
 import { BETTER_AUTH, createBetterAuth } from '../auth/better-auth.factory';
@@ -63,7 +64,74 @@ describe('BrokerUserResolver', () => {
   });
 
   afterEach(async () => {
+    jest.restoreAllMocks();
     await storage.close();
+  });
+
+  async function invitationStatus(id: string): Promise<string | undefined> {
+    const rows = await invitations.list();
+    return rows.find((row) => {
+      return row.id === id;
+    })?.status;
+  }
+
+  async function invite(email: string): Promise<{ id: string; token: string }> {
+    const owner = await resolver.resolve(identity('owner@example.com'), null);
+    const created = await invitations.create({
+      email,
+      role: 'member',
+      invitedBy: owner.member.id,
+    });
+    return { id: created.invitation.id, token: created.token };
+  }
+
+  function silenceErrors(): jest.SpyInstance {
+    return jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {
+      return undefined;
+    });
+  }
+
+  async function failingSession(): Promise<Response> {
+    throw new Error('session down');
+  }
+
+  it('keeps the invitation accepted and rethrows the session error when removal fails', async () => {
+    const invited = await invite('invitee@example.com');
+    const errorLog = silenceErrors();
+    jest.spyOn(members, 'remove').mockRejectedValueOnce(new Error('member vanished'));
+    await expect(
+      resolver.signIn(identity('invitee@example.com'), null, failingSession),
+    ).rejects.toThrow('session down');
+    expect(await members.findByEmail('invitee@example.com')).not.toBeNull();
+    expect(await invitationStatus(invited.id)).toBe('accepted');
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.stringContaining('invitee@example.com'),
+      expect.stringContaining('member vanished'),
+    );
+  });
+
+  it('logs a release that finds the invitation no longer accepted', async () => {
+    const invited = await invite('invitee@example.com');
+    const errorLog = silenceErrors();
+    jest.spyOn(invitations, 'release').mockResolvedValueOnce(false);
+    await expect(
+      resolver.signIn(identity('invitee@example.com'), null, failingSession),
+    ).rejects.toThrow('session down');
+    expect(await members.findByEmail('invitee@example.com')).toBeNull();
+    expect(errorLog).toHaveBeenCalledWith(expect.stringContaining(invited.id));
+  });
+
+  it('keeps the member creation error when releasing the invitation fails', async () => {
+    const invited = await invite('invitee@example.com');
+    const errorLog = silenceErrors();
+    jest.spyOn(members, 'createSocial').mockRejectedValueOnce(new Error('email taken'));
+    jest.spyOn(invitations, 'release').mockRejectedValueOnce(new Error('disk full'));
+    await expect(resolver.resolve(identity('invitee@example.com'), null)).rejects.toThrow(
+      'email taken',
+    );
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.stringMatching(new RegExp(`${invited.id}.*disk full`)),
+    );
   });
 
   it('makes the first broker user the owner', async () => {

@@ -830,7 +830,7 @@ describe('BrokerController when the session cannot be started', () => {
     );
   });
 
-  it('reopens the invitation even when removing the invited member fails', async () => {
+  it('keeps the invitation accepted when removing the invited member fails', async () => {
     await signInThrough(app);
     const invite = await inviteToken();
     jest.spyOn(members, 'startSession').mockImplementationOnce(SESSION_FAILURES[0][1]);
@@ -840,7 +840,8 @@ describe('BrokerController when the session cannot be started', () => {
       claims: INVITEE_CLAIMS,
     });
     expect(failed.location).toBe('http://localhost/login?error=invalid');
-    expect(await invitationStatus(invite.id)).toBe('pending');
+    expect(await invitationStatus(invite.id)).toBe('accepted');
+    expect(await members.findByEmail(INVITEE_CLAIMS.email)).not.toBeNull();
     expect(errorLog).toHaveBeenCalledWith(
       expect.stringContaining(INVITEE_CLAIMS.email),
       expect.stringContaining('member vanished'),

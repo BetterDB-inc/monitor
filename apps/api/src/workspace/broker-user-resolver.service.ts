@@ -108,11 +108,23 @@ export class BrokerUserResolver {
     if (resolved.entrance !== 'invite' || invitationId === null) {
       return;
     }
+    await this.members.remove(resolved.member.id);
+    await this.releaseClaim(invitationId);
+  }
+
+  private async releaseClaim(invitationId: string): Promise<void> {
+    let reason = 'it was no longer accepted';
     try {
-      await this.members.remove(resolved.member.id);
-    } finally {
-      await this.invitations.release(invitationId);
+      if ((await this.invitations.release(invitationId)) === true) {
+        return;
+      }
+    } catch (error) {
+      reason = describeError(error);
     }
+    this.logger.error(
+      `Could not release invitation ${invitationId} after a failed broker sign-in: ${reason}. ` +
+        'An admin can revoke it from the invitations list and invite again.',
+    );
   }
 
   private async resolveNow(
@@ -136,7 +148,7 @@ export class BrokerUserResolver {
       const member = await this.createMember(identity, invitation.role, false);
       return { member, entrance: 'invite', invitationId: invitation.id };
     } catch (error) {
-      await this.invitations.release(invitation.id);
+      await this.releaseClaim(invitation.id);
       throw error;
     }
   }
