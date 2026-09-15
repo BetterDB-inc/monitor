@@ -2,6 +2,8 @@ import { Injectable, CanActivate, ExecutionContext, UnauthorizedException } from
 import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'crypto';
 
+const BEARER_PREFIX = 'Bearer ';
+
 @Injectable()
 export class BrokerApiGuard implements CanActivate {
   constructor(private readonly config: ConfigService) {}
@@ -10,11 +12,11 @@ export class BrokerApiGuard implements CanActivate {
     const request = context.switchToHttp().getRequest();
     const authHeader = request.headers['authorization'];
 
-    if (!authHeader) {
-      throw new UnauthorizedException('Missing authorization header');
+    if (typeof authHeader !== 'string' || authHeader.startsWith(BEARER_PREFIX) === false) {
+      throw new UnauthorizedException('Missing bearer token');
     }
 
-    const token = authHeader.replace('Bearer ', '');
+    const token = authHeader.slice(BEARER_PREFIX.length);
     const brokerToken = this.config.get<string>('BROKER_API_TOKEN');
 
     if (!brokerToken) {

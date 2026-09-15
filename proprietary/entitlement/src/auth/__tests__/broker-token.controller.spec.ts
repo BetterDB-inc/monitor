@@ -88,6 +88,17 @@ describe('BrokerTokenController (HTTP)', () => {
     expect(res.statusCode).toBe(401);
   });
 
+  it('rejects the BROKER_API_TOKEN without the Bearer scheme', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/broker-token',
+      headers: { authorization: BROKER_TOKEN },
+      payload: VALID_BODY,
+    });
+
+    expect(res.statusCode).toBe(401);
+  });
+
   it('accepts the BROKER_API_TOKEN bearer with a valid body', async () => {
     const res = await post(app, BROKER_TOKEN);
 
