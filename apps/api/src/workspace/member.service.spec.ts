@@ -245,6 +245,34 @@ describe('MemberService', () => {
     expect(again.isOwner).toBe(true);
   });
 
+  it('keeps the sole owner for a retry when deleting their accounts fails', async () => {
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {
+      return undefined;
+    });
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {
+      return undefined;
+    });
+    const owner = await createSocialOwner();
+    const context = await auth.$context;
+    const deleteMany = context.adapter.deleteMany.bind(context.adapter);
+    const spy = jest.spyOn(context.adapter, 'deleteMany').mockImplementation((input) => {
+      if (input.model === 'account') {
+        return Promise.reject(new Error('account delete failed'));
+      }
+      return deleteMany(input);
+    });
+    await service.discardBootstrapOwner(owner.id).catch(() => {
+      return undefined;
+    });
+    spy.mockRestore();
+    expect(await service.findById(owner.id)).toEqual(owner);
+    await service.discardBootstrapOwner(owner.id);
+    expect(await service.count()).toBe(0);
+    expect(await context.internalAdapter.findAccountByUserId(owner.id)).toEqual([]);
+    const again = await createSocialOwner();
+    expect(again.isOwner).toBe(true);
+  });
+
   it('keeps an owner who is no longer the only user and logs why', async () => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {
       return undefined;

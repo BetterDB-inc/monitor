@@ -150,19 +150,21 @@ async function deleteNonOwner(adapter: UserWriter, userId: string): Promise<void
   }
 }
 
+function ownerWhere(userId: string): Array<{ field: string; value: string | boolean }> {
+  return [
+    { field: 'id', value: userId },
+    { field: 'isOwner', value: true },
+  ];
+}
+
 async function deleteOwner(adapter: UserWriter, userId: string): Promise<boolean> {
-  const deleted = await adapter.deleteMany({
-    model: 'user',
-    where: [
-      { field: 'id', value: userId },
-      { field: 'isOwner', value: true },
-    ],
-  });
-  if (deleted !== 1) {
+  const target = await adapter.findOne<StoredUser>({ model: 'user', where: ownerWhere(userId) });
+  if (target === null) {
     return false;
   }
   await deleteSessionsAndAccounts(adapter, userId);
-  return true;
+  const deleted = await adapter.deleteMany({ model: 'user', where: ownerWhere(userId) });
+  return deleted === 1;
 }
 
 function describeError(error: unknown): string {
