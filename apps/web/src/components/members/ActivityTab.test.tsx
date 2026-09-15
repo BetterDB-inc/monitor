@@ -121,5 +121,16 @@ describe('ActivityTab', () => {
     fireEvent.change(screen.getByLabelText('Actor'), { target: { value: 'u2' } });
     expect(await screen.findByText('boom')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
+    expect(screen.queryByText('member.invite')).toBeNull();
+  });
+
+  it('keeps loaded rows when loading more fails', async () => {
+    api.getActivity.mockResolvedValueOnce({ items: [entry()], nextCursor: 'c1' });
+    render(<ActivityTab members={MEMBERS} />);
+    const loadMore = await screen.findByRole('button', { name: 'Load more' });
+    api.getActivity.mockRejectedValueOnce(new Error('boom'));
+    fireEvent.click(loadMore);
+    expect(await screen.findByText('boom')).toBeInTheDocument();
+    expect(screen.getByText('member.invite')).toBeInTheDocument();
   });
 });

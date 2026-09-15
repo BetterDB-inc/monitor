@@ -86,6 +86,9 @@ export function ActivityTab({ members }: ActivityTabProps): ReactElement {
         if (requestId.current !== currentRequestId) {
           return;
         }
+        if (cursor === null) {
+          setItems([]);
+        }
         setError(errorMessage(err));
       } finally {
         if (requestId.current === currentRequestId) {
