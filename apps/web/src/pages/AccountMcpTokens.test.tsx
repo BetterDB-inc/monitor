@@ -95,6 +95,23 @@ describe('member reachability for personal MCP tokens', () => {
     expect(screen.queryByText('Settings page')).not.toBeInTheDocument();
   });
 
+  it('keeps demo visitors away from the token page and its menu link', () => {
+    api.list.mockReset();
+    api.list.mockResolvedValue([]);
+    authState.user = { userId: 'u1', email: 'admin@example.com', role: 'admin', isOwner: true };
+    authState.mode = 'self-hosted';
+    authState.isCloud = false;
+    useCanMutateMock.mockReset();
+    useCanMutateMock.mockReturnValue(true);
+    useDemoStateMock.mockReset();
+    useDemoStateMock.mockReturnValue({ isDemo: true, loading: false });
+
+    renderApp('/account/mcp-tokens');
+
+    expect(screen.getByText('Home page')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'MCP Tokens' })).not.toBeInTheDocument();
+  });
+
   it('lets a self-hosted admin reach the token page too', async () => {
     api.list.mockReset();
     api.list.mockResolvedValue([]);

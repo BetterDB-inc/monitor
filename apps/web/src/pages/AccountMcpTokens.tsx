@@ -1,7 +1,16 @@
 import { ReactElement } from 'react';
+import { Navigate } from 'react-router-dom';
 import { McpTokensPanel } from '../components/pages/settings/McpTokensPanel';
+import { useDemoState } from '../contexts/DemoContext';
 
-export function AccountMcpTokens(): ReactElement {
+export function AccountMcpTokens(): ReactElement | null {
+  const { isDemo, loading } = useDemoState();
+  if (loading === true) {
+    return null;
+  }
+  if (isDemo === true) {
+    return <Navigate to="/" replace />;
+  }
   return (
     <div className="space-y-6 max-w-2xl">
       <div>

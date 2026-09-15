@@ -213,6 +213,31 @@ describe('PersonalTokensController', () => {
     expect(JSON.stringify(ownerView)).not.toContain('tokenHash');
   });
 
+  it('refuses to create a token on the demo host', async () => {
+    const previous = process.env.DEMO_HOSTNAME;
+    process.env.DEMO_HOSTNAME = 'demo.example.com';
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/agent-tokens',
+        headers: {
+          cookie: ownerCookie,
+          host: 'demo.example.com',
+          origin: ORIGIN,
+          'content-type': 'application/json',
+        },
+        payload: { name: 'demo' },
+      });
+      expect(response.statusCode).toBe(403);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.DEMO_HOSTNAME;
+      } else {
+        process.env.DEMO_HOSTNAME = previous;
+      }
+    }
+  });
+
   it('validates the token body', async () => {
     const blank = await app.inject({
       method: 'POST',

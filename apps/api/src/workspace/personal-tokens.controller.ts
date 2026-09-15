@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, Req } from '@nestjs/common';
+import { Body, Controller, Delete, ForbiddenException, Get, Param, Post, Req } from '@nestjs/common';
 import type { FastifyRequest } from 'fastify';
 import type { Actor, TokenType } from '@betterdb/shared';
 import { ActivityService, toActivityActor } from '../activity/activity.service';
@@ -14,6 +14,13 @@ export interface GeneratedPersonalTokenView {
   name: string;
   type: TokenType;
   expiresAt: number;
+}
+
+export const DEMO_TOKENS_MESSAGE = 'Personal tokens are not available on the demo';
+
+function isDemoHost(req: FastifyRequest): boolean {
+  const demoHost = process.env.DEMO_HOSTNAME;
+  return typeof demoHost === 'string' && demoHost.length > 0 && req.headers.host === demoHost;
 }
 
 interface RevokedResponse {
@@ -35,6 +42,9 @@ export class PersonalTokensController {
     @Req() req: FastifyRequest,
   ): Promise<GeneratedPersonalTokenView> {
     requireSession(actor);
+    if (isDemoHost(req) === true) {
+      throw new ForbiddenException(DEMO_TOKENS_MESSAGE);
+    }
     const { token, metadata } = await this.tokens.generate(body.name, actor);
     void this.activity.record({
       actor: toActivityActor(actor),

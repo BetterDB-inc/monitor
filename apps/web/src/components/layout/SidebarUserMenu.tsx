@@ -1,9 +1,11 @@
 import { ReactElement } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
+import { useDemoState } from '../../contexts/DemoContext';
 
 export function SidebarUserMenu(): ReactElement | null {
   const { user, mode, signOut } = useAuth();
+  const { isDemo } = useDemoState();
   const location = useLocation();
   if (mode !== 'self-hosted' || user === null) {
     return null;
@@ -32,14 +34,16 @@ export function SidebarUserMenu(): ReactElement | null {
           Sign out
         </button>
       </div>
-      <Link
-        to="/account/mcp-tokens"
-        className={`block w-full rounded-md px-3 py-2 text-sm transition-colors ${
-          onMcpTokensPage ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'
-        }`}
-      >
-        MCP Tokens
-      </Link>
+      {isDemo !== true && (
+        <Link
+          to="/account/mcp-tokens"
+          className={`block w-full rounded-md px-3 py-2 text-sm transition-colors ${
+            onMcpTokensPage ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'
+          }`}
+        >
+          MCP Tokens
+        </Link>
+      )}
     </div>
   );
 }
