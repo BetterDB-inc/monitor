@@ -90,3 +90,23 @@ groups:
         annotations:
           summary: "Persistent anomalies on {{ $labels.instance }}"
           description: "{{ $value }} anomalies detected in the last hour. System may be unstable."
+
+      # New KEV-exploited CVEs detected
+      - alert: CveKevDetected
+        expr: betterdb_cve_kev > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "KEV-exploited CVEs on {{ $labels.connection }}"
+          description: "{{ $value }} known-exploited CVEs in the latest scan. Patch immediately."
+
+      # New critical CVEs detected
+      - alert: CveCriticalDetected
+        expr: betterdb_cve_findings{severity="critical"} > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical CVEs on {{ $labels.connection }}"
+          description: "{{ $value }} critical CVEs in the latest scan. Review Security page."
