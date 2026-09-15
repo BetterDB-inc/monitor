@@ -160,6 +160,19 @@ describe('CliGateway.handleUpgrade', () => {
 });
 
 describe('CliGateway command execution', () => {
+  beforeEach(() => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  function accessOf(gateway: CliGateway, ws: FakeWebSocket): Promise<unknown> {
+    return (
+      gateway as unknown as { resolveAccess: (ws: unknown) => Promise<unknown> }
+    ).resolveAccess(ws);
+  }
   function connect(
     gateway: CliGateway,
     request: IncomingMessage = makeRequest('c=1'),
@@ -229,18 +242,67 @@ describe('CliGateway command execution', () => {
     expect(execute).toHaveBeenCalledWith('SET a b', 'c1', { readOnly: false });
   });
 
-  it('re-resolves the session on every command using the upgrade request', async () => {
+  it('resolves the session once for commands within 30 seconds of each other', async () => {
     const execute = executeMock();
     const resolver = resolverWith(true, admin);
     const gateway = new CliGateway({ execute } as unknown as CliService, resolver);
     const request = makeRequest('c=1');
     const ws = connect(gateway, request);
     sendExecute(ws);
+    await flush();
+    jest.advanceTimersByTime(29_999);
+    sendExecute(ws);
+    await flush();
+    expect(resolver.resolveFromUpgrade).toHaveBeenCalledTimes(1);
+    expect(resolver.resolveFromUpgrade).toHaveBeenCalledWith(request);
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it('resolves the session again once 30 seconds have passed', async () => {
+    const execute = executeMock();
+    const resolver = resolverWith(true, admin);
+    const gateway = new CliGateway({ execute } as unknown as CliService, resolver);
+    const ws = connect(gateway);
+    sendExecute(ws);
+    await flush();
+    jest.advanceTimersByTime(30_000);
     sendExecute(ws);
     await flush();
     expect(resolver.resolveFromUpgrade).toHaveBeenCalledTimes(2);
-    expect(resolver.resolveFromUpgrade).toHaveBeenCalledWith(request);
     expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not cache a failed session resolve', async () => {
+    const resolver = resolverWith(true, admin);
+    (resolver.resolveFromUpgrade as jest.Mock)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(admin);
+    const gateway = new CliGateway({} as CliService, resolver);
+    const ws = connect(gateway);
+    await expect(accessOf(gateway, ws)).resolves.toEqual({
+      sessionValid: false,
+      readOnly: true,
+      actor: null,
+    });
+    await expect(accessOf(gateway, ws)).resolves.toEqual({
+      sessionValid: true,
+      readOnly: false,
+      actor: admin,
+    });
+    expect(resolver.resolveFromUpgrade).toHaveBeenCalledTimes(2);
+  });
+
+  it('carries the resolved actor in the cached access', async () => {
+    const resolver = resolverWith(true, member);
+    const gateway = new CliGateway({} as CliService, resolver);
+    const ws = connect(gateway);
+    await accessOf(gateway, ws);
+    await expect(accessOf(gateway, ws)).resolves.toEqual({
+      sessionValid: true,
+      readOnly: true,
+      actor: member,
+    });
+    expect(resolver.resolveFromUpgrade).toHaveBeenCalledTimes(1);
   });
 
   it('expires the socket instead of running the command when the session is gone', async () => {
@@ -252,6 +314,7 @@ describe('CliGateway command execution', () => {
     sendExecute(ws);
     await flush();
     expect(execute).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(30_000);
     sendExecute(ws);
     await flush();
     expect(execute).toHaveBeenCalledTimes(1);
@@ -269,6 +332,6 @@ describe('CliGateway command execution', () => {
         resolveAccess: (ws: WebSocket) => Promise<{ sessionValid: boolean; readOnly: boolean }>;
       }
     ).resolveAccess(new FakeWebSocket() as unknown as WebSocket);
-    expect(access).toEqual({ sessionValid: true, readOnly: true });
+    expect(access).toEqual({ sessionValid: true, readOnly: true, actor: null });
   });
 });

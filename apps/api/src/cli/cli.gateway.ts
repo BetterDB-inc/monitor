@@ -9,19 +9,27 @@ import { CliService } from './cli.service';
 import { CliExecuteMessage, CliServerMessage } from './cli.types';
 
 const MAX_COMMANDS_PER_SECOND = 50;
+const ACCESS_CACHE_TTL_MS = 30_000;
 const SESSION_EXPIRED_CLOSE_CODE = 4401;
 const SESSION_EXPIRED_CLOSE_REASON = 'Session expired';
 export const SESSION_EXPIRED_MESSAGE = 'Session expired. Sign in again.';
+
+interface CommandAccess {
+  sessionValid: boolean;
+  readOnly: boolean;
+  actor: Actor | null;
+}
+
+interface CachedAccess {
+  result: CommandAccess;
+  expiresAt: number;
+}
 
 interface CliConnectionState {
   request: IncomingMessage;
   tokens: number;
   lastRefill: number;
-}
-
-interface CommandAccess {
-  sessionValid: boolean;
-  readOnly: boolean;
+  access: CachedAccess | null;
 }
 
 @Injectable()
@@ -86,23 +94,35 @@ export class CliGateway implements OnModuleDestroy {
 
   private attach(ws: WebSocket, request: IncomingMessage): void {
     this.logger.log('CLI WebSocket client connected');
-    this.connections.set(ws, { request, tokens: MAX_COMMANDS_PER_SECOND, lastRefill: Date.now() });
+    this.connections.set(ws, {
+      request,
+      tokens: MAX_COMMANDS_PER_SECOND,
+      lastRefill: Date.now(),
+      access: null,
+    });
     this.handleConnection(ws);
   }
 
   private async resolveAccess(ws: WebSocket): Promise<CommandAccess> {
     const state = this.connections.get(ws);
     if (state === undefined) {
-      return { sessionValid: true, readOnly: true };
+      return { sessionValid: true, readOnly: true, actor: null };
     }
     if (this.isAuthEnabled() === false) {
-      return { sessionValid: true, readOnly: false };
+      return { sessionValid: true, readOnly: false, actor: null };
     }
+    const now = Date.now();
+    if (state.access !== null && state.access.expiresAt > now) {
+      return state.access.result;
+    }
+    state.access = null;
     const actor = await this.resolveActor(state.request);
     if (actor === null) {
-      return { sessionValid: false, readOnly: true };
+      return { sessionValid: false, readOnly: true, actor: null };
     }
-    return { sessionValid: true, readOnly: this.isReadOnly(actor) };
+    const result: CommandAccess = { sessionValid: true, readOnly: this.isReadOnly(actor), actor };
+    state.access = { result, expiresAt: now + ACCESS_CACHE_TTL_MS };
+    return result;
   }
 
   private isReadOnly(actor: Actor): boolean {
