@@ -11,16 +11,27 @@ interface NavItemProps {
   to: string;
   requiredFeature?: Feature;
   demoLocked?: boolean;
+  locked?: boolean;
+  lockedReason?: string;
 }
 
-export function NavItem({ children, active, to, requiredFeature, demoLocked }: NavItemProps) {
+export function NavItem({
+  children,
+  active,
+  to,
+  requiredFeature,
+  demoLocked,
+  locked,
+  lockedReason,
+}: NavItemProps) {
   const { hasFeature } = useLicense();
 
-  if (demoLocked) {
+  if (demoLocked === true || locked === true) {
+    const tooltipContent = demoLocked === true ? DEMO_TOOLTIP : (lockedReason ?? 'Admins only');
     return (
       <span
         data-tooltip-id="license-tooltip"
-        data-tooltip-content={DEMO_TOOLTIP}
+        data-tooltip-content={tooltipContent}
         className="block w-full rounded-md px-3 py-2 text-sm opacity-40 cursor-not-allowed select-none"
       >
         {children}

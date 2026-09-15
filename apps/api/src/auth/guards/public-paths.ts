@@ -41,8 +41,14 @@ function matchesAnyPrefix(path: string, prefixes: string[]): boolean {
   });
 }
 
+export function normalizePath(rawPath: string): string {
+  const queryIndex = rawPath.indexOf('?');
+  const path = queryIndex === -1 ? rawPath : rawPath.slice(0, queryIndex);
+  return stripApiPrefix(path);
+}
+
 export function isPublicPath(rawPath: string, method: string): boolean {
-  const path = stripApiPrefix(rawPath.split('?')[0]);
+  const path = normalizePath(rawPath);
   if (matchesAnyPrefix(path, PUBLIC_PREFIXES)) {
     return true;
   }

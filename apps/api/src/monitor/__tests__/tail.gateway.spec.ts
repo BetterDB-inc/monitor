@@ -1,25 +1,63 @@
 import { EventEmitter } from 'events';
 import type { Socket } from 'net';
 import type { IncomingMessage } from 'http';
+import { Actor } from '@betterdb/shared';
 import type { StoragePort } from '../../common/interfaces/storage-port.interface';
+import type { ActorResolver } from '../../auth/actor-resolver';
 import type { CaptureWriter } from '../capture-writer';
 import type { MonitorCaptureService } from '../monitor-capture.service';
 import { TailGateway } from '../tail.gateway';
 
 const SESSION_ID = '11111111-2222-3333-4444-555555555555';
 
+const admin: Actor = {
+  userId: 'a',
+  email: 'a@x',
+  role: 'admin',
+  isOwner: true,
+  via: 'session',
+  tokenId: null,
+};
+
 class FakeSocket extends EventEmitter {
+  written: string[] = [];
   destroyed = false;
+  write(chunk: string): boolean {
+    this.written.push(chunk);
+    return true;
+  }
   destroy(): void {
     this.destroyed = true;
   }
 }
 
 function makeRequest(path: string, host = 'localhost'): IncomingMessage {
-  return { url: path, headers: { host } } as unknown as IncomingMessage;
+  return {
+    url: path,
+    headers: { host, cookie: undefined },
+    socket: { remoteAddress: '10.0.0.5' },
+  } as unknown as IncomingMessage;
 }
 
-function makeGateway() {
+function resolverWith(enabled: boolean, actor: Actor | null): ActorResolver {
+  return {
+    isEnabled: () => {
+      return enabled;
+    },
+    isReady: () => {
+      return true;
+    },
+    resolveFromUpgrade: jest.fn().mockResolvedValue(actor),
+  } as unknown as ActorResolver;
+}
+
+async function flush(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setImmediate(resolve);
+  });
+}
+
+function makeGateway(actorResolver: ActorResolver | null = resolverWith(false, null)) {
   const captureService = {
     getSession: jest.fn(),
     getActiveWriter: jest.fn(),
@@ -30,8 +68,9 @@ function makeGateway() {
   const gateway = new TailGateway(
     captureService as unknown as MonitorCaptureService,
     storage as StoragePort,
+    actorResolver,
   );
-  return { gateway, captureService, storage };
+  return { gateway, captureService, storage, actorResolver };
 }
 
 const ORIGINAL_ENV = { ...process.env };
@@ -74,12 +113,102 @@ describe('TailGateway.handleUpgrade', () => {
   it('destroys the socket when sessionId query param is missing', () => {
     const { gateway } = makeGateway();
     const socket = new FakeSocket();
+    gateway.handleUpgrade(makeRequest('/monitor/ws'), socket as unknown as Socket, Buffer.alloc(0));
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it('passes through without resolving when the workspace is disabled', async () => {
+    const resolver = resolverWith(false, null);
+    const { gateway } = makeGateway(resolver);
+    const wss = (gateway as unknown as { wss: { handleUpgrade: jest.Mock } }).wss;
+    wss.handleUpgrade = jest.fn();
+    const socket = new FakeSocket();
     gateway.handleUpgrade(
-      makeRequest('/monitor/ws'),
+      makeRequest(`/monitor/ws?sessionId=${SESSION_ID}`),
       socket as unknown as Socket,
       Buffer.alloc(0),
     );
+    await flush();
+    expect(resolver.resolveFromUpgrade).not.toHaveBeenCalled();
+    expect(wss.handleUpgrade).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(false);
+  });
+
+  it('rejects the upgrade with HTTP 401 when enabled and no session resolves', async () => {
+    const { gateway } = makeGateway(resolverWith(true, null));
+    const wss = (gateway as unknown as { wss: { handleUpgrade: jest.Mock } }).wss;
+    wss.handleUpgrade = jest.fn();
+    const socket = new FakeSocket();
+    gateway.handleUpgrade(
+      makeRequest(`/monitor/ws?sessionId=${SESSION_ID}`),
+      socket as unknown as Socket,
+      Buffer.alloc(0),
+    );
+    await flush();
+    expect(socket.written[0].startsWith('HTTP/1.1 401 Unauthorized')).toBe(true);
     expect(socket.destroyed).toBe(true);
+    expect(wss.handleUpgrade).not.toHaveBeenCalled();
+  });
+
+  it('passes through when no resolver is provided at all', async () => {
+    const { gateway } = makeGateway(null);
+    const wss = (gateway as unknown as { wss: { handleUpgrade: jest.Mock } }).wss;
+    wss.handleUpgrade = jest.fn();
+    const socket = new FakeSocket();
+    gateway.handleUpgrade(
+      makeRequest(`/monitor/ws?sessionId=${SESSION_ID}`),
+      socket as unknown as Socket,
+      Buffer.alloc(0),
+    );
+    await flush();
+    expect(wss.handleUpgrade).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(false);
+  });
+
+  it('destroys the socket when the resolver throws during the upgrade', async () => {
+    const resolver = resolverWith(true, admin);
+    (resolver.resolveFromUpgrade as jest.Mock).mockRejectedValue(new Error('boom'));
+    const { gateway } = makeGateway(resolver);
+    const wss = (gateway as unknown as { wss: { handleUpgrade: jest.Mock } }).wss;
+    wss.handleUpgrade = jest.fn();
+    const socket = new FakeSocket();
+    gateway.handleUpgrade(
+      makeRequest(`/monitor/ws?sessionId=${SESSION_ID}`),
+      socket as unknown as Socket,
+      Buffer.alloc(0),
+    );
+    await flush();
+    expect(socket.destroyed).toBe(true);
+    expect(wss.handleUpgrade).not.toHaveBeenCalled();
+  });
+
+  it('destroys the socket on a socket error while the upgrade is pending', () => {
+    const { gateway } = makeGateway(resolverWith(true, admin));
+    const wss = (gateway as unknown as { wss: { handleUpgrade: jest.Mock } }).wss;
+    wss.handleUpgrade = jest.fn();
+    const socket = new FakeSocket();
+    gateway.handleUpgrade(
+      makeRequest(`/monitor/ws?sessionId=${SESSION_ID}`),
+      socket as unknown as Socket,
+      Buffer.alloc(0),
+    );
+    socket.emit('error', new Error('reset'));
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it('completes the handshake when a session resolves', async () => {
+    const { gateway } = makeGateway(resolverWith(true, admin));
+    const wss = (gateway as unknown as { wss: { handleUpgrade: jest.Mock } }).wss;
+    wss.handleUpgrade = jest.fn();
+    const socket = new FakeSocket();
+    gateway.handleUpgrade(
+      makeRequest(`/monitor/ws?sessionId=${SESSION_ID}`),
+      socket as unknown as Socket,
+      Buffer.alloc(0),
+    );
+    await flush();
+    expect(wss.handleUpgrade).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(false);
   });
 });
 
@@ -134,9 +263,7 @@ describe('TailGateway connection handling', () => {
     const ws = new FakeWebSocket();
     await asPrivate(gateway).handleConnection(ws, SESSION_ID);
 
-    expect(ws.sent).toEqual([
-      { type: 'error', error: `session ${SESSION_ID} not found` },
-    ]);
+    expect(ws.sent).toEqual([{ type: 'error', error: `session ${SESSION_ID} not found` }]);
     expect(ws.closed).toBe(true);
   });
 
@@ -150,8 +277,22 @@ describe('TailGateway connection handling', () => {
       });
       captureService.getActiveWriter.mockReturnValue(undefined);
       (storage.getCaptureChunks as jest.Mock).mockResolvedValue([
-        { sessionId: SESSION_ID, chunkIndex: 0, bytes: Buffer.from('one\ntwo'), lineCount: 2, firstTs: 0, lastTs: 1 },
-        { sessionId: SESSION_ID, chunkIndex: 1, bytes: Buffer.from('three'), lineCount: 1, firstTs: 2, lastTs: 3 },
+        {
+          sessionId: SESSION_ID,
+          chunkIndex: 0,
+          bytes: Buffer.from('one\ntwo'),
+          lineCount: 2,
+          firstTs: 0,
+          lastTs: 1,
+        },
+        {
+          sessionId: SESSION_ID,
+          chunkIndex: 1,
+          bytes: Buffer.from('three'),
+          lineCount: 1,
+          firstTs: 2,
+          lastTs: 3,
+        },
       ]);
 
       const ws = new FakeWebSocket();

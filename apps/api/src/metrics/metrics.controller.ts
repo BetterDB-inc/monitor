@@ -1,9 +1,10 @@
-import { Controller, Get, Post, Delete, Query, Param, HttpException, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Delete, Query, Param, HttpException, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam, ApiHeader } from '@nestjs/swagger';
 import { MetricsService } from './metrics.service';
 import { ClusterDiscoveryService, DiscoveredNode } from '../cluster/cluster-discovery.service';
 import { ClusterMetricsService, NodeStats, ClusterSlowlogEntry, ClusterClientEntry, ClusterCommandlogEntry, SlotMigration } from '../cluster/cluster-metrics.service';
 import { ConnectionId } from '../common/decorators';
+import { Roles } from '../auth/guards/roles.decorator';
 import {
   InfoResponse,
   SlowLogEntry,
@@ -27,13 +28,11 @@ import {
   CommandLogEntryDto,
   LatencyEventDto,
   LatencyHistoryEntryDto,
-  LatencyHistogramDto,
   MemoryStatsDto,
   ClientInfoDto,
   AclLogEntryDto,
   RoleInfoDto,
   ClusterNodeDto,
-  SlotStatsMetricDto,
   GenericSuccessDto,
   LengthResponseDto,
   ReportResponseDto,
@@ -605,6 +604,7 @@ export class MetricsController {
   }
 
   @Get('config/:parameter')
+  @Roles('admin')
   @ApiOperation({ summary: 'Get config parameter', description: 'Retrieve value of a specific configuration parameter' })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiParam({ name: 'parameter', description: 'Configuration parameter name' })
@@ -626,6 +626,7 @@ export class MetricsController {
   }
 
   @Get('config')
+  @Roles('admin')
   @ApiOperation({ summary: 'Get config values', description: 'Retrieve configuration values matching pattern' })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiQuery({ name: 'pattern', required: false, description: 'Glob pattern for config keys (default: *)' })

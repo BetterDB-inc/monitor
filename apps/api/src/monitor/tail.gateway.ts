@@ -1,7 +1,9 @@
-import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import { IncomingMessage } from 'http';
 import { Socket } from 'net';
 import { WebSocket, WebSocketServer } from 'ws';
+import { ActorResolver } from '../auth/actor-resolver';
+import { rejectUpgrade } from '../auth/upgrade-response';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { CaptureWriter } from './capture-writer';
 import { MonitorCaptureService } from './monitor-capture.service';
@@ -36,6 +38,9 @@ export class TailGateway implements OnModuleDestroy {
     private readonly captureService: MonitorCaptureService,
     @Inject('STORAGE_CLIENT')
     private readonly storage: StoragePort,
+    @Optional()
+    @Inject(ActorResolver)
+    private readonly actorResolver: ActorResolver | null = null,
   ) {
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
     this.logger.log('Monitor tail WebSocket gateway initialized');
@@ -55,6 +60,9 @@ export class TailGateway implements OnModuleDestroy {
    * enforce the demo-host restriction here.
    */
   handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer): void {
+    socket.on('error', () => {
+      socket.destroy();
+    });
     const host = request.headers.host || '';
     if (process.env.DEMO_HOSTNAME && host === process.env.DEMO_HOSTNAME) {
       this.logger.debug(`Tail upgrade rejected: demo host ${host}`);
@@ -76,9 +84,38 @@ export class TailGateway implements OnModuleDestroy {
       return;
     }
 
-    const requestedSessionId = sessionId;
+    this.authorizeUpgrade(request, socket, head, sessionId).catch(() => {
+      socket.destroy();
+    });
+  }
+
+  private isAuthEnabled(): boolean {
+    return this.actorResolver !== null && this.actorResolver.isEnabled() === true;
+  }
+
+  private async hasSession(request: IncomingMessage): Promise<boolean> {
+    if (this.actorResolver === null) {
+      return false;
+    }
+    const actor = await this.actorResolver.resolveFromUpgrade(request);
+    return actor !== null;
+  }
+
+  private async authorizeUpgrade(
+    request: IncomingMessage,
+    socket: Socket,
+    head: Buffer,
+    sessionId: string,
+  ): Promise<void> {
+    if (this.isAuthEnabled() === true) {
+      const authenticated = await this.hasSession(request);
+      if (authenticated === false) {
+        rejectUpgrade(socket, 401);
+        return;
+      }
+    }
     this.wss.handleUpgrade(request, socket, head, (ws) => {
-      this.handleConnection(ws, requestedSessionId).catch((err: Error) => {
+      this.handleConnection(ws, sessionId).catch((err: Error) => {
         this.logger.error(`Tail connection setup failed: ${err.message}`);
         send(ws, { type: 'error', error: err.message });
         ws.close();

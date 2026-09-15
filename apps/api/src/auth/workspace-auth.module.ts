@@ -6,6 +6,7 @@ import { hasRawDatabaseHandle } from '../storage/raw-database-handle';
 import { StorageModule } from '../storage/storage.module';
 import { WorkspaceController } from '../workspace/workspace.controller';
 import { WORKSPACE_STATUS, WorkspaceStatusService } from '../workspace/workspace-status.service';
+import { ActorResolver } from './actor-resolver';
 import { resolveAuthSecret } from './auth-secret';
 import { BetterAuthController } from './better-auth.controller';
 import {
@@ -15,6 +16,8 @@ import {
   runBetterAuthMigrations,
 } from './better-auth.factory';
 import { ActorGuard } from './guards/actor.guard';
+import { MutationGuard } from './guards/mutation.guard';
+import { RolesGuard } from './guards/roles.guard';
 import { resolveWorkspaceConfig, WORKSPACE_CONFIG, WorkspaceConfig } from './workspace-config';
 
 const DEFAULT_DATA_DIR = join(process.cwd(), 'data');
@@ -65,10 +68,13 @@ export class WorkspaceAuthModule {
     const config = resolveWorkspaceConfig(process.env);
     const providers: Provider[] = [
       { provide: WORKSPACE_CONFIG, useValue: config },
+      ActorResolver,
       { provide: APP_GUARD, useClass: ActorGuard },
+      { provide: APP_GUARD, useClass: RolesGuard },
+      { provide: APP_GUARD, useClass: MutationGuard },
     ];
     const controllers: Type<unknown>[] = [];
-    const exports: string[] = [WORKSPACE_CONFIG];
+    const exports: (string | Type<unknown>)[] = [WORKSPACE_CONFIG, ActorResolver];
     if (config.enabled === true) {
       providers.push({
         provide: BETTER_AUTH,

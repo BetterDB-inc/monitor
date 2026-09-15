@@ -3,6 +3,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { BETTER_AUTH, createBetterAuth } from '../auth/better-auth.factory';
 import { BetterAuthController } from '../auth/better-auth.controller';
+import { ActorResolver } from '../auth/actor-resolver';
 import { ActorGuard } from '../auth/guards/actor.guard';
 import { resolveWorkspaceConfig, WORKSPACE_CONFIG } from '../auth/workspace-config';
 import { WorkspaceController } from './workspace.controller';
@@ -22,6 +23,7 @@ describe('GET /workspace/me', () => {
       providers: [
         { provide: BETTER_AUTH, useValue: auth },
         { provide: WORKSPACE_CONFIG, useValue: config },
+        ActorResolver,
         { provide: APP_GUARD, useClass: ActorGuard },
       ],
     }).compile();

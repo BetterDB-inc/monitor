@@ -4,6 +4,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import type { Actor } from '@betterdb/shared';
+import { ActorResolver } from '../actor-resolver';
 import type { BetterAuthInstance } from '../better-auth.factory';
 import { CLIENT_IP_HEADER, createBetterAuth } from '../better-auth.factory';
 import { resolveWorkspaceConfig, WorkspaceConfig } from '../workspace-config';
@@ -145,28 +146,30 @@ describe('ActorGuard', () => {
   });
 
   it('allows everything with a null actor when the workspace is disabled', async () => {
-    const guard = new ActorGuard(resolveWorkspaceConfig({ WORKSPACE_DISABLED: 'true' }), null);
+    const guard = new ActorGuard(
+      new ActorResolver(resolveWorkspaceConfig({ WORKSPACE_DISABLED: 'true' }), null),
+    );
     const request: FakeRequest = { url: '/connections', headers: {} };
     expect(await guard.canActivate(contextFor(request))).toBe(true);
     expect(request.actor).toBeNull();
   });
 
   it('allows public paths without a session', async () => {
-    const guard = new ActorGuard(config, auth);
+    const guard = new ActorGuard(new ActorResolver(config, auth));
     const request: FakeRequest = { url: '/auth/sign-in/email?x=1', headers: {} };
     expect(await guard.canActivate(contextFor(request))).toBe(true);
     expect(request.actor).toBeNull();
   });
 
   it('rejects protected paths without a session with 401', async () => {
-    const guard = new ActorGuard(config, auth);
+    const guard = new ActorGuard(new ActorResolver(config, auth));
     await expect(
       guard.canActivate(contextFor({ url: '/connections', headers: {} })),
     ).rejects.toBeInstanceOf(UnauthorizedException);
   });
 
   it('fails closed when the workspace is enabled but no auth instance is wired', async () => {
-    const guard = new ActorGuard(config, null);
+    const guard = new ActorGuard(new ActorResolver(config, null));
     await expect(
       guard.canActivate(contextFor({ url: '/connections', headers: {} })),
     ).rejects.toBeInstanceOf(ServiceUnavailableException);
@@ -177,7 +180,7 @@ describe('ActorGuard', () => {
   });
 
   it('treats a malformed session cookie as signed out', async () => {
-    const guard = new ActorGuard(config, auth);
+    const guard = new ActorGuard(new ActorResolver(config, auth));
     const cookieName = cookie.split('=')[0];
     const request: FakeRequest = {
       url: '/connections',
@@ -190,7 +193,7 @@ describe('ActorGuard', () => {
   });
 
   it('resolves the actor from a session cookie', async () => {
-    const guard = new ActorGuard(config, auth);
+    const guard = new ActorGuard(new ActorResolver(config, auth));
     const request: FakeRequest = { url: '/api/connections', headers: { cookie } };
     expect(await guard.canActivate(contextFor(request))).toBe(true);
     expect(request.actor).toEqual(
@@ -205,21 +208,21 @@ describe('ActorGuard', () => {
   });
 
   it('rejects /system/connect-defaults without a session', async () => {
-    const guard = new ActorGuard(config, auth);
+    const guard = new ActorGuard(new ActorResolver(config, auth));
     await expect(
       guard.canActivate(contextFor({ url: '/api/system/connect-defaults', headers: {} })),
     ).rejects.toBeInstanceOf(UnauthorizedException);
   });
 
   it('allows /system/workspace without a session', async () => {
-    const guard = new ActorGuard(config, auth);
+    const guard = new ActorGuard(new ActorResolver(config, auth));
     const request: FakeRequest = { url: '/api/system/workspace', headers: {} };
     expect(await guard.canActivate(contextFor(request))).toBe(true);
     expect(request.actor).toBeNull();
   });
 
   it('rejects an mcp proposal approval without a session', async () => {
-    const guard = new ActorGuard(config, auth);
+    const guard = new ActorGuard(new ActorResolver(config, auth));
     await expect(
       guard.canActivate(
         contextFor({ url: '/api/mcp/cache-proposals/p1/approve', headers: {}, method: 'POST' }),
@@ -228,14 +231,14 @@ describe('ActorGuard', () => {
   });
 
   it('still serves mcp reads without a session', async () => {
-    const guard = new ActorGuard(config, auth);
+    const guard = new ActorGuard(new ActorResolver(config, auth));
     const request: FakeRequest = { url: '/api/mcp/instances', headers: {}, method: 'GET' };
     expect(await guard.canActivate(contextFor(request))).toBe(true);
     expect(request.actor).toBeNull();
   });
 
   it('overrides a client-supplied ip header with the socket address', async () => {
-    const guard = new ActorGuard(config, auth);
+    const guard = new ActorGuard(new ActorResolver(config, auth));
     const getSession = jest.spyOn(auth.api, 'getSession');
     const request: FakeRequest = {
       url: '/api/connections',
@@ -249,7 +252,7 @@ describe('ActorGuard', () => {
   });
 
   it('forwards a renewed session cookie to the reply', async () => {
-    const guard = new ActorGuard(config, auth);
+    const guard = new ActorGuard(new ActorResolver(config, auth));
     const getSession = jest.spyOn(auth.api, 'getSession');
     getSession.mockResolvedValueOnce({
       headers: new Headers([['set-cookie', 'better-auth.session_token=x; Max-Age=604800']]),
@@ -266,7 +269,7 @@ describe('ActorGuard', () => {
   });
 
   it('leaves the reply untouched when the session carries no set-cookie', async () => {
-    const guard = new ActorGuard(config, auth);
+    const guard = new ActorGuard(new ActorResolver(config, auth));
     const getSession = jest.spyOn(auth.api, 'getSession');
     getSession.mockResolvedValueOnce({
       headers: new Headers(),

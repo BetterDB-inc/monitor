@@ -66,6 +66,7 @@ curl -X DELETE http://localhost:3001/connections/{id}
 #### Via Web UI
 
 Use the connection selector in the top navigation bar to:
+
 - View all registered connections and their status
 - Switch between connections (data displayed is scoped to selected connection)
 - Add new connections with the "+" button
@@ -88,6 +89,7 @@ If no header is provided, the default connection is used.
 ### Webhooks and Connections
 
 Webhooks can be:
+
 - **Global**: Fire for events from any connection (created without `X-Connection-Id`)
 - **Connection-scoped**: Fire only for events from a specific connection (created with `X-Connection-Id`)
 
@@ -108,11 +110,11 @@ curl -X POST http://localhost:3001/webhooks \
 
 When using **BetterDB Cloud**, each workspace runs in an isolated container with a restricted outbound network policy. The following port ranges are permitted for direct database connections:
 
-| Port range | Protocol | Use case |
-|------------|----------|----------|
-| `443` | TCP | HTTPS/TLS connections |
-| `2000–2999` | TCP | Managed Redis/Valkey providers that use ports in this range |
-| `6000–6999` | TCP | Standard Redis/Valkey (6379), TLS (6380), Azure Enterprise (6380), etc. |
+| Port range  | Protocol | Use case                                                                |
+| ----------- | -------- | ----------------------------------------------------------------------- |
+| `443`       | TCP      | HTTPS/TLS connections                                                   |
+| `2000–2999` | TCP      | Managed Redis/Valkey providers that use ports in this range             |
+| `6000–6999` | TCP      | Standard Redis/Valkey (6379), TLS (6380), Azure Enterprise (6380), etc. |
 
 A small number of sensitive infrastructure ports within these ranges are blocked (e.g. 2375–2376, 2379–2380, 6443). If your database runs on a port outside these ranges, use the [BetterDB Agent](./agent-connection.md) instead — the agent runs in your own network and connects outbound on port 443, so there are no port restrictions on your side.
 
@@ -121,6 +123,7 @@ A small number of sensitive infrastructure ports within these ranges are blocked
 ### Data Isolation
 
 All stored data is isolated by connection:
+
 - Audit trail entries
 - Client analytics snapshots
 - Slowlog/Commandlog entries
@@ -128,6 +131,7 @@ All stored data is isolated by connection:
 - Key analytics snapshots
 
 This means:
+
 - Querying `/audit/entries` with `X-Connection-Id: A` returns only data from connection A
 - Prometheus metrics are labeled with `connection="host:port"` for filtering
 - Dashboard displays data for the currently selected connection
@@ -136,22 +140,22 @@ This means:
 
 ### Database Connection
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `DB_HOST` | Yes | `localhost` | Valkey/Redis host to monitor |
-| `DB_PORT` | No | `6379` | Valkey/Redis port |
-| `DB_USERNAME` | No | `default` | Valkey/Redis ACL username |
-| `DB_PASSWORD` | No | - | Valkey/Redis password |
-| `DB_TYPE` | No | `auto` | Database type: `auto`, `valkey`, or `redis` |
+| Variable      | Required | Default     | Description                                 |
+| ------------- | -------- | ----------- | ------------------------------------------- |
+| `DB_HOST`     | Yes      | `localhost` | Valkey/Redis host to monitor                |
+| `DB_PORT`     | No       | `6379`      | Valkey/Redis port                           |
+| `DB_USERNAME` | No       | `default`   | Valkey/Redis ACL username                   |
+| `DB_PASSWORD` | No       | -           | Valkey/Redis password                       |
+| `DB_TYPE`     | No       | `auto`      | Database type: `auto`, `valkey`, or `redis` |
 
 ### Storage Backend
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `STORAGE_TYPE` | No | `memory` | Storage backend: `memory`, `postgres`, `sqlite`, or `turso` |
-| `STORAGE_URL` | Conditional | - | PostgreSQL connection URL (required if `STORAGE_TYPE=postgres`), or libSQL URL (required if `STORAGE_TYPE=turso`) |
-| `STORAGE_AUTH_TOKEN` | Conditional | - | Turso auth token (startup requires it when `STORAGE_URL` uses `libsql://`, and rejects it when `STORAGE_URL` uses `http://`; a hosted `https://` endpoint needs it too but is not checked at startup - see below) |
-| `STORAGE_SQLITE_FILEPATH` | No | `./data/audit.db` | SQLite database file path (only for `STORAGE_TYPE=sqlite`) |
+| Variable                  | Required    | Default           | Description                                                                                                                                                                                                       |
+| ------------------------- | ----------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `STORAGE_TYPE`            | No          | `memory`          | Storage backend: `memory`, `postgres`, `sqlite`, or `turso`                                                                                                                                                       |
+| `STORAGE_URL`             | Conditional | -                 | PostgreSQL connection URL (required if `STORAGE_TYPE=postgres`), or libSQL URL (required if `STORAGE_TYPE=turso`)                                                                                                 |
+| `STORAGE_AUTH_TOKEN`      | Conditional | -                 | Turso auth token (startup requires it when `STORAGE_URL` uses `libsql://`, and rejects it when `STORAGE_URL` uses `http://`; a hosted `https://` endpoint needs it too but is not checked at startup - see below) |
+| `STORAGE_SQLITE_FILEPATH` | No          | `./data/audit.db` | SQLite database file path (only for `STORAGE_TYPE=sqlite`)                                                                                                                                                        |
 
 **Warning**: `memory` is for development and testing only. Users and sessions live in the process, so a restart loses them, the instance returns to the register screen, and the next visitor claims the owner account. Use `sqlite` or `postgres` for anything other people can reach.
 
@@ -165,10 +169,10 @@ This means:
 
 ### Application Settings
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `PORT` | No | `3001` | Application HTTP port |
-| `NODE_ENV` | No | `production` | Node environment (`production` or `development`) |
+| Variable   | Required | Default      | Description                                      |
+| ---------- | -------- | ------------ | ------------------------------------------------ |
+| `PORT`     | No       | `3001`       | Application HTTP port                            |
+| `NODE_ENV` | No       | `production` | Node environment (`production` or `development`) |
 
 ### Security
 
@@ -182,6 +186,8 @@ This means:
 | `TRUST_PROXY` | No | `false` | Trust `X-Forwarded-For`, `X-Forwarded-Host` and `X-Forwarded-Proto`. Set to a comma-separated list of proxy addresses/CIDRs (`10.0.0.0/8,127.0.0.1`) so client IPs, rate limits and the CSRF origin check see the browser-facing host, or to `true` when the API is only reachable through the proxy. A hop count (`1`) is refused with a warning: Fastify's hop-count matching ignores the connecting address, so anyone who reaches the API directly can spoof the headers. Leave unset when the API is reachable directly |
 | `AUTH_BROKER_URL` | No | `https://betterdb.com` | Origin of the BetterDB sign-in broker (used from phase 5) |
 
+**Roles**: The first account to register becomes the workspace owner, who holds the `admin` role. Admins can change anything. Members are read-only: every `POST`, `PUT`, `PATCH`, and `DELETE` request answers `403` except signing in/out and a small set of read-only `POST` endpoints (vector-search similarity search, profiling, and full-text search, plus the monitor session preflight check, which run a query but do not mutate data). The browser CLI and the monitor tail both require a signed-in session — an unauthenticated socket is rejected before the WebSocket handshake completes — and a member's CLI session is restricted to read-only commands regardless of `BETTERDB_UNSAFE_CLI`; `CONFIG`, `ACL`, `DEBUG`, and `CLIENT` are refused for members outright because they expose server configuration and credentials, and `SLOWLOG RESET`, `COMMANDLOG RESET`, and `LATENCY RESET` are refused because they clear diagnostic state. Members can read monitor capture sessions, including the live tail; captured values are redacted only when `MONITOR_REDACT_VALUES=true`. Invitations arrive in phase 3; until then, the only way to add a member is for an operator to create the account directly in the database.
+
 **Password Encryption**: When `ENCRYPTION_KEY` is set, all connection passwords are encrypted at rest using envelope encryption (AES-256-GCM). Each password gets a unique encryption key (DEK) that is itself encrypted with a master key (KEK) derived from your `ENCRYPTION_KEY`. The same encryption covers SSH tunnel secrets (SSH password, key passphrase, and inline private keys).
 
 - If not set, passwords are stored in plaintext (a warning is logged at startup)
@@ -194,9 +200,9 @@ This means:
 
 A connection can reach its database through an SSH bastion/jump host (single hop) instead of connecting directly. Configure it per-connection via the web UI ("Connect via SSH tunnel") or the connection API (`sshTunnel` field). Authentication is a password or a private key.
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `BETTERDB_SSH_KEY_DIR` | No | - | Directory that server-side SSH private keys must live in. Enables the "server file path" key source; a connection's `privateKeyPath` must resolve inside this directory. Unset disables file-based keys. |
+| Variable               | Required | Default | Description                                                                                                                                                                                              |
+| ---------------------- | -------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BETTERDB_SSH_KEY_DIR` | No       | -       | Directory that server-side SSH private keys must live in. Enables the "server file path" key source; a connection's `privateKeyPath` must resolve inside this directory. Unset disables file-based keys. |
 
 **Private key sources**:
 
@@ -215,24 +221,24 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 
 ### Audit Trail
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `AUDIT_POLL_INTERVAL_MS` | No | `60000` | ACL audit polling interval (milliseconds) |
+| Variable                 | Required | Default | Description                               |
+| ------------------------ | -------- | ------- | ----------------------------------------- |
+| `AUDIT_POLL_INTERVAL_MS` | No       | `60000` | ACL audit polling interval (milliseconds) |
 
 ### Anomaly Detection
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `ANOMALY_DETECTION_ENABLED` | No | `true` | Enable anomaly detection features (Pro tier required) |
-| `ANOMALY_POLL_INTERVAL_MS` | No | `1000` | Anomaly detection polling interval (milliseconds) |
-| `ANOMALY_CACHE_TTL_MS` | No | `3600000` | Anomaly detection cache TTL (milliseconds) |
-| `ANOMALY_PROMETHEUS_INTERVAL_MS` | No | `30000` | Prometheus summary update interval (milliseconds) |
+| Variable                         | Required | Default   | Description                                           |
+| -------------------------------- | -------- | --------- | ----------------------------------------------------- |
+| `ANOMALY_DETECTION_ENABLED`      | No       | `true`    | Enable anomaly detection features (Pro tier required) |
+| `ANOMALY_POLL_INTERVAL_MS`       | No       | `1000`    | Anomaly detection polling interval (milliseconds)     |
+| `ANOMALY_CACHE_TTL_MS`           | No       | `3600000` | Anomaly detection cache TTL (milliseconds)            |
+| `ANOMALY_PROMETHEUS_INTERVAL_MS` | No       | `30000`   | Prometheus summary update interval (milliseconds)     |
 
 ### Client Analytics
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `CLIENT_ANALYTICS_POLL_INTERVAL_MS` | No | `60000` | Client analytics polling interval (milliseconds) |
+| Variable                            | Required | Default | Description                                      |
+| ----------------------------------- | -------- | ------- | ------------------------------------------------ |
+| `CLIENT_ANALYTICS_POLL_INTERVAL_MS` | No       | `60000` | Client analytics polling interval (milliseconds) |
 
 ### Data Retention
 
@@ -281,18 +287,18 @@ environment? Activate an offline license.”** See
 **[Offline & Air-Gapped Licenses](./offline-licenses.md)** for the full flow,
 verification precedence, and key-rotation runbook.
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `BETTERDB_LICENSE_KEY` | No | - | Online license key (Option 1); validated against `ENTITLEMENT_URL`. |
-| `BETTERDB_OFFLINE_LICENSE` | No | - | Offline license token as a JWT string (Option 2). |
-| `BETTERDB_OFFLINE_LICENSE_FILE` | No | - | Path to an offline license `.jwt` (Option 2); falls back to `<data-dir>/license-offline.jwt`. |
-| `BETTERDB_DATA_DIR` | No | `/app/data` (Docker) / `./data` (local) | Directory for persisted license state (`license.jwt`, `license-offline.jwt`, `license-clock.json`), written mode `0600`. |
-| `BETTERDB_TELEMETRY` | No | `true` | Enable anonymous telemetry (set `false` to disable; force-disabled in air-gapped mode). |
-| `ENTITLEMENT_URL` | No | `https://www.betterdb.com/api/v1/entitlements` | Entitlement validation endpoint (Option 1). |
-| `LICENSE_ALLOW_UNSIGNED` | No | `false` | Accept unsigned entitlement responses from a legacy server. Use only during migration — an unsigned paid grant is otherwise refused. |
-| `LICENSE_CACHE_TTL_MS` | No | `3600000` | License cache TTL (milliseconds) |
-| `LICENSE_MAX_STALE_MS` | No | `604800000` | Maximum stale license age (milliseconds) |
-| `LICENSE_TIMEOUT_MS` | No | `10000` | License validation timeout (milliseconds) |
+| Variable                        | Required | Default                                        | Description                                                                                                                          |
+| ------------------------------- | -------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `BETTERDB_LICENSE_KEY`          | No       | -                                              | Online license key (Option 1); validated against `ENTITLEMENT_URL`.                                                                  |
+| `BETTERDB_OFFLINE_LICENSE`      | No       | -                                              | Offline license token as a JWT string (Option 2).                                                                                    |
+| `BETTERDB_OFFLINE_LICENSE_FILE` | No       | -                                              | Path to an offline license `.jwt` (Option 2); falls back to `<data-dir>/license-offline.jwt`.                                        |
+| `BETTERDB_DATA_DIR`             | No       | `/app/data` (Docker) / `./data` (local)        | Directory for persisted license state (`license.jwt`, `license-offline.jwt`, `license-clock.json`), written mode `0600`.             |
+| `BETTERDB_TELEMETRY`            | No       | `true`                                         | Enable anonymous telemetry (set `false` to disable; force-disabled in air-gapped mode).                                              |
+| `ENTITLEMENT_URL`               | No       | `https://www.betterdb.com/api/v1/entitlements` | Entitlement validation endpoint (Option 1).                                                                                          |
+| `LICENSE_ALLOW_UNSIGNED`        | No       | `false`                                        | Accept unsigned entitlement responses from a legacy server. Use only during migration — an unsigned paid grant is otherwise refused. |
+| `LICENSE_CACHE_TTL_MS`          | No       | `3600000`                                      | License cache TTL (milliseconds)                                                                                                     |
+| `LICENSE_MAX_STALE_MS`          | No       | `604800000`                                    | Maximum stale license age (milliseconds)                                                                                             |
+| `LICENSE_TIMEOUT_MS`            | No       | `10000`                                        | License validation timeout (milliseconds)                                                                                            |
 
 > **Persisting license state (Docker/Kubernetes):** the signed-token outage grace
 > (Option 1) and UI/runtime-activated offline licenses (Option 2) are written to the
@@ -309,6 +315,7 @@ verification precedence, and key-rotation runbook.
 > ```
 
 **Telemetry**: BetterDB Monitor collects anonymous usage telemetry to help improve the product. No personally identifiable information is collected. The telemetry includes:
+
 - Instance ID (deterministic hash derived from DB_HOST, DB_PORT, STORAGE_URL, and license key)
 - Application version
 - Platform and architecture (e.g., linux, x64)
@@ -319,9 +326,9 @@ To disable telemetry, set `BETTERDB_TELEMETRY=false` in your environment variabl
 
 ### Version Update Checks
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `VERSION_CHECK_INTERVAL_MS` | No | `3600000` | Version check interval (milliseconds, default: 1 hour) |
+| Variable                    | Required | Default   | Description                                            |
+| --------------------------- | -------- | --------- | ------------------------------------------------------ |
+| `VERSION_CHECK_INTERVAL_MS` | No       | `3600000` | Version check interval (milliseconds, default: 1 hour) |
 
 BetterDB Monitor automatically checks for new versions and displays an update banner in the web UI when a newer version is available. Version information is obtained from:
 
@@ -330,11 +337,11 @@ BetterDB Monitor automatically checks for new versions and displays an update ba
 
 ### Key Analytics (Pro Tier)
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `KEY_ANALYTICS_SAMPLE_SIZE` | No | `10000` | Number of keys to sample for analytics |
-| `KEY_ANALYTICS_SCAN_BATCH_SIZE` | No | `1000` | Batch size for key scanning operations |
-| `KEY_ANALYTICS_INTERVAL_MS` | No | `300000` | Key analytics collection interval (milliseconds) |
+| Variable                        | Required | Default  | Description                                      |
+| ------------------------------- | -------- | -------- | ------------------------------------------------ |
+| `KEY_ANALYTICS_SAMPLE_SIZE`     | No       | `10000`  | Number of keys to sample for analytics           |
+| `KEY_ANALYTICS_SCAN_BATCH_SIZE` | No       | `1000`   | Batch size for key scanning operations           |
+| `KEY_ANALYTICS_INTERVAL_MS`     | No       | `300000` | Key analytics collection interval (milliseconds) |
 
 Key analytics history follows the standard retention policy (see [Data Retention](#data-retention)): self-hosted installs keep it until a retention window is configured; BetterDB Cloud prunes it at the tier window (Community 7 days, Pro 90, Enterprise 365).
 
@@ -342,14 +349,14 @@ Key analytics history follows the standard retention policy (see [Data Retention
 
 ### AI Features (Experimental)
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `AI_ENABLED` | No | `false` | Enable AI-powered features (chatbot, RAG) |
-| `OLLAMA_BASE_URL` | No | `http://localhost:11434` | Ollama API endpoint for LLM inference |
-| `OLLAMA_KEEP_ALIVE` | No | `24h` | Keep-alive duration for Ollama models |
-| `AI_USE_LLM_CLASSIFICATION` | No | `false` | Use LLM for anomaly classification |
-| `LANCEDB_PATH` | No | `./data/lancedb` | Path to LanceDB vector database |
-| `VALKEY_DOCS_PATH` | No | `./data/valkey-docs` | Path to indexed Valkey documentation |
+| Variable                    | Required | Default                  | Description                               |
+| --------------------------- | -------- | ------------------------ | ----------------------------------------- |
+| `AI_ENABLED`                | No       | `false`                  | Enable AI-powered features (chatbot, RAG) |
+| `OLLAMA_BASE_URL`           | No       | `http://localhost:11434` | Ollama API endpoint for LLM inference     |
+| `OLLAMA_KEEP_ALIVE`         | No       | `24h`                    | Keep-alive duration for Ollama models     |
+| `AI_USE_LLM_CLASSIFICATION` | No       | `false`                  | Use LLM for anomaly classification        |
+| `LANCEDB_PATH`              | No       | `./data/lancedb`         | Path to LanceDB vector database           |
+| `VALKEY_DOCS_PATH`          | No       | `./data/valkey-docs`     | Path to indexed Valkey documentation      |
 
 **Note**: AI features are experimental and require explicit opt-in. You must have Ollama running locally or accessible at the configured URL.
 
@@ -498,12 +505,12 @@ Once running, access the web interface at:
 
 ## HTTP Endpoints
 
-| Endpoint | Description |
-|----------|-------------|
-| `/` | Web UI dashboard |
-| `/health` | Health check endpoint |
-| `/api` | Swagger/OpenAPI documentation |
-| `/api/prometheus/metrics` | Prometheus metrics endpoint |
+| Endpoint                  | Description                   |
+| ------------------------- | ----------------------------- |
+| `/`                       | Web UI dashboard              |
+| `/health`                 | Health check endpoint         |
+| `/api`                    | Swagger/OpenAPI documentation |
+| `/api/prometheus/metrics` | Prometheus metrics endpoint   |
 
 All API endpoints are prefixed with `/api` when accessed through the web server.
 
@@ -536,99 +543,99 @@ member takes effect within that window rather than on the next request.
 
 ### Health
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health status of API server, Valkey/Redis, and storage backend |
+| Endpoint  | Method | Description                                                    |
+| --------- | ------ | -------------------------------------------------------------- |
+| `/health` | GET    | Health status of API server, Valkey/Redis, and storage backend |
 
 ### Version
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/version` | GET | Current and latest version info, update availability |
+| Endpoint   | Method | Description                                          |
+| ---------- | ------ | ---------------------------------------------------- |
+| `/version` | GET    | Current and latest version info, update availability |
 
 ### Settings
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/settings` | GET | Get current application settings |
-| `/settings` | PUT | Update application settings |
-| `/settings/reset` | POST | Reset settings to defaults from environment variables |
+| Endpoint          | Method | Description                                           |
+| ----------------- | ------ | ----------------------------------------------------- |
+| `/settings`       | GET    | Get current application settings                      |
+| `/settings`       | PUT    | Update application settings                           |
+| `/settings/reset` | POST   | Reset settings to defaults from environment variables |
 
 ### Audit Trail
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/audit/entries` | GET | Get ACL audit log entries with optional filters |
-| `/audit/stats` | GET | Get aggregated audit statistics |
-| `/audit/failed-auth` | GET | Get failed authentication attempts |
-| `/audit/by-user` | GET | Get audit entries for a specific username |
+| Endpoint             | Method | Description                                     |
+| -------------------- | ------ | ----------------------------------------------- |
+| `/audit/entries`     | GET    | Get ACL audit log entries with optional filters |
+| `/audit/stats`       | GET    | Get aggregated audit statistics                 |
+| `/audit/failed-auth` | GET    | Get failed authentication attempts              |
+| `/audit/by-user`     | GET    | Get audit entries for a specific username       |
 
 ### Client Analytics
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/client-analytics/snapshots` | GET | Get historical client connection snapshots |
-| `/client-analytics/timeseries` | GET | Get aggregated client counts over time |
-| `/client-analytics/stats` | GET | Get client analytics statistics |
-| `/client-analytics/history` | GET | Get connection history for specific client |
-| `/client-analytics/cleanup` | DELETE | Manually trigger cleanup of old data |
-| `/client-analytics/command-distribution` | GET | Get command frequency distribution by client |
-| `/client-analytics/idle-connections` | GET | Identify connections idle for extended periods |
-| `/client-analytics/buffer-anomalies` | GET | Detect clients with unusual buffer sizes |
-| `/client-analytics/activity-timeline` | GET | Get activity over time for correlation |
-| `/client-analytics/spike-detection` | GET | Automatically detect unusual activity spikes |
+| Endpoint                                 | Method | Description                                    |
+| ---------------------------------------- | ------ | ---------------------------------------------- |
+| `/client-analytics/snapshots`            | GET    | Get historical client connection snapshots     |
+| `/client-analytics/timeseries`           | GET    | Get aggregated client counts over time         |
+| `/client-analytics/stats`                | GET    | Get client analytics statistics                |
+| `/client-analytics/history`              | GET    | Get connection history for specific client     |
+| `/client-analytics/cleanup`              | DELETE | Manually trigger cleanup of old data           |
+| `/client-analytics/command-distribution` | GET    | Get command frequency distribution by client   |
+| `/client-analytics/idle-connections`     | GET    | Identify connections idle for extended periods |
+| `/client-analytics/buffer-anomalies`     | GET    | Detect clients with unusual buffer sizes       |
+| `/client-analytics/activity-timeline`    | GET    | Get activity over time for correlation         |
+| `/client-analytics/spike-detection`      | GET    | Automatically detect unusual activity spikes   |
 
 ### Metrics
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/metrics/info` | GET | Parsed INFO command output |
-| `/metrics/slowlog` | GET | Slowlog entries |
-| `/metrics/slowlog/length` | GET | Current slowlog length |
-| `/metrics/slowlog` | DELETE | Reset slowlog |
-| `/metrics/slowlog/patterns` | GET | Aggregated slowlog pattern analysis |
-| `/metrics/commandlog` | GET | Commandlog entries (Valkey 8.1+) |
-| `/metrics/commandlog/length` | GET | Commandlog length (Valkey 8.1+) |
-| `/metrics/commandlog` | DELETE | Reset commandlog (Valkey 8.1+) |
-| `/metrics/commandlog/patterns` | GET | Commandlog pattern analysis (Valkey 8.1+) |
-| `/metrics/latency/latest` | GET | Latest latency monitoring events |
-| `/metrics/latency/history/:eventName` | GET | Latency history for specific event |
-| `/metrics/latency/histogram` | GET | Latency histogram for commands |
-| `/metrics/latency/doctor` | GET | Automated latency analysis report |
-| `/metrics/latency` | DELETE | Reset latency monitoring data |
-| `/metrics/memory/stats` | GET | Detailed memory usage statistics |
-| `/metrics/memory/doctor` | GET | Automated memory analysis report |
-| `/metrics/clients` | GET | List of currently connected clients |
-| `/metrics/clients/:id` | GET | Information about specific client |
-| `/metrics/clients` | DELETE | Terminate client connections |
-| `/metrics/acl/log` | GET | ACL security log entries |
-| `/metrics/acl/log` | DELETE | Clear ACL log |
-| `/metrics/role` | GET | Replication role and status |
-| `/metrics/cluster/info` | GET | Cluster information and status |
-| `/metrics/cluster/nodes` | GET | Information about all cluster nodes |
-| `/metrics/cluster/slot-stats` | GET | Per-slot statistics (Valkey 8.0+) |
-| `/metrics/config` | GET | Configuration values matching pattern |
-| `/metrics/config/:parameter` | GET | Value of specific config parameter |
-| `/metrics/dbsize` | GET | Number of keys in current database |
-| `/metrics/lastsave` | GET | Unix timestamp of last RDB save |
+| Endpoint                              | Method | Description                               |
+| ------------------------------------- | ------ | ----------------------------------------- |
+| `/metrics/info`                       | GET    | Parsed INFO command output                |
+| `/metrics/slowlog`                    | GET    | Slowlog entries                           |
+| `/metrics/slowlog/length`             | GET    | Current slowlog length                    |
+| `/metrics/slowlog`                    | DELETE | Reset slowlog                             |
+| `/metrics/slowlog/patterns`           | GET    | Aggregated slowlog pattern analysis       |
+| `/metrics/commandlog`                 | GET    | Commandlog entries (Valkey 8.1+)          |
+| `/metrics/commandlog/length`          | GET    | Commandlog length (Valkey 8.1+)           |
+| `/metrics/commandlog`                 | DELETE | Reset commandlog (Valkey 8.1+)            |
+| `/metrics/commandlog/patterns`        | GET    | Commandlog pattern analysis (Valkey 8.1+) |
+| `/metrics/latency/latest`             | GET    | Latest latency monitoring events          |
+| `/metrics/latency/history/:eventName` | GET    | Latency history for specific event        |
+| `/metrics/latency/histogram`          | GET    | Latency histogram for commands            |
+| `/metrics/latency/doctor`             | GET    | Automated latency analysis report         |
+| `/metrics/latency`                    | DELETE | Reset latency monitoring data             |
+| `/metrics/memory/stats`               | GET    | Detailed memory usage statistics          |
+| `/metrics/memory/doctor`              | GET    | Automated memory analysis report          |
+| `/metrics/clients`                    | GET    | List of currently connected clients       |
+| `/metrics/clients/:id`                | GET    | Information about specific client         |
+| `/metrics/clients`                    | DELETE | Terminate client connections              |
+| `/metrics/acl/log`                    | GET    | ACL security log entries                  |
+| `/metrics/acl/log`                    | DELETE | Clear ACL log                             |
+| `/metrics/role`                       | GET    | Replication role and status               |
+| `/metrics/cluster/info`               | GET    | Cluster information and status            |
+| `/metrics/cluster/nodes`              | GET    | Information about all cluster nodes       |
+| `/metrics/cluster/slot-stats`         | GET    | Per-slot statistics (Valkey 8.0+)         |
+| `/metrics/config`                     | GET    | Configuration values matching pattern     |
+| `/metrics/config/:parameter`          | GET    | Value of specific config parameter        |
+| `/metrics/dbsize`                     | GET    | Number of keys in current database        |
+| `/metrics/lastsave`                   | GET    | Unix timestamp of last RDB save           |
 
 ### Prometheus
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/prometheus/metrics` | GET | Prometheus-formatted metrics for scraping |
+| Endpoint                  | Method | Description                               |
+| ------------------------- | ------ | ----------------------------------------- |
+| `/api/prometheus/metrics` | GET    | Prometheus-formatted metrics for scraping |
 
 ## Runtime Settings
 
 The following settings can be modified at runtime via the `/settings` API endpoint without requiring an application restart:
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `auditPollIntervalMs` | `60000` | ACL audit log polling interval (milliseconds) |
-| `clientAnalyticsPollIntervalMs` | `60000` | Client analytics data collection interval (milliseconds) |
-| `anomalyPollIntervalMs` | `1000` | Anomaly detection polling interval (milliseconds) |
-| `anomalyCacheTtlMs` | `3600000` | Anomaly detection cache TTL (milliseconds) |
-| `anomalyPrometheusIntervalMs` | `30000` | Prometheus summary update interval (milliseconds) |
+| Setting                         | Default   | Description                                              |
+| ------------------------------- | --------- | -------------------------------------------------------- |
+| `auditPollIntervalMs`           | `60000`   | ACL audit log polling interval (milliseconds)            |
+| `clientAnalyticsPollIntervalMs` | `60000`   | Client analytics data collection interval (milliseconds) |
+| `anomalyPollIntervalMs`         | `1000`    | Anomaly detection polling interval (milliseconds)        |
+| `anomalyCacheTtlMs`             | `3600000` | Anomaly detection cache TTL (milliseconds)               |
+| `anomalyPrometheusIntervalMs`   | `30000`   | Prometheus summary update interval (milliseconds)        |
 
 ### Example: Update Settings
 
