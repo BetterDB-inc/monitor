@@ -36,6 +36,10 @@ export class ActorResolver {
     return this.auth !== null;
   }
 
+  enforcesMemberReadOnly(): boolean {
+    return true;
+  }
+
   async resolveSessionFromHeaders(
     headers: IncomingHttpHeaders,
     clientIp: string,

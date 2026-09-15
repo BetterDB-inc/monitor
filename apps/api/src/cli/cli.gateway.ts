@@ -102,7 +102,14 @@ export class CliGateway implements OnModuleDestroy {
     if (actor === null) {
       return { sessionValid: false, readOnly: true };
     }
-    return { sessionValid: true, readOnly: actor.role === 'member' };
+    return { sessionValid: true, readOnly: this.isReadOnly(actor) };
+  }
+
+  private isReadOnly(actor: Actor): boolean {
+    if (this.actorResolver === null || this.actorResolver.enforcesMemberReadOnly() === false) {
+      return false;
+    }
+    return actor.role === 'member';
   }
 
   private expireSession(ws: WebSocket): void {

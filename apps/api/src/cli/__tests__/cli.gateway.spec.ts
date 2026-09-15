@@ -56,13 +56,20 @@ function makeRequest(cookie?: string): IncomingMessage {
   } as unknown as IncomingMessage;
 }
 
-function resolverWith(enabled: boolean, actor: Actor | null): ActorResolver {
+function resolverWith(
+  enabled: boolean,
+  actor: Actor | null,
+  enforcesMemberReadOnly = true,
+): ActorResolver {
   return {
     isEnabled: () => {
       return enabled;
     },
     isReady: () => {
       return true;
+    },
+    enforcesMemberReadOnly: () => {
+      return enforcesMemberReadOnly;
     },
     resolveFromUpgrade: jest.fn().mockResolvedValue(actor),
   } as unknown as ActorResolver;
@@ -188,6 +195,18 @@ describe('CliGateway command execution', () => {
     sendExecute(ws);
     await flush();
     expect(execute).toHaveBeenCalledWith('SET a b', 'c1', { readOnly: true });
+  });
+
+  it('executes member commands unrestricted when the resolver does not enforce read-only', async () => {
+    const execute = executeMock();
+    const gateway = new CliGateway(
+      { execute } as unknown as CliService,
+      resolverWith(true, member, false),
+    );
+    const ws = connect(gateway);
+    sendExecute(ws);
+    await flush();
+    expect(execute).toHaveBeenCalledWith('SET a b', 'c1', { readOnly: false });
   });
 
   it('executes admin commands without the read-only flag', async () => {

@@ -103,6 +103,11 @@ describe('ActorResolver', () => {
     expect(resolver.isReady()).toBe(true);
   });
 
+  it('keeps workspace members read-only', () => {
+    const resolver = new ActorResolver(config, auth);
+    expect(resolver.enforcesMemberReadOnly()).toBe(true);
+  });
+
   describe('resolveSessionFromHeaders', () => {
     it('returns the renewed session cookies alongside the actor', async () => {
       const resolver = new ActorResolver(config, auth);
