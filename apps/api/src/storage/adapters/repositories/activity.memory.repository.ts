@@ -26,7 +26,7 @@ function matches(record: ActivityRecord, query: ActivityListQuery): boolean {
 }
 
 function clone(record: ActivityRecord): ActivityRecord {
-  return { ...record, details: { ...record.details } };
+  return structuredClone(record);
 }
 
 export class ActivityMemoryRepository implements ActivityRepository {

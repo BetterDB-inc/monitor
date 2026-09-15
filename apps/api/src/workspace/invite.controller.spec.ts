@@ -166,13 +166,25 @@ describe('InviteController', () => {
   });
 
   it('records auth.login for the accepted invitation', async () => {
+    const { token } = await invitations.create({
+      email: 'login-record@example.com',
+      role: 'member',
+      invitedBy: ownerId,
+    });
+    const accept = await app.inject({
+      method: 'POST',
+      url: `/invite/${token}/accept`,
+      headers: { 'content-type': 'application/json', origin: ORIGIN },
+      payload: { name: 'Login Record', password: 'login record horse battery' },
+    });
+    expect(accept.statusCode).toBe(201);
+
     const page = await storage.getActivityRepository().list({ limit: 50, action: 'auth.login' });
-    expect(page.items.length).toBeGreaterThanOrEqual(1);
-    const [latest] = page.items;
-    expect(latest.actorEmail).toBe('joiner@example.com');
-    expect(latest.actorVia).toBe('session');
-    expect(latest.statusCode).toBe(201);
-    expect(latest.details).toEqual({ method: 'invite' });
+    const login = page.items.find((item) => item.actorEmail === 'login-record@example.com');
+    expect(login).toBeDefined();
+    expect(login?.actorVia).toBe('session');
+    expect(login?.statusCode).toBe(201);
+    expect(login?.details).toEqual({ method: 'invite' });
   });
 
   it('rejects a weak password and leaves the invitation pending', async () => {

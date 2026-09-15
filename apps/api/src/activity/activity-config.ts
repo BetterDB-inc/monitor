@@ -5,14 +5,21 @@ export interface ActivityConfig {
   retentionDays: number;
 }
 
+export function parseActivityRetentionDays(raw: string | undefined): number | null {
+  const value = raw?.trim() ?? '';
+  if (/^\d+$/.test(value) === false) {
+    return null;
+  }
+  const parsed = Number(value);
+  if (Number.isSafeInteger(parsed) === false || parsed < 1) {
+    return null;
+  }
+  return parsed;
+}
+
 export function resolveActivityConfig(env: NodeJS.ProcessEnv): ActivityConfig {
-  const raw = env.ACTIVITY_RETENTION_DAYS;
-  if (raw === undefined || raw.trim().length === 0) {
-    return { retentionDays: DEFAULT_RETENTION_DAYS };
-  }
-  const parsed = Number.parseInt(raw, 10);
-  if (Number.isFinite(parsed) === false || parsed < 1) {
-    return { retentionDays: DEFAULT_RETENTION_DAYS };
-  }
-  return { retentionDays: parsed };
+  return {
+    retentionDays:
+      parseActivityRetentionDays(env.ACTIVITY_RETENTION_DAYS) ?? DEFAULT_RETENTION_DAYS,
+  };
 }

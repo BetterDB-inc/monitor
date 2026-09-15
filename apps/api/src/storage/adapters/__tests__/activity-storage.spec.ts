@@ -51,6 +51,20 @@ function describeRepository(name: string, open: () => Promise<StoragePort>): voi
       expect(page.next).toBeNull();
     });
 
+    it('isolates nested details from the caller after insert and list', async () => {
+      const saved = record({ id: 'nested', details: { args: ['a'], meta: { depth: 1 } } });
+      await repository.insert(saved);
+      (saved.details.args as string[]).push('inserted');
+      (saved.details.meta as { depth: number }).depth = 2;
+
+      const [listed] = (await repository.list({ limit: 10 })).items;
+      (listed.details.args as string[]).push('listed');
+      (listed.details.meta as { depth: number }).depth = 3;
+
+      const [stored] = (await repository.list({ limit: 10 })).items;
+      expect(stored.details).toEqual({ args: ['a'], meta: { depth: 1 } });
+    });
+
     it('lists newest first with id as the tie-breaker', async () => {
       await repository.insert(record({ id: 'a', occurredAt: 10 }));
       await repository.insert(record({ id: 'c', occurredAt: 30 }));
