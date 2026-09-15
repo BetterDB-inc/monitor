@@ -1,5 +1,6 @@
 import { INestApplication, Logger, RequestMethod, ValidationPipe } from '@nestjs/common';
 import { isCloudMode } from './common/utils/cloud-mode';
+import { requireCloudAuth } from './common/utils/cloud-auth-loader';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
@@ -86,16 +87,12 @@ async function bootstrap(): Promise<void> {
   // Register cloud auth middleware at Fastify level BEFORE any other middleware
   // This ensures it runs before static file serving
   if (isCloudMode()) {
-    try {
-      const {
-        CloudAuthMiddleware,
-      } = require('../../../proprietary/cloud-auth/cloud-auth.middleware');
-      const middleware = new CloudAuthMiddleware();
-      app.use((req: any, res: any, next: () => void) => middleware.use(req, res, next));
-      console.log('[CloudAuth] Middleware registered at Fastify level');
-    } catch {
-      console.warn('[CloudAuth] Failed to register middleware — proprietary module not found');
-    }
+    const { CloudAuthMiddleware } = requireCloudAuth(() =>
+      require('../../../proprietary/cloud-auth/cloud-auth.middleware'),
+    );
+    const middleware = new CloudAuthMiddleware();
+    app.use((req: any, res: any, next: () => void) => middleware.use(req, res, next));
+    console.log('[CloudAuth] Middleware registered at Fastify level');
   }
 
   // Register startup error handlers — report fatal errors within the first 60s

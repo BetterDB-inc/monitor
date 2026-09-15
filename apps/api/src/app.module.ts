@@ -30,6 +30,7 @@ import { PosthogProxyModule } from './posthog-proxy/posthog-proxy.module';
 import { SystemModule } from './system/system.module';
 import { MonitorModule } from './monitor/monitor.module';
 import { isCloudMode } from './common/utils/cloud-mode';
+import { requireCloudAuth } from './common/utils/cloud-auth-loader';
 import { CveModule } from './cve/cve.module';
 
 let AiModule: any = null;
@@ -147,13 +148,11 @@ if (isCloudMode()) {
 // Cloud auth module - uses proprietary implementation in cloud mode
 let CloudAuthModuleToUse: any = WorkspaceAuthModule.forRoot();
 if (isCloudMode()) {
-  try {
-    const proprietaryCloudAuth = require('../../../proprietary/cloud-auth/cloud-auth.module');
-    CloudAuthModuleToUse = proprietaryCloudAuth.ProprietaryCloudAuthModule;
-    console.log('[CloudAuth] Proprietary module loaded');
-  } catch {
-    // Proprietary module not available, use OSS no-op
-  }
+  const proprietaryCloudAuth = requireCloudAuth(() =>
+    require('../../../proprietary/cloud-auth/cloud-auth.module'),
+  );
+  CloudAuthModuleToUse = proprietaryCloudAuth.ProprietaryCloudAuthModule;
+  console.log('[CloudAuth] Proprietary module loaded');
 }
 
 const baseImports = [
