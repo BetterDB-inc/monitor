@@ -48,4 +48,19 @@ describe('CveAlertBanner', () => {
     expect(screen.getByText('Exploited (KEV) CVEs detected')).toBeInTheDocument();
     expect(screen.getByTestId('cve-alert-kev')).toBeInTheDocument();
   });
+
+  it('de-duplicates a shared CVE across cluster nodes into one badge', () => {
+    const critical = (cveId: string) =>
+      finding(cveId, {
+        advisory: { ...finding(cveId).advisory, severity: 'critical' },
+      });
+    const result = scanResult({
+      nodes: [node('1', '8.0.9', [critical('CVE-2026-00001')]), node('2', '8.0.9', [critical('CVE-2026-00001')])],
+    });
+
+    render(<CveAlertBanner result={result} />);
+
+    expect(screen.getByTestId('cve-alert-banner')).toBeInTheDocument();
+    expect(screen.getAllByTestId('cve-alert-CVE-2026-00001')).toHaveLength(1);
+  });
 });

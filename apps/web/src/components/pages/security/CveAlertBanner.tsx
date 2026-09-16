@@ -29,15 +29,18 @@ export function CveAlertBanner({ result }: CveAlertBannerProps) {
   const isCritical = critical > 0;
   const title = isCritical ? 'Critical CVEs detected' : 'Exploited (KEV) CVEs detected';
   // Critical first, then KEV, then the rest — so the badge row always covers
-  // what the count line advertises, in either mode.
-  const topIds = [...findings]
-    .sort((a, b) => {
-      const rank = (finding: CveFinding) =>
-        finding.advisory.severity === 'critical' ? 0 : finding.advisory.knownExploited === true ? 1 : 2;
-      return rank(a) - rank(b);
-    })
-    .slice(0, 3)
-    .map((finding) => finding.advisory.cveId);
+  // what the count line advertises, in either mode. De-duplicated by CVE id:
+  // a shared finding across cluster nodes must not repeat badges (or React
+  // keys).
+  const topIds = [...new Map(
+    [...findings]
+      .sort((a, b) => {
+        const rank = (finding: CveFinding) =>
+          finding.advisory.severity === 'critical' ? 0 : finding.advisory.knownExploited === true ? 1 : 2;
+        return rank(a) - rank(b);
+      })
+      .map((finding) => [finding.advisory.cveId, finding] as const),
+  ).keys()].slice(0, 3);
 
   return (
     <Alert

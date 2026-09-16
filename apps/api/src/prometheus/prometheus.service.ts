@@ -765,6 +765,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
     try {
       const scan = await this.storage.getCveScanResult(connectionId);
+  
+      if (this.perConnectionState.get(connectionId) !== state) {
+        return;
+      }
+      if (this.getConnectionLabel(connectionId) !== connLabel) {
+        return;
+      }
       if (!scan) {
         // No scan yet: drop any previously exported series so a deleted or
         // never-scanned connection does not page forever on stale values.

@@ -83,6 +83,7 @@ export const ENTERPRISE_EVENTS: WebhookEventType[] = [
 // ============================================================================
 
 import { Tier } from '../license/types';
+import type { CveWebhookFindingSummary } from '../types/cve';
 import type { MetricKind } from '../types/metric-forecasting.types';
 export { Tier };
 
@@ -519,13 +520,9 @@ export interface IWebhookEventsProService {
 
 /**
  * Shared CVE webhook finding summary (top 3 to keep payload bounded).
+ * Single source of truth lives in types/cve as CveWebhookFindingSummary.
  */
-export interface CveWebhookFinding {
-  cveId: string;
-  severity: string;
-  knownExploited: boolean;
-  fixedIn?: string;
-}
+export type CveWebhookFinding = CveWebhookFindingSummary;
 
 /**
  * Payload for cve.critical_detected (Pro).

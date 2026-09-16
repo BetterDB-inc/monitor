@@ -148,14 +148,3 @@ export interface CveWebhookFindingSummary {
   knownExploited: boolean;
   fixedIn?: string;
 }
-
-export interface CveWebhookData {
-  connectionId: string;
-  fingerprint: string;
-  datasetVersion: string;
-  criticalCount: number;
-  kevCount: number;
-  topFindings: CveWebhookFindingSummary[];
-  drift: boolean;
-  partial: boolean;
-}

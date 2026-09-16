@@ -137,4 +137,29 @@ describe('PrometheusService CVE metrics', () => {
     ).toBeNull();
     expect(await gaugeValue('betterdb_cve_dataset_stale', { connection: '10.0.0.1:6379' })).toBeNull();
   });
+
+  it('does not recreate CVE series when cleanup runs during the storage await', async () => {
+    buildService();
+    let resolveScan!: (value: unknown) => void;
+    storage.getCveScanResult.mockReturnValue(
+      new Promise((resolve) => {
+        resolveScan = resolve;
+      }),
+    );
+    const update = (service as unknown as { updateCveMetrics: (c: string, l: string) => Promise<void> }).updateCveMetrics.bind(service);
+
+    const pending = update(CONNECTION_ID, '10.0.0.1:6379');
+    // Connection removed mid-await: cleanup drops the series and the state.
+    service.cleanupConnectionMetrics(CONNECTION_ID);
+    resolveScan(scanFixture());
+    await pending;
+
+    // The resumed update must not rewrite gauges onto the detached state,
+    // which no later cleanup could find (forever-paging stale series).
+    expect(await gaugeValue('betterdb_cve_kev', { connection: '10.0.0.1:6379' })).toBeNull();
+    expect(
+      await gaugeValue('betterdb_cve_findings', { connection: '10.0.0.1:6379', severity: 'critical' }),
+    ).toBeNull();
+    expect(await gaugeValue('betterdb_cve_dataset_stale', { connection: '10.0.0.1:6379' })).toBeNull();
+  });
 });
