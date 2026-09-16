@@ -118,7 +118,7 @@ export function Members(): ReactElement {
   if (loading === true) {
     return (
       <div className="space-y-6">
-        <h1 className="text-3xl font-bold">Team</h1>
+        <h2 className="text-xl font-semibold">Team</h2>
         <p className="text-muted-foreground">Loading...</p>
       </div>
     );
@@ -143,7 +143,7 @@ export function Members(): ReactElement {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-3xl font-bold">Team</h1>
+      <h2 className="text-xl font-semibold">Team</h2>
       {error !== null && (
         <div className="p-3 rounded-md bg-destructive/5 text-destructive border border-destructive/20 text-sm">
           {error}

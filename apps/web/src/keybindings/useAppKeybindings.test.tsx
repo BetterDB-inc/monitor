@@ -3,16 +3,15 @@ import { fireEvent, render, renderHook, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { useAppKeybindings } from './useAppKeybindings';
 
-vi.mock('../components/ui/switch', () => ({
-  Switch: ({ checked, 'aria-label': label }: { checked?: boolean; 'aria-label'?: string }) => (
-    <button role="switch" aria-checked={checked} aria-label={label} />
-  ),
-}));
-
-import { ModeToggle } from '../components/ModeToggle';
+import { useTheme } from '../hooks/useTheme';
 import { SidebarProvider, useSidebar } from '../components/ui/sidebar';
 
 const noop = () => {};
+
+function ThemeReader() {
+  const { resolvedTheme } = useTheme();
+  return <span data-testid="theme">{resolvedTheme}</span>;
+}
 
 const ACTIONS = {
   toggleCli: noop,
@@ -41,8 +40,8 @@ describe('useAppKeybindings', () => {
     document.documentElement.classList.remove('dark');
   });
 
-  it('toggles the theme with no ModeToggle mounted', () => {
-    // The binding used to live inside ModeToggle, which the mobile sidebar
+  it('toggles the theme with no theme switch mounted', () => {
+    // The binding used to live inside the theme switch, which the mobile sidebar
     // renders in a Sheet — closed, the switch and its shortcut both stopped
     // existing. Registered globally it survives that unmount.
     renderHook(() => useAppKeybindings(ACTIONS, { isCloud: false, shortcutsOpen: false }), {
@@ -67,17 +66,17 @@ describe('useAppKeybindings', () => {
     expect(document.documentElement.classList.contains('dark')).toBe(false);
   });
 
-  it('leaves a mounted switch showing the theme it just set', () => {
+  it('leaves a mounted theme reader showing the theme it just set', () => {
     render(
       <MemoryRouter>
         <Bound />
-        <ModeToggle />
+        <ThemeReader />
       </MemoryRouter>,
     );
 
     pressThemeShortcut();
 
-    expect(screen.getByRole('switch')).toBeChecked();
+    expect(screen.getByTestId('theme')).toHaveTextContent('dark');
   });
 
   it('opens the connection switcher on Mod+K', () => {

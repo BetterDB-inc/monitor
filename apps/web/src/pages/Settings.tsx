@@ -1,10 +1,15 @@
 import { useState, useEffect } from 'react';
+import { Navigate, useSearchParams } from 'react-router-dom';
+import { Lock } from 'lucide-react';
 import { settingsApi } from '../api/settings';
 import { licenseApi } from '../api/license';
 import { useConnection } from '../hooks/useConnection';
 import { useLicense } from '../hooks/useLicense';
 import { useAuth } from '../contexts/AuthContext';
+import { useDemoState } from '../contexts/DemoContext';
+import { useCanMutate } from '../hooks/useCanMutate';
 import { McpTokensPanel } from '../components/pages/settings/McpTokensPanel';
+import { Members } from './Members';
 import {
   AppSettings,
   SettingsUpdateRequest,
@@ -14,7 +19,23 @@ import {
 import { Card } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { useQueryClient } from '@tanstack/react-query';
-type SettingsCategory = 'license' | 'audit' | 'clientAnalytics' | 'anomaly' | 'dataRetention' | 'mcpTokens';
+type SettingsCategory =
+  | 'team'
+  | 'mcpTokens'
+  | 'license'
+  | 'audit'
+  | 'clientAnalytics'
+  | 'anomaly'
+  | 'dataRetention';
+
+interface CategoryEntry {
+  id: SettingsCategory;
+  section: string;
+  label: string;
+  adminOnly: boolean;
+}
+
+const ACCOUNT_CATEGORY_IDS: ReadonlySet<SettingsCategory> = new Set(['team', 'mcpTokens']);
 
 const RETENTION_INPUT_ERROR = `Enter a whole number of days between 1 and ${MAX_RETENTION_DAYS}, or leave empty to keep history forever.`;
 
@@ -33,15 +54,17 @@ function copySettingsKey<K extends keyof AppSettings & keyof SettingsUpdateReque
 }
 
 export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
+  const { isDemo, loading: demoLoading } = useDemoState();
+  const isAdmin = useCanMutate() !== false;
+  const [searchParams, setSearchParams] = useSearchParams();
   const { currentConnection } = useConnection();
   const { tier, license } = useLicense();
   const queryClient = useQueryClient();
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(isAdmin);
   const [saving, setSaving] = useState(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [source, setSource] = useState<'database' | 'environment' | 'defaults'>('defaults');
   const [requiresRestart, setRequiresRestart] = useState(false);
-  const [activeCategory, setActiveCategory] = useState<SettingsCategory>('license');
   const [formData, setFormData] = useState<Partial<AppSettings>>({});
   const [hasChanges, setHasChanges] = useState(false);
 
@@ -72,11 +95,34 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const [showOffline, setShowOffline] = useState(false);
 
   const { mode } = useAuth();
-  const showMcpTokens = isCloudMode === true || mode === 'self-hosted';
+  const showAccountSections = isCloudMode === true || mode === 'self-hosted';
+
+  const allCategories: CategoryEntry[] = [
+    { id: 'team', section: 'team', label: 'Team', adminOnly: false },
+    { id: 'mcpTokens', section: 'mcp-tokens', label: 'MCP Tokens', adminOnly: false },
+    { id: 'license', section: 'license', label: 'License', adminOnly: true },
+    { id: 'audit', section: 'audit', label: 'Audit Trail', adminOnly: true },
+    { id: 'clientAnalytics', section: 'client-analytics', label: 'Client Analytics', adminOnly: true },
+    { id: 'anomaly', section: 'anomaly', label: 'Anomaly Detection', adminOnly: true },
+    { id: 'dataRetention', section: 'data-retention', label: 'Data Retention', adminOnly: true },
+  ];
+  const categories = allCategories.filter((category) => {
+    if (ACCOUNT_CATEGORY_IDS.has(category.id)) {
+      return showAccountSections;
+    }
+    return category.id !== 'dataRetention' || !isCloudMode;
+  });
+  const availableCategories = categories.filter((category) => isAdmin || !category.adminOnly);
+  const requestedCategory = availableCategories.find(
+    (category) => category.section === searchParams.get('section'),
+  );
+  const activeCategory = (requestedCategory ?? availableCategories[0])?.id;
 
   useEffect(() => {
-    loadSettings();
-  }, [currentConnection?.id]);
+    if (isAdmin) {
+      loadSettings();
+    }
+  }, [currentConnection?.id, isAdmin]);
 
   const loadSettings = async () => {
     try {
@@ -158,6 +204,14 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setSaving(false);
     }
   };
+
+  if (demoLoading === true) {
+    return null;
+  }
+
+  if (isDemo === true) {
+    return <Navigate to="/" replace />;
+  }
 
   if (loading) {
     return (
@@ -272,15 +326,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     </div>
   );
 
-  const categories: { id: SettingsCategory; label: string }[] = [
-    { id: 'license', label: 'License' },
-    { id: 'audit', label: 'Audit Trail' },
-    { id: 'clientAnalytics', label: 'Client Analytics' },
-    { id: 'anomaly', label: 'Anomaly Detection' },
-    ...(!isCloudMode ? [{ id: 'dataRetention' as const, label: 'Data Retention' }] : []),
-    ...(showMcpTokens ? [{ id: 'mcpTokens' as const, label: 'MCP Tokens' }] : []),
-  ];
-
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -288,46 +333,66 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
           <h1 className="text-3xl font-bold">Settings</h1>
           <p className="text-sm text-muted-foreground mt-1">Configure application settings</p>
         </div>
-        <div className="flex items-center gap-2">
-          <Badge variant="secondary">Source: {source}</Badge>
-          {requiresRestart && <Badge variant="destructive">Restart Required</Badge>}
-        </div>
+        {isAdmin && (
+          <div className="flex items-center gap-2">
+            <Badge variant="secondary">Source: {source}</Badge>
+            {requiresRestart && <Badge variant="destructive">Restart Required</Badge>}
+          </div>
+        )}
       </div>
 
       <div className="flex gap-6">
         <aside className="w-64 space-y-2">
-          {categories.map((category) => (
-            <button
-              key={category.id}
-              onClick={() => {
-                setActiveCategory(category.id);
-                // A pending invalid retention entry gates the shared Save
-                // button but its message only renders inside the Data
-                // Retention tab — leaving the tab discards the invalid text
-                // (formData was never updated with it) so other tabs aren't
-                // blocked by an error they can't see.
-                if (category.id !== 'dataRetention' && retentionError) {
-                  // Discard the WHOLE draft, including any valid prefix that
-                  // was committed to formData while typing (e.g. "3" en route
-                  // to "3650") — reverting only the visible input would let a
-                  // hidden partial value ride along with a save made from
-                  // another tab and silently shrink the retention window.
-                  setFormData((prev) => ({
-                    ...prev,
-                    localRetentionDays: settings?.localRetentionDays ?? null,
-                  }));
-                  syncRetentionFrom(settings?.localRetentionDays);
-                }
-              }}
-              className={`w-full text-left px-4 py-3 rounded-lg transition-colors ${
-                activeCategory === category.id
-                  ? 'bg-primary/10 text-primary font-medium'
-                  : 'hover:bg-muted'
-              }`}
-            >
-              {category.label}
-            </button>
-          ))}
+          {categories.map((category) => {
+            if (category.adminOnly && !isAdmin) {
+              return (
+                <span
+                  key={category.id}
+                  aria-disabled="true"
+                  data-tooltip-id="license-tooltip"
+                  data-tooltip-content="Admins only"
+                  className="flex w-full items-center justify-between px-4 py-3 rounded-lg opacity-40 cursor-not-allowed select-none"
+                >
+                  {category.label}
+                  <Lock aria-hidden="true" className="size-3.5" />
+                </span>
+              );
+            }
+            return (
+              <button
+                key={category.id}
+                type="button"
+                aria-current={activeCategory === category.id ? 'page' : undefined}
+                onClick={() => {
+                  setSearchParams({ section: category.section }, { replace: true });
+                  // A pending invalid retention entry gates the shared Save
+                  // button but its message only renders inside the Data
+                  // Retention tab — leaving the tab discards the invalid text
+                  // (formData was never updated with it) so other tabs aren't
+                  // blocked by an error they can't see.
+                  if (category.id !== 'dataRetention' && retentionError) {
+                    // Discard the WHOLE draft, including any valid prefix that
+                    // was committed to formData while typing (e.g. "3" en route
+                    // to "3650") — reverting only the visible input would let a
+                    // hidden partial value ride along with a save made from
+                    // another tab and silently shrink the retention window.
+                    setFormData((prev) => ({
+                      ...prev,
+                      localRetentionDays: settings?.localRetentionDays ?? null,
+                    }));
+                    syncRetentionFrom(settings?.localRetentionDays);
+                  }
+                }}
+                className={`w-full text-left px-4 py-3 rounded-lg transition-colors ${
+                  activeCategory === category.id
+                    ? 'bg-primary/10 text-primary font-medium'
+                    : 'hover:bg-muted'
+                }`}
+              >
+                {category.label}
+              </button>
+            );
+          })}
         </aside>
 
         <div className="flex-1">
@@ -647,9 +712,13 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
               </div>
             )}
 
+            {activeCategory === 'team' && <Members />}
+
             {activeCategory === 'mcpTokens' && <McpTokensPanel />}
 
-            {activeCategory !== 'mcpTokens' && activeCategory !== 'license' && (
+            {activeCategory !== undefined &&
+              !ACCOUNT_CATEGORY_IDS.has(activeCategory) &&
+              activeCategory !== 'license' && (
               <div className="flex items-center gap-3 mt-6 pt-6 border-t">
                 <button
                   onClick={handleSave}

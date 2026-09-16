@@ -1,5 +1,5 @@
 import { ReactElement, useMemo, useState } from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Navigate, Routes, Route } from 'react-router-dom';
 import { DemoBanner } from '../DemoBanner';
 import { useIdleTracker } from '../../hooks/useIdleTracker';
 import { useNavigationTracker } from '../../hooks/useNavigationTracker';
@@ -25,7 +25,6 @@ import { KeyAnalytics } from '../../pages/KeyAnalytics';
 import { BulkDelete } from '../../pages/BulkDelete';
 import { ClusterDashboard } from '../../pages/ClusterDashboard';
 import { Settings } from '../../pages/Settings';
-import { AccountMcpTokens } from '../../pages/AccountMcpTokens';
 import { Webhooks } from '../../pages/Webhooks';
 import { MigrationPage } from '../../pages/MigrationPage';
 import { MigrationPlanProvider } from '../migration/MigrationPlanProvider';
@@ -36,7 +35,6 @@ import { MetricForecasting } from '../../pages/MetricForecasting';
 import { CacheProposals } from '../../pages/CacheProposals';
 import { Monitor } from '../../pages/Monitor';
 import { MonitorSession } from '../../pages/MonitorSession';
-import { Members } from '../../pages/Members';
 import { Security } from '../../pages/Security';
 
 import { useAuth } from '../../contexts/AuthContext';
@@ -64,8 +62,7 @@ export function AppLayout(): ReactElement {
 function AppLayoutInner(): ReactElement {
   const { user, isCloud, mode } = useAuth();
   const cloudUser = isCloud ? user : null;
-  const showTeam = isCloud === true || mode === 'self-hosted';
-  const showMcpTokens = isCloud === true || mode === 'self-hosted';
+  const showAccountSections = isCloud === true || mode === 'self-hosted';
   const [showFeedback, setShowFeedback] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -105,7 +102,6 @@ function AppLayoutInner(): ReactElement {
       <div className="min-h-screen bg-background w-full">
         <AppSidebar
           cloudUser={cloudUser}
-          showTeam={showTeam}
           onFeedbackClick={() => setShowFeedback(true)}
           onShortcutsClick={() => setShowShortcuts(true)}
         />
@@ -334,16 +330,19 @@ function AppLayoutInner(): ReactElement {
                   </NoConnectionsGuard>
                 }
               />
-              {showTeam && <Route path="/workspace/members" element={<Members />} />}
-              {showMcpTokens && <Route path="/account/mcp-tokens" element={<AccountMcpTokens />} />}
-              <Route
-                path="/settings"
-                element={
-                  <RestrictedRoute>
-                    <Settings isCloudMode={!!cloudUser} />
-                  </RestrictedRoute>
-                }
-              />
+              {showAccountSections && (
+                <Route
+                  path="/workspace/members"
+                  element={<Navigate to="/settings?section=team" replace />}
+                />
+              )}
+              {showAccountSections && (
+                <Route
+                  path="/account/mcp-tokens"
+                  element={<Navigate to="/settings?section=mcp-tokens" replace />}
+                />
+              )}
+              <Route path="/settings" element={<Settings isCloudMode={!!cloudUser} />} />
             </Routes>
           </div>
         </main>
