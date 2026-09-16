@@ -158,6 +158,16 @@ describe('Settings access', () => {
     expect(screen.getByText('Home page')).toBeInTheDocument();
   });
 
+  it('opens the License section an admin was sent to', async () => {
+    signIn(ADMIN, true);
+
+    renderApp('/settings?section=license');
+
+    expect(await screen.findByText('Source: database')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'License' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.queryByRole('heading', { level: 2, name: 'Team' })).not.toBeInTheDocument();
+  });
+
   it('loads the admin settings and unlocks every section for an admin', async () => {
     signIn(ADMIN, true);
 
