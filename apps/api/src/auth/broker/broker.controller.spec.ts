@@ -904,8 +904,10 @@ describe('BrokerController when the session cannot be started', () => {
     expect(failed.status).toBe(302);
     expect(failed.location).toBe('http://localhost/login?error=invalid');
     expect(failed.setCookies).toEqual([CLEARED_NONCE]);
+    const owner = await members.findByEmail('owner@example.com');
+    expect(owner).not.toBeNull();
     expect(errorLog).toHaveBeenCalledWith(
-      expect.stringContaining('owner@example.com'),
+      expect.stringContaining(String(owner?.id)),
       expect.stringContaining('disk full'),
     );
   });
@@ -921,9 +923,10 @@ describe('BrokerController when the session cannot be started', () => {
     });
     expect(failed.location).toBe('http://localhost/login?error=invalid');
     expect(await invitationStatus(invite.id)).toBe('accepted');
-    expect(await members.findByEmail(INVITEE_CLAIMS.email)).not.toBeNull();
+    const invited = await members.findByEmail(INVITEE_CLAIMS.email);
+    expect(invited).not.toBeNull();
     expect(errorLog).toHaveBeenCalledWith(
-      expect.stringContaining(INVITEE_CLAIMS.email),
+      expect.stringContaining(String(invited?.id)),
       expect.stringContaining('member vanished'),
     );
   });

@@ -111,7 +111,7 @@ export class BrokerUserResolver {
       await this.revert(resolved);
     } catch (error) {
       this.logger.error(
-        `Could not undo the broker ${resolved.entrance} of ${resolved.member.email} ` +
+        `Could not undo the broker ${resolved.entrance} of user ${resolved.member.id} ` +
           'after the session failed to start',
         describeError(error),
       );
