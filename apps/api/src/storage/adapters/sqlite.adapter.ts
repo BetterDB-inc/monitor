@@ -441,6 +441,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       { name: 'delivery_config', type: 'TEXT' },
       { name: 'alert_config', type: 'TEXT' },
       { name: 'thresholds', type: 'TEXT' },
+      { name: 'payload_format', type: "TEXT DEFAULT 'generic'" },
     ];
 
     for (const col of newColumns) {
@@ -1480,6 +1481,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         delivery_config TEXT,
         alert_config TEXT,
         thresholds TEXT,
+        payload_format TEXT DEFAULT 'generic',
         connection_id TEXT NOT NULL DEFAULT 'env-default',
         created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000),
         updated_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)

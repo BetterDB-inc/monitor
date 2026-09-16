@@ -151,6 +151,10 @@ export const envSchema = z
     // Webhook configuration
     WEBHOOK_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).optional(),
     WEBHOOK_MAX_RESPONSE_BODY_BYTES: z.coerce.number().int().min(0).optional(),
+    // Public base URL of the web UI (e.g. https://monitor.example.com).
+    // Used to build "View in BetterDB" links in Slack/Discord payloads.
+    // Unset = chat messages render without the link button.
+    FRONTEND_URL: z.string().url().optional(),
 
     // Monitor health gate
     MONITOR_RECENT_OOM_WINDOW_MS: z.coerce

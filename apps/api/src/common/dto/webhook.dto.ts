@@ -10,9 +10,10 @@ import type {
   WebhookPayload,
   WebhookDeliveryConfig,
   WebhookAlertConfig,
-  WebhookThresholds
+  WebhookThresholds,
+  WebhookPayloadFormat,
 } from '@betterdb/shared';
-import { WebhookEventType as EventTypeEnum } from '@betterdb/shared';
+import { WebhookEventType as EventTypeEnum, WebhookPayloadFormat as PayloadFormatEnum } from '@betterdb/shared';
 
 /**
  * DTO for webhook delivery configuration
@@ -220,6 +221,15 @@ export class CreateWebhookDto {
   @ValidateNested()
   @Type(() => WebhookThresholdsDto)
   thresholds?: WebhookThresholdsDto;
+
+  @ApiPropertyOptional({
+    description: 'Payload format (generic, slack, discord)',
+    enum: PayloadFormatEnum,
+    default: PayloadFormatEnum.GENERIC,
+  })
+  @IsOptional()
+  @IsEnum(PayloadFormatEnum)
+  payloadFormat?: WebhookPayloadFormat;
 }
 
 /**
@@ -299,6 +309,15 @@ export class UpdateWebhookDto {
   @ValidateNested()
   @Type(() => WebhookThresholdsDto)
   thresholds?: WebhookThresholdsDto;
+
+  @ApiPropertyOptional({
+    description: 'Payload format (generic, slack, discord)',
+    enum: PayloadFormatEnum,
+    default: PayloadFormatEnum.GENERIC,
+  })
+  @IsOptional()
+  @IsEnum(PayloadFormatEnum)
+  payloadFormat?: WebhookPayloadFormat;
 }
 
 /**
@@ -356,6 +375,13 @@ export class WebhookDto implements Webhook {
     type: WebhookThresholdsDto,
   })
   thresholds?: WebhookThresholds;
+
+  @ApiPropertyOptional({
+    description: 'Payload format',
+    enum: PayloadFormatEnum,
+    default: PayloadFormatEnum.GENERIC,
+  })
+  payloadFormat?: WebhookPayloadFormat;
 
   @ApiProperty({ description: 'Creation timestamp (ms)', example: 1704934800000 })
   createdAt: number;
@@ -456,4 +482,13 @@ export class TestWebhookResponseDto {
 
   @ApiProperty({ description: 'Request duration (ms)', example: 250 })
   durationMs: number;
+
+  @ApiPropertyOptional({
+    description: 'Payload format used for the test',
+    enum: PayloadFormatEnum,
+  })
+  payloadFormat?: WebhookPayloadFormat;
+
+  @ApiPropertyOptional({ description: 'Rendered request body preview (parsed JSON)' })
+  renderedPayload?: Record<string, unknown>;
 }

@@ -9,6 +9,7 @@ import type {
   WebhookDeliveryConfig as SharedWebhookDeliveryConfig,
   WebhookAlertConfig as SharedWebhookAlertConfig,
   WebhookThresholds as SharedWebhookThresholds,
+  WebhookPayloadFormat as SharedWebhookPayloadFormat,
 } from '@betterdb/shared';
 
 export type Webhook = SharedWebhook;
@@ -20,6 +21,8 @@ export type RetryPolicy = SharedRetryPolicy;
 export type WebhookDeliveryConfig = SharedWebhookDeliveryConfig;
 export type WebhookAlertConfig = SharedWebhookAlertConfig;
 export type WebhookThresholds = SharedWebhookThresholds;
+export type WebhookPayloadFormat = SharedWebhookPayloadFormat;
+export { WebhookPayloadFormat as WebhookPayloadFormatEnum } from '@betterdb/shared';
 
 // Additional frontend-specific types
 export interface WebhookFormData {
@@ -33,6 +36,7 @@ export interface WebhookFormData {
   deliveryConfig?: SharedWebhookDeliveryConfig;
   alertConfig?: SharedWebhookAlertConfig;
   thresholds?: SharedWebhookThresholds;
+  payloadFormat?: SharedWebhookPayloadFormat;
 }
 
 export interface TestWebhookResponse {
@@ -41,4 +45,6 @@ export interface TestWebhookResponse {
   responseBody?: string;
   error?: string;
   durationMs: number;
+  payloadFormat?: SharedWebhookPayloadFormat;
+  renderedPayload?: Record<string, unknown>;
 }
