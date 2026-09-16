@@ -515,7 +515,7 @@ export interface IWebhookEventsProService {
     connectionId?: string;
   }): Promise<void>;
 
-  dispatchCveCriticalDetected(data: CveCriticalDetectedData): Promise<void>;
+  dispatchCveCriticalDetected(data: CveCriticalDetectedData): Promise<boolean>;
 }
 
 /**
@@ -619,5 +619,5 @@ export interface IWebhookEventsEnterpriseService {
     connectionId?: string;
   }): Promise<void>;
 
-  dispatchCveKevDetected(data: CveKevDetectedData): Promise<void>;
+  dispatchCveKevDetected(data: CveKevDetectedData): Promise<boolean>;
 }

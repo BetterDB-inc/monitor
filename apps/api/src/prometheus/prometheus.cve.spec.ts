@@ -49,6 +49,20 @@ function scanFixture(overrides: Record<string, unknown> = {}) {
 describe('PrometheusService CVE metrics', () => {
   let storage: { getCveScanResult: jest.Mock };
   let service: PrometheusService;
+  let prevCveEnabled: string | undefined;
+
+  beforeEach(() => {
+    prevCveEnabled = process.env.CVE_ENABLED;
+    process.env.CVE_ENABLED = 'true';
+  });
+
+  afterEach(() => {
+    if (prevCveEnabled === undefined) {
+      delete process.env.CVE_ENABLED;
+    } else {
+      process.env.CVE_ENABLED = prevCveEnabled;
+    }
+  });
 
   function buildService() {
     storage = { getCveScanResult: jest.fn() };

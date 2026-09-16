@@ -91,8 +91,8 @@ groups:
           summary: "Persistent anomalies on {{ $labels.instance }}"
           description: "{{ $value }} anomalies detected in the last hour. System may be unstable."
 
-      # New KEV-exploited CVEs detected
-      - alert: CveKevDetected
+      # Level alert: fires while unpatched (webhooks are fire-on-change)
+      - alert: CveKevPresent
         expr: betterdb_cve_kev > 0
         for: 0m
         labels:
@@ -101,8 +101,8 @@ groups:
           summary: "KEV-exploited CVEs on {{ $labels.connection }}"
           description: "{{ $value }} known-exploited CVEs in the latest scan. Patch immediately."
 
-      # New critical CVEs detected
-      - alert: CveCriticalDetected
+      # Level alert: fires while unpatched (webhooks are fire-on-change)
+      - alert: CveCriticalPresent
         expr: betterdb_cve_findings{severity="critical"} > 0
         for: 0m
         labels:
@@ -110,3 +110,13 @@ groups:
         annotations:
           summary: "Critical CVEs on {{ $labels.connection }}"
           description: "{{ $value }} critical CVEs in the latest scan. Review Security page."
+
+      # Webhooks are degraded when the dataset is stale
+      - alert: CveDatasetStale
+        expr: betterdb_cve_dataset_stale > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CVE dataset stale on {{ $labels.connection }}"
+          description: "CVE scan is partial or missing sources; counts are a floor and new findings may be delayed. Check data sources and unreachable nodes."

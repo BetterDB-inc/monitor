@@ -74,7 +74,7 @@ describe('WebhookProcessorService', () => {
 
       storageClient.getRetriableDeliveries.mockResolvedValue([delivery]);
       webhooksService.getWebhook.mockResolvedValue(webhook);
-      dispatcherService.sendWebhook.mockResolvedValue();
+      dispatcherService.sendWebhook.mockResolvedValue(DeliveryStatus.SUCCESS);
 
       await service.processRetries();
 

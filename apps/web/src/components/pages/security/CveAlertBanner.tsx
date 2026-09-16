@@ -13,9 +13,7 @@ function allFindings(result: CveScanResult): CveFinding[] {
 
 /**
  * Action banner for CVE detection → action.
- * Shown when the current scan contains critical or KEV-exploited findings.
- * Counts and badges derive from the same findings list so they always agree.
- * Mirrors DataLossAlertBanner styling (destructive for critical).
+ * Counts are per-node findings; badges are de-duplicated by CVE id.
  */
 export function CveAlertBanner({ result }: CveAlertBannerProps) {
   const findings = allFindings(result);
@@ -28,6 +26,17 @@ export function CveAlertBanner({ result }: CveAlertBannerProps) {
 
   const isCritical = critical > 0;
   const title = isCritical ? 'Critical CVEs detected' : 'Exploited (KEV) CVEs detected';
+  const affectedNodes = new Set(
+    result.nodes
+      .filter((node) =>
+        node.findings.some(
+          (finding) =>
+            finding.advisory.severity === 'critical' ||
+            finding.advisory.knownExploited === true,
+        ),
+      )
+      .map((node) => node.nodeId),
+  ).size;
   // Critical first, then KEV, then the rest — so the badge row always covers
   // what the count line advertises, in either mode. De-duplicated by CVE id:
   // a shared finding across cluster nodes must not repeat badges (or React
@@ -52,9 +61,10 @@ export function CveAlertBanner({ result }: CveAlertBannerProps) {
       <AlertTitle>{title}</AlertTitle>
       <AlertDescription>
         <p className="font-medium">
-          {critical > 0 ? `${critical} critical` : null}
+          {critical > 0 ? `${critical} critical finding${critical === 1 ? '' : 's'}` : null}
           {critical > 0 && kev > 0 ? ' · ' : null}
-          {kev > 0 ? `${kev} exploited (KEV)` : null} in this scan
+          {kev > 0 ? `${kev} exploited (KEV) finding${kev === 1 ? '' : 's'}` : null} across{' '}
+          {affectedNodes} node{affectedNodes === 1 ? '' : 's'} in this scan
           {result.drift ? ' · mixed versions across nodes' : null}
           {result.partial ? ' · incomplete scan (counts are a floor)' : null}.
         </p>

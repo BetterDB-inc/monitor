@@ -222,16 +222,15 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
 
   /**
    * Dispatch CVE KEV event (ENTERPRISE)
-   * Called by CveScanService only when new KEV-exploited findings appear
-   * vs the previous stored scan — even when severity is below critical.
+   * @returns true when delivered (or skipped); false when delivery failed.
    */
-  async dispatchCveKevDetected(data: CveKevDetectedData): Promise<void> {
+  async dispatchCveKevDetected(data: CveKevDetectedData): Promise<boolean> {
     if (!this.isEnabled()) {
       this.logger.debug('CVE KEV detected event skipped - requires ENTERPRISE license');
-      return;
+      return true;
     }
 
-    await this.webhookDispatcher.dispatchEvent(
+    const delivered = await this.webhookDispatcher.dispatchEvent(
       WebhookEventType.CVE_KEV_DETECTED,
       {
         kevCount: data.kevCount,
@@ -247,5 +246,6 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
       },
       data.connectionId,
     );
+    return delivered !== false;
   }
 }

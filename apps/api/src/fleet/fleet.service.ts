@@ -24,6 +24,7 @@ export class FleetService {
   private readonly logger = new Logger(FleetService.name);
   private static readonly CACHE_TTL_MS = 15_000;
   private static readonly PER_INSTANCE_TIMEOUT_MS = 5_000;
+  private static readonly CVE_TIMEOUT_MS = 1_000;
 
   private cached: { expiresAt: number; payload: FleetSummaryResponse } | null = null;
   private readonly lastSeenUp = new Map<string, number>();
@@ -120,6 +121,7 @@ export class FleetService {
     port: number,
     isCancelled: () => boolean = () => false,
   ): Promise<FleetInstanceSummary> {
+    const cvePromise = this.getCveSummaryWithTimeout(connectionId);
     const [healthResult, infoResult] = await Promise.allSettled([
       this.healthService.getHealth(connectionId),
       this.metricsService.getInfoParsed(undefined, connectionId),
@@ -138,7 +140,7 @@ export class FleetService {
         port,
         'unknown',
         error,
-        await this.getCveSummary(connectionId),
+        await cvePromise,
       );
     }
 
@@ -152,7 +154,7 @@ export class FleetService {
         port,
         health.status === 'waiting' ? 'unknown' : 'down',
         error,
-        await this.getCveSummary(connectionId),
+        await cvePromise,
       );
     }
 
@@ -178,7 +180,7 @@ export class FleetService {
         ? (memoryUsedBytes / memoryMaxBytes) * 100
         : null;
 
-    const cve = await this.getCveSummary(connectionId);
+    const cve = await cvePromise;
 
     return {
       connectionId,
@@ -196,6 +198,18 @@ export class FleetService {
       lastSeen: now,
       cve,
     };
+  }
+
+  private getCveSummaryWithTimeout(connectionId: string): Promise<FleetCveSummary | null> {
+    return this.withTimeout(
+      this.getCveSummary(connectionId),
+      FleetService.CVE_TIMEOUT_MS,
+      `Timed out reading CVE summary for ${connectionId}`,
+    ).catch((error: unknown) => {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.logger.debug(`Fleet CVE rollup degraded for ${connectionId}: ${reason}`);
+      return null;
+    });
   }
 
   private async getCveSummary(connectionId: string): Promise<FleetCveSummary | null> {

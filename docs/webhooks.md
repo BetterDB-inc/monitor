@@ -329,8 +329,11 @@ scan (fire on change — dataset refresh alone does not spam).
 Notes:
 - The first scan after enabling CVE (or upgrading) only establishes the
   baseline and does not fire.
-- Partial scans (unreachable nodes, missing sources) never fire; the next
-  full-vs-full cycle re-arms.
+- Degraded scans still fire with `"partial": true` (unreachable nodes,
+  missing sources, unknown topology/modules): counts are a floor, not a
+  ceiling, so a permanently degraded scan cannot mute alerting forever.
+  Findings on nodes that first appear after a partial baseline stay suppressed
+  so recovery from a blip does not page.
 - A single finding that is both critical and KEV-exploited emits both
   `cve.critical_detected` (Pro) and `cve.kev_detected` (Enterprise) plus one
   OTel event each, so subscribe accordingly.

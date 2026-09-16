@@ -557,16 +557,15 @@ export class WebhookEventsProService implements OnModuleInit {
 
   /**
    * Dispatch CVE critical event (PRO+)
-   * Called by CveScanService only when new critical findings appear
-   * vs the previous stored scan (fire on change, not every poll).
+   * @returns true when delivered (or skipped); false when delivery failed.
    */
-  async dispatchCveCriticalDetected(data: CveCriticalDetectedData): Promise<void> {
+  async dispatchCveCriticalDetected(data: CveCriticalDetectedData): Promise<boolean> {
     if (!this.isEnabled()) {
       this.logger.debug('CVE critical detected event skipped - requires PRO license');
-      return;
+      return true;
     }
 
-    await this.webhookDispatcher.dispatchEvent(
+    const delivered = await this.webhookDispatcher.dispatchEvent(
       WebhookEventType.CVE_CRITICAL_DETECTED,
       {
         criticalCount: data.criticalCount,
@@ -582,6 +581,7 @@ export class WebhookEventsProService implements OnModuleInit {
       },
       data.connectionId,
     );
+    return delivered !== false;
   }
 }
 
