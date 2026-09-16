@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -23,6 +23,11 @@ vi.mock('../hooks/useConnection', () => ({
 
 vi.mock('../contexts/DemoContext', () => ({
   useIsDemo: () => false,
+}));
+
+const permission = { canMutate: true };
+vi.mock('../hooks/useCanMutate', () => ({
+  useCanMutate: () => permission.canMutate,
 }));
 
 const mockCapture = vi.fn();
@@ -70,6 +75,47 @@ function renderAt(path: string) {
     </MemoryRouter>,
   );
 }
+
+describe('NoConnectionsGuard - read-only member', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    permission.canMutate = false;
+    connectionState.hasNoConnections = true;
+    connectionState.loading = false;
+    connectionState.error = null;
+    installFetch({ connectDefaults: { host: 'valkey.internal', source: 'env' } });
+  });
+
+  afterEach(() => {
+    permission.canMutate = true;
+  });
+
+  it('asks the member to contact an admin instead of offering connection controls', async () => {
+    const eventListener = vi.fn();
+    window.addEventListener('betterdb:open-add-connection', eventListener);
+    renderAt('/');
+
+    expect(screen.getByText(/ask a workspace admin to add a connection/i)).toBeInTheDocument();
+    expect(screen.queryByTestId('quick-connect')).toBeNull();
+    expect(screen.queryByLabelText(/quick connect/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /add connection manually/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /connect \S+:\d+/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /preparing/i })).toBeNull();
+    expect(screen.queryByText(/configured from your environment/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /valkey instance/i })).toBeNull();
+    expect(screen.queryAllByRole('button')).toEqual([]);
+    expect(fetchApi).not.toHaveBeenCalled();
+    expect(eventListener).not.toHaveBeenCalled();
+
+    window.removeEventListener('betterdb:open-add-connection', eventListener);
+  });
+
+  it('still renders children for a member once connections exist', () => {
+    connectionState.hasNoConnections = false;
+    renderAt('/');
+    expect(screen.getByTestId('page-content')).toBeInTheDocument();
+  });
+});
 
 describe('NoConnectionsGuard - empty state', () => {
   beforeEach(() => {

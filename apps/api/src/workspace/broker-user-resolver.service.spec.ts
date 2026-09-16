@@ -102,10 +102,11 @@ describe('BrokerUserResolver', () => {
     await expect(
       resolver.signIn(identity('invitee@example.com'), null, failingSession),
     ).rejects.toThrow('session down');
-    expect(await members.findByEmail('invitee@example.com')).not.toBeNull();
+    const member = await members.findByEmail('invitee@example.com');
+    expect(member).not.toBeNull();
     expect(await invitationStatus(invited.id)).toBe('accepted');
     expect(errorLog).toHaveBeenCalledWith(
-      expect.stringContaining('invitee@example.com'),
+      expect.stringContaining(String(member?.id)),
       expect.stringContaining('member vanished'),
     );
   });
