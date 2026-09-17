@@ -205,4 +205,59 @@ describe('PrometheusService staleness bounds', () => {
 
     expect(getSpy).not.toHaveBeenCalled();
   });
+
+  it('bounds the INFO update per connection so one hung connection cannot stall another', async () => {
+    const conn1Client = { getInfoParsed: jest.fn().mockReturnValue(new Promise(() => {})) };
+    const conn2Client = { getInfoParsed: jest.fn().mockResolvedValue({}) };
+    const registryGet = service['connectionRegistry'].get as jest.Mock;
+    registryGet.mockImplementation((id: string) => {
+      if (id === 'conn-1') return conn1Client;
+      if (id === 'conn-2') return conn2Client;
+      return { getInfoParsed };
+    });
+    (service as unknown as Record<string, unknown>)['healthService'] = {
+      getHealth: jest.fn().mockResolvedValue(undefined),
+    };
+    jest
+      .spyOn(service as never, 'updateStorageBasedMetricsForConnection' as never)
+      .mockResolvedValue(undefined as never);
+
+    const ctx1 = {
+      connectionId: 'conn-1',
+      connectionName: 'conn-1',
+      client: conn1Client as never,
+      host: '10.0.0.1',
+      port: 6379,
+    };
+    const ctx2 = {
+      connectionId: 'conn-2',
+      connectionName: 'conn-2',
+      client: conn2Client as never,
+      host: '10.0.0.2',
+      port: 6379,
+    };
+    const pollBoth = () =>
+      Promise.allSettled([service['pollConnection'](ctx1), service['pollConnection'](ctx2)]);
+
+    const firstRound = pollBoth();
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1);
+    await firstRound;
+
+    setMemory(OTHER_LABEL, 300);
+
+    const secondRound = pollBoth();
+    await jest.advanceTimersByTimeAsync(BOUND_MS - POLL_INTERVAL_MS + 1);
+    await secondRound;
+
+    const snapshot = await service.collectMetricsAsJson();
+    const pollStale = snapshot.find((m) => m.name === 'betterdb_poll_stale');
+    const staleFor = (label: string) =>
+      pollStale?.values.find((v) => v.labels.connection === label)?.value;
+
+    expect(staleFor(LABEL)).toBe(1);
+    expect(staleFor(OTHER_LABEL)).toBe(0);
+
+    const memory = snapshot.find((m) => m.name === 'betterdb_memory_used_bytes');
+    expect(memory?.values.map((v) => v.labels.connection)).toEqual([OTHER_LABEL]);
+  });
 });
