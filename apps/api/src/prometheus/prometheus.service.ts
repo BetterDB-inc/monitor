@@ -1759,9 +1759,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (labels.size === 0) {
       return;
     }
-    const gauges = this.registry
-      .getMetricsAsArray()
-      .filter((metric) => metric instanceof Gauge) as unknown as Gauge[];
+    const gauges = (
+      this.registry
+        .getMetricsAsArray()
+        .filter((metric) => metric instanceof Gauge) as unknown as Gauge[]
+    ).filter((gauge) =>
+      (gauge as unknown as { labelNames: string[] }).labelNames.includes('connection'),
+    );
     const snapshots = (await Promise.all(
       gauges.map((gauge) => gauge.get()),
     )) as unknown as SeriesSnapshot[];
