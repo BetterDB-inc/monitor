@@ -118,7 +118,15 @@ async function promoteOwner(adapter: UserWriter, toId: string): Promise<Workspac
   if (toRole(target.role) !== 'admin') {
     throw new BadRequestException(ONLY_ADMINS_CAN_BECOME_OWNER_MESSAGE);
   }
-  const promoted = await setOwnerIf(adapter, toId, false, { role: 'admin', isOwner: true });
+  const promoted = await adapter.updateMany({
+    model: 'user',
+    where: [
+      { field: 'id', value: toId },
+      { field: 'isOwner', value: false },
+      { field: 'role', value: 'admin' },
+    ],
+    update: { role: 'admin', isOwner: true },
+  });
   if (promoted !== 1) {
     throw new ConflictException(OWNERSHIP_CHANGED_MESSAGE);
   }

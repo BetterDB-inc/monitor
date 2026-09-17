@@ -610,13 +610,13 @@ describe('WorkspaceController', () => {
         email: 'race-one@example.com',
         name: 'Race One',
         password: 'race horse battery',
-        role: 'member',
+        role: 'admin',
       });
       const second = await members.create({
         email: 'race-two@example.com',
         name: 'Race Two',
         password: 'race horse battery',
-        role: 'member',
+        role: 'admin',
       });
       const targets = new Set([first.id, second.id]);
       const spy = holdLookups(members, targets, targets.size);
@@ -659,7 +659,7 @@ describe('WorkspaceController', () => {
         email: 'contested@example.com',
         name: 'Contested',
         password: 'race horse battery',
-        role: 'member',
+        role: 'admin',
       });
       const spy = holdLookups(members, new Set([contested.id]), 2);
       const [removal, transfer] = await Promise.all([

@@ -331,14 +331,22 @@ interface Workspace {
   ownerId: string;
 }
 
-async function addMember(service: MemberService, email: string): Promise<string> {
+async function addMember(
+  service: MemberService,
+  email: string,
+  role: 'member' | 'admin' = 'member',
+): Promise<string> {
   const member = await service.create({
     email,
     name: email,
     password: 'correct horse battery',
-    role: 'member',
+    role,
   });
   return member.id;
+}
+
+async function addAdmin(service: MemberService, email: string): Promise<string> {
+  return addMember(service, email, 'admin');
 }
 
 async function ownerIds(service: MemberService): Promise<string[]> {
@@ -427,12 +435,16 @@ function describeOwnershipTransfer(
       return addMember(service, email);
     }
 
+    function addAdminNamed(email: string): Promise<string> {
+      return addAdmin(service, email);
+    }
+
     beforeEach(async () => {
       ({ auth, service, ownerId } = await openWorkspace(await open()));
     });
 
     it(`runs ${transactional ? 'inside one transaction' : 'without a transaction'}`, async () => {
-      const target = await addMemberNamed('tx@example.com');
+      const target = await addAdminNamed('tx@example.com');
       const injected = await failUserUpdates(auth, new Map());
       await service.transferOwnership(ownerId, target);
       const transactionCalls = injected.transaction.mock.calls.length;
@@ -442,8 +454,8 @@ function describeOwnershipTransfer(
     });
 
     it('leaves exactly one owner when two transfers race', async () => {
-      const first = await addMemberNamed('first@example.com');
-      const second = await addMemberNamed('second@example.com');
+      const first = await addAdminNamed('first@example.com');
+      const second = await addAdminNamed('second@example.com');
       const results = await Promise.allSettled([
         service.transferOwnership(ownerId, first),
         service.transferOwnership(ownerId, second),
@@ -466,15 +478,15 @@ function describeOwnershipTransfer(
     });
 
     it('refuses a transfer from a user who is no longer the owner', async () => {
-      const target = await addMemberNamed('target@example.com');
-      const bystander = await addMemberNamed('bystander@example.com');
+      const target = await addAdminNamed('target@example.com');
+      const bystander = await addAdminNamed('bystander@example.com');
       await service.transferOwnership(ownerId, target);
       await expect(service.transferOwnership(ownerId, bystander)).rejects.toThrow(
         new ConflictException(OWNERSHIP_CHANGED_MESSAGE),
       );
       expect(await ownerIds(service)).toEqual([target]);
       expect(await service.findById(bystander)).toEqual(
-        expect.objectContaining({ role: 'member', isOwner: false }),
+        expect.objectContaining({ role: 'admin', isOwner: false }),
       );
     });
 
@@ -486,7 +498,7 @@ function describeOwnershipTransfer(
     });
 
     it('promotes the target before releasing the old owner', async () => {
-      const target = await addMemberNamed('order@example.com');
+      const target = await addAdminNamed('order@example.com');
       const injected = await failUserUpdates(auth, new Map());
       await service.transferOwnership(ownerId, target);
       injected.restore();
@@ -513,13 +525,13 @@ function describeOwnershipTransfer(
     });
 
     it('keeps the owner when promoting the target fails', async () => {
-      const target = await addMemberNamed('broken@example.com');
+      const target = await addAdminNamed('broken@example.com');
       const injected = await failUserUpdates(auth, new Map([[1, 'write failed']]));
       await expect(service.transferOwnership(ownerId, target)).rejects.toThrow('write failed');
       injected.restore();
       expect(await ownerIds(service)).toEqual([ownerId]);
       expect(await service.findById(target)).toEqual(
-        expect.objectContaining({ role: 'member', isOwner: false }),
+        expect.objectContaining({ role: 'admin', isOwner: false }),
       );
     });
 
@@ -536,7 +548,7 @@ function describeOwnershipTransfer(
     });
 
     it('refuses to remove a member who became the owner', async () => {
-      const heir = await addMemberNamed('heir@example.com');
+      const heir = await addAdminNamed('heir@example.com');
       await service.transferOwnership(ownerId, heir);
       await expect(service.remove(heir)).rejects.toThrow(
         new ConflictException(MEMBER_CHANGED_MESSAGE),
@@ -551,7 +563,7 @@ function describeOwnershipTransfer(
     });
 
     it('leaves exactly one owner when a removal races a transfer', async () => {
-      const contested = await addMemberNamed('contested@example.com');
+      const contested = await addAdminNamed('contested@example.com');
       const results = await Promise.allSettled([
         service.transferOwnership(ownerId, contested),
         service.remove(contested),
@@ -574,7 +586,7 @@ function describeOwnershipTransfer(
     });
 
     it('refuses a role change for a member who became the owner', async () => {
-      const crowned = await addMemberNamed('crowned@example.com');
+      const crowned = await addAdminNamed('crowned@example.com');
       await service.transferOwnership(ownerId, crowned);
       await expect(service.setRole(crowned, 'member')).rejects.toThrow(
         new ConflictException(MEMBER_CHANGED_MESSAGE),
@@ -585,7 +597,7 @@ function describeOwnershipTransfer(
     });
 
     it('keeps the owner an admin when a role change races a transfer', async () => {
-      const raced = await addMemberNamed('raced@example.com');
+      const raced = await addAdminNamed('raced@example.com');
       await Promise.allSettled([
         service.transferOwnership(ownerId, raced),
         service.setRole(raced, 'member'),
@@ -606,20 +618,20 @@ describe('MemberService.transferOwnership compensation (memory)', () => {
 
   it('demotes the target back to its previous role when releasing the owner fails', async () => {
     const { auth, service, ownerId } = await openWorkspace({ kind: 'memory' });
-    const target = await addMember(service, 'demoted@example.com');
+    const target = await addAdmin(service, 'demoted@example.com');
     const injected = await failUserUpdates(auth, new Map([[2, 'release failed']]));
     await expect(service.transferOwnership(ownerId, target)).rejects.toThrow('release failed');
     injected.restore();
     expect(injected.updatedIds).toEqual([target, ownerId, target]);
     expect(await ownerIds(service)).toEqual([ownerId]);
     expect(await service.findById(target)).toEqual(
-      expect.objectContaining({ role: 'member', isOwner: false }),
+      expect.objectContaining({ role: 'admin', isOwner: false }),
     );
   });
 
   it('logs both errors and rethrows the original when demoting the target fails', async () => {
     const { auth, service, ownerId } = await openWorkspace({ kind: 'memory' });
-    const target = await addMember(service, 'stuck@example.com');
+    const target = await addAdmin(service, 'stuck@example.com');
     const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {
       return undefined;
     });
@@ -641,7 +653,7 @@ describe('MemberService.transferOwnership compensation (memory)', () => {
   it('logs the conflict and rethrows it when demoting after a lost ownership fails', async () => {
     const { auth, service } = await openWorkspace({ kind: 'memory' });
     const formerOwner = await addMember(service, 'former@example.com');
-    const target = await addMember(service, 'late@example.com');
+    const target = await addAdmin(service, 'late@example.com');
     const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {
       return undefined;
     });

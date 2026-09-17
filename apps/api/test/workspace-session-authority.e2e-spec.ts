@@ -138,7 +138,7 @@ describe('Workspace session authority (E2E)', () => {
     ownerCookie = extractAllCookies(signUp.headers['set-cookie']);
 
     await createMember(ADMIN, 'admin');
-    await createMember(HEIR, 'member');
+    await createMember(HEIR, 'admin');
     adminCookie = await signIn(ADMIN, '198.51.100.42');
     heirCookie = await signIn(HEIR, '198.51.100.43');
 
