@@ -742,7 +742,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // Update both INFO-based and storage-based metrics for all connections
     for (const conn of connectedConnections) {
       try {
-        await this.updateMetricsForConnection(conn.id);
+        await this.readWithTimeout(
+          this.updateMetricsForConnection(conn.id),
+          this.pollIntervalMs,
+          `INFO update for ${conn.id}`,
+        );
         await this.updateStorageBasedMetricsForConnection(conn.id);
       } catch (error) {
         this.logger.warn(

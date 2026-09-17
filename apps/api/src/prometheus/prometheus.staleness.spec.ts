@@ -260,4 +260,36 @@ describe('PrometheusService staleness bounds', () => {
     const memory = snapshot.find((m) => m.name === 'betterdb_memory_used_bytes');
     expect(memory?.values.map((v) => v.labels.connection)).toEqual([OTHER_LABEL]);
   });
+
+  it('bounds the scrape-path INFO refresh so one hung connection cannot hang the endpoint', async () => {
+    const conn1Client = { getInfoParsed: jest.fn().mockReturnValue(new Promise(() => {})) };
+    const conn2Client = { getInfoParsed: jest.fn().mockResolvedValue({}) };
+    const registry = service['connectionRegistry'] as unknown as Record<string, jest.Mock>;
+    registry.get.mockImplementation((id: string) =>
+      id === 'conn-1' ? conn1Client : conn2Client,
+    );
+    registry.list.mockReturnValue([
+      { id: 'conn-1', name: 'conn-1', isConnected: true },
+      { id: 'conn-2', name: 'conn-2', isConnected: true },
+    ]);
+    jest
+      .spyOn(service as never, 'updateStorageBasedMetricsForConnection' as never)
+      .mockResolvedValue(undefined as never);
+
+    const scrape = async (): Promise<string> => {
+      const pending = service.getMetrics();
+      await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1);
+      return pending;
+    };
+
+    await scrape();
+    await scrape();
+    setMemory(OTHER_LABEL, 300);
+    const text = await scrape();
+
+    expect(text).toContain(`betterdb_poll_stale{connection="${LABEL}"} 1`);
+    expect(text).toContain(`betterdb_poll_stale{connection="${OTHER_LABEL}"} 0`);
+    expect(text).toContain(`betterdb_memory_used_bytes{connection="${OTHER_LABEL}"} 300`);
+    expect(conn2Client.getInfoParsed).toHaveBeenCalledTimes(3);
+  });
 });
