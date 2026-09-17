@@ -1,6 +1,13 @@
 import { Injectable, OnModuleInit, Inject, Logger, Optional, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Registry, Gauge, Counter, Histogram, collectDefaultMetrics } from 'prom-client';
+import {
+  Registry,
+  Gauge,
+  Counter,
+  Histogram,
+  LabelValues,
+  collectDefaultMetrics,
+} from 'prom-client';
 import {
   WebhookEventType,
   IWebhookEventsProService,
@@ -40,6 +47,13 @@ import {
   DemotedNodeObservation,
   DemotionWatch,
 } from '../cluster/demoted-writes';
+import {
+  FreshnessTracker,
+  POLL_STALE_METRIC,
+  resolveStalenessMs,
+  selectSeriesToRemove,
+  SeriesSnapshot,
+} from './staleness';
 
 /**
  * Ceiling on the demoted-node read, clamped down to the poll interval when that
@@ -47,6 +61,9 @@ import {
  * is answering at all.
  */
 const DEMOTED_NODE_READ_TIMEOUT_MS = 2_000;
+
+const SWEEP_EXCLUSIONS: ReadonlySet<string> = new Set([POLL_STALE_METRIC]);
+const NO_EXCLUSIONS: ReadonlySet<string> = new Set();
 
 // Per-connection state for tracking previous values and stale labels
 interface ConnectionMetricState {
@@ -89,6 +106,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   protected readonly logger = new Logger(PrometheusService.name);
   private readonly registry: Registry;
   private readonly pollIntervalMs: number;
+  private readonly freshness: FreshnessTracker;
+  private pollStale: Gauge;
 
   // Per-connection state tracking
   private perConnectionState = new Map<string, ConnectionMetricState>();
@@ -253,7 +272,16 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     private readonly clusterMetricsService?: ClusterMetricsService,
   ) {
     super(connectionRegistry);
-    this.pollIntervalMs = this.configService.get<number>('PROMETHEUS_POLL_INTERVAL_MS', 5000);
+    this.pollIntervalMs = Number(
+      this.configService.get<number>('PROMETHEUS_POLL_INTERVAL_MS', 5000),
+    );
+    const configuredStaleness = this.configService.get<number>('PROMETHEUS_STALENESS_MS');
+    this.freshness = new FreshnessTracker(
+      resolveStalenessMs(
+        this.pollIntervalMs,
+        configuredStaleness === undefined ? undefined : Number(configuredStaleness),
+      ),
+    );
     this.registry = new Registry();
     this.initializeMetrics();
   }
@@ -644,6 +672,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       labelNames: ['connection'],
       registers: [this.registry],
     });
+    this.pollStale = this.createGauge(
+      'poll_stale',
+      'Whether the connection has had no successful poll within the staleness bound: 1 stale, 0 fresh',
+    );
 
     // Poll Duration Metric (per connection)
     this.pollDuration = new Histogram({
@@ -753,6 +785,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
    * Update storage-based metrics for a specific connection
    */
   private async updateStorageBasedMetricsForConnection(connectionId: string): Promise<void> {
+    if (this.freshness.isStale(connectionId, Date.now())) {
+      return;
+    }
+
     const connLabel = this.getConnectionLabel(connectionId);
     const state = this.getConnectionState(connectionId);
 
@@ -948,9 +984,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const connLabel = this.getConnectionLabel(connectionId);
     const state = this.getConnectionState(connectionId);
     const config = this.connectionRegistry.getConfig(connectionId);
+    this.freshness.observe(connectionId, connLabel, Date.now());
 
     try {
       const info = await client.getInfoParsed();
+      this.freshness.markFresh(connectionId, connLabel, Date.now());
 
       this.updateServerMetrics(info, connLabel);
       this.updateClientInfoMetrics(info, connLabel, connectionId, config);
@@ -1822,6 +1860,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   async getMetrics(): Promise<string> {
     await this.updateMetrics();
+    await this.sweepStaleSeries();
     const metrics = await this.registry.metrics();
     return metrics
       .split('\n')
@@ -1833,8 +1872,39 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     return this.registry.contentType;
   }
 
-  collectMetricsAsJson(): ReturnType<Registry['getMetricsAsJSON']> {
+  async collectMetricsAsJson(): ReturnType<Registry['getMetricsAsJSON']> {
+    await this.sweepStaleSeries();
     return this.registry.getMetricsAsJSON();
+  }
+
+  private async sweepStaleSeries(): Promise<void> {
+    const { stale, fresh } = this.freshness.labelsByFreshness(Date.now());
+    for (const label of fresh) {
+      this.pollStale.labels(label).set(0);
+    }
+    for (const label of stale) {
+      this.pollStale.labels(label).set(1);
+    }
+    await this.removeSeriesForLabels(stale, SWEEP_EXCLUSIONS);
+  }
+
+  private async removeSeriesForLabels(
+    labels: ReadonlySet<string>,
+    excludedNames: ReadonlySet<string>,
+  ): Promise<void> {
+    if (labels.size === 0) {
+      return;
+    }
+    const gauges = this.registry
+      .getMetricsAsArray()
+      .filter((metric) => metric instanceof Gauge) as unknown as Gauge[];
+    const snapshots = (await Promise.all(
+      gauges.map((gauge) => gauge.get()),
+    )) as unknown as SeriesSnapshot[];
+    for (const ref of selectSeriesToRemove(snapshots, labels, excludedNames)) {
+      const gauge = this.registry.getSingleMetric(ref.name) as Gauge | undefined;
+      gauge?.remove(ref.labels as LabelValues<string>);
+    }
   }
 
   incrementPollCounter(connectionId?: string): void {
@@ -2085,8 +2155,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // stale work. The promise itself still settles; its compare-and-delete
     // finally then no-ops because the entry is already gone.
     this.updateMetricsInFlight.delete(connectionId);
-    // Note: prom-client doesn't easily support removing specific label values
-    // The metrics will be overwritten on next scrape or remain at last value
+    const label = this.freshness.forget(connectionId);
+    if (label === undefined || this.freshness.hasLabel(label)) {
+      return;
+    }
+    this.removeSeriesForLabels(new Set([label]), NO_EXCLUSIONS).catch((error) => {
+      this.logger.warn(
+        `Failed to remove series for ${label}: ${error instanceof Error ? error.message : error}`,
+      );
+    });
   }
 
   private formatBytes(bytes: number): string {
