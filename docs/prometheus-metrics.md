@@ -312,7 +312,9 @@ BetterDB Monitor application health metrics.
 
 **Service Values**: Names of polling services (audit, client-analytics, metrics, etc.)
 
-**Staleness**: If a connection has no successful `INFO` read within `PROMETHEUS_STALENESS_MS` (default: 3 × `PROMETHEUS_POLL_INTERVAL_MS`), all of its gauge series are removed from the exposition and from the OTLP mirror. A dead or wedged connection then shows up as a gap instead of a flat line. Counters and `betterdb_poll_stale` stay, so `betterdb_poll_stale == 1` tells a stale connection apart from one that was never collected. Series come back on the next successful poll. Deleting a connection removes its gauge series immediately.
+**Staleness**: If a connection has no successful `INFO` read within `PROMETHEUS_STALENESS_MS` (default: 3 × `PROMETHEUS_POLL_INTERVAL_MS`), all of its gauge series are removed from the exposition and from the OTLP mirror. A dead or wedged connection then shows up as a gap instead of a flat line. Counters and `betterdb_poll_stale` stay, so `betterdb_poll_stale == 1` tells a stale connection apart from one that was never collected. INFO-based series return on the next successful poll; series owned by other collectors (commandstats and inference latency refresh every 60s, the vector index every 30s, the anomaly summary on its own cadence) return on their own refresh cycle instead. Deleting a connection removes its gauge series on the next poll cycle, not immediately.
+
+**Alerting note**: this is a behaviour change — alert rules that test a gauge's value directly (e.g. `betterdb_inference_unhealthy == 1`) will now resolve when a connection dies or is removed, since the series disappears instead of holding its last value. Alert on `betterdb_poll_stale == 1` as well to catch that case.
 
 ### Node.js Process Metrics
 
