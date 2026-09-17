@@ -292,8 +292,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     try {
-      // Update INFO-based metrics for this connection
-      await this.updateMetricsForConnection(ctx.connectionId);
+      await this.readWithTimeout(
+        this.updateMetricsForConnection(ctx.connectionId),
+        this.pollIntervalMs,
+        `INFO update for ${ctx.connectionId}`,
+      );
 
       // Update storage-based metrics for this connection
       await this.updateStorageBasedMetricsForConnection(ctx.connectionId);
@@ -1759,6 +1762,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           includeCommandStats: true,
           nodeIds: [...state.demotionWatch.keys()],
         }),
+        Math.min(this.pollIntervalMs, DEMOTED_NODE_READ_TIMEOUT_MS),
+        'demoted-node read',
       );
       observations = nodeStats.map((node) => {
         return {
@@ -1836,19 +1841,16 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   /**
-   * Bound the demoted-node read so a hung node cannot stall the metrics pass.
-   *
-   * The node under observation is by definition in a bad state, and the read is
-   * awaited inline in the poll. A timeout is treated like any other failed read:
-   * the watch keeps its evidence and the next poll tries again.
+   * Bound a read so a hung connection cannot stall the metrics pass. A timeout
+   * is treated like any other failed read: the caller's own error handling
+   * takes over, and the next poll tries again.
    */
-  private async readWithTimeout<T>(work: Promise<T>): Promise<T> {
-    const limit = Math.min(this.pollIntervalMs, DEMOTED_NODE_READ_TIMEOUT_MS);
+  private async readWithTimeout<T>(work: Promise<T>, limitMs: number, label: string): Promise<T> {
     let timer: NodeJS.Timeout | undefined;
     const expiry = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
-        reject(new Error(`demoted-node read exceeded ${limit}ms`));
-      }, limit);
+        reject(new Error(`${label} exceeded ${limitMs}ms`));
+      }, limitMs);
     });
 
     try {
