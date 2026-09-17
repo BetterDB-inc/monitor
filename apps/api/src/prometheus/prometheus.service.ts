@@ -81,6 +81,7 @@ interface ConnectionMetricState {
   lastCveConnLabel: string | null;
   lastCveFingerprint: string | null;
   lastCveCheckAt: number;
+  lastCveCheckedLabel: string | null;
 }
 
 @Injectable()
@@ -334,6 +335,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         lastCveConnLabel: null,
         lastCveFingerprint: null,
         lastCveCheckAt: 0,
+        lastCveCheckedLabel: null,
       });
     }
     return this.perConnectionState.get(connectionId)!;
@@ -774,6 +776,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       }
       state.lastCveFingerprint = null;
       state.lastCveCheckAt = 0;
+      state.lastCveCheckedLabel = null;
       return;
     }
     // Re-addressing a connection orphans the old host:port series: drop it
@@ -785,12 +788,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       state.lastCveCheckAt = 0;
     }
     if (
-      state.lastCveConnLabel === connLabel &&
+      state.lastCveCheckedLabel === connLabel &&
       now - state.lastCveCheckAt < PrometheusService.CVE_METRICS_REFRESH_MS
     ) {
       return;
     }
     state.lastCveCheckAt = now;
+    state.lastCveCheckedLabel = connLabel;
     try {
       const scan = await this.storage.getCveScanResult(connectionId);
 

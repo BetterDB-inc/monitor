@@ -160,6 +160,27 @@ describe('PrometheusService CVE metrics', () => {
     expect(await gaugeValue('betterdb_cve_dataset_stale', { connection: '10.0.0.1:6379' })).toBeNull();
   });
 
+  it('reads storage only once within the refresh window when no scan is found', async () => {
+    buildService();
+    storage.getCveScanResult.mockResolvedValue(null);
+    const update = (service as unknown as { updateCveMetrics: (c: string, l: string) => Promise<void> }).updateCveMetrics.bind(service);
+
+    await update(CONNECTION_ID, '10.0.0.1:6379');
+    await update(CONNECTION_ID, '10.0.0.1:6379');
+    expect(storage.getCveScanResult).toHaveBeenCalledTimes(1);
+    expect(await gaugeValue('betterdb_cve_kev', { connection: '10.0.0.1:6379' })).toBeNull();
+  });
+
+  it('checks immediately for a new label after re-addressing', async () => {
+    buildService();
+    storage.getCveScanResult.mockResolvedValue(null);
+    const update = (service as unknown as { updateCveMetrics: (c: string, l: string) => Promise<void> }).updateCveMetrics.bind(service);
+
+    await update(CONNECTION_ID, '10.0.0.1:6379');
+    await update(CONNECTION_ID, '10.0.0.2:6379');
+    expect(storage.getCveScanResult).toHaveBeenCalledTimes(2);
+  });
+
   it('does not recreate CVE series when cleanup runs during the storage await', async () => {
     buildService();
     let resolveScan!: (value: unknown) => void;
