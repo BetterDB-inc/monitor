@@ -308,8 +308,11 @@ BetterDB Monitor application health metrics.
 |--------|------|--------|-------------|---------|
 | `betterdb_polls_total` | counter | - | Total number of poll cycles completed | `123456` |
 | `betterdb_poll_duration_seconds` | histogram | `service` | Duration of poll cycles in seconds | buckets: 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10 |
+| `betterdb_poll_stale` | gauge | - | `1` when the connection has had no successful poll within the staleness bound, `0` otherwise | `0` |
 
 **Service Values**: Names of polling services (audit, client-analytics, metrics, etc.)
+
+**Staleness**: If a connection has no successful `INFO` read within `PROMETHEUS_STALENESS_MS` (default: 3 × `PROMETHEUS_POLL_INTERVAL_MS`), all of its gauge series are removed from the exposition and from the OTLP mirror. A dead or wedged connection then shows up as a gap instead of a flat line. Counters and `betterdb_poll_stale` stay, so `betterdb_poll_stale == 1` tells a stale connection apart from one that was never collected. Series come back on the next successful poll. Deleting a connection removes its gauge series immediately.
 
 ### Node.js Process Metrics
 
