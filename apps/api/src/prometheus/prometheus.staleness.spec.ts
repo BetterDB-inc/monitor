@@ -1,4 +1,5 @@
 import { ConfigService } from '@nestjs/config';
+import { collectDefaultMetrics, Gauge } from 'prom-client';
 import { PrometheusService } from './prometheus.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
@@ -188,5 +189,20 @@ describe('PrometheusService staleness bounds', () => {
     await service['updateStorageBasedMetricsForConnection']('conn-1');
 
     expect(acl).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not read unlabelled default-metric gauges when sweeping stale series', async () => {
+    collectDefaultMetrics({ register: service['registry'], prefix: 'betterdb_' });
+    const lagGauge = service['registry'].getSingleMetric(
+      'betterdb_nodejs_eventloop_lag_seconds',
+    ) as Gauge;
+    const getSpy = jest.spyOn(lagGauge, 'get');
+
+    await update('conn-1');
+    jest.advanceTimersByTime(BOUND_MS + 1);
+
+    await service['sweepStaleSeries']();
+
+    expect(getSpy).not.toHaveBeenCalled();
   });
 });
