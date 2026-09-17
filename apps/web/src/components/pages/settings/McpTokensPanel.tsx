@@ -153,6 +153,14 @@ export function McpTokensPanel(): ReactElement {
         Generate tokens for MCP (Model Context Protocol) clients like Claude Code to access your
         database observability data.
       </p>
+      <p className="text-xs text-muted-foreground border rounded-md bg-muted p-2">
+        <span className="font-medium text-foreground">Which token?</span> The{' '}
+        <span className="font-medium text-foreground">MCP token</span> below is for Claude Code's
+        MCP config (<span className="font-mono">BETTERDB_TOKEN</span>). To run the Docker / npx
+        monitoring agent instead, use an{' '}
+        <span className="font-medium text-foreground">Agent token</span> from Add Connection → Via
+        Agent.
+      </p>
       {isCloud === false && (
         <p className="text-sm text-muted-foreground">
           A token acts as you: calls made with it can do only what your role allows, and changes

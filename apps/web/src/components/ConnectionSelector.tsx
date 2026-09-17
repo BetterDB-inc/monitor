@@ -982,6 +982,14 @@ function AgentTab({
         accessible. The agent connects outbound to BetterDB Cloud via WebSocket.
       </p>
 
+      <p className="text-xs text-muted-foreground border rounded-md bg-muted p-2">
+        <span className="font-medium text-foreground">Which token?</span> The{' '}
+        <span className="font-medium text-foreground">Agent token</span> below is for the Docker /
+        npx agent (<span className="font-mono">BETTERDB_TOKEN</span>). To connect Claude Code
+        instead, use an <span className="font-medium text-foreground">MCP token</span> from Settings
+        → MCP Tokens.
+      </p>
+
       {/* Connected Agents */}
       {agents.length > 0 && (
         <div>
