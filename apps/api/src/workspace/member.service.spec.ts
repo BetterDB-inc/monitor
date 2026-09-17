@@ -16,6 +16,7 @@ import {
   MEMBER_CHANGED_MESSAGE,
   MemberRecord,
   MemberService,
+  ONLY_ADMINS_CAN_BECOME_OWNER_MESSAGE,
   OWNERSHIP_CHANGED_MESSAGE,
 } from './member.service';
 
@@ -179,6 +180,32 @@ describe('MemberService', () => {
     );
     expect(await service.findById(owner.id)).toEqual(
       expect.objectContaining({ role: 'admin', isOwner: false }),
+    );
+  });
+
+  it('refuses to transfer ownership to a member (reg)', async () => {
+    const owner = await service.create({
+      email: 'reg-owner@example.com',
+      name: 'Reg Owner',
+      password: 'correct horse battery',
+      role: 'admin',
+    });
+    const member = await service.create({
+      email: 'reg-member@example.com',
+      name: 'Reg Member',
+      password: 'correct horse battery',
+      role: 'member',
+    });
+    const context = await auth.$context;
+    await context.internalAdapter.updateUser(owner.id, { isOwner: true });
+    await expect(service.transferOwnership(owner.id, member.id)).rejects.toThrow(
+      ONLY_ADMINS_CAN_BECOME_OWNER_MESSAGE,
+    );
+    expect(await service.findById(owner.id)).toEqual(
+      expect.objectContaining({ isOwner: true }),
+    );
+    expect(await service.findById(member.id)).toEqual(
+      expect.objectContaining({ role: 'member', isOwner: false }),
     );
   });
 

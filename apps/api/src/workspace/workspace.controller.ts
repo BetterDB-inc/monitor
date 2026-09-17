@@ -25,7 +25,7 @@ import { InviteMemberDto } from './dto/invite-member.dto';
 import { TransferOwnershipDto } from './dto/transfer-ownership.dto';
 import { UpdateMemberRoleDto } from './dto/update-member-role.dto';
 import { InvitationService } from './invitation.service';
-import { MemberRecord, MemberService } from './member.service';
+import { MemberRecord, MemberService, ONLY_ADMINS_CAN_BECOME_OWNER_MESSAGE } from './member.service';
 import { InvitationView, MemberView, toInvitationView, toMemberView } from './workspace-views';
 
 export const CANNOT_REMOVE_SELF_MESSAGE = 'Cannot remove yourself';
@@ -33,6 +33,7 @@ export const CANNOT_REMOVE_OWNER_MESSAGE = 'Cannot remove the owner';
 export const CANNOT_CHANGE_OWN_ROLE_MESSAGE = 'Cannot change your own role';
 export const CANNOT_CHANGE_OWNER_ROLE_MESSAGE = "Cannot change the owner's role";
 export const ALREADY_OWNER_MESSAGE = 'User is already the owner';
+export { ONLY_ADMINS_CAN_BECOME_OWNER_MESSAGE };
 export const MEMBER_NOT_FOUND_MESSAGE = 'Member not found';
 
 interface OkResponse {
@@ -193,6 +194,9 @@ export class WorkspaceController {
     const member = await this.requireMember(body.userId);
     if (member.isOwner === true) {
       throw new BadRequestException(ALREADY_OWNER_MESSAGE);
+    }
+    if (member.role !== 'admin') {
+      throw new BadRequestException(ONLY_ADMINS_CAN_BECOME_OWNER_MESSAGE);
     }
     await this.members.transferOwnership(actor.userId, body.userId);
     return { ok: true };
