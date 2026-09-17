@@ -11,7 +11,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "node scripts/build.mjs",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "test": "jest"
@@ -22,11 +22,12 @@
     "@smithy/protocol-http": "^4.1.0",
     "@smithy/signature-v4": "^4.2.0",
     "@aws-sdk/util-format-url": "^3.667.0",
-    "@betterdb/shared": "workspace:*",
     "iovalkey": "^0.3.3",
     "ws": "^8.21.0"
   },
   "devDependencies": {
+    "@betterdb/shared": "workspace:*",
+    "esbuild": "^0.28.1",
     "@types/jest": "^29.5.14",
     "@types/node": "^22.19.15",
     "@types/ws": "^8.18.1",
