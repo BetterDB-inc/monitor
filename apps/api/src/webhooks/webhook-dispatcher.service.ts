@@ -108,8 +108,9 @@ export class WebhookDispatcherService {
 
   /**
    * Dispatch a webhook event to all subscribed webhooks
-   * @returns true when every delivery succeeded (or nothing to deliver);
-   * false when any delivery failed. Never throws for delivery failures.
+   * @returns true when every delivery succeeded, was skipped, or is owned
+   * by the retry processor (RETRYING); false only for terminal failures
+   * nothing else will retry. Never throws for delivery failures.
    */
   async dispatchEvent(
     eventType: WebhookEventType,
@@ -147,7 +148,10 @@ export class WebhookDispatcherService {
         if (result.status === 'rejected') {
           return true;
         }
-        return result.value !== null && result.value !== DeliveryStatus.SUCCESS;
+        return (
+          result.value === DeliveryStatus.FAILED ||
+          result.value === DeliveryStatus.DEAD_LETTER
+        );
       });
 
       if (failed.length > 0) {

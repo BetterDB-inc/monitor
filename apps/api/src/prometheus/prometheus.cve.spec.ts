@@ -132,15 +132,23 @@ describe('PrometheusService CVE metrics', () => {
     buildService();
     storage.getCveScanResult.mockResolvedValue(scanFixture());
     const update = (service as unknown as { updateCveMetrics: (c: string, l: string) => Promise<void> }).updateCveMetrics.bind(service);
+    const expireThrottle = () => {
+      const state = (
+        service as unknown as { perConnectionState: Map<string, { lastCveCheckAt: number }> }
+      ).perConnectionState.get(CONNECTION_ID);
+      if (state) state.lastCveCheckAt = 0;
+    };
 
     await update(CONNECTION_ID, '10.0.0.1:6379');
     expect(await gaugeValue('betterdb_cve_kev', { connection: '10.0.0.1:6379' })).toBe(1);
 
     storage.getCveScanResult.mockResolvedValue(null);
+    expireThrottle();
     await update(CONNECTION_ID, '10.0.0.1:6379');
     expect(await gaugeValue('betterdb_cve_kev', { connection: '10.0.0.1:6379' })).toBeNull();
 
     storage.getCveScanResult.mockResolvedValue(scanFixture());
+    expireThrottle();
     await update(CONNECTION_ID, '10.0.0.1:6379');
     expect(await gaugeValue('betterdb_cve_kev', { connection: '10.0.0.1:6379' })).toBe(1);
 

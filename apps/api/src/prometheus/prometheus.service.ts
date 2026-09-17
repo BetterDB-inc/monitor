@@ -80,6 +80,7 @@ interface ConnectionMetricState {
   // Last exported CVE connection label (host:port can change on re-address)
   lastCveConnLabel: string | null;
   lastCveFingerprint: string | null;
+  lastCveCheckAt: number;
 }
 
 @Injectable()
@@ -90,6 +91,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   // Per-connection state tracking
   private perConnectionState = new Map<string, ConnectionMetricState>();
+
+  private static readonly CVE_METRICS_REFRESH_MS = 60_000;
 
   // Per-connection in-flight INFO-metric updates, so the background poller and a
   // /metrics scrape coalesce instead of racing on shared per-connection state.
@@ -330,6 +333,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         currentInferenceSlaBreachLabels: new Set(),
         lastCveConnLabel: null,
         lastCveFingerprint: null,
+        lastCveCheckAt: 0,
       });
     }
     return this.perConnectionState.get(connectionId)!;
@@ -760,6 +764,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   private async updateCveMetrics(connectionId: string, connLabel: string): Promise<void> {
     const state = this.getConnectionState(connectionId);
+    const now = Date.now();
     if (isCveEnabled() === false) {
       if (state.lastCveConnLabel) {
         this.removeCveSeries(state.lastCveConnLabel);
@@ -768,6 +773,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         this.removeCveSeries(connLabel);
       }
       state.lastCveFingerprint = null;
+      state.lastCveCheckAt = 0;
       return;
     }
     // Re-addressing a connection orphans the old host:port series: drop it
@@ -776,7 +782,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.removeCveSeries(state.lastCveConnLabel);
       state.lastCveConnLabel = null;
       state.lastCveFingerprint = null;
+      state.lastCveCheckAt = 0;
     }
+    if (
+      state.lastCveConnLabel === connLabel &&
+      now - state.lastCveCheckAt < PrometheusService.CVE_METRICS_REFRESH_MS
+    ) {
+      return;
+    }
+    state.lastCveCheckAt = now;
     try {
       const scan = await this.storage.getCveScanResult(connectionId);
 
