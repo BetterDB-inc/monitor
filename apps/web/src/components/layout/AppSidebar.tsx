@@ -4,7 +4,6 @@ import { useCanMutate } from '../../hooks/useCanMutate';
 import { useCapabilities } from '../../hooks/useCapabilities';
 import { useCacheProposalsUnread } from '../../hooks/useCacheProposals';
 import { ConnectionSelector } from '../ConnectionSelector';
-import { ModeToggle } from '../ModeToggle';
 import { CloudUser } from '../../api/workspace';
 import { NavItem } from './NavItem';
 import { SidebarUserMenu } from './SidebarUserMenu';
@@ -17,21 +16,15 @@ import {
 } from '@/components/ui/sidebar.tsx';
 import { Feature } from '@betterdb/shared';
 import { CommunityBanner } from '@/components/layout/CommunityBanner.tsx';
-import { formatForDisplay } from '@tanstack/hotkeys';
+import { ExternalLink } from 'lucide-react';
 
 interface SidebarProps {
   cloudUser: CloudUser | null;
-  showTeam: boolean;
   onFeedbackClick: () => void;
   onShortcutsClick: () => void;
 }
 
-export function AppSidebar({
-  cloudUser,
-  showTeam,
-  onFeedbackClick,
-  onShortcutsClick,
-}: SidebarProps) {
+export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: SidebarProps) {
   const location = useLocation();
   const { hasVectorSearch } = useCapabilities();
   const { unreadCount: cacheProposalsUnread } = useCacheProposalsUnread();
@@ -185,49 +178,26 @@ export function AppSidebar({
       </SidebarContent>
       <SidebarFooter className="p-0 gap-1">
         <div className="px-3 pb-4 border-t border-border pt-2 space-y-1">
-          <ModeToggle />
           <a
             href="https://docs.betterdb.com"
             target="_blank"
             rel="noopener noreferrer"
-            className="block w-full rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted"
+            className="flex w-full items-center justify-between rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted"
           >
             Documentation
+            <ExternalLink aria-hidden="true" className="size-3.5 text-muted-foreground" />
           </a>
           <button
+            type="button"
             onClick={onFeedbackClick}
             className="block w-full text-left rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted"
           >
             Feedback
           </button>
-          <button
-            onClick={onShortcutsClick}
-            className="flex w-full items-center justify-between rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted"
-          >
-            <span>Keyboard shortcuts</span>
-            <kbd className="text-xs font-mono font-bold text-muted-foreground shadow-lg px-1">
-              {formatForDisplay('shift+?')}
-            </kbd>
-          </button>
-          {showTeam && (
-            <NavItem
-              to="/workspace/members"
-              active={location.pathname === '/workspace/members'}
-              demoLocked={isDemo}
-            >
-              Team
-            </NavItem>
-          )}
-          <NavItem
-            to="/settings"
-            active={location.pathname === '/settings'}
-            demoLocked={isDemo}
-            locked={canMutate === false}
-            lockedReason="Admins only"
-          >
+          <NavItem to="/settings" active={location.pathname === '/settings'} demoLocked={isDemo}>
             Settings
           </NavItem>
-          <SidebarUserMenu />
+          <SidebarUserMenu onShortcutsClick={onShortcutsClick} />
         </div>
       </SidebarFooter>
     </Sidebar>

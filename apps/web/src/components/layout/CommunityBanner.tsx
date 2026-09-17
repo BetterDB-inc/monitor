@@ -20,7 +20,7 @@ export function CommunityBanner() {
       <div className="flex items-start justify-between gap-1">
         <div>
           <span className="text-foreground">Running on Community.</span>{' '}
-          <Link to="/settings" className="text-primary hover:underline font-medium">
+          <Link to="/settings?section=license" className="text-primary hover:underline font-medium">
             Register free to unlock all Enterprise features.
           </Link>
         </div>

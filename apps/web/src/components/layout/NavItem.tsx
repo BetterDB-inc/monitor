@@ -45,7 +45,7 @@ export function NavItem({
   if (isLocked) {
     return (
       <Link
-        to="/settings"
+        to="/settings?section=license"
         data-tooltip-id="license-tooltip"
         data-tooltip-content={tooltipText}
         className="block w-full rounded-md px-3 py-2 text-sm opacity-50 hover:opacity-75 transition-opacity flex items-center justify-between"
