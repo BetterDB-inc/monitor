@@ -247,10 +247,10 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 
 ### Prometheus Metrics
 
-| Variable                       | Required | Default                 | Description                                                                          |
-| ------------------------------ | -------- | ----------------------- | ------------------------------------------------------------------------------------ |
-| `PROMETHEUS_POLL_INTERVAL_MS`  | No       | `5000`                  | How often exported metrics are refreshed (milliseconds)                              |
-| `PROMETHEUS_STALENESS_MS`      | No       | 3 × poll interval       | Drop a connection's gauge series after this long without a successful poll (ms, ≥ 1000) |
+| Variable                       | Required | Default                 | Description                                                                                |
+| ------------------------------ | -------- | ----------------------- | ------------------------------------------------------------------------------------------ |
+| `PROMETHEUS_POLL_INTERVAL_MS`  | No       | `5000`                  | How often exported metrics are refreshed (milliseconds)                                    |
+| `PROMETHEUS_STALENESS_MS`      | No       | 3 × poll interval       | Drop a connection's gauge series after this long without a successful poll (ms, ≥ 1000)   |
 
 ### Client Analytics
 
