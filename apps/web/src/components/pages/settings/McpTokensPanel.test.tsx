@@ -46,6 +46,11 @@ describe('McpTokensPanel', () => {
     }
     authState.user = { userId: 'u2', email: 'member@example.com', role: 'member', isOwner: false };
     authState.isCloud = false;
+    vi.stubGlobal('confirm', vi.fn(() => true));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it('lists tokens and names the owner of tokens that are not yours', async () => {
@@ -137,6 +142,31 @@ describe('McpTokensPanel', () => {
       expect(api.revoke).toHaveBeenCalledWith('t1');
     });
     expect(await screen.findByText('Token not found')).toBeInTheDocument();
+  });
+
+  it('asks for confirmation before revoking', async () => {
+    api.list.mockResolvedValue([OWN]);
+    api.revoke.mockResolvedValue({ revoked: true });
+    const confirmMock = vi.mocked(window.confirm);
+    renderWithQuery(<McpTokensPanel />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Revoke' }));
+    await waitFor(() => {
+      expect(confirmMock).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(api.revoke).toHaveBeenCalledWith('t1');
+    });
+  });
+
+  it('does not revoke when confirmation is cancelled', async () => {
+    api.list.mockResolvedValue([OWN]);
+    vi.mocked(window.confirm).mockReturnValueOnce(false);
+    renderWithQuery(<McpTokensPanel />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Revoke' }));
+    await waitFor(() => {
+      expect(window.confirm).toHaveBeenCalled();
+    });
+    expect(api.revoke).not.toHaveBeenCalled();
   });
 
   it('marks revoked and expired tokens without a revoke button', async () => {

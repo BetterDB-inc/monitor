@@ -89,6 +89,12 @@ export function McpTokensPanel(): ReactElement {
   };
 
   const handleRevoke = async (id: string): Promise<void> => {
+    if (
+      !confirm(
+        'Are you sure you want to revoke this token? MCP clients using it will stop working.',
+      )
+    )
+      return;
     setError(null);
     try {
       await agentTokensApi.revoke(id);
@@ -253,6 +259,7 @@ export function McpTokensPanel(): ReactElement {
                     <div className="font-medium truncate">{token.name}</div>
                     <div className="text-xs text-muted-foreground">
                       {`Created ${new Date(token.createdAt).toLocaleDateString()}`}
+                      {` · Expires ${new Date(token.expiresAt).toLocaleDateString()}`}
                       {token.lastUsedAt !== null &&
                         ` · Last used ${new Date(token.lastUsedAt).toLocaleDateString()}`}
                     </div>
