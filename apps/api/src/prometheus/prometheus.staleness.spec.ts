@@ -438,4 +438,35 @@ describe('PrometheusService staleness bounds', () => {
     expect(text).not.toContain(`betterdb_uptime_in_seconds{connection="${LABEL}"}`);
     expect(text).toContain(`betterdb_poll_stale{connection="${LABEL}"} 0`);
   });
+
+  it('keeps a later pass alive when an earlier one times out behind it', async () => {
+    let resolveSecond: (info: unknown) => void = () => undefined;
+    const client = {
+      getInfoParsed: jest
+        .fn()
+        .mockReturnValueOnce(new Promise(() => {}))
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveSecond = resolve;
+          }),
+        ),
+    };
+    (service['connectionRegistry'].get as jest.Mock).mockReturnValue(client);
+
+    const abandoned = service['updateMetricsForConnection']('conn-1').catch(() => undefined);
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS - 2000);
+
+    service.cleanupConnectionMetrics('conn-1');
+    const current = service['updateMetricsForConnection']('conn-1');
+
+    await jest.advanceTimersByTimeAsync(2001);
+    await abandoned;
+
+    resolveSecond({ server: { uptime_in_seconds: '42' } });
+    await current;
+
+    const text = await service.getMetrics();
+
+    expect(text).toContain(`betterdb_uptime_in_seconds{connection="${LABEL}"} 42`);
+  });
 });
