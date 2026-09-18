@@ -87,4 +87,25 @@ describe('CloudAuthGuardImpl', () => {
     expect(redirect).toHaveBeenCalledTimes(1);
     expect(request.actor).toBeNull();
   });
+
+  it('bypasses session auth for the Prometheus metrics scrape path', () => {
+    const request: FakeRequest = {
+      url: '/api/prometheus/metrics',
+      headers: { host: 'acme.betterdb.com' },
+    };
+    const { context, redirect } = contextFor(request);
+    expect(new CloudAuthGuardImpl().canActivate(context)).toBe(true);
+    expect(redirect).not.toHaveBeenCalled();
+    expect(request.actor).toBeNull();
+  });
+
+  it('still redirects an unrelated api path without a session', () => {
+    const request: FakeRequest = {
+      url: '/api/prometheus-report',
+      headers: { host: 'acme.betterdb.com' },
+    };
+    const { context, redirect } = contextFor(request);
+    expect(new CloudAuthGuardImpl().canActivate(context)).toBe(false);
+    expect(redirect).toHaveBeenCalledTimes(1);
+  });
 });
