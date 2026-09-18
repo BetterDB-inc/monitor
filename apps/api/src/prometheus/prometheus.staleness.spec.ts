@@ -501,4 +501,37 @@ describe('PrometheusService staleness bounds', () => {
     expect(client.getClusterInfo).toHaveBeenCalledTimes(1);
     expect(text).not.toContain(`betterdb_cluster_known_nodes{connection="${LABEL}"}`);
   });
+
+  it('skips the storage pass for a connection removed during its INFO pass', async () => {
+    const getAuditStats = jest
+      .fn()
+      .mockResolvedValue({ totalEntries: 7, entriesByReason: {}, entriesByUser: {} });
+    (service as unknown as Record<string, unknown>)['storage'] = { getAuditStats };
+
+    await update('conn-1');
+    const epoch = service['currentEpoch']('conn-1');
+    service.cleanupConnectionMetrics('conn-1');
+
+    await service['updateStorageBasedMetricsForConnection']('conn-1', epoch);
+    await jest.runAllTimersAsync();
+
+    const text = await service.getMetrics();
+
+    expect(getAuditStats).not.toHaveBeenCalled();
+    expect(text).not.toContain(`betterdb_acl_denied_total{connection="${LABEL}"}`);
+  });
+
+  it('sweeps a series a late write recreated after removal', async () => {
+    await update('conn-1');
+    setMemory(LABEL, 100);
+    service.cleanupConnectionMetrics('conn-1');
+    await jest.advanceTimersByTimeAsync(0);
+
+    setMemory(LABEL, 400);
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+
+    const text = await service.getMetrics();
+
+    expect(text).not.toContain(`betterdb_memory_used_bytes{connection="${LABEL}"}`);
+  });
 });
