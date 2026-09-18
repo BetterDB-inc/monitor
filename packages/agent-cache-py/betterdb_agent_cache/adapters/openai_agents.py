@@ -1,9 +1,10 @@
 """OpenAI Agents SDK adapter.
 
 Wraps any Agents SDK ``Model`` with an exact-match LLM cache.  Cache is
-consulted before each ``get_response()`` call; on miss the underlying model
-is invoked and the response is stored.  ``stream_response()`` is not cached
-(streaming responses are not cached by any adapter — documented convention).
+consulted before each ``get_response()`` and ``stream_response()`` call; on
+miss the underlying model is invoked and the response is stored.  Streaming
+uses the same cache key as ``get_response()``, so a streamed request can hit
+an entry stored by its non-streamed twin (and vice-versa).
 
 Usage via ModelProvider (recommended)::
 
@@ -29,7 +30,10 @@ manually rather than through the wrapper.
 
 Limitations
 ~~~~~~~~~~~
-* ``stream_response()`` is delegated directly — streaming is not cached.
+* Tool-call streams are not stored — mirrors the TypeScript
+  ``@betterdb/agent-cache`` v0.11.0 ``wrapStream`` convention of not caching
+  half-executed agent steps.  Non-streaming ``get_response()`` continues to
+  cache tool calls; see the PR notes for the follow-up discussion.
 * Binary / multimodal content in input items is JSON-serialised raw via
   ``_to_text()``.  A follow-up can add explicit normalizer dispatch
   matching ``openai.py``.
@@ -355,9 +359,106 @@ def _cache_hit_model_response(output: list[Any], usage: Any) -> Any:
     return ModelResponse(**kw)
 
 
+def _terminal_response_from_event(event: Any) -> Any | None:
+    """Return the terminal ``Response`` from a stream event, else ``None``.
+
+    Tolerant across SDK shapes: primary path is ``event.type == "response.completed"``
+    with a ``.response`` attribute; falls back to any event carrying a ``response``
+    with a populated ``output``.
+    """
+    etype = getattr(event, "type", None)
+    if etype in ("response.completed", "response.incomplete"):
+        return getattr(event, "response", None)
+    resp = getattr(event, "response", None)
+    if resp is not None and getattr(resp, "output", None) is not None and etype is None:
+        return resp
+    return None
+
+
+def _response_has_tool_calls(response: Any) -> bool:
+    """True if the terminal Response's output contains any function_call item."""
+    output = getattr(response, "output", None) or []
+    for item in output:
+        item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+        if item_type == "function_call":
+            return True
+    return False
+
+
+def _synthesize_stream_events(
+    content_blocks: list[ContentBlock] | None,
+    response_text: str | None,
+    input_tokens: int,
+    output_tokens: int,
+) -> list[Any]:
+    """Build a minimal, valid Responses event stream for a cache hit.
+
+    Best-effort emits an ``output_text.delta`` for cached text, then a terminal
+    ``response.completed`` carrying a ``Response`` rebuilt via ``_rebuild_output``.
+    Falls back to a ``SimpleNamespace`` terminal event if the SDK event models
+    are unavailable — the terminal ``response.completed`` is the contract.
+    """
+    events: list[Any] = []
+
+    text = response_text or "".join(
+        b.get("text", "")
+        for b in (content_blocks or [])
+        if b.get("type") == "text"
+    )
+
+    if text:
+        try:
+            from openai.types.responses import ResponseTextDeltaEvent  # type: ignore
+
+            events.append(
+                ResponseTextDeltaEvent.model_construct(
+                    type="response.output_text.delta",
+                    delta=text,
+                    output_index=0,
+                    content_index=0,
+                    item_id="betterdb-cache",
+                    sequence_number=0,
+                ),
+            )
+        except Exception:
+            events.append(SimpleNamespace(
+                type="response.output_text.delta",
+                delta=text,
+                output_index=0,
+                content_index=0,
+            ))
+
+    output = _rebuild_output(content_blocks, response_text)
+    usage = _make_usage(input_tokens, output_tokens)
+
+    try:
+        from openai.types.responses import ResponseCompletedEvent  # type: ignore
+        from openai.types.responses.response import Response  # type: ignore
+
+        response = Response.model_construct(
+            id="betterdb-cache",
+            object="response",
+            output=output,
+            usage=usage,
+            status="completed",
+        )
+        events.append(ResponseCompletedEvent.model_construct(
+            type="response.completed",
+            response=response,
+            sequence_number=len(events),
+        ))
+    except Exception:
+        events.append(SimpleNamespace(
+            type="response.completed",
+            response=SimpleNamespace(output=output, usage=usage),
+        ))
+
+    return events
+
+
 class CachedModel:
     """Agents SDK ``Model`` wrapper that checks the cache before each
-    ``get_response()`` call.  ``stream_response()`` is delegated directly.
+    ``get_response()`` and ``stream_response()`` call.
     """
 
     def __init__(
@@ -373,9 +474,92 @@ class CachedModel:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._model, name)
 
-    def stream_response(self, *args: Any, **kwargs: Any) -> Any:
-        """Streaming is not cached — delegate directly."""
-        return self._model.stream_response(*args, **kwargs)
+    async def stream_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[Any],
+        model_settings: Any,
+        tools: list[Any],
+        output_schema: Any | None,
+        handoffs: list[Any],
+        tracing: Any,
+        *,
+        previous_response_id: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Cache-aware streaming.
+
+        On a cache hit, synthesize the event stream from the stored response and
+        skip the underlying model.  On a miss, pass every upstream event through
+        unchanged while capturing the terminal ``response.completed`` event, then
+        persist on completion (fail-open).
+
+        Cache-key parity with :meth:`get_response` means a streamed request can
+        hit an entry stored by its non-streamed twin, and vice-versa.  Tool-call
+        streams are not stored — mirrors the ``@betterdb/agent-cache`` v0.11.0
+        ``wrapStream`` convention.
+        """
+        model_name = str(getattr(self._model, "model", "unknown"))
+
+        params = await prepare_params(
+            system_instructions, input, model_name, model_settings, self._opts,
+        )
+
+        cached = await self._cache.llm.check(params)
+        if cached.hit:
+            for event in _synthesize_stream_events(
+                cached.content_blocks,
+                cached.response,
+                cached.input_tokens,
+                cached.output_tokens,
+            ):
+                yield event
+            return
+
+        terminal_response: Any = None
+        errored = False
+        try:
+            async for event in self._model.stream_response(
+                system_instructions,
+                input,
+                model_settings,
+                tools,
+                output_schema,
+                handoffs,
+                tracing,
+                previous_response_id=previous_response_id,
+                **kwargs,
+            ):
+                resp = _terminal_response_from_event(event)
+                if resp is not None:
+                    terminal_response = resp
+                yield event
+        except Exception:
+            errored = True
+            raise
+        finally:
+            if not errored and terminal_response is not None:
+                if not _response_has_tool_calls(terminal_response):
+                    try:
+                        store_blocks = _extract_blocks(terminal_response)
+                        usage = getattr(terminal_response, "usage", None)
+                        inp = int(getattr(usage, "input_tokens", 0) or 0)
+                        out_tok = int(getattr(usage, "output_tokens", 0) or 0)
+                        await self._cache.llm.store_multipart(
+                            params,
+                            store_blocks,
+                            LlmStoreOptions(tokens={"input": inp, "output": out_tok}),
+                        )
+                    except ValkeyCommandError as exc:
+                        _LOGGER.warning(
+                            "agent-cache stream store failed; stream already delivered: %s",
+                            exc,
+                        )
+                    except Exception as exc:  # defensive: store must fail open
+                        _LOGGER.warning(
+                            "agent-cache stream store errored unexpectedly: %s",
+                            exc,
+                        )
 
     async def get_response(
         self,
