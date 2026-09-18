@@ -70,7 +70,7 @@ describe('WorkspaceAuthModule', () => {
       mode: 'self-hosted',
       enabled: true,
       bootstrapped: false,
-      broker: false,
+      broker: true,
     });
     await app.close();
   });

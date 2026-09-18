@@ -1,3 +1,4 @@
+import { BROKER_SIGNING_PUBLIC_KEYS } from '@betterdb/shared';
 import { resolveWorkspaceConfig } from './workspace-config';
 
 describe('resolveWorkspaceConfig', () => {
@@ -62,10 +63,10 @@ describe('resolveWorkspaceConfig', () => {
     expect(config.brokerEnabled).toBe(false);
   });
 
-  it('disables the broker when there is no trusted key', () => {
+  it('enables the broker with the embedded keys by default', () => {
     const config = resolveWorkspaceConfig({});
-    expect(config.brokerKeys).toEqual({});
-    expect(config.brokerEnabled).toBe(false);
+    expect(config.brokerKeys).toEqual(BROKER_SIGNING_PUBLIC_KEYS);
+    expect(config.brokerEnabled).toBe(true);
   });
 
   it('enables the broker with a trusted key in self-hosted mode', () => {
