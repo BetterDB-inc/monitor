@@ -42,7 +42,7 @@ describe('GET /system/workspace', () => {
       mode: 'self-hosted',
       enabled: true,
       bootstrapped: false,
-      broker: false,
+      broker: true,
     });
     await auth.api.signUpEmail({
       body: { email: 'owner@example.com', password: 'correct horse battery', name: 'O' },
