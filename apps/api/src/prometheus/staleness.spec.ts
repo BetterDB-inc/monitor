@@ -19,10 +19,10 @@ describe('resolveStalenessMs', () => {
     expect(resolveStalenessMs(5000, 0)).toBe(15000);
   });
 
-  it('raises a configured bound below two poll intervals to the floor', () => {
-    expect(resolveStalenessMs(5000, 1000)).toBe(10000);
-    expect(resolveStalenessMs(5000, 10000)).toBe(10000);
-    expect(resolveStalenessMs(5000, 10001)).toBe(10001);
+  it('raises a configured bound below three poll intervals to the floor', () => {
+    expect(resolveStalenessMs(5000, 1000)).toBe(15000);
+    expect(resolveStalenessMs(5000, 15000)).toBe(15000);
+    expect(resolveStalenessMs(5000, 15001)).toBe(15001);
   });
 });
 
