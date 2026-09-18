@@ -33,6 +33,7 @@ export interface GeneratedPersonalTokenView {
 
 export const DEMO_TOKENS_MESSAGE = 'Personal tokens are not available on the demo';
 export const AGENT_UNAVAILABLE_MESSAGE = 'Agent connections are not available on this instance';
+export const AGENT_ADMIN_ONLY_MESSAGE = 'Only workspace admins can manage agent tokens';
 
 // Structural types for the proprietary services injected in self-hosted mode. They
 // are optional (null when the proprietary agent code is not built).
@@ -126,7 +127,12 @@ export class PersonalTokensController {
 
   @Get('connections')
   getConnections(): AgentConnectionInfo[] {
-    return this.gateway ? this.gateway.getConnectedAgents() : [];
+    // Match list(type:'agent'): report an unwired agent feature as 503, not as an
+    // empty (but "working") list, so both halves of the UI tell the same story.
+    if (!this.gateway) {
+      throw new ServiceUnavailableException(AGENT_UNAVAILABLE_MESSAGE);
+    }
+    return this.gateway.getConnectedAgents();
   }
 
   @Delete(':id')
@@ -159,6 +165,10 @@ export class PersonalTokensController {
       if (error instanceof NotFoundException && this.agentTokens) {
         const agentTokens = await this.agentTokens.listTokens('agent');
         if (agentTokens.some((token) => token.id === id)) {
+          // Agent tokens are workspace-scoped and unowned (userId: null), so there is
+          // no ownership check to fall back on — revoking one drops a live Valkey
+          // connection for the whole workspace. Restrict it to admins.
+          this.requireAgentAdmin(actor);
           await this.agentTokens.revokeToken(id);
           void this.activity.record({
             actor: toActivityActor(actor),
@@ -180,6 +190,10 @@ export class PersonalTokensController {
     actor: Actor,
     req: FastifyRequest,
   ): Promise<GeneratedPersonalTokenView> {
+    // @AllowMembers() on the handler is correct for mcp (a member minting their own
+    // token), but an agent token is an unowned, workspace-wide, year-long machine
+    // credential — restrict minting it to admins.
+    this.requireAgentAdmin(actor);
     const service = this.requireAgent();
     const { token, metadata } = await service.generateToken(name.trim(), 'agent');
     void this.activity.record({
@@ -204,5 +218,11 @@ export class PersonalTokensController {
       throw new ServiceUnavailableException(AGENT_UNAVAILABLE_MESSAGE);
     }
     return this.agentTokens;
+  }
+
+  private requireAgentAdmin(actor: Actor): void {
+    if (actor.role !== 'admin') {
+      throw new ForbiddenException(AGENT_ADMIN_ONLY_MESSAGE);
+    }
   }
 }

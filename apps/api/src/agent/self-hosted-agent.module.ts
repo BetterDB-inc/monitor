@@ -1,7 +1,7 @@
 import { join } from 'path';
 import { Global, Logger, Module } from '@nestjs/common';
 import { StorageModule } from '../storage/storage.module';
-import { resolveAuthSecret } from '../auth/auth-secret';
+import { resolveAuthSecretWithSource } from '../auth/auth-secret';
 import {
   AGENT_GATEWAY,
   AGENT_TOKENS_SERVICE,
@@ -39,8 +39,21 @@ if (agentProviders.length > 0) {
       );
     }
     const dataDir = process.env.BETTERDB_DATA_DIR || join(process.cwd(), 'data');
-    process.env.SESSION_SECRET = resolveAuthSecret(process.env, dataDir);
-    logger.log('Seeded SESSION_SECRET for agent-token signing from the workspace auth secret');
+    const resolved = resolveAuthSecretWithSource(process.env, dataDir);
+    process.env.SESSION_SECRET = resolved.secret;
+    if (resolved.ephemeral) {
+      // resolveAuthSecret fell back to a per-process random value (no AUTH_SECRET and
+      // the data dir could not be read/written). Agent tokens are signed for 365d, so
+      // an ephemeral secret means every issued token STOPS validating after a restart
+      // and each agent must be re-provisioned by hand. Surface it at boot.
+      logger.warn(
+        'Agent-token signing is using an EPHEMERAL secret: it is regenerated on every restart, ' +
+          'so already-issued agent tokens will stop working after a restart. Set AUTH_SECRET ' +
+          '(>=32 chars) or make BETTERDB_DATA_DIR writable to persist it.',
+      );
+    } else {
+      logger.log('Seeded SESSION_SECRET for agent-token signing from the workspace auth secret');
+    }
   }
 }
 

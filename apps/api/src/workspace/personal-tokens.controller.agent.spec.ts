@@ -1,4 +1,4 @@
-import { NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import type { FastifyRequest } from 'fastify';
 import type { Actor, AgentConnectionInfo, AgentToken } from '@betterdb/shared';
 import { ActivityService } from '../activity/activity.service';
@@ -13,6 +13,15 @@ const ACTOR: Actor = {
   email: 'owner@example.com',
   role: 'admin',
   isOwner: true,
+  via: 'session',
+  tokenId: null,
+};
+
+const MEMBER: Actor = {
+  userId: 'user-2',
+  email: 'member@example.com',
+  role: 'member',
+  isOwner: false,
   via: 'session',
   tokenId: null,
 };
@@ -113,12 +122,31 @@ describe('PersonalTokensController agent routing', () => {
     ]);
   });
 
-  it('returns connected agents from the gateway, or [] when absent', async () => {
+  it('returns connected agents from the gateway, and 503s when the gateway is absent', () => {
     const withGw = build({ withAgent: true, withGateway: true });
     expect(withGw.controller.getConnections()).toEqual(withGw.connections);
 
+    // A missing gateway is reported as unavailable (matching list(type:'agent')), not
+    // as an empty list that looks like "working, no agents connected".
     const noGw = build({ withAgent: true, withGateway: false });
-    expect(noGw.controller.getConnections()).toEqual([]);
+    expect(() => noGw.controller.getConnections()).toThrow(ServiceUnavailableException);
+  });
+
+  it('rejects agent minting for non-admin members', async () => {
+    const { controller, agentTokens } = build({ withAgent: true, withGateway: true });
+    await expect(
+      controller.create({ name: 'ci-agent', type: 'agent' }, MEMBER, REQ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(agentTokens?.generateToken).not.toHaveBeenCalled();
+  });
+
+  it('rejects agent revocation for non-admin members', async () => {
+    const { controller, personal, agentTokens } = build({ withAgent: true, withGateway: true });
+    (personal.revoke as jest.Mock).mockRejectedValue(new NotFoundException('Token not found'));
+    await expect(controller.revoke('agent-token-1', MEMBER, REQ)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(agentTokens?.revokeToken).not.toHaveBeenCalled();
   });
 
   it('falls back to agent revoke only for genuine agent tokens', async () => {
