@@ -5,6 +5,7 @@ import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+import { BROKER_SIGNING_PUBLIC_KEYS } from '@betterdb/shared';
 import { BrokerTokenController } from '../broker-token.controller';
 import { BrokerApiGuard } from '../broker-api.guard';
 import { BrokerThrottlerGuard } from '../broker-throttler.guard';
@@ -15,11 +16,18 @@ const BROKER_TOKEN = 'broker-secret-token';
 const ADMIN_TOKEN = 'admin-secret-token';
 const BROKER_LIMIT = 60;
 
-const { privateKey } = generateKeyPairSync('rsa', {
+const { publicKey, privateKey } = generateKeyPairSync('rsa', {
   modulusLength: 2048,
   publicKeyEncoding: { type: 'spki', format: 'pem' },
   privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
 });
+
+const hadBrkTestKey = Object.prototype.hasOwnProperty.call(
+  BROKER_SIGNING_PUBLIC_KEYS,
+  'brk-test',
+);
+const originalBrkTestKey = BROKER_SIGNING_PUBLIC_KEYS['brk-test'];
+BROKER_SIGNING_PUBLIC_KEYS['brk-test'] = publicKey;
 
 const VALID_BODY = {
   email: 'owner@example.com',
@@ -150,4 +158,12 @@ describe('BrokerTokenController rate limit (HTTP)', () => {
 
     expect(res.statusCode).toBe(201);
   });
+});
+
+afterAll(() => {
+  if (hadBrkTestKey) {
+    BROKER_SIGNING_PUBLIC_KEYS['brk-test'] = originalBrkTestKey;
+  } else {
+    delete BROKER_SIGNING_PUBLIC_KEYS['brk-test'];
+  }
 });

@@ -31,10 +31,20 @@ describe('BrokerSigningService', () => {
     key: process.env.BROKER_SIGNING_PRIVATE_KEY,
     kid: process.env.BROKER_SIGNING_KID,
   };
+  const shippedTrustMap = { ...BROKER_SIGNING_PUBLIC_KEYS };
+
+  function resetTrustMap(): void {
+    for (const kid of Object.keys(BROKER_SIGNING_PUBLIC_KEYS)) {
+      delete BROKER_SIGNING_PUBLIC_KEYS[kid];
+    }
+    Object.assign(BROKER_SIGNING_PUBLIC_KEYS, shippedTrustMap);
+  }
 
   beforeEach(() => {
     vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     vi.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    resetTrustMap();
+    BROKER_SIGNING_PUBLIC_KEYS['brk-test'] = publicKey;
   });
 
   afterEach(() => {
@@ -46,6 +56,7 @@ describe('BrokerSigningService', () => {
     if (original.kid === undefined) {
       delete process.env.BROKER_SIGNING_KID;
     }
+    resetTrustMap();
     vi.restoreAllMocks();
   });
 
@@ -186,17 +197,22 @@ describe('BrokerSigningService', () => {
 
     afterEach(() => {
       process.env.NODE_ENV = originalNodeEnv;
+    });
+
+    function clearTrustMap(): void {
       for (const kid of Object.keys(BROKER_SIGNING_PUBLIC_KEYS)) {
         delete BROKER_SIGNING_PUBLIC_KEYS[kid];
       }
-    });
+    }
 
     it('accepts any kid outside production while no public key is trusted yet', () => {
+      clearTrustMap();
       process.env.NODE_ENV = 'development';
       expect(configured().isConfigured()).toBe(true);
     });
 
     it('refuses to boot in production when the kid is missing from an empty trust map', () => {
+      clearTrustMap();
       process.env.NODE_ENV = 'production';
       expect(() => {
         return configured();
@@ -216,6 +232,7 @@ describe('BrokerSigningService', () => {
     });
 
     it('rejects a kid that is missing from a non-empty trust map', () => {
+      clearTrustMap();
       BROKER_SIGNING_PUBLIC_KEYS['brk-other'] = publicKey;
       const service = configured();
       expect(service.isConfigured()).toBe(false);
