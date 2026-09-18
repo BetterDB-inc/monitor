@@ -25,16 +25,28 @@ describe('Prometheus metrics endpoint env', () => {
     ).toBe(false);
   });
 
-  it('rejects a whitespace-only token', () => {
+  it('normalises a whitespace-only token to unset', () => {
     const result = envSchema.safeParse({ PROMETHEUS_METRICS_TOKEN: '   ' });
-    expect(result.success).toBe(false);
-    expect(JSON.stringify(result)).toContain('PROMETHEUS_METRICS_TOKEN');
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.PROMETHEUS_METRICS_TOKEN).toBeUndefined();
+    }
   });
 
   it('requires a token in cloud mode', () => {
     const result = envSchema.safeParse({
       CLOUD_MODE: 'true',
       OTEL_INGEST_TOKEN: 'ingest',
+    });
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result)).toContain('PROMETHEUS_METRICS_TOKEN');
+  });
+
+  it('still fails validation in cloud mode when the token is blank', () => {
+    const result = envSchema.safeParse({
+      CLOUD_MODE: 'true',
+      OTEL_INGEST_TOKEN: 'ingest',
+      PROMETHEUS_METRICS_TOKEN: '   ',
     });
     expect(result.success).toBe(false);
     expect(JSON.stringify(result)).toContain('PROMETHEUS_METRICS_TOKEN');
