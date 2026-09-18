@@ -469,4 +469,36 @@ describe('PrometheusService staleness bounds', () => {
 
     expect(text).toContain(`betterdb_uptime_in_seconds{connection="${LABEL}"} 42`);
   });
+
+  it('drops cluster writes for a connection removed mid CLUSTER INFO', async () => {
+    let resolveCluster: (info: unknown) => void = () => undefined;
+    const client = {
+      getInfoParsed: jest.fn().mockResolvedValue({ cluster: { cluster_enabled: '1' } }),
+      getClusterInfo: jest.fn().mockReturnValue(
+        new Promise((resolve) => {
+          resolveCluster = resolve;
+        }),
+      ),
+      getClusterNodes: jest.fn().mockResolvedValue([]),
+      getCapabilities: jest.fn().mockReturnValue({ hasClusterSlotStats: false }),
+    };
+    (service['connectionRegistry'].get as jest.Mock).mockReturnValue(client);
+    (service as unknown as Record<string, unknown>)['runtimeCapabilityTracker'] = {
+      isAvailable: jest.fn().mockReturnValue(true),
+      recordFailure: jest.fn(),
+    };
+
+    const pass = service['runUpdateMetricsForConnection']('conn-1');
+    await jest.advanceTimersByTimeAsync(1);
+
+    service.cleanupConnectionMetrics('conn-1');
+    resolveCluster({ cluster_state: 'ok', cluster_known_nodes: '3', cluster_size: '3' });
+    await pass;
+    await jest.runAllTimersAsync();
+
+    const text = await service.getMetrics();
+
+    expect(client.getClusterInfo).toHaveBeenCalledTimes(1);
+    expect(text).not.toContain(`betterdb_cluster_known_nodes{connection="${LABEL}"}`);
+  });
 });
