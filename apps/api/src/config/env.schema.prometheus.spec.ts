@@ -13,6 +13,24 @@ describe('Prometheus metrics endpoint env', () => {
     ).toBe(false);
   });
 
+  it('disables the endpoint case-insensitively', () => {
+    expect(
+      envSchema.parse({ PROMETHEUS_METRICS_ENABLED: 'FALSE' }).PROMETHEUS_METRICS_ENABLED,
+    ).toBe(false);
+    expect(
+      envSchema.parse({ PROMETHEUS_METRICS_ENABLED: 'False' }).PROMETHEUS_METRICS_ENABLED,
+    ).toBe(false);
+    expect(
+      envSchema.parse({ PROMETHEUS_METRICS_ENABLED: ' false ' }).PROMETHEUS_METRICS_ENABLED,
+    ).toBe(false);
+  });
+
+  it('rejects a whitespace-only token', () => {
+    const result = envSchema.safeParse({ PROMETHEUS_METRICS_TOKEN: '   ' });
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result)).toContain('PROMETHEUS_METRICS_TOKEN');
+  });
+
   it('requires a token in cloud mode', () => {
     const result = envSchema.safeParse({
       CLOUD_MODE: 'true',

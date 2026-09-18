@@ -202,8 +202,8 @@ export const envSchema = z
     PROMETHEUS_METRICS_ENABLED: z
       .string()
       .default('true')
-      .transform((v) => v !== 'false'),
-    PROMETHEUS_METRICS_TOKEN: z.string().optional(),
+      .transform((v) => v.trim().toLowerCase() !== 'false'),
+    PROMETHEUS_METRICS_TOKEN: z.string().trim().min(1).optional(),
 
     // OTel telemetry export (mirror of Prometheus metrics). No-op unless
     // OTEL_EXPORTER_OTLP_ENDPOINT is set.

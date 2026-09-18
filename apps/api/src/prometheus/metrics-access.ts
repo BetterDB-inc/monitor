@@ -16,7 +16,7 @@ export function isMetricsEndpointEnabled(value: unknown): boolean {
   if (typeof value === 'boolean') {
     return value;
   }
-  return String(value).trim() !== 'false';
+  return String(value).trim().toLowerCase() !== 'false';
 }
 
 export function matchesBearerToken(authorization: string | undefined, token: string): boolean {
