@@ -1,6 +1,7 @@
 import { ExecutionContext, HttpException, HttpStatus } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrometheusMetricsGuard } from './prometheus-metrics.guard';
+import { PrometheusController } from './prometheus.controller';
 import { PrometheusService } from './prometheus.service';
 import { ClusterMetricsService } from '../cluster/cluster-metrics.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
@@ -85,19 +86,15 @@ describe('PrometheusMetricsGuard', () => {
     } as unknown as ExecutionContext;
     expect(new PrometheusMetricsGuard(config).canActivate(context)).toBe(true);
   });
+
+  it('binds the guard to PrometheusController', () => {
+    expect(Reflect.getMetadata('__guards__', PrometheusController)).toContain(
+      PrometheusMetricsGuard,
+    );
+  });
 });
 
 describe('OTLP mirror with the endpoint disabled', () => {
-  const metricsEnabled = process.env.PROMETHEUS_METRICS_ENABLED;
-
-  afterEach(() => {
-    if (metricsEnabled === undefined) {
-      delete process.env.PROMETHEUS_METRICS_ENABLED;
-    } else {
-      process.env.PROMETHEUS_METRICS_ENABLED = metricsEnabled;
-    }
-  });
-
   function buildService(): PrometheusService {
     const registry = {
       getConfig: jest.fn().mockReturnValue({ host: '10.0.0.1', port: 6379 }),
@@ -127,8 +124,6 @@ describe('OTLP mirror with the endpoint disabled', () => {
   }
 
   it('rejects the route with 404 while the mirror still produces a snapshot', async () => {
-    process.env.PROMETHEUS_METRICS_ENABLED = 'false';
-
     expect.assertions(3);
     try {
       guardWith({ PROMETHEUS_METRICS_ENABLED: 'false' }).canActivate(contextFor());

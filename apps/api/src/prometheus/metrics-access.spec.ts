@@ -23,6 +23,12 @@ describe('isMetricsEndpointEnabled', () => {
     expect(isMetricsEndpointEnabled('true')).toBe(true);
     expect(isMetricsEndpointEnabled('0')).toBe(true);
   });
+
+  it('is disabled case-insensitively', () => {
+    expect(isMetricsEndpointEnabled('FALSE')).toBe(false);
+    expect(isMetricsEndpointEnabled('False')).toBe(false);
+    expect(isMetricsEndpointEnabled(' false ')).toBe(false);
+  });
 });
 
 describe('matchesBearerToken', () => {
