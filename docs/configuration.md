@@ -251,6 +251,8 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 | ------------------------------ | -------- | ----------------------- | ------------------------------------------------------------------------------------------ |
 | `PROMETHEUS_POLL_INTERVAL_MS`  | No       | `5000`                  | How often exported metrics are refreshed (milliseconds)                                    |
 | `PROMETHEUS_STALENESS_MS`      | No       | 3 × poll interval       | Drop a connection's gauge series after this long without a successful `INFO` read (ms, ≥ 1000, raised to 3 × poll interval if lower) |
+| `PROMETHEUS_METRICS_ENABLED`   | No       | `true`                  | Set to `false` to disable `/api/prometheus/metrics` entirely (the OTLP mirror keeps exporting) |
+| `PROMETHEUS_METRICS_TOKEN`     | No       | _(none)_                | Bearer token required to scrape the metrics endpoint; required when `CLOUD_MODE` is set |
 
 ### Client Analytics
 
@@ -648,6 +650,8 @@ member takes effect within that window rather than on the next request.
 | Endpoint                  | Method | Description                               |
 | ------------------------- | ------ | ----------------------------------------- |
 | `/api/prometheus/metrics` | GET    | Prometheus-formatted metrics for scraping |
+
+Returns 401 when `PROMETHEUS_METRICS_TOKEN` is set and the scrape omits it, and 404 when `PROMETHEUS_METRICS_ENABLED=false`.
 
 ## Runtime Settings
 
