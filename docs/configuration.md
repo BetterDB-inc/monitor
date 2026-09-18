@@ -274,9 +274,9 @@ To keep the database from growing forever, set a retention window from **Setting
 
 ### Webhooks
 
-| Variable       | Required | Default | Description                                                                                                                                                                    |
-| -------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `FRONTEND_URL` | No       | -       | Public base URL of the web UI (e.g. `https://monitor.example.com`). Used to build "View in BetterDB" links in Slack/Discord messages; unset = messages render without the link |
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `FRONTEND_URL` | No | - | Public base URL of the web UI (e.g. `https://monitor.example.com`). Used to build "View in BetterDB" links in Slack/Discord messages; unset = messages render without the link |
 
 ### License Configuration
 
