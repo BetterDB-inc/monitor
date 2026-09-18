@@ -2,13 +2,12 @@ export const POLL_STALE_METRIC = 'betterdb_poll_stale';
 
 const STALENESS_POLL_MULTIPLIER = 3;
 
-export const STALENESS_FLOOR_MULTIPLIER = 2;
-
 export function resolveStalenessMs(pollIntervalMs: number, configuredMs?: number): number {
+  const floorMs = pollIntervalMs * STALENESS_POLL_MULTIPLIER;
   if (configuredMs !== undefined && configuredMs > 0) {
-    return Math.max(configuredMs, pollIntervalMs * STALENESS_FLOOR_MULTIPLIER);
+    return Math.max(configuredMs, floorMs);
   }
-  return pollIntervalMs * STALENESS_POLL_MULTIPLIER;
+  return floorMs;
 }
 
 interface FreshnessEntry {
