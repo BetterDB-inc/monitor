@@ -89,6 +89,13 @@ jobs:
       - name: Build shared package
         run: pnpm --filter @betterdb/shared build
 
+      # esbuild bundles the agent without type-checking, so run tsc --noEmit as a
+      # required gate before publishing. Runs after the shared build so
+      # @betterdb/shared's declarations are available. No `|| true`: a type error
+      # must fail the release rather than ship an unchecked bundle.
+      - name: Type-check agent
+        run: pnpm --filter @betterdb/agent typecheck
+
       - name: Build agent
         run: pnpm --filter @betterdb/agent build
 

@@ -12,6 +12,7 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "test": "jest"
