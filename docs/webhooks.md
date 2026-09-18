@@ -333,9 +333,10 @@ Notes:
   missing sources, unknown topology/modules): counts are a floor, not a
   ceiling, so a permanently degraded scan cannot mute alerting forever.
   Findings on nodes that first appear after a partial baseline stay suppressed
-  so recovery from a blip does not page. Module findings are also skipped
-  while either scan has unknown module inventory for that node, so a
-  transient MODULE LIST failure does not re-alert known module CVEs.
+  so recovery from a blip does not page. When module inventory is unknown
+  for a node, its last-known module findings are carried forward, so a
+  transient MODULE LIST failure neither hides nor re-alerts them; genuinely
+  new module CVEs still fire on recovery.
 - A single finding that is both critical and KEV-exploited emits both
   `cve.critical_detected` (Pro) and `cve.kev_detected` (Enterprise) plus one
   OTel event each, so subscribe accordingly.
