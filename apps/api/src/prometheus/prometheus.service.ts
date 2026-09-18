@@ -786,7 +786,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   /**
    * Update storage-based metrics for a specific connection
    */
-  private async updateStorageBasedMetricsForConnection(connectionId: string): Promise<void> {
+  private async updateStorageBasedMetricsForConnection(
+    connectionId: string,
+    epoch: number = this.currentEpoch(connectionId),
+  ): Promise<void> {
     if (this.freshness.isStale(connectionId, Date.now())) {
       return;
     }
@@ -795,9 +798,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const state = this.getConnectionState(connectionId);
 
     await this.updateAclMetrics(connectionId, connLabel, state);
+    if (this.isSuperseded(connectionId, epoch)) return;
     await this.updateClientMetrics(connectionId, connLabel, state);
+    if (this.isSuperseded(connectionId, epoch)) return;
     await this.updateSlowlogMetrics(connectionId, connLabel, state);
+    if (this.isSuperseded(connectionId, epoch)) return;
     await this.updateCommandlogMetrics(connectionId, connLabel, state);
+    if (this.isSuperseded(connectionId, epoch)) return;
     await this.updateMetricForecastMetrics(connectionId, connLabel);
   }
 
@@ -936,11 +943,19 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.updateCpuMetrics(info, connLabel);
       this.updateReplicationMetrics(info, connLabel, connectionId, config);
       this.updateKeyspaceMetricsFromInfo(info, connLabel, state);
-      await this.updateClusterMetricsFromInfo(client, info, connLabel, connectionId, state, config);
+      await this.updateClusterMetricsFromInfo(
+        client,
+        info,
+        connLabel,
+        connectionId,
+        state,
+        config,
+        epoch,
+      );
       if (this.isSuperseded(connectionId, epoch)) {
         return;
       }
-      await this.updateSlowlogRawMetrics(connLabel, connectionId, config);
+      await this.updateSlowlogRawMetrics(connLabel, connectionId, config, epoch);
     } catch (error) {
       this.logger.error(`Failed to update INFO-based metrics for ${connLabel}`, error);
     }
@@ -1205,6 +1220,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     connectionId: string,
     state: ConnectionMetricState,
     config: { host: string; port: number } | null,
+    epoch: number = this.currentEpoch(connectionId),
   ): Promise<void> {
     const clusterEnabled = info.cluster?.cluster_enabled === '1';
     this.clusterEnabled.labels(connLabel).set(clusterEnabled ? 1 : 0);
@@ -1217,6 +1233,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
     try {
       const clusterInfo = await client.getClusterInfo();
+      if (this.isSuperseded(connectionId, epoch)) {
+        return;
+      }
 
       const clusterState = clusterInfo.cluster_state;
       const slotsFail = parseInt(clusterInfo.cluster_slots_fail) || 0;
@@ -1337,6 +1356,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         );
       }
 
+      if (this.isSuperseded(connectionId, epoch)) {
+        return;
+      }
+
       // One dispatch per poll no matter how many signals fired: a real outage
       // trips the CLUSTER INFO edges and churns the topology at the same time,
       // and two events for one failover would double-page.
@@ -1406,7 +1429,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         recordDemotions(state.demotionWatch, topologyDiff, demotionCheckedAt);
       }
       pruneDemotionWatch(state.demotionWatch, topology, demotionCheckedAt);
-      await this.detectDemotedMasterWrites(connectionId, state, config);
+      await this.detectDemotedMasterWrites(connectionId, state, config, epoch);
 
       const capabilities = client.getCapabilities();
       if (
@@ -1416,6 +1439,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         try {
           const newSlotLabels = new Set<string>();
           const slotStats = await client.getClusterSlotStats('key-count', 100);
+          if (this.isSuperseded(connectionId, epoch)) {
+            return;
+          }
 
           for (const [slot, stats] of Object.entries(slotStats)) {
             newSlotLabels.add(slot);
@@ -1635,6 +1661,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     connLabel: string,
     connectionId: string,
     config: { host: string; port: number } | null,
+    epoch: number = this.currentEpoch(connectionId),
   ): Promise<void> {
     if (!this.runtimeCapabilityTracker.isAvailable(connectionId, 'canSlowLog')) {
       return;
@@ -1642,6 +1669,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
     try {
       const length = await this.slowLogAnalytics.getSlowLogLength(connectionId);
+      if (this.isSuperseded(connectionId, epoch)) {
+        return;
+      }
       this.slowlogLength.labels(connLabel).set(length);
 
       const lastId = this.slowLogAnalytics.getLastSeenId(connectionId);
@@ -1683,6 +1713,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     connectionId: string,
     state: ConnectionMetricState,
     config: { host: string; port: number } | null,
+    epoch: number = this.currentEpoch(connectionId),
   ): Promise<void> {
     if (state.demotionWatch.size === 0) {
       return;
@@ -1720,6 +1751,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.logger.debug(
         `Demoted-node stats failed for ${connectionId}: ${err instanceof Error ? err.message : err}`,
       );
+      return;
+    }
+
+    if (this.isSuperseded(connectionId, epoch)) {
       return;
     }
 
