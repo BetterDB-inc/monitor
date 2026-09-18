@@ -521,6 +521,42 @@ describe('PrometheusService staleness bounds', () => {
     expect(text).not.toContain(`betterdb_acl_denied_total{connection="${LABEL}"}`);
   });
 
+  it('does not page twice when a pass is abandoned mid failover dispatch', async () => {
+    const clusterInfo = {
+      cluster_state: 'ok',
+      cluster_slots_fail: '0',
+      cluster_slots_assigned: '16384',
+      cluster_known_nodes: '3',
+      cluster_size: '3',
+    };
+    const client = {
+      getInfoParsed: jest.fn().mockResolvedValue({ cluster: { cluster_enabled: '1' } }),
+      getClusterInfo: jest.fn(async () => clusterInfo),
+      getClusterNodes: jest.fn().mockResolvedValue([]),
+      getCapabilities: jest.fn().mockReturnValue({ hasClusterSlotStats: false }),
+    };
+    (service['connectionRegistry'].get as jest.Mock).mockReturnValue(client);
+    (service as unknown as Record<string, unknown>)['runtimeCapabilityTracker'] = {
+      isAvailable: jest.fn().mockReturnValue(true),
+      recordFailure: jest.fn(),
+    };
+    const dispatchClusterFailover = jest.fn().mockReturnValue(new Promise(() => {}));
+    (service as unknown as Record<string, unknown>)['webhookEventsProService'] = {
+      dispatchClusterFailover,
+    };
+
+    await update('conn-1');
+
+    clusterInfo.cluster_state = 'fail';
+    const abandoned = service['updateMetricsForConnection']('conn-1').catch(() => undefined);
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1);
+    await abandoned;
+
+    await update('conn-1');
+
+    expect(dispatchClusterFailover).toHaveBeenCalledTimes(1);
+  });
+
   it('sweeps a series a late write recreated after removal', async () => {
     await update('conn-1');
     setMemory(LABEL, 100);
