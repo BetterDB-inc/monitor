@@ -263,12 +263,16 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.configService.get<number>('PROMETHEUS_POLL_INTERVAL_MS', 5000),
     );
     const configuredStaleness = this.configService.get<number>('PROMETHEUS_STALENESS_MS');
-    this.freshness = new FreshnessTracker(
-      resolveStalenessMs(
-        this.pollIntervalMs,
-        configuredStaleness === undefined ? undefined : Number(configuredStaleness),
-      ),
-    );
+    const requestedStaleness =
+      configuredStaleness === undefined ? undefined : Number(configuredStaleness);
+    const stalenessMs = resolveStalenessMs(this.pollIntervalMs, requestedStaleness);
+    if (requestedStaleness !== undefined && requestedStaleness !== stalenessMs) {
+      this.logger.warn(
+        `PROMETHEUS_STALENESS_MS=${requestedStaleness} is below the floor for a ` +
+          `${this.pollIntervalMs}ms poll interval; using ${stalenessMs}ms instead`,
+      );
+    }
+    this.freshness = new FreshnessTracker(stalenessMs);
     this.registry = new Registry();
     this.initializeMetrics();
   }
@@ -279,22 +283,26 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     try {
-      await this.readWithTimeout(
-        this.updateMetricsForConnection(ctx.connectionId),
-        this.pollIntervalMs,
-        `INFO update for ${ctx.connectionId}`,
-      );
+      await this.updateMetricsForConnection(ctx.connectionId);
 
       // Update storage-based metrics for this connection
       await this.updateStorageBasedMetricsForConnection(ctx.connectionId);
 
       // Trigger health check on successful metrics update - may fire instance.up webhook if recovered
-      await this.healthService.getHealth(ctx.connectionId).catch(() => {});
+      await this.pingHealth(ctx.connectionId);
     } catch (error) {
       // Trigger health check on failure - may fire instance.down webhook
-      await this.healthService.getHealth(ctx.connectionId).catch(() => {});
+      await this.pingHealth(ctx.connectionId);
       throw error; // Re-throw so base class logs the error
     }
+  }
+
+  private async pingHealth(connectionId: string): Promise<void> {
+    await this.readWithTimeout(
+      this.healthService.getHealth(connectionId),
+      this.pollIntervalMs,
+      `health check for ${connectionId}`,
+    ).catch(() => {});
   }
 
   protected onConnectionRemoved(connectionId: string): void {
@@ -739,21 +747,21 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const connections = this.connectionRegistry.list();
     const connectedConnections = connections.filter((c) => c.isConnected);
 
-    // Update both INFO-based and storage-based metrics for all connections
-    for (const conn of connectedConnections) {
-      try {
-        await this.readWithTimeout(
-          this.updateMetricsForConnection(conn.id),
-          this.pollIntervalMs,
-          `INFO update for ${conn.id}`,
-        );
-        await this.updateStorageBasedMetricsForConnection(conn.id);
-      } catch (error) {
-        this.logger.warn(
-          `Failed to update metrics for connection ${conn.name}: ${error instanceof Error ? error.message : 'Unknown'}`,
-        );
-      }
-    }
+    // Update both INFO-based and storage-based metrics for all connections.
+    // Connections refresh concurrently so a wedged node costs the pass one
+    // bounded read instead of one per connection.
+    await Promise.allSettled(
+      connectedConnections.map(async (conn) => {
+        try {
+          await this.updateMetricsForConnection(conn.id);
+          await this.updateStorageBasedMetricsForConnection(conn.id);
+        } catch (error) {
+          this.logger.warn(
+            `Failed to update metrics for connection ${conn.name}: ${error instanceof Error ? error.message : 'Unknown'}`,
+          );
+        }
+      }),
+    );
   }
 
   /**
@@ -832,7 +840,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (existing !== undefined) {
       return existing;
     }
-    const run = this.runUpdateMetricsForConnection(connectionId).finally(() => {
+    // The read is bounded here rather than at the call sites so that a hung
+    // INFO releases its in-flight entry when the bound expires; otherwise the
+    // entry would outlive every later pass and no connection would ever be
+    // re-read.
+    const run: Promise<void> = this.readWithTimeout(
+      this.runUpdateMetricsForConnection(connectionId),
+      this.pollIntervalMs,
+      `INFO update for ${connectionId}`,
+    ).finally(() => {
       // Compare-and-delete: only clear the entry if it is still ours. If the
       // connection was removed (cleanupConnectionMetrics) or re-added with a
       // fresh in-flight update while this one ran, we must not evict that newer

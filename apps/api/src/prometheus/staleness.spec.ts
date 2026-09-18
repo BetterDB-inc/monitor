@@ -18,6 +18,12 @@ describe('resolveStalenessMs', () => {
   it('ignores a non-positive configured bound', () => {
     expect(resolveStalenessMs(5000, 0)).toBe(15000);
   });
+
+  it('raises a configured bound below two poll intervals to the floor', () => {
+    expect(resolveStalenessMs(5000, 1000)).toBe(10000);
+    expect(resolveStalenessMs(5000, 10000)).toBe(10000);
+    expect(resolveStalenessMs(5000, 10001)).toBe(10001);
+  });
 });
 
 describe('FreshnessTracker', () => {
@@ -51,17 +57,27 @@ describe('FreshnessTracker', () => {
 
   it('keeps a label fresh while any connection sharing it is fresh', () => {
     const tracker = new FreshnessTracker(BOUND);
-    tracker.markFresh('conn-1', 'h:1', 0);
+    tracker.observe('conn-1', 'h:1', 0);
+    tracker.observe('conn-2', 'h:1', 0);
+    tracker.observe('conn-3', 'h:3', 0);
     tracker.markFresh('conn-2', 'h:1', 10_000);
-    tracker.markFresh('conn-3', 'h:3', 0);
     const { stale, fresh } = tracker.labelsByFreshness(BOUND + 1);
     expect([...stale]).toEqual(['h:3']);
     expect([...fresh]).toEqual(['h:1']);
   });
 
+  it('does not resurrect a forgotten connection on a late success', () => {
+    const tracker = new FreshnessTracker(BOUND);
+    tracker.observe('conn-1', 'h:1', 0);
+    tracker.forget('conn-1');
+    tracker.markFresh('conn-1', 'h:1', 10_000);
+    expect(tracker.hasLabel('h:1')).toBe(false);
+    expect(tracker.labelsByFreshness(10_000).fresh.size).toBe(0);
+  });
+
   it('forgets a connection and reports its label', () => {
     const tracker = new FreshnessTracker(BOUND);
-    tracker.markFresh('conn-1', 'h:1', 0);
+    tracker.observe('conn-1', 'h:1', 0);
     expect(tracker.forget('conn-1')).toBe('h:1');
     expect(tracker.hasLabel('h:1')).toBe(false);
     expect(tracker.forget('conn-1')).toBeUndefined();

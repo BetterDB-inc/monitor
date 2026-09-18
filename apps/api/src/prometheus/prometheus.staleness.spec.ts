@@ -292,4 +292,76 @@ describe('PrometheusService staleness bounds', () => {
     expect(text).toContain(`betterdb_memory_used_bytes{connection="${OTHER_LABEL}"} 300`);
     expect(conn2Client.getInfoParsed).toHaveBeenCalledTimes(3);
   });
+
+  it('keeps the scrape within one bound no matter how many connections are wedged', async () => {
+    const wedged = { getInfoParsed: jest.fn().mockReturnValue(new Promise(() => {})) };
+    const registry = service['connectionRegistry'] as unknown as Record<string, jest.Mock>;
+    registry.get.mockReturnValue(wedged);
+    registry.list.mockReturnValue([
+      { id: 'conn-1', name: 'conn-1', isConnected: true },
+      { id: 'conn-2', name: 'conn-2', isConnected: true },
+      { id: 'conn-3', name: 'conn-3', isConnected: true },
+    ]);
+    jest
+      .spyOn(service as never, 'updateStorageBasedMetricsForConnection' as never)
+      .mockResolvedValue(undefined as never);
+
+    let settled = false;
+    const pending = service.getMetrics().then((text) => {
+      settled = true;
+      return text;
+    });
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1);
+
+    expect(settled).toBe(true);
+    await pending;
+    expect(wedged.getInfoParsed).toHaveBeenCalledTimes(3);
+  });
+
+  it('releases the in-flight entry when an INFO read times out', async () => {
+    const wedged = { getInfoParsed: jest.fn().mockReturnValue(new Promise(() => {})) };
+    const registry = service['connectionRegistry'] as unknown as Record<string, jest.Mock>;
+    registry.get.mockReturnValue(wedged);
+    registry.list.mockReturnValue([{ id: 'conn-1', name: 'conn-1', isConnected: true }]);
+    jest
+      .spyOn(service as never, 'updateStorageBasedMetricsForConnection' as never)
+      .mockResolvedValue(undefined as never);
+
+    const scrape = async (): Promise<void> => {
+      const pending = service.getMetrics();
+      await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1);
+      await pending;
+    };
+
+    await scrape();
+    await scrape();
+
+    expect(wedged.getInfoParsed).toHaveBeenCalledTimes(2);
+  });
+
+  it('bounds the health ping so a wedged health check cannot block the tick', async () => {
+    const client = { getInfoParsed: jest.fn().mockResolvedValue({}) };
+    (service['connectionRegistry'].get as jest.Mock).mockReturnValue(client);
+    const getHealth = jest.fn().mockReturnValue(new Promise(() => {}));
+    (service as unknown as Record<string, unknown>)['healthService'] = { getHealth };
+    jest
+      .spyOn(service as never, 'updateStorageBasedMetricsForConnection' as never)
+      .mockResolvedValue(undefined as never);
+
+    let settled = false;
+    const poll = service['pollConnection']({
+      connectionId: 'conn-1',
+      connectionName: 'conn-1',
+      client: client as never,
+      host: '10.0.0.1',
+      port: 6379,
+    } as never).then(() => {
+      settled = true;
+    });
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1);
+
+    expect(getHealth).toHaveBeenCalledTimes(1);
+    expect(settled).toBe(true);
+    await poll;
+  });
 });
