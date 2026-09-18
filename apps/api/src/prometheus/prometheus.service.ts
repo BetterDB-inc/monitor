@@ -871,7 +871,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       `INFO update for ${connectionId}`,
     )
       .catch((error) => {
-        this.retireEpoch(connectionId);
+        // Only retire our own epoch: a removal or a newer pass may already
+        // have moved it, and retiring again would drop that pass's reply.
+        if (!this.isSuperseded(connectionId, epoch)) {
+          this.retireEpoch(connectionId);
+        }
         throw error;
       })
       .finally(() => {
