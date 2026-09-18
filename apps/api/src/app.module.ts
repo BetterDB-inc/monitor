@@ -46,6 +46,7 @@ let InferenceLatencyProModule: any = null;
 let CacheProposalsModule: any = null;
 let MemoryProposalsModule: any = null;
 let AgentModule: any = null;
+let SelfHostedAgentModule: any = null;
 let DataRetentionModule: any = null;
 
 try {
@@ -129,6 +130,20 @@ try {
   // Proprietary module not available
 }
 
+if (!isCloudMode()) {
+  // Self-hosted agent connections: mirror the cloud AgentModule capability without
+  // the cloud-only AgentTokensController (PersonalTokensController mints agent tokens
+  // in self-hosted). Loaded only outside cloud mode so it never double-provides
+  // AgentGateway alongside the cloud AgentModule.
+  try {
+    const selfHostedAgent = require('./agent/self-hosted-agent.module');
+    SelfHostedAgentModule = selfHostedAgent.SelfHostedAgentModule;
+    console.log('[Agent] Self-hosted agent module loaded');
+  } catch {
+    // Agent gateway not available in this build
+  }
+}
+
 if (isCloudMode()) {
   try {
     const agentModule = require('../../../proprietary/agent/agent.module');
@@ -208,6 +223,7 @@ const proprietaryImports = [
   MemoryProposalsModule,
   AiModule,
   AgentModule,
+  SelfHostedAgentModule,
   DataRetentionModule,
 ].filter(Boolean);
 

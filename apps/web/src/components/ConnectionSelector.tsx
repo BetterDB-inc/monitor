@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useIsDemo } from '../contexts/DemoContext';
+import { useAuth } from '../contexts/AuthContext';
 import { useCanMutate } from '../hooks/useCanMutate';
 import { useConnection } from '../hooks/useConnection';
 import { fetchApi } from '../api/client';
@@ -96,7 +97,12 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   const emptyFormData = isCloudMode ? { ...defaultFormData, host: '' } : defaultFormData;
   const isDemo = useIsDemo();
   const canMutate = useCanMutate();
+  const { mode } = useAuth();
   const locked = isDemo === true || canMutate === false;
+  // The "Via Agent" tab works in cloud and in self-hosted (workspace-enabled): both
+  // expose the /agent-tokens mint endpoint and the /agent/ws gateway. The "BetterDB
+  // Valkey instances" tab stays cloud-only (it provisions managed instances).
+  const showAgentTab = isCloudMode === true || mode === 'self-hosted';
   const { currentConnection, connections, loading, error, setConnection, refreshConnections } =
     useConnection();
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -120,8 +126,9 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
         });
         setTestResult(null);
         setAddTab('direct');
-      } else if (detail?.tab && isCloudMode) {
-        // Non-direct tabs only exist in cloud mode.
+      } else if (detail?.tab && (detail.tab === 'agent' ? showAgentTab : isCloudMode)) {
+        // The agent tab is available in cloud and self-hosted; the valkey tab is
+        // cloud-only.
         setAddTab(detail.tab);
         setValkeyMaxmemory(detail.valkeyMaxmemory ?? null);
       }
@@ -129,7 +136,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
     };
     window.addEventListener('betterdb:open-add-connection', handler);
     return () => window.removeEventListener('betterdb:open-add-connection', handler);
-  }, [isCloudMode, locked]);
+  }, [isCloudMode, showAgentTab, locked]);
   const [showManageDialog, setShowManageDialog] = useState(false);
   const [formData, setFormData] = useState<ConnectionFormData>(emptyFormData);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
@@ -399,15 +406,16 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       >
         <DialogContent
           className={
-            isCloudMode ? (addTab === 'valkey' ? 'sm:max-w-3xl' : 'sm:max-w-2xl') : 'sm:max-w-md'
+            showAgentTab ? (addTab === 'valkey' ? 'sm:max-w-3xl' : 'sm:max-w-2xl') : 'sm:max-w-md'
           }
         >
           <DialogHeader>
             <DialogTitle>Add Connection</DialogTitle>
           </DialogHeader>
 
-          {/* Tab switcher (only if cloud mode) */}
-          {isCloudMode && (
+          {/* Tab switcher: Direct + Via Agent show in cloud and self-hosted; the
+              Valkey-instances tab is cloud-only. */}
+          {showAgentTab && (
             <div className="flex border-b">
               <button
                 onClick={() => setAddTab('direct')}
@@ -429,16 +437,18 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
               >
                 Via Agent
               </button>
-              <button
-                onClick={() => setAddTab('valkey')}
-                className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                  addTab === 'valkey'
-                    ? 'border-primary text-primary'
-                    : 'border-transparent text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                BetterDB Valkey instances
-              </button>
+              {isCloudMode && (
+                <button
+                  onClick={() => setAddTab('valkey')}
+                  className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                    addTab === 'valkey'
+                      ? 'border-primary text-primary'
+                      : 'border-transparent text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  BetterDB Valkey instances
+                </button>
+              )}
             </div>
           )}
 

@@ -16,6 +16,6 @@ export class CreatePersonalTokenDto {
   name: string;
 
   @IsOptional()
-  @IsIn(['mcp'])
-  type?: 'mcp';
+  @IsIn(['mcp', 'agent'])
+  type?: 'mcp' | 'agent';
 }
