@@ -521,6 +521,33 @@ describe('PrometheusService staleness bounds', () => {
     expect(text).not.toContain(`betterdb_acl_denied_total{connection="${LABEL}"}`);
   });
 
+  it('keeps a connection whose INFO reliably answers after the bound', async () => {
+    let resolveInfo: (info: unknown) => void = () => undefined;
+    const slow = {
+      getInfoParsed: jest.fn().mockReturnValue(
+        new Promise((resolve) => {
+          resolveInfo = resolve;
+        }),
+      ),
+    };
+    (service['connectionRegistry'].get as jest.Mock).mockReturnValue(slow);
+
+    const abandoned = service['updateMetricsForConnection']('conn-1').catch(() => undefined);
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1);
+    await abandoned;
+
+    resolveInfo({});
+    await Promise.resolve();
+    setMemory(LABEL, 100);
+
+    await jest.advanceTimersByTimeAsync(BOUND_MS - POLL_INTERVAL_MS);
+
+    const text = await service.getMetrics();
+
+    expect(text).toContain(`betterdb_poll_stale{connection="${LABEL}"} 0`);
+    expect(text).toContain(`betterdb_memory_used_bytes{connection="${LABEL}"} 100`);
+  });
+
   it('does not page twice when a pass is abandoned mid failover dispatch', async () => {
     const clusterInfo = {
       cluster_state: 'ok',

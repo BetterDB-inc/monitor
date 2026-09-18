@@ -1076,6 +1076,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
     try {
       const info = await client.getInfoParsed();
+      // A reply is evidence the connection is alive even when this pass no
+      // longer owns the metrics, and markFresh only updates a connection the
+      // tracker still knows — so a removed one stays removed.
+      this.freshness.markFresh(connectionId, connLabel, Date.now());
       // The connection may have been removed, or this pass abandoned at its
       // bound, while the read was outstanding. Writing now would recreate
       // series cleanup has already dropped and move shared per-connection
@@ -1083,7 +1087,6 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       if (this.isSuperseded(connectionId, epoch)) {
         return;
       }
-      this.freshness.markFresh(connectionId, connLabel, Date.now());
 
       this.updateServerMetrics(info, connLabel);
       this.updateClientInfoMetrics(info, connLabel, connectionId, config);
@@ -1479,7 +1482,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       // (no Pro webhook service) still sees failover — parity with the
       // instance.down / instance.up availability edges. Only the webhook dispatch
       // itself is gated on the Pro service being present.
-      const stateChanged = state.previousClusterState === 'ok' && clusterState === 'fail';
+      const previousClusterState = state.previousClusterState;
+      const stateChanged = previousClusterState === 'ok' && clusterState === 'fail';
       const newSlotFailures = state.previousSlotsFail < slotsFail && slotsFail > 0;
 
       // Both edges above read CLUSTER INFO, so they only see a cluster-wide
@@ -1561,7 +1565,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           try {
             await this.webhookEventsProService.dispatchClusterFailover({
               clusterState,
-              previousState: state.previousClusterState ?? undefined,
+              previousState: previousClusterState ?? undefined,
               reasons,
               changedNodes,
               slotsAssigned: parseInt(clusterInfo.cluster_slots_assigned) || 0,
