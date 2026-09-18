@@ -2,9 +2,11 @@ export const POLL_STALE_METRIC = 'betterdb_poll_stale';
 
 const STALENESS_POLL_MULTIPLIER = 3;
 
+export const STALENESS_FLOOR_MULTIPLIER = 2;
+
 export function resolveStalenessMs(pollIntervalMs: number, configuredMs?: number): number {
   if (configuredMs !== undefined && configuredMs > 0) {
-    return configuredMs;
+    return Math.max(configuredMs, pollIntervalMs * STALENESS_FLOOR_MULTIPLIER);
   }
   return pollIntervalMs * STALENESS_POLL_MULTIPLIER;
 }
@@ -29,7 +31,12 @@ export class FreshnessTracker {
   }
 
   markFresh(connectionId: string, label: string, now: number): void {
-    this.entries.set(connectionId, { label, lastSuccessAt: now });
+    const entry = this.entries.get(connectionId);
+    if (entry === undefined) {
+      return;
+    }
+    entry.label = label;
+    entry.lastSuccessAt = now;
   }
 
   isStale(connectionId: string, now: number): boolean {
