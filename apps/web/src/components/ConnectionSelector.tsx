@@ -989,9 +989,16 @@ function AgentTab({
   };
 
   const cloudHost = window.location.host;
-  // Match the page scheme: cloud is always HTTPS (wss), but a self-hosted instance on
-  // plain HTTP needs ws:// — a hardcoded wss:// would make the copied run command fail.
-  const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  const pageIsHttps = window.location.protocol === 'https:';
+  // The agent authenticates by sending BETTERDB_TOKEN in the WebSocket Authorization
+  // header, so plain ws:// exposes the token to anyone on the network. Only use ws://
+  // for loopback (local dev, where there is no network hop); every network-facing host
+  // gets wss:// so the token is never emitted in cleartext. On a plain-HTTP non-loopback
+  // instance that means the command uses wss:// and needs TLS terminated first — see the
+  // warning shown below.
+  const hostIsLoopback = isLocalhostHost(window.location.hostname.replace(/^\[|\]$/g, ''));
+  const wsScheme = pageIsHttps || !hostIsLoopback ? 'wss' : 'ws';
+  const insecureAgentHost = !pageIsHttps && !hostIsLoopback;
 
   return (
     <div className="space-y-4 max-h-[70vh] overflow-y-auto">
@@ -1079,6 +1086,15 @@ function AgentTab({
               {copied ? 'Copied!' : 'Copy'}
             </button>
           </div>
+
+          {insecureAgentHost && (
+            <p className="text-xs border rounded-md border-amber-300 bg-amber-50 text-amber-800 p-2 mb-2">
+              This instance is served over HTTP on a network-facing host. The agent sends its
+              token over the connection, so the commands below use <span className="font-mono">wss://</span> and
+              require HTTPS (terminate TLS at a reverse proxy) before the agent can connect — a
+              plain <span className="font-mono">ws://</span> URL would transmit the token in cleartext.
+            </p>
+          )}
 
           <h4 className="text-xs font-medium mb-1">Run the agent with Docker:</h4>
           <pre className="text-xs bg-background p-2 rounded border overflow-x-auto">
