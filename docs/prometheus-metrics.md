@@ -385,6 +385,9 @@ scrape_configs:
     metrics_path: '/api/prometheus/metrics'
     scrape_interval: 15s
     scrape_timeout: 10s
+    authorization:
+      type: Bearer
+      credentials: '<PROMETHEUS_METRICS_TOKEN>'
 ```
 
 ### Multi-Instance Setup
@@ -402,6 +405,8 @@ scrape_configs:
     metrics_path: '/api/prometheus/metrics'
     scrape_interval: 15s
 ```
+
+If `PROMETHEUS_METRICS_TOKEN` is set, add the `authorization` block from the basic example above.
 
 ### With Service Discovery (Kubernetes)
 
@@ -421,6 +426,8 @@ scrape_configs:
     metrics_path: '/api/prometheus/metrics'
     scrape_interval: 15s
 ```
+
+If `PROMETHEUS_METRICS_TOKEN` is set, add the `authorization` block from the basic example above.
 
 ## Useful PromQL Queries
 
@@ -644,6 +651,15 @@ curl -b cookies.txt -X PUT http://localhost:3001/settings \
   -d '{"anomalyPrometheusIntervalMs": 15000}'
 ```
 
+### Authentication
+
+By default the endpoint is open and unauthenticated, matching every scrape example above.
+
+- `PROMETHEUS_METRICS_ENABLED` — set to `false` to return 404 from `/api/prometheus/metrics`; the OTLP mirror keeps exporting regardless.
+- `PROMETHEUS_METRICS_TOKEN` — when set, a scrape must send `Authorization: Bearer <token>`; a missing or wrong token returns 401.
+
+In `CLOUD_MODE`, `PROMETHEUS_METRICS_TOKEN` is required whenever the endpoint is enabled: startup fails validation if it's unset, and an enabled endpoint with no token configured answers 401 at request time.
+
 ### Cardinality Management
 
 High-cardinality labels can impact Prometheus performance. Monitor these metrics:
@@ -672,6 +688,12 @@ If cardinality becomes an issue, consider:
 **Anomaly metrics showing zeros?**
 - Wait for warmup: Anomaly detection requires 30 samples (30 seconds at 1s poll rate)
 - Check buffer readiness: Query `betterdb_anomaly_buffer_ready`
+
+**Getting a 401 Unauthorized?**
+- The token is missing or wrong: send `Authorization: Bearer <PROMETHEUS_METRICS_TOKEN>`
+
+**Getting a 404 Not Found?**
+- The endpoint is disabled: `PROMETHEUS_METRICS_ENABLED` is set to `false`
 
 ### High Scrape Duration
 
