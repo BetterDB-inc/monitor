@@ -1521,6 +1521,20 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       }
       reasons.push(...topologyReasons);
 
+      // Advance the baseline before the dispatches, the way the CRC edge does:
+      // a pass abandoned at its bound mid-dispatch has already emitted the
+      // event, and leaving the edge uncommitted would page again next poll.
+      state.previousClusterState = clusterState;
+      state.previousSlotsFail = slotsFail;
+      if (topology !== null) {
+        state.previousTopology = topology;
+      }
+      const demotionCheckedAt = Date.now();
+      if (topologyDiff !== null) {
+        recordDemotions(state.demotionWatch, topologyDiff, demotionCheckedAt);
+      }
+      pruneDemotionWatch(state.demotionWatch, topology, demotionCheckedAt);
+
       if (reasons.length > 0) {
         // OTLP mirror is decoupled from the Pro webhook gate (the dispatcher
         // no-ops unless OTEL_* is set).
@@ -1563,25 +1577,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         }
       }
 
-      if (this.isSuperseded(connectionId, epoch)) {
-        return;
-      }
-
-      state.previousClusterState = clusterState;
-      state.previousSlotsFail = slotsFail;
-      if (topology !== null) {
-        state.previousTopology = topology;
-      }
-
       // cluster.demoted.writes: the failover above is over, but the node it
       // demoted may not know yet. While it still answers `role:master` it keeps
       // accepting writes for slots it no longer owns, and those writes are
       // discarded the moment the client's slot cache refreshes — silently.
-      const demotionCheckedAt = Date.now();
-      if (topologyDiff !== null) {
-        recordDemotions(state.demotionWatch, topologyDiff, demotionCheckedAt);
-      }
-      pruneDemotionWatch(state.demotionWatch, topology, demotionCheckedAt);
       await this.detectDemotedMasterWrites(connectionId, state, config, epoch);
 
       const capabilities = client.getCapabilities();
