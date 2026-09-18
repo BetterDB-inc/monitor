@@ -1,5 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+import type { FastifyRequest } from 'fastify';
 import type { Actor } from '@betterdb/shared';
 import { StorageModule } from '../storage/storage.module';
 import { ConnectionsModule } from '../connections/connections.module';
@@ -67,5 +68,24 @@ describe('self-hosted agent wiring (boot verification)', () => {
     const controller = app.get(PersonalTokensController, { strict: false });
     const actor = { userId: 'u1', role: 'admin', via: 'session' } as unknown as Actor;
     await expect(controller.list(actor, 'agent')).resolves.toEqual([]);
+  });
+
+  // Regression: agent-token JWTs are signed with SESSION_SECRET, which is unset on a
+  // standard self-hosted instance (auth uses AUTH_SECRET). jsonwebtoken throws on an
+  // empty secret, so without the module seeding SESSION_SECRET this mint would 500.
+  it('mints an agent token without SESSION_SECRET set', async () => {
+    const controller = app.get(PersonalTokensController, { strict: false });
+    const actor = {
+      userId: 'u1',
+      email: 'a@b.c',
+      role: 'admin',
+      isOwner: true,
+      via: 'session',
+    } as unknown as Actor;
+    const req = { headers: {}, ip: '127.0.0.1' } as unknown as FastifyRequest;
+    const result = await controller.create({ name: 'ci-agent', type: 'agent' }, actor, req);
+    expect(typeof result.token).toBe('string');
+    expect(result.token.length).toBeGreaterThan(0);
+    expect(result.type).toBe('agent');
   });
 });
