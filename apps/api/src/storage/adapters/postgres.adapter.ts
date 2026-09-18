@@ -1423,6 +1423,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000;
       ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000;
       ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS inference_sla_config JSONB NOT NULL DEFAULT '{}'::JSONB;
+      ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS anomaly_detector_config JSONB NOT NULL DEFAULT '{}'::JSONB;
       ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS local_retention_days INTEGER;
 
       CREATE TABLE IF NOT EXISTS metric_forecast_settings (
@@ -3008,6 +3009,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         id, audit_poll_interval_ms, client_analytics_poll_interval_ms,
         anomaly_poll_interval_ms, anomaly_cache_ttl_ms, anomaly_prometheus_interval_ms,
         throughput_forecasting_enabled, throughput_forecasting_default_rolling_window_ms, throughput_forecasting_default_alert_threshold_ms,
+        inference_sla_config, anomaly_detector_config,
         inference_sla_config, local_retention_days,
         updated_at, created_at
       ) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
@@ -3021,6 +3023,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         throughput_forecasting_default_rolling_window_ms = EXCLUDED.throughput_forecasting_default_rolling_window_ms,
         throughput_forecasting_default_alert_threshold_ms = EXCLUDED.throughput_forecasting_default_alert_threshold_ms,
         inference_sla_config = EXCLUDED.inference_sla_config,
+        anomaly_detector_config = EXCLUDED.anomaly_detector_config,
         local_retention_days = EXCLUDED.local_retention_days,
         updated_at = EXCLUDED.updated_at`,
       [
@@ -3033,6 +3036,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         settings.metricForecastingDefaultRollingWindowMs,
         settings.metricForecastingDefaultAlertThresholdMs,
         JSON.stringify(settings.inferenceSlaConfig ?? {}),
+        JSON.stringify(settings.anomalyDetectorConfig ?? {}),
         settings.localRetentionDays ?? null,
         now,
         settings.createdAt || now,
