@@ -9,7 +9,8 @@
   "scripts": {
     "bench": "tsx src/cli.ts",
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint ."
   },
   "dependencies": {
     "@betterdb/semantic-cache": "workspace:*",

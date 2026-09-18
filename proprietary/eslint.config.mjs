@@ -9,8 +9,11 @@ export default tseslint.config(
       'node_modules/**',
       'coverage/**',
       'eslint.config.mjs',
-      'scripts/**',
       '**/*.js',
+      // Has its own workspace lint (proprietary/entitlement).
+      'entitlement/**',
+      // Helm/Terraform, not TS (charts covered by `helm lint`).
+      'infra/**',
     ],
   },
   eslint.configs.recommended,
@@ -19,7 +22,7 @@ export default tseslint.config(
     languageOptions: {
       globals: { ...globals.node, ...globals.jest },
       parserOptions: {
-        project: './tsconfig.eslint.json',
+        project: '../apps/api/tsconfig.eslint.json',
         tsconfigRootDir: import.meta.dirname,
       },
     },
