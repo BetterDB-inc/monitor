@@ -291,11 +291,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // connection before the next tick, so stacking a second full bound here
     // would push healthy connections past their own staleness bound.
     const deadline = Date.now() + this.pollIntervalMs;
+    const epoch = this.currentEpoch(ctx.connectionId);
     try {
       await this.updateMetricsForConnection(ctx.connectionId);
 
       // Update storage-based metrics for this connection
-      await this.updateStorageBasedMetricsForConnection(ctx.connectionId);
+      await this.updateStorageBasedMetricsForConnection(ctx.connectionId, epoch);
 
       // Trigger health check on successful metrics update - may fire instance.up webhook if recovered
       await this.pingHealth(ctx.connectionId, deadline);
@@ -771,9 +772,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // bounded read instead of one per connection.
     await Promise.allSettled(
       connectedConnections.map(async (conn) => {
+        const epoch = this.currentEpoch(conn.id);
         try {
           await this.updateMetricsForConnection(conn.id);
-          await this.updateStorageBasedMetricsForConnection(conn.id);
+          await this.updateStorageBasedMetricsForConnection(conn.id, epoch);
         } catch (error) {
           this.logger.warn(
             `Failed to update metrics for connection ${conn.name}: ${error instanceof Error ? error.message : 'Unknown'}`,
@@ -790,6 +792,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     connectionId: string,
     epoch: number = this.currentEpoch(connectionId),
   ): Promise<void> {
+    if (this.isSuperseded(connectionId, epoch)) {
+      return;
+    }
     if (this.freshness.isStale(connectionId, Date.now())) {
       return;
     }
@@ -797,20 +802,21 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const connLabel = this.getConnectionLabel(connectionId);
     const state = this.getConnectionState(connectionId);
 
-    await this.updateAclMetrics(connectionId, connLabel, state);
+    await this.updateAclMetrics(connectionId, connLabel, state, epoch);
     if (this.isSuperseded(connectionId, epoch)) return;
-    await this.updateClientMetrics(connectionId, connLabel, state);
+    await this.updateClientMetrics(connectionId, connLabel, state, epoch);
     if (this.isSuperseded(connectionId, epoch)) return;
     await this.updateSlowlogMetrics(connectionId, connLabel, state);
     if (this.isSuperseded(connectionId, epoch)) return;
     await this.updateCommandlogMetrics(connectionId, connLabel, state);
     if (this.isSuperseded(connectionId, epoch)) return;
-    await this.updateMetricForecastMetrics(connectionId, connLabel);
+    await this.updateMetricForecastMetrics(connectionId, connLabel, epoch);
   }
 
   private async updateMetricForecastMetrics(
     connectionId: string,
     connLabel: string,
+    epoch: number = this.currentEpoch(connectionId),
   ): Promise<void> {
     if (!this.metricForecastingService) return;
 
@@ -819,12 +825,18 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     for (const metricKind of ALL_METRIC_KINDS) {
       try {
         const settings = await this.storage.getMetricForecastSettings(connectionId, metricKind);
+        if (this.isSuperseded(connectionId, epoch)) {
+          return;
+        }
         if (!settings || !settings.enabled) {
           this.metricForecastTimeToLimitSeconds.remove(connLabel, metricKind);
           continue;
         }
 
         const forecast = await this.metricForecastingService.getForecast(connectionId, metricKind);
+        if (this.isSuperseded(connectionId, epoch)) {
+          return;
+        }
         if (forecast.ceiling === null || !forecast.enabled) {
           this.metricForecastTimeToLimitSeconds.remove(connLabel, metricKind);
           continue;
@@ -1414,6 +1426,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         }
       }
 
+      if (this.isSuperseded(connectionId, epoch)) {
+        return;
+      }
+
       state.previousClusterState = clusterState;
       state.previousSlotsFail = slotsFail;
       if (topology !== null) {
@@ -1484,9 +1500,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     connectionId: string,
     connLabel: string,
     state: ConnectionMetricState,
+    epoch: number = this.currentEpoch(connectionId),
   ): Promise<void> {
     try {
       const stats = await this.storage.getAuditStats(undefined, undefined, connectionId);
+      if (this.isSuperseded(connectionId, epoch)) {
+        return;
+      }
 
       this.aclDeniedTotal.labels(connLabel).set(stats.totalEntries);
 
@@ -1525,9 +1545,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     connectionId: string,
     connLabel: string,
     state: ConnectionMetricState,
+    epoch: number = this.currentEpoch(connectionId),
   ): Promise<void> {
     try {
       const stats = await this.storage.getClientAnalyticsStats(undefined, undefined, connectionId);
+      if (this.isSuperseded(connectionId, epoch)) {
+        return;
+      }
 
       this.clientConnectionsCurrent.labels(connLabel).set(stats.currentConnections);
       this.clientConnectionsPeak.labels(connLabel).set(stats.peakConnections);
@@ -2129,6 +2153,20 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (label === undefined || this.freshness.hasLabel(label)) {
       return;
     }
+    this.dropSeriesForRemovedLabel(label);
+    // A pass that was already past an epoch check when cleanup ran can still
+    // write one more time. Sweeping again after the pass bound catches that
+    // without waiting for a scrape, and the label check keeps a connection
+    // re-added under the same host:port in the meantime.
+    const recheck = setTimeout(() => {
+      if (!this.freshness.hasLabel(label)) {
+        this.dropSeriesForRemovedLabel(label);
+      }
+    }, this.pollIntervalMs);
+    recheck.unref?.();
+  }
+
+  private dropSeriesForRemovedLabel(label: string): void {
     this.removeSeriesForLabels(new Set([label]), NO_EXCLUSIONS).catch((error) => {
       this.logger.warn(
         `Failed to remove series for ${label}: ${error instanceof Error ? error.message : error}`,
