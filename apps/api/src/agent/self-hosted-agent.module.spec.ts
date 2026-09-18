@@ -8,13 +8,13 @@ import { SystemModule } from '../system/system.module';
 import { TelemetryModule } from '../telemetry/telemetry.module';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { WorkspaceAuthModule } from '../auth/workspace-auth.module';
-import { SelfHostedAgentModule } from './self-hosted-agent.module';
 import { PersonalTokensController } from '../workspace/personal-tokens.controller';
 
-// Throwaway verification: boot the real module graph in self-hosted ENABLED mode
-// with the self-hosted agent wiring, and confirm (a) DI resolves across module
-// boundaries (AgentGateway needs the global ConnectionRegistry), (b) Fastify
-// registers routes with no collision, (c) the injected gateway/token service work.
+// Boot the real module graph in self-hosted ENABLED mode with the self-hosted agent
+// wiring, and confirm (a) DI resolves across module boundaries (AgentGateway needs
+// the global ConnectionRegistry), (b) Fastify registers routes with no collision,
+// (c) the injected gateway/token service work, (d) agent minting succeeds with no
+// preconfigured SESSION_SECRET.
 describe('self-hosted agent wiring (boot verification)', () => {
   let app: NestFastifyApplication;
 
@@ -23,6 +23,12 @@ describe('self-hosted agent wiring (boot verification)', () => {
     process.env.AUTH_SECRET = 's'.repeat(40);
     delete process.env.WORKSPACE_DISABLED;
     delete process.env.CLOUD_MODE;
+    // Clear any inherited SESSION_SECRET, then load the module so its import-time
+    // seeding runs against this controlled env — otherwise the mint test below could
+    // pass on an inherited secret and mask a seeding regression.
+    delete process.env.SESSION_SECRET;
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { SelfHostedAgentModule } = require('./self-hosted-agent.module');
     const moduleRef = await Test.createTestingModule({
       imports: [
         StorageModule,

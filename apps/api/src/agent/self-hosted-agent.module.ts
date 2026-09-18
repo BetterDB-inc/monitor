@@ -22,12 +22,26 @@ const agentProviders = createAgentGatewayProviders(logger);
 // (type:'agent') 500 instead of returning a token. Seed SESSION_SECRET from the same
 // persisted secret better-auth resolves, so it is non-empty AND stable across
 // restarts (a changing secret would invalidate every already-issued agent token).
-// Cloud is unaffected: this module only loads outside cloud mode, where the
-// deployment already sets SESSION_SECRET.
-if (agentProviders.length > 0 && !process.env.SESSION_SECRET) {
-  const dataDir = process.env.BETTERDB_DATA_DIR || join(process.cwd(), 'data');
-  process.env.SESSION_SECRET = resolveAuthSecret(process.env, dataDir);
-  logger.log('Seeded SESSION_SECRET for agent-token signing from the workspace auth secret');
+//
+// A configured SESSION_SECRET is only kept if it is actually strong: a truthiness
+// check alone would accept a whitespace-only or too-short value and hand it to HS256
+// signing. Treat anything shorter than 32 non-whitespace characters as unset and
+// fall back to the resolved auth secret. Cloud is unaffected: this module only loads
+// outside cloud mode.
+const MIN_SESSION_SECRET_LENGTH = 32;
+if (agentProviders.length > 0) {
+  const configured = (process.env.SESSION_SECRET ?? '').trim();
+  if (configured.length < MIN_SESSION_SECRET_LENGTH) {
+    if (configured.length > 0) {
+      logger.warn(
+        `SESSION_SECRET is shorter than ${MIN_SESSION_SECRET_LENGTH} characters; ignoring it and ` +
+          'using the workspace auth secret for agent-token signing instead.',
+      );
+    }
+    const dataDir = process.env.BETTERDB_DATA_DIR || join(process.cwd(), 'data');
+    process.env.SESSION_SECRET = resolveAuthSecret(process.env, dataDir);
+    logger.log('Seeded SESSION_SECRET for agent-token signing from the workspace auth secret');
+  }
 }
 
 /**

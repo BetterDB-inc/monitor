@@ -126,9 +126,14 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
         });
         setTestResult(null);
         setAddTab('direct');
-      } else if (detail?.tab && (detail.tab === 'agent' ? showAgentTab : isCloudMode)) {
-        // The agent tab is available in cloud and self-hosted; the valkey tab is
-        // cloud-only.
+      } else if (
+        detail?.tab &&
+        (detail.tab === 'direct' ||
+          (detail.tab === 'agent' && showAgentTab) ||
+          (detail.tab === 'valkey' && isCloudMode))
+      ) {
+        // Direct is always selectable; the agent tab is available in cloud and
+        // self-hosted; the valkey (provisioning) tab is cloud-only.
         setAddTab(detail.tab);
         setValkeyMaxmemory(detail.valkeyMaxmemory ?? null);
       }
@@ -984,6 +989,9 @@ function AgentTab({
   };
 
   const cloudHost = window.location.host;
+  // Match the page scheme: cloud is always HTTPS (wss), but a self-hosted instance on
+  // plain HTTP needs ws:// — a hardcoded wss:// would make the copied run command fail.
+  const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
 
   return (
     <div className="space-y-4 max-h-[70vh] overflow-y-auto">
@@ -1078,7 +1086,7 @@ function AgentTab({
   --name betterdb-agent \\
   -e VALKEY_HOST=your-valkey-host \\
   -e VALKEY_PORT=6379 \\
-  -e BETTERDB_CLOUD_URL=wss://${cloudHost}/agent/ws \\
+  -e BETTERDB_CLOUD_URL=${wsScheme}://${cloudHost}/agent/ws \\
   -e BETTERDB_TOKEN=${generatedToken.token} \\
   betterdb/agent:latest`}
           </pre>
@@ -1088,7 +1096,7 @@ function AgentTab({
             {`npx @betterdb/agent \\
   --valkey-host your-valkey-host \\
   --valkey-port 6379 \\
-  --cloud-url wss://${cloudHost}/agent/ws \\
+  --cloud-url ${wsScheme}://${cloudHost}/agent/ws \\
   --token ${generatedToken.token}`}
           </pre>
 
