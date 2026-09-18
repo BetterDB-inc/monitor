@@ -153,14 +153,21 @@ export function McpTokensPanel(): ReactElement {
         Generate tokens for MCP (Model Context Protocol) clients like Claude Code to access your
         database observability data.
       </p>
-      <p className="text-xs text-muted-foreground border rounded-md bg-muted p-2">
-        <span className="font-medium text-foreground">Which token?</span> The{' '}
-        <span className="font-medium text-foreground">MCP token</span> below is for Claude Code's
-        MCP config (<span className="font-mono">BETTERDB_TOKEN</span>). To run the Docker / npx
-        monitoring agent instead, use an{' '}
-        <span className="font-medium text-foreground">Agent token</span> from Add Connection → Via
-        Agent.
-      </p>
+      {/* The Agent token lives only in cloud mode (the "Via Agent" tab and the
+          /agent-tokens endpoint are cloud-only), so the MCP-vs-Agent disambiguation
+          only makes sense there. In self-hosted there is no Agent token to confuse
+          this with, and pointing at a "Via Agent" tab that isn't rendered would be
+          misleading. */}
+      {isCloud === true && (
+        <p className="text-xs text-muted-foreground border rounded-md bg-muted p-2">
+          <span className="font-medium text-foreground">Which token?</span> The{' '}
+          <span className="font-medium text-foreground">MCP token</span> below is for Claude Code's
+          MCP config (<span className="font-mono">BETTERDB_TOKEN</span>). To run the Docker / npx
+          monitoring agent instead, use an{' '}
+          <span className="font-medium text-foreground">Agent token</span> from Add Connection → Via
+          Agent.
+        </p>
+      )}
       {isCloud === false && (
         <p className="text-sm text-muted-foreground">
           A token acts as you: calls made with it can do only what your role allows, and changes
