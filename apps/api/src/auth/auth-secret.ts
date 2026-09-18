@@ -73,7 +73,10 @@ export function resolveAuthSecretWithSource(
   env: NodeJS.ProcessEnv,
   dataDir: string,
 ): ResolvedAuthSecret {
-  if (env.AUTH_SECRET !== undefined && env.AUTH_SECRET.length >= MIN_SECRET_LENGTH) {
+  // Measure strength after trimming: a whitespace-only value (e.g. 32 spaces) passes a
+  // raw length check but is a trivially guessable HS256 key. Treat it as unset and
+  // fall through to the persisted/generated secret.
+  if (env.AUTH_SECRET !== undefined && env.AUTH_SECRET.trim().length >= MIN_SECRET_LENGTH) {
     return { secret: env.AUTH_SECRET, ephemeral: false };
   }
   if (dataDir.trim() === '') {
