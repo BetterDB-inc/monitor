@@ -72,3 +72,34 @@ describe('Prometheus metrics endpoint env', () => {
     ).toBe(true);
   });
 });
+
+describe('Metric export profile env', () => {
+  it('defaults to the full profile and top 100 slots', () => {
+    const parsed = envSchema.parse({});
+    expect(parsed.METRICS_EXPORT_PROFILE).toBe('full');
+    expect(parsed.METRICS_SLOT_STATS_TOP_N).toBe(100);
+  });
+
+  it('accepts vitals case- and whitespace-insensitively', () => {
+    expect(envSchema.parse({ METRICS_EXPORT_PROFILE: ' Vitals ' }).METRICS_EXPORT_PROFILE).toBe(
+      'vitals',
+    );
+  });
+
+  it('rejects an unknown profile', () => {
+    expect(envSchema.safeParse({ METRICS_EXPORT_PROFILE: 'minimal' }).success).toBe(false);
+  });
+
+  it('accepts a slot top-N in range, including zero', () => {
+    expect(envSchema.parse({ METRICS_SLOT_STATS_TOP_N: '0' }).METRICS_SLOT_STATS_TOP_N).toBe(0);
+    expect(envSchema.parse({ METRICS_SLOT_STATS_TOP_N: '16384' }).METRICS_SLOT_STATS_TOP_N).toBe(
+      16384,
+    );
+  });
+
+  it('rejects a slot top-N out of range or fractional', () => {
+    expect(envSchema.safeParse({ METRICS_SLOT_STATS_TOP_N: '-1' }).success).toBe(false);
+    expect(envSchema.safeParse({ METRICS_SLOT_STATS_TOP_N: '16385' }).success).toBe(false);
+    expect(envSchema.safeParse({ METRICS_SLOT_STATS_TOP_N: '2.5' }).success).toBe(false);
+  });
+});
