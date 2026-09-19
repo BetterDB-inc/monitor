@@ -93,6 +93,7 @@ interface ConnectionMetricState {
   // Inference latency labels (per-connection)
   currentInferenceBucketLabels: Set<string>;
   currentInferenceSlaBreachLabels: Set<string>;
+  instanceInfoLabels: [string, string, string] | null;
 }
 
 @Injectable()
@@ -178,6 +179,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private dbKeys: Gauge;
   private dbKeysExpiring: Gauge;
   private dbAvgTtlSeconds: Gauge;
+  private keyspaceKeys: Gauge;
+  private keyspaceKeysExpiring: Gauge;
+  private rdbChangesSinceLastSave: Gauge;
+  private rdbLastSaveTimestampSeconds: Gauge;
+  private rdbLastBgsaveOk: Gauge;
+  private aofEnabled: Gauge;
+  private aofLastBgrewriteOk: Gauge;
 
   // Cluster Metrics
   private clusterEnabled: Gauge;
@@ -378,6 +386,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         // Inference latency labels
         currentInferenceBucketLabels: new Set(),
         currentInferenceSlaBreachLabels: new Set(),
+        instanceInfoLabels: null,
       });
     }
     return this.perConnectionState.get(connectionId)!;
@@ -563,6 +572,28 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       'db',
     ]);
     this.dbAvgTtlSeconds = this.createGauge('db_avg_ttl_seconds', 'Average TTL in seconds', ['db']);
+    this.keyspaceKeys = this.createGauge('keyspace_keys', 'Total keys across all databases');
+    this.keyspaceKeysExpiring = this.createGauge(
+      'keyspace_keys_expiring',
+      'Keys with an expiration across all databases',
+    );
+    this.rdbChangesSinceLastSave = this.createGauge(
+      'rdb_changes_since_last_save',
+      'Writes since the last RDB save',
+    );
+    this.rdbLastSaveTimestampSeconds = this.createGauge(
+      'rdb_last_save_timestamp_seconds',
+      'Unix time of the last successful RDB save',
+    );
+    this.rdbLastBgsaveOk = this.createGauge(
+      'rdb_last_bgsave_ok',
+      '1 if the last RDB background save succeeded',
+    );
+    this.aofEnabled = this.createGauge('aof_enabled', '1 if AOF persistence is enabled');
+    this.aofLastBgrewriteOk = this.createGauge(
+      'aof_last_bgrewrite_ok',
+      '1 if the last AOF rewrite succeeded',
+    );
 
     // Cluster Metrics (per connection)
     this.clusterEnabled = this.createGauge('cluster_enabled', '1 if cluster mode is enabled');
@@ -951,11 +982,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         return;
       }
 
-      this.updateServerMetrics(info, connLabel);
+      this.updateServerMetrics(info, connLabel, state);
       this.updateClientInfoMetrics(info, connLabel, connectionId, config);
       this.updateMemoryMetrics(info, connLabel, connectionId, config);
       this.updateStatsMetrics(info, connLabel);
       this.updateCpuMetrics(info, connLabel);
+      this.updatePersistenceMetrics(info, connLabel);
       this.updateReplicationMetrics(info, connLabel, connectionId, config);
       this.updateKeyspaceMetricsFromInfo(info, connLabel, state);
       await this.updateClusterMetricsFromInfo(
@@ -976,12 +1008,21 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
   }
 
-  private updateServerMetrics(info: InfoResponse, connLabel: string): void {
+  private updateServerMetrics(
+    info: InfoResponse,
+    connLabel: string,
+    state: ConnectionMetricState,
+  ): void {
     if (!info.server) return;
 
     const version = info.server.valkey_version || info.server.redis_version || 'unknown';
     const role = info.replication?.role || 'unknown';
     const os = info.server.os || 'unknown';
+    const previous = state.instanceInfoLabels;
+    if (previous && (previous[0] !== version || previous[1] !== role || previous[2] !== os)) {
+      this.instanceInfo.remove(connLabel, ...previous);
+    }
+    state.instanceInfoLabels = [version, role, os];
 
     this.uptimeInSeconds.labels(connLabel).set(parseInt(info.server.uptime_in_seconds) || 0);
     this.instanceInfo.labels(connLabel, version, role, os).set(1);
@@ -1143,6 +1184,24 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.cpuUserSecondsTotal.labels(connLabel).set(parseFloat(info.cpu.used_cpu_user) || 0);
   }
 
+  private updatePersistenceMetrics(info: InfoResponse, connLabel: string): void {
+    if (!info.persistence) return;
+
+    this.rdbChangesSinceLastSave
+      .labels(connLabel)
+      .set(parseInt(info.persistence.rdb_changes_since_last_save) || 0);
+    this.rdbLastSaveTimestampSeconds
+      .labels(connLabel)
+      .set(parseInt(info.persistence.rdb_last_save_time) || 0);
+    this.rdbLastBgsaveOk
+      .labels(connLabel)
+      .set(info.persistence.rdb_last_bgsave_status === 'ok' ? 1 : 0);
+    this.aofEnabled.labels(connLabel).set(info.persistence.aof_enabled === '1' ? 1 : 0);
+    this.aofLastBgrewriteOk
+      .labels(connLabel)
+      .set(info.persistence.aof_last_bgrewrite_status === 'ok' ? 1 : 0);
+  }
+
   private updateReplicationMetrics(
     info: InfoResponse,
     connLabel: string,
@@ -1154,6 +1213,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const role = info.replication.role;
 
     if (role === 'master') {
+      this.masterLinkUp.remove(connLabel);
+      this.masterLastIoSecondsAgo.remove(connLabel);
       this.connectedSlaves
         .labels(connLabel)
         .set(parseInt(info.replication.connected_slaves || '0') || 0);
@@ -1163,6 +1224,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           .set(parseInt(info.replication.master_repl_offset) || 0);
       }
     } else if (role === 'slave') {
+      this.connectedSlaves.remove(connLabel);
       const masterLinkStatus = info.replication.master_link_status;
       this.masterLinkUp.labels(connLabel).set(masterLinkStatus === 'up' ? 1 : 0);
 
@@ -1203,6 +1265,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (!info.keyspace) return;
 
     const newDbLabels = new Set<string>();
+    let totalKeys = 0;
+    let totalExpiring = 0;
 
     for (const [dbKey, dbInfo] of Object.entries(info.keyspace as Record<string, unknown>)) {
       // parseInfoToTyped emits typed objects for db* entries; anything still
@@ -1214,7 +1278,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.dbKeys.labels(connLabel, dbKey).set(parsedInfo.keys || 0);
       this.dbKeysExpiring.labels(connLabel, dbKey).set(parsedInfo.expires || 0);
       this.dbAvgTtlSeconds.labels(connLabel, dbKey).set((parsedInfo.avg_ttl || 0) / 1000);
+      totalKeys += parsedInfo.keys || 0;
+      totalExpiring += parsedInfo.expires || 0;
     }
+
+    this.keyspaceKeys.labels(connLabel).set(totalKeys);
+    this.keyspaceKeysExpiring.labels(connLabel).set(totalExpiring);
 
     // Remove stale db labels for this connection
     for (const staleDb of state.currentKeyspaceDbLabels) {
