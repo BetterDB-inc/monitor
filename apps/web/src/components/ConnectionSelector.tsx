@@ -1007,6 +1007,17 @@ function AgentTab({
         accessible. The agent connects outbound to BetterDB Cloud via WebSocket.
       </p>
 
+      <p className="text-xs text-muted-foreground border rounded-md bg-muted p-2">
+        <span className="font-medium text-foreground">Which token?</span> This{' '}
+        <span className="font-medium text-foreground">Agent token</span> goes on the agent's run
+        command below (the <span className="font-mono">-e BETTERDB_TOKEN=…</span> /{' '}
+        <span className="font-mono">--token</span> argument). Claude Code needs a separate{' '}
+        <span className="font-medium text-foreground">MCP token</span> (Settings → MCP Tokens),
+        pasted into the <span className="font-mono">env</span> block of its MCP config. Both use the
+        variable name <span className="font-mono">BETTERDB_TOKEN</span>, but the values are{' '}
+        <span className="font-medium text-foreground">not interchangeable</span>.
+      </p>
+
       {/* Connected Agents */}
       {agents.length > 0 && (
         <div>

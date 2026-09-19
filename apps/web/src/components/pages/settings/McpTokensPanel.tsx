@@ -153,6 +153,23 @@ export function McpTokensPanel(): ReactElement {
         Generate tokens for MCP (Model Context Protocol) clients like Claude Code to access your
         database observability data.
       </p>
+      {/* The Agent token lives only in cloud mode (the "Via Agent" tab and the
+          /agent-tokens endpoint are cloud-only), so the MCP-vs-Agent disambiguation
+          only makes sense there. In self-hosted there is no Agent token to confuse
+          this with, and pointing at a "Via Agent" tab that isn't rendered would be
+          misleading. */}
+      {isCloud === true && (
+        <p className="text-xs text-muted-foreground border rounded-md bg-muted p-2">
+          <span className="font-medium text-foreground">Which token?</span> This{' '}
+          <span className="font-medium text-foreground">MCP token</span> goes in the{' '}
+          <span className="font-mono">env</span> block of Claude Code's MCP server config. The
+          Docker / npx monitoring agent needs a separate{' '}
+          <span className="font-medium text-foreground">Agent token</span> (Add Connection → Via
+          Agent), passed on its run command. Both use the variable name{' '}
+          <span className="font-mono">BETTERDB_TOKEN</span>, but the values are{' '}
+          <span className="font-medium text-foreground">not interchangeable</span>.
+        </p>
+      )}
       {isCloud === false && (
         <p className="text-sm text-muted-foreground">
           A token acts as you: calls made with it can do only what your role allows, and changes
