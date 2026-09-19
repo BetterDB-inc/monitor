@@ -1748,13 +1748,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       !client.getCapabilities().hasClusterSlotStats ||
       !this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterSlotStats')
     ) {
-      for (const staleSlot of state.currentClusterSlotLabels) {
-        this.clusterSlotKeys.remove(connLabel, staleSlot);
-        this.clusterSlotExpires.remove(connLabel, staleSlot);
-        this.clusterSlotReadsTotal.remove(connLabel, staleSlot);
-        this.clusterSlotWritesTotal.remove(connLabel, staleSlot);
-      }
-      state.currentClusterSlotLabels = new Set();
+      this.clearSlotSeries(connLabel, state);
       return;
     }
 
@@ -1775,22 +1769,36 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
       for (const staleSlot of state.currentClusterSlotLabels) {
         if (!newSlotLabels.has(staleSlot)) {
-          this.clusterSlotKeys.remove(connLabel, staleSlot);
-          this.clusterSlotExpires.remove(connLabel, staleSlot);
-          this.clusterSlotReadsTotal.remove(connLabel, staleSlot);
-          this.clusterSlotWritesTotal.remove(connLabel, staleSlot);
+          this.removeSlotSeries(connLabel, staleSlot);
         }
       }
 
       state.currentClusterSlotLabels = newSlotLabels;
     } catch (slotStatsError) {
-      this.runtimeCapabilityTracker.recordFailure(
+      const disabled = this.runtimeCapabilityTracker.recordFailure(
         connectionId,
         'canClusterSlotStats',
         slotStatsError instanceof Error ? slotStatsError : String(slotStatsError),
       );
+      if (disabled && !this.isSuperseded(connectionId, epoch)) {
+        this.clearSlotSeries(connLabel, state);
+      }
       this.logger.error(`Failed to update cluster slot stats for ${connLabel}`, slotStatsError);
     }
+  }
+
+  private clearSlotSeries(connLabel: string, state: ConnectionMetricState): void {
+    for (const slot of state.currentClusterSlotLabels) {
+      this.removeSlotSeries(connLabel, slot);
+    }
+    state.currentClusterSlotLabels = new Set();
+  }
+
+  private removeSlotSeries(connLabel: string, slot: string): void {
+    this.clusterSlotKeys.remove(connLabel, slot);
+    this.clusterSlotExpires.remove(connLabel, slot);
+    this.clusterSlotReadsTotal.remove(connLabel, slot);
+    this.clusterSlotWritesTotal.remove(connLabel, slot);
   }
 
   private async updateAclMetrics(
