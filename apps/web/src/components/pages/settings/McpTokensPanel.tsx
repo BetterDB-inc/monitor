@@ -160,12 +160,14 @@ export function McpTokensPanel(): ReactElement {
           misleading. */}
       {isCloud === true && (
         <p className="text-xs text-muted-foreground border rounded-md bg-muted p-2">
-          <span className="font-medium text-foreground">Which token?</span> The{' '}
-          <span className="font-medium text-foreground">MCP token</span> below is for Claude Code's
-          MCP config (<span className="font-mono">BETTERDB_TOKEN</span>). To run the Docker / npx
-          monitoring agent instead, use an{' '}
-          <span className="font-medium text-foreground">Agent token</span> from Add Connection → Via
-          Agent.
+          <span className="font-medium text-foreground">Which token?</span> This{' '}
+          <span className="font-medium text-foreground">MCP token</span> goes in the{' '}
+          <span className="font-mono">env</span> block of Claude Code's MCP server config. The
+          Docker / npx monitoring agent needs a separate{' '}
+          <span className="font-medium text-foreground">Agent token</span> (Add Connection → Via
+          Agent), passed on its run command. Both use the variable name{' '}
+          <span className="font-mono">BETTERDB_TOKEN</span>, but the values are{' '}
+          <span className="font-medium text-foreground">not interchangeable</span>.
         </p>
       )}
       {isCloud === false && (

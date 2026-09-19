@@ -12,14 +12,15 @@
 //     '@betterdb/shared'".
 //   - Docker: shared has to be vendored + resolved via a file: dependency, which
 //     is fragile (and previously also failed to resolve shared's own `zod`).
-// Bundling inlines @betterdb/shared (and its only runtime dep, zod) into the
-// output, so the published package and the image are both self-contained.
+// Bundling inlines @betterdb/shared into the output, so the published package and
+// the image no longer have to vendor or resolve it at runtime.
 //
-// The heavy runtime deps declared in package.json `dependencies` (AWS SDK,
-// iovalkey, ws) are kept EXTERNAL and installed by npm as usual — bundling the
-// AWS SDK is large and brittle, and there's no distribution reason to inline it.
-// Everything NOT listed there (i.e. @betterdb/shared, which lives in
-// devDependencies, and zod, pulled in transitively) gets bundled.
+// Everything declared in package.json `dependencies` (AWS SDK, iovalkey, ws, zod)
+// is kept EXTERNAL and installed by npm as usual. zod in particular is a normal,
+// published package: keeping it external means it lands in node_modules where a
+// scanner can see its version, rather than being baked into dist/index.js where a
+// CVE would be invisible. @betterdb/shared lives in devDependencies (it is private
+// and unpublishable), so it is absent from this list and gets inlined.
 
 import { build } from 'esbuild';
 import { readFileSync } from 'fs';
@@ -29,8 +30,9 @@ import { fileURLToPath } from 'url';
 const agentRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(readFileSync(join(agentRoot, 'package.json'), 'utf-8'));
 
-// Externalize exactly the declared runtime dependencies. @betterdb/shared and zod
-// are deliberately absent from this list, so esbuild inlines them.
+// Externalize exactly the declared runtime dependencies (AWS SDK, iovalkey, ws,
+// zod). @betterdb/shared is deliberately absent from `dependencies`, so esbuild
+// inlines it.
 const external = Object.keys(pkg.dependencies ?? {});
 
 await build({
