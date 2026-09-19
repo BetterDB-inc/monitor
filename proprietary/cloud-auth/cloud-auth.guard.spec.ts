@@ -108,4 +108,24 @@ describe('CloudAuthGuardImpl', () => {
     expect(new CloudAuthGuardImpl().canActivate(context)).toBe(false);
     expect(redirect).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    '/api/prometheus/metrics-extra',
+    '/api/prometheus/metrics/other',
+    '/prometheus/metricsx',
+  ])('redirects a path that only shares the metrics prefix (%s)', (url) => {
+    const request: FakeRequest = { url, headers: { host: 'acme.betterdb.com' } };
+    const { context, redirect } = contextFor(request);
+    expect(new CloudAuthGuardImpl().canActivate(context)).toBe(false);
+    expect(redirect).toHaveBeenCalledTimes(1);
+  });
+
+  it('bypasses session auth for the unprefixed metrics path with a query string', () => {
+    const request: FakeRequest = {
+      url: '/prometheus/metrics?x=1',
+      headers: { host: 'acme.betterdb.com' },
+    };
+    const { context } = contextFor(request);
+    expect(new CloudAuthGuardImpl().canActivate(context)).toBe(true);
+  });
 });

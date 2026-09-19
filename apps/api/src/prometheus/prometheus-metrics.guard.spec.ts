@@ -37,6 +37,7 @@ describe('PrometheusMetricsGuard', () => {
   });
 
   it('allows an unconfigured self-hosted scrape', () => {
+    delete process.env.CLOUD_MODE;
     expect(guardWith({}).canActivate(contextFor())).toBe(true);
   });
 

@@ -252,7 +252,7 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 | `PROMETHEUS_POLL_INTERVAL_MS` | No       | `5000`            | How often exported metrics are refreshed (milliseconds)                                                                              |
 | `PROMETHEUS_STALENESS_MS`     | No       | 3 × poll interval | Drop a connection's gauge series after this long without a successful `INFO` read (ms, ≥ 1000, raised to 3 × poll interval if lower) |
 | `PROMETHEUS_METRICS_ENABLED`  | No       | `true`            | Set to `false` to disable `/api/prometheus/metrics` entirely (the OTLP mirror keeps exporting)                                       |
-| `PROMETHEUS_METRICS_TOKEN`    | No       | _(none)_          | Bearer token required to scrape the metrics endpoint; required when `CLOUD_MODE` is set                                              |
+| `PROMETHEUS_METRICS_TOKEN`    | No       | _(none)_          | Bearer token required to scrape the metrics endpoint; required when `CLOUD_MODE` is set and the endpoint is enabled                  |
 
 ### Client Analytics
 
@@ -274,9 +274,9 @@ To keep the database from growing forever, set a retention window from **Setting
 
 ### Webhooks
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `FRONTEND_URL` | No | - | Public base URL of the web UI (e.g. `https://monitor.example.com`). Used to build "View in BetterDB" links in Slack/Discord messages; unset = messages render without the link |
+| Variable       | Required | Default | Description                                                                                                                                                                    |
+| -------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `FRONTEND_URL` | No       | -       | Public base URL of the web UI (e.g. `https://monitor.example.com`). Used to build "View in BetterDB" links in Slack/Discord messages; unset = messages render without the link |
 
 ### License Configuration
 

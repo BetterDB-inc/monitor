@@ -41,8 +41,8 @@ export class CloudAuthMiddleware implements NestMiddleware {
       path.startsWith('/mcp/') ||
       path.startsWith('/api/mcp/') ||
       path.startsWith('/v1/traces') ||
-      path.startsWith('/prometheus/metrics') ||
-      path.startsWith('/api/prometheus/metrics') ||
+      path === '/prometheus/metrics' ||
+      path === '/api/prometheus/metrics' ||
       path.startsWith('/assets/') ||
       path.startsWith('/favicon') ||
       path === '/symbol-white.svg'
