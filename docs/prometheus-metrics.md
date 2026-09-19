@@ -58,6 +58,8 @@ All custom metrics are prefixed with `betterdb_`. Standard Node.js process metri
 
 Both the scrape endpoint (`/api/prometheus/metrics`) and the OTLP mirror honour the profile — whichever families `vitals` allows are what both exporters emit.
 
+`vitals` only reduces what is exported: storage-backed collectors (ACL, client, slowlog/commandlog patterns, commandstats) and per-db series are still collected on each scrape, so it lowers series count, not scrape cost.
+
 | Connection type    | Series per connection (`vitals`) |
 | ------------------ | --------------------------------- |
 | Standalone primary | 33                                |
@@ -707,9 +709,10 @@ High-cardinality labels can impact Prometheus performance. Monitor these metrics
 
 - `betterdb_client_connections_by_name` - Scales with unique client names
 - `betterdb_client_connections_by_user` - Scales with unique usernames
-- `betterdb_cluster_slot_*` - Limited to top 100 slots automatically
+- `betterdb_cluster_slot_*` - Limited to the top `METRICS_SLOT_STATS_TOP_N` slots by key count (default 100; `0` disables the call entirely). A slot that leaves the top N is removed rather than reported as 0, so a cluster connection exports at most 4 × N slot series.
 
 If cardinality becomes an issue, consider:
+- Setting `METRICS_EXPORT_PROFILE=vitals` for a fixed, bounded series budget per connection regardless of key count, database count, or cluster size
 - Aggregating client names using `relabel_configs` in Prometheus
 - Filtering specific labels using `metric_relabel_configs`
 - Reducing retention period for client analytics data
@@ -740,7 +743,7 @@ If cardinality becomes an issue, consider:
 
 If `/api/prometheus/metrics` takes >1s to respond:
 - Reduce slowlog analysis sample size (default: 128 entries)
-- Reduce cluster slot stats limit (default: 100 slots)
+- Reduce `METRICS_SLOT_STATS_TOP_N` (default: 100 slots; `0` disables the call)
 - Increase scrape timeout in Prometheus config
 - Check if database is responding slowly
 
