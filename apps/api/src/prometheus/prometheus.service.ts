@@ -1574,6 +1574,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       !client.getCapabilities().hasClusterSlotStats ||
       !this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterSlotStats')
     ) {
+      for (const staleSlot of state.currentClusterSlotLabels) {
+        this.clusterSlotKeys.remove(connLabel, staleSlot);
+        this.clusterSlotExpires.remove(connLabel, staleSlot);
+        this.clusterSlotReadsTotal.remove(connLabel, staleSlot);
+        this.clusterSlotWritesTotal.remove(connLabel, staleSlot);
+      }
+      state.currentClusterSlotLabels = new Set();
       return;
     }
 
