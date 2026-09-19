@@ -202,3 +202,99 @@ describe('PrometheusService vitals gauges', () => {
     expect(text).toContain(`betterdb_connected_slaves{connection="${LABEL}"} 1`);
   });
 });
+
+describe('PrometheusService export profiles', () => {
+  const CLUSTER_INFO = { cluster_enabled: '1' };
+
+  async function vitalsSeries(info: Record<string, unknown>): Promise<string[]> {
+    const { service, client } = buildService({ METRICS_EXPORT_PROFILE: 'vitals' });
+    client.getInfoParsed.mockResolvedValue(info);
+    await update(service);
+    return seriesFor(await service.getMetrics());
+  }
+
+  it('holds a standalone primary to 33 series', async () => {
+    expect(await vitalsSeries(primaryInfo())).toHaveLength(33);
+  });
+
+  it('holds a standalone replica to 34 series', async () => {
+    expect(
+      await vitalsSeries(primaryInfo({ replication: REPLICA_REPLICATION })),
+    ).toHaveLength(34);
+  });
+
+  it('holds a cluster primary to 39 series', async () => {
+    expect(await vitalsSeries(primaryInfo({ cluster: CLUSTER_INFO }))).toHaveLength(39);
+  });
+
+  it('holds a cluster replica to 40 series', async () => {
+    expect(
+      await vitalsSeries(
+        primaryInfo({ cluster: CLUSTER_INFO, replication: REPLICA_REPLICATION }),
+      ),
+    ).toHaveLength(40);
+  });
+
+  it('does not grow with the number of populated databases', async () => {
+    const keyspace: Record<string, unknown> = {};
+    for (let db = 0; db < 12; db++) {
+      keyspace[`db${db}`] = { keys: db + 1, expires: 0, avg_ttl: 0 };
+    }
+    expect(await vitalsSeries(primaryInfo({ keyspace }))).toHaveLength(33);
+  });
+
+  it('leaves per-db, per-slot and pattern families out of the vitals scrape', async () => {
+    const { service } = buildService({ METRICS_EXPORT_PROFILE: 'vitals' });
+    await update(service);
+    const text = await service.getMetrics();
+
+    expect(text).not.toContain('# HELP betterdb_db_keys ');
+    expect(text).not.toContain('# HELP betterdb_cluster_slot_keys ');
+    expect(text).not.toContain('# HELP betterdb_slowlog_pattern_count ');
+    expect(text).toContain('# HELP betterdb_memory_used_bytes ');
+  });
+
+  it('keeps every family under full', async () => {
+    const { service } = buildService();
+    await update(service);
+    const text = await service.getMetrics();
+
+    expect(text).toContain('# HELP betterdb_db_keys ');
+    expect(text).toContain('# HELP betterdb_cluster_slot_keys ');
+    expect(text).toContain('# HELP betterdb_slowlog_pattern_count ');
+  });
+
+  it('gives the OTLP mirror the same families as the scrape', async () => {
+    const { service } = buildService({ METRICS_EXPORT_PROFILE: 'vitals' });
+    await update(service);
+    const text = await service.getMetrics();
+    const scraped = new Set(
+      text
+        .split('\n')
+        .filter((line) => line.startsWith('# HELP '))
+        .map((line) => line.split(' ')[2]),
+    );
+
+    const mirrored = new Set((await service.collectMetricsAsJson()).map((m) => m.name));
+
+    expect(mirrored).toEqual(scraped);
+    expect(mirrored.has('betterdb_cluster_slot_keys')).toBe(false);
+  });
+
+  it('still removes a stale connection from the vitals scrape', async () => {
+    jest.useFakeTimers({ now: 1_000_000 });
+    try {
+      const { service, client } = buildService({ METRICS_EXPORT_PROFILE: 'vitals' });
+      await update(service);
+      client.getInfoParsed.mockRejectedValue(new Error('connection lost'));
+      jest.advanceTimersByTime(5000 * 3 + 1);
+      await update(service);
+      const text = await service.getMetrics();
+
+      expect(text).not.toContain(`betterdb_memory_used_bytes{connection="${LABEL}"}`);
+      expect(text).toContain(`betterdb_poll_stale{connection="${LABEL}"} 1`);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});

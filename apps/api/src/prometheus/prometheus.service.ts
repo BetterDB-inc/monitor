@@ -54,6 +54,7 @@ import {
   selectSeriesToRemove,
   SeriesSnapshot,
 } from './staleness';
+import { ExportProfile, isExportedInProfile, parseExportProfile } from './export-profile';
 
 /**
  * Ceiling on the demoted-node read, clamped down to the poll interval when that
@@ -106,6 +107,8 @@ interface ConnectionMetricState {
 export class PrometheusService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(PrometheusService.name);
   private readonly registry: Registry;
+  private readonly exportProfile: ExportProfile;
+  private readonly exportRegistry: Registry;
   private readonly pollIntervalMs: number;
   private readonly freshness: FreshnessTracker;
   private pollStale: Gauge;
@@ -301,8 +304,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       );
     }
     this.freshness = new FreshnessTracker(stalenessMs);
+    this.exportProfile = parseExportProfile(this.configService.get('METRICS_EXPORT_PROFILE'));
     this.registry = new Registry();
     this.initializeMetrics();
+    this.exportRegistry = this.buildExportRegistry();
   }
 
   protected getIntervalMs(): number {
@@ -437,8 +442,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   async onModuleInit(): Promise<void> {
-    collectDefaultMetrics({ register: this.registry, prefix: 'betterdb_' });
-    this.logger.log(`Starting Prometheus metrics polling (interval: ${this.pollIntervalMs}ms)`);
+    collectDefaultMetrics({ register: this.exportRegistry, prefix: 'betterdb_' });
+    this.logger.log(
+      `Starting Prometheus metrics polling (interval: ${this.pollIntervalMs}ms, profile: ${this.exportProfile})`,
+    );
     this.start();
   }
 
@@ -452,6 +459,19 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       labelNames: ['connection', ...(additionalLabels || [])],
       registers: [this.registry],
     });
+  }
+
+  private buildExportRegistry(): Registry {
+    if (this.exportProfile === 'full') {
+      return this.registry;
+    }
+    const exported = new Registry();
+    for (const metric of this.registry.getMetricsAsArray()) {
+      if (isExportedInProfile(metric.name, this.exportProfile)) {
+        exported.registerMetric(metric as unknown as Parameters<Registry['registerMetric']>[0]);
+      }
+    }
+    return exported;
   }
 
   private initializeMetrics(): void {
@@ -2107,7 +2127,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   async getMetrics(): Promise<string> {
     await this.updateMetrics();
     await this.sweepStaleSeries();
-    const metrics = await this.registry.metrics();
+    const metrics = await this.exportRegistry.metrics();
     return metrics
       .split('\n')
       .filter((line) => !line.match(/\s+[Nn]a[Nn]\s*$/))
@@ -2115,12 +2135,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   getContentType(): string {
-    return this.registry.contentType;
+    return this.exportRegistry.contentType;
   }
 
   async collectMetricsAsJson(): ReturnType<Registry['getMetricsAsJSON']> {
     await this.sweepStaleSeries();
-    return this.registry.getMetricsAsJSON();
+    return this.exportRegistry.getMetricsAsJSON();
   }
 
   private async sweepStaleSeries(): Promise<void> {
