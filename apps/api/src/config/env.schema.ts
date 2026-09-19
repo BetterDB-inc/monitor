@@ -203,12 +203,18 @@ export const envSchema = z
         return trimmed;
       }),
 
-    METRICS_EXPORT_PROFILE: z
-      .string()
-      .default('full')
-      .transform((v) => v.trim().toLowerCase())
-      .pipe(z.enum(['vitals', 'full'])),
-    METRICS_SLOT_STATS_TOP_N: z.coerce.number().int().min(0).max(16384).default(100),
+    METRICS_EXPORT_PROFILE: z.preprocess(
+      (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+      z
+        .string()
+        .default('full')
+        .transform((v) => v.trim().toLowerCase())
+        .pipe(z.enum(['vitals', 'full'])),
+    ),
+    METRICS_SLOT_STATS_TOP_N: z.preprocess(
+      (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+      z.coerce.number().int().min(0).max(16384).default(100),
+    ),
 
     // OTel telemetry export (mirror of Prometheus metrics). No-op unless
     // OTEL_EXPORTER_OTLP_ENDPOINT is set.
