@@ -53,6 +53,12 @@ import {
   selectSeriesToRemove,
   SeriesSnapshot,
 } from './staleness';
+import {
+  ExportProfile,
+  isExportedInProfile,
+  parseExportProfile,
+  resolveSlotStatsTopN,
+} from './export-profile';
 
 /**
  * Ceiling on the demoted-node read, clamped down to the poll interval when that
@@ -93,12 +99,16 @@ interface ConnectionMetricState {
   // Inference latency labels (per-connection)
   currentInferenceBucketLabels: Set<string>;
   currentInferenceSlaBreachLabels: Set<string>;
+  instanceInfoLabels: [string, string, string] | null;
 }
 
 @Injectable()
 export class PrometheusService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(PrometheusService.name);
   private readonly registry: Registry;
+  private readonly exportProfile: ExportProfile;
+  private readonly slotStatsTopN: number;
+  private readonly exportRegistry: Registry;
   private readonly pollIntervalMs: number;
   private readonly freshness: FreshnessTracker;
   private pollStale: Gauge;
@@ -178,6 +188,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private dbKeys: Gauge;
   private dbKeysExpiring: Gauge;
   private dbAvgTtlSeconds: Gauge;
+  private keyspaceKeys: Gauge;
+  private keyspaceKeysExpiring: Gauge;
+  private rdbChangesSinceLastSave: Gauge;
+  private rdbLastSaveTimestampSeconds: Gauge;
+  private rdbLastBgsaveOk: Gauge;
+  private aofEnabled: Gauge;
+  private aofLastBgrewriteOk: Gauge;
 
   // Cluster Metrics
   private clusterEnabled: Gauge;
@@ -278,8 +295,14 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       );
     }
     this.freshness = new FreshnessTracker(stalenessMs);
+    this.exportProfile = parseExportProfile(this.configService.get('METRICS_EXPORT_PROFILE'));
+    this.slotStatsTopN = resolveSlotStatsTopN(
+      this.configService.get('METRICS_SLOT_STATS_TOP_N'),
+      this.exportProfile,
+    );
     this.registry = new Registry();
     this.initializeMetrics();
+    this.exportRegistry = this.buildExportRegistry();
   }
 
   protected getIntervalMs(): number {
@@ -378,14 +401,17 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         // Inference latency labels
         currentInferenceBucketLabels: new Set(),
         currentInferenceSlaBreachLabels: new Set(),
+        instanceInfoLabels: null,
       });
     }
     return this.perConnectionState.get(connectionId)!;
   }
 
   async onModuleInit(): Promise<void> {
-    collectDefaultMetrics({ register: this.registry, prefix: 'betterdb_' });
-    this.logger.log(`Starting Prometheus metrics polling (interval: ${this.pollIntervalMs}ms)`);
+    collectDefaultMetrics({ register: this.exportRegistry, prefix: 'betterdb_' });
+    this.logger.log(
+      `Starting Prometheus metrics polling (interval: ${this.pollIntervalMs}ms, profile: ${this.exportProfile})`,
+    );
     this.start();
   }
 
@@ -399,6 +425,19 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       labelNames: ['connection', ...(additionalLabels || [])],
       registers: [this.registry],
     });
+  }
+
+  private buildExportRegistry(): Registry {
+    if (this.exportProfile === 'full') {
+      return this.registry;
+    }
+    const exported = new Registry();
+    for (const metric of this.registry.getMetricsAsArray()) {
+      if (isExportedInProfile(metric.name, this.exportProfile)) {
+        exported.registerMetric(metric as unknown as Parameters<Registry['registerMetric']>[0]);
+      }
+    }
+    return exported;
   }
 
   private initializeMetrics(): void {
@@ -563,6 +602,28 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       'db',
     ]);
     this.dbAvgTtlSeconds = this.createGauge('db_avg_ttl_seconds', 'Average TTL in seconds', ['db']);
+    this.keyspaceKeys = this.createGauge('keyspace_keys', 'Total keys across all databases');
+    this.keyspaceKeysExpiring = this.createGauge(
+      'keyspace_keys_expiring',
+      'Keys with an expiration across all databases',
+    );
+    this.rdbChangesSinceLastSave = this.createGauge(
+      'rdb_changes_since_last_save',
+      'Writes since the last RDB save',
+    );
+    this.rdbLastSaveTimestampSeconds = this.createGauge(
+      'rdb_last_save_timestamp_seconds',
+      'Unix time of the last successful RDB save',
+    );
+    this.rdbLastBgsaveOk = this.createGauge(
+      'rdb_last_bgsave_ok',
+      '1 if the last RDB background save succeeded',
+    );
+    this.aofEnabled = this.createGauge('aof_enabled', '1 if AOF persistence is enabled');
+    this.aofLastBgrewriteOk = this.createGauge(
+      'aof_last_bgrewrite_ok',
+      '1 if the last AOF rewrite succeeded',
+    );
 
     // Cluster Metrics (per connection)
     this.clusterEnabled = this.createGauge('cluster_enabled', '1 if cluster mode is enabled');
@@ -951,11 +1012,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         return;
       }
 
-      this.updateServerMetrics(info, connLabel);
+      this.updateServerMetrics(info, connLabel, state);
       this.updateClientInfoMetrics(info, connLabel, connectionId, config);
       this.updateMemoryMetrics(info, connLabel, connectionId, config);
       this.updateStatsMetrics(info, connLabel);
       this.updateCpuMetrics(info, connLabel);
+      this.updatePersistenceMetrics(info, connLabel);
       this.updateReplicationMetrics(info, connLabel, connectionId, config);
       this.updateKeyspaceMetricsFromInfo(info, connLabel, state);
       await this.updateClusterMetricsFromInfo(
@@ -976,12 +1038,21 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
   }
 
-  private updateServerMetrics(info: InfoResponse, connLabel: string): void {
+  private updateServerMetrics(
+    info: InfoResponse,
+    connLabel: string,
+    state: ConnectionMetricState,
+  ): void {
     if (!info.server) return;
 
     const version = info.server.valkey_version || info.server.redis_version || 'unknown';
     const role = info.replication?.role || 'unknown';
     const os = info.server.os || 'unknown';
+    const previous = state.instanceInfoLabels;
+    if (previous && (previous[0] !== version || previous[1] !== role || previous[2] !== os)) {
+      this.instanceInfo.remove(connLabel, ...previous);
+    }
+    state.instanceInfoLabels = [version, role, os];
 
     this.uptimeInSeconds.labels(connLabel).set(parseInt(info.server.uptime_in_seconds) || 0);
     this.instanceInfo.labels(connLabel, version, role, os).set(1);
@@ -1143,6 +1214,24 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.cpuUserSecondsTotal.labels(connLabel).set(parseFloat(info.cpu.used_cpu_user) || 0);
   }
 
+  private updatePersistenceMetrics(info: InfoResponse, connLabel: string): void {
+    if (!info.persistence) return;
+
+    this.rdbChangesSinceLastSave
+      .labels(connLabel)
+      .set(parseInt(info.persistence.rdb_changes_since_last_save) || 0);
+    this.rdbLastSaveTimestampSeconds
+      .labels(connLabel)
+      .set(parseInt(info.persistence.rdb_last_save_time) || 0);
+    this.rdbLastBgsaveOk
+      .labels(connLabel)
+      .set(info.persistence.rdb_last_bgsave_status === 'ok' ? 1 : 0);
+    this.aofEnabled.labels(connLabel).set(info.persistence.aof_enabled === '1' ? 1 : 0);
+    this.aofLastBgrewriteOk
+      .labels(connLabel)
+      .set(info.persistence.aof_last_bgrewrite_status === 'ok' ? 1 : 0);
+  }
+
   private updateReplicationMetrics(
     info: InfoResponse,
     connLabel: string,
@@ -1154,6 +1243,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const role = info.replication.role;
 
     if (role === 'master') {
+      this.masterLinkUp.remove(connLabel);
+      this.masterLastIoSecondsAgo.remove(connLabel);
       this.connectedSlaves
         .labels(connLabel)
         .set(parseInt(info.replication.connected_slaves || '0') || 0);
@@ -1163,6 +1254,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           .set(parseInt(info.replication.master_repl_offset) || 0);
       }
     } else if (role === 'slave') {
+      this.connectedSlaves.remove(connLabel);
       const masterLinkStatus = info.replication.master_link_status;
       this.masterLinkUp.labels(connLabel).set(masterLinkStatus === 'up' ? 1 : 0);
 
@@ -1203,6 +1295,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (!info.keyspace) return;
 
     const newDbLabels = new Set<string>();
+    let totalKeys = 0;
+    let totalExpiring = 0;
 
     for (const [dbKey, dbInfo] of Object.entries(info.keyspace as Record<string, unknown>)) {
       // parseInfoToTyped emits typed objects for db* entries; anything still
@@ -1214,7 +1308,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.dbKeys.labels(connLabel, dbKey).set(parsedInfo.keys || 0);
       this.dbKeysExpiring.labels(connLabel, dbKey).set(parsedInfo.expires || 0);
       this.dbAvgTtlSeconds.labels(connLabel, dbKey).set((parsedInfo.avg_ttl || 0) / 1000);
+      totalKeys += parsedInfo.keys || 0;
+      totalExpiring += parsedInfo.expires || 0;
     }
+
+    this.keyspaceKeys.labels(connLabel).set(totalKeys);
+    this.keyspaceKeysExpiring.labels(connLabel).set(totalExpiring);
 
     // Remove stale db labels for this connection
     for (const staleDb of state.currentKeyspaceDbLabels) {
@@ -1450,45 +1549,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       // discarded the moment the client's slot cache refreshes — silently.
       await this.detectDemotedMasterWrites(connectionId, state, config, epoch);
 
-      const capabilities = client.getCapabilities();
-      if (
-        capabilities.hasClusterSlotStats &&
-        this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterSlotStats')
-      ) {
-        try {
-          const newSlotLabels = new Set<string>();
-          const slotStats = await client.getClusterSlotStats('key-count', 100);
-          if (this.isSuperseded(connectionId, epoch)) {
-            return;
-          }
-
-          for (const [slot, stats] of Object.entries(slotStats)) {
-            newSlotLabels.add(slot);
-            this.clusterSlotKeys.labels(connLabel, slot).set(stats.key_count || 0);
-            this.clusterSlotExpires.labels(connLabel, slot).set(stats.expires_count || 0);
-            this.clusterSlotReadsTotal.labels(connLabel, slot).set(stats.total_reads || 0);
-            this.clusterSlotWritesTotal.labels(connLabel, slot).set(stats.total_writes || 0);
-          }
-
-          for (const staleSlot of state.currentClusterSlotLabels) {
-            if (!newSlotLabels.has(staleSlot)) {
-              this.clusterSlotKeys.labels(connLabel, staleSlot).set(0);
-              this.clusterSlotExpires.labels(connLabel, staleSlot).set(0);
-              this.clusterSlotReadsTotal.labels(connLabel, staleSlot).set(0);
-              this.clusterSlotWritesTotal.labels(connLabel, staleSlot).set(0);
-            }
-          }
-
-          state.currentClusterSlotLabels = newSlotLabels;
-        } catch (slotStatsError) {
-          this.runtimeCapabilityTracker.recordFailure(
-            connectionId,
-            'canClusterSlotStats',
-            slotStatsError instanceof Error ? slotStatsError : String(slotStatsError),
-          );
-          this.logger.error(`Failed to update cluster slot stats for ${connLabel}`, slotStatsError);
-        }
-      }
+      await this.updateSlotStatsMetrics(client, connectionId, connLabel, state, epoch);
     } catch (error) {
       this.runtimeCapabilityTracker.recordFailure(
         connectionId,
@@ -1497,6 +1558,73 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       );
       this.logger.error(`Failed to update cluster metrics for ${connLabel}`, error);
     }
+  }
+
+  private async updateSlotStatsMetrics(
+    client: DatabasePort,
+    connectionId: string,
+    connLabel: string,
+    state: ConnectionMetricState,
+    epoch: number,
+  ): Promise<void> {
+    if (this.slotStatsTopN === 0) {
+      return;
+    }
+    if (
+      !client.getCapabilities().hasClusterSlotStats ||
+      !this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterSlotStats')
+    ) {
+      this.clearSlotSeries(connLabel, state);
+      return;
+    }
+
+    try {
+      const slotStats = await client.getClusterSlotStats('key-count', this.slotStatsTopN);
+      if (this.isSuperseded(connectionId, epoch)) {
+        return;
+      }
+
+      const newSlotLabels = new Set<string>();
+      for (const [slot, stats] of Object.entries(slotStats)) {
+        newSlotLabels.add(slot);
+        this.clusterSlotKeys.labels(connLabel, slot).set(stats.key_count || 0);
+        this.clusterSlotExpires.labels(connLabel, slot).set(stats.expires_count || 0);
+        this.clusterSlotReadsTotal.labels(connLabel, slot).set(stats.total_reads || 0);
+        this.clusterSlotWritesTotal.labels(connLabel, slot).set(stats.total_writes || 0);
+      }
+
+      for (const staleSlot of state.currentClusterSlotLabels) {
+        if (!newSlotLabels.has(staleSlot)) {
+          this.removeSlotSeries(connLabel, staleSlot);
+        }
+      }
+
+      state.currentClusterSlotLabels = newSlotLabels;
+    } catch (slotStatsError) {
+      const disabled = this.runtimeCapabilityTracker.recordFailure(
+        connectionId,
+        'canClusterSlotStats',
+        slotStatsError instanceof Error ? slotStatsError : String(slotStatsError),
+      );
+      if (disabled && !this.isSuperseded(connectionId, epoch)) {
+        this.clearSlotSeries(connLabel, state);
+      }
+      this.logger.error(`Failed to update cluster slot stats for ${connLabel}`, slotStatsError);
+    }
+  }
+
+  private clearSlotSeries(connLabel: string, state: ConnectionMetricState): void {
+    for (const slot of state.currentClusterSlotLabels) {
+      this.removeSlotSeries(connLabel, slot);
+    }
+    state.currentClusterSlotLabels = new Set();
+  }
+
+  private removeSlotSeries(connLabel: string, slot: string): void {
+    this.clusterSlotKeys.remove(connLabel, slot);
+    this.clusterSlotExpires.remove(connLabel, slot);
+    this.clusterSlotReadsTotal.remove(connLabel, slot);
+    this.clusterSlotWritesTotal.remove(connLabel, slot);
   }
 
   private async updateAclMetrics(
@@ -1864,7 +1992,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   async getMetrics(): Promise<string> {
     await this.updateMetrics();
     await this.sweepStaleSeries();
-    const metrics = await this.registry.metrics();
+    const metrics = await this.exportRegistry.metrics();
     return metrics
       .split('\n')
       .filter((line) => !line.match(/\s+[Nn]a[Nn]\s*$/))
@@ -1872,12 +2000,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   getContentType(): string {
-    return this.registry.contentType;
+    return this.exportRegistry.contentType;
   }
 
   async collectMetricsAsJson(): ReturnType<Registry['getMetricsAsJSON']> {
     await this.sweepStaleSeries();
-    return this.registry.getMetricsAsJSON();
+    return this.exportRegistry.getMetricsAsJSON();
   }
 
   private async sweepStaleSeries(): Promise<void> {

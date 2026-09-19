@@ -10,6 +10,7 @@ Complete reference for all metrics exposed by BetterDB Monitor at the `/api/prom
 ## Table of Contents
 
 - [Overview](#overview)
+- [Export Profiles](#export-profiles)
 - [Metrics Categories](#metrics-categories)
   - [ACL Audit Metrics](#acl-audit-metrics)
   - [Client Analytics Metrics](#client-analytics-metrics)
@@ -24,6 +25,7 @@ Complete reference for all metrics exposed by BetterDB Monitor at the `/api/prom
   - [CPU Metrics](#cpu-metrics)
   - [Replication Metrics](#replication-metrics)
   - [Keyspace Metrics](#keyspace-metrics)
+  - [Persistence Metrics](#persistence-metrics)
   - [Cluster Metrics](#cluster-metrics)
   - [Anomaly Detection Metrics](#anomaly-detection-metrics)
   - [Metric Forecasting Metrics](#metric-forecasting-metrics)
@@ -46,6 +48,41 @@ All custom metrics are prefixed with `betterdb_`. Standard Node.js process metri
 
 **Scrape Interval**: Recommended 15s
 **Metrics Update**: Metrics are computed on-demand during each scrape
+
+## Export Profiles
+
+`METRICS_EXPORT_PROFILE` controls how much of the metric surface below is exported:
+
+- `full` (default) — every metric in this reference is exported.
+- `vitals` — a fixed set of series per connection: no per-db, per-slot, or pattern-labelled series. Cardinality stays flat regardless of key count, database count, or cluster size.
+
+Both the scrape endpoint (`/api/prometheus/metrics`) and the OTLP mirror honour the profile — whichever families `vitals` allows are what both exporters emit.
+
+`vitals` only reduces what is exported: storage-backed collectors (ACL, client, slowlog/commandlog patterns, commandstats) and per-db series are still collected on each scrape, so it lowers series count, not scrape cost.
+
+| Connection type    | Series per connection (`vitals`) |
+| ------------------ | --------------------------------- |
+| Standalone primary | 33                                |
+| Standalone replica | 34                                |
+| Cluster primary    | 39                                |
+| Cluster replica    | 40                                |
+
+BetterDB's own Node.js process metrics (`betterdb_process_*`, `betterdb_nodejs_*`) are added once per BetterDB instance in both profiles.
+
+`vitals` exports these families:
+
+- Server: `betterdb_uptime_in_seconds`, `betterdb_instance_info`
+- Clients: `betterdb_connected_clients`, `betterdb_blocked_clients`, `betterdb_tracking_clients`
+- Memory: `betterdb_memory_used_bytes`, `betterdb_memory_used_rss_bytes`, `betterdb_memory_used_peak_bytes`, `betterdb_memory_max_bytes`, `betterdb_memory_fragmentation_ratio`, `betterdb_memory_fragmentation_bytes`
+- Stats: `betterdb_connections_received_total`, `betterdb_commands_processed_total`, `betterdb_instantaneous_ops_per_sec`, `betterdb_instantaneous_input_kbps`, `betterdb_instantaneous_output_kbps`, `betterdb_keyspace_hits_total`, `betterdb_keyspace_misses_total`, `betterdb_evicted_keys_total`, `betterdb_expired_keys_total`
+- CPU: `betterdb_cpu_sys_seconds_total`, `betterdb_cpu_user_seconds_total`
+- Keyspace totals: `betterdb_keyspace_keys`, `betterdb_keyspace_keys_expiring`
+- Persistence: `betterdb_rdb_changes_since_last_save`, `betterdb_rdb_last_save_timestamp_seconds`, `betterdb_rdb_last_bgsave_ok`, `betterdb_aof_enabled`, `betterdb_aof_last_bgrewrite_ok`
+- Replication: `betterdb_connected_slaves`, `betterdb_replication_offset`, `betterdb_master_link_up`, `betterdb_master_last_io_seconds_ago`
+- Cluster health: `betterdb_cluster_enabled`, `betterdb_cluster_known_nodes`, `betterdb_cluster_size`, `betterdb_cluster_slots_assigned`, `betterdb_cluster_slots_ok`, `betterdb_cluster_slots_fail`, `betterdb_cluster_slots_pfail`
+- `betterdb_poll_stale`
+
+See [Configuration Reference](configuration.md#prometheus-metrics) for the `METRICS_EXPORT_PROFILE` and `METRICS_SLOT_STATS_TOP_N` env vars.
 
 ## Metrics Categories
 
@@ -219,6 +256,8 @@ Replication status and offset tracking.
 | `betterdb_master_link_up` | gauge | - | 1 if link to master is up (replica only) | `1` |
 | `betterdb_master_last_io_seconds_ago` | gauge | - | Seconds since last I/O with master (replica only) | `2` |
 
+**Note**: after a failover, the previous role's series (`betterdb_connected_slaves` or `betterdb_master_link_up` / `betterdb_master_last_io_seconds_ago`) are removed, and `betterdb_instance_info` keeps one series per connection.
+
 ### Keyspace Metrics
 
 Per-database key statistics.
@@ -228,8 +267,22 @@ Per-database key statistics.
 | `betterdb_db_keys` | gauge | `db` | Total keys in database | `125000` |
 | `betterdb_db_keys_expiring` | gauge | `db` | Keys with expiration in database | `45000` |
 | `betterdb_db_avg_ttl_seconds` | gauge | `db` | Average TTL in seconds | `3600` |
+| `betterdb_keyspace_keys` | gauge | - | Total keys across all databases | `125000` |
+| `betterdb_keyspace_keys_expiring` | gauge | - | Keys with an expiration across all databases | `45000` |
 
 **Label Example**: `db="db0"`, `db="db1"`
+
+### Persistence Metrics
+
+RDB and AOF persistence status from the Valkey/Redis INFO persistence section.
+
+| Metric | Type | Labels | Description | Example |
+|--------|------|--------|-------------|---------|
+| `betterdb_rdb_changes_since_last_save` | gauge | - | Writes since the last RDB save | `128` |
+| `betterdb_rdb_last_save_timestamp_seconds` | gauge | - | Unix time of the last successful RDB save | `1737400000` |
+| `betterdb_rdb_last_bgsave_ok` | gauge | - | 1 if the last RDB background save succeeded | `1` |
+| `betterdb_aof_enabled` | gauge | - | 1 if AOF persistence is enabled | `1` |
+| `betterdb_aof_last_bgrewrite_ok` | gauge | - | 1 if the last AOF rewrite succeeded | `1` |
 
 ### Cluster Metrics
 
@@ -254,7 +307,7 @@ Cluster mode health and slot distribution.
 | `betterdb_cluster_slot_reads_total` | gauge | `slot` | Total reads for cluster slot | `45678` |
 | `betterdb_cluster_slot_writes_total` | gauge | `slot` | Total writes for cluster slot | `12345` |
 
-**Availability**: Only populated when connected to Valkey 8.0+ cluster. Limited to top 100 slots by key count.
+**Availability**: Only populated when connected to Valkey 8.0+ cluster. Limited to the top `METRICS_SLOT_STATS_TOP_N` slots by key count (default 100; `0` disables). A slot that leaves the top N is removed rather than reported as 0, so a cluster connection exports at most 4 × N slot series. Not exported under `vitals`.
 
 ### Anomaly Detection Metrics
 
@@ -656,9 +709,10 @@ High-cardinality labels can impact Prometheus performance. Monitor these metrics
 
 - `betterdb_client_connections_by_name` - Scales with unique client names
 - `betterdb_client_connections_by_user` - Scales with unique usernames
-- `betterdb_cluster_slot_*` - Limited to top 100 slots automatically
+- `betterdb_cluster_slot_*` - Limited to the top `METRICS_SLOT_STATS_TOP_N` slots by key count (default 100; `0` disables the call entirely). A slot that leaves the top N is removed rather than reported as 0, so a cluster connection exports at most 4 × N slot series.
 
 If cardinality becomes an issue, consider:
+- Setting `METRICS_EXPORT_PROFILE=vitals` for a fixed, bounded series budget per connection regardless of key count, database count, or cluster size
 - Aggregating client names using `relabel_configs` in Prometheus
 - Filtering specific labels using `metric_relabel_configs`
 - Reducing retention period for client analytics data
@@ -689,7 +743,7 @@ If cardinality becomes an issue, consider:
 
 If `/api/prometheus/metrics` takes >1s to respond:
 - Reduce slowlog analysis sample size (default: 128 entries)
-- Reduce cluster slot stats limit (default: 100 slots)
+- Reduce `METRICS_SLOT_STATS_TOP_N` (default: 100 slots; `0` disables the call)
 - Increase scrape timeout in Prometheus config
 - Check if database is responding slowly
 
