@@ -81,6 +81,10 @@ interface Harness {
     getCapabilities: jest.Mock;
     getClusterSlotStats: jest.Mock;
   };
+  tracker: {
+    isAvailable: jest.Mock;
+    recordFailure: jest.Mock;
+  };
 }
 
 function buildService(env: Record<string, unknown> = {}): Harness {
@@ -112,20 +116,20 @@ function buildService(env: Record<string, unknown> = {}): Harness {
   const tracker = {
     isAvailable: jest.fn().mockReturnValue(true),
     recordFailure: jest.fn(),
-  } as unknown as RuntimeCapabilityTracker;
+  };
 
   const service = new PrometheusService(
     {} as StoragePort,
     registry,
     config,
-    tracker,
+    tracker as unknown as RuntimeCapabilityTracker,
     {} as SlowLogAnalyticsService,
     {} as CommandLogAnalyticsService,
     {} as HealthService,
   );
   jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
   jest.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
-  return { service, client };
+  return { service, client, tracker };
 }
 
 async function update(service: PrometheusService): Promise<void> {
@@ -353,5 +357,21 @@ describe('PrometheusService slot stats', () => {
 
     expect(text).not.toContain(`slot="1"`);
     expect(text).toContain(`betterdb_cluster_slot_keys{connection="${LABEL}",slot="2"} 60`);
+  });
+
+  it('clears slot series when slot stats become unavailable', async () => {
+    const harness = buildService();
+    harness.client.getClusterSlotStats.mockResolvedValueOnce({ '1': slot(50), '2': slot(40) });
+    await runSlotStats(harness);
+    const exported = await harness.service.getMetrics();
+    expect(exported).toContain(`slot="1"`);
+    expect(exported).toContain(`slot="2"`);
+
+    harness.tracker.isAvailable.mockReturnValue(false);
+    await runSlotStats(harness);
+    const text = await harness.service.getMetrics();
+
+    expect(text).not.toContain(`slot="1"`);
+    expect(text).not.toContain(`slot="2"`);
   });
 });
