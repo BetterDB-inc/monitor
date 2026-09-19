@@ -222,9 +222,7 @@ describe('PrometheusService export profiles', () => {
   });
 
   it('holds a standalone replica to 34 series', async () => {
-    expect(
-      await vitalsSeries(primaryInfo({ replication: REPLICA_REPLICATION })),
-    ).toHaveLength(34);
+    expect(await vitalsSeries(primaryInfo({ replication: REPLICA_REPLICATION }))).toHaveLength(34);
   });
 
   it('holds a cluster primary to 39 series', async () => {
@@ -233,9 +231,7 @@ describe('PrometheusService export profiles', () => {
 
   it('holds a cluster replica to 40 series', async () => {
     expect(
-      await vitalsSeries(
-        primaryInfo({ cluster: CLUSTER_INFO, replication: REPLICA_REPLICATION }),
-      ),
+      await vitalsSeries(primaryInfo({ cluster: CLUSTER_INFO, replication: REPLICA_REPLICATION })),
     ).toHaveLength(40);
   });
 
@@ -373,5 +369,32 @@ describe('PrometheusService slot stats', () => {
 
     expect(text).not.toContain(`slot="1"`);
     expect(text).not.toContain(`slot="2"`);
+  });
+
+  it('clears slot series as soon as a failure disables slot stats', async () => {
+    const harness = buildService();
+    harness.client.getClusterSlotStats.mockResolvedValueOnce({ '1': slot(50) });
+    await runSlotStats(harness);
+    expect(await harness.service.getMetrics()).toContain(`slot="1"`);
+
+    harness.client.getClusterSlotStats.mockRejectedValueOnce(new Error('NOPERM'));
+    harness.tracker.recordFailure.mockReturnValueOnce(true);
+    await runSlotStats(harness);
+
+    expect(await harness.service.getMetrics()).not.toContain(`slot="1"`);
+  });
+
+  it('keeps slot series through a transient failure', async () => {
+    const harness = buildService();
+    harness.client.getClusterSlotStats.mockResolvedValueOnce({ '1': slot(50) });
+    await runSlotStats(harness);
+
+    harness.client.getClusterSlotStats.mockRejectedValueOnce(new Error('ETIMEDOUT'));
+    harness.tracker.recordFailure.mockReturnValueOnce(false);
+    await runSlotStats(harness);
+
+    expect(await harness.service.getMetrics()).toContain(
+      `betterdb_cluster_slot_keys{connection="${LABEL}",slot="1"} 50`,
+    );
   });
 });
