@@ -466,6 +466,9 @@ importers:
       ws:
         specifier: ^8.21.0
         version: 8.21.1
+      zod:
+        specifier: ^4.3.6
+        version: 4.3.6
     devDependencies:
       '@betterdb/shared':
         specifier: workspace:*
