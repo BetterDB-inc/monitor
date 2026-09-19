@@ -298,3 +298,60 @@ describe('PrometheusService export profiles', () => {
     }
   });
 });
+
+describe('PrometheusService slot stats', () => {
+  function slot(keys: number): Record<string, number> {
+    return { key_count: keys, expires_count: 0, total_reads: 0, total_writes: 0 };
+  }
+
+  async function runSlotStats(harness: Harness): Promise<void> {
+    const { service, client } = harness;
+    const state = service['getConnectionState']('conn-1');
+    await service['updateSlotStatsMetrics'](
+      client as never,
+      'conn-1',
+      LABEL,
+      state,
+      service['currentEpoch']('conn-1'),
+    );
+  }
+
+  it('asks for the top 100 slots by default', async () => {
+    const harness = buildService();
+    await runSlotStats(harness);
+    expect(harness.client.getClusterSlotStats).toHaveBeenCalledWith('key-count', 100);
+  });
+
+  it('asks for the configured top-N', async () => {
+    const harness = buildService({ METRICS_SLOT_STATS_TOP_N: '25' });
+    await runSlotStats(harness);
+    expect(harness.client.getClusterSlotStats).toHaveBeenCalledWith('key-count', 25);
+  });
+
+  it('skips slot stats when top-N is zero', async () => {
+    const harness = buildService({ METRICS_SLOT_STATS_TOP_N: '0' });
+    await runSlotStats(harness);
+    expect(harness.client.getClusterSlotStats).not.toHaveBeenCalled();
+  });
+
+  it('skips slot stats under vitals', async () => {
+    const harness = buildService({
+      METRICS_EXPORT_PROFILE: 'vitals',
+      METRICS_SLOT_STATS_TOP_N: '25',
+    });
+    await runSlotStats(harness);
+    expect(harness.client.getClusterSlotStats).not.toHaveBeenCalled();
+  });
+
+  it('removes a slot that leaves the top-N instead of zeroing it', async () => {
+    const harness = buildService();
+    harness.client.getClusterSlotStats.mockResolvedValueOnce({ '1': slot(50), '2': slot(40) });
+    await runSlotStats(harness);
+    harness.client.getClusterSlotStats.mockResolvedValueOnce({ '2': slot(60) });
+    await runSlotStats(harness);
+    const text = await harness.service.getMetrics();
+
+    expect(text).not.toContain(`slot="1"`);
+    expect(text).toContain(`betterdb_cluster_slot_keys{connection="${LABEL}",slot="2"} 60`);
+  });
+});

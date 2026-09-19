@@ -53,7 +53,12 @@ import {
   selectSeriesToRemove,
   SeriesSnapshot,
 } from './staleness';
-import { ExportProfile, isExportedInProfile, parseExportProfile } from './export-profile';
+import {
+  ExportProfile,
+  isExportedInProfile,
+  parseExportProfile,
+  resolveSlotStatsTopN,
+} from './export-profile';
 
 /**
  * Ceiling on the demoted-node read, clamped down to the poll interval when that
@@ -102,6 +107,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   protected readonly logger = new Logger(PrometheusService.name);
   private readonly registry: Registry;
   private readonly exportProfile: ExportProfile;
+  private readonly slotStatsTopN: number;
   private readonly exportRegistry: Registry;
   private readonly pollIntervalMs: number;
   private readonly freshness: FreshnessTracker;
@@ -290,6 +296,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
     this.freshness = new FreshnessTracker(stalenessMs);
     this.exportProfile = parseExportProfile(this.configService.get('METRICS_EXPORT_PROFILE'));
+    this.slotStatsTopN = resolveSlotStatsTopN(
+      this.configService.get('METRICS_SLOT_STATS_TOP_N'),
+      this.exportProfile,
+    );
     this.registry = new Registry();
     this.initializeMetrics();
     this.exportRegistry = this.buildExportRegistry();
@@ -1539,45 +1549,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       // discarded the moment the client's slot cache refreshes — silently.
       await this.detectDemotedMasterWrites(connectionId, state, config, epoch);
 
-      const capabilities = client.getCapabilities();
-      if (
-        capabilities.hasClusterSlotStats &&
-        this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterSlotStats')
-      ) {
-        try {
-          const newSlotLabels = new Set<string>();
-          const slotStats = await client.getClusterSlotStats('key-count', 100);
-          if (this.isSuperseded(connectionId, epoch)) {
-            return;
-          }
-
-          for (const [slot, stats] of Object.entries(slotStats)) {
-            newSlotLabels.add(slot);
-            this.clusterSlotKeys.labels(connLabel, slot).set(stats.key_count || 0);
-            this.clusterSlotExpires.labels(connLabel, slot).set(stats.expires_count || 0);
-            this.clusterSlotReadsTotal.labels(connLabel, slot).set(stats.total_reads || 0);
-            this.clusterSlotWritesTotal.labels(connLabel, slot).set(stats.total_writes || 0);
-          }
-
-          for (const staleSlot of state.currentClusterSlotLabels) {
-            if (!newSlotLabels.has(staleSlot)) {
-              this.clusterSlotKeys.labels(connLabel, staleSlot).set(0);
-              this.clusterSlotExpires.labels(connLabel, staleSlot).set(0);
-              this.clusterSlotReadsTotal.labels(connLabel, staleSlot).set(0);
-              this.clusterSlotWritesTotal.labels(connLabel, staleSlot).set(0);
-            }
-          }
-
-          state.currentClusterSlotLabels = newSlotLabels;
-        } catch (slotStatsError) {
-          this.runtimeCapabilityTracker.recordFailure(
-            connectionId,
-            'canClusterSlotStats',
-            slotStatsError instanceof Error ? slotStatsError : String(slotStatsError),
-          );
-          this.logger.error(`Failed to update cluster slot stats for ${connLabel}`, slotStatsError);
-        }
-      }
+      await this.updateSlotStatsMetrics(client, connectionId, connLabel, state, epoch);
     } catch (error) {
       this.runtimeCapabilityTracker.recordFailure(
         connectionId,
@@ -1585,6 +1557,58 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         error instanceof Error ? error : String(error),
       );
       this.logger.error(`Failed to update cluster metrics for ${connLabel}`, error);
+    }
+  }
+
+  private async updateSlotStatsMetrics(
+    client: DatabasePort,
+    connectionId: string,
+    connLabel: string,
+    state: ConnectionMetricState,
+    epoch: number,
+  ): Promise<void> {
+    if (this.slotStatsTopN === 0) {
+      return;
+    }
+    if (
+      !client.getCapabilities().hasClusterSlotStats ||
+      !this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterSlotStats')
+    ) {
+      return;
+    }
+
+    try {
+      const slotStats = await client.getClusterSlotStats('key-count', this.slotStatsTopN);
+      if (this.isSuperseded(connectionId, epoch)) {
+        return;
+      }
+
+      const newSlotLabels = new Set<string>();
+      for (const [slot, stats] of Object.entries(slotStats)) {
+        newSlotLabels.add(slot);
+        this.clusterSlotKeys.labels(connLabel, slot).set(stats.key_count || 0);
+        this.clusterSlotExpires.labels(connLabel, slot).set(stats.expires_count || 0);
+        this.clusterSlotReadsTotal.labels(connLabel, slot).set(stats.total_reads || 0);
+        this.clusterSlotWritesTotal.labels(connLabel, slot).set(stats.total_writes || 0);
+      }
+
+      for (const staleSlot of state.currentClusterSlotLabels) {
+        if (!newSlotLabels.has(staleSlot)) {
+          this.clusterSlotKeys.remove(connLabel, staleSlot);
+          this.clusterSlotExpires.remove(connLabel, staleSlot);
+          this.clusterSlotReadsTotal.remove(connLabel, staleSlot);
+          this.clusterSlotWritesTotal.remove(connLabel, staleSlot);
+        }
+      }
+
+      state.currentClusterSlotLabels = newSlotLabels;
+    } catch (slotStatsError) {
+      this.runtimeCapabilityTracker.recordFailure(
+        connectionId,
+        'canClusterSlotStats',
+        slotStatsError instanceof Error ? slotStatsError : String(slotStatsError),
+      );
+      this.logger.error(`Failed to update cluster slot stats for ${connLabel}`, slotStatsError);
     }
   }
 
