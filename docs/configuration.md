@@ -247,10 +247,12 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 
 ### Prometheus Metrics
 
-| Variable                       | Required | Default                 | Description                                                                                |
-| ------------------------------ | -------- | ----------------------- | ------------------------------------------------------------------------------------------ |
-| `PROMETHEUS_POLL_INTERVAL_MS`  | No       | `5000`                  | How often exported metrics are refreshed (milliseconds)                                    |
-| `PROMETHEUS_STALENESS_MS`      | No       | 3 × poll interval       | Drop a connection's gauge series after this long without a successful `INFO` read (ms, ≥ 1000, raised to 3 × poll interval if lower) |
+| Variable                      | Required | Default           | Description                                                                                                                          |
+| ----------------------------- | -------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `PROMETHEUS_POLL_INTERVAL_MS` | No       | `5000`            | How often exported metrics are refreshed (milliseconds)                                                                              |
+| `PROMETHEUS_STALENESS_MS`     | No       | 3 × poll interval | Drop a connection's gauge series after this long without a successful `INFO` read (ms, ≥ 1000, raised to 3 × poll interval if lower) |
+| `PROMETHEUS_METRICS_ENABLED`  | No       | `true`            | Set to `false` to disable `/api/prometheus/metrics` entirely (the OTLP mirror keeps exporting)                                       |
+| `PROMETHEUS_METRICS_TOKEN`    | No       | _(none)_          | Bearer token required to scrape the metrics endpoint; required when `CLOUD_MODE` is set and the endpoint is enabled                  |
 
 ### Client Analytics
 
@@ -272,9 +274,9 @@ To keep the database from growing forever, set a retention window from **Setting
 
 ### Webhooks
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `FRONTEND_URL` | No | - | Public base URL of the web UI (e.g. `https://monitor.example.com`). Used to build "View in BetterDB" links in Slack/Discord messages; unset = messages render without the link |
+| Variable       | Required | Default | Description                                                                                                                                                                    |
+| -------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `FRONTEND_URL` | No       | -       | Public base URL of the web UI (e.g. `https://monitor.example.com`). Used to build "View in BetterDB" links in Slack/Discord messages; unset = messages render without the link |
 
 ### License Configuration
 
@@ -558,6 +560,9 @@ These routes stay open without a session: `/api/health`, `/api/version`,
 `/api/system/workspace`, `/api/prometheus/metrics`, `/api/docs`, the `/api/auth` and
 `/api/invite` routes, and reads under `/api/mcp`. Writes under `/api/mcp` that apply
 changes — approving or rejecting cache and memory proposals — need a session too.
+The Prometheus metrics endpoint has its own gate on top of this: it can be turned off
+with `PROMETHEUS_METRICS_ENABLED=false` and guarded with a `PROMETHEUS_METRICS_TOKEN`
+bearer credential (see [Prometheus Metrics](./prometheus-metrics.md)).
 
 Set `WORKSPACE_DISABLED=true` to run without user control, in which case every endpoint
 is reachable without signing in.
@@ -648,6 +653,8 @@ member takes effect within that window rather than on the next request.
 | Endpoint                  | Method | Description                               |
 | ------------------------- | ------ | ----------------------------------------- |
 | `/api/prometheus/metrics` | GET    | Prometheus-formatted metrics for scraping |
+
+Returns 401 when `PROMETHEUS_METRICS_TOKEN` is set and the scrape omits it, and 404 when `PROMETHEUS_METRICS_ENABLED=false`.
 
 ## Runtime Settings
 

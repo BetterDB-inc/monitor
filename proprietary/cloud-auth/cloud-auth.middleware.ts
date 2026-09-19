@@ -17,15 +17,18 @@ export class CloudAuthMiddleware implements NestMiddleware {
     // Skip if not in cloud mode (should never happen since module is only loaded
     // in CLOUD_MODE, but safety check). Match the codebase convention
     // (isCloudMode()) so a value like "false"/"0" is treated as
-    // self-hosted here and everywhere else, keeping the /v1/traces session-auth
-    // bypass in lockstep with the ingest token requirement.
+    // self-hosted here and everywhere else, keeping the /v1/traces and
+    // /prometheus/metrics session-auth bypasses in lockstep with their own
+    // bearer token requirements.
     if (!isCloudMode()) {
       return next();
     }
 
     const path = (req.url || '').split('?')[0]; // Strip query params for path matching
 
-    // Allow these paths through without auth
+    // Allow these paths through without auth. /prometheus/metrics is safe to
+    // bypass because PrometheusMetricsGuard requires PROMETHEUS_METRICS_TOKEN,
+    // and boot validation makes that token mandatory in cloud mode.
     if (
       path.startsWith('/auth/callback') ||
       path.startsWith('/api/auth/callback') ||
@@ -38,6 +41,8 @@ export class CloudAuthMiddleware implements NestMiddleware {
       path.startsWith('/mcp/') ||
       path.startsWith('/api/mcp/') ||
       path.startsWith('/v1/traces') ||
+      path === '/prometheus/metrics' ||
+      path === '/api/prometheus/metrics' ||
       path.startsWith('/assets/') ||
       path.startsWith('/favicon') ||
       path === '/symbol-white.svg'
@@ -54,7 +59,8 @@ export class CloudAuthMiddleware implements NestMiddleware {
         }) as any;
 
         // Skip schema check on demo hostname — any valid session is accepted
-        const isDemoHost = !!process.env.DEMO_HOSTNAME && (req.headers.host || '') === process.env.DEMO_HOSTNAME;
+        const isDemoHost =
+          !!process.env.DEMO_HOSTNAME && (req.headers.host || '') === process.env.DEMO_HOSTNAME;
         const expectedSchema = `tenant_${payload.subdomain.replace(/-/g, '_')}`;
         if (!isDemoHost && expectedSchema !== this.tenantSchema) {
           return this.redirectToLogin(res, req);

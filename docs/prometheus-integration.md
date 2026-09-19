@@ -39,6 +39,9 @@ scrape_configs:
       - targets: ['localhost:3001']
     metrics_path: '/api/prometheus/metrics'
     scrape_interval: 15s
+    authorization:
+      type: Bearer
+      credentials: '<PROMETHEUS_METRICS_TOKEN>'
 ```
 
 ## Useful Queries
@@ -87,3 +90,6 @@ See `docs/alertmanager-rules.yml` for ready-to-use Alertmanager rules.
 ## Configuration
 
 The anomaly summary update interval can be configured via `ANOMALY_PROMETHEUS_INTERVAL_MS` (default: 30000ms).
+
+- `PROMETHEUS_METRICS_TOKEN` — require `Authorization: Bearer <token>` on scrapes; a missing or wrong token returns 401.
+- `PROMETHEUS_METRICS_ENABLED=false` — disable the endpoint (404) without stopping the OTLP mirror.

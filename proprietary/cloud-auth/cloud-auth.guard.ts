@@ -20,8 +20,12 @@ export class CloudAuthGuardImpl implements CanActivate {
     const reply = context.switchToHttp().getResponse<FastifyReply>();
     const path = (request.url || '').split('?')[0];
 
-    // Skip auth for callback route, logout route, health checks, agent WebSocket, and static assets
-    if (path.startsWith('/auth/callback') ||
+    // Skip auth for callback route, logout route, health checks, agent WebSocket, and static assets.
+    // /prometheus/metrics is safe to bypass because PrometheusMetricsGuard
+    // requires PROMETHEUS_METRICS_TOKEN, and boot validation makes that token
+    // mandatory in cloud mode.
+    if (
+      path.startsWith('/auth/callback') ||
       path.startsWith('/api/auth/callback') ||
       path.startsWith('/auth/logout') ||
       path.startsWith('/api/auth/logout') ||
@@ -32,8 +36,11 @@ export class CloudAuthGuardImpl implements CanActivate {
       path.startsWith('/mcp/') ||
       path.startsWith('/api/mcp/') ||
       path.startsWith('/v1/traces') ||
+      path === '/prometheus/metrics' ||
+      path === '/api/prometheus/metrics' ||
       path.startsWith('/assets/') ||
-      path.startsWith('/favicon')) {
+      path.startsWith('/favicon')
+    ) {
       return true;
     }
 
