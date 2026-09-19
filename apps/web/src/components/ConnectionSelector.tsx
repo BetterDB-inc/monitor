@@ -411,7 +411,11 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       >
         <DialogContent
           className={
-            showAgentTab ? (addTab === 'valkey' ? 'sm:max-w-3xl' : 'sm:max-w-2xl') : 'sm:max-w-md'
+            showAgentTab
+              ? addTab === 'valkey'
+                ? 'sm:max-w-3xl max-h-[90vh] overflow-y-auto themed-scroll'
+                : 'sm:max-w-2xl max-h-[90vh] overflow-y-auto themed-scroll'
+              : 'sm:max-w-md max-h-[90vh] overflow-y-auto themed-scroll'
           }
         >
           <DialogHeader>
@@ -472,7 +476,12 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
             />
           ) : addTab === 'direct' ? (
             <>
-              <div className="space-y-4">
+              <div
+                className="space-y-4 max-h-[60vh] overflow-y-auto themed-scroll bg-transparent pr-1 pb-1"
+                tabIndex={0}
+                role="region"
+                aria-label="Direct connection form"
+              >
                 <div>
                   <label className="block text-sm font-medium mb-1">Name *</label>
                   <input

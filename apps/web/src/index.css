@@ -188,4 +188,33 @@
     outline: 1px solid var(--ring);
     outline-offset: -1px;
   }
+
+  /* Generic theme-aware thin scrollbar for dialog scroll regions.
+     Transparent track + border thumb follows light/dark vars. */
+  .themed-scroll {
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+    background: transparent;
+  }
+  .themed-scroll::-webkit-scrollbar {
+    width: 8px;
+  }
+  .themed-scroll::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .themed-scroll::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 8px;
+  }
+  .themed-scroll::-webkit-scrollbar-thumb:hover {
+    background: var(--muted-foreground);
+  }
+  .themed-scroll:focus {
+    outline: none;
+  }
+  .themed-scroll:focus-visible {
+    outline: 1px solid var(--ring);
+    outline-offset: -1px;
+  }
 }
