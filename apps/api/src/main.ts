@@ -206,21 +206,24 @@ async function bootstrap(): Promise<void> {
     const tailGateway = app.get(TailGateway);
     const httpServer = app.getHttpServer();
 
-    const agentGateway = isCloudMode()
-      ? (() => {
-          try {
-            const { AgentGateway } = require('../../../proprietary/agent/agent-gateway');
-            const gw = app.get(AgentGateway);
-            console.log('[Agent] WebSocket gateway resolved');
-            return gw as {
-              handleUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): void;
-            };
-          } catch {
-            console.warn('[Agent] Failed to resolve WebSocket gateway — module not available');
-            return null;
-          }
-        })()
-      : null;
+    // Resolve the agent WebSocket gateway if it is registered. Cloud provides it via
+    // AgentModule; self-hosted provides the same class via SelfHostedAgentModule
+    // (createAgentGatewayProviders). Both require the identical module file, so the
+    // class reference matches and app.get resolves in either mode. Null when the
+    // proprietary agent code is not built (agent upgrades are then rejected).
+    const agentGateway = (() => {
+      try {
+        const { AgentGateway } = require('../../../proprietary/agent/agent-gateway');
+        const gw = app.get(AgentGateway);
+        console.log('[Agent] WebSocket gateway resolved');
+        return gw as {
+          handleUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): void;
+        };
+      } catch {
+        console.warn('[Agent] WebSocket gateway not registered — agent connections disabled');
+        return null;
+      }
+    })();
 
     httpServer.on(
       'upgrade',

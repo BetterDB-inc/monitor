@@ -56,9 +56,28 @@ function ephemeralSecret(reason: string): string {
   return generateSecret();
 }
 
-export function resolveAuthSecret(env: NodeJS.ProcessEnv, dataDir: string): string {
-  if (env.AUTH_SECRET !== undefined && env.AUTH_SECRET.length >= MIN_SECRET_LENGTH) {
-    return env.AUTH_SECRET;
+export interface ResolvedAuthSecret {
+  secret: string;
+  // true when the secret is a fresh per-process value (not from AUTH_SECRET and not
+  // persisted to disk), so it changes on every restart. Sessions — and, notably,
+  // agent tokens — signed with it stop verifying after a restart.
+  ephemeral: boolean;
+}
+
+/**
+ * Like `resolveAuthSecret`, but also reports whether the returned secret is
+ * ephemeral (regenerated per process) so callers that need restart stability — e.g.
+ * long-lived agent-token signing — can warn instead of silently degrading.
+ */
+export function resolveAuthSecretWithSource(
+  env: NodeJS.ProcessEnv,
+  dataDir: string,
+): ResolvedAuthSecret {
+  // Measure strength after trimming: a whitespace-only value (e.g. 32 spaces) passes a
+  // raw length check but is a trivially guessable HS256 key. Treat it as unset and
+  // fall through to the persisted/generated secret.
+  if (env.AUTH_SECRET !== undefined && env.AUTH_SECRET.trim().length >= MIN_SECRET_LENGTH) {
+    return { secret: env.AUTH_SECRET, ephemeral: false };
   }
   if (dataDir.trim() === '') {
     throw new Error('BETTERDB_DATA_DIR must not be empty');
@@ -67,13 +86,16 @@ export function resolveAuthSecret(env: NodeJS.ProcessEnv, dataDir: string): stri
   if (existsSync(file)) {
     const stored = readStoredSecret(file);
     if (stored.kind === 'usable') {
-      return stored.secret;
+      return { secret: stored.secret, ephemeral: false };
     }
     if (stored.kind === 'unreadable') {
-      return ephemeralSecret(
-        `Could not read the auth secret stored at ${file}: ${describeError(stored.error)}. ` +
-          'Leaving the file in place so a later boot can still use it.',
-      );
+      return {
+        secret: ephemeralSecret(
+          `Could not read the auth secret stored at ${file}: ${describeError(stored.error)}. ` +
+            'Leaving the file in place so a later boot can still use it.',
+        ),
+        ephemeral: true,
+      };
     }
     logger.warn(
       `The auth secret stored at ${file} is shorter than ${MIN_SECRET_LENGTH} characters; ` +
@@ -82,15 +104,19 @@ export function resolveAuthSecret(env: NodeJS.ProcessEnv, dataDir: string): stri
     try {
       rmSync(file, { force: true });
     } catch (error) {
-      return ephemeralSecret(
-        `Could not replace the auth secret at ${file}: ${describeError(error)}.`,
-      );
+      return {
+        secret: ephemeralSecret(`Could not replace the auth secret at ${file}: ${describeError(error)}.`),
+        ephemeral: true,
+      };
     }
   }
   try {
     mkdirSync(dataDir, { recursive: true });
   } catch (error) {
-    return ephemeralSecret(`Could not persist an auth secret at ${file}: ${describeError(error)}.`);
+    return {
+      secret: ephemeralSecret(`Could not persist an auth secret at ${file}: ${describeError(error)}.`),
+      ephemeral: true,
+    };
   }
   const generated = generateSecret();
   try {
@@ -100,12 +126,19 @@ export function resolveAuthSecret(env: NodeJS.ProcessEnv, dataDir: string): stri
       const raced = readStoredSecret(file);
       if (raced.kind === 'usable') {
         logger.log(`Reusing the auth secret another process wrote at ${file}`);
-        return raced.secret;
+        return { secret: raced.secret, ephemeral: false };
       }
     }
-    return ephemeralSecret(`Could not persist an auth secret at ${file}: ${describeError(error)}.`);
+    return {
+      secret: ephemeralSecret(`Could not persist an auth secret at ${file}: ${describeError(error)}.`),
+      ephemeral: true,
+    };
   }
   restrictPermissions(file);
   logger.log(`Generated a new auth secret at ${file}`);
-  return generated;
+  return { secret: generated, ephemeral: false };
+}
+
+export function resolveAuthSecret(env: NodeJS.ProcessEnv, dataDir: string): string {
+  return resolveAuthSecretWithSource(env, dataDir).secret;
 }

@@ -95,6 +95,15 @@ describe('resolveAuthSecret', () => {
     expect(resolveAuthSecret({ AUTH_SECRET: secret }, dataDir)).toBe(secret);
   });
 
+  it('rejects a whitespace-only AUTH_SECRET and falls back to a persisted secret', () => {
+    const whitespace = ' '.repeat(40);
+    const resolved = resolveAuthSecret({ AUTH_SECRET: whitespace }, dataDir);
+    expect(resolved).not.toBe(whitespace);
+    expect(resolved.trim().length).toBeGreaterThanOrEqual(32);
+    // Persisted, so it is stable across calls (not the weak env value).
+    expect(readFileSync(join(dataDir, 'auth-secret'), 'utf8')).toBe(resolved);
+  });
+
   it('generates, persists with 0600 and reuses a secret when the env is unset', () => {
     const first = resolveAuthSecret({}, dataDir);
     expect(first.length).toBeGreaterThanOrEqual(43);

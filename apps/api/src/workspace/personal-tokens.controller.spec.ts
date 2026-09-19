@@ -249,13 +249,24 @@ describe('PersonalTokensController', () => {
     });
     expect(blank.statusCode).toBe(400);
 
+    // 'agent' is a valid token type, but this module does not wire the proprietary
+    // agent service, so minting an agent token reports the feature as unavailable
+    // (503) rather than a validation error.
     const agent = await app.inject({
       method: 'POST',
       url: '/agent-tokens',
       headers: jsonHeaders({ cookie: ownerCookie }),
       payload: { name: 'agent', type: 'agent' },
     });
-    expect(agent.statusCode).toBe(400);
+    expect(agent.statusCode).toBe(503);
+
+    const badType = await app.inject({
+      method: 'POST',
+      url: '/agent-tokens',
+      headers: jsonHeaders({ cookie: ownerCookie }),
+      payload: { name: 'bad', type: 'nope' },
+    });
+    expect(badType.statusCode).toBe(400);
   });
 
   it('attributes a bearer mutation to the token owner in the activity log', async () => {

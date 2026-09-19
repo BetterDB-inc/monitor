@@ -31,6 +31,7 @@ import { PosthogProxyModule } from './posthog-proxy/posthog-proxy.module';
 import { SystemModule } from './system/system.module';
 import { MonitorModule } from './monitor/monitor.module';
 import { isCloudMode } from './common/utils/cloud-mode';
+import { isTrueFlag } from './config/env-normalize';
 import { requireCloudAuth } from './common/utils/cloud-auth-loader';
 import { CveModule } from './cve/cve.module';
 import { ActivityModule } from './activity/activity.module';
@@ -46,6 +47,7 @@ let InferenceLatencyProModule: any = null;
 let CacheProposalsModule: any = null;
 let MemoryProposalsModule: any = null;
 let AgentModule: any = null;
+let SelfHostedAgentModule: any = null;
 let DataRetentionModule: any = null;
 
 try {
@@ -129,6 +131,27 @@ try {
   // Proprietary module not available
 }
 
+// Self-hosted agent connections: mirror the cloud AgentModule capability without the
+// cloud-only AgentTokensController (PersonalTokensController mints agent tokens in
+// self-hosted). Gated on workspace-enabled self-hosted: never in cloud (the cloud
+// AgentModule provides AgentGateway there, and double-providing would conflict), and
+// not under WORKSPACE_DISABLED (which has no PersonalTokensController to mint tokens,
+// so the gateway would accept upgrades no token could ever satisfy).
+const selfHostedAgentEnabled = !isCloudMode() && !isTrueFlag(process.env.WORKSPACE_DISABLED);
+if (selfHostedAgentEnabled) {
+  // Unlike the proprietary `require`s below, this module ships in apps/api/src and is
+  // always present — MODULE_NOT_FOUND is not a real outcome. A throw here means the
+  // module's import-time body failed (e.g. resolveAuthSecret doing filesystem work),
+  // so log it rather than silently booting with agent connections off.
+  try {
+    const selfHostedAgent = require('./agent/self-hosted-agent.module');
+    SelfHostedAgentModule = selfHostedAgent.SelfHostedAgentModule;
+    console.log('[Agent] Self-hosted agent module loaded');
+  } catch (error) {
+    console.warn('[Agent] Failed to load self-hosted agent module:', error);
+  }
+}
+
 if (isCloudMode()) {
   try {
     const agentModule = require('../../../proprietary/agent/agent.module');
@@ -208,6 +231,7 @@ const proprietaryImports = [
   MemoryProposalsModule,
   AiModule,
   AgentModule,
+  SelfHostedAgentModule,
   DataRetentionModule,
 ].filter(Boolean);
 

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useIsDemo } from '../contexts/DemoContext';
+import { useAuth } from '../contexts/AuthContext';
 import { useCanMutate } from '../hooks/useCanMutate';
 import { useConnection } from '../hooks/useConnection';
 import { fetchApi } from '../api/client';
@@ -96,7 +97,12 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   const emptyFormData = isCloudMode ? { ...defaultFormData, host: '' } : defaultFormData;
   const isDemo = useIsDemo();
   const canMutate = useCanMutate();
+  const { mode } = useAuth();
   const locked = isDemo === true || canMutate === false;
+  // The "Via Agent" tab works in cloud and in self-hosted (workspace-enabled): both
+  // expose the /agent-tokens mint endpoint and the /agent/ws gateway. The "BetterDB
+  // Valkey instances" tab stays cloud-only (it provisions managed instances).
+  const showAgentTab = isCloudMode === true || mode === 'self-hosted';
   const { currentConnection, connections, loading, error, setConnection, refreshConnections } =
     useConnection();
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -120,8 +126,14 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
         });
         setTestResult(null);
         setAddTab('direct');
-      } else if (detail?.tab && isCloudMode) {
-        // Non-direct tabs only exist in cloud mode.
+      } else if (
+        detail?.tab &&
+        (detail.tab === 'direct' ||
+          (detail.tab === 'agent' && showAgentTab) ||
+          (detail.tab === 'valkey' && isCloudMode))
+      ) {
+        // Direct is always selectable; the agent tab is available in cloud and
+        // self-hosted; the valkey (provisioning) tab is cloud-only.
         setAddTab(detail.tab);
         setValkeyMaxmemory(detail.valkeyMaxmemory ?? null);
       }
@@ -129,7 +141,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
     };
     window.addEventListener('betterdb:open-add-connection', handler);
     return () => window.removeEventListener('betterdb:open-add-connection', handler);
-  }, [isCloudMode, locked]);
+  }, [isCloudMode, showAgentTab, locked]);
   const [showManageDialog, setShowManageDialog] = useState(false);
   const [formData, setFormData] = useState<ConnectionFormData>(emptyFormData);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
@@ -399,15 +411,16 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       >
         <DialogContent
           className={
-            isCloudMode ? (addTab === 'valkey' ? 'sm:max-w-3xl' : 'sm:max-w-2xl') : 'sm:max-w-md'
+            showAgentTab ? (addTab === 'valkey' ? 'sm:max-w-3xl' : 'sm:max-w-2xl') : 'sm:max-w-md'
           }
         >
           <DialogHeader>
             <DialogTitle>Add Connection</DialogTitle>
           </DialogHeader>
 
-          {/* Tab switcher (only if cloud mode) */}
-          {isCloudMode && (
+          {/* Tab switcher: Direct + Via Agent show in cloud and self-hosted; the
+              Valkey-instances tab is cloud-only. */}
+          {showAgentTab && (
             <div className="flex border-b">
               <button
                 onClick={() => setAddTab('direct')}
@@ -429,16 +442,18 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
               >
                 Via Agent
               </button>
-              <button
-                onClick={() => setAddTab('valkey')}
-                className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                  addTab === 'valkey'
-                    ? 'border-primary text-primary'
-                    : 'border-transparent text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                BetterDB Valkey instances
-              </button>
+              {isCloudMode && (
+                <button
+                  onClick={() => setAddTab('valkey')}
+                  className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                    addTab === 'valkey'
+                      ? 'border-primary text-primary'
+                      : 'border-transparent text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  BetterDB Valkey instances
+                </button>
+              )}
             </div>
           )}
 
@@ -974,6 +989,16 @@ function AgentTab({
   };
 
   const cloudHost = window.location.host;
+  const pageIsHttps = window.location.protocol === 'https:';
+  // The agent authenticates by sending BETTERDB_TOKEN in the WebSocket Authorization
+  // header, so plain ws:// exposes the token to anyone on the network. Only use ws://
+  // for loopback (local dev, where there is no network hop); every network-facing host
+  // gets wss:// so the token is never emitted in cleartext. On a plain-HTTP non-loopback
+  // instance that means the command uses wss:// and needs TLS terminated first — see the
+  // warning shown below.
+  const hostIsLoopback = isLocalhostHost(window.location.hostname.replace(/^\[|\]$/g, ''));
+  const wsScheme = pageIsHttps || !hostIsLoopback ? 'wss' : 'ws';
+  const insecureAgentHost = !pageIsHttps && !hostIsLoopback;
 
   return (
     <div className="space-y-4 max-h-[70vh] overflow-y-auto">
@@ -1062,13 +1087,22 @@ function AgentTab({
             </button>
           </div>
 
+          {insecureAgentHost && (
+            <p className="text-xs border rounded-md border-amber-300 bg-amber-50 text-amber-800 p-2 mb-2">
+              This instance is served over HTTP on a network-facing host. The agent sends its
+              token over the connection, so the commands below use <span className="font-mono">wss://</span> and
+              require HTTPS (terminate TLS at a reverse proxy) before the agent can connect — a
+              plain <span className="font-mono">ws://</span> URL would transmit the token in cleartext.
+            </p>
+          )}
+
           <h4 className="text-xs font-medium mb-1">Run the agent with Docker:</h4>
           <pre className="text-xs bg-background p-2 rounded border overflow-x-auto">
             {`docker run -d \\
   --name betterdb-agent \\
   -e VALKEY_HOST=your-valkey-host \\
   -e VALKEY_PORT=6379 \\
-  -e BETTERDB_CLOUD_URL=wss://${cloudHost}/agent/ws \\
+  -e BETTERDB_CLOUD_URL=${wsScheme}://${cloudHost}/agent/ws \\
   -e BETTERDB_TOKEN=${generatedToken.token} \\
   betterdb/agent:latest`}
           </pre>
@@ -1078,7 +1112,7 @@ function AgentTab({
             {`npx @betterdb/agent \\
   --valkey-host your-valkey-host \\
   --valkey-port 6379 \\
-  --cloud-url wss://${cloudHost}/agent/ws \\
+  --cloud-url ${wsScheme}://${cloudHost}/agent/ws \\
   --token ${generatedToken.token}`}
           </pre>
 
