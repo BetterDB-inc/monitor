@@ -93,3 +93,5 @@ The anomaly summary update interval can be configured via `ANOMALY_PROMETHEUS_IN
 
 - `PROMETHEUS_METRICS_TOKEN` — require `Authorization: Bearer <token>` on scrapes; a missing or wrong token returns 401.
 - `PROMETHEUS_METRICS_ENABLED=false` — disable the endpoint (404) without stopping the OTLP mirror.
+
+Set `METRICS_EXPORT_PROFILE=vitals` for a bounded series budget per connection instead of the full metric surface — see [Export Profiles](prometheus-metrics.md#export-profiles).

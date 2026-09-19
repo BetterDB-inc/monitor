@@ -247,12 +247,14 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 
 ### Prometheus Metrics
 
-| Variable                      | Required | Default           | Description                                                                                                                          |
-| ----------------------------- | -------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `PROMETHEUS_POLL_INTERVAL_MS` | No       | `5000`            | How often exported metrics are refreshed (milliseconds)                                                                              |
-| `PROMETHEUS_STALENESS_MS`     | No       | 3 × poll interval | Drop a connection's gauge series after this long without a successful `INFO` read (ms, ≥ 1000, raised to 3 × poll interval if lower) |
-| `PROMETHEUS_METRICS_ENABLED`  | No       | `true`            | Set to `false` to disable `/api/prometheus/metrics` entirely (the OTLP mirror keeps exporting)                                       |
-| `PROMETHEUS_METRICS_TOKEN`    | No       | _(none)_          | Bearer token required to scrape the metrics endpoint; required when `CLOUD_MODE` is set and the endpoint is enabled                  |
+| Variable                      | Required | Default           | Description                                                                                                                                                                           |
+| ----------------------------- | -------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PROMETHEUS_POLL_INTERVAL_MS` | No       | `5000`            | How often exported metrics are refreshed (milliseconds)                                                                                                                               |
+| `PROMETHEUS_STALENESS_MS`     | No       | 3 × poll interval | Drop a connection's gauge series after this long without a successful `INFO` read (ms, ≥ 1000, raised to 3 × poll interval if lower)                                                  |
+| `METRICS_EXPORT_PROFILE`      | No       | `full`            | `vitals` exports a fixed set of series per connection (no per-db, per-slot or pattern-labelled series); `full` exports everything. Applies to the scrape endpoint and the OTLP mirror |
+| `METRICS_SLOT_STATS_TOP_N`    | No       | `100`             | Export slot stats for the top N slots by key count (0–16384, `0` disables). Ignored under `vitals`                                                                                    |
+| `PROMETHEUS_METRICS_ENABLED`  | No       | `true`            | Set to `false` to disable `/api/prometheus/metrics` entirely (the OTLP mirror keeps exporting)                                                                                        |
+| `PROMETHEUS_METRICS_TOKEN`    | No       | _(none)_          | Bearer token required to scrape the metrics endpoint; required when `CLOUD_MODE` is set and the endpoint is enabled                                                                   |
 
 ### Client Analytics
 
