@@ -245,6 +245,13 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 | `ANOMALY_CACHE_TTL_MS`           | No       | `3600000` | Anomaly detection cache TTL (milliseconds)            |
 | `ANOMALY_PROMETHEUS_INTERVAL_MS` | No       | `30000`   | Prometheus summary update interval (milliseconds)     |
 
+### Prometheus Metrics
+
+| Variable                       | Required | Default                 | Description                                                                                |
+| ------------------------------ | -------- | ----------------------- | ------------------------------------------------------------------------------------------ |
+| `PROMETHEUS_POLL_INTERVAL_MS`  | No       | `5000`                  | How often exported metrics are refreshed (milliseconds)                                    |
+| `PROMETHEUS_STALENESS_MS`      | No       | 3 × poll interval       | Drop a connection's gauge series after this long without a successful `INFO` read (ms, ≥ 1000, raised to 3 × poll interval if lower) |
+
 ### Client Analytics
 
 | Variable                            | Required | Default | Description                                      |
