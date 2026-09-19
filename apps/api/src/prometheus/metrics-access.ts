@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 
 export type MetricsAccess = 'allow' | 'disabled' | 'unauthorized';
 
@@ -23,11 +23,8 @@ export function matchesBearerToken(authorization: string | undefined, token: str
   if (!authorization) {
     return false;
   }
-  const expected = Buffer.from(`Bearer ${token}`);
-  const presented = Buffer.from(authorization);
-  if (expected.length !== presented.length) {
-    return false;
-  }
+  const expected = createHash('sha256').update(`Bearer ${token}`).digest();
+  const presented = createHash('sha256').update(authorization).digest();
   return timingSafeEqual(expected, presented);
 }
 
