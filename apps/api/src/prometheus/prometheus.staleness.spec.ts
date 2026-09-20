@@ -265,9 +265,7 @@ describe('PrometheusService staleness bounds', () => {
     const conn1Client = { getInfoParsed: jest.fn().mockReturnValue(new Promise(() => {})) };
     const conn2Client = { getInfoParsed: jest.fn().mockResolvedValue({}) };
     const registry = service['connectionRegistry'] as unknown as Record<string, jest.Mock>;
-    registry.get.mockImplementation((id: string) =>
-      id === 'conn-1' ? conn1Client : conn2Client,
-    );
+    registry.get.mockImplementation((id: string) => (id === 'conn-1' ? conn1Client : conn2Client));
     registry.list.mockReturnValue([
       { id: 'conn-1', name: 'conn-1', isConnected: true },
       { id: 'conn-2', name: 'conn-2', isConnected: true },
@@ -596,5 +594,66 @@ describe('PrometheusService staleness bounds', () => {
     const text = await service.getMetrics();
 
     expect(text).not.toContain(`betterdb_memory_used_bytes{connection="${LABEL}"}`);
+  });
+
+  it('coalesces health checks so a timed-out check cannot overlap the next one', async () => {
+    const client = { getInfoParsed: jest.fn().mockResolvedValue({}) };
+    (service['connectionRegistry'].get as jest.Mock).mockReturnValue(client);
+    let resolveHealth: () => void = () => undefined;
+    const getHealth = jest.fn().mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolveHealth = () => resolve();
+      }),
+    );
+    (service as unknown as Record<string, unknown>)['healthService'] = { getHealth };
+    jest
+      .spyOn(service as never, 'updateStorageBasedMetricsForConnection' as never)
+      .mockResolvedValue(undefined as never);
+
+    const ctx = {
+      connectionId: 'conn-1',
+      connectionName: 'conn-1',
+      client: client as never,
+      host: '10.0.0.1',
+      port: 6379,
+    } as never;
+
+    const first = service['pollConnection'](ctx);
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1);
+    await first;
+
+    const second = service['pollConnection'](ctx);
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1);
+    await second;
+
+    expect(getHealth).toHaveBeenCalledTimes(1);
+
+    resolveHealth();
+    await jest.advanceTimersByTimeAsync(1);
+
+    const third = service['pollConnection'](ctx);
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1);
+    await third;
+
+    expect(getHealth).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps series a connection re-added under the same label wrote during cleanup', async () => {
+    await update('conn-1');
+    setMemory(LABEL, 100);
+    service['freshness'].forget('conn-1');
+
+    const gauge = service['memoryUsedBytes'];
+    const readSnapshot = gauge.get.bind(gauge);
+    jest.spyOn(gauge, 'get').mockImplementationOnce(async () => {
+      await update('conn-3');
+      setMemory(LABEL, 250);
+      return readSnapshot();
+    });
+
+    await service['removeSeriesForLabels'](new Set([LABEL]), new Set<string>());
+    const text = await service.getMetrics();
+
+    expect(text).toContain(`betterdb_memory_used_bytes{connection="${LABEL}"} 250`);
   });
 });

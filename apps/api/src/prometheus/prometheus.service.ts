@@ -117,6 +117,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   // Per-connection in-flight INFO-metric updates, so the background poller and a
   // /metrics scrape coalesce instead of racing on shared per-connection state.
   private updateMetricsInFlight = new Map<string, Promise<void>>();
+  private healthChecksInFlight = new Map<string, Promise<void>>();
 
   // Per-connection pass epoch. Removing a connection or abandoning a pass at
   // its bound retires the epoch, so a reply that lands afterwards is dropped
@@ -328,7 +329,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private pingHealth(connectionId: string, deadline: number): Promise<void> {
     const budgetMs = deadline - Date.now();
     const ping = this.readWithTimeout(
-      this.healthService.getHealth(connectionId),
+      this.startOrJoinHealthCheck(connectionId),
       budgetMs > 0 ? budgetMs : this.pollIntervalMs,
       `health check for ${connectionId}`,
     ).then(
@@ -336,6 +337,32 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       () => undefined,
     );
     return budgetMs > 0 ? ping : Promise.resolve();
+  }
+
+  /**
+   * Coalesce health checks per connection. A timed-out ping abandons the wait
+   * but not the underlying getHealth(), so without this a later tick could
+   * start a second check and let the older one apply its up/down transition
+   * after the newer result.
+   */
+  private startOrJoinHealthCheck(connectionId: string): Promise<void> {
+    const existing = this.healthChecksInFlight.get(connectionId);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const run: Promise<void> = this.healthService
+      .getHealth(connectionId)
+      .then(
+        () => undefined,
+        () => undefined,
+      )
+      .finally(() => {
+        if (this.healthChecksInFlight.get(connectionId) === run) {
+          this.healthChecksInFlight.delete(connectionId);
+        }
+      });
+    this.healthChecksInFlight.set(connectionId, run);
+    return run;
   }
 
   protected onConnectionRemoved(connectionId: string): void {
@@ -2045,7 +2072,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const snapshots = (await Promise.all(
       gauges.map((gauge) => gauge.get()),
     )) as unknown as SeriesSnapshot[];
-    for (const ref of selectSeriesToRemove(snapshots, labels, excludedNames)) {
+    // Reading the snapshots yields. A connection re-added under the same
+    // host:port label in that window owns these series now, so drop it from
+    // the removal set rather than deleting the new connection's children.
+    const { fresh } = this.freshness.labelsByFreshness(Date.now());
+    const removable = new Set([...labels].filter((label) => !fresh.has(label)));
+    if (removable.size === 0) {
+      return;
+    }
+    for (const ref of selectSeriesToRemove(snapshots, removable, excludedNames)) {
       const gauge = this.registry.getSingleMetric(ref.name) as Gauge | undefined;
       gauge?.remove(ref.labels as LabelValues<string>);
     }
@@ -2299,6 +2334,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // stale work. The promise itself still settles; its compare-and-delete
     // finally then no-ops because the entry is already gone.
     this.updateMetricsInFlight.delete(connectionId);
+    this.healthChecksInFlight.delete(connectionId);
     this.retireEpoch(connectionId);
     const label = this.freshness.forget(connectionId);
     if (label === undefined || this.freshness.hasLabel(label)) {
