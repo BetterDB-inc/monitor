@@ -397,4 +397,63 @@ describe('PrometheusService slot stats', () => {
       `betterdb_cluster_slot_keys{connection="${LABEL}",slot="1"} 50`,
     );
   });
+
+  it("ignores a superseded pass instead of clearing a newer pass's slots", async () => {
+    const harness = buildService();
+    harness.client.getClusterSlotStats.mockResolvedValueOnce({ '1': slot(50) });
+    await runSlotStats(harness);
+
+    const staleEpoch = harness.service['currentEpoch']('conn-1');
+    harness.service['retireEpoch']('conn-1');
+    harness.tracker.isAvailable.mockReturnValue(false);
+    await harness.service['updateSlotStatsMetrics'](
+      harness.client as never,
+      'conn-1',
+      LABEL,
+      harness.service['getConnectionState']('conn-1'),
+      staleEpoch,
+    );
+
+    expect(await harness.service.getMetrics()).toContain(
+      `betterdb_cluster_slot_keys{connection="${LABEL}",slot="1"} 50`,
+    );
+  });
+
+  it('clears slot series when the connection stops reporting cluster mode', async () => {
+    const harness = buildService();
+    harness.client.getClusterSlotStats.mockResolvedValueOnce({ '1': slot(50) });
+    await runSlotStats(harness);
+    expect(await harness.service.getMetrics()).toContain(`slot="1"`);
+
+    await harness.service['updateClusterMetricsFromInfo'](
+      harness.client as never,
+      { cluster: { cluster_enabled: '0' } } as never,
+      LABEL,
+      'conn-1',
+      harness.service['getConnectionState']('conn-1'),
+      null,
+    );
+
+    expect(await harness.service.getMetrics()).not.toContain(`slot="1"`);
+  });
+
+  it('clears slot series when cluster info becomes unavailable', async () => {
+    const harness = buildService();
+    harness.client.getClusterSlotStats.mockResolvedValueOnce({ '1': slot(50) });
+    await runSlotStats(harness);
+
+    harness.tracker.isAvailable.mockImplementation(
+      (_id: string, key: string) => key !== 'canClusterInfo',
+    );
+    await harness.service['updateClusterMetricsFromInfo'](
+      harness.client as never,
+      { cluster: { cluster_enabled: '1' } } as never,
+      LABEL,
+      'conn-1',
+      harness.service['getConnectionState']('conn-1'),
+      null,
+    );
+
+    expect(await harness.service.getMetrics()).not.toContain(`slot="1"`);
+  });
 });

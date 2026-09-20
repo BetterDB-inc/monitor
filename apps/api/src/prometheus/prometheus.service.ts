@@ -1513,9 +1513,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const clusterEnabled = info.cluster?.cluster_enabled === '1';
     this.clusterEnabled.labels(connLabel).set(clusterEnabled ? 1 : 0);
 
-    if (!clusterEnabled) return;
+    if (!clusterEnabled) {
+      this.clearSlotSeries(connLabel, state);
+      return;
+    }
 
     if (!this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterInfo')) {
+      this.clearSlotSeries(connLabel, state);
       return;
     }
 
@@ -1741,6 +1745,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     state: ConnectionMetricState,
     epoch: number,
   ): Promise<void> {
+    if (this.isSuperseded(connectionId, epoch)) {
+      return;
+    }
     if (this.slotStatsTopN === 0) {
       return;
     }
