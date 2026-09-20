@@ -1105,7 +1105,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       const info = await client.getInfoParsed();
       // A reply is evidence the connection is alive even when this pass no
       // longer owns the metrics, and markFresh only updates a connection the
-      // tracker still knows — so a removed one stays removed.
+      // tracker still knows under this same label — so a removed one stays
+      // removed and an ID reused for another host keeps its own label.
       this.freshness.markFresh(connectionId, connLabel, Date.now());
       // The connection may have been removed, or this pass abandoned at its
       // bound, while the read was outstanding. Writing now would recreate

@@ -31,10 +31,9 @@ export class FreshnessTracker {
 
   markFresh(connectionId: string, label: string, now: number): void {
     const entry = this.entries.get(connectionId);
-    if (entry === undefined) {
+    if (entry === undefined || entry.label !== label) {
       return;
     }
-    entry.label = label;
     entry.lastSuccessAt = now;
   }
 

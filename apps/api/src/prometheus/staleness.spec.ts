@@ -66,6 +66,18 @@ describe('FreshnessTracker', () => {
     expect([...fresh]).toEqual(['h:1']);
   });
 
+  it('ignores a late success for an ID reused under another label', () => {
+    const tracker = new FreshnessTracker(BOUND);
+    tracker.observe('conn-1', 'h:1', 0);
+    tracker.forget('conn-1');
+    tracker.observe('conn-1', 'h:2', 9_000);
+    tracker.markFresh('conn-1', 'h:1', 10_000);
+
+    expect(tracker.hasLabel('h:1')).toBe(false);
+    expect(tracker.hasLabel('h:2')).toBe(true);
+    expect(tracker.isStale('conn-1', 9_000 + BOUND + 1)).toBe(true);
+  });
+
   it('does not resurrect a forgotten connection on a late success', () => {
     const tracker = new FreshnessTracker(BOUND);
     tracker.observe('conn-1', 'h:1', 0);

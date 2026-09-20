@@ -656,4 +656,30 @@ describe('PrometheusService staleness bounds', () => {
 
     expect(text).toContain(`betterdb_memory_used_bytes{connection="${LABEL}"} 250`);
   });
+
+  it('does not refresh a reused connection ID with the old label', async () => {
+    let resolveInfo: (info: unknown) => void = () => undefined;
+    const slow = {
+      getInfoParsed: jest.fn().mockReturnValue(
+        new Promise((resolve) => {
+          resolveInfo = resolve;
+        }),
+      ),
+    };
+    (service['connectionRegistry'].get as jest.Mock).mockReturnValueOnce(slow);
+
+    const pass = service['runUpdateMetricsForConnection']('conn-1');
+    service['cleanupConnectionMetrics']('conn-1');
+    configs['conn-1'] = { host: '10.0.0.9', port: 6379 };
+    await update('conn-1');
+
+    jest.advanceTimersByTime(BOUND_MS + 1);
+    resolveInfo({});
+    await pass;
+
+    const { stale, fresh } = service['freshness'].labelsByFreshness(Date.now());
+
+    expect([...fresh]).toEqual([]);
+    expect([...stale]).toEqual(['10.0.0.9:6379']);
+  });
 });
