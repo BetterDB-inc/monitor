@@ -15,6 +15,7 @@ interface CredentialsFormProps {
   lockedEmail?: string;
   description?: string;
   notice?: string | null;
+  hint?: ReactNode;
   footer?: ReactNode;
   onSubmit: (values: CredentialsFormValues) => Promise<void>;
 }
@@ -26,6 +27,7 @@ export function CredentialsForm({
   lockedEmail,
   description,
   notice,
+  hint,
   footer,
   onSubmit,
 }: CredentialsFormProps): ReactElement {
@@ -49,8 +51,15 @@ export function CredentialsForm({
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background p-8">
+    <div className="min-h-screen flex flex-col items-center justify-center gap-6 bg-background p-8">
       <form onSubmit={handleSubmit} className="w-full max-w-sm space-y-4">
+        <div className="flex justify-center">
+          <img
+            src="/symbol-white.svg"
+            alt="BetterDB Monitor"
+            className="h-12 w-12 rounded-lg bg-primary p-1.5"
+          />
+        </div>
         <h1 className="text-2xl font-semibold">{title}</h1>
         {description !== undefined && (
           <p className="text-sm text-muted-foreground">{description}</p>
@@ -97,6 +106,11 @@ export function CredentialsForm({
         </Button>
         {footer}
       </form>
+      {hint !== undefined && (
+        <p className="whitespace-nowrap text-center text-sm text-muted-foreground">
+          {hint}
+        </p>
+      )}
     </div>
   );
 }

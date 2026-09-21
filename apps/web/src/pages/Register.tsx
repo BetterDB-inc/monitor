@@ -17,6 +17,16 @@ export function Register(): ReactElement {
       title="Create the owner account"
       submitLabel="Create account"
       askName
+      hint={
+        <>
+          Not running a team?
+          <br />
+          Set{' '}
+          <code className="font-mono text-foreground">WORKSPACE_DISABLED=true</code>{' '}
+          to skip sign-in entirely and open the dashboard to anyone with this
+          URL.
+        </>
+      }
       notice={brokerErrorMessage(params.get('error'))}
       footer={<BrokerButtons />}
       onSubmit={async ({ email, password, name }) => {
