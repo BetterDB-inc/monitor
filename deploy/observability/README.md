@@ -17,7 +17,10 @@ and Grafana running side by side against a seeded Valkey instance.
   analysis: top slow-query patterns, large requests/replies, slowest
   commands.
 - `dashboards/betterdb-cluster-slots.json` — cluster health and per-slot key
-  distribution, hottest slots, and read/write rates.
+  distribution, and the hottest slots by key count. Per-slot CPU and network
+  breakdowns are not here yet: Valkey reports them through
+  `CLUSTER SLOT-STATS` only when `cluster-slot-stats-enabled yes` is set, and
+  the monitor does not read those fields today.
 - `dashboards/betterdb-anomalies.json` — anomaly counts by severity and
   metric, correlated groups by pattern, detector baselines, and forecasted
   time to limit.
