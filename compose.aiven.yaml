@@ -11,13 +11,12 @@
 #     Runtime's Compose scanner provisions it as a MANAGED Aiven PostgreSQL
 #     (no passwords live in this file — Runtime injects them).
 #
-# BRING YOUR OWN database to monitor. BetterDB Monitor is a monitoring tool: it
-# points at the Valkey/Redis you ALREADY run, so this file does NOT provision a
-# throwaway Valkey. Connect the database you want to monitor either by:
-#   a) adding it in the app UI after deploy (Settings > Connections) — supports
-#      a per-connection TLS toggle; or
-#   b) uncommenting the DB_* block below and pointing it at your existing Aiven
-#      Valkey/Redis service (set DB_TLS=true — Aiven managed services need TLS).
+# BRING YOUR OWN database to monitor. BetterDB Monitor points at the
+# Valkey/Redis you ALREADY run, so this file does NOT provision a throwaway
+# Valkey. Everything that CAN be pre-set to a correct value is (DB_TYPE,
+# DB_USERNAME, DB_TLS, WORKSPACE_DISABLED). The only deployment-specific inputs
+# are your Valkey's endpoint + password — set DB_HOST/DB_PORT and DB_PASSWORD
+# (as a SECRET) in Runtime, or add the connection in the app UI after deploy.
 #
 # Suggested Runtime sizing:
 #   - App: 1 replica, ~1 GiB RAM, public HTTP port 3001.
@@ -42,27 +41,26 @@ services:
       NODE_ENV: production
       PORT: "3001"
 
-      # --- Database to MONITOR (bring your own) ---
-      # Leave commented to add the connection in the app UI after deploy, or
-      # uncomment and point at your existing Aiven Valkey/Redis service.
-      # DB_TYPE: valkey
-      # DB_HOST: your-valkey.aivencloud.com
-      # DB_PORT: "12345"
-      # DB_USERNAME: default
-      # DB_PASSWORD: CHANGE_ME     # set as a secret in Runtime
-      # DB_TLS: "true"            # Aiven managed Valkey/Redis requires TLS
+      # Single-tenant template: no login wall, no roles/team page, and no
+      # AUTH_SECRET needed. Set to "false" if you want multi-user auth.
+      WORKSPACE_DISABLED: "true"
 
-      # --- Audit storage (the managed Aiven PostgreSQL below) ---
+      # --- Database to MONITOR (your existing Aiven Valkey/Redis) ---
+      # These are pre-set to the correct values for a managed Aiven Valkey:
+      DB_TYPE: valkey
+      DB_USERNAME: default
+      DB_TLS: "true"             # Aiven managed Valkey/Redis requires TLS
+      # Deployment-specific — set on YOUR Aiven Valkey's Overview page. Enter
+      # DB_PASSWORD as a SECRET in Runtime; never commit a real password here.
+      # DB_HOST: your-valkey-xxxxx.aivencloud.com
+      # DB_PORT: "12345"
+      # DB_PASSWORD: <set as a Runtime secret>
+
+      # --- Audit storage (managed Aiven PostgreSQL) ---
       STORAGE_TYPE: postgres
       # Aiven managed PostgreSQL requires SSL — keep sslmode=require.
       STORAGE_URL: postgresql://USER:PASSWORD@betterdb-postgres:5432/defaultdb?sslmode=require
 
-      # --- App auth / misc ---
-      # AUTH_SECRET must be >= 32 chars. DO NOT hardcode it here — set it as a
-      # secret in Runtime (generate one with: openssl rand -base64 48). If left
-      # unset the app generates an internal secret, but it won't survive a
-      # redeploy unless /app/data is persisted, so an explicit secret is better.
-      AUTH_PUBLIC_URL: https://your-app.aiven.run   # set to the Runtime app URL
       AI_ENABLED: "false"
 
   # Managed service: Runtime auto-detects this image and provisions the real
