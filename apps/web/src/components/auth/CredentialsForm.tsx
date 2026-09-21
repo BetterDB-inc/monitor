@@ -107,7 +107,7 @@ export function CredentialsForm({
         {footer}
       </form>
       {hint !== undefined && (
-        <p className="whitespace-nowrap text-center text-sm text-muted-foreground">
+        <p className="text-center text-sm text-muted-foreground">
           {hint}
         </p>
       )}
