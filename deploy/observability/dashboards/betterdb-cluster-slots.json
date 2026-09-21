@@ -484,7 +484,9 @@
               "Time": true,
               "__name__": true,
               "instance": true,
-              "job": true
+              "job": true,
+              "exported_job": true,
+              "service_name": true
             },
             "includeByName": {},
             "indexByName": {},

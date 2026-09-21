@@ -18,9 +18,9 @@ and Grafana running side by side against a seeded Valkey instance.
   commands.
 - `dashboards/betterdb-cluster-slots.json` — cluster health and per-slot key
   distribution, hottest slots, and read/write rates.
-- `dashboards/betterdb-anomalies.json` — anomaly and correlated-group counts
-  by severity/metric/pattern, detector baselines, and forecasted time to
-  limit.
+- `dashboards/betterdb-anomalies.json` — anomaly counts by severity and
+  metric, correlated groups by pattern, detector baselines, and forecasted
+  time to limit.
 - `demo/docker-compose.yml` — Valkey, BetterDB Monitor, the Collector,
   Prometheus, and Grafana wired together.
 - `demo/prometheus.yml` — scrapes the monitor directly (job `betterdb`) and

@@ -265,41 +265,6 @@
       }
     },
     {
-      "id": 6,
-      "type": "barchart",
-      "title": "Correlated groups by severity",
-      "description": "How the last hour's correlated anomaly groups split across severity levels.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${ds}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${ds}"
-          },
-          "expr": "sum by (severity) (betterdb_correlated_groups_by_severity{job=~\"$job\",connection=~\"$connection\"})",
-          "legendFormat": "{{severity}}",
-          "instant": true,
-          "range": false
-        }
-      ],
-      "gridPos": {
-        "h": 8,
-        "w": 9,
-        "x": 6,
-        "y": 16
-      }
-    },
-    {
       "id": 7,
       "type": "barchart",
       "title": "Correlated groups by pattern",
@@ -329,8 +294,8 @@
       ],
       "gridPos": {
         "h": 8,
-        "w": 9,
-        "x": 15,
+        "w": 18,
+        "x": 6,
         "y": 16
       }
     },
@@ -371,7 +336,9 @@
               "Time": true,
               "__name__": true,
               "instance": true,
-              "job": true
+              "job": true,
+              "exported_job": true,
+              "service_name": true
             },
             "includeByName": {},
             "indexByName": {},
@@ -481,7 +448,9 @@
               "Time": true,
               "__name__": true,
               "instance": true,
-              "job": true
+              "job": true,
+              "exported_job": true,
+              "service_name": true
             },
             "includeByName": {},
             "indexByName": {},
