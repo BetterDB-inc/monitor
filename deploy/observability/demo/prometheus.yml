@@ -8,12 +8,10 @@ scrape_configs:
     metrics_path: '/api/prometheus/metrics'
     static_configs:
       - targets: ['betterdb:3001']
-    # Uncomment when the monitor runs with PROMETHEUS_METRICS_TOKEN:
-    # authorization:
-    #   type: Bearer
-    #   credentials: '<PROMETHEUS_METRICS_TOKEN>'
 
   # The same series after a round trip through the OTLP mirror and Collector.
+  # Both jobs carry identical series; the dashboards' "Scrape job" variable
+  # selects which path to read.
   - job_name: 'otel-collector'
     static_configs:
       - targets: ['otel-collector:8889']

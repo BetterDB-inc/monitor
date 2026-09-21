@@ -93,9 +93,12 @@ Monitor pushes its OTLP mirror on `OTEL_METRICS_EXPORT_INTERVAL_MS` (default
 `15000`ms). Point Prometheus at the Collector's exporter on `:8889` rather
 than at Monitor directly if you want the Collector in the path.
 
-The Prometheus exporter's `resource_to_telemetry_conversion` setting is what
-keeps the `connection` resource attribute attached as a `connection` label
-on every metric that passes through the Collector. That's why the
+`connection` is a datapoint attribute, not a resource attribute, so the
+Prometheus exporter turns it into a `connection` label on every metric
+regardless of configuration. The exporter's
+`resource_to_telemetry_conversion` setting covers the resource attributes
+instead — Monitor sets exactly one, `service.name`, which the setting
+promotes to a `service_name` label. That is why the
 **[dashboard pack](prometheus-integration.md#grafana-dashboard-pack)**,
 which is templated on `connection`, works unmodified whether Grafana points
 at Monitor's own `/api/prometheus/metrics` or at the Collector's `:8889`.

@@ -12,15 +12,56 @@
   "templating": {
     "list": [
       {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data source",
+        "multi": false,
+        "name": "ds",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "betterdb",
+          "value": "betterdb"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${ds}"
+        },
+        "definition": "label_values(betterdb_memory_used_bytes, job)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Scrape job",
+        "multi": false,
+        "name": "job",
+        "options": [],
+        "query": {
+          "query": "label_values(betterdb_memory_used_bytes, job)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
         "name": "connection",
         "label": "Connection",
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "betterdb-prometheus"
+          "uid": "${ds}"
         },
         "query": {
-          "query": "label_values(betterdb_memory_used_bytes, connection)",
+          "query": "label_values(betterdb_memory_used_bytes{job=~\"$job\"}, connection)",
           "refId": "connection"
         },
         "includeAll": true,
@@ -41,7 +82,7 @@
       "description": "The ten most frequent slow-query patterns right now, so an operator can see at a glance which command shape to optimize first.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -54,9 +95,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "topk(10, betterdb_slowlog_pattern_count{connection=~\"$connection\"})",
+          "expr": "topk(10, betterdb_slowlog_pattern_count{job=~\"$job\",connection=~\"$connection\"})",
           "legendFormat": "{{pattern}}",
           "instant": true,
           "range": false
@@ -76,7 +117,7 @@
       "description": "How the top slow-query patterns trend over time, revealing whether a pattern is a one-off spike or a sustained regression.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -92,9 +133,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "topk(10, betterdb_slowlog_pattern_count{connection=~\"$connection\"})",
+          "expr": "topk(10, betterdb_slowlog_pattern_count{job=~\"$job\",connection=~\"$connection\"})",
           "legendFormat": "{{connection}} {{pattern}}"
         }
       ],
@@ -112,7 +153,7 @@
       "description": "Average execution time for the slowest patterns, useful for judging whether a pattern is slow because of volume or because each call is inherently expensive.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -128,9 +169,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "topk(10, betterdb_slowlog_pattern_avg_duration_us{connection=~\"$connection\"})",
+          "expr": "topk(10, betterdb_slowlog_pattern_avg_duration_us{job=~\"$job\",connection=~\"$connection\"})",
           "legendFormat": "{{pattern}}"
         }
       ],
@@ -148,7 +189,7 @@
       "description": "Proportion of the slowlog occupied by each pattern, showing where remediation effort would cut slow-query volume the most.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -161,9 +202,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "betterdb_slowlog_pattern_percentage{connection=~\"$connection\"}",
+          "expr": "betterdb_slowlog_pattern_percentage{job=~\"$job\",connection=~\"$connection\"}",
           "legendFormat": "{{pattern}}",
           "instant": true,
           "range": false
@@ -183,7 +224,7 @@
       "description": "Current entry count in the slowlog ring buffer. A value pinned at the configured maximum means older entries are being evicted before anyone reviews them.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -199,9 +240,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "betterdb_slowlog_length{connection=~\"$connection\"}",
+          "expr": "betterdb_slowlog_length{job=~\"$job\",connection=~\"$connection\"}",
           "legendFormat": "{{connection}}"
         }
       ],
@@ -219,7 +260,7 @@
       "description": "Command patterns generating oversized requests, which helps find clients sending payloads large enough to risk latency spikes.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -235,9 +276,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "topk(10, betterdb_commandlog_large_request_by_pattern{connection=~\"$connection\"})",
+          "expr": "topk(10, betterdb_commandlog_large_request_by_pattern{job=~\"$job\",connection=~\"$connection\"})",
           "legendFormat": "{{pattern}}"
         }
       ],
@@ -255,7 +296,7 @@
       "description": "Command patterns generating oversized replies, which helps find queries returning more data than clients actually need.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -271,9 +312,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "topk(10, betterdb_commandlog_large_reply_by_pattern{connection=~\"$connection\"})",
+          "expr": "topk(10, betterdb_commandlog_large_reply_by_pattern{job=~\"$job\",connection=~\"$connection\"})",
           "legendFormat": "{{pattern}}"
         }
       ],
@@ -291,7 +332,7 @@
       "description": "The fifteen commands with the highest average latency, ranked so an operator can decide which command to profile or rate-limit first.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -304,12 +345,29 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "topk(15, betterdb_commandstats_latency_us{connection=~\"$connection\"})",
+          "expr": "topk(15, betterdb_commandstats_latency_us{job=~\"$job\",connection=~\"$connection\"})",
+          "format": "table",
           "legendFormat": "{{command}}",
           "instant": true,
           "range": false
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "includeByName": {},
+            "indexByName": {},
+            "renameByName": {}
+          }
         }
       ],
       "gridPos": {

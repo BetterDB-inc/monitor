@@ -23,20 +23,33 @@ and Grafana running side by side against a seeded Valkey instance.
   limit.
 - `demo/docker-compose.yml` — Valkey, BetterDB Monitor, the Collector,
   Prometheus, and Grafana wired together.
-- `demo/prometheus.yml` — scrapes the monitor directly and the Collector's
-  Prometheus exporter, so both paths land in the same Prometheus.
+- `demo/prometheus.yml` — scrapes the monitor directly (job `betterdb`) and
+  the Collector's Prometheus exporter (job `otel-collector`), so both paths
+  land in the same Prometheus.
 - `demo/grafana/provisioning/` — auto-provisions the Prometheus datasource
   and the dashboard pack into Grafana.
 - `demo/seed/seed.sh` — generates keyspace traffic, cache hits/misses, a
-  slow command, and an oversized reply so the dashboards have data.
+  slow command, and an oversized reply.
+
+## Dashboard variables
+
+Every dashboard in the pack carries three variables:
+
+- **Data source** (`ds`) — any Prometheus datasource in the Grafana it runs
+  in. It defaults to the default datasource, which the demo provisions.
+- **Scrape job** (`job`) — which scrape job to read. The same series arrive
+  twice when Prometheus scrapes both the monitor and the Collector, so the
+  panels always read exactly one of them. Pick `betterdb` for the direct
+  path or `otel-collector` for the OTLP round trip.
+- **Connection** (`connection`) — the monitored instances to chart, scoped
+  to the selected scrape job.
 
 ## Importing a dashboard into an existing Grafana
 
 In Grafana: **Dashboards → New → Import**, upload one of the JSON files from
-`dashboards/`, and pick a Prometheus datasource on the import screen. The
-pack's panels reference datasource uid `betterdb-prometheus`; the import
-screen lets you remap that to whichever Prometheus datasource you already
-have configured.
+`dashboards/`, and open it. The panels read the **Data source** variable
+rather than a fixed datasource uid, so pick your Prometheus from that
+dropdown at the top of the dashboard — there is nothing to remap.
 
 ## Pointing an existing Collector at the monitor
 
@@ -60,11 +73,27 @@ docker compose exec -T valkey sh < seed/seed.sh
 ```
 
 Then open `http://localhost:3000`. Grafana is provisioned with anonymous
-admin access and the BetterDB dashboard pack.
+admin access and the BetterDB dashboard pack. The compose file is a demo
+only — it hardcodes a password and leaves Grafana open — not a deployment
+template.
 
 The seed script talks to Valkey over the Docker network, so it has to run
 inside the `valkey` container — the compose file doesn't publish a Valkey
 port to the host, and the host doesn't need `valkey-cli` installed.
+
+### What the demo actually shows
+
+- **Instance Vitals** — populated as soon as the monitor polls; the seed
+  script drives memory, ops/sec, hit rate, and client counts.
+- **Query Patterns** — populated by the seed script's slow command and
+  oversized request/reply.
+- **Anomalies** — mostly empty on a fresh run. The detectors need a warm
+  rolling baseline before they emit anything, which takes far longer than
+  one seed pass; "Detector buffers" shows the warm-up state in the
+  meantime.
+- **Cluster Slots** — empty. The demo runs a standalone Valkey, which has
+  no cluster bus and no `CLUSTER SLOT-STATS`; that dashboard needs a
+  cluster-mode deployment.
 
 ## Ports
 

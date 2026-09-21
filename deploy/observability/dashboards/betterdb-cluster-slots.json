@@ -12,15 +12,56 @@
   "templating": {
     "list": [
       {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data source",
+        "multi": false,
+        "name": "ds",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "betterdb",
+          "value": "betterdb"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${ds}"
+        },
+        "definition": "label_values(betterdb_memory_used_bytes, job)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Scrape job",
+        "multi": false,
+        "name": "job",
+        "options": [],
+        "query": {
+          "query": "label_values(betterdb_memory_used_bytes, job)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
         "name": "connection",
         "label": "Connection",
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "betterdb-prometheus"
+          "uid": "${ds}"
         },
         "query": {
-          "query": "label_values(betterdb_memory_used_bytes, connection)",
+          "query": "label_values(betterdb_memory_used_bytes{job=~\"$job\"}, connection)",
           "refId": "connection"
         },
         "includeAll": true,
@@ -41,7 +82,7 @@
       "description": "Whether the connection is running in cluster mode or standalone.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -50,8 +91,12 @@
             {
               "type": "value",
               "options": {
-                "0": { "text": "Standalone" },
-                "1": { "text": "Cluster" }
+                "0": {
+                  "text": "Standalone"
+                },
+                "1": {
+                  "text": "Cluster"
+                }
               }
             }
           ]
@@ -63,9 +108,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "betterdb_cluster_enabled{connection=~\"$connection\"}",
+          "expr": "betterdb_cluster_enabled{job=~\"$job\",connection=~\"$connection\"}",
           "legendFormat": "{{connection}}"
         }
       ],
@@ -83,7 +128,7 @@
       "description": "Number of hash slots assigned to the cluster.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -96,9 +141,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "betterdb_cluster_slots_assigned{connection=~\"$connection\"}",
+          "expr": "betterdb_cluster_slots_assigned{job=~\"$job\",connection=~\"$connection\"}",
           "legendFormat": "{{connection}}"
         }
       ],
@@ -116,7 +161,7 @@
       "description": "Number of hash slots currently in the OK state.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -129,9 +174,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "betterdb_cluster_slots_ok{connection=~\"$connection\"}",
+          "expr": "betterdb_cluster_slots_ok{job=~\"$job\",connection=~\"$connection\"}",
           "legendFormat": "{{connection}}"
         }
       ],
@@ -149,7 +194,7 @@
       "description": "Slots currently in the FAIL or PFAIL state. Any non-zero value means part of the keyspace is unreachable.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -157,8 +202,14 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
             ]
           }
         },
@@ -169,9 +220,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "betterdb_cluster_slots_fail{connection=~\"$connection\"} + betterdb_cluster_slots_pfail{connection=~\"$connection\"}",
+          "expr": "betterdb_cluster_slots_fail{job=~\"$job\",connection=~\"$connection\"} + betterdb_cluster_slots_pfail{job=~\"$job\",connection=~\"$connection\"}",
           "legendFormat": "{{connection}}"
         }
       ],
@@ -189,7 +240,7 @@
       "description": "Number of nodes known to the cluster bus.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -202,9 +253,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "betterdb_cluster_known_nodes{connection=~\"$connection\"}",
+          "expr": "betterdb_cluster_known_nodes{job=~\"$job\",connection=~\"$connection\"}",
           "legendFormat": "{{connection}}"
         }
       ],
@@ -222,7 +273,7 @@
       "description": "Number of master nodes serving the keyspace.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -235,9 +286,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "betterdb_cluster_size{connection=~\"$connection\"}",
+          "expr": "betterdb_cluster_size{job=~\"$job\",connection=~\"$connection\"}",
           "legendFormat": "{{connection}}"
         }
       ],
@@ -255,7 +306,7 @@
       "description": "Distribution of key counts over hash slots per time bucket, which makes slot skew visible at a glance.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "options": {
         "calculate": true,
@@ -277,9 +328,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "betterdb_cluster_slot_keys{connection=~\"$connection\"}"
+          "expr": "betterdb_cluster_slot_keys{job=~\"$job\",connection=~\"$connection\"}"
         }
       ],
       "gridPos": {
@@ -296,7 +347,7 @@
       "description": "The twenty slots holding the most keys right now, answering which slot the heatmap's skew belongs to.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -309,9 +360,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "topk(20, betterdb_cluster_slot_keys{connection=~\"$connection\"})",
+          "expr": "topk(20, betterdb_cluster_slot_keys{job=~\"$job\",connection=~\"$connection\"})",
           "legendFormat": "slot {{slot}}",
           "instant": true,
           "range": false
@@ -331,7 +382,7 @@
       "description": "Read throughput for the ten busiest slots, useful for spotting a hot key range under read pressure.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -347,9 +398,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "topk(10, rate(betterdb_cluster_slot_reads_total{connection=~\"$connection\"}[5m]))",
+          "expr": "topk(10, rate(betterdb_cluster_slot_reads_total{job=~\"$job\",connection=~\"$connection\"}[5m]))",
           "legendFormat": "slot {{slot}}"
         }
       ],
@@ -367,7 +418,7 @@
       "description": "Write throughput for the ten busiest slots, useful for spotting a hot key range under write pressure.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -383,9 +434,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "topk(10, rate(betterdb_cluster_slot_writes_total{connection=~\"$connection\"}[5m]))",
+          "expr": "topk(10, rate(betterdb_cluster_slot_writes_total{job=~\"$job\",connection=~\"$connection\"}[5m]))",
           "legendFormat": "slot {{slot}}"
         }
       ],
@@ -403,7 +454,7 @@
       "description": "The twenty slots with the most keys carrying a TTL, useful for judging expiration pressure per slot.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -416,12 +467,29 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "topk(20, betterdb_cluster_slot_expires{connection=~\"$connection\"})",
+          "expr": "topk(20, betterdb_cluster_slot_expires{job=~\"$job\",connection=~\"$connection\"})",
+          "format": "table",
           "legendFormat": "slot {{slot}}",
           "instant": true,
           "range": false
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "includeByName": {},
+            "indexByName": {},
+            "renameByName": {}
+          }
         }
       ],
       "gridPos": {

@@ -53,7 +53,9 @@ A ready-made set of dashboards ships in `deploy/observability/dashboards/`:
 | **BetterDB · Anomalies**       | What's anomalous right now, grouped by severity and correlated pattern, and how close is a metric to its forecast limit? |
 
 Each dashboard is templated on a `connection` variable, so one Grafana can
-switch between every BetterDB instance it scrapes.
+switch between every BetterDB instance it scrapes, plus a `ds` datasource
+variable and a `job` variable that picks which scrape job to read when the
+same series arrive over more than one path.
 
 See **[the observability pack README](../deploy/observability/README.md)**
 for how to import a dashboard into an existing Grafana, how to point an

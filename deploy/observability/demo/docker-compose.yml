@@ -1,6 +1,11 @@
 # Side-by-side demo: Valkey under load, BetterDB Monitor scraping it, the OTel
 # Collector taking the OTLP mirror, Prometheus scraping both, Grafana showing
 # the shipped dashboard pack. Run with: docker compose up -d
+#
+# DEMO ONLY — not a deployment template. It hardcodes a Valkey password in
+# plain text, serves Grafana with anonymous admin access and embedding
+# enabled, and publishes every port to the host without TLS. Do not copy it
+# into a shared or production environment.
 services:
   valkey:
     image: valkey/valkey:8-alpine

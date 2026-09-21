@@ -12,15 +12,56 @@
   "templating": {
     "list": [
       {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data source",
+        "multi": false,
+        "name": "ds",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "betterdb",
+          "value": "betterdb"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${ds}"
+        },
+        "definition": "label_values(betterdb_memory_used_bytes, job)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Scrape job",
+        "multi": false,
+        "name": "job",
+        "options": [],
+        "query": {
+          "query": "label_values(betterdb_memory_used_bytes, job)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
         "name": "connection",
         "label": "Connection",
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "betterdb-prometheus"
+          "uid": "${ds}"
         },
         "query": {
-          "query": "label_values(betterdb_memory_used_bytes, connection)",
+          "query": "label_values(betterdb_memory_used_bytes{job=~\"$job\"}, connection)",
           "refId": "connection"
         },
         "includeAll": true,
@@ -41,7 +82,7 @@
       "description": "Unresolved anomalies right now, across all severities.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -49,9 +90,18 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 1 },
-              { "color": "red", "value": 5 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
             ]
           }
         },
@@ -62,9 +112,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "betterdb_anomaly_events_current{connection=~\"$connection\"}",
+          "expr": "sum by (connection) (betterdb_anomaly_events_current{job=~\"$job\",connection=~\"$connection\"})",
           "legendFormat": "{{connection}}"
         }
       ],
@@ -82,7 +132,7 @@
       "description": "Rate of newly detected anomaly events, revealing whether detections are a one-off blip or a sustained wave.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -98,9 +148,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "rate(betterdb_anomaly_events_total{connection=~\"$connection\"}[15m])",
+          "expr": "rate(betterdb_anomaly_events_total{job=~\"$job\",connection=~\"$connection\"}[15m])",
           "legendFormat": "{{connection}}"
         }
       ],
@@ -118,7 +168,7 @@
       "description": "How the last hour's anomalies split across severity levels.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -131,9 +181,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "sum by (severity) (betterdb_anomaly_by_severity{connection=~\"$connection\"})",
+          "expr": "sum by (severity) (betterdb_anomaly_by_severity{job=~\"$job\",connection=~\"$connection\"})",
           "legendFormat": "{{severity}}",
           "instant": true,
           "range": false
@@ -153,7 +203,7 @@
       "description": "How the last hour's anomalies split across the metric that triggered them.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -166,9 +216,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "sum by (metric_type) (betterdb_anomaly_by_metric{connection=~\"$connection\"})",
+          "expr": "sum by (metric_type) (betterdb_anomaly_by_metric{job=~\"$job\",connection=~\"$connection\"})",
           "legendFormat": "{{metric_type}}",
           "instant": true,
           "range": false
@@ -185,10 +235,10 @@
       "id": 5,
       "type": "stat",
       "title": "Correlated groups",
-      "description": "Total correlated anomaly groups formed, where multiple related anomalies are grouped into one incident.",
+      "description": "Correlated anomaly groups formed in the last hour, where multiple related anomalies are grouped into one incident.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -201,9 +251,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "betterdb_correlated_groups_total{connection=~\"$connection\"}",
+          "expr": "sum by (connection) (betterdb_correlated_groups_by_severity{job=~\"$job\",connection=~\"$connection\"})",
           "legendFormat": "{{connection}}"
         }
       ],
@@ -221,7 +271,7 @@
       "description": "How the last hour's correlated anomaly groups split across severity levels.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -234,9 +284,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "sum by (severity) (betterdb_correlated_groups_by_severity{connection=~\"$connection\"})",
+          "expr": "sum by (severity) (betterdb_correlated_groups_by_severity{job=~\"$job\",connection=~\"$connection\"})",
           "legendFormat": "{{severity}}",
           "instant": true,
           "range": false
@@ -256,7 +306,7 @@
       "description": "How the last hour's correlated anomaly groups split across detected correlation pattern.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -269,9 +319,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "sum by (pattern) (betterdb_correlated_groups_by_pattern{connection=~\"$connection\"})",
+          "expr": "sum by (pattern) (betterdb_correlated_groups_by_pattern{job=~\"$job\",connection=~\"$connection\"})",
           "legendFormat": "{{pattern}}",
           "instant": true,
           "range": false
@@ -291,7 +341,7 @@
       "description": "Whether each metric's anomaly-detection buffer has warmed up enough to detect against.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -304,12 +354,29 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "betterdb_anomaly_buffer_ready{connection=~\"$connection\"}",
+          "expr": "betterdb_anomaly_buffer_ready{job=~\"$job\",connection=~\"$connection\"}",
+          "format": "table",
           "legendFormat": "{{metric_type}}",
           "instant": true,
           "range": false
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "includeByName": {},
+            "indexByName": {},
+            "renameByName": {}
+          }
         }
       ],
       "gridPos": {
@@ -326,7 +393,7 @@
       "description": "Rolling mean and standard deviation each detector uses as its baseline, useful for sanity-checking a detector's sensitivity.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -342,18 +409,18 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "betterdb_anomaly_buffer_mean{connection=~\"$connection\"}",
+          "expr": "betterdb_anomaly_buffer_mean{job=~\"$job\",connection=~\"$connection\"}",
           "legendFormat": "{{metric_type}} mean"
         },
         {
           "refId": "B",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "betterdb_anomaly_buffer_stddev{connection=~\"$connection\"}",
+          "expr": "betterdb_anomaly_buffer_stddev{job=~\"$job\",connection=~\"$connection\"}",
           "legendFormat": "{{metric_type}} stddev"
         }
       ],
@@ -371,7 +438,7 @@
       "description": "Projected time until a forecasted metric reaches its configured ceiling. Rows below the red threshold need attention soon.",
       "datasource": {
         "type": "prometheus",
-        "uid": "betterdb-prometheus"
+        "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
@@ -379,8 +446,14 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 3600 }
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 3600
+              }
             ]
           }
         },
@@ -391,12 +464,29 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "betterdb-prometheus"
+            "uid": "${ds}"
           },
-          "expr": "betterdb_metric_forecast_time_to_limit_seconds{connection=~\"$connection\"}",
+          "expr": "betterdb_metric_forecast_time_to_limit_seconds{job=~\"$job\",connection=~\"$connection\"}",
+          "format": "table",
           "legendFormat": "{{metric_kind}}",
           "instant": true,
           "range": false
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "includeByName": {},
+            "indexByName": {},
+            "renameByName": {}
+          }
         }
       ],
       "gridPos": {

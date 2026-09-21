@@ -120,6 +120,7 @@ it('extracts metric names from a PromQL expression', () => {
 interface DashboardTarget {
   refId: string;
   expr: string;
+  format?: string;
   datasource?: { type: string; uid: string };
 }
 
@@ -131,11 +132,18 @@ interface DashboardPanel {
   panels?: DashboardPanel[];
 }
 
+interface DashboardVariable {
+  name: string;
+  type: string;
+  label?: string;
+  query?: string | { query: string };
+}
+
 interface Dashboard {
   uid: string;
   title: string;
   schemaVersion: number;
-  templating: { list: Array<{ name: string; type: string; query?: { query: string } }> };
+  templating: { list: DashboardVariable[] };
   panels: DashboardPanel[];
 }
 
@@ -163,20 +171,47 @@ describe('Grafana dashboard pack', () => {
     expect(dashboard.schemaVersion).toBeGreaterThanOrEqual(39);
   });
 
+  it.each(files)('%s exposes a datasource variable first', (file) => {
+    const [variable] = loadDashboard(file).templating.list;
+
+    expect(variable.name).toBe('ds');
+    expect(variable.type).toBe('datasource');
+    expect(variable.query).toBe('prometheus');
+  });
+
+  it.each(files)('%s exposes a scrape job variable', (file) => {
+    const variable = loadDashboard(file).templating.list.find((item) => item.name === 'job');
+
+    expect(variable?.type).toBe('query');
+    expect(variable?.query).toEqual({
+      query: 'label_values(betterdb_memory_used_bytes, job)',
+      refId: 'StandardVariableQuery',
+    });
+  });
+
   it.each(files)('%s exposes a connection variable', (file) => {
     const variable = loadDashboard(file).templating.list.find((item) => item.name === 'connection');
 
     expect(variable?.type).toBe('query');
-    expect(variable?.query?.query).toBe('label_values(betterdb_memory_used_bytes, connection)');
+    expect(variable?.query).toEqual({
+      query: 'label_values(betterdb_memory_used_bytes{job=~"$job"}, connection)',
+      refId: 'connection',
+    });
   });
 
-  it.each(files)('%s points every target at the provisioned datasource', (file) => {
+  it.each(files)('%s points every target at the datasource variable', (file) => {
     const targets = allPanels(loadDashboard(file)).flatMap((panel) => panel.targets ?? []);
 
     expect(targets.length).toBeGreaterThan(0);
     for (const target of targets) {
-      expect(target.datasource).toEqual({ type: 'prometheus', uid: 'betterdb-prometheus' });
+      expect(target.datasource).toEqual({ type: 'prometheus', uid: '${ds}' });
     }
+  });
+
+  it.each(files)('%s leaves no literal datasource uid behind', (file) => {
+    expect(readFileSync(path.join(DASHBOARD_DIR, file), 'utf8')).not.toContain(
+      'betterdb-prometheus',
+    );
   });
 
   it.each(files)('%s only queries metrics the service registers', (file) => {
@@ -197,6 +232,38 @@ describe('Grafana dashboard pack', () => {
 
     for (const target of targets) {
       expect(target.expr).toContain('connection=~"$connection"');
+    }
+  });
+
+  it.each(files)('%s filters every query by the scrape job variable', (file) => {
+    const targets = allPanels(loadDashboard(file)).flatMap((panel) => panel.targets ?? []);
+
+    for (const target of targets) {
+      expect(target.expr).toContain('job=~"$job"');
+    }
+  });
+
+  it.each(files)('%s pins every selector to both variables', (file) => {
+    const targets = allPanels(loadDashboard(file)).flatMap((panel) => panel.targets ?? []);
+
+    for (const target of targets) {
+      const selectors = [...target.expr.matchAll(/betterdb_[a-z0-9_]+\{([^}]*)\}/g)];
+
+      expect(selectors.length).toBeGreaterThan(0);
+      for (const [, selector] of selectors) {
+        expect(selector).toBe('job=~"$job",connection=~"$connection"');
+      }
+    }
+  });
+
+  it.each(files)('%s asks for table frames on every table panel', (file) => {
+    const tables = allPanels(loadDashboard(file)).filter((panel) => panel.type === 'table');
+
+    for (const panel of tables) {
+      expect(panel.targets?.length).toBeGreaterThan(0);
+      for (const target of panel.targets ?? []) {
+        expect(target.format).toBe('table');
+      }
     }
   });
 
@@ -255,6 +322,7 @@ describe('demo stack', () => {
 
     expect(datasource.datasources[0].uid).toBe('betterdb-prometheus');
     expect(datasource.datasources[0].url).toBe('http://prometheus:9090');
+    expect(datasource.datasources[0].isDefault).toBe(true);
   });
 
   it('scrapes both the monitor and the collector', () => {
