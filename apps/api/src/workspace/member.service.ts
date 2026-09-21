@@ -1,4 +1,4 @@
-import { ConflictException, Inject, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, Logger } from '@nestjs/common';
 import type { BrokerProvider, WorkspaceRole } from '@betterdb/shared';
 import { BETTER_AUTH, type BetterAuthInstance, countUsers } from '../auth/better-auth.factory';
 
@@ -6,6 +6,7 @@ export const OWNERSHIP_CHANGED_MESSAGE =
   'Ownership changed while this request was running. Reload and try again.';
 export const MEMBER_CHANGED_MESSAGE =
   'This member changed while the request was running. Reload and try again.';
+export const ONLY_ADMINS_CAN_BECOME_OWNER_MESSAGE = 'Only admins can become the owner';
 
 const LOCAL_CREDENTIAL_ISSUER = 'local:credential';
 const CREDENTIAL_PROVIDER = 'credential';
@@ -114,7 +115,18 @@ async function promoteOwner(adapter: UserWriter, toId: string): Promise<Workspac
   if (target === null) {
     throw new ConflictException(OWNERSHIP_CHANGED_MESSAGE);
   }
-  const promoted = await setOwnerIf(adapter, toId, false, { role: 'admin', isOwner: true });
+  if (toRole(target.role) !== 'admin') {
+    throw new BadRequestException(ONLY_ADMINS_CAN_BECOME_OWNER_MESSAGE);
+  }
+  const promoted = await adapter.updateMany({
+    model: 'user',
+    where: [
+      { field: 'id', value: toId },
+      { field: 'isOwner', value: false },
+      { field: 'role', value: 'admin' },
+    ],
+    update: { role: 'admin', isOwner: true },
+  });
   if (promoted !== 1) {
     throw new ConflictException(OWNERSHIP_CHANGED_MESSAGE);
   }

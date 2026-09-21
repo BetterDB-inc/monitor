@@ -21,7 +21,7 @@ import { MemoryAdapter } from '../storage/adapters/memory.adapter';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { InvitationService, PENDING_EXISTS_MESSAGE } from './invitation.service';
 import { InviteController } from './invite.controller';
-import { MEMBER_CHANGED_MESSAGE, MemberService, OWNERSHIP_CHANGED_MESSAGE } from './member.service';
+import { MEMBER_CHANGED_MESSAGE, MemberService, ONLY_ADMINS_CAN_BECOME_OWNER_MESSAGE, OWNERSHIP_CHANGED_MESSAGE } from './member.service';
 import { WorkspaceController } from './workspace.controller';
 
 const ORIGIN = 'http://localhost';
@@ -471,6 +471,38 @@ describe('WorkspaceController', () => {
       expect(telemetry.trackMemberRemoved).toHaveBeenCalledWith();
     });
 
+    it('rejects ownership transfer to members (reg)', async () => {
+      const regMember = await members.create({
+        email: 'reg-member@example.com',
+        name: 'Reg Member',
+        password: 'reg member battery',
+        role: 'member',
+      });
+      try {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/workspace/ownership/transfer',
+          headers: { cookie: ownerCookie, 'content-type': 'application/json', origin: ORIGIN },
+          payload: { userId: regMember.id },
+        });
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toEqual(
+          expect.objectContaining({ message: ONLY_ADMINS_CAN_BECOME_OWNER_MESSAGE }),
+        );
+        const me = await app.inject({
+          method: 'GET',
+          url: '/workspace/me',
+          headers: { cookie: ownerCookie },
+        });
+        expect(me.json()).toEqual(expect.objectContaining({ isOwner: true }));
+        expect(await members.findById(regMember.id)).toEqual(
+          expect.objectContaining({ role: 'member', isOwner: false }),
+        );
+      } finally {
+        await members.remove(regMember.id);
+      }
+    });
+
     it('lets only the owner change roles, transfer ownership and remove members', async () => {
       const admin = await members.create({
         email: 'admin@example.com',
@@ -578,13 +610,13 @@ describe('WorkspaceController', () => {
         email: 'race-one@example.com',
         name: 'Race One',
         password: 'race horse battery',
-        role: 'member',
+        role: 'admin',
       });
       const second = await members.create({
         email: 'race-two@example.com',
         name: 'Race Two',
         password: 'race horse battery',
-        role: 'member',
+        role: 'admin',
       });
       const targets = new Set([first.id, second.id]);
       const spy = holdLookups(members, targets, targets.size);
@@ -627,7 +659,7 @@ describe('WorkspaceController', () => {
         email: 'contested@example.com',
         name: 'Contested',
         password: 'race horse battery',
-        role: 'member',
+        role: 'admin',
       });
       const spy = holdLookups(members, new Set([contested.id]), 2);
       const [removal, transfer] = await Promise.all([

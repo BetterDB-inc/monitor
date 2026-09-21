@@ -42,6 +42,14 @@ const MEMBER = {
   isOwner: false,
   createdAt: '2026-09-02T00:00:00.000Z',
 };
+const ADMIN = {
+  id: 'u3',
+  email: 'admin@example.com',
+  name: 'Admin',
+  role: 'admin',
+  isOwner: false,
+  createdAt: '2026-09-03T00:00:00.000Z',
+};
 const INVITATION = {
   id: 'i1',
   email: 'pending@example.com',
@@ -155,14 +163,15 @@ describe('Members', () => {
 
   it('refreshes the current user after transferring ownership', async () => {
     authState.user = { userId: 'u1', email: OWNER.email, role: 'admin', isOwner: true };
+    api.getMembers.mockResolvedValue([OWNER, ADMIN]);
     api.transferOwnership.mockResolvedValue(undefined);
     vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
     render(<Members />);
-    const row = (await screen.findByText('member@example.com')).closest(
+    const row = (await screen.findByText('admin@example.com')).closest(
       'tr',
     ) as HTMLTableRowElement;
     fireEvent.click(within(row).getByRole('button', { name: 'Make owner' }));
-    await waitFor(() => expect(api.transferOwnership).toHaveBeenCalledWith('u2'));
+    await waitFor(() => expect(api.transferOwnership).toHaveBeenCalledWith('u3'));
     await waitFor(() => expect(refreshMock).toHaveBeenCalled());
     vi.unstubAllGlobals();
   });

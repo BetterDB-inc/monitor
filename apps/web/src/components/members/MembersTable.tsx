@@ -67,6 +67,7 @@ export function MembersTable({
               member.id !== currentUserId &&
               member.isOwner === false &&
               member.role !== 'owner';
+            const canTransferOwnership = manageable && member.role === 'admin';
             const nextRole = member.role === 'admin' ? 'member' : 'admin';
             return (
               <TableRow key={member.id}>
@@ -96,16 +97,18 @@ export function MembersTable({
                         >
                           {nextRole === 'admin' ? 'Make admin' : 'Make member'}
                         </Button>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() => {
-                            onTransfer(member);
-                          }}
-                        >
-                          Make owner
-                        </Button>
+                        {canTransferOwnership && (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              onTransfer(member);
+                            }}
+                          >
+                            Make owner
+                          </Button>
+                        )}
                         <Button
                           type="button"
                           variant="destructive"
