@@ -119,6 +119,6 @@
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.57.2",
-    "yaml": "2.6.1"
+    "yaml": ">=2.8.3 <3"
   }
 }
