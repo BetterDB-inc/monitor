@@ -206,3 +206,69 @@ describe('Grafana dashboard pack', () => {
     expect(onDisk.sort()).toEqual([...files].sort());
   });
 });
+
+describe('demo stack', () => {
+  const DEMO_DIR = path.join(REPO_ROOT, 'deploy/observability/demo');
+
+  interface ComposeFile {
+    services: Record<
+      string,
+      { image: string; volumes?: string[]; ports?: string[]; environment?: string[] }
+    >;
+  }
+
+  function loadCompose(): ComposeFile {
+    return parseYaml(
+      readFileSync(path.join(DEMO_DIR, 'docker-compose.yml'), 'utf8'),
+    ) as ComposeFile;
+  }
+
+  it('runs the five services the demo needs', () => {
+    expect(Object.keys(loadCompose().services).sort()).toEqual([
+      'betterdb',
+      'grafana',
+      'otel-collector',
+      'prometheus',
+      'valkey',
+    ]);
+  });
+
+  it('mounts the shipped collector config and dashboard pack', () => {
+    const services = loadCompose().services;
+
+    expect(services['otel-collector'].volumes).toContain(
+      '../collector/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro',
+    );
+    expect(services.grafana.volumes).toContain('../dashboards:/var/lib/grafana/dashboards:ro');
+  });
+
+  it('points the monitor at the collector', () => {
+    expect(loadCompose().services.betterdb.environment).toContain(
+      'OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318',
+    );
+  });
+
+  it('provisions the datasource uid the dashboards query', () => {
+    const datasource = parseYaml(
+      readFileSync(path.join(DEMO_DIR, 'grafana/provisioning/datasources/prometheus.yaml'), 'utf8'),
+    ) as { datasources: Array<{ uid: string; url: string; isDefault: boolean }> };
+
+    expect(datasource.datasources[0].uid).toBe('betterdb-prometheus');
+    expect(datasource.datasources[0].url).toBe('http://prometheus:9090');
+  });
+
+  it('scrapes both the monitor and the collector', () => {
+    const prometheus = parseYaml(readFileSync(path.join(DEMO_DIR, 'prometheus.yml'), 'utf8')) as {
+      scrape_configs: Array<{
+        job_name: string;
+        metrics_path?: string;
+        static_configs: Array<{ targets: string[] }>;
+      }>;
+    };
+    const jobs = Object.fromEntries(prometheus.scrape_configs.map((job) => [job.job_name, job]));
+
+    expect(jobs.betterdb.metrics_path).toBe('/api/prometheus/metrics');
+    expect(jobs.betterdb.static_configs[0].targets).toEqual(['betterdb:3001']);
+    expect(jobs['otel-collector'].static_configs[0].targets).toEqual(['otel-collector:8889']);
+  });
+});
