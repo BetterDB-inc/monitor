@@ -4,6 +4,7 @@ export interface DatabaseConfig {
   username: string;
   password: string;
   type: 'valkey' | 'redis' | 'auto';
+  tls: boolean;
 }
 
 export interface StorageConfig {
@@ -49,6 +50,10 @@ export default (): AppConfig => ({
     username: process.env.DB_USERNAME || 'default',
     password: process.env.DB_PASSWORD || '',
     type: (process.env.DB_TYPE as 'valkey' | 'redis' | 'auto') || 'auto',
+    // Enable TLS for the env-configured default connection (e.g. Aiven,
+    // ElastiCache Serverless, or any managed provider that requires
+    // encryption). UI-added connections carry their own per-connection tls flag.
+    tls: process.env.DB_TLS === 'true',
   },
   storage: {
     type: 'sqlite',

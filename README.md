@@ -203,6 +203,7 @@ docker run -d \
 | `DB_PASSWORD` | No | - | Valkey/Redis password |
 | `DB_USERNAME` | No | `default` | Valkey/Redis ACL username |
 | `DB_TYPE` | No | `auto` | Database type: `auto`, `valkey`, or `redis` |
+| `DB_TLS` | No | `false` | Set to `true` to connect to the monitored database over TLS (required by managed providers such as Aiven or ElastiCache Serverless) |
 | `STORAGE_TYPE` | No | `memory` | Storage backend: `memory` or `postgres` |
 | `STORAGE_URL` | Conditional | - | PostgreSQL connection URL (required if `STORAGE_TYPE=postgres`) |
 | `PORT` | No | `3001` | Application HTTP port |
