@@ -44,12 +44,6 @@ COPY proprietary ./proprietary
 # Create symlink for proprietary node_modules (symlinks don't copy properly)
 RUN ln -sf ../apps/api/node_modules proprietary/node_modules
 
-# PostHog telemetry token (baked into frontend at build time)
-ARG VITE_PUBLIC_POSTHOG_PROJECT_TOKEN
-ARG VITE_PUBLIC_POSTHOG_HOST=https://eu.i.posthog.com
-ENV VITE_PUBLIC_POSTHOG_PROJECT_TOKEN=$VITE_PUBLIC_POSTHOG_PROJECT_TOKEN
-ENV VITE_PUBLIC_POSTHOG_HOST=$VITE_PUBLIC_POSTHOG_HOST
-
 # Monitor version (baked into the frontend so PostHog events carry the release).
 # Re-declares the global ARG to bring it into this stage, then exposes it to Vite
 # via the VITE_PUBLIC_ prefix so it reaches import.meta.env in the web build.
@@ -209,12 +203,6 @@ COPY --chmod=755 --from=redisshake-builder /out/redis-shake /usr/local/bin/redis
 # Set APP_VERSION from build argument (re-declares the global ARG for this stage)
 ARG APP_VERSION
 ENV APP_VERSION=$APP_VERSION
-
-# PostHog telemetry (backend, runtime)
-ARG POSTHOG_API_KEY
-ARG POSTHOG_HOST=https://eu.i.posthog.com
-ENV POSTHOG_API_KEY=$POSTHOG_API_KEY
-ENV POSTHOG_HOST=$POSTHOG_HOST
 
 # Environment defaults common to both variants
 ENV NODE_ENV=production
