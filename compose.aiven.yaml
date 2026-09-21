@@ -50,11 +50,13 @@ services:
       DB_TYPE: valkey
       DB_USERNAME: default
       DB_TLS: "true"             # Aiven managed Valkey/Redis requires TLS
-      # Deployment-specific — set on YOUR Aiven Valkey's Overview page. Enter
-      # DB_PASSWORD as a SECRET in Runtime; never commit a real password here.
+      # Empty on purpose: this makes DB_PASSWORD a visible, ready-to-fill field
+      # on the deploy screen (toggle Secret and paste your Valkey password).
+      # No real password is committed here.
+      DB_PASSWORD: ""
+      # Deployment-specific — set on YOUR Aiven Valkey's Overview page:
       # DB_HOST: your-valkey-xxxxx.aivencloud.com
       # DB_PORT: "12345"
-      # DB_PASSWORD: <set as a Runtime secret>
 
       # --- Audit storage (managed Aiven PostgreSQL) ---
       STORAGE_TYPE: postgres
