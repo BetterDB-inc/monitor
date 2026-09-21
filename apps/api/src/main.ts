@@ -206,24 +206,31 @@ async function bootstrap(): Promise<void> {
     const tailGateway = app.get(TailGateway);
     const httpServer = app.getHttpServer();
 
-    // Resolve the agent WebSocket gateway if it is registered. Cloud provides it via
-    // AgentModule; self-hosted provides the same class via SelfHostedAgentModule
-    // (createAgentGatewayProviders). Both require the identical module file, so the
-    // class reference matches and app.get resolves in either mode. Null when the
-    // proprietary agent code is not built (agent upgrades are then rejected).
-    const agentGateway = (() => {
-      try {
-        const { AgentGateway } = require('../../../proprietary/agent/agent-gateway');
-        const gw = app.get(AgentGateway);
-        console.log('[Agent] WebSocket gateway resolved');
-        return gw as {
-          handleUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): void;
-        };
-      } catch {
-        console.warn('[Agent] WebSocket gateway not registered — agent connections disabled');
-        return null;
-      }
-    })();
+    // Resolve the agent WebSocket gateway only when a module actually provides it.
+    // Cloud provides it via AgentModule; self-hosted via SelfHostedAgentModule
+    // (createAgentGatewayProviders). Under WORKSPACE_DISABLED neither is loaded, so
+    // the AgentGateway provider does not exist. We must NOT call app.get() in that
+    // case: app.get runs inside Nest's ExceptionsZone whose default teardown is
+    // process.exit(1), so an UnknownElementException there crashes bootstrap rather
+    // than being caught by the try/catch below. The inner try/catch remains for the
+    // case where the proprietary agent code simply isn't built.
+    const workspaceConfig = resolveWorkspaceConfig(process.env);
+    const agentGateway =
+      workspaceConfig.mode !== 'disabled'
+        ? (() => {
+            try {
+              const { AgentGateway } = require('../../../proprietary/agent/agent-gateway');
+              const gw = app.get(AgentGateway);
+              console.log('[Agent] WebSocket gateway resolved');
+              return gw as {
+                handleUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): void;
+              };
+            } catch {
+              console.warn('[Agent] WebSocket gateway not registered — agent connections disabled');
+              return null;
+            }
+          })()
+        : null;
 
     httpServer.on(
       'upgrade',
@@ -231,7 +238,7 @@ async function bootstrap(): Promise<void> {
         cli: cliGateway,
         tail: tailGateway,
         agent: agentGateway,
-        trustedOrigins: resolveWorkspaceConfig(process.env).trustedOrigins,
+        trustedOrigins: workspaceConfig.trustedOrigins,
       }),
     );
 
