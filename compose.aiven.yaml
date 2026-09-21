@@ -5,21 +5,22 @@
 # file when creating the Runtime application (Runtime > Deploy application >
 # scan compose.aiven.yaml).
 #
-# How it differs from docker-compose.yml:
-#   - It contains the BetterDB Monitor APP (built from the repo Dockerfile),
-#     which docker-compose.yml does not.
-#   - Valkey (the database being monitored) and PostgreSQL (audit storage) are
-#     declared as bare `image:` services. Runtime's Compose scanner DETECTS
-#     these and provisions them as MANAGED Aiven services instead of running
-#     them as containers — so no passwords live in this file.
-#   - The USER / PASSWORD / host placeholders below are filled in by Runtime
-#     from the bound managed services; set the actual secrets (AUTH_SECRET,
-#     DB_PASSWORD, STORAGE_URL) in the Runtime application's settings.
+# Topology:
+#   - betterdb-monitor: the APP, built from the repo Dockerfile.
+#   - betterdb-postgres: audit storage, declared as a bare `image:` service so
+#     Runtime's Compose scanner provisions it as a MANAGED Aiven PostgreSQL
+#     (no passwords live in this file — Runtime injects them).
+#
+# BRING YOUR OWN database to monitor. BetterDB Monitor is a monitoring tool: it
+# points at the Valkey/Redis you ALREADY run, so this file does NOT provision a
+# throwaway Valkey. Connect the database you want to monitor either by:
+#   a) adding it in the app UI after deploy (Settings > Connections) — supports
+#      a per-connection TLS toggle; or
+#   b) uncommenting the DB_* block below and pointing it at your existing Aiven
+#      Valkey/Redis service (set DB_TLS=true — Aiven managed services need TLS).
 #
 # Suggested Runtime sizing:
 #   - App: 1 replica, ~1 GiB RAM, public HTTP port 3001.
-#   - Valkey (target to monitor): >= 1 GiB. Version 8.x for native COMMANDLOG /
-#     CLUSTER SLOT-STATS support.
 #   - PostgreSQL (audit storage): version 16, defaultdb.
 #
 # AI features (Ollama-backed) are intentionally OFF here: this builds the
@@ -36,32 +37,32 @@ services:
     ports:
       - "3001:3001"
     depends_on:
-      - betterdb-valkey
       - betterdb-postgres
     environment:
       NODE_ENV: production
       PORT: "3001"
 
-      # --- Target database to MONITOR (the managed Aiven Valkey below) ---
-      DB_TYPE: valkey
-      DB_HOST: betterdb-valkey
-      DB_PORT: "6379"
-      DB_USERNAME: default
-      DB_PASSWORD: PASSWORD        # injected by Runtime from the bound Valkey
+      # --- Database to MONITOR (bring your own) ---
+      # Leave commented to add the connection in the app UI after deploy, or
+      # uncomment and point at your existing Aiven Valkey/Redis service.
+      # DB_TYPE: valkey
+      # DB_HOST: your-valkey.aivencloud.com
+      # DB_PORT: "12345"
+      # DB_USERNAME: default
+      # DB_PASSWORD: CHANGE_ME     # set as a secret in Runtime
+      # DB_TLS: "true"            # Aiven managed Valkey/Redis requires TLS
 
       # --- Audit storage (the managed Aiven PostgreSQL below) ---
       STORAGE_TYPE: postgres
-      STORAGE_URL: postgresql://USER:PASSWORD@betterdb-postgres:5432/defaultdb
+      # Aiven managed PostgreSQL requires SSL — keep sslmode=require.
+      STORAGE_URL: postgresql://USER:PASSWORD@betterdb-postgres:5432/defaultdb?sslmode=require
 
       # --- App auth / misc ---
       AUTH_SECRET: CHANGE_ME       # set as a secret in Runtime
       AUTH_PUBLIC_URL: https://your-app.aiven.run   # set to the Runtime app URL
       AI_ENABLED: "false"
 
-  # Managed services: Runtime auto-detects these images and provisions the
-  # real Aiven services. Do not add credentials here.
-  betterdb-valkey:
-    image: valkey/valkey:8
-
+  # Managed service: Runtime auto-detects this image and provisions the real
+  # Aiven PostgreSQL. Do not add credentials here.
   betterdb-postgres:
     image: postgres:16
