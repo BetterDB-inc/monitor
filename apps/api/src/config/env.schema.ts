@@ -136,7 +136,10 @@ export const envSchema = z
       .optional(),
     TELEMETRY_PROVIDER: z.enum(['http', 'posthog', 'noop']).default('posthog'),
     POSTHOG_API_KEY: z.string().optional(),
-    POSTHOG_HOST: z.url().optional(),
+    // Preprocess so a blank/empty value (e.g. an empty POSTHOG_HOST baked into
+    // or injected around the container image) is treated as unset rather than
+    // failing URL validation, matching AUTH_PUBLIC_URL above.
+    POSTHOG_HOST: z.preprocess(optionalUrl, z.string().url().optional()),
 
     // CLI configuration
     BETTERDB_UNSAFE_CLI: z

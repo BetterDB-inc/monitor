@@ -58,7 +58,10 @@ services:
       STORAGE_URL: postgresql://USER:PASSWORD@betterdb-postgres:5432/defaultdb?sslmode=require
 
       # --- App auth / misc ---
-      AUTH_SECRET: CHANGE_ME       # set as a secret in Runtime
+      # AUTH_SECRET must be >= 32 chars. DO NOT hardcode it here — set it as a
+      # secret in Runtime (generate one with: openssl rand -base64 48). If left
+      # unset the app generates an internal secret, but it won't survive a
+      # redeploy unless /app/data is persisted, so an explicit secret is better.
       AUTH_PUBLIC_URL: https://your-app.aiven.run   # set to the Runtime app URL
       AI_ENABLED: "false"
 

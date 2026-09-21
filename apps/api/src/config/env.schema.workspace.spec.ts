@@ -29,4 +29,15 @@ describe('workspace env vars', () => {
       'https://mon.example.com',
     );
   });
+
+  it('treats an empty POSTHOG_HOST as unset instead of failing URL validation', () => {
+    // Regression: an empty POSTHOG_HOST injected around the container image
+    // must not fail startup env validation.
+    const parsed = envSchema.parse({ POSTHOG_HOST: '' });
+    expect(parsed.POSTHOG_HOST).toBeUndefined();
+    expect(envSchema.parse({ POSTHOG_HOST: 'https://ph.example.com' }).POSTHOG_HOST).toBe(
+      'https://ph.example.com',
+    );
+    expect(envSchema.safeParse({ POSTHOG_HOST: 'not a url' }).success).toBe(false);
+  });
 });
