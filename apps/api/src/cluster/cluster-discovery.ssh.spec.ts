@@ -137,4 +137,31 @@ describe('ClusterDiscoveryService — SSH tunnel dial', () => {
     expect(mockDbClient.dialNodeThroughTunnel).toHaveBeenCalledTimes(1);
     await service.disconnectAll();
   });
+
+  it('releases forward when Valkey connect fails after successful dial', async () => {
+    const release = jest.fn();
+    let valkeyCallCount = 0;
+    const { service, mockDbClient } = await buildService(async () => ({ host: '127.0.0.1', port: MOCK_TUNNEL_PORT }));
+    (mockDbClient as unknown as { releaseNodeThroughTunnel: jest.Mock }).releaseNodeThroughTunnel = release;
+
+    const ValkeyMock = jest.requireMock('iovalkey').default as jest.Mock;
+    const originalImpl = ValkeyMock.getMockImplementation();
+    ValkeyMock.mockImplementation((opts: { host: string; port: number }) => {
+      valkeyCallCount++;
+      const instance = (originalImpl as unknown as (opts: { host: string; port: number }) => FakeValkey)(opts);
+      if (valkeyCallCount === 1) {
+        instance.connect = jest.fn(async () => {
+          throw new Error('Valkey handshake failed');
+        });
+      }
+      return instance;
+    });
+
+    const nodes = await service.discoverNodes('conn-1');
+    await expect(service.getNodeConnection(nodes[0].id, 'conn-1')).rejects.toThrow(/Valkey handshake failed/);
+    expect(release).toHaveBeenCalledWith('10.0.1.5', DEFAULT_REDIS_PORT);
+    expect(seenOptions.length).toBe(1);
+    ValkeyMock.mockImplementation(originalImpl as unknown as (...args: unknown[]) => unknown);
+    await service.disconnectAll();
+  });
 });

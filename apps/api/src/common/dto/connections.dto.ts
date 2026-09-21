@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsNumber, IsBoolean, IsOptional, IsIn, IsArray, ArrayMaxSize, Min, Max, MinLength, MaxLength, ValidateNested } from 'class-validator';
+import { IsString, IsNumber, IsBoolean, IsOptional, IsIn, IsArray, ArrayMaxSize, Min, Max, MinLength, MaxLength, ValidateNested, ValidateIf } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ENV_DEFAULT_ID } from '../../connections/connection.constants';
 import type {
@@ -81,25 +81,29 @@ export class SshTunnelDto implements SshTunnelInput {
   @IsBoolean()
   enabled: boolean;
 
-  @ApiProperty({ description: 'SSH server (bastion) host', example: 'bastion.example.com' })
+  @ApiPropertyOptional({ description: 'SSH server (bastion) host — required when hops is empty', example: 'bastion.example.com' })
+  @ValidateIf((o) => !o.hops || o.hops.length === 0)
   @IsString()
   @MinLength(1)
-  host: string;
+  host!: string;
 
-  @ApiProperty({ description: 'SSH server port', example: 22, minimum: 1, maximum: 65535 })
+  @ApiPropertyOptional({ description: 'SSH server port — required when hops is empty', example: 22, minimum: 1, maximum: 65535 })
+  @ValidateIf((o) => !o.hops || o.hops.length === 0)
   @IsNumber()
   @Min(1)
   @Max(65535)
-  port: number;
+  port!: number;
 
-  @ApiProperty({ description: 'SSH username', example: 'ec2-user' })
+  @ApiPropertyOptional({ description: 'SSH username — required when hops is empty', example: 'ec2-user' })
+  @ValidateIf((o) => !o.hops || o.hops.length === 0)
   @IsString()
   @MinLength(1)
-  username: string;
+  username!: string;
 
-  @ApiProperty({ description: 'SSH authentication method', enum: ['password', 'privateKey'], example: 'privateKey' })
+  @ApiPropertyOptional({ description: 'SSH authentication method — required when hops is empty', enum: ['password', 'privateKey'], example: 'privateKey' })
+  @ValidateIf((o) => !o.hops || o.hops.length === 0)
   @IsIn(['password', 'privateKey'])
-  authMethod: SshAuthMethod;
+  authMethod!: SshAuthMethod;
 
   @ApiPropertyOptional({ description: 'Password for password auth' })
   @IsOptional()

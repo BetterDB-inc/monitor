@@ -285,13 +285,11 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
       return client;
     } catch (error) {
-      // Only log each unique connection error once to avoid spam
       const errorKey = `connect-${nodeId}`;
       if (!this.loggedGetConnectionErrors.has(errorKey)) {
         this.logger.debug(
           `Failed to connect to node ${nodeId} at ${host}:${port}: ${error instanceof Error ? error.message : error}`,
         );
-        // Prevent unbounded growth
         if (this.loggedGetConnectionErrors.size >= this.MAX_LOGGED_ERRORS) {
           this.loggedGetConnectionErrors.clear();
         }
@@ -299,6 +297,16 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       }
 
       await client.quit().catch(() => {});
+
+      const didDialViaTunnel = dialHost !== host || dialPort !== port;
+      if (didDialViaTunnel) {
+        try {
+          (dbClient as unknown as { releaseNodeThroughTunnel?: (h: string, p: number) => void }).releaseNodeThroughTunnel?.(
+            host,
+            port,
+          );
+        } catch {}
+      }
 
       throw error;
     }
