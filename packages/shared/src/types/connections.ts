@@ -22,13 +22,46 @@ export type SshAuthMethod = 'password' | 'privateKey';
  */
 export type SshKeySource = 'inline' | 'file';
 
+/** Maximum bastion hops accepted in a single chained SSH tunnel. */
+export const SSH_MAX_HOPS = 5;
+
+/** Maximum per-node forwarded servers per SSH tunnel (cluster fan-out bound). */
+export const SSH_MAX_NODE_FORWARDS = 32;
+
+/** Timeout for a single per-node SSH forward (channel open + loopback bind). */
+export const SSH_NODE_FORWARD_TIMEOUT_MS = 5000;
+
+export const SSH_DEFAULT_PORT = 22;
+
+export const DEFAULT_REDIS_PORT = 6379;
+
+export const MOCK_TUNNEL_PORT = 54321;
+
+/** One bastion hop in a chained tunnel. */
+export interface SshHopConfig {
+  host: string;
+  port: number;
+  username: string;
+  authMethod: SshAuthMethod;
+  password?: string;
+  keySource?: SshKeySource;
+  privateKey?: string;
+  privateKeyPath?: string;
+  passphrase?: string;
+  hostKeyFingerprint?: string;
+}
+
 /**
- * SSH tunnel configuration for reaching a database through a bastion/jump host.
- * A single hop is supported (no multi-hop chaining).
+ * SSH tunnel configuration for reaching a database through bastion/jump host(s).
  *
- * Secret fields (`password`, `privateKey`, `passphrase`) are envelope-encrypted
- * at rest when ENCRYPTION_KEY is configured; `secretsEncrypted` records whether
- * the persisted values are ciphertext. `privateKeyPath` is not a secret.
+ * Single-hop configs use the top-level `host`/`port`/`username`/… fields.
+ * Multi-hop chains set `hops` (outermost first); when non-empty it takes
+ * precedence and the top-level fields mirror `hops[0]`.
+ *
+ * Secret fields (`password`, `privateKey`, `passphrase`, per-hop included) are
+ * envelope-encrypted at rest when ENCRYPTION_KEY is configured;
+ * `secretsEncrypted` records whether the persisted values are ciphertext.
+ * `privateKeyPath` is not a secret.
  */
 export interface SshTunnelConfig {
   enabled: boolean;
@@ -55,6 +88,10 @@ export interface SshTunnelConfig {
    * matches. Accepts a `SHA256:<base64>` string or the raw base64/hex digest.
    */
   hostKeyFingerprint?: string;
+  /** Ordered bastion hops, outermost first. Non-empty overrides the top-level fields. */
+  hops?: SshHopConfig[];
+  /** Dial cluster per-node connections through the SSH chain (default true). */
+  clusterViaTunnel?: boolean;
   /**
    * Whether the secret fields above are currently encrypted at rest.
    * Server-managed only — never accepted from API input (see `SshTunnelInput`).
@@ -114,6 +151,32 @@ export function parseSshTunnel(value: unknown): SshTunnelConfig | undefined {
   return obj as SshTunnelConfig;
 }
 
+/** Effective hop list: `hops` when non-empty, else the top-level fields as one hop. */
+export function resolveSshHops(tunnel: SshTunnelConfig | undefined): SshHopConfig[] {
+  if (!tunnel?.enabled) return [];
+  if (tunnel.hops && tunnel.hops.length > 0) return tunnel.hops;
+  return [
+    {
+      host: tunnel.host,
+      port: tunnel.port,
+      username: tunnel.username,
+      authMethod: tunnel.authMethod,
+      password: tunnel.password,
+      keySource: tunnel.keySource,
+      privateKey: tunnel.privateKey,
+      privateKeyPath: tunnel.privateKeyPath,
+      passphrase: tunnel.passphrase,
+      hostKeyFingerprint: tunnel.hostKeyFingerprint,
+    },
+  ];
+}
+
+/** Whether cluster per-node connections go through the SSH chain (default true). */
+export function isClusterViaTunnel(tunnel: SshTunnelConfig | undefined): boolean {
+  if (!tunnel?.enabled) return false;
+  return tunnel.clusterViaTunnel ?? true;
+}
+
 /**
  * Connection capabilities
  */
@@ -122,6 +185,16 @@ export interface ConnectionCapabilities {
   version: string;
   supportsCommandLog?: boolean;
   supportsSlotStats?: boolean;
+}
+
+/** Redacted per-hop summary safe to return over the API (no secrets). */
+export interface SshHopStatus {
+  host: string;
+  port: number;
+  username: string;
+  authMethod: SshAuthMethod;
+  keySource?: SshKeySource;
+  hostKeyPinned?: boolean;
 }
 
 /**
@@ -136,6 +209,9 @@ export interface SshTunnelStatus {
   keySource?: SshKeySource;
   /** Whether a host-key fingerprint is pinned for this tunnel. */
   hostKeyPinned?: boolean;
+  hopCount?: number;
+  hops?: SshHopStatus[];
+  clusterViaTunnel?: boolean;
 }
 
 /**

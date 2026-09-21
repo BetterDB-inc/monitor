@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsNumber, IsBoolean, IsOptional, IsIn, Min, Max, MinLength, MaxLength, ValidateNested } from 'class-validator';
+import { IsString, IsNumber, IsBoolean, IsOptional, IsIn, IsArray, ArrayMaxSize, Min, Max, MinLength, MaxLength, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ENV_DEFAULT_ID } from '../../connections/connection.constants';
 import type {
@@ -11,9 +11,64 @@ import type {
   CurrentConnectionResponse,
   AllConnectionsHealthResponse,
   SshTunnelInput,
+  SshHopConfig,
   SshAuthMethod,
   SshKeySource,
 } from '@betterdb/shared';
+import { SSH_MAX_HOPS } from '@betterdb/shared';
+
+/** DTO for a single SSH hop in a chained tunnel (outermost first). */
+export class SshHopDto implements SshHopConfig {
+  @ApiProperty({ description: 'SSH server (bastion) host', example: 'bastion.example.com' })
+  @IsString()
+  @MinLength(1)
+  host: string;
+
+  @ApiProperty({ description: 'SSH server port', example: 22, minimum: 1, maximum: 65535 })
+  @IsNumber()
+  @Min(1)
+  @Max(65535)
+  port: number;
+
+  @ApiProperty({ description: 'SSH username', example: 'ec2-user' })
+  @IsString()
+  @MinLength(1)
+  username: string;
+
+  @ApiProperty({ description: 'SSH authentication method', enum: ['password', 'privateKey'], example: 'privateKey' })
+  @IsIn(['password', 'privateKey'])
+  authMethod: SshAuthMethod;
+
+  @ApiPropertyOptional({ description: 'Password for password auth' })
+  @IsOptional()
+  @IsString()
+  password?: string;
+
+  @ApiPropertyOptional({ description: "Private key source: 'inline' content or server-side 'file'", enum: ['inline', 'file'], example: 'inline' })
+  @IsOptional()
+  @IsIn(['inline', 'file'])
+  keySource?: SshKeySource;
+
+  @ApiPropertyOptional({ description: 'Inline PEM private key content (keySource=inline)' })
+  @IsOptional()
+  @IsString()
+  privateKey?: string;
+
+  @ApiPropertyOptional({ description: 'Server-side private key path (keySource=file); must be inside BETTERDB_SSH_KEY_DIR' })
+  @IsOptional()
+  @IsString()
+  privateKeyPath?: string;
+
+  @ApiPropertyOptional({ description: 'Passphrase protecting the private key' })
+  @IsOptional()
+  @IsString()
+  passphrase?: string;
+
+  @ApiPropertyOptional({ description: 'Pinned SSH host-key fingerprint (SHA256:<base64>) for this hop' })
+  @IsOptional()
+  @IsString()
+  hostKeyFingerprint?: string;
+}
 
 /**
  * DTO for an SSH tunnel used to reach the database.
@@ -75,6 +130,23 @@ export class SshTunnelDto implements SshTunnelInput {
   @IsOptional()
   @IsString()
   hostKeyFingerprint?: string;
+
+  @ApiPropertyOptional({
+    description: 'Ordered bastion hops (outermost first). When non-empty, defines a chained tunnel; top-level host/port/user are kept as hops[0] alias.',
+    type: [SshHopDto],
+    maxItems: SSH_MAX_HOPS,
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(SSH_MAX_HOPS)
+  @ValidateNested({ each: true })
+  @Type(() => SshHopDto)
+  hops?: SshHopDto[];
+
+  @ApiPropertyOptional({ description: 'Dial cluster per-node connections through the SSH chain (default true). Disable for legacy direct dial.', example: true })
+  @IsOptional()
+  @IsBoolean()
+  clusterViaTunnel?: boolean;
 }
 
 /**

@@ -10,11 +10,11 @@ import { databasesApi, Database, DatabaseStatus, DatabaseCredentials } from '../
 import { workspaceApi, CloudUser } from '../api/workspace';
 import type { Connection } from '../hooks/useConnection';
 import type { AgentConnectionInfo } from '@betterdb/shared';
+import { SSH_MAX_HOPS } from '@betterdb/shared';
 import { ConnectionSwitcher } from './connection-selector/ConnectionSwitcher';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 
-interface SshFormData {
-  enabled: boolean;
+interface SshHopFormData {
   host: string;
   port: number;
   username: string;
@@ -25,6 +25,12 @@ interface SshFormData {
   privateKeyPath: string;
   passphrase: string;
   hostKeyFingerprint: string;
+}
+
+interface SshFormData extends SshHopFormData {
+  enabled: boolean;
+  extraHops: SshHopFormData[];
+  clusterViaTunnel: boolean;
 }
 
 interface ConnectionFormData {
@@ -38,8 +44,7 @@ interface ConnectionFormData {
   ssh: SshFormData;
 }
 
-const defaultSshFormData: SshFormData = {
-  enabled: false,
+const defaultSshHopFormData: SshHopFormData = {
   host: '',
   port: 22,
   username: '',
@@ -52,26 +57,43 @@ const defaultSshFormData: SshFormData = {
   hostKeyFingerprint: '',
 };
 
+const defaultSshFormData: SshFormData = {
+  enabled: false,
+  ...defaultSshHopFormData,
+  extraHops: [],
+  clusterViaTunnel: true,
+};
+
+function buildSshHopPayload(hop: SshHopFormData) {
+  const usesKey = hop.authMethod === 'privateKey';
+  return {
+    host: hop.host,
+    port: hop.port,
+    username: hop.username,
+    authMethod: hop.authMethod,
+    password: hop.authMethod === 'password' ? hop.password || undefined : undefined,
+    keySource: usesKey ? hop.keySource : undefined,
+    privateKey: usesKey && hop.keySource === 'inline' ? hop.privateKey || undefined : undefined,
+    privateKeyPath:
+      usesKey && hop.keySource === 'file' ? hop.privateKeyPath || undefined : undefined,
+    passphrase: usesKey ? hop.passphrase || undefined : undefined,
+    hostKeyFingerprint: hop.hostKeyFingerprint || undefined,
+  };
+}
+
 /**
  * Build the SSH tunnel payload (or undefined) from the form. Secrets that don't
  * apply to the chosen auth method / key source are dropped.
  */
-function buildSshTunnelPayload(ssh: SshFormData) {
+function buildSshTunnelPayload(ssh: SshFormData, opts?: { includeClusterRouting?: boolean }) {
   if (!ssh.enabled) return undefined;
-  const usesKey = ssh.authMethod === 'privateKey';
+  const first = buildSshHopPayload(ssh);
+  const extra = ssh.extraHops.map(buildSshHopPayload);
   return {
     enabled: true,
-    host: ssh.host,
-    port: ssh.port,
-    username: ssh.username,
-    authMethod: ssh.authMethod,
-    password: ssh.authMethod === 'password' ? ssh.password || undefined : undefined,
-    keySource: usesKey ? ssh.keySource : undefined,
-    privateKey: usesKey && ssh.keySource === 'inline' ? ssh.privateKey || undefined : undefined,
-    privateKeyPath:
-      usesKey && ssh.keySource === 'file' ? ssh.privateKeyPath || undefined : undefined,
-    passphrase: usesKey ? ssh.passphrase || undefined : undefined,
-    hostKeyFingerprint: ssh.hostKeyFingerprint || undefined,
+    ...first,
+    hops: extra.length > 0 ? [first, ...extra] : undefined,
+    ...(opts?.includeClusterRouting === false ? {} : { clusterViaTunnel: ssh.clusterViaTunnel }),
   };
 }
 
@@ -163,6 +185,40 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
     setTestResult(null);
   };
 
+  const handleExtraHopChange = (
+    index: number,
+    field: keyof SshHopFormData,
+    value: string | number,
+  ) => {
+    setFormData((prev) => ({
+      ...prev,
+      ssh: {
+        ...prev.ssh,
+        extraHops: prev.ssh.extraHops.map((hop, i) => (i === index ? { ...hop, [field]: value } : hop)),
+      },
+    }));
+    setTestResult(null);
+  };
+
+  const handleAddHop = () => {
+    setFormData((prev) => {
+      if (prev.ssh.extraHops.length >= SSH_MAX_HOPS - 1) return prev;
+      return {
+        ...prev,
+        ssh: { ...prev.ssh, extraHops: [...prev.ssh.extraHops, { ...defaultSshHopFormData }] },
+      };
+    });
+    setTestResult(null);
+  };
+
+  const handleRemoveHop = (index: number) => {
+    setFormData((prev) => ({
+      ...prev,
+      ssh: { ...prev.ssh, extraHops: prev.ssh.extraHops.filter((_, i) => i !== index) },
+    }));
+    setTestResult(null);
+  };
+
   // In cloud mode a loopback host is normally unreachable — but with an SSH
   // tunnel the bastion resolves the host, so localhost/127.* is valid there.
   const cloudLoopbackBlocked =
@@ -214,7 +270,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
             password: formData.password || undefined,
             dbIndex: formData.dbIndex,
             tls: formData.tls,
-            sshTunnel: buildSshTunnelPayload(formData.ssh),
+            sshTunnel: buildSshTunnelPayload(formData.ssh, { includeClusterRouting: false }),
           }),
         },
       );
@@ -761,6 +817,196 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                           the server identity is not verified.
                         </p>
                       </div>
+
+                      {formData.ssh.extraHops.map((hop, hopIndex) => (
+                        <div key={hopIndex} className="border rounded-md p-3 space-y-3 bg-muted/20">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-semibold">
+                              Hop {hopIndex + 2} (via Hop {hopIndex + 1})
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveHop(hopIndex)}
+                              className="text-xs text-destructive hover:underline"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="col-span-2 sm:col-span-1">
+                              <label className="block text-xs font-medium mb-1">SSH Host</label>
+                              <input
+                                type="text"
+                                value={hop.host}
+                                onChange={(e) => handleExtraHopChange(hopIndex, 'host', e.target.value)}
+                                placeholder="inner-bastion.internal"
+                                className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium mb-1">SSH Port</label>
+                              <input
+                                type="number"
+                                value={hop.port}
+                                onChange={(e) =>
+                                  handleExtraHopChange(hopIndex, 'port', parseInt(e.target.value) || 22)
+                                }
+                                min="1"
+                                max="65535"
+                                className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium mb-1">SSH Username</label>
+                            <input
+                              type="text"
+                              value={hop.username}
+                              onChange={(e) => handleExtraHopChange(hopIndex, 'username', e.target.value)}
+                              placeholder="ec2-user"
+                              className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium mb-1">Authentication</label>
+                            <div className="flex gap-4 text-sm">
+                              <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                  type="radio"
+                                  name={`ssh-auth-${hopIndex}`}
+                                  checked={hop.authMethod === 'privateKey'}
+                                  onChange={() => handleExtraHopChange(hopIndex, 'authMethod', 'privateKey')}
+                                />
+                                <span>Private key</span>
+                              </label>
+                              <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                  type="radio"
+                                  name={`ssh-auth-${hopIndex}`}
+                                  checked={hop.authMethod === 'password'}
+                                  onChange={() => handleExtraHopChange(hopIndex, 'authMethod', 'password')}
+                                />
+                                <span>Password</span>
+                              </label>
+                            </div>
+                          </div>
+                          {hop.authMethod === 'password' ? (
+                            <div>
+                              <label className="block text-xs font-medium mb-1">SSH Password</label>
+                              <input
+                                type="password"
+                                value={hop.password}
+                                onChange={(e) => handleExtraHopChange(hopIndex, 'password', e.target.value)}
+                                autoComplete="new-password"
+                                className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                              />
+                            </div>
+                          ) : (
+                            <>
+                              <div>
+                                <label className="block text-xs font-medium mb-1">Key source</label>
+                                <div className="flex gap-4 text-sm">
+                                  <label className="flex items-center gap-2 cursor-pointer">
+                                    <input
+                                      type="radio"
+                                      name={`ssh-key-source-${hopIndex}`}
+                                      checked={hop.keySource === 'inline'}
+                                      onChange={() => handleExtraHopChange(hopIndex, 'keySource', 'inline')}
+                                    />
+                                    <span>Paste key</span>
+                                  </label>
+                                  <label className="flex items-center gap-2 cursor-pointer">
+                                    <input
+                                      type="radio"
+                                      name={`ssh-key-source-${hopIndex}`}
+                                      checked={hop.keySource === 'file'}
+                                      onChange={() => handleExtraHopChange(hopIndex, 'keySource', 'file')}
+                                    />
+                                    <span>Server file path</span>
+                                  </label>
+                                </div>
+                              </div>
+                              {hop.keySource === 'inline' ? (
+                                <div>
+                                  <label className="block text-xs font-medium mb-1">Private key (PEM)</label>
+                                  <textarea
+                                    value={hop.privateKey}
+                                    onChange={(e) => handleExtraHopChange(hopIndex, 'privateKey', e.target.value)}
+                                    rows={3}
+                                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                                    className="w-full px-3 py-2 border rounded-md bg-background font-mono text-xs focus:outline-none focus:ring-2 focus:ring-primary"
+                                  />
+                                </div>
+                              ) : (
+                                <div>
+                                  <label className="block text-xs font-medium mb-1">Server key path</label>
+                                  <input
+                                    type="text"
+                                    value={hop.privateKeyPath}
+                                    onChange={(e) => handleExtraHopChange(hopIndex, 'privateKeyPath', e.target.value)}
+                                    placeholder="id_ed25519"
+                                    className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                                  />
+                                </div>
+                              )}
+                              <div>
+                                <label className="block text-xs font-medium mb-1">Key passphrase (optional)</label>
+                                <input
+                                  type="password"
+                                  value={hop.passphrase}
+                                  onChange={(e) => handleExtraHopChange(hopIndex, 'passphrase', e.target.value)}
+                                  autoComplete="new-password"
+                                  className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                                />
+                              </div>
+                            </>
+                          )}
+                          <div>
+                            <label className="block text-xs font-medium mb-1">
+                              Host key fingerprint (optional)
+                            </label>
+                            <input
+                              type="text"
+                              value={hop.hostKeyFingerprint}
+                              onChange={(e) => handleExtraHopChange(hopIndex, 'hostKeyFingerprint', e.target.value)}
+                              placeholder="SHA256:..."
+                              className="w-full px-3 py-2 border rounded-md bg-background font-mono text-xs focus:outline-none focus:ring-2 focus:ring-primary"
+                            />
+                          </div>
+                        </div>
+                      ))}
+
+                      <div className="flex items-center justify-between">
+                        <button
+                          type="button"
+                          onClick={handleAddHop}
+                          disabled={formData.ssh.extraHops.length >= SSH_MAX_HOPS - 1}
+                          className="text-xs px-3 py-1.5 border rounded-md hover:bg-muted disabled:opacity-50"
+                        >
+                          + Add hop (chained bastion)
+                        </button>
+                        <span className="text-xs text-muted-foreground">
+                          {formData.ssh.extraHops.length === 0
+                            ? 'Single hop'
+                            : `${formData.ssh.extraHops.length + 1} hops total (max ${SSH_MAX_HOPS})`}
+                        </span>
+                      </div>
+
+                      <label className="flex items-start gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={formData.ssh.clusterViaTunnel}
+                          onChange={(e) => handleSshChange('clusterViaTunnel', e.target.checked)}
+                          className="rounded mt-0.5"
+                        />
+                        <span className="text-xs">
+                          <span className="font-medium">Route cluster nodes through tunnel</span>
+                          <span className="block text-muted-foreground">
+                            Required when nodes advertise private addresses (ElastiCache/MemoryDB).
+                            Uncheck for legacy direct dial.
+                          </span>
+                        </span>
+                      </label>
                     </div>
                   )}
                 </div>

@@ -112,4 +112,13 @@ export interface DatabasePort {
    * (trust-on-first-use). Present only on adapters that support SSH tunnels.
    */
   getObservedHostKeyFingerprint?(): string | undefined;
+  /** Per-hop observed fingerprints (outermost first) for chained tunnels. */
+  getObservedHostKeyFingerprints?(): (string | undefined)[] | undefined;
+  /**
+   * Dial `remoteHost:remotePort` through the SSH chain. When the tunnel is
+   * required (`clusterViaTunnel:true`) but not established, throws instead of
+   * falling back to the advertised private address (which would bypass the
+   * chain or stall).
+   */
+  dialNodeThroughTunnel?(remoteHost: string, remotePort: number): Promise<{ host: string; port: number }>;
 }

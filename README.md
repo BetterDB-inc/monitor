@@ -221,18 +221,18 @@ Full reference, including AI, webhook tuning, and health-gate thresholds: [docs/
 
 ### SSH Tunnels
 
-Connections can reach a database through an SSH bastion/jump host instead of connecting directly — useful for Valkey/Redis in a private subnet, ElastiCache, or MemoryDB. Enable **Connect via SSH tunnel** when adding a connection and provide the SSH host, port, and username. A single hop is supported.
+Connections can reach a database through SSH bastion/jump host(s) instead of connecting directly — useful for Valkey/Redis in a private subnet, ElastiCache, or MemoryDB. Enable **Connect via SSH tunnel** when adding a connection and provide the SSH host, port, and username. Chained bastions are supported via **+ Add hop** (up to 5 hops, outermost first); each hop authenticates and pins its host key independently.
 
 Authentication is either a password or a private key. Private keys come from one of two sources:
 
 - **Paste key** (inline): the PEM key content is submitted with the connection. It is stored encrypted at rest **only when `ENCRYPTION_KEY` is set** (envelope encryption); without that key it is stored in plaintext, like connection passwords. Works everywhere, including managed/cloud deployments.
 - **Server file path**: the key already lives on the monitor server's filesystem and is referenced by path. This requires setting the `BETTERDB_SSH_KEY_DIR` environment variable to the directory holding the allowed keys, and the referenced path must resolve inside it, so the API can never be coerced into reading arbitrary files. Leave `BETTERDB_SSH_KEY_DIR` unset to disable this option.
 
-Optionally pin the SSH server's **host key fingerprint** (`SHA256:...`) on the connection; when set, the tunnel is refused unless the server presents a matching key, preventing man-in-the-middle attacks on the bastion path. Left blank, the server identity is not verified (a warning is logged).
+Optionally pin each hop's **host key fingerprint** (`SHA256:...`); when set, the tunnel is refused unless that hop presents a matching key, preventing man-in-the-middle attacks on the bastion path. Left blank, the server identity is trusted on first use and pinned automatically (a warning is logged).
 
 The tunnel forwards to the database over `127.0.0.1`; when TLS is enabled the certificate is still validated against the real database hostname. Set `ENCRYPTION_KEY` so SSH passwords, key passphrases, and inline keys are encrypted at rest.
 
-**Known limitation — cluster/Sentinel topologies:** only the connection you configure is tunnelled. Cluster and Sentinel monitoring fan out to the other nodes using the addresses those nodes advertise (`CLUSTER NODES` / Sentinel), and those per-node connections are made directly, not through the tunnel. If the other nodes are only reachable via the bastion (e.g. ElastiCache/MemoryDB in a private subnet), per-node views will be unavailable. Use SSH tunnels for single-node/primary monitoring, or place the monitor where it can reach the cluster nodes directly.
+**Cluster/Sentinel topologies:** cluster per-node connections are dialled through the same SSH chain by default (**Route cluster nodes through tunnel**), so nodes advertising private-subnet addresses (e.g. ElastiCache/MemoryDB) stay reachable for per-node views. Uncheck it to restore the legacy direct dial. Sentinel topology reads already go through the tunnelled primary connection.
 
 ### Licensing & Air-Gapped Support
 
