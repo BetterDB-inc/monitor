@@ -116,3 +116,82 @@ it('extracts metric names from a PromQL expression', () => {
     metricNamesIn('rate(betterdb_keyspace_hits_total{connection=~"$connection"}[5m])'),
   ).toEqual(['betterdb_keyspace_hits_total']);
 });
+
+interface DashboardTarget {
+  refId: string;
+  expr: string;
+  datasource?: { type: string; uid: string };
+}
+
+interface DashboardPanel {
+  id: number;
+  type: string;
+  title: string;
+  targets?: DashboardTarget[];
+  panels?: DashboardPanel[];
+}
+
+interface Dashboard {
+  uid: string;
+  title: string;
+  schemaVersion: number;
+  templating: { list: Array<{ name: string; type: string; query?: { query: string } }> };
+  panels: DashboardPanel[];
+}
+
+function loadDashboard(file: string): Dashboard {
+  return JSON.parse(readFileSync(path.join(DASHBOARD_DIR, file), 'utf8')) as Dashboard;
+}
+
+function allPanels(dashboard: Dashboard): DashboardPanel[] {
+  return dashboard.panels.flatMap((panel) => [panel, ...(panel.panels ?? [])]);
+}
+
+describe('Grafana dashboard pack', () => {
+  const files = ['betterdb-instance-vitals.json', 'betterdb-query-patterns.json'];
+
+  it.each(files)('%s declares the shared contract', (file) => {
+    const dashboard = loadDashboard(file);
+
+    expect(dashboard.uid).toBe(file.replace('.json', ''));
+    expect(dashboard.title.startsWith('BetterDB · ')).toBe(true);
+    expect(dashboard.schemaVersion).toBeGreaterThanOrEqual(39);
+  });
+
+  it.each(files)('%s exposes a connection variable', (file) => {
+    const variable = loadDashboard(file).templating.list.find((item) => item.name === 'connection');
+
+    expect(variable?.type).toBe('query');
+    expect(variable?.query?.query).toBe('label_values(betterdb_memory_used_bytes, connection)');
+  });
+
+  it.each(files)('%s points every target at the provisioned datasource', (file) => {
+    const targets = allPanels(loadDashboard(file)).flatMap((panel) => panel.targets ?? []);
+
+    expect(targets.length).toBeGreaterThan(0);
+    for (const target of targets) {
+      expect(target.datasource).toEqual({ type: 'prometheus', uid: 'betterdb-prometheus' });
+    }
+  });
+
+  it.each(files)('%s only queries metrics the service registers', (file) => {
+    const registered = registeredMetricNames();
+    const used = allPanels(loadDashboard(file))
+      .flatMap((panel) => panel.targets ?? [])
+      .flatMap((target) => metricNamesIn(target.expr));
+
+    expect(used.length).toBeGreaterThan(0);
+    for (const name of used) {
+      const base = name.replace(/_(bucket|sum)$/, '');
+      expect(registered.has(name) || registered.has(base)).toBe(true);
+    }
+  });
+
+  it.each(files)('%s filters every query by the connection variable', (file) => {
+    const targets = allPanels(loadDashboard(file)).flatMap((panel) => panel.targets ?? []);
+
+    for (const target of targets) {
+      expect(target.expr).toContain('connection=~"$connection"');
+    }
+  });
+});

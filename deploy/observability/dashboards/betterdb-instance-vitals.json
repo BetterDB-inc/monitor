@@ -1,0 +1,477 @@
+{
+  "uid": "betterdb-instance-vitals",
+  "title": "BetterDB · Instance Vitals",
+  "tags": ["betterdb", "valkey"],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "connection",
+        "label": "Connection",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "betterdb-prometheus"
+        },
+        "query": {
+          "query": "label_values(betterdb_memory_used_bytes, connection)",
+          "refId": "connection"
+        },
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Memory used vs limit",
+      "description": "Allocated memory against the configured maxmemory ceiling. A flat line at the limit means evictions are imminent.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "betterdb_memory_used_bytes{connection=~\"$connection\"}",
+          "legendFormat": "{{connection}} used"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "betterdb_memory_max_bytes{connection=~\"$connection\"} > 0",
+          "legendFormat": "{{connection}} limit"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "RSS overhead",
+      "description": "RSS memory beyond what Valkey reports as used. A growing gap points to allocator fragmentation or a memory leak outside the dataset.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "betterdb_memory_used_rss_bytes{connection=~\"$connection\"} - betterdb_memory_used_bytes{connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Fragmentation ratio",
+      "description": "RSS-to-used memory ratio. Sustained values above roughly 1.5 indicate the allocator is holding onto freed memory and a restart or defrag may help.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "betterdb_memory_fragmentation_ratio{connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Operations per second",
+      "description": "Command throughput reported by the server. A sudden drop usually means clients are stalled or the connection is unreachable.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "betterdb_instantaneous_ops_per_sec{connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Keyspace hit rate",
+      "description": "Share of lookups served from existing keys. A falling hit rate means the working set no longer fits in the cache or TTLs are too aggressive.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "100 * rate(betterdb_keyspace_hits_total{connection=~\"$connection\"}[5m]) / clamp_min(rate(betterdb_keyspace_hits_total{connection=~\"$connection\"}[5m]) + rate(betterdb_keyspace_misses_total{connection=~\"$connection\"}[5m]), 0.001)",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "CPU seconds per second",
+      "description": "User and system CPU consumed by the server process. A climbing sys share often signals syscall or context-switch pressure rather than command work.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "rate(betterdb_cpu_user_seconds_total{connection=~\"$connection\"}[5m])",
+          "legendFormat": "{{connection}} user"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "rate(betterdb_cpu_sys_seconds_total{connection=~\"$connection\"}[5m])",
+          "legendFormat": "{{connection}} sys"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Clients",
+      "description": "Connected versus blocked clients. Blocked clients climbing alongside connected clients points to a blocking command backlog (BLPOP, BRPOP, and similar).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "betterdb_connected_clients{connection=~\"$connection\"}",
+          "legendFormat": "{{connection}} connected"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "betterdb_blocked_clients{connection=~\"$connection\"}",
+          "legendFormat": "{{connection}} blocked"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Keys by database",
+      "description": "Key counts per logical database. A steady climb with no matching drop elsewhere suggests missing TTLs or an eviction policy that is not keeping up.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "sum by (connection, db) (betterdb_db_keys{connection=~\"$connection\"})",
+          "legendFormat": "{{connection}} db{{db}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Replication offset",
+      "description": "Byte offset of the replication stream. A stalled offset on a primary with active replicas indicates replication has stopped making progress.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "betterdb_replication_offset{connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Uptime",
+      "description": "Seconds since the server last started. An unexpectedly small value flags a recent restart that may explain a metrics discontinuity.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "betterdb_uptime_in_seconds{connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      }
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Instance info",
+      "description": "Version, role, and OS for each connection at a glance, useful for spotting a version drift or an unexpected replica promotion.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "betterdb_instance_info{connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "includeByName": {
+              "connection": true,
+              "version": true,
+              "role": true,
+              "os": true
+            },
+            "indexByName": {
+              "connection": 0,
+              "version": 1,
+              "role": 2,
+              "os": 3
+            },
+            "excludeByName": {}
+          }
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      }
+    }
+  ]
+}
