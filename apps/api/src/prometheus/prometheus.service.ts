@@ -1414,8 +1414,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   ): void {
     const replication = info.replication;
     const role = replication?.role;
+    const isReplica = role === 'slave' || role === 'replica';
 
-    if (replication === undefined || (role !== 'master' && role !== 'slave')) {
+    if (replication === undefined || (role !== 'master' && !isReplica)) {
       this.clearRoleSpecificReplicationSeries(connLabel);
       return;
     }
@@ -1429,7 +1430,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       if (replication.master_repl_offset) {
         this.replicationOffset.labels(connLabel).set(parseInt(replication.master_repl_offset) || 0);
       }
-    } else if (role === 'slave') {
+    } else {
       this.connectedSlaves.remove(connLabel);
       const masterLinkStatus = replication.master_link_status;
       this.masterLinkUp.labels(connLabel).set(masterLinkStatus === 'up' ? 1 : 0);
@@ -1735,11 +1736,14 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
       await this.updateSlotStatsMetrics(client, connectionId, connLabel, state, epoch);
     } catch (error) {
-      this.runtimeCapabilityTracker.recordFailure(
+      const disabled = this.runtimeCapabilityTracker.recordFailure(
         connectionId,
         'canClusterInfo',
         error instanceof Error ? error : String(error),
       );
+      if (disabled && !this.isSuperseded(connectionId, epoch)) {
+        this.clearSlotSeries(connLabel, state);
+      }
       this.logger.error(`Failed to update cluster metrics for ${connLabel}`, error);
     }
   }

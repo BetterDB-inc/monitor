@@ -193,6 +193,20 @@ describe('PrometheusService vitals gauges', () => {
     expect(text).toContain(`betterdb_master_link_up{connection="${LABEL}"} 1`);
   });
 
+  it('treats role replica like slave', async () => {
+    const { service, client } = buildService();
+    await update(service);
+    client.getInfoParsed.mockResolvedValue(
+      primaryInfo({ replication: { ...REPLICA_REPLICATION, role: 'replica' } }),
+    );
+    await update(service);
+    const text = await service.getMetrics();
+
+    expect(text).toContain(`betterdb_master_link_up{connection="${LABEL}"} 1`);
+    expect(text).toContain(`betterdb_master_last_io_seconds_ago{connection="${LABEL}"} 1`);
+    expect(text).not.toContain(`betterdb_connected_slaves{connection="${LABEL}"}`);
+  });
+
   it('drops role-specific replication series when the role is unknown', async () => {
     const { service, client } = buildService();
     await update(service);
@@ -347,6 +361,20 @@ describe('PrometheusService slot stats', () => {
     return { key_count: keys, expires_count: 0, total_reads: 0, total_writes: 0 };
   }
 
+  async function runClusterInfo(harness: Harness): Promise<void> {
+    const { service, client } = harness;
+    const state = service['getConnectionState']('conn-1');
+    await service['updateClusterMetricsFromInfo'](
+      client as never,
+      { cluster: { cluster_enabled: '1' } } as never,
+      LABEL,
+      'conn-1',
+      state,
+      { host: '10.0.0.1', port: 6379 },
+      service['currentEpoch']('conn-1'),
+    );
+  }
+
   async function runSlotStats(harness: Harness): Promise<void> {
     const { service, client } = harness;
     const state = service['getConnectionState']('conn-1');
@@ -425,6 +453,33 @@ describe('PrometheusService slot stats', () => {
     await runSlotStats(harness);
 
     expect(await harness.service.getMetrics()).not.toContain(`slot="1"`);
+  });
+
+  it('clears slot series as soon as a failure disables cluster info', async () => {
+    const harness = buildService();
+    harness.client.getClusterSlotStats.mockResolvedValueOnce({ '1': slot(50) });
+    await runSlotStats(harness);
+    expect(await harness.service.getMetrics()).toContain(`slot="1"`);
+
+    harness.client.getClusterInfo.mockRejectedValueOnce(new Error('NOPERM'));
+    harness.tracker.recordFailure.mockReturnValueOnce(true);
+    await runClusterInfo(harness);
+
+    expect(await harness.service.getMetrics()).not.toContain(`slot="1"`);
+  });
+
+  it('keeps slot series through a transient cluster info failure', async () => {
+    const harness = buildService();
+    harness.client.getClusterSlotStats.mockResolvedValueOnce({ '1': slot(50) });
+    await runSlotStats(harness);
+
+    harness.client.getClusterInfo.mockRejectedValueOnce(new Error('ETIMEDOUT'));
+    harness.tracker.recordFailure.mockReturnValueOnce(false);
+    await runClusterInfo(harness);
+
+    expect(await harness.service.getMetrics()).toContain(
+      `betterdb_cluster_slot_keys{connection="${LABEL}",slot="1"} 50`,
+    );
   });
 
   it('keeps slot series through a transient failure', async () => {
