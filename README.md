@@ -206,6 +206,7 @@ docker run -d \
 | `DB_TLS` | No | `false` | Set to `true` to connect to the monitored database over TLS (required by managed providers such as Aiven or ElastiCache Serverless) |
 | `STORAGE_TYPE` | No | `memory` | Storage backend: `memory` or `postgres` |
 | `STORAGE_URL` | Conditional | - | PostgreSQL connection URL (required if `STORAGE_TYPE=postgres`) |
+| `STORAGE_SSL_NO_VERIFY` | No | `false` | Connect to PostgreSQL over TLS without verifying the server certificate chain. Use for managed providers (e.g. Aiven) that present their own CA and force `sslmode=require`, when you can't supply `STORAGE_SSL_CA` |
 | `PORT` | No | `3001` | Application HTTP port |
 | `NODE_ENV` | No | `production` | Node environment |
 | `ANOMALY_DETECTION_ENABLED` | No | `true` | Enable anomaly detection |

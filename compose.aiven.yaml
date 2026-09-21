@@ -60,12 +60,13 @@ services:
 
       # --- Audit storage (managed Aiven PostgreSQL) ---
       STORAGE_TYPE: postgres
-      # Aiven managed PostgreSQL uses its own CA. The pg driver now treats
-      # sslmode=require as verify-full, which rejects that CA ("self-signed
-      # certificate in certificate chain"). Use sslmode=no-verify to keep the
-      # connection encrypted without CA verification. To verify the chain
-      # instead, drop ?sslmode=... and set STORAGE_SSL_CA to Aiven's CA cert.
-      STORAGE_URL: postgresql://USER:PASSWORD@betterdb-postgres:5432/defaultdb?sslmode=no-verify
+      # Runtime injects STORAGE_URL from the bound Postgres service (its own CA,
+      # sslmode=require), so a sslmode override in the URL below would be lost.
+      # STORAGE_SSL_NO_VERIFY forces the app to connect over TLS WITHOUT chain
+      # verification, which overrides the injected sslmode. To verify the chain
+      # instead, unset this and set STORAGE_SSL_CA to Aiven's CA cert.
+      STORAGE_SSL_NO_VERIFY: "true"
+      STORAGE_URL: postgresql://USER:PASSWORD@betterdb-postgres:5432/defaultdb
 
       AI_ENABLED: "false"
 

@@ -324,6 +324,15 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
           rejectUnauthorized: true,
           ca,
         };
+      } else if (process.env.STORAGE_SSL_NO_VERIFY === 'true') {
+        // Connect over TLS without verifying the server certificate chain.
+        // Needed for managed providers (e.g. Aiven) that present their own CA
+        // and inject a connection string with sslmode=require — which the pg
+        // driver now treats as verify-full and rejects with "self-signed
+        // certificate in certificate chain". An explicit ssl object overrides
+        // the connection string's sslmode. Prefer STORAGE_SSL_CA when you can
+        // supply the provider's CA and want full chain verification.
+        poolConfig.ssl = { rejectUnauthorized: false };
       }
 
       this.pool = new Pool(poolConfig);
