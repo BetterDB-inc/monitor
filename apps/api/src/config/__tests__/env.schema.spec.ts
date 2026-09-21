@@ -323,6 +323,28 @@ describe('envSchema', () => {
     });
   });
 
+  describe('Prometheus poll interval validation', () => {
+    it('should coerce a numeric poll interval', () => {
+      const result = envSchema.safeParse({ PROMETHEUS_POLL_INTERVAL_MS: '2000' });
+      expect(result.success && result.data.PROMETHEUS_POLL_INTERVAL_MS).toBe(2000);
+    });
+
+    it('should leave the poll interval unset when it is absent', () => {
+      const result = envSchema.safeParse({});
+      expect(result.success && result.data.PROMETHEUS_POLL_INTERVAL_MS).toBeUndefined();
+    });
+
+    it('should reject a poll interval below one second', () => {
+      const result = envSchema.safeParse({ PROMETHEUS_POLL_INTERVAL_MS: '999' });
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject a non-numeric poll interval', () => {
+      const result = envSchema.safeParse({ PROMETHEUS_POLL_INTERVAL_MS: 'soon' });
+      expect(result.success).toBe(false);
+    });
+  });
+
   describe('validateEnv function', () => {
     it('should exit with error for invalid config', () => {
       const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);

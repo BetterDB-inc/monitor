@@ -184,6 +184,7 @@ export const envSchema = z
       .transform((v) => v !== 'false'),
     OTEL_INGEST_TOKEN: z.string().optional(),
 
+    PROMETHEUS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).optional(),
     PROMETHEUS_STALENESS_MS: z.coerce.number().int().min(1000).optional(),
 
     // OTel telemetry export (mirror of Prometheus metrics). No-op unless
