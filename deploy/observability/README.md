@@ -87,10 +87,10 @@ port to the host, and the host doesn't need `valkey-cli` installed.
   script drives memory, ops/sec, hit rate, and client counts.
 - **Query Patterns** — populated by the seed script's slow command and
   oversized request/reply.
-- **Anomalies** — mostly empty on a fresh run. The detectors need a warm
-  rolling baseline before they emit anything, which takes far longer than
-  one seed pass; "Detector buffers" shows the warm-up state in the
-  meantime.
+- **Anomalies** — populated a minute or two after seeding, once the
+  detectors have a rolling baseline; "Detector buffers" shows the warm-up
+  state per detector in the meantime. "Time to limit" stays empty until the
+  forecaster has enough history to project a limit.
 - **Cluster Slots** — empty. The demo runs a standalone Valkey, which has
   no cluster bus and no `CLUSTER SLOT-STATS`; that dashboard needs a
   cluster-mode deployment.

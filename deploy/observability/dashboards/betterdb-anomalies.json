@@ -253,7 +253,7 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "sum by (connection) (betterdb_correlated_groups_by_severity{job=~\"$job\",connection=~\"$connection\"})",
+          "expr": "sum by (connection) (betterdb_correlated_groups_by_pattern{job=~\"$job\",connection=~\"$connection\"})",
           "legendFormat": "{{connection}}"
         }
       ],
