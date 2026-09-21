@@ -1,8 +1,3 @@
-# Monitor/app version. Passed by CI (docker-publish.yml) as --build-arg APP_VERSION
-# and applied to every stage that re-declares `ARG APP_VERSION`. Declared once here
-# as a global ARG (before the first FROM) so the default lives in a single place.
-ARG APP_VERSION=0.1.1
-
 # ============================================
 # Build Stage (shared by both image variants)
 # ============================================
@@ -43,18 +38,6 @@ COPY proprietary ./proprietary
 
 # Create symlink for proprietary node_modules (symlinks don't copy properly)
 RUN ln -sf ../apps/api/node_modules proprietary/node_modules
-
-# Monitor version (baked into the frontend so PostHog events carry the release).
-# Re-declares the global ARG to bring it into this stage, then exposes it to Vite
-# via the VITE_PUBLIC_ prefix so it reaches import.meta.env in the web build.
-ARG APP_VERSION
-ENV VITE_PUBLIC_APP_VERSION=$APP_VERSION
-
-# Registration proxy URL (baked into frontend at build time).
-# Defaults to the canonical www host so the in-app registration form on
-# self-hosted instances reaches the public website proxy out of the box.
-ARG VITE_REGISTRATION_URL=https://www.betterdb.com/api/register
-ENV VITE_REGISTRATION_URL=$VITE_REGISTRATION_URL
 
 # Build api, web, and their dependency graphs (exclude entitlement). The "..."
 # suffix pulls in @betterdb/shared plus the agent-memory dependency chain.
@@ -199,10 +182,6 @@ RUN addgroup --system --gid 1001 nodejs && \
 # redisshake-builder stage with a current Go toolchain so the embedded Go stdlib
 # is patched (the upstream prebuilt release ships an EOL Go 1.21.13 runtime).
 COPY --chmod=755 --from=redisshake-builder /out/redis-shake /usr/local/bin/redis-shake
-
-# Set APP_VERSION from build argument (re-declares the global ARG for this stage)
-ARG APP_VERSION
-ENV APP_VERSION=$APP_VERSION
 
 # Environment defaults common to both variants
 ENV NODE_ENV=production
