@@ -23,6 +23,7 @@ import {
 } from '../common/services/multi-connection-poller';
 import { MetricForecastingService } from '../metric-forecasting/metric-forecasting.service';
 import { ALL_METRIC_KINDS } from '@betterdb/shared';
+import { isCveEnabled } from '../cve/cve.constants';
 import { OtelEventDispatcherService } from '../otel-telemetry/otel-event-dispatcher.service';
 import {
   diffClusterTopology,
@@ -76,6 +77,11 @@ interface ConnectionMetricState {
   // Inference latency labels (per-connection)
   currentInferenceBucketLabels: Set<string>;
   currentInferenceSlaBreachLabels: Set<string>;
+  // Last exported CVE connection label (host:port can change on re-address)
+  lastCveConnLabel: string | null;
+  lastCveFingerprint: string | null;
+  lastCveCheckAt: number;
+  lastCveCheckedLabel: string | null;
 }
 
 @Injectable()
@@ -86,6 +92,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   // Per-connection state tracking
   private perConnectionState = new Map<string, ConnectionMetricState>();
+
+  private static readonly CVE_METRICS_REFRESH_MS = 60_000;
 
   // Per-connection in-flight INFO-metric updates, so the background poller and a
   // /metrics scrape coalesce instead of racing on shared per-connection state.
@@ -217,6 +225,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   // Metric Forecasting
   private metricForecastTimeToLimitSeconds: Gauge;
 
+  // CVE Detection (storage-based, per-connection)
+  private cveFindings: Gauge;
+  private cveKev: Gauge;
+  private cveDatasetStale: Gauge;
+
   constructor(
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
     connectionRegistry: ConnectionRegistry,
@@ -319,6 +332,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         // Inference latency labels
         currentInferenceBucketLabels: new Set(),
         currentInferenceSlaBreachLabels: new Set(),
+        lastCveConnLabel: null,
+        lastCveFingerprint: null,
+        lastCveCheckAt: 0,
+        lastCveCheckedLabel: null,
       });
     }
     return this.perConnectionState.get(connectionId)!;
@@ -695,6 +712,21 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       'Projected seconds until metric reaches configured ceiling.',
       ['metric_kind'],
     );
+
+    // CVE Detection (storage-based, per-connection)
+    this.cveFindings = this.createGauge(
+      'cve_findings',
+      'Current CVE findings by severity from the latest scan',
+      ['severity'],
+    );
+    this.cveKev = this.createGauge(
+      'cve_kev',
+      'Current KEV-exploited CVE findings from the latest scan',
+    );
+    this.cveDatasetStale = this.createGauge(
+      'cve_dataset_stale',
+      'Whether the CVE scan is partial or sources are missing: 1 stale, 0 ok',
+    );
   }
 
   /**
@@ -729,6 +761,110 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     await this.updateSlowlogMetrics(connectionId, connLabel, state);
     await this.updateCommandlogMetrics(connectionId, connLabel, state);
     await this.updateMetricForecastMetrics(connectionId, connLabel);
+    await this.updateCveMetrics(connectionId, connLabel);
+  }
+
+  private async updateCveMetrics(connectionId: string, connLabel: string): Promise<void> {
+    const state = this.getConnectionState(connectionId);
+    const now = Date.now();
+    if (isCveEnabled() === false) {
+      if (state.lastCveConnLabel) {
+        this.removeCveSeries(state.lastCveConnLabel);
+        state.lastCveConnLabel = null;
+      } else {
+        this.removeCveSeries(connLabel);
+      }
+      state.lastCveFingerprint = null;
+      state.lastCveCheckAt = 0;
+      state.lastCveCheckedLabel = null;
+      return;
+    }
+    // Re-addressing a connection orphans the old host:port series: drop it
+    // before exporting under the new label.
+    if (state.lastCveConnLabel && state.lastCveConnLabel !== connLabel) {
+      this.removeCveSeries(state.lastCveConnLabel);
+      state.lastCveConnLabel = null;
+      state.lastCveFingerprint = null;
+      state.lastCveCheckAt = 0;
+    }
+    if (
+      state.lastCveCheckedLabel === connLabel &&
+      now - state.lastCveCheckAt < PrometheusService.CVE_METRICS_REFRESH_MS
+    ) {
+      return;
+    }
+    state.lastCveCheckAt = now;
+    state.lastCveCheckedLabel = connLabel;
+    try {
+      const scan = await this.storage.getCveScanResult(connectionId);
+
+      if (this.perConnectionState.get(connectionId) !== state) {
+        return;
+      }
+      if (this.getConnectionLabel(connectionId) !== connLabel) {
+        return;
+      }
+      if (!scan) {
+        // No scan yet: drop any previously exported series so a deleted or
+        // never-scanned connection does not page forever on stale values.
+        if (state.lastCveConnLabel) {
+          this.removeCveSeries(state.lastCveConnLabel);
+          state.lastCveConnLabel = null;
+        } else {
+          this.removeCveSeries(connLabel);
+        }
+        state.lastCveFingerprint = null;
+        return;
+      }
+      if (
+        state.lastCveFingerprint === scan.fingerprint &&
+        state.lastCveConnLabel === connLabel
+      ) {
+        return;
+      }
+      const totals = { critical: 0, high: 0, medium: 0, low: 0 };
+      let kev = 0;
+      for (const node of scan.nodes) {
+        totals.critical += node.severityCounts.critical;
+        totals.high += node.severityCounts.high;
+        totals.medium += node.severityCounts.medium;
+        totals.low += node.severityCounts.low;
+        for (const finding of node.findings) {
+          if (finding.advisory.knownExploited === true) {
+            kev += 1;
+          }
+        }
+      }
+      for (const severity of ['critical', 'high', 'medium', 'low'] as const) {
+        this.cveFindings.labels(connLabel, severity).set(totals[severity]);
+      }
+      this.cveKev.labels(connLabel).set(kev);
+      const missingSources = scan.missingSources?.length ?? 0;
+      this.cveDatasetStale
+        .labels(connLabel)
+        .set(scan.partial || missingSources > 0 ? 1 : 0);
+      state.lastCveConnLabel = connLabel;
+      state.lastCveFingerprint = scan.fingerprint;
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.logger.debug(`CVE metrics scrape skipped for ${connectionId}: ${reason}`);
+    }
+  }
+
+  /**
+   * Drop all CVE gauge children for a connection label so removed or
+   * re-addressed connections stop exporting (and alerting on) stale values.
+   */
+  private removeCveSeries(connLabel: string): void {
+    try {
+      for (const severity of ['critical', 'high', 'medium', 'low'] as const) {
+        this.cveFindings.remove(connLabel, severity);
+      }
+      this.cveKev.remove(connLabel);
+      this.cveDatasetStale.remove(connLabel);
+    } catch {
+      // Best effort: a missing child must never fail a scrape.
+    }
   }
 
   private async updateMetricForecastMetrics(
@@ -1933,6 +2069,17 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
    * Clean up metrics for a removed connection
    */
   cleanupConnectionMetrics(connectionId: string): void {
+    const state = this.perConnectionState.get(connectionId);
+    if (state?.lastCveConnLabel) {
+      this.removeCveSeries(state.lastCveConnLabel);
+    } else {
+      try {
+        this.removeCveSeries(this.getConnectionLabel(connectionId));
+      } catch {
+        // Registry lookup can fail for an already-removed connection; the
+        // tracked lastCveConnLabel path above covers the common case.
+      }
+    }
     this.perConnectionState.delete(connectionId);
     // Drop any in-flight metric update so a reused connection ID cannot join
     // stale work. The promise itself still settles; its compare-and-delete

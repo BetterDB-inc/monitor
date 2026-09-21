@@ -17,7 +17,7 @@ import {
 } from '../components/ui/table';
 
 type StatusFilter = 'all' | 'up' | 'down' | 'unknown';
-type SortKey = 'name' | 'memory' | 'ops';
+type SortKey = 'name' | 'memory' | 'ops' | 'cve';
 
 const OVERALL_BADGE: Record<FleetOverallStatus, 'success' | 'warning' | 'destructive' | 'secondary'> = {
   healthy: 'success',
@@ -82,6 +82,11 @@ export function Fleet() {
           return (b.memPct ?? -1) - (a.memPct ?? -1);
         case 'ops':
           return (b.opsPerSec ?? -1) - (a.opsPerSec ?? -1);
+        case 'cve':
+          return (
+            (b.cve?.critical ?? -1) - (a.cve?.critical ?? -1) ||
+            (b.cve?.kev ?? -1) - (a.cve?.kev ?? -1)
+          );
         case 'name':
         default:
           return a.name.localeCompare(b.name);
@@ -172,6 +177,7 @@ export function Fleet() {
           <option value="name">Sort: name</option>
           <option value="memory">Sort: memory %</option>
           <option value="ops">Sort: ops/sec</option>
+          <option value="cve">Sort: CVEs</option>
         </select>
       </div>
 
@@ -189,6 +195,7 @@ export function Fleet() {
             <TableRow>
               <TableHead>Status</TableHead>
               <TableHead>Instance</TableHead>
+              <TableHead>CVEs</TableHead>
               <TableHead>Memory</TableHead>
               <TableHead>Ops/sec</TableHead>
               <TableHead>Clients</TableHead>
@@ -235,6 +242,34 @@ export function Fleet() {
                   </div>
                   {row.error && (
                     <div className="text-xs text-destructive truncate max-w-56">{row.error}</div>
+                  )}
+                </TableCell>
+                <TableCell>
+                  {row.cve ? (
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      <Badge
+                        data-testid={`fleet-cve-${row.connectionId}`}
+                        variant={row.cve.critical > 0 ? 'destructive' : 'outline'}
+                      >
+                        {row.cve.critical} crit
+                      </Badge>
+                      {row.cve.kev > 0 ? (
+                        <Badge data-testid={`fleet-kev-${row.connectionId}`} variant="destructive">
+                          KEV
+                        </Badge>
+                      ) : null}
+                      {row.cve.stale ? (
+                        <span
+                          data-testid={`fleet-cve-stale-${row.connectionId}`}
+                          className="text-xs text-muted-foreground"
+                          title="Incomplete scan or missing sources — counts are a floor"
+                        >
+                          stale
+                        </span>
+                      ) : null}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">—</span>
                   )}
                 </TableCell>
                 <TableCell>

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { CveSeverityCounts, ScannedNode } from '@betterdb/shared';
+import { CveAlertBanner } from '../components/pages/security/CveAlertBanner';
 import { DriftBanner } from '../components/pages/security/DriftBanner';
 import { DriftFindingsCard } from '../components/pages/security/DriftFindingsCard';
 import { EmptyScanCard } from '../components/pages/security/EmptyScanCard';
@@ -180,6 +181,7 @@ export function Security() {
   return (
     <div className="space-y-6">
       {header}
+      <CveAlertBanner result={result} />
       <ScanCaveats caveats={caveats} />
       {drifted ? (
         <>

@@ -108,15 +108,15 @@ export class WebhookDispatcherService {
 
   /**
    * Dispatch a webhook event to all subscribed webhooks
-   * @param eventType The type of event to dispatch
-   * @param data Event data payload
-   * @param connectionId Optional connection ID to filter webhooks and include in payload
+   * @returns true when every delivery succeeded, was skipped, or is owned
+   * by the retry processor (RETRYING); false only for terminal failures
+   * nothing else will retry. Never throws for delivery failures.
    */
   async dispatchEvent(
     eventType: WebhookEventType,
     data: Record<string, unknown>,
     connectionId?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       // Get webhooks subscribed to this event, filtered by connectionId
       // This returns webhooks that are either:
@@ -128,7 +128,7 @@ export class WebhookDispatcherService {
         this.logger.debug(
           `No webhooks subscribed to event: ${eventType}${connectionId ? ` for connection ${connectionId}` : ''}`,
         );
-        return;
+        return true;
       }
 
       this.logger.log(
@@ -138,14 +138,33 @@ export class WebhookDispatcherService {
       // Enrich data with connectionId if provided
       const enrichedData = connectionId ? { ...data, connectionId } : data;
 
-      // Dispatch to all webhooks in parallel
-      await Promise.allSettled(
+      const settled = await Promise.allSettled(
         webhooks.map((webhook) =>
           this.dispatchToWebhook(webhook, eventType, enrichedData, connectionId),
         ),
       );
+
+      const failed = settled.filter((result) => {
+        if (result.status === 'rejected') {
+          return true;
+        }
+        return (
+          result.value === DeliveryStatus.FAILED ||
+          result.value === DeliveryStatus.DEAD_LETTER
+        );
+      });
+
+      if (failed.length > 0) {
+        this.logger.warn(
+          `Webhook dispatch for ${eventType} had ${failed.length}/${settled.length} failed deliveries`,
+        );
+        return false;
+      }
+
+      return true;
     } catch (error) {
       this.logger.error(`Failed to dispatch event ${eventType}:`, error);
+      return false;
     }
   }
 
@@ -328,21 +347,18 @@ export class WebhookDispatcherService {
 
   /**
    * Dispatch event to a single webhook
-   * @param webhook The webhook to dispatch to
-   * @param eventType The event type
-   * @param data Event data payload
-   * @param connectionId Optional connection ID to include in payload
+   * @returns The delivery status, or null when skipped (disabled).
    */
   private async dispatchToWebhook(
     webhook: Webhook,
     eventType: WebhookEventType,
     data: Record<string, unknown>,
     connectionId?: string,
-  ): Promise<void> {
+  ): Promise<DeliveryStatus | null> {
     // Skip if webhook is disabled
     if (!webhook.enabled) {
       this.logger.debug(`Skipping disabled webhook: ${webhook.id}`);
-      return;
+      return null;
     }
 
     const instanceInfo = this.getInstanceInfo(connectionId);
@@ -368,14 +384,18 @@ export class WebhookDispatcherService {
       connectionId,
     });
 
-    // Send webhook immediately
-    await this.sendWebhook(webhook, delivery.id, payload);
+    return this.sendWebhook(webhook, delivery.id, payload);
   }
 
   /**
    * Send webhook HTTP request
+   * @returns The status for this attempt (SUCCESS only on 2xx).
    */
-  async sendWebhook(webhook: Webhook, deliveryId: string, payload: WebhookPayload): Promise<void> {
+  async sendWebhook(
+    webhook: Webhook,
+    deliveryId: string,
+    payload: WebhookPayload,
+  ): Promise<DeliveryStatus> {
     const startTime = Date.now();
     let status: DeliveryStatus;
     let statusCode: number | undefined;
@@ -475,6 +495,8 @@ export class WebhookDispatcherService {
       responseBody: responseBody?.substring(0, maxResponseBodyBytes),
       durationMs,
     });
+
+    return status;
   }
 
   /**

@@ -1,5 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
+  FleetCveSummary,
   FleetInstanceSummary,
   FleetOverallStatus,
   FleetSummaryResponse,
@@ -8,6 +9,7 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { HealthService } from '../health/health.service';
 import { MetricsService } from '../metrics/metrics.service';
 import type { InfoResponse } from '../common/types/metrics.types';
+import type { StoragePort } from '../common/interfaces/storage-port.interface';
 
 /**
  * Fleet-wide rollup for the multi-instance "are we green?" view.
@@ -22,6 +24,7 @@ export class FleetService {
   private readonly logger = new Logger(FleetService.name);
   private static readonly CACHE_TTL_MS = 15_000;
   private static readonly PER_INSTANCE_TIMEOUT_MS = 5_000;
+  private static readonly CVE_TIMEOUT_MS = 1_000;
 
   private cached: { expiresAt: number; payload: FleetSummaryResponse } | null = null;
   private readonly lastSeenUp = new Map<string, number>();
@@ -30,6 +33,7 @@ export class FleetService {
     private readonly connectionRegistry: ConnectionRegistry,
     private readonly healthService: HealthService,
     private readonly metricsService: MetricsService,
+    @Optional() @Inject('STORAGE_CLIENT') private readonly storage?: StoragePort,
   ) {}
 
   async getSummary(): Promise<FleetSummaryResponse> {
@@ -95,6 +99,7 @@ export class FleetService {
         replicationRole: null,
         lastSeen: this.lastSeenUp.get(conn.id) ?? null,
         error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+        cve: null,
       };
     });
 
@@ -116,6 +121,7 @@ export class FleetService {
     port: number,
     isCancelled: () => boolean = () => false,
   ): Promise<FleetInstanceSummary> {
+    const cvePromise = this.getCveSummaryWithTimeout(connectionId);
     const [healthResult, infoResult] = await Promise.allSettled([
       this.healthService.getHealth(connectionId),
       this.metricsService.getInfoParsed(undefined, connectionId),
@@ -127,7 +133,15 @@ export class FleetService {
           ? healthResult.reason.message
           : String(healthResult.reason);
       this.logger.debug(`Fleet health probe failed for ${connectionId}: ${error}`);
-      return this.emptySummary(connectionId, name, host, port, 'unknown', error);
+      return this.emptySummary(
+        connectionId,
+        name,
+        host,
+        port,
+        'unknown',
+        error,
+        await cvePromise,
+      );
     }
 
     const health = healthResult.value;
@@ -140,6 +154,7 @@ export class FleetService {
         port,
         health.status === 'waiting' ? 'unknown' : 'down',
         error,
+        await cvePromise,
       );
     }
 
@@ -165,6 +180,8 @@ export class FleetService {
         ? (memoryUsedBytes / memoryMaxBytes) * 100
         : null;
 
+    const cve = await cvePromise;
+
     return {
       connectionId,
       name,
@@ -179,7 +196,52 @@ export class FleetService {
       connectedClients: toNumberOrNull(info?.clients?.connected_clients),
       replicationRole: info?.replication?.role ?? null,
       lastSeen: now,
+      cve,
     };
+  }
+
+  private getCveSummaryWithTimeout(connectionId: string): Promise<FleetCveSummary | null> {
+    return this.withTimeout(
+      this.getCveSummary(connectionId),
+      FleetService.CVE_TIMEOUT_MS,
+      `Timed out reading CVE summary for ${connectionId}`,
+    ).catch((error: unknown) => {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.logger.debug(`Fleet CVE rollup degraded for ${connectionId}: ${reason}`);
+      return null;
+    });
+  }
+
+  private async getCveSummary(connectionId: string): Promise<FleetCveSummary | null> {
+    if (!this.storage) {
+      return null;
+    }
+    try {
+      const scan = await this.storage.getCveScanResult(connectionId);
+      if (!scan) {
+        return null;
+      }
+      let critical = 0;
+      let kev = 0;
+      for (const node of scan.nodes) {
+        critical += node.severityCounts.critical;
+        for (const finding of node.findings) {
+          if (finding.advisory.knownExploited === true) {
+            kev += 1;
+          }
+        }
+      }
+      return {
+        critical,
+        kev,
+        fingerprint: scan.fingerprint,
+        stale: scan.partial || (scan.missingSources?.length ?? 0) > 0,
+      };
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.logger.debug(`Fleet CVE rollup failed for ${connectionId}: ${reason}`);
+      return null;
+    }
   }
 
   private emptySummary(
@@ -189,6 +251,7 @@ export class FleetService {
     port: number,
     status: 'down' | 'unknown',
     error: string,
+    cve: FleetCveSummary | null = null,
   ): FleetInstanceSummary {
     return {
       connectionId,
@@ -205,6 +268,7 @@ export class FleetService {
       replicationRole: null,
       lastSeen: this.lastSeenUp.get(connectionId) ?? null,
       error,
+      cve,
     };
   }
 
