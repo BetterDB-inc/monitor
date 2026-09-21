@@ -1,0 +1,435 @@
+{
+  "uid": "betterdb-cluster-slots",
+  "title": "BetterDB · Cluster Slots",
+  "tags": ["betterdb", "valkey"],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "connection",
+        "label": "Connection",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "betterdb-prometheus"
+        },
+        "query": {
+          "query": "label_values(betterdb_memory_used_bytes, connection)",
+          "refId": "connection"
+        },
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Cluster mode",
+      "description": "Whether the connection is running in cluster mode or standalone.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "Standalone" },
+                "1": { "text": "Cluster" }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "betterdb_cluster_enabled{connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Slots assigned",
+      "description": "Number of hash slots assigned to the cluster.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "betterdb_cluster_slots_assigned{connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Slots OK",
+      "description": "Number of hash slots currently in the OK state.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "betterdb_cluster_slots_ok{connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Slots failing",
+      "description": "Slots currently in the FAIL or PFAIL state. Any non-zero value means part of the keyspace is unreachable.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "betterdb_cluster_slots_fail{connection=~\"$connection\"} + betterdb_cluster_slots_pfail{connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Known nodes",
+      "description": "Number of nodes known to the cluster bus.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "betterdb_cluster_known_nodes{connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 0
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Cluster size",
+      "description": "Number of master nodes serving the keyspace.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "betterdb_cluster_size{connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      }
+    },
+    {
+      "id": 7,
+      "type": "heatmap",
+      "title": "Key distribution across slots",
+      "description": "Distribution of key counts over hash slots per time bucket, which makes slot skew visible at a glance.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "options": {
+        "calculate": true,
+        "calculation": {
+          "xBuckets": {
+            "mode": "size",
+            "value": "1m"
+          }
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "betterdb_cluster_slot_keys{connection=~\"$connection\"}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      }
+    },
+    {
+      "id": 8,
+      "type": "barchart",
+      "title": "Hottest slots by keys",
+      "description": "The twenty slots holding the most keys right now, answering which slot the heatmap's skew belongs to.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "topk(20, betterdb_cluster_slot_keys{connection=~\"$connection\"})",
+          "legendFormat": "slot {{slot}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 12
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Slot read rate",
+      "description": "Read throughput for the ten busiest slots, useful for spotting a hot key range under read pressure.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "topk(10, rate(betterdb_cluster_slot_reads_total{connection=~\"$connection\"}[5m]))",
+          "legendFormat": "slot {{slot}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Slot write rate",
+      "description": "Write throughput for the ten busiest slots, useful for spotting a hot key range under write pressure.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "topk(10, rate(betterdb_cluster_slot_writes_total{connection=~\"$connection\"}[5m]))",
+          "legendFormat": "slot {{slot}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      }
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Slots with most volatile keys",
+      "description": "The twenty slots with the most keys carrying a TTL, useful for judging expiration pressure per slot.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "betterdb-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "betterdb-prometheus"
+          },
+          "expr": "topk(20, betterdb_cluster_slot_expires{connection=~\"$connection\"})",
+          "legendFormat": "slot {{slot}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      }
+    }
+  ]
+}

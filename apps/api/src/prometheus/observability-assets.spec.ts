@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { PrometheusService } from './prometheus.service';
@@ -148,7 +148,12 @@ function allPanels(dashboard: Dashboard): DashboardPanel[] {
 }
 
 describe('Grafana dashboard pack', () => {
-  const files = ['betterdb-instance-vitals.json', 'betterdb-query-patterns.json'];
+  const files = [
+    'betterdb-instance-vitals.json',
+    'betterdb-query-patterns.json',
+    'betterdb-cluster-slots.json',
+    'betterdb-anomalies.json',
+  ];
 
   it.each(files)('%s declares the shared contract', (file) => {
     const dashboard = loadDashboard(file);
@@ -193,5 +198,11 @@ describe('Grafana dashboard pack', () => {
     for (const target of targets) {
       expect(target.expr).toContain('connection=~"$connection"');
     }
+  });
+
+  it('provisions every dashboard file in the directory', () => {
+    const onDisk = readdirSync(DASHBOARD_DIR).filter((file) => file.endsWith('.json'));
+
+    expect(onDisk.sort()).toEqual([...files].sort());
   });
 });
