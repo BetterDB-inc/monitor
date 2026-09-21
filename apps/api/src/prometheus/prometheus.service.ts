@@ -1412,35 +1412,35 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     connectionId: string,
     config: { host: string; port: number } | null,
   ): void {
-    if (!info.replication) return;
+    const replication = info.replication;
+    const role = replication?.role;
 
-    const role = info.replication.role;
+    if (replication === undefined || (role !== 'master' && role !== 'slave')) {
+      this.clearRoleSpecificReplicationSeries(connLabel);
+      return;
+    }
 
     if (role === 'master') {
       this.masterLinkUp.remove(connLabel);
       this.masterLastIoSecondsAgo.remove(connLabel);
       this.connectedSlaves
         .labels(connLabel)
-        .set(parseInt(info.replication.connected_slaves || '0') || 0);
-      if (info.replication.master_repl_offset) {
-        this.replicationOffset
-          .labels(connLabel)
-          .set(parseInt(info.replication.master_repl_offset) || 0);
+        .set(parseInt(replication.connected_slaves || '0') || 0);
+      if (replication.master_repl_offset) {
+        this.replicationOffset.labels(connLabel).set(parseInt(replication.master_repl_offset) || 0);
       }
     } else if (role === 'slave') {
       this.connectedSlaves.remove(connLabel);
-      const masterLinkStatus = info.replication.master_link_status;
+      const masterLinkStatus = replication.master_link_status;
       this.masterLinkUp.labels(connLabel).set(masterLinkStatus === 'up' ? 1 : 0);
 
-      const lastIoSecondsAgo = parseInt(info.replication.master_last_io_seconds_ago ?? '') || 0;
-      if (info.replication.master_last_io_seconds_ago) {
+      const lastIoSecondsAgo = parseInt(replication.master_last_io_seconds_ago ?? '') || 0;
+      if (replication.master_last_io_seconds_ago) {
         this.masterLastIoSecondsAgo.labels(connLabel).set(lastIoSecondsAgo);
       }
 
-      if (info.replication.slave_repl_offset) {
-        this.replicationOffset
-          .labels(connLabel)
-          .set(parseInt(info.replication.slave_repl_offset) || 0);
+      if (replication.slave_repl_offset) {
+        this.replicationOffset.labels(connLabel).set(parseInt(replication.slave_repl_offset) || 0);
       }
 
       // Webhook dispatch for replication.lag
@@ -1459,6 +1459,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           });
       }
     }
+  }
+
+  private clearRoleSpecificReplicationSeries(connLabel: string): void {
+    this.connectedSlaves.remove(connLabel);
+    this.masterLinkUp.remove(connLabel);
+    this.masterLastIoSecondsAgo.remove(connLabel);
   }
 
   private updateKeyspaceMetricsFromInfo(

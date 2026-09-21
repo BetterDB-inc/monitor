@@ -193,6 +193,49 @@ describe('PrometheusService vitals gauges', () => {
     expect(text).toContain(`betterdb_master_link_up{connection="${LABEL}"} 1`);
   });
 
+  it('drops role-specific replication series when the role is unknown', async () => {
+    const { service, client } = buildService();
+    await update(service);
+    client.getInfoParsed.mockResolvedValue(
+      primaryInfo({ replication: { role: 'unknown', connected_slaves: '1' } }),
+    );
+    await update(service);
+    const text = await service.getMetrics();
+
+    expect(text).not.toContain(`betterdb_connected_slaves{connection="${LABEL}"}`);
+    expect(text).not.toContain(`betterdb_master_link_up{connection="${LABEL}"}`);
+    expect(text).not.toContain(`betterdb_master_last_io_seconds_ago{connection="${LABEL}"}`);
+  });
+
+  it('drops role-specific replication series when the section is absent', async () => {
+    const { service, client } = buildService();
+    client.getInfoParsed.mockResolvedValue(primaryInfo({ replication: REPLICA_REPLICATION }));
+    await update(service);
+    const withoutReplication = primaryInfo();
+    delete withoutReplication.replication;
+    client.getInfoParsed.mockResolvedValue(withoutReplication);
+    await update(service);
+    const text = await service.getMetrics();
+
+    expect(text).not.toContain(`betterdb_master_link_up{connection="${LABEL}"}`);
+    expect(text).not.toContain(`betterdb_master_last_io_seconds_ago{connection="${LABEL}"}`);
+    expect(text).not.toContain(`betterdb_connected_slaves{connection="${LABEL}"}`);
+  });
+
+  it('omits keyspace and persistence gauges when the instance withholds the sections', async () => {
+    const { service, client } = buildService();
+    const withoutSections = primaryInfo();
+    delete withoutSections.keyspace;
+    delete withoutSections.persistence;
+    client.getInfoParsed.mockResolvedValue(withoutSections);
+    await update(service);
+    const text = await service.getMetrics();
+
+    expect(text).not.toContain(`betterdb_keyspace_keys{connection="${LABEL}"}`);
+    expect(text).not.toContain(`betterdb_rdb_last_bgsave_ok{connection="${LABEL}"}`);
+    expect(text).toContain(`betterdb_memory_used_bytes{connection="${LABEL}"}`);
+  });
+
   it('drops replica-only replication series after promotion', async () => {
     const { service, client } = buildService();
     client.getInfoParsed.mockResolvedValue(primaryInfo({ replication: REPLICA_REPLICATION }));
