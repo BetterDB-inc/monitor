@@ -216,13 +216,32 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async initialize(): Promise<void> {
     try {
-      // Issue #11: Properly type poolConfig instead of using 'any'
-      const poolConfig: PoolConfig = {
-        connectionString: this.config.connectionString,
-      };
-
       // Enable SSL if STORAGE_SSL_CA is set (URL or file path)
       const sslCa = process.env.STORAGE_SSL_CA;
+
+      // Managed providers (e.g. Aiven) inject a connection string with
+      // sslmode=require and present their own CA. pg treats sslmode=require as
+      // verify-full and rejects the self-signed chain. When STORAGE_SSL_NO_VERIFY
+      // is set (and no CA is supplied), force sslmode=no-verify ON THE CONNECTION
+      // STRING itself. An explicit `ssl` option does NOT work here: pg's
+      // ConnectionParameters overwrites it with the parsed connection string
+      // (Object.assign(config, parse(connectionString))), so only sslmode in the
+      // string is honored (pg maps no-verify -> { rejectUnauthorized: false }).
+      let connectionString = this.config.connectionString;
+      if (!sslCa && process.env.STORAGE_SSL_NO_VERIFY === 'true') {
+        try {
+          const parsed = new URL(connectionString);
+          parsed.searchParams.set('sslmode', 'no-verify');
+          connectionString = parsed.toString();
+        } catch {
+          // Not a parseable URL (e.g. a key=value DSN); leave it unchanged.
+        }
+      }
+
+      // Issue #11: Properly type poolConfig instead of using 'any'
+      const poolConfig: PoolConfig = {
+        connectionString,
+      };
 
       if (sslCa) {
         let ca: string;
@@ -324,15 +343,6 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
           rejectUnauthorized: true,
           ca,
         };
-      } else if (process.env.STORAGE_SSL_NO_VERIFY === 'true') {
-        // Connect over TLS without verifying the server certificate chain.
-        // Needed for managed providers (e.g. Aiven) that present their own CA
-        // and inject a connection string with sslmode=require — which the pg
-        // driver now treats as verify-full and rejects with "self-signed
-        // certificate in certificate chain". An explicit ssl object overrides
-        // the connection string's sslmode. Prefer STORAGE_SSL_CA when you can
-        // supply the provider's CA and want full chain verification.
-        poolConfig.ssl = { rejectUnauthorized: false };
       }
 
       this.pool = new Pool(poolConfig);
