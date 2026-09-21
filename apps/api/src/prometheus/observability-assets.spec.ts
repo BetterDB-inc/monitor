@@ -259,6 +259,7 @@ describe('Grafana dashboard pack', () => {
   it.each(files)('%s asks for table frames on every table panel', (file) => {
     const tables = allPanels(loadDashboard(file)).filter((panel) => panel.type === 'table');
 
+    expect(tables.length).toBeGreaterThan(0);
     for (const panel of tables) {
       expect(panel.targets?.length).toBeGreaterThan(0);
       for (const target of panel.targets ?? []) {
@@ -315,7 +316,7 @@ describe('demo stack', () => {
     );
   });
 
-  it('provisions the datasource uid the dashboards query', () => {
+  it('provisions a default Prometheus datasource for the dashboards', () => {
     const datasource = parseYaml(
       readFileSync(path.join(DEMO_DIR, 'grafana/provisioning/datasources/prometheus.yaml'), 'utf8'),
     ) as { datasources: Array<{ uid: string; url: string; isDefault: boolean }> };
