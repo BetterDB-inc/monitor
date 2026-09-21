@@ -5229,6 +5229,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const byMetric: Record<string, number> = {};
     const unresolvedBySeverity: Record<string, number> = { info: 0, warning: 0, critical: 0 };
     const byPattern: Record<string, number> = {};
+    const groupsBySeverity: Record<string, number> = { info: 0, warning: 0, critical: 0 };
 
     for (const a of this.recentAnomalies) {
       if (a.timestamp < oneHourAgo) continue;
@@ -5239,13 +5240,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     }
 
     for (const g of this.recentGroups) {
-      if (g.timestamp >= oneHourAgo) byPattern[g.pattern] = (byPattern[g.pattern] ?? 0) + 1;
+      if (g.timestamp < oneHourAgo) continue;
+      byPattern[g.pattern] = (byPattern[g.pattern] ?? 0) + 1;
+      groupsBySeverity[g.severity] = (groupsBySeverity[g.severity] ?? 0) + 1;
     }
 
     this.prometheusService.updateAnomalySummary({
       bySeverity,
       byMetric,
       byPattern,
+      groupsBySeverity,
       unresolvedBySeverity,
     });
 
