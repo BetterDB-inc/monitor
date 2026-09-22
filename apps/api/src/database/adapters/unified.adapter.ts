@@ -329,6 +329,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     return this.capabilities;
   }
 
+  async refreshCapabilities(): Promise<void> {
+    await this.detectCapabilities();
+  }
+
   private async detectCapabilities(): Promise<void> {
     const info = await this.getInfo(['server']);
     const version = InfoParser.getVersion(info);
