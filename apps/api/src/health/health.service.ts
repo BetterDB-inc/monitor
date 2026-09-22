@@ -68,6 +68,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
 
   protected onConnectionRemoved(connectionId: string): void {
     this.instanceUpStates.delete(connectionId);
+    this.reconnectLocks.delete(connectionId);
     this.logger.debug(`Cleaned up health state for removed connection: ${connectionId}`);
   }
 
