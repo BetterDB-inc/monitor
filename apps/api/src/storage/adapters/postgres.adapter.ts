@@ -1,4 +1,5 @@
 import { Pool, PoolConfig } from 'pg';
+import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
 import { randomUUID } from 'crypto';
 import { parseSshTunnel } from '@betterdb/shared';
@@ -227,10 +228,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       // carries. We therefore have to express SSL intent IN the connection
       // string, and normalize sslmode based on how we intend to verify:
       //   - CA supplied (STORAGE_SSL_CA): strip sslmode so pg does not clobber
-      //     the { rejectUnauthorized: true, ca } option set below — that gives
+      //     the { rejectUnauthorized: true, ca } option set below, giving
       //     full chain + hostname verification against the provided CA.
       //   - else no-verify opt-in (STORAGE_SSL_NO_VERIFY): set sslmode=no-verify
-      //     (pg maps it to { rejectUnauthorized: false }) — TLS without CA
+      //     (pg maps it to { rejectUnauthorized: false }), i.e. TLS without CA
       //     verification, matching Aiven's own default sslmode=require posture.
       //   - else leave the string untouched.
       let connectionString = this.config.connectionString;
@@ -239,7 +240,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         if (sslCa) {
           parsed.searchParams.delete('sslmode');
           connectionString = parsed.toString();
-        } else if (process.env.STORAGE_SSL_NO_VERIFY === 'true') {
+        } else if (isTrueFlag(process.env.STORAGE_SSL_NO_VERIFY)) {
           parsed.searchParams.set('sslmode', 'no-verify');
           connectionString = parsed.toString();
         }

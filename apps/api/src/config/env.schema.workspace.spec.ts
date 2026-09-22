@@ -41,3 +41,21 @@ describe('workspace env vars', () => {
     expect(envSchema.safeParse({ POSTHOG_HOST: 'not a url' }).success).toBe(false);
   });
 });
+
+describe('TLS boolean flags trim whitespace', () => {
+  // Regression: these flags used `=== 'true'`, so a trailing newline from a
+  // secret store (e.g. "true\n") silently meant off. They now go through
+  // isTrueFlag, which trims.
+  it('DB_TLS defaults to false and accepts whitespace-padded true', () => {
+    expect(envSchema.parse({}).DB_TLS).toBe(false);
+    expect(envSchema.parse({ DB_TLS: 'true' }).DB_TLS).toBe(true);
+    expect(envSchema.parse({ DB_TLS: ' true\n' }).DB_TLS).toBe(true);
+    expect(envSchema.parse({ DB_TLS: 'false' }).DB_TLS).toBe(false);
+  });
+
+  it('STORAGE_SSL_NO_VERIFY defaults to false and accepts whitespace-padded true', () => {
+    expect(envSchema.parse({}).STORAGE_SSL_NO_VERIFY).toBe(false);
+    expect(envSchema.parse({ STORAGE_SSL_NO_VERIFY: 'true' }).STORAGE_SSL_NO_VERIFY).toBe(true);
+    expect(envSchema.parse({ STORAGE_SSL_NO_VERIFY: ' true\n' }).STORAGE_SSL_NO_VERIFY).toBe(true);
+  });
+});

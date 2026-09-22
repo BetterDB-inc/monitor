@@ -81,9 +81,15 @@ async function bootstrap(): Promise<void> {
   }
 
   // Type assertion required due to NestJS/Fastify adapter version mismatch during transition
+  // abortOnError:false makes Nest rethrow provider-lookup failures instead of running the
+  // default ExceptionsZone teardown (process.exit(1)). That lets the AgentGateway resolution
+  // below survive via its try/catch even in the edge case where the agent module fails to
+  // load in workspace-enabled mode (it logs a warning and keeps booting, so the provider is
+  // absent) rather than crash-looping the whole app.
   const app = (await (NestFactory.create as Function)(
     AppModule,
     fastifyAdapter,
+    { abortOnError: false },
   )) as NestFastifyApplication;
 
   // Register cloud auth middleware at Fastify level BEFORE any other middleware
