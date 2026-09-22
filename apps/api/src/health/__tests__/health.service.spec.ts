@@ -122,10 +122,19 @@ describe('HealthService detailed health', () => {
     expect(health.database.version).toBe('7.2.0');
   });
 
-  it('returns disconnected without down edge while reconnect is still pending', async () => {
+  it('emits the down edge even while reconnect is still pending', async () => {
     client.isConnected.mockReturnValue(false);
     client.connect.mockReturnValue(new Promise(() => {}));
-    const service = build(false);
+    const webhooks = { dispatchHealthChange: jest.fn().mockResolvedValue(undefined) };
+    const otelEvents = { dispatch: jest.fn() };
+    const service = new HealthService(
+      registry,
+      tracker,
+      webhooks as unknown as WebhookDispatcherService,
+      undefined,
+      undefined,
+      otelEvents as unknown as OtelEventDispatcherService,
+    );
     (service as unknown as { RECONNECT_TIMEOUT_MS: number }).RECONNECT_TIMEOUT_MS = 50;
     const [first, second] = await Promise.all([
       service.getHealth('conn-1'),
@@ -133,9 +142,11 @@ describe('HealthService detailed health', () => {
     ]);
     expect(client.connect).toHaveBeenCalledTimes(1);
     expect(first.status).toBe('disconnected');
-    expect(first.error).toBe('Reconnect in progress');
+    expect(first.error).toBe('Not connected to database');
     expect(second.status).toBe('disconnected');
-    expect(second.error).toBe('Reconnect in progress');
+    expect(second.error).toBe('Not connected to database');
+    expect(webhooks.dispatchHealthChange).toHaveBeenCalledTimes(1);
+    expect(otelEvents.dispatch).toHaveBeenCalledTimes(1);
   });
 
   it('returns connected degraded when capability refresh fails after ping', async () => {
