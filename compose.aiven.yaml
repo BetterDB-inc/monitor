@@ -60,11 +60,16 @@ services:
 
       # --- Audit storage (managed Aiven PostgreSQL) ---
       STORAGE_TYPE: postgres
-      # Runtime injects STORAGE_URL from the bound Postgres service (its own CA,
-      # sslmode=require), so a sslmode override in the URL below would be lost.
-      # STORAGE_SSL_NO_VERIFY forces the app to connect over TLS WITHOUT chain
-      # verification, which overrides the injected sslmode. To verify the chain
-      # instead, unset this and set STORAGE_SSL_CA to Aiven's CA cert.
+      # Runtime injects STORAGE_URL from the bound Postgres service (Aiven's own
+      # project CA, sslmode=require). STORAGE_SSL_NO_VERIFY connects over TLS
+      # WITHOUT certificate verification: traffic is encrypted but the server is
+      # not authenticated (same posture as Aiven's default sslmode=require). It
+      # is the zero-config default so the template deploys out of the box.
+      #
+      # RECOMMENDED for production: verify the chain instead. Download the Aiven
+      # project CA, make it available to the app as a file, unset
+      # STORAGE_SSL_NO_VERIFY, and set STORAGE_SSL_CA to that file path. The app
+      # then connects with full CA + hostname verification.
       STORAGE_SSL_NO_VERIFY: "true"
       STORAGE_URL: postgresql://USER:PASSWORD@betterdb-postgres:5432/defaultdb
 
