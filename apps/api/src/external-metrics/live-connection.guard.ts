@@ -18,7 +18,14 @@ export class LiveConnectionGuard implements CanActivate {
   ) {}
 
   canActivate(context: ExecutionContext): boolean {
-    if (this.reflector.get<boolean>(ALLOW_EXTERNAL_CONNECTION_KEY, context.getHandler())) return true;
+    if (
+      this.reflector.getAllAndOverride<boolean>(ALLOW_EXTERNAL_CONNECTION_KEY, [
+        context.getHandler(),
+        context.getClass(),
+      ])
+    ) {
+      return true;
+    }
     const request = context.switchToHttp().getRequest<{ headers?: Record<string, unknown> }>();
     const header = request.headers?.[CONNECTION_ID_HEADER];
     const connectionId = typeof header === 'string' && header !== '' ? header : undefined;
