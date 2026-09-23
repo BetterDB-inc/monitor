@@ -89,6 +89,8 @@ service:
 
 Use `metrics_endpoint`, not the plain `endpoint` — `endpoint` appends the standard `/v1/metrics` path and misses this route entirely.
 
+**Compression.** Request bodies compressed with `gzip` (the `otlphttp` exporter's default) or `deflate` are accepted on both `/v1/external/metrics` and `/v1/traces`; any other `Content-Encoding` is rejected with `415`.
+
 **Supported vocabularies.** Monitor understands the `redis.*` names emitted by the collector-contrib `redisreceiver`, and the equivalent `valkey.*` names from Valkey Admin's exporter (only `valkey.memory.used` and `valkey.cpu.time` are confirmed against a real deployment so far; the rest of the `valkey.*` mapping assumes it mirrors `redisreceiver`). Only cumulative sums and gauges are accepted — histograms, summaries and delta-temporality sums are rejected outright (`unsupported_type` / `unsupported_temporality`). Each accepted point maps to exactly one INFO field; nothing is summed:
 
 | OTLP metric (`redis.` or `valkey.`) | Point attributes | INFO section.field |
@@ -131,6 +133,8 @@ Use `metrics_endpoint`, not the plain `endpoint` — `endpoint` appends the stan
 
 **What doesn't.** Every view that needs a live command against the instance stays unavailable: slow log, clients, latency, key analytics, cluster, security/audit, vector search, and the other live-only pages. They show: "Not available for OTLP-ingested connections — this view needs a live connection." Migration is a related but separate case — it's blocked at the source/target picker instead, with its own message ("One or more selected instances only pushes OTLP metrics. Migration needs a live connection to both instances."), since an OTLP-ingested connection is never a valid migration source or target.
 
+Prometheus re-export isn't supported yet: OTLP-push connections are omitted from `/api/prometheus/metrics`.
+
 **Drop reasons.** A response's `partialSuccess.errorMessage` summarises rejected points by reason, for example `unknown_instance=12 unmapped_metric=3`:
 
 | Reason | Meaning |
@@ -142,7 +146,7 @@ Use `metrics_endpoint`, not the plain `endpoint` — `endpoint` appends the stan
 | `unsupported_temporality` | The point is a sum with delta (not cumulative) temporality. |
 | `unmapped_metric` | The metric name or its attributes don't match anything in the table above. |
 
-**Staleness.** `OTEL_METRICS_STALE_AFTER_MS` (default 5 minutes) sets how long a pushed point stays valid. Once every field has gone stale with no fresh push, the connection shows as disconnected and health fires an instance-down event. Points are timed by the collector's clock, not Monitor's, so keep NTP in sync on both sides. After a BetterDB restart, a connection stays disconnected until the next push arrives — nothing is lost, since prior history is kept in storage.
+**Staleness.** `OTEL_METRICS_STALE_AFTER_MS` (default 5 minutes) sets how long a pushed point stays valid. Once every field has gone stale with no fresh push, the connection shows as disconnected and health fires an instance-down event. Points are timed by the collector's clock, not Monitor's (a point stamped ahead of Monitor's clock is treated as received now), so keep NTP in sync on both sides. After a BetterDB restart, a connection stays disconnected until the next push arrives — nothing is lost, since prior history is kept in storage.
 
 **Memory snapshots.** For pushed instances, `allocator_frag_ratio` and the io-thread read/write counters are stored as `0` rather than left blank, because `redisreceiver` doesn't emit them.
 
@@ -166,7 +170,7 @@ When an OTLP endpoint is configured, Monitor also emits discrete monitoring even
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OTEL_INGEST_ENABLED` | `true` | Enable the `/v1/traces` OTLP trace receiver. |
+| `OTEL_INGEST_ENABLED` | `true` | Enable the OTLP receivers: `/v1/traces` (traces) and `/v1/external/metrics` (metrics ingestion). |
 | `OTEL_INGEST_TOKEN` | unset | Bearer token required to post traces or push metrics. Required in cloud mode. |
 | `OTEL_METRICS_STALE_AFTER_MS` | `300000` | Age after which a pushed metric is ignored; min `1000`. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Base URL of your OTLP/HTTP collector. Setting it enables the metrics and event exports; `/v1/metrics` and `/v1/logs` are appended automatically. |

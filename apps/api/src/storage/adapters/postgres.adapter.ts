@@ -1877,7 +1877,6 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       -- Migration: add ssh_tunnel column if it doesn't exist
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS ssh_tunnel TEXT;
 
-      -- Migration: add connection_type column if it doesn't exist
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS connection_type TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_connections_is_default ON connections(is_default);
