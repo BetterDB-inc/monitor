@@ -438,6 +438,37 @@ describe('PrometheusService staleness bounds', () => {
     expect(text).toContain(`betterdb_poll_stale{connection="${LABEL}"} 0`);
   });
 
+  it('counts a superseded pass reply as liveness without writing its gauges', async () => {
+    let resolveFirst: (info: unknown) => void = () => undefined;
+    const client = {
+      getInfoParsed: jest
+        .fn()
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+        )
+        .mockReturnValueOnce(new Promise(() => {})),
+    };
+    (service['connectionRegistry'].get as jest.Mock).mockReturnValue(client);
+
+    const superseded = service['updateMetricsForConnection']('conn-1').catch(() => undefined);
+    await jest.advanceTimersByTimeAsync(1000);
+    service.cleanupConnectionMetrics('conn-1');
+    const current = service['updateMetricsForConnection']('conn-1').catch(() => undefined);
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+    await Promise.all([superseded, current]);
+
+    await jest.advanceTimersByTimeAsync(BOUND_MS - POLL_INTERVAL_MS - 2000);
+    resolveFirst({ server: { uptime_in_seconds: '42' } });
+    await jest.advanceTimersByTimeAsync(3000);
+
+    const text = await service.getMetrics();
+
+    expect(text).not.toContain(`betterdb_uptime_in_seconds{connection="${LABEL}"}`);
+    expect(text).toContain(`betterdb_poll_stale{connection="${LABEL}"} 0`);
+  });
+
   it('writes a shared late reply only from the newest pass', async () => {
     let resolveInfo: (info: unknown) => void = () => undefined;
     const slow = {
