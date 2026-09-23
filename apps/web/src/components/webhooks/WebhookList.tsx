@@ -27,7 +27,7 @@ export function WebhookList({ webhooks, onEdit, onDelete, onTest, onViewDeliveri
       {webhooks.map((webhook) => (
         <Card key={webhook.id} className="p-6">
           <div className="flex items-start justify-between">
-            <div className="flex-1">
+            <div className="flex-1 min-w-0">
               <div className="flex items-center gap-3 mb-2">
                 <h3 className="text-lg font-semibold">{webhook.name}</h3>
                 <Badge variant={webhook.enabled ? 'success' : 'secondary'}>
@@ -39,9 +39,6 @@ export function WebhookList({ webhooks, onEdit, onDelete, onTest, onViewDeliveri
               </div>
 
               <div className="space-y-2 text-sm text-muted-foreground">
-                <div>
-                  <span className="font-medium">URL:</span> {webhook.url}
-                </div>
                 <div>
                   <span className="font-medium">Events:</span>{' '}
                   <span className="inline-flex flex-wrap gap-1">
@@ -64,7 +61,7 @@ export function WebhookList({ webhooks, onEdit, onDelete, onTest, onViewDeliveri
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-shrink-0">
               <button
                 onClick={() => onTest(webhook)}
                 className="px-3 py-1.5 text-sm border border-primary text-primary rounded hover:bg-primary/10 transition-colors"
