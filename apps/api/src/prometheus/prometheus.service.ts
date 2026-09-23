@@ -118,6 +118,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   // /metrics scrape coalesce instead of racing on shared per-connection state.
   private updateMetricsInFlight = new Map<string, Promise<void>>();
   private healthChecksInFlight = new Map<string, Promise<void>>();
+  private infoReadsInFlight = new Map<string, Promise<InfoResponse>>();
 
   // Per-connection pass epoch. Removing a connection or abandoning a pass at
   // its bound retires the epoch, so a reply that lands afterwards is dropped
@@ -1074,6 +1075,22 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     return run;
   }
 
+  private readInfo(connectionId: string, client: DatabasePort): Promise<InfoResponse> {
+    const outstanding = this.infoReadsInFlight.get(connectionId);
+    if (outstanding !== undefined) {
+      return outstanding;
+    }
+    const read = client.getInfoParsed();
+    const release = (): void => {
+      if (this.infoReadsInFlight.get(connectionId) === read) {
+        this.infoReadsInFlight.delete(connectionId);
+      }
+    };
+    read.then(release, release);
+    this.infoReadsInFlight.set(connectionId, read);
+    return read;
+  }
+
   private currentEpoch(connectionId: string): number {
     return this.connectionEpochs.get(connectionId) ?? 0;
   }
@@ -1102,7 +1119,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.freshness.observe(connectionId, connLabel, Date.now());
 
     try {
-      const info = await client.getInfoParsed();
+      const info = await this.readInfo(connectionId, client);
       // The connection may have been removed, or this pass abandoned at its
       // bound, while the read was outstanding. Writing now would recreate
       // series cleanup has already dropped and move shared per-connection
@@ -2332,6 +2349,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // finally then no-ops because the entry is already gone.
     this.updateMetricsInFlight.delete(connectionId);
     this.healthChecksInFlight.delete(connectionId);
+    this.infoReadsInFlight.delete(connectionId);
     this.retireEpoch(connectionId);
     const label = this.freshness.forget(connectionId);
     if (label === undefined || this.freshness.hasLabel(label)) {

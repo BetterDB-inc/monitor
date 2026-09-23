@@ -316,7 +316,7 @@ describe('PrometheusService staleness bounds', () => {
     expect(wedged.getInfoParsed).toHaveBeenCalledTimes(3);
   });
 
-  it('releases the in-flight entry when an INFO read times out', async () => {
+  it('does not issue another INFO while one is still outstanding', async () => {
     const wedged = { getInfoParsed: jest.fn().mockReturnValue(new Promise(() => {})) };
     const registry = service['connectionRegistry'] as unknown as Record<string, jest.Mock>;
     registry.get.mockReturnValue(wedged);
@@ -334,7 +334,7 @@ describe('PrometheusService staleness bounds', () => {
     await scrape();
     await scrape();
 
-    expect(wedged.getInfoParsed).toHaveBeenCalledTimes(2);
+    expect(wedged.getInfoParsed).toHaveBeenCalledTimes(1);
   });
 
   it('bounds the health ping so a wedged health check cannot block the tick', async () => {
@@ -460,6 +460,60 @@ describe('PrometheusService staleness bounds', () => {
 
     expect(text).not.toContain(`betterdb_uptime_in_seconds{connection="${LABEL}"}`);
     expect(text).toContain(`betterdb_poll_stale{connection="${LABEL}"} 1`);
+  });
+
+  it('keeps gauges current when INFO is slower than the poll interval on every pass', async () => {
+    const slow = {
+      getInfoParsed: jest.fn(
+        () =>
+          new Promise((resolve) => {
+            setTimeout(
+              () => resolve({ server: { uptime_in_seconds: '42' } }),
+              POLL_INTERVAL_MS + 2000,
+            );
+          }),
+      ),
+    };
+    (service['connectionRegistry'].get as jest.Mock).mockReturnValue(slow);
+
+    for (let pass = 0; pass < 6; pass++) {
+      void service['updateMetricsForConnection']('conn-1').catch(() => undefined);
+      await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+    }
+
+    const text = await service.getMetrics();
+
+    expect(text).toContain(`betterdb_uptime_in_seconds{connection="${LABEL}"} 42`);
+    expect(text).toContain(`betterdb_poll_stale{connection="${LABEL}"} 0`);
+    expect(slow.getInfoParsed).toHaveBeenCalledTimes(3);
+  });
+
+  it('issues a fresh INFO once the outstanding one has settled', async () => {
+    let resolveFirst: (info: unknown) => void = () => undefined;
+    const client = {
+      getInfoParsed: jest
+        .fn()
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+        )
+        .mockResolvedValue({ server: { uptime_in_seconds: '43' } }),
+    };
+    (service['connectionRegistry'].get as jest.Mock).mockReturnValue(client);
+
+    const abandoned = service['updateMetricsForConnection']('conn-1').catch(() => undefined);
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1);
+    await abandoned;
+    resolveFirst({ server: { uptime_in_seconds: '42' } });
+    await Promise.resolve();
+
+    await service['updateMetricsForConnection']('conn-1');
+
+    const text = await service.getMetrics();
+
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(2);
+    expect(text).toContain(`betterdb_uptime_in_seconds{connection="${LABEL}"} 43`);
   });
 
   it('keeps a later pass alive when an earlier one times out behind it', async () => {
