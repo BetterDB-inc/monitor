@@ -58,6 +58,10 @@ const COMMAND_SUBKEYS: Record<string, string> = {
   'cmd.usec': 'usec',
 };
 
+function lookup<T>(table: Record<string, T>, key: string): T | undefined {
+  return Object.hasOwn(table, key) ? table[key] : undefined;
+}
+
 const DB_PATTERN = /^\d+$/;
 const CMD_PATTERN = /^[A-Za-z0-9_|.-]+$/;
 const PREFIXES = ['redis.', 'valkey.'] as const;
@@ -81,7 +85,7 @@ export function mapDataPoint(
   const suffix = stripPrefix(name);
   if (suffix === null) return null;
 
-  const scalar = SCALARS[suffix];
+  const scalar = lookup(SCALARS, suffix);
   if (scalar) return { target: { kind: 'scalar', section: scalar[0], field: scalar[1] }, value };
 
   if (suffix === 'cpu.time') {
@@ -91,13 +95,13 @@ export function mapDataPoint(
   }
 
   if (suffix === 'role') {
-    const role = ROLES[attrs.role ?? ''];
+    const role = lookup(ROLES, attrs.role ?? '');
     if (!role) return null;
     if (Number(value) !== 1) return 'ignored';
     return { target: { kind: 'scalar', section: 'replication', field: 'role' }, value: role };
   }
 
-  const keyspaceSubkey = KEYSPACE_SUBKEYS[suffix];
+  const keyspaceSubkey = lookup(KEYSPACE_SUBKEYS, suffix);
   if (keyspaceSubkey) {
     const db = attrs.db;
     if (!db || !DB_PATTERN.test(db)) return null;
@@ -107,7 +111,7 @@ export function mapDataPoint(
     };
   }
 
-  const commandSubkey = COMMAND_SUBKEYS[suffix];
+  const commandSubkey = lookup(COMMAND_SUBKEYS, suffix);
   if (commandSubkey) {
     const cmd = attrs.cmd;
     if (!cmd || !CMD_PATTERN.test(cmd)) return null;

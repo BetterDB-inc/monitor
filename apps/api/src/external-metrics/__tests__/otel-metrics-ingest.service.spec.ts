@@ -101,6 +101,24 @@ describe('OtelMetricsIngestService', () => {
     });
   });
 
+  it('treats prototype property names as unmapped', () => {
+    const { service, store } = build();
+    const result = service.ingest(
+      resource(identity, [
+        gauge('redis.constructor', 1),
+        gauge('redis.__proto__', 1),
+        gauge('redis.toString', 1),
+        gauge('valkey.hasOwnProperty', 1),
+        gauge('redis.db.keys', 1, [str('db', '0')]),
+        gauge('redis.role', 1, [str('role', 'toString')]),
+      ]),
+      NOW_MS,
+    );
+    expect(result.dropped.unmapped_metric).toBe(5);
+    expect(result.accepted).toBe(1);
+    expect(store.snapshot('ext', NOW_MS)).toEqual({ keyspace: { db0: 'keys=1' } });
+  });
+
   it('accepts cumulative sums and skips role points whose value is 0', () => {
     const { service, store } = build();
     const result = service.ingest(
