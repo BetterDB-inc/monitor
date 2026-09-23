@@ -437,6 +437,31 @@ describe('PrometheusService staleness bounds', () => {
     expect(text).toContain(`betterdb_poll_stale{connection="${LABEL}"} 0`);
   });
 
+  it('does not count a late reply from an abandoned pass as fresh', async () => {
+    let resolveInfo: (info: unknown) => void = () => undefined;
+    const wedged = {
+      getInfoParsed: jest.fn().mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveInfo = resolve;
+        }),
+      ),
+    };
+    (service['connectionRegistry'].get as jest.Mock).mockReturnValue(wedged);
+
+    const abandoned = service['updateMetricsForConnection']('conn-1').catch(() => undefined);
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1);
+    await abandoned;
+
+    await jest.advanceTimersByTimeAsync(BOUND_MS - POLL_INTERVAL_MS - 1000);
+    resolveInfo({ server: { uptime_in_seconds: '42' } });
+    await jest.advanceTimersByTimeAsync(2000);
+
+    const text = await service.getMetrics();
+
+    expect(text).not.toContain(`betterdb_uptime_in_seconds{connection="${LABEL}"}`);
+    expect(text).toContain(`betterdb_poll_stale{connection="${LABEL}"} 1`);
+  });
+
   it('keeps a later pass alive when an earlier one times out behind it', async () => {
     let resolveSecond: (info: unknown) => void = () => undefined;
     const client = {
@@ -517,33 +542,6 @@ describe('PrometheusService staleness bounds', () => {
 
     expect(getAuditStats).not.toHaveBeenCalled();
     expect(text).not.toContain(`betterdb_acl_denied_total{connection="${LABEL}"}`);
-  });
-
-  it('keeps a connection whose INFO reliably answers after the bound', async () => {
-    let resolveInfo: (info: unknown) => void = () => undefined;
-    const slow = {
-      getInfoParsed: jest.fn().mockReturnValue(
-        new Promise((resolve) => {
-          resolveInfo = resolve;
-        }),
-      ),
-    };
-    (service['connectionRegistry'].get as jest.Mock).mockReturnValue(slow);
-
-    const abandoned = service['updateMetricsForConnection']('conn-1').catch(() => undefined);
-    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1);
-    await abandoned;
-
-    resolveInfo({});
-    await Promise.resolve();
-    setMemory(LABEL, 100);
-
-    await jest.advanceTimersByTimeAsync(BOUND_MS - POLL_INTERVAL_MS);
-
-    const text = await service.getMetrics();
-
-    expect(text).toContain(`betterdb_poll_stale{connection="${LABEL}"} 0`);
-    expect(text).toContain(`betterdb_memory_used_bytes{connection="${LABEL}"} 100`);
   });
 
   it('does not page twice when a pass is abandoned mid failover dispatch', async () => {
