@@ -89,7 +89,7 @@ service:
 
 Use `metrics_endpoint`, not the plain `endpoint` — `endpoint` appends the standard `/v1/metrics` path and misses this route entirely.
 
-**Compression.** Request bodies compressed with `gzip` (the `otlphttp` exporter's default) or `deflate` are accepted on both `/v1/external/metrics` and `/v1/traces`; any other `Content-Encoding` is rejected with `415`.
+**Compression.** Request bodies compressed with `gzip` (the `otlphttp` exporter's default) or `deflate` are accepted on both `/v1/external/metrics` and `/v1/traces`; any other `Content-Encoding` is rejected with `415`. Request bodies are limited to 1 MiB after decompression, and oversize requests are rejected; if the collector config adds a `batch` processor, keep `send_batch_max_size` small enough to stay under this limit.
 
 **Supported vocabularies.** Monitor understands the `redis.*` names emitted by the collector-contrib `redisreceiver`, and the equivalent `valkey.*` names from Valkey Admin's exporter (only `valkey.memory.used` and `valkey.cpu.time` are confirmed against a real deployment so far; the rest of the `valkey.*` mapping assumes it mirrors `redisreceiver`). Only cumulative sums and gauges are accepted — histograms, summaries and delta-temporality sums are rejected outright (`unsupported_type` / `unsupported_temporality`). Each accepted point maps to exactly one INFO field; nothing is summed:
 
