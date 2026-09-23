@@ -1,4 +1,5 @@
 import { Pool, PoolConfig } from 'pg';
+import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
 import { randomUUID } from 'crypto';
 import { parseSshTunnel } from '@betterdb/shared';
@@ -216,13 +217,41 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async initialize(): Promise<void> {
     try {
-      // Issue #11: Properly type poolConfig instead of using 'any'
-      const poolConfig: PoolConfig = {
-        connectionString: this.config.connectionString,
-      };
-
       // Enable SSL if STORAGE_SSL_CA is set (URL or file path)
       const sslCa = process.env.STORAGE_SSL_CA;
+
+      // Managed providers (e.g. Aiven) inject a connection string with
+      // sslmode=require and present their own CA. pg treats sslmode=require as
+      // verify-full and rejects that CA. Crucially, pg's ConnectionParameters
+      // does Object.assign(config, parse(connectionString)), so an explicit
+      // `ssl` option is OVERWRITTEN by whatever sslmode the connection string
+      // carries. We therefore have to express SSL intent IN the connection
+      // string, and normalize sslmode based on how we intend to verify:
+      //   - CA supplied (STORAGE_SSL_CA): strip sslmode so pg does not clobber
+      //     the { rejectUnauthorized: true, ca } option set below, giving
+      //     full chain + hostname verification against the provided CA.
+      //   - else no-verify opt-in (STORAGE_SSL_NO_VERIFY): set sslmode=no-verify
+      //     (pg maps it to { rejectUnauthorized: false }), i.e. TLS without CA
+      //     verification, matching Aiven's own default sslmode=require posture.
+      //   - else leave the string untouched.
+      let connectionString = this.config.connectionString;
+      try {
+        const parsed = new URL(connectionString);
+        if (sslCa) {
+          parsed.searchParams.delete('sslmode');
+          connectionString = parsed.toString();
+        } else if (isTrueFlag(process.env.STORAGE_SSL_NO_VERIFY)) {
+          parsed.searchParams.set('sslmode', 'no-verify');
+          connectionString = parsed.toString();
+        }
+      } catch {
+        // Not a parseable URL (e.g. a key=value DSN); leave it unchanged.
+      }
+
+      // Issue #11: Properly type poolConfig instead of using 'any'
+      const poolConfig: PoolConfig = {
+        connectionString,
+      };
 
       if (sslCa) {
         let ca: string;
