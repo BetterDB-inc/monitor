@@ -16,7 +16,6 @@ export interface ConnectionContext {
   host: string;
   /** Port of the database */
   port: number;
-  /** Type of connection, when known */
   connectionType?: 'agent' | 'direct' | 'external';
 }
 
