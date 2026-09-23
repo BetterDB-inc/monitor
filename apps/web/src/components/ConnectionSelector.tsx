@@ -11,6 +11,7 @@ import { workspaceApi, CloudUser } from '../api/workspace';
 import type { Connection } from '../hooks/useConnection';
 import type { AgentConnectionInfo } from '@betterdb/shared';
 import { ConnectionSwitcher } from './connection-selector/ConnectionSwitcher';
+import { OtlpPushTab } from './connection-selector/OtlpPushTab';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 
 interface SshFormData {
@@ -91,7 +92,7 @@ const defaultFormData: ConnectionFormData = {
   ssh: defaultSshFormData,
 };
 
-type AddTab = 'direct' | 'agent' | 'valkey';
+type AddTab = 'direct' | 'agent' | 'valkey' | 'otlp';
 
 export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   const emptyFormData = isCloudMode ? { ...defaultFormData, host: '' } : defaultFormData;
@@ -129,6 +130,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       } else if (
         detail?.tab &&
         (detail.tab === 'direct' ||
+          detail.tab === 'otlp' ||
           (detail.tab === 'agent' && showAgentTab) ||
           (detail.tab === 'valkey' && isCloudMode))
       ) {
@@ -418,20 +420,28 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
             <DialogTitle>Add Connection</DialogTitle>
           </DialogHeader>
 
-          {/* Tab switcher: Direct + Via Agent show in cloud and self-hosted; the
-              Valkey-instances tab is cloud-only. */}
-          {showAgentTab && (
-            <div className="flex border-b">
-              <button
-                onClick={() => setAddTab('direct')}
-                className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                  addTab === 'direct'
-                    ? 'border-primary text-primary'
-                    : 'border-transparent text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                Direct Connection
-              </button>
+          <div className="flex border-b">
+            <button
+              onClick={() => setAddTab('direct')}
+              className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                addTab === 'direct'
+                  ? 'border-primary text-primary'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              Direct Connection
+            </button>
+            <button
+              onClick={() => setAddTab('otlp')}
+              className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                addTab === 'otlp'
+                  ? 'border-primary text-primary'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              OTLP push
+            </button>
+            {showAgentTab && (
               <button
                 onClick={() => setAddTab('agent')}
                 className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
@@ -442,20 +452,20 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
               >
                 Via Agent
               </button>
-              {isCloudMode && (
-                <button
-                  onClick={() => setAddTab('valkey')}
-                  className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                    addTab === 'valkey'
-                      ? 'border-primary text-primary'
-                      : 'border-transparent text-muted-foreground hover:text-foreground'
-                  }`}
-                >
-                  BetterDB Valkey instances
-                </button>
-              )}
-            </div>
-          )}
+            )}
+            {isCloudMode && (
+              <button
+                onClick={() => setAddTab('valkey')}
+                className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                  addTab === 'valkey'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                BetterDB Valkey instances
+              </button>
+            )}
+          </div>
 
           {addTab === 'valkey' ? (
             <ValkeyInstancesTab
@@ -469,6 +479,15 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                 setValkeyMaxmemory(null);
               }}
               refreshConnections={refreshConnections}
+            />
+          ) : addTab === 'otlp' ? (
+            <OtlpPushTab
+              isFirstConnection={connections.length === 0}
+              onCreated={async () => {
+                setShowAddDialog(false);
+                setAddTab('direct');
+                await refreshConnections();
+              }}
             />
           ) : addTab === 'direct' ? (
             <>
