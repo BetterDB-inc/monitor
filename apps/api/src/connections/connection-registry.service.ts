@@ -486,6 +486,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   async addConnection(request: CreateConnectionRequest): Promise<string> {
     if (request.connectionType === 'external') {
       this.assertValidExternalRequest(request);
+    } else if (this.findByHostPort(request.host, request.port)?.connectionType === 'external') {
+      throw new Error(`${request.host}:${request.port} is already registered as an OTLP push connection`);
     }
 
     const id = randomUUID();

@@ -74,6 +74,17 @@ describe('ConnectionRegistry external connections', () => {
     await expect(registry.addConnection(external)).rejects.toThrow('A connection for cache.internal:6379 already exists');
   });
 
+  it('rejects a direct connection whose host:port is already an external connection', async () => {
+    const { registry, storage } = build();
+    await registry.addConnection(external);
+    storage.saveConnection.mockClear();
+    await expect(registry.addConnection({ name: 'Polled', host: 'cache.internal', port: 6379 })).rejects.toThrow(
+      'cache.internal:6379 is already registered as an OTLP push connection',
+    );
+    expect(UnifiedDatabaseAdapter).not.toHaveBeenCalled();
+    expect(storage.saveConnection).not.toHaveBeenCalled();
+  });
+
   it('tests an external connection without dialing', async () => {
     const { registry } = build();
     await expect(registry.testConnection(external)).resolves.toEqual({
