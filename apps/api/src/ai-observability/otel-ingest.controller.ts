@@ -9,10 +9,10 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
-import { isCloudMode } from '../common/utils/cloud-mode';
 import { ApiTags, ApiOperation, ApiExcludeEndpoint } from '@nestjs/swagger';
 import { OtelIngestService, OtlpTraceRequest } from './otel-ingest.service';
 import { decodeOtlpTraceProtobuf } from './otlp-protobuf';
+import { assertOtlpIngestAuthorized } from './otel-ingest-auth';
 
 /**
  * OTLP/HTTP trace ingestion. Exporters POST an ExportTraceServiceRequest here.
@@ -42,22 +42,7 @@ export class OtelIngestController {
     @Headers('content-type') contentType?: string,
     @Headers('authorization') auth?: string,
   ): Promise<Buffer | Record<string, never>> {
-    if ((process.env.OTEL_INGEST_ENABLED ?? 'true') === 'false') {
-      throw new HttpException('OTLP ingestion disabled', HttpStatus.NOT_FOUND);
-    }
-    const token = process.env.OTEL_INGEST_TOKEN;
-    // In cloud mode /v1/traces bypasses session auth (allowlisted), so a bearer
-    // token is the only credential. Fail closed when it isn't configured instead
-    // of leaving the tenant's span store open to anyone who can reach the host.
-    if (isCloudMode() && !token) {
-      throw new HttpException(
-        'OTLP ingestion requires OTEL_INGEST_TOKEN in cloud mode',
-        HttpStatus.UNAUTHORIZED,
-      );
-    }
-    if (token && auth !== `Bearer ${token}`) {
-      throw new HttpException('Invalid ingestion token', HttpStatus.UNAUTHORIZED);
-    }
+    assertOtlpIngestAuthorized(auth);
 
     const isProtobuf = (contentType ?? '').includes('application/x-protobuf');
     let request: OtlpTraceRequest;

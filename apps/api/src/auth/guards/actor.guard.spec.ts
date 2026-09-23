@@ -84,6 +84,7 @@ describe('isPublicPath', () => {
       '/prometheus',
       '/ingest/e',
       '/v1/traces',
+      '/v1/external/metrics',
       '/version',
       '/health/live',
     ]) {
@@ -154,6 +155,8 @@ describe('isActorOptionalPath', () => {
       '/api/ingest/x',
       '/v1/traces',
       '/api/v1/traces',
+      '/v1/external/metrics',
+      '/api/v1/external/metrics',
       '/auth/sign-in/email',
       '/api/auth/get-session',
       '/prometheus',
@@ -424,6 +427,7 @@ describe('ActorGuard bearer tokens', () => {
   it.each([
     ['/api/ingest/x', 'POST'],
     ['/v1/traces', 'POST'],
+    ['/v1/external/metrics', 'POST'],
     ['/auth/sign-in/email', 'POST'],
   ])('skips actor resolution on non-mcp public path %s', async (url, method) => {
     const resolveFromHeaders = jest.fn().mockResolvedValue(sessionActor);

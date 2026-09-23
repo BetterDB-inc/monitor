@@ -162,6 +162,7 @@ async function bootstrap(): Promise<void> {
         { path: 'ingest/*splat', method: RequestMethod.ALL },
         // OTLP-standard trace ingestion path (see OtelIngestController).
         { path: 'v1/traces', method: RequestMethod.POST },
+        { path: 'v1/external/metrics', method: RequestMethod.POST },
       ],
     });
 
