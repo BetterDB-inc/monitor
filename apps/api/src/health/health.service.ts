@@ -137,6 +137,20 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
 
     try {
       const client = this.connectionRegistry.get(targetId);
+      if (config.connectionType === 'external' && (client.sampleVersion?.() ?? null) === null) {
+        return {
+          status: 'waiting',
+          database: {
+            type: 'unknown',
+            version: null,
+            host: config.host,
+            port: config.port,
+          },
+          capabilities: null,
+          runtimeCapabilities: null,
+          message: 'Waiting for first OTLP sample',
+        };
+      }
       const isConnected = client.isConnected();
 
       if (!isConnected) {

@@ -4,6 +4,8 @@ import { RuntimeCapabilityTracker } from '../../connections/runtime-capability-t
 import { ConfigHazardService } from '../../monitor/config-hazard.service';
 import { ConnectionContext } from '../../common/services/multi-connection-poller';
 import { DatabasePort } from '../../common/interfaces/database-port.interface';
+import { WebhookDispatcherService } from '../../webhooks/webhook-dispatcher.service';
+import { OtelEventDispatcherService } from '../../otel-telemetry/otel-event-dispatcher.service';
 
 describe('HealthService detailed health', () => {
   const hazardFinding = {
@@ -106,6 +108,55 @@ describe('HealthService external connections', () => {
     const service = makeService();
     expect((service as any).supportsExternalConnections()).toBe(true);
     expect((service as any).skipUnchangedSamples()).toBe(false);
+  });
+
+  describe('getHealth before the first OTLP sample', () => {
+    const buildWithDispatchers = (sampleVersion: number | null) => {
+      const client = {
+        isConnected: jest.fn().mockReturnValue(false),
+        ping: jest.fn().mockResolvedValue(false),
+        sampleVersion: jest.fn().mockReturnValue(sampleVersion),
+      };
+      const webhooks = { dispatchHealthChange: jest.fn().mockResolvedValue(undefined) };
+      const otelEvents = { dispatch: jest.fn() };
+      const service = new HealthService(
+        {
+          list: jest.fn().mockReturnValue([]),
+          get: jest.fn().mockReturnValue(client),
+          getConfig: jest.fn().mockReturnValue({ host: 'cache.internal', port: 6379, connectionType: 'external' }),
+          getDefaultId: jest.fn().mockReturnValue('ext-1'),
+        } as unknown as ConnectionRegistry,
+        { getCapabilities: jest.fn(), getDisabledReasons: jest.fn() } as unknown as RuntimeCapabilityTracker,
+        webhooks as unknown as WebhookDispatcherService,
+        undefined,
+        undefined,
+        otelEvents as unknown as OtelEventDispatcherService,
+      );
+      return { service, webhooks, otelEvents };
+    };
+
+    it('reports waiting without dispatching instance.down', async () => {
+      const { service, webhooks, otelEvents } = buildWithDispatchers(null);
+      const health = await service.getHealth('ext-1');
+      expect(health).toEqual({
+        status: 'waiting',
+        database: { type: 'unknown', version: null, host: 'cache.internal', port: 6379 },
+        capabilities: null,
+        runtimeCapabilities: null,
+        message: 'Waiting for first OTLP sample',
+      });
+      expect(webhooks.dispatchHealthChange).not.toHaveBeenCalled();
+      expect(otelEvents.dispatch).not.toHaveBeenCalled();
+      expect((service as any).instanceUpStates.get('ext-1')).not.toBe(false);
+    });
+
+    it('still reports instance.down once a pushed connection goes stale', async () => {
+      const { service, webhooks, otelEvents } = buildWithDispatchers(123);
+      const health = await service.getHealth('ext-1');
+      expect(health.status).toBe('disconnected');
+      expect(webhooks.dispatchHealthChange).toHaveBeenCalledTimes(1);
+      expect(otelEvents.dispatch).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('ignores an external connection that has never pushed', async () => {
