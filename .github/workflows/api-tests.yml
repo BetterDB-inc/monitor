@@ -15,7 +15,12 @@ on:
       - 'apps/api/**'
       - 'packages/**'
       - 'proprietary/**'
+      - 'apps/web/**'
       - 'pnpm-lock.yaml'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/api-tests.yml'
+      - 'scripts/ci-test-matrix.mjs'
 
 jobs:
   test-matrix:
@@ -26,6 +31,7 @@ jobs:
     outputs:
       node_matrix: ${{ steps.select.outputs.node_matrix }}
       python_matrix: ${{ steps.select.outputs.python_matrix }}
+      dedicated_jobs: ${{ steps.select.outputs.dedicated_jobs }}
 
     steps:
       - uses: actions/checkout@v4
@@ -203,6 +209,8 @@ jobs:
             valkey-cluster-1 valkey-cluster-2 valkey-cluster-3
 
   api-tests:
+    needs: test-matrix
+    if: needs.test-matrix.outputs.dedicated_jobs == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -249,6 +257,8 @@ jobs:
           docker logs betterdb-test-postgres 2>&1 | tail -50 || echo "Container not found"
 
   ai-facade-tests:
+    needs: test-matrix
+    if: needs.test-matrix.outputs.dedicated_jobs == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -276,6 +286,8 @@ jobs:
         run: pnpm --filter @betterdb/ai test
 
   ai-py-facade-tests:
+    needs: test-matrix
+    if: needs.test-matrix.outputs.dedicated_jobs == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
