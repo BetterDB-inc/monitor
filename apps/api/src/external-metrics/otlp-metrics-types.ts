@@ -70,3 +70,8 @@ export interface InstanceKey {
   host: string;
   port: number;
 }
+
+export interface PartialSuccess {
+  rejectedDataPoints: number;
+  errorMessage: string;
+}
