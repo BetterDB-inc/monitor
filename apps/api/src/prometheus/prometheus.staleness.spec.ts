@@ -413,40 +413,16 @@ describe('PrometheusService staleness bounds', () => {
     expect(text).not.toContain(`connection="${LABEL}"`);
   });
 
-  it('drops a late INFO reply from a pass that was abandoned at its bound', async () => {
+  it('applies a late INFO reply when no newer pass has started', async () => {
     let resolveInfo: (info: unknown) => void = () => undefined;
-    const wedged = {
+    const slow = {
       getInfoParsed: jest.fn().mockReturnValueOnce(
         new Promise((resolve) => {
           resolveInfo = resolve;
         }),
       ),
     };
-    (service['connectionRegistry'].get as jest.Mock).mockReturnValue(wedged);
-
-    const abandoned = service['updateMetricsForConnection']('conn-1').catch(() => undefined);
-    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1);
-    await abandoned;
-
-    resolveInfo({ server: { uptime_in_seconds: '42' } });
-    await Promise.resolve();
-
-    const text = await service.getMetrics();
-
-    expect(text).not.toContain(`betterdb_uptime_in_seconds{connection="${LABEL}"}`);
-    expect(text).toContain(`betterdb_poll_stale{connection="${LABEL}"} 0`);
-  });
-
-  it('does not count a late reply from an abandoned pass as fresh', async () => {
-    let resolveInfo: (info: unknown) => void = () => undefined;
-    const wedged = {
-      getInfoParsed: jest.fn().mockReturnValueOnce(
-        new Promise((resolve) => {
-          resolveInfo = resolve;
-        }),
-      ),
-    };
-    (service['connectionRegistry'].get as jest.Mock).mockReturnValue(wedged);
+    (service['connectionRegistry'].get as jest.Mock).mockReturnValue(slow);
 
     const abandoned = service['updateMetricsForConnection']('conn-1').catch(() => undefined);
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1);
@@ -458,10 +434,33 @@ describe('PrometheusService staleness bounds', () => {
 
     const text = await service.getMetrics();
 
-    expect(text).not.toContain(`betterdb_uptime_in_seconds{connection="${LABEL}"}`);
-    expect(text).toContain(`betterdb_poll_stale{connection="${LABEL}"} 1`);
+    expect(text).toContain(`betterdb_uptime_in_seconds{connection="${LABEL}"} 42`);
+    expect(text).toContain(`betterdb_poll_stale{connection="${LABEL}"} 0`);
   });
 
+  it('writes a shared late reply only from the newest pass', async () => {
+    let resolveInfo: (info: unknown) => void = () => undefined;
+    const slow = {
+      getInfoParsed: jest.fn().mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveInfo = resolve;
+        }),
+      ),
+    };
+    (service['connectionRegistry'].get as jest.Mock).mockReturnValue(slow);
+    const serverWrites = jest.spyOn(service as never, 'updateServerMetrics' as never);
+
+    const abandoned = service['updateMetricsForConnection']('conn-1').catch(() => undefined);
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 1);
+    await abandoned;
+
+    const newer = service['updateMetricsForConnection']('conn-1');
+    resolveInfo({ server: { uptime_in_seconds: '42' } });
+    await newer;
+
+    expect(slow.getInfoParsed).toHaveBeenCalledTimes(1);
+    expect(serverWrites).toHaveBeenCalledTimes(1);
+  });
   it('keeps gauges current when INFO is slower than the poll interval on every pass', async () => {
     const slow = {
       getInfoParsed: jest.fn(
@@ -486,6 +485,41 @@ describe('PrometheusService staleness bounds', () => {
     expect(text).toContain(`betterdb_uptime_in_seconds{connection="${LABEL}"} 42`);
     expect(text).toContain(`betterdb_poll_stale{connection="${LABEL}"} 0`);
     expect(slow.getInfoParsed).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps a node fresh under the real poller when INFO is slower than the interval', async () => {
+    const slow = {
+      getInfoParsed: jest.fn(
+        () =>
+          new Promise((resolve) => {
+            setTimeout(
+              () => resolve({ server: { uptime_in_seconds: '42' } }),
+              POLL_INTERVAL_MS + 2000,
+            );
+          }),
+      ),
+    };
+    const registry = service['connectionRegistry'] as unknown as Record<string, jest.Mock>;
+    registry.get.mockReturnValue(slow);
+    registry.list.mockReturnValue([
+      { id: 'conn-1', name: 'conn-1', host: '10.0.0.1', port: 6379, isConnected: true },
+    ]);
+    (service as unknown as Record<string, unknown>)['healthService'] = {
+      getHealth: jest.fn().mockReturnValue(new Promise(() => {})),
+    };
+    jest
+      .spyOn(service as never, 'updateStorageBasedMetricsForConnection' as never)
+      .mockResolvedValue(undefined as never);
+
+    service['start']();
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 8);
+    service['stop']();
+    registry.list.mockReturnValue([]);
+
+    const text = await service.getMetrics();
+
+    expect(text).toContain(`betterdb_uptime_in_seconds{connection="${LABEL}"} 42`);
+    expect(text).toContain(`betterdb_poll_stale{connection="${LABEL}"} 0`);
   });
 
   it('issues a fresh INFO once the outstanding one has settled', async () => {

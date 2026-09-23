@@ -116,7 +116,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   // Per-connection in-flight INFO-metric updates, so the background poller and a
   // /metrics scrape coalesce instead of racing on shared per-connection state.
-  private updateMetricsInFlight = new Map<string, Promise<void>>();
+  private updateMetricsInFlight = new Map<string, Promise<number>>();
   private healthChecksInFlight = new Map<string, Promise<void>>();
   private infoReadsInFlight = new Map<string, Promise<InfoResponse>>();
 
@@ -306,9 +306,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // connection before the next tick, so stacking a second full bound here
     // would push healthy connections past their own staleness bound.
     const deadline = Date.now() + this.pollIntervalMs;
-    const epoch = this.currentEpoch(ctx.connectionId);
     try {
-      await this.updateMetricsForConnection(ctx.connectionId);
+      const epoch = await this.updateMetricsForConnection(ctx.connectionId);
 
       // Update storage-based metrics for this connection
       await this.updateStorageBasedMetricsForConnection(ctx.connectionId, epoch);
@@ -832,9 +831,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // bounded read instead of one per connection.
     await Promise.allSettled(
       connectedConnections.map(async (conn) => {
-        const epoch = this.currentEpoch(conn.id);
         try {
-          await this.updateMetricsForConnection(conn.id);
+          const epoch = await this.updateMetricsForConnection(conn.id);
           await this.updateStorageBasedMetricsForConnection(conn.id, epoch);
         } catch (error) {
           this.logger.warn(
@@ -1038,7 +1036,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
    * delta on the next poll. Serializing per connection (the granularity of the
    * shared state) closes that race for both paths.
    */
-  private updateMetricsForConnection(connectionId: string): Promise<void> {
+  private updateMetricsForConnection(connectionId: string): Promise<number> {
     const existing = this.updateMetricsInFlight.get(connectionId);
     if (existing !== undefined) {
       return existing;
@@ -1046,22 +1044,16 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // The read is bounded here rather than at the call sites so that a hung
     // INFO releases its in-flight entry when the bound expires; otherwise the
     // entry would outlive every later pass and no connection would ever be
-    // re-read. Abandoning a pass retires its epoch, so a reply that arrives
-    // after the bound cannot write metrics behind a newer pass.
+    // re-read. Starting a pass retires the previous epoch, so a reply that
+    // arrives after the bound cannot write metrics behind a newer pass.
+    this.retireEpoch(connectionId);
     const epoch = this.currentEpoch(connectionId);
-    const run: Promise<void> = this.readWithTimeout(
+    const run: Promise<number> = this.readWithTimeout(
       this.runUpdateMetricsForConnection(connectionId, epoch),
       this.pollIntervalMs,
       `INFO update for ${connectionId}`,
     )
-      .catch((error) => {
-        // Only retire our own epoch: a removal or a newer pass may already
-        // have moved it, and retiring again would drop that pass's reply.
-        if (!this.isSuperseded(connectionId, epoch)) {
-          this.retireEpoch(connectionId);
-        }
-        throw error;
-      })
+      .then(() => epoch)
       .finally(() => {
         // Compare-and-delete: only clear the entry if it is still ours. If the
         // connection was removed (cleanupConnectionMetrics) or re-added with a
