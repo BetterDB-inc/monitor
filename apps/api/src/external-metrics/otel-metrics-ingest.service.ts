@@ -141,7 +141,8 @@ export class OtelMetricsIngestService {
         continue;
       }
       if (point === 'ignored') continue;
-      updates.push({ target: point.target, value: point.value, timeMs: nanosToMs(dataPoint.timeUnixNano) ?? nowMs });
+      const timeMs = Math.min(nanosToMs(dataPoint.timeUnixNano) ?? nowMs, nowMs);
+      updates.push({ target: point.target, value: point.value, timeMs });
       mapped = true;
     }
     this.drop(result, 'unmapped_metric', unmapped, instance, nowMs);

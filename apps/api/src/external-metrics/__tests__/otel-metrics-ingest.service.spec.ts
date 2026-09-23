@@ -149,11 +149,31 @@ describe('OtelMetricsIngestService', () => {
 
   it('ignores an older point without counting it as dropped', () => {
     const { service, store } = build();
-    service.ingest(resource(identity, [gauge('redis.uptime', 9, [], String(BigInt(NOW_MS + 10) * 1_000_000n))]), NOW_MS);
-    const result = service.ingest(resource(identity, [gauge('redis.uptime', 1)]), NOW_MS);
+    service.ingest(resource(identity, [gauge('redis.uptime', 9)]), NOW_MS);
+    const result = service.ingest(
+      resource(identity, [gauge('redis.uptime', 1, [], String(BigInt(NOW_MS - 10) * 1_000_000n))]),
+      NOW_MS,
+    );
     expect(result.accepted).toBe(0);
     expect(toPartialSuccess(result)).toBeNull();
     expect(store.snapshot('ext', NOW_MS).server).toEqual({ uptime_in_seconds: '9' });
+  });
+
+  it('clamps a future-stamped point to the receive time', () => {
+    const { service, store } = build();
+    const inAnHour = String(BigInt(NOW_MS + 3_600_000) * 1_000_000n);
+    service.ingest(resource(identity, [gauge('redis.memory.used', 1, [], inAnHour)]), NOW_MS);
+    expect(store.latestVersion('ext')).toBe(NOW_MS);
+
+    const later = NOW_MS + 10_000;
+    const result = service.ingest(
+      resource(identity, [gauge('redis.memory.used', 2, [], String(BigInt(later) * 1_000_000n))]),
+      later,
+    );
+    expect(result.accepted).toBe(1);
+    expect(store.snapshot('ext', later)).toEqual({ memory: { used_memory: '2' } });
+
+    expect(store.isFresh('ext', later + store.staleAfterMs + 1)).toBe(false);
   });
 
   it('rate-limits warnings per reason and instance to one per five minutes', () => {
