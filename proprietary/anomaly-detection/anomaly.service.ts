@@ -193,6 +193,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
   private recentAnomalies: AnomalyEvent[] = [];
   private recentGroups: CorrelatedAnomalyGroup[] = [];
+  private lastHourGroups: Array<
+    Pick<CorrelatedAnomalyGroup, 'timestamp' | 'pattern' | 'severity'>
+  > = [];
   private lastSlowlogId = new Map<string, number>();
   // Previous lifetime rejected_connections counter per connection, so we can feed
   // the per-poll DELTA (new refusals) to the detector rather than the ever-growing
@@ -4811,6 +4814,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       }
 
       this.recentGroups.push(...newGroups);
+      this.lastHourGroups.push(
+        ...newGroups.map(({ timestamp, pattern, severity }) => ({ timestamp, pattern, severity })),
+      );
       if (this.recentGroups.length > this.maxRecentGroups) {
         this.recentGroups = this.recentGroups.slice(-this.maxRecentGroups);
       }
@@ -5229,6 +5235,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const byMetric: Record<string, number> = {};
     const unresolvedBySeverity: Record<string, number> = { info: 0, warning: 0, critical: 0 };
     const byPattern: Record<string, number> = {};
+    const groupsBySeverity: Record<string, number> = { info: 0, warning: 0, critical: 0 };
 
     for (const a of this.recentAnomalies) {
       if (a.timestamp < oneHourAgo) continue;
@@ -5238,14 +5245,17 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         unresolvedBySeverity[a.severity] = (unresolvedBySeverity[a.severity] ?? 0) + 1;
     }
 
-    for (const g of this.recentGroups) {
-      if (g.timestamp >= oneHourAgo) byPattern[g.pattern] = (byPattern[g.pattern] ?? 0) + 1;
+    this.lastHourGroups = this.lastHourGroups.filter((g) => g.timestamp >= oneHourAgo);
+    for (const g of this.lastHourGroups) {
+      byPattern[g.pattern] = (byPattern[g.pattern] ?? 0) + 1;
+      groupsBySeverity[g.severity] = (groupsBySeverity[g.severity] ?? 0) + 1;
     }
 
     this.prometheusService.updateAnomalySummary({
       bySeverity,
       byMetric,
       byPattern,
+      groupsBySeverity,
       unresolvedBySeverity,
     });
 

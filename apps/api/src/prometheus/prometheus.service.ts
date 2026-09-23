@@ -2009,6 +2009,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       bySeverity: Record<string, number>;
       byMetric: Record<string, number>;
       byPattern: Record<string, number>;
+      groupsBySeverity: Record<string, number>;
       unresolvedBySeverity: Record<string, number>;
     },
     connectionId?: string,
@@ -2021,6 +2022,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     for (const sev of ['info', 'warning', 'critical']) {
       this.anomalyBySeverity.labels(connLabel, sev).set(summary.bySeverity[sev] ?? 0);
       this.anomalyEventsCurrent.labels(connLabel, sev).set(summary.unresolvedBySeverity[sev] ?? 0);
+      this.correlatedGroupsBySeverity
+        .labels(connLabel, sev)
+        .set(summary.groupsBySeverity[sev] ?? 0);
     }
 
     const newMetricLabels = new Set<string>();

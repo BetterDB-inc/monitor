@@ -16,6 +16,7 @@ import {
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
   AnomalySeverity,
   AnomalyType,
+  AnomalyPattern,
 } from '../types';
 import { WEBHOOK_EVENTS_PRO_SERVICE, WebhookEventType } from '@betterdb/shared';
 import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispatcher.service';
@@ -5757,6 +5758,44 @@ describe('AnomalyService', () => {
       expect((service as any).sentinelLastProbe.has('conn-1')).toBe(false);
       expect((service as any).sentinelDriftFirstSeen.has('conn-1')).toBe(false);
       expect((service as any).activeSentinelDrifts.has('conn-1')).toBe(false);
+    });
+  });
+
+  describe('prometheus correlated group summary', () => {
+    function groups(count: number, severity: AnomalySeverity, timestamp: number) {
+      return Array.from({ length: count }, (_, i) => ({
+        correlationId: `grp-${severity}-${timestamp}-${i}`,
+        timestamp,
+        anomalies: [],
+        pattern: AnomalyPattern.TRAFFIC_BURST,
+        diagnosis: '',
+        recommendations: [],
+        severity,
+      }));
+    }
+
+    async function correlate(newGroups: ReturnType<typeof groups>) {
+      (service as any).recentAnomalies = [{ resolved: false }];
+      jest.spyOn((service as any).correlator, 'correlate').mockReturnValueOnce(newGroups);
+      await (service as any).correlateAnomalies();
+    }
+
+    it('counts every group from the last hour, beyond the recent-groups cap', async () => {
+      const now = Date.now();
+      await correlate([
+        ...groups(110, AnomalySeverity.WARNING, now),
+        ...groups(30, AnomalySeverity.CRITICAL, now),
+      ]);
+      await correlate(groups(5, AnomalySeverity.INFO, now - 2 * 3600000));
+
+      await (service as any).updatePrometheusSummary();
+
+      expect(prometheusService.updateAnomalySummary).toHaveBeenCalledWith(
+        expect.objectContaining({
+          byPattern: { [AnomalyPattern.TRAFFIC_BURST]: 140 },
+          groupsBySeverity: { info: 0, warning: 110, critical: 30 },
+        }),
+      );
     });
   });
 });
