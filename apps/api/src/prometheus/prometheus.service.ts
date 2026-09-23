@@ -885,7 +885,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
    */
   async updateMetrics(): Promise<void> {
     const connections = this.connectionRegistry.list();
-    const connectedConnections = connections.filter((c) => c.isConnected);
+    const connectedConnections = connections.filter(
+      (c) => c.isConnected && c.connectionType !== 'external',
+    );
 
     // Update both INFO-based and storage-based metrics for all connections.
     // Connections refresh concurrently so a wedged node costs the pass one
