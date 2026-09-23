@@ -1,10 +1,12 @@
-import { Controller, Get, Delete, Query, Param, HttpException, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Delete, Query, Param, HttpException, HttpStatus, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam, ApiHeader } from '@nestjs/swagger';
 import { MetricsService } from './metrics.service';
 import { ClusterDiscoveryService, DiscoveredNode } from '../cluster/cluster-discovery.service';
 import { ClusterMetricsService, NodeStats, ClusterSlowlogEntry, ClusterClientEntry, ClusterCommandlogEntry, SlotMigration } from '../cluster/cluster-metrics.service';
 import { ConnectionId } from '../common/decorators';
 import { Roles } from '../auth/guards/roles.decorator';
+import { ExternalConnectionUnsupportedError } from '../external-metrics/external-connection-unsupported.error';
+import { AllowExternalConnection, LiveConnectionGuard } from '../external-metrics/live-connection.guard';
 import {
   InfoResponse,
   SlowLogEntry,
@@ -50,6 +52,7 @@ import {
 
 @ApiTags('metrics')
 @Controller('metrics')
+@UseGuards(LiveConnectionGuard)
 export class MetricsController {
   constructor(
     private readonly metricsService: MetricsService,
@@ -58,6 +61,7 @@ export class MetricsController {
   ) {}
 
   @Get('info')
+  @AllowExternalConnection()
   @ApiOperation({ summary: 'Get parsed INFO response', description: 'Retrieve parsed Valkey/Redis INFO command output, optionally filtered by sections' })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiQuery({ name: 'sections', required: false, description: 'Comma-separated list of INFO sections (server,clients,memory,etc.)' })
@@ -143,6 +147,7 @@ export class MetricsController {
   }
 
   @Get('slowlog/patterns')
+  @AllowExternalConnection()
   @ApiOperation({ summary: 'Analyze slowlog patterns', description: 'Get aggregated analysis of slowlog command patterns' })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiQuery({ name: 'count', required: false, description: 'Number of slowlog entries to analyze' })
@@ -181,6 +186,7 @@ export class MetricsController {
       const parsedType = type as CommandLogType | undefined;
       return await this.metricsService.getCommandLog(parsedCount, parsedType, connectionId);
     } catch (error) {
+      if (error instanceof ExternalConnectionUnsupportedError) throw error;
       const status = error instanceof Error && error.message.includes('not supported')
         ? HttpStatus.NOT_IMPLEMENTED
         : HttpStatus.INTERNAL_SERVER_ERROR;
@@ -244,6 +250,7 @@ export class MetricsController {
   }
 
   @Get('commandlog/patterns')
+  @AllowExternalConnection()
   @ApiOperation({ summary: 'Analyze commandlog patterns (Valkey 8.1+)', description: 'Get aggregated analysis of commandlog patterns' })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiQuery({ name: 'count', required: false, description: 'Number of commandlog entries to analyze' })
