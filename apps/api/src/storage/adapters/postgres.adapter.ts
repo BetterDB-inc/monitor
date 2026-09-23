@@ -1877,6 +1877,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       -- Migration: add ssh_tunnel column if it doesn't exist
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS ssh_tunnel TEXT;
 
+      -- Migration: add connection_type column if it doesn't exist
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS connection_type TEXT;
+
       CREATE INDEX IF NOT EXISTS idx_connections_is_default ON connections(is_default);
 
       -- Agent Tokens Table (cloud-only)
@@ -4372,8 +4375,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     await this.pool.query(
       `
-      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, ssh_tunnel, is_default, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, ssh_tunnel, connection_type, is_default, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
       ON CONFLICT(id) DO UPDATE SET
         name = EXCLUDED.name,
         host = EXCLUDED.host,
@@ -4384,6 +4387,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         db_index = EXCLUDED.db_index,
         tls = EXCLUDED.tls,
         ssh_tunnel = EXCLUDED.ssh_tunnel,
+        connection_type = EXCLUDED.connection_type,
         is_default = EXCLUDED.is_default,
         updated_at = EXCLUDED.updated_at
     `,
@@ -4398,6 +4402,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         config.dbIndex || 0,
         config.tls || false,
         config.sshTunnel ? JSON.stringify(config.sshTunnel) : null,
+        config.connectionType ?? null,
         config.isDefault || false,
         config.createdAt,
         config.updatedAt || null,
@@ -4421,6 +4426,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       dbIndex: row.db_index,
       tls: row.tls,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
+      connectionType: row.connection_type === 'external' ? 'external' : 'direct',
       isDefault: row.is_default,
       createdAt: Number(row.created_at),
       updatedAt: row.updated_at ? Number(row.updated_at) : undefined,
@@ -4445,6 +4451,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       dbIndex: row.db_index,
       tls: row.tls,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
+      connectionType: row.connection_type === 'external' ? 'external' : 'direct',
       isDefault: row.is_default,
       createdAt: Number(row.created_at),
       updatedAt: row.updated_at ? Number(row.updated_at) : undefined,
