@@ -6,6 +6,8 @@ import { RetentionPolicyService } from '../../retention/retention-policy.service
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { ConnectionContext } from '../../common/services/multi-connection-poller';
 import { PrometheusService } from '../../prometheus/prometheus.service';
+import { ExternalMetricsStore } from '../../external-metrics/external-metrics-store';
+import { ExternalMetricsAdapter } from '../../external-metrics/external-metrics.adapter';
 
 describe('CommandstatsPollerService', () => {
   let service: CommandstatsPollerService;
@@ -247,5 +249,23 @@ describe('CommandstatsPollerService', () => {
     });
     expect(byCommand.get.callsTotal).toBe(1000);
     expect(service.getSnapshot('unknown-conn')).toEqual([]);
+  });
+
+  describe('external connections', () => {
+    it('opts in and persists deltas from pushed cmd.calls / cmd.usec', async () => {
+      expect((service as any).supportsExternalConnections()).toBe(true);
+      const store = new ExternalMetricsStore();
+      const client = new ExternalMetricsAdapter('ext-1', store);
+      const push = (calls: string, usec: string) =>
+        store.apply('ext-1', [
+          { target: { kind: 'composite', section: 'commandstats', field: 'cmdstat_get', subkey: 'calls' }, value: calls, timeMs: Date.now() },
+          { target: { kind: 'composite', section: 'commandstats', field: 'cmdstat_get', subkey: 'usec' }, value: usec, timeMs: Date.now() },
+        ]);
+      push('100', '500');
+      await (service as any).pollConnection({ ...makeCtx(client, 'ext-1'), connectionType: 'external' });
+      push('150', '800');
+      await (service as any).pollConnection({ ...makeCtx(client, 'ext-1'), connectionType: 'external' });
+      expect(storage.saveCommandStatsSamples).toHaveBeenCalledTimes(1);
+    });
   });
 });

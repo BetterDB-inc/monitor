@@ -3,6 +3,9 @@ import { MemoryAnalyticsService } from '../memory-analytics.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { ConnectionContext } from '../../common/services/multi-connection-poller';
+import { ExternalMetricsStore } from '../../external-metrics/external-metrics-store';
+import { ExternalMetricsAdapter } from '../../external-metrics/external-metrics.adapter';
+import { FieldUpdate } from '../../external-metrics/otlp-metrics-types';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const NOW = 1_700_000_000_000;
@@ -154,6 +157,73 @@ describe('MemoryAnalyticsService', () => {
       ).resolves.toBeUndefined();
 
       expect(storage.saveMemorySnapshots).not.toHaveBeenCalled();
+    });
+
+    describe('external connections', () => {
+      const push = (store: ExternalMetricsStore, fields: Record<string, string>) => {
+        const updates: FieldUpdate[] = Object.entries(fields).map(([key, value]) => {
+          const [section, field] = key.split('.');
+          return { target: { kind: 'scalar', section, field }, value, timeMs: Date.now() };
+        });
+        store.apply('ext-1', updates);
+      };
+
+      const externalCtx = (store: ExternalMetricsStore): ConnectionContext => ({
+        connectionId: 'ext-1',
+        connectionName: 'pushed',
+        client: new ExternalMetricsAdapter('ext-1', store),
+        host: 'cache.internal',
+        port: 6379,
+        connectionType: 'external',
+      });
+
+      it('opts into external connections', () => {
+        expect((service as any).supportsExternalConnections()).toBe(true);
+      });
+
+      it('saves a snapshot when the core memory fields are pushed', async () => {
+        const store = new ExternalMetricsStore();
+        push(store, {
+          'memory.used_memory': '1000',
+          'memory.used_memory_rss': '1500',
+          'memory.used_memory_peak': '2000',
+          'memory.mem_fragmentation_ratio': '1.5',
+          'stats.instantaneous_ops_per_sec': '42',
+        });
+        await (service as any).pollConnection(externalCtx(store));
+        expect(storage.saveMemorySnapshots).toHaveBeenCalledWith(
+          [
+            expect.objectContaining({
+              usedMemory: 1000,
+              usedMemoryRss: 1500,
+              usedMemoryPeak: 2000,
+              memFragmentationRatio: 1.5,
+              maxmemory: 0,
+              allocatorFragRatio: 0,
+              opsPerSec: 42,
+              connectionId: 'ext-1',
+            }),
+          ],
+          'ext-1',
+        );
+      });
+
+      it('skips the snapshot when a core memory field is missing', async () => {
+        const store = new ExternalMetricsStore();
+        push(store, {
+          'memory.used_memory': '1000',
+          'memory.used_memory_rss': '1500',
+          'memory.mem_fragmentation_ratio': '1.5',
+        });
+        await (service as any).pollConnection(externalCtx(store));
+        expect(storage.saveMemorySnapshots).not.toHaveBeenCalled();
+      });
+
+      it('keeps saving direct snapshots with missing fields as before', async () => {
+        const client = { getInfoParsed: jest.fn().mockResolvedValue({ memory: { used_memory: '10' } }) };
+        await (service as any).pollConnection(makeCtx(client));
+        expect(storage.saveMemorySnapshots).toHaveBeenCalledTimes(1);
+      });
     });
   });
 

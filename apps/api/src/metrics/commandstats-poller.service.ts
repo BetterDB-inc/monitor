@@ -56,6 +56,10 @@ export class CommandstatsPollerService extends MultiConnectionPoller implements 
     this.lastPruneByConnection.delete(connectionId);
   }
 
+  protected supportsExternalConnections(): boolean {
+    return true;
+  }
+
   getSnapshot(connectionId: string): CommandStatsSnapshotEntry[] {
     const baseline = this.baselines.get(connectionId);
     if (!baseline) {

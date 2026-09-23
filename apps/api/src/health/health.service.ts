@@ -59,8 +59,18 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
     return true;
   }
 
+  protected supportsExternalConnections(): boolean {
+    return true;
+  }
+
+  protected skipUnchangedSamples(): boolean {
+    return false;
+  }
+
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
-    // Perform health check for this connection - triggers webhooks on state change
+    if (ctx.connectionType === 'external' && (ctx.client.sampleVersion?.() ?? null) === null) {
+      return;
+    }
     await this.getHealth(ctx.connectionId);
   }
 

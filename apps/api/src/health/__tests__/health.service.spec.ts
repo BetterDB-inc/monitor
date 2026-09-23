@@ -2,6 +2,8 @@ import { HealthService } from '../health.service';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../../connections/runtime-capability-tracker.service';
 import { ConfigHazardService } from '../../monitor/config-hazard.service';
+import { ConnectionContext } from '../../common/services/multi-connection-poller';
+import { DatabasePort } from '../../common/interfaces/database-port.interface';
 
 describe('HealthService detailed health', () => {
   const hazardFinding = {
@@ -76,5 +78,42 @@ describe('HealthService detailed health', () => {
     const detailed = await service.getDetailedHealth('conn-1');
     expect(detailed.status).toBe('connected');
     expect(detailed.configHazards).toEqual([]);
+  });
+});
+
+describe('HealthService external connections', () => {
+  const makeService = () =>
+    new HealthService(
+      {
+        list: jest.fn().mockReturnValue([]),
+        get: jest.fn(),
+        getConfig: jest.fn().mockReturnValue({ host: 'cache.internal', port: 6379 }),
+        getDefaultId: jest.fn().mockReturnValue('ext-1'),
+      } as unknown as ConnectionRegistry,
+      { getCapabilities: jest.fn(), getDisabledReasons: jest.fn() } as unknown as RuntimeCapabilityTracker,
+    );
+
+  const ctx = (sampleVersion: number | null): ConnectionContext => ({
+    connectionId: 'ext-1',
+    connectionName: 'pushed',
+    client: { sampleVersion: () => sampleVersion } as unknown as DatabasePort,
+    host: 'cache.internal',
+    port: 6379,
+    connectionType: 'external',
+  });
+
+  it('opts in and polls every tick', () => {
+    const service = makeService();
+    expect((service as any).supportsExternalConnections()).toBe(true);
+    expect((service as any).skipUnchangedSamples()).toBe(false);
+  });
+
+  it('ignores an external connection that has never pushed', async () => {
+    const service = makeService();
+    const getHealth = jest.spyOn(service, 'getHealth').mockResolvedValue({} as never);
+    await (service as any).pollConnection(ctx(null));
+    expect(getHealth).not.toHaveBeenCalled();
+    await (service as any).pollConnection(ctx(123));
+    expect(getHealth).toHaveBeenCalledWith('ext-1');
   });
 });
