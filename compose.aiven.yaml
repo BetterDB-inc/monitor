@@ -29,7 +29,9 @@ services:
   betterdb-monitor:
     build:
       context: .
-      dockerfile: Dockerfile
+      # Aiven-specific build variant: same as ./Dockerfile but without the
+      # telemetry/version ARGs, so they don't clutter the Runtime deploy screen.
+      dockerfile: Dockerfile.aiven
       target: production-no-ai
       # args:
       #   APP_VERSION: "0.44.0"

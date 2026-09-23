@@ -4,8 +4,6 @@ import { requireCloudAuth } from './common/utils/cloud-auth-loader';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
-import { IncomingMessage } from 'http';
-import { Socket } from 'net';
 import { join } from 'path';
 import { readFileSync } from 'fs';
 import fastifyStatic from '@fastify/static';
@@ -17,6 +15,7 @@ import { CliGateway } from './cli/cli.gateway';
 import { TailGateway } from './monitor/tail.gateway';
 import { createUpgradeRouter } from './common/websocket/upgrade-router';
 import { resolveWorkspaceConfig } from './auth/workspace-config';
+import { resolveAgentGateway } from './agent/resolve-agent-gateway';
 
 async function bootstrap(): Promise<void> {
   // Validate environment variables before anything else
@@ -212,31 +211,13 @@ async function bootstrap(): Promise<void> {
     const tailGateway = app.get(TailGateway);
     const httpServer = app.getHttpServer();
 
-    // Resolve the agent WebSocket gateway only when a module actually provides it.
-    // Cloud provides it via AgentModule; self-hosted via SelfHostedAgentModule
-    // (createAgentGatewayProviders). Under WORKSPACE_DISABLED neither is loaded, so
-    // the AgentGateway provider does not exist. We must NOT call app.get() in that
-    // case: app.get runs inside Nest's ExceptionsZone whose default teardown is
-    // process.exit(1), so an UnknownElementException there crashes bootstrap rather
-    // than being caught by the try/catch below. The inner try/catch remains for the
-    // case where the proprietary agent code simply isn't built.
+    // Resolve the agent WebSocket gateway only when a module actually provides it
+    // (see resolveAgentGateway for why the lookup is guarded). The require stays
+    // here so its relative path resolves against main.js at runtime.
     const workspaceConfig = resolveWorkspaceConfig(process.env);
-    const agentGateway =
-      workspaceConfig.mode !== 'disabled'
-        ? (() => {
-            try {
-              const { AgentGateway } = require('../../../proprietary/agent/agent-gateway');
-              const gw = app.get(AgentGateway);
-              console.log('[Agent] WebSocket gateway resolved');
-              return gw as {
-                handleUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): void;
-              };
-            } catch {
-              console.warn('[Agent] WebSocket gateway not registered — agent connections disabled');
-              return null;
-            }
-          })()
-        : null;
+    const agentGateway = resolveAgentGateway(app, workspaceConfig.mode, () =>
+      require('../../../proprietary/agent/agent-gateway'),
+    );
 
     httpServer.on(
       'upgrade',
@@ -295,4 +276,9 @@ async function bootstrap(): Promise<void> {
   console.log('');
 }
 
-bootstrap();
+// With abortOnError:false a startup failure rejects instead of Nest calling
+// process.exit(1) itself; catch it so container logs show a readable error.
+bootstrap().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
