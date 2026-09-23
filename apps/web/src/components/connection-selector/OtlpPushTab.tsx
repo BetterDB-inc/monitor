@@ -8,9 +8,9 @@ export function buildCollectorSnippet(host: string, port: number, origin: string
     collection_interval: 15s
     resource_attributes:
       server.address:
-          enabled: true
+        enabled: true
       server.port:
-          enabled: true
+        enabled: true
     metrics:
       redis.maxmemory:
         enabled: true

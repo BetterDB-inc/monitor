@@ -12,8 +12,8 @@ describe('buildCollectorSnippet', () => {
   it('points the redis receiver at the instance and the exporter at the external endpoint', () => {
     const snippet = buildCollectorSnippet('cache.internal', 6380, 'https://monitor.example.com');
     expect(snippet).toContain('endpoint: cache.internal:6380');
-    expect(snippet).toContain('server.address:\n          enabled: true');
-    expect(snippet).toContain('server.port:\n          enabled: true');
+    expect(snippet).toContain('server.address:\n        enabled: true');
+    expect(snippet).toContain('server.port:\n        enabled: true');
     expect(snippet).toContain('metrics_endpoint: https://monitor.example.com/v1/external/metrics');
     expect(snippet).toContain('Authorization: "Bearer ${env:BETTERDB_OTEL_INGEST_TOKEN}"');
     expect(snippet).not.toMatch(/^\s+endpoint: https/m);
