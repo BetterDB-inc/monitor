@@ -5,7 +5,7 @@ nav_order: 3.5
 
 # OpenTelemetry (OTLP)
 
-BetterDB Monitor speaks OTLP in both directions. It **ingests** traces from your instrumented applications, and it can **export** its metrics and events to any OTLP collector.
+BetterDB Monitor speaks OTLP in both directions. It **ingests** traces from your instrumented applications and metrics pushed by an OpenTelemetry Collector for instances it doesn't connect to, and it can **export** its metrics and events to any OTLP collector.
 
 One thing to be clear about up front: Monitor's metrics are Prometheus-first (see **[Prometheus Integration](prometheus-integration.md)**). The OTLP metrics export is a mirror of that registry, not the source of truth. And on the trace side Monitor is a **receiver**: it stores spans your apps send, it does not emit spans of its own.
 
@@ -14,7 +14,7 @@ One thing to be clear about up front: Monitor's metrics are Prometheus-first (se
 | Signal | Direction | Endpoint | Default |
 |--------|-----------|----------|---------|
 | Traces | Ingest (receive) | `POST /v1/traces` | on |
-| Metrics ingestion | Ingest (receive) | `POST /v1/external/metrics` | JSON or protobuf OTLP metrics for instances BetterDB doesn't connect to |
+| Metrics (external instances) | Ingest (receive) | `POST /v1/external/metrics` | on |
 | Metrics | Export (mirror) | `${OTLP endpoint}/v1/metrics` | off, opt-in |
 | Events | Export (logs) | `${OTLP endpoint}/v1/logs` | off, opt-in |
 
@@ -120,7 +120,7 @@ Use `metrics_endpoint`, not the plain `endpoint` — `endpoint` appends the stan
 | `slaves.connected` | — | `replication.connected_slaves` |
 | `replication.offset` | — | `replication.master_repl_offset` |
 | `replication.backlog_first_byte_offset` | — | `replication.repl_backlog_first_byte_offset` |
-| `role` | `role` ∈ primary, replica; value 1 | `replication.role` = `master` / `slave` |
+| `role` | `role` ∈ primary, replica; value 1 | `replication.role` = `master` / `slave` (a point whose value isn't 1 is skipped silently, not counted as dropped) |
 | `uptime` | — | `server.uptime_in_seconds` |
 | `rdb.changes_since_last_save` | — | `persistence.rdb_changes_since_last_save` |
 | `db.keys` / `db.expires` / `db.avg_ttl` | `db` | composite `keyspace.db<N>` → `keys` / `expires` / `avg_ttl` |
@@ -135,7 +135,7 @@ Use `metrics_endpoint`, not the plain `endpoint` — `endpoint` appends the stan
 
 | Reason | Meaning |
 |---|---|
-| `unidentified` | The resource has neither `service.instance.id` nor `server.address`/`server.port`, so no instance could be resolved. |
+| `unidentified` | The resource has no `service.instance.id`, or one that can't be parsed as `host:port`/`host-port`, and there's no `server.address`/`server.port` fallback either — so no instance could be resolved. |
 | `unknown_instance` | The resolved host:port isn't a registered connection. |
 | `already_polled` | The resolved host:port is a connection BetterDB already polls directly (not registered as OTLP push). |
 | `unsupported_type` | The point is a histogram, exponential histogram, or summary. |
