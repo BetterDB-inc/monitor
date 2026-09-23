@@ -11,7 +11,7 @@ export interface Connection {
     dbType: 'valkey' | 'redis';
     version: string;
   };
-  connectionType?: 'direct' | 'agent';
+  connectionType?: 'direct' | 'agent' | 'external';
 }
 
 export interface ConnectionContextValue {
