@@ -113,7 +113,7 @@ function AppLayoutInner(): ReactElement {
         <main className="min-h-screen  flex flex-col pl-0 transition-[padding] duration-200 ease-linear md:peer-data-[state=expanded]:pl-64">
           <DemoBanner cloudUser={cloudUser} />
           {!cloudUser && <UpdateBanner />}
-          <div className="p-8 flex-1 flex flex-col">
+          <div className="p-8 pb-17 flex-1 flex flex-col">
             <Routes>
               <Route
                 path="/"
