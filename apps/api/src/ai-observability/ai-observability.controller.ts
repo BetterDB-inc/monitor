@@ -7,12 +7,13 @@ import type {
   SpanCorrelation,
 } from '@betterdb/shared';
 import { ConnectionId } from '../common/decorators';
-import { LiveConnectionGuard } from '../external-metrics/live-connection.guard';
+import { LiveConnectionGuard, UseHeaderConnectionId } from '../external-metrics/live-connection.guard';
 import { AiObservabilityService, AiInstanceWithSample } from './ai-observability.service';
 import { TraceCorrelationService } from './trace-correlation.service';
 
 @ApiTags('ai-observability')
 @Controller('ai')
+@UseHeaderConnectionId()
 export class AiObservabilityController {
   constructor(
     private readonly service: AiObservabilityService,

@@ -4,12 +4,17 @@ import type { CveDatasetStatus, CveScanResult } from '@betterdb/shared';
 import { ConnectionId } from '../common/decorators';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { requireConnectionId } from '../connections/require-connection-id';
-import { AllowExternalConnection, LiveConnectionGuard } from '../external-metrics/live-connection.guard';
+import {
+  AllowExternalConnection,
+  LiveConnectionGuard,
+  UseHeaderConnectionId,
+} from '../external-metrics/live-connection.guard';
 import { CveService } from './cve.service';
 
 @ApiTags('cve')
 @Controller('cve')
 @UseGuards(LiveConnectionGuard)
+@UseHeaderConnectionId()
 export class CveController {
   constructor(
     private readonly cveService: CveService,

@@ -134,10 +134,13 @@ describe('live-only controllers', () => {
     },
   );
 
-  it.each([VectorSearchController, BulkDeleteController])(
-    '%p resolves the guarded connection from the header it binds',
-    (controller) => {
-      expect(Reflect.getMetadata(HEADER_CONNECTION_ID_KEY, controller)).toBe(true);
-    },
-  );
+  it.each([
+    VectorSearchController,
+    BulkDeleteController,
+    MetricsController,
+    CveController,
+    AiObservabilityController,
+  ])('%p resolves the guarded connection from the header it binds', (controller) => {
+    expect(Reflect.getMetadata(HEADER_CONNECTION_ID_KEY, controller)).toBe(true);
+  });
 });

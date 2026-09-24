@@ -6,7 +6,11 @@ import { ClusterMetricsService, NodeStats, ClusterSlowlogEntry, ClusterClientEnt
 import { ConnectionId } from '../common/decorators';
 import { Roles } from '../auth/guards/roles.decorator';
 import { ExternalConnectionUnsupportedError } from '../external-metrics/external-connection-unsupported.error';
-import { AllowExternalConnection, LiveConnectionGuard } from '../external-metrics/live-connection.guard';
+import {
+  AllowExternalConnection,
+  LiveConnectionGuard,
+  UseHeaderConnectionId,
+} from '../external-metrics/live-connection.guard';
 import {
   InfoResponse,
   SlowLogEntry,
@@ -53,6 +57,7 @@ import {
 @ApiTags('metrics')
 @Controller('metrics')
 @UseGuards(LiveConnectionGuard)
+@UseHeaderConnectionId()
 export class MetricsController {
   constructor(
     private readonly metricsService: MetricsService,
