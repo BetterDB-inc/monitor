@@ -10,7 +10,6 @@ interface GuardedRequest {
   headers?: Record<string, unknown>;
   params?: Record<string, unknown>;
   body?: unknown;
-  query?: Record<string, unknown>;
 }
 
 function nonEmptyString(value: unknown): string | undefined {
@@ -22,7 +21,6 @@ function resolveConnectionId(request: GuardedRequest): string | undefined {
   return (
     nonEmptyString(request.params?.connectionId) ??
     nonEmptyString(body.connectionId) ??
-    nonEmptyString(request.query?.connectionId) ??
     nonEmptyString(request.headers?.[CONNECTION_ID_HEADER])
   );
 }

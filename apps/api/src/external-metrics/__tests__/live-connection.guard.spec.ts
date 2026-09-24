@@ -98,8 +98,14 @@ describe('LiveConnectionGuard', () => {
       expect(() => guard.canActivate(context)).toThrow(ExternalConnectionUnsupportedError);
     });
 
-    it('rejects an external connection named in the query string', () => {
+    it('ignores a query-string connectionId, which guarded handlers do not bind', () => {
       const context = contextFor(handler, klass, 'direct-1', { query: { connectionId: 'ext-1' } });
+
+      expect(guard.canActivate(context)).toBe(true);
+    });
+
+    it('checks the header connection when only the query names another one', () => {
+      const context = contextFor(handler, klass, 'ext-1', { query: { connectionId: 'direct-1' } });
 
       expect(() => guard.canActivate(context)).toThrow(ExternalConnectionUnsupportedError);
     });
