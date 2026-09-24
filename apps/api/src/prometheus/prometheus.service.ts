@@ -954,10 +954,14 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const connLabel = this.getConnectionLabel(connectionId);
     const state = this.getConnectionState(connectionId);
 
-    await this.updateAclMetrics(connectionId, connLabel, state, epoch);
-    if (this.isSuperseded(connectionId, epoch)) return;
-    await this.updateClientMetrics(connectionId, connLabel, state, epoch);
-    if (this.isSuperseded(connectionId, epoch)) return;
+    if (this.isExternalConnection(connectionId)) {
+      this.removeLiveAnalyticsSeries(connLabel, state);
+    } else {
+      await this.updateAclMetrics(connectionId, connLabel, state, epoch);
+      if (this.isSuperseded(connectionId, epoch)) return;
+      await this.updateClientMetrics(connectionId, connLabel, state, epoch);
+      if (this.isSuperseded(connectionId, epoch)) return;
+    }
     await this.updateSlowlogMetrics(connectionId, connLabel, state);
     if (this.isSuperseded(connectionId, epoch)) return;
     await this.updateCommandlogMetrics(connectionId, connLabel, state);
@@ -965,6 +969,32 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     await this.updateMetricForecastMetrics(connectionId, connLabel, epoch);
     if (this.isSuperseded(connectionId, epoch)) return;
     await this.updateCveMetrics(connectionId, connLabel);
+  }
+
+  private isExternalConnection(connectionId: string): boolean {
+    return this.connectionRegistry.getConfig(connectionId)?.connectionType === 'external';
+  }
+
+  private removeLiveAnalyticsSeries(connLabel: string, state: ConnectionMetricState): void {
+    this.aclDeniedTotal.remove(connLabel);
+    for (const reason of state.currentAclReasonLabels) {
+      this.aclDeniedByReason.remove(connLabel, reason);
+    }
+    for (const user of state.currentAclUserLabels) {
+      this.aclDeniedByUser.remove(connLabel, user);
+    }
+    this.clientConnectionsCurrent.remove(connLabel);
+    this.clientConnectionsPeak.remove(connLabel);
+    for (const name of state.currentClientNameLabels) {
+      this.clientConnectionsByName.remove(connLabel, name);
+    }
+    for (const user of state.currentClientUserLabels) {
+      this.clientConnectionsByUser.remove(connLabel, user);
+    }
+    state.currentAclReasonLabels = new Set();
+    state.currentAclUserLabels = new Set();
+    state.currentClientNameLabels = new Set();
+    state.currentClientUserLabels = new Set();
   }
 
   private async updateCveMetrics(connectionId: string, connLabel: string): Promise<void> {
@@ -1202,7 +1232,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const connLabel = this.getConnectionLabel(connectionId);
     const state = this.getConnectionState(connectionId);
     const config = this.connectionRegistry.getConfig(connectionId);
-    const external = config?.connectionType === 'external';
+    const external = this.isExternalConnection(connectionId);
     const absentAsZero = !external;
     this.freshness.observe(connectionId, connLabel, Date.now());
 
@@ -1406,7 +1436,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
     const memoryUsed = this.readInfoNumber(memory.used_memory, absentAsZero);
     const maxMemory = this.readInfoNumber(memory.maxmemory, absentAsZero);
-    const maxmemoryPolicy = memory.maxmemory_policy || 'noeviction';
+    const maxmemoryPolicy = memory.maxmemory_policy || (absentAsZero ? 'noeviction' : undefined);
 
     this.setOrRemove(this.memoryUsedBytes, connLabel, memoryUsed);
     this.setInfoGauge(this.memoryUsedRssBytes, connLabel, memory.used_memory_rss, absentAsZero);

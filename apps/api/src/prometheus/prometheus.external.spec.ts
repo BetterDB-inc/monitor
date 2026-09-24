@@ -1,5 +1,5 @@
 import { ConfigService } from '@nestjs/config';
-import { WebhookEventType } from '@betterdb/shared';
+import { IWebhookEventsEnterpriseService, WebhookEventType } from '@betterdb/shared';
 import { PrometheusService } from './prometheus.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
@@ -37,6 +37,7 @@ describe('PrometheusService external connections', () => {
   let store: ExternalMetricsStore;
   let adapter: ExternalMetricsAdapter;
   let dispatchThresholdAlertPerWebhook: jest.Mock;
+  let dispatchComplianceAlert: jest.Mock;
   let directInfo: jest.Mock;
   let includeDirect: boolean;
   let runtimeCapabilityTracker: { isAvailable: jest.Mock; recordFailure: jest.Mock };
@@ -96,6 +97,21 @@ describe('PrometheusService external connections', () => {
       get: jest.fn((key: string, fallback?: unknown) => values[key] ?? fallback),
     } as unknown as ConfigService;
     dispatchThresholdAlertPerWebhook = jest.fn().mockResolvedValue(undefined);
+    dispatchComplianceAlert = jest.fn().mockResolvedValue(false);
+    const storage = {
+      getAuditStats: jest.fn().mockResolvedValue({
+        totalEntries: 0,
+        entriesByReason: {},
+        entriesByUser: {},
+      }),
+      getClientAnalyticsStats: jest.fn().mockResolvedValue({
+        currentConnections: 0,
+        peakConnections: 0,
+        connectionsByName: {},
+        connectionsByUser: {},
+      }),
+      getCveScanResult: jest.fn().mockResolvedValue(null),
+    };
     runtimeCapabilityTracker = {
       isAvailable: jest.fn().mockReturnValue(true),
       recordFailure: jest.fn().mockReturnValue(false),
@@ -107,7 +123,7 @@ describe('PrometheusService external connections', () => {
     };
 
     service = new PrometheusService(
-      {} as StoragePort,
+      storage as unknown as StoragePort,
       registry,
       config,
       runtimeCapabilityTracker as unknown as RuntimeCapabilityTracker,
@@ -117,6 +133,8 @@ describe('PrometheusService external connections', () => {
       } as unknown as CommandLogAnalyticsService,
       { getHealth: jest.fn().mockResolvedValue(undefined) } as unknown as HealthService,
       { dispatchThresholdAlertPerWebhook } as unknown as WebhookDispatcherService,
+      undefined,
+      { dispatchComplianceAlert } as unknown as IWebhookEventsEnterpriseService,
     );
     jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
     jest.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
@@ -149,6 +167,15 @@ describe('PrometheusService external connections', () => {
     return service['registry'].metrics();
   }
 
+  function expectNoLiveAnalyticsSeries(text: string): void {
+    expect(text).not.toMatch(anySeries('acl_denied', EXT_LABEL));
+    expect(text).not.toMatch(anySeries('client_connections_', EXT_LABEL));
+  }
+
+  function complianceConnectionIds(): unknown[] {
+    return dispatchComplianceAlert.mock.calls.map(([payload]) => payload.connectionId);
+  }
+
   function connectionCriticalCalls(): unknown[][] {
     return dispatchThresholdAlertPerWebhook.mock.calls.filter(
       ([event]) => event === WebhookEventType.CONNECTION_CRITICAL,
@@ -177,6 +204,7 @@ describe('PrometheusService external connections', () => {
       expect(text).not.toMatch(series('keyspace_hits_total', EXT_LABEL));
       expect(text).not.toMatch(anySeries('cluster_', EXT_LABEL));
       expect(text).not.toMatch(anySeries('slowlog_', EXT_LABEL));
+      expectNoLiveAnalyticsSeries(text);
       expect(runtimeCapabilityTracker.isAvailable).not.toHaveBeenCalled();
       expect(slowLogAnalytics.getSlowLogLength).not.toHaveBeenCalled();
     });
@@ -248,6 +276,26 @@ describe('PrometheusService external connections', () => {
         ),
       ).toHaveLength(0);
     });
+
+    it('does not raise a compliance alert without a pushed maxmemory_policy', async () => {
+      push({ 'memory.used_memory': '900', 'memory.maxmemory': '1000' });
+
+      await pollTick();
+
+      expect(dispatchComplianceAlert).not.toHaveBeenCalled();
+    });
+
+    it('raises a compliance alert once maxmemory_policy is present', async () => {
+      push({
+        'memory.used_memory': '900',
+        'memory.maxmemory': '1000',
+        'memory.maxmemory_policy': 'noeviction',
+      });
+
+      await pollTick();
+
+      expect(complianceConnectionIds()).toEqual(['ext-1']);
+    });
   });
 
   describe('scrape path', () => {
@@ -260,7 +308,30 @@ describe('PrometheusService external connections', () => {
       expect(text).not.toMatch(series('memory_used_rss_bytes', EXT_LABEL));
       expect(text).not.toMatch(anySeries('cluster_', EXT_LABEL));
       expect(text).not.toMatch(anySeries('slowlog_', EXT_LABEL));
+      expectNoLiveAnalyticsSeries(text);
       expect(connectionCriticalCalls()).toHaveLength(0);
+    });
+
+    it('keeps the noeviction compliance default for direct connections only', async () => {
+      includeDirect = true;
+      directInfo.mockResolvedValue({ memory: { used_memory: '900', maxmemory: '1000' } });
+      push({ 'memory.used_memory': '900', 'memory.maxmemory': '1000' });
+
+      const text = await service.getMetrics();
+
+      expect(complianceConnectionIds()).toEqual(['direct-1']);
+      expect(text).toMatch(series('acl_denied', DIRECT_LABEL));
+      expect(text).toMatch(series('client_connections_current', DIRECT_LABEL));
+      expectNoLiveAnalyticsSeries(text);
+    });
+
+    it('removes live-only analytics series already exported under the label', async () => {
+      service['aclDeniedTotal'].labels(EXT_LABEL).set(4);
+      service['clientConnectionsCurrent'].labels(EXT_LABEL).set(2);
+      service['clientConnectionsPeak'].labels(EXT_LABEL).set(9);
+      push({ 'memory.used_memory': '1024' });
+
+      expectNoLiveAnalyticsSeries(await service.getMetrics());
     });
 
     it('removes a pushed field once it goes stale in the store', async () => {
