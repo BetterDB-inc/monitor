@@ -5,6 +5,7 @@ import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { useCapabilities } from '../hooks/useCapabilities';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { EmptyState } from '../components/ui/empty-state';
 import { UnavailableOverlay } from '../components/UnavailableOverlay';
 
 function formatTimestamp(timestamp: number): string {
@@ -269,9 +270,11 @@ export function AuditTrail() {
               </table>
             </div>
           ) : (
-            <div className="text-center py-8 text-muted-foreground">
-              No audit entries found. The audit trail will populate as ACL events occur.
-            </div>
+            <EmptyState
+              variant="inline"
+              title="No audit entries found"
+              description="The audit trail will populate as ACL events occur."
+            />
           )}
         </CardContent>
       </Card>

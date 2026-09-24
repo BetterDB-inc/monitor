@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
+import { EmptyState } from '../ui/empty-state';
 import { Badge } from '../ui/badge';
 import { AlertTriangle, Activity, Database, Users } from 'lucide-react';
 import { formatBytes } from '../../lib/utils';
@@ -38,13 +39,7 @@ export function NodeStatsComparison({ nodeStats }: NodeStatsComparisonProps) {
   }, [statsArray]);
 
   if (statsArray.length === 0) {
-    return (
-      <Card>
-        <CardContent className="p-6">
-          <div className="text-center text-muted-foreground">No node statistics available</div>
-        </CardContent>
-      </Card>
-    );
+    return <EmptyState title="No node statistics available" />;
   }
 
   const isImbalanced = (nodeId: string) =>

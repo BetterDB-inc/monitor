@@ -7,6 +7,7 @@ import { useStoredLatencySnapshots, useStoredLatencyHistograms } from '../hooks/
 import { useLatencyHistory } from '../hooks/useLatencyHistory';
 import { useLatencyDoctor } from '../hooks/useLatencyDoctor';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { EmptyState } from '../components/ui/empty-state';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
 import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
 import { DoctorCard } from '../components/DoctorCard';
@@ -249,9 +250,7 @@ export function Latency() {
                 </LineChart>
               </ResponsiveContainer>
             ) : (
-              <div className="text-center text-muted-foreground py-8">
-                No history data available for this event
-              </div>
+              <EmptyState variant="inline" title="No history data available for this event" />
             )}
           </CardContent>
         </Card>
@@ -287,7 +286,7 @@ export function Latency() {
               </AreaChart>
             </ResponsiveContainer>
           ) : (
-            <div className="text-center text-muted-foreground py-8">No command data available</div>
+            <EmptyState variant="inline" title="No command data available" />
           )}
         </CardContent>
       </Card>
@@ -317,7 +316,7 @@ export function Latency() {
               </BarChart>
             </ResponsiveContainer>
           ) : (
-            <div className="text-center text-muted-foreground py-8">No command data available</div>
+            <EmptyState variant="inline" title="No command data available" />
           )}
         </CardContent>
       </Card>
@@ -360,7 +359,7 @@ export function Latency() {
               </Table>
             </>
           ) : (
-            <div className="text-center text-muted-foreground py-8">No command data available</div>
+            <EmptyState variant="inline" title="No command data available" />
           )}
         </CardContent>
       </Card>

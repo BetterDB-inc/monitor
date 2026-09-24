@@ -7,6 +7,7 @@ import { useCapabilities } from '../hooks/useCapabilities';
 import { useLicense } from '../hooks/useLicense';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { EmptyState } from '../components/ui/empty-state';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { Badge } from '../components/ui/badge';
 import { UnavailableOverlay } from '../components/UnavailableOverlay';
@@ -463,9 +464,7 @@ export function ClientAnalyticsDeepDive() {
                   </table>
                 </div>
               ) : (
-                <div className="text-center py-8 text-muted-foreground">
-                  No idle connections detected
-                </div>
+                <EmptyState variant="inline" title="No idle connections detected" />
               )}
             </CardContent>
           </Card>
@@ -574,9 +573,7 @@ export function ClientAnalyticsDeepDive() {
                     </table>
                   </div>
                 ) : (
-                  <div className="text-center py-8 text-muted-foreground">
-                    No buffer anomalies detected
-                  </div>
+                  <EmptyState variant="inline" title="No buffer anomalies detected" />
                 )}
               </CardContent>
             </Card>

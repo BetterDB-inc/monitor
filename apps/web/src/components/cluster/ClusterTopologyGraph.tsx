@@ -14,6 +14,7 @@ import {
   type ZoomBehavior,
 } from 'd3';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
+import { EmptyState } from '../ui/empty-state';
 import { Badge } from '../ui/badge';
 import { Network, ZoomIn, ZoomOut, Maximize } from 'lucide-react';
 import { formatBytes } from '../../lib/utils';
@@ -347,13 +348,7 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
   }, []);
 
   if (graphNodes.length === 0) {
-    return (
-      <Card>
-        <CardContent className="p-6">
-          <div className="text-center text-muted-foreground">No cluster nodes available</div>
-        </CardContent>
-      </Card>
-    );
+    return <EmptyState title="No cluster nodes available" />;
   }
 
   const masterCount = graphNodes.filter((n) => n.role === 'master').length;
