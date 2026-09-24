@@ -1,4 +1,5 @@
 import { ConfigService } from '@nestjs/config';
+import { WebhookEventType } from '@betterdb/shared';
 import { PrometheusService } from './prometheus.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
@@ -6,31 +7,300 @@ import { SlowLogAnalyticsService } from '../slowlog-analytics/slowlog-analytics.
 import { CommandLogAnalyticsService } from '../commandlog-analytics/commandlog-analytics.service';
 import { HealthService } from '../health/health.service';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
+import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
+import { ExternalMetricsStore } from '../external-metrics/external-metrics-store';
+import { ExternalMetricsAdapter } from '../external-metrics/external-metrics.adapter';
+import type { InfoTarget } from '../external-metrics/otlp-metrics-types';
 
-describe('PrometheusService.updateMetrics with external connections', () => {
-  it('skips external connections when exporting', async () => {
+const T0 = 1_700_000_000_000;
+const EXT_LABEL = 'cache.internal:6379';
+const DIRECT_LABEL = '10.0.0.1:6379';
+const POLL_INTERVAL_MS = 5000;
+const BOUND_MS = POLL_INTERVAL_MS * 3;
+
+function series(name: string, label: string): RegExp {
+  return new RegExp(
+    `^betterdb_${name}\\{connection="${label.replace(/\./g, '\\.')}"[^}]*\\} (\\S+)$`,
+    'm',
+  );
+}
+
+function anySeries(prefix: string, label: string): RegExp {
+  return new RegExp(
+    `^betterdb_${prefix}[a-z_]*\\{connection="${label.replace(/\./g, '\\.')}"`,
+    'm',
+  );
+}
+
+describe('PrometheusService external connections', () => {
+  let service: PrometheusService;
+  let store: ExternalMetricsStore;
+  let adapter: ExternalMetricsAdapter;
+  let dispatchThresholdAlertPerWebhook: jest.Mock;
+  let directInfo: jest.Mock;
+  let includeDirect: boolean;
+  let runtimeCapabilityTracker: { isAvailable: jest.Mock; recordFailure: jest.Mock };
+  let slowLogAnalytics: {
+    getCachedAnalysis: jest.Mock;
+    getSlowLogLength: jest.Mock;
+    getLastSeenId: jest.Mock;
+  };
+
+  beforeEach(() => {
+    jest.useFakeTimers({ now: T0 });
+    store = new ExternalMetricsStore();
+    adapter = new ExternalMetricsAdapter('ext-1', store);
+    directInfo = jest.fn().mockResolvedValue({
+      memory: { used_memory: '500' },
+      clients: { connected_clients: '2' },
+    });
+    includeDirect = false;
+
+    const configs: Record<string, { host: string; port: number; connectionType?: string }> = {
+      'ext-1': { host: 'cache.internal', port: 6379, connectionType: 'external' },
+      'direct-1': { host: '10.0.0.1', port: 6379 },
+    };
+    const clients: Record<string, unknown> = {
+      'ext-1': adapter,
+      'direct-1': { getInfoParsed: directInfo, getClusterInfo: jest.fn() },
+    };
     const registry = {
-      list: jest.fn().mockReturnValue([
-        { id: 'direct-1', name: 'polled', isConnected: true, connectionType: 'direct' },
-        { id: 'ext-1', name: 'pushed', isConnected: true, connectionType: 'external' },
-        { id: 'agent-1', name: 'agent', isConnected: true, connectionType: 'agent' },
+      getConfig: jest.fn((id: string) => configs[id] ?? null),
+      get: jest.fn((id: string) => clients[id]),
+      list: jest.fn(() => [
+        {
+          id: 'ext-1',
+          name: 'pushed',
+          host: 'cache.internal',
+          port: 6379,
+          isConnected: adapter.isConnected(),
+          connectionType: 'external',
+        },
+        ...(includeDirect
+          ? [
+              {
+                id: 'direct-1',
+                name: 'polled',
+                host: '10.0.0.1',
+                port: 6379,
+                isConnected: true,
+                connectionType: 'direct',
+              },
+            ]
+          : []),
       ]),
+      getDefaultId: jest.fn().mockReturnValue('ext-1'),
     } as unknown as ConnectionRegistry;
-    const service = new PrometheusService(
+    const values: Record<string, unknown> = { PROMETHEUS_POLL_INTERVAL_MS: POLL_INTERVAL_MS };
+    const config = {
+      get: jest.fn((key: string, fallback?: unknown) => values[key] ?? fallback),
+    } as unknown as ConfigService;
+    dispatchThresholdAlertPerWebhook = jest.fn().mockResolvedValue(undefined);
+    runtimeCapabilityTracker = {
+      isAvailable: jest.fn().mockReturnValue(true),
+      recordFailure: jest.fn().mockReturnValue(false),
+    };
+    slowLogAnalytics = {
+      getCachedAnalysis: jest.fn().mockReturnValue(null),
+      getSlowLogLength: jest.fn().mockResolvedValue(7),
+      getLastSeenId: jest.fn().mockReturnValue(3),
+    };
+
+    service = new PrometheusService(
       {} as StoragePort,
       registry,
-      { get: jest.fn().mockReturnValue(5000) } as unknown as ConfigService,
-      {} as RuntimeCapabilityTracker,
-      {} as SlowLogAnalyticsService,
-      {} as CommandLogAnalyticsService,
-      {} as HealthService,
+      config,
+      runtimeCapabilityTracker as unknown as RuntimeCapabilityTracker,
+      slowLogAnalytics as unknown as SlowLogAnalyticsService,
+      {
+        hasCommandLogSupport: jest.fn().mockReturnValue(false),
+      } as unknown as CommandLogAnalyticsService,
+      { getHealth: jest.fn().mockResolvedValue(undefined) } as unknown as HealthService,
+      { dispatchThresholdAlertPerWebhook } as unknown as WebhookDispatcherService,
     );
-    const info = jest.spyOn(service as any, 'updateMetricsForConnection').mockResolvedValue(undefined);
-    const stored = jest.spyOn(service as any, 'updateStorageBasedMetricsForConnection').mockResolvedValue(undefined);
+    jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
+    jest.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
+    jest.spyOn(service['logger'], 'debug').mockImplementation(() => undefined);
+  });
 
-    await service.updateMetrics();
+  afterEach(() => {
+    jest.useRealTimers();
+  });
 
-    expect(info.mock.calls.map(([id]) => id)).toEqual(['direct-1', 'agent-1']);
-    expect(stored.mock.calls.map(([id]) => id)).toEqual(['direct-1', 'agent-1']);
+  function push(fields: Record<string, string>, timeMs = Date.now()): void {
+    store.apply(
+      'ext-1',
+      Object.entries(fields).map(([key, value]) => {
+        const [section, field, subkey] = key.split('.');
+        const target: InfoTarget =
+          subkey === undefined
+            ? { kind: 'scalar', section, field }
+            : { kind: 'composite', section: section as 'keyspace', field, subkey };
+        return { target, value, timeMs };
+      }),
+    );
+  }
+
+  async function pollTick(): Promise<void> {
+    await (service as any).tick();
+  }
+
+  function registryText(): Promise<string> {
+    return service['registry'].metrics();
+  }
+
+  function connectionCriticalCalls(): unknown[][] {
+    return dispatchThresholdAlertPerWebhook.mock.calls.filter(
+      ([event]) => event === WebhookEventType.CONNECTION_CRITICAL,
+    );
+  }
+
+  it('opts in to external connections and polls every tick', () => {
+    expect((service as any).supportsExternalConnections()).toBe(true);
+    expect((service as any).skipUnchangedSamples()).toBe(false);
+  });
+
+  describe('poller path', () => {
+    it('exports pushed fields and no series for absent ones', async () => {
+      push({ 'memory.used_memory': '1024', 'clients.connected_clients': '3' });
+
+      await pollTick();
+      const text = await registryText();
+
+      expect(text).toMatch(series('memory_used_bytes', EXT_LABEL));
+      expect(text.match(series('memory_used_bytes', EXT_LABEL))?.[1]).toBe('1024');
+      expect(text.match(series('connected_clients', EXT_LABEL))?.[1]).toBe('3');
+      expect(text).not.toMatch(series('memory_used_rss_bytes', EXT_LABEL));
+      expect(text).not.toMatch(series('memory_max_bytes', EXT_LABEL));
+      expect(text).not.toMatch(series('blocked_clients', EXT_LABEL));
+      expect(text).not.toMatch(series('uptime_in_seconds', EXT_LABEL));
+      expect(text).not.toMatch(series('keyspace_hits_total', EXT_LABEL));
+      expect(text).not.toMatch(anySeries('cluster_', EXT_LABEL));
+      expect(text).not.toMatch(anySeries('slowlog_', EXT_LABEL));
+      expect(runtimeCapabilityTracker.isAvailable).not.toHaveBeenCalled();
+      expect(slowLogAnalytics.getSlowLogLength).not.toHaveBeenCalled();
+    });
+
+    it('removes a series when its field stops being pushed', async () => {
+      push({ 'memory.used_memory': '1024', 'memory.used_memory_rss': '2048' });
+      await pollTick();
+      expect(await registryText()).toMatch(series('memory_used_rss_bytes', EXT_LABEL));
+
+      store.clear('ext-1');
+      push({ 'memory.used_memory': '1024' });
+      await pollTick();
+      const text = await registryText();
+
+      expect(text).not.toMatch(series('memory_used_rss_bytes', EXT_LABEL));
+      expect(text.match(series('memory_used_bytes', EXT_LABEL))?.[1]).toBe('1024');
+    });
+
+    it('removes a section when none of its fields are pushed any more', async () => {
+      push({
+        'memory.used_memory': '1024',
+        'clients.connected_clients': '3',
+        'keyspace.db0.keys': '5',
+        'keyspace.db0.expires': '1',
+        'keyspace.db0.avg_ttl': '0',
+      });
+      await pollTick();
+      let text = await registryText();
+      expect(text).toMatch(series('db_keys', EXT_LABEL));
+      expect(text.match(series('keyspace_keys', EXT_LABEL))?.[1]).toBe('5');
+
+      store.clear('ext-1');
+      push({ 'clients.connected_clients': '4' });
+      await pollTick();
+      text = await registryText();
+
+      expect(text).not.toMatch(series('memory_used_bytes', EXT_LABEL));
+      expect(text).not.toMatch(series('db_keys', EXT_LABEL));
+      expect(text).not.toMatch(series('keyspace_keys', EXT_LABEL));
+      expect(text).not.toMatch(series('keyspace_keys_expiring', EXT_LABEL));
+      expect(text.match(series('connected_clients', EXT_LABEL))?.[1]).toBe('4');
+    });
+
+    it('does not fire connection_critical without a pushed maxclients', async () => {
+      push({ 'clients.connected_clients': '9999' });
+
+      await pollTick();
+
+      expect(connectionCriticalCalls()).toHaveLength(0);
+    });
+
+    it('fires connection_critical once maxclients is pushed', async () => {
+      push({ 'clients.connected_clients': '90', 'clients.maxclients': '100' });
+
+      await pollTick();
+
+      expect(connectionCriticalCalls()).toHaveLength(1);
+      expect(connectionCriticalCalls()[0][2]).toBe(90);
+    });
+
+    it('does not fire memory_critical without a pushed maxmemory', async () => {
+      push({ 'memory.used_memory': '1024' });
+
+      await pollTick();
+
+      expect(
+        dispatchThresholdAlertPerWebhook.mock.calls.filter(
+          ([event]) => event === WebhookEventType.MEMORY_CRITICAL,
+        ),
+      ).toHaveLength(0);
+    });
+  });
+
+  describe('scrape path', () => {
+    it('exports external connections from getMetrics', async () => {
+      push({ 'memory.used_memory': '1024', 'clients.connected_clients': '3' });
+
+      const text = await service.getMetrics();
+
+      expect(text.match(series('memory_used_bytes', EXT_LABEL))?.[1]).toBe('1024');
+      expect(text).not.toMatch(series('memory_used_rss_bytes', EXT_LABEL));
+      expect(text).not.toMatch(anySeries('cluster_', EXT_LABEL));
+      expect(text).not.toMatch(anySeries('slowlog_', EXT_LABEL));
+      expect(connectionCriticalCalls()).toHaveLength(0);
+    });
+
+    it('removes a pushed field once it goes stale in the store', async () => {
+      push({ 'memory.used_memory': '1024', 'memory.used_memory_rss': '2048' });
+      expect(await service.getMetrics()).toMatch(series('memory_used_rss_bytes', EXT_LABEL));
+
+      jest.advanceTimersByTime(store.staleAfterMs - 1000);
+      push({ 'memory.used_memory': '4096' });
+      jest.advanceTimersByTime(2000);
+      const text = await service.getMetrics();
+
+      expect(text.match(series('memory_used_bytes', EXT_LABEL))?.[1]).toBe('4096');
+      expect(text).not.toMatch(series('memory_used_rss_bytes', EXT_LABEL));
+    });
+
+    it('stops refreshing and sweeps the connection once every push is stale', async () => {
+      push({ 'memory.used_memory': '1024' });
+      expect(await service.getMetrics()).toMatch(series('memory_used_bytes', EXT_LABEL));
+
+      jest.advanceTimersByTime(store.staleAfterMs + BOUND_MS + 1);
+      expect(adapter.isConnected()).toBe(false);
+      const text = await service.getMetrics();
+
+      expect(text).not.toMatch(series('memory_used_bytes', EXT_LABEL));
+      expect(text).toMatch(series('poll_stale', EXT_LABEL));
+      expect(text.match(series('poll_stale', EXT_LABEL))?.[1]).toBe('1');
+    });
+
+    it('keeps zero defaults for direct connections', async () => {
+      includeDirect = true;
+      push({ 'memory.used_memory': '1024' });
+
+      const text = await service.getMetrics();
+
+      expect(text.match(series('memory_used_bytes', DIRECT_LABEL))?.[1]).toBe('500');
+      expect(text.match(series('memory_used_rss_bytes', DIRECT_LABEL))?.[1]).toBe('0');
+      expect(text.match(series('blocked_clients', DIRECT_LABEL))?.[1]).toBe('0');
+      expect(text).toMatch(series('cluster_enabled', DIRECT_LABEL));
+      expect(text).not.toMatch(series('memory_used_rss_bytes', EXT_LABEL));
+      expect(connectionCriticalCalls().map((call) => call[6])).toEqual(['direct-1']);
+    });
   });
 });
