@@ -357,14 +357,32 @@ describe('ConnectionSwitcher', () => {
   });
 
   it('marks an OTLP-pushed connection but not a direct one', () => {
-    open([
-      ...CONNECTIONS,
-      connection({ id: 'd', name: 'pushed', connectionType: 'external' }),
-    ]);
+    open([...CONNECTIONS, connection({ id: 'd', name: 'pushed', connectionType: 'external' })]);
 
     const pushedOption = screen.getByRole('option', { name: /pushed/ });
     expect(pushedOption).toHaveTextContent('OTLP');
     const directOption = screen.getByRole('option', { name: /production-eu/ });
     expect(directOption).not.toHaveTextContent('OTLP');
+  });
+
+  it('marks an OTLP-pushed connection on the closed trigger', () => {
+    const pushed = connection({ id: 'd', name: 'pushed', connectionType: 'external' });
+    render(
+      <ConnectionSwitcher
+        connections={[...CONNECTIONS, pushed]}
+        current={pushed}
+        onSelect={onSelect}
+      />,
+    );
+
+    expect(screen.getByRole('combobox')).toHaveTextContent('OTLP');
+  });
+
+  it('does not mark a direct connection on the closed trigger', () => {
+    render(
+      <ConnectionSwitcher connections={CONNECTIONS} current={CONNECTIONS[0]} onSelect={onSelect} />,
+    );
+
+    expect(screen.getByRole('combobox')).not.toHaveTextContent('OTLP');
   });
 });

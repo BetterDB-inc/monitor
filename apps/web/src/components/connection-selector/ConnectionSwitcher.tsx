@@ -129,6 +129,7 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
                 )}
               />
               <span className="truncate">{current.name}</span>
+              <ConnectionTypeBadge connection={current} />
             </>
           ) : (
             <span className="text-muted-foreground">Select connection</span>

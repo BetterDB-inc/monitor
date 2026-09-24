@@ -6,6 +6,8 @@ export function ConnectionTypeBadge({ connection }: { connection: Connection }) 
     return null;
   }
   return (
-    <span className="ms-1 rounded bg-muted px-1 text-[10px] font-medium uppercase">OTLP</span>
+    <span className="ms-1 shrink-0 rounded bg-muted px-1 text-[10px] font-medium uppercase">
+      OTLP
+    </span>
   );
 }
