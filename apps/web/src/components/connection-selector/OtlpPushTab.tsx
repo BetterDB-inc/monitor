@@ -98,7 +98,7 @@ export function OtlpPushTab({
           {copied ? 'Copied' : 'Copy'}
         </button>
       </div>
-      <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs">{snippet}</pre>
+      <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs dark:[color-scheme:dark]">{snippet}</pre>
       <p className="mt-1 text-xs text-muted-foreground">
         Set <code>BETTERDB_OTEL_INGEST_TOKEN</code> to this server's{' '}
         <code>OTEL_INGEST_TOKEN</code>. Use <code>metrics_endpoint</code>, not{' '}
@@ -109,7 +109,7 @@ export function OtlpPushTab({
 
   if (saved) {
     return (
-      <div className="space-y-4">
+      <div className="min-w-0 space-y-4">
         <p className="text-sm text-green-600">
           Connection added. Copy the collector config below before closing this dialog.
         </p>
@@ -126,7 +126,7 @@ export function OtlpPushTab({
   }
 
   return (
-    <div className="space-y-4">
+    <div className="min-w-0 space-y-4">
       <p className="text-sm text-muted-foreground">
         BetterDB won't connect to this instance. An OpenTelemetry Collector scrapes it and pushes
         metrics here. Views that need a live connection (slow log, clients, key analytics) stay

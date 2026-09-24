@@ -415,7 +415,11 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       >
         <DialogContent
           className={
-            showAgentTab ? (addTab === 'valkey' ? 'sm:max-w-3xl' : 'sm:max-w-2xl') : 'sm:max-w-md'
+            addTab === 'valkey'
+              ? 'sm:max-w-3xl'
+              : showAgentTab || addTab === 'otlp'
+                ? 'sm:max-w-2xl'
+                : 'sm:max-w-md'
           }
         >
           <DialogHeader>
