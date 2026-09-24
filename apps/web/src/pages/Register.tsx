@@ -19,12 +19,13 @@ export function Register(): ReactElement {
       askName
       hint={
         <>
-          Not running a team?
+          Just trying it out solo?
           <br />
           Set{' '}
           <code className="font-mono text-foreground">WORKSPACE_DISABLED=true</code>{' '}
-          to skip sign-in entirely and open the dashboard to anyone with this
-          URL.
+          to skip sign-in entirely. Anyone who can reach this URL then gets
+          full, unauthenticated control of the instance, including its stored
+          connection credentials.
         </>
       }
       notice={brokerErrorMessage(params.get('error'))}
