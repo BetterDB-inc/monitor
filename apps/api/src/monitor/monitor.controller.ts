@@ -18,6 +18,7 @@ import { LicenseGuard } from '@proprietary/licenses';
 import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
 import { AllowMembers } from '../auth/guards/roles.decorator';
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
+import { LiveConnectionGuard } from '../external-metrics/live-connection.guard';
 import { StoragePort, StoredCaptureSession } from '../common/interfaces/storage-port.interface';
 import { CaptureScheduler } from './capture-scheduler';
 import { CaptureTriggerRegistry } from './capture-trigger-registry';
@@ -117,6 +118,7 @@ export class MonitorController {
    * `MONITOR`); subsequent calls return the cached verdict instantly.
    */
   @Get('connections/:connectionId/monitor-support')
+  @UseGuards(LiveConnectionGuard)
   async getMonitorSupport(
     @Param('connectionId') connectionId: string,
   ): Promise<MonitorSupportResult> {
@@ -125,6 +127,7 @@ export class MonitorController {
 
   @AllowMembers()
   @Post('sessions/preflight')
+  @UseGuards(LiveConnectionGuard)
   async preflight(@Body() body: PreflightRequestBody): Promise<PreflightResult> {
     if (!body?.connectionId) {
       throw new BadRequestException('connectionId is required in the request body');
@@ -152,6 +155,7 @@ export class MonitorController {
   }
 
   @Post('sessions')
+  @UseGuards(LiveConnectionGuard)
   async startSession(@Body() body: StartSessionRequestBody): Promise<StoredCaptureSession> {
     if (!body?.connectionId) {
       throw new BadRequestException('connectionId is required in the request body');
@@ -167,10 +171,11 @@ export class MonitorController {
     });
   }
 
-  @Get('connections/:id/nodes')
-  async listConnectionNodes(@Param('id') id: string): Promise<MonitorNodesResponse> {
+  @Get('connections/:connectionId/nodes')
+  @UseGuards(LiveConnectionGuard)
+  async listConnectionNodes(@Param('connectionId') connectionId: string): Promise<MonitorNodesResponse> {
     try {
-      const nodes = await this.clusterDiscovery.discoverNodes(id);
+      const nodes = await this.clusterDiscovery.discoverNodes(connectionId);
       if (nodes.length === 0) {
         return { isCluster: false, nodes: [] };
       }
@@ -339,7 +344,7 @@ export class MonitorController {
   }
 
   @Post('triggers')
-  @UseGuards(LicenseGuard)
+  @UseGuards(LicenseGuard, LiveConnectionGuard)
   @RequiresFeature(Feature.MONITOR_ANOMALY_TRIGGER)
   async createTrigger(@Body() body: CreateTriggerRequestBody): Promise<StoredCaptureTrigger> {
     if (!body?.connectionId) {
@@ -392,7 +397,7 @@ export class MonitorController {
   }
 
   @Post('schedules')
-  @UseGuards(LicenseGuard)
+  @UseGuards(LicenseGuard, LiveConnectionGuard)
   @RequiresFeature(Feature.MONITOR_SCHEDULED_CAPTURES)
   async createSchedule(@Body() body: CreateScheduleRequestBody): Promise<StoredScheduledCapture> {
     if (!body?.connectionId) {
