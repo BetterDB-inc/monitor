@@ -4,7 +4,7 @@ import type { InfoResponse } from '../common/types/metrics.types';
 import { InfoParser } from '../database/parsers/info.parser';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { ExternalConnectionUnsupportedError } from './external-connection-unsupported.error';
-import type { ExternalMetricsStore } from './external-metrics-store';
+import type { ExternalMetricsStore, InfoSections } from './external-metrics-store';
 
 const SECTION_TITLES: Record<string, string> = {
   server: 'Server',
@@ -19,6 +19,44 @@ const SECTION_TITLES: Record<string, string> = {
 };
 
 const EXCLUDED_BY_DEFAULT = new Set(['commandstats']);
+
+const HUMAN_BYTES_FIELDS: ReadonlyArray<readonly [string, string]> = [
+  ['used_memory', 'used_memory_human'],
+  ['used_memory_rss', 'used_memory_rss_human'],
+  ['used_memory_peak', 'used_memory_peak_human'],
+];
+
+const BYTE_UNITS = ['K', 'M', 'G', 'T', 'P'];
+
+const SECONDS_PER_DAY = 86_400;
+
+function bytesToHuman(raw: string): string | null {
+  const bytes = Number(raw);
+  if (!Number.isFinite(bytes) || bytes < 0) return null;
+  if (bytes < 1024) return `${Math.floor(bytes)}B`;
+  let scaled = bytes;
+  for (const unit of BYTE_UNITS) {
+    scaled /= 1024;
+    if (scaled < 1024) return `${scaled.toFixed(2)}${unit}`;
+  }
+  return `${Math.floor(bytes)}B`;
+}
+
+function withPresentationFields(snapshot: InfoSections): InfoSections {
+  const memory = snapshot.memory;
+  if (memory) {
+    for (const [source, target] of HUMAN_BYTES_FIELDS) {
+      const human = memory[source] === undefined ? null : bytesToHuman(memory[source]);
+      if (human !== null) memory[target] = human;
+    }
+  }
+  const server = snapshot.server;
+  const uptime = server?.uptime_in_seconds === undefined ? NaN : Number(server.uptime_in_seconds);
+  if (server && Number.isFinite(uptime) && uptime >= 0) {
+    server.uptime_in_days = String(Math.floor(uptime / SECONDS_PER_DAY));
+  }
+  return snapshot;
+}
 
 export class ExternalMetricsAdapter implements DatabasePort {
   constructor(
@@ -118,7 +156,7 @@ export class ExternalMetricsAdapter implements DatabasePort {
   }
 
   private renderInfo(sections?: string[]): string {
-    const snapshot = this.store.snapshot(this.connectionId, this.now());
+    const snapshot = withPresentationFields(this.store.snapshot(this.connectionId, this.now()));
     const include = this.sectionFilter(sections);
     const lines: string[] = [];
     for (const [name, title] of Object.entries(SECTION_TITLES)) {

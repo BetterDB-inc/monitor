@@ -47,14 +47,16 @@ describe('ExternalMetricsAdapter', () => {
     expect(adapter.sampleVersion()).toBe(store.latestVersion('c'));
     const info = await adapter.getInfo();
     expect(info).toEqual({
-      memory: { used_memory: '1024' },
+      memory: { used_memory: '1024', used_memory_human: '1.00K' },
       cpu: { used_cpu_sys: '1.5' },
       replication: { role: 'master' },
       keyspace: { db0: 'keys=3' },
     });
     expect(await adapter.getInfo(['commandstats'])).toEqual({ commandstats: { cmdstat_get: 'calls=2' } });
     expect(Object.keys(await adapter.getInfo(['everything']))).toContain('commandstats');
-    expect(await adapter.getInfo(['Memory', 'latencystats'])).toEqual({ memory: { used_memory: '1024' } });
+    expect(await adapter.getInfo(['Memory', 'latencystats'])).toEqual({
+      memory: { used_memory: '1024', used_memory_human: '1.00K' },
+    });
   });
 
   it('parses into the typed INFO response', async () => {
@@ -66,6 +68,52 @@ describe('ExternalMetricsAdapter', () => {
     expect(parsed.memory?.used_memory).toBe('2048');
     const db0 = parsed.keyspace?.db0;
     expect(typeof db0 === 'object' ? db0?.keys : undefined).toBe(7);
+  });
+
+  describe('presentation fields', () => {
+    it('derives human-readable memory and uptime days from the pushed numbers', async () => {
+      store.apply('c', [
+        scalar('memory', 'used_memory', String(1024 * 1024)),
+        scalar('memory', 'used_memory_peak', String(2 * 1024 * 1024)),
+        scalar('memory', 'used_memory_rss', '1536'),
+        scalar('server', 'uptime_in_seconds', '90000'),
+      ]);
+      const parsed = await adapter.getInfoParsed();
+      expect(parsed.memory).toMatchObject({
+        used_memory_human: '1.00M',
+        used_memory_peak_human: '2.00M',
+        used_memory_rss_human: '1.50K',
+      });
+      expect(parsed.server?.uptime_in_days).toBe('1');
+      expect(await adapter.getInfo(['server'])).toEqual({
+        server: { uptime_in_seconds: '90000', uptime_in_days: '1' },
+      });
+    });
+
+    it.each([
+      ['0', '0B'],
+      ['1023', '1023B'],
+      ['1024', '1.00K'],
+      [String(5 * 1024 ** 3 + 512 * 1024 ** 2), '5.50G'],
+      [String(3 * 1024 ** 4), '3.00T'],
+      [String(2 * 1024 ** 5), '2.00P'],
+    ])('formats %s bytes as %s', async (bytes, human) => {
+      store.apply('c', [scalar('memory', 'used_memory', bytes)]);
+      expect((await adapter.getInfo(['memory'])).memory).toEqual({ used_memory: bytes, used_memory_human: human });
+    });
+
+    it('never derives a field from an absent source', async () => {
+      store.apply('c', [scalar('memory', 'used_memory', '2048'), scalar('clients', 'connected_clients', '3')]);
+      const info = await adapter.getInfo();
+      expect(info.memory).toEqual({ used_memory: '2048', used_memory_human: '2.00K' });
+      expect(info.server).toBeUndefined();
+    });
+
+    it('leaves the server section without uptime days when uptime was not pushed', async () => {
+      store.setServerVersion('c', '7.2.4');
+      store.apply('c', [scalar('memory', 'used_memory', '1')]);
+      expect((await adapter.getInfo(['server'])).server).toEqual({ redis_version: '7.2.4' });
+    });
   });
 
   it('goes stale with the store window', () => {
