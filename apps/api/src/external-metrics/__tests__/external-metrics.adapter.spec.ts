@@ -43,7 +43,8 @@ describe('ExternalMetricsAdapter', () => {
       { target: { kind: 'composite', section: 'commandstats', field: 'cmdstat_get', subkey: 'calls' }, value: '2', timeMs: T0 },
     ]);
     expect(adapter.isConnected()).toBe(true);
-    expect(adapter.sampleVersion()).toBe(T0);
+    expect(adapter.sampleVersion()).not.toBeNull();
+    expect(adapter.sampleVersion()).toBe(store.latestVersion('c'));
     const info = await adapter.getInfo();
     expect(info).toEqual({
       memory: { used_memory: '1024' },
@@ -71,7 +72,7 @@ describe('ExternalMetricsAdapter', () => {
     store.apply('c', [scalar('memory', 'used_memory', '1')]);
     now = T0 + store.staleAfterMs + 1;
     expect(adapter.isConnected()).toBe(false);
-    expect(adapter.sampleVersion()).toBe(T0);
+    expect(adapter.sampleVersion()).not.toBeNull();
   });
 
   it('reports capabilities with every feature off', () => {

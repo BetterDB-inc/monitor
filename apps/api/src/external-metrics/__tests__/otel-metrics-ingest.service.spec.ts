@@ -55,7 +55,7 @@ describe('OtelMetricsIngestService', () => {
       cpu: { used_cpu_user: '3' },
       keyspace: { db0: 'keys=5' },
     });
-    expect(store.latestVersion('ext')).toBe(NOW_MS);
+    expect(store.latestVersion('ext')).not.toBeNull();
   });
 
   it('drops every point of an unidentified resource', () => {
@@ -147,7 +147,8 @@ describe('OtelMetricsIngestService', () => {
   it('uses the receive time for points without a timestamp', () => {
     const { service, store } = build();
     service.ingest(resource(identity, [gauge('redis.uptime', 5, [], undefined)]), NOW_MS + 7);
-    expect(store.latestVersion('ext')).toBe(NOW_MS + 7);
+    expect(store.isFresh('ext', NOW_MS + 7 + store.staleAfterMs)).toBe(true);
+    expect(store.isFresh('ext', NOW_MS + 8 + store.staleAfterMs)).toBe(false);
   });
 
   it('records the server version and the valkey flag', () => {
@@ -181,7 +182,7 @@ describe('OtelMetricsIngestService', () => {
     const { service, store } = build();
     const inAnHour = String(BigInt(NOW_MS + 3_600_000) * 1_000_000n);
     service.ingest(resource(identity, [gauge('redis.memory.used', 1, [], inAnHour)]), NOW_MS);
-    expect(store.latestVersion('ext')).toBe(NOW_MS);
+    expect(store.isFresh('ext', NOW_MS + store.staleAfterMs + 1)).toBe(false);
 
     const later = NOW_MS + 10_000;
     const result = service.ingest(

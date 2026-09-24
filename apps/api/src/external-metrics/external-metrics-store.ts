@@ -27,22 +27,30 @@ interface ConnectionSample {
   valkey: boolean;
 }
 
+function isSame(existing: Stamped, update: FieldUpdate): boolean {
+  return existing.timeMs === update.timeMs && existing.value === update.value;
+}
+
 @Injectable()
 export class ExternalMetricsStore {
   readonly staleAfterMs = otelMetricsStaleAfterMsSchema.parse(
     process.env.OTEL_METRICS_STALE_AFTER_MS,
   );
   private readonly samples = new Map<string, ConnectionSample>();
+  private revision = 0;
 
   apply(connectionId: string, updates: FieldUpdate[]): number {
     const sample = this.getOrCreate(connectionId);
     let accepted = 0;
+    let changed = false;
     for (const update of updates) {
       const { target } = update;
       const key = `${target.section}.${target.field}`;
       if (target.kind === 'scalar') {
         const existing = sample.scalars.get(key);
         if (existing && existing.timeMs > update.timeMs) continue;
+        accepted += 1;
+        if (existing && isSame(existing, update)) continue;
         sample.scalars.set(key, { section: target.section, field: target.field, value: update.value, timeMs: update.timeMs });
       } else {
         let entry = sample.composites.get(key);
@@ -52,11 +60,13 @@ export class ExternalMetricsStore {
         }
         const existing = entry.subkeys.get(target.subkey);
         if (existing && existing.timeMs > update.timeMs) continue;
+        accepted += 1;
+        if (existing && isSame(existing, update)) continue;
         entry.subkeys.set(target.subkey, { value: update.value, timeMs: update.timeMs });
       }
-      accepted += 1;
-      sample.version = sample.version === null ? update.timeMs : Math.max(sample.version, update.timeMs);
+      changed = true;
     }
+    if (changed) sample.version = ++this.revision;
     return accepted;
   }
 
@@ -83,7 +93,8 @@ export class ExternalMetricsStore {
     if (!sample) return false;
     for (const entry of sample.scalars.values()) if (this.fresh(entry.timeMs, nowMs)) return true;
     for (const entry of sample.composites.values()) {
-      for (const stamped of entry.subkeys.values()) if (this.fresh(stamped.timeMs, nowMs)) return true;
+      const primary = entry.subkeys.get(COMPOSITE_PRIMARY[entry.section]);
+      if (primary && this.fresh(primary.timeMs, nowMs)) return true;
     }
     return false;
   }

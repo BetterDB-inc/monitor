@@ -219,6 +219,37 @@ describe('MemoryAnalyticsService', () => {
         expect(storage.saveMemorySnapshots).not.toHaveBeenCalled();
       });
 
+      it('saves the snapshot when a split batch completes after a poll at the same timestamp', async () => {
+        const store = new ExternalMetricsStore();
+        const timeMs = Date.now();
+        const apply = (fields: Record<string, string>) =>
+          store.apply(
+            'ext-1',
+            Object.entries(fields).map(([key, value]): FieldUpdate => {
+              const [section, field] = key.split('.');
+              return { target: { kind: 'scalar', section, field }, value, timeMs };
+            }),
+          );
+        const adapter = new ExternalMetricsAdapter('ext-1', store);
+        const registry = (service as any).connectionRegistry;
+        registry.list.mockReturnValue([
+          { id: 'ext-1', name: 'pushed', host: 'cache.internal', port: 6379, isConnected: true, connectionType: 'external' },
+        ]);
+        registry.get = jest.fn().mockReturnValue(adapter);
+
+        apply({ 'memory.used_memory': '1000' });
+        await (service as any).tick();
+        expect(storage.saveMemorySnapshots).not.toHaveBeenCalled();
+
+        apply({
+          'memory.used_memory_rss': '1500',
+          'memory.used_memory_peak': '2000',
+          'memory.mem_fragmentation_ratio': '1.5',
+        });
+        await (service as any).tick();
+        expect(storage.saveMemorySnapshots).toHaveBeenCalledTimes(1);
+      });
+
       it('keeps saving direct snapshots with missing fields as before', async () => {
         const client = { getInfoParsed: jest.fn().mockResolvedValue({ memory: { used_memory: '10' } }) };
         await (service as any).pollConnection(makeCtx(client));

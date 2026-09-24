@@ -56,21 +56,102 @@ describe('ExternalMetricsStore', () => {
     expect(store.staleAfterMs).toBe(60_000);
   });
 
-  it('merges scalars across batches and reports the latest version', () => {
+  it('merges scalars across batches and advances the version', () => {
     expect(store.apply('c', [scalar('memory', 'used_memory', '100')])).toBe(1);
+    const first = store.latestVersion('c');
     expect(store.apply('c', [scalar('clients', 'connected_clients', '5', T0 + 10)])).toBe(1);
     expect(store.snapshot('c', T0 + 20)).toEqual({
       memory: { used_memory: '100' },
       clients: { connected_clients: '5' },
     });
-    expect(store.latestVersion('c')).toBe(T0 + 10);
+    expect(first).not.toBeNull();
+    expect(store.latestVersion('c')).toBeGreaterThan(first as number);
   });
 
   it('ignores a point older than the stored one without counting it', () => {
     store.apply('c', [scalar('memory', 'used_memory', '200', T0 + 5)]);
+    const version = store.latestVersion('c');
     expect(store.apply('c', [scalar('memory', 'used_memory', '100', T0)])).toBe(0);
     expect(store.snapshot('c', T0 + 5).memory).toEqual({ used_memory: '200' });
-    expect(store.latestVersion('c')).toBe(T0 + 5);
+    expect(store.latestVersion('c')).toBe(version);
+  });
+
+  describe('sample version', () => {
+    it('stays null until data is stored', () => {
+      store.apply('c', []);
+      expect(store.latestVersion('c')).toBeNull();
+    });
+
+    it('advances when a new field arrives at the same timestamp', () => {
+      store.apply('c', [scalar('memory', 'used_memory', '1')]);
+      const before = store.latestVersion('c') as number;
+      store.apply('c', [scalar('memory', 'used_memory_rss', '2')]);
+      expect(store.latestVersion('c')).toBeGreaterThan(before);
+    });
+
+    it('advances when a value changes at the same timestamp', () => {
+      store.apply('c', [composite('keyspace', 'db0', 'keys', '1')]);
+      const before = store.latestVersion('c') as number;
+      store.apply('c', [composite('keyspace', 'db0', 'keys', '2')]);
+      expect(store.latestVersion('c')).toBeGreaterThan(before);
+    });
+
+    it('advances when the same value arrives with a newer timestamp', () => {
+      store.apply('c', [scalar('memory', 'used_memory', '1')]);
+      const before = store.latestVersion('c') as number;
+      store.apply('c', [scalar('memory', 'used_memory', '1', T0 + 1)]);
+      expect(store.latestVersion('c')).toBeGreaterThan(before);
+    });
+
+    it('does not advance on an exact duplicate but still accepts it', () => {
+      store.apply('c', [scalar('memory', 'used_memory', '1'), composite('keyspace', 'db0', 'keys', '3')]);
+      const before = store.latestVersion('c');
+      expect(store.apply('c', [scalar('memory', 'used_memory', '1'), composite('keyspace', 'db0', 'keys', '3')])).toBe(2);
+      expect(store.latestVersion('c')).toBe(before);
+    });
+
+    it('never reuses a version after the connection is cleared', () => {
+      store.apply('c', [scalar('memory', 'used_memory', '1')]);
+      const before = store.latestVersion('c') as number;
+      store.clear('c');
+      store.apply('c', [scalar('memory', 'used_memory', '1')]);
+      expect(store.latestVersion('c')).toBeGreaterThan(before);
+    });
+  });
+
+  describe('freshness agrees with the snapshot', () => {
+    it('is not fresh when a keyspace entry only has expires', () => {
+      store.apply('c', [composite('keyspace', 'db0', 'expires', '3')]);
+      expect(store.snapshot('c', T0)).toEqual({});
+      expect(store.isFresh('c', T0)).toBe(false);
+    });
+
+    it('is not fresh when a commandstats entry only has usec', () => {
+      store.apply('c', [composite('commandstats', 'cmdstat_get', 'usec', '10')]);
+      expect(store.snapshot('c', T0)).toEqual({});
+      expect(store.isFresh('c', T0)).toBe(false);
+    });
+
+    it('is not fresh once the primary subkey ages out before the others', () => {
+      store.apply('c', [
+        composite('keyspace', 'db0', 'keys', '5', T0),
+        composite('keyspace', 'db0', 'expires', '1', T0 + 50_000),
+      ]);
+      expect(store.isFresh('c', T0 + 60_000)).toBe(true);
+      expect(store.snapshot('c', T0 + 60_001)).toEqual({});
+      expect(store.isFresh('c', T0 + 60_001)).toBe(false);
+    });
+
+    it('is fresh when a composite primary subkey is fresh', () => {
+      store.apply('c', [composite('commandstats', 'cmdstat_get', 'calls', '4')]);
+      expect(store.isFresh('c', T0)).toBe(true);
+    });
+
+    it('ignores the server version when nothing else is fresh', () => {
+      store.setServerVersion('c', '7.2.4');
+      store.apply('c', [composite('keyspace', 'db0', 'expires', '3')]);
+      expect(store.isFresh('c', T0)).toBe(false);
+    });
   });
 
   it('overwrites a point with the same timestamp', () => {
