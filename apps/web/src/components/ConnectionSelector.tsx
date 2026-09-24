@@ -1152,6 +1152,7 @@ function AgentTab({
                     <div className="font-medium truncate">{token.name}</div>
                     <div className="text-xs text-muted-foreground">
                       Created {new Date(token.createdAt).toLocaleDateString()}
+                      {` · Expires ${new Date(token.expiresAt).toLocaleDateString()}`}
                       {token.lastUsedAt &&
                         ` · Last used ${new Date(token.lastUsedAt).toLocaleDateString()}`}
                     </div>
