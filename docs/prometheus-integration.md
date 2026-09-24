@@ -39,6 +39,9 @@ scrape_configs:
       - targets: ['localhost:3001']
     metrics_path: '/api/prometheus/metrics'
     scrape_interval: 15s
+    authorization:
+      type: Bearer
+      credentials: '<PROMETHEUS_METRICS_TOKEN>'
 ```
 
 ## Grafana dashboard pack
@@ -108,3 +111,8 @@ See `docs/alertmanager-rules.yml` for ready-to-use Alertmanager rules.
 ## Configuration
 
 The anomaly summary update interval can be configured via `ANOMALY_PROMETHEUS_INTERVAL_MS` (default: 30000ms).
+
+- `PROMETHEUS_METRICS_TOKEN` — require `Authorization: Bearer <token>` on scrapes; a missing or wrong token returns 401.
+- `PROMETHEUS_METRICS_ENABLED=false` — disable the endpoint (404) without stopping the OTLP mirror.
+
+Set `METRICS_EXPORT_PROFILE=vitals` for a bounded series budget per connection instead of the full metric surface — see [Export Profiles](prometheus-metrics.md#export-profiles).
