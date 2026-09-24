@@ -37,7 +37,7 @@ export function ConnectionCard({ health, loading, connection }: Props) {
         <div className="text-2xl font-bold">
           {health?.database.type === 'valkey' ? 'Valkey' : 'Redis'} {health?.database.version}
         </div>
-        <p className="text-xs text-muted-foreground">
+        <p className="flex flex-wrap items-center gap-y-1 text-xs text-muted-foreground">
           {health?.database.host}:{health?.database.port}
           {connection ? <ConnectionTypeBadge connection={connection} /> : null}
         </p>
