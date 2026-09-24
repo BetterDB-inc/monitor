@@ -14,6 +14,7 @@ from .normalizer import (
     hash_url,
     passthrough,
 )
+from .default_cost_table import DEFAULT_COST_TABLE
 from .semantic_cache import SemanticCache
 from .types import (
     CacheCheckOptions,
@@ -37,6 +38,7 @@ from .types import (
 )
 from .utils import (
     BinaryBlock,
+    BlockHints,
     ContentBlock,
     ReasoningBlock,
     TextBlock,
@@ -53,6 +55,7 @@ from .utils import (
 
 __all__ = [
     "SemanticCache",
+    "DEFAULT_COST_TABLE",
     "SemanticCacheOptions",
     "ConfigRefreshOptions",
     "DiscoveryOptions",
@@ -95,6 +98,7 @@ __all__ = [
     "ToolCallBlock",
     "ToolResultBlock",
     "ReasoningBlock",
+    "BlockHints",
     # utils
     "encode_float32",
     "decode_float32",
