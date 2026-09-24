@@ -29,7 +29,7 @@ export function ConnectionCard({ health, loading, connection }: Props) {
 
   return (
     <Card className="min-w-[180px] flex-1">
-      <CardHeader className="flex flex-row items-center justify-between pb-2">
+      <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
         <CardTitle className="text-sm font-medium">Connection</CardTitle>
         <Badge variant={statusVariant}>{health?.status ?? 'Unknown'}</Badge>
       </CardHeader>
