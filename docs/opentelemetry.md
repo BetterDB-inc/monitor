@@ -11,12 +11,12 @@ One thing to be clear about up front: Monitor's metrics are Prometheus-first (se
 
 ## At a glance
 
-| Signal | Direction | Endpoint | Default |
-|--------|-----------|----------|---------|
-| Traces | Ingest (receive) | `POST /v1/traces` | on |
-| Metrics (external instances) | Ingest (receive) | `POST /v1/external/metrics` | on |
-| Metrics | Export (mirror) | `${OTLP endpoint}/v1/metrics` | off, opt-in |
-| Events | Export (logs) | `${OTLP endpoint}/v1/logs` | off, opt-in |
+| Signal                       | Direction        | Endpoint                      | Default     |
+| ---------------------------- | ---------------- | ----------------------------- | ----------- |
+| Traces                       | Ingest (receive) | `POST /v1/traces`             | on          |
+| Metrics (external instances) | Ingest (receive) | `POST /v1/external/metrics`   | on          |
+| Metrics                      | Export (mirror)  | `${OTLP endpoint}/v1/metrics` | off, opt-in |
+| Events                       | Export (logs)    | `${OTLP endpoint}/v1/logs`    | off, opt-in |
 
 Both exports are off until you set `OTEL_EXPORTER_OTLP_ENDPOINT`. The collector handles fan-out to Jaeger, Tempo, Cloudwatch, or whatever backend you run.
 
@@ -46,7 +46,7 @@ The same `OTEL_INGEST_ENABLED` gate and `OTEL_INGEST_TOKEN` also cover `POST /v1
 
 ## Metrics ingestion
 
-BetterDB Monitor can also ingest OTLP *metrics*, at **`POST /v1/external/metrics`**, for instances it doesn't dial itself — a Redis or Valkey behind a firewall, or one whose credentials you'd rather not hand to Monitor. An OpenTelemetry Collector scrapes the instance and pushes metrics here instead.
+BetterDB Monitor can also ingest OTLP _metrics_, at **`POST /v1/external/metrics`**, for instances it doesn't dial itself — a Redis or Valkey behind a firewall, or one whose credentials you'd rather not hand to Monitor. An OpenTelemetry Collector scrapes the instance and pushes metrics here instead.
 
 **Register the instance first.** Add Connection → OTLP push, giving the host and port the collector reports. Metrics for an instance that isn't registered are dropped (`unknown_instance`); metrics for an instance BetterDB already polls directly are also dropped (`already_polled`).
 
@@ -78,7 +78,7 @@ exporters:
   otlphttp/betterdb:
     metrics_endpoint: <betterdb-url>/v1/external/metrics
     headers:
-      Authorization: "Bearer ${env:BETTERDB_OTEL_INGEST_TOKEN}"
+      Authorization: 'Bearer ${env:BETTERDB_OTEL_INGEST_TOKEN}'
 
 service:
   pipelines:
@@ -93,41 +93,41 @@ Use `metrics_endpoint`, not the plain `endpoint` — `endpoint` appends the stan
 
 **Supported vocabularies.** Monitor understands the `redis.*` names emitted by the collector-contrib `redisreceiver`, and the equivalent `valkey.*` names from Valkey Admin's exporter (only `valkey.memory.used` and `valkey.cpu.time` are confirmed against a real deployment so far; the rest of the `valkey.*` mapping assumes it mirrors `redisreceiver`). Only cumulative sums and gauges are accepted — histograms, summaries and delta-temporality sums are rejected outright (`unsupported_type` / `unsupported_temporality`). Each accepted point maps to exactly one INFO field; nothing is summed:
 
-| OTLP metric (`redis.` or `valkey.`) | Point attributes | INFO section.field |
-|---|---|---|
-| `memory.used` | — | `memory.used_memory` |
-| `memory.rss` | — | `memory.used_memory_rss` |
-| `memory.peak` | — | `memory.used_memory_peak` |
-| `memory.lua` | — | `memory.used_memory_lua` |
-| `memory.fragmentation_ratio` | — | `memory.mem_fragmentation_ratio` |
-| `memory.used_memory_overhead` | — | `memory.used_memory_overhead` |
-| `memory.used_memory_startup` | — | `memory.used_memory_startup` |
-| `maxmemory` | — | `memory.maxmemory` |
-| `cpu.time` | `state` ∈ sys, sys_children, sys_main_thread, user, user_children, user_main_thread | `cpu.used_cpu_<state>` |
-| `commands` | — | `stats.instantaneous_ops_per_sec` |
-| `commands.processed` | — | `stats.total_commands_processed` |
-| `connections.received` | — | `stats.total_connections_received` |
-| `connections.rejected` | — | `stats.rejected_connections` |
-| `keys.evicted` | — | `stats.evicted_keys` |
-| `keys.expired` | — | `stats.expired_keys` |
-| `keyspace.hits` | — | `stats.keyspace_hits` |
-| `keyspace.misses` | — | `stats.keyspace_misses` |
-| `net.input` | — | `stats.total_net_input_bytes` |
-| `net.output` | — | `stats.total_net_output_bytes` |
-| `latest_fork` | — | `stats.latest_fork_usec` |
-| `clients.connected` | — | `clients.connected_clients` |
-| `clients.blocked` | — | `clients.blocked_clients` |
-| `clients.max_input_buffer` | — | `clients.client_recent_max_input_buffer` |
-| `clients.max_output_buffer` | — | `clients.client_recent_max_output_buffer` |
-| `slaves.connected` | — | `replication.connected_slaves` |
-| `replication.offset` | — | `replication.master_repl_offset` |
-| `replication.backlog_first_byte_offset` | — | `replication.repl_backlog_first_byte_offset` |
-| `role` | `role` ∈ primary, replica; value 1 | `replication.role` = `master` / `slave` (a point whose value isn't 1 is skipped silently, not counted as dropped) |
-| `uptime` | — | `server.uptime_in_seconds` |
-| `rdb.changes_since_last_save` | — | `persistence.rdb_changes_since_last_save` |
-| `db.keys` / `db.expires` / `db.avg_ttl` | `db` | composite `keyspace.db<N>` → `keys` / `expires` / `avg_ttl` |
-| `cmd.calls` / `cmd.usec` | `cmd` | composite `commandstats.cmdstat_<cmd>` → `calls` / `usec` |
-| resource `redis.version` | — | `server.redis_version`, plus capabilities |
+| OTLP metric (`redis.` or `valkey.`)     | Point attributes                                                                    | INFO section.field                                                                                                |
+| --------------------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `memory.used`                           | —                                                                                   | `memory.used_memory`                                                                                              |
+| `memory.rss`                            | —                                                                                   | `memory.used_memory_rss`                                                                                          |
+| `memory.peak`                           | —                                                                                   | `memory.used_memory_peak`                                                                                         |
+| `memory.lua`                            | —                                                                                   | `memory.used_memory_lua`                                                                                          |
+| `memory.fragmentation_ratio`            | —                                                                                   | `memory.mem_fragmentation_ratio`                                                                                  |
+| `memory.used_memory_overhead`           | —                                                                                   | `memory.used_memory_overhead`                                                                                     |
+| `memory.used_memory_startup`            | —                                                                                   | `memory.used_memory_startup`                                                                                      |
+| `maxmemory`                             | —                                                                                   | `memory.maxmemory`                                                                                                |
+| `cpu.time`                              | `state` ∈ sys, sys_children, sys_main_thread, user, user_children, user_main_thread | `cpu.used_cpu_<state>`                                                                                            |
+| `commands`                              | —                                                                                   | `stats.instantaneous_ops_per_sec`                                                                                 |
+| `commands.processed`                    | —                                                                                   | `stats.total_commands_processed`                                                                                  |
+| `connections.received`                  | —                                                                                   | `stats.total_connections_received`                                                                                |
+| `connections.rejected`                  | —                                                                                   | `stats.rejected_connections`                                                                                      |
+| `keys.evicted`                          | —                                                                                   | `stats.evicted_keys`                                                                                              |
+| `keys.expired`                          | —                                                                                   | `stats.expired_keys`                                                                                              |
+| `keyspace.hits`                         | —                                                                                   | `stats.keyspace_hits`                                                                                             |
+| `keyspace.misses`                       | —                                                                                   | `stats.keyspace_misses`                                                                                           |
+| `net.input`                             | —                                                                                   | `stats.total_net_input_bytes`                                                                                     |
+| `net.output`                            | —                                                                                   | `stats.total_net_output_bytes`                                                                                    |
+| `latest_fork`                           | —                                                                                   | `stats.latest_fork_usec`                                                                                          |
+| `clients.connected`                     | —                                                                                   | `clients.connected_clients`                                                                                       |
+| `clients.blocked`                       | —                                                                                   | `clients.blocked_clients`                                                                                         |
+| `clients.max_input_buffer`              | —                                                                                   | `clients.client_recent_max_input_buffer`                                                                          |
+| `clients.max_output_buffer`             | —                                                                                   | `clients.client_recent_max_output_buffer`                                                                         |
+| `slaves.connected`                      | —                                                                                   | `replication.connected_slaves`                                                                                    |
+| `replication.offset`                    | —                                                                                   | `replication.master_repl_offset`                                                                                  |
+| `replication.backlog_first_byte_offset` | —                                                                                   | `replication.repl_backlog_first_byte_offset`                                                                      |
+| `role`                                  | `role` ∈ primary, replica; value 1                                                  | `replication.role` = `master` / `slave` (a point whose value isn't 1 is skipped silently, not counted as dropped) |
+| `uptime`                                | —                                                                                   | `server.uptime_in_seconds`                                                                                        |
+| `rdb.changes_since_last_save`           | —                                                                                   | `persistence.rdb_changes_since_last_save`                                                                         |
+| `db.keys` / `db.expires` / `db.avg_ttl` | `db`                                                                                | composite `keyspace.db<N>` → `keys` / `expires` / `avg_ttl`                                                       |
+| `cmd.calls` / `cmd.usec`                | `cmd`                                                                               | composite `commandstats.cmdstat_<cmd>` → `calls` / `usec`                                                         |
+| resource `redis.version`                | —                                                                                   | `server.redis_version`, plus capabilities                                                                         |
 
 **What works.** Memory history and forecasting, anomaly detection (INFO-based detectors, limited to the fields the collector pushes), health and instance-down webhooks, and commandstats all run against pushed data the same as a polled connection.
 
@@ -137,14 +137,14 @@ Prometheus re-export isn't supported yet: OTLP-push connections are omitted from
 
 **Drop reasons.** A response's `partialSuccess.errorMessage` summarises rejected points by reason, for example `unknown_instance=12 unmapped_metric=3`:
 
-| Reason | Meaning |
-|---|---|
-| `unidentified` | The resource has no `service.instance.id`, or one that can't be parsed as `host:port`/`host-port`, and there's no `server.address`/`server.port` fallback either — so no instance could be resolved. |
-| `unknown_instance` | The resolved host:port isn't a registered connection. |
-| `already_polled` | The resolved host:port is a connection BetterDB already polls directly (not registered as OTLP push). |
-| `unsupported_type` | The point is a histogram, exponential histogram, or summary. |
-| `unsupported_temporality` | The point is a sum with delta (not cumulative) temporality. |
-| `unmapped_metric` | The metric name or its attributes don't match anything in the table above. |
+| Reason                    | Meaning                                                                                                                                                                                              |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unidentified`            | The resource has no `service.instance.id`, or one that can't be parsed as `host:port`/`host-port`, and there's no `server.address`/`server.port` fallback either — so no instance could be resolved. |
+| `unknown_instance`        | The resolved host:port isn't a registered connection.                                                                                                                                                |
+| `already_polled`          | The resolved host:port is a connection BetterDB already polls directly (not registered as OTLP push).                                                                                                |
+| `unsupported_type`        | The point is a histogram, exponential histogram, or summary.                                                                                                                                         |
+| `unsupported_temporality` | The point is a sum with delta (not cumulative) temporality.                                                                                                                                          |
+| `unmapped_metric`         | The metric name or its attributes don't match anything in the table above.                                                                                                                           |
 
 **Staleness.** `OTEL_METRICS_STALE_AFTER_MS` (default 5 minutes) sets how long a pushed point stays valid. Once every field has gone stale with no fresh push, the connection shows as disconnected and health fires an instance-down event. Points are timed by the collector's clock, not Monitor's (a point stamped ahead of Monitor's clock is treated as received now), so keep NTP in sync on both sides. After a BetterDB restart, a connection stays disconnected until the next push arrives — nothing is lost, since prior history is kept in storage.
 
@@ -168,14 +168,14 @@ When an OTLP endpoint is configured, Monitor also emits discrete monitoring even
 
 ## Environment variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OTEL_INGEST_ENABLED` | `true` | Enable the OTLP receivers: `/v1/traces` (traces) and `/v1/external/metrics` (metrics ingestion). |
-| `OTEL_INGEST_TOKEN` | unset | Bearer token required to post traces or push metrics. Required in cloud mode. |
-| `OTEL_METRICS_STALE_AFTER_MS` | `300000` | Age after which a pushed metric is ignored; min `1000`. |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Base URL of your OTLP/HTTP collector. Setting it enables the metrics and event exports; `/v1/metrics` and `/v1/logs` are appended automatically. |
-| `OTEL_TELEMETRY_ENABLED` | `true` | Set `false` to disable the metrics and event exports even when an endpoint is set. |
-| `OTEL_METRICS_EXPORT_INTERVAL_MS` | `15000` | Metrics mirror push interval in milliseconds (minimum `1000`). |
+| Variable                          | Default  | Description                                                                                                                                      |
+| --------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `OTEL_INGEST_ENABLED`             | `true`   | Enable the OTLP receivers: `/v1/traces` (traces) and `/v1/external/metrics` (metrics ingestion).                                                 |
+| `OTEL_INGEST_TOKEN`               | unset    | Bearer token required to post traces or push metrics. Required in cloud mode.                                                                    |
+| `OTEL_METRICS_STALE_AFTER_MS`     | `300000` | Age after which a pushed metric is ignored; min `1000`.                                                                                          |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`     | unset    | Base URL of your OTLP/HTTP collector. Setting it enables the metrics and event exports; `/v1/metrics` and `/v1/logs` are appended automatically. |
+| `OTEL_TELEMETRY_ENABLED`          | `true`   | Set `false` to disable the metrics and event exports even when an endpoint is set.                                                               |
+| `OTEL_METRICS_EXPORT_INTERVAL_MS` | `15000`  | Metrics mirror push interval in milliseconds (minimum `1000`).                                                                                   |
 
 ## Kubernetes
 
