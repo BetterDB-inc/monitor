@@ -1,9 +1,11 @@
-import { Controller, Get, Header } from '@nestjs/common';
+import { Controller, Get, Header, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiProduces } from '@nestjs/swagger';
 import { PrometheusService } from './prometheus.service';
+import { PrometheusMetricsGuard } from './prometheus-metrics.guard';
 
 @ApiTags('prometheus')
 @Controller('prometheus')
+@UseGuards(PrometheusMetricsGuard)
 export class PrometheusController {
   constructor(private prometheusService: PrometheusService) {}
 
@@ -11,7 +13,8 @@ export class PrometheusController {
   @Header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8')
   @ApiOperation({
     summary: 'Get Prometheus metrics',
-    description: 'Returns metrics in Prometheus text exposition format for scraping by Prometheus server'
+    description:
+      'Returns metrics in Prometheus text exposition format for scraping by Prometheus server',
   })
   @ApiProduces('text/plain; version=0.0.4; charset=utf-8')
   @ApiResponse({
@@ -19,9 +22,12 @@ export class PrometheusController {
     description: 'Prometheus metrics in text format',
     schema: {
       type: 'string',
-      example: '# HELP valkey_info_uptime_seconds Uptime in seconds\n# TYPE valkey_info_uptime_seconds gauge\nvalkey_info_uptime_seconds 3600\n'
-    }
+      example:
+        '# HELP valkey_info_uptime_seconds Uptime in seconds\n# TYPE valkey_info_uptime_seconds gauge\nvalkey_info_uptime_seconds 3600\n',
+    },
   })
+  @ApiResponse({ status: 401, description: 'Missing or invalid metrics token' })
+  @ApiResponse({ status: 404, description: 'Metrics endpoint disabled' })
   @ApiResponse({ status: 500, description: 'Internal server error' })
   async getMetrics(): Promise<string> {
     return this.prometheusService.getMetrics();

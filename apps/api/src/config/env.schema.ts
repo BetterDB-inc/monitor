@@ -199,6 +199,23 @@ export const envSchema = z
     PROMETHEUS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).optional(),
     PROMETHEUS_STALENESS_MS: z.coerce.number().int().min(1000).optional(),
 
+    PROMETHEUS_METRICS_ENABLED: z
+      .string()
+      .default('true')
+      .transform((v) => v.trim().toLowerCase() !== 'false'),
+    PROMETHEUS_METRICS_TOKEN: z
+      .string()
+      .optional()
+      .transform((value) => {
+        const trimmed = value?.trim();
+
+        if (trimmed === undefined || trimmed.length === 0) {
+          return undefined;
+        }
+
+        return trimmed;
+      }),
+
     // OTel telemetry export (mirror of Prometheus metrics). No-op unless
     // OTEL_EXPORTER_OTLP_ENDPOINT is set.
     OTEL_TELEMETRY_ENABLED: z
@@ -306,6 +323,22 @@ export const envSchema = z
         message:
           'OTEL_INGEST_TOKEN is required when CLOUD_MODE is set (guards OTLP trace ingestion)',
         path: ['OTEL_INGEST_TOKEN'],
+      });
+    }
+
+    // In cloud mode the Prometheus metrics endpoint is allowlisted past session
+    // auth, so the bearer token is the only credential guarding it. Require it
+    // when the endpoint is enabled rather than leaving metrics open to anonymous scrapes.
+    if (
+      isCloudModeValue(data.CLOUD_MODE) &&
+      data.PROMETHEUS_METRICS_ENABLED &&
+      !data.PROMETHEUS_METRICS_TOKEN
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'PROMETHEUS_METRICS_TOKEN is required when CLOUD_MODE is set (guards the metrics endpoint)',
+        path: ['PROMETHEUS_METRICS_TOKEN'],
       });
     }
   });

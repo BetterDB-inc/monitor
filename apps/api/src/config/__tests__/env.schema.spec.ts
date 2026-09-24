@@ -281,15 +281,19 @@ describe('envSchema', () => {
 
   describe('OTLP ingest token in cloud mode', () => {
     it('requires OTEL_INGEST_TOKEN when CLOUD_MODE is set', () => {
-      const result = envSchema.safeParse({ CLOUD_MODE: 'true' });
+      const result = envSchema.safeParse({ CLOUD_MODE: 'true', PROMETHEUS_METRICS_TOKEN: 'token' });
       expect(result.success).toBe(false);
       if (!result.success) {
         expect(result.error.issues.some((i) => i.path.includes('OTEL_INGEST_TOKEN'))).toBe(true);
       }
     });
 
-    it('accepts CLOUD_MODE when OTEL_INGEST_TOKEN is provided', () => {
-      const result = envSchema.safeParse({ CLOUD_MODE: 'true', OTEL_INGEST_TOKEN: 'secret' });
+    it('accepts CLOUD_MODE when both OTEL_INGEST_TOKEN and PROMETHEUS_METRICS_TOKEN are provided', () => {
+      const result = envSchema.safeParse({
+        CLOUD_MODE: 'true',
+        OTEL_INGEST_TOKEN: 'secret',
+        PROMETHEUS_METRICS_TOKEN: 'token',
+      });
       expect(result.success).toBe(true);
     });
 
@@ -308,7 +312,10 @@ describe('envSchema', () => {
       // share isCloudModeValue semantics — CLOUD_MODE=1 once passed boot
       // validation and then 401ed every /v1/traces request at runtime.
       for (const value of ['1', 'yes', 'TRUE']) {
-        const result = envSchema.safeParse({ CLOUD_MODE: value });
+        const result = envSchema.safeParse({
+          CLOUD_MODE: value,
+          PROMETHEUS_METRICS_TOKEN: 'token',
+        });
         expect(result.success).toBe(false);
         if (!result.success) {
           expect(result.error.issues.some((i) => i.path.includes('OTEL_INGEST_TOKEN'))).toBe(true);
