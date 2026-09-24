@@ -3,8 +3,19 @@ import { z } from 'zod';
 
 const list = <T extends z.ZodType>(item: T) => z.array(item).optional();
 
-const attributes = list(z.looseObject({}));
+const anyValue = z.looseObject({
+  stringValue: z.string().optional(),
+  boolValue: z.boolean().optional(),
+  intValue: z.union([z.string(), z.number().int()]).optional(),
+  doubleValue: z.number().optional(),
+  arrayValue: z.unknown().optional(),
+  kvlistValue: z.unknown().optional(),
+  bytesValue: z.unknown().optional(),
+});
+
+const attributes = list(z.looseObject({ key: z.string(), value: anyValue.optional() }));
 const resource = z.looseObject({ attributes }).optional();
+const scope = z.looseObject({ name: z.string().optional(), attributes }).optional();
 const dataPoints = z
   .looseObject({
     dataPoints: list(z.looseObject({ attributes, flags: z.number().int().nonnegative().optional() })),
@@ -17,6 +28,7 @@ const metricsRequest = z.looseObject({
       resource,
       scopeMetrics: list(
         z.looseObject({
+          scope,
           metrics: list(
             z.looseObject({
               name: z.string().optional(),
@@ -39,7 +51,7 @@ const traceRequest = z.looseObject({
       resource,
       scopeSpans: list(
         z.looseObject({
-          scope: z.looseObject({ name: z.string().optional() }).optional(),
+          scope,
           spans: list(z.looseObject({ attributes })),
         }),
       ),

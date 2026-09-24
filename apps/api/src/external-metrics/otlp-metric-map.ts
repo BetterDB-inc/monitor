@@ -127,12 +127,12 @@ export function mapDataPoint(
 export function attrsToRecord(kvs: OtlpKeyValue[] | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   for (const kv of kvs ?? []) {
-    const v = kv.value;
-    if (!v) continue;
-    if (v.stringValue !== undefined) out[kv.key] = v.stringValue;
-    else if (v.intValue !== undefined) out[kv.key] = String(v.intValue);
-    else if (v.doubleValue !== undefined) out[kv.key] = String(v.doubleValue);
-    else if (v.boolValue !== undefined) out[kv.key] = String(v.boolValue);
+    const v = kv?.value;
+    if (typeof kv?.key !== 'string' || !v || typeof v !== 'object') continue;
+    if (typeof v.stringValue === 'string') out[kv.key] = v.stringValue;
+    else if (typeof v.intValue === 'string' || typeof v.intValue === 'number') out[kv.key] = String(v.intValue);
+    else if (typeof v.doubleValue === 'number') out[kv.key] = String(v.doubleValue);
+    else if (typeof v.boolValue === 'boolean') out[kv.key] = String(v.boolValue);
   }
   return out;
 }

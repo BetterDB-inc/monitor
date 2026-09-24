@@ -6,6 +6,7 @@ import {
   pointValue,
   resolveInstanceKey,
 } from '../otlp-metric-map';
+import type { OtlpKeyValue } from '../otlp-metrics-types';
 
 const scalar = (section: string, field: string, value: string) => ({
   target: { kind: 'scalar', section, field },
@@ -181,6 +182,19 @@ describe('attrsToRecord', () => {
       ]),
     ).toEqual({ s: 'a', i: '6379', n: '6380', d: '1.5', b: 'true' });
     expect(attrsToRecord(undefined)).toEqual({});
+  });
+
+  it('ignores values whose type does not match their variant', () => {
+    const malformed = [
+      { key: 'service.instance.id', value: { stringValue: 42 } },
+      { key: 'i', value: { intValue: { high: 1 } } },
+      { key: 'd', value: { doubleValue: '1.5' } },
+      { key: 'b', value: { boolValue: 'true' } },
+      { key: 7, value: { stringValue: 'x' } },
+      null,
+      { key: 'ok', value: { stringValue: 'y' } },
+    ] as unknown as OtlpKeyValue[];
+    expect(attrsToRecord(malformed)).toEqual({ ok: 'y' });
   });
 });
 

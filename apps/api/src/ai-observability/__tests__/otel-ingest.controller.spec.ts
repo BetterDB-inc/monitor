@@ -40,6 +40,14 @@ describe('OtelIngestController.ingestTraces', () => {
     ['a span is null', { resourceSpans: [{ scopeSpans: [{ spans: [null] }] }] }],
     ['a span attribute is null', { resourceSpans: [{ scopeSpans: [{ spans: [{ attributes: [null] }] }] }] }],
     ['a scope name is not a string', { resourceSpans: [{ scopeSpans: [{ scope: { name: 5 } }] }] }],
+    [
+      'a resource attribute stringValue is a number',
+      { resourceSpans: [{ resource: { attributes: [{ key: 'service.name', value: { stringValue: 1 } }] } }] },
+    ],
+    [
+      'a span attribute key is not a string',
+      { resourceSpans: [{ scopeSpans: [{ spans: [{ attributes: [{ key: 1, value: { stringValue: 'x' } }] }] }] }] },
+    ],
   ])('returns 400 without ingesting when %s', async (_label, body) => {
     const { ctrl, ingest } = makeCtrl();
     await expect(ctrl.ingestTraces(fakeReply(), body as never, 'application/json')).rejects.toMatchObject({
