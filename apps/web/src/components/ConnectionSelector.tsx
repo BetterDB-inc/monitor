@@ -11,6 +11,7 @@ import { workspaceApi, CloudUser } from '../api/workspace';
 import type { Connection } from '../hooks/useConnection';
 import type { AgentConnectionInfo } from '@betterdb/shared';
 import { ConnectionSwitcher } from './connection-selector/ConnectionSwitcher';
+import { ConnectionTypeBadge } from './connection-selector/ConnectionTypeBadge';
 import { OtlpPushTab } from './connection-selector/OtlpPushTab';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 
@@ -387,6 +388,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
               <span className="text-sm font-medium truncate block">{connections[0].name}</span>
               <span className="text-xs text-muted-foreground">
                 {connections[0].host}:{connections[0].port}
+                <ConnectionTypeBadge connection={connections[0]} />
               </span>
             </div>
           </div>

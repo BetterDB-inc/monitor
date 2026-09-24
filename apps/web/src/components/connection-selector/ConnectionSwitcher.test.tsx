@@ -355,4 +355,16 @@ describe('ConnectionSwitcher', () => {
     expect(screen.getByTestId('conn-status-b')).toHaveAttribute('data-connected', 'false');
     expect(screen.getByTestId('conn-status-a')).toHaveAttribute('data-connected', 'true');
   });
+
+  it('marks an OTLP-pushed connection but not a direct one', () => {
+    open([
+      ...CONNECTIONS,
+      connection({ id: 'd', name: 'pushed', connectionType: 'external' }),
+    ]);
+
+    const pushedOption = screen.getByRole('option', { name: /pushed/ });
+    expect(pushedOption).toHaveTextContent('OTLP');
+    const directOption = screen.getByRole('option', { name: /production-eu/ });
+    expect(directOption).not.toHaveTextContent('OTLP');
+  });
 });

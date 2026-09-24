@@ -3,8 +3,8 @@ import { Popover } from 'radix-ui';
 import { CheckIcon, ChevronDownIcon, SearchIcon } from 'lucide-react';
 import type { Connection } from '../../hooks/useConnection';
 import { cn } from '@/lib/utils';
-import { isExternalConnection } from '../../utils/connectionType';
 import { ConnectionSwitcherOpenContext } from './switcher-open-context';
+import { ConnectionTypeBadge } from './ConnectionTypeBadge';
 
 interface ConnectionSwitcherProps {
   connections: Connection[];
@@ -234,11 +234,7 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
                     <span className="min-w-0 truncate">{connection.name}</span>
                     <span className="ml-auto min-w-0 truncate ps-2 text-xs text-muted-foreground">
                       {connection.host}:{connection.port}
-                      {isExternalConnection(connection) ? (
-                        <span className="ms-1 rounded bg-muted px-1 text-[10px] font-medium uppercase">
-                          OTLP
-                        </span>
-                      ) : null}
+                      <ConnectionTypeBadge connection={connection} />
                     </span>
                     {isCurrent ? <CheckIcon className="w-4 h-4 flex-shrink-0" /> : null}
                   </button>
