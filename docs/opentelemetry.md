@@ -133,7 +133,7 @@ Use `metrics_endpoint`, not the plain `endpoint` — `endpoint` appends the stan
 
 **What doesn't.** Every view that needs a live command against the instance stays unavailable: slow log, clients, latency, key analytics, cluster, security/audit, vector search, and the other live-only pages. They show: "Not available for OTLP-ingested connections — this view needs a live connection." Migration is a related but separate case — it's blocked at the source/target picker instead, with its own message ("One or more selected instances only pushes OTLP metrics. Migration needs a live connection to both instances."), since an OTLP-ingested connection is never a valid migration source or target.
 
-Prometheus re-export isn't supported yet: OTLP-push connections are omitted from `/api/prometheus/metrics`.
+**Prometheus.** OTLP-push connections are exported at `/api/prometheus/metrics` like polled ones, with one difference: a series exists only for a field the collector actually pushed. A field that was never pushed, or stopped being pushed, has no series rather than a `0`. Cluster, slot-stats, raw slow log, ACL and client-analytics series are never produced for these connections, and webhooks or compliance alerts that depend on an unpushed field (for example `maxclients` or `maxmemory_policy`) don't fire. Ingest itself is counted by `betterdb_otlp_metric_points_accepted_total` and `betterdb_otlp_metric_points_dropped_total{reason}` (full export profile only).
 
 **Drop reasons.** A response's `partialSuccess.errorMessage` summarises rejected points by reason, for example `unknown_instance=12 unmapped_metric=3`:
 
@@ -224,6 +224,6 @@ Collector, Prometheus, and Grafana running together.
 ## Summary
 
 - **Traces:** Monitor receives OTLP traces at `/v1/traces` (JSON and protobuf). It does not export its own spans.
-- **Metrics ingestion:** Monitor receives OTLP metrics at `/v1/external/metrics` for registered OTLP-push connections, driving memory history, forecasting, anomaly detection and health for instances it doesn't dial directly.
+- **Metrics ingestion:** Monitor receives OTLP metrics at `/v1/external/metrics` for registered OTLP-push connections, driving memory history, forecasting, anomaly detection, health and the Prometheus export for instances it doesn't dial directly.
 - **Metrics:** Prometheus-first at `/api/prometheus/metrics`; opt-in OTLP mirror of counters and gauges when an endpoint is set (histograms via Prometheus only).
 - **Events:** opt-in OTLP logs for the same events that trigger webhooks.
