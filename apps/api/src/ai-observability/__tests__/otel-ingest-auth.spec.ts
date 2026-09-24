@@ -1,5 +1,11 @@
+import { timingSafeEqual } from 'crypto';
 import { HttpException, HttpStatus } from '@nestjs/common';
 import { assertOtlpIngestAuthorized } from '../otel-ingest-auth';
+
+jest.mock('crypto', () => {
+  const actual = jest.requireActual('crypto');
+  return { ...actual, timingSafeEqual: jest.fn(actual.timingSafeEqual) };
+});
 
 describe('assertOtlpIngestAuthorized', () => {
   const ENV_KEYS = ['OTEL_INGEST_ENABLED', 'OTEL_INGEST_TOKEN', 'CLOUD_MODE'] as const;
@@ -48,5 +54,23 @@ describe('assertOtlpIngestAuthorized', () => {
     expect(statusOf(() => assertOtlpIngestAuthorized('Bearer nope'))).toBe(HttpStatus.UNAUTHORIZED);
     expect(statusOf(() => assertOtlpIngestAuthorized(undefined))).toBe(HttpStatus.UNAUTHORIZED);
     expect(statusOf(() => assertOtlpIngestAuthorized('Bearer s3cret'))).toBeNull();
+  });
+
+  it('rejects tokens that only share a prefix with the configured one', () => {
+    process.env.OTEL_INGEST_TOKEN = 's3cret';
+    expect(statusOf(() => assertOtlpIngestAuthorized('Bearer s3cre'))).toBe(HttpStatus.UNAUTHORIZED);
+    expect(statusOf(() => assertOtlpIngestAuthorized('Bearer s3cretX'))).toBe(
+      HttpStatus.UNAUTHORIZED,
+    );
+    expect(statusOf(() => assertOtlpIngestAuthorized('s3cret'))).toBe(HttpStatus.UNAUTHORIZED);
+  });
+
+  it('compares the bearer token in constant time', () => {
+    process.env.OTEL_INGEST_TOKEN = 's3cret';
+    (timingSafeEqual as jest.Mock).mockClear();
+
+    assertOtlpIngestAuthorized('Bearer s3cret');
+
+    expect(timingSafeEqual).toHaveBeenCalledTimes(1);
   });
 });

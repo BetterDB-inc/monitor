@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from 'crypto';
 import { HttpException, HttpStatus } from '@nestjs/common';
 import { isCloudMode } from '../common/utils/cloud-mode';
 
@@ -12,7 +13,12 @@ export function assertOtlpIngestAuthorized(auth?: string): void {
       HttpStatus.UNAUTHORIZED,
     );
   }
-  if (token && auth !== `Bearer ${token}`) {
+  if (token && !matchesBearer(auth, token)) {
     throw new HttpException('Invalid ingestion token', HttpStatus.UNAUTHORIZED);
   }
+}
+
+function matchesBearer(auth: string | undefined, token: string): boolean {
+  const digest = (value: string): Buffer => createHash('sha256').update(value).digest();
+  return timingSafeEqual(digest(auth ?? ''), digest(`Bearer ${token}`));
 }
