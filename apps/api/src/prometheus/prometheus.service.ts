@@ -60,6 +60,7 @@ import {
   parseExportProfile,
   resolveSlotStatsTopN,
 } from './export-profile';
+import { DropReason } from '../external-metrics/otlp-metrics-types';
 
 /**
  * Ceiling on the demoted-node read, clamped down to the poll interval when that
@@ -272,6 +273,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private cveFindings: Gauge;
   private cveKev: Gauge;
   private cveDatasetStale: Gauge;
+
+  // OTLP Ingest Metrics
+  private otlpPointsAccepted: Counter;
+  private otlpPointsDropped: Counter;
 
   constructor(
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
@@ -878,6 +883,26 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       'cve_dataset_stale',
       'Whether the CVE scan is partial or sources are missing: 1 stale, 0 ok',
     );
+
+    // OTLP Ingest Metrics
+    this.otlpPointsAccepted = new Counter({
+      name: 'betterdb_otlp_metric_points_accepted_total',
+      help: 'OTLP metric data points accepted into external connections',
+      registers: [this.registry],
+    });
+    this.otlpPointsDropped = new Counter({
+      name: 'betterdb_otlp_metric_points_dropped_total',
+      help: 'OTLP metric data points dropped, by reason',
+      labelNames: ['reason'],
+      registers: [this.registry],
+    });
+  }
+
+  recordOtlpIngest(accepted: number, droppedByReason: Partial<Record<DropReason, number>>): void {
+    if (accepted > 0) this.otlpPointsAccepted.inc(accepted);
+    for (const [reason, count] of Object.entries(droppedByReason)) {
+      if (count && count > 0) this.otlpPointsDropped.inc({ reason }, count);
+    }
   }
 
   /**

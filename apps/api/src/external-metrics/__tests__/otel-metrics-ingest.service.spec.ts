@@ -208,4 +208,12 @@ describe('OtelMetricsIngestService', () => {
     const { service } = build();
     expect(toPartialSuccess(service.ingest({}, NOW_MS))).toBeNull();
   });
+
+  it('reports each ingest to Prometheus when available', () => {
+    const prometheus = { recordOtlpIngest: jest.fn() };
+    const registry = { findByHostPort: jest.fn().mockReturnValue(null) } as unknown as ConnectionRegistry;
+    const service = new OtelMetricsIngestService(registry, new ExternalMetricsStore(), prometheus as never);
+    service.ingest(resource(identity, [gauge('redis.uptime', 1)]), NOW_MS);
+    expect(prometheus.recordOtlpIngest).toHaveBeenCalledWith(0, expect.objectContaining({ unknown_instance: 1 }));
+  });
 });

@@ -1,5 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { PrometheusService } from '../prometheus/prometheus.service';
 import { ExternalMetricsStore } from './external-metrics-store';
 import {
   attrsToRecord,
@@ -71,6 +72,7 @@ export class OtelMetricsIngestService {
   constructor(
     private readonly registry: ConnectionRegistry,
     private readonly store: ExternalMetricsStore,
+    @Optional() private readonly prometheus?: PrometheusService,
   ) {}
 
   ingest(request: OtlpMetricsRequest, nowMs: number = Date.now()): IngestResult {
@@ -78,6 +80,7 @@ export class OtelMetricsIngestService {
     for (const resourceMetrics of request.resourceMetrics ?? []) {
       this.ingestResource(resourceMetrics, nowMs, result);
     }
+    this.prometheus?.recordOtlpIngest(result.accepted, result.dropped);
     return result;
   }
 

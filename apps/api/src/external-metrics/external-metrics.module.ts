@@ -1,12 +1,13 @@
 import { Module } from '@nestjs/common';
 import { APP_FILTER } from '@nestjs/core';
+import { PrometheusModule } from '../prometheus/prometheus.module';
 import { ExternalConnectionUnsupportedFilter } from './external-connection-unsupported.filter';
 import { ExternalMetricsStoreModule } from './external-metrics-store.module';
 import { OtelMetricsIngestController } from './otel-metrics-ingest.controller';
 import { OtelMetricsIngestService } from './otel-metrics-ingest.service';
 
 @Module({
-  imports: [ExternalMetricsStoreModule],
+  imports: [ExternalMetricsStoreModule, PrometheusModule],
   controllers: [OtelMetricsIngestController],
   providers: [OtelMetricsIngestService, { provide: APP_FILTER, useClass: ExternalConnectionUnsupportedFilter }],
 })
