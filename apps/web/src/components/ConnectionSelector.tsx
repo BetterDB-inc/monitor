@@ -1,20 +1,17 @@
 import { useState, useEffect, useRef } from 'react';
 import { useIsDemo } from '../contexts/DemoContext';
+import { useAuth } from '../contexts/AuthContext';
+import { useCanMutate } from '../hooks/useCanMutate';
 import { useConnection } from '../hooks/useConnection';
 import { fetchApi } from '../api/client';
 import { parseConnectionUrl, looksLikeConnectionUrl } from '../utils/connectionUrl';
 import { agentTokensApi, GeneratedToken, TokenListItem } from '../api/agent-tokens';
 import { databasesApi, Database, DatabaseStatus, DatabaseCredentials } from '../api/databases';
-import { workspaceApi } from '../api/workspace';
+import { workspaceApi, CloudUser } from '../api/workspace';
 import type { Connection } from '../hooks/useConnection';
 import type { AgentConnectionInfo } from '@betterdb/shared';
 import { ConnectionSwitcher } from './connection-selector/ConnectionSwitcher';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from './ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 
 interface SshFormData {
   enabled: boolean;
@@ -71,7 +68,8 @@ function buildSshTunnelPayload(ssh: SshFormData) {
     password: ssh.authMethod === 'password' ? ssh.password || undefined : undefined,
     keySource: usesKey ? ssh.keySource : undefined,
     privateKey: usesKey && ssh.keySource === 'inline' ? ssh.privateKey || undefined : undefined,
-    privateKeyPath: usesKey && ssh.keySource === 'file' ? ssh.privateKeyPath || undefined : undefined,
+    privateKeyPath:
+      usesKey && ssh.keySource === 'file' ? ssh.privateKeyPath || undefined : undefined,
     passphrase: usesKey ? ssh.passphrase || undefined : undefined,
     hostKeyFingerprint: ssh.hostKeyFingerprint || undefined,
   };
@@ -79,12 +77,7 @@ function buildSshTunnelPayload(ssh: SshFormData) {
 
 function isLocalhostHost(host: string): boolean {
   const h = host.trim().toLowerCase();
-  return (
-    h === 'localhost' ||
-    h === '::1' ||
-    h === '0.0.0.0' ||
-    /^127\./.test(h)
-  );
+  return h === 'localhost' || h === '::1' || h === '0.0.0.0' || /^127\./.test(h);
 }
 
 const defaultFormData: ConnectionFormData = {
@@ -103,11 +96,22 @@ type AddTab = 'direct' | 'agent' | 'valkey';
 export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   const emptyFormData = isCloudMode ? { ...defaultFormData, host: '' } : defaultFormData;
   const isDemo = useIsDemo();
-  const { currentConnection, connections, loading, error, setConnection, refreshConnections } = useConnection();
+  const canMutate = useCanMutate();
+  const { mode } = useAuth();
+  const locked = isDemo === true || canMutate === false;
+  // The "Via Agent" tab works in cloud and in self-hosted (workspace-enabled): both
+  // expose the /agent-tokens mint endpoint and the /agent/ws gateway. The "BetterDB
+  // Valkey instances" tab stays cloud-only (it provisions managed instances).
+  const showAgentTab = isCloudMode === true || mode === 'self-hosted';
+  const { currentConnection, connections, loading, error, setConnection, refreshConnections } =
+    useConnection();
   const [showAddDialog, setShowAddDialog] = useState(false);
 
   useEffect(() => {
     const handler = (e: Event) => {
+      if (locked === true) {
+        return;
+      }
       const detail = (
         e as CustomEvent<
           | { prefill?: Partial<ConnectionFormData>; tab?: AddTab; valkeyMaxmemory?: string }
@@ -122,8 +126,14 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
         });
         setTestResult(null);
         setAddTab('direct');
-      } else if (detail?.tab && isCloudMode) {
-        // Non-direct tabs only exist in cloud mode.
+      } else if (
+        detail?.tab &&
+        (detail.tab === 'direct' ||
+          (detail.tab === 'agent' && showAgentTab) ||
+          (detail.tab === 'valkey' && isCloudMode))
+      ) {
+        // Direct is always selectable; the agent tab is available in cloud and
+        // self-hosted; the valkey (provisioning) tab is cloud-only.
         setAddTab(detail.tab);
         setValkeyMaxmemory(detail.valkeyMaxmemory ?? null);
       }
@@ -131,7 +141,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
     };
     window.addEventListener('betterdb:open-add-connection', handler);
     return () => window.removeEventListener('betterdb:open-add-connection', handler);
-  }, [isCloudMode]);
+  }, [isCloudMode, showAgentTab, locked]);
   const [showManageDialog, setShowManageDialog] = useState(false);
   const [formData, setFormData] = useState<ConnectionFormData>(emptyFormData);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
@@ -144,12 +154,12 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
     if (field === 'host' && typeof value === 'string') {
       value = value.replace(/^https?:\/\//, '').replace(/\/$/, '');
     }
-    setFormData(prev => ({ ...prev, [field]: value }));
+    setFormData((prev) => ({ ...prev, [field]: value }));
     setTestResult(null);
   };
 
   const handleSshChange = (field: keyof SshFormData, value: string | number | boolean) => {
-    setFormData(prev => ({ ...prev, ssh: { ...prev.ssh, [field]: value } }));
+    setFormData((prev) => ({ ...prev, ssh: { ...prev.ssh, [field]: value } }));
     setTestResult(null);
   };
 
@@ -167,7 +177,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
     const parsed = parseConnectionUrl(text);
     if (!parsed.ok) return;
     e.preventDefault();
-    setFormData(prev => ({
+    setFormData((prev) => ({
       ...prev,
       name: prev.name || parsed.value.name,
       host: parsed.value.host,
@@ -182,28 +192,35 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
 
   const handleTestConnection = async () => {
     if (cloudLoopbackBlocked) {
-      setTestResult({ success: false, message: 'localhost is not reachable from the cloud. Please provide a publicly accessible host.' });
+      setTestResult({
+        success: false,
+        message:
+          'localhost is not reachable from the cloud. Please provide a publicly accessible host.',
+      });
       return;
     }
     setTesting(true);
     setTestResult(null);
     try {
-      const result = await fetchApi<{ success: boolean; message?: string; error?: string }>('/connections/test', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: formData.name || 'Test',
-          host: formData.host,
-          port: formData.port,
-          username: formData.username || undefined,
-          password: formData.password || undefined,
-          dbIndex: formData.dbIndex,
-          tls: formData.tls,
-          sshTunnel: buildSshTunnelPayload(formData.ssh),
-        }),
-      });
+      const result = await fetchApi<{ success: boolean; message?: string; error?: string }>(
+        '/connections/test',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            name: formData.name || 'Test',
+            host: formData.host,
+            port: formData.port,
+            username: formData.username || undefined,
+            password: formData.password || undefined,
+            dbIndex: formData.dbIndex,
+            tls: formData.tls,
+            sshTunnel: buildSshTunnelPayload(formData.ssh),
+          }),
+        },
+      );
       setTestResult({
         success: result.success,
-        message: result.success ? 'Connection successful!' : (result.error || 'Connection failed'),
+        message: result.success ? 'Connection successful!' : result.error || 'Connection failed',
       });
     } catch (err) {
       setTestResult({
@@ -221,7 +238,11 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       return;
     }
     if (cloudLoopbackBlocked) {
-      setTestResult({ success: false, message: 'localhost is not reachable from the cloud. Please provide a publicly accessible host.' });
+      setTestResult({
+        success: false,
+        message:
+          'localhost is not reachable from the cloud. Please provide a publicly accessible host.',
+      });
       return;
     }
 
@@ -276,11 +297,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   };
 
   if (loading) {
-    return (
-      <div className="px-3 py-2 text-sm text-muted-foreground">
-        Loading connections...
-      </div>
-    );
+    return <div className="px-3 py-2 text-sm text-muted-foreground">Loading connections...</div>;
   }
 
   if (error) {
@@ -288,8 +305,14 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       <div className="px-3 py-2">
         <div className="text-sm text-destructive mb-2">{error}</div>
         <button
-          onClick={() => setShowAddDialog(true)}
-          className="text-xs text-primary hover:underline"
+          onClick={() => {
+            if (locked === true) {
+              return;
+            }
+            setShowAddDialog(true);
+          }}
+          disabled={locked}
+          className={`text-xs text-primary ${locked ? 'opacity-30 cursor-not-allowed' : 'hover:underline'}`}
         >
           + Add Connection
         </button>
@@ -304,31 +327,35 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
           <label className="text-xs text-muted-foreground">Connection</label>
           <div className="flex gap-1">
             <button
-              onClick={() => !isDemo && setShowAddDialog(true)}
-              disabled={isDemo}
+              onClick={() => !locked && setShowAddDialog(true)}
+              disabled={locked}
               data-tooltip-id="license-tooltip"
-              data-tooltip-content={isDemo ? 'Not available in demo mode' : undefined}
+              data-tooltip-content={
+                locked ? (isDemo ? 'Not available in demo mode' : 'Admins only') : undefined
+              }
               className={`w-7 h-7 flex items-center justify-center rounded-md text-base font-medium transition-colors ${
-                isDemo
+                locked
                   ? 'opacity-30 cursor-not-allowed text-primary'
                   : 'text-primary hover:bg-primary/10'
               }`}
-              title={isDemo ? undefined : 'Add connection'}
+              title={locked ? undefined : 'Add connection'}
             >
               +
             </button>
             {connections.length > 0 && (
               <button
-                onClick={() => !isDemo && setShowManageDialog(true)}
-                disabled={isDemo}
+                onClick={() => !locked && setShowManageDialog(true)}
+                disabled={locked}
                 data-tooltip-id="license-tooltip"
-                data-tooltip-content={isDemo ? 'Not available in demo mode' : undefined}
+                data-tooltip-content={
+                  locked ? (isDemo ? 'Not available in demo mode' : 'Admins only') : undefined
+                }
                 className={`w-7 h-7 flex items-center justify-center rounded-md text-base transition-colors ${
-                  isDemo
+                  locked
                     ? 'opacity-30 cursor-not-allowed text-muted-foreground'
                     : 'text-muted-foreground hover:text-foreground hover:bg-muted'
                 }`}
-                title={isDemo ? undefined : 'Manage connections'}
+                title={locked ? undefined : 'Manage connections'}
               >
                 ⚙
               </button>
@@ -337,8 +364,10 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
         </div>
 
         {connections.length === 0 ? (
-          isDemo ? (
-            <div className="px-2 py-1.5 text-sm text-muted-foreground">Demo workspace</div>
+          locked ? (
+            <div className="px-2 py-1.5 text-sm text-muted-foreground">
+              {isDemo ? 'Demo workspace' : 'No connections yet'}
+            </div>
           ) : (
             <button
               onClick={() => setShowAddDialog(true)}
@@ -354,7 +383,9 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
             />
             <div className="min-w-0">
               <span className="text-sm font-medium truncate block">{connections[0].name}</span>
-              <span className="text-xs text-muted-foreground">{connections[0].host}:{connections[0].port}</span>
+              <span className="text-xs text-muted-foreground">
+                {connections[0].host}:{connections[0].port}
+              </span>
             </div>
           </div>
         ) : (
@@ -367,49 +398,62 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       </div>
 
       {/* Add Connection Dialog */}
-      <Dialog open={showAddDialog} onOpenChange={(open) => {
-        setShowAddDialog(open);
-        if (!open) {
-          setFormData(emptyFormData);
-          setTestResult(null);
-          setValkeyMaxmemory(null);
-        }
-      }}>
-        <DialogContent className={isCloudMode ? (addTab === 'valkey' ? 'sm:max-w-3xl' : 'sm:max-w-2xl') : 'sm:max-w-md'}>
+      <Dialog
+        open={showAddDialog}
+        onOpenChange={(open) => {
+          setShowAddDialog(open);
+          if (!open) {
+            setFormData(emptyFormData);
+            setTestResult(null);
+            setValkeyMaxmemory(null);
+          }
+        }}
+      >
+        <DialogContent
+          className={
+            showAgentTab ? (addTab === 'valkey' ? 'sm:max-w-3xl' : 'sm:max-w-2xl') : 'sm:max-w-md'
+          }
+        >
           <DialogHeader>
             <DialogTitle>Add Connection</DialogTitle>
           </DialogHeader>
 
-          {/* Tab switcher (only if cloud mode) */}
-          {isCloudMode && (
+          {/* Tab switcher: Direct + Via Agent show in cloud and self-hosted; the
+              Valkey-instances tab is cloud-only. */}
+          {showAgentTab && (
             <div className="flex border-b">
               <button
                 onClick={() => setAddTab('direct')}
-                className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${addTab === 'direct'
-                  ? 'border-primary text-primary'
-                  : 'border-transparent text-muted-foreground hover:text-foreground'
-                  }`}
+                className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                  addTab === 'direct'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground'
+                }`}
               >
                 Direct Connection
               </button>
               <button
                 onClick={() => setAddTab('agent')}
-                className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${addTab === 'agent'
-                  ? 'border-primary text-primary'
-                  : 'border-transparent text-muted-foreground hover:text-foreground'
-                  }`}
+                className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                  addTab === 'agent'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground'
+                }`}
               >
                 Via Agent
               </button>
-              <button
-                onClick={() => setAddTab('valkey')}
-                className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${addTab === 'valkey'
-                  ? 'border-primary text-primary'
-                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              {isCloudMode && (
+                <button
+                  onClick={() => setAddTab('valkey')}
+                  className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                    addTab === 'valkey'
+                      ? 'border-primary text-primary'
+                      : 'border-transparent text-muted-foreground hover:text-foreground'
                   }`}
-              >
-                BetterDB Valkey instances
-              </button>
+                >
+                  BetterDB Valkey instances
+                </button>
+              )}
             </div>
           )}
 
@@ -455,7 +499,10 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                     />
                     {cloudLoopbackBlocked && (
                       <div className="mt-1.5 text-xs text-amber-600 dark:text-amber-500 leading-snug space-y-1">
-                        <p><strong>localhost won't work on the cloud.</strong> Please provide a publicly accessible address.</p>
+                        <p>
+                          <strong>localhost won't work on the cloud.</strong> Please provide a
+                          publicly accessible address.
+                        </p>
                         <a
                           href="https://docs.betterdb.com/providers/"
                           target="_blank"
@@ -475,7 +522,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                         </a>
                       </div>
                     )}
-                    {!(cloudLoopbackBlocked) && (
+                    {!cloudLoopbackBlocked && (
                       <p className="mt-1 text-[11px] text-muted-foreground">
                         Tip: paste a full URL like rediss://user:pass@host:6379 to fill every field.
                       </p>
@@ -568,7 +615,9 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                           <input
                             type="number"
                             value={formData.ssh.port}
-                            onChange={(e) => handleSshChange('port', parseInt(e.target.value) || 22)}
+                            onChange={(e) =>
+                              handleSshChange('port', parseInt(e.target.value) || 22)
+                            }
                             min="1"
                             max="65535"
                             className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
@@ -650,7 +699,9 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
 
                           {formData.ssh.keySource === 'inline' ? (
                             <div>
-                              <label className="block text-xs font-medium mb-1">Private key (PEM)</label>
+                              <label className="block text-xs font-medium mb-1">
+                                Private key (PEM)
+                              </label>
                               <textarea
                                 value={formData.ssh.privateKey}
                                 onChange={(e) => handleSshChange('privateKey', e.target.value)}
@@ -661,7 +712,9 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                             </div>
                           ) : (
                             <div>
-                              <label className="block text-xs font-medium mb-1">Server key path</label>
+                              <label className="block text-xs font-medium mb-1">
+                                Server key path
+                              </label>
                               <input
                                 type="text"
                                 value={formData.ssh.privateKeyPath}
@@ -670,13 +723,16 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                                 className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
                               />
                               <p className="text-xs text-muted-foreground mt-1">
-                                Resolved inside the server's <code>BETTERDB_SSH_KEY_DIR</code> directory.
+                                Resolved inside the server's <code>BETTERDB_SSH_KEY_DIR</code>{' '}
+                                directory.
                               </p>
                             </div>
                           )}
 
                           <div>
-                            <label className="block text-xs font-medium mb-1">Key passphrase (optional)</label>
+                            <label className="block text-xs font-medium mb-1">
+                              Key passphrase (optional)
+                            </label>
                             <input
                               type="password"
                               value={formData.ssh.passphrase}
@@ -689,7 +745,9 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                       )}
 
                       <div>
-                        <label className="block text-xs font-medium mb-1">Host key fingerprint (optional)</label>
+                        <label className="block text-xs font-medium mb-1">
+                          Host key fingerprint (optional)
+                        </label>
                         <input
                           type="text"
                           value={formData.ssh.hostKeyFingerprint}
@@ -698,7 +756,9 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                           className="w-full px-3 py-2 border rounded-md bg-background font-mono text-xs focus:outline-none focus:ring-2 focus:ring-primary"
                         />
                         <p className="text-xs text-muted-foreground mt-1">
-                          Pin the SSH server's key to prevent MITM. Get it with <code>ssh-keyscan -t ed25519 host | ssh-keygen -lf -</code>. Left blank, the server identity is not verified.
+                          Pin the SSH server's key to prevent MITM. Get it with{' '}
+                          <code>ssh-keyscan -t ed25519 host | ssh-keygen -lf -</code>. Left blank,
+                          the server identity is not verified.
                         </p>
                       </div>
                     </div>
@@ -706,7 +766,9 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                 </div>
 
                 {testResult && (
-                  <div className={`p-3 rounded-md text-sm ${testResult.success ? 'bg-green-500/10 text-green-500' : 'bg-destructive/10 text-destructive'}`}>
+                  <div
+                    className={`p-3 rounded-md text-sm ${testResult.success ? 'bg-green-500/10 text-green-500' : 'bg-destructive/10 text-destructive'}`}
+                  >
                     {testResult.message}
                   </div>
                 )}
@@ -715,7 +777,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
               <div className="flex items-center justify-between pt-3 border-t bg-muted/30 -mx-4 -mb-4 px-4 py-3 rounded-b-xl">
                 <button
                   onClick={handleTestConnection}
-                  disabled={testing || !formData.host || (cloudLoopbackBlocked)}
+                  disabled={testing || !formData.host || cloudLoopbackBlocked}
                   className="px-4 py-2 text-sm border rounded-md hover:bg-muted disabled:opacity-50"
                 >
                   {testing ? 'Testing...' : 'Test Connection'}
@@ -733,7 +795,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                   </button>
                   <button
                     onClick={handleSaveConnection}
-                    disabled={saving || !formData.name || !formData.host || (cloudLoopbackBlocked)}
+                    disabled={saving || !formData.name || !formData.host || cloudLoopbackBlocked}
                     className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50"
                   >
                     {saving ? 'Saving...' : 'Save'}
@@ -766,8 +828,9 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
             {connections.map((conn) => (
               <div
                 key={conn.id}
-                className={`flex items-center justify-between p-3 border rounded-md ${currentConnection?.id === conn.id ? 'border-primary bg-primary/5' : ''
-                  }`}
+                className={`flex items-center justify-between p-3 border rounded-md ${
+                  currentConnection?.id === conn.id ? 'border-primary bg-primary/5' : ''
+                }`}
               >
                 <div className="flex items-center gap-3 min-w-0">
                   <span
@@ -775,7 +838,9 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                   />
                   <div className="min-w-0">
                     <div className="font-medium truncate">{conn.name}</div>
-                    <div className="text-xs text-muted-foreground">{conn.host}:{conn.port}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {conn.host}:{conn.port}
+                    </div>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
@@ -903,7 +968,12 @@ function AgentTab({
   };
 
   const handleRevoke = async (id: string) => {
-    if (!confirm('Are you sure you want to revoke this token? Connected agents using it will be disconnected.')) return;
+    if (
+      !confirm(
+        'Are you sure you want to revoke this token? Connected agents using it will be disconnected.',
+      )
+    )
+      return;
     try {
       await agentTokensApi.revoke(id);
       await loadData();
@@ -919,12 +989,33 @@ function AgentTab({
   };
 
   const cloudHost = window.location.host;
+  const pageIsHttps = window.location.protocol === 'https:';
+  // The agent authenticates by sending BETTERDB_TOKEN in the WebSocket Authorization
+  // header, so plain ws:// exposes the token to anyone on the network. Only use ws://
+  // for loopback (local dev, where there is no network hop); every network-facing host
+  // gets wss:// so the token is never emitted in cleartext. On a plain-HTTP non-loopback
+  // instance that means the command uses wss:// and needs TLS terminated first — see the
+  // warning shown below.
+  const hostIsLoopback = isLocalhostHost(window.location.hostname.replace(/^\[|\]$/g, ''));
+  const wsScheme = pageIsHttps || !hostIsLoopback ? 'wss' : 'ws';
+  const insecureAgentHost = !pageIsHttps && !hostIsLoopback;
 
   return (
     <div className="space-y-4 max-h-[70vh] overflow-y-auto">
       <p className="text-sm text-muted-foreground">
-        Deploy an agent inside your VPC to monitor Valkey/Redis instances that aren't directly accessible.
-        The agent connects outbound to BetterDB Cloud via WebSocket.
+        Deploy an agent inside your VPC to monitor Valkey/Redis instances that aren't directly
+        accessible. The agent connects outbound to BetterDB Cloud via WebSocket.
+      </p>
+
+      <p className="text-xs text-muted-foreground border rounded-md bg-muted p-2">
+        <span className="font-medium text-foreground">Which token?</span> This{' '}
+        <span className="font-medium text-foreground">Agent token</span> goes on the agent's run
+        command below (the <span className="font-mono">-e BETTERDB_TOKEN=…</span> /{' '}
+        <span className="font-mono">--token</span> argument). Claude Code needs a separate{' '}
+        <span className="font-medium text-foreground">MCP token</span> (Settings → MCP Tokens),
+        pasted into the <span className="font-mono">env</span> block of its MCP config. Both use the
+        variable name <span className="font-mono">BETTERDB_TOKEN</span>, but the values are{' '}
+        <span className="font-medium text-foreground">not interchangeable</span>.
       </p>
 
       {/* Connected Agents */}
@@ -933,7 +1024,10 @@ function AgentTab({
           <h3 className="text-sm font-medium mb-2">Connected Agents</h3>
           <div className="space-y-2">
             {agents.map((agent) => (
-              <div key={agent.id} className="flex items-center gap-2 p-2 border rounded-md bg-green-500/5">
+              <div
+                key={agent.id}
+                className="flex items-center gap-2 p-2 border rounded-md bg-green-500/5"
+              >
                 <span className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />
                 <div className="min-w-0 flex-1">
                   <div className="text-sm font-medium truncate">{agent.name}</div>
@@ -988,7 +1082,9 @@ function AgentTab({
       {generatedToken && (
         <div className="border rounded-md p-3 bg-amber-500/5 border-amber-500/30">
           <div className="flex items-center justify-between mb-2">
-            <h3 className="text-sm font-medium text-amber-600">Save this token - it won't be shown again</h3>
+            <h3 className="text-sm font-medium text-amber-600">
+              Save this token - it won't be shown again
+            </h3>
           </div>
           <div className="flex gap-2 mb-3">
             <code className="flex-1 text-xs bg-background p-2 rounded border font-mono break-all select-all">
@@ -1002,13 +1098,22 @@ function AgentTab({
             </button>
           </div>
 
+          {insecureAgentHost && (
+            <p className="text-xs border rounded-md border-amber-300 bg-amber-50 text-amber-800 p-2 mb-2">
+              This instance is served over HTTP on a network-facing host. The agent sends its
+              token over the connection, so the commands below use <span className="font-mono">wss://</span> and
+              require HTTPS (terminate TLS at a reverse proxy) before the agent can connect — a
+              plain <span className="font-mono">ws://</span> URL would transmit the token in cleartext.
+            </p>
+          )}
+
           <h4 className="text-xs font-medium mb-1">Run the agent with Docker:</h4>
           <pre className="text-xs bg-background p-2 rounded border overflow-x-auto">
             {`docker run -d \\
   --name betterdb-agent \\
   -e VALKEY_HOST=your-valkey-host \\
   -e VALKEY_PORT=6379 \\
-  -e BETTERDB_CLOUD_URL=wss://${cloudHost}/agent/ws \\
+  -e BETTERDB_CLOUD_URL=${wsScheme}://${cloudHost}/agent/ws \\
   -e BETTERDB_TOKEN=${generatedToken.token} \\
   betterdb/agent:latest`}
           </pre>
@@ -1018,7 +1123,7 @@ function AgentTab({
             {`npx @betterdb/agent \\
   --valkey-host your-valkey-host \\
   --valkey-port 6379 \\
-  --cloud-url wss://${cloudHost}/agent/ws \\
+  --cloud-url ${wsScheme}://${cloudHost}/agent/ws \\
   --token ${generatedToken.token}`}
           </pre>
 
@@ -1047,7 +1152,8 @@ function AgentTab({
                     <div className="font-medium truncate">{token.name}</div>
                     <div className="text-xs text-muted-foreground">
                       Created {new Date(token.createdAt).toLocaleDateString()}
-                      {token.lastUsedAt && ` · Last used ${new Date(token.lastUsedAt).toLocaleDateString()}`}
+                      {token.lastUsedAt &&
+                        ` · Last used ${new Date(token.lastUsedAt).toLocaleDateString()}`}
                     </div>
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
@@ -1080,21 +1186,14 @@ function AgentTab({
         </div>
       )}
 
-      {loadingTokens && (
-        <div className="text-sm text-muted-foreground">Loading tokens...</div>
-      )}
+      {loadingTokens && <div className="text-sm text-muted-foreground">Loading tokens...</div>}
 
       {error && (
-        <div className="p-3 rounded-md text-sm bg-destructive/10 text-destructive">
-          {error}
-        </div>
+        <div className="p-3 rounded-md text-sm bg-destructive/10 text-destructive">{error}</div>
       )}
 
       <div className="flex justify-end pt-2 border-t">
-        <button
-          onClick={onClose}
-          className="px-4 py-2 text-sm border rounded-md hover:bg-muted"
-        >
+        <button onClick={onClose} className="px-4 py-2 text-sm border rounded-md hover:bg-muted">
           Close
         </button>
       </div>
@@ -1164,7 +1263,9 @@ function ValkeyInstancesTab({
     loadData();
     workspaceApi
       .getMe()
-      .then((me) => setIsAdminOrOwner(me.role === 'admin' || me.role === 'owner'))
+      .then((me: CloudUser) => {
+        setIsAdminOrOwner(me.role === 'admin' || me.role === 'owner' || me.isOwner === true);
+      })
       .catch(() => {});
   }, []);
 
@@ -1264,8 +1365,8 @@ function ValkeyInstancesTab({
   return (
     <div className="space-y-4 max-h-[70vh] overflow-y-auto">
       <p className="text-sm text-muted-foreground">
-        Provision a managed Valkey instance with the Search module, reachable over TLS.
-        Once ready, it's added to your connections automatically.
+        Provision a managed Valkey instance with the Search module, reachable over TLS. Once ready,
+        it's added to your connections automatically.
       </p>
 
       {error && (
@@ -1414,10 +1515,7 @@ function ValkeyInstancesTab({
       )}
 
       <div className="flex justify-end pt-2 border-t">
-        <button
-          onClick={onClose}
-          className="px-4 py-2 text-sm border rounded-md hover:bg-muted"
-        >
+        <button onClick={onClose} className="px-4 py-2 text-sm border rounded-md hover:bg-muted">
           Close
         </button>
       </div>

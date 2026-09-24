@@ -1,11 +1,12 @@
 import { useLocation } from 'react-router-dom';
 import { useIsDemo } from '../../contexts/DemoContext';
+import { useCanMutate } from '../../hooks/useCanMutate';
 import { useCapabilities } from '../../hooks/useCapabilities';
 import { useCacheProposalsUnread } from '../../hooks/useCacheProposals';
 import { ConnectionSelector } from '../ConnectionSelector';
-import { ModeToggle } from '../ModeToggle';
 import { CloudUser } from '../../api/workspace';
 import { NavItem } from './NavItem';
+import { SidebarUserMenu } from './SidebarUserMenu';
 import {
   Sidebar,
   SidebarContent,
@@ -15,7 +16,7 @@ import {
 } from '@/components/ui/sidebar.tsx';
 import { Feature } from '@betterdb/shared';
 import { CommunityBanner } from '@/components/layout/CommunityBanner.tsx';
-import { formatForDisplay } from '@tanstack/hotkeys';
+import { ExternalLink } from 'lucide-react';
 
 interface SidebarProps {
   cloudUser: CloudUser | null;
@@ -28,11 +29,18 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
   const { hasVectorSearch } = useCapabilities();
   const { unreadCount: cacheProposalsUnread } = useCacheProposalsUnread();
   const isDemo = useIsDemo();
+  const canMutate = useCanMutate();
 
   return (
     <Sidebar className="bg-card">
       <SidebarHeader>
-        <div className="p-4 pb-2">
+        <div className="p-4 pb-2 flex items-center gap-2">
+          <img
+            src="/symbol-white.svg"
+            alt=""
+            aria-hidden="true"
+            className="h-8 w-8 shrink-0 rounded-md bg-primary p-1"
+          />
           <h2 className="text-lg font-semibold">BetterDB Monitor</h2>
         </div>
         <div className=" mb-1">
@@ -41,9 +49,12 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
       </SidebarHeader>
       <SidebarSeparator className="mb-2 mx-0" />
       <SidebarContent>
-        <nav className="space-y-1 px-3 flex-1">
+        <nav className="space-y-1 px-3 flex-1" aria-label="Primary">
           <NavItem to="/" active={location.pathname === '/'}>
             Dashboard
+          </NavItem>
+          <NavItem to="/fleet" active={location.pathname === '/fleet'}>
+            Fleet
           </NavItem>
           <NavItem to="/slowlog" active={location.pathname === '/slowlog'}>
             Slow Log
@@ -88,6 +99,8 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
             active={location.pathname === '/bulk-delete'}
             requiredFeature={Feature.BULK_DELETE}
             demoLocked={isDemo}
+            locked={canMutate === false}
+            lockedReason="Admins only"
           >
             Bulk Delete
           </NavItem>
@@ -121,7 +134,13 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
           <NavItem to="/monitor" active={location.pathname === '/monitor'}>
             MONITOR
           </NavItem>
-          <NavItem to="/webhooks" active={location.pathname === '/webhooks'} demoLocked={isDemo}>
+          <NavItem
+            to="/webhooks"
+            active={location.pathname === '/webhooks'}
+            demoLocked={isDemo}
+            locked={canMutate === false}
+            lockedReason="Admins only"
+          >
             Webhooks
           </NavItem>
           <NavItem to="/migration" active={location.pathname === '/migration'}>
@@ -159,40 +178,26 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
       </SidebarContent>
       <SidebarFooter className="p-0 gap-1">
         <div className="px-3 pb-4 border-t border-border pt-2 space-y-1">
-          <ModeToggle />
           <a
             href="https://docs.betterdb.com"
             target="_blank"
             rel="noopener noreferrer"
-            className="block w-full rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted"
+            className="flex w-full items-center justify-between rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted"
           >
             Documentation
+            <ExternalLink aria-hidden="true" className="size-3.5 text-muted-foreground" />
           </a>
           <button
+            type="button"
             onClick={onFeedbackClick}
             className="block w-full text-left rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted"
           >
             Feedback
           </button>
-          <button
-            onClick={onShortcutsClick}
-            className="flex w-full items-center justify-between rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted"
-          >
-            <span>Keyboard shortcuts</span>
-            <kbd className="text-xs font-mono font-bold text-muted-foreground shadow-lg px-1">{formatForDisplay('shift+?')}</kbd>
-          </button>
-          {cloudUser && (
-            <NavItem
-              to="/workspace/members"
-              active={location.pathname === '/workspace/members'}
-              demoLocked={isDemo}
-            >
-              Team
-            </NavItem>
-          )}
           <NavItem to="/settings" active={location.pathname === '/settings'} demoLocked={isDemo}>
             Settings
           </NavItem>
+          <SidebarUserMenu onShortcutsClick={onShortcutsClick} />
         </div>
       </SidebarFooter>
     </Sidebar>

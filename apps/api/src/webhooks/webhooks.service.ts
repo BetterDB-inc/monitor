@@ -3,6 +3,7 @@ import { randomBytes, createHmac } from 'crypto';
 import { promises as dns } from 'dns';
 import type { Webhook, WebhookDelivery, WebhookEventType, DEFAULT_RETRY_POLICY } from '@betterdb/shared';
 import { Tier, validateEventsForTier, getRequiredTierForEvent, getEventsForTier, getLockedEventsForTier } from '@betterdb/shared';
+import { WebhookPayloadFormat } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { CreateWebhookDto, UpdateWebhookDto } from '../common/dto/webhook.dto';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
@@ -202,6 +203,7 @@ export class WebhooksService {
       deliveryConfig: dto.deliveryConfig,
       alertConfig: dto.alertConfig,
       thresholds: dto.thresholds,
+      payloadFormat: dto.payloadFormat ?? WebhookPayloadFormat.GENERIC,
       connectionId: this.resolveConnectionId(dto.connectionId),
     });
 

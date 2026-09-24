@@ -32,7 +32,10 @@ export function VectorSearch() {
     try {
       const info = await metricsApi.getInfo(['memory']);
       usedMemoryBytes = parseInt(info.memory?.used_memory || '0', 10) || 0;
-    } catch { /* don't break index list */ }
+    } catch (err) {
+      /* don't break index list */
+      console.debug('[vector-search] failed to fetch memory info:', err);
+    }
 
     try {
       const details = await Promise.all(
@@ -334,10 +337,15 @@ function IndexCard({ info, usedMemoryBytes }: { info: VectorIndexInfo; usedMemor
   const semanticCache = isSemanticCache(info);
 
   useEffect(() => {
+    const controller = new AbortController();
     setSnapshots(null);
-    metricsApi.getVectorIndexSnapshots(info.name, snapshotHours)
+    metricsApi.getVectorIndexSnapshots(info.name, snapshotHours, controller.signal)
       .then(res => setSnapshots(res.snapshots))
-      .catch(() => { /* ignore */ });
+      .catch((err) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        console.debug(`[vector-search] snapshots failed for ${info.name}:`, err);
+      });
+    return () => controller.abort();
   }, [info.name, currentConnection?.id, snapshotHours]);
 
   const hoursLabel = snapshotHours <= 24 ? `${snapshotHours}h` : '7d';

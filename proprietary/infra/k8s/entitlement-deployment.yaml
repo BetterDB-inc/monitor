@@ -22,7 +22,7 @@ spec:
       serviceAccountName: entitlement
       containers:
         - name: entitlement
-          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:v1.11.2
+          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:v1.12.0
           imagePullPolicy: Always
           ports:
             - containerPort: 3002
@@ -42,7 +42,7 @@ spec:
             - name: ACM_CERT_ARN
               value: "arn:aws:acm:us-east-1:811740411689:certificate/5124962a-e39c-4629-93d0-04275ba4167e"
             - name: ALB_GROUP_NAME
-              value: "betterdb-tenants-8"
+              value: "betterdb-tenants-9"
             - name: APP_DOMAIN
               value: "app.betterdb.com"
             - name: ROUTE53_ZONE_ID
@@ -65,6 +65,11 @@ spec:
                 secretKeyRef:
                   name: entitlement-config
                   key: ADMIN_API_TOKEN
+            - name: BROKER_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: BROKER_API_TOKEN
             - name: RDS_HOST
               valueFrom:
                 secretKeyRef:
@@ -114,6 +119,21 @@ spec:
                 secretKeyRef:
                   name: entitlement-config
                   key: LICENSE_SIGNING_KID
+            # Broker token signing (dedicated keypair — kid must match a key
+            # in packages/shared's BROKER_SIGNING_PUBLIC_KEYS map). Both live
+            # in the secret so key + kid rotate atomically.
+            - name: BROKER_SIGNING_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: BROKER_SIGNING_PRIVATE_KEY
+                  optional: true
+            - name: BROKER_SIGNING_KID
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: BROKER_SIGNING_KID
+                  optional: true
           resources:
             requests:
               cpu: "250m"

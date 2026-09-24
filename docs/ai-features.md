@@ -527,8 +527,10 @@ The AI assistant has access to the official Valkey documentation through RAG (Re
 
 4. **Verify license tier:**
    ```bash
-   curl http://localhost:3001/api/license/status
+   curl -b cookies.txt http://localhost:3001/api/license/status
    ```
+
+   > **Note**: API calls need a signed-in session when user control is enabled — see [Authenticating API Requests](configuration.md#authenticating-api-requests).
 
    AI requires Pro or Enterprise tier.
 

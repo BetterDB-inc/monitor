@@ -5,6 +5,7 @@ import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import {
   WebhookEventType,
   DeliveryStatus,
+  WebhookPayloadFormat,
   getDeliveryConfig,
   type WebhookPayload,
 } from '@betterdb/shared';
@@ -230,6 +231,32 @@ describe('WebhookDispatcherService', () => {
 
       expect(webhooksService.generateSignature).toHaveBeenCalled();
       expect(result).toBe('test-signature');
+    });
+  });
+
+  describe('Test Webhook Preview', () => {
+    it('should include renderedPayload when delivery fails', async () => {
+      webhooksService.generateSignature.mockReturnValue('test-signature');
+
+      const result = await service.testWebhook({
+        id: '1',
+        name: 'Unreachable Slack',
+        url: 'http://127.0.0.1:1/hook',
+        enabled: true,
+        events: [WebhookEventType.INSTANCE_DOWN],
+        headers: {},
+        retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+        payloadFormat: WebhookPayloadFormat.SLACK,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.payloadFormat).toBe('slack');
+      expect(result.renderedPayload).toMatchObject({
+        text: expect.any(String),
+        blocks: expect.any(Array),
+      });
     });
   });
 

@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
 import { parseSshTunnel } from '@betterdb/shared';
+import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
   StoragePort,
   StoredAclEntry,
@@ -100,12 +101,18 @@ import type {
   UpdateMemoryProposalStatusInput,
   AppendMemoryProposalAuditInput,
   MemoryForgetPayload,
+  AgentToken,
+  TokenType,
 } from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
 import { openLibsqlDatabase } from './libsql-driver';
 import { loadBetterSqlite3 } from './better-sqlite3-driver';
 import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repository';
 import { SlowLogSqliteRepository } from './repositories/slowlog.sqlite.repository';
+import { InvitationSqliteRepository } from './repositories/invitation.sqlite.repository';
+import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
+import { ActivitySqliteRepository } from './repositories/activity.sqlite.repository';
+import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
 
 /**
  * Idempotent migration for the memory_proposals columns added with the
@@ -333,12 +340,40 @@ interface MemoryProposalAuditRow {
   actor_source: ActorSource;
 }
 
-export class SqliteAdapter implements StoragePort {
+interface AgentTokenRow {
+  id: string;
+  name: string;
+  type: string | null;
+  token_hash: string;
+  created_at: number;
+  expires_at: number;
+  revoked_at: number | null;
+  last_used_at: number | null;
+  user_id: string | null;
+}
+
+function toAgentToken(row: AgentTokenRow): AgentToken {
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.type === 'mcp' ? 'mcp' : 'agent',
+    tokenHash: row.token_hash,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    revokedAt: row.revoked_at,
+    lastUsedAt: row.last_used_at,
+    userId: row.user_id,
+  };
+}
+
+export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   private db: Database.Database | null = null;
   private ready: boolean = false;
   private readonly mappers = new RowMappers(SqliteDialect);
   private webhookRepo!: WebhookSqliteRepository;
   private slowlogRepo!: SlowLogSqliteRepository;
+  private invitationRepo!: InvitationSqliteRepository;
+  private activityRepo!: ActivitySqliteRepository;
 
   constructor(private config: SqliteAdapterConfig) {}
 
@@ -352,6 +387,8 @@ export class SqliteAdapter implements StoragePort {
       this.runMigrations();
       this.webhookRepo = new WebhookSqliteRepository(this.db, this.mappers);
       this.slowlogRepo = new SlowLogSqliteRepository(this.db, this.mappers);
+      this.invitationRepo = new InvitationSqliteRepository(this.db);
+      this.activityRepo = new ActivitySqliteRepository(this.db);
       this.ready = true;
     } catch (error) {
       this.ready = false;
@@ -359,6 +396,16 @@ export class SqliteAdapter implements StoragePort {
         `Failed to initialize SQLite: ${error instanceof Error ? error.message : 'Unknown error'}`,
       );
     }
+  }
+
+  getRawDatabaseHandle(): RawDatabaseHandle {
+    if (this.db === null) {
+      throw new Error('SQLite storage is not initialized');
+    }
+    if (this.config.url !== undefined) {
+      return { kind: 'libsql', db: this.db };
+    }
+    return { kind: 'sqlite', db: this.db };
   }
 
   private async openDatabase(): Promise<Database.Database> {
@@ -394,6 +441,7 @@ export class SqliteAdapter implements StoragePort {
       { name: 'delivery_config', type: 'TEXT' },
       { name: 'alert_config', type: 'TEXT' },
       { name: 'thresholds', type: 'TEXT' },
+      { name: 'payload_format', type: "TEXT DEFAULT 'generic'" },
     ];
 
     for (const col of newColumns) {
@@ -1433,6 +1481,7 @@ export class SqliteAdapter implements StoragePort {
         delivery_config TEXT,
         alert_config TEXT,
         thresholds TEXT,
+        payload_format TEXT DEFAULT 'generic',
         connection_id TEXT NOT NULL DEFAULT 'env-default',
         created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000),
         updated_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
@@ -1860,6 +1909,40 @@ export class SqliteAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_scheduled_captures_conn_status
         ON scheduled_captures(connection_id, status);
+
+      CREATE TABLE IF NOT EXISTS invitations (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        role TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        invited_by TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'revoked')),
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS activity_events (
+        id TEXT PRIMARY KEY,
+        occurred_at INTEGER NOT NULL,
+        actor_user_id TEXT NOT NULL,
+        actor_email TEXT NOT NULL,
+        actor_via TEXT NOT NULL CHECK (actor_via IN ('session', 'token', 'cli')),
+        token_id TEXT,
+        action TEXT NOT NULL,
+        target_type TEXT,
+        target_id TEXT,
+        connection_id TEXT,
+        status_code INTEGER NOT NULL,
+        ip TEXT NOT NULL,
+        details TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_activity_events_occurred
+        ON activity_events(occurred_at);
+      CREATE INDEX IF NOT EXISTS idx_activity_events_actor
+        ON activity_events(actor_user_id, occurred_at);
+      CREATE INDEX IF NOT EXISTS idx_activity_events_connection
+        ON activity_events(connection_id, occurred_at);
     `);
 
     // Idempotent migration for deployments that ran the PR 19 schema before
@@ -1905,6 +1988,35 @@ export class SqliteAdapter implements StoragePort {
     addColumnIfMissing('command_stats_samples', 'failed_calls', 'INTEGER', '0');
     addCaptureSessionsTargetNodeColumn(this.db!);
     addMemoryProposalIntegrityColumns(this.db!);
+
+    // Agent Tokens Table (cloud-only, but created in all environments for interface compliance)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_tokens (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL DEFAULT 'agent',
+        token_hash TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        revoked_at INTEGER,
+        last_used_at INTEGER,
+        user_id TEXT
+      )
+    `);
+
+    const atCols = this.db.prepare('PRAGMA table_info(agent_tokens)').all() as { name: string }[];
+    const hasType = atCols.some((c) => {
+      return c.name === 'type';
+    });
+    if (hasType === false) {
+      this.db.exec("ALTER TABLE agent_tokens ADD COLUMN type TEXT NOT NULL DEFAULT 'agent'");
+    }
+    const hasUserId = atCols.some((c) => {
+      return c.name === 'user_id';
+    });
+    if (hasUserId === false) {
+      this.db.exec('ALTER TABLE agent_tokens ADD COLUMN user_id TEXT');
+    }
   }
 
   async saveBulkDeleteAudit(record: StoredBulkDeleteAudit): Promise<string> {
@@ -4020,26 +4132,6 @@ export class SqliteAdapter implements StoragePort {
       this.db.exec('ALTER TABLE connections ADD COLUMN ssh_tunnel TEXT');
     }
 
-    // Agent Tokens Table (cloud-only, but created in all environments for interface compliance)
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS agent_tokens (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        type TEXT NOT NULL DEFAULT 'agent',
-        token_hash TEXT NOT NULL UNIQUE,
-        created_at INTEGER NOT NULL,
-        expires_at INTEGER NOT NULL,
-        revoked_at INTEGER,
-        last_used_at INTEGER
-      )
-    `);
-
-    // Migration: add type column to existing agent_tokens tables
-    const atCols = this.db.prepare('PRAGMA table_info(agent_tokens)').all() as { name: string }[];
-    if (!atCols.some((c) => c.name === 'type')) {
-      this.db.exec("ALTER TABLE agent_tokens ADD COLUMN type TEXT NOT NULL DEFAULT 'agent'");
-    }
-
     const stmt = this.db.prepare(`
       INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, ssh_tunnel, is_default, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -4188,21 +4280,12 @@ export class SqliteAdapter implements StoragePort {
 
   // Agent Token Methods
 
-  async saveAgentToken(token: {
-    id: string;
-    name: string;
-    type: 'agent' | 'mcp';
-    tokenHash: string;
-    createdAt: number;
-    expiresAt: number;
-    revokedAt: number | null;
-    lastUsedAt: number | null;
-  }): Promise<void> {
+  async saveAgentToken(token: AgentToken): Promise<void> {
     if (!this.db) throw new Error('Database not initialized');
     this.db
       .prepare(
-        `INSERT OR REPLACE INTO agent_tokens (id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR REPLACE INTO agent_tokens (id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at, user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         token.id,
@@ -4213,61 +4296,33 @@ export class SqliteAdapter implements StoragePort {
         token.expiresAt,
         token.revokedAt,
         token.lastUsedAt,
+        token.userId,
       );
   }
 
-  async getAgentTokens(type?: 'agent' | 'mcp'): Promise<
-    Array<{
-      id: string;
-      name: string;
-      type: 'agent' | 'mcp';
-      tokenHash: string;
-      createdAt: number;
-      expiresAt: number;
-      revokedAt: number | null;
-      lastUsedAt: number | null;
-    }>
-  > {
+  async getAgentTokens(type?: TokenType): Promise<AgentToken[]> {
     if (!this.db) throw new Error('Database not initialized');
-    const query = type
-      ? 'SELECT * FROM agent_tokens WHERE type = ? ORDER BY created_at DESC'
-      : 'SELECT * FROM agent_tokens ORDER BY created_at DESC';
-    const rows = (type ? this.db.prepare(query).all(type) : this.db.prepare(query).all()) as any[];
-    return rows.map((row: any) => ({
-      id: row.id,
-      name: row.name,
-      type: row.type || 'agent',
-      tokenHash: row.token_hash,
-      createdAt: row.created_at,
-      expiresAt: row.expires_at,
-      revokedAt: row.revoked_at,
-      lastUsedAt: row.last_used_at,
-    }));
+    if (type === undefined) {
+      const rows = this.db
+        .prepare('SELECT * FROM agent_tokens ORDER BY created_at DESC')
+        .all() as AgentTokenRow[];
+      return rows.map(toAgentToken);
+    }
+    const rows = this.db
+      .prepare('SELECT * FROM agent_tokens WHERE type = ? ORDER BY created_at DESC')
+      .all(type) as AgentTokenRow[];
+    return rows.map(toAgentToken);
   }
 
-  async getAgentTokenByHash(hash: string): Promise<{
-    id: string;
-    name: string;
-    type: 'agent' | 'mcp';
-    tokenHash: string;
-    createdAt: number;
-    expiresAt: number;
-    revokedAt: number | null;
-    lastUsedAt: number | null;
-  } | null> {
+  async getAgentTokenByHash(hash: string): Promise<AgentToken | null> {
     if (!this.db) throw new Error('Database not initialized');
-    const row = this.db.prepare('SELECT * FROM agent_tokens WHERE token_hash = ?').get(hash) as any;
-    if (!row) return null;
-    return {
-      id: row.id,
-      name: row.name,
-      type: row.type || 'agent',
-      tokenHash: row.token_hash,
-      createdAt: row.created_at,
-      expiresAt: row.expires_at,
-      revokedAt: row.revoked_at,
-      lastUsedAt: row.last_used_at,
-    };
+    const row = this.db.prepare('SELECT * FROM agent_tokens WHERE token_hash = ?').get(hash) as
+      | AgentTokenRow
+      | undefined;
+    if (row === undefined) {
+      return null;
+    }
+    return toAgentToken(row);
   }
 
   async revokeAgentToken(id: string): Promise<void> {
@@ -5266,6 +5321,14 @@ export class SqliteAdapter implements StoragePort {
       lastFiredSessionId: (row.last_fired_session_id as string | null) ?? undefined,
       lastSkipReason: (row.last_skip_reason as string | null) ?? undefined,
     };
+  }
+
+  getInvitationRepository(): InvitationRepository {
+    return this.invitationRepo;
+  }
+
+  getActivityRepository(): ActivityRepository {
+    return this.activityRepo;
   }
 }
 

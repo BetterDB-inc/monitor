@@ -3,6 +3,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ConfigModule } from './config/config.module';
 import { ConnectionsModule } from './connections/connections.module';
+import { FleetModule } from './fleet/fleet.module';
 import { HealthModule } from './health/health.module';
 import { MetricsModule } from './metrics/metrics.module';
 import { AuditModule } from './audit/audit.module';
@@ -21,7 +22,7 @@ import { TelemetryModule } from './telemetry/telemetry.module';
 import { VectorSearchModule } from './vector-search/vector-search.module';
 import { AiObservabilityModule } from './ai-observability/ai-observability.module';
 import { MigrationModule } from './migration/migration.module';
-import { CloudAuthModule } from './auth/cloud-auth.module';
+import { WorkspaceAuthModule } from './auth/workspace-auth.module';
 import { McpModule } from './mcp/mcp.module';
 import { MetricForecastingModule } from './metric-forecasting/metric-forecasting.module';
 import { InferenceLatencyModule } from './inference-latency/inference-latency.module';
@@ -30,7 +31,10 @@ import { PosthogProxyModule } from './posthog-proxy/posthog-proxy.module';
 import { SystemModule } from './system/system.module';
 import { MonitorModule } from './monitor/monitor.module';
 import { isCloudMode } from './common/utils/cloud-mode';
+import { isTrueFlag } from './config/env-normalize';
+import { requireCloudAuth } from './common/utils/cloud-auth-loader';
 import { CveModule } from './cve/cve.module';
+import { ActivityModule } from './activity/activity.module';
 
 let AiModule: any = null;
 let LicenseModule: any = null;
@@ -43,6 +47,7 @@ let InferenceLatencyProModule: any = null;
 let CacheProposalsModule: any = null;
 let MemoryProposalsModule: any = null;
 let AgentModule: any = null;
+let SelfHostedAgentModule: any = null;
 let DataRetentionModule: any = null;
 
 try {
@@ -126,6 +131,27 @@ try {
   // Proprietary module not available
 }
 
+// Self-hosted agent connections: mirror the cloud AgentModule capability without the
+// cloud-only AgentTokensController (PersonalTokensController mints agent tokens in
+// self-hosted). Gated on workspace-enabled self-hosted: never in cloud (the cloud
+// AgentModule provides AgentGateway there, and double-providing would conflict), and
+// not under WORKSPACE_DISABLED (which has no PersonalTokensController to mint tokens,
+// so the gateway would accept upgrades no token could ever satisfy).
+const selfHostedAgentEnabled = !isCloudMode() && !isTrueFlag(process.env.WORKSPACE_DISABLED);
+if (selfHostedAgentEnabled) {
+  // Unlike the proprietary `require`s below, this module ships in apps/api/src and is
+  // always present — MODULE_NOT_FOUND is not a real outcome. A throw here means the
+  // module's import-time body failed (e.g. resolveAuthSecret doing filesystem work),
+  // so log it rather than silently booting with agent connections off.
+  try {
+    const selfHostedAgent = require('./agent/self-hosted-agent.module');
+    SelfHostedAgentModule = selfHostedAgent.SelfHostedAgentModule;
+    console.log('[Agent] Self-hosted agent module loaded');
+  } catch (error) {
+    console.warn('[Agent] Failed to load self-hosted agent module:', error);
+  }
+}
+
 if (isCloudMode()) {
   try {
     const agentModule = require('../../../proprietary/agent/agent.module');
@@ -145,15 +171,13 @@ if (isCloudMode()) {
 }
 
 // Cloud auth module - uses proprietary implementation in cloud mode
-let CloudAuthModuleToUse: any = CloudAuthModule;
+let CloudAuthModuleToUse: any = WorkspaceAuthModule.forRoot();
 if (isCloudMode()) {
-  try {
-    const proprietaryCloudAuth = require('../../../proprietary/cloud-auth/cloud-auth.module');
-    CloudAuthModuleToUse = proprietaryCloudAuth.ProprietaryCloudAuthModule;
-    console.log('[CloudAuth] Proprietary module loaded');
-  } catch {
-    // Proprietary module not available, use OSS no-op
-  }
+  const proprietaryCloudAuth = requireCloudAuth(() =>
+    require('../../../proprietary/cloud-auth/cloud-auth.module'),
+  );
+  CloudAuthModuleToUse = proprietaryCloudAuth.ProprietaryCloudAuthModule;
+  console.log('[CloudAuth] Proprietary module loaded');
 }
 
 const baseImports = [
@@ -166,6 +190,7 @@ const baseImports = [
   ]),
   CloudAuthModuleToUse, // Cloud auth (no-op for self-hosted, proprietary for cloud)
   ConnectionsModule, // Must come early - provides ConnectionRegistry globally
+  FleetModule,
   HealthModule,
   MetricsModule,
   AuditModule,
@@ -191,6 +216,7 @@ const baseImports = [
   SystemModule,
   MonitorModule,
   CveModule,
+  ActivityModule,
 ];
 
 const proprietaryImports = [
@@ -205,6 +231,7 @@ const proprietaryImports = [
   MemoryProposalsModule,
   AiModule,
   AgentModule,
+  SelfHostedAgentModule,
   DataRetentionModule,
 ].filter(Boolean);
 

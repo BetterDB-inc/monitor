@@ -211,7 +211,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       username: dbConfig.username,
       password: dbConfig.password,
       dbIndex: 0,
-      tls: false,
+      tls: dbConfig.tls ?? false,
       isDefault: true,
       createdAt: now,
       updatedAt: now,

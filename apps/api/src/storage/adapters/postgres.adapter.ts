@@ -1,7 +1,9 @@
 import { Pool, PoolConfig } from 'pg';
+import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
 import { randomUUID } from 'crypto';
 import { parseSshTunnel } from '@betterdb/shared';
+import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
   AnomalyQueryOptions,
   AnomalyStats,
@@ -98,10 +100,16 @@ import type {
   ListMemoryProposalsOptions,
   UpdateMemoryProposalStatusInput,
   AppendMemoryProposalAuditInput,
+  AgentToken,
+  TokenType,
 } from '@betterdb/shared';
 import { PostgresDialect, RowMappers } from './base-sql.adapter';
 import { WebhookPostgresRepository } from './repositories/webhook.postgres.repository';
 import { SlowLogPostgresRepository } from './repositories/slowlog.postgres.repository';
+import { InvitationPostgresRepository } from './repositories/invitation.postgres.repository';
+import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
+import { ActivityPostgresRepository } from './repositories/activity.postgres.repository';
+import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
 
 // Domain-specific repositories (webhooks, slowlog extracted). Remaining domains to extract:
 // ACL, anomaly, commandlog, latency, memory, hotkeys, settings,
@@ -170,24 +178,80 @@ interface MemoryProposalAuditRow {
   actor_source: ActorSource;
 }
 
-export class PostgresAdapter implements StoragePort {
+interface AgentTokenPgRow {
+  id: string;
+  name: string;
+  type: string | null;
+  token_hash: string;
+  created_at: PgNumeric;
+  expires_at: PgNumeric;
+  revoked_at: PgNumeric | null;
+  last_used_at: PgNumeric | null;
+  user_id: string | null;
+}
+
+function toAgentToken(row: AgentTokenPgRow): AgentToken {
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.type === 'mcp' ? 'mcp' : 'agent',
+    tokenHash: row.token_hash,
+    createdAt: Number(row.created_at),
+    expiresAt: Number(row.expires_at),
+    revokedAt: row.revoked_at === null ? null : Number(row.revoked_at),
+    lastUsedAt: row.last_used_at === null ? null : Number(row.last_used_at),
+    userId: row.user_id,
+  };
+}
+
+export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   private pool: Pool | null = null;
   private ready: boolean = false;
   private readonly mappers = new RowMappers(PostgresDialect);
   private webhookRepo!: WebhookPostgresRepository;
   private slowlogRepo!: SlowLogPostgresRepository;
+  private invitationRepo!: InvitationPostgresRepository;
+  private activityRepo!: ActivityPostgresRepository;
 
   constructor(private config: PostgresAdapterConfig) {}
 
   async initialize(): Promise<void> {
     try {
-      // Issue #11: Properly type poolConfig instead of using 'any'
-      const poolConfig: PoolConfig = {
-        connectionString: this.config.connectionString,
-      };
-
       // Enable SSL if STORAGE_SSL_CA is set (URL or file path)
       const sslCa = process.env.STORAGE_SSL_CA;
+
+      // Managed providers (e.g. Aiven) inject a connection string with
+      // sslmode=require and present their own CA. pg treats sslmode=require as
+      // verify-full and rejects that CA. Crucially, pg's ConnectionParameters
+      // does Object.assign(config, parse(connectionString)), so an explicit
+      // `ssl` option is OVERWRITTEN by whatever sslmode the connection string
+      // carries. We therefore have to express SSL intent IN the connection
+      // string, and normalize sslmode based on how we intend to verify:
+      //   - CA supplied (STORAGE_SSL_CA): strip sslmode so pg does not clobber
+      //     the { rejectUnauthorized: true, ca } option set below, giving
+      //     full chain + hostname verification against the provided CA.
+      //   - else no-verify opt-in (STORAGE_SSL_NO_VERIFY): set sslmode=no-verify
+      //     (pg maps it to { rejectUnauthorized: false }), i.e. TLS without CA
+      //     verification, matching Aiven's own default sslmode=require posture.
+      //   - else leave the string untouched.
+      let connectionString = this.config.connectionString;
+      try {
+        const parsed = new URL(connectionString);
+        if (sslCa) {
+          parsed.searchParams.delete('sslmode');
+          connectionString = parsed.toString();
+        } else if (isTrueFlag(process.env.STORAGE_SSL_NO_VERIFY)) {
+          parsed.searchParams.set('sslmode', 'no-verify');
+          connectionString = parsed.toString();
+        }
+      } catch {
+        // Not a parseable URL (e.g. a key=value DSN); leave it unchanged.
+      }
+
+      // Issue #11: Properly type poolConfig instead of using 'any'
+      const poolConfig: PoolConfig = {
+        connectionString,
+      };
 
       if (sslCa) {
         let ca: string;
@@ -318,6 +382,8 @@ export class PostgresAdapter implements StoragePort {
 
       this.webhookRepo = new WebhookPostgresRepository(this.pool, this.mappers);
       this.slowlogRepo = new SlowLogPostgresRepository(this.pool, this.mappers);
+      this.invitationRepo = new InvitationPostgresRepository(this.pool);
+      this.activityRepo = new ActivityPostgresRepository(this.pool);
 
       // Test connection (will have correct search_path if schema is set)
       const testClient = await this.pool.connect();
@@ -341,6 +407,13 @@ export class PostgresAdapter implements StoragePort {
         `Failed to initialize PostgreSQL: ${error instanceof Error ? error.message : 'Unknown error'}`,
       );
     }
+  }
+
+  getRawDatabaseHandle(): RawDatabaseHandle {
+    if (this.pool === null) {
+      throw new Error('PostgreSQL storage is not initialized');
+    }
+    return { kind: 'postgres', pool: this.pool };
   }
 
   /**
@@ -1404,6 +1477,7 @@ export class PostgresAdapter implements StoragePort {
         delivery_config JSONB,
         alert_config JSONB,
         thresholds JSONB,
+        payload_format VARCHAR(20) DEFAULT 'generic',
         connection_id TEXT NOT NULL DEFAULT 'env-default',
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -1413,6 +1487,7 @@ export class PostgresAdapter implements StoragePort {
       ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS delivery_config JSONB;
       ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS alert_config JSONB;
       ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS thresholds JSONB;
+      ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS payload_format VARCHAR(20) DEFAULT 'generic';
 
       CREATE INDEX IF NOT EXISTS idx_webhooks_connection_id ON webhooks(connection_id);
 
@@ -1813,12 +1888,14 @@ export class PostgresAdapter implements StoragePort {
         created_at BIGINT NOT NULL,
         expires_at BIGINT NOT NULL,
         revoked_at BIGINT,
-        last_used_at BIGINT
+        last_used_at BIGINT,
+        user_id TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_agent_tokens_hash ON agent_tokens(token_hash);
 
       ALTER TABLE agent_tokens ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'agent';
+      ALTER TABLE agent_tokens ADD COLUMN IF NOT EXISTS user_id TEXT;
 
       CREATE TABLE IF NOT EXISTS cache_proposals (
         id TEXT PRIMARY KEY,
@@ -2047,6 +2124,40 @@ export class PostgresAdapter implements StoragePort {
       -- Idempotent migration for deployments that ran the PR 19 schema
       ALTER TABLE scheduled_captures
         ADD COLUMN IF NOT EXISTS cron_expression TEXT;
+
+      CREATE TABLE IF NOT EXISTS invitations (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        role VARCHAR(20) NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        invited_by TEXT NOT NULL,
+        status VARCHAR(20) NOT NULL CHECK (status IN ('pending', 'accepted', 'revoked')),
+        created_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS activity_events (
+        id TEXT PRIMARY KEY,
+        occurred_at BIGINT NOT NULL,
+        actor_user_id TEXT NOT NULL,
+        actor_email TEXT NOT NULL,
+        actor_via VARCHAR(20) NOT NULL CHECK (actor_via IN ('session', 'token', 'cli')),
+        token_id TEXT,
+        action TEXT NOT NULL,
+        target_type TEXT,
+        target_id TEXT,
+        connection_id TEXT,
+        status_code INTEGER NOT NULL,
+        ip TEXT NOT NULL,
+        details TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_activity_events_occurred
+        ON activity_events(occurred_at);
+      CREATE INDEX IF NOT EXISTS idx_activity_events_actor
+        ON activity_events(actor_user_id, occurred_at);
+      CREATE INDEX IF NOT EXISTS idx_activity_events_connection
+        ON activity_events(connection_id, occurred_at);
     `);
   }
 
@@ -4399,27 +4510,19 @@ export class PostgresAdapter implements StoragePort {
 
   // Agent Token Methods
 
-  async saveAgentToken(token: {
-    id: string;
-    name: string;
-    type: 'agent' | 'mcp';
-    tokenHash: string;
-    createdAt: number;
-    expiresAt: number;
-    revokedAt: number | null;
-    lastUsedAt: number | null;
-  }): Promise<void> {
+  async saveAgentToken(token: AgentToken): Promise<void> {
     if (!this.pool) throw new Error('Database not initialized');
     await this.pool.query(
-      `INSERT INTO agent_tokens (id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO agent_tokens (id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at, user_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          type = EXCLUDED.type,
          token_hash = EXCLUDED.token_hash,
          expires_at = EXCLUDED.expires_at,
          revoked_at = EXCLUDED.revoked_at,
-         last_used_at = EXCLUDED.last_used_at`,
+         last_used_at = EXCLUDED.last_used_at,
+         user_id = EXCLUDED.user_id`,
       [
         token.id,
         token.name,
@@ -4429,69 +4532,40 @@ export class PostgresAdapter implements StoragePort {
         token.expiresAt,
         token.revokedAt,
         token.lastUsedAt,
+        token.userId,
       ],
     );
   }
 
-  async getAgentTokens(type?: 'agent' | 'mcp'): Promise<
-    Array<{
-      id: string;
-      name: string;
-      type: 'agent' | 'mcp';
-      tokenHash: string;
-      createdAt: number;
-      expiresAt: number;
-      revokedAt: number | null;
-      lastUsedAt: number | null;
-    }>
-  > {
+  async getAgentTokens(type?: TokenType): Promise<AgentToken[]> {
     if (!this.pool) throw new Error('Database not initialized');
-    const query = type
-      ? `SELECT id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at
-         FROM agent_tokens WHERE type = $1 ORDER BY created_at DESC`
-      : `SELECT id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at
-         FROM agent_tokens ORDER BY created_at DESC`;
-    const result = type ? await this.pool.query(query, [type]) : await this.pool.query(query);
-    return result.rows.map((row: any) => ({
-      id: row.id,
-      name: row.name,
-      type: row.type || 'agent',
-      tokenHash: row.token_hash,
-      createdAt: Number(row.created_at),
-      expiresAt: Number(row.expires_at),
-      revokedAt: row.revoked_at ? Number(row.revoked_at) : null,
-      lastUsedAt: row.last_used_at ? Number(row.last_used_at) : null,
-    }));
+    const columns =
+      'id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at, user_id';
+    if (type === undefined) {
+      const result = await this.pool.query(
+        `SELECT ${columns} FROM agent_tokens ORDER BY created_at DESC`,
+      );
+      return (result.rows as AgentTokenPgRow[]).map(toAgentToken);
+    }
+    const result = await this.pool.query(
+      `SELECT ${columns} FROM agent_tokens WHERE type = $1 ORDER BY created_at DESC`,
+      [type],
+    );
+    return (result.rows as AgentTokenPgRow[]).map(toAgentToken);
   }
 
-  async getAgentTokenByHash(hash: string): Promise<{
-    id: string;
-    name: string;
-    type: 'agent' | 'mcp';
-    tokenHash: string;
-    createdAt: number;
-    expiresAt: number;
-    revokedAt: number | null;
-    lastUsedAt: number | null;
-  } | null> {
+  async getAgentTokenByHash(hash: string): Promise<AgentToken | null> {
     if (!this.pool) throw new Error('Database not initialized');
     const result = await this.pool.query(
-      `SELECT id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at
+      `SELECT id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at, user_id
        FROM agent_tokens WHERE token_hash = $1`,
       [hash],
     );
-    if (result.rows.length === 0) return null;
-    const row = result.rows[0];
-    return {
-      id: row.id,
-      name: row.name,
-      type: row.type || 'agent',
-      tokenHash: row.token_hash,
-      createdAt: Number(row.created_at),
-      expiresAt: Number(row.expires_at),
-      revokedAt: row.revoked_at ? Number(row.revoked_at) : null,
-      lastUsedAt: row.last_used_at ? Number(row.last_used_at) : null,
-    };
+    const rows = result.rows as AgentTokenPgRow[];
+    if (rows.length === 0) {
+      return null;
+    }
+    return toAgentToken(rows[0]);
   }
 
   async revokeAgentToken(id: string): Promise<void> {
@@ -5493,6 +5567,14 @@ export class PostgresAdapter implements StoragePort {
       lastTs: toNumber(row.last_ts),
       nodeId: (row.node_id as string | null) ?? undefined,
     }));
+  }
+
+  getInvitationRepository(): InvitationRepository {
+    return this.invitationRepo;
+  }
+
+  getActivityRepository(): ActivityRepository {
+    return this.activityRepo;
   }
 }
 

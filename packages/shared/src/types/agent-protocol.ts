@@ -79,6 +79,7 @@ export interface AgentToken {
   expiresAt: number;
   revokedAt: number | null;
   lastUsedAt: number | null;
+  userId: string | null;
 }
 
 // Agent connection info (live WS connections)

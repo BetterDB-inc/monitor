@@ -120,6 +120,8 @@ betterdb_commandlog_large_reply_by_pattern{pattern="LRANGE *"}
 
 ### Example Use Cases
 
+> **Note**: API calls need a signed-in session when user control is enabled — see [Authenticating API Requests](configuration.md#authenticating-api-requests).
+
 #### Identify Large Hash Retrievals
 
 ```bash

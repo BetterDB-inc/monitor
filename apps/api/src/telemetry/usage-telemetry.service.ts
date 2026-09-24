@@ -2,7 +2,10 @@ import { Injectable, Optional, Inject, OnModuleInit } from '@nestjs/common';
 import { isCloudMode } from '../common/utils/cloud-mode';
 import { ConfigService } from '@nestjs/config';
 import { LicenseService } from '@proprietary/licenses';
+import type { WorkspaceRole } from '@betterdb/shared';
 import { TelemetryPort } from '../common/interfaces/telemetry-port.interface';
+
+export type AuthMethod = 'password' | 'broker';
 
 @Injectable()
 export class UsageTelemetryService implements OnModuleInit {
@@ -22,8 +25,7 @@ export class UsageTelemetryService implements OnModuleInit {
       this.configService.get<string>('APP_VERSION') ||
       this.configService.get<string>('npm_package_version') ||
       'unknown';
-    this.deploymentMode =
-      isCloudMode() ? 'cloud' : 'self-hosted';
+    this.deploymentMode = isCloudMode() ? 'cloud' : 'self-hosted';
     this.workspaceName = this.configService.get<string>('TENANT_ID') || undefined;
     const dbSchema = this.configService.get<string>('DB_SCHEMA');
     this.subdomain = dbSchema?.startsWith('tenant_')
@@ -103,6 +105,26 @@ export class UsageTelemetryService implements OnModuleInit {
 
   async trackAppStart(): Promise<void> {
     this.sendEvent('app_start');
+  }
+
+  async trackUserInvited(opts: { role: WorkspaceRole }): Promise<void> {
+    this.sendEvent('user_invited', opts);
+  }
+
+  async trackInviteAccepted(opts: { role: WorkspaceRole; method: AuthMethod }): Promise<void> {
+    this.sendEvent('invite_accepted', opts);
+  }
+
+  async trackWorkspaceFirstRegister(opts: { method: AuthMethod }): Promise<void> {
+    this.sendEvent('workspace_first_register', opts);
+  }
+
+  async trackUserLogin(opts: { method: AuthMethod }): Promise<void> {
+    this.sendEvent('user_login', opts);
+  }
+
+  async trackMemberRemoved(): Promise<void> {
+    this.sendEvent('member_removed', {});
   }
 
   async trackInteractionAfterIdle(idleDurationMs: number): Promise<void> {

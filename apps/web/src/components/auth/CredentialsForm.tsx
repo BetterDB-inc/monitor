@@ -1,0 +1,102 @@
+import { FormEvent, ReactElement, ReactNode, useState } from 'react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+
+export interface CredentialsFormValues {
+  email: string;
+  password: string;
+  name: string;
+}
+
+interface CredentialsFormProps {
+  title: string;
+  submitLabel: string;
+  askName: boolean;
+  lockedEmail?: string;
+  description?: string;
+  notice?: string | null;
+  footer?: ReactNode;
+  onSubmit: (values: CredentialsFormValues) => Promise<void>;
+}
+
+export function CredentialsForm({
+  title,
+  submitLabel,
+  askName,
+  lockedEmail,
+  description,
+  notice,
+  footer,
+  onSubmit,
+}: CredentialsFormProps): ReactElement {
+  const [email, setEmail] = useState(lockedEmail ?? '');
+  const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const handleSubmit = async (event: FormEvent): Promise<void> => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await onSubmit({ email: lockedEmail ?? email, password, name });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Something went wrong');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-background p-8">
+      <form onSubmit={handleSubmit} className="w-full max-w-sm space-y-4">
+        <h1 className="text-2xl font-semibold">{title}</h1>
+        {description !== undefined && (
+          <p className="text-sm text-muted-foreground">{description}</p>
+        )}
+        {notice !== undefined && notice !== null && (
+          <p className="text-sm text-destructive">{notice}</p>
+        )}
+        {askName && (
+          <Input
+            aria-label="Name"
+            placeholder="Name"
+            value={name}
+            onChange={(e) => {
+              setName(e.target.value);
+            }}
+            required
+          />
+        )}
+        <Input
+          aria-label="Email"
+          type="email"
+          placeholder="Email"
+          value={email}
+          onChange={(e) => {
+            setEmail(e.target.value);
+          }}
+          readOnly={lockedEmail !== undefined}
+          required
+        />
+        <Input
+          aria-label="Password"
+          type="password"
+          placeholder="Password"
+          value={password}
+          onChange={(e) => {
+            setPassword(e.target.value);
+          }}
+          minLength={8}
+          required
+        />
+        {error && <p className="text-sm text-destructive">{error}</p>}
+        <Button type="submit" className="w-full" disabled={busy}>
+          {submitLabel}
+        </Button>
+        {footer}
+      </form>
+    </div>
+  );
+}

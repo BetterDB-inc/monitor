@@ -104,7 +104,9 @@ export function useConnectionState(): ConnectionContextValue {
             dbVersion: connection.capabilities?.version ?? 'unknown',
           },
         }),
-      }).catch(() => {});
+      }).catch((err) => {
+        console.debug('[telemetry] failed to capture connection_switch:', err);
+      });
     }
   }, [connections]);
 

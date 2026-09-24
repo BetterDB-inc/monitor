@@ -161,4 +161,31 @@
   .event-timeline-lanes .recharts-wrapper {
     overflow: visible !important;
   }
+
+  /* Sidebar nav: permanently visible thin scrollbar, scoped to nav only. */
+  .sidebar-nav-scroll {
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .sidebar-nav-scroll::-webkit-scrollbar {
+    width: 8px;
+  }
+  .sidebar-nav-scroll::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .sidebar-nav-scroll::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 8px;
+  }
+  .sidebar-nav-scroll::-webkit-scrollbar-thumb:hover {
+    background: var(--muted-foreground);
+  }
+  .sidebar-nav-scroll:focus {
+    outline: none;
+  }
+  .sidebar-nav-scroll:focus-visible {
+    outline: 1px solid var(--ring);
+    outline-offset: -1px;
+  }
 }

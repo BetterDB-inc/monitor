@@ -19,6 +19,8 @@ export interface TokenListItem {
   expiresAt: number;
   revokedAt: number | null;
   lastUsedAt: number | null;
+  userId?: string | null;
+  ownerEmail?: string | null;
 }
 
 export const agentTokensApi = {
@@ -36,6 +38,5 @@ export const agentTokensApi = {
       method: 'DELETE',
     }),
 
-  getConnections: () =>
-    fetchApi<AgentConnectionInfo[]>('/agent-tokens/connections'),
+  getConnections: () => fetchApi<AgentConnectionInfo[]>('/agent-tokens/connections'),
 };

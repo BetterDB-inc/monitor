@@ -1,3 +1,4 @@
-export * from './cloud-auth.module';
-export * from './cloud-auth.guard';
-export * from './auth.controller';
+export * from './workspace-auth.module';
+export * from './guards/actor.guard';
+export * from './guards/current-user.decorator';
+export * from './workspace-config';

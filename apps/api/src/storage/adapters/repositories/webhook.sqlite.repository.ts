@@ -6,6 +6,7 @@ import {
   WebhookDelivery,
   WebhookEventType,
 } from '../../../common/interfaces/storage-port.interface';
+import { WebhookPayloadFormat } from '@betterdb/shared';
 import { RowMappers } from '../base-sql.adapter';
 
 export class WebhookSqliteRepository {
@@ -18,8 +19,8 @@ export class WebhookSqliteRepository {
     const id = randomUUID();
     const now = Date.now();
     const stmt = this.db.prepare(`
-      INSERT INTO webhooks (id, name, url, secret, enabled, events, headers, retry_policy, delivery_config, alert_config, thresholds, connection_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO webhooks (id, name, url, secret, enabled, events, headers, retry_policy, delivery_config, alert_config, thresholds, payload_format, connection_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -34,6 +35,7 @@ export class WebhookSqliteRepository {
       webhook.deliveryConfig ? JSON.stringify(webhook.deliveryConfig) : null,
       webhook.alertConfig ? JSON.stringify(webhook.alertConfig) : null,
       webhook.thresholds ? JSON.stringify(webhook.thresholds) : null,
+      webhook.payloadFormat ?? WebhookPayloadFormat.GENERIC,
       webhook.connectionId || null,
       now,
       now,
@@ -51,6 +53,7 @@ export class WebhookSqliteRepository {
       deliveryConfig: webhook.deliveryConfig,
       alertConfig: webhook.alertConfig,
       thresholds: webhook.thresholds,
+      payloadFormat: webhook.payloadFormat ?? WebhookPayloadFormat.GENERIC,
       connectionId: webhook.connectionId,
       createdAt: now,
       updatedAt: now,
@@ -149,6 +152,10 @@ export class WebhookSqliteRepository {
     if (updates.thresholds !== undefined) {
       setClauses.push('thresholds = ?');
       params.push(JSON.stringify(updates.thresholds));
+    }
+    if (updates.payloadFormat !== undefined) {
+      setClauses.push('payload_format = ?');
+      params.push(updates.payloadFormat);
     }
     if (updates.connectionId !== undefined) {
       setClauses.push('connection_id = ?');

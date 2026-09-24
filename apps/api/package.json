@@ -1,6 +1,6 @@
 {
   "name": "api",
-  "version": "0.41.0",
+  "version": "0.46.0",
   "homepage": "https://betterdb.com",
   "private": true,
   "scripts": {
@@ -44,6 +44,7 @@
   "dependencies": {
     "@betterdb/agent-memory": "workspace:*",
     "@betterdb/shared": "workspace:*",
+    "@fastify/proxy-addr": "^5.1.0",
     "@fastify/static": "^10.1.2",
     "@fastify/swagger": "^9.7.0",
     "@fastify/swagger-ui": "^5.2.5",
@@ -69,14 +70,16 @@
     "@opentelemetry/semantic-conventions": "^1.43.0",
     "@types/better-sqlite3": "^7.6.13",
     "apache-arrow": "^21.1.0",
+    "better-auth": "1.7.2",
     "better-sqlite3": "^12.8.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
     "cron": "^4.4.0",
-    "fastify": "^5.8.5",
+    "fastify": "^5.12.1",
     "hnswlib-node": "^3.0.0",
     "iovalkey": "^0.3.3",
     "jsonwebtoken": "^9.0.3",
+    "kysely": "0.29.5",
     "langchain": "^1.2.36",
     "libsql": "^0.5.29",
     "long": "^5.3.2",
@@ -115,6 +118,7 @@
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.57.2"
+    "typescript-eslint": "^8.57.2",
+    "yaml": ">=2.8.3 <3"
   }
 }

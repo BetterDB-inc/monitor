@@ -112,7 +112,7 @@ Once connected, your AI assistant can query your databases directly:
 | Variable | Default | Description |
 |---|---|---|
 | `BETTERDB_URL` | `http://localhost:3001` | BetterDB instance URL (port depends on your Docker config) |
-| `BETTERDB_TOKEN` | — | MCP token from Settings (required for cloud, optional for local) |
+| `BETTERDB_TOKEN` | — | MCP token from Settings → MCP Tokens. Required for cloud. Optional for self-hosted: without it, read tools work anonymously; with it, calls act as the token's owner (write tools need an admin's token) and changes they make are recorded under the owner's name in the activity log. Tokens cannot manage members or other tokens |
 | `BETTERDB_INSTANCE_ID` | — | Pre-select a specific instance (skips `select_instance`) |
 
 ### CLI Arguments

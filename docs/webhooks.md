@@ -74,6 +74,7 @@ Advanced monitoring events for anomaly detection and performance tracking:
 | `anomaly.detected` | Anomaly detected | Z-score analysis detects unusual patterns |
 | `latency.spike` | Latency spike detected | Command latency spikes above baseline |
 | `connection.spike` | Connection spike detected | Connection count spikes above baseline |
+| `cve.critical_detected` | New critical CVEs | CVE scan finds new critical findings vs previous scan |
 
 ### Enterprise Tier
 
@@ -86,12 +87,106 @@ Compliance and audit events for regulated environments:
 | `acl.violation` | ACL access violation | Runtime ACL access denied |
 | `acl.modified` | ACL configuration changed | User added/removed or permissions changed |
 | `config.changed` | Database configuration changed | CONFIG SET command executed |
+| `cve.kev_detected` | New KEV-exploited CVEs | CVE scan finds new CISA KEV findings vs previous scan |
 
 ## Payload Format
 
+Set `payloadFormat` per webhook (`generic` default, `slack`, or `discord`).
+`generic` sends the raw BetterDB event JSON below; `slack` sends Block Kit
+blocks and `discord` sends an embed with the same fields (instance, metric,
+value/baseline, link back to `/anomalies` or `/dashboard`).
+HMAC headers are still sent for all formats; Slack/Discord ignore them.
+
+Getting the webhook URL: Slack — create an app and enable an **Incoming
+Webhook** in its configuration; Discord — **Channel Settings → Integrations
+→ Webhooks → New Webhook**. In the BetterDB form, pick the matching payload
+format (it is auto-suggested from the URL).
+
+The "View in BetterDB" button (Slack) / embed link (Discord) points at your
+`FRONTEND_URL` (e.g. `https://monitor.example.com`). When `FRONTEND_URL` is
+unset, messages render without the link — everything else is unchanged.
+
+```jsonc
+// generic (default)
+{ "id": "...", "event": "anomaly.detected", "timestamp": 1706457600000,
+  "instance": { "host": "valkey.example.com", "port": 6379 },
+  "data": { "metricType": "latency", "value": 42, "baseline": 10 } }
+```
+
+A `memory.critical` event renders exactly as follows
+(`FRONTEND_URL=https://monitor.example.com`):
+
+```jsonc
+// slack (payloadFormat: "slack") — Block Kit
+{
+  "text": "Memory usage critical: 92.5% (threshold: 90%)",
+  "blocks": [
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*Memory usage critical: 92.5% (threshold: 90%)*"
+      }
+    },
+    {
+      "type": "section",
+      "fields": [
+        { "type": "mrkdwn", "text": "*Event:*\nmemory.critical" },
+        { "type": "mrkdwn", "text": "*Instance:*\nvalkey.example.com:6379" },
+        { "type": "mrkdwn", "text": "*Metric:*\nmemory_used_percent" },
+        { "type": "mrkdwn", "text": "*Value / baseline:*\n92.5 / 90" }
+      ]
+    },
+    {
+      "type": "context",
+      "elements": [
+        { "type": "mrkdwn", "text": "<!date^1706457600^{date_short} {time}|alert time>" }
+      ]
+    },
+    {
+      "type": "actions",
+      "elements": [
+        {
+          "type": "button",
+          "text": { "type": "plain_text", "text": "View in BetterDB" },
+          "url": "https://monitor.example.com/dashboard"
+        }
+      ]
+    }
+  ]
+}
+```
+
+```jsonc
+// discord (payloadFormat: "discord") — embed
+{
+  "content": "Memory usage critical: 92.5% (threshold: 90%)",
+  "embeds": [
+    {
+      "title": "Memory usage critical: 92.5% (threshold: 90%)",
+      "color": 4088797,
+      "fields": [
+        { "name": "Event", "value": "memory.critical", "inline": true },
+        { "name": "Instance", "value": "valkey.example.com:6379", "inline": true },
+        { "name": "Metric", "value": "memory_used_percent", "inline": true },
+        { "name": "Value / baseline", "value": "92.5 / 90", "inline": true }
+      ],
+      "timestamp": "2024-01-28T16:00:00.000Z",
+      "url": "https://monitor.example.com/dashboard",
+      "footer": { "text": "BetterDB Monitor" }
+    }
+  ]
+}
+```
+
+Use `POST /webhooks/:id/test` to preview: the response includes
+`payloadFormat` and the exact `renderedPayload` that would be sent —
+including on failure, so you can see what a failing Slack/Discord hook
+would have received.
+
 All webhooks send JSON payloads with this structure:
 
-```json
+```jsonc
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "event": "instance.down",
@@ -222,6 +317,63 @@ X-Webhook-Event: <event-type>
   "zScore": 4.2,
   "threshold": 3.0,
   "message": "Unusual spike in ops_per_sec: 50000 (baseline: 10000, z-score: 4.2)",
+  "timestamp": 1706457600000
+}
+```
+
+#### cve.critical_detected (Pro)
+
+Fired only when a CVE scan finds new critical findings vs the previous stored
+scan (fire on change — dataset refresh alone does not spam).
+
+Notes:
+- The first scan after enabling CVE (or upgrading) only establishes the
+  baseline and does not fire.
+- Degraded scans still fire with `"partial": true` (unreachable nodes,
+  missing sources, unknown topology/modules): counts are a floor, not a
+  ceiling, so a permanently degraded scan cannot mute alerting forever.
+  Findings on nodes that first appear after a partial baseline stay suppressed
+  so recovery from a blip does not page. When module inventory is unknown
+  for a node, its last-known module findings are carried forward, so a
+  transient MODULE LIST failure neither hides nor re-alerts them; genuinely
+  new module CVEs still fire on recovery.
+- A single finding that is both critical and KEV-exploited emits both
+  `cve.critical_detected` (Pro) and `cve.kev_detected` (Enterprise) plus one
+  OTel event each, so subscribe accordingly.
+
+```json
+{
+  "criticalCount": 2,
+  "kevCount": 1,
+  "fingerprint": "a1b2c3d4e5f60718",
+  "datasetVersion": "2026-09-15T00:00:00Z",
+  "topFindings": [
+    { "cveId": "CVE-2026-12345", "severity": "critical", "knownExploited": true, "fixedIn": "8.0.10" }
+  ],
+  "drift": false,
+  "partial": false,
+  "message": "New critical CVEs detected (2 critical, 1 exploited (KEV)) on connection conn-1",
+  "timestamp": 1706457600000
+}
+```
+
+#### cve.kev_detected (Enterprise)
+
+Fired only when a CVE scan finds new CISA KEV-exploited findings vs the
+previous stored scan, even when severity is below critical.
+
+```json
+{
+  "kevCount": 1,
+  "criticalCount": 0,
+  "fingerprint": "a1b2c3d4e5f60718",
+  "datasetVersion": "2026-09-15T00:00:00Z",
+  "topFindings": [
+    { "cveId": "CVE-2026-54321", "severity": "high", "knownExploited": true, "fixedIn": "8.0.10" }
+  ],
+  "drift": false,
+  "partial": false,
+  "message": "New exploited (KEV) CVEs detected (1 KEV) on connection conn-1",
   "timestamp": 1706457600000
 }
 ```
@@ -562,6 +714,7 @@ Override default alert thresholds per webhook. This enables different notificati
 {
   "name": "Early Warning - Slack",
   "url": "https://hooks.slack.com/services/...",
+  "payloadFormat": "slack",
   "events": ["memory.critical", "connection.critical"],
   "thresholds": {
     "memoryCriticalPercent": 75,

@@ -85,7 +85,12 @@ export function VectorAi() {
   const indexInfoQuery = usePolling({
     fetcher: async () => {
       const infos = await Promise.all(
-        indexNames.map((name) => metricsApi.getVectorIndexInfo(name).catch(() => null)),
+        indexNames.map((name) =>
+          metricsApi.getVectorIndexInfo(name).catch((err) => {
+            console.debug(`[vector-ai] failed to load index ${name}:`, err);
+            return null;
+          }),
+        ),
       );
       return infos.filter((v): v is VectorIndexInfo => v !== null);
     },

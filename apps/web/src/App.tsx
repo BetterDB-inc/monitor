@@ -13,13 +13,20 @@ import { VersionCheckContext, useVersionCheckState } from './hooks/useVersionChe
 import { UpgradePrompt } from './components/UpgradePrompt';
 import { ServerStartupGuard } from './components/ServerStartupGuard';
 import { AppLayout } from './components/layout/AppLayout';
-import { workspaceApi, CloudUser } from './api/workspace';
 import { DemoProvider } from './contexts/DemoContext';
+import { AuthProvider } from './contexts/AuthContext';
+import { AuthGate } from './components/auth/AuthGate';
 
 function App() {
   return (
     <ServerStartupGuard>
-      <AppContent />
+      <BrowserRouter>
+        <AuthProvider>
+          <AuthGate>
+            <AppContent />
+          </AuthGate>
+        </AuthProvider>
+      </BrowserRouter>
     </ServerStartupGuard>
   );
 }
@@ -30,12 +37,13 @@ function App() {
  * ensuring all data fetching happens when the backend is fully initialized.
  */
 function AppContent() {
-  const [capabilitiesData, setCapabilitiesData] = useState<Omit<CapabilitiesState, 'retryCapability'>>({
+  const [capabilitiesData, setCapabilitiesData] = useState<
+    Omit<CapabilitiesState, 'retryCapability'>
+  >({
     static: null,
     runtime: null,
     reasons: {},
   });
-  const [cloudUser, setCloudUser] = useState<CloudUser | null>(null);
   const { license } = useLicenseStatus();
   const upgradePromptState = useUpgradePromptState();
   const connectionState = useConnectionState();
@@ -78,24 +86,24 @@ function AppContent() {
   useEffect(() => {
     setCapabilitiesData({ static: null, runtime: null, reasons: {} });
     refreshCapabilities();
-
-    workspaceApi.getMe()
-      .then(setCloudUser)
-      .catch(() => { /* Not in cloud mode */ });
   }, [currentConnectionId, refreshCapabilities]);
 
   return (
-    <BrowserRouter>
-      <DemoProvider>
+    <DemoProvider>
       <TooltipProvider>
         <ConnectionContext.Provider value={connectionState}>
           <UpgradePromptContext.Provider value={upgradePromptState}>
             <LicenseContext.Provider value={license}>
               <CapabilitiesContext.Provider value={capabilitiesState}>
                 <VersionCheckContext.Provider value={versionCheckState}>
-                  <AppLayout cloudUser={cloudUser} />
+                  <AppLayout />
                   <Tooltip id="license-tooltip" />
-                  <Tooltip id="info-tip" place="top" className="max-w-xs text-sm" style={{ zIndex: 50 }} />
+                  <Tooltip
+                    id="info-tip"
+                    place="top"
+                    className="max-w-xs text-sm"
+                    style={{ zIndex: 50 }}
+                  />
                   {upgradePromptState.error && (
                     <UpgradePrompt
                       error={upgradePromptState.error}
@@ -108,8 +116,7 @@ function AppContent() {
           </UpgradePromptContext.Provider>
         </ConnectionContext.Provider>
       </TooltipProvider>
-      </DemoProvider>
-    </BrowserRouter>
+    </DemoProvider>
   );
 }
 

@@ -1,19 +1,111 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { Socket } from 'net';
+import { Actor } from '@betterdb/shared';
+import { ActorResolver } from '../auth/actor-resolver';
+import { rejectUpgrade } from '../auth/upgrade-response';
+import { isReadCommand } from '../cluster/write-commands';
+import { ActivityService } from '../activity/activity.service';
+import { upgradeClientIp } from '../config/client-ip';
+import { resolveTrustProxy, TrustProxySetting } from '../config/trust-proxy';
+import { parseCommandLine } from './command-parser';
 import { CliService } from './cli.service';
 import { CliExecuteMessage, CliServerMessage } from './cli.types';
 
+const SECRET_COMMANDS = new Set(['AUTH', 'HELLO', 'CONFIG', 'ACL', 'MIGRATE']);
+const PAYLOAD_COMMANDS = new Set([
+  'COMMAND',
+  'ECHO',
+  'EVAL',
+  'EVALSHA',
+  'EVALSHA_RO',
+  'EVAL_RO',
+  'FCALL',
+  'FCALL_RO',
+  'FUNCTION',
+  'PING',
+  'PUBLISH',
+  'SCRIPT',
+  'SPUBLISH',
+]);
+const MAX_RECORDED_ARGS = 16;
+const MAX_RECORDED_ARG_LENGTH = 128;
+const CLIENT_METADATA_SUBCOMMANDS = new Set([
+  'GETNAME',
+  'GETREDIR',
+  'HELP',
+  'ID',
+  'INFO',
+  'LIST',
+  'TRACKINGINFO',
+]);
+
 const MAX_COMMANDS_PER_SECOND = 50;
+const ACCESS_CACHE_TTL_MS = 30_000;
+const SESSION_EXPIRED_CLOSE_CODE = 4401;
+const SESSION_EXPIRED_CLOSE_REASON = 'Session expired';
+export const SESSION_EXPIRED_MESSAGE = 'Session expired. Sign in again.';
+
+/**
+ * `isReadCommand` rules out keyspace writes, which is necessary but not
+ * sufficient: several read-classified commands carry a caller-supplied body -
+ * a published message, a Lua script - that has no place in an audit row.
+ */
+function recordsArgs(command: string, rest: string[]): boolean {
+  if (SECRET_COMMANDS.has(command) === true || PAYLOAD_COMMANDS.has(command) === true) {
+    return false;
+  }
+  if (command === 'CLIENT') {
+    return CLIENT_METADATA_SUBCOMMANDS.has((rest[0] ?? '').toUpperCase());
+  }
+  return isReadCommand(command);
+}
+
+function isFailure(result: CliServerMessage): boolean {
+  return result.type === 'error' || result.resultType === 'error';
+}
+
+function recordedArgs(rest: string[]): string[] {
+  return rest.slice(0, MAX_RECORDED_ARGS).map((value) => value.slice(0, MAX_RECORDED_ARG_LENGTH));
+}
+
+interface CommandAccess {
+  sessionValid: boolean;
+  readOnly: boolean;
+  actor: Actor | null;
+  ip: string;
+}
+
+interface CachedAccess {
+  result: CommandAccess;
+  expiresAt: number;
+}
+
+interface CliConnectionState {
+  request: IncomingMessage;
+  ip: string;
+  tokens: number;
+  lastRefill: number;
+  access: CachedAccess | null;
+}
 
 @Injectable()
 export class CliGateway implements OnModuleDestroy {
   private readonly logger = new Logger(CliGateway.name);
   private readonly wss: WebSocketServer;
-  private readonly rateLimiters = new Map<WebSocket, { tokens: number; lastRefill: number }>();
+  private readonly connections = new Map<WebSocket, CliConnectionState>();
+  private readonly trustProxy: TrustProxySetting = resolveTrustProxy(process.env);
 
-  constructor(private readonly cliService: CliService) {
+  constructor(
+    private readonly cliService: CliService,
+    @Optional()
+    @Inject(ActorResolver)
+    private readonly actorResolver: ActorResolver | null = null,
+    @Optional()
+    @Inject(ActivityService)
+    private readonly activity: ActivityService | null = null,
+  ) {
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 }); // 1 MiB
     this.logger.log('CLI WebSocket gateway initialized');
   }
@@ -26,11 +118,128 @@ export class CliGateway implements OnModuleDestroy {
   }
 
   handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer): void {
-    this.wss.handleUpgrade(request, socket, head, (ws) => {
-      this.logger.log('CLI WebSocket client connected');
-      this.rateLimiters.set(ws, { tokens: MAX_COMMANDS_PER_SECOND, lastRefill: Date.now() });
-      this.handleConnection(ws);
+    socket.on('error', () => {
+      socket.destroy();
     });
+    this.authorizeUpgrade(request, socket, head).catch(() => {
+      socket.destroy();
+    });
+  }
+
+  private isAuthEnabled(): boolean {
+    return this.actorResolver !== null && this.actorResolver.isEnabled() === true;
+  }
+
+  private async resolveActor(request: IncomingMessage): Promise<Actor | null> {
+    if (this.actorResolver === null) {
+      return null;
+    }
+    return this.actorResolver.resolveFromUpgrade(request);
+  }
+
+  private async authorizeUpgrade(
+    request: IncomingMessage,
+    socket: Socket,
+    head: Buffer,
+  ): Promise<void> {
+    if (this.isAuthEnabled() === true) {
+      const actor = await this.resolveActor(request);
+      if (actor === null) {
+        rejectUpgrade(socket, 401);
+        return;
+      }
+    }
+    this.wss.handleUpgrade(request, socket, head, (ws) => {
+      this.attach(ws, request);
+    });
+  }
+
+  private attach(ws: WebSocket, request: IncomingMessage): void {
+    this.logger.log('CLI WebSocket client connected');
+    const ip = upgradeClientIp(request, this.trustProxy);
+    this.connections.set(ws, {
+      request,
+      ip,
+      tokens: MAX_COMMANDS_PER_SECOND,
+      lastRefill: Date.now(),
+      access: null,
+    });
+    this.handleConnection(ws);
+  }
+
+  private async resolveAccess(ws: WebSocket): Promise<CommandAccess> {
+    const state = this.connections.get(ws);
+    if (state === undefined) {
+      return { sessionValid: false, readOnly: true, actor: null, ip: '' };
+    }
+    const ip = state.ip;
+    if (this.isAuthEnabled() === false) {
+      return { sessionValid: true, readOnly: false, actor: null, ip };
+    }
+    const now = Date.now();
+    if (state.access !== null && state.access.expiresAt > now) {
+      return state.access.result;
+    }
+    state.access = null;
+    const actor = await this.resolveActor(state.request);
+    if (this.connections.get(ws) !== state) {
+      return { sessionValid: false, readOnly: true, actor: null, ip: '' };
+    }
+    if (actor === null) {
+      return { sessionValid: false, readOnly: true, actor: null, ip };
+    }
+    const result: CommandAccess = {
+      sessionValid: true,
+      readOnly: this.isReadOnly(actor),
+      actor,
+      ip,
+    };
+    state.access = { result, expiresAt: now + ACCESS_CACHE_TTL_MS };
+    return result;
+  }
+
+  private isReadOnly(actor: Actor): boolean {
+    if (this.actorResolver === null || this.actorResolver.enforcesMemberReadOnly() === false) {
+      return false;
+    }
+    return actor.role === 'member';
+  }
+
+  private recordCommand(
+    actor: Actor | null,
+    ip: string,
+    message: CliExecuteMessage,
+    result: CliServerMessage,
+  ): void {
+    if (this.activity === null || actor === null) {
+      return;
+    }
+    const args = parseCommandLine(message.command.trim());
+    if (args.length === 0) {
+      return;
+    }
+    const command = args[0].toUpperCase();
+    const rest = args.slice(1);
+    const details: Record<string, unknown> = { command, argCount: rest.length };
+    if (recordsArgs(command, rest) === true) {
+      details.args = recordedArgs(rest);
+    }
+    void this.activity.record({
+      actor: { userId: actor.userId, email: actor.email, via: 'cli', tokenId: actor.tokenId },
+      action: 'cli.command',
+      statusCode: isFailure(result) ? 400 : 200,
+      ip,
+      connectionId: message.connectionId ?? null,
+      details,
+    });
+  }
+
+  private expireSession(ws: WebSocket): void {
+    const errorMsg: CliServerMessage = { type: 'error', error: SESSION_EXPIRED_MESSAGE };
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(errorMsg));
+    }
+    ws.close(SESSION_EXPIRED_CLOSE_CODE, SESSION_EXPIRED_CLOSE_REASON);
   }
 
   private handleConnection(ws: WebSocket): void {
@@ -67,18 +276,28 @@ export class CliGateway implements OnModuleDestroy {
         return;
       }
 
-      execChain = execChain.then(async () => {
-        const result = await this.cliService.execute(message.command, message.connectionId);
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify(result));
-        }
-      }).catch(() => {
-        // Ensure chain never rejects — errors are handled inside execute()
-      });
+      execChain = execChain
+        .then(async () => {
+          const access = await this.resolveAccess(ws);
+          if (access.sessionValid === false) {
+            this.expireSession(ws);
+            return;
+          }
+          const result = await this.cliService.execute(message.command, message.connectionId, {
+            readOnly: access.readOnly,
+          });
+          this.recordCommand(access.actor, access.ip, message, result);
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(result));
+          }
+        })
+        .catch(() => {
+          // Ensure chain never rejects — errors are handled inside execute()
+        });
     });
 
     ws.on('close', () => {
-      this.rateLimiters.delete(ws);
+      this.connections.delete(ws);
       this.logger.log('CLI WebSocket client disconnected');
     });
 
@@ -88,16 +307,23 @@ export class CliGateway implements OnModuleDestroy {
   }
 
   private consumeToken(ws: WebSocket): boolean {
-    const bucket = this.rateLimiters.get(ws);
-    if (!bucket) return false;
+    const state = this.connections.get(ws);
+    if (state === undefined) {
+      return false;
+    }
 
     const now = Date.now();
-    const elapsed = (now - bucket.lastRefill) / 1000;
-    bucket.tokens = Math.min(MAX_COMMANDS_PER_SECOND, bucket.tokens + elapsed * MAX_COMMANDS_PER_SECOND);
-    bucket.lastRefill = now;
+    const elapsed = (now - state.lastRefill) / 1000;
+    state.tokens = Math.min(
+      MAX_COMMANDS_PER_SECOND,
+      state.tokens + elapsed * MAX_COMMANDS_PER_SECOND,
+    );
+    state.lastRefill = now;
 
-    if (bucket.tokens < 1) return false;
-    bucket.tokens -= 1;
+    if (state.tokens < 1) {
+      return false;
+    }
+    state.tokens -= 1;
     return true;
   }
 }

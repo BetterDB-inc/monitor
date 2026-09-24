@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
   StoragePort,
   StoredAclEntry,
@@ -56,6 +57,8 @@ import {
   ScheduledCapturePatch,
 } from '../../common/interfaces/storage-port.interface';
 import type {
+  AgentToken,
+  TokenType,
   VectorIndexSnapshot,
   VectorIndexSnapshotQueryOptions,
   MetricForecastSettings,
@@ -83,6 +86,10 @@ import {
 } from '@betterdb/shared';
 import { WebhookMemoryRepository } from './repositories/webhook.memory.repository';
 import { SlowLogMemoryRepository } from './repositories/slowlog.memory.repository';
+import { InvitationMemoryRepository } from './repositories/invitation.memory.repository';
+import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
+import { ActivityMemoryRepository } from './repositories/activity.memory.repository';
+import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
 
 const NULL_SUB_DISCRIMINATOR = '__betterdb_null__';
 
@@ -101,7 +108,7 @@ function pendingProposalSubDiscriminator(
   return null;
 }
 
-export class MemoryAdapter implements StoragePort {
+export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   private aclEntries: StoredAclEntry[] = [];
   private clientSnapshots: StoredClientSnapshot[] = [];
   private anomalyEvents: StoredAnomalyEvent[] = [];
@@ -119,11 +126,17 @@ export class MemoryAdapter implements StoragePort {
   private readonly MAX_DELIVERIES_PER_WEBHOOK = 1000;
   private readonly webhookRepo = new WebhookMemoryRepository(this.MAX_DELIVERIES_PER_WEBHOOK);
   private readonly slowlogRepo = new SlowLogMemoryRepository();
+  private readonly invitationRepo = new InvitationMemoryRepository();
+  private readonly activityRepo = new ActivityMemoryRepository();
   private idCounter = 1;
   private ready: boolean = false;
 
   async initialize(): Promise<void> {
     this.ready = true;
+  }
+
+  getRawDatabaseHandle(): RawDatabaseHandle {
+    return { kind: 'memory' };
   }
 
   async close(): Promise<void> {
@@ -1507,64 +1520,30 @@ export class MemoryAdapter implements StoragePort {
     }
   }
 
-  // Agent Token Methods (no-op for non-cloud deployments)
+  private agentTokens = new Map<string, AgentToken>();
 
-  private agentTokens = new Map<
-    string,
-    {
-      id: string;
-      name: string;
-      type: 'agent' | 'mcp';
-      tokenHash: string;
-      createdAt: number;
-      expiresAt: number;
-      revokedAt: number | null;
-      lastUsedAt: number | null;
-    }
-  >();
-
-  async saveAgentToken(token: {
-    id: string;
-    name: string;
-    type: 'agent' | 'mcp';
-    tokenHash: string;
-    createdAt: number;
-    expiresAt: number;
-    revokedAt: number | null;
-    lastUsedAt: number | null;
-  }): Promise<void> {
-    this.agentTokens.set(token.id, token);
+  async saveAgentToken(token: AgentToken): Promise<void> {
+    this.agentTokens.set(token.id, { ...token });
   }
 
-  async getAgentTokens(type?: 'agent' | 'mcp'): Promise<
-    Array<{
-      id: string;
-      name: string;
-      type: 'agent' | 'mcp';
-      tokenHash: string;
-      createdAt: number;
-      expiresAt: number;
-      revokedAt: number | null;
-      lastUsedAt: number | null;
-    }>
-  > {
-    let tokens = Array.from(this.agentTokens.values());
-    if (type) tokens = tokens.filter((t) => t.type === type);
-    return tokens.sort((a, b) => b.createdAt - a.createdAt);
+  async getAgentTokens(type?: TokenType): Promise<AgentToken[]> {
+    const tokens = Array.from(this.agentTokens.values()).filter((token) => {
+      return type === undefined || token.type === type;
+    });
+    return tokens
+      .map((token) => {
+        return { ...token };
+      })
+      .sort((a, b) => {
+        return b.createdAt - a.createdAt;
+      });
   }
 
-  async getAgentTokenByHash(hash: string): Promise<{
-    id: string;
-    name: string;
-    type: 'agent' | 'mcp';
-    tokenHash: string;
-    createdAt: number;
-    expiresAt: number;
-    revokedAt: number | null;
-    lastUsedAt: number | null;
-  } | null> {
+  async getAgentTokenByHash(hash: string): Promise<AgentToken | null> {
     for (const token of this.agentTokens.values()) {
-      if (token.tokenHash === hash) return token;
+      if (token.tokenHash === hash) {
+        return { ...token };
+      }
     }
     return null;
   }
@@ -2149,5 +2128,13 @@ export class MemoryAdapter implements StoragePort {
       }
     }
     return pruned;
+  }
+
+  getInvitationRepository(): InvitationRepository {
+    return this.invitationRepo;
+  }
+
+  getActivityRepository(): ActivityRepository {
+    return this.activityRepo;
   }
 }

@@ -300,6 +300,16 @@ Forward-looking projections of when a tracked metric will reach its configured c
 |--------|------|--------|-------------|---------|
 | `betterdb_metric_forecast_time_to_limit_seconds` | gauge | `metric_kind` | Projected seconds until the metric reaches its configured ceiling | `3600` |
 
+### CVE Detection Metrics
+
+Latest CVE scan rollup per connection. Updated on storage-based poll.
+
+| Metric | Type | Labels | Description | Example |
+|--------|------|--------|-------------|---------|
+| `betterdb_cve_findings` | gauge | `connection`, `severity` | Current CVE findings by severity from the latest scan | `2` |
+| `betterdb_cve_kev` | gauge | `connection` | Current KEV-exploited CVE findings from the latest scan | `1` |
+| `betterdb_cve_dataset_stale` | gauge | `connection` | Whether the CVE scan is partial or sources are missing: 1 stale, 0 ok | `0` |
+
 ### Internal Metrics
 
 BetterDB Monitor application health metrics.
@@ -621,8 +631,10 @@ ANOMALY_PROMETHEUS_INTERVAL_MS=30000
 
 Or update at runtime via the `/settings` API endpoint:
 
+> **Note**: API calls need a signed-in session when user control is enabled — see [Authenticating API Requests](configuration.md#authenticating-api-requests).
+
 ```bash
-curl -X PUT http://localhost:3001/settings \
+curl -b cookies.txt -X PUT http://localhost:3001/settings \
   -H "Content-Type: application/json" \
   -d '{"anomalyPrometheusIntervalMs": 15000}'
 ```

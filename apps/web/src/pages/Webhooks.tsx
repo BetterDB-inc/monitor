@@ -158,6 +158,16 @@ export function Webhooks() {
                     </pre>
                   </div>
                 )}
+                {testResult.renderedPayload && (
+                  <div>
+                    <span className="font-medium">
+                      Sent payload preview ({testResult.payloadFormat ?? 'generic'}):
+                    </span>
+                    <pre className="mt-1 p-2 bg-muted border rounded text-xs overflow-x-auto">
+                      {JSON.stringify(testResult.renderedPayload, null, 2)}
+                    </pre>
+                  </div>
+                )}
                 {testResult.error && (
                   <div>
                     <span className="font-medium">Error:</span>{' '}

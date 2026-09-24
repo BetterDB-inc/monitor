@@ -1,18 +1,21 @@
 import { INestApplication, Logger, RequestMethod, ValidationPipe } from '@nestjs/common';
 import { isCloudMode } from './common/utils/cloud-mode';
+import { requireCloudAuth } from './common/utils/cloud-auth-loader';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
-import { IncomingMessage } from 'http';
-import { Socket } from 'net';
 import { join } from 'path';
 import { readFileSync } from 'fs';
 import fastifyStatic from '@fastify/static';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { validateEnv } from './config/env.schema';
+import { resolveTrustProxy } from './config/trust-proxy';
 import { categorizeError } from './common/utils/error-categorizer';
 import { CliGateway } from './cli/cli.gateway';
 import { TailGateway } from './monitor/tail.gateway';
+import { createUpgradeRouter } from './common/websocket/upgrade-router';
+import { resolveWorkspaceConfig } from './auth/workspace-config';
+import { resolveAgentGateway } from './agent/resolve-agent-gateway';
 
 async function bootstrap(): Promise<void> {
   // Validate environment variables before anything else
@@ -27,7 +30,7 @@ async function bootstrap(): Promise<void> {
 
   const isProduction = process.env.NODE_ENV === 'production';
 
-  const fastifyAdapter = new FastifyAdapter();
+  const fastifyAdapter = new FastifyAdapter({ trustProxy: resolveTrustProxy(process.env) });
 
   // Compute publicPath once to avoid divergence between SPA fallback and static file serving
   const publicPath = isProduction
@@ -77,24 +80,26 @@ async function bootstrap(): Promise<void> {
   }
 
   // Type assertion required due to NestJS/Fastify adapter version mismatch during transition
+  // abortOnError:false makes Nest rethrow provider-lookup failures instead of running the
+  // default ExceptionsZone teardown (process.exit(1)). That lets the AgentGateway resolution
+  // below survive via its try/catch even in the edge case where the agent module fails to
+  // load in workspace-enabled mode (it logs a warning and keeps booting, so the provider is
+  // absent) rather than crash-looping the whole app.
   const app = (await (NestFactory.create as Function)(
     AppModule,
     fastifyAdapter,
+    { abortOnError: false },
   )) as NestFastifyApplication;
 
   // Register cloud auth middleware at Fastify level BEFORE any other middleware
   // This ensures it runs before static file serving
   if (isCloudMode()) {
-    try {
-      const {
-        CloudAuthMiddleware,
-      } = require('../../../proprietary/cloud-auth/cloud-auth.middleware');
-      const middleware = new CloudAuthMiddleware();
-      app.use((req: any, res: any, next: () => void) => middleware.use(req, res, next));
-      console.log('[CloudAuth] Middleware registered at Fastify level');
-    } catch {
-      console.warn('[CloudAuth] Failed to register middleware — proprietary module not found');
-    }
+    const { CloudAuthMiddleware } = requireCloudAuth(() =>
+      require('../../../proprietary/cloud-auth/cloud-auth.middleware'),
+    );
+    const middleware = new CloudAuthMiddleware();
+    app.use((req: any, res: any, next: () => void) => middleware.use(req, res, next));
+    console.log('[CloudAuth] Middleware registered at Fastify level');
   }
 
   // Register startup error handlers — report fatal errors within the first 60s
@@ -206,37 +211,23 @@ async function bootstrap(): Promise<void> {
     const tailGateway = app.get(TailGateway);
     const httpServer = app.getHttpServer();
 
-    const agentGateway = isCloudMode()
-      ? (() => {
-          try {
-            const { AgentGateway } = require('../../../proprietary/agent/agent-gateway');
-            const gw = app.get(AgentGateway);
-            console.log('[Agent] WebSocket gateway resolved');
-            return gw as {
-              handleUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): void;
-            };
-          } catch {
-            console.warn('[Agent] Failed to resolve WebSocket gateway — module not available');
-            return null;
-          }
-        })()
-      : null;
+    // Resolve the agent WebSocket gateway only when a module actually provides it
+    // (see resolveAgentGateway for why the lookup is guarded). The require stays
+    // here so its relative path resolves against main.js at runtime.
+    const workspaceConfig = resolveWorkspaceConfig(process.env);
+    const agentGateway = resolveAgentGateway(app, workspaceConfig.mode, () =>
+      require('../../../proprietary/agent/agent-gateway'),
+    );
 
-    httpServer.on('upgrade', (request: IncomingMessage, socket: Socket, head: Buffer) => {
-      const url = new URL(request.url || '', `http://${request.headers.host}`);
-      if (url.pathname === '/cli/ws' || url.pathname === '/api/cli/ws') {
-        cliGateway.handleUpgrade(request, socket, head);
-      } else if (url.pathname === '/monitor/ws' || url.pathname === '/api/monitor/ws') {
-        tailGateway.handleUpgrade(request, socket, head);
-      } else if (
-        agentGateway &&
-        (url.pathname === '/agent/ws' || url.pathname === '/api/agent/ws')
-      ) {
-        agentGateway.handleUpgrade(request, socket, head);
-      } else {
-        socket.destroy();
-      }
-    });
+    httpServer.on(
+      'upgrade',
+      createUpgradeRouter({
+        cli: cliGateway,
+        tail: tailGateway,
+        agent: agentGateway,
+        trustedOrigins: workspaceConfig.trustedOrigins,
+      }),
+    );
 
     new Logger('CLI').log('WebSocket upgrade handler registered');
   }
@@ -285,4 +276,9 @@ async function bootstrap(): Promise<void> {
   console.log('');
 }
 
-bootstrap();
+// With abortOnError:false a startup failure rejects instead of Nest calling
+// process.exit(1) itself; catch it so container logs show a readable error.
+bootstrap().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

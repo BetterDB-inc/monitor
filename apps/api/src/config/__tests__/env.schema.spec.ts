@@ -213,6 +213,26 @@ describe('envSchema', () => {
     });
   });
 
+  describe('ACTIVITY_RETENTION_DAYS validation', () => {
+    it('should accept a whole number of days', () => {
+      const result = envSchema.safeParse({ ACTIVITY_RETENTION_DAYS: '100' });
+      expect(result.success).toBe(true);
+    });
+
+    it('should treat a missing or blank value as unset', () => {
+      expect(envSchema.safeParse({}).success).toBe(true);
+      expect(envSchema.safeParse({ ACTIVITY_RETENTION_DAYS: '' }).success).toBe(true);
+      expect(envSchema.safeParse({ ACTIVITY_RETENTION_DAYS: '   ' }).success).toBe(true);
+    });
+
+    it.each(['1e2', '1.5', '0', '-5', '30days', '9007199254740993'])(
+      'should reject %s',
+      (value) => {
+        expect(envSchema.safeParse({ ACTIVITY_RETENTION_DAYS: value }).success).toBe(false);
+      },
+    );
+  });
+
   describe('boolean transforms', () => {
     it('should transform AI_ENABLED to true when "true"', () => {
       const result = envSchema.safeParse({ AI_ENABLED: 'true' });

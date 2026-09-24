@@ -1,9 +1,12 @@
+import { isTrueFlag } from './env-normalize';
+
 export interface DatabaseConfig {
   host: string;
   port: number;
   username: string;
   password: string;
   type: 'valkey' | 'redis' | 'auto';
+  tls: boolean;
 }
 
 export interface StorageConfig {
@@ -49,6 +52,12 @@ export default (): AppConfig => ({
     username: process.env.DB_USERNAME || 'default',
     password: process.env.DB_PASSWORD || '',
     type: (process.env.DB_TYPE as 'valkey' | 'redis' | 'auto') || 'auto',
+    // Enable TLS for the env-configured default connection (e.g. Aiven,
+    // ElastiCache Serverless, or any managed provider that requires
+    // encryption). UI-added connections carry their own per-connection tls flag.
+    // isTrueFlag trims whitespace so a trailing newline from a secret store does
+    // not silently disable TLS.
+    tls: isTrueFlag(process.env.DB_TLS),
   },
   storage: {
     type: 'sqlite',
