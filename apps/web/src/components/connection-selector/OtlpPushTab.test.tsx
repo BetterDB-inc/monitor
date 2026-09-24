@@ -40,6 +40,15 @@ describe('OtlpPushTab', () => {
     });
   });
 
+  it('disables Save when the port is not an integer', () => {
+    render(<OtlpPushTab isFirstConnection={false} onCreated={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('Name *'), { target: { value: 'Pushed' } });
+    fireEvent.change(screen.getByLabelText('Host *'), { target: { value: 'cache.internal' } });
+    fireEvent.change(screen.getByLabelText('Port *'), { target: { value: '6380.5' } });
+
+    expect(screen.getByRole('button', { name: 'Add OTLP connection' })).toBeDisabled();
+  });
+
   it('shows the API error', async () => {
     fetchApi.mockRejectedValue(new Error('A connection for cache.internal:6380 already exists'));
     render(<OtlpPushTab isFirstConnection={false} onCreated={vi.fn()} />);

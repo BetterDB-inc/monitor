@@ -50,7 +50,13 @@ export function OtlpPushTab({
   const [copied, setCopied] = useState(false);
 
   const snippet = buildCollectorSnippet(host || '<host>', port, apiOrigin());
-  const canSave = name.trim() !== '' && host.trim() !== '' && port > 0 && port <= 65535 && !saving;
+  const canSave =
+    name.trim() !== '' &&
+    host.trim() !== '' &&
+    Number.isInteger(port) &&
+    port > 0 &&
+    port <= 65535 &&
+    !saving;
 
   const save = async () => {
     setSaving(true);
