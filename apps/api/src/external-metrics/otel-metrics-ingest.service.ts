@@ -32,6 +32,8 @@ function emptyDropCounts(): Record<DropReason, number> {
   return Object.fromEntries(DROP_REASONS.map((reason) => [reason, 0])) as Record<DropReason, number>;
 }
 
+const NO_RECORDED_VALUE = 1;
+
 function isDelta(temporality: number | string | undefined): boolean {
   return temporality === 1 || temporality === 'AGGREGATION_TEMPORALITY_DELTA';
 }
@@ -139,6 +141,7 @@ export class OtelMetricsIngestService {
     let unmapped = 0;
     let mapped = false;
     for (const dataPoint of metric.gauge?.dataPoints ?? metric.sum?.dataPoints ?? []) {
+      if ((dataPoint.flags ?? 0) & NO_RECORDED_VALUE) continue;
       const value = pointValue(dataPoint);
       const point = value === null ? null : mapDataPoint(name, attrsToRecord(dataPoint.attributes), value);
       if (point === null) {

@@ -16,6 +16,7 @@ export interface OtlpNumberDataPoint {
   timeUnixNano?: string | number;
   asDouble?: number | string;
   asInt?: string | number;
+  flags?: number;
 }
 
 export interface OtlpMetric {

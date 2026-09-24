@@ -4,6 +4,9 @@ import {
   encodeOtlpMetricsResponse,
   otlpMetricsRoot,
 } from '../otlp-metrics-protobuf';
+import type { ConnectionRegistry } from '../../connections/connection-registry.service';
+import { ExternalMetricsStore } from '../external-metrics-store';
+import { OtelMetricsIngestService } from '../otel-metrics-ingest.service';
 
 const UPSTREAM = `
 syntax = "proto3";
@@ -167,6 +170,23 @@ describe('decodeOtlpMetricsProtobuf', () => {
       name: 'redis.memory.used',
       unit: 'By',
       gauge: { dataPoints: [{ timeUnixNano: NOW, asInt: '9007199254740993' }] },
+    });
+  });
+
+  it('keeps the data point flags', () => {
+    expect(metrics[0].gauge?.dataPoints?.[0].flags).toBe(1);
+    expect(metrics[1].sum?.dataPoints?.[0].flags).toBeUndefined();
+  });
+
+  it('skips a point flagged as having no recorded value', () => {
+    const registry = { findByHostPort: () => ({ id: 'ext', connectionType: 'external' }) } as unknown as ConnectionRegistry;
+    const store = new ExternalMetricsStore();
+    const nowMs = 1_700_000_000_123;
+    const result = new OtelMetricsIngestService(registry, store).ingest(decoded, nowMs);
+    expect(result.accepted).toBe(1);
+    expect(store.snapshot('ext', nowMs)).toEqual({
+      cpu: { used_cpu_sys: '1.25' },
+      server: { redis_version: '7.2.4' },
     });
   });
 

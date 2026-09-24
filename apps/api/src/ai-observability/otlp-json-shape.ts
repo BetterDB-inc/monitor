@@ -5,7 +5,11 @@ const list = <T extends z.ZodType>(item: T) => z.array(item).optional();
 
 const attributes = list(z.looseObject({}));
 const resource = z.looseObject({ attributes }).optional();
-const dataPoints = z.looseObject({ dataPoints: list(z.looseObject({ attributes })) }).optional();
+const dataPoints = z
+  .looseObject({
+    dataPoints: list(z.looseObject({ attributes, flags: z.number().int().nonnegative().optional() })),
+  })
+  .optional();
 
 const metricsRequest = z.looseObject({
   resourceMetrics: list(

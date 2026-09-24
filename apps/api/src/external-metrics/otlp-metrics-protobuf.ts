@@ -49,6 +49,7 @@ message NumberDataPoint {
   fixed64 start_time_unix_nano = 2;
   fixed64 time_unix_nano = 3;
   oneof value { double as_double = 4; sfixed64 as_int = 6; }
+  uint32 flags = 8;
 }
 message HistogramDataPoint { repeated KeyValue attributes = 9; fixed64 start_time_unix_nano = 2; fixed64 time_unix_nano = 3; }
 message ExponentialHistogramDataPoint {

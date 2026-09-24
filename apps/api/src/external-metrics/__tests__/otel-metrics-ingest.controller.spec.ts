@@ -71,6 +71,14 @@ describe('OtelMetricsIngestController.ingestMetrics', () => {
       },
     ],
     ['a metric name is not a string', { resourceMetrics: [{ scopeMetrics: [{ metrics: [{ name: 5 }] }] }] }],
+    [
+      'data point flags are not a number',
+      {
+        resourceMetrics: [
+          { scopeMetrics: [{ metrics: [{ name: 'redis.uptime', gauge: { dataPoints: [{ flags: 'x' }] } }] }] },
+        ],
+      },
+    ],
   ])('returns 400 without ingesting when %s', (_label, body) => {
     const { ctrl, service } = makeCtrl();
     let status: number | undefined;

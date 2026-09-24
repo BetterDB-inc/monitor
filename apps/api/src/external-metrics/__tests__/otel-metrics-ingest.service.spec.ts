@@ -112,6 +112,42 @@ describe('OtelMetricsIngestService', () => {
     expect(Object.keys(store.snapshot('ext', NOW_MS).commandstats ?? {})).toHaveLength(1024);
   });
 
+  describe('no-recorded-value flag', () => {
+    const flagged = (name: string, flags: number, timeUnixNano = NOW_NS): OtlpMetric => ({
+      name,
+      gauge: { dataPoints: [{ timeUnixNano, asInt: '0', flags }] },
+    });
+
+    it('skips a flagged point without storing, refreshing or counting it', () => {
+      const { service, store } = build();
+      const result = service.ingest(resource(identity, [flagged('redis.memory.used', 1)]), NOW_MS);
+      expect(result.accepted).toBe(0);
+      expect(toPartialSuccess(result)).toBeNull();
+      expect(store.snapshot('ext', NOW_MS)).toEqual({});
+      expect(store.isFresh('ext', NOW_MS)).toBe(false);
+      expect(store.latestVersion('ext')).toBeNull();
+    });
+
+    it('keeps the previous value, freshness and version when a flagged point follows', () => {
+      const { service, store } = build();
+      service.ingest(resource(identity, [gauge('redis.memory.used', 1024)]), NOW_MS);
+      const version = store.latestVersion('ext');
+      const later = NOW_MS + store.staleAfterMs;
+      const laterNs = String(BigInt(later) * 1_000_000n);
+      service.ingest(resource(identity, [flagged('redis.memory.used', 1, laterNs)]), later);
+      expect(store.snapshot('ext', NOW_MS).memory).toEqual({ used_memory: '1024' });
+      expect(store.latestVersion('ext')).toBe(version);
+      expect(store.isFresh('ext', later + 1)).toBe(false);
+    });
+
+    it('stores a point whose flags leave the no-recorded-value bit clear', () => {
+      const { service, store } = build();
+      const result = service.ingest(resource(identity, [flagged('redis.memory.used', 2)]), NOW_MS);
+      expect(result.accepted).toBe(1);
+      expect(store.snapshot('ext', NOW_MS).memory).toEqual({ used_memory: '0' });
+    });
+  });
+
   it('treats prototype property names as unmapped', () => {
     const { service, store } = build();
     const result = service.ingest(
