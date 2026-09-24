@@ -1,4 +1,5 @@
-import { ExternalMetricsStore, resolveStaleAfterMs } from '../external-metrics-store';
+import { ExternalMetricsStore } from '../external-metrics-store';
+import { envSchema } from '../../config/env.schema';
 import type { FieldUpdate } from '../otlp-metrics-types';
 
 const T0 = 1_700_000_000_000;
@@ -17,12 +18,23 @@ const composite = (
   timeMs = T0,
 ): FieldUpdate => ({ target: { kind: 'composite', section, field, subkey }, value, timeMs });
 
-describe('resolveStaleAfterMs', () => {
-  it('defaults to 300000 and enforces a 1000 floor', () => {
-    expect(resolveStaleAfterMs(undefined)).toBe(300_000);
-    expect(resolveStaleAfterMs('abc')).toBe(300_000);
-    expect(resolveStaleAfterMs('999')).toBe(300_000);
-    expect(resolveStaleAfterMs('60000')).toBe(60_000);
+describe('ExternalMetricsStore stale window', () => {
+  const saved = process.env.OTEL_METRICS_STALE_AFTER_MS;
+
+  afterEach(() => {
+    if (saved === undefined) delete process.env.OTEL_METRICS_STALE_AFTER_MS;
+    else process.env.OTEL_METRICS_STALE_AFTER_MS = saved;
+  });
+
+  it('defaults to 300000 when unset', () => {
+    delete process.env.OTEL_METRICS_STALE_AFTER_MS;
+    expect(new ExternalMetricsStore().staleAfterMs).toBe(300_000);
+  });
+
+  it.each(['abc', '999', '1500.5'])('rejects %s the same way the boot schema does', (raw) => {
+    process.env.OTEL_METRICS_STALE_AFTER_MS = raw;
+    expect(envSchema.safeParse({ OTEL_METRICS_STALE_AFTER_MS: raw }).success).toBe(false);
+    expect(() => new ExternalMetricsStore()).toThrow();
   });
 });
 

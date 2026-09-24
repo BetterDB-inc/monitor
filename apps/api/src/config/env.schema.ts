@@ -12,6 +12,8 @@ function optionalUrl(value: unknown): unknown {
  * Environment variable validation schema
  * Validates all environment variables at application startup
  */
+export const otelMetricsStaleAfterMsSchema = z.coerce.number().int().min(1000).default(300000);
+
 export const envSchema = z
   .object({
     // Application
@@ -195,7 +197,7 @@ export const envSchema = z
       .default('true')
       .transform((v) => v !== 'false'),
     OTEL_INGEST_TOKEN: z.string().optional(),
-    OTEL_METRICS_STALE_AFTER_MS: z.coerce.number().int().min(1000).default(300000),
+    OTEL_METRICS_STALE_AFTER_MS: otelMetricsStaleAfterMsSchema,
 
     PROMETHEUS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).optional(),
     PROMETHEUS_STALENESS_MS: z.coerce.number().int().min(1000).optional(),

@@ -1,10 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import type { FieldUpdate } from './otlp-metrics-types';
+import { otelMetricsStaleAfterMsSchema } from '../config/env.schema';
 
 export type InfoSections = Record<string, Record<string, string>>;
-
-const DEFAULT_STALE_AFTER_MS = 300_000;
-const MIN_STALE_AFTER_MS = 1_000;
 
 const COMPOSITE_ORDER: Record<string, string[]> = {
   keyspace: ['keys', 'expires', 'avg_ttl'],
@@ -29,14 +27,11 @@ interface ConnectionSample {
   valkey: boolean;
 }
 
-export function resolveStaleAfterMs(raw: string | undefined): number {
-  const parsed = Number(raw);
-  return Number.isInteger(parsed) && parsed >= MIN_STALE_AFTER_MS ? parsed : DEFAULT_STALE_AFTER_MS;
-}
-
 @Injectable()
 export class ExternalMetricsStore {
-  readonly staleAfterMs = resolveStaleAfterMs(process.env.OTEL_METRICS_STALE_AFTER_MS);
+  readonly staleAfterMs = otelMetricsStaleAfterMsSchema.parse(
+    process.env.OTEL_METRICS_STALE_AFTER_MS,
+  );
   private readonly samples = new Map<string, ConnectionSample>();
 
   apply(connectionId: string, updates: FieldUpdate[]): number {
