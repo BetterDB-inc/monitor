@@ -38,9 +38,11 @@ service:
 export function OtlpPushTab({
   isFirstConnection,
   onCreated,
+  onDone,
 }: {
   isFirstConnection: boolean;
   onCreated: () => Promise<void>;
+  onDone: () => void;
 }) {
   const [name, setName] = useState('');
   const [host, setHost] = useState('');
@@ -48,6 +50,7 @@ export function OtlpPushTab({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [saved, setSaved] = useState(false);
 
   const snippet = buildCollectorSnippet(host || '<host>', port, apiOrigin());
   const canSave =
@@ -73,6 +76,7 @@ export function OtlpPushTab({
         }),
       });
       await onCreated();
+      setSaved(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save connection');
     } finally {
@@ -85,6 +89,41 @@ export function OtlpPushTab({
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
+
+  const collectorConfig = (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-sm font-medium">Collector config</span>
+        <button type="button" onClick={copy} className="text-xs text-primary hover:underline">
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs">{snippet}</pre>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Set <code>BETTERDB_OTEL_INGEST_TOKEN</code> to this server's{' '}
+        <code>OTEL_INGEST_TOKEN</code>. Use <code>metrics_endpoint</code>, not{' '}
+        <code>endpoint</code>: <code>endpoint</code> appends /v1/metrics.
+      </p>
+    </div>
+  );
+
+  if (saved) {
+    return (
+      <div className="space-y-4">
+        <p className="text-sm text-green-600">
+          Connection added. Copy the collector config below before closing this dialog.
+        </p>
+        {collectorConfig}
+        <button
+          type="button"
+          onClick={onDone}
+          className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
+        >
+          Done
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
@@ -137,20 +176,7 @@ export function OtlpPushTab({
         Host and port must match the collector's <code>server.address</code> and{' '}
         <code>server.port</code> resource attributes.
       </p>
-      <div>
-        <div className="flex items-center justify-between mb-1">
-          <span className="text-sm font-medium">Collector config</span>
-          <button type="button" onClick={copy} className="text-xs text-primary hover:underline">
-            {copied ? 'Copied' : 'Copy'}
-          </button>
-        </div>
-        <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs">{snippet}</pre>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Set <code>BETTERDB_OTEL_INGEST_TOKEN</code> to this server's{' '}
-          <code>OTEL_INGEST_TOKEN</code>. Use <code>metrics_endpoint</code>, not{' '}
-          <code>endpoint</code>: <code>endpoint</code> appends /v1/metrics.
-        </p>
-      </div>
+      {collectorConfig}
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
       <button
         type="button"

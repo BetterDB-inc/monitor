@@ -485,10 +485,10 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
           ) : addTab === 'otlp' ? (
             <OtlpPushTab
               isFirstConnection={connections.length === 0}
-              onCreated={async () => {
+              onCreated={refreshConnections}
+              onDone={() => {
                 setShowAddDialog(false);
                 setAddTab('direct');
-                await refreshConnections();
               }}
             />
           ) : addTab === 'direct' ? (

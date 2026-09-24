@@ -28,7 +28,7 @@ describe('OtlpPushTab', () => {
   it('creates an external connection with only name, host and port', async () => {
     fetchApi.mockResolvedValue({ id: 'new' });
     const onCreated = vi.fn().mockResolvedValue(undefined);
-    render(<OtlpPushTab isFirstConnection={true} onCreated={onCreated} />);
+    render(<OtlpPushTab isFirstConnection={true} onCreated={onCreated} onDone={vi.fn()} />);
     fireEvent.change(screen.getByLabelText('Name *'), { target: { value: 'Pushed' } });
     fireEvent.change(screen.getByLabelText('Host *'), { target: { value: 'cache.internal' } });
     fireEvent.change(screen.getByLabelText('Port *'), { target: { value: '6380' } });
@@ -41,7 +41,7 @@ describe('OtlpPushTab', () => {
   });
 
   it('disables Save when the port is not an integer', () => {
-    render(<OtlpPushTab isFirstConnection={false} onCreated={vi.fn()} />);
+    render(<OtlpPushTab isFirstConnection={false} onCreated={vi.fn()} onDone={vi.fn()} />);
     fireEvent.change(screen.getByLabelText('Name *'), { target: { value: 'Pushed' } });
     fireEvent.change(screen.getByLabelText('Host *'), { target: { value: 'cache.internal' } });
     fireEvent.change(screen.getByLabelText('Port *'), { target: { value: '6380.5' } });
@@ -51,10 +51,29 @@ describe('OtlpPushTab', () => {
 
   it('shows the API error', async () => {
     fetchApi.mockRejectedValue(new Error('A connection for cache.internal:6380 already exists'));
-    render(<OtlpPushTab isFirstConnection={false} onCreated={vi.fn()} />);
+    render(<OtlpPushTab isFirstConnection={false} onCreated={vi.fn()} onDone={vi.fn()} />);
     fireEvent.change(screen.getByLabelText('Name *'), { target: { value: 'Pushed' } });
     fireEvent.change(screen.getByLabelText('Host *'), { target: { value: 'cache.internal' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add OTLP connection' }));
     expect(await screen.findByText('A connection for cache.internal:6380 already exists')).toBeTruthy();
+  });
+
+  it('keeps the collector config visible after creating and closes only on Done', async () => {
+    fetchApi.mockResolvedValue({ id: 'new' });
+    const onCreated = vi.fn().mockResolvedValue(undefined);
+    const onDone = vi.fn();
+    render(<OtlpPushTab isFirstConnection={true} onCreated={onCreated} onDone={onDone} />);
+    fireEvent.change(screen.getByLabelText('Name *'), { target: { value: 'Pushed' } });
+    fireEvent.change(screen.getByLabelText('Host *'), { target: { value: 'cache.internal' } });
+    fireEvent.change(screen.getByLabelText('Port *'), { target: { value: '6380' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add OTLP connection' }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalled());
+    expect(onDone).not.toHaveBeenCalled();
+    expect(screen.getByText(/endpoint: cache.internal:6380/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /copy/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(onDone).toHaveBeenCalled();
   });
 });
