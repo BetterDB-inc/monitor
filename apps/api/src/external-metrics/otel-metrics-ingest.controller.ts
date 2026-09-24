@@ -2,6 +2,7 @@ import { Body, Controller, Headers, HttpCode, HttpException, HttpStatus, Post, R
 import { ApiExcludeEndpoint } from '@nestjs/swagger';
 import type { FastifyReply } from 'fastify';
 import { assertOtlpIngestAuthorized } from '../ai-observability/otel-ingest-auth';
+import { assertOtlpMetricsShape } from '../ai-observability/otlp-json-shape';
 import { OtelMetricsIngestService, toPartialSuccess } from './otel-metrics-ingest.service';
 import { decodeOtlpMetricsProtobuf, encodeOtlpMetricsResponse } from './otlp-metrics-protobuf';
 import type { OtlpMetricsRequest } from './otlp-metrics-types';
@@ -39,6 +40,7 @@ export class OtelMetricsIngestController {
       }
     } else {
       request = (body as OtlpMetricsRequest) ?? {};
+      assertOtlpMetricsShape(request);
     }
 
     const partial = toPartialSuccess(this.ingestService.ingest(request));

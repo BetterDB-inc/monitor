@@ -56,6 +56,74 @@ describe('OtelMetricsIngestController.ingestMetrics', () => {
     }
   });
 
+  it.each([
+    ['resourceMetrics is not an array', { resourceMetrics: 5 }],
+    ['a resourceMetrics entry is null', { resourceMetrics: [null] }],
+    ['a metrics entry is null', { resourceMetrics: [{ scopeMetrics: [{ metrics: [null] }] }] }],
+    ['a resource attribute is null', { resourceMetrics: [{ resource: { attributes: [null] } }] }],
+    [
+      'a data point attribute is null',
+      {
+        resourceMetrics: [
+          { scopeMetrics: [{ metrics: [{ name: 'redis.uptime', gauge: { dataPoints: [{ attributes: [null] }] } }] }] },
+        ],
+      },
+    ],
+    ['a metric name is not a string', { resourceMetrics: [{ scopeMetrics: [{ metrics: [{ name: 5 }] }] }] }],
+  ])('returns 400 without ingesting when %s', (_label, body) => {
+    const { ctrl, service } = makeCtrl();
+    let status: number | undefined;
+    try {
+      ctrl.ingestMetrics(fakeReply(), body as never, 'application/json');
+    } catch (err) {
+      status = err instanceof HttpException ? err.getStatus() : -1;
+    }
+    expect(status).toBe(400);
+    expect(service.ingest).not.toHaveBeenCalled();
+  });
+
+  it('passes a realistic collector JSON export through to ingest', () => {
+    const { ctrl, service } = makeCtrl();
+    const body = {
+      resourceMetrics: [
+        {
+          resource: {
+            attributes: [
+              { key: 'server.address', value: { stringValue: '10.0.0.1' } },
+              { key: 'server.port', value: { intValue: '6379' } },
+            ],
+          },
+          scopeMetrics: [
+            {
+              scope: { name: 'otelcol/redisreceiver', version: '0.110.0' },
+              metrics: [
+                {
+                  name: 'redis.uptime',
+                  unit: 's',
+                  sum: {
+                    aggregationTemporality: 2,
+                    isMonotonic: true,
+                    dataPoints: [{ asInt: '42', timeUnixNano: '1700000000000000000' }],
+                  },
+                },
+                {
+                  name: 'redis.memory.used',
+                  gauge: {
+                    dataPoints: [{ asInt: '1024', attributes: [{ key: 'db', value: { stringValue: '0' } }] }],
+                  },
+                },
+                { name: 'redis.latency', histogram: { dataPoints: [{ count: '3', bucketCounts: ['1', '2'] }] } },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    expect(ctrl.ingestMetrics(fakeReply(), body as never, 'application/json')).toEqual({});
+    expect(service.ingest).toHaveBeenCalledWith(body);
+  });
+
   it('returns {} for a fully accepted JSON request', () => {
     const { ctrl, service } = makeCtrl();
     const reply = fakeReply();

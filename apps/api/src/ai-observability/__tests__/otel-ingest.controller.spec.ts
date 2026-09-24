@@ -34,6 +34,20 @@ describe('OtelIngestController.ingestTraces', () => {
 
   // --- response encoding ---
 
+  it.each([
+    ['resourceSpans is not an array', { resourceSpans: 5 }],
+    ['a resourceSpans entry is null', { resourceSpans: [null] }],
+    ['a span is null', { resourceSpans: [{ scopeSpans: [{ spans: [null] }] }] }],
+    ['a span attribute is null', { resourceSpans: [{ scopeSpans: [{ spans: [{ attributes: [null] }] }] }] }],
+    ['a scope name is not a string', { resourceSpans: [{ scopeSpans: [{ scope: { name: 5 } }] }] }],
+  ])('returns 400 without ingesting when %s', async (_label, body) => {
+    const { ctrl, ingest } = makeCtrl();
+    await expect(ctrl.ingestTraces(fakeReply(), body as never, 'application/json')).rejects.toMatchObject({
+      status: HttpStatus.BAD_REQUEST,
+    });
+    expect(ingest.ingest).not.toHaveBeenCalled();
+  });
+
   it('returns JSON {} for a JSON request (no content-type override)', async () => {
     const { ctrl } = makeCtrl();
     const reply = fakeReply();

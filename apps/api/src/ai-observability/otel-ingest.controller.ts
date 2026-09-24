@@ -13,6 +13,7 @@ import { ApiTags, ApiOperation, ApiExcludeEndpoint } from '@nestjs/swagger';
 import { OtelIngestService, OtlpTraceRequest } from './otel-ingest.service';
 import { decodeOtlpTraceProtobuf } from './otlp-protobuf';
 import { assertOtlpIngestAuthorized } from './otel-ingest-auth';
+import { assertOtlpTraceShape } from './otlp-json-shape';
 
 /**
  * OTLP/HTTP trace ingestion. Exporters POST an ExportTraceServiceRequest here.
@@ -60,6 +61,7 @@ export class OtelIngestController {
       }
     } else {
       request = (body as OtlpTraceRequest) ?? {};
+      assertOtlpTraceShape(request);
     }
 
     // Stamp receive time here (Date.now is unavailable inside pure helpers only).
