@@ -27,6 +27,11 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
   // refresh that started before the write would otherwise clobber the fresh
   // value with the older database snapshot it read.
   private cacheGeneration = 0;
+  // The refresh runs every 30s and nothing re-seeds a wiped row, so a missing
+  // settings row would otherwise log the same warning ~2,880 times a day and
+  // bury the one actionable line. Warn once per missing episode, reset when
+  // the row comes back.
+  private warnedSettingsRowMissing = false;
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
@@ -64,7 +69,9 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     // must not be able to trigger deletion.
     if (dbSettings) {
       this.cachedSettings = dbSettings;
-    } else if (this.cachedSettings) {
+      this.warnedSettingsRowMissing = false; // episode over — warn again next time
+    } else if (this.cachedSettings && !this.warnedSettingsRowMissing) {
+      this.warnedSettingsRowMissing = true;
       this.logger.warn(
         'Settings row missing on cache refresh; keeping the previously loaded settings',
       );

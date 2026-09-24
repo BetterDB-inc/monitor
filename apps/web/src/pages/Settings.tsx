@@ -18,6 +18,28 @@ type SettingsCategory = 'license' | 'audit' | 'clientAnalytics' | 'anomaly' | 'd
 
 const RETENTION_INPUT_ERROR = `Enter a whole number of days between 1 and ${MAX_RETENTION_DAYS}, or leave empty to keep history forever.`;
 
+// Server-managed columns the user never edits; excluded from every dirty /
+// diff comparison so an updatedAt bump can't look like a pending change.
+const SERVER_MANAGED_KEYS: ReadonlySet<keyof AppSettings> = new Set([
+  'id',
+  'createdAt',
+  'updatedAt',
+]);
+
+// The single definition of "what the user has changed": the editable keys whose
+// draft value differs from what's saved. Both the Save gate (hasChanges) and the
+// update payload derive from this, so a draft that collapses back to the stored
+// value (e.g. type 30, then clear it) can never leave Save enabled or PUT {}.
+function changedKeys(
+  form: Partial<AppSettings>,
+  saved: AppSettings | null,
+): Array<keyof AppSettings> {
+  if (!saved) return [];
+  return (Object.keys(form) as Array<keyof AppSettings>).filter(
+    (key) => !SERVER_MANAGED_KEYS.has(key) && form[key] !== saved[key],
+  );
+}
+
 export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const { currentConnection } = useConnection();
   const { tier, license } = useLicense();
@@ -29,7 +51,9 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const [requiresRestart, setRequiresRestart] = useState(false);
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>('license');
   const [formData, setFormData] = useState<Partial<AppSettings>>({});
-  const [hasChanges, setHasChanges] = useState(false);
+  // Derived, never stored: recomputed from (formData, settings) every render so
+  // it can't fall out of sync with the draft the way a manual boolean did.
+  const hasChanges = changedKeys(formData, settings).length > 0;
 
   // Raw text of the retention input so invalid entries stay visible with an
   // error instead of silently collapsing to "keep forever".
@@ -79,7 +103,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setFormData(response.settings);
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
-      setHasChanges(false);
       syncRetentionFrom(response.settings.localRetentionDays);
     } catch (error) {
       console.error('Failed to load settings:', error);
@@ -90,7 +113,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
 
   const handleInputChange = (key: keyof AppSettings, value: any) => {
     setFormData((prev) => ({ ...prev, [key]: value }));
-    setHasChanges(true);
   };
 
   const handleSave = async () => {
@@ -99,12 +121,8 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     try {
       setSaving(true);
       const updates: SettingsUpdateRequest = {};
-
-      // Only include changed fields
-      (Object.keys(formData) as Array<keyof AppSettings>).forEach((key) => {
-        if (formData[key] !== settings[key] && key !== 'id' && key !== 'createdAt' && key !== 'updatedAt') {
-          (updates as any)[key] = formData[key];
-        }
+      changedKeys(formData, settings).forEach((key) => {
+        (updates as any)[key] = formData[key];
       });
 
       const response = await settingsApi.updateSettings(updates);
@@ -112,7 +130,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setFormData(response.settings);
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
-      setHasChanges(false);
       syncRetentionFrom(response.settings.localRetentionDays);
     } catch (error) {
       console.error('Failed to save settings:', error);
@@ -125,7 +142,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const handleCancel = () => {
     if (settings) {
       setFormData(settings);
-      setHasChanges(false);
       syncRetentionFrom(settings.localRetentionDays);
     }
   };
@@ -142,7 +158,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setFormData(response.settings);
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
-      setHasChanges(false);
       syncRetentionFrom(response.settings.localRetentionDays);
     } catch (error) {
       console.error('Failed to reset settings:', error);
@@ -336,24 +351,13 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                   // to "3650"): reverting only the visible input would let a
                   // hidden partial value ride along with a save made from
                   // another tab and silently shrink the retention window.
-                  // Recompute hasChanges from the reverted form so Save is
-                  // not left enabled by a draft that no longer exists.
-                  const reverted = {
-                    ...formData,
+                  // hasChanges is derived from (formData, settings), so putting
+                  // localRetentionDays back is enough — Save can't stay enabled
+                  // for a draft that no longer exists.
+                  setFormData((prev) => ({
+                    ...prev,
                     localRetentionDays: settings?.localRetentionDays ?? null,
-                  };
-                  setFormData(reverted);
-                  setHasChanges(
-                    settings
-                      ? (Object.keys(reverted) as Array<keyof AppSettings>).some(
-                          (key) =>
-                            key !== 'id' &&
-                            key !== 'createdAt' &&
-                            key !== 'updatedAt' &&
-                            reverted[key] !== settings[key],
-                        )
-                      : false,
-                  );
+                  }));
                   syncRetentionFrom(settings?.localRetentionDays);
                 }
               }}

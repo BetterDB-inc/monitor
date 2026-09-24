@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { MAX_RETENTION_DAYS, parseRetentionDaysToken } from '@betterdb/shared';
 import { isCloudModeValue } from '../common/utils/cloud-mode';
+import { isNegativeEnvValue } from '../common/utils/env-bool';
 
 /**
  * Environment variable validation schema
@@ -110,7 +111,7 @@ export const envSchema = z
     LICENSE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).optional(),
     BETTERDB_TELEMETRY: z
       .string()
-      .transform((v) => !['false', '0', 'no', 'off'].includes(v.toLowerCase()))
+      .transform((v) => !isNegativeEnvValue(v))
       .optional(),
     TELEMETRY_PROVIDER: z.enum(['http', 'posthog', 'noop']).default('posthog'),
     POSTHOG_API_KEY: z.string().optional(),
