@@ -339,9 +339,7 @@ function AppLayoutInner(): ReactElement {
                 path="/cache-proposals"
                 element={
                   <NoConnectionsGuard>
-                    <LiveConnectionGuard>
-                      <CacheProposals />
-                    </LiveConnectionGuard>
+                    <CacheProposals />
                   </NoConnectionsGuard>
                 }
               />

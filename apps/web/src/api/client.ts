@@ -95,6 +95,9 @@ export class ApiError extends Error {
 export const EXTERNAL_UNSUPPORTED_MESSAGE =
   'Not available for OTLP-ingested connections — this view needs a live connection.';
 
+export const EXTERNAL_UNSUPPORTED_ACTION_MESSAGE =
+  'Not available for OTLP-ingested connections — this action needs a live connection.';
+
 export class ExternalConnectionUnsupportedError extends ApiError {
   public readonly method: string | null;
 
