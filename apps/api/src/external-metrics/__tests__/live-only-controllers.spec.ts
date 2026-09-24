@@ -6,7 +6,11 @@ import { CveController } from '../../cve/cve.controller';
 import { MetricsController } from '../../metrics/metrics.controller';
 import { MonitorController } from '../../monitor/monitor.controller';
 import { VectorSearchController } from '../../vector-search/vector-search.controller';
-import { ALLOW_EXTERNAL_CONNECTION_KEY, LiveConnectionGuard } from '../live-connection.guard';
+import {
+  ALLOW_EXTERNAL_CONNECTION_KEY,
+  HEADER_CONNECTION_ID_KEY,
+  LiveConnectionGuard,
+} from '../live-connection.guard';
 
 type Expectation = 'live' | 'open';
 
@@ -116,12 +120,24 @@ function isGuarded(controller: Type<unknown>, handler: object): boolean {
 
 describe('live-only controllers', () => {
   const rows = cases.flatMap(({ controller, handlers }) =>
-    Object.entries(handlers).map(([name, expectation]) => [controller.name, name, expectation, controller] as const),
+    Object.entries(handlers).map(
+      ([name, expectation]) => [controller.name, name, expectation, controller] as const,
+    ),
   );
 
-  it.each(rows)('%s.%s is %s for external connections', (_className, name, expectation, controller) => {
-    const handler = (controller.prototype as Record<string, unknown>)[name];
-    expect(typeof handler).toBe('function');
-    expect(isGuarded(controller, handler as object)).toBe(expectation === 'live');
-  });
+  it.each(rows)(
+    '%s.%s is %s for external connections',
+    (_className, name, expectation, controller) => {
+      const handler = (controller.prototype as Record<string, unknown>)[name];
+      expect(typeof handler).toBe('function');
+      expect(isGuarded(controller, handler as object)).toBe(expectation === 'live');
+    },
+  );
+
+  it.each([VectorSearchController, BulkDeleteController])(
+    '%p resolves the guarded connection from the header it binds',
+    (controller) => {
+      expect(Reflect.getMetadata(HEADER_CONNECTION_ID_KEY, controller)).toBe(true);
+    },
+  );
 });

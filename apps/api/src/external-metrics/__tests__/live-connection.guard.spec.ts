@@ -3,7 +3,11 @@ import { Reflector } from '@nestjs/core';
 import { CONNECTION_ID_HEADER } from '../../common/decorators';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { ExternalConnectionUnsupportedError } from '../external-connection-unsupported.error';
-import { AllowExternalConnection, LiveConnectionGuard } from '../live-connection.guard';
+import {
+  AllowExternalConnection,
+  LiveConnectionGuard,
+  UseHeaderConnectionId,
+} from '../live-connection.guard';
 
 interface RequestParts {
   params?: Record<string, unknown>;
@@ -120,6 +124,40 @@ describe('LiveConnectionGuard', () => {
       const context = contextFor(handler, klass, 'ext-1', { body: { connectionId: 42 } });
 
       expect(() => guard.canActivate(context)).toThrow(ExternalConnectionUnsupportedError);
+    });
+  });
+
+  describe('header-bound routes', () => {
+    const configs: Record<string, { connectionType: 'external' | 'direct' }> = {
+      'ext-1': { connectionType: 'external' },
+      'direct-1': { connectionType: 'direct' },
+    };
+
+    beforeEach(() => {
+      registry.getConfig.mockImplementation((id?: string) => configs[id ?? 'direct-1'] ?? null);
+    });
+
+    it('checks the header even when the body names a direct connection', () => {
+      const handler = function textSearch() {};
+      class SearchLikeController {}
+      UseHeaderConnectionId()(SearchLikeController);
+      const context = contextFor(handler, SearchLikeController, 'ext-1', {
+        body: { connectionId: 'direct-1' },
+      });
+
+      expect(() => guard.canActivate(context)).toThrow(ExternalConnectionUnsupportedError);
+    });
+
+    it('ignores a route param and body when the handler is header-bound', () => {
+      const handler = function preview() {};
+      UseHeaderConnectionId()({}, 'preview', { value: handler } as PropertyDescriptor);
+      const klass = class BulkLikeController {};
+      const context = contextFor(handler, klass, 'direct-1', {
+        params: { connectionId: 'ext-1' },
+        body: { connectionId: 'ext-1' },
+      });
+
+      expect(guard.canActivate(context)).toBe(true);
     });
   });
 });

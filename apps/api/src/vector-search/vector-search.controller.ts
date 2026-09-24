@@ -22,11 +22,16 @@ import {
   FieldDistribution,
 } from '../common/types/metrics.types';
 import { mapMcpError } from '../mcp/mcp-helpers';
-import { AllowExternalConnection, LiveConnectionGuard } from '../external-metrics/live-connection.guard';
+import {
+  AllowExternalConnection,
+  LiveConnectionGuard,
+  UseHeaderConnectionId,
+} from '../external-metrics/live-connection.guard';
 
 @ApiTags('vector-search')
 @Controller('vector-search')
 @UseGuards(LiveConnectionGuard)
+@UseHeaderConnectionId()
 export class VectorSearchController {
   private readonly logger = new Logger(VectorSearchController.name);
 
