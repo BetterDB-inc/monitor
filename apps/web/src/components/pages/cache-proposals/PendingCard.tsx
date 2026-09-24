@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import type { StoredCacheProposal } from '@betterdb/shared';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -79,10 +79,12 @@ export function PendingCard({ proposal }: Props) {
 
   const isMutating = approve.isPending || reject.isPending || editAndApprove.isPending;
   const editHidden = isInvalidate(proposal);
+  const externalNoteId = useId();
   const applyDisabledProps = isExternal
     ? {
         'data-tooltip-id': 'license-tooltip',
         'data-tooltip-content': EXTERNAL_UNSUPPORTED_ACTION_MESSAGE,
+        'aria-describedby': externalNoteId,
       }
     : {};
 
@@ -186,6 +188,12 @@ export function PendingCard({ proposal }: Props) {
             data-testid="action-error"
           >
             {actionError}
+          </p>
+        )}
+
+        {isExternal && (
+          <p id={externalNoteId} className="text-xs text-muted-foreground">
+            {EXTERNAL_UNSUPPORTED_ACTION_MESSAGE}
           </p>
         )}
 
