@@ -47,6 +47,8 @@ Set `OTEL_EXPORTER_OTLP_ENDPOINT` and Monitor mirrors its Prometheus registry to
 
 A caveat worth knowing: counters and gauges are mirrored, but **histograms and summaries are skipped** because they do not map cleanly onto the OTLP instruments here. So the OTLP mirror is a subset. For the complete set, including histograms and every `betterdb_*` family, scrape the Prometheus endpoint at `/api/prometheus/metrics` (see **[Prometheus Integration](prometheus-integration.md)** and the **[full metrics reference](prometheus-metrics.md)**).
 
+The mirror reads the same registry as `/api/prometheus/metrics`, so stale-connection series are dropped from it on the same staleness bound (see `PROMETHEUS_STALENESS_MS`).
+
 Tune the push interval with `OTEL_METRICS_EXPORT_INTERVAL_MS` (default `15000`).
 
 ## Event export
