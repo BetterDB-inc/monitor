@@ -44,7 +44,7 @@ describe('parseCommandStatsSection', () => {
     expect(result.map((s) => s.command)).toEqual(['get']);
   });
 
-  it('defaults missing numeric fields to 0', () => {
+  it('leaves usec and usecPerCall absent when the entry reports only calls', () => {
     const [sample] = parseCommandStatsSection({
       'cmdstat_get': 'calls=50',
     });
@@ -52,6 +52,21 @@ describe('parseCommandStatsSection', () => {
     expect(sample).toEqual({
       command: 'get',
       calls: 50,
+      rejectedCalls: 0,
+      failedCalls: 0,
+    });
+    expect(sample).not.toHaveProperty('usec');
+    expect(sample).not.toHaveProperty('usecPerCall');
+  });
+
+  it('keeps a reported zero latency as zero', () => {
+    const [sample] = parseCommandStatsSection({
+      'cmdstat_ping': 'calls=3,usec=0,usec_per_call=0.00,rejected_calls=0,failed_calls=0',
+    });
+
+    expect(sample).toEqual({
+      command: 'ping',
+      calls: 3,
       usec: 0,
       usecPerCall: 0,
       rejectedCalls: 0,

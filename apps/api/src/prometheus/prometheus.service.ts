@@ -2520,7 +2520,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     samples: ReadonlyArray<{
       command: string;
       callsTotal: number;
-      usecPerCall: number;
+      usecPerCall?: number;
     }>,
   ): void {
     const connLabel = this.getConnectionLabel(connectionId);
@@ -2530,7 +2530,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     for (const s of samples) {
       currentLabels.add(s.command);
       this.commandstatsCallsTotal.labels(connLabel, s.command).set(s.callsTotal);
-      this.commandstatsLatencyUs.labels(connLabel, s.command).set(s.usecPerCall);
+      if (s.usecPerCall === undefined) {
+        this.commandstatsLatencyUs.remove(connLabel, s.command);
+      } else {
+        this.commandstatsLatencyUs.labels(connLabel, s.command).set(s.usecPerCall);
+      }
     }
 
     for (const staleLabel of state.currentCommandStatsLabels) {
