@@ -114,7 +114,9 @@ export class OtelMetricsIngestService {
       }
     }
     if (sawValkeyVocabulary) this.store.markValkey(match.id);
-    result.accepted += this.store.apply(match.id, updates);
+    const applied = this.store.apply(match.id, updates, nowMs);
+    result.accepted += applied.accepted;
+    this.drop(result, 'cardinality_limit', applied.rejected, instance, nowMs);
   }
 
   private collectMetric(

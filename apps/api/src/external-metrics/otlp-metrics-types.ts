@@ -62,6 +62,7 @@ export const DROP_REASONS = [
   'unsupported_type',
   'unsupported_temporality',
   'unmapped_metric',
+  'cardinality_limit',
 ] as const;
 
 export type DropReason = (typeof DROP_REASONS)[number];

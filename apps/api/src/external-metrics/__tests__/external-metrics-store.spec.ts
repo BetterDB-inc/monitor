@@ -44,7 +44,12 @@ describe('ExternalMetricsStore', () => {
 
   beforeEach(() => {
     process.env.OTEL_METRICS_STALE_AFTER_MS = '60000';
+    jest.spyOn(Date, 'now').mockReturnValue(T0);
     store = new ExternalMetricsStore();
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
   });
 
   afterAll(() => {
@@ -57,9 +62,9 @@ describe('ExternalMetricsStore', () => {
   });
 
   it('merges scalars across batches and advances the version', () => {
-    expect(store.apply('c', [scalar('memory', 'used_memory', '100')])).toBe(1);
+    expect(store.apply('c', [scalar('memory', 'used_memory', '100')]).accepted).toBe(1);
     const first = store.latestVersion('c');
-    expect(store.apply('c', [scalar('clients', 'connected_clients', '5', T0 + 10)])).toBe(1);
+    expect(store.apply('c', [scalar('clients', 'connected_clients', '5', T0 + 10)]).accepted).toBe(1);
     expect(store.snapshot('c', T0 + 20)).toEqual({
       memory: { used_memory: '100' },
       clients: { connected_clients: '5' },
@@ -71,9 +76,61 @@ describe('ExternalMetricsStore', () => {
   it('ignores a point older than the stored one without counting it', () => {
     store.apply('c', [scalar('memory', 'used_memory', '200', T0 + 5)]);
     const version = store.latestVersion('c');
-    expect(store.apply('c', [scalar('memory', 'used_memory', '100', T0)])).toBe(0);
+    expect(store.apply('c', [scalar('memory', 'used_memory', '100', T0)]).accepted).toBe(0);
     expect(store.snapshot('c', T0 + 5).memory).toEqual({ used_memory: '200' });
     expect(store.latestVersion('c')).toBe(version);
+  });
+
+  describe('composite cardinality', () => {
+    const commands = (count: number, timeMs: number, prefix = 'c') =>
+      Array.from({ length: count }, (_, i) => composite('commandstats', `cmdstat_${prefix}${i}`, 'calls', '1', timeMs));
+    const dbs = (count: number, timeMs: number, offset = 0) =>
+      Array.from({ length: count }, (_, i) => composite('keyspace', `db${offset + i}`, 'keys', '1', timeMs));
+
+    it('caps commandstats at 1024 entries and rejects points for new commands beyond it', () => {
+      expect(store.apply('c', commands(1024, T0), T0)).toEqual({ accepted: 1024, rejected: 0 });
+      const over = [
+        composite('commandstats', 'cmdstat_extra', 'calls', '1'),
+        composite('commandstats', 'cmdstat_extra', 'usec', '5'),
+        composite('commandstats', 'cmdstat_c0', 'usec', '5'),
+      ];
+      expect(store.apply('c', over, T0)).toEqual({ accepted: 1, rejected: 2 });
+      const rendered = store.snapshot('c', T0).commandstats ?? {};
+      expect(Object.keys(rendered)).toHaveLength(1024);
+      expect(rendered.cmdstat_extra).toBeUndefined();
+      expect(rendered.cmdstat_c0).toBe('calls=1,usec=5,usec_per_call=5.00');
+    });
+
+    it('caps keyspace at 256 entries independently of commandstats', () => {
+      store.apply('c', commands(1024, T0), T0);
+      expect(store.apply('c', dbs(257, T0), T0)).toEqual({ accepted: 256, rejected: 1 });
+      expect(Object.keys(store.snapshot('c', T0).keyspace ?? {})).toHaveLength(256);
+    });
+
+    it('caps each connection separately', () => {
+      store.apply('a', dbs(256, T0), T0);
+      expect(store.apply('b', dbs(1, T0), T0)).toEqual({ accepted: 1, rejected: 0 });
+    });
+
+    it('frees the slots of entries whose subkeys are all stale', () => {
+      store.apply('c', commands(1024, T0), T0);
+      const later = T0 + 60_001;
+      expect(store.apply('c', commands(1024, later, 'n'), later)).toEqual({ accepted: 1024, rejected: 0 });
+    });
+
+    it('keeps the slot of an entry with any fresh subkey', () => {
+      store.apply('c', commands(1024, T0), T0);
+      store.apply('c', [composite('commandstats', 'cmdstat_c0', 'usec', '5', T0 + 50_000)], T0 + 50_000);
+      const later = T0 + 60_001;
+      expect(store.apply('c', commands(1024, later, 'n'), later)).toEqual({ accepted: 1023, rejected: 1 });
+    });
+
+    it('does not advance the version for rejected points', () => {
+      store.apply('c', dbs(256, T0), T0);
+      const before = store.latestVersion('c');
+      store.apply('c', dbs(1, T0, 300), T0);
+      expect(store.latestVersion('c')).toBe(before);
+    });
   });
 
   describe('sample version', () => {
@@ -106,7 +163,7 @@ describe('ExternalMetricsStore', () => {
     it('does not advance on an exact duplicate but still accepts it', () => {
       store.apply('c', [scalar('memory', 'used_memory', '1'), composite('keyspace', 'db0', 'keys', '3')]);
       const before = store.latestVersion('c');
-      expect(store.apply('c', [scalar('memory', 'used_memory', '1'), composite('keyspace', 'db0', 'keys', '3')])).toBe(2);
+      expect(store.apply('c', [scalar('memory', 'used_memory', '1'), composite('keyspace', 'db0', 'keys', '3')]).accepted).toBe(2);
       expect(store.latestVersion('c')).toBe(before);
     });
 
@@ -156,7 +213,7 @@ describe('ExternalMetricsStore', () => {
 
   it('overwrites a point with the same timestamp', () => {
     store.apply('c', [scalar('memory', 'used_memory', '100')]);
-    expect(store.apply('c', [scalar('memory', 'used_memory', '150')])).toBe(1);
+    expect(store.apply('c', [scalar('memory', 'used_memory', '150')]).accepted).toBe(1);
     expect(store.snapshot('c', T0).memory).toEqual({ used_memory: '150' });
   });
 

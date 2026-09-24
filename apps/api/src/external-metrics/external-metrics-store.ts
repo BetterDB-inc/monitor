@@ -14,14 +14,30 @@ const COMPOSITE_PRIMARY: Record<string, string> = {
   commandstats: 'calls',
 };
 
+const COMPOSITE_LIMIT: Record<string, number> = {
+  keyspace: 256,
+  commandstats: 1024,
+};
+
 interface Stamped {
   value: string;
   timeMs: number;
 }
 
+interface CompositeEntry {
+  section: string;
+  field: string;
+  subkeys: Map<string, Stamped>;
+}
+
+export interface ApplyResult {
+  accepted: number;
+  rejected: number;
+}
+
 interface ConnectionSample {
   scalars: Map<string, Stamped & { section: string; field: string }>;
-  composites: Map<string, { section: string; field: string; subkeys: Map<string, Stamped> }>;
+  composites: Map<string, Map<string, CompositeEntry>>;
   version: number | null;
   serverVersion: string | null;
   valkey: boolean;
@@ -39,24 +55,35 @@ export class ExternalMetricsStore {
   private readonly samples = new Map<string, ConnectionSample>();
   private revision = 0;
 
-  apply(connectionId: string, updates: FieldUpdate[]): number {
+  apply(connectionId: string, updates: FieldUpdate[], nowMs: number = Date.now()): ApplyResult {
     const sample = this.getOrCreate(connectionId);
+    this.pruneStaleComposites(sample, nowMs);
     let accepted = 0;
+    let rejected = 0;
     let changed = false;
     for (const update of updates) {
       const { target } = update;
-      const key = `${target.section}.${target.field}`;
       if (target.kind === 'scalar') {
+        const key = `${target.section}.${target.field}`;
         const existing = sample.scalars.get(key);
         if (existing && existing.timeMs > update.timeMs) continue;
         accepted += 1;
         if (existing && isSame(existing, update)) continue;
         sample.scalars.set(key, { section: target.section, field: target.field, value: update.value, timeMs: update.timeMs });
       } else {
-        let entry = sample.composites.get(key);
+        let entries = sample.composites.get(target.section);
+        if (!entries) {
+          entries = new Map();
+          sample.composites.set(target.section, entries);
+        }
+        let entry = entries.get(target.field);
         if (!entry) {
+          if (entries.size >= COMPOSITE_LIMIT[target.section]) {
+            rejected += 1;
+            continue;
+          }
           entry = { section: target.section, field: target.field, subkeys: new Map() };
-          sample.composites.set(key, entry);
+          entries.set(target.field, entry);
         }
         const existing = entry.subkeys.get(target.subkey);
         if (existing && existing.timeMs > update.timeMs) continue;
@@ -67,7 +94,7 @@ export class ExternalMetricsStore {
       changed = true;
     }
     if (changed) sample.version = ++this.revision;
-    return accepted;
+    return { accepted, rejected };
   }
 
   snapshot(connectionId: string, nowMs: number): InfoSections {
@@ -80,9 +107,11 @@ export class ExternalMetricsStore {
     for (const entry of sample.scalars.values()) {
       if (this.fresh(entry.timeMs, nowMs)) put(entry.section, entry.field, entry.value);
     }
-    for (const entry of sample.composites.values()) {
-      const rendered = this.renderComposite(entry.section, entry.subkeys, nowMs);
-      if (rendered !== null) put(entry.section, entry.field, rendered);
+    for (const entries of sample.composites.values()) {
+      for (const entry of entries.values()) {
+        const rendered = this.renderComposite(entry.section, entry.subkeys, nowMs);
+        if (rendered !== null) put(entry.section, entry.field, rendered);
+      }
     }
     if (sample.serverVersion && Object.keys(out).length > 0) put('server', 'redis_version', sample.serverVersion);
     return out;
@@ -92,9 +121,11 @@ export class ExternalMetricsStore {
     const sample = this.samples.get(connectionId);
     if (!sample) return false;
     for (const entry of sample.scalars.values()) if (this.fresh(entry.timeMs, nowMs)) return true;
-    for (const entry of sample.composites.values()) {
-      const primary = entry.subkeys.get(COMPOSITE_PRIMARY[entry.section]);
-      if (primary && this.fresh(primary.timeMs, nowMs)) return true;
+    for (const entries of sample.composites.values()) {
+      for (const entry of entries.values()) {
+        const primary = entry.subkeys.get(COMPOSITE_PRIMARY[entry.section]);
+        if (primary && this.fresh(primary.timeMs, nowMs)) return true;
+      }
     }
     return false;
   }
@@ -125,6 +156,15 @@ export class ExternalMetricsStore {
 
   private fresh(timeMs: number, nowMs: number): boolean {
     return nowMs - timeMs <= this.staleAfterMs;
+  }
+
+  private pruneStaleComposites(sample: ConnectionSample, nowMs: number): void {
+    for (const entries of sample.composites.values()) {
+      for (const [field, entry] of entries) {
+        const stale = [...entry.subkeys.values()].every((stamped) => !this.fresh(stamped.timeMs, nowMs));
+        if (stale) entries.delete(field);
+      }
+    }
   }
 
   private renderComposite(section: string, subkeys: Map<string, Stamped>, nowMs: number): string | null {

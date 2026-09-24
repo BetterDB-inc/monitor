@@ -94,11 +94,22 @@ describe('OtelMetricsIngestService', () => {
       unsupported_type: 4,
       unsupported_temporality: 2,
       unmapped_metric: 2,
+      cardinality_limit: 0,
     });
     expect(toPartialSuccess(result)).toEqual({
       rejectedDataPoints: 8,
       errorMessage: 'unsupported_type=4 unsupported_temporality=2 unmapped_metric=2',
     });
+  });
+
+  it('drops points for new commands beyond the cardinality cap', () => {
+    const { service, store } = build();
+    const commands = Array.from({ length: 1030 }, (_, i) => gauge('redis.cmd.calls', 1, [str('cmd', `c${i}`)]));
+    const result = service.ingest(resource(identity, [gauge('redis.memory.used', 1), ...commands]), NOW_MS);
+    expect(result.accepted).toBe(1025);
+    expect(result.dropped.cardinality_limit).toBe(6);
+    expect(toPartialSuccess(result)).toEqual({ rejectedDataPoints: 6, errorMessage: 'cardinality_limit=6' });
+    expect(Object.keys(store.snapshot('ext', NOW_MS).commandstats ?? {})).toHaveLength(1024);
   });
 
   it('treats prototype property names as unmapped', () => {

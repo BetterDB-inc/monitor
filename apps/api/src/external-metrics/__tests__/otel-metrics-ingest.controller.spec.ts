@@ -15,6 +15,7 @@ const clean: IngestResult = {
     unsupported_type: 0,
     unsupported_temporality: 0,
     unmapped_metric: 0,
+    cardinality_limit: 0,
   },
 };
 
