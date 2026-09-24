@@ -59,6 +59,17 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  // Every direct cache write restores the settings row, so it also ends any
+  // missing-row episode: bump the generation (so an in-flight refresh can't
+  // clobber the fresh value), swap the cache, and re-arm the missing-row
+  // warning. Centralized so a future direct-write path can't reintroduce the
+  // "row came back, then vanished again, warned nothing" gap.
+  private commitCacheWrite(settings: AppSettings): void {
+    this.cacheGeneration++;
+    this.cachedSettings = settings;
+    this.warnedSettingsRowMissing = false;
+  }
+
   private async refreshCache(): Promise<void> {
     const generation = this.cacheGeneration;
     const dbSettings = await this.storageClient.getSettings();
@@ -173,8 +184,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     // leave consumers of getCachedSettings() reading stale data for up to
     // half a minute — notably InferenceLatencyService, whose SLA evaluation
     // runs on a 60s tick and depends on fresh inferenceSlaConfig.
-    this.cacheGeneration++;
-    this.cachedSettings = updated;
+    this.commitCacheWrite(updated);
 
     return {
       settings: updated,
@@ -200,8 +210,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
       throw new Error('Failed to reset settings');
     }
 
-    this.cacheGeneration++;
-    this.cachedSettings = settings;
+    this.commitCacheWrite(settings);
 
     return {
       settings,
