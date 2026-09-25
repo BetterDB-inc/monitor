@@ -1289,25 +1289,37 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (!info.server) {
       if (!absentAsZero) {
         this.uptimeInSeconds.remove(connLabel);
-        if (state.instanceInfoLabels) {
-          this.instanceInfo.remove(connLabel, ...state.instanceInfoLabels);
-          state.instanceInfoLabels = null;
-        }
+        this.removeInstanceInfo(connLabel, state);
       }
       return;
     }
 
-    const version = info.server.valkey_version || info.server.redis_version || 'unknown';
-    const role = info.replication?.role || 'unknown';
-    const os = info.server.os || 'unknown';
+    this.setInfoGauge(this.uptimeInSeconds, connLabel, info.server.uptime_in_seconds, absentAsZero);
+
+    const rawVersion = info.server.valkey_version || info.server.redis_version;
+    const rawRole = info.replication?.role;
+    const rawOs = info.server.os;
+    if (!rawVersion && !rawRole && !rawOs) {
+      this.removeInstanceInfo(connLabel, state);
+      return;
+    }
+
+    const version = rawVersion || 'unknown';
+    const role = rawRole || 'unknown';
+    const os = rawOs || 'unknown';
     const previous = state.instanceInfoLabels;
     if (previous && (previous[0] !== version || previous[1] !== role || previous[2] !== os)) {
       this.instanceInfo.remove(connLabel, ...previous);
     }
     state.instanceInfoLabels = [version, role, os];
-
-    this.setInfoGauge(this.uptimeInSeconds, connLabel, info.server.uptime_in_seconds, absentAsZero);
     this.instanceInfo.labels(connLabel, version, role, os).set(1);
+  }
+
+  private removeInstanceInfo(connLabel: string, state: ConnectionMetricState): void {
+    if (state.instanceInfoLabels) {
+      this.instanceInfo.remove(connLabel, ...state.instanceInfoLabels);
+      state.instanceInfoLabels = null;
+    }
   }
 
   private readInfoNumber(

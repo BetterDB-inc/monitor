@@ -285,6 +285,40 @@ describe('PrometheusService external connections', () => {
       });
     });
 
+    describe('instance_info', () => {
+      it('is not created when no version, role or os was pushed', async () => {
+        push({ 'server.uptime_in_seconds': '9' });
+
+        await pollTick();
+        const text = await registryText();
+
+        expect(text.match(series('uptime_in_seconds', EXT_LABEL))?.[1]).toBe('9');
+        expect(text).not.toMatch(anySeries('instance_info', EXT_LABEL));
+      });
+
+      it('is created with unknown placeholders once one of them is pushed', async () => {
+        push({ 'server.uptime_in_seconds': '9', 'server.os': 'Linux' });
+
+        await pollTick();
+        const text = await registryText();
+
+        expect(text).toMatch(
+          /^betterdb_instance_info\{connection="cache\.internal:6379",version="unknown",role="unknown",os="Linux"\} 1$/m,
+        );
+      });
+
+      it('is removed when the pushed metadata disappears', async () => {
+        push({ 'server.uptime_in_seconds': '9', 'server.os': 'Linux' });
+        await pollTick();
+
+        store.clear('ext-1');
+        push({ 'server.uptime_in_seconds': '10' });
+        await pollTick();
+
+        expect(await registryText()).not.toMatch(anySeries('instance_info', EXT_LABEL));
+      });
+    });
+
     it('does not fire connection_critical without a pushed maxclients', async () => {
       push({ 'clients.connected_clients': '9999' });
 
