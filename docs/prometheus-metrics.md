@@ -177,7 +177,7 @@ Patterns are fingerprinted before they become label values. Each key segment is 
 ### Worst cases
 
 - **Full slot coverage.** With `METRICS_SLOT_STATS_TOP_N=16384`, one cluster connection exports 65,536 slot series. At the default of 100 it exports at most 400.
-- **Pattern churn.** Fingerprinting does not catch short, non-hex dynamic segments such as `session:ab12x` or `user:alice`. Each distinct key then becomes its own pattern. A workload like this can add up to 128 new slowlog patterns per poll. Because the pattern families are zeroed rather than removed, over the process lifetime they are bounded only by the number of distinct keys that reach the slowlog. The client-name and ACL-username families behave the same way when names are generated per session.
+- **Pattern churn.** Fingerprinting does not catch short, non-hex dynamic segments such as `session:ab12x` or `user:alice`. Each distinct key then becomes its own pattern. A workload like this can add up to 128 new slowlog patterns per poll. On servers with COMMANDLOG (Valkey 8.1+) it can also add up to 128 new large-request and 128 new large-reply patterns per poll. Because the pattern families are zeroed rather than removed, over the process lifetime they are bounded only by the number of distinct keys that reach the slowlog or COMMANDLOG. The client-name and ACL-username families behave the same way when names are generated per session.
 - **Many databases.** A standalone server that uses all 16 databases adds 48 per-db series.
 
 If a worst case applies, use one of these:
