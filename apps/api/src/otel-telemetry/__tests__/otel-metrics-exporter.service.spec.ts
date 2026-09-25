@@ -1,7 +1,9 @@
 import { ConfigService } from '@nestjs/config';
+import { Logger } from '@nestjs/common';
 import { MeterProvider } from '@opentelemetry/sdk-metrics';
 import { OtelMetricsExporterService } from '../otel-metrics-exporter.service';
 import type { PrometheusService } from '../../prometheus/prometheus.service';
+import type { ConnectionRegistry } from '../../connections/connection-registry.service';
 
 function makeConfig(values: Record<string, unknown>): ConfigService {
   return {
@@ -15,6 +17,10 @@ function makePrometheus(snapshot: unknown[] = []): PrometheusService & {
   return {
     collectMetricsAsJson: jest.fn().mockResolvedValue(snapshot),
   } as unknown as PrometheusService & { collectMetricsAsJson: jest.Mock };
+}
+
+function makeRegistry(): ConnectionRegistry {
+  return { list: jest.fn().mockReturnValue([]) } as unknown as ConnectionRegistry;
 }
 
 interface ObservedPoint {
@@ -37,16 +43,28 @@ class FakeMeter {
   callback?: (result: { observe: jest.Mock }) => Promise<void>;
   observedCount = 0;
   readonly options = new Map<string, { description?: string; unit?: string }>();
+  readonly kinds = new Map<string, 'gauge' | 'counter' | 'updown'>();
   private observed: object[] = [];
   private readonly names = new Map<object, string>();
 
   createObservableGauge(name: string, options?: { description?: string; unit?: string }): object {
     this.options.set(name, options ?? {});
+    this.kinds.set(name, 'gauge');
     return this.track(name);
   }
 
   createObservableCounter(name: string, options?: { description?: string; unit?: string }): object {
     this.options.set(name, options ?? {});
+    this.kinds.set(name, 'counter');
+    return this.track(name);
+  }
+
+  createObservableUpDownCounter(
+    name: string,
+    options?: { description?: string; unit?: string },
+  ): object {
+    this.options.set(name, options ?? {});
+    this.kinds.set(name, 'updown');
     return this.track(name);
   }
 
@@ -112,6 +130,7 @@ class FakeMeter {
 async function initWithMeter(
   prom: PrometheusService,
   meter: FakeMeter,
+  env: Record<string, unknown> = {},
 ): Promise<OtelMetricsExporterService> {
   jest
     .spyOn(MeterProvider.prototype, 'getMeter')
@@ -123,8 +142,10 @@ async function initWithMeter(
       OTEL_TELEMETRY_ENABLED: true,
       OTEL_EXPORTER_OTLP_ENDPOINT: 'http://localhost:4318',
       OTEL_METRICS_EXPORT_INTERVAL_MS: 600000,
+      ...env,
     }),
     prom,
+    makeRegistry(),
   );
   await service.onModuleInit();
   return service;
@@ -140,6 +161,7 @@ describe('OtelMetricsExporterService', () => {
     const service = new OtelMetricsExporterService(
       makeConfig({ OTEL_TELEMETRY_ENABLED: true }),
       prom,
+      makeRegistry(),
     );
 
     await service.onModuleInit();
@@ -156,6 +178,7 @@ describe('OtelMetricsExporterService', () => {
         OTEL_EXPORTER_OTLP_ENDPOINT: 'http://localhost:4318',
       }),
       prom,
+      makeRegistry(),
     );
 
     await service.onModuleInit();
@@ -176,6 +199,7 @@ describe('OtelMetricsExporterService', () => {
         OTEL_METRICS_EXPORT_INTERVAL_MS: 600000,
       }),
       prom,
+      makeRegistry(),
     );
 
     await service.onModuleInit();
@@ -324,5 +348,99 @@ describe('OtelMetricsExporterService', () => {
 
     expect(meter.callback).toBeUndefined();
     await service.onModuleDestroy();
+  });
+
+  describe('export mode', () => {
+    const CONN = '10.0.0.1:6379';
+    const snapshot = [
+      {
+        name: 'betterdb_memory_used_bytes',
+        help: 'mem',
+        type: 'gauge',
+        values: [{ value: 1000, labels: { connection: CONN } }],
+      },
+      {
+        name: 'betterdb_connected_clients',
+        help: 'clients',
+        type: 'gauge',
+        values: [{ value: 5, labels: { connection: CONN } }],
+      },
+      {
+        name: 'betterdb_db_keys',
+        help: 'keys',
+        type: 'gauge',
+        values: [{ value: 3, labels: { connection: CONN, db: 'bogus' } }],
+      },
+    ];
+
+    it('observes semconv instruments in semconv mode', async () => {
+      const meter = new FakeMeter();
+      await initWithMeter(makePrometheus(snapshot), meter, {
+        OTEL_METRICS_EXPORT_MODE: 'semconv',
+      });
+
+      expect(meter.kinds.get('valkey.memory.used')).toBe('gauge');
+      expect(meter.kinds.get('valkey.clients.connected')).toBe('updown');
+      expect(meter.options.get('valkey.memory.used')).toEqual({ description: 'mem', unit: 'By' });
+      expect(await meter.collect()).toEqual([
+        { instrument: 'valkey.memory.used', value: 1000, attributes: { connection: CONN } },
+        { instrument: 'valkey.clients.connected', value: 5, attributes: { connection: CONN } },
+      ]);
+    });
+
+    it('accepts the mode case-insensitively with surrounding spaces', async () => {
+      const meter = new FakeMeter();
+      await initWithMeter(makePrometheus(snapshot), meter, {
+        OTEL_METRICS_EXPORT_MODE: ' SemConv ',
+      });
+
+      expect(meter.kinds.has('valkey.memory.used')).toBe(true);
+    });
+
+    it('logs a skipped point once per family', async () => {
+      const debug = jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
+      const meter = new FakeMeter();
+      await initWithMeter(makePrometheus(snapshot), meter, {
+        OTEL_METRICS_EXPORT_MODE: 'semconv',
+      });
+
+      await meter.collect();
+      await meter.collect();
+
+      expect(
+        debug.mock.calls.filter(([message]) => String(message).includes('betterdb_db_keys')),
+      ).toHaveLength(1);
+    });
+
+    it('warns and mirrors on an unknown mode', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const meter = new FakeMeter();
+      await initWithMeter(makePrometheus(snapshot), meter, { OTEL_METRICS_EXPORT_MODE: 'otel' });
+
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('OTEL_METRICS_EXPORT_MODE'));
+      expect(meter.kinds.get('betterdb_memory_used_bytes')).toBe('gauge');
+      expect(meter.kinds.has('valkey.memory.used')).toBe(false);
+    });
+
+    it('warns without mentioning the mirror when semconv finds nothing to export', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const meter = new FakeMeter();
+      const service = await initWithMeter(makePrometheus([]), meter, {
+        OTEL_METRICS_EXPORT_MODE: 'semconv',
+      });
+
+      expect(warn).toHaveBeenCalledWith(
+        'OTel metrics export found no exportable metrics; nothing will be exported',
+      );
+      expect(meter.callback).toBeUndefined();
+      await service.onModuleDestroy();
+    });
+
+    it('mirrors when the mode is empty', async () => {
+      const meter = new FakeMeter();
+      await initWithMeter(makePrometheus(snapshot), meter, { OTEL_METRICS_EXPORT_MODE: '' });
+
+      expect(meter.kinds.has('betterdb_memory_used_bytes')).toBe(true);
+    });
   });
 });

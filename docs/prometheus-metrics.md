@@ -219,6 +219,8 @@ The total with `full` is 55 + 5 × 263 + 2 × 667 = **2,704 series**. Add up to 
 
 The same fleet under `vitals` exports 55 + 5 × 33 + 2 × 39 = **298 series**, and that number does not change with key count, database count, pattern churn or cluster size.
 
+The OTLP export in `semconv` mode (see [OpenTelemetry export modes](opentelemetry.md#export-modes)) carries the same series under different names, split into one resource per node, minus `betterdb_keyspace_keys`, `betterdb_keyspace_keys_expiring` and `betterdb_poll_duration_seconds`. The counts above are therefore upper bounds for it too.
+
 ## Metrics Categories
 
 ### ACL Audit Metrics

@@ -238,6 +238,7 @@ export const envSchema = z
       .transform((v) => v !== 'false'),
     OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().or(z.literal('')).optional(),
     OTEL_METRICS_EXPORT_INTERVAL_MS: z.coerce.number().int().min(1000).default(15000),
+    OTEL_METRICS_EXPORT_MODE: z.string().optional(),
 
     // Cloud mode (set by the hosted deployment; gates per-tenant auth)
     CLOUD_MODE: z.string().optional(),
