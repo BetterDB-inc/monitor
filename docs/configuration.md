@@ -209,7 +209,7 @@ This means:
 
 ### SSH Tunnels
 
-A connection can reach its database through an SSH bastion/jump host (single hop) instead of connecting directly. Configure it per-connection via the web UI ("Connect via SSH tunnel") or the connection API (`sshTunnel` field). Authentication is a password or a private key.
+A connection can reach its database through SSH bastion/jump host(s) instead of connecting directly. Configure it per-connection via the web UI ("Connect via SSH tunnel") or the connection API (`sshTunnel` field, with optional ordered `hops` for chained bastions, outermost first, up to 5). Authentication is a password or a private key (per hop).
 
 | Variable               | Required | Default | Description                                                                                                                                                                                              |
 | ---------------------- | -------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -220,7 +220,7 @@ A connection can reach its database through an SSH bastion/jump host (single hop
 - **Inline (paste key)** — the PEM key content is submitted with the connection. It is encrypted at rest **only when `ENCRYPTION_KEY` is set**; without it, the key (like connection passwords) is stored in plaintext and a warning is logged at startup. Works in any deployment, including managed/cloud.
 - **Server file path** — the key already exists on the monitor server's filesystem. Set `BETTERDB_SSH_KEY_DIR` to the directory holding allowed keys; the connection's `privateKeyPath` is resolved relative to it and rejected if it escapes the directory (no path traversal). Best for self-hosted deployments that mount keys as a secret volume.
 
-**Host key verification**: pin the SSH server's SHA256 host-key fingerprint on the connection (`hostKeyFingerprint`, e.g. `SHA256:...` from `ssh-keyscan -t ed25519 HOST | ssh-keygen -lf -`). When set, the tunnel is refused unless the server presents a matching key, which prevents a man-in-the-middle on the bastion path. When left unset the server key is accepted and a warning is logged.
+**Host key verification**: pin each hop's SHA256 host-key fingerprint (`hostKeyFingerprint`, e.g. `SHA256:...` from `ssh-keyscan -t ed25519 HOST | ssh-keygen -lf -`). When set, the tunnel is refused unless that hop presents a matching key, which prevents a man-in-the-middle on the bastion path. When left unset the server key is trusted on first use and pinned automatically (a warning is logged).
 
 The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through the tunnel. When TLS is enabled, the certificate is still validated against the real database hostname (SNI `servername`), not localhost.
 
@@ -228,7 +228,7 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 
 **Password auth:** password and keyboard-interactive (PAM) bastions are both supported; a password is answered to interactive prompts automatically.
 
-**Known limitation — cluster/Sentinel:** only the configured connection is tunnelled. Cluster/Sentinel monitoring connects to peer nodes at the addresses they advertise, directly rather than through the tunnel, so nodes reachable only via the bastion (e.g. ElastiCache/MemoryDB in a private subnet) will not have per-node views. Use tunnels for single-node/primary monitoring.
+**Cluster/Sentinel via tunnel:** cluster per-node connections are dialled through the same SSH chain by default (`clusterViaTunnel`, true). This keeps per-node views working when nodes advertise private-subnet addresses (e.g. ElastiCache/MemoryDB) only reachable via the bastion(s). Set `clusterViaTunnel: false` for the legacy direct dial. Sentinel topology reads go through the tunnelled primary connection.
 
 ### Audit Trail
 

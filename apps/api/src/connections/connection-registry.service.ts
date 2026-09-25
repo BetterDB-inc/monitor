@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
-import { ConnectionStatus, CreateConnectionRequest, TestConnectionResponse, DatabaseConnectionConfig } from '@betterdb/shared';
+import { ConnectionStatus, CreateConnectionRequest, TestConnectionResponse, DatabaseConnectionConfig, SSH_MAX_HOPS } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { UnifiedDatabaseAdapter } from '../database/adapters/unified.adapter';
@@ -299,11 +299,37 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   ): DatabaseConnectionConfig['sshTunnel'] {
     if (!tunnel) return tunnel;
     const { secretsEncrypted: _ignored, ...rest } = tunnel;
-    // Normalise a blank/whitespace-only fingerprint to undefined so the pinned
-    // status reported by list() matches the runtime behaviour (the tunnel
-    // service trims it and skips verification when empty).
-    const hostKeyFingerprint = rest.hostKeyFingerprint?.trim() || undefined;
-    return { ...rest, hostKeyFingerprint, secretsEncrypted: false };
+    const normalisePin = (v: unknown): string | undefined =>
+      typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
+    if (Array.isArray(rest.hops) && rest.hops.length > SSH_MAX_HOPS) {
+      throw new Error(`Too many SSH hops (${rest.hops.length}); at most ${SSH_MAX_HOPS} are supported`);
+    }
+    const hops = Array.isArray(rest.hops)
+      ? rest.hops.map((h) => ({ ...h, hostKeyFingerprint: normalisePin(h.hostKeyFingerprint) }))
+      : undefined;
+    const sanitised = {
+      ...rest,
+      hostKeyFingerprint: normalisePin(rest.hostKeyFingerprint),
+      hops,
+      secretsEncrypted: false,
+    };
+    // Mirror hops[0] onto the legacy top-level fields for older readers.
+    if (hops && hops.length > 0) {
+      const [first] = hops;
+      sanitised.host = first.host;
+      sanitised.port = first.port;
+      sanitised.username = first.username;
+      sanitised.authMethod = first.authMethod;
+      sanitised.password = first.password;
+      sanitised.keySource = first.keySource;
+      sanitised.privateKey = first.privateKey;
+      sanitised.privateKeyPath = first.privateKeyPath;
+      sanitised.passphrase = first.passphrase;
+      if (!sanitised.hostKeyFingerprint) {
+        sanitised.hostKeyFingerprint = first.hostKeyFingerprint;
+      }
+    }
+    return sanitised;
   }
 
   /**
@@ -313,16 +339,33 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
    * fingerprint was captured. `hostKeyFingerprint` is not a secret.
    */
   private captureLearnedHostKey(config: DatabaseConnectionConfig, adapter: DatabasePort): boolean {
-    if (!config.sshTunnel?.enabled || config.sshTunnel.hostKeyFingerprint) {
+    if (!config.sshTunnel?.enabled) {
       return false;
     }
-    const fingerprint = adapter.getObservedHostKeyFingerprint?.();
-    if (!fingerprint) {
-      return false;
+    const observedList = adapter.getObservedHostKeyFingerprints?.();
+    const fallback = adapter.getObservedHostKeyFingerprint?.();
+    const observed: (string | undefined)[] =
+      observedList && observedList.length > 0 ? observedList : [fallback];
+    let captured = false;
+    const tunnel = { ...config.sshTunnel };
+    if (tunnel.hops && tunnel.hops.length > 0) {
+      tunnel.hops = tunnel.hops.map((hop, i) => {
+        if (hop.hostKeyFingerprint || !observed[i]) return hop;
+        captured = true;
+        return { ...hop, hostKeyFingerprint: observed[i] };
+      });
+      if (!tunnel.hostKeyFingerprint && tunnel.hops[0]?.hostKeyFingerprint) {
+        tunnel.hostKeyFingerprint = tunnel.hops[0].hostKeyFingerprint;
+      }
+    } else if (!tunnel.hostKeyFingerprint && observed[0]) {
+      tunnel.hostKeyFingerprint = observed[0];
+      captured = true;
     }
-    config.sshTunnel = { ...config.sshTunnel, hostKeyFingerprint: fingerprint };
-    this.logger.log(`Pinned SSH host key for ${config.name} on first use (${fingerprint})`);
-    return true;
+    if (captured) {
+      config.sshTunnel = tunnel;
+      this.logger.log(`Pinned SSH host key for ${config.name} on first use (${observed[0]})`);
+    }
+    return captured;
   }
 
   /**
@@ -335,11 +378,20 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     if (!tunnel || !this.encryption || tunnel.secretsEncrypted) {
       return tunnel;
     }
+    const encryption = this.encryption;
+    const encrypt = (v: string | undefined): string | undefined =>
+      v ? encryption.encrypt(v) : v;
     return {
       ...tunnel,
-      password: tunnel.password ? this.encryption.encrypt(tunnel.password) : tunnel.password,
-      privateKey: tunnel.privateKey ? this.encryption.encrypt(tunnel.privateKey) : tunnel.privateKey,
-      passphrase: tunnel.passphrase ? this.encryption.encrypt(tunnel.passphrase) : tunnel.passphrase,
+      password: encrypt(tunnel.password),
+      privateKey: encrypt(tunnel.privateKey),
+      passphrase: encrypt(tunnel.passphrase),
+      hops: tunnel.hops?.map((h) => ({
+        ...h,
+        password: encrypt(h.password),
+        privateKey: encrypt(h.privateKey),
+        passphrase: encrypt(h.passphrase),
+      })),
       secretsEncrypted: true,
     };
   }
@@ -363,15 +415,30 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         password: undefined,
         privateKey: undefined,
         passphrase: undefined,
+        hops: tunnel.hops?.map((h) => ({
+          ...h,
+          password: undefined,
+          privateKey: undefined,
+          passphrase: undefined,
+        })),
         secretsEncrypted: false,
       };
     }
     try {
+      const encryption = this.encryption;
+      const decrypt = (v: string | undefined): string | undefined =>
+        v ? encryption.decrypt(v) : v;
       return {
         ...tunnel,
-        password: tunnel.password ? this.encryption.decrypt(tunnel.password) : tunnel.password,
-        privateKey: tunnel.privateKey ? this.encryption.decrypt(tunnel.privateKey) : tunnel.privateKey,
-        passphrase: tunnel.passphrase ? this.encryption.decrypt(tunnel.passphrase) : tunnel.passphrase,
+        password: decrypt(tunnel.password),
+        privateKey: decrypt(tunnel.privateKey),
+        passphrase: decrypt(tunnel.passphrase),
+        hops: tunnel.hops?.map((h) => ({
+          ...h,
+          password: decrypt(h.password),
+          privateKey: decrypt(h.privateKey),
+          passphrase: decrypt(h.passphrase),
+        })),
         secretsEncrypted: false,
       };
     } catch (error) {
@@ -383,6 +450,12 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         password: undefined,
         privateKey: undefined,
         passphrase: undefined,
+        hops: tunnel.hops?.map((h) => ({
+          ...h,
+          password: undefined,
+          privateKey: undefined,
+          passphrase: undefined,
+        })),
         secretsEncrypted: false,
       };
     }
@@ -712,6 +785,16 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
               authMethod: config.sshTunnel.authMethod,
               keySource: config.sshTunnel.keySource,
               hostKeyPinned: !!config.sshTunnel.hostKeyFingerprint,
+              hopCount: config.sshTunnel.hops?.length ?? 1,
+              hops: config.sshTunnel.hops?.map((h) => ({
+                host: h.host,
+                port: h.port,
+                username: h.username,
+                authMethod: h.authMethod,
+                keySource: h.keySource,
+                hostKeyPinned: !!h.hostKeyFingerprint,
+              })),
+              clusterViaTunnel: config.sshTunnel.clusterViaTunnel ?? true,
             }
           : undefined,
         isDefault: config.isDefault,

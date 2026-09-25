@@ -2,6 +2,13 @@ import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { ClusterNode } from '../common/types/metrics.types';
+import {
+  CLUSTER_CONNECTION_TIMEOUT_MS,
+  CLUSTER_DISCOVERY_CACHE_TTL_MS,
+  CLUSTER_HEALTH_CHECK_INTERVAL_MS,
+  CLUSTER_HEALTH_CHECK_TIMEOUT_MS,
+  CLUSTER_IDLE_TIMEOUT_MS,
+} from '../common/constants/cluster.constants';
 
 export interface DiscoveredNode {
   id: string;
@@ -18,6 +25,19 @@ export interface NodeConnection {
   client: Valkey;
   lastHealthCheck: number;
   healthy: boolean;
+  /** Registry connection id this node belongs to (for SSH forward eviction). */
+  connectionId?: string;
+  /** Advertised remote endpoint the SSH forward was opened for. */
+  remoteHost?: string;
+  remotePort?: number;
+}
+
+/** Parse an advertised `host:port[@busport]` endpoint. */
+function parseAdvertisedEndpoint(address: string): { host: string; port: number } | null {
+  const [host, portStr] = address.split('@')[0].split(':');
+  const port = parseInt(portStr, 10);
+  if (!host || isNaN(port)) return null;
+  return { host, port };
 }
 
 export interface NodeHealth {
@@ -42,11 +62,11 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   private discoveryCacheByConnection: Map<string, DiscoveryCache> = new Map();
   private loggedConnectionErrors: Set<string> = new Set();
   private loggedGetConnectionErrors: Set<string> = new Set();
-  private readonly MAX_LOGGED_ERRORS = 1000; // Prevent unbounded growth
-  private readonly DISCOVERY_CACHE_TTL = 30000; // 30 seconds
-  private readonly CONNECTION_TIMEOUT = 5000; // 5 seconds
-  private readonly HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
-  private readonly MAX_CONNECTIONS = 100; // Maximum number of concurrent connections
+  private readonly MAX_LOGGED_ERRORS = 1000;
+  private readonly DISCOVERY_CACHE_TTL = CLUSTER_DISCOVERY_CACHE_TTL_MS;
+  private readonly CONNECTION_TIMEOUT = CLUSTER_CONNECTION_TIMEOUT_MS;
+  private readonly HEALTH_CHECK_INTERVAL = CLUSTER_HEALTH_CHECK_INTERVAL_MS;
+  private readonly MAX_CONNECTIONS = 100;
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
@@ -158,6 +178,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
           if (oldConnection) {
             await oldConnection.client.quit().catch(() => {/* ignore */});
             this.discoveredNodes.delete(oldestNodeId);
+            this.releaseNodeForward(oldConnection);
           }
         }
       }
@@ -184,9 +205,27 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     const username = primaryClient.options.username || '';
     const password = primaryClient.options.password || '';
 
+    let dialHost = host;
+    let dialPort = port;
+    try {
+      const tunnelled = await dbClient.dialNodeThroughTunnel?.(host, port);
+      if (tunnelled) {
+        dialHost = tunnelled.host;
+        dialPort = tunnelled.port;
+        if (dialHost !== host || dialPort !== port) {
+          this.logger.log(`Dialling cluster node ${nodeId} at ${host}:${port} via SSH tunnel (${dialHost}:${dialPort})`);
+        }
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Cannot open SSH node forward to ${host}:${port} for node ${nodeId.substring(0, 12)}: ${error instanceof Error ? error.message : error}`,
+      );
+      throw error;
+    }
+
     const client = new Valkey({
-      host,
-      port,
+      host: dialHost,
+      port: dialPort,
       username,
       password,
       lazyConnect: true,
@@ -225,6 +264,9 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         client,
         lastHealthCheck: Date.now(),
         healthy: true,
+        connectionId,
+        remoteHost: host,
+        remotePort: port,
       };
 
       // Quit any stale client we're about to replace so the overwrite never
@@ -243,13 +285,11 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
       return client;
     } catch (error) {
-      // Only log each unique connection error once to avoid spam
       const errorKey = `connect-${nodeId}`;
       if (!this.loggedGetConnectionErrors.has(errorKey)) {
         this.logger.debug(
           `Failed to connect to node ${nodeId} at ${host}:${port}: ${error instanceof Error ? error.message : error}`,
         );
-        // Prevent unbounded growth
         if (this.loggedGetConnectionErrors.size >= this.MAX_LOGGED_ERRORS) {
           this.loggedGetConnectionErrors.clear();
         }
@@ -257,6 +297,16 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       }
 
       await client.quit().catch(() => {});
+
+      const didDialViaTunnel = dialHost !== host || dialPort !== port;
+      if (didDialViaTunnel) {
+        try {
+          (dbClient as unknown as { releaseNodeThroughTunnel?: (h: string, p: number) => void }).releaseNodeThroughTunnel?.(
+            host,
+            port,
+          );
+        } catch {}
+      }
 
       throw error;
     }
@@ -289,7 +339,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       const result = await Promise.race([
         client.ping(),
         new Promise<string>((_, reject) =>
-          setTimeout(() => reject(new Error('Health check timeout')), 2000),
+          setTimeout(() => reject(new Error('Health check timeout')), CLUSTER_HEALTH_CHECK_TIMEOUT_MS),
         ),
       ]);
 
@@ -328,6 +378,22 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     return Array.from(this.discoveredNodes.values());
   }
 
+  private releaseNodeForward(connection: NodeConnection): void {
+    const remote = connection.remoteHost !== undefined && connection.remotePort !== undefined
+      ? { host: connection.remoteHost, port: connection.remotePort }
+      : connection.node?.address
+        ? parseAdvertisedEndpoint(connection.node.address)
+        : null;
+    if (!remote) return;
+    try {
+      const dbClient = this.connectionRegistry.get(connection.connectionId);
+      (dbClient as unknown as { releaseNodeThroughTunnel?: (h: string, p: number) => void })
+        .releaseNodeThroughTunnel?.(remote.host, remote.port);
+    } catch {
+      // Registry lookup can throw for a removed connection; eviction is best-effort.
+    }
+  }
+
   async disconnectAll(): Promise<void> {
     this.logger.log(`Disconnecting from ${this.discoveredNodes.size} nodes`);
 
@@ -344,12 +410,15 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     }
 
     await Promise.allSettled(disconnectPromises);
+    for (const connection of this.discoveredNodes.values()) {
+      this.releaseNodeForward(connection);
+    }
     this.discoveredNodes.clear();
     this.discoveryCacheByConnection.clear();
     this.logger.log('All node connections closed');
   }
 
-  async cleanupIdleConnections(maxIdleTime: number = 60000): Promise<void> {
+  async cleanupIdleConnections(maxIdleTime: number = CLUSTER_IDLE_TIMEOUT_MS): Promise<void> {
     const now = Date.now();
     const toRemove: string[] = [];
 
@@ -367,6 +436,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         if (connection) {
           await connection.client.quit().catch(() => {});
           this.discoveredNodes.delete(nodeId);
+          this.releaseNodeForward(connection);
         }
       }
     }
