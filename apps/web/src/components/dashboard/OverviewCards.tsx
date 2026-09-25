@@ -38,8 +38,11 @@ export function OverviewCards({ info }: Props) {
     },
     {
       title: 'Uptime',
-      value: info?.server ? `${info.server.uptime_in_days}d` : '-',
-      subtitle: info?.server ? `${Math.floor(parseInt(info.server.uptime_in_seconds, 10) / 3600) % 24}h` : '',
+      value: info?.server?.uptime_in_days != null ? `${info.server.uptime_in_days}d` : '-',
+      subtitle:
+        info?.server?.uptime_in_seconds != null
+          ? `${Math.floor(parseInt(info.server.uptime_in_seconds, 10) / 3600) % 24}h`
+          : '',
     },
   ];
 

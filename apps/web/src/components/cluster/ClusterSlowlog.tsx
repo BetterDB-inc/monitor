@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
+import { EmptyState } from '../ui/empty-state';
 import { Clock, Server, AlertCircle } from 'lucide-react';
 import { useClusterSlowlog } from '../../hooks/useClusterSlowlog';
 
@@ -111,9 +112,7 @@ export function ClusterSlowlog() {
         )}
 
         {filteredAndSortedEntries.length === 0 ? (
-          <div className="text-center text-muted-foreground py-8">
-            No slow queries found
-          </div>
+          <EmptyState variant="inline" title="No slow queries found" />
         ) : (
           <div className="space-y-2">
             <div className="grid grid-cols-12 gap-2 text-xs font-medium text-muted-foreground pb-2 border-b">

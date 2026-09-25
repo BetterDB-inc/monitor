@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import type { StoredCacheProposal } from '@betterdb/shared';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -9,6 +9,9 @@ import {
   useEditAndApproveProposal,
   useRejectProposal,
 } from '../../../hooks/useCacheProposals';
+import { useConnection } from '../../../hooks/useConnection';
+import { isExternalConnection } from '../../../utils/connectionType';
+import { EXTERNAL_UNSUPPORTED_ACTION_MESSAGE } from '../../../api/client';
 import { formatExpiresIn, formatTimeAgo } from '../../../lib/formatters';
 import { SemanticThresholdBody } from './card-bodies/SemanticThresholdBody';
 import { AgentTtlBody } from './card-bodies/AgentTtlBody';
@@ -71,9 +74,19 @@ export function PendingCard({ proposal }: Props) {
   const approve = useApproveProposal();
   const reject = useRejectProposal();
   const editAndApprove = useEditAndApproveProposal();
+  const { currentConnection } = useConnection();
+  const isExternal = isExternalConnection(currentConnection);
 
   const isMutating = approve.isPending || reject.isPending || editAndApprove.isPending;
   const editHidden = isInvalidate(proposal);
+  const externalNoteId = useId();
+  const applyDisabledProps = isExternal
+    ? {
+        'data-tooltip-id': 'license-tooltip',
+        'data-tooltip-content': EXTERNAL_UNSUPPORTED_ACTION_MESSAGE,
+        'aria-describedby': externalNoteId,
+      }
+    : {};
 
   const onApprove = async () => {
     setActionError(null);
@@ -178,6 +191,12 @@ export function PendingCard({ proposal }: Props) {
           </p>
         )}
 
+        {isExternal && (
+          <p id={externalNoteId} className="text-xs text-muted-foreground">
+            {EXTERNAL_UNSUPPORTED_ACTION_MESSAGE}
+          </p>
+        )}
+
         <div className="flex items-center justify-between pt-1">
           <span className="text-xs text-muted-foreground">
             {formatExpiresIn(proposal.expires_at)}
@@ -217,12 +236,18 @@ export function PendingCard({ proposal }: Props) {
                     variant="outline"
                     size="sm"
                     onClick={() => setMode((m) => (m === 'editing' ? 'idle' : 'editing'))}
-                    disabled={isMutating}
+                    disabled={isMutating || isExternal}
+                    {...applyDisabledProps}
                   >
                     {mode === 'editing' ? 'Cancel edit' : 'Edit'}
                   </Button>
                 )}
-                <Button size="sm" onClick={onApprove} disabled={isMutating}>
+                <Button
+                  size="sm"
+                  onClick={onApprove}
+                  disabled={isMutating || isExternal}
+                  {...applyDisabledProps}
+                >
                   {approve.isPending || editAndApprove.isPending ? 'Applying…' : 'Approve'}
                 </Button>
               </>

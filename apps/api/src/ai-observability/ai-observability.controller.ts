@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, HttpException, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Param, Query, HttpException, HttpStatus, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiHeader } from '@nestjs/swagger';
 import type {
   StoredAiCacheSample,
@@ -7,11 +7,13 @@ import type {
   SpanCorrelation,
 } from '@betterdb/shared';
 import { ConnectionId } from '../common/decorators';
+import { LiveConnectionGuard, UseHeaderConnectionId } from '../external-metrics/live-connection.guard';
 import { AiObservabilityService, AiInstanceWithSample } from './ai-observability.service';
 import { TraceCorrelationService } from './trace-correlation.service';
 
 @ApiTags('ai-observability')
 @Controller('ai')
+@UseHeaderConnectionId()
 export class AiObservabilityController {
   constructor(
     private readonly service: AiObservabilityService,
@@ -19,6 +21,7 @@ export class AiObservabilityController {
   ) {}
 
   @Get('instances')
+  @UseGuards(LiveConnectionGuard)
   @ApiOperation({
     summary: 'List discovered AI cache/memory instances with their latest sample',
   })
@@ -92,6 +95,7 @@ export class AiObservabilityController {
   }
 
   @Get('traces/:traceId/correlate')
+  @UseGuards(LiveConnectionGuard)
   @ApiOperation({
     summary: 'Correlate a trace\'s BetterDB spans with live Valkey state (key TTL, threshold, index)',
   })

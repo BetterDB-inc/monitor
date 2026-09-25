@@ -16,6 +16,7 @@ export interface ConnectionContext {
   host: string;
   /** Port of the database */
   port: number;
+  connectionType?: 'agent' | 'direct' | 'external';
 }
 
 /**
@@ -96,6 +97,16 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
     return false;
   }
 
+  private lastPolledVersion = new Map<string, number>();
+
+  protected supportsExternalConnections(): boolean {
+    return false;
+  }
+
+  protected skipUnchangedSamples(): boolean {
+    return true;
+  }
+
   /**
    * Start the multi-connection polling loop.
    * Call this in onModuleInit().
@@ -168,24 +179,36 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
         if (!currentConnectionIds.has(knownId)) {
           this.logger.log(`Connection ${knownId} removed, cleaning up state`);
           this.onConnectionRemoved(knownId);
+          this.lastPolledVersion.delete(knownId);
         }
       }
       this.knownConnections = currentConnectionIds;
 
       // Poll instances in parallel (by default only connected ones, unless shouldPollDisconnected)
       const pollDisconnected = this.shouldPollDisconnected();
+      const pollExternal = this.supportsExternalConnections();
+      const skipUnchanged = this.skipUnchangedSamples();
       const pollPromises = connections
         .filter((conn) => conn.isConnected || pollDisconnected)
+        .filter((conn) => conn.connectionType !== 'external' || pollExternal)
         .map(async (conn) => {
           try {
             const client = this.connectionRegistry.get(conn.id);
+            const version = client.sampleVersion?.() ?? null;
+            if (skipUnchanged && version !== null && this.lastPolledVersion.get(conn.id) === version) {
+              return;
+            }
             await this.pollConnection({
               connectionId: conn.id,
               connectionName: conn.name,
               client,
               host: conn.host,
               port: conn.port,
+              connectionType: conn.connectionType,
             });
+            if (version !== null) {
+              this.lastPolledVersion.set(conn.id, version);
+            }
           } catch (error) {
             this.logger.warn(
               `Poll failed for ${conn.name} (${conn.host}:${conn.port}): ${

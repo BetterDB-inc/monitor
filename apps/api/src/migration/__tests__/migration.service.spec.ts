@@ -1,5 +1,5 @@
 import { MigrationService } from '../migration.service';
-import { NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 
 // Mock dependencies to prevent actual analysis from running
 jest.mock('../analysis/type-sampler', () => ({
@@ -156,5 +156,37 @@ describe('MigrationService', () => {
       // At least the oldest should have been evicted
       expect(service.getJob(ids[0])).toBeUndefined();
     });
+  });
+});
+
+describe('MigrationService with external connections', () => {
+  const EXTERNAL_MESSAGE =
+    'One or more selected instances only pushes OTLP metrics. Migration needs a live connection to both instances.';
+
+  it.each([
+    ['source', 'conn-1'],
+    ['target', 'conn-2'],
+  ])('rejects an external %s before creating an analysis job', async (_side, externalId) => {
+    const registry = createMockRegistry();
+    registry.getConfig.mockImplementation((id: string) => ({
+      id,
+      name: id,
+      host: '127.0.0.1',
+      port: 6379,
+      createdAt: Date.now(),
+      connectionType: id === externalId ? 'external' : 'direct',
+    }));
+    const service = new MigrationService(registry as any);
+    const runAnalysis = jest.spyOn(service as unknown as { runAnalysis: () => Promise<void> }, 'runAnalysis');
+
+    const error = await service
+      .startAnalysis({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2' })
+      .catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect((error as Error).message).toBe(EXTERNAL_MESSAGE);
+    expect(runAnalysis).not.toHaveBeenCalled();
+    expect(registry.mockAdapter.getClient).not.toHaveBeenCalled();
+    expect((service as unknown as { jobs: Map<string, unknown> }).jobs.size).toBe(0);
   });
 });

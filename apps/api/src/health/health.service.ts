@@ -59,8 +59,18 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
     return true;
   }
 
+  protected supportsExternalConnections(): boolean {
+    return true;
+  }
+
+  protected skipUnchangedSamples(): boolean {
+    return false;
+  }
+
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
-    // Perform health check for this connection - triggers webhooks on state change
+    if (ctx.connectionType === 'external' && (ctx.client.sampleVersion?.() ?? null) === null) {
+      return;
+    }
     await this.getHealth(ctx.connectionId);
   }
 
@@ -127,6 +137,20 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
 
     try {
       const client = this.connectionRegistry.get(targetId);
+      if (config.connectionType === 'external' && (client.sampleVersion?.() ?? null) === null) {
+        return {
+          status: 'waiting',
+          database: {
+            type: 'unknown',
+            version: null,
+            host: config.host,
+            port: config.port,
+          },
+          capabilities: null,
+          runtimeCapabilities: null,
+          message: 'Waiting for first OTLP sample',
+        };
+      }
       const isConnected = client.isConnected();
 
       if (!isConnected) {
@@ -230,11 +254,14 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
       });
     }
 
-    const allConnected = results.every((r) => r.status === 'connected');
-    const anyConnected = results.some((r) => r.status === 'connected');
+    const settled = results.filter((r) => r.status !== 'waiting');
+    const allConnected = settled.every((r) => r.status === 'connected');
+    const anyConnected = settled.some((r) => r.status === 'connected');
+    const overallStatus: AllConnectionsHealthResponse['overallStatus'] =
+      settled.length === 0 ? 'waiting' : allConnected ? 'healthy' : anyConnected ? 'degraded' : 'unhealthy';
 
     return {
-      overallStatus: allConnected ? 'healthy' : anyConnected ? 'degraded' : 'unhealthy',
+      overallStatus,
       connections: results,
       timestamp: Date.now(),
     };

@@ -1,5 +1,6 @@
 import { useState, useMemo, Fragment } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
+import { EmptyState } from '../ui/empty-state';
 import { Badge } from '../ui/badge';
 import {
   Table,
@@ -306,9 +307,7 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
         </Table>
 
         {sortedNodes.length === 0 && (
-          <div className="text-center py-8 text-muted-foreground">
-            No nodes found in the selected filter
-          </div>
+          <EmptyState variant="inline" title="No nodes found in the selected filter" />
         )}
       </CardContent>
     </Card>

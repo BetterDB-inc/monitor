@@ -1,6 +1,7 @@
 import { Webhook } from '../../types/webhooks';
 import { Badge } from '../ui/badge';
 import { Card } from '../ui/card';
+import { EmptyState } from '../ui/empty-state';
 
 interface WebhookListProps {
   webhooks: Webhook[];
@@ -13,12 +14,10 @@ interface WebhookListProps {
 export function WebhookList({ webhooks, onEdit, onDelete, onTest, onViewDeliveries }: WebhookListProps) {
   if (webhooks.length === 0) {
     return (
-      <Card className="p-8 text-center">
-        <div className="text-muted-foreground">
-          <p className="text-lg font-medium mb-2">No webhooks configured</p>
-          <p className="text-sm">Create your first webhook to get started with real-time notifications.</p>
-        </div>
-      </Card>
+      <EmptyState
+        title="No webhooks configured"
+        description="Create your first webhook to get started with real-time notifications."
+      />
     );
   }
 

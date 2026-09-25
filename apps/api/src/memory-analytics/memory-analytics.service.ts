@@ -37,11 +37,19 @@ export class MemoryAnalyticsService extends MultiConnectionPoller implements OnM
     this.prevCpu.delete(connectionId);
   }
 
+  protected supportsExternalConnections(): boolean {
+    return true;
+  }
+
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     try {
       const info = await ctx.client.getInfoParsed();
       const mem = info.memory;
       const now = Date.now();
+
+      if (ctx.connectionType === 'external' && mem?.used_memory === undefined) {
+        return;
+      }
 
       // Compute CPU delta rate
       let cpuSys = 0;

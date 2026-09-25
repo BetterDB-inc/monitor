@@ -1,6 +1,7 @@
 import { X } from 'lucide-react';
 import type { Connection } from '../../../hooks/useConnection';
 import { Button } from '../../ui/button';
+import { connectionTypeSuffix } from '../../../utils/connectionType';
 import { EngineBadge } from './EngineBadge';
 
 export type EndpointRole = 'source' | 'target';
@@ -105,7 +106,7 @@ export function EndpointPanel({
 
       <span className="font-mono text-xs text-muted-foreground">
         {connection.host}:{connection.port}
-        {connection.connectionType === 'agent' ? ' · via agent' : ' · direct'}
+        {connectionTypeSuffix(connection)}
       </span>
 
       <Button variant="outline" size="sm" className="mt-auto self-start" onClick={onChoose}>

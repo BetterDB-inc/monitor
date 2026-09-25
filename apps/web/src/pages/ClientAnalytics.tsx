@@ -6,6 +6,7 @@ import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { useCapabilities } from '../hooks/useCapabilities';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { EmptyState } from '../components/ui/empty-state';
 import { UnavailableOverlay } from '../components/UnavailableOverlay';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
@@ -224,9 +225,12 @@ export function ClientAnalytics() {
               </AreaChart>
             </ResponsiveContainer>
           ) : (
-            <div className="text-center py-12 text-muted-foreground">
-              No time series data available. Data will populate as client snapshots are captured.
-            </div>
+            <EmptyState
+              variant="inline"
+              className="py-12"
+              title="No time series data available"
+              description="Data will populate as client snapshots are captured."
+            />
           )}
         </CardContent>
       </Card>
@@ -276,9 +280,7 @@ export function ClientAnalytics() {
               </table>
             </div>
           ) : (
-            <div className="text-center py-8 text-muted-foreground">
-              No client data available yet.
-            </div>
+            <EmptyState variant="inline" title="No client data available yet" />
           )}
         </CardContent>
       </Card>
@@ -330,9 +332,7 @@ export function ClientAnalytics() {
               </table>
             </div>
           ) : (
-            <div className="text-center py-8 text-muted-foreground">
-              No connection data available yet.
-            </div>
+            <EmptyState variant="inline" title="No connection data available yet" />
           )}
         </CardContent>
       </Card>
@@ -399,9 +399,7 @@ export function ClientAnalytics() {
                 </table>
               </div>
             ) : (
-              <div className="text-center py-8 text-muted-foreground">
-                No connection history found for this filter.
-              </div>
+              <EmptyState variant="inline" title="No connection history found for this filter" />
             )}
           </CardContent>
         </Card>

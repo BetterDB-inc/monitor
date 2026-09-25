@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo, Fragment } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { EmptyState } from '../components/ui/empty-state';
 import { Badge } from '../components/ui/badge';
 import { Skeleton } from '../components/ui/skeleton';
 import { InsightCallout } from '../components/InsightCallout';
@@ -59,18 +60,11 @@ export function VectorSearch() {
     return (
       <div className="space-y-6">
         <PageHeader />
-        <Card>
-          <CardContent className="pt-6">
-            <div className="flex flex-col items-center justify-center py-12 text-center">
-              <Search className="w-16 h-16 text-muted-foreground mb-4 opacity-50" />
-              <h3 className="text-xl font-semibold mb-2">Search Module Not Available</h3>
-              <p className="text-muted-foreground max-w-md">
-                Vector search features require the Search module to be loaded.
-                This instance does not have the Search module enabled.
-              </p>
-            </div>
-          </CardContent>
-        </Card>
+        <EmptyState
+          icon={Search}
+          title="Search Module Not Available"
+          description="Vector search features require the Search module to be loaded. This instance does not have the Search module enabled."
+        />
       </div>
     );
   }
@@ -112,17 +106,11 @@ export function VectorSearch() {
       <PageHeader />
 
       {indexes.length === 0 ? (
-        <Card>
-          <CardContent className="pt-6">
-            <div className="flex flex-col items-center justify-center py-12 text-center">
-              <Search className="w-16 h-16 text-muted-foreground mb-4 opacity-50" />
-              <h3 className="text-xl font-semibold mb-2">No Vector Indexes Found</h3>
-              <p className="text-muted-foreground max-w-md">
-                No vector indexes found. Create an index with FT.CREATE to get started.
-              </p>
-            </div>
-          </CardContent>
-        </Card>
+        <EmptyState
+          icon={Search}
+          title="No Vector Indexes Found"
+          description="Create an index with FT.CREATE to get started."
+        />
       ) : (
         <div className="space-y-4">
           {/* Multi-index overview when >1 index */}

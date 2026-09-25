@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
-import { ConnectionStatus, CreateConnectionRequest, TestConnectionResponse, DatabaseConnectionConfig } from '@betterdb/shared';
+import { ConnectionStatus, CreateConnectionRequest, TestConnectionResponse, DatabaseConnectionConfig, DatabaseConnectionType } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { UnifiedDatabaseAdapter } from '../database/adapters/unified.adapter';
@@ -9,9 +9,15 @@ import { SshTunnelService } from '../database/ssh/ssh-tunnel.service';
 import { EnvelopeEncryptionService, getEncryptionService } from '../common/utils/encryption';
 import { RuntimeCapabilityTracker } from './runtime-capability-tracker.service';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
+import { ExternalMetricsStore } from '../external-metrics/external-metrics-store';
+import { ExternalMetricsAdapter } from '../external-metrics/external-metrics.adapter';
 
 export { ENV_DEFAULT_ID } from './connection.constants';
 import { ENV_DEFAULT_ID } from './connection.constants';
+
+function sameHost(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
 
 @Injectable()
 export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
@@ -27,6 +33,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     private readonly configService: ConfigService,
     private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
     private readonly sshTunnelService: SshTunnelService,
+    private readonly externalMetricsStore: ExternalMetricsStore,
     @Optional() private readonly usageTelemetry?: UsageTelemetryService,
   ) {
     this.encryption = getEncryptionService();
@@ -196,6 +203,15 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return authErrorPatterns.some(pattern => pattern.test(errorMsg));
   }
 
+  private assertValidExternalRequest(request: CreateConnectionRequest): void {
+    if (request.password || request.username || request.tls || request.sshTunnel?.enabled) {
+      throw new Error('OTLP push connections take no credentials, TLS or SSH tunnel');
+    }
+    if (this.findIdByHostPort(request.host, request.port)) {
+      throw new Error(`A connection for ${request.host}:${request.port} already exists`);
+    }
+  }
+
   private async createEnvDefaultConnection(): Promise<void> {
     const dbConfig = this.configService.get('database');
     if (!dbConfig) {
@@ -256,6 +272,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   createAdapter(config: DatabaseConnectionConfig, connectionName?: string): DatabasePort {
+    if (config.connectionType === 'external') {
+      return new ExternalMetricsAdapter(config.id, this.externalMetricsStore);
+    }
     return new UnifiedDatabaseAdapter({
       host: config.host,
       port: config.port,
@@ -469,6 +488,12 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   async addConnection(request: CreateConnectionRequest): Promise<string> {
+    if (request.connectionType === 'external') {
+      this.assertValidExternalRequest(request);
+    } else if (this.findByHostPort(request.host, request.port)?.connectionType === 'external') {
+      throw new Error(`${request.host}:${request.port} is already registered as an OTLP push connection`);
+    }
+
     const id = randomUUID();
     const now = Date.now();
 
@@ -482,6 +507,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       dbIndex: request.dbIndex,
       tls: request.tls,
       sshTunnel: this.sanitizeSshTunnelInput(request.sshTunnel),
+      connectionType: request.connectionType,
       isDefault: false, // Will be set via setDefault() if requested
       createdAt: now,
       updatedAt: now,
@@ -489,7 +515,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
     // Create and connect adapter BEFORE persisting to storage
     // This ensures we don't end up with config in storage but no working connection
-    const connectionType = config.host === 'agent' ? 'agent' : 'direct';
+    const connectionType = config.host === 'agent' ? 'agent' : (config.connectionType ?? 'direct');
     const adapter = this.createAdapter(config);
     try {
       await adapter.connect();
@@ -564,11 +590,12 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     this.connections.delete(id);
     this.configs.delete(id);
     this.runtimeCapabilityTracker.removeConnection(id);
+    this.externalMetricsStore.clear(id);
     await this.storage.deleteConnection(id);
 
     if (removedConfig) {
       this.usageTelemetry?.trackDbRemove({
-        connectionType: removedConfig.host === 'agent' ? 'agent' : 'direct',
+        connectionType: removedConfig.host === 'agent' ? 'agent' : (removedConfig.connectionType ?? 'direct'),
         remainingConnections: this.configs.size,
       });
     }
@@ -620,6 +647,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   async testConnection(request: CreateConnectionRequest): Promise<TestConnectionResponse> {
+    if (request.connectionType === 'external') {
+      return { success: true, message: 'Waiting for first OTLP sample' };
+    }
     const adapter = new UnifiedDatabaseAdapter({
       host: request.host,
       port: request.port,
@@ -722,7 +752,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         runtimeCapabilities: this.runtimeCapabilityTracker.getCapabilities(config.id),
         credentialStatus: config.credentialStatus,
         credentialError: config.credentialError,
-        connectionType: config.host === 'agent' ? 'agent' : 'direct',
+        connectionType: config.host === 'agent' ? 'agent' : (config.connectionType ?? 'direct'),
       });
     }
 
@@ -854,10 +884,20 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   findIdByHostPort(host: string, port: number): string | null {
     for (const [id, config] of this.configs.entries()) {
-      if (config.host === host && config.port === port) {
+      if (sameHost(config.host, host) && config.port === port) {
         return id;
       }
     }
     return null;
+  }
+
+  findByHostPort(host: string, port: number): { id: string; connectionType: DatabaseConnectionType } | null {
+    let directId: string | null = null;
+    for (const [id, config] of this.configs.entries()) {
+      if (!sameHost(config.host, host) || config.port !== port) continue;
+      if (config.connectionType === 'external') return { id, connectionType: 'external' };
+      directId ??= id;
+    }
+    return directId ? { id: directId, connectionType: 'direct' } : null;
   }
 }

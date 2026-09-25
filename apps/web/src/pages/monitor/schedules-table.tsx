@@ -9,6 +9,7 @@ import {
   TableHeader,
   TableRow,
 } from '../../components/ui/table';
+import { EmptyState } from '../../components/ui/empty-state';
 
 interface SchedulesTableProps {
   schedules: StoredScheduledCapture[];
@@ -31,9 +32,7 @@ export function SchedulesTable({
 
   if (schedules.length === 0) {
     return (
-      <p className="py-8 text-center text-sm text-muted-foreground">
-        No scheduled captures configured for this connection.
-      </p>
+      <EmptyState variant="inline" title="No scheduled captures configured for this connection" />
     );
   }
 

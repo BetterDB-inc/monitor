@@ -92,6 +92,30 @@ export class ApiError extends Error {
   }
 }
 
+export const EXTERNAL_UNSUPPORTED_MESSAGE =
+  'Not available for OTLP-ingested connections — this view needs a live connection.';
+
+export const EXTERNAL_UNSUPPORTED_ACTION_MESSAGE =
+  'Not available for OTLP-ingested connections — this action needs a live connection.';
+
+export class ExternalConnectionUnsupportedError extends ApiError {
+  public readonly method: string | null;
+
+  constructor(method: string | null) {
+    super(EXTERNAL_UNSUPPORTED_MESSAGE, 501);
+    this.name = 'ExternalConnectionUnsupportedError';
+    this.method = method;
+  }
+}
+
+function isExternalUnsupportedPayload(payload: unknown): payload is { code: string; method?: string } {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    (payload as Record<string, unknown>).code === 'EXTERNAL_CONNECTION_UNSUPPORTED'
+  );
+}
+
 export const AUTH_ROUTES = ['/login', '/register', '/invite'];
 
 let authRedirectEnabled = false;
@@ -332,6 +356,12 @@ export async function fetchApi<T>(endpoint: string, options?: FetchApiOptions): 
         if (isPaymentRequiredPayload(errorPayload)) {
           throw new PaymentRequiredError(errorPayload);
         }
+      }
+
+      if (response.status === 501 && isExternalUnsupportedPayload(errorPayload)) {
+        throw new ExternalConnectionUnsupportedError(
+          typeof errorPayload.method === 'string' ? errorPayload.method : null,
+        );
       }
 
       const errorMessage = getErrorMessageFromPayload(errorPayload);

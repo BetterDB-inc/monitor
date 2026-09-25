@@ -9,10 +9,11 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
-import { isCloudMode } from '../common/utils/cloud-mode';
 import { ApiTags, ApiOperation, ApiExcludeEndpoint } from '@nestjs/swagger';
 import { OtelIngestService, OtlpTraceRequest } from './otel-ingest.service';
 import { decodeOtlpTraceProtobuf } from './otlp-protobuf';
+import { assertOtlpIngestAuthorized } from './otel-ingest-auth';
+import { assertOtlpTraceShape } from './otlp-json-shape';
 
 /**
  * OTLP/HTTP trace ingestion. Exporters POST an ExportTraceServiceRequest here.
@@ -25,7 +26,7 @@ import { decodeOtlpTraceProtobuf } from './otlp-protobuf';
  * In CLOUD_MODE the path is allowlisted past session auth, so the token is
  * mandatory there: the endpoint fails closed when it is unconfigured rather
  * than accepting anonymous spans into a tenant's store.
- * Gate: `OTEL_INGEST_ENABLED=false` disables the endpoint.
+ * Gate: `OTEL_INGEST_ENABLED` set to `false`, `0`, `no` or `off` disables the endpoint.
  */
 @ApiTags('ai-observability')
 @Controller('v1')
@@ -42,22 +43,7 @@ export class OtelIngestController {
     @Headers('content-type') contentType?: string,
     @Headers('authorization') auth?: string,
   ): Promise<Buffer | Record<string, never>> {
-    if ((process.env.OTEL_INGEST_ENABLED ?? 'true') === 'false') {
-      throw new HttpException('OTLP ingestion disabled', HttpStatus.NOT_FOUND);
-    }
-    const token = process.env.OTEL_INGEST_TOKEN;
-    // In cloud mode /v1/traces bypasses session auth (allowlisted), so a bearer
-    // token is the only credential. Fail closed when it isn't configured instead
-    // of leaving the tenant's span store open to anyone who can reach the host.
-    if (isCloudMode() && !token) {
-      throw new HttpException(
-        'OTLP ingestion requires OTEL_INGEST_TOKEN in cloud mode',
-        HttpStatus.UNAUTHORIZED,
-      );
-    }
-    if (token && auth !== `Bearer ${token}`) {
-      throw new HttpException('Invalid ingestion token', HttpStatus.UNAUTHORIZED);
-    }
+    assertOtlpIngestAuthorized(auth);
 
     const isProtobuf = (contentType ?? '').includes('application/x-protobuf');
     let request: OtlpTraceRequest;
@@ -75,6 +61,7 @@ export class OtelIngestController {
       }
     } else {
       request = (body as OtlpTraceRequest) ?? {};
+      assertOtlpTraceShape(request);
     }
 
     // Stamp receive time here (Date.now is unavailable inside pure helpers only).

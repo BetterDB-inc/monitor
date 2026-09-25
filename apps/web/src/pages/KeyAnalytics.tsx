@@ -6,6 +6,7 @@ import { extractPattern } from '@betterdb/shared';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { EmptyState } from '../components/ui/empty-state';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs';
 import {
   Table,
@@ -447,9 +448,7 @@ export function KeyAnalytics() {
                       </BarChart>
                     </ResponsiveContainer>
                   ) : (
-                    <div className="text-center py-12 text-muted-foreground">
-                      No pattern data available
-                    </div>
+                    <EmptyState variant="inline" className="py-12" title="No pattern data available" />
                   )}
                 </CardContent>
               </Card>
@@ -483,9 +482,7 @@ export function KeyAnalytics() {
                       </PieChart>
                     </ResponsiveContainer>
                   ) : (
-                    <div className="text-center py-12 text-muted-foreground">
-                      No pattern data available
-                    </div>
+                    <EmptyState variant="inline" className="py-12" title="No pattern data available" />
                   )}
                 </CardContent>
               </Card>
@@ -574,9 +571,11 @@ export function KeyAnalytics() {
                     </table>
                   </div>
                 ) : (
-                  <div className="text-center py-8 text-muted-foreground">
-                    No pattern data available. Click "Trigger Collection" to analyze keys.
-                  </div>
+                  <EmptyState
+                    variant="inline"
+                    title="No pattern data available"
+                    description='Click "Trigger Collection" to analyze keys.'
+                  />
                 )}
               </CardContent>
             </Card>
@@ -782,9 +781,12 @@ export function KeyAnalytics() {
                     </TableBody>
                   </Table>
                 ) : !hotKeysLoading && (!hotKeys || hotKeys.length === 0) ? (
-                  <div className="text-center py-12 text-muted-foreground">
-                    No hot key data yet. Collection runs every 5 minutes.
-                  </div>
+                  <EmptyState
+                    variant="inline"
+                    className="py-12"
+                    title="No hot key data yet"
+                    description="Collection runs every 5 minutes."
+                  />
                 ) : (
                   <Table>
                     <TableHeader>
@@ -940,10 +942,12 @@ export function KeyAnalytics() {
                     </TableBody>
                   </Table>
                 ) : !largestKeys || largestKeys.length === 0 ? (
-                  <div className="text-center py-12 text-muted-foreground">
-                    No largest-key data yet. Click "Trigger Collection" (or "Deep Scan" for full
-                    coverage) to analyze keys.
-                  </div>
+                  <EmptyState
+                    variant="inline"
+                    className="py-12"
+                    title="No largest-key data yet"
+                    description='Click "Trigger Collection" (or "Deep Scan" for full coverage) to analyze keys.'
+                  />
                 ) : (
                   <Table>
                     <TableHeader>
@@ -1035,11 +1039,17 @@ export function KeyAnalytics() {
                     <Skeleton className="h-48 w-full" />
                   </div>
                 ) : !keySizes || !keySizes.available ? (
-                  <div className="text-center py-12 text-muted-foreground">
-                    No key size data available. The{' '}
-                    <code className="font-mono text-xs">keysizes</code> INFO section is only exposed
-                    by Redis 8.0+; Valkey does not currently emit it.
-                  </div>
+                  <EmptyState
+                    variant="inline"
+                    className="py-12"
+                    title="No key size data available"
+                    description={
+                      <>
+                        The <code className="font-mono text-xs">keysizes</code> INFO section is only
+                        exposed by Redis 8.0+; Valkey does not currently emit it.
+                      </>
+                    }
+                  />
                 ) : (
                   <div className="space-y-8">
                     {Object.entries(keySizes.databases).map(([db, types]) => (

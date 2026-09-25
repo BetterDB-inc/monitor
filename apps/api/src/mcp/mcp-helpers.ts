@@ -7,6 +7,7 @@ import {
   PipeTransform,
 } from '@nestjs/common';
 import { CapabilityUnavailableError } from '../common/errors/capability-unavailable.error';
+import { ExternalConnectionUnsupportedError } from '../external-metrics/external-connection-unsupported.error';
 
 export const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
 export const MAX_LIMIT = 10000;
@@ -71,6 +72,9 @@ export function mapMcpError(
   fallback: string,
   logMessage: string = fallback,
 ): HttpException {
+  if (error instanceof ExternalConnectionUnsupportedError) {
+    throw error;
+  }
   if (error instanceof HttpException) {
     return error;
   }

@@ -7,6 +7,7 @@ import { useCliPanel } from '../../hooks/useCliPanel';
 import { useValkeyAutoLink } from '../../hooks/useValkeyAutoLink';
 import { UpdateBanner } from '../UpdateBanner';
 import { NoConnectionsGuard } from '../NoConnectionsGuard';
+import { LiveConnectionGuard } from '../LiveConnectionGuard';
 import { VectorSearchGuard } from '../VectorSearchGuard';
 import { CliPanel } from '../CliPanel';
 import { Dashboard } from '../../pages/Dashboard';
@@ -112,7 +113,7 @@ function AppLayoutInner(): ReactElement {
         <main className="min-h-screen  flex flex-col pl-0 transition-[padding] duration-200 ease-linear md:peer-data-[state=expanded]:pl-64">
           <DemoBanner cloudUser={cloudUser} />
           {!cloudUser && <UpdateBanner />}
-          <div className="p-8 flex-1 flex flex-col">
+          <div className="p-8 pb-17 flex-1 flex flex-col">
             <Routes>
               <Route
                 path="/"
@@ -134,7 +135,9 @@ function AppLayoutInner(): ReactElement {
                 path="/slowlog"
                 element={
                   <NoConnectionsGuard>
-                    <SlowLog />
+                    <LiveConnectionGuard>
+                      <SlowLog />
+                    </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }
               />
@@ -142,7 +145,9 @@ function AppLayoutInner(): ReactElement {
                 path="/latency"
                 element={
                   <NoConnectionsGuard>
-                    <Latency />
+                    <LiveConnectionGuard>
+                      <Latency />
+                    </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }
               />
@@ -150,7 +155,9 @@ function AppLayoutInner(): ReactElement {
                 path="/clients"
                 element={
                   <NoConnectionsGuard>
-                    <Clients />
+                    <LiveConnectionGuard>
+                      <Clients />
+                    </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }
               />
@@ -158,7 +165,9 @@ function AppLayoutInner(): ReactElement {
                 path="/client-analytics"
                 element={
                   <NoConnectionsGuard>
-                    <ClientAnalytics />
+                    <LiveConnectionGuard>
+                      <ClientAnalytics />
+                    </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }
               />
@@ -166,7 +175,9 @@ function AppLayoutInner(): ReactElement {
                 path="/client-analytics/deep-dive"
                 element={
                   <NoConnectionsGuard>
-                    <ClientAnalyticsDeepDive />
+                    <LiveConnectionGuard>
+                      <ClientAnalyticsDeepDive />
+                    </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }
               />
@@ -182,7 +193,9 @@ function AppLayoutInner(): ReactElement {
                 path="/key-analytics"
                 element={
                   <NoConnectionsGuard>
-                    <KeyAnalytics />
+                    <LiveConnectionGuard>
+                      <KeyAnalytics />
+                    </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }
               />
@@ -191,7 +204,9 @@ function AppLayoutInner(): ReactElement {
                 element={
                   <RestrictedRoute>
                     <NoConnectionsGuard>
-                      <BulkDelete />
+                      <LiveConnectionGuard>
+                        <BulkDelete />
+                      </LiveConnectionGuard>
                     </NoConnectionsGuard>
                   </RestrictedRoute>
                 }
@@ -200,7 +215,9 @@ function AppLayoutInner(): ReactElement {
                 path="/vector-search"
                 element={
                   <NoConnectionsGuard>
-                    <VectorSearch />
+                    <LiveConnectionGuard>
+                      <VectorSearch />
+                    </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }
               />
@@ -208,7 +225,9 @@ function AppLayoutInner(): ReactElement {
                 path="/vector-ai"
                 element={
                   <NoConnectionsGuard>
-                    <VectorAi />
+                    <LiveConnectionGuard>
+                      <VectorAi />
+                    </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }
               />
@@ -216,7 +235,9 @@ function AppLayoutInner(): ReactElement {
                 path="/ai-cache-memory"
                 element={
                   <NoConnectionsGuard>
-                    <AiCacheMemory />
+                    <LiveConnectionGuard>
+                      <AiCacheMemory />
+                    </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }
               />
@@ -232,17 +253,19 @@ function AppLayoutInner(): ReactElement {
                 path="/inference-latency"
                 element={
                   <NoConnectionsGuard>
-                    <VectorSearchGuard
-                      featureName="Inference Latency"
-                      description={
-                        <>
-                          The Valkey/Redis Search module is not available on this connection, so
-                          there is no inference workload to analyse.
-                        </>
-                      }
-                    >
-                      <InferenceLatency />
-                    </VectorSearchGuard>
+                    <LiveConnectionGuard>
+                      <VectorSearchGuard
+                        featureName="Inference Latency"
+                        description={
+                          <>
+                            The Valkey/Redis Search module is not available on this connection, so
+                            there is no inference workload to analyse.
+                          </>
+                        }
+                      >
+                        <InferenceLatency />
+                      </VectorSearchGuard>
+                    </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }
               />
@@ -250,7 +273,9 @@ function AppLayoutInner(): ReactElement {
                 path="/cluster"
                 element={
                   <NoConnectionsGuard>
-                    <ClusterDashboard />
+                    <LiveConnectionGuard>
+                      <ClusterDashboard />
+                    </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }
               />
@@ -266,7 +291,9 @@ function AppLayoutInner(): ReactElement {
                 path="/security"
                 element={
                   <NoConnectionsGuard>
-                    <Security />
+                    <LiveConnectionGuard>
+                      <Security />
+                    </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }
               />
@@ -274,7 +301,9 @@ function AppLayoutInner(): ReactElement {
                 path="/audit"
                 element={
                   <NoConnectionsGuard>
-                    <AuditTrail />
+                    <LiveConnectionGuard>
+                      <AuditTrail />
+                    </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }
               />
@@ -318,7 +347,9 @@ function AppLayoutInner(): ReactElement {
                 path="/monitor"
                 element={
                   <NoConnectionsGuard>
-                    <Monitor />
+                    <LiveConnectionGuard>
+                      <Monitor />
+                    </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }
               />

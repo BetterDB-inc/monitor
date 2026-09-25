@@ -5,6 +5,8 @@ import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { RetentionPolicyService } from '../../retention/retention-policy.service';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { ConnectionContext } from '../../common/services/multi-connection-poller';
+import { ExternalMetricsStore } from '../../external-metrics/external-metrics-store';
+import { ExternalMetricsAdapter } from '../../external-metrics/external-metrics.adapter';
 
 describe('LatencystatsPollerService', () => {
   let service: LatencystatsPollerService;
@@ -206,5 +208,24 @@ describe('LatencystatsPollerService', () => {
 
     // Snapshot unchanged — the new p99=5000 was never durably stored, so it must not surface.
     expect(service.getSnapshot('conn-1')[0].p99Us).toBe(99);
+  });
+
+  describe('external connections', () => {
+    it('opts in and stores nothing because latencystats is never pushed', async () => {
+      expect((service as any).supportsExternalConnections()).toBe(true);
+      const store = new ExternalMetricsStore();
+      store.apply('ext-1', [
+        { target: { kind: 'scalar', section: 'server', field: 'uptime_in_seconds' }, value: '10', timeMs: Date.now() },
+      ]);
+      await (service as any).pollConnection({
+        connectionId: 'ext-1',
+        connectionName: 'pushed',
+        client: new ExternalMetricsAdapter('ext-1', store),
+        host: 'cache.internal',
+        port: 6379,
+        connectionType: 'external',
+      });
+      expect(storage.saveLatencyStatsSamples).not.toHaveBeenCalled();
+    });
   });
 });

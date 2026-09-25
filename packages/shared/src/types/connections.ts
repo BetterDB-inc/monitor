@@ -69,6 +69,8 @@ export interface SshTunnelConfig {
  */
 export type SshTunnelInput = Omit<SshTunnelConfig, 'secretsEncrypted'>;
 
+export type DatabaseConnectionType = 'direct' | 'external';
+
 /**
  * Connection configuration for storing database connections
  */
@@ -88,6 +90,7 @@ export interface DatabaseConnectionConfig {
   isDefault?: boolean;
   createdAt: number;
   updatedAt?: number;
+  connectionType?: DatabaseConnectionType;
   /** Status of credential validation (not persisted, set at runtime) */
   credentialStatus?: CredentialStatus;
   /** Error message when credentials are invalid */
@@ -155,7 +158,7 @@ export interface ConnectionStatus {
   createdAt?: number;
   updatedAt?: number;
   isConnected: boolean;
-  connectionType?: 'direct' | 'agent';
+  connectionType?: 'direct' | 'agent' | 'external';
   capabilities?: ConnectionCapabilities;
   runtimeCapabilities?: import('./health').RuntimeCapabilities;
   /** Status of credential validation */
@@ -178,6 +181,7 @@ export interface CreateConnectionRequest {
   /** Optional SSH tunnel used to reach the database. */
   sshTunnel?: SshTunnelInput;
   setAsDefault?: boolean;
+  connectionType?: DatabaseConnectionType;
 }
 
 /**
@@ -187,6 +191,7 @@ export interface TestConnectionResponse {
   success: boolean;
   capabilities?: ConnectionCapabilities;
   error?: string;
+  message?: string;
 }
 
 /**

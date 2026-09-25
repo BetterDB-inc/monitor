@@ -1,4 +1,5 @@
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
+import { EmptyState } from '../ui/empty-state';
 import { Badge } from '../ui/badge';
 import { ArrowRight, Database } from 'lucide-react';
 import type { SlotMigration } from '../../types/cluster';
@@ -27,12 +28,7 @@ export function SlotMigrations({ migrations }: SlotMigrationsProps) {
       </CardHeader>
       <CardContent>
         {activeMigrations.length === 0 ? (
-          <div className="text-center py-8">
-            <Database className="w-12 h-12 text-muted-foreground mx-auto mb-3" />
-            <div className="text-sm text-muted-foreground">
-              No active slot migrations
-            </div>
-          </div>
+          <EmptyState variant="inline" icon={Database} title="No active slot migrations" />
         ) : (
           <div className="space-y-4">
             {activeMigrations.map((migration) => {
