@@ -40,7 +40,7 @@ OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf          # or http/json
 OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <token>
 ```
 
-**Auth.** If `OTEL_INGEST_TOKEN` is set, requests must carry `Authorization: Bearer <token>`. The token is required in cloud mode, where `/v1/traces` is allowlisted past session auth. Set `OTEL_INGEST_ENABLED=false` (or `0`) to turn the receiver off entirely.
+**Auth.** If `OTEL_INGEST_TOKEN` is set, requests must carry `Authorization: Bearer <token>`. The token is required in cloud mode, where `/v1/traces` is allowlisted past session auth. Set `OTEL_INGEST_ENABLED` to `false`, `0`, `no` or `off` to turn the receiver off entirely.
 
 The same `OTEL_INGEST_ENABLED` gate and `OTEL_INGEST_TOKEN` also cover `POST /v1/external/metrics` — see **Metrics ingestion** below.
 

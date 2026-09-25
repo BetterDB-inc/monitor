@@ -39,7 +39,7 @@ describe('assertOtlpIngestAuthorized', () => {
     expect(statusOf(() => assertOtlpIngestAuthorized(undefined))).toBeNull();
   });
 
-  it.each(['false', '0', ' FALSE ', '0\n'])('returns 404 when ingestion is disabled with %j', (value) => {
+  it.each(['false', '0', ' FALSE ', '0\n', 'no', 'off'])('returns 404 when ingestion is disabled with %j', (value) => {
     process.env.OTEL_INGEST_ENABLED = value;
     expect(statusOf(() => assertOtlpIngestAuthorized(undefined))).toBe(HttpStatus.NOT_FOUND);
   });

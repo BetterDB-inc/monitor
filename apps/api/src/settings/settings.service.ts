@@ -27,6 +27,11 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
   // refresh that started before the write would otherwise clobber the fresh
   // value with the older database snapshot it read.
   private cacheGeneration = 0;
+  // The refresh runs every 30s and nothing re-seeds a wiped row, so a missing
+  // settings row would otherwise log the same warning ~2,880 times a day and
+  // bury the one actionable line. Warn once per missing episode, reset when
+  // the row comes back.
+  private warnedSettingsRowMissing = false;
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
@@ -54,6 +59,17 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  // Every direct cache write restores the settings row, so it also ends any
+  // missing-row episode: bump the generation (so an in-flight refresh can't
+  // clobber the fresh value), swap the cache, and re-arm the missing-row
+  // warning. Centralized so a future direct-write path can't reintroduce the
+  // "row came back, then vanished again, warned nothing" gap.
+  private commitCacheWrite(settings: AppSettings): void {
+    this.cacheGeneration++;
+    this.cachedSettings = settings;
+    this.warnedSettingsRowMissing = false;
+  }
+
   private async refreshCache(): Promise<void> {
     const generation = this.cacheGeneration;
     const dbSettings = await this.storageClient.getSettings();
@@ -64,6 +80,12 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     // must not be able to trigger deletion.
     if (dbSettings) {
       this.cachedSettings = dbSettings;
+      this.warnedSettingsRowMissing = false; // episode over — warn again next time
+    } else if (this.cachedSettings && !this.warnedSettingsRowMissing) {
+      this.warnedSettingsRowMissing = true;
+      this.logger.warn(
+        'Settings row missing on cache refresh; keeping the previously loaded settings',
+      );
     }
   }
 
@@ -162,8 +184,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     // leave consumers of getCachedSettings() reading stale data for up to
     // half a minute — notably InferenceLatencyService, whose SLA evaluation
     // runs on a 60s tick and depends on fresh inferenceSlaConfig.
-    this.cacheGeneration++;
-    this.cachedSettings = updated;
+    this.commitCacheWrite(updated);
 
     return {
       settings: updated,
@@ -189,8 +210,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
       throw new Error('Failed to reset settings');
     }
 
-    this.cacheGeneration++;
-    this.cachedSettings = settings;
+    this.commitCacheWrite(settings);
 
     return {
       settings,

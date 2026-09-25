@@ -16,9 +16,9 @@ export class CloudAuthMiddleware implements NestMiddleware {
   use(req: FastifyRequest['raw'], res: FastifyReply['raw'], next: () => void) {
     // Skip if not in cloud mode (should never happen since module is only loaded
     // in CLOUD_MODE, but safety check). Match the codebase convention
-    // (isCloudMode()) so a value like "false"/"0" is treated as
-    // self-hosted here and everywhere else, keeping the /v1/traces and
-    // /prometheus/metrics session-auth bypasses in lockstep with their own
+    // (isCloudMode()) so a negative value like "false"/"0"/"no"/"off" is
+    // treated as self-hosted here and everywhere else, keeping the /v1/traces
+    // and /prometheus/metrics session-auth bypasses in lockstep with their own
     // bearer token requirements.
     if (!isCloudMode()) {
       return next();

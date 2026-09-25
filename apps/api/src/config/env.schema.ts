@@ -2,7 +2,8 @@ import { z } from 'zod';
 import { MAX_RETENTION_DAYS, parseRetentionDaysToken } from '@betterdb/shared';
 import { parseActivityRetentionDays } from '../activity/activity-config';
 import { isCloudModeValue } from '../common/utils/cloud-mode';
-import { DEFAULT_AUTH_BROKER_URL, isFalseFlag, isTrueFlag, normalizeOptionalUrl } from './env-normalize';
+import { isNegativeEnvValue } from '../common/utils/env-bool';
+import { DEFAULT_AUTH_BROKER_URL, isTrueFlag, normalizeOptionalUrl } from './env-normalize';
 
 function optionalUrl(value: unknown): unknown {
   return normalizeOptionalUrl(value) ?? undefined;
@@ -150,7 +151,7 @@ export const envSchema = z
     LICENSE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).optional(),
     BETTERDB_TELEMETRY: z
       .string()
-      .transform((v) => !['false', '0', 'no', 'off'].includes(v.toLowerCase()))
+      .transform((v) => !isNegativeEnvValue(v))
       .optional(),
     TELEMETRY_PROVIDER: z.enum(['http', 'posthog', 'noop']).default('posthog'),
     POSTHOG_API_KEY: z.string().optional(),
@@ -202,7 +203,7 @@ export const envSchema = z
     OTEL_INGEST_ENABLED: z
       .string()
       .default('true')
-      .transform((v) => !isFalseFlag(v)),
+      .transform((v) => !isNegativeEnvValue(v)),
     OTEL_INGEST_TOKEN: z.string().optional(),
     OTEL_METRICS_STALE_AFTER_MS: otelMetricsStaleAfterMsSchema,
 
