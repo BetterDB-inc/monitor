@@ -143,11 +143,16 @@ export class OtelMetricsIngestService {
 
     const name = metric.name ?? '';
     let unmapped = 0;
+    let invalid = 0;
     let mapped = false;
     for (const dataPoint of metric.gauge?.dataPoints ?? metric.sum?.dataPoints ?? []) {
       if ((dataPoint.flags ?? 0) & NO_RECORDED_VALUE) continue;
       const value = pointValue(dataPoint);
-      const point = value === null ? null : mapDataPoint(name, attrsToRecord(dataPoint.attributes), value);
+      if (value === null) {
+        invalid += 1;
+        continue;
+      }
+      const point = mapDataPoint(name, attrsToRecord(dataPoint.attributes), value);
       if (point === null) {
         unmapped += 1;
         continue;
@@ -158,6 +163,7 @@ export class OtelMetricsIngestService {
       mapped = true;
     }
     this.drop(result, 'unmapped_metric', unmapped, instance, nowMs);
+    this.drop(result, 'invalid_value', invalid, instance, nowMs);
     return mapped && metricVocabulary(name) === 'valkey';
   }
 

@@ -93,7 +93,7 @@ describe('OtelMetricsIngestService', () => {
     ).toBe(1);
   });
 
-  it('counts unsupported types, delta sums and unmapped metrics', () => {
+  it('counts unsupported types, delta sums, unmapped metrics and missing values', () => {
     const { service } = build();
     const result = service.ingest(
       resource(identity, [
@@ -113,12 +113,13 @@ describe('OtelMetricsIngestService', () => {
       already_polled: 0,
       unsupported_type: 4,
       unsupported_temporality: 2,
-      unmapped_metric: 2,
+      unmapped_metric: 1,
+      invalid_value: 1,
       cardinality_limit: 0,
     });
     expect(toPartialSuccess(result)).toEqual({
       rejectedDataPoints: 8,
-      errorMessage: 'unsupported_type=4 unsupported_temporality=2 unmapped_metric=2',
+      errorMessage: 'unsupported_type=4 unsupported_temporality=2 unmapped_metric=1 invalid_value=1',
     });
   });
 

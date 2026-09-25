@@ -63,6 +63,7 @@ export const DROP_REASONS = [
   'unsupported_type',
   'unsupported_temporality',
   'unmapped_metric',
+  'invalid_value',
   'cardinality_limit',
 ] as const;
 
