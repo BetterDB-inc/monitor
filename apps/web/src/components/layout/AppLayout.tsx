@@ -357,9 +357,7 @@ function AppLayoutInner(): ReactElement {
                 path="/monitor/sessions/:id"
                 element={
                   <NoConnectionsGuard>
-                    <LiveConnectionGuard>
-                      <MonitorSession />
-                    </LiveConnectionGuard>
+                    <MonitorSession />
                   </NoConnectionsGuard>
                 }
               />
