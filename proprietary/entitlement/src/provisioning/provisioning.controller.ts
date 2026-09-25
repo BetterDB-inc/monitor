@@ -41,6 +41,13 @@ export class ProvisioningController {
     return this.provisioningService.reconcileNetworkPolicies();
   }
 
+  @Post('reconcile-prometheus-metrics-token')
+  @HttpCode(HttpStatus.OK)
+  async reconcilePrometheusMetricsToken() {
+    this.logger.log('Received reconcile-prometheus-metrics-token request');
+    return this.provisioningService.reconcilePrometheusMetricsToken();
+  }
+
   @Post(':id/deprovision')
   @HttpCode(HttpStatus.ACCEPTED)
   async deprovisionTenant(@Param('id') id: string) {
