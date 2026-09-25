@@ -71,9 +71,11 @@ Any other value logs a warning and uses `mirror`. `METRICS_EXPORT_PROFILE` appli
 | `server.port` | port |
 | `valkey.version` | server version (omitted until detected) |
 
-Monitor process metrics (`betterdb_process_*`, `betterdb_nodejs_*`) stay on the `betterdb-monitor` resource under their Prometheus names. A point whose connection is not registered also lands there and keeps its `connection` attribute.
+Monitor process metrics (`betterdb_process_*`, `betterdb_nodejs_*`) stay on the `betterdb-monitor` resource under their Prometheus names. A point whose connection is not registered also lands there and keeps its `connection` attribute. Agent connections have no `host:port` of their own, so their points land there too.
 
-Monitor sends one OTLP request per node plus one for the monitor each interval.
+After a connection is removed, its points are no longer exported: they are dropped, not moved to the `betterdb-monitor` resource. Otherwise the OpenTelemetry SDK keeps reporting the last value of a series that stops being observed until Monitor restarts.
+
+Monitor sends one OTLP request per node plus one for the monitor each interval, at most eight at a time.
 
 **Metric names in `semconv` mode**
 
@@ -179,7 +181,7 @@ Monitor sends one OTLP request per node plus one for the monitor each interval.
 | `betterdb_cve_kev` | `betterdb.cve.kev` | `{finding}` |
 | `betterdb_cve_dataset_stale` | `betterdb.cve.dataset_stale` | `1` |
 
-Conversions: `db` values drop the `db` prefix (`db0` → `0`), `valkey.db.avg_ttl` is in milliseconds, the two CPU families become `valkey.cpu.time` with `state=sys|user`, `betterdb_instance_info` becomes `valkey.role{role=primary|replica}` (the version moves to the resource), `command` is renamed `cmd`, and the three inference percentile families become `betterdb.inference.bucket.latency{percentile}`. `betterdb_keyspace_keys` and `betterdb_keyspace_keys_expiring` are not exported in this mode because they are sums of `valkey.db.*`.
+Conversions: `db` values drop the `db` prefix (`db0` → `0`), `valkey.db.avg_ttl` is in milliseconds, the two CPU families become `valkey.cpu.time` with `state=sys|user`, `betterdb_instance_info` becomes `valkey.role{role=primary|replica}` (the version moves to the resource), `command` is renamed `cmd`, and the three inference percentile families become `betterdb.inference.bucket.latency{percentile}`. `betterdb_keyspace_keys` and `betterdb_keyspace_keys_expiring` are not exported in this mode because they are sums of `valkey.db.*`. `betterdb_poll_duration_seconds` is a histogram, so it is not exported in either mode.
 
 ## Event export
 
