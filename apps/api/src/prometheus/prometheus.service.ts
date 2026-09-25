@@ -1602,7 +1602,20 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const role = replication?.role;
     const isReplica = role === 'slave' || role === 'replica';
 
-    if (replication === undefined || (role !== 'master' && !isReplica)) {
+    if (replication === undefined || role === undefined) {
+      this.masterLinkUp.remove(connLabel);
+      this.masterLastIoSecondsAgo.remove(connLabel);
+      this.setPresentInfoGauge(this.connectedSlaves, connLabel, replication?.connected_slaves, false);
+      this.setPresentInfoGauge(
+        this.replicationOffset,
+        connLabel,
+        replication?.master_repl_offset,
+        absentAsZero,
+      );
+      return;
+    }
+
+    if (role !== 'master' && !isReplica) {
       this.clearRoleSpecificReplicationSeries(connLabel);
       if (!absentAsZero) {
         this.replicationOffset.remove(connLabel);

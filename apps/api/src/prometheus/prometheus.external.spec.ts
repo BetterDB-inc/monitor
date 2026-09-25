@@ -248,6 +248,43 @@ describe('PrometheusService external connections', () => {
       expect(text.match(series('connected_clients', EXT_LABEL))?.[1]).toBe('4');
     });
 
+    describe('replication without a pushed role', () => {
+      it('exports the pushed offset and connected slaves', async () => {
+        push({ 'replication.master_repl_offset': '4242', 'replication.connected_slaves': '2' });
+
+        await pollTick();
+        const text = await registryText();
+
+        expect(text.match(series('replication_offset', EXT_LABEL))?.[1]).toBe('4242');
+        expect(text.match(series('connected_slaves', EXT_LABEL))?.[1]).toBe('2');
+        expect(text).not.toMatch(series('master_link_up', EXT_LABEL));
+        expect(text).not.toMatch(series('master_last_io_seconds_ago', EXT_LABEL));
+      });
+
+      it('exports only the fields that were pushed', async () => {
+        push({ 'replication.master_repl_offset': '7' });
+
+        await pollTick();
+        const text = await registryText();
+
+        expect(text.match(series('replication_offset', EXT_LABEL))?.[1]).toBe('7');
+        expect(text).not.toMatch(series('connected_slaves', EXT_LABEL));
+      });
+
+      it('removes the series once the fields stop being pushed', async () => {
+        push({ 'replication.master_repl_offset': '7', 'replication.connected_slaves': '1' });
+        await pollTick();
+
+        store.clear('ext-1');
+        push({ 'memory.used_memory': '1' });
+        await pollTick();
+        const text = await registryText();
+
+        expect(text).not.toMatch(series('replication_offset', EXT_LABEL));
+        expect(text).not.toMatch(series('connected_slaves', EXT_LABEL));
+      });
+    });
+
     it('does not fire connection_critical without a pushed maxclients', async () => {
       push({ 'clients.connected_clients': '9999' });
 
