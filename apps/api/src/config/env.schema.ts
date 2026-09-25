@@ -12,7 +12,14 @@ function optionalUrl(value: unknown): unknown {
  * Environment variable validation schema
  * Validates all environment variables at application startup
  */
-export const otelMetricsStaleAfterMsSchema = z.coerce.number().int().min(1000).default(300000);
+export const otelMetricsStaleAfterMsSchema = z.coerce
+  .number()
+  .int()
+  .min(60000, {
+    message:
+      'OTEL_METRICS_STALE_AFTER_MS must be at least 60000 and exceed the exporter push interval (at least 2x is recommended)',
+  })
+  .default(300000);
 
 export const envSchema = z
   .object({

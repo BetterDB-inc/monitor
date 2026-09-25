@@ -31,10 +31,21 @@ describe('ExternalMetricsStore stale window', () => {
     expect(new ExternalMetricsStore().staleAfterMs).toBe(300_000);
   });
 
-  it.each(['abc', '999', '1500.5'])('rejects %s the same way the boot schema does', (raw) => {
+  it.each(['abc', '999', '1500.5', '30000', '59999'])('rejects %s the same way the boot schema does', (raw) => {
     process.env.OTEL_METRICS_STALE_AFTER_MS = raw;
     expect(envSchema.safeParse({ OTEL_METRICS_STALE_AFTER_MS: raw }).success).toBe(false);
     expect(() => new ExternalMetricsStore()).toThrow();
+  });
+
+  it('accepts the 60000 minimum', () => {
+    process.env.OTEL_METRICS_STALE_AFTER_MS = '60000';
+    expect(new ExternalMetricsStore().staleAfterMs).toBe(60_000);
+  });
+
+  it('explains that the window must exceed the exporter push interval', () => {
+    const result = envSchema.safeParse({ OTEL_METRICS_STALE_AFTER_MS: '30000' });
+    const issue = result.error?.issues.find((i) => i.path[0] === 'OTEL_METRICS_STALE_AFTER_MS');
+    expect(issue?.message).toMatch(/push interval/);
   });
 });
 
