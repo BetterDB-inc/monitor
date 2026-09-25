@@ -309,12 +309,18 @@ export class ProvisioningService {
       // with RESTRICT (no cascade), so they must be removed first or the delete
       // throws a foreign-key violation. The tenant's k8s resources (including any
       // Valkey instances) are already gone with the namespace in Step 5.
+      //
+      // Use deleteMany (not delete) for the tenant row so this step is idempotent:
+      // if a previous run was interrupted after tearing down the schema/namespace
+      // but before committing this transaction, re-running deprovisionTenant drives
+      // it to completion instead of throwing P2025 ("record not found") and leaving
+      // the tenant stuck in 'deleting'. Every earlier step is already NotFound-safe.
       this.logger.log(`[${tenant.subdomain}] Deleting tenant record`);
       await this.prisma.$transaction([
         this.prisma.user.deleteMany({ where: { tenantId } }),
         this.prisma.invitation.deleteMany({ where: { tenantId } }),
         this.prisma.valkeyInstance.deleteMany({ where: { tenantId } }),
-        this.prisma.tenant.delete({ where: { id: tenantId } }),
+        this.prisma.tenant.deleteMany({ where: { id: tenantId } }),
       ]);
 
       this.logger.log(`[${tenant.subdomain}] Deprovisioning complete`);
@@ -810,7 +816,11 @@ export class ProvisioningService {
   }
 
   private async updateTenantStatus(id: string, status: TenantStatus, statusMessage?: string): Promise<void> {
-    await this.prisma.tenant.update({
+    // updateMany (not update) so a status write to an already-deleted tenant is a
+    // no-op rather than throwing P2025. This keeps the deprovision error handler
+    // safe when a concurrent/retried run has already removed the row, so it never
+    // masks the original failure with a secondary "record not found".
+    await this.prisma.tenant.updateMany({
       where: { id },
       data: {
         status,
