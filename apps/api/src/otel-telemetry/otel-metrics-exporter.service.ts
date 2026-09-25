@@ -141,7 +141,9 @@ export class OtelMetricsExporterService implements OnModuleInit, OnModuleDestroy
     if (this.instruments.size === 0) {
       // The SDK rejects a batch callback with no instruments, so there would be
       // nothing to re-sync from later and the mirror would stay inert.
-      this.logger.warn('OTel metrics mirror found no mirrorable metrics; nothing will be exported');
+      this.logger.warn(
+        'OTel metrics export found no exportable metrics; nothing will be exported',
+      );
       return;
     }
 

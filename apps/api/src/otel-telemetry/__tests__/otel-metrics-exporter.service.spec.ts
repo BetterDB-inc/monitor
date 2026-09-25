@@ -422,6 +422,20 @@ describe('OtelMetricsExporterService', () => {
       expect(meter.kinds.has('valkey.memory.used')).toBe(false);
     });
 
+    it('warns without mentioning the mirror when semconv finds nothing to export', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const meter = new FakeMeter();
+      const service = await initWithMeter(makePrometheus([]), meter, {
+        OTEL_METRICS_EXPORT_MODE: 'semconv',
+      });
+
+      expect(warn).toHaveBeenCalledWith(
+        'OTel metrics export found no exportable metrics; nothing will be exported',
+      );
+      expect(meter.callback).toBeUndefined();
+      await service.onModuleDestroy();
+    });
+
     it('mirrors when the mode is empty', async () => {
       const meter = new FakeMeter();
       await initWithMeter(makePrometheus(snapshot), meter, { OTEL_METRICS_EXPORT_MODE: '' });
