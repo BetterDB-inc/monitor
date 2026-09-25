@@ -8,8 +8,6 @@ import {
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 
-const CORE_MEMORY_FIELDS = ['used_memory', 'used_memory_rss', 'used_memory_peak', 'mem_fragmentation_ratio'] as const;
-
 @Injectable()
 export class MemoryAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(MemoryAnalyticsService.name);
@@ -49,7 +47,7 @@ export class MemoryAnalyticsService extends MultiConnectionPoller implements OnM
       const mem = info.memory;
       const now = Date.now();
 
-      if (ctx.connectionType === 'external' && !CORE_MEMORY_FIELDS.every((field) => mem?.[field] !== undefined)) {
+      if (ctx.connectionType === 'external' && mem?.used_memory === undefined) {
         return;
       }
 

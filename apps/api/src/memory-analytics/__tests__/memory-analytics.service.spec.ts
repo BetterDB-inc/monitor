@@ -208,18 +208,36 @@ describe('MemoryAnalyticsService', () => {
         );
       });
 
-      it('skips the snapshot when a core memory field is missing', async () => {
+      it('saves a snapshot when only used_memory is pushed, writing 0 for the missing core fields', async () => {
+        const store = new ExternalMetricsStore();
+        push(store, { 'memory.used_memory': '1000' });
+        await (service as any).pollConnection(externalCtx(store));
+        expect(storage.saveMemorySnapshots).toHaveBeenCalledWith(
+          [
+            expect.objectContaining({
+              usedMemory: 1000,
+              usedMemoryRss: 0,
+              usedMemoryPeak: 0,
+              memFragmentationRatio: 0,
+              connectionId: 'ext-1',
+            }),
+          ],
+          'ext-1',
+        );
+      });
+
+      it('skips the snapshot when used_memory is missing', async () => {
         const store = new ExternalMetricsStore();
         push(store, {
-          'memory.used_memory': '1000',
           'memory.used_memory_rss': '1500',
+          'memory.used_memory_peak': '2000',
           'memory.mem_fragmentation_ratio': '1.5',
         });
         await (service as any).pollConnection(externalCtx(store));
         expect(storage.saveMemorySnapshots).not.toHaveBeenCalled();
       });
 
-      it('saves the snapshot when a split batch completes after a poll at the same timestamp', async () => {
+      it('saves again when a split batch completes after a poll at the same timestamp', async () => {
         const store = new ExternalMetricsStore();
         const timeMs = Date.now();
         const apply = (fields: Record<string, string>) =>
@@ -239,7 +257,7 @@ describe('MemoryAnalyticsService', () => {
 
         apply({ 'memory.used_memory': '1000' });
         await (service as any).tick();
-        expect(storage.saveMemorySnapshots).not.toHaveBeenCalled();
+        expect(storage.saveMemorySnapshots).toHaveBeenCalledTimes(1);
 
         apply({
           'memory.used_memory_rss': '1500',
@@ -247,7 +265,11 @@ describe('MemoryAnalyticsService', () => {
           'memory.mem_fragmentation_ratio': '1.5',
         });
         await (service as any).tick();
-        expect(storage.saveMemorySnapshots).toHaveBeenCalledTimes(1);
+        expect(storage.saveMemorySnapshots).toHaveBeenCalledTimes(2);
+        expect(storage.saveMemorySnapshots).toHaveBeenLastCalledWith(
+          [expect.objectContaining({ usedMemory: 1000, usedMemoryRss: 1500, usedMemoryPeak: 2000, memFragmentationRatio: 1.5 })],
+          'ext-1',
+        );
       });
 
       it('keeps saving direct snapshots with missing fields as before', async () => {
