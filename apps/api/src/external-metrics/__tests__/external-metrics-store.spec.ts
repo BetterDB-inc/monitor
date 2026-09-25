@@ -190,10 +190,8 @@ describe('ExternalMetricsStore', () => {
     });
 
     it('is not fresh once the primary subkey ages out before the others', () => {
-      store.apply('c', [
-        composite('keyspace', 'db0', 'keys', '5', T0),
-        composite('keyspace', 'db0', 'expires', '1', T0 + 50_000),
-      ]);
+      store.apply('c', [composite('keyspace', 'db0', 'keys', '5', T0)], T0);
+      store.apply('c', [composite('keyspace', 'db0', 'expires', '1', T0 + 50_000)], T0 + 50_000);
       expect(store.isFresh('c', T0 + 60_000)).toBe(true);
       expect(store.snapshot('c', T0 + 60_001)).toEqual({});
       expect(store.isFresh('c', T0 + 60_001)).toBe(false);
@@ -211,6 +209,29 @@ describe('ExternalMetricsStore', () => {
     });
   });
 
+  describe('freshness follows receipt time', () => {
+    it('keeps a point received now fresh even when its own timestamp is old', () => {
+      store.apply('c', [scalar('memory', 'used_memory', '1', T0 - 600_000)], T0);
+      expect(store.isFresh('c', T0 + 60_000)).toBe(true);
+      expect(store.snapshot('c', T0 + 60_000)).toEqual({ memory: { used_memory: '1' } });
+      expect(store.isFresh('c', T0 + 60_001)).toBe(false);
+      expect(store.snapshot('c', T0 + 60_001)).toEqual({});
+    });
+
+    it('refreshes freshness when an exact duplicate is received again', () => {
+      store.apply('c', [scalar('memory', 'used_memory', '1')], T0);
+      store.apply('c', [scalar('memory', 'used_memory', '1')], T0 + 50_000);
+      expect(store.isFresh('c', T0 + 110_000)).toBe(true);
+      expect(store.snapshot('c', T0 + 110_000)).toEqual({ memory: { used_memory: '1' } });
+    });
+
+    it('does not refresh freshness for an older point it ignores', () => {
+      store.apply('c', [scalar('memory', 'used_memory', '2', T0)], T0);
+      store.apply('c', [scalar('memory', 'used_memory', '1', T0 - 10)], T0 + 50_000);
+      expect(store.isFresh('c', T0 + 60_001)).toBe(false);
+    });
+  });
+
   it('overwrites a point with the same timestamp', () => {
     store.apply('c', [scalar('memory', 'used_memory', '100')]);
     expect(store.apply('c', [scalar('memory', 'used_memory', '150')]).accepted).toBe(1);
@@ -218,7 +239,8 @@ describe('ExternalMetricsStore', () => {
   });
 
   it('expires fields individually', () => {
-    store.apply('c', [scalar('memory', 'used_memory', '1', T0), scalar('stats', 'evicted_keys', '2', T0 + 30_000)]);
+    store.apply('c', [scalar('memory', 'used_memory', '1', T0)], T0);
+    store.apply('c', [scalar('stats', 'evicted_keys', '2', T0 + 30_000)], T0 + 30_000);
     expect(store.snapshot('c', T0 + 60_000)).toEqual({ memory: { used_memory: '1' }, stats: { evicted_keys: '2' } });
     expect(store.snapshot('c', T0 + 60_001)).toEqual({ stats: { evicted_keys: '2' } });
     expect(store.isFresh('c', T0 + 90_000)).toBe(true);
@@ -238,10 +260,8 @@ describe('ExternalMetricsStore', () => {
   it('omits a composite whose primary subkey is stale or missing', () => {
     store.apply('c', [composite('keyspace', 'db1', 'expires', '3')]);
     expect(store.snapshot('c', T0).keyspace).toBeUndefined();
-    store.apply('c', [
-      composite('keyspace', 'db2', 'keys', '5', T0),
-      composite('keyspace', 'db2', 'expires', '1', T0 + 50_000),
-    ]);
+    store.apply('c', [composite('keyspace', 'db2', 'keys', '5', T0)], T0);
+    store.apply('c', [composite('keyspace', 'db2', 'expires', '1', T0 + 50_000)], T0 + 50_000);
     expect(store.snapshot('c', T0 + 60_001).keyspace).toBeUndefined();
   });
 

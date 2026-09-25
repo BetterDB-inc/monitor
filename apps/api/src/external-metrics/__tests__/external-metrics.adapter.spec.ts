@@ -117,7 +117,7 @@ describe('ExternalMetricsAdapter', () => {
   });
 
   it('goes stale with the store window', () => {
-    store.apply('c', [scalar('memory', 'used_memory', '1')]);
+    store.apply('c', [scalar('memory', 'used_memory', '1')], T0);
     now = T0 + store.staleAfterMs + 1;
     expect(adapter.isConnected()).toBe(false);
     expect(adapter.sampleVersion()).not.toBeNull();

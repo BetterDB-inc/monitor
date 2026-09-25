@@ -225,6 +225,16 @@ describe('OtelMetricsIngestService', () => {
     expect(store.snapshot('ext', NOW_MS).server).toEqual({ uptime_in_seconds: '9' });
   });
 
+  it('keeps a point stamped ten minutes ago fresh when it is received now', () => {
+    const { service, store } = build();
+    const tenMinutesAgo = String(BigInt(NOW_MS - 600_000) * 1_000_000n);
+    service.ingest(resource(identity, [gauge('redis.memory.used', 7, [], tenMinutesAgo)]), NOW_MS);
+    expect(store.isFresh('ext', NOW_MS)).toBe(true);
+    expect(store.snapshot('ext', NOW_MS)).toEqual({ memory: { used_memory: '7' } });
+    expect(store.isFresh('ext', NOW_MS + store.staleAfterMs)).toBe(true);
+    expect(store.isFresh('ext', NOW_MS + store.staleAfterMs + 1)).toBe(false);
+  });
+
   it('clamps a future-stamped point to the receive time', () => {
     const { service, store } = build();
     const inAnHour = String(BigInt(NOW_MS + 3_600_000) * 1_000_000n);

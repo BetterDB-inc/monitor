@@ -22,6 +22,7 @@ const COMPOSITE_LIMIT: Record<string, number> = {
 interface Stamped {
   value: string;
   timeMs: number;
+  receivedMs: number;
 }
 
 interface CompositeEntry {
@@ -68,8 +69,17 @@ export class ExternalMetricsStore {
         const existing = sample.scalars.get(key);
         if (existing && existing.timeMs > update.timeMs) continue;
         accepted += 1;
-        if (existing && isSame(existing, update)) continue;
-        sample.scalars.set(key, { section: target.section, field: target.field, value: update.value, timeMs: update.timeMs });
+        if (existing && isSame(existing, update)) {
+          existing.receivedMs = nowMs;
+          continue;
+        }
+        sample.scalars.set(key, {
+          section: target.section,
+          field: target.field,
+          value: update.value,
+          timeMs: update.timeMs,
+          receivedMs: nowMs,
+        });
       } else {
         let entries = sample.composites.get(target.section);
         if (!entries) {
@@ -88,8 +98,11 @@ export class ExternalMetricsStore {
         const existing = entry.subkeys.get(target.subkey);
         if (existing && existing.timeMs > update.timeMs) continue;
         accepted += 1;
-        if (existing && isSame(existing, update)) continue;
-        entry.subkeys.set(target.subkey, { value: update.value, timeMs: update.timeMs });
+        if (existing && isSame(existing, update)) {
+          existing.receivedMs = nowMs;
+          continue;
+        }
+        entry.subkeys.set(target.subkey, { value: update.value, timeMs: update.timeMs, receivedMs: nowMs });
       }
       changed = true;
     }
@@ -105,7 +118,7 @@ export class ExternalMetricsStore {
       (out[section] ??= {})[field] = value;
     };
     for (const entry of sample.scalars.values()) {
-      if (this.fresh(entry.timeMs, nowMs)) put(entry.section, entry.field, entry.value);
+      if (this.fresh(entry, nowMs)) put(entry.section, entry.field, entry.value);
     }
     for (const entries of sample.composites.values()) {
       for (const entry of entries.values()) {
@@ -120,11 +133,11 @@ export class ExternalMetricsStore {
   isFresh(connectionId: string, nowMs: number): boolean {
     const sample = this.samples.get(connectionId);
     if (!sample) return false;
-    for (const entry of sample.scalars.values()) if (this.fresh(entry.timeMs, nowMs)) return true;
+    for (const entry of sample.scalars.values()) if (this.fresh(entry, nowMs)) return true;
     for (const entries of sample.composites.values()) {
       for (const entry of entries.values()) {
         const primary = entry.subkeys.get(COMPOSITE_PRIMARY[entry.section]);
-        if (primary && this.fresh(primary.timeMs, nowMs)) return true;
+        if (primary && this.fresh(primary, nowMs)) return true;
       }
     }
     return false;
@@ -154,14 +167,14 @@ export class ExternalMetricsStore {
     this.samples.delete(connectionId);
   }
 
-  private fresh(timeMs: number, nowMs: number): boolean {
-    return nowMs - timeMs <= this.staleAfterMs;
+  private fresh(stamped: Stamped, nowMs: number): boolean {
+    return nowMs - stamped.receivedMs <= this.staleAfterMs;
   }
 
   private pruneStaleComposites(sample: ConnectionSample, nowMs: number): void {
     for (const entries of sample.composites.values()) {
       for (const [field, entry] of entries) {
-        const stale = [...entry.subkeys.values()].every((stamped) => !this.fresh(stamped.timeMs, nowMs));
+        const stale = [...entry.subkeys.values()].every((stamped) => !this.fresh(stamped, nowMs));
         if (stale) entries.delete(field);
       }
     }
@@ -170,7 +183,7 @@ export class ExternalMetricsStore {
   private renderComposite(section: string, subkeys: Map<string, Stamped>, nowMs: number): string | null {
     const freshValues = new Map<string, string>();
     for (const [subkey, stamped] of subkeys) {
-      if (this.fresh(stamped.timeMs, nowMs)) freshValues.set(subkey, stamped.value);
+      if (this.fresh(stamped, nowMs)) freshValues.set(subkey, stamped.value);
     }
     if (!freshValues.has(COMPOSITE_PRIMARY[section])) return null;
     const parts = COMPOSITE_ORDER[section]
