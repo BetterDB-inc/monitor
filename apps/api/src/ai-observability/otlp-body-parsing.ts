@@ -1,6 +1,8 @@
 import { Readable } from 'stream';
 import { gunzipSync, inflateSync, type ZlibOptions } from 'zlib';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { HttpException } from '@nestjs/common';
+import { assertOtlpIngestAuthorized } from './otel-ingest-auth';
 
 const OTLP_PATHS = new Set(['/v1/traces', '/v1/external/metrics']);
 
@@ -22,6 +24,9 @@ export function decompressOtlpBody(encoding: string, body: Buffer, maxOutputLeng
   try {
     return decode(body, { maxOutputLength });
   } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ERR_BUFFER_TOO_LARGE') {
+      throw httpError(413, `Decompressed ${encoding} body is too large`);
+    }
     throw httpError(400, `Failed to decompress ${encoding} body: ${err instanceof Error ? err.message : 'unknown'}`);
   }
 }
@@ -58,6 +63,15 @@ function readAll(payload: NodeJS.ReadableStream, limit: number): Promise<Buffer>
   });
 }
 
+function assertAuthorized(request: FastifyRequest): void {
+  try {
+    assertOtlpIngestAuthorized(request.headers.authorization);
+  } catch (err) {
+    if (err instanceof HttpException) throw httpError(err.getStatus(), err.message);
+    throw err;
+  }
+}
+
 function contentEncoding(request: FastifyRequest): string {
   const raw = request.headers['content-encoding'];
   return (Array.isArray(raw) ? raw.join(',') : (raw ?? '')).trim().toLowerCase();
@@ -77,6 +91,7 @@ export function registerOtlpBodyParsing(fastify: FastifyInstance): void {
     const encoding = contentEncoding(request);
     if (encoding === '' || encoding === 'identity') return payload;
     if (!DECODERS.has(encoding)) throw httpError(415, `Unsupported content encoding: ${encoding}`);
+    assertAuthorized(request);
     const compressed = await readAll(payload, limit);
     const decompressed = decompressOtlpBody(encoding, compressed, limit);
     const stream = Readable.from([decompressed], { objectMode: false });

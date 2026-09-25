@@ -116,11 +116,11 @@ describe('OTLP request body parsing', () => {
     expect(tracesIngest).toHaveBeenCalledWith(traces, expect.any(Number));
   });
 
-  it('rejects a body that inflates past the cap with 400', async () => {
+  it('rejects a body that inflates past the cap with 413', async () => {
     const bomb = gzipSync(Buffer.alloc(64 * 1024 * 1024));
     const res = await post('/v1/external/metrics', 'application/json', bomb, 'gzip');
-    expect(res.statusCode).toBe(400);
-    expect(res.json().message).toMatch(/Failed to decompress gzip body/);
+    expect(res.statusCode).toBe(413);
+    expect(res.json().message).toBe('Decompressed gzip body is too large');
     expect(metricsIngest).not.toHaveBeenCalled();
   });
 
@@ -128,6 +128,43 @@ describe('OTLP request body parsing', () => {
     const res = await post('/v1/traces', 'application/json', Buffer.from('not gzip at all'), 'gzip');
     expect(res.statusCode).toBe(400);
     expect(tracesIngest).not.toHaveBeenCalled();
+  });
+
+  describe('with an ingestion token', () => {
+    beforeEach(() => {
+      process.env.OTEL_INGEST_TOKEN = 'secret';
+    });
+    afterEach(() => {
+      delete process.env.OTEL_INGEST_TOKEN;
+    });
+
+    it('rejects an unauthenticated compressed body with 401 before decompressing it', async () => {
+      const res = await post('/v1/traces', 'application/json', Buffer.from('not gzip at all'), 'gzip');
+      expect(res.statusCode).toBe(401);
+      expect(res.json().message).toBe('Invalid ingestion token');
+      expect(tracesIngest).not.toHaveBeenCalled();
+    });
+
+    it('decompresses an authenticated body', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v1/external/metrics',
+        headers: { 'content-type': 'application/json', 'content-encoding': 'gzip', authorization: 'Bearer secret' },
+        payload: gzipSync(JSON.stringify(metricsJson)),
+      });
+      expect(res.statusCode).toBe(200);
+      expect(metricsIngest).toHaveBeenCalledWith(metricsJson);
+    });
+  });
+
+  it('returns 404 for a compressed body when ingestion is disabled', async () => {
+    process.env.OTEL_INGEST_ENABLED = 'false';
+    try {
+      const res = await post('/v1/external/metrics', 'application/json', Buffer.from('not gzip at all'), 'gzip');
+      expect(res.statusCode).toBe(404);
+    } finally {
+      delete process.env.OTEL_INGEST_ENABLED;
+    }
   });
 
   it('rejects an unknown content encoding with 415', async () => {
