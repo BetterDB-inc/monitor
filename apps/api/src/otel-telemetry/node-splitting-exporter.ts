@@ -13,6 +13,8 @@ export const CONNECTION_ATTRIBUTE = 'connection';
 
 export const MAX_CONCURRENT_EXPORTS = 8;
 
+const AGENT_HOST = 'agent';
+
 export interface NodeIdentity {
   host: string;
   port: number;
@@ -32,6 +34,9 @@ interface Bucket {
 export function buildNodeResolver(connections: ConnectionStatus[]): NodeResolver {
   const nodes = new Map<string, NodeIdentity>();
   for (const connection of connections) {
+    if (connection.host === AGENT_HOST) {
+      continue;
+    }
     const node: NodeIdentity = { host: connection.host, port: connection.port };
     if (connection.capabilities) {
       node.dbType = connection.capabilities.dbType;
@@ -62,6 +67,7 @@ function withoutConnection(attributes: Attributes): Attributes {
 export function splitByConnection(
   resourceMetrics: ResourceMetrics,
   resolve: NodeResolver,
+  isRetired: (label: string) => boolean = () => false,
 ): ResourceMetrics[] {
   const buckets = new Map<string, Bucket>();
   const monitorKey = '';
@@ -80,6 +86,9 @@ export function splitByConnection(
       for (const point of metric.dataPoints as AnyDataPoint[]) {
         const label = point.attributes[CONNECTION_ATTRIBUTE];
         const node = typeof label === 'string' ? resolve(label) : null;
+        if (!node && typeof label === 'string' && isRetired(label)) {
+          continue;
+        }
         const bucket =
           node && typeof label === 'string'
             ? bucketFor(label, () => resourceFromAttributes(nodeResourceAttributes(label, node)))
@@ -111,6 +120,7 @@ export function splitByConnection(
 export class NodeSplittingExporter implements PushMetricExporter {
   readonly selectAggregationTemporality?: PushMetricExporter['selectAggregationTemporality'];
   readonly selectAggregation?: PushMetricExporter['selectAggregation'];
+  private readonly knownNodes = new Map<string, NodeIdentity>();
 
   constructor(
     private readonly inner: PushMetricExporter,
@@ -121,7 +131,12 @@ export class NodeSplittingExporter implements PushMetricExporter {
   }
 
   export(metrics: ResourceMetrics, resultCallback: (result: ExportResult) => void): void {
-    const parts = splitByConnection(metrics, this.createResolver());
+    const current = this.createResolver();
+    const parts = splitByConnection(
+      metrics,
+      (label) => this.remember(label, current(label)),
+      (label) => this.knownNodes.has(label),
+    );
     if (parts.length === 0) {
       resultCallback({ code: ExportResultCode.SUCCESS });
       return;
@@ -148,6 +163,24 @@ export class NodeSplittingExporter implements PushMetricExporter {
 
   shutdown(): Promise<void> {
     return this.inner.shutdown();
+  }
+
+  private remember(label: string, node: NodeIdentity | null): NodeIdentity | null {
+    if (!node) {
+      return null;
+    }
+    const last = this.knownNodes.get(label);
+    const identity: NodeIdentity = { host: node.host, port: node.port };
+    const dbType = node.dbType ?? last?.dbType;
+    const version = node.version ?? last?.version;
+    if (dbType) {
+      identity.dbType = dbType;
+    }
+    if (version) {
+      identity.version = version;
+    }
+    this.knownNodes.set(label, identity);
+    return identity;
   }
 
   private exportPart(part: ResourceMetrics): Promise<ExportResult> {

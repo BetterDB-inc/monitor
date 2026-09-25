@@ -62,6 +62,29 @@ describe('buildNodeResolver', () => {
     expect(resolver('cache-b:6380')).toEqual({ host: 'cache-b', port: 6380 });
     expect(resolver('conn-x')).toBeNull();
   });
+
+  it('leaves agent connections unresolved so they stay on the monitor resource', () => {
+    const agents = buildNodeResolver([
+      {
+        id: 'agent-1',
+        name: 'agent-1',
+        host: 'agent',
+        port: 0,
+        isConnected: true,
+        capabilities: { dbType: 'valkey', version: '8.1.0' },
+      },
+      { id: 'agent-2', name: 'agent-2', host: 'agent', port: 0, isConnected: true },
+    ]);
+    expect(agents('agent:0')).toBeNull();
+
+    const rm = input([gaugeMetric('valkey.memory.used', [[1, { connection: 'agent:0' }]])]);
+    const parts = splitByConnection(rm, agents);
+    expect(parts).toHaveLength(1);
+    expect(parts[0].resource).toBe(rm.resource);
+    expect(parts[0].scopeMetrics[0].metrics[0].dataPoints[0].attributes).toEqual({
+      connection: 'agent:0',
+    });
+  });
 });
 
 describe('splitByConnection', () => {
@@ -113,6 +136,23 @@ describe('splitByConnection', () => {
       { connection: 'conn-x' },
       {},
     ]);
+  });
+
+  it('drops points whose label is retired and keeps other unmatched points', () => {
+    const rm = input([
+      gaugeMetric('valkey.memory.used', [
+        [1, { connection: '10.0.0.1:6379' }],
+        [2, { connection: 'gone:6379' }],
+        [3, { connection: 'conn-x' }],
+      ]),
+    ]);
+    const parts = splitByConnection(rm, resolver, (label) => label === 'gone:6379');
+
+    expect(parts.map((part) => part.scopeMetrics[0].metrics[0].dataPoints)).toEqual([
+      [{ startTime: T, endTime: T, value: 1, attributes: {} }],
+      [{ startTime: T, endTime: T, value: 3, attributes: { connection: 'conn-x' } }],
+    ]);
+    expect(parts[1].resource).toBe(rm.resource);
   });
 
   it('does not emit a resource that received no points', () => {
@@ -217,6 +257,62 @@ describe('NodeSplittingExporter', () => {
     await exportOnce(exporter, twoNodes);
 
     expect(createResolver).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops a removed node instead of moving its points to the monitor resource', async () => {
+    const inner = fakeInner();
+    const remaining = buildNodeResolver([
+      { id: 'b', name: 'b', host: 'cache-b', port: 6380, isConnected: false },
+    ]);
+    const resolvers = [resolver, remaining];
+    const exporter = new NodeSplittingExporter(inner, () => resolvers.shift() ?? remaining);
+    const rm = input([
+      gaugeMetric('valkey.memory.used', [
+        [1, { connection: '10.0.0.1:6379' }],
+        [2, { connection: 'cache-b:6380' }],
+        [3, { connection: 'conn-x' }],
+      ]),
+    ]);
+
+    await exportOnce(exporter, rm);
+    expect(inner.exported).toHaveLength(3);
+    await exportOnce(exporter, rm);
+
+    const second = inner.exported.slice(3);
+    expect(second.map((part) => part.resource.attributes['service.instance.id'])).toEqual([
+      'cache-b:6380',
+      undefined,
+    ]);
+    expect(second[1].resource).toBe(rm.resource);
+    expect(second[1].scopeMetrics[0].metrics[0].dataPoints.map((p) => p.attributes)).toEqual([
+      { connection: 'conn-x' },
+    ]);
+  });
+
+  it('keeps the last known type and version of a node while it is disconnected', async () => {
+    const inner = fakeInner();
+    const node = { id: 'r', name: 'r', host: '10.0.0.9', port: 6379 };
+    const resolvers = [
+      buildNodeResolver([
+        { ...node, isConnected: true, capabilities: { dbType: 'redis', version: '7.2.4' } },
+      ]),
+      buildNodeResolver([{ ...node, isConnected: false }]),
+    ];
+    const exporter = new NodeSplittingExporter(inner, () => resolvers.shift()!);
+    const rm = input([gaugeMetric('valkey.memory.used', [[1, { connection: '10.0.0.9:6379' }]])]);
+
+    await exportOnce(exporter, rm);
+    await exportOnce(exporter, rm);
+
+    const redis = {
+      'service.name': 'redis',
+      'service.instance.id': '10.0.0.9:6379',
+      'db.system.name': 'redis',
+      'server.address': '10.0.0.9',
+      'server.port': 6379,
+      'valkey.version': '7.2.4',
+    };
+    expect(inner.exported.map((part) => part.resource.attributes)).toEqual([redis, redis]);
   });
 
   describe('concurrency', () => {
