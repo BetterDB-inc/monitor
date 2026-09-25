@@ -5,15 +5,15 @@ import tseslint from 'typescript-eslint';
 export default tseslint.config(
   {
     ignores: [
-      'dist/**',
-      'node_modules/**',
-      'coverage/**',
-      'eslint.config.mjs',
+      '**/dist/**',
+      '**/node_modules/**',
+      '**/coverage/**',
+      '**/eslint.config.mjs',
       '**/*.js',
       // Has its own workspace lint (proprietary/entitlement).
-      'entitlement/**',
+      '**/entitlement/**',
       // Helm/Terraform, not TS (charts covered by `helm lint`).
-      'infra/**',
+      '**/infra/**',
     ],
   },
   eslint.configs.recommended,
