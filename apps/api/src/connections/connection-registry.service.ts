@@ -15,6 +15,10 @@ import { ExternalMetricsAdapter } from '../external-metrics/external-metrics.ada
 export { ENV_DEFAULT_ID } from './connection.constants';
 import { ENV_DEFAULT_ID } from './connection.constants';
 
+function sameHost(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
 @Injectable()
 export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ConnectionRegistry.name);
@@ -880,7 +884,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   findIdByHostPort(host: string, port: number): string | null {
     for (const [id, config] of this.configs.entries()) {
-      if (config.host === host && config.port === port) {
+      if (sameHost(config.host, host) && config.port === port) {
         return id;
       }
     }
@@ -890,7 +894,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   findByHostPort(host: string, port: number): { id: string; connectionType: DatabaseConnectionType } | null {
     let directId: string | null = null;
     for (const [id, config] of this.configs.entries()) {
-      if (config.host !== host || config.port !== port) continue;
+      if (!sameHost(config.host, host) || config.port !== port) continue;
       if (config.connectionType === 'external') return { id, connectionType: 'external' };
       directId ??= id;
     }

@@ -112,6 +112,37 @@ describe('ConnectionRegistry external connections', () => {
     expect(registry.findByHostPort('cache.internal', 6379)).toEqual({ id: 'ext-1', connectionType: 'external' });
   });
 
+  describe('host case', () => {
+    it('resolves a pushed host that differs only in case', async () => {
+      const { registry } = build();
+      const id = await registry.addConnection({ ...external, host: 'Cache-01' });
+      expect(registry.findByHostPort('cache-01', 6379)).toEqual({ id, connectionType: 'external' });
+      expect(registry.findByHostPort('CACHE-01', 6379)).toEqual({ id, connectionType: 'external' });
+    });
+
+    it('keeps the host exactly as the user typed it', async () => {
+      const { registry } = build();
+      const id = await registry.addConnection({ ...external, host: 'Cache-01' });
+      expect(registry.getConfig(id)?.host).toBe('Cache-01');
+    });
+
+    it('rejects an external connection whose host differs only in case from an existing one', async () => {
+      const { registry } = build();
+      seedDirect(registry, 'cache.internal', 6379);
+      await expect(registry.addConnection({ ...external, host: 'Cache.Internal' })).rejects.toThrow(
+        'A connection for Cache.Internal:6379 already exists',
+      );
+    });
+
+    it('rejects a direct connection whose host differs only in case from an external one', async () => {
+      const { registry } = build();
+      await registry.addConnection(external);
+      await expect(registry.addConnection({ name: 'Polled', host: 'CACHE.INTERNAL', port: 6379 })).rejects.toThrow(
+        'CACHE.INTERNAL:6379 is already registered as an OTLP push connection',
+      );
+    });
+  });
+
   it('clears pushed metrics when the connection is removed', async () => {
     const { registry, store } = build();
     const id = await registry.addConnection(external);
