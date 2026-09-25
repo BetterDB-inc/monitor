@@ -407,7 +407,9 @@ describe('OtelMetricsExporterService', () => {
       await meter.collect();
       await meter.collect();
 
-      expect(debug.mock.calls.filter(([message]) => String(message).includes('betterdb_db_keys'))).toHaveLength(1);
+      expect(
+        debug.mock.calls.filter(([message]) => String(message).includes('betterdb_db_keys')),
+      ).toHaveLength(1);
     });
 
     it('warns and mirrors on an unknown mode', async () => {
