@@ -242,6 +242,15 @@ describe('collectSemconvPoints', () => {
     ).toBe('replica');
   });
 
+  it.each([
+    ['primary', 'primary'],
+    ['replica', 'replica'],
+  ])('keeps an INFO role already reported as %s', (infoRole, expected) => {
+    expect(
+      one('betterdb_instance_info', 1, { version: '9.0.0', role: infoRole, os: 'Linux' }).points[0].attributes.role,
+    ).toBe(expected);
+  });
+
   it('skips an unknown role', () => {
     expect(one('betterdb_instance_info', 1, { version: 'unknown', role: 'unknown', os: 'unknown' })).toEqual({
       points: [],

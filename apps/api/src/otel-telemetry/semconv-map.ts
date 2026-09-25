@@ -34,7 +34,12 @@ export interface SemconvRule {
 
 const LABEL_RENAMES: Readonly<Record<string, string>> = { command: 'cmd' };
 
-const ROLE_NAMES: Readonly<Record<string, string>> = { master: 'primary', slave: 'replica' };
+const ROLE_NAMES: Readonly<Record<string, string>> = {
+  master: 'primary',
+  primary: 'primary',
+  slave: 'replica',
+  replica: 'replica',
+};
 
 const PASS_THROUGH_PREFIXES = ['betterdb_process_', 'betterdb_nodejs_'];
 
