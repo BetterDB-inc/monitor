@@ -84,14 +84,8 @@ jobs:
           ref: ${{ inputs.branch || github.ref }}
           persist-credentials: false
 
-      - uses: pnpm/action-setup@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'pnpm'
-
-      - run: pnpm install --frozen-lockfile
+      - name: Setup Node.js and pnpm
+        uses: ./.github/actions/setup-node-pnpm
 
       - name: Build ${{ matrix.name }} and its dependencies
         run: pnpm build --filter ${{ matrix.name }}...
@@ -164,14 +158,8 @@ jobs:
           ref: ${{ inputs.branch || github.ref }}
           persist-credentials: false
 
-      - uses: pnpm/action-setup@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'pnpm'
-
-      - run: pnpm install --frozen-lockfile
+      - name: Setup Node.js and pnpm
+        uses: ./.github/actions/setup-node-pnpm
 
       - name: Start the three-node Valkey cluster
         run: |
@@ -222,14 +210,8 @@ jobs:
           ref: ${{ inputs.branch || github.ref }}
           persist-credentials: false
 
-      - uses: pnpm/action-setup@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'pnpm'
-
-      - run: pnpm install --frozen-lockfile
+      - name: Setup Node.js and pnpm
+        uses: ./.github/actions/setup-node-pnpm
 
       - name: Generate Prisma client
         working-directory: proprietary/entitlement
@@ -270,14 +252,8 @@ jobs:
           ref: ${{ inputs.branch || github.ref }}
           persist-credentials: false
 
-      - uses: pnpm/action-setup@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'pnpm'
-
-      - run: pnpm install --frozen-lockfile
+      - name: Setup Node.js and pnpm
+        uses: ./.github/actions/setup-node-pnpm
 
       - name: Build @betterdb/ai and its dependencies
         run: pnpm build --filter @betterdb/ai...

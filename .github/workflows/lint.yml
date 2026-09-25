@@ -1,0 +1,77 @@
+name: Lint
+
+on:
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    branches:
+      - master
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-format:
+    name: Lint and format check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js and pnpm
+        uses: ./.github/actions/setup-node-pnpm
+
+      - name: Get changed type-aware files
+        id: changed-typed
+        uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c # v45
+        with:
+          files: |
+            apps/api/**/*.{ts,tsx,js,jsx,mjs,cjs}
+            apps/web/**/*.{ts,tsx,js,jsx,mjs,cjs}
+            proprietary/**/*.{ts,tsx,js,jsx,mjs,cjs}
+          files_ignore: |
+            proprietary/infra/**
+            proprietary/entitlement/**
+            apps/api/scripts/**
+            **/dist/**
+
+      - name: Run ESLint on changed type-aware files
+        if: steps.changed-typed.outputs.any_changed == 'true'
+        run: pnpm exec eslint ${{ steps.changed-typed.outputs.all_changed_files }}
+
+      - name: Get changed base-config files
+        id: changed-base
+        uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c # v45
+        with:
+          files: |
+            packages/**/*.{ts,tsx,js,jsx,mjs,cjs}
+            proprietary/entitlement/**/*.{ts,tsx,js,jsx,mjs,cjs}
+          files_ignore: |
+            **/dist/**
+
+      - name: Run ESLint on changed base-config files
+        if: steps.changed-base.outputs.any_changed == 'true'
+        run: pnpm exec eslint ${{ steps.changed-base.outputs.all_changed_files }}
+
+      - name: Get changed files for Prettier
+        id: changed-format
+        uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c # v45
+
+      - name: Check Prettier formatting on changed files
+        if: steps.changed-format.outputs.any_changed == 'true'
+        run: pnpm exec prettier --check --ignore-unknown ${{ steps.changed-format.outputs.all_changed_files }}

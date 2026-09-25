@@ -4,34 +4,26 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: [
-      'dist/**',
-      'node_modules/**',
-      'coverage/**',
-      'eslint.config.mjs',
-      'scripts/**',
-      '**/*.js',
-    ],
+    ignores: ['dist/**', 'node_modules/**', 'coverage/**', 'eslint.config.mjs'],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    files: ['**/*.js', '**/*.cjs', '**/*.mjs'],
     languageOptions: {
       globals: { ...globals.node, ...globals.jest },
-      parserOptions: {
-        project: './tsconfig.eslint.json',
-        tsconfigRootDir: import.meta.dirname,
-      },
     },
+  },
+  {
     rules: {
-      '@typescript-eslint/explicit-function-return-type': 'off',
-      '@typescript-eslint/explicit-module-boundary-types': 'off',
       '@typescript-eslint/no-explicit-any': 'warn',
       '@typescript-eslint/no-unused-vars': [
         'error',
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
       ],
-      // Same basic safe rules as eslint.base.mjs.
+      // Basic safe rules (no type-aware parsing required).
+      // Note: no `curly` (800+ existing violations — defer to a dedicated
+      // --fix PR) and no `no-console` (CLI/scripts log to console by design).
       eqeqeq: ['error', 'always'],
       'prefer-const': 'error',
       'no-var': 'error',
