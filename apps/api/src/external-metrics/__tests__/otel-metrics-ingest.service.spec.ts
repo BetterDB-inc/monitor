@@ -65,6 +65,26 @@ describe('OtelMetricsIngestService', () => {
     expect(result.accepted).toBe(0);
   });
 
+  it('falls back to server.address when the instance id parses to an unregistered key', () => {
+    const { service, registry } = build();
+    (registry.findByHostPort as jest.Mock).mockImplementation((host: string, port: number) =>
+      host === 'redis-node-1' && port === 6379 ? { id: 'ext', connectionType: 'external' } : null,
+    );
+    const result = service.ingest(
+      resource(
+        [
+          str('service.instance.id', 'redis-node-1'),
+          str('server.address', 'redis-node-1'),
+          { key: 'server.port', value: { intValue: '6379' } },
+        ],
+        [gauge('redis.uptime', 1)],
+      ),
+      NOW_MS,
+    );
+    expect(result.accepted).toBe(1);
+    expect(result.dropped.unknown_instance).toBe(0);
+  });
+
   it('drops unknown and already-polled instances', () => {
     expect(build(null).service.ingest(resource(identity, [gauge('redis.uptime', 1)]), NOW_MS).dropped.unknown_instance).toBe(1);
     expect(

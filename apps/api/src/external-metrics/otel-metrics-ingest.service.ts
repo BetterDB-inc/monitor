@@ -8,7 +8,7 @@ import {
   metricVocabulary,
   nanosToMs,
   pointValue,
-  resolveInstanceKey,
+  resolveInstanceKeys,
 } from './otlp-metric-map';
 import {
   DROP_REASONS,
@@ -88,17 +88,21 @@ export class OtelMetricsIngestService {
 
   private ingestResource(resourceMetrics: OtlpResourceMetrics, nowMs: number, result: IngestResult): void {
     const attrs = attrsToRecord(resourceMetrics.resource?.attributes);
-    const key = resolveInstanceKey(attrs);
-    if (!key) {
+    const keys = resolveInstanceKeys(attrs);
+    if (keys.length === 0) {
       this.drop(result, 'unidentified', resourcePointCount(resourceMetrics), 'unidentified resource', nowMs);
       return;
     }
-    const instance = `${key.host}:${key.port}`;
-    const match = this.registry.findByHostPort(key.host, key.port);
-    if (!match) {
-      this.drop(result, 'unknown_instance', resourcePointCount(resourceMetrics), instance, nowMs);
+    const resolved = keys
+      .map((key) => ({ key, match: this.registry.findByHostPort(key.host, key.port) }))
+      .find((candidate) => candidate.match);
+    if (!resolved?.match) {
+      const [first] = keys;
+      this.drop(result, 'unknown_instance', resourcePointCount(resourceMetrics), `${first.host}:${first.port}`, nowMs);
       return;
     }
+    const { key, match } = resolved;
+    const instance = `${key.host}:${key.port}`;
     if (match.connectionType !== 'external') {
       this.drop(result, 'already_polled', resourcePointCount(resourceMetrics), instance, nowMs);
       return;

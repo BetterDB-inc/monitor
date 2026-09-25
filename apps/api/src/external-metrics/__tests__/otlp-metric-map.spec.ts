@@ -4,7 +4,7 @@ import {
   metricVocabulary,
   nanosToMs,
   pointValue,
-  resolveInstanceKey,
+  resolveInstanceKeys,
 } from '../otlp-metric-map';
 import type { OtlpKeyValue } from '../otlp-metrics-types';
 
@@ -133,39 +133,55 @@ describe('metricVocabulary', () => {
   });
 });
 
-describe('resolveInstanceKey', () => {
-  it('prefers service.instance.id split at the last colon', () => {
+describe('resolveInstanceKeys', () => {
+  it('puts the service.instance.id split at the last colon first', () => {
     expect(
-      resolveInstanceKey({ 'service.instance.id': 'cache-a.internal:6380', 'server.address': 'x', 'server.port': '1' }),
-    ).toEqual({ host: 'cache-a.internal', port: 6380 });
+      resolveInstanceKeys({ 'service.instance.id': 'cache-a.internal:6380', 'server.address': 'x', 'server.port': '1' }),
+    ).toEqual([
+      { host: 'cache-a.internal', port: 6380 },
+      { host: 'x', port: 1 },
+    ]);
   });
 
   it('splits the Valkey Admin host-port form at the trailing digits', () => {
-    expect(resolveInstanceKey({ 'service.instance.id': 'my-cache-host-6379' })).toEqual({
-      host: 'my-cache-host',
-      port: 6379,
-    });
+    expect(resolveInstanceKeys({ 'service.instance.id': 'my-cache-host-6379' })).toEqual([
+      { host: 'my-cache-host', port: 6379 },
+    ]);
   });
 
-  it('falls back to server.address and server.port', () => {
-    expect(resolveInstanceKey({ 'server.address': '10.0.0.5', 'server.port': '6379' })).toEqual({
-      host: '10.0.0.5',
-      port: 6379,
-    });
-  });
-
-  it('falls back when service.instance.id cannot be parsed', () => {
+  it('keeps server.address and server.port as a fallback behind a parseable instance id', () => {
     expect(
-      resolveInstanceKey({ 'service.instance.id': 'b9f0c2', 'server.address': 'h', 'server.port': '7000' }),
-    ).toEqual({ host: 'h', port: 7000 });
+      resolveInstanceKeys({ 'service.instance.id': 'redis-node-1', 'server.address': 'redis-node-1', 'server.port': '6379' }),
+    ).toEqual([
+      { host: 'redis-node', port: 1 },
+      { host: 'redis-node-1', port: 6379 },
+    ]);
   });
 
-  it('returns null without an identity or with an invalid port', () => {
-    expect(resolveInstanceKey({})).toBeNull();
-    expect(resolveInstanceKey({ 'server.address': 'h' })).toBeNull();
-    expect(resolveInstanceKey({ 'server.address': 'h', 'server.port': '0' })).toBeNull();
-    expect(resolveInstanceKey({ 'server.address': 'h', 'server.port': '70000' })).toBeNull();
-    expect(resolveInstanceKey({ 'service.instance.id': 'host:abc' })).toBeNull();
+  it('uses server.address and server.port alone', () => {
+    expect(resolveInstanceKeys({ 'server.address': '10.0.0.5', 'server.port': '6379' })).toEqual([
+      { host: '10.0.0.5', port: 6379 },
+    ]);
+  });
+
+  it('skips an instance id that cannot be parsed', () => {
+    expect(
+      resolveInstanceKeys({ 'service.instance.id': 'b9f0c2', 'server.address': 'h', 'server.port': '7000' }),
+    ).toEqual([{ host: 'h', port: 7000 }]);
+  });
+
+  it('lists a key once when both sources agree', () => {
+    expect(
+      resolveInstanceKeys({ 'service.instance.id': 'h:7000', 'server.address': 'h', 'server.port': '7000' }),
+    ).toEqual([{ host: 'h', port: 7000 }]);
+  });
+
+  it('returns no keys without an identity or with an invalid port', () => {
+    expect(resolveInstanceKeys({})).toEqual([]);
+    expect(resolveInstanceKeys({ 'server.address': 'h' })).toEqual([]);
+    expect(resolveInstanceKeys({ 'server.address': 'h', 'server.port': '0' })).toEqual([]);
+    expect(resolveInstanceKeys({ 'server.address': 'h', 'server.port': '70000' })).toEqual([]);
+    expect(resolveInstanceKeys({ 'service.instance.id': 'host:abc' })).toEqual([]);
   });
 });
 

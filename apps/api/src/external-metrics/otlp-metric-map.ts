@@ -151,16 +151,17 @@ function splitInstanceId(id: string): InstanceKey | null {
   return match ? toInstanceKey(match[1], match[2]) : null;
 }
 
-export function resolveInstanceKey(attrs: Record<string, string>): InstanceKey | null {
+export function resolveInstanceKeys(attrs: Record<string, string>): InstanceKey[] {
+  const keys: InstanceKey[] = [];
+  const add = (key: InstanceKey | null) => {
+    if (key && !keys.some((k) => k.host === key.host && k.port === key.port)) keys.push(key);
+  };
   const instanceId = attrs['service.instance.id'];
-  if (instanceId) {
-    const key = splitInstanceId(instanceId);
-    if (key) return key;
-  }
+  if (instanceId) add(splitInstanceId(instanceId));
   const host = attrs['server.address'];
   const port = attrs['server.port'];
-  if (host && port !== undefined) return toInstanceKey(host, port);
-  return null;
+  if (host && port !== undefined) add(toInstanceKey(host, port));
+  return keys;
 }
 
 export function pointValue(dp: OtlpNumberDataPoint): string | null {
