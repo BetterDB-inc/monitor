@@ -11,6 +11,7 @@ Complete reference for all metrics exposed by BetterDB Monitor at the `/api/prom
 
 - [Overview](#overview)
 - [Export Profiles](#export-profiles)
+- [Cardinality Contract](#cardinality-contract)
 - [Metrics Categories](#metrics-categories)
   - [ACL Audit Metrics](#acl-audit-metrics)
   - [Client Analytics Metrics](#client-analytics-metrics)
@@ -85,6 +86,138 @@ BetterDB's own Node.js process metrics (`betterdb_process_*`, `betterdb_nodejs_*
 - `betterdb_poll_stale`
 
 See [Configuration Reference](configuration.md#prometheus-metrics) for the `METRICS_EXPORT_PROFILE` and `METRICS_SLOT_STATS_TOP_N` env vars.
+
+## Cardinality Contract
+
+This section states how many series a scrape can hold, so you can size Prometheus before you add connections. Every series except the Node.js process metrics carries a `connection` label. The total is therefore a fixed instance overhead plus a budget per connection.
+
+```
+total = P + A + Σ over connections (F + V)
+```
+
+- `P`: process metrics, paid once per BetterDB instance.
+- `A`: the anomaly summary, paid once per instance under `full`.
+- `F`: the fixed series for the connection's type and profile.
+- `V`: the variable series. Under `vitals` this is always 0.
+
+The OTLP mirror exports the same series as the scrape, so the same budget applies to both.
+
+### Instance overhead
+
+| Source                                                              | Series                                                                        | Profile |
+| ------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ------- |
+| Node.js process metrics (`betterdb_process_*`, `betterdb_nodejs_*`) | about 55 on Node 22. The count shifts slightly with heap spaces and GC kinds. | both    |
+| Anomaly summary and baseline buffers                                | up to 181, while anomaly detection runs                                       | `full`  |
+
+The anomaly summary and buffer gauges are published once per instance under the default connection's label, not once per connection. Their bounds:
+
+| Gauges                                                                                                      | Label               | Bound         | Series |
+| ----------------------------------------------------------------------------------------------------------- | ------------------- | ------------- | ------ |
+| `betterdb_anomaly_events_current`, `betterdb_anomaly_by_severity`, `betterdb_correlated_groups_by_severity` | severity            | 3 values each | 9      |
+| `betterdb_anomaly_by_metric`                                                                                | metric type         | 40            | 40     |
+| `betterdb_correlated_groups_by_pattern`                                                                     | correlation pattern | 12            | 12     |
+| the three `betterdb_anomaly_buffer_*` gauges                                                                | metric type         | 40 each       | 120    |
+
+Total: 9 + 40 + 12 + 120 = 181.
+
+### Fixed series per connection (`F`)
+
+| Connection type    | `vitals` | `full` |
+| ------------------ | -------- | ------ |
+| Standalone primary | 33       | 73     |
+| Standalone replica | 34       | 74     |
+| Cluster primary    | 39       | 80     |
+| Cluster replica    | 40       | 81     |
+
+The `vitals` column is the budget from [Export Profiles](#export-profiles).
+
+The `full` column starts from the INFO-derived series: the `vitals` families plus `betterdb_pubsub_channels` and `betterdb_pubsub_patterns`. That gives 35, 36, 41 and 42 series. Each family below then adds its series once its collector has data. The `full` column is the ceiling with every one of them present:
+
+| Family                                                                                   | Series | Present when                                                                                    |
+| ---------------------------------------------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------- |
+| `betterdb_acl_denied`                                                                    | 1      | ACL audit data is stored                                                                        |
+| `betterdb_client_connections_current`, `betterdb_client_connections_peak`                | 2      | client snapshots are stored                                                                     |
+| `betterdb_slowlog_length`, `betterdb_slowlog_last_id`                                    | 2      | the slowlog is readable                                                                         |
+| `betterdb_commandlog_large_request`, `betterdb_commandlog_large_reply`                   | 2      | the server supports COMMANDLOG (Valkey 8.1+)                                                    |
+| `betterdb_cluster_stats_messages_crc_mismatch`                                           | 1      | cluster mode, when the server reports it                                                        |
+| `betterdb_cve_findings` (4 severities), `betterdb_cve_kev`, `betterdb_cve_dataset_stale` | 6      | a CVE scan has run for the connection                                                           |
+| `betterdb_polls_total`                                                                   | 1      | always                                                                                          |
+| `betterdb_poll_duration_seconds`                                                         | 24     | 2 services (`audit`, `client-analytics`) × 12 series each (9 buckets, `+Inf`, `_sum`, `_count`) |
+
+Under `vitals`, none of these families are exported, and neither are the counters or the histogram.
+
+### Variable series per connection (`V`, `full` only)
+
+A family marked **removed** tracks only its current label values: a value that disappears loses its series. A family marked **zeroed** instead holds a series at `0` for every value it has seen since BetterDB started. A zeroed family therefore grows until one of these happens:
+
+- the process restarts
+- the connection is removed
+- the connection goes stale (see [Internal Metrics](#internal-metrics))
+
+| Family                                                                                       | Series       | What bounds it                                                                                                                                                 | Stale values |
+| -------------------------------------------------------------------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| `betterdb_db_keys`, `betterdb_db_keys_expiring`, `betterdb_db_avg_ttl_seconds`               | 3 × D        | D is the number of databases that have held keys. It cannot exceed the server's `databases` setting (default 16). In cluster mode this is normally just `db0`. | zeroed       |
+| `betterdb_cluster_slot_keys`, `_expires`, `_reads_total`, `_writes_total`                    | 4 × N        | N is `METRICS_SLOT_STATS_TOP_N` (default 100, maximum 16384). Only cluster connections on Valkey 8.0+ emit these.                                              | removed      |
+| `betterdb_commandstats_calls_total`, `betterdb_commandstats_latency_us`                      | 2 × C        | C is the number of commands with at least one call. The command table (with any module commands) caps it; typically a few dozen.                               | removed      |
+| `betterdb_repl_output_buffer_ratio`                                                          | R            | R is the number of connected replicas.                                                                                                                         | removed      |
+| `betterdb_vector_index_docs`, `_memory_bytes`, `_indexing_failures`, `_percent_indexed`      | 4 × I        | I is the number of search indexes.                                                                                                                             | removed      |
+| `betterdb_inference_bucket_p50_us`, `_p95_us`, `_p99_us`, `betterdb_inference_unhealthy`     | 4 × (2 + I′) | One `read` bucket, one `write` bucket, and one `FT.SEARCH:<index>` bucket for each of the I′ indexes that appear in the slowlog or COMMANDLOG window.          | removed      |
+| `betterdb_inference_sla_breach`                                                              | ≤ I          | One per index with an SLA configured.                                                                                                                          | removed      |
+| `betterdb_metric_forecast_time_to_limit_seconds`                                             | ≤ 4          | The four forecast metric kinds.                                                                                                                                | removed      |
+| `betterdb_acl_denied_by_reason`                                                              | ≤ 4          | The ACL LOG reasons: `auth`, `command`, `key`, `channel`.                                                                                                      | zeroed       |
+| `betterdb_acl_denied_by_user`                                                                | U            | Distinct usernames in retained ACL audit history.                                                                                                              | zeroed       |
+| `betterdb_client_connections_by_name`, `betterdb_client_connections_by_user`                 | K + L        | Distinct client names (K) and users (L) in retained client-snapshot history.                                                                                   | zeroed       |
+| `betterdb_slowlog_pattern_count`, `_avg_duration_us`, `_percentage`                          | 3 × S        | S is the number of distinct command/key patterns. Each poll reads the latest 128 slowlog entries.                                                              | zeroed       |
+| `betterdb_commandlog_large_request_by_pattern`, `betterdb_commandlog_large_reply_by_pattern` | Q + Q′       | Distinct patterns in the latest 128 entries of each COMMANDLOG type.                                                                                           | zeroed       |
+| `betterdb_anomaly_events_total` (counter)                                                    | ≤ 240        | 3 severities × 40 metric types × 2 anomaly types.                                                                                                              | counter      |
+| `betterdb_correlated_groups_total` (counter)                                                 | ≤ 36         | 12 correlation patterns × 3 severities.                                                                                                                        | counter      |
+
+Patterns are fingerprinted before they become label values. Each key segment is split on `:` or `/`. A segment that is numeric, a UUID, an alphanumeric token of 20 or more characters, or a hex string of 6 or more characters becomes `*`. So `user:1234:profile` and `user:9876:profile` share the pattern `GET user:*:profile`.
+
+### Worst cases
+
+- **Full slot coverage.** With `METRICS_SLOT_STATS_TOP_N=16384`, one cluster connection exports 65,536 slot series. At the default of 100 it exports at most 400.
+- **Pattern churn.** Fingerprinting does not catch short, non-hex dynamic segments such as `session:ab12x` or `user:alice`. Each distinct key then becomes its own pattern. A workload like this can add up to 128 new slowlog patterns per poll. Because the pattern families are zeroed rather than removed, over the process lifetime they are bounded only by the number of distinct keys that reach the slowlog. The client-name and ACL-username families behave the same way when names are generated per session.
+- **Many databases.** A standalone server that uses all 16 databases adds 48 per-db series.
+
+If a worst case applies, use one of these:
+
+- Switch to `METRICS_EXPORT_PROFILE=vitals`, which drops every variable family.
+- Lower `METRICS_SLOT_STATS_TOP_N`.
+- Drop the pattern families with `metric_relabel_configs`.
+
+### Worked example
+
+This example uses `full` with 5 standalone primaries and 2 cluster primaries, assuming each connection has:
+
+- 2 populated databases for a standalone primary, or `db0` only for a cluster primary
+- default `METRICS_SLOT_STATS_TOP_N` (100)
+- 40 active commands
+- no search indexes
+- 20 slowlog patterns
+- 10 large-request and 10 large-reply patterns
+- 5 client names, 2 client users and 1 denied ACL user
+- all 4 ACL reasons
+- 4 forecasts
+- no anomaly events
+
+| Term                | Standalone primary | Cluster primary |
+| ------------------- | ------------------ | --------------- |
+| `F`                 | 73                 | 80              |
+| Per-db              | 6                  | 3               |
+| Slot stats          | 0                  | 400             |
+| Commandstats        | 80                 | 80              |
+| Inference latency   | 8                  | 8               |
+| Forecast            | 4                  | 4               |
+| Slowlog patterns    | 60                 | 60              |
+| COMMANDLOG patterns | 20                 | 20              |
+| Client name/user    | 7                  | 7               |
+| ACL reason/user     | 5                  | 5               |
+| **Per connection**  | **263**            | **667**         |
+
+The total with `full` is 55 + 5 × 263 + 2 × 667 = **2,704 series**. Add up to 181 more while anomaly detection runs.
+
+The same fleet under `vitals` exports 55 + 5 × 33 + 2 × 39 = **298 series**, and that number does not change with key count, database count, pattern churn or cluster size.
 
 ## Metrics Categories
 
@@ -727,7 +860,7 @@ In `CLOUD_MODE`, `PROMETHEUS_METRICS_TOKEN` is required whenever the endpoint is
 
 ### Cardinality Management
 
-High-cardinality labels can impact Prometheus performance. Monitor these metrics:
+High-cardinality labels can impact Prometheus performance. See [Cardinality Contract](#cardinality-contract) for the full series budget and its worst cases. Monitor these metrics:
 
 - `betterdb_client_connections_by_name` - Scales with unique client names
 - `betterdb_client_connections_by_user` - Scales with unique usernames
