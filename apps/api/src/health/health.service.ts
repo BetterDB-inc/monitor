@@ -30,8 +30,10 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
   protected readonly logger = new Logger(HealthService.name);
   // Per-connection health state tracking
   private instanceUpStates = new Map<string, boolean>();
+  private reconnectLocks = new Map<string, Promise<void>>();
   private readonly startTime = Date.now();
   private readonly HEALTH_POLL_INTERVAL_MS = 10000; // Check every 10 seconds
+  private readonly RECONNECT_TIMEOUT_MS = 3000;
   private startupTimeout: NodeJS.Timeout | null = null;
 
   constructor(
@@ -66,7 +68,45 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
 
   protected onConnectionRemoved(connectionId: string): void {
     this.instanceUpStates.delete(connectionId);
+    this.reconnectLocks.delete(connectionId);
     this.logger.debug(`Cleaned up health state for removed connection: ${connectionId}`);
+  }
+
+  private tryReconnect(connectionId: string): Promise<void> {
+    const existing = this.reconnectLocks.get(connectionId);
+    if (existing) {
+      return this.withTimeout(existing, this.RECONNECT_TIMEOUT_MS).catch(() => {});
+    }
+    const raw = (async () => {
+      try {
+        const client = this.connectionRegistry.get(connectionId);
+        if (!client.isConnected()) {
+          await client.connect();
+        }
+      } catch {
+        return;
+      }
+    })();
+    this.reconnectLocks.set(connectionId, raw);
+    raw
+      .finally(() => {
+        if (this.reconnectLocks.get(connectionId) === raw) {
+          this.reconnectLocks.delete(connectionId);
+        }
+      })
+      .catch(() => {});
+    return this.withTimeout(raw, this.RECONNECT_TIMEOUT_MS).catch(() => {});
+  }
+
+  private withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Timed out')), ms);
+      timer.unref?.();
+    });
+    return Promise.race([promise, timeout]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
   }
 
   onModuleInit(): void {
@@ -127,9 +167,27 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
 
     try {
       const client = this.connectionRegistry.get(targetId);
-      const isConnected = client.isConnected();
 
-      if (!isConnected) {
+      if (!client.isConnected()) {
+        await this.tryReconnect(targetId);
+      }
+
+      if (!client.isConnected()) {
+        if (this.reconnectLocks.has(targetId)) {
+          this.logger.debug(`Reconnect still in progress for ${targetId}`);
+          return {
+            status: 'disconnected',
+            database: {
+              type: 'unknown',
+              version: null,
+              host: config.host,
+              port: config.port,
+            },
+            capabilities: null,
+            runtimeCapabilities: null,
+            error: 'Reconnect in progress',
+          };
+        }
         await this.handleInstanceDown(
           targetId,
           config.host,
@@ -171,7 +229,33 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
       // Instance is up - check if it recovered
       await this.handleInstanceUp(targetId, config.host, config.port);
 
-      const capabilities = client.getCapabilities();
+      let capabilities;
+      try {
+        capabilities = client.getCapabilities();
+      } catch {
+        const refresh = client.refreshCapabilities?.bind(client);
+        if (!refresh) {
+          throw new Error('Capabilities not yet detected. Call connect() first.');
+        }
+        try {
+          await this.withTimeout(refresh(), this.RECONNECT_TIMEOUT_MS);
+          capabilities = client.getCapabilities();
+        } catch {
+          this.logger.debug(`Capability refresh failed for ${targetId}; ping succeeded`);
+          return {
+            status: 'connected',
+            database: {
+              type: 'unknown',
+              version: null,
+              host: config.host,
+              port: config.port,
+            },
+            capabilities: null,
+            runtimeCapabilities: this.runtimeCapabilityTracker.getCapabilities(targetId),
+            runtimeCapabilityReasons: this.runtimeCapabilityTracker.getDisabledReasons(targetId),
+          };
+        }
+      }
 
       return {
         status: 'connected',
