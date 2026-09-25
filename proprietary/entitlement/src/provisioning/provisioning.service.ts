@@ -1081,6 +1081,11 @@ export class ProvisioningService {
     } catch (error: any) {
       if (this.isAlreadyExistsError(error)) {
         this.logger.warn(`Secret db-credentials already exists in ${namespace}, continuing...`);
+        // A retry of a tenant whose secret predates the metrics-endpoint gate can
+        // reuse a Secret that lacks PROMETHEUS_METRICS_TOKEN. The Deployment
+        // created below references that key (non-optional), so without it the pod
+        // fails to start. Backfill it before we get there.
+        await this.ensureMetricsTokenInSecret(namespace);
       } else {
         throw error;
       }
@@ -1647,24 +1652,33 @@ export class ProvisioningService {
   // image fails closed on boot in CLOUD_MODE without the token. Returns true when
   // the Deployment env changed (which triggers a rollout that also picks up the
   // secret value).
-  private async ensurePrometheusMetricsToken(namespace: string): Promise<boolean> {
-    // 1. Make sure the secret holds a token. Generate one only if absent, so we
-    // never rotate a token a running pod may already be using.
+  // Adds a generated PROMETHEUS_METRICS_TOKEN to the tenant's db-credentials
+  // Secret only if absent (so we never rotate a token a running pod is using).
+  // Returns true when it wrote a new token. Not concurrency-safe: the reconcile
+  // endpoint is a one-shot admin migration meant to be run serially.
+  private async ensureMetricsTokenInSecret(namespace: string): Promise<boolean> {
     const secret = await this.coreApi.readNamespacedSecret({
       name: 'db-credentials',
       namespace,
     });
-    if (!secret.data?.PROMETHEUS_METRICS_TOKEN) {
-      const token = crypto.randomBytes(32).toString('hex');
-      await this.coreApi.patchNamespacedSecret(
-        {
-          name: 'db-credentials',
-          namespace,
-          body: { stringData: { PROMETHEUS_METRICS_TOKEN: token } },
-        },
-        k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch),
-      );
+    if (secret.data?.PROMETHEUS_METRICS_TOKEN) {
+      return false;
     }
+    const token = crypto.randomBytes(32).toString('hex');
+    await this.coreApi.patchNamespacedSecret(
+      {
+        name: 'db-credentials',
+        namespace,
+        body: { stringData: { PROMETHEUS_METRICS_TOKEN: token } },
+      },
+      k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch),
+    );
+    return true;
+  }
+
+  private async ensurePrometheusMetricsToken(namespace: string): Promise<boolean> {
+    // 1. Make sure the secret holds a token.
+    const wroteSecret = await this.ensureMetricsTokenInSecret(namespace);
 
     // 2. Make sure the Deployment injects it. Read first so the replace carries
     // the current resourceVersion (a stale replace is rejected with 409).
@@ -1679,22 +1693,48 @@ export class ProvisioningService {
       throw new Error(`betterdb container not found in ${namespace}`);
     }
     const env = container.env ?? [];
-    if (env.some((e) => e.name === 'PROMETHEUS_METRICS_TOKEN')) {
-      return false;
+    if (!env.some((e) => e.name === 'PROMETHEUS_METRICS_TOKEN')) {
+      env.push({
+        name: 'PROMETHEUS_METRICS_TOKEN',
+        valueFrom: {
+          secretKeyRef: { name: 'db-credentials', key: 'PROMETHEUS_METRICS_TOKEN' },
+        },
+      });
+      container.env = env;
+      await this.appsApi.replaceNamespacedDeployment({
+        name: 'betterdb',
+        namespace,
+        body: deployment,
+      });
+      return true;
     }
-    env.push({
-      name: 'PROMETHEUS_METRICS_TOKEN',
-      valueFrom: {
-        secretKeyRef: { name: 'db-credentials', key: 'PROMETHEUS_METRICS_TOKEN' },
-      },
-    });
-    container.env = env;
-    await this.appsApi.replaceNamespacedDeployment({
-      name: 'betterdb',
-      namespace,
-      body: deployment,
-    });
-    return true;
+
+    // The Deployment already references the token but we just wrote a fresh one
+    // to the Secret. Running pods captured the old value at start, so restart the
+    // Deployment to pick up the new token.
+    if (wroteSecret) {
+      await this.appsApi.patchNamespacedDeployment(
+        {
+          name: 'betterdb',
+          namespace,
+          body: {
+            spec: {
+              template: {
+                metadata: {
+                  annotations: {
+                    'betterdb.io/metrics-token-restarted-at': new Date().toISOString(),
+                  },
+                },
+              },
+            },
+          },
+        },
+        k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch),
+      );
+      return true;
+    }
+
+    return false;
   }
 
   async reconcilePrometheusMetricsToken(): Promise<{
