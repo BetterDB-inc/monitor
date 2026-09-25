@@ -16,6 +16,7 @@ import {
   StoredCommandLogEntry,
   CommandLogType,
 } from '../../common/interfaces/storage-port.interface';
+import { WebhookPayloadFormat } from '@betterdb/shared';
 
 /**
  * SQL dialect abstraction for database-specific operations.
@@ -292,6 +293,7 @@ export class RowMappers {
       deliveryConfig: this.dialect.fromJson(row.delivery_config),
       alertConfig: this.dialect.fromJson(row.alert_config),
       thresholds: this.dialect.fromJson(row.thresholds),
+      payloadFormat: row.payload_format ?? WebhookPayloadFormat.GENERIC,
       connectionId: row.connection_id,
       createdAt: this.dialect.fromTimestamp(row.created_at) ?? 0,
       updatedAt: this.dialect.fromTimestamp(row.updated_at) ?? 0,

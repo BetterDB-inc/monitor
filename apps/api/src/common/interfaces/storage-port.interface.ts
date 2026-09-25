@@ -73,6 +73,8 @@ export type {
   ScheduledCaptureQueryOptions,
   ScheduledCapturePatch,
 } from '@betterdb/shared';
+import type { InvitationRepository } from './invitation-repository.interface';
+import type { ActivityRepository } from './activity-repository.interface';
 import type {
   AppSettings,
   AuditQueryOptions,
@@ -126,6 +128,7 @@ import type {
   ScheduledCaptureQueryOptions,
   ScheduledCapturePatch,
 } from '@betterdb/shared';
+import type { AgentToken, TokenType } from '@betterdb/shared';
 
 // Anomaly Event Types
 export interface StoredAnomalyEvent {
@@ -646,39 +649,9 @@ export interface StoragePort {
   deleteConnection(id: string): Promise<void>;
   updateConnection(id: string, updates: Partial<DatabaseConnectionConfig>): Promise<void>;
 
-  // Agent/MCP Token Methods (cloud-only, optional — implementations may no-op)
-  saveAgentToken(token: {
-    id: string;
-    name: string;
-    type: 'agent' | 'mcp';
-    tokenHash: string;
-    createdAt: number;
-    expiresAt: number;
-    revokedAt: number | null;
-    lastUsedAt: number | null;
-  }): Promise<void>;
-  getAgentTokens(type?: 'agent' | 'mcp'): Promise<
-    Array<{
-      id: string;
-      name: string;
-      type: 'agent' | 'mcp';
-      tokenHash: string;
-      createdAt: number;
-      expiresAt: number;
-      revokedAt: number | null;
-      lastUsedAt: number | null;
-    }>
-  >;
-  getAgentTokenByHash(hash: string): Promise<{
-    id: string;
-    name: string;
-    type: 'agent' | 'mcp';
-    tokenHash: string;
-    createdAt: number;
-    expiresAt: number;
-    revokedAt: number | null;
-    lastUsedAt: number | null;
-  } | null>;
+  saveAgentToken(token: AgentToken): Promise<void>;
+  getAgentTokens(type?: TokenType): Promise<AgentToken[]>;
+  getAgentTokenByHash(hash: string): Promise<AgentToken | null>;
   revokeAgentToken(id: string): Promise<void>;
   updateAgentTokenLastUsed(id: string): Promise<void>;
 
@@ -728,4 +701,8 @@ export interface StoragePort {
     store_name: string;
     target_discriminator: string;
   }): Promise<number>;
+
+  getInvitationRepository(): InvitationRepository;
+
+  getActivityRepository(): ActivityRepository;
 }

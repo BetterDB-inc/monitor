@@ -89,6 +89,10 @@ jobs:
       - name: Build shared package
         run: pnpm --filter @betterdb/shared build
 
+      # The agent `build` script runs `tsc --noEmit` before esbuild, so this both
+      # type-checks and bundles — a type error fails the release. The same gate runs
+      # in PR CI (the package test matrix invokes `pnpm build`), so type errors are
+      # caught at PR time, not first at release.
       - name: Build agent
         run: pnpm --filter @betterdb/agent build
 

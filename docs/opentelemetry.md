@@ -11,11 +11,11 @@ One thing to be clear about up front: Monitor's metrics are Prometheus-first (se
 
 ## At a glance
 
-| Signal | Direction | Endpoint | Default |
-|--------|-----------|----------|---------|
-| Traces | Ingest (receive) | `POST /v1/traces` | on |
-| Metrics | Export (mirror) | `${OTLP endpoint}/v1/metrics` | off, opt-in |
-| Events | Export (logs) | `${OTLP endpoint}/v1/logs` | off, opt-in |
+| Signal  | Direction        | Endpoint                      | Default     |
+| ------- | ---------------- | ----------------------------- | ----------- |
+| Traces  | Ingest (receive) | `POST /v1/traces`             | on          |
+| Metrics | Export (mirror)  | `${OTLP endpoint}/v1/metrics` | off, opt-in |
+| Events  | Export (logs)    | `${OTLP endpoint}/v1/logs`    | off, opt-in |
 
 Both exports are off until you set `OTEL_EXPORTER_OTLP_ENDPOINT`. The collector handles fan-out to Jaeger, Tempo, Cloudwatch, or whatever backend you run.
 
@@ -47,6 +47,8 @@ Set `OTEL_EXPORTER_OTLP_ENDPOINT` and Monitor mirrors its Prometheus registry to
 
 A caveat worth knowing: counters and gauges are mirrored, but **histograms and summaries are skipped** because they do not map cleanly onto the OTLP instruments here. So the OTLP mirror is a subset. For the complete set, including histograms and every `betterdb_*` family, scrape the Prometheus endpoint at `/api/prometheus/metrics` (see **[Prometheus Integration](prometheus-integration.md)** and the **[full metrics reference](prometheus-metrics.md)**).
 
+The mirror reads the same registry as `/api/prometheus/metrics`, so stale-connection series are dropped from it on the same staleness bound (see `PROMETHEUS_STALENESS_MS`).
+
 Tune the push interval with `OTEL_METRICS_EXPORT_INTERVAL_MS` (default `15000`).
 
 ## Event export
@@ -55,13 +57,13 @@ When an OTLP endpoint is configured, Monitor also emits discrete monitoring even
 
 ## Environment variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OTEL_INGEST_ENABLED` | `true` | Enable the `/v1/traces` OTLP trace receiver. |
-| `OTEL_INGEST_TOKEN` | unset | Bearer token required to post traces. Required in cloud mode. |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Base URL of your OTLP/HTTP collector. Setting it enables the metrics and event exports; `/v1/metrics` and `/v1/logs` are appended automatically. |
-| `OTEL_TELEMETRY_ENABLED` | `true` | Set `false` to disable the metrics and event exports even when an endpoint is set. |
-| `OTEL_METRICS_EXPORT_INTERVAL_MS` | `15000` | Metrics mirror push interval in milliseconds (minimum `1000`). |
+| Variable                          | Default | Description                                                                                                                                      |
+| --------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `OTEL_INGEST_ENABLED`             | `true`  | Enable the `/v1/traces` OTLP trace receiver.                                                                                                     |
+| `OTEL_INGEST_TOKEN`               | unset   | Bearer token required to post traces. Required in cloud mode.                                                                                    |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`     | unset   | Base URL of your OTLP/HTTP collector. Setting it enables the metrics and event exports; `/v1/metrics` and `/v1/logs` are appended automatically. |
+| `OTEL_TELEMETRY_ENABLED`          | `true`  | Set `false` to disable the metrics and event exports even when an endpoint is set.                                                               |
+| `OTEL_METRICS_EXPORT_INTERVAL_MS` | `15000` | Metrics mirror push interval in milliseconds (minimum `1000`).                                                                                   |
 
 ## Kubernetes
 
@@ -70,8 +72,42 @@ The install chart wires the export endpoint through an env var. See **[Kubernete
 ```yaml
 env:
   - name: OTEL_EXPORTER_OTLP_ENDPOINT
-    value: "http://otel-collector.observability.svc.cluster.local:4318"
+    value: 'http://otel-collector.observability.svc.cluster.local:4318'
 ```
+
+## OpenTelemetry Collector
+
+A tested Collector config ships in `deploy/observability/collector/`:
+
+- **`otel-collector.yaml`** — the base config. It receives OTLP on
+  `0.0.0.0:4317` (grpc) and `0.0.0.0:4318` (http) — the same endpoint you
+  point `OTEL_EXPORTER_OTLP_ENDPOINT` at — batches and memory-limits the
+  stream, and re-exposes it as a Prometheus scrape target on `:8889`.
+- **`otel-collector.fanout.yaml`** — the same intake, additionally exporting
+  to a second OTLP backend of your choice via the `SECONDARY_OTLP_ENDPOINT`
+  environment variable (for example a hosted metrics backend), alongside
+  the same Prometheus exporter.
+
+Both configs are plain YAML mounted into the Collector container — editing
+them doesn't require rebuilding an image.
+
+Monitor pushes its OTLP mirror on `OTEL_METRICS_EXPORT_INTERVAL_MS` (default
+`15000`ms). Point Prometheus at the Collector's exporter on `:8889` rather
+than at Monitor directly if you want the Collector in the path.
+
+`connection` is a datapoint attribute, not a resource attribute, so the
+Prometheus exporter turns it into a `connection` label on every metric
+regardless of configuration. The exporter's
+`resource_to_telemetry_conversion` setting covers the resource attributes
+instead — Monitor sets exactly one, `service.name`, which the setting
+promotes to a `service_name` label. That is why the
+**[dashboard pack](prometheus-integration.md#grafana-dashboard-pack)**,
+which is templated on `connection`, works unmodified whether Grafana points
+at Monitor's own `/api/prometheus/metrics` or at the Collector's `:8889`.
+
+See **[the observability pack README](../deploy/observability/README.md)**
+for import instructions and a full docker-compose demo of Monitor, the
+Collector, Prometheus, and Grafana running together.
 
 ## Summary
 

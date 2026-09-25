@@ -4,7 +4,9 @@ import {
   Tier,
   getEventsByTierCategory,
   isEventAllowedForTier,
-  WebhookEventType as WebhookEventTypeEnum
+  suggestPayloadFormatForUrl,
+  WebhookEventType as WebhookEventTypeEnum,
+  WebhookPayloadFormat,
 } from '@betterdb/shared';
 import { Card } from '../ui/card';
 import { licenseApi } from '../../api/license';
@@ -23,6 +25,12 @@ const THRESHOLD_EVENTS: WebhookEventType[] = [
 function hasThresholdEvents(events?: WebhookEventType[]): boolean {
   return events?.some(e => THRESHOLD_EVENTS.includes(e)) ?? false;
 }
+
+const FORMAT_PLACEHOLDERS: Record<WebhookPayloadFormat, string> = {
+  [WebhookPayloadFormat.GENERIC]: 'https://api.example.com/webhooks',
+  [WebhookPayloadFormat.SLACK]: 'https://hooks.slack.com/services/...',
+  [WebhookPayloadFormat.DISCORD]: 'https://discord.com/api/webhooks/...',
+};
 
 function cleanEmptyObjects(data: WebhookFormData): WebhookFormData {
   const cleaned = { ...data };
@@ -72,6 +80,8 @@ const EVENT_LABELS: Record<WebhookEventType, string> = {
   'config.changed': 'Config Changed',
   'metric_forecast.limit': 'Metric Forecast Limit',
   'inference.sla.breach': 'Inference SLA Breach',
+  'cve.critical_detected': 'CVE Critical Detected',
+  'cve.kev_detected': 'CVE KEV Detected',
   'monitor.session.started': 'MONITOR Session Started',
   'monitor.session.completed': 'MONITOR Session Completed',
   'monitor.session.truncated': 'MONITOR Session Truncated',
@@ -94,6 +104,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
     enabled: true,
     events: [],
     headers: {},
+    payloadFormat: WebhookPayloadFormat.GENERIC,
     retryPolicy: {
       maxRetries: 3,
       backoffMultiplier: 2,
@@ -135,6 +146,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
         enabled: webhook.enabled,
         events: webhook.events,
         headers: webhook.headers || {},
+        payloadFormat: webhook.payloadFormat ?? WebhookPayloadFormat.GENERIC,
         retryPolicy: webhook.retryPolicy,
         deliveryConfig: webhook.deliveryConfig ?? {},
         alertConfig: webhook.alertConfig ?? {},
@@ -216,6 +228,9 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
     });
   };
 
+  const suggestedFormat = formData.url ? suggestPayloadFormatForUrl(formData.url) : undefined;
+  const showFormatHint = !!suggestedFormat && suggestedFormat !== formData.payloadFormat;
+
   return (
     <form onSubmit={handleSubmit}>
       <Card className="p-6">
@@ -245,8 +260,36 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
               value={formData.url}
               onChange={(e) => setFormData({ ...formData, url: e.target.value })}
               className="w-full px-3 py-2 border rounded-md"
-              placeholder="https://api.example.com/webhooks"
+              placeholder={FORMAT_PLACEHOLDERS[formData.payloadFormat ?? WebhookPayloadFormat.GENERIC]}
             />
+            {showFormatHint && (
+              <p className="text-xs text-primary mt-1">
+                This looks like a {suggestedFormat} URL.{' '}
+                <button
+                  type="button"
+                  className="underline"
+                  onClick={() => setFormData({ ...formData, payloadFormat: suggestedFormat })}
+                >
+                  Use {suggestedFormat} format
+                </button>
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium mb-1">Payload format</label>
+            <select
+              value={formData.payloadFormat ?? WebhookPayloadFormat.GENERIC}
+              onChange={(e) => setFormData({ ...formData, payloadFormat: e.target.value as WebhookPayloadFormat })}
+              className="w-full px-3 py-2 border rounded-md dark:[color-scheme:dark]"
+            >
+              <option className="bg-card text-card-foreground" value={WebhookPayloadFormat.GENERIC}>Generic JSON</option>
+              <option className="bg-card text-card-foreground" value={WebhookPayloadFormat.SLACK}>Slack (Block Kit)</option>
+              <option className="bg-card text-card-foreground" value={WebhookPayloadFormat.DISCORD}>Discord (embed)</option>
+            </select>
+            <p className="text-xs text-muted-foreground mt-1">
+              Slack and Discord render rich messages; generic sends the raw BetterDB event JSON.
+            </p>
           </div>
 
           <div>

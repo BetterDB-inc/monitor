@@ -5,6 +5,7 @@ import {
   WebhookDelivery,
   WebhookEventType,
 } from '../../../common/interfaces/storage-port.interface';
+import { WebhookPayloadFormat } from '@betterdb/shared';
 import { RowMappers } from '../base-sql.adapter';
 
 export class WebhookPostgresRepository {
@@ -15,8 +16,8 @@ export class WebhookPostgresRepository {
 
   async createWebhook(webhook: Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>): Promise<Webhook> {
     const result = await this.pool.query(
-      `INSERT INTO webhooks (name, url, secret, enabled, events, headers, retry_policy, delivery_config, alert_config, thresholds, connection_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `INSERT INTO webhooks (name, url, secret, enabled, events, headers, retry_policy, delivery_config, alert_config, thresholds, payload_format, connection_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING *`,
       [
         webhook.name,
@@ -29,6 +30,7 @@ export class WebhookPostgresRepository {
         webhook.deliveryConfig ? JSON.stringify(webhook.deliveryConfig) : null,
         webhook.alertConfig ? JSON.stringify(webhook.alertConfig) : null,
         webhook.thresholds ? JSON.stringify(webhook.thresholds) : null,
+        webhook.payloadFormat ?? WebhookPayloadFormat.GENERIC,
         webhook.connectionId || null,
       ],
     );
@@ -125,6 +127,10 @@ export class WebhookPostgresRepository {
     if (updates.thresholds !== undefined) {
       setClauses.push(`thresholds = $${paramIndex++}`);
       params.push(JSON.stringify(updates.thresholds));
+    }
+    if (updates.payloadFormat !== undefined) {
+      setClauses.push(`payload_format = $${paramIndex++}`);
+      params.push(updates.payloadFormat);
     }
     if (updates.connectionId !== undefined) {
       setClauses.push(`connection_id = $${paramIndex++}`);

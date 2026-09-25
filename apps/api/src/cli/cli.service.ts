@@ -1,10 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { checkBlocked, checkSafeMode } from '@betterdb/shared';
+import { checkBlocked, checkMemberReadOnly, checkSafeMode } from '@betterdb/shared';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { parseCommandLine } from './command-parser';
 import { CliResultMessage, CliErrorMessage } from './cli.types';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
+
+export interface CliExecuteOptions {
+  readOnly: boolean;
+}
 
 @Injectable()
 export class CliService {
@@ -25,6 +29,7 @@ export class CliService {
   async execute(
     commandLine: string,
     connectionId?: string,
+    options: CliExecuteOptions = { readOnly: false },
   ): Promise<CliResultMessage | CliErrorMessage> {
     const args = parseCommandLine(commandLine.trim());
     if (args.length === 0) {
@@ -38,6 +43,13 @@ export class CliService {
     const blockError = checkBlocked(command, subCommand);
     if (blockError) {
       return { type: 'error', error: blockError };
+    }
+
+    if (options.readOnly === true) {
+      const memberError = checkMemberReadOnly(command, subCommand);
+      if (memberError !== null) {
+        return { type: 'error', error: memberError };
+      }
     }
 
     if (!this.unsafeMode) {

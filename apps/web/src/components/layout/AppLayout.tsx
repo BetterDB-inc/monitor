@@ -1,6 +1,5 @@
-import { useMemo, useState, ReactNode } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
-import { useDemoState } from '../../contexts/DemoContext';
+import { ReactElement, useMemo, useState } from 'react';
+import { Navigate, Routes, Route } from 'react-router-dom';
 import { DemoBanner } from '../DemoBanner';
 import { useIdleTracker } from '../../hooks/useIdleTracker';
 import { useNavigationTracker } from '../../hooks/useNavigationTracker';
@@ -11,6 +10,7 @@ import { NoConnectionsGuard } from '../NoConnectionsGuard';
 import { VectorSearchGuard } from '../VectorSearchGuard';
 import { CliPanel } from '../CliPanel';
 import { Dashboard } from '../../pages/Dashboard';
+import { Fleet } from '../../pages/Fleet';
 import { SlowLog } from '../../pages/SlowLog';
 import { Latency } from '../../pages/Latency';
 import { Clients } from '../../pages/Clients';
@@ -35,29 +35,22 @@ import { MetricForecasting } from '../../pages/MetricForecasting';
 import { CacheProposals } from '../../pages/CacheProposals';
 import { Monitor } from '../../pages/Monitor';
 import { MonitorSession } from '../../pages/MonitorSession';
-import { Members } from '../../pages/Members';
 import { Security } from '../../pages/Security';
 
-import { CloudUser } from '../../api/workspace';
+import { useAuth } from '../../contexts/AuthContext';
 import { AppSidebar } from './AppSidebar.tsx';
 import { FeedbackModal } from './FeedbackModal';
+import { RestrictedRoute } from './RestrictedRoute';
 import { ShortcutsOverlay } from '@/components/layout/ShortcutsOverlay';
 import { useAppKeybindings } from '@/keybindings/useAppKeybindings';
 import { ConnectionSwitcherOpenContext } from '@/components/connection-selector/switcher-open-context';
 import { useSidebar } from '@/components/ui/sidebar';
 import { SidebarProvider } from '@/components/ui/sidebar.tsx';
 
-function DemoGuardedRoute({ children }: { children: ReactNode }) {
-  const { isDemo, loading } = useDemoState();
-  if (loading) return null;
-  if (isDemo) return <Navigate to="/" replace />;
-  return <>{children}</>;
-}
-
-export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
+export function AppLayout(): ReactElement {
   return (
     <SidebarProvider>
-      <AppLayoutInner cloudUser={cloudUser} />
+      <AppLayoutInner />
     </SidebarProvider>
   );
 }
@@ -66,7 +59,10 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
  * Split out so the keybindings can reach `useSidebar`, which only exists
  * inside `SidebarProvider`.
  */
-function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
+function AppLayoutInner(): ReactElement {
+  const { user, isCloud, mode } = useAuth();
+  const cloudUser = isCloud ? user : null;
+  const showAccountSections = isCloud === true || mode === 'self-hosted';
   const [showFeedback, setShowFeedback] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -123,6 +119,14 @@ function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
                 element={
                   <NoConnectionsGuard>
                     <Dashboard />
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/fleet"
+                element={
+                  <NoConnectionsGuard>
+                    <Fleet />
                   </NoConnectionsGuard>
                 }
               />
@@ -185,9 +189,11 @@ function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
               <Route
                 path="/bulk-delete"
                 element={
-                  <NoConnectionsGuard>
-                    <BulkDelete />
-                  </NoConnectionsGuard>
+                  <RestrictedRoute>
+                    <NoConnectionsGuard>
+                      <BulkDelete />
+                    </NoConnectionsGuard>
+                  </RestrictedRoute>
                 }
               />
               <Route
@@ -283,11 +289,11 @@ function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
               <Route
                 path="/webhooks"
                 element={
-                  <DemoGuardedRoute>
+                  <RestrictedRoute>
                     <NoConnectionsGuard>
                       <Webhooks />
                     </NoConnectionsGuard>
-                  </DemoGuardedRoute>
+                  </RestrictedRoute>
                 }
               />
               <Route
@@ -324,24 +330,19 @@ function AppLayoutInner({ cloudUser }: { cloudUser: CloudUser | null }) {
                   </NoConnectionsGuard>
                 }
               />
-              {cloudUser && (
+              {showAccountSections && (
                 <Route
                   path="/workspace/members"
-                  element={
-                    <DemoGuardedRoute>
-                      <Members cloudUser={cloudUser} />
-                    </DemoGuardedRoute>
-                  }
+                  element={<Navigate to="/settings?section=team" replace />}
                 />
               )}
-              <Route
-                path="/settings"
-                element={
-                  <DemoGuardedRoute>
-                    <Settings isCloudMode={!!cloudUser} />
-                  </DemoGuardedRoute>
-                }
-              />
+              {showAccountSections && (
+                <Route
+                  path="/account/mcp-tokens"
+                  element={<Navigate to="/settings?section=mcp-tokens" replace />}
+                />
+              )}
+              <Route path="/settings" element={<Settings isCloudMode={!!cloudUser} />} />
             </Routes>
           </div>
         </main>

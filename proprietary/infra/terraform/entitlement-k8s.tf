@@ -58,6 +58,7 @@ resource "kubernetes_secret" "entitlement_config" {
   data = {
     ENTITLEMENT_DATABASE_URL = "postgresql://${var.db_username}:${urlencode(var.db_password)}@${aws_db_instance.this.address}:5432/betterdb?sslmode=require"
     ADMIN_API_TOKEN          = var.service_layer_admin_key
+    BROKER_API_TOKEN         = var.broker_api_token
     RDS_HOST                 = aws_db_instance.this.address
     RDS_PORT                 = "5432"
     RDS_USER                 = var.db_username
@@ -72,5 +73,10 @@ resource "kubernetes_secret" "entitlement_config" {
     # entitlement service fail-fast-boots in production without it.
     LICENSE_SIGNING_PRIVATE_KEY = var.license_signing_private_key
     LICENSE_SIGNING_KID         = var.license_signing_kid
+    # Broker token signing (RS256, dedicated keypair). Managed here so
+    # `terraform apply` never strips it back out of the secret — self-hosted
+    # sign-in is unavailable in production without it.
+    BROKER_SIGNING_PRIVATE_KEY = var.broker_signing_private_key
+    BROKER_SIGNING_KID         = var.broker_signing_kid
   }
 }

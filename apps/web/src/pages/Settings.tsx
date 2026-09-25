@@ -1,10 +1,15 @@
 import { useState, useEffect } from 'react';
+import { Navigate, useSearchParams } from 'react-router-dom';
+import { Lock } from 'lucide-react';
 import { settingsApi } from '../api/settings';
-import { agentTokensApi, GeneratedToken } from '../api/agent-tokens';
 import { licenseApi } from '../api/license';
-import { useMcpTokens } from '../hooks/useMcpTokens';
 import { useConnection } from '../hooks/useConnection';
 import { useLicense } from '../hooks/useLicense';
+import { useAuth } from '../contexts/AuthContext';
+import { useDemoState } from '../contexts/DemoContext';
+import { useCanMutate } from '../hooks/useCanMutate';
+import { McpTokensPanel } from '../components/pages/settings/McpTokensPanel';
+import { Members } from './Members';
 import {
   AppSettings,
   SettingsUpdateRequest,
@@ -14,22 +19,71 @@ import {
 import { Card } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { useQueryClient } from '@tanstack/react-query';
-type SettingsCategory = 'license' | 'audit' | 'clientAnalytics' | 'anomaly' | 'dataRetention' | 'mcpTokens';
+type SettingsCategory =
+  | 'team'
+  | 'mcpTokens'
+  | 'license'
+  | 'audit'
+  | 'clientAnalytics'
+  | 'anomaly'
+  | 'dataRetention';
+
+interface CategoryEntry {
+  id: SettingsCategory;
+  section: string;
+  label: string;
+  adminOnly: boolean;
+}
+
+const ACCOUNT_CATEGORY_IDS: ReadonlySet<SettingsCategory> = new Set(['team', 'mcpTokens']);
 
 const RETENTION_INPUT_ERROR = `Enter a whole number of days between 1 and ${MAX_RETENTION_DAYS}, or leave empty to keep history forever.`;
 
+function isUpdatableSettingsKey(
+  key: keyof AppSettings,
+): key is keyof AppSettings & keyof SettingsUpdateRequest {
+  return key !== 'id' && key !== 'createdAt' && key !== 'updatedAt';
+}
+
+function copySettingsKey<K extends keyof AppSettings & keyof SettingsUpdateRequest>(
+  updates: SettingsUpdateRequest,
+  formData: Partial<AppSettings>,
+  key: K,
+): void {
+  updates[key] = formData[key];
+}
+
+// The single definition of "what the user has changed": the editable keys whose
+// draft value differs from what's saved. Both the Save gate (hasChanges) and the
+// update payload derive from this, so a draft that collapses back to the stored
+// value (e.g. type 30, then clear it) can never leave Save enabled or PUT {}.
+function changedKeys(
+  form: Partial<AppSettings>,
+  saved: AppSettings | null,
+): Array<keyof AppSettings & keyof SettingsUpdateRequest> {
+  if (!saved) return [];
+  return (Object.keys(form) as Array<keyof AppSettings>).filter(
+    (key): key is keyof AppSettings & keyof SettingsUpdateRequest =>
+      isUpdatableSettingsKey(key) && form[key] !== saved[key],
+  );
+}
+
 export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
+  const { isDemo, loading: demoLoading } = useDemoState();
+  const isAdmin = useCanMutate() !== false;
+  const [searchParams, setSearchParams] = useSearchParams();
   const { currentConnection } = useConnection();
   const { tier, license } = useLicense();
   const queryClient = useQueryClient();
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(isAdmin);
   const [saving, setSaving] = useState(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [source, setSource] = useState<'database' | 'environment' | 'defaults'>('defaults');
   const [requiresRestart, setRequiresRestart] = useState(false);
-  const [activeCategory, setActiveCategory] = useState<SettingsCategory>('license');
   const [formData, setFormData] = useState<Partial<AppSettings>>({});
-  const [hasChanges, setHasChanges] = useState(false);
+  // Derived, never stored: recomputed from (formData, settings) every render so
+  // it can't fall out of sync with the draft the way a manual boolean did.
+  const hasChanges = changedKeys(formData, settings).length > 0;
 
   // Raw text of the retention input so invalid entries stay visible with an
   // error instead of silently collapsing to "keep forever".
@@ -57,19 +111,35 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const [offlineNotice, setOfflineNotice] = useState<string | null>(null);
   const [showOffline, setShowOffline] = useState(false);
 
-  // MCP Tokens state (must be before any early returns)
-  const { tokens: mcpTokens, invalidate: invalidateMcpTokens } = useMcpTokens(
-    isCloudMode && activeCategory === 'mcpTokens',
+  const { mode } = useAuth();
+  const showAccountSections = isCloudMode === true || mode === 'self-hosted';
+
+  const allCategories: CategoryEntry[] = [
+    { id: 'team', section: 'team', label: 'Team', adminOnly: false },
+    { id: 'mcpTokens', section: 'mcp-tokens', label: 'MCP Tokens', adminOnly: false },
+    { id: 'license', section: 'license', label: 'License', adminOnly: true },
+    { id: 'audit', section: 'audit', label: 'Audit Trail', adminOnly: true },
+    { id: 'clientAnalytics', section: 'client-analytics', label: 'Client Analytics', adminOnly: true },
+    { id: 'anomaly', section: 'anomaly', label: 'Anomaly Detection', adminOnly: true },
+    { id: 'dataRetention', section: 'data-retention', label: 'Data Retention', adminOnly: true },
+  ];
+  const categories = allCategories.filter((category) => {
+    if (ACCOUNT_CATEGORY_IDS.has(category.id)) {
+      return showAccountSections;
+    }
+    return category.id !== 'dataRetention' || !isCloudMode;
+  });
+  const availableCategories = categories.filter((category) => isAdmin || !category.adminOnly);
+  const requestedCategory = availableCategories.find(
+    (category) => category.section === searchParams.get('section'),
   );
-  const [mcpTokenName, setMcpTokenName] = useState('');
-  const [mcpGenerating, setMcpGenerating] = useState(false);
-  const [mcpGeneratedToken, setMcpGeneratedToken] = useState<GeneratedToken | null>(null);
-  const [mcpCopied, setMcpCopied] = useState(false);
-  const [mcpError, setMcpError] = useState<string | null>(null);
+  const activeCategory = (requestedCategory ?? availableCategories[0])?.id;
 
   useEffect(() => {
-    loadSettings();
-  }, [currentConnection?.id]);
+    if (isAdmin) {
+      loadSettings();
+    }
+  }, [currentConnection?.id, isAdmin]);
 
   const loadSettings = async () => {
     try {
@@ -79,7 +149,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setFormData(response.settings);
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
-      setHasChanges(false);
       syncRetentionFrom(response.settings.localRetentionDays);
     } catch (error) {
       console.error('Failed to load settings:', error);
@@ -88,9 +157,8 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     }
   };
 
-  const handleInputChange = (key: keyof AppSettings, value: any) => {
+  const handleInputChange = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     setFormData((prev) => ({ ...prev, [key]: value }));
-    setHasChanges(true);
   };
 
   const handleSave = async () => {
@@ -99,12 +167,8 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     try {
       setSaving(true);
       const updates: SettingsUpdateRequest = {};
-
-      // Only include changed fields
-      (Object.keys(formData) as Array<keyof AppSettings>).forEach((key) => {
-        if (formData[key] !== settings[key] && key !== 'id' && key !== 'createdAt' && key !== 'updatedAt') {
-          (updates as any)[key] = formData[key];
-        }
+      changedKeys(formData, settings).forEach((key) => {
+        copySettingsKey(updates, formData, key);
       });
 
       const response = await settingsApi.updateSettings(updates);
@@ -112,7 +176,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setFormData(response.settings);
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
-      setHasChanges(false);
       syncRetentionFrom(response.settings.localRetentionDays);
     } catch (error) {
       console.error('Failed to save settings:', error);
@@ -125,7 +188,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const handleCancel = () => {
     if (settings) {
       setFormData(settings);
-      setHasChanges(false);
       syncRetentionFrom(settings.localRetentionDays);
     }
   };
@@ -142,7 +204,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setFormData(response.settings);
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
-      setHasChanges(false);
       syncRetentionFrom(response.settings.localRetentionDays);
     } catch (error) {
       console.error('Failed to reset settings:', error);
@@ -152,6 +213,14 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     }
   };
 
+  if (demoLoading === true) {
+    return null;
+  }
+
+  if (isDemo === true) {
+    return <Navigate to="/" replace />;
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -159,37 +228,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       </div>
     );
   }
-
-  const handleMcpGenerate = async () => {
-    if (!mcpTokenName.trim()) return;
-    setMcpGenerating(true);
-    setMcpError(null);
-    try {
-      const result = await agentTokensApi.generate(mcpTokenName.trim(), 'mcp');
-      setMcpGeneratedToken(result);
-      setMcpTokenName('');
-      await invalidateMcpTokens();
-    } catch (err) {
-      setMcpError(err instanceof Error ? err.message : 'Failed to generate token');
-    } finally {
-      setMcpGenerating(false);
-    }
-  };
-
-  const handleMcpRevoke = async (id: string) => {
-    try {
-      await agentTokensApi.revoke(id);
-      await invalidateMcpTokens();
-    } catch (err) {
-      setMcpError(err instanceof Error ? err.message : 'Failed to revoke token');
-    }
-  };
-
-  const copyMcpToken = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setMcpCopied(true);
-    setTimeout(() => setMcpCopied(false), 2000);
-  };
 
   const handleActivate = async () => {
     if (!activateKey.trim()) return;
@@ -296,15 +334,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     </div>
   );
 
-  const categories: { id: SettingsCategory; label: string }[] = [
-    { id: 'license', label: 'License' },
-    { id: 'audit', label: 'Audit Trail' },
-    { id: 'clientAnalytics', label: 'Client Analytics' },
-    { id: 'anomaly', label: 'Anomaly Detection' },
-    ...(!isCloudMode ? [{ id: 'dataRetention' as const, label: 'Data Retention' }] : []),
-    ...(isCloudMode ? [{ id: 'mcpTokens' as const, label: 'MCP Tokens' }] : []),
-  ];
-
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -312,46 +341,66 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
           <h1 className="text-3xl font-bold">Settings</h1>
           <p className="text-sm text-muted-foreground mt-1">Configure application settings</p>
         </div>
-        <div className="flex items-center gap-2">
-          <Badge variant="secondary">Source: {source}</Badge>
-          {requiresRestart && <Badge variant="destructive">Restart Required</Badge>}
-        </div>
+        {isAdmin && (
+          <div className="flex items-center gap-2">
+            <Badge variant="secondary">Source: {source}</Badge>
+            {requiresRestart && <Badge variant="destructive">Restart Required</Badge>}
+          </div>
+        )}
       </div>
 
       <div className="flex gap-6">
         <aside className="w-64 space-y-2">
-          {categories.map((category) => (
-            <button
-              key={category.id}
-              onClick={() => {
-                setActiveCategory(category.id);
-                // A pending invalid retention entry gates the shared Save
-                // button but its message only renders inside the Data
-                // Retention tab — leaving the tab discards the invalid text
-                // (formData was never updated with it) so other tabs aren't
-                // blocked by an error they can't see.
-                if (category.id !== 'dataRetention' && retentionError) {
-                  // Discard the WHOLE draft, including any valid prefix that
-                  // was committed to formData while typing (e.g. "3" en route
-                  // to "3650") — reverting only the visible input would let a
-                  // hidden partial value ride along with a save made from
-                  // another tab and silently shrink the retention window.
-                  setFormData((prev) => ({
-                    ...prev,
-                    localRetentionDays: settings?.localRetentionDays ?? null,
-                  }));
-                  syncRetentionFrom(settings?.localRetentionDays);
-                }
-              }}
-              className={`w-full text-left px-4 py-3 rounded-lg transition-colors ${
-                activeCategory === category.id
-                  ? 'bg-primary/10 text-primary font-medium'
-                  : 'hover:bg-muted'
-              }`}
-            >
-              {category.label}
-            </button>
-          ))}
+          {categories.map((category) => {
+            if (category.adminOnly && !isAdmin) {
+              return (
+                <span
+                  key={category.id}
+                  aria-disabled="true"
+                  data-tooltip-id="license-tooltip"
+                  data-tooltip-content="Admins only"
+                  className="flex w-full items-center justify-between px-4 py-3 rounded-lg opacity-40 cursor-not-allowed select-none"
+                >
+                  {category.label}
+                  <Lock aria-hidden="true" className="size-3.5" />
+                </span>
+              );
+            }
+            return (
+              <button
+                key={category.id}
+                type="button"
+                aria-current={activeCategory === category.id ? 'page' : undefined}
+                onClick={() => {
+                  setSearchParams({ section: category.section }, { replace: true });
+                  // A pending invalid retention entry gates the shared Save
+                  // button but its message only renders inside the Data
+                  // Retention tab — leaving the tab discards the invalid text
+                  // (formData was never updated with it) so other tabs aren't
+                  // blocked by an error they can't see.
+                  if (category.id !== 'dataRetention' && retentionError) {
+                    // Discard the WHOLE draft, including any valid prefix that
+                    // was committed to formData while typing (e.g. "3" en route
+                    // to "3650") — reverting only the visible input would let a
+                    // hidden partial value ride along with a save made from
+                    // another tab and silently shrink the retention window.
+                    setFormData((prev) => ({
+                      ...prev,
+                      localRetentionDays: settings?.localRetentionDays ?? null,
+                    }));
+                    syncRetentionFrom(settings?.localRetentionDays);
+                  }
+                }}
+                className={`w-full text-left px-4 py-3 rounded-lg transition-colors ${
+                  activeCategory === category.id
+                    ? 'bg-primary/10 text-primary font-medium'
+                    : 'hover:bg-muted'
+                }`}
+              >
+                {category.label}
+              </button>
+            );
+          })}
         </aside>
 
         <div className="flex-1">
@@ -671,139 +720,13 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
               </div>
             )}
 
-            {activeCategory === 'mcpTokens' && (
-              <div className="space-y-4">
-                <h2 className="text-xl font-semibold mb-4">MCP Tokens</h2>
-                <p className="text-sm text-muted-foreground">
-                  Generate tokens for MCP (Model Context Protocol) clients like Claude Code to access your database observability data.
-                </p>
+            {activeCategory === 'team' && <Members />}
 
-                {mcpError && (
-                  <div className="text-sm text-destructive bg-destructive/5 border border-destructive/20 rounded-md p-2">
-                    {mcpError}
-                  </div>
-                )}
+            {activeCategory === 'mcpTokens' && <McpTokensPanel />}
 
-                {/* Generate Token */}
-                {!mcpGeneratedToken && (
-                  <div>
-                    <label className="block text-sm font-medium mb-1">Generate MCP Token</label>
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        value={mcpTokenName}
-                        onChange={(e) => setMcpTokenName(e.target.value)}
-                        placeholder="Token name (e.g., claude-code)"
-                        className="flex-1 px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                        onKeyDown={(e) => e.key === 'Enter' && handleMcpGenerate()}
-                      />
-                      <button
-                        onClick={handleMcpGenerate}
-                        disabled={mcpGenerating || !mcpTokenName.trim()}
-                        className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed"
-                      >
-                        {mcpGenerating ? 'Generating...' : 'Generate'}
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Show Generated Token */}
-                {mcpGeneratedToken && (
-                  <div className="border rounded-md p-3 bg-amber-50 border-amber-300">
-                    <h3 className="text-sm font-medium text-amber-700 mb-2">
-                      Save this token - it won't be shown again
-                    </h3>
-                    <div className="flex gap-2 mb-3">
-                      <code className="flex-1 text-xs bg-white dark:text-gray-900 p-2 rounded border font-mono break-all select-all">
-                        {mcpGeneratedToken.token}
-                      </code>
-                      <button
-                        onClick={() => copyMcpToken(mcpGeneratedToken.token)}
-                        className="px-3 py-1 text-xs border rounded hover:bg-muted flex-shrink-0"
-                      >
-                        {mcpCopied ? 'Copied!' : 'Copy'}
-                      </button>
-                    </div>
-
-                    <h4 className="text-xs font-medium mb-1">Add to your Claude Code MCP config:</h4>
-                    <pre className="text-xs bg-white dark:text-gray-900 p-2 rounded border overflow-x-auto">
-{`{
-  "mcpServers": {
-    "betterdb": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["@betterdb/mcp"],
-      "env": {
-        "BETTERDB_URL": "${window.location.origin}",
-        "BETTERDB_TOKEN": "${mcpGeneratedToken.token}"
-      }
-    }
-  }
-}`}
-                    </pre>
-
-                    <button
-                      onClick={() => setMcpGeneratedToken(null)}
-                      className="mt-3 text-xs text-primary hover:underline"
-                    >
-                      I've saved the token
-                    </button>
-                  </div>
-                )}
-
-                {/* Existing Tokens */}
-                {mcpTokens.length > 0 && (
-                  <div>
-                    <h3 className="text-sm font-medium mb-2">Existing Tokens</h3>
-                    <div className="space-y-1">
-                      {mcpTokens.map((token) => {
-                        const isActive = !token.revokedAt && token.expiresAt > Date.now();
-                        return (
-                          <div
-                            key={token.id}
-                            className="flex items-center justify-between p-2 border rounded-md text-sm"
-                          >
-                            <div className="min-w-0">
-                              <div className="font-medium truncate">{token.name}</div>
-                              <div className="text-xs text-muted-foreground">
-                                Created {new Date(token.createdAt).toLocaleDateString()}
-                                {token.lastUsedAt && ` · Last used ${new Date(token.lastUsedAt).toLocaleDateString()}`}
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-2 flex-shrink-0">
-                              {token.revokedAt ? (
-                                <span className="text-xs px-1.5 py-0.5 bg-destructive/10 text-destructive rounded">
-                                  Revoked
-                                </span>
-                              ) : !isActive ? (
-                                <span className="text-xs px-1.5 py-0.5 bg-yellow-100 text-yellow-700 rounded">
-                                  Expired
-                                </span>
-                              ) : (
-                                <>
-                                  <span className="text-xs px-1.5 py-0.5 bg-green-100 text-green-700 rounded">
-                                    Active
-                                  </span>
-                                  <button
-                                    onClick={() => handleMcpRevoke(token.id)}
-                                    className="text-xs px-2 py-1 border border-destructive/20 text-destructive rounded hover:bg-destructive/10"
-                                  >
-                                    Revoke
-                                  </button>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {activeCategory !== 'mcpTokens' && activeCategory !== 'license' && (
+            {activeCategory !== undefined &&
+              !ACCOUNT_CATEGORY_IDS.has(activeCategory) &&
+              activeCategory !== 'license' && (
               <div className="flex items-center gap-3 mt-6 pt-6 border-t">
                 <button
                   onClick={handleSave}

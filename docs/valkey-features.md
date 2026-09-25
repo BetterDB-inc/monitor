@@ -120,6 +120,8 @@ betterdb_commandlog_large_reply_by_pattern{pattern="LRANGE *"}
 
 ### Example Use Cases
 
+> **Note**: API calls need a signed-in session when user control is enabled — see [Authenticating API Requests](configuration.md#authenticating-api-requests).
+
 #### Identify Large Hash Retrievals
 
 ```bash
@@ -212,7 +214,7 @@ betterdb_cluster_slot_reads_total{slot="5461"}
 betterdb_cluster_slot_writes_total{slot="5461"}
 ```
 
-**Cardinality Note**: Automatically limited to top 100 slots by key count to prevent metric explosion (16,384 slots × 4 metrics = 65,536 series without limit).
+**Cardinality Note**: Limited to the top `METRICS_SLOT_STATS_TOP_N` slots by key count to prevent metric explosion (default 100; `0` disables the call entirely; 16,384 slots × 4 metrics = 65,536 series without limit). A slot that leaves the top N is removed rather than reported as 0, so a cluster connection exports at most 4 × N slot series. Not exported under `METRICS_EXPORT_PROFILE=vitals`.
 
 ### Example Use Cases
 
@@ -702,12 +704,12 @@ curl http://localhost:3001/api/health
 
 **On Valkey cluster**:
 - Computation per slot: ~0.1ms
-- Total for 100 slots: ~10ms
+- Total for the default top 100 slots: ~10ms
 - No caching (computed on-demand)
 
 **On BetterDB**:
 - Fetching stats: ~50-200ms (depends on cluster size)
-- Limited to 100 slots to prevent overhead
+- Limited to `METRICS_SLOT_STATS_TOP_N` slots to prevent overhead (default 100; `0` disables the call)
 - Cached in Prometheus metrics (updated on scrape)
 
 ### Optimization Recommendations

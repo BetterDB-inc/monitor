@@ -271,6 +271,18 @@ resource "aws_apigatewayv2_route" "workspace_token" {
   authorizer_id      = aws_apigatewayv2_authorizer.api_key.id
 }
 
+# Broker token — reached by the betterdb.com /self-hosted/sign-in consent page
+# (lib/entitlement.ts getBrokerToken) to mint the RS256 handoff token for
+# self-hosted broker sign-in. Behind the same api-key authorizer; the site
+# holds the X-Api-Key and sends the dedicated ENTITLEMENT_BROKER_KEY bearer.
+resource "aws_apigatewayv2_route" "broker_token" {
+  api_id             = aws_apigatewayv2_api.entitlement.id
+  route_key          = "POST /auth/broker-token"
+  target             = "integrations/${aws_apigatewayv2_integration.entitlement.id}"
+  authorization_type = "CUSTOM"
+  authorizer_id      = aws_apigatewayv2_authorizer.api_key.id
+}
+
 # Public registration endpoint — kept behind the API key authorizer so it can
 # only be reached via the betterdb.com /api/register proxy (which holds the
 # server-side X-Api-Key). The entitlement service applies its own per-IP

@@ -31,3 +31,7 @@ if (!process.env.AUDIT_POLL_INTERVAL_MS) {
 if (!process.env.ANOMALY_POLL_INTERVAL_MS) {
   process.env.ANOMALY_POLL_INTERVAL_MS = '1000';
 }
+
+if (!process.env.WORKSPACE_DISABLED) {
+  process.env.WORKSPACE_DISABLED = 'true';
+}

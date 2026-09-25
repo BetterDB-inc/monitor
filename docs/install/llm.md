@@ -27,8 +27,10 @@ ask Claude about your database health, slow queries, or memory usage.
 npx @betterdb/mcp
 ```
 
-Create a token under **Settings → MCP Tokens** in the dashboard to authenticate
-the server against a running monitor.
+Create a token under **Settings → MCP Tokens** in the dashboard and pass it as
+`BETTERDB_TOKEN`. Cloud requires it. On self-hosted it is optional: read tools
+work without it. With it, every call acts as you, and changes it makes are
+recorded under your name in the activity log.
 
 See [Packages](../packages.md) for the full tool list and the
 [`@betterdb/mcp`](https://www.npmjs.com/package/@betterdb/mcp) package.

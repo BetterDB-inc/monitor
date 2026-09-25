@@ -2,6 +2,7 @@ import { useConnection } from '../hooks/useConnection';
 import { ReactNode, ReactElement, useState, useRef, useEffect, FormEvent } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useIsDemo } from '../contexts/DemoContext';
+import { useCanMutate } from '../hooks/useCanMutate';
 import { useTelemetry } from '../hooks/useTelemetry';
 import { fetchApi } from '../api/client';
 import { parseConnectionUrl, ParsedConnection } from '../utils/connectionUrl';
@@ -18,6 +19,11 @@ const DEFAULT_PAGE_STATE: PageEmptyState = {
 };
 
 const PAGE_STATES: Record<string, PageEmptyState> = {
+  '/fleet': {
+    headline: 'See every instance at a glance.',
+    description:
+      'Connect your Valkey or Redis instances to get a fleet-wide health overview - status, memory, throughput, and clients in one view.',
+  },
   '/slowlog': {
     headline: 'Find your slowest queries.',
     description:
@@ -624,6 +630,7 @@ interface NoConnectionsGuardProps {
 export function NoConnectionsGuard({ children }: NoConnectionsGuardProps): ReactElement | null {
   const { hasNoConnections, loading, error, refreshConnections } = useConnection();
   const isDemo = useIsDemo();
+  const canMutate = useCanMutate();
   const { client: telemetry } = useTelemetry();
   const location = useLocation();
 
@@ -673,6 +680,25 @@ export function NoConnectionsGuard({ children }: NoConnectionsGuardProps): React
             <p className="text-[15px] text-muted-foreground leading-relaxed">
               You're in a read-only demo. Select a pre-configured connection from the sidebar to
               explore live metrics.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    if (canMutate === false) {
+      return (
+        <div className="flex-1 flex items-center justify-center">
+          <div className="max-w-md text-center">
+            <p className="text-[10px] font-bold tracking-[0.2em] uppercase text-primary mb-4 select-none">
+              No database connected
+            </p>
+            <h1 className="text-3xl font-extrabold tracking-tight mb-3 text-foreground">
+              {page.headline}
+            </h1>
+            <p className="text-[15px] text-muted-foreground leading-relaxed">
+              Ask a workspace admin to add a connection. Your account is read-only, so it cannot
+              add or change connections.
             </p>
           </div>
         </div>

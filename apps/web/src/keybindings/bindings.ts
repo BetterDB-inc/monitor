@@ -70,6 +70,7 @@ export const NAV_CHORDS: readonly NavChord[] = [
   },
   { keys: ['M'], path: '/monitor', name: 'Monitor' },
   { keys: ['C'], path: '/clients', name: 'Clients' },
+  { keys: ['E'], path: '/fleet', name: 'Fleet' },
   {
     keys: ['K'],
     path: '/key-analytics',

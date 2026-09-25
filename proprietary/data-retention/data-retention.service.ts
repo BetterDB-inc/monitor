@@ -30,14 +30,21 @@ export class DataRetentionService {
       return;
     }
 
-    // In cloud mode the policy always resolves to the tier window, never
-    // null; the day count identifies the tier, so we don't resolve the tier
-    // a second time just for the log (two lookups could disagree mid-sweep).
-    const retentionDays = this.retentionPolicy.getRetentionDays()!;
+    // In cloud mode the policy resolves to the tier window today, but guard
+    // anyway: if a future change ever returned null here, the arithmetic
+    // below would compute cutoff = now and the sweep would delete everything.
+    const retentionDays = this.retentionPolicy.getRetentionDays();
+    const sampleRetentionMs = this.retentionPolicy.getSampleRetentionMs();
+    if (retentionDays == null || sampleRetentionMs == null) {
+      this.logger.error(
+        'Retention policy returned no window in cloud mode; skipping the sweep rather than pruning with a zero cutoff',
+      );
+      return;
+    }
     const cutoff = Date.now() - retentionDays * MS_PER_DAY;
-    // The sample stores keep their tighter cloud cap even in the sweep — it
+    // The sample stores keep their tighter cloud cap even in the sweep: it
     // is the only pruner that reaches removed/unreachable connections' rows.
-    const sampleCutoff = Date.now() - this.retentionPolicy.getSampleRetentionMs()!;
+    const sampleCutoff = Date.now() - sampleRetentionMs;
 
     this.logger.log(`Running data retention: retentionDays=${retentionDays}, cutoff=${new Date(cutoff).toISOString()}`);
 

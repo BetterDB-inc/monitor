@@ -213,6 +213,26 @@ describe('envSchema', () => {
     });
   });
 
+  describe('ACTIVITY_RETENTION_DAYS validation', () => {
+    it('should accept a whole number of days', () => {
+      const result = envSchema.safeParse({ ACTIVITY_RETENTION_DAYS: '100' });
+      expect(result.success).toBe(true);
+    });
+
+    it('should treat a missing or blank value as unset', () => {
+      expect(envSchema.safeParse({}).success).toBe(true);
+      expect(envSchema.safeParse({ ACTIVITY_RETENTION_DAYS: '' }).success).toBe(true);
+      expect(envSchema.safeParse({ ACTIVITY_RETENTION_DAYS: '   ' }).success).toBe(true);
+    });
+
+    it.each(['1e2', '1.5', '0', '-5', '30days', '9007199254740993'])(
+      'should reject %s',
+      (value) => {
+        expect(envSchema.safeParse({ ACTIVITY_RETENTION_DAYS: value }).success).toBe(false);
+      },
+    );
+  });
+
   describe('boolean transforms', () => {
     it('should transform AI_ENABLED to true when "true"', () => {
       const result = envSchema.safeParse({ AI_ENABLED: 'true' });
@@ -245,6 +265,20 @@ describe('envSchema', () => {
         expect(result.data.ANOMALY_DETECTION_ENABLED).toBe(true);
       }
     });
+
+    it('reads BETTERDB_TELEMETRY through the shared negative set, trimming like CLOUD_MODE', () => {
+      // Parity guard for the isNegativeEnvValue helper CLOUD_MODE also uses: a
+      // padded ' off ' opts out here exactly as ' off ' reads self-hosted for
+      // CLOUD_MODE, and every accepted negative spelling disables telemetry.
+      for (const off of ['false', '0', 'no', 'off', 'OFF', ' off ', '\tno\n']) {
+        const result = envSchema.safeParse({ BETTERDB_TELEMETRY: off });
+        expect(result.success && result.data.BETTERDB_TELEMETRY).toBe(false);
+      }
+      for (const on of ['true', '1', 'yes', 'anything']) {
+        const result = envSchema.safeParse({ BETTERDB_TELEMETRY: on });
+        expect(result.success && result.data.BETTERDB_TELEMETRY).toBe(true);
+      }
+    });
   });
 
   describe('URL validation', () => {
@@ -261,15 +295,19 @@ describe('envSchema', () => {
 
   describe('OTLP ingest token in cloud mode', () => {
     it('requires OTEL_INGEST_TOKEN when CLOUD_MODE is set', () => {
-      const result = envSchema.safeParse({ CLOUD_MODE: 'true' });
+      const result = envSchema.safeParse({ CLOUD_MODE: 'true', PROMETHEUS_METRICS_TOKEN: 'token' });
       expect(result.success).toBe(false);
       if (!result.success) {
         expect(result.error.issues.some((i) => i.path.includes('OTEL_INGEST_TOKEN'))).toBe(true);
       }
     });
 
-    it('accepts CLOUD_MODE when OTEL_INGEST_TOKEN is provided', () => {
-      const result = envSchema.safeParse({ CLOUD_MODE: 'true', OTEL_INGEST_TOKEN: 'secret' });
+    it('accepts CLOUD_MODE when both OTEL_INGEST_TOKEN and PROMETHEUS_METRICS_TOKEN are provided', () => {
+      const result = envSchema.safeParse({
+        CLOUD_MODE: 'true',
+        OTEL_INGEST_TOKEN: 'secret',
+        PROMETHEUS_METRICS_TOKEN: 'token',
+      });
       expect(result.success).toBe(true);
     });
 
@@ -288,18 +326,45 @@ describe('envSchema', () => {
       // share isCloudModeValue semantics — CLOUD_MODE=1 once passed boot
       // validation and then 401ed every /v1/traces request at runtime.
       for (const value of ['1', 'yes', 'TRUE']) {
-        const result = envSchema.safeParse({ CLOUD_MODE: value });
+        const result = envSchema.safeParse({
+          CLOUD_MODE: value,
+          PROMETHEUS_METRICS_TOKEN: 'token',
+        });
         expect(result.success).toBe(false);
         if (!result.success) {
           expect(result.error.issues.some((i) => i.path.includes('OTEL_INGEST_TOKEN'))).toBe(true);
         }
       }
-      expect(envSchema.safeParse({ CLOUD_MODE: '0' }).success).toBe(true);
+      for (const negative of ['0', 'no', 'off', 'False']) {
+        expect(envSchema.safeParse({ CLOUD_MODE: negative }).success).toBe(true);
+      }
     });
 
     it('defaults OTEL_INGEST_ENABLED to true', () => {
       const result = envSchema.safeParse({});
       expect(result.success && result.data.OTEL_INGEST_ENABLED).toBe(true);
+    });
+  });
+
+  describe('Prometheus poll interval validation', () => {
+    it('should coerce a numeric poll interval', () => {
+      const result = envSchema.safeParse({ PROMETHEUS_POLL_INTERVAL_MS: '2000' });
+      expect(result.success && result.data.PROMETHEUS_POLL_INTERVAL_MS).toBe(2000);
+    });
+
+    it('should leave the poll interval unset when it is absent', () => {
+      const result = envSchema.safeParse({});
+      expect(result.success && result.data.PROMETHEUS_POLL_INTERVAL_MS).toBeUndefined();
+    });
+
+    it('should reject a poll interval below one second', () => {
+      const result = envSchema.safeParse({ PROMETHEUS_POLL_INTERVAL_MS: '999' });
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject a non-numeric poll interval', () => {
+      const result = envSchema.safeParse({ PROMETHEUS_POLL_INTERVAL_MS: 'soon' });
+      expect(result.success).toBe(false);
     });
   });
 
