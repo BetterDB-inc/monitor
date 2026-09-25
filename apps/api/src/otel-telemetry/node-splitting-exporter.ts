@@ -11,6 +11,8 @@ import type { ConnectionStatus } from '@betterdb/shared';
 
 export const CONNECTION_ATTRIBUTE = 'connection';
 
+export const MAX_CONCURRENT_EXPORTS = 8;
+
 export interface NodeIdentity {
   host: string;
   port: number;
@@ -124,7 +126,17 @@ export class NodeSplittingExporter implements PushMetricExporter {
       resultCallback({ code: ExportResultCode.SUCCESS });
       return;
     }
-    void Promise.all(parts.map((part) => this.exportPart(part))).then((results) => {
+    const results: ExportResult[] = [];
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < parts.length) {
+        const index = next;
+        next += 1;
+        results[index] = await this.exportPart(parts[index]);
+      }
+    };
+    const workers = Array.from({ length: Math.min(MAX_CONCURRENT_EXPORTS, parts.length) }, worker);
+    void Promise.all(workers).then(() => {
       const failed = results.find((result) => result.code !== ExportResultCode.SUCCESS);
       resultCallback(failed ?? { code: ExportResultCode.SUCCESS });
     });

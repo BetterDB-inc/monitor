@@ -9,6 +9,7 @@ import {
   type ResourceMetrics,
 } from '@opentelemetry/sdk-metrics';
 import {
+  MAX_CONCURRENT_EXPORTS,
   NodeSplittingExporter,
   buildNodeResolver,
   splitByConnection,
@@ -216,6 +217,79 @@ describe('NodeSplittingExporter', () => {
     await exportOnce(exporter, twoNodes);
 
     expect(createResolver).toHaveBeenCalledTimes(2);
+  });
+
+  describe('concurrency', () => {
+    const labels = Array.from({ length: 20 }, (_, index) => `node-${index}:6379`);
+    const manyNodes = input([
+      gaugeMetric(
+        'valkey.memory.used',
+        labels.map(
+          (connection, index) => [index, { connection }] as [number, Record<string, string>],
+        ),
+      ),
+    ]);
+    const manyResolver = buildNodeResolver(
+      labels.map((label, index) => ({
+        id: String(index),
+        name: label,
+        host: `node-${index}`,
+        port: 6379,
+        isConnected: true,
+      })),
+    );
+
+    function asyncInner(limit = Infinity): PushMetricExporter & {
+      exported: ResourceMetrics[];
+      peak: () => number;
+    } {
+      const exported: ResourceMetrics[] = [];
+      let inFlight = 0;
+      let peak = 0;
+      return {
+        exported,
+        peak: () => peak,
+        export: (metrics: ResourceMetrics, callback: (result: ExportResult) => void) => {
+          if (inFlight >= limit) {
+            callback({
+              code: ExportResultCode.FAILED,
+              error: new Error('Concurrent export limit reached'),
+            });
+            return;
+          }
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          setImmediate(() => {
+            inFlight -= 1;
+            exported.push(metrics);
+            callback({ code: ExportResultCode.SUCCESS });
+          });
+        },
+        forceFlush: () => Promise.resolve(),
+        shutdown: () => Promise.resolve(),
+      };
+    }
+
+    it('caps in-flight exports at MAX_CONCURRENT_EXPORTS and exports every part', async () => {
+      const inner = asyncInner();
+      const exporter = new NodeSplittingExporter(inner, () => manyResolver);
+
+      await expect(exportOnce(exporter, manyNodes)).resolves.toEqual({
+        code: ExportResultCode.SUCCESS,
+      });
+      expect(inner.peak()).toBeLessThanOrEqual(MAX_CONCURRENT_EXPORTS);
+      expect(inner.exported).toHaveLength(20);
+    });
+
+    it('never trips an inner exporter that enforces the same concurrency limit', async () => {
+      const inner = asyncInner(MAX_CONCURRENT_EXPORTS);
+      const exporter = new NodeSplittingExporter(inner, () => manyResolver);
+
+      await expect(exportOnce(exporter, manyNodes)).resolves.toEqual({
+        code: ExportResultCode.SUCCESS,
+      });
+      expect(inner.exported).toHaveLength(20);
+    });
   });
 
   it('delegates flush, shutdown and temporality selection', async () => {
