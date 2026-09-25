@@ -233,8 +233,10 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
                         Both shrink now, in proportion to their length, so the
                         long hosted URL gives ground before the name does. */}
                     <span className="min-w-0 truncate">{connection.name}</span>
-                    <span className="ml-auto min-w-0 truncate ps-2 text-xs text-muted-foreground">
-                      {connection.host}:{connection.port}
+                    <span className="ml-auto flex min-w-0 items-center ps-2 text-xs text-muted-foreground">
+                      <span className="min-w-0 truncate">
+                        {connection.host}:{connection.port}
+                      </span>
                       <ConnectionTypeBadge connection={connection} />
                     </span>
                     {isCurrent ? <CheckIcon className="w-4 h-4 flex-shrink-0" /> : null}

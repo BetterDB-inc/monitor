@@ -365,6 +365,22 @@ describe('ConnectionSwitcher', () => {
     expect(directOption).not.toHaveTextContent('OTLP');
   });
 
+  it('keeps the OTLP badge out of the truncated host text', () => {
+    open([
+      ...CONNECTIONS,
+      connection({
+        id: 'd',
+        name: 'pushed',
+        host: 'a-very-long-hostname.internal.example.com',
+        connectionType: 'external',
+      }),
+    ]);
+
+    const host = screen.getByText('a-very-long-hostname.internal.example.com:6379');
+    expect(host).toHaveClass('truncate');
+    expect(host).not.toContainElement(screen.getAllByText('OTLP')[0]);
+  });
+
   it('marks an OTLP-pushed connection on the closed trigger', () => {
     const pushed = connection({ id: 'd', name: 'pushed', connectionType: 'external' });
     render(
