@@ -1,9 +1,10 @@
 import { createHash, timingSafeEqual } from 'crypto';
 import { HttpException, HttpStatus } from '@nestjs/common';
 import { isCloudMode } from '../common/utils/cloud-mode';
+import { isFalseFlag } from '../config/env-normalize';
 
 export function assertOtlpIngestAuthorized(auth?: string): void {
-  if ((process.env.OTEL_INGEST_ENABLED ?? 'true') === 'false') {
+  if (isFalseFlag(process.env.OTEL_INGEST_ENABLED)) {
     throw new HttpException('OTLP ingestion disabled', HttpStatus.NOT_FOUND);
   }
   const token = process.env.OTEL_INGEST_TOKEN;

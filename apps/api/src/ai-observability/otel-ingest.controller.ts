@@ -26,7 +26,7 @@ import { assertOtlpTraceShape } from './otlp-json-shape';
  * In CLOUD_MODE the path is allowlisted past session auth, so the token is
  * mandatory there: the endpoint fails closed when it is unconfigured rather
  * than accepting anonymous spans into a tenant's store.
- * Gate: `OTEL_INGEST_ENABLED=false` disables the endpoint.
+ * Gate: `OTEL_INGEST_ENABLED=false` (or `0`) disables the endpoint.
  */
 @ApiTags('ai-observability')
 @Controller('v1')

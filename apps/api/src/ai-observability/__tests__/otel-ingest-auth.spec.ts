@@ -39,9 +39,14 @@ describe('assertOtlpIngestAuthorized', () => {
     expect(statusOf(() => assertOtlpIngestAuthorized(undefined))).toBeNull();
   });
 
-  it('returns 404 when ingestion is disabled', () => {
-    process.env.OTEL_INGEST_ENABLED = 'false';
+  it.each(['false', '0', ' FALSE ', '0\n'])('returns 404 when ingestion is disabled with %j', (value) => {
+    process.env.OTEL_INGEST_ENABLED = value;
     expect(statusOf(() => assertOtlpIngestAuthorized(undefined))).toBe(HttpStatus.NOT_FOUND);
+  });
+
+  it.each(['true', '1', ''])('keeps ingestion enabled with %j', (value) => {
+    process.env.OTEL_INGEST_ENABLED = value;
+    expect(statusOf(() => assertOtlpIngestAuthorized(undefined))).toBeNull();
   });
 
   it('fails closed in cloud mode without a token', () => {

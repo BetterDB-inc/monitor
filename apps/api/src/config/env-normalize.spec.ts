@@ -1,4 +1,4 @@
-import { DEFAULT_AUTH_BROKER_URL, isTrueFlag, normalizeOptionalUrl } from './env-normalize';
+import { DEFAULT_AUTH_BROKER_URL, isFalseFlag, isTrueFlag, normalizeOptionalUrl } from './env-normalize';
 
 describe('isTrueFlag', () => {
   it('accepts only the string true', () => {
@@ -8,6 +8,16 @@ describe('isTrueFlag', () => {
     expect(isTrueFlag('1')).toBe(false);
     expect(isTrueFlag(undefined)).toBe(false);
     expect(isTrueFlag(true)).toBe(false);
+  });
+});
+
+describe('isFalseFlag', () => {
+  it.each(['false', '0', ' FALSE ', 'False', '0\n'])('treats %j as false', (value) => {
+    expect(isFalseFlag(value)).toBe(true);
+  });
+
+  it.each(['true', '1', 'yes', '', undefined, false])('does not treat %j as false', (value) => {
+    expect(isFalseFlag(value)).toBe(false);
   });
 });
 

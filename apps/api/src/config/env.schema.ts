@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { MAX_RETENTION_DAYS, parseRetentionDaysToken } from '@betterdb/shared';
 import { parseActivityRetentionDays } from '../activity/activity-config';
 import { isCloudModeValue } from '../common/utils/cloud-mode';
-import { DEFAULT_AUTH_BROKER_URL, isTrueFlag, normalizeOptionalUrl } from './env-normalize';
+import { DEFAULT_AUTH_BROKER_URL, isFalseFlag, isTrueFlag, normalizeOptionalUrl } from './env-normalize';
 
 function optionalUrl(value: unknown): unknown {
   return normalizeOptionalUrl(value) ?? undefined;
@@ -202,7 +202,7 @@ export const envSchema = z
     OTEL_INGEST_ENABLED: z
       .string()
       .default('true')
-      .transform((v) => v !== 'false'),
+      .transform((v) => !isFalseFlag(v)),
     OTEL_INGEST_TOKEN: z.string().optional(),
     OTEL_METRICS_STALE_AFTER_MS: otelMetricsStaleAfterMsSchema,
 
