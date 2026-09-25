@@ -254,11 +254,14 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
       });
     }
 
-    const allConnected = results.every((r) => r.status === 'connected');
-    const anyConnected = results.some((r) => r.status === 'connected');
+    const settled = results.filter((r) => r.status !== 'waiting');
+    const allConnected = settled.every((r) => r.status === 'connected');
+    const anyConnected = settled.some((r) => r.status === 'connected');
+    const overallStatus: AllConnectionsHealthResponse['overallStatus'] =
+      settled.length === 0 ? 'waiting' : allConnected ? 'healthy' : anyConnected ? 'degraded' : 'unhealthy';
 
     return {
-      overallStatus: allConnected ? 'healthy' : anyConnected ? 'degraded' : 'unhealthy',
+      overallStatus,
       connections: results,
       timestamp: Date.now(),
     };

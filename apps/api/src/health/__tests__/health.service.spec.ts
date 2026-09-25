@@ -168,3 +168,36 @@ describe('HealthService external connections', () => {
     expect(getHealth).toHaveBeenCalledWith('ext-1');
   });
 });
+
+describe('HealthService getAllConnectionsHealth', () => {
+  const statusesToOverall = async (statuses: Array<'connected' | 'disconnected' | 'error' | 'waiting'>) => {
+    const registry = {
+      list: jest.fn().mockReturnValue(statuses.map((_, i) => ({ id: `c${i}`, name: `conn-${i}` }))),
+    } as unknown as ConnectionRegistry;
+    const service = new HealthService(registry, {} as RuntimeCapabilityTracker);
+    jest.spyOn(service, 'getHealth').mockImplementation(async (id?: string) => ({
+      status: statuses[Number(id?.slice(1))],
+      database: { type: 'unknown', version: null, host: 'h', port: 1 },
+      capabilities: null,
+      runtimeCapabilities: null,
+    }));
+    return (await service.getAllConnectionsHealth()).overallStatus;
+  };
+
+  it('reports waiting when every connection is waiting', async () => {
+    expect(await statusesToOverall(['waiting'])).toBe('waiting');
+    expect(await statusesToOverall(['waiting', 'waiting'])).toBe('waiting');
+  });
+
+  it('ignores waiting connections next to connected ones', async () => {
+    expect(await statusesToOverall(['connected', 'waiting'])).toBe('healthy');
+  });
+
+  it('ignores waiting connections when the rest are down', async () => {
+    expect(await statusesToOverall(['disconnected', 'waiting'])).toBe('unhealthy');
+  });
+
+  it('reports degraded for a mix of connected and down beside waiting ones', async () => {
+    expect(await statusesToOverall(['connected', 'error', 'waiting'])).toBe('degraded');
+  });
+});
