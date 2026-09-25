@@ -22,13 +22,16 @@ function one(name: string, value: number, labels: Record<string, string | number
 }
 
 describe('planSemconvInstruments', () => {
+  const CPU = 'CPU time consumed by the server, by state';
+  const ROLE = 'Replication role of the node (1 for the current role)';
+  const LATENCY = 'Inference bucket latency by percentile';
+
   it.each([
     ['betterdb_memory_used_bytes', 'valkey.memory.used', 'gauge', 'By'],
     ['betterdb_memory_used_rss_bytes', 'valkey.memory.rss', 'gauge', 'By'],
     ['betterdb_memory_used_peak_bytes', 'valkey.memory.peak', 'gauge', 'By'],
     ['betterdb_memory_max_bytes', 'valkey.maxmemory', 'gauge', 'By'],
     ['betterdb_memory_fragmentation_ratio', 'valkey.memory.fragmentation_ratio', 'gauge', '1'],
-    ['betterdb_cpu_sys_seconds_total', 'valkey.cpu.time', 'counter', 's'],
     ['betterdb_connected_clients', 'valkey.clients.connected', 'updown', '{client}'],
     ['betterdb_blocked_clients', 'valkey.clients.blocked', 'updown', '{client}'],
     ['betterdb_commands_processed_total', 'valkey.commands.processed', 'counter', '{command}'],
@@ -52,7 +55,6 @@ describe('planSemconvInstruments', () => {
     ['betterdb_cluster_slots_ok', 'valkey.cluster.slots_ok', 'gauge', '{slot}'],
     ['betterdb_cluster_slots_fail', 'valkey.cluster.slots_fail', 'gauge', '{slot}'],
     ['betterdb_cluster_slots_pfail', 'valkey.cluster.slots_pfail', 'gauge', '{slot}'],
-    ['betterdb_instance_info', 'valkey.role', 'updown', '{role}'],
     ['betterdb_memory_fragmentation_bytes', 'betterdb.memory.fragmentation', 'gauge', 'By'],
     ['betterdb_tracking_clients', 'betterdb.clients.tracking', 'gauge', '{client}'],
     ['betterdb_instantaneous_input_kbps', 'betterdb.net.input_rate', 'gauge', 'KiBy/s'],
@@ -93,7 +95,6 @@ describe('planSemconvInstruments', () => {
     ['betterdb_vector_index_memory_bytes', 'betterdb.vector_index.memory', 'gauge', 'By'],
     ['betterdb_vector_index_indexing_failures', 'betterdb.vector_index.indexing_failures', 'gauge', '{failure}'],
     ['betterdb_vector_index_percent_indexed', 'betterdb.vector_index.indexed', 'gauge', '%'],
-    ['betterdb_inference_bucket_p50_us', 'betterdb.inference.bucket.latency', 'gauge', 'us'],
     ['betterdb_inference_unhealthy', 'betterdb.inference.bucket.unhealthy', 'gauge', '1'],
     ['betterdb_inference_sla_breach', 'betterdb.inference.sla_breach', 'gauge', '1'],
     ['betterdb_poll_stale', 'betterdb.poll.stale', 'gauge', '1'],
@@ -115,6 +116,19 @@ describe('planSemconvInstruments', () => {
   ])('%s → %s (%s, %s)', (prom, name, kind, unit) => {
     expect(planSemconvInstruments([family(prom, [])])).toEqual([
       { name, kind, unit, description: `${prom} help` },
+    ]);
+  });
+
+  it.each([
+    ['betterdb_cpu_sys_seconds_total', 'valkey.cpu.time', 'counter', 's', CPU],
+    ['betterdb_cpu_user_seconds_total', 'valkey.cpu.time', 'counter', 's', CPU],
+    ['betterdb_instance_info', 'valkey.role', 'updown', '{role}', ROLE],
+    ['betterdb_inference_bucket_p50_us', 'betterdb.inference.bucket.latency', 'gauge', 'us', LATENCY],
+    ['betterdb_inference_bucket_p95_us', 'betterdb.inference.bucket.latency', 'gauge', 'us', LATENCY],
+    ['betterdb_inference_bucket_p99_us', 'betterdb.inference.bucket.latency', 'gauge', 'us', LATENCY],
+  ])('%s → %s uses its own description', (prom, name, kind, unit, description) => {
+    expect(planSemconvInstruments([family(prom, [])])).toEqual([
+      { name, kind, unit, description },
     ]);
   });
 

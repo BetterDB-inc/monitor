@@ -29,6 +29,7 @@ export interface SemconvRule {
   kind: SemconvKind;
   unit: string;
   convert: Convert;
+  description?: string;
 }
 
 const LABEL_RENAMES: Readonly<Record<string, string>> = { command: 'cmd' };
@@ -91,14 +92,28 @@ function updown(name: string, unit: string, convert: Convert = keep): SemconvRul
   return { name, kind: 'updown', unit, convert };
 }
 
+function described(description: string, rule: SemconvRule): SemconvRule {
+  return { ...rule, description };
+}
+
+const CPU_TIME = 'CPU time consumed by the server, by state';
+
+const INFERENCE_LATENCY = 'Inference bucket latency by percentile';
+
 export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
   betterdb_memory_used_bytes: gauge('valkey.memory.used', 'By'),
   betterdb_memory_used_rss_bytes: gauge('valkey.memory.rss', 'By'),
   betterdb_memory_used_peak_bytes: gauge('valkey.memory.peak', 'By'),
   betterdb_memory_max_bytes: gauge('valkey.maxmemory', 'By'),
   betterdb_memory_fragmentation_ratio: gauge('valkey.memory.fragmentation_ratio', '1'),
-  betterdb_cpu_sys_seconds_total: counter('valkey.cpu.time', 's', withAttributes({ state: 'sys' })),
-  betterdb_cpu_user_seconds_total: counter('valkey.cpu.time', 's', withAttributes({ state: 'user' })),
+  betterdb_cpu_sys_seconds_total: described(
+    CPU_TIME,
+    counter('valkey.cpu.time', 's', withAttributes({ state: 'sys' })),
+  ),
+  betterdb_cpu_user_seconds_total: described(
+    CPU_TIME,
+    counter('valkey.cpu.time', 's', withAttributes({ state: 'user' })),
+  ),
   betterdb_connected_clients: updown('valkey.clients.connected', '{client}'),
   betterdb_blocked_clients: updown('valkey.clients.blocked', '{client}'),
   betterdb_commands_processed_total: counter('valkey.commands.processed', '{command}'),
@@ -122,7 +137,10 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
   betterdb_cluster_slots_ok: gauge('valkey.cluster.slots_ok', '{slot}'),
   betterdb_cluster_slots_fail: gauge('valkey.cluster.slots_fail', '{slot}'),
   betterdb_cluster_slots_pfail: gauge('valkey.cluster.slots_pfail', '{slot}'),
-  betterdb_instance_info: updown('valkey.role', '{role}', role),
+  betterdb_instance_info: described(
+    'Replication role of the node (1 for the current role)',
+    updown('valkey.role', '{role}', role),
+  ),
   betterdb_memory_fragmentation_bytes: gauge('betterdb.memory.fragmentation', 'By'),
   betterdb_tracking_clients: gauge('betterdb.clients.tracking', '{client}'),
   betterdb_instantaneous_input_kbps: gauge('betterdb.net.input_rate', 'KiBy/s'),
@@ -172,20 +190,17 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
   betterdb_vector_index_memory_bytes: gauge('betterdb.vector_index.memory', 'By'),
   betterdb_vector_index_indexing_failures: gauge('betterdb.vector_index.indexing_failures', '{failure}'),
   betterdb_vector_index_percent_indexed: gauge('betterdb.vector_index.indexed', '%'),
-  betterdb_inference_bucket_p50_us: gauge(
-    'betterdb.inference.bucket.latency',
-    'us',
-    withAttributes({ percentile: 'p50' }),
+  betterdb_inference_bucket_p50_us: described(
+    INFERENCE_LATENCY,
+    gauge('betterdb.inference.bucket.latency', 'us', withAttributes({ percentile: 'p50' })),
   ),
-  betterdb_inference_bucket_p95_us: gauge(
-    'betterdb.inference.bucket.latency',
-    'us',
-    withAttributes({ percentile: 'p95' }),
+  betterdb_inference_bucket_p95_us: described(
+    INFERENCE_LATENCY,
+    gauge('betterdb.inference.bucket.latency', 'us', withAttributes({ percentile: 'p95' })),
   ),
-  betterdb_inference_bucket_p99_us: gauge(
-    'betterdb.inference.bucket.latency',
-    'us',
-    withAttributes({ percentile: 'p99' }),
+  betterdb_inference_bucket_p99_us: described(
+    INFERENCE_LATENCY,
+    gauge('betterdb.inference.bucket.latency', 'us', withAttributes({ percentile: 'p99' })),
   ),
   betterdb_inference_unhealthy: gauge('betterdb.inference.bucket.unhealthy', '1'),
   betterdb_inference_sla_breach: gauge('betterdb.inference.sla_breach', '1'),
@@ -253,7 +268,7 @@ export function planSemconvInstruments(snapshot: PromMetricJson[]): SemconvInstr
       name: rule.name,
       kind: rule.kind,
       unit: rule.unit,
-      description: metric.help ?? '',
+      description: rule.description ?? metric.help ?? '',
     });
   }
   return [...specs.values()];
