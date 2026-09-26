@@ -272,3 +272,9 @@ export function checkCompatibility(
 
   return issues;
 }
+
+/** Only severity==='blocking' blocks execution; warnings/info never block. */
+export function getBlockingIssues(issues: Incompatibility[] | undefined): Incompatibility[] {
+  if (!issues) return [];
+  return issues.filter(i => i.severity === 'blocking');
+}
