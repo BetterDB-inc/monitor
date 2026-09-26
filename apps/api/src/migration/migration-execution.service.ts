@@ -7,6 +7,8 @@ import * as os from 'os';
 import Valkey from 'iovalkey';
 import type { MigrationExecutionRequest, MigrationExecutionResult, StartExecutionResponse, ExecutionMode } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { MigrationService } from './migration.service';
+import { getBlockingIssues } from './analysis/compatibility-checker';
 import type { ExecutionJob } from './execution/execution-job';
 import { findRedisShakeBinary } from './execution/redisshake-runner';
 import { buildScanReaderToml, buildSyncReaderToml } from './execution/toml-builder';
@@ -42,9 +44,11 @@ export class MigrationExecutionService {
   private jobs = new Map<string, ExecutionJob>();
   private readonly MAX_JOBS = 10;
   private readonly MAX_LOG_LINES = 500;
+  private readonly ANALYSIS_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
+    private readonly migrationService: MigrationService,
   ) {}
 
   async startExecution(req: MigrationExecutionRequest): Promise<StartExecutionResponse> {
@@ -64,6 +68,10 @@ export class MigrationExecutionService {
     if (req.sourceConnectionId === req.targetConnectionId) {
       throw new BadRequestException('Source and target must be different connections');
     }
+
+    // 2b. Safety gate: blocking incompatibilities from latest analysis.
+    // Only severity==='blocking' blocks (warnings/info never block).
+    this.enforceSafetyGate(req);
 
     // 3. Detect if source/target is cluster
     const sourceInfo = await sourceAdapter.getInfo(['cluster']);
@@ -516,6 +524,68 @@ export class MigrationExecutionService {
         `Execution job limit reached (${this.MAX_JOBS}). All slots occupied by running jobs — try again later.`,
       );
     }
+  }
+
+  /** Fail-closed gate: missing/stale analysis or blocking issues reject execution unless forced with a reason. */
+  private enforceSafetyGate(req: MigrationExecutionRequest): void {
+    if (!this.migrationService) {
+      throw new ServiceUnavailableException(
+        'Safety gate unavailable: MigrationService not wired. Refusing to execute without a blocking-compatibility check.',
+      );
+    }
+    const latest = this.migrationService.findLatestCompletedAnalysis(
+      req.sourceConnectionId,
+      req.targetConnectionId,
+    );
+
+    if (!latest) {
+      throw new BadRequestException({
+        code: 'ANALYSIS_REQUIRED',
+        detail:
+          'No completed migration analysis found for this source/target pair. Run POST /migration/analysis first.',
+      });
+    }
+
+    const completedAt = latest.completedAt ?? latest.createdAt ?? Date.now();
+    if (Date.now() - completedAt > this.ANALYSIS_TTL_MS) {
+      throw new BadRequestException({
+        code: 'ANALYSIS_STALE',
+        analysisId: latest.id,
+        detail:
+          'Latest migration analysis is older than 24h. Re-run POST /migration/analysis before execution.',
+      });
+    }
+
+    const blocking = getBlockingIssues(latest.incompatibilities);
+    if (blocking.length === 0) return;
+
+    const forced = req.force === true;
+    const reason = typeof req.forceReason === 'string' ? req.forceReason.trim() : '';
+
+    if (!forced) {
+      throw new BadRequestException({
+        code: 'BLOCKING_INCOMPATIBILITIES',
+        analysisId: latest.id,
+        blocking,
+        detail: `Migration blocked by ${blocking.length} blocking incompatibility(ies): ${blocking.map(b => `${b.category}:${b.title}`).join('; ')}. Re-run analysis or retry with force:true + forceReason.`,
+      });
+    }
+
+    if (reason.length === 0) {
+      throw new BadRequestException({
+        code: 'FORCE_REASON_REQUIRED',
+        analysisId: latest.id,
+        blocking,
+        detail: 'force:true requires a non-empty forceReason justifying the bypass.',
+      });
+    }
+
+    this.logger.warn(
+      `Forced execution bypassing ${blocking.length} blocking issue(s) ` +
+      `analysisId=${latest.id} ` +
+      `categories=[${blocking.map(b => b.category).join(',')}] ` +
+      `reason=${reason}`,
+    );
   }
 }
 

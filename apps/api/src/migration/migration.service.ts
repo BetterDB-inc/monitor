@@ -9,6 +9,11 @@ import { sampleTtls } from './analysis/ttl-sampler';
 import { detectHfe } from './analysis/hfe-detector';
 import { analyzeCommands } from './analysis/commandlog-analyzer';
 import { buildInstanceMeta, checkCompatibility } from './analysis/compatibility-checker';
+import {
+  loadAnalysisVerdict,
+  resolveVerdictDir,
+  saveAnalysisVerdict,
+} from './analysis/analysis-verdict-store';
 import { probeSourceFunctions, aggregateFunctionPresence } from './fork-compat';
 import { parseNodeAddress } from './function-presence';
 
@@ -81,6 +86,52 @@ export class MigrationService {
     }
     job.nodeClients = [];
     return true;
+  }
+
+  /** Latest completed analysis for the pair; falls back to the file store on memory miss. */
+  findLatestCompletedAnalysis(
+    sourceConnectionId: string,
+    targetConnectionId: string,
+  ): MigrationAnalysisResult | undefined {
+    let latestId: string | undefined;
+    let latestAt = -1;
+    for (const [id, job] of this.jobs) {
+      if (job.status !== 'completed') continue;
+      if (
+        job.result.sourceConnectionId !== sourceConnectionId ||
+        job.result.targetConnectionId !== targetConnectionId
+      ) {
+        continue;
+      }
+      const at = job.completedAt ?? job.result.completedAt ?? job.createdAt;
+      if (at > latestAt) {
+        latestAt = at;
+        latestId = id;
+      }
+    }
+    if (latestId) return this.getJob(latestId);
+
+    const verdict = loadAnalysisVerdict(
+      resolveVerdictDir(),
+      sourceConnectionId,
+      targetConnectionId,
+    );
+    if (!verdict) return undefined;
+    this.logger.log(
+      `Serving analysis verdict from durable store: analysisId=${verdict.analysisId}`,
+    );
+    return {
+      id: verdict.analysisId,
+      status: 'completed',
+      progress: 100,
+      createdAt: verdict.createdAt,
+      completedAt: verdict.completedAt,
+      sourceConnectionId: verdict.sourceConnectionId,
+      targetConnectionId: verdict.targetConnectionId,
+      incompatibilities: verdict.incompatibilities,
+      blockingCount: verdict.blockingCount,
+      warningCount: verdict.warningCount,
+    } as MigrationAnalysisResult;
   }
 
   private async runAnalysis(job: AnalysisJob, req: MigrationAnalysisRequest): Promise<void> {
@@ -468,6 +519,21 @@ export class MigrationService {
       job.completedAt = Date.now();
       job.result.status = 'completed';
       job.result.completedAt = job.completedAt;
+
+      try {
+        if (job.result.sourceConnectionId && job.result.targetConnectionId) {
+          saveAnalysisVerdict(resolveVerdictDir(), {
+            analysisId: job.id,
+            sourceConnectionId: job.result.sourceConnectionId,
+            targetConnectionId: job.result.targetConnectionId,
+            completedAt: job.completedAt,
+            createdAt: job.createdAt,
+            incompatibilities: job.result.incompatibilities ?? [],
+            blockingCount: job.result.blockingCount ?? 0,
+            warningCount: job.result.warningCount ?? 0,
+          });
+        }
+      } catch { /* best-effort */ }
 
       this.logger.log(`Analysis ${job.id} completed: blocking=${job.result.blockingCount}, warnings=${job.result.warningCount}, sampledKeys=${sampledKeys.length}, totalKeys=${totalKeys}`);
 

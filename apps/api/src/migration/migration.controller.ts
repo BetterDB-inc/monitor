@@ -103,6 +103,13 @@ export class MigrationController {
       }
     }
 
+    if (body.force !== undefined && typeof body.force !== 'boolean') {
+      throw new BadRequestException('force must be a boolean');
+    }
+    if (body.forceReason !== undefined && typeof body.forceReason !== 'string') {
+      throw new BadRequestException('forceReason must be a string');
+    }
+
     return this.executionService.startExecution(body);
   }
 

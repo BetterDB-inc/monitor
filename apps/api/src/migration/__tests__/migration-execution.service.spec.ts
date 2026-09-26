@@ -82,6 +82,30 @@ function createMockRegistry(overrides?: { sourceClusterEnabled?: boolean; target
   };
 }
 
+// Fail-closed gate: tests inject a clean analysis so they take the production path.
+function createMockMigrationService(
+  analysis?: Record<string, unknown> | null,
+) {
+  const fresh = {
+    id: 'analysis-1',
+    status: 'completed',
+    progress: 100,
+    createdAt: Date.now(),
+    completedAt: Date.now(),
+    sourceConnectionId: 'conn-1',
+    targetConnectionId: 'conn-2',
+    incompatibilities: [],
+    blockingCount: 0,
+    warningCount: 0,
+    ...(analysis ?? {}),
+  };
+  return {
+    findLatestCompletedAnalysis: jest
+      .fn()
+      .mockReturnValue(analysis === null ? undefined : fresh),
+  };
+}
+
 // startExecution now fires the function-presence probe detached (so the POST returns
 // before it connects to the source masters), pushing the notice a beat later. Draining
 // the microtask + immediate queue lets that probe settle before we assert on notices.
@@ -93,7 +117,10 @@ describe('MigrationExecutionService', () => {
 
   beforeEach(() => {
     registry = createMockRegistry();
-    service = new MigrationExecutionService(registry as any);
+    service = new MigrationExecutionService(
+      registry as any,
+      createMockMigrationService() as any,
+    );
   });
 
   describe('startExecution', () => {
@@ -145,7 +172,10 @@ describe('MigrationExecutionService', () => {
       const { runCommandMigration } = require('../execution/command-migration-worker');
 
       const clusterRegistry = createMockRegistry({ targetClusterEnabled: true });
-      const clusterService = new MigrationExecutionService(clusterRegistry as any);
+      const clusterService = new MigrationExecutionService(
+        clusterRegistry as any,
+        createMockMigrationService() as any,
+      );
 
       await clusterService.startExecution({
         sourceConnectionId: 'conn-1',
@@ -222,7 +252,10 @@ describe('MigrationExecutionService', () => {
       (buildScanReaderToml as jest.Mock).mockClear();
 
       const crossForkRegistry = createMockRegistry({ targetDbType: 'redis' });
-      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+      const crossForkService = new MigrationExecutionService(
+        crossForkRegistry as any,
+        createMockMigrationService() as any,
+      );
 
       await crossForkService.startExecution({
         sourceConnectionId: 'conn-1',
@@ -239,7 +272,10 @@ describe('MigrationExecutionService', () => {
       // 'present': a real library exists on the source, so the notice must fire — and
       // fire because FUNCTION LIST returned a library, not because the probe errored.
       const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'present' });
-      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+      const crossForkService = new MigrationExecutionService(
+        crossForkRegistry as any,
+        createMockMigrationService() as any,
+      );
 
       const { id } = await crossForkService.startExecution({
         sourceConnectionId: 'conn-1',
@@ -258,7 +294,10 @@ describe('MigrationExecutionService', () => {
       // before it completes. A UI that stops polling once the job is terminal can never
       // miss it, even if the migration finishes quickly.
       const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'present' });
-      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+      const crossForkService = new MigrationExecutionService(
+        crossForkRegistry as any,
+        createMockMigrationService() as any,
+      );
 
       const { id } = await crossForkService.startExecution({
         sourceConnectionId: 'conn-1',
@@ -283,7 +322,10 @@ describe('MigrationExecutionService', () => {
       const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'present' });
       const flushall = jest.fn().mockResolvedValue('OK');
       crossForkRegistry.mockTargetAdapter.getClient = jest.fn().mockReturnValue({ flushall, quit: jest.fn() });
-      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+      const crossForkService = new MigrationExecutionService(
+        crossForkRegistry as any,
+        createMockMigrationService() as any,
+      );
 
       const { id } = await crossForkService.startExecution({
         sourceConnectionId: 'conn-1',
@@ -306,7 +348,10 @@ describe('MigrationExecutionService', () => {
       // 'throw' -> 'unknown': the filter is written regardless, so an indeterminate
       // probe must not silently drop the warning.
       const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'throw' });
-      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+      const crossForkService = new MigrationExecutionService(
+        crossForkRegistry as any,
+        createMockMigrationService() as any,
+      );
 
       const { id } = await crossForkService.startExecution({
         sourceConnectionId: 'conn-1',
@@ -321,7 +366,10 @@ describe('MigrationExecutionService', () => {
 
     it('keeps the exclusion notice even after the log cap rolls over', async () => {
       const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'present' });
-      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+      const crossForkService = new MigrationExecutionService(
+        crossForkRegistry as any,
+        createMockMigrationService() as any,
+      );
 
       const { id } = await crossForkService.startExecution({
         sourceConnectionId: 'conn-1',
@@ -348,7 +396,10 @@ describe('MigrationExecutionService', () => {
       // get a scary "functions excluded" notice about functions it never had. This is
       // the suppression gate the previous review asked for.
       const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'absent' });
-      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+      const crossForkService = new MigrationExecutionService(
+        crossForkRegistry as any,
+        createMockMigrationService() as any,
+      );
 
       const { id } = await crossForkService.startExecution({
         sourceConnectionId: 'conn-1',
