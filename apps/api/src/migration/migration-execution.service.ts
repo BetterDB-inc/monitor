@@ -14,7 +14,7 @@ import { findRedisShakeBinary } from './execution/redisshake-runner';
 import { buildScanReaderToml, buildSyncReaderToml } from './execution/toml-builder';
 import { parseLogLine, classifyRedisShakeFailure, stripAnsi } from './execution/log-parser';
 import { runCommandMigration } from './execution/command-migration-worker';
-import { shouldExcludeFunctions } from './fork-compat';
+import { shouldExcludeFunctions, isRdbRestoreCompatible } from './fork-compat';
 import { probeSourceFunctionsClusterAware, parseNodeAddress } from './function-presence';
 
 /**
@@ -69,9 +69,17 @@ export class MigrationExecutionService {
       throw new BadRequestException('Source and target must be different connections');
     }
 
-    // 2b. Safety gate: blocking incompatibilities from latest analysis.
-    // Only severity==='blocking' blocks (warnings/info never block).
     this.enforceSafetyGate(req);
+
+    if (mode === 'redis_shake') {
+      const sourceDbType = sourceAdapter.getCapabilities().dbType;
+      const targetDbType = targetAdapter.getCapabilities().dbType;
+      if (!isRdbRestoreCompatible(sourceDbType, targetDbType)) {
+        throw new BadRequestException(
+          `Cross-engine redis_shake migration (${sourceDbType} → ${targetDbType}) is not supported due to RDB version incompatibility: RESTORE would fail mid-run. Use command or redis_shake_sync mode instead.`,
+        );
+      }
+    }
 
     // 3. Detect if source/target is cluster
     const sourceInfo = await sourceAdapter.getInfo(['cluster']);
