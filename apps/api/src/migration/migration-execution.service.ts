@@ -560,7 +560,7 @@ export class MigrationExecutionService {
     if (blocking.length === 0) return;
 
     const forced = req.force === true;
-    const reason = typeof req.forceReason === 'string' ? req.forceReason.trim() : '';
+    const reason = sanitizeForceReason(req.forceReason);
 
     if (!forced) {
       throw new BadRequestException({
@@ -587,6 +587,17 @@ export class MigrationExecutionService {
       `reason=${reason}`,
     );
   }
+}
+
+// Cap + strip control chars so a client-supplied reason can't forge log lines or bloat logs.
+const MAX_FORCE_REASON_LOG_LENGTH = 500;
+
+function sanitizeForceReason(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value
+    .replace(/[\x00-\x1F\x7F]+/g, ' ')
+    .trim()
+    .slice(0, MAX_FORCE_REASON_LOG_LENGTH);
 }
 
 // Redact credentials from RedisShake log lines before serving to the frontend
