@@ -537,4 +537,18 @@ describe('ConnectionSwitcher sentinel grouping', () => {
     fireEvent.click(retired);
     expect(onSelect).not.toHaveBeenCalled();
   });
+
+  it('still shows a non-sentinel child of a sentinel seed', () => {
+    const claimed = connection({
+      id: 'c1',
+      name: 'sentinel · claimed',
+      host: '10.0.1.9',
+      port: 6379,
+      membership: { seedId: 's', nodeId: 'c1', origin: 'adopted', source: 'cluster' },
+    });
+    open([sentinelSeed, ...sentinelKids, claimed], sentinelSeed);
+    fireEvent.click(screen.getByRole('button', { name: /5 nodes/i }));
+    const names = optionNames();
+    expect(names.some((name) => name.includes('claimed'))).toBe(true);
+  });
 });

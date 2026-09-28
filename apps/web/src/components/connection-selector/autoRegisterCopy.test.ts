@@ -71,4 +71,19 @@ describe('auto-register copy', () => {
       { group: 'b', members: [m('p1', 'b', 'primary'), m('r1', 'b', 'replica')] },
     ]);
   });
+
+  it('keeps a non-sentinel member of a sentinel seed visible under an "other" group', () => {
+    const primary: Connection = {
+      id: 'p1', name: 'p1', host: 'p1', port: 6379, isConnected: true,
+      membership: { seedId: 's', nodeId: 'p1', origin: 'auto', source: 'sentinel', group: 'a', role: 'primary' },
+    };
+    const claimed: Connection = {
+      id: 'c1', name: 'c1', host: 'c1', port: 6379, isConnected: true,
+      membership: { seedId: 's', nodeId: 'c1', origin: 'adopted', source: 'cluster' },
+    };
+    expect(groupSentinelMembers('s', [primary, claimed])).toEqual([
+      { group: 'a', members: [primary] },
+      { group: '', members: [claimed] },
+    ]);
+  });
 });

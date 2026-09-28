@@ -48,12 +48,12 @@ export function groupSentinelMembers(
 ): Array<{ group: string; members: Connection[] }> {
   const groups = new Map<string, Connection[]>();
   for (const c of all) {
-    if (c.membership?.seedId !== seedId || c.membership.source !== 'sentinel') continue;
-    const key = c.membership.group ?? '';
+    if (c.membership?.seedId !== seedId) continue;
+    const key = c.membership.source === 'sentinel' ? (c.membership.group ?? '') : '';
     groups.set(key, [...(groups.get(key) ?? []), c]);
   }
   return [...groups.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
+    .sort(([a], [b]) => (a === '' ? 1 : b === '' ? -1 : a.localeCompare(b)))
     .map(([group, members]) => ({
       group,
       members: [...members].sort(
