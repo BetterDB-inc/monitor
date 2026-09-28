@@ -257,14 +257,20 @@ describe('ClusterDiscoveryService', () => {
   });
 
   describe('getNodeConnection TLS', () => {
-    it('passes the seed client TLS options to node clients', async () => {
+    it('passes the seed client TLS options to node clients without the seed servername', async () => {
       mockDbClient.getClient.mockReturnValue({
-        options: { username: 'u', password: 'p', tls: { servername: 'seed.example' } },
+        options: { username: 'u', password: 'p', tls: { servername: 'seed.example', ca: 'seed-ca', rejectUnauthorized: true } },
       });
       await service.getNodeConnection('node2-id-def456', 'test-connection').catch(() => undefined);
       expect(jest.mocked(Valkey)).toHaveBeenCalledWith(
-        expect.objectContaining({ tls: { servername: 'seed.example' } }),
+        expect.objectContaining({ tls: { ca: 'seed-ca', rejectUnauthorized: true } }),
       );
+    });
+
+    it('leaves TLS off for node clients when the seed has none', async () => {
+      mockDbClient.getClient.mockReturnValue({ options: { username: 'u', password: 'p' } });
+      await service.getNodeConnection('node2-id-def456', 'test-connection').catch(() => undefined);
+      expect(jest.mocked(Valkey)).toHaveBeenCalledWith(expect.objectContaining({ tls: undefined }));
     });
   });
 

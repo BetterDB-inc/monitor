@@ -185,7 +185,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     const primaryClient = dbClient.getClient();
     const username = primaryClient.options.username || '';
     const password = primaryClient.options.password || '';
-    const tls = primaryClient.options.tls;
+    const { servername: _servername, ...nodeTls } = primaryClient.options.tls ?? {};
+    const tls = primaryClient.options.tls ? nodeTls : undefined;
 
     const client = new Valkey({
       host,
