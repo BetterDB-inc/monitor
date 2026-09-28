@@ -186,6 +186,21 @@ describe('ClusterAutoRegistrationService', () => {
     expect(registry.removeChild).not.toHaveBeenCalled();
   });
 
+  it('gives up on a discovery that never answers so the next seed still reconciles', async () => {
+    jest.useFakeTimers();
+    try {
+      const { service, registry, discovery } = build({ nodes: clusterOf(1) });
+      discovery.discoverNodes.mockReturnValueOnce(new Promise<DiscoveredNode[]>(() => undefined));
+      const hung = service.reconcile('seed');
+      const next = service.reconcile('seed');
+      await jest.advanceTimersByTimeAsync(15_000);
+      await Promise.all([hung, next]);
+      expect(registry.addManagedChild).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('serialises reconciles across seeds so only one claims a shared address', async () => {
     const seedA: DatabaseConnectionConfig = { id: 'a', name: 'A', host: 'a.local', port: 7001, isDefault: true, createdAt: 1, autoRegisterNodes: true };
     const seedB: DatabaseConnectionConfig = { id: 'b', name: 'B', host: 'b.local', port: 7002, isDefault: false, createdAt: 1, autoRegisterNodes: true };

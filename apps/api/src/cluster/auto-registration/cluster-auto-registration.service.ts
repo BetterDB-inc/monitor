@@ -15,6 +15,8 @@ import {
   retirementKey,
 } from './membership-diff';
 
+const DISCOVERY_TIMEOUT_MS = 10_000;
+
 @Injectable()
 export class ClusterAutoRegistrationService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(ClusterAutoRegistrationService.name);
@@ -112,11 +114,17 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
       return null;
     }
     if (!clusterEnabled) return null;
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`timed out after ${DISCOVERY_TIMEOUT_MS}ms`)), DISCOVERY_TIMEOUT_MS);
+    });
     try {
-      return await this.discovery.discoverNodes(seed.id);
+      return await Promise.race([this.discovery.discoverNodes(seed.id), timeout]);
     } catch (error) {
       this.logger.warn(`Cluster discovery failed for ${seed.name}; leaving members unchanged: ${error instanceof Error ? error.message : error}`);
       return null;
+    } finally {
+      clearTimeout(timer);
     }
   }
 
