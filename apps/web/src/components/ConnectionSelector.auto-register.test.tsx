@@ -202,4 +202,48 @@ describe('ConnectionSelector - auto-register toggle', () => {
     expect(body.nodeUsername).toBe('node-user');
     expect(body.nodePassword).toBe('node-pass');
   });
+
+  it('drops stale node credentials when a re-test comes back non-Sentinel', async () => {
+    let sentinel = true;
+    vi.mocked(fetchApi).mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/connections/test') {
+        return {
+          success: true,
+          capabilities: sentinel ? { isSentinel: true } : { clusterEnabled: true },
+        };
+      }
+      if (url === '/connections' && init?.method === 'POST') return { id: 'new-id' };
+      return {};
+    });
+    render(<ConnectionSelector />);
+    const disclosureSummary = await openAddDialogWithSentinelTest();
+    fireEvent.click(disclosureSummary);
+    const nodeUsernameInput = screen
+      .getByText('Node username')
+      .closest('div')!
+      .querySelector('input') as HTMLInputElement;
+    const nodePasswordInput = screen
+      .getByText('Node password')
+      .closest('div')!
+      .querySelector('input') as HTMLInputElement;
+    fireEvent.change(nodeUsernameInput, { target: { value: 'node-user' } });
+    fireEvent.change(nodePasswordInput, { target: { value: 'node-pass' } });
+
+    // Change the host (clears testResult), then re-test against a non-Sentinel host.
+    sentinel = false;
+    fireEvent.change(screen.getByPlaceholderText('localhost'), { target: { value: 'plain-host' } });
+    fireEvent.click(screen.getByText('Test Connection'));
+    await screen.findByLabelText('Auto-register cluster nodes');
+    expect(screen.queryByText('Data node credentials')).toBeNull();
+
+    fireEvent.click(screen.getByText('Save'));
+    await waitFor(() => expect(mockRefreshConnections).toHaveBeenCalled());
+    const createCall = vi
+      .mocked(fetchApi)
+      .mock.calls.find(([url, init]) => url === '/connections' && (init as RequestInit)?.method === 'POST');
+    expect(createCall).toBeDefined();
+    const body = JSON.parse((createCall![1] as RequestInit).body as string);
+    expect(body.nodeUsername).toBeUndefined();
+    expect(body.nodePassword).toBeUndefined();
+  });
 });

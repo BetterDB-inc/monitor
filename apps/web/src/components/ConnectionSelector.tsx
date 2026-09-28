@@ -257,6 +257,9 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
         clusterEnabled: result.capabilities?.clusterEnabled,
         isSentinel: result.capabilities?.isSentinel,
       });
+      if (result.capabilities?.isSentinel !== true) {
+        setFormData((prev) => ({ ...prev, nodeUsername: '', nodePassword: '' }));
+      }
     } catch (err) {
       setTestResult({
         success: false,
@@ -291,8 +294,8 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
           port: formData.port,
           username: formData.username || undefined,
           password: formData.password || undefined,
-          nodeUsername: formData.nodeUsername || undefined,
-          nodePassword: formData.nodePassword || undefined,
+          nodeUsername: testResult?.isSentinel ? formData.nodeUsername || undefined : undefined,
+          nodePassword: testResult?.isSentinel ? formData.nodePassword || undefined : undefined,
           dbIndex: formData.dbIndex,
           tls: formData.tls,
           sshTunnel: buildSshTunnelPayload(formData.ssh),
