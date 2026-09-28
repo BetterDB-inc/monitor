@@ -115,7 +115,7 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
     if (event.key === 'Enter') {
       event.preventDefault();
       const choice = filtered[effectiveIndex];
-      if (choice === undefined) {
+      if (choice === undefined || isRetiredMember(choice)) {
         return;
       }
       handleSelect(choice.id);
@@ -260,13 +260,18 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
                       type="button"
                       role="option"
                       aria-selected={isCurrent}
+                      aria-disabled={retired || undefined}
                       onMouseEnter={() => {
                         if (keyboardNav.current) {
                           return;
                         }
                         setActiveIndex(index);
                       }}
-                      onClick={() => handleSelect(connection.id)}
+                      onClick={() => {
+                        if (!retired) {
+                          handleSelect(connection.id);
+                        }
+                      }}
                       className={cn(
                         'w-full flex items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-left',
                         depth === 1 && 'ps-6',

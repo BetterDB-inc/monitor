@@ -444,6 +444,18 @@ describe('ConnectionSwitcher cluster grouping', () => {
     expect(optionNames()).toEqual([expect.stringContaining('10.0.0.2:7002')]);
   });
 
+  it('does not select a retired child by click or Enter', () => {
+    onSelect.mockClear();
+    open([seed, ...kids], seed);
+    fireEvent.click(screen.getByRole('button', { name: /2 nodes/i }));
+    const retired = screen.getAllByRole('option')[2];
+    expect(retired).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.click(retired);
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: '7003' } });
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Enter' });
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
   it('shows the siblings of the current child expanded', () => {
     open([seed, ...kids], kids[0]);
     expect(screen.getAllByRole('option')).toHaveLength(3);
