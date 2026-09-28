@@ -6,7 +6,7 @@ import { ConnectionRegistry } from '../connection-registry.service';
 import { UnifiedDatabaseAdapter } from '../../database/adapters/unified.adapter';
 import { ExternalMetricsStore } from '../../external-metrics/external-metrics-store';
 
-function build() {
+function build(env: Record<string, string> = {}) {
   const storage = {
     saveConnection: jest.fn().mockResolvedValue(undefined),
     deleteConnection: jest.fn().mockResolvedValue(undefined),
@@ -18,7 +18,8 @@ function build() {
     resetConnection: jest.fn(),
     getCapabilities: jest.fn().mockReturnValue(null),
   };
-  const registry = new ConnectionRegistry(storage as never, {} as never, tracker as never, {} as never, new ExternalMetricsStore());
+  const config = { get: jest.fn((key: string) => env[key]) };
+  const registry = new ConnectionRegistry(storage as never, config as never, tracker as never, {} as never, new ExternalMetricsStore());
   return { registry, storage };
 }
 
@@ -98,6 +99,12 @@ describe('ConnectionRegistry membership', () => {
     const { registry } = build();
     put(registry, { ...seed, autoRegisterNodes: true });
     expect(registry.list()[0]).toMatchObject({ autoRegisterNodes: true });
+  });
+
+  it('reads the auto-register env default as a boolean flag', () => {
+    expect(build({ CLUSTER_AUTO_REGISTER_NODES: 'true' }).registry.getAutoRegisterNodesDefault()).toBe(true);
+    expect(build({ CLUSTER_AUTO_REGISTER_NODES: 'false' }).registry.getAutoRegisterNodesDefault()).toBe(false);
+    expect(build().registry.getAutoRegisterNodesDefault()).toBe(false);
   });
 
   it('ignores retired auto children in host:port lookups', () => {

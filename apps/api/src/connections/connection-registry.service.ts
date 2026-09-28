@@ -11,6 +11,7 @@ import { RuntimeCapabilityTracker } from './runtime-capability-tracker.service';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { ExternalMetricsStore } from '../external-metrics/external-metrics-store';
 import { ExternalMetricsAdapter } from '../external-metrics/external-metrics.adapter';
+import { isTrueFlag } from '../config/env-normalize';
 
 export { ENV_DEFAULT_ID } from './connection.constants';
 import { ENV_DEFAULT_ID } from './connection.constants';
@@ -921,6 +922,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   getStartupConnectionErrors(): Array<{ name: string; host: string; port: number; error: string }> {
     return this.startupConnectionErrors;
+  }
+
+  getAutoRegisterNodesDefault(): boolean {
+    return isTrueFlag(this.configService.get<string>('CLUSTER_AUTO_REGISTER_NODES'));
   }
 
   isEnvDefault(id: string): boolean {

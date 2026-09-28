@@ -26,6 +26,7 @@ function setup(opts: SetupOptions = {}) {
     setDefault: jest.fn(),
     list: jest.fn().mockReturnValue([]),
     getDefaultId: jest.fn().mockReturnValue(null),
+    getAutoRegisterNodesDefault: jest.fn().mockReturnValue(true),
   } as unknown as ConnectionRegistry;
   const tracker = new RuntimeCapabilityTracker();
   const controller = new ConnectionsController(registry, tracker);
@@ -221,6 +222,11 @@ describe('ConnectionsController.list', () => {
     const { controller, registry } = setup();
     controller.list();
     expect(registry.list).toHaveBeenCalledWith({ includeRetired: true });
+  });
+
+  it('exposes the env default for auto-registration', () => {
+    const { controller } = setup();
+    expect(controller.list().autoRegisterNodesDefault).toBe(true);
   });
 });
 

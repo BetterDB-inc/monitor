@@ -75,6 +75,7 @@ export class ConnectionsController {
     return {
       connections: this.registry.list({ includeRetired: true }),
       currentId: this.registry.getDefaultId(),
+      autoRegisterNodesDefault: this.registry.getAutoRegisterNodesDefault(),
     };
   }
 

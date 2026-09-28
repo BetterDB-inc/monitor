@@ -231,6 +231,9 @@ export class ConnectionListResponseDto implements ConnectionListResponse {
 
   @ApiProperty({ description: 'Current default connection ID', nullable: true, example: ENV_DEFAULT_ID })
   currentId: string | null;
+
+  @ApiProperty({ description: 'Auto-register default applied to seeds that have not set the flag (CLUSTER_AUTO_REGISTER_NODES)', example: false })
+  autoRegisterNodesDefault: boolean;
 }
 
 /**
