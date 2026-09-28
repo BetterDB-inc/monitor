@@ -44,7 +44,7 @@ interface ConnectionFormData {
   dbIndex: number;
   tls: boolean;
   ssh: SshFormData;
-  autoRegisterNodes: boolean;
+  autoRegisterNodes: boolean | null;
 }
 
 const defaultSshFormData: SshFormData = {
@@ -98,7 +98,7 @@ const defaultFormData: ConnectionFormData = {
   dbIndex: 0,
   tls: false,
   ssh: defaultSshFormData,
-  autoRegisterNodes: false,
+  autoRegisterNodes: null,
 };
 
 type AddTab = 'direct' | 'agent' | 'valkey' | 'otlp';
@@ -113,8 +113,15 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   // expose the /agent-tokens mint endpoint and the /agent/ws gateway. The "BetterDB
   // Valkey instances" tab stays cloud-only (it provisions managed instances).
   const showAgentTab = isCloudMode === true || mode === 'self-hosted';
-  const { currentConnection, connections, loading, error, setConnection, refreshConnections } =
-    useConnection();
+  const {
+    currentConnection,
+    connections,
+    loading,
+    error,
+    setConnection,
+    refreshConnections,
+    autoRegisterNodesDefault = false,
+  } = useConnection();
   const [showAddDialog, setShowAddDialog] = useState(false);
 
   useEffect(() => {
@@ -280,15 +287,22 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
           setAsDefault: connections.length === 0,
         }),
       });
-      if (formData.autoRegisterNodes) {
-        await fetchApi(`/connections/${id}/auto-register`, {
-          method: 'PATCH',
-          body: JSON.stringify({ enabled: true }),
-        });
-      }
+      const autoRegisterNodes = formData.autoRegisterNodes;
       setShowAddDialog(false);
       setFormData(emptyFormData);
       setTestResult(null);
+      if (autoRegisterNodes !== null && autoRegisterNodes !== autoRegisterNodesDefault) {
+        await fetchApi(`/connections/${id}/auto-register`, {
+          method: 'PATCH',
+          body: JSON.stringify({ enabled: autoRegisterNodes }),
+        }).catch((err) => {
+          alert(
+            `Connection saved, but auto-registration could not be updated: ${
+              err instanceof Error ? err.message : 'unknown error'
+            }`,
+          );
+        });
+      }
       await refreshConnections();
     } catch (err) {
       setTestResult({
@@ -837,7 +851,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                   <label className="flex items-center gap-2 text-sm">
                     <input
                       type="checkbox"
-                      checked={formData.autoRegisterNodes}
+                      checked={formData.autoRegisterNodes ?? autoRegisterNodesDefault}
                       onChange={(e) =>
                         setFormData({ ...formData, autoRegisterNodes: e.target.checked })
                       }
@@ -926,7 +940,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                         <label className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
                           <input
                             type="checkbox"
-                            checked={conn.autoRegisterNodes ?? false}
+                            checked={conn.autoRegisterNodes ?? autoRegisterNodesDefault}
                             onChange={(e) => handleToggleAutoRegister(conn, e.target.checked)}
                           />
                           Auto-register cluster nodes

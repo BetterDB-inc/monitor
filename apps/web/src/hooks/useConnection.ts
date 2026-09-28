@@ -33,6 +33,7 @@ export interface ConnectionContextValue {
   refreshConnections: () => Promise<void>;
   /** Whether there are no connections configured */
   hasNoConnections: boolean;
+  autoRegisterNodesDefault?: boolean;
 }
 
 export const ConnectionContext = createContext<ConnectionContextValue | null>(null);
@@ -54,6 +55,7 @@ export function useConnectionState(): ConnectionContextValue {
   const [currentConnection, setCurrentConnection] = useState<Connection | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [autoRegisterNodesDefault, setAutoRegisterNodesDefault] = useState(false);
   const initialLoadDone = useRef(false);
 
   const fetchConnections = useCallback(async () => {
@@ -64,9 +66,14 @@ export function useConnectionState(): ConnectionContextValue {
       setError(null);
 
       // Fetch connections from API using centralized client
-      const responseData = await fetchApi<{ connections: Connection[]; currentId: string | null }>('/connections');
+      const responseData = await fetchApi<{
+        connections: Connection[];
+        currentId: string | null;
+        autoRegisterNodesDefault?: boolean;
+      }>('/connections');
       const data: Connection[] = responseData.connections || [];
       setConnections(data);
+      setAutoRegisterNodesDefault(responseData.autoRegisterNodesDefault === true);
 
       const stillListed =
         currentConnection !== null &&
@@ -132,5 +139,6 @@ export function useConnectionState(): ConnectionContextValue {
     setConnection,
     refreshConnections: fetchConnections,
     hasNoConnections: !loading && connections.length === 0,
+    autoRegisterNodesDefault,
   };
 }
