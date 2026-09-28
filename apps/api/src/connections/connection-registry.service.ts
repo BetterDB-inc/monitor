@@ -458,7 +458,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       return { ...decrypted, nodePassword: this.encryption.decrypt(config.nodePassword), nodePasswordEncrypted: false };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Decryption failed';
-      this.logger.error(`Failed to decrypt data node password for ${config.name}: ${errorMsg}`);
+      this.logger.error(
+        `Could not decrypt the data node password for ${config.name}: ${errorMsg}. ` +
+        "Discovered data nodes will use the seed's password."
+      );
       return { ...decrypted, nodePassword: config.nodePassword, nodePasswordEncrypted: true };
     }
   }
