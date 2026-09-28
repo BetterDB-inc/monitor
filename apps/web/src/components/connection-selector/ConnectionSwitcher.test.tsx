@@ -402,3 +402,50 @@ describe('ConnectionSwitcher', () => {
     expect(screen.getByRole('combobox')).not.toHaveTextContent('OTLP');
   });
 });
+
+describe('ConnectionSwitcher cluster grouping', () => {
+  const seed = connection({ id: 's', name: 'prod', host: '10.0.0.1', port: 7001 });
+  const kids = [
+    connection({
+      id: 'k2',
+      name: 'prod · 10.0.0.2:7002',
+      host: '10.0.0.2',
+      port: 7002,
+      membership: { seedId: 's', nodeId: 'n2', origin: 'auto' },
+    }),
+    connection({
+      id: 'k3',
+      name: 'prod · 10.0.0.3:7003',
+      host: '10.0.0.3',
+      port: 7003,
+      isConnected: false,
+      membership: { seedId: 's', nodeId: 'n3', origin: 'auto', retiredAt: Date.now() - 3_600_000 },
+    }),
+  ];
+
+  it('collapses children under their seed with a count', () => {
+    open([seed, ...kids], seed);
+    expect(screen.getAllByRole('option')).toHaveLength(1);
+    expect(screen.getByRole('button', { name: /2 nodes/i })).toBeInTheDocument();
+  });
+
+  it('expands to show children, retired last and labelled', () => {
+    open([seed, ...kids], seed);
+    fireEvent.click(screen.getByRole('button', { name: /2 nodes/i }));
+    const names = optionNames();
+    expect(names).toHaveLength(3);
+    expect(names[1]).toContain('Auto');
+    expect(names[2]).toContain('left cluster');
+  });
+
+  it('shows matching children when searching without expanding', () => {
+    open([seed, ...kids], seed);
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: '7002' } });
+    expect(optionNames()).toEqual([expect.stringContaining('10.0.0.2:7002')]);
+  });
+
+  it('shows the siblings of the current child expanded', () => {
+    open([seed, ...kids], kids[0]);
+    expect(screen.getAllByRole('option')).toHaveLength(3);
+  });
+});

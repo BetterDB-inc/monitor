@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import type { ClusterMembership } from '@betterdb/shared';
 import { setCurrentConnectionId, fetchApi } from '../api/client';
 
 export interface Connection {
@@ -10,8 +11,11 @@ export interface Connection {
   capabilities?: {
     dbType: 'valkey' | 'redis';
     version: string;
+    clusterEnabled?: boolean;
   };
   connectionType?: 'direct' | 'agent' | 'external';
+  autoRegisterNodes?: boolean;
+  membership?: ClusterMembership;
 }
 
 export interface ConnectionContextValue {
