@@ -1,6 +1,7 @@
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
-import { ClusterAutoRegistrationService } from '../cluster-auto-registration.service';
-import type { DiscoveredNode } from '../../cluster-discovery.service';
+import { TopologyAutoRegistrationService } from '../topology-auto-registration.service';
+import { ClusterTopologySource } from '../cluster-topology.source';
+import type { DiscoveredNode } from '../../cluster/cluster-discovery.service';
 
 function discovered(id: string, address: string, flags = ['master']): DiscoveredNode {
   return { id, address, flags, role: 'master', slots: [], configEpoch: 0, healthy: true };
@@ -33,7 +34,7 @@ function build(options: {
     adoptChild: jest.fn().mockResolvedValue(undefined),
     retireChild: jest.fn().mockResolvedValue(undefined),
     reactivateChild: jest.fn().mockResolvedValue(undefined),
-    refreshChildNodeId: jest.fn().mockResolvedValue(undefined),
+    refreshChild: jest.fn().mockResolvedValue(undefined),
     removeChild: jest.fn().mockResolvedValue(undefined),
     list: jest.fn(() => []),
   };
@@ -44,7 +45,7 @@ function build(options: {
   };
   const config = { get: jest.fn(() => options.envDefault) };
   const retention = { getRetentionDays: jest.fn(() => options.retentionDays ?? null) };
-  const service = new ClusterAutoRegistrationService(registry as never, discovery as never, config as never, retention as never);
+  const service = new TopologyAutoRegistrationService(registry as never, [new ClusterTopologySource(discovery as never)], config as never, retention as never);
   return { service, registry, discovery, setMembers: (next: DatabaseConnectionConfig[]) => { members = next; } };
 }
 
@@ -55,13 +56,13 @@ function child(id: string, host: string, port: number, extra: Partial<DatabaseCo
 const clusterOf = (count: number) =>
   Array.from({ length: count }, (_, i) => discovered(`n${i + 2}`, `10.0.0.${i + 2}:700${i + 2}@1700${i + 2}`));
 
-describe('ClusterAutoRegistrationService', () => {
+describe('TopologyAutoRegistrationService', () => {
   it('adds every discovered node except the seed', async () => {
     const { service, registry } = build({ nodes: [discovered('self', '127.0.0.1:7001@17001', ['myself', 'master']), ...clusterOf(2)] });
     await service.reconcile('seed');
     expect(registry.addManagedChild.mock.calls).toEqual([
-      ['seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2' }],
-      ['seed', { host: '10.0.0.3', port: 7003, nodeId: 'n3' }],
+      ['seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' }],
+      ['seed', { host: '10.0.0.3', port: 7003, nodeId: 'n3', source: 'cluster' }],
     ]);
   });
 
@@ -102,7 +103,28 @@ describe('ClusterAutoRegistrationService', () => {
     const optedOut = build({ envDefault: 'true', nodes: clusterOf(1) });
     optedOut.registry.findConfigByHostPort.mockReturnValue({ ...other, autoRegisterNodes: false });
     await optedOut.service.reconcile('seed');
-    expect(optedOut.registry.adoptChild).toHaveBeenCalledWith('other', 'seed', 'n2');
+    expect(optedOut.registry.adoptChild).toHaveBeenCalledWith('other', 'seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' });
+  });
+
+  it('treats a disconnected unset connection as a seed when the env default is on', async () => {
+    const other: DatabaseConnectionConfig = { id: 'other', name: 'other', host: '10.0.0.2', port: 7002, isDefault: false, createdAt: 1 };
+    const disconnectedOther = (registry: ReturnType<typeof build>['registry']) =>
+      registry.get.mockImplementation(((id: string) => ({
+        isConnected: () => id !== 'other',
+        getCapabilities: () => ({ clusterEnabled: true }),
+      })) as never);
+
+    const on = build({ seed: { autoRegisterNodes: undefined }, envDefault: 'true', nodes: clusterOf(1) });
+    disconnectedOther(on.registry);
+    on.registry.findConfigByHostPort.mockReturnValue(other);
+    await on.service.reconcile('seed');
+    expect(on.registry.adoptChild).not.toHaveBeenCalled();
+
+    const optedOut = build({ envDefault: 'true', nodes: clusterOf(1) });
+    disconnectedOther(optedOut.registry);
+    optedOut.registry.findConfigByHostPort.mockReturnValue({ ...other, autoRegisterNodes: false });
+    await optedOut.service.reconcile('seed');
+    expect(optedOut.registry.adoptChild).toHaveBeenCalledWith('other', 'seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' });
   });
 
   it('does nothing when discovery fails or returns no nodes', async () => {
@@ -258,14 +280,14 @@ describe('ClusterAutoRegistrationService', () => {
       adoptChild: jest.fn().mockResolvedValue(undefined),
       retireChild: jest.fn().mockResolvedValue(undefined),
       reactivateChild: jest.fn().mockResolvedValue(undefined),
-      refreshChildNodeId: jest.fn().mockResolvedValue(undefined),
+      refreshChild: jest.fn().mockResolvedValue(undefined),
       removeChild: jest.fn().mockResolvedValue(undefined),
       list: jest.fn(() => []),
     };
     const discovery = { discoverNodesIsolated: jest.fn(() => Promise.resolve([discovered('shared', '10.0.0.9:7009@17009')])) };
     const config = { get: jest.fn(() => false) };
     const retention = { getRetentionDays: jest.fn(() => null) };
-    const service = new ClusterAutoRegistrationService(registry as never, discovery as never, config as never, retention as never);
+    const service = new TopologyAutoRegistrationService(registry as never, [new ClusterTopologySource(discovery as never)], config as never, retention as never);
 
     await Promise.all([service.reconcile('a'), service.reconcile('b')]);
 
