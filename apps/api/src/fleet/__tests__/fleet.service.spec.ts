@@ -87,6 +87,46 @@ describe('FleetService', () => {
     expect(summary.instances[0].status).toBe('down');
   });
 
+  describe('waiting connections', () => {
+    const byId: Record<string, unknown> = {
+      up: { status: 'connected', database: { type: 'valkey', version: '8.0', host: 'h', port: 6379 } },
+      down: { status: 'error', database: { type: 'unknown', version: null, host: 'h', port: 6379 }, error: 'boom' },
+      wait: { status: 'waiting', database: { type: 'unknown', version: null, host: 'h', port: 6379 } },
+    };
+
+    const overallFor = async (ids: string[]) => {
+      registry.list.mockReturnValue(ids.map((id, i) => ({ id: `${id}-${i}`, name: id, host: 'h', port: 6379 })));
+      health.getHealth.mockImplementation((id: string) => {
+        const key = id.split('-')[0];
+        return key === 'fail' ? Promise.reject(new Error('probe failed')) : Promise.resolve(byId[key]);
+      });
+      metrics.getInfoParsed.mockResolvedValue(infoFixture());
+      return service.collectUncached();
+    };
+
+    it('reports waiting when every connection is waiting', async () => {
+      const summary = await overallFor(['wait', 'wait']);
+      expect(summary.overallStatus).toBe('waiting');
+      expect(summary.instances.map((i) => i.status)).toEqual(['unknown', 'unknown']);
+    });
+
+    it('ignores waiting connections next to up ones', async () => {
+      expect((await overallFor(['up', 'wait'])).overallStatus).toBe('healthy');
+    });
+
+    it('ignores waiting connections when the rest are down', async () => {
+      expect((await overallFor(['down', 'wait'])).overallStatus).toBe('unhealthy');
+    });
+
+    it('reports degraded for a mix of up and down beside waiting ones', async () => {
+      expect((await overallFor(['up', 'down', 'wait'])).overallStatus).toBe('degraded');
+    });
+
+    it('still counts a failed health probe as not up', async () => {
+      expect((await overallFor(['up', 'fail', 'wait'])).overallStatus).toBe('degraded');
+    });
+  });
+
   it('leaves memPct null when maxmemory is 0 (no limit)', async () => {
     registry.list.mockReturnValue([{ id: 'c1', name: 'One', host: 'h1', port: 6379 }]);
     health.getHealth.mockResolvedValue({ status: 'connected', database: { type: 'valkey', version: '8.0', host: 'h1', port: 6379 } });

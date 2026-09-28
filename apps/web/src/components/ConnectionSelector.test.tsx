@@ -235,6 +235,21 @@ describe('ConnectionSelector - open-add-connection event prefill', () => {
   });
 });
 
+describe('ConnectionSelector - add-connection tab bar', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('offers the OTLP push tab in every mode', () => {
+    render(<ConnectionSelector />);
+
+    fireEvent.click(screen.getByText('+ Add your first connection'));
+
+    expect(screen.getByRole('button', { name: 'OTLP push' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Via Agent' })).toBeNull();
+  });
+});
+
 describe('ConnectionSelector - connection URL paste into Host', () => {
   beforeEach(() => {
     vi.clearAllMocks();

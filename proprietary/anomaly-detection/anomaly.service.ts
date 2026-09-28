@@ -429,6 +429,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     return this.settingsService.getCachedSettings().anomalyPollIntervalMs;
   }
 
+  protected supportsExternalConnections(): boolean {
+    return true;
+  }
+
   private get cacheTtlMs(): number {
     return this.settingsService.getCachedSettings().anomalyCacheTtlMs;
   }
@@ -685,6 +689,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     try {
+      const live = ctx.connectionType !== 'external';
       // Timed around the socket call only: this round-trip doubles as the
       // control-plane probe latency sample for detectControlPlaneSaturation.
       const probeStart = performance.now();
@@ -834,7 +839,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // eviction is abnormal, so absolute thresholds are low. Skipped when eviction
       // is disabled (maxmemory-clients = 0). See valkey#4151.
       const currentEvicted = this.parseNumber(info.evicted_clients);
-      if (currentEvicted !== null && (await this.clientEvictionEnabled(ctx))) {
+      if (live && currentEvicted !== null && (await this.clientEvictionEnabled(ctx))) {
         const lastEvicted = this.lastEvictedClients.get(ctx.connectionId);
         // max(0, …) absorbs a counter reset on server restart.
         const evictedDelta = Math.max(0, currentEvicted - (lastEvicted ?? currentEvicted));
@@ -965,7 +970,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // wipes its replicas via full resync. Rule A fires on the primary the
       // moment it comes back empty; Rule B confirms a replica has been wiped.
       const replid = info['master_replid'];
-      if (replid && (roleStr === 'master' || roleStr === 'slave' || roleStr === 'replica')) {
+      if (
+        live &&
+        replid &&
+        (roleStr === 'master' || roleStr === 'slave' || roleStr === 'replica')
+      ) {
         const snapshot = {
           role: (roleStr === 'master' ? 'master' : 'replica') as 'master' | 'replica',
           replid,
@@ -1089,7 +1098,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
       // Cluster state transition detection
       const clusterEnabled = info['cluster_enabled'];
-      if (clusterEnabled === '1') {
+      if (live && clusterEnabled === '1') {
         // Raft (Cluster V2) vs gossip is decided from CLUSTER INFO. Default to the
         // last known mode so a transient CLUSTER INFO failure can't flip a Raft
         // connection back to gossip and run the gossip topology detectors on it.
@@ -1250,18 +1259,18 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // repeated auth failures from ONE client address, which the aggregate
       // ACL_DENIED counter cannot tell you. Reads the audit store rather than
       // polling ACL LOG a second time.
-      await this.detectAuthFailureBurst(ctx, timestamp);
+      if (live) await this.detectAuthFailureBurst(ctx, timestamp);
 
       // Cross-node ACL drift + live-reload confirmation (valkey-io/valkey#4355):
       // one node in a replication group serving a different ruleset than its
       // peers, or a node whose ruleset changed. Same shared-snapshot shape as
       // config drift — no fan-out, so a hung peer cannot stall this poll.
-      await this.detectAclDrift(info, ctx, timestamp);
+      if (live) await this.detectAclDrift(info, ctx, timestamp);
 
       // Sentinel endpoint drift (valkey-io/valkey#2158): a replica carried under
       // an ephemeral pod IP where the group announces hostnames, or a node
       // configured as a replica of itself. Sentinel deployments only.
-      await this.detectSentinelDrift(ctx, timestamp, info);
+      if (live) await this.detectSentinelDrift(ctx, timestamp, info);
 
       // Cross-node config drift (valkey-io/valkey#1193): CONFIG SET only ever
       // applies to the single node it's sent to today, so nodes in the same
@@ -1269,12 +1278,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // primary/replica ends up with a different maxmemory-policy). Updates
       // this connection's slice of the shared snapshot, then scans the whole
       // snapshot for cross-node disagreement. State-based, not z-score.
-      await this.detectConfigDrift(info, ctx, timestamp);
+      if (live) await this.detectConfigDrift(info, ctx, timestamp);
 
       // Replication output-buffer pressure (valkey-io/valkey#3963): replica
       // omem approaching the slave COB limit, and the resync-loop signal once
       // an overflow already forced a full sync. State-based with hysteresis.
-      await this.detectCobPressure(info, ctx, timestamp);
+      if (live) await this.detectCobPressure(info, ctx, timestamp);
 
       // Full-resync failure loop (valkey-io/valkey#1836): this replica's link
       // held down through repeated full-sync attempts that never complete —
@@ -1285,19 +1294,21 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // overhead (client buffers, repl backlog/buffers, AOF buffer, scripts,
       // cluster links) consuming the maxmemory budget and/or driving eviction
       // of user data. State-based with hysteresis, not z-score.
-      await this.detectMemoryOverhead(info, ctx, timestamp);
+      if (live) await this.detectMemoryOverhead(info, ctx, timestamp);
 
       // Control-plane saturation (valkey-io/valkey#3927): sustained CPU
       // saturation paired with control-plane impact evidence. Runs last so
       // this poll's detector emissions can corroborate.
-      await this.detectControlPlaneSaturation(
-        info,
-        ctx,
-        timestamp,
-        cpuUtilizationSample,
-        probeRttMs,
-        cpuCounterReset,
-      );
+      if (live) {
+        await this.detectControlPlaneSaturation(
+          info,
+          ctx,
+          timestamp,
+          cpuUtilizationSample,
+          probeRttMs,
+          cpuCounterReset,
+        );
+      }
 
       // Event-loop load saturation (valkey-io/valkey#2055): busy-fraction of
       // the event loop — the real-work busyness that raw CPU% hides. Passes the
@@ -1313,7 +1324,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // (already polled on its own 30s cadence, so no extra COMMANDLOG call
       // here); the threshold config is fetched on a slow recheck like the COB
       // limit. State-based with per-offending-command dedupe.
-      await this.detectLargeReplyPressure(ctx, timestamp);
+      if (live) await this.detectLargeReplyPressure(ctx, timestamp);
     } catch (error) {
       this.logger.error(`Failed to poll metrics for ${ctx.connectionName}:`, error);
       throw error;
@@ -2624,6 +2635,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       this.forkMemLastChanges.set(ctx.connectionId, { changes: currentChanges, ts: timestamp });
     }
 
+    const usedMemoryRss = this.parseNumber(info.used_memory_rss);
+    const usedMemory = this.parseNumber(info.used_memory) ?? usedMemoryRss;
+    if (usedMemory === null) return;
+
     const finding = evaluateForkMemoryRisk(state, {
       bgsaveInProgress: info.rdb_bgsave_in_progress === '1',
       aofRewriteInProgress: info.aof_rewrite_in_progress === '1',
@@ -2631,8 +2646,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       rdbLastCowSize: this.parseNumber(info.rdb_last_cow_size),
       aofLastCowSize: this.parseNumber(info.aof_last_cow_size),
       latestForkUsec: this.parseNumber(info.latest_fork_usec),
-      usedMemory: this.parseNumber(info.used_memory) ?? 0,
-      usedMemoryRss: this.parseNumber(info.used_memory_rss),
+      usedMemory,
+      usedMemoryRss,
       totalSystemMemory: this.parseNumber(info.total_system_memory),
       writeRatePerSec,
       timestamp,

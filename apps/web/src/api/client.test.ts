@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   apiOrigin,
+  ApiError,
+  ExternalConnectionUnsupportedError,
+  EXTERNAL_UNSUPPORTED_MESSAGE,
   fetchApi,
   PaymentRequiredError,
   UnauthorizedError,
@@ -105,6 +108,38 @@ describe('fetchApi error handling', () => {
     );
 
     await expect(fetchApi<{ id: string }>('/webhooks/123')).resolves.toEqual({ id: '123' });
+  });
+
+  it('throws ExternalConnectionUnsupportedError on a 501 with the external code', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          statusCode: 501,
+          code: 'EXTERNAL_CONNECTION_UNSUPPORTED',
+          method: 'getSlowLog',
+          message: 'x',
+        }),
+        {
+          status: 501,
+          headers: { 'content-type': 'application/json' },
+        },
+      ),
+    );
+    const error = await fetchApi('/slowlog').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ExternalConnectionUnsupportedError);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ExternalConnectionUnsupportedError).status).toBe(501);
+    expect((error as ExternalConnectionUnsupportedError).method).toBe('getSlowLog');
+    expect((error as Error).message).toBe(EXTERNAL_UNSUPPORTED_MESSAGE);
+  });
+
+  it('keeps a plain ApiError for other 501s', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ message: 'nope' }), { status: 501 }),
+    );
+    const error = await fetchApi('/x').catch((e: unknown) => e);
+    expect(error).not.toBeInstanceOf(ExternalConnectionUnsupportedError);
+    expect(error).toBeInstanceOf(ApiError);
   });
 });
 

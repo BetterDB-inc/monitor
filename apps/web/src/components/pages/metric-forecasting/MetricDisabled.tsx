@@ -1,11 +1,11 @@
 import type { MetricKindMeta } from '@betterdb/shared';
-import { Card } from '../../ui/card';
+import { EmptyState } from '../../ui/empty-state';
 
 export function MetricDisabled({ meta }: { meta: MetricKindMeta }) {
   return (
-    <Card className="p-6 text-center text-muted-foreground">
-      <p>{meta.label} forecasting is disabled for this connection.</p>
-      <p className="text-sm mt-2">Enable it in the settings panel below.</p>
-    </Card>
+    <EmptyState
+      title={`${meta.label} forecasting is disabled for this connection`}
+      description="Enable it in the settings panel below."
+    />
   );
 }

@@ -415,7 +415,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
    */
   async triggerCollection(fullScan = false): Promise<void> {
     const connections = this.connectionRegistry.list();
-    const connectedConnections = connections.filter((conn) => conn.isConnected);
+    const connectedConnections = connections.filter((conn) => conn.isConnected && conn.connectionType !== 'external');
 
     if (connectedConnections.length === 0) {
       this.logger.warn('No connected databases found for key analytics collection');
@@ -456,7 +456,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
   async getKeySizes(connectionId?: string): Promise<KeySizeDistribution> {
     let targetId = connectionId;
     if (!targetId) {
-      const connected = this.connectionRegistry.list().filter((conn) => conn.isConnected);
+      const connected = this.connectionRegistry.list().filter((conn) => conn.isConnected && conn.connectionType !== 'external');
       if (connected.length === 0) {
         return { databases: {}, available: false };
       }

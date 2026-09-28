@@ -61,6 +61,10 @@ export class LatencystatsPollerService extends MultiConnectionPoller implements 
     this.sectionAbsentLogged.delete(connectionId);
   }
 
+  protected supportsExternalConnections(): boolean {
+    return true;
+  }
+
   getSnapshot(connectionId: string): LatencyStatsSnapshotEntry[] {
     return this.snapshots.get(connectionId)?.entries ?? [];
   }

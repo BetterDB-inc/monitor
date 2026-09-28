@@ -170,3 +170,27 @@ describe('KeyAnalyticsService.collect composite persistence', () => {
     expect(typeof composites[0].capturedAt).toBe('number');
   });
 });
+
+describe('external connections', () => {
+  const statuses = [
+    { id: 'ext', name: 'pushed', host: 'a', port: 1, isConnected: true, connectionType: 'external' },
+    { id: 'dir', name: 'polled', host: 'b', port: 2, isConnected: true, connectionType: 'direct' },
+  ];
+
+  it('skips external connections in triggerCollection', async () => {
+    const registry = { list: jest.fn().mockReturnValue(statuses), get: jest.fn().mockReturnValue({}) };
+    const service = new KeyAnalyticsService(registry as never, {} as never, {} as never);
+    const collect = jest.spyOn(service as any, 'collect').mockResolvedValue(undefined);
+    await service.triggerCollection();
+    expect(collect).toHaveBeenCalledTimes(1);
+    expect(collect.mock.calls[0][0]).toMatchObject({ connectionId: 'dir' });
+  });
+
+  it('never defaults getKeySizes to an external connection', async () => {
+    const client = { call: jest.fn().mockResolvedValue('') };
+    const registry = { list: jest.fn().mockReturnValue(statuses), get: jest.fn().mockReturnValue(client) };
+    const service = new KeyAnalyticsService(registry as never, {} as never, {} as never);
+    await service.getKeySizes();
+    expect(registry.get).toHaveBeenCalledWith('dir');
+  });
+});

@@ -355,4 +355,50 @@ describe('ConnectionSwitcher', () => {
     expect(screen.getByTestId('conn-status-b')).toHaveAttribute('data-connected', 'false');
     expect(screen.getByTestId('conn-status-a')).toHaveAttribute('data-connected', 'true');
   });
+
+  it('marks an OTLP-pushed connection but not a direct one', () => {
+    open([...CONNECTIONS, connection({ id: 'd', name: 'pushed', connectionType: 'external' })]);
+
+    const pushedOption = screen.getByRole('option', { name: /pushed/ });
+    expect(pushedOption).toHaveTextContent('OTLP');
+    const directOption = screen.getByRole('option', { name: /production-eu/ });
+    expect(directOption).not.toHaveTextContent('OTLP');
+  });
+
+  it('keeps the OTLP badge out of the truncated host text', () => {
+    open([
+      ...CONNECTIONS,
+      connection({
+        id: 'd',
+        name: 'pushed',
+        host: 'a-very-long-hostname.internal.example.com',
+        connectionType: 'external',
+      }),
+    ]);
+
+    const host = screen.getByText('a-very-long-hostname.internal.example.com:6379');
+    expect(host).toHaveClass('truncate');
+    expect(host).not.toContainElement(screen.getAllByText('OTLP')[0]);
+  });
+
+  it('marks an OTLP-pushed connection on the closed trigger', () => {
+    const pushed = connection({ id: 'd', name: 'pushed', connectionType: 'external' });
+    render(
+      <ConnectionSwitcher
+        connections={[...CONNECTIONS, pushed]}
+        current={pushed}
+        onSelect={onSelect}
+      />,
+    );
+
+    expect(screen.getByRole('combobox')).toHaveTextContent('OTLP');
+  });
+
+  it('does not mark a direct connection on the closed trigger', () => {
+    render(
+      <ConnectionSwitcher connections={CONNECTIONS} current={CONNECTIONS[0]} onSelect={onSelect} />,
+    );
+
+    expect(screen.getByRole('combobox')).not.toHaveTextContent('OTLP');
+  });
 });

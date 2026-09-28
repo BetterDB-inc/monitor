@@ -203,7 +203,7 @@ export function Dashboard() {
       </div>
 
       <div className="flex flex-wrap gap-4">
-        <ConnectionCard health={health} loading={healthLoading} />
+        <ConnectionCard health={health} loading={healthLoading} connection={currentConnection} />
         <OverviewCards info={info} />
       </div>
 

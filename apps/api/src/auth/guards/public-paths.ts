@@ -8,6 +8,7 @@ const PUBLIC_PREFIXES = [
   '/prometheus',
   '/ingest/',
   '/v1/traces',
+  '/v1/external/metrics',
   '/version',
 ];
 

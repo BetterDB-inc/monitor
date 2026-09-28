@@ -344,6 +344,11 @@ describe('envSchema', () => {
       const result = envSchema.safeParse({});
       expect(result.success && result.data.OTEL_INGEST_ENABLED).toBe(true);
     });
+
+    it.each(['false', '0', ' FALSE ', '0\n'])('parses OTEL_INGEST_ENABLED=%j as disabled', (value) => {
+      const result = envSchema.safeParse({ OTEL_INGEST_ENABLED: value });
+      expect(result.success && result.data.OTEL_INGEST_ENABLED).toBe(false);
+    });
   });
 
   describe('Prometheus poll interval validation', () => {

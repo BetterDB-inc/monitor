@@ -16,6 +16,7 @@ import {
 } from './analysis/analysis-verdict-store';
 import { probeSourceFunctions, aggregateFunctionPresence } from './fork-compat';
 import { parseNodeAddress } from './function-presence';
+import { assertLiveMigrationPair } from './live-connections';
 
 @Injectable()
 export class MigrationService {
@@ -32,6 +33,7 @@ export class MigrationService {
     // Verify both connections exist before creating job (get() throws NotFoundException if not found)
     this.connectionRegistry.get(req.sourceConnectionId);
     this.connectionRegistry.get(req.targetConnectionId);
+    assertLiveMigrationPair(this.connectionRegistry, req.sourceConnectionId, req.targetConnectionId);
 
     this.evictOldJobs();
 

@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
+import { EmptyState } from '../ui/empty-state';
 import { Badge } from '../ui/badge';
 import { Server, ChevronDown, ChevronUp, Grid3x3, Network } from 'lucide-react';
 import type { ClusterNode } from '../../types/metrics';
@@ -259,10 +260,7 @@ export function ClusterTopology({ nodes, nodeStats }: ClusterTopologyProps) {
             ))}
 
             {topology.length === 0 && (
-              <div className="text-center py-8 text-muted-foreground">
-                <Server className="w-12 h-12 mx-auto mb-3 opacity-50" />
-                <p>No cluster nodes found</p>
-              </div>
+              <EmptyState variant="inline" icon={Server} title="No cluster nodes found" />
             )}
           </div>
         </CardContent>

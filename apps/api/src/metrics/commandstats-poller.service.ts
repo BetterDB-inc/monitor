@@ -17,8 +17,8 @@ interface ConnectionBaseline {
 export interface CommandStatsSnapshotEntry {
   command: string;
   callsTotal: number;
-  usecTotal: number;
-  usecPerCall: number;
+  usecTotal?: number;
+  usecPerCall?: number;
   rejectedCalls: number;
   failedCalls: number;
   capturedAt: number;
@@ -54,6 +54,10 @@ export class CommandstatsPollerService extends MultiConnectionPoller implements 
   protected onConnectionRemoved(connectionId: string): void {
     this.baselines.delete(connectionId);
     this.lastPruneByConnection.delete(connectionId);
+  }
+
+  protected supportsExternalConnections(): boolean {
+    return true;
   }
 
   getSnapshot(connectionId: string): CommandStatsSnapshotEntry[] {
@@ -129,8 +133,14 @@ export class CommandstatsPollerService extends MultiConnectionPoller implements 
         continue;
       }
       const callsDelta = sample.calls - prev.calls;
-      const usecDelta = sample.usec - prev.usec;
-      if (callsDelta < 0 || usecDelta < 0) {
+      if (callsDelta < 0) {
+        hadReset = true;
+        break;
+      }
+      const { usec, usecPerCall } = sample;
+      if (usec === undefined || usecPerCall === undefined || prev.usec === undefined) continue;
+      const usecDelta = usec - prev.usec;
+      if (usecDelta < 0) {
         hadReset = true;
         break;
       }
@@ -139,8 +149,8 @@ export class CommandstatsPollerService extends MultiConnectionPoller implements 
       batch.push({
         command: sample.command,
         callsTotal: sample.calls,
-        usecTotal: sample.usec,
-        usecPerCall: sample.usecPerCall,
+        usecTotal: usec,
+        usecPerCall,
         rejectedCalls: sample.rejectedCalls,
         failedCalls: sample.failedCalls,
         callsDelta,

@@ -16,6 +16,7 @@ import { parseLogLine, classifyRedisShakeFailure, stripAnsi } from './execution/
 import { runCommandMigration } from './execution/command-migration-worker';
 import { shouldExcludeFunctions, isRdbRestoreCompatible } from './fork-compat';
 import { probeSourceFunctionsClusterAware, parseNodeAddress } from './function-presence';
+import { assertLiveMigrationPair } from './live-connections';
 
 /**
  * Everything runRedisShake needs to do before it spawns the process: the
@@ -68,6 +69,8 @@ export class MigrationExecutionService {
     if (req.sourceConnectionId === req.targetConnectionId) {
       throw new BadRequestException('Source and target must be different connections');
     }
+
+    assertLiveMigrationPair(this.connectionRegistry, req.sourceConnectionId, req.targetConnectionId);
 
     this.enforceSafetyGate(req);
 
