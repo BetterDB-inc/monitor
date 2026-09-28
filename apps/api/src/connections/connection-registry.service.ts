@@ -1001,9 +1001,17 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       credentialError = isAuthError ? errorMsg : undefined;
       this.logger.warn(`Auto-registered ${config.name} but could not connect: ${errorMsg}`);
     }
-    await this.storage.saveConnection(this.encryptConfig(config));
-    this.configs.set(config.id, { ...config, credentialStatus, credentialError });
-    this.connections.set(config.id, adapter);
+    try {
+      await this.storage.saveConnection(this.encryptConfig(config));
+      this.configs.set(config.id, { ...config, credentialStatus, credentialError });
+      this.connections.set(config.id, adapter);
+    } catch (error) {
+      this.configs.delete(config.id);
+      this.connections.delete(config.id);
+      await adapter.disconnect().catch(() => { });
+      this.logger.error(`Failed to persist auto-registered node ${config.name}: ${error instanceof Error ? error.message : error}`);
+      throw error;
+    }
     this.logger.log(`Auto-registered cluster node ${config.name}`);
     return config.id;
   }

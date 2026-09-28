@@ -71,6 +71,20 @@ describe('ConnectionRegistry membership', () => {
     expect(storage.saveConnection).toHaveBeenCalled();
   });
 
+  it('disconnects and forgets a managed child when persisting it fails', async () => {
+    const { registry, storage } = build();
+    put(registry, seed);
+    const disconnect = jest.fn().mockResolvedValue(undefined);
+    jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(
+      () => ({ connect: jest.fn().mockResolvedValue(undefined), disconnect }) as never,
+    );
+    storage.saveConnection.mockRejectedValueOnce(new Error('disk full'));
+    await expect(registry.addManagedChild('seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2' })).rejects.toThrow('disk full');
+    expect(disconnect).toHaveBeenCalled();
+    expect(registry.listMembers('seed')).toEqual([]);
+    expect((registry as unknown as Internals).connections.size).toBe(1);
+  });
+
   it('hides retired auto children from list() but not adopted ones', () => {
     const { registry } = build();
     put(registry, seed);
