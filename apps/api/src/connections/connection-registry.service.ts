@@ -711,6 +711,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
           version: capabilities.version,
           supportsCommandLog: capabilities.hasCommandLog,
           supportsSlotStats: capabilities.hasSlotStats,
+          clusterEnabled: capabilities.clusterEnabled,
         },
       };
     } catch (error) {

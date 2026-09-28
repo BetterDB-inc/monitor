@@ -22,6 +22,9 @@ function setup(opts: SetupOptions = {}) {
   const registry = {
     getConfig: jest.fn().mockReturnValue(opts.hasConfig === false ? undefined : { id: 'conn-1' }),
     get: jest.fn().mockReturnValue(adapter),
+    setAutoRegister: jest.fn(),
+    list: jest.fn().mockReturnValue([]),
+    getDefaultId: jest.fn().mockReturnValue(null),
   } as unknown as ConnectionRegistry;
   const tracker = new RuntimeCapabilityTracker();
   const controller = new ConnectionsController(registry, tracker);
@@ -191,5 +194,31 @@ describe('ConnectionsController.retryCapability — HttpException shapes', () =>
     } catch (err) {
       expect(err).toBeInstanceOf(HttpException);
     }
+  });
+});
+
+describe('ConnectionsController.setAutoRegister', () => {
+  it('forwards the flag to the registry', async () => {
+    const { controller, registry } = setup();
+    await controller.setAutoRegister('seed', { enabled: true });
+    expect(registry.setAutoRegister).toHaveBeenCalledWith('seed', true);
+  });
+
+  it('maps a registry rejection to 400', async () => {
+    const { controller, registry } = setup();
+    (registry.setAutoRegister as jest.Mock).mockRejectedValueOnce(
+      new Error('Auto-registration can only be set on a seed connection'),
+    );
+    await expect(controller.setAutoRegister('child', { enabled: true })).rejects.toMatchObject({
+      status: 400,
+    });
+  });
+});
+
+describe('ConnectionsController.list', () => {
+  it('lists retired children for the UI', () => {
+    const { controller, registry } = setup();
+    controller.list();
+    expect(registry.list).toHaveBeenCalledWith({ includeRetired: true });
   });
 });

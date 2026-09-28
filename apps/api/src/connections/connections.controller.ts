@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Delete, Param, Body, HttpException, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Param, Body, HttpException, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
 import { CapabilityRetryVerdict, RuntimeCapabilities } from '@betterdb/shared';
 import { ConnectionRegistry } from './connection-registry.service';
@@ -13,6 +13,7 @@ import {
   TestConnectionResponseDto,
   ConnectionIdResponseDto,
   SuccessResponseDto,
+  SetAutoRegisterDto,
 } from '../common/dto/connections.dto';
 
 const RUNTIME_CAPABILITY_KEYS = Object.keys(
@@ -72,7 +73,7 @@ export class ConnectionsController {
   @ApiResponse({ status: 200, description: 'Returns all connections with their status', type: ConnectionListResponseDto })
   list(): ConnectionListResponseDto {
     return {
-      connections: this.registry.list(),
+      connections: this.registry.list({ includeRetired: true }),
       currentId: this.registry.getDefaultId(),
     };
   }
@@ -211,6 +212,33 @@ export class ConnectionsController {
         return { available: false, reason };
       }
       return { available: 'unknown', reason };
+    }
+  }
+
+  @Patch(':id/auto-register')
+  @ApiOperation({
+    summary: 'Set cluster node auto-registration for a seed connection',
+    description:
+      'Enables, disables, or resets (null) auto-registration of CLUSTER NODES as child connections. Only valid on a seed connection.',
+  })
+  @ApiParam({ name: 'id', description: 'Seed connection ID' })
+  @ApiResponse({ status: 200, description: 'Auto-registration updated', type: SuccessResponseDto })
+  @ApiResponse({ status: 400, description: 'Not a seed connection' })
+  async setAutoRegister(
+    @Param('id') id: string,
+    @Body() body: SetAutoRegisterDto,
+  ): Promise<SuccessResponseDto> {
+    try {
+      await this.registry.setAutoRegister(id, body.enabled);
+      return { success: true };
+    } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      throw new HttpException(
+        error instanceof Error ? error.message : 'Failed to update connection',
+        HttpStatus.BAD_REQUEST,
+      );
     }
   }
 

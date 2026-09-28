@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsNumber, IsBoolean, IsOptional, IsIn, Min, Max, MinLength, MaxLength, ValidateNested } from 'class-validator';
+import { IsString, IsNumber, IsBoolean, IsOptional, IsIn, Min, Max, MinLength, MaxLength, ValidateNested, ValidateIf } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ENV_DEFAULT_ID } from '../../connections/connection.constants';
 import type {
@@ -13,6 +13,7 @@ import type {
   SshTunnelInput,
   SshAuthMethod,
   SshKeySource,
+  ClusterMembership,
 } from '@betterdb/shared';
 
 /**
@@ -92,6 +93,9 @@ export class ConnectionCapabilitiesDto implements ConnectionCapabilities {
 
   @ApiPropertyOptional({ description: 'Whether CLUSTER SLOT-STATS is supported', example: true })
   supportsSlotStats?: boolean;
+
+  @ApiPropertyOptional({ description: 'Whether cluster mode is enabled on this server', example: false })
+  clusterEnabled?: boolean;
 }
 
 /**
@@ -133,6 +137,12 @@ export class ConnectionStatusDto implements ConnectionStatus {
 
   @ApiPropertyOptional({ description: 'Connection capabilities (only when connected)', type: ConnectionCapabilitiesDto })
   capabilities?: ConnectionCapabilities;
+
+  @ApiPropertyOptional({ description: 'Auto-register cluster nodes for this seed; undefined follows CLUSTER_AUTO_REGISTER_NODES', example: true })
+  autoRegisterNodes?: boolean;
+
+  @ApiPropertyOptional({ description: 'Cluster membership details when this connection was registered as a cluster node' })
+  membership?: ClusterMembership;
 }
 
 /**
@@ -237,6 +247,17 @@ export class CurrentConnectionResponseDto implements CurrentConnectionResponse {
 export class ConnectionIdResponseDto {
   @ApiProperty({ description: 'Created connection ID', example: '550e8400-e29b-41d4-a716-446655440000' })
   id: string;
+}
+
+export class SetAutoRegisterDto {
+  @ApiProperty({
+    description: 'Auto-register cluster nodes; null follows CLUSTER_AUTO_REGISTER_NODES',
+    nullable: true,
+    type: Boolean,
+  })
+  @ValidateIf((_, value) => value !== null)
+  @IsBoolean()
+  enabled: boolean | null;
 }
 
 /**

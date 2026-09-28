@@ -39,6 +39,8 @@ export interface FleetInstanceSummary {
   error?: string;
   /** Latest CVE rollup for this connection. Absent when never scanned. */
   cve?: FleetCveSummary | null;
+  /** Name of the cluster seed this connection was auto-registered under. */
+  clusterSeedName?: string;
 }
 
 export type FleetOverallStatus = 'healthy' | 'degraded' | 'unhealthy' | 'waiting';
