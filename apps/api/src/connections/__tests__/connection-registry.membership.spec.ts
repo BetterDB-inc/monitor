@@ -135,6 +135,49 @@ describe('ConnectionRegistry membership', () => {
     expect(storage.updateConnection).toHaveBeenCalledWith('auto', { membership: { seedId: 'seed', nodeId: 'new', origin: 'auto' } });
   });
 
+  it('drops a reactivated adapter when the child was removed while connecting', async () => {
+    const { registry, storage } = build();
+    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'old', origin: 'auto', retiredAt: 5 } });
+    const internals = registry as unknown as Internals;
+    const disconnect = jest.fn().mockResolvedValue(undefined);
+    jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(
+      () => ({
+        connect: jest.fn(async () => {
+          internals.configs.delete('auto');
+          internals.connections.delete('auto');
+        }),
+        disconnect,
+      }) as never,
+    );
+    await registry.reactivateChild('auto', 'new');
+    expect(disconnect).toHaveBeenCalled();
+    expect(internals.connections.has('auto')).toBe(false);
+    expect(storage.updateConnection).not.toHaveBeenCalled();
+  });
+
+  it('removes a member child under its seed lock', async () => {
+    const { registry, storage } = build();
+    put(registry, seed);
+    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto' } });
+    let release!: () => void;
+    const held = registry.withSeedLock('seed', () => new Promise<void>((resolve) => { release = resolve; }));
+    const removal = registry.removeConnection('auto');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteConnection).not.toHaveBeenCalled();
+    release();
+    await Promise.all([held, removal]);
+    expect(storage.deleteConnection).toHaveBeenCalledWith('auto');
+  });
+
+  it('removes a child while its seed lock is already held', async () => {
+    const { registry, storage } = build();
+    put(registry, seed);
+    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', retiredAt: 5 } });
+    await registry.withSeedLock('seed', () => registry.removeChild('auto'));
+    expect(storage.deleteConnection).toHaveBeenCalledWith('auto');
+    expect(registry.getConfig('auto')).toBeNull();
+  });
+
   it('adopts an existing connection without touching anything else', async () => {
     const { registry } = build();
     put(registry, { id: 'manual', name: 'my node', password: 'mine' });

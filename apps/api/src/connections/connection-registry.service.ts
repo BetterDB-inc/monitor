@@ -605,6 +605,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       });
       return;
     }
+    if (config?.membership) {
+      await this.withSeedLock(config.membership.seedId, () => this.removeOne(id));
+      return;
+    }
     await this.removeOne(id);
   }
 
@@ -1052,10 +1056,19 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       } catch (err) {
         this.logger.warn(`Reactivated ${config.name} but could not connect: ${err instanceof Error ? err.message : err}`);
       }
+      if (!this.configs.has(id)) {
+        await adapter.disconnect().catch(() => { });
+        return;
+      }
       this.connections.set(id, adapter);
       this.runtimeCapabilityTracker.resetConnection(id);
     }
     await this.setMembership(id, { ...active, nodeId });
+  }
+
+  async removeChild(id: string): Promise<void> {
+    this.requireMembership(id);
+    await this.removeOne(id);
   }
 
   async setAutoRegister(id: string, value: boolean | null): Promise<void> {

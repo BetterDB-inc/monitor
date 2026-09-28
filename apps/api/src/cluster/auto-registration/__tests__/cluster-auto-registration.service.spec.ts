@@ -34,7 +34,7 @@ function build(options: {
     retireChild: jest.fn().mockResolvedValue(undefined),
     reactivateChild: jest.fn().mockResolvedValue(undefined),
     refreshChildNodeId: jest.fn().mockResolvedValue(undefined),
-    removeConnection: jest.fn().mockResolvedValue(undefined),
+    removeChild: jest.fn().mockResolvedValue(undefined),
     list: jest.fn(() => []),
   };
   const discovery = {
@@ -163,14 +163,14 @@ describe('ClusterAutoRegistrationService', () => {
     ];
     const { service, registry } = build({ retentionDays: 7, members, nodes: clusterOf(0) });
     await service.reconcile('seed');
-    expect(registry.removeConnection.mock.calls).toEqual([['stale']]);
+    expect(registry.removeChild.mock.calls).toEqual([['stale']]);
   });
 
   it('keeps retired children forever when retention is unset', async () => {
     const members = [child('stale', '10.0.0.5', 7005, { retiredAt: 1 })];
     const { service, registry } = build({ retentionDays: null, members });
     await service.reconcile('seed');
-    expect(registry.removeConnection).not.toHaveBeenCalled();
+    expect(registry.removeChild).not.toHaveBeenCalled();
   });
 
   it('serialises reconciles across seeds so only one claims a shared address', async () => {
@@ -202,7 +202,7 @@ describe('ClusterAutoRegistrationService', () => {
       retireChild: jest.fn().mockResolvedValue(undefined),
       reactivateChild: jest.fn().mockResolvedValue(undefined),
       refreshChildNodeId: jest.fn().mockResolvedValue(undefined),
-      removeConnection: jest.fn().mockResolvedValue(undefined),
+      removeChild: jest.fn().mockResolvedValue(undefined),
       list: jest.fn(() => []),
     };
     const discovery = { discoverNodes: jest.fn(() => Promise.resolve([discovered('shared', '10.0.0.9:7009@17009')])) };

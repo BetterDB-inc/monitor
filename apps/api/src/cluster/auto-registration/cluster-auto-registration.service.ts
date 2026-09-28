@@ -166,7 +166,7 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
     if (days === null) return;
     const cutoff = Date.now() - days * MS_PER_DAY;
     const expired = members.filter((m) => m.membership?.origin === 'auto' && m.membership.retiredAt !== undefined && m.membership.retiredAt < cutoff);
-    await this.applyEach(expired.map((m) => m.id), (id) => this.connectionRegistry.removeConnection(id), 'purge');
+    await this.applyEach(expired.map((m) => m.id), (id) => this.connectionRegistry.removeChild(id), 'purge');
   }
 
   private async applyEach<T>(items: T[], op: (item: T) => Promise<void>, label: string): Promise<void> {
