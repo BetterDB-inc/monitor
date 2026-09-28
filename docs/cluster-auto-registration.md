@@ -76,3 +76,8 @@ on the next sync unless the seed's auto-register toggle is turned off.
 Cluster, Key Analytics and Migration continue to operate against the seed
 connection only — they are not duplicated per node. Child connections show
 a "View cluster → &lt;seed&gt;" link back to the seed instead.
+
+## See also
+
+[Sentinel Node Auto-Registration](sentinel-auto-registration.md) covers
+the equivalent feature for Sentinel-monitored primaries and replicas.
