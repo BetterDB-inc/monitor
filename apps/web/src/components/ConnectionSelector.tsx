@@ -13,6 +13,12 @@ import type { AgentConnectionInfo } from '@betterdb/shared';
 import { ConnectionSwitcher } from './connection-selector/ConnectionSwitcher';
 import { ConnectionTypeBadge } from './connection-selector/ConnectionTypeBadge';
 import { OtlpPushTab } from './connection-selector/OtlpPushTab';
+import {
+  deleteConfirmation,
+  disableConfirmation,
+  showsAutoRegisterToggle,
+} from './connection-selector/autoRegisterCopy';
+import { isRetiredMember, orderWithMembers } from '../utils/connectionType';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 
 interface SshFormData {
@@ -38,6 +44,7 @@ interface ConnectionFormData {
   dbIndex: number;
   tls: boolean;
   ssh: SshFormData;
+  autoRegisterNodes: boolean;
 }
 
 const defaultSshFormData: SshFormData = {
@@ -91,6 +98,7 @@ const defaultFormData: ConnectionFormData = {
   dbIndex: 0,
   tls: false,
   ssh: defaultSshFormData,
+  autoRegisterNodes: false,
 };
 
 type AddTab = 'direct' | 'agent' | 'valkey' | 'otlp';
@@ -147,7 +155,11 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   }, [isCloudMode, showAgentTab, locked]);
   const [showManageDialog, setShowManageDialog] = useState(false);
   const [formData, setFormData] = useState<ConnectionFormData>(emptyFormData);
-  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [testResult, setTestResult] = useState<{
+    success: boolean;
+    message: string;
+    clusterEnabled?: boolean;
+  } | null>(null);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [addTab, setAddTab] = useState<AddTab>('direct');
@@ -205,25 +217,28 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
     setTesting(true);
     setTestResult(null);
     try {
-      const result = await fetchApi<{ success: boolean; message?: string; error?: string }>(
-        '/connections/test',
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            name: formData.name || 'Test',
-            host: formData.host,
-            port: formData.port,
-            username: formData.username || undefined,
-            password: formData.password || undefined,
-            dbIndex: formData.dbIndex,
-            tls: formData.tls,
-            sshTunnel: buildSshTunnelPayload(formData.ssh),
-          }),
-        },
-      );
+      const result = await fetchApi<{
+        success: boolean;
+        message?: string;
+        error?: string;
+        capabilities?: { clusterEnabled?: boolean };
+      }>('/connections/test', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: formData.name || 'Test',
+          host: formData.host,
+          port: formData.port,
+          username: formData.username || undefined,
+          password: formData.password || undefined,
+          dbIndex: formData.dbIndex,
+          tls: formData.tls,
+          sshTunnel: buildSshTunnelPayload(formData.ssh),
+        }),
+      });
       setTestResult({
         success: result.success,
         message: result.success ? 'Connection successful!' : result.error || 'Connection failed',
+        clusterEnabled: result.capabilities?.clusterEnabled,
       });
     } catch (err) {
       setTestResult({
@@ -251,7 +266,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
 
     setSaving(true);
     try {
-      await fetchApi<{ id: string }>('/connections', {
+      const { id } = await fetchApi<{ id: string }>('/connections', {
         method: 'POST',
         body: JSON.stringify({
           name: formData.name,
@@ -265,6 +280,12 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
           setAsDefault: connections.length === 0,
         }),
       });
+      if (formData.autoRegisterNodes) {
+        await fetchApi(`/connections/${id}/auto-register`, {
+          method: 'PATCH',
+          body: JSON.stringify({ enabled: true }),
+        });
+      }
       setShowAddDialog(false);
       setFormData(emptyFormData);
       setTestResult(null);
@@ -280,13 +301,27 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   };
 
   const handleDeleteConnection = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this connection?')) return;
+    const target = connections.find((c) => c.id === id);
+    if (!target || !confirm(deleteConfirmation(target, connections))) return;
 
     try {
       await fetchApi(`/connections/${id}`, { method: 'DELETE' });
       await refreshConnections();
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to delete connection');
+    }
+  };
+
+  const handleToggleAutoRegister = async (conn: Connection, enabled: boolean) => {
+    if (!enabled && !confirm(disableConfirmation(conn, connections))) return;
+    try {
+      await fetchApi(`/connections/${conn.id}/auto-register`, {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled }),
+      });
+      await refreshConnections();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update auto-registration');
     }
   };
 
@@ -797,6 +832,19 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                     {testResult.message}
                   </div>
                 )}
+
+                {testResult?.success && testResult.clusterEnabled && (
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={formData.autoRegisterNodes}
+                      onChange={(e) =>
+                        setFormData({ ...formData, autoRegisterNodes: e.target.checked })
+                      }
+                    />
+                    Auto-register cluster nodes
+                  </label>
+                )}
               </div>
 
               <div className="flex items-center justify-between pt-3 border-t bg-muted/30 -mx-4 -mb-4 px-4 py-3 rounded-b-xl">
@@ -850,52 +898,74 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
           </DialogHeader>
 
           <div className="space-y-2 max-h-96 overflow-y-auto">
-            {connections.map((conn) => (
-              <div
-                key={conn.id}
-                className={`flex items-center justify-between p-3 border rounded-md ${
-                  currentConnection?.id === conn.id ? 'border-primary bg-primary/5' : ''
-                }`}
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <span
-                    className={`w-2 h-2 rounded-full flex-shrink-0 ${conn.isConnected ? 'bg-green-500' : 'bg-destructive'}`}
-                  />
-                  <div className="min-w-0">
-                    <div className="font-medium truncate">{conn.name}</div>
-                    <div className="text-xs text-muted-foreground">
-                      {conn.host}:{conn.port}
+            {orderWithMembers(connections).map(({ connection: conn, depth }) => {
+              const retired = isRetiredMember(conn);
+              return (
+                <div
+                  key={conn.id}
+                  className={`flex items-center justify-between p-3 border rounded-md ${
+                    depth === 1 ? 'ms-6' : ''
+                  } ${retired ? 'opacity-60' : ''} ${
+                    currentConnection?.id === conn.id ? 'border-primary bg-primary/5' : ''
+                  }`}
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span
+                      className={`w-2 h-2 rounded-full flex-shrink-0 ${conn.isConnected ? 'bg-green-500' : 'bg-destructive'}`}
+                    />
+                    <div className="min-w-0">
+                      <div className="font-medium truncate flex items-center">
+                        {conn.name}
+                        <ConnectionTypeBadge connection={conn} />
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {conn.host}:{conn.port}
+                      </div>
+                      {retired && <div className="text-xs text-muted-foreground">left cluster</div>}
+                      {showsAutoRegisterToggle(conn) && (
+                        <label className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                          <input
+                            type="checkbox"
+                            checked={conn.autoRegisterNodes ?? false}
+                            onChange={(e) => handleToggleAutoRegister(conn, e.target.checked)}
+                          />
+                          Auto-register cluster nodes
+                          {conn.autoRegisterNodes === undefined ? ' (default)' : ''}
+                        </label>
+                      )}
                     </div>
                   </div>
-                </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  {currentConnection?.id !== conn.id && (
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    {!retired && currentConnection?.id !== conn.id && (
+                      <button
+                        onClick={() => {
+                          setConnection(conn.id);
+                          setShowManageDialog(false);
+                        }}
+                        className="text-xs px-2 py-1 border rounded hover:bg-muted"
+                      >
+                        Select
+                      </button>
+                    )}
+                    {!retired && (
+                      <button
+                        onClick={() => handleSetDefault(conn.id)}
+                        className="text-xs px-2 py-1 border rounded hover:bg-muted"
+                        title="Set as default"
+                      >
+                        ★
+                      </button>
+                    )}
                     <button
-                      onClick={() => {
-                        setConnection(conn.id);
-                        setShowManageDialog(false);
-                      }}
-                      className="text-xs px-2 py-1 border rounded hover:bg-muted"
+                      onClick={() => handleDeleteConnection(conn.id)}
+                      className="text-xs px-2 py-1 border border-destructive/50 text-destructive rounded hover:bg-destructive/10"
                     >
-                      Select
+                      Delete
                     </button>
-                  )}
-                  <button
-                    onClick={() => handleSetDefault(conn.id)}
-                    className="text-xs px-2 py-1 border rounded hover:bg-muted"
-                    title="Set as default"
-                  >
-                    ★
-                  </button>
-                  <button
-                    onClick={() => handleDeleteConnection(conn.id)}
-                    className="text-xs px-2 py-1 border border-destructive/50 text-destructive rounded hover:bg-destructive/10"
-                  >
-                    Delete
-                  </button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <div className="flex items-center justify-between pt-3 border-t bg-muted/30 -mx-4 -mb-4 px-4 py-3 rounded-b-xl">

@@ -3,6 +3,7 @@ import { useIsDemo } from '../../contexts/DemoContext';
 import { useCanMutate } from '../../hooks/useCanMutate';
 import { useCapabilities } from '../../hooks/useCapabilities';
 import { useCacheProposalsUnread } from '../../hooks/useCacheProposals';
+import { useConnection } from '../../hooks/useConnection';
 import { ConnectionSelector } from '../ConnectionSelector';
 import { CloudUser } from '../../api/workspace';
 import { NavItem } from './NavItem';
@@ -30,6 +31,11 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
   const { unreadCount: cacheProposalsUnread } = useCacheProposalsUnread();
   const isDemo = useIsDemo();
   const canMutate = useCanMutate();
+  const { currentConnection, connections, setConnection } = useConnection();
+  const isChild = !!currentConnection?.membership;
+  const seed = isChild
+    ? connections.find((c) => c.id === currentConnection!.membership!.seedId)
+    : undefined;
 
   return (
     <Sidebar className="bg-card">
@@ -74,9 +80,20 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
           >
             Analytics Deep Dive
           </NavItem>
-          <NavItem to="/cluster" active={location.pathname === '/cluster'}>
-            Cluster
-          </NavItem>
+          {!isChild && (
+            <NavItem to="/cluster" active={location.pathname === '/cluster'}>
+              Cluster
+            </NavItem>
+          )}
+          {isChild && seed && (
+            <button
+              type="button"
+              onClick={() => setConnection(seed.id)}
+              className="w-full text-left ps-3 pe-2 py-2 text-sm text-muted-foreground hover:text-foreground"
+            >
+              View cluster → {seed.name}
+            </button>
+          )}
           <NavItem to="/forecasting" active={location.pathname === '/forecasting'}>
             Forecasting
           </NavItem>
@@ -87,13 +104,15 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
           >
             Anomaly Detection
           </NavItem>
-          <NavItem
-            to="/key-analytics"
-            active={location.pathname === '/key-analytics'}
-            requiredFeature={Feature.KEY_ANALYTICS}
-          >
-            Key Analytics
-          </NavItem>
+          {!isChild && (
+            <NavItem
+              to="/key-analytics"
+              active={location.pathname === '/key-analytics'}
+              requiredFeature={Feature.KEY_ANALYTICS}
+            >
+              Key Analytics
+            </NavItem>
+          )}
           <NavItem
             to="/bulk-delete"
             active={location.pathname === '/bulk-delete'}
@@ -143,9 +162,11 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
           >
             Webhooks
           </NavItem>
-          <NavItem to="/migration" active={location.pathname === '/migration'}>
-            Migration
-          </NavItem>
+          {!isChild && (
+            <NavItem to="/migration" active={location.pathname === '/migration'}>
+              Migration
+            </NavItem>
+          )}
           <NavItem
             to="/cache-proposals"
             active={location.pathname === '/cache-proposals'}
