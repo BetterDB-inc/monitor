@@ -99,7 +99,8 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
           ? [{ id: m.id, host: m.host, port: m.port, membership: m.membership }]
           : [],
       );
-      const diff = diffMembership(seedId, discovery.nodes, current, (host, port) => this.lookup(host, port));
+      const desired = discovery.nodes.filter((n) => n.group === undefined || !unknown.has(n.group));
+      const diff = diffMembership(seedId, desired, current, (host, port) => this.lookup(host, port));
       await this.apply(seed, diff, members);
     });
   }

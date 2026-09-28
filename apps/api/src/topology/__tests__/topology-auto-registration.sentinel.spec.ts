@@ -13,7 +13,7 @@ function build(opts: { nodes: DesiredNode[]; unknownGroups?: string[]; members?:
     getConfig: jest.fn((id: string) => (id === 'seed' ? seed : members.find((m) => m.id === id) ?? null)),
     get: jest.fn(() => ({ isConnected: () => true, getCapabilities: () => ({ isSentinel: true }) })),
     listMembers: jest.fn(() => members),
-    findConfigByHostPort: jest.fn(() => null),
+    findConfigByHostPort: jest.fn((_host: string, _port: number): DatabaseConnectionConfig | null => null),
     withSeedLock: jest.fn((_id: string, fn: () => Promise<void>) => fn()),
     addManagedChild: jest.fn().mockResolvedValue('new'),
     adoptChild: jest.fn(),
@@ -70,5 +70,6 @@ describe('TopologyAutoRegistrationService (sentinel)', () => {
     });
     await service.reconcile('seed');
     expect(registry.retireChild).not.toHaveBeenCalled();
+    expect(registry.addManagedChild).not.toHaveBeenCalled();
   });
 });
