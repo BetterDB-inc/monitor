@@ -56,7 +56,7 @@ describe('ConnectionRegistry membership', () => {
       tls: true,
       connectionType: 'direct',
       isDefault: false,
-      membership: { seedId: 'seed', nodeId: 'n2', origin: 'auto' },
+      membership: { seedId: 'seed', nodeId: 'n2', origin: 'auto', source: 'cluster' },
     });
     expect(storage.saveConnection).toHaveBeenCalledWith(expect.objectContaining({ id, membership: child.membership }));
   });
@@ -89,8 +89,8 @@ describe('ConnectionRegistry membership', () => {
   it('hides retired auto children from list() but not adopted ones', () => {
     const { registry } = build();
     put(registry, seed);
-    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', retiredAt: 5 } });
-    put(registry, { id: 'adopted', membership: { seedId: 'seed', nodeId: 'b', origin: 'adopted', retiredAt: 5 } });
+    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', source: 'cluster', retiredAt: 5 } });
+    put(registry, { id: 'adopted', membership: { seedId: 'seed', nodeId: 'b', origin: 'adopted', source: 'cluster', retiredAt: 5 } });
     expect(registry.list().map((c) => c.id)).toEqual(['seed', 'adopted']);
     expect(registry.list({ includeRetired: true }).map((c) => c.id)).toEqual(['seed', 'auto', 'adopted']);
   });
@@ -109,7 +109,7 @@ describe('ConnectionRegistry membership', () => {
 
   it('ignores retired auto children in host:port lookups', () => {
     const { registry } = build();
-    put(registry, { id: 'auto', host: '10.0.0.2', port: 7002, membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', retiredAt: 5 } });
+    put(registry, { id: 'auto', host: '10.0.0.2', port: 7002, membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', source: 'cluster', retiredAt: 5 } });
     expect(registry.findByHostPort('10.0.0.2', 7002)).toBeNull();
     expect(registry.findConfigByHostPort('10.0.0.2', 7002)).toBeNull();
     expect(registry.listMembers('seed').map((c) => c.id)).toEqual(['auto']);
@@ -117,7 +117,7 @@ describe('ConnectionRegistry membership', () => {
 
   it('retires an auto child by disconnecting it and persisting retiredAt', async () => {
     const { registry, storage } = build();
-    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto' } });
+    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', source: 'cluster' } });
     const adapter = (registry as unknown as Internals).connections.get('auto') as { disconnect: jest.Mock };
     await registry.retireChild('auto');
     expect(adapter.disconnect).toHaveBeenCalled();
@@ -127,7 +127,7 @@ describe('ConnectionRegistry membership', () => {
 
   it('retires an adopted child without disconnecting it', async () => {
     const { registry } = build();
-    put(registry, { id: 'adopted', membership: { seedId: 'seed', nodeId: 'a', origin: 'adopted' } });
+    put(registry, { id: 'adopted', membership: { seedId: 'seed', nodeId: 'a', origin: 'adopted', source: 'cluster' } });
     const adapter = (registry as unknown as Internals).connections.get('adopted') as { disconnect: jest.Mock };
     await registry.retireChild('adopted');
     expect(adapter.disconnect).not.toHaveBeenCalled();
@@ -135,16 +135,16 @@ describe('ConnectionRegistry membership', () => {
 
   it('reactivates a retired auto child with a fresh adapter and node id', async () => {
     const { registry, storage } = build();
-    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'old', origin: 'auto', retiredAt: 5 } });
+    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'old', origin: 'auto', source: 'cluster', retiredAt: 5 } });
     await registry.reactivateChild('auto', 'new');
-    expect(registry.getConfig('auto')?.membership).toEqual({ seedId: 'seed', nodeId: 'new', origin: 'auto' });
+    expect(registry.getConfig('auto')?.membership).toEqual({ seedId: 'seed', nodeId: 'new', origin: 'auto', source: 'cluster' });
     expect(UnifiedDatabaseAdapter).toHaveBeenCalledTimes(1);
-    expect(storage.updateConnection).toHaveBeenCalledWith('auto', { membership: { seedId: 'seed', nodeId: 'new', origin: 'auto' } });
+    expect(storage.updateConnection).toHaveBeenCalledWith('auto', { membership: { seedId: 'seed', nodeId: 'new', origin: 'auto', source: 'cluster' } });
   });
 
   it('drops a reactivated adapter when the child was removed while connecting', async () => {
     const { registry, storage } = build();
-    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'old', origin: 'auto', retiredAt: 5 } });
+    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'old', origin: 'auto', source: 'cluster', retiredAt: 5 } });
     const internals = registry as unknown as Internals;
     const disconnect = jest.fn().mockResolvedValue(undefined);
     jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(
@@ -165,7 +165,7 @@ describe('ConnectionRegistry membership', () => {
   it('removes a member child under its seed lock', async () => {
     const { registry, storage } = build();
     put(registry, seed);
-    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto' } });
+    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', source: 'cluster' } });
     let release!: () => void;
     const held = registry.withSeedLock('seed', () => new Promise<void>((resolve) => { release = resolve; }));
     const removal = registry.removeConnection('auto');
@@ -179,7 +179,7 @@ describe('ConnectionRegistry membership', () => {
   it('removes a child while its seed lock is already held', async () => {
     const { registry, storage } = build();
     put(registry, seed);
-    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', retiredAt: 5 } });
+    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', source: 'cluster', retiredAt: 5 } });
     await registry.withSeedLock('seed', () => registry.removeChild('auto'));
     expect(storage.deleteConnection).toHaveBeenCalledWith('auto');
     expect(registry.getConfig('auto')).toBeNull();
@@ -189,15 +189,15 @@ describe('ConnectionRegistry membership', () => {
     const { registry } = build();
     put(registry, { id: 'manual', name: 'my node', password: 'mine' });
     await registry.adoptChild('manual', 'seed', 'n3');
-    expect(registry.getConfig('manual')).toMatchObject({ name: 'my node', password: 'mine', membership: { seedId: 'seed', nodeId: 'n3', origin: 'adopted' } });
+    expect(registry.getConfig('manual')).toMatchObject({ name: 'my node', password: 'mine', membership: { seedId: 'seed', nodeId: 'n3', origin: 'adopted', source: 'cluster' } });
   });
 
   it('cascades seed removal: deletes auto children, detaches adopted ones', async () => {
     const { registry, storage } = build();
     put(registry, seed);
-    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto' } });
-    put(registry, { id: 'retired', membership: { seedId: 'seed', nodeId: 'r', origin: 'auto', retiredAt: 5 } });
-    put(registry, { id: 'adopted', membership: { seedId: 'seed', nodeId: 'b', origin: 'adopted' } });
+    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', source: 'cluster' } });
+    put(registry, { id: 'retired', membership: { seedId: 'seed', nodeId: 'r', origin: 'auto', source: 'cluster', retiredAt: 5 } });
+    put(registry, { id: 'adopted', membership: { seedId: 'seed', nodeId: 'b', origin: 'adopted', source: 'cluster' } });
     await registry.removeConnection('seed');
     expect(storage.deleteConnection.mock.calls.map((c) => c[0]).sort()).toEqual(['auto', 'retired', 'seed']);
     expect(registry.getConfig('adopted')?.membership).toBeUndefined();
@@ -207,7 +207,7 @@ describe('ConnectionRegistry membership', () => {
   it('sets and clears the auto-register flag on a seed only', async () => {
     const { registry, storage } = build();
     put(registry, seed);
-    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto' } });
+    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', source: 'cluster' } });
     await registry.setAutoRegister('seed', true);
     expect(registry.getConfig('seed')?.autoRegisterNodes).toBe(true);
     await registry.setAutoRegister('seed', null);
@@ -234,7 +234,7 @@ describe('ConnectionRegistry membership', () => {
   it('refuses to make an auto child the default connection', async () => {
     const { registry } = build();
     put(registry, seed);
-    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto' } });
+    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', source: 'cluster' } });
     await expect(registry.setDefault('auto')).rejects.toBeInstanceOf(BadRequestException);
     expect(registry.getDefaultId()).toBeNull();
   });
@@ -242,8 +242,8 @@ describe('ConnectionRegistry membership', () => {
   it('falls back to an active non-auto connection when the default is removed', async () => {
     const { registry } = build();
     put(registry, { id: 'first', isDefault: true });
-    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto' } });
-    put(registry, { id: 'retired', membership: { seedId: 'seed', nodeId: 'r', origin: 'adopted', retiredAt: 5 } });
+    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', source: 'cluster' } });
+    put(registry, { id: 'retired', membership: { seedId: 'seed', nodeId: 'r', origin: 'adopted', source: 'cluster', retiredAt: 5 } });
     put(registry, { id: 'manual' });
     (registry as unknown as Internals).defaultId = 'first';
     await registry.removeConnection('first');
@@ -253,7 +253,7 @@ describe('ConnectionRegistry membership', () => {
   it('picks an active non-auto connection as the startup default', async () => {
     const { registry, storage } = build();
     storage.getConnections.mockResolvedValue([
-      { id: 'auto', name: 'auto', host: 'h', port: 1, isDefault: false, createdAt: 1, membership: { seedId: 'seed', nodeId: 'a', origin: 'auto' } },
+      { id: 'auto', name: 'auto', host: 'h', port: 1, isDefault: false, createdAt: 1, membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', source: 'cluster' } },
       { id: 'seed', name: 'seed', host: 'h', port: 2, isDefault: false, createdAt: 1 },
     ]);
     await (registry as unknown as Internals).loadConnections();
@@ -263,7 +263,7 @@ describe('ConnectionRegistry membership', () => {
   it('moves the default off a child when it is retired', async () => {
     const { registry } = build();
     put(registry, seed);
-    put(registry, { id: 'adopted', membership: { seedId: 'seed', nodeId: 'b', origin: 'adopted' } });
+    put(registry, { id: 'adopted', membership: { seedId: 'seed', nodeId: 'b', origin: 'adopted', source: 'cluster' } });
     await registry.setDefault('adopted');
     await registry.retireChild('adopted');
     expect(registry.getDefaultId()).toBe('seed');

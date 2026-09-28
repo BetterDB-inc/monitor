@@ -3,8 +3,8 @@ import type { Connection } from '../../hooks/useConnection';
 import { deleteConfirmation, disableConfirmation, showsAutoRegisterToggle } from './autoRegisterCopy';
 
 const seed: Connection = { id: 's', name: 'prod', host: 'h', port: 7001, isConnected: true, capabilities: { dbType: 'valkey', version: '8', clusterEnabled: true } };
-const auto = (id: string, retiredAt?: number): Connection => ({ id, name: id, host: 'h', port: 1, isConnected: true, membership: { seedId: 's', nodeId: id, origin: 'auto', retiredAt } });
-const adopted: Connection = { id: 'm', name: 'mine', host: 'h', port: 2, isConnected: true, membership: { seedId: 's', nodeId: 'm', origin: 'adopted' } };
+const auto = (id: string, retiredAt?: number): Connection => ({ id, name: id, host: 'h', port: 1, isConnected: true, membership: { seedId: 's', nodeId: id, origin: 'auto', source: 'cluster', retiredAt } });
+const adopted: Connection = { id: 'm', name: 'mine', host: 'h', port: 2, isConnected: true, membership: { seedId: 's', nodeId: 'm', origin: 'adopted', source: 'cluster' } };
 
 describe('auto-register copy', () => {
   it('warns that deleting a seed deletes its auto nodes and keeps adopted ones', () => {

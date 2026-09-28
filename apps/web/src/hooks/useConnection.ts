@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import type { ClusterMembership } from '@betterdb/shared';
+import type { TopologyMembership } from '@betterdb/shared';
 import { setCurrentConnectionId, fetchApi } from '../api/client';
 
 export interface Connection {
@@ -15,7 +15,7 @@ export interface Connection {
   };
   connectionType?: 'direct' | 'agent' | 'external';
   autoRegisterNodes?: boolean;
-  membership?: ClusterMembership;
+  membership?: TopologyMembership;
 }
 
 export interface ConnectionContextValue {

@@ -49,7 +49,7 @@ function build(options: {
 }
 
 function child(id: string, host: string, port: number, extra: Partial<DatabaseConnectionConfig['membership']> = {}): DatabaseConnectionConfig {
-  return { id, name: id, host, port, isDefault: false, createdAt: 1, membership: { seedId: 'seed', nodeId: id, origin: 'auto', ...extra } };
+  return { id, name: id, host, port, isDefault: false, createdAt: 1, membership: { seedId: 'seed', nodeId: id, origin: 'auto', source: 'cluster', ...extra } };
 }
 
 const clusterOf = (count: number) =>
@@ -85,7 +85,7 @@ describe('ClusterAutoRegistrationService', () => {
     const withMembers = build({ nodes: clusterOf(1) });
     withMembers.registry.findConfigByHostPort.mockReturnValue(other);
     withMembers.registry.listMembers.mockImplementation((seedId: string) =>
-      seedId === 'other' ? [{ ...other, id: 'o-child', membership: { seedId: 'other', nodeId: 'x', origin: 'auto' } }] : [],
+      seedId === 'other' ? [{ ...other, id: 'o-child', membership: { seedId: 'other', nodeId: 'x', origin: 'auto', source: 'cluster' } }] : [],
     );
     await withMembers.service.reconcile('seed');
     expect(withMembers.registry.adoptChild).not.toHaveBeenCalled();
@@ -121,7 +121,7 @@ describe('ClusterAutoRegistrationService', () => {
     ['ssh-tunnelled', { seed: { sshTunnel: { enabled: true, host: 'b', port: 22, username: 'u', authMethod: 'password' as const } } }],
     ['undecryptable', { seed: { credentialStatus: 'decryption_failed' as const } }],
     ['external', { seed: { connectionType: 'external' as const } }],
-    ['a child', { seed: { membership: { seedId: 'x', nodeId: 'y', origin: 'auto' as const } } }],
+    ['a child', { seed: { membership: { seedId: 'x', nodeId: 'y', origin: 'auto' as const, source: 'cluster' as const } } }],
   ])('skips a %s seed', async (_label, options) => {
     const { service, discovery } = build({ nodes: clusterOf(1), ...options });
     await service.reconcile('seed');
@@ -251,7 +251,7 @@ describe('ClusterAutoRegistrationService', () => {
           port: node.port,
           isDefault: false,
           createdAt: 1,
-          membership: { seedId, nodeId: node.nodeId, origin: 'auto' },
+          membership: { seedId, nodeId: node.nodeId, origin: 'auto', source: 'cluster' },
         });
         return Promise.resolve(id);
       }),

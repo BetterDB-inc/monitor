@@ -1,4 +1,4 @@
-import type { ClusterMembership } from '@betterdb/shared';
+import type { TopologyMembership } from '@betterdb/shared';
 import type { DiscoveredNode } from '../../cluster-discovery.service';
 import {
   AddressOwner,
@@ -14,9 +14,9 @@ function node(id: string, address: string, flags: string[] = ['master']): Discov
   return { id, address, flags, role: 'master', slots: [], configEpoch: 0, healthy: true };
 }
 
-function member(id: string, address: string, membership: Partial<ClusterMembership> = {}): MemberSnapshot {
+function member(id: string, address: string, membership: Partial<TopologyMembership> = {}): MemberSnapshot {
   const [host, port] = address.split(':');
-  return { id, host, port: Number(port), membership: { seedId: 'seed', nodeId: id, origin: 'auto', ...membership } };
+  return { id, host, port: Number(port), membership: { seedId: 'seed', nodeId: id, origin: 'auto', source: 'cluster', ...membership } };
 }
 
 const none = () => null;
@@ -102,7 +102,7 @@ describe('diffMembership', () => {
   it('skips addresses claimed by another seed or pushed over OTLP', () => {
     const lookup = (host: string): AddressOwner =>
       host === '10.0.0.3'
-        ? { id: 'x', connectionType: 'direct', membership: { seedId: 'other', nodeId: 'n3', origin: 'auto' } }
+        ? { id: 'x', connectionType: 'direct', membership: { seedId: 'other', nodeId: 'n3', origin: 'auto', source: 'cluster' } }
         : { id: 'y', connectionType: 'external' };
     const diff = diffMembership('seed', [
       { host: '10.0.0.3', port: 7003, nodeId: 'n3' },

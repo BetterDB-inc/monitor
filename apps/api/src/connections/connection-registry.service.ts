@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional, NotFoundException, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
-import { ClusterMembership, ConnectionStatus, CreateConnectionRequest, CredentialStatus, TestConnectionResponse, DatabaseConnectionConfig, DatabaseConnectionType } from '@betterdb/shared';
+import { TopologyMembership, ConnectionStatus, CreateConnectionRequest, CredentialStatus, TestConnectionResponse, DatabaseConnectionConfig, DatabaseConnectionType } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { UnifiedDatabaseAdapter } from '../database/adapters/unified.adapter';
@@ -996,7 +996,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       isDefault: false,
       createdAt: now,
       updatedAt: now,
-      membership: { seedId, nodeId: node.nodeId, origin: 'auto' },
+      membership: { seedId, nodeId: node.nodeId, origin: 'auto', source: 'cluster' },
     };
     const adapter = this.createAdapter(config);
     let credentialStatus: CredentialStatus = 'valid';
@@ -1026,7 +1026,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   async adoptChild(id: string, seedId: string, nodeId: string): Promise<void> {
-    await this.setMembership(id, { seedId, nodeId, origin: 'adopted' });
+    await this.setMembership(id, { seedId, nodeId, origin: 'adopted', source: 'cluster' });
   }
 
   async refreshChildNodeId(id: string, nodeId: string): Promise<void> {
@@ -1098,7 +1098,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
-  private requireMembership(id: string): ClusterMembership {
+  private requireMembership(id: string): TopologyMembership {
     const membership = this.configs.get(id)?.membership;
     if (!membership) {
       throw new NotFoundException(`Connection '${id}' is not a cluster member.`);
@@ -1106,7 +1106,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return membership;
   }
 
-  private async setMembership(id: string, membership: ClusterMembership | undefined): Promise<void> {
+  private async setMembership(id: string, membership: TopologyMembership | undefined): Promise<void> {
     const config = this.configs.get(id);
     if (!config) {
       throw new NotFoundException(`Connection '${id}' not found.`);

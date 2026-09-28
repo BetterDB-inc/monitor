@@ -27,7 +27,7 @@ describe('cluster membership helpers', () => {
   const seed = { id: 's', name: 's', host: 'h', port: 1, isConnected: true };
   const child = (id: string, extra = {}) => ({
     id, name: id, host: 'h', port: 2, isConnected: true,
-    membership: { seedId: 's', nodeId: id, origin: 'auto' as const, ...extra },
+    membership: { seedId: 's', nodeId: id, origin: 'auto' as const, source: 'cluster' as const, ...extra },
   });
 
   it('flags retired and child connections', () => {
@@ -46,7 +46,7 @@ describe('cluster membership helpers', () => {
   });
 
   it('keeps an orphaned child at the top level', () => {
-    const orphan = { ...child('x'), membership: { seedId: 'missing', nodeId: 'x', origin: 'auto' as const } };
+    const orphan = { ...child('x'), membership: { seedId: 'missing', nodeId: 'x', origin: 'auto' as const, source: 'cluster' as const } };
     expect(orderWithMembers([orphan]).map((e) => e.depth)).toEqual([0]);
   });
 });

@@ -13,7 +13,10 @@ import type {
   SshTunnelInput,
   SshAuthMethod,
   SshKeySource,
-  ClusterMembership,
+  TopologyMembership,
+  TopologyMembershipOrigin,
+  TopologyKind,
+  TopologyRole,
 } from '@betterdb/shared';
 
 /**
@@ -99,6 +102,32 @@ export class ConnectionCapabilitiesDto implements ConnectionCapabilities {
 }
 
 /**
+ * DTO for topology membership (auto-registered or adopted cluster/sentinel node)
+ */
+export class TopologyMembershipDto implements TopologyMembership {
+  @ApiProperty({ description: 'Connection ID of the seed that owns this membership', example: ENV_DEFAULT_ID })
+  seedId: string;
+
+  @ApiProperty({ description: 'Node identifier within the topology', example: 'abc123' })
+  nodeId: string;
+
+  @ApiProperty({ description: 'How this membership was created', enum: ['auto', 'adopted'], example: 'auto' })
+  origin: TopologyMembershipOrigin;
+
+  @ApiProperty({ description: 'Topology kind this membership belongs to', enum: ['cluster', 'sentinel'], example: 'cluster' })
+  source: TopologyKind;
+
+  @ApiPropertyOptional({ description: 'Sentinel group name (master name)', example: 'mymaster' })
+  group?: string;
+
+  @ApiPropertyOptional({ description: 'Role within the topology', enum: ['primary', 'replica'], example: 'primary' })
+  role?: TopologyRole;
+
+  @ApiPropertyOptional({ description: 'Retirement timestamp (Unix ms), set when the node is no longer part of the topology', example: 1704067200000 })
+  retiredAt?: number;
+}
+
+/**
  * DTO for connection status
  */
 export class ConnectionStatusDto implements ConnectionStatus {
@@ -141,8 +170,8 @@ export class ConnectionStatusDto implements ConnectionStatus {
   @ApiPropertyOptional({ description: 'Auto-register cluster nodes for this seed; undefined follows CLUSTER_AUTO_REGISTER_NODES', example: true })
   autoRegisterNodes?: boolean;
 
-  @ApiPropertyOptional({ description: 'Cluster membership details when this connection was registered as a cluster node' })
-  membership?: ClusterMembership;
+  @ApiPropertyOptional({ description: 'Cluster membership details when this connection was registered as a cluster node', type: TopologyMembershipDto })
+  membership?: TopologyMembership;
 }
 
 /**

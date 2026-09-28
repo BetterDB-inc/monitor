@@ -411,7 +411,7 @@ describe('ConnectionSwitcher cluster grouping', () => {
       name: 'prod · 10.0.0.2:7002',
       host: '10.0.0.2',
       port: 7002,
-      membership: { seedId: 's', nodeId: 'n2', origin: 'auto' },
+      membership: { seedId: 's', nodeId: 'n2', origin: 'auto', source: 'cluster' },
     }),
     connection({
       id: 'k3',
@@ -419,7 +419,7 @@ describe('ConnectionSwitcher cluster grouping', () => {
       host: '10.0.0.3',
       port: 7003,
       isConnected: false,
-      membership: { seedId: 's', nodeId: 'n3', origin: 'auto', retiredAt: Date.now() - 3_600_000 },
+      membership: { seedId: 's', nodeId: 'n3', origin: 'auto', source: 'cluster', retiredAt: Date.now() - 3_600_000 },
     }),
   ];
 

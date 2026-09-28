@@ -18,7 +18,7 @@ function config(overrides: Partial<DatabaseConnectionConfig> = {}): DatabaseConn
   return { id: 'c1', name: 'Node', host: '10.0.0.1', port: 7001, isDefault: false, createdAt: 1, ...overrides };
 }
 
-const membership = { seedId: 'seed', nodeId: 'abc', origin: 'auto' as const, retiredAt: 1_700_000_000_000 };
+const membership = { seedId: 'seed', nodeId: 'abc', origin: 'auto' as const, source: 'cluster' as const, retiredAt: 1_700_000_000_000 };
 
 afterAll(() => {
   for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });

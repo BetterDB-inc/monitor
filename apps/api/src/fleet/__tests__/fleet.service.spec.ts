@@ -222,7 +222,7 @@ describe('FleetService', () => {
 
   it('attaches the seed name for an auto-registered cluster child', async () => {
     registry.list.mockReturnValue([
-      { id: 'child-1', name: 'Child', host: 'h1', port: 6379, membership: { seedId: 'seed', nodeId: 'n1', origin: 'auto' } },
+      { id: 'child-1', name: 'Child', host: 'h1', port: 6379, membership: { seedId: 'seed', nodeId: 'n1', origin: 'auto', source: 'cluster' } },
     ]);
     registry.getConfig.mockReturnValue({ name: 'prod' });
     health.getHealth.mockResolvedValue({ status: 'connected', database: { type: 'valkey', version: '8.0', host: 'h1', port: 6379 } });

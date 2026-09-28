@@ -1,4 +1,4 @@
-import type { ClusterMembership } from '@betterdb/shared';
+import type { TopologyMembership } from '@betterdb/shared';
 import type { DiscoveredNode } from '../cluster-discovery.service';
 
 export interface DesiredNode {
@@ -11,13 +11,13 @@ export interface MemberSnapshot {
   id: string;
   host: string;
   port: number;
-  membership: ClusterMembership;
+  membership: TopologyMembership;
 }
 
 export interface AddressOwner {
   id: string;
   connectionType: 'direct' | 'external';
-  membership?: ClusterMembership;
+  membership?: TopologyMembership;
   isSeed?: boolean;
 }
 
