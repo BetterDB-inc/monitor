@@ -1,6 +1,18 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import Valkey from 'iovalkey';
 import { ClusterDiscoveryService, DiscoveredNode } from './cluster-discovery.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+
+jest.mock('iovalkey', () => {
+  return jest.fn().mockImplementation(() => ({
+    status: 'ready',
+    connect: jest.fn().mockResolvedValue(undefined),
+    quit: jest.fn().mockResolvedValue(undefined),
+    disconnect: jest.fn(),
+    ping: jest.fn().mockResolvedValue('PONG'),
+    on: jest.fn(),
+  }));
+});
 
 describe('ClusterDiscoveryService', () => {
   let service: ClusterDiscoveryService;
@@ -171,6 +183,12 @@ describe('ClusterDiscoveryService', () => {
 
       await expect(service.discoverNodes()).rejects.toThrow('Connection failed');
     });
+
+    it('exposes the raw node flags', async () => {
+      const nodes = await service.discoverNodes();
+      expect(nodes[0].flags).toEqual(['master', 'myself']);
+      expect(nodes[1].flags).toEqual(['slave']);
+    });
   });
 
   describe('getNodeConnection', () => {
@@ -234,6 +252,18 @@ describe('ClusterDiscoveryService', () => {
 
       await expect(service.getNodeConnection(nodes[0].id)).rejects.toThrow(
         'Invalid node address'
+      );
+    });
+  });
+
+  describe('getNodeConnection TLS', () => {
+    it('passes the seed client TLS options to node clients', async () => {
+      mockDbClient.getClient.mockReturnValue({
+        options: { username: 'u', password: 'p', tls: { servername: 'seed.example' } },
+      });
+      await service.getNodeConnection('node2-id-def456', 'test-connection').catch(() => undefined);
+      expect(jest.mocked(Valkey)).toHaveBeenCalledWith(
+        expect.objectContaining({ tls: { servername: 'seed.example' } }),
       );
     });
   });

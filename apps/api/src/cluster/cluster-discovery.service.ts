@@ -11,6 +11,7 @@ export interface DiscoveredNode {
   slots: number[][];
   configEpoch: number;
   healthy: boolean;
+  flags: string[];
 }
 
 export interface NodeConnection {
@@ -94,6 +95,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
           slots: node.slots,
           configEpoch: node.configEpoch,
           healthy: isHealthy,
+          flags: node.flags,
         });
       }
 
@@ -183,12 +185,14 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     const primaryClient = dbClient.getClient();
     const username = primaryClient.options.username || '';
     const password = primaryClient.options.password || '';
+    const tls = primaryClient.options.tls;
 
     const client = new Valkey({
       host,
       port,
       username,
       password,
+      tls,
       lazyConnect: true,
       connectTimeout: this.CONNECTION_TIMEOUT,
       enableOfflineQueue: false,

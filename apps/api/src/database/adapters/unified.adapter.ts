@@ -367,6 +367,15 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // Search module not loaded
     }
 
+    let clusterEnabled = false;
+    try {
+      const clusterInfo = await this.getInfo(['cluster']);
+      clusterEnabled =
+        (clusterInfo.cluster as Record<string, unknown> | undefined)?.cluster_enabled === '1';
+    } catch {
+      clusterEnabled = false;
+    }
+
     this.capabilities = {
       dbType: isValkey ? 'valkey' : 'redis',
       version,
@@ -378,6 +387,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       hasMemoryDoctor: true,
       hasConfig,
       hasVectorSearch,
+      clusterEnabled,
     };
   }
 
