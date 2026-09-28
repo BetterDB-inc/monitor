@@ -74,6 +74,24 @@ describe('ClusterAutoRegistrationService', () => {
     expect(on.registry.addManagedChild).toHaveBeenCalledTimes(1);
   });
 
+  it('never adopts a connection that is itself a seed', async () => {
+    const other: DatabaseConnectionConfig = { id: 'other', name: 'other', host: '10.0.0.2', port: 7002, isDefault: false, createdAt: 1 };
+    const flagged = build({ nodes: clusterOf(1) });
+    flagged.registry.findConfigByHostPort.mockReturnValue({ ...other, autoRegisterNodes: true });
+    await flagged.service.reconcile('seed');
+    expect(flagged.registry.adoptChild).not.toHaveBeenCalled();
+    expect(flagged.registry.addManagedChild).not.toHaveBeenCalled();
+
+    const withMembers = build({ nodes: clusterOf(1) });
+    withMembers.registry.findConfigByHostPort.mockReturnValue(other);
+    withMembers.registry.listMembers.mockImplementation((seedId: string) =>
+      seedId === 'other' ? [{ ...other, id: 'o-child', membership: { seedId: 'other', nodeId: 'x', origin: 'auto' } }] : [],
+    );
+    await withMembers.service.reconcile('seed');
+    expect(withMembers.registry.adoptChild).not.toHaveBeenCalled();
+    expect(withMembers.registry.addManagedChild).not.toHaveBeenCalled();
+  });
+
   it('does nothing when discovery fails or returns no nodes', async () => {
     const members = [child('c2', '10.0.0.2', 7002)];
     for (const nodes of [new Error('CLUSTERDOWN'), []]) {

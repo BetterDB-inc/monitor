@@ -91,6 +91,14 @@ describe('diffMembership', () => {
     expect(diff.adopt).toEqual([{ id: 'manual', nodeId: 'n3' }]);
   });
 
+  it('never adopts a connection that is itself a seed', () => {
+    const owner: AddressOwner = { id: 'other-seed', connectionType: 'direct', isSeed: true };
+    const diff = diffMembership('seed', [{ host: '10.0.0.3', port: 7003, nodeId: 'n3' }], [], () => owner);
+    expect(diff.adopt).toEqual([]);
+    expect(diff.add).toEqual([]);
+    expect(diff.skipped).toEqual([{ host: '10.0.0.3', port: 7003, reason: 'seed' }]);
+  });
+
   it('skips addresses claimed by another seed or pushed over OTLP', () => {
     const lookup = (host: string): AddressOwner =>
       host === '10.0.0.3'

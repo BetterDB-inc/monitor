@@ -123,7 +123,12 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
   private lookup(host: string, port: number): AddressOwner | null {
     const config = this.connectionRegistry.findConfigByHostPort(host, port);
     if (!config) return null;
-    return { id: config.id, connectionType: config.connectionType === 'external' ? 'external' : 'direct', membership: config.membership };
+    return {
+      id: config.id,
+      connectionType: config.connectionType === 'external' ? 'external' : 'direct',
+      membership: config.membership,
+      isSeed: config.autoRegisterNodes === true || this.connectionRegistry.listMembers(config.id).length > 0,
+    };
   }
 
   private async apply(seed: DatabaseConnectionConfig, diff: MembershipDiff, members: DatabaseConnectionConfig[]): Promise<void> {

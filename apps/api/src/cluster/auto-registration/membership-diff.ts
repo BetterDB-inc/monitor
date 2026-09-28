@@ -18,11 +18,12 @@ export interface AddressOwner {
   id: string;
   connectionType: 'direct' | 'external';
   membership?: ClusterMembership;
+  isSeed?: boolean;
 }
 
 export type AddressLookup = (host: string, port: number) => AddressOwner | null;
 
-export type SkipReason = 'claimed' | 'external' | 'occupied';
+export type SkipReason = 'claimed' | 'external' | 'occupied' | 'seed';
 
 export interface MembershipDiff {
   add: DesiredNode[];
@@ -95,6 +96,8 @@ export function diffMembership(
       diff.skipped.push({ host: node.host, port: node.port, reason: 'external' });
     } else if (owner.membership && owner.membership.seedId !== seedId) {
       diff.skipped.push({ host: node.host, port: node.port, reason: 'claimed' });
+    } else if (owner.isSeed) {
+      diff.skipped.push({ host: node.host, port: node.port, reason: 'seed' });
     } else if (!owner.membership) {
       diff.adopt.push({ id: owner.id, nodeId: node.nodeId });
     }
