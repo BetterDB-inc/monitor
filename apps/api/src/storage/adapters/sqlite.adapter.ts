@@ -4116,6 +4116,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         db_index INTEGER DEFAULT 0,
         tls INTEGER DEFAULT 0,
         ssh_tunnel TEXT,
+        connection_type TEXT,
         is_default INTEGER DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER
@@ -4131,10 +4132,13 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!columns.some((c) => c.name === 'ssh_tunnel')) {
       this.db.exec('ALTER TABLE connections ADD COLUMN ssh_tunnel TEXT');
     }
+    if (!columns.some((c) => c.name === 'connection_type')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN connection_type TEXT');
+    }
 
     const stmt = this.db.prepare(`
-      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, ssh_tunnel, is_default, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, ssh_tunnel, connection_type, is_default, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         host = excluded.host,
@@ -4145,6 +4149,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         db_index = excluded.db_index,
         tls = excluded.tls,
         ssh_tunnel = excluded.ssh_tunnel,
+        connection_type = excluded.connection_type,
         is_default = excluded.is_default,
         updated_at = excluded.updated_at
     `);
@@ -4160,6 +4165,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       config.dbIndex || 0,
       config.tls ? 1 : 0,
       config.sshTunnel ? JSON.stringify(config.sshTunnel) : null,
+      config.connectionType ?? null,
       config.isDefault ? 1 : 0,
       config.createdAt,
       config.updatedAt || null,
@@ -4190,6 +4196,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       dbIndex: row.db_index,
       tls: row.tls === 1,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
+      connectionType: row.connection_type === 'external' ? 'external' : 'direct',
       isDefault: row.is_default === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at || undefined,
@@ -4218,6 +4225,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       dbIndex: row.db_index,
       tls: row.tls === 1,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
+      connectionType: row.connection_type === 'external' ? 'external' : 'direct',
       isDefault: row.is_default === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at || undefined,

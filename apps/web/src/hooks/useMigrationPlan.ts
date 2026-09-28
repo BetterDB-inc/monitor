@@ -1,5 +1,6 @@
 import { createContext, useContext, useState } from 'react';
 import { useConnection } from './useConnection';
+import { isExternalConnection } from '../utils/connectionType';
 
 export const DEFAULT_SCAN_SAMPLE_SIZE = 10000;
 
@@ -35,7 +36,9 @@ export function useMigrationPlan(): MigrationPlanContextValue {
  */
 export function useMigrationPlanState(): MigrationPlanContextValue {
   const { currentConnection } = useConnection();
-  const [sourceId, setSourceId] = useState<string | null>(currentConnection?.id ?? null);
+  const [sourceId, setSourceId] = useState<string | null>(
+    isExternalConnection(currentConnection) ? null : (currentConnection?.id ?? null),
+  );
   const [targetId, setTargetId] = useState<string | null>(null);
   const [sourceChosen, setSourceChosen] = useState(false);
   const [scanSampleSize, setScanSampleSize] = useState(DEFAULT_SCAN_SAMPLE_SIZE);

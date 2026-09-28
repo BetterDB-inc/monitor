@@ -11,6 +11,7 @@ import {
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { EmptyState } from '../components/ui/empty-state';
 import { aiObservabilityApi, type AiInstanceWithSample } from '../api/aiObservability';
 import type { AiInstanceKind, StoredAiCacheSample } from '@betterdb/shared';
 
@@ -269,16 +270,16 @@ export function AiCacheMemory() {
       )}
 
       {!error && !isLoading && instances.length === 0 && (
-        <Card>
-          <CardContent className="py-8 text-center text-sm text-muted-foreground">
-            No BetterDB AI caches or memory stores found on this connection.{' '}
-            <span className="block mt-1">
+        <EmptyState
+          title="No BetterDB AI caches or memory stores found on this connection"
+          description={
+            <>
               Point <code>@betterdb/agent-cache</code>, <code>agent-memory</code>,{' '}
               <code>semantic-cache</code>, or <code>retrieval</code> at this Valkey and they'll
               appear here automatically.
-            </span>
-          </CardContent>
-        </Card>
+            </>
+          }
+        />
       )}
 
       {instances.length > 0 && (

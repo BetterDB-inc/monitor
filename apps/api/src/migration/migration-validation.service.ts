@@ -16,6 +16,7 @@ import { validateSample } from './validation/sample-validator';
 import { compareBaseline } from './validation/baseline-comparator';
 import { MigrationService } from './migration.service';
 import { createClient, createTargetClient } from './execution/client-factory';
+import { assertLiveMigrationPair } from './live-connections';
 
 @Injectable()
 export class MigrationValidationService {
@@ -44,6 +45,8 @@ export class MigrationValidationService {
     if (req.sourceConnectionId === req.targetConnectionId) {
       throw new BadRequestException('Source and target must be different connections');
     }
+
+    assertLiveMigrationPair(this.connectionRegistry, req.sourceConnectionId, req.targetConnectionId);
 
     // 3. Optionally retrieve Phase 1 analysis result
     let analysisResult: MigrationAnalysisResult | undefined;

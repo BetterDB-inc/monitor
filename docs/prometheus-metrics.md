@@ -493,25 +493,27 @@ Forward-looking projections of when a tracked metric will reach its configured c
 
 Latest CVE scan rollup per connection. Updated on storage-based poll.
 
-| Metric | Type | Labels | Description | Example |
-|--------|------|--------|-------------|---------|
-| `betterdb_cve_findings` | gauge | `connection`, `severity` | Current CVE findings by severity from the latest scan | `2` |
-| `betterdb_cve_kev` | gauge | `connection` | Current KEV-exploited CVE findings from the latest scan | `1` |
-| `betterdb_cve_dataset_stale` | gauge | `connection` | Whether the CVE scan is partial or sources are missing: 1 stale, 0 ok | `0` |
+| Metric                       | Type  | Labels                   | Description                                                           | Example |
+| ---------------------------- | ----- | ------------------------ | --------------------------------------------------------------------- | ------- |
+| `betterdb_cve_findings`      | gauge | `connection`, `severity` | Current CVE findings by severity from the latest scan                 | `2`     |
+| `betterdb_cve_kev`           | gauge | `connection`             | Current KEV-exploited CVE findings from the latest scan               | `1`     |
+| `betterdb_cve_dataset_stale` | gauge | `connection`             | Whether the CVE scan is partial or sources are missing: 1 stale, 0 ok | `0`     |
 
 ### Internal Metrics
 
 BetterDB Monitor application health metrics.
 
-| Metric                           | Type      | Labels       | Description                                                                                         | Example                                            |
-| -------------------------------- | --------- | ------------ | --------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `betterdb_polls_total`           | counter   | -            | Total number of poll cycles completed                                                               | `123456`                                           |
-| `betterdb_poll_duration_seconds` | histogram | `service`    | Duration of poll cycles in seconds                                                                  | buckets: 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10 |
-| `betterdb_poll_stale`            | gauge     | `connection` | `1` when the connection has had no successful `INFO` read within the staleness bound, `0` otherwise | `0`                                                |
+| Metric                                       | Type      | Labels       | Description                                                                                         | Example                                            |
+| -------------------------------------------- | --------- | ------------ | --------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `betterdb_polls_total`                       | counter   | -            | Total number of poll cycles completed                                                               | `123456`                                           |
+| `betterdb_poll_duration_seconds`             | histogram | `service`    | Duration of poll cycles in seconds                                                                  | buckets: 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10 |
+| `betterdb_poll_stale`                        | gauge     | `connection` | `1` when the connection has had no successful `INFO` read within the staleness bound, `0` otherwise | `0`                                                |
+| `betterdb_otlp_metric_points_accepted_total` | counter   | -            | OTLP metric data points accepted into external connections                                          | `1024`                                             |
+| `betterdb_otlp_metric_points_dropped_total`  | counter   | `reason`     | OTLP metric data points dropped, by reason (see [drop reasons](opentelemetry.md))                   | `3`                                                |
 
 **Service Values**: Names of polling services (audit, client-analytics, metrics, etc.)
 
-**Staleness**: If a connection has no successful `INFO` read within `PROMETHEUS_STALENESS_MS` (default: 3 × `PROMETHEUS_POLL_INTERVAL_MS`), all of its gauge series are removed from the exposition and from the OTLP mirror. A dead or wedged connection then shows up as a gap instead of a flat line. Counters and `betterdb_poll_stale` stay, so `betterdb_poll_stale == 1` tells a stale connection apart from one that was never collected. INFO-based series return on the next successful poll; series owned by other collectors (commandstats and inference latency refresh every 60s, the vector index every 30s, the anomaly summary on its own cadence) return on their own refresh cycle instead. Deleting a connection removes its gauge series on the next poll cycle, not immediately.
+**Staleness**: If a connection has no successful `INFO` read within `PROMETHEUS_STALENESS_MS` (default: 3 × `PROMETHEUS_POLL_INTERVAL_MS`), all of its gauge series are removed from the exposition and from the OTLP mirror. A dead or wedged connection then shows up as a gap instead of a flat line. Counters and `betterdb_poll_stale` stay, so `betterdb_poll_stale == 1` tells a stale connection apart from one that was never collected. INFO-based series return on the next successful poll; series owned by other collectors (commandstats and inference latency refresh every 60s, the vector index every 30s, the anomaly summary on its own cadence) return on their own refresh cycle instead. Deleting a connection removes its gauge series on the next poll cycle, not immediately. For an OTLP-push connection the clock starts only once its pushed data goes stale: its series keep their last pushed values for `OTEL_METRICS_STALE_AFTER_MS` (default 5 minutes) after the last push, then disappear after the staleness bound.
 
 **Alerting note**: this is a behaviour change — alert rules that test a gauge's value directly (e.g. `betterdb_inference_unhealthy == 1`) will now resolve when a connection dies or is removed, since the series disappears instead of holding its last value. Alert on `betterdb_poll_stale == 1` as well to catch that case.
 

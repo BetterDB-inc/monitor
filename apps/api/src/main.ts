@@ -16,6 +16,7 @@ import { TailGateway } from './monitor/tail.gateway';
 import { createUpgradeRouter } from './common/websocket/upgrade-router';
 import { resolveWorkspaceConfig } from './auth/workspace-config';
 import { resolveAgentGateway } from './agent/resolve-agent-gateway';
+import { registerOtlpBodyParsing } from './ai-observability/otlp-body-parsing';
 
 async function bootstrap(): Promise<void> {
   // Validate environment variables before anything else
@@ -142,17 +143,7 @@ async function bootstrap(): Promise<void> {
     }),
   );
 
-  // Accept OTLP/protobuf trace bodies (application/x-protobuf) as raw Buffers so
-  // OtelIngestController can decode them (the OTel SDK default is http/protobuf).
-  app
-    .getHttpAdapter()
-    .getInstance()
-    .addContentTypeParser(
-      'application/x-protobuf',
-      { parseAs: 'buffer' },
-      (_req: unknown, body: Buffer, done: (err: Error | null, body?: Buffer) => void) =>
-        done(null, body),
-    );
+  registerOtlpBodyParsing(app.getHttpAdapter().getInstance());
 
   if (isProduction && publicPath) {
     // Set global prefix for API routes
@@ -162,6 +153,7 @@ async function bootstrap(): Promise<void> {
         { path: 'ingest/*splat', method: RequestMethod.ALL },
         // OTLP-standard trace ingestion path (see OtelIngestController).
         { path: 'v1/traces', method: RequestMethod.POST },
+        { path: 'v1/external/metrics', method: RequestMethod.POST },
       ],
     });
 

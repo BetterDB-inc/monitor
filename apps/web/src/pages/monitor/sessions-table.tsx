@@ -8,6 +8,7 @@ import {
   TableHeader,
   TableRow,
 } from '../../components/ui/table';
+import { EmptyState } from '../../components/ui/empty-state';
 import { SessionStatusBadge } from './session-status-badge';
 
 interface SessionsTableProps {
@@ -25,11 +26,7 @@ export function SessionsTable({ sessions, isLoading }: SessionsTableProps) {
   }
 
   if (sessions.length === 0) {
-    return (
-      <p className="py-8 text-center text-sm text-muted-foreground">
-        No capture sessions for this connection yet.
-      </p>
-    );
+    return <EmptyState variant="inline" title="No capture sessions for this connection yet" />;
   }
 
   return (

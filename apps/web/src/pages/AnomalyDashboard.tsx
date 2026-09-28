@@ -8,6 +8,7 @@ import { metricsApi } from '../api/metrics';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 import { Button } from '../components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { EmptyState } from '../components/ui/empty-state';
 import { CaptureOnNextModal, type CaptureOnNextContext } from './anomalies/capture-on-next-modal';
 import { DataLossAlertBanner } from '../components/anomalies/DataLossAlertBanner';
 import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressionBanner';
@@ -599,11 +600,12 @@ export function AnomalyDashboard() {
               );
             })
           ) : (
-            <div className="text-center py-8 text-muted-foreground">
-              <Activity className="w-12 h-12 mx-auto mb-3 opacity-50" />
-              <p>No correlated anomalies detected</p>
-              <p className="text-sm">Events will appear here when patterns are identified</p>
-            </div>
+            <EmptyState
+              variant="inline"
+              icon={Activity}
+              title="No correlated anomalies detected"
+              description="Events will appear here when patterns are identified"
+            />
           )}
         </CardContent>
       </Card>
@@ -659,11 +661,12 @@ export function AnomalyDashboard() {
               })}
             </div>
           ) : (
-            <div className="text-center py-8 text-muted-foreground">
-              <Info className="w-12 h-12 mx-auto mb-3 opacity-50" />
-              <p>No anomalies detected</p>
-              <p className="text-sm">System is operating within normal parameters</p>
-            </div>
+            <EmptyState
+              variant="inline"
+              icon={Info}
+              title="No anomalies detected"
+              description="System is operating within normal parameters"
+            />
           )}
         </CardContent>
       </Card>

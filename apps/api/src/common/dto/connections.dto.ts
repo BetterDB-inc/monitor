@@ -188,6 +188,11 @@ export class CreateConnectionDto implements CreateConnectionRequest {
   @IsOptional()
   @IsBoolean()
   setAsDefault?: boolean;
+
+  @ApiPropertyOptional({ enum: ['direct', 'external'], description: 'direct (polled) or external (OTLP push)' })
+  @IsOptional()
+  @IsIn(['direct', 'external'])
+  connectionType?: 'direct' | 'external';
 }
 
 /**
@@ -202,6 +207,9 @@ export class TestConnectionResponseDto implements TestConnectionResponse {
 
   @ApiPropertyOptional({ description: 'Error message if failed', example: 'Connection refused' })
   error?: string;
+
+  @ApiPropertyOptional()
+  message?: string;
 }
 
 /**
