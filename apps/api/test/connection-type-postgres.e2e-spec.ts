@@ -94,7 +94,7 @@ describePostgres('connection type storage — postgres', () => {
   });
 
   it('round-trips membership and the auto-register flag', async () => {
-    const membership = { seedId: 'seed', nodeId: 'abc', origin: 'adopted' as const };
+    const membership = { seedId: 'seed', nodeId: 'abc', origin: 'adopted' as const, source: 'cluster' as const };
     await adapter.saveConnection({ id: 'mem', name: 'M', host: 'h', port: 7001, isDefault: false, createdAt: 3, autoRegisterNodes: true, membership });
     expect((await adapter.getConnection('mem'))?.membership).toEqual(membership);
     expect((await adapter.getConnection('mem'))?.autoRegisterNodes).toBe(true);
