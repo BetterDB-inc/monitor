@@ -10,7 +10,7 @@ function build(options: {
   seed?: Partial<DatabaseConnectionConfig>;
   members?: DatabaseConnectionConfig[];
   nodes?: DiscoveredNode[] | Error;
-  envDefault?: boolean;
+  envDefault?: string;
   retentionDays?: number | null;
   clusterEnabled?: boolean;
   connected?: boolean;
@@ -26,8 +26,8 @@ function build(options: {
       isConnected: () => options.connected ?? true,
       getCapabilities: () => ({ clusterEnabled: options.clusterEnabled ?? true }),
     })),
-    listMembers: jest.fn(() => members),
-    findConfigByHostPort: jest.fn(() => null),
+    listMembers: jest.fn((_seedId: string) => members),
+    findConfigByHostPort: jest.fn((_host: string, _port: number): DatabaseConnectionConfig | null => null),
     withSeedLock: jest.fn((_id: string, fn: () => Promise<void>) => fn()),
     addManagedChild: jest.fn().mockResolvedValue('new-id'),
     adoptChild: jest.fn().mockResolvedValue(undefined),
@@ -42,7 +42,7 @@ function build(options: {
       options.nodes instanceof Error ? Promise.reject(options.nodes) : Promise.resolve(options.nodes ?? []),
     ),
   };
-  const config = { get: jest.fn(() => options.envDefault ?? false) };
+  const config = { get: jest.fn(() => options.envDefault) };
   const retention = { getRetentionDays: jest.fn(() => options.retentionDays ?? null) };
   const service = new ClusterAutoRegistrationService(registry as never, discovery as never, config as never, retention as never);
   return { service, registry, discovery, setMembers: (next: DatabaseConnectionConfig[]) => { members = next; } };
@@ -66,10 +66,10 @@ describe('ClusterAutoRegistrationService', () => {
   });
 
   it('follows the env default when the seed has not set the flag', async () => {
-    const off = build({ seed: { autoRegisterNodes: undefined }, envDefault: false, nodes: clusterOf(1) });
+    const off = build({ seed: { autoRegisterNodes: undefined }, envDefault: 'false', nodes: clusterOf(1) });
     await off.service.reconcile('seed');
     expect(off.registry.addManagedChild).not.toHaveBeenCalled();
-    const on = build({ seed: { autoRegisterNodes: undefined }, envDefault: true, nodes: clusterOf(1) });
+    const on = build({ seed: { autoRegisterNodes: undefined }, envDefault: 'true', nodes: clusterOf(1) });
     await on.service.reconcile('seed');
     expect(on.registry.addManagedChild).toHaveBeenCalledTimes(1);
   });

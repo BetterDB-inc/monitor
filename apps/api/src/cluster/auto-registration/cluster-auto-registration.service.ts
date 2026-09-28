@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
+import { isTrueFlag } from '../../config/env-normalize';
 import { ConnectionContext, MultiConnectionPoller } from '../../common/services/multi-connection-poller';
 import { MS_PER_DAY, RetentionPolicyService } from '../../retention/retention-policy.service';
 import { ClusterDiscoveryService, DiscoveredNode } from '../cluster-discovery.service';
@@ -94,7 +95,7 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
   }
 
   private isEnabled(seed: DatabaseConnectionConfig): boolean {
-    return seed.autoRegisterNodes ?? this.configService.get<boolean>('CLUSTER_AUTO_REGISTER_NODES') ?? false;
+    return seed.autoRegisterNodes ?? isTrueFlag(this.configService.get<string>('CLUSTER_AUTO_REGISTER_NODES'));
   }
 
   private async discover(seed: DatabaseConnectionConfig): Promise<DiscoveredNode[] | null> {
