@@ -22,6 +22,7 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
   protected readonly logger = new Logger(ClusterAutoRegistrationService.name);
   private readonly heldRetirements = new Map<string, string>();
   private readonly loggedOnce = new Set<string>();
+  private readonly pendingDiscovery = new Set<string>();
   private reconcileChain: Promise<void> = Promise.resolve();
 
   constructor(
@@ -114,12 +115,22 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
       return null;
     }
     if (!clusterEnabled) return null;
+    if (this.pendingDiscovery.has(seed.id)) {
+      this.logger.debug(`Skipping discovery for ${seed.name}: the previous CLUSTER NODES has not returned yet`);
+      return null;
+    }
+    this.pendingDiscovery.add(seed.id);
+    const settled = (): void => {
+      this.pendingDiscovery.delete(seed.id);
+    };
+    const call = this.discovery.discoverNodes(seed.id);
+    call.then(settled, settled);
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error(`timed out after ${DISCOVERY_TIMEOUT_MS}ms`)), DISCOVERY_TIMEOUT_MS);
     });
     try {
-      return await Promise.race([this.discovery.discoverNodes(seed.id), timeout]);
+      return await Promise.race([call, timeout]);
     } catch (error) {
       this.logger.warn(`Cluster discovery failed for ${seed.name}; leaving members unchanged: ${error instanceof Error ? error.message : error}`);
       return null;
