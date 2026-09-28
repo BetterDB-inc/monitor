@@ -33,6 +33,13 @@ describe('connection membership storage — memory', () => {
     expect(stored?.autoRegisterNodes).toBe(true);
     expect(stored?.membership).toEqual(membership);
   });
+
+  it('round-trips data node credentials', async () => {
+    const adapter = new MemoryAdapter();
+    await adapter.initialize();
+    await adapter.saveConnection(config({ nodeUsername: 'app', nodePassword: 'pw', nodePasswordEncrypted: true }));
+    expect(await adapter.getConnection('c1')).toMatchObject({ nodeUsername: 'app', nodePassword: 'pw', nodePasswordEncrypted: true });
+  });
 });
 
 describe('connection membership storage — sqlite', () => {
@@ -43,6 +50,28 @@ describe('connection membership storage — sqlite', () => {
     expect((await adapter.getConnection('c1'))?.membership).toEqual(membership);
     expect((await adapter.getConnection('c1'))?.autoRegisterNodes).toBe(false);
     expect((await adapter.getConnections())[0].membership).toEqual(membership);
+    await adapter.close();
+  });
+
+  it('round-trips data node credentials through getConnection and getConnections', async () => {
+    const adapter = new SqliteAdapter({ filepath: tempDbPath() });
+    await adapter.initialize();
+    await adapter.saveConnection(config({ nodeUsername: 'app', nodePassword: '{"v":1}', nodePasswordEncrypted: true }));
+    const expected = { nodeUsername: 'app', nodePassword: '{"v":1}', nodePasswordEncrypted: true };
+    expect(await adapter.getConnection('c1')).toMatchObject(expected);
+    expect((await adapter.getConnections())[0]).toMatchObject(expected);
+    await adapter.close();
+  });
+
+  it('reads a connection without data node credentials with the fields absent', async () => {
+    const adapter = new SqliteAdapter({ filepath: tempDbPath() });
+    await adapter.initialize();
+    await adapter.saveConnection(config());
+    const stored = await adapter.getConnection('c1');
+    expect(stored?.nodeUsername).toBeUndefined();
+    expect(stored?.nodePassword).toBeUndefined();
+    expect(stored?.nodePasswordEncrypted).toBeUndefined();
+    expect((await adapter.getConnections())[0].nodePasswordEncrypted).toBeUndefined();
     await adapter.close();
   });
 
@@ -84,8 +113,10 @@ describe('connection membership storage — sqlite', () => {
     const adapter = new SqliteAdapter({ filepath });
     await adapter.initialize();
     expect((await adapter.getConnection('old'))?.membership).toBeUndefined();
-    await adapter.saveConnection(config({ id: 'new', membership }));
+    expect((await adapter.getConnection('old'))?.nodeUsername).toBeUndefined();
+    await adapter.saveConnection(config({ id: 'new', membership, nodeUsername: 'app', nodePassword: 'pw' }));
     expect((await adapter.getConnection('new'))?.membership).toEqual(membership);
+    expect(await adapter.getConnection('new')).toMatchObject({ nodeUsername: 'app', nodePassword: 'pw' });
     await adapter.close();
   });
 });

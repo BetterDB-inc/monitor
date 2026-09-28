@@ -99,6 +99,12 @@ export interface DatabaseConnectionConfig {
   password?: string;
   /** Whether the password is encrypted (envelope encryption) */
   passwordEncrypted?: boolean;
+  /** Username for data nodes discovered through this Sentinel; defaults to username */
+  nodeUsername?: string;
+  /** Password for data nodes discovered through this Sentinel; defaults to password (secret) */
+  nodePassword?: string;
+  /** Whether nodePassword is encrypted (envelope encryption) */
+  nodePasswordEncrypted?: boolean;
   dbIndex?: number;
   tls?: boolean;
   /** Optional SSH tunnel used to reach the database. */
@@ -225,6 +231,8 @@ export interface CreateConnectionRequest {
   port: number;
   username?: string;
   password?: string;
+  nodeUsername?: string;
+  nodePassword?: string;
   dbIndex?: number;
   tls?: boolean;
   /** Optional SSH tunnel used to reach the database. */

@@ -330,6 +330,14 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       };
     }
 
+    if (this.encryption && config.nodePassword) {
+      result = {
+        ...result,
+        nodePassword: this.encryption.encrypt(config.nodePassword),
+        nodePasswordEncrypted: true,
+      };
+    }
+
     result = { ...result, sshTunnel: this.encryptSshTunnel(result.sshTunnel) };
     return result;
   }
@@ -434,12 +442,37 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private decryptConfig(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
+    const decrypted = this.decryptSeedPassword(config);
+    if (!config.nodePasswordEncrypted || !config.nodePassword) {
+      return decrypted;
+    }
+    return { ...decrypted, nodePassword: this.decryptNodePassword(config.name, config.nodePassword), nodePasswordEncrypted: false };
+  }
+
+  private decryptNodePassword(name: string, ciphertext: string): string | undefined {
+    if (!this.encryption) {
+      this.logger.error(
+        `Cannot decrypt data node password for ${name}: ENCRYPTION_KEY not set but password is encrypted. ` +
+        'Discovered data nodes will use the seed credentials.'
+      );
+      return undefined;
+    }
+    try {
+      return this.encryption.decrypt(ciphertext);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Decryption failed';
+      this.logger.error(`Failed to decrypt data node password for ${name}: ${errorMsg}`);
+      return undefined;
+    }
+  }
+
   /**
    * Decrypt password in config for use.
    * Returns a new config object with decrypted password.
    * Sets credentialStatus to 'decryption_failed' if decryption fails.
    */
-  private decryptConfig(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
+  private decryptSeedPassword(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
     const sshTunnel = this.decryptSshTunnel(config.sshTunnel);
 
     if (!config.passwordEncrypted || !config.password) {
@@ -531,6 +564,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       port: request.port,
       username: request.username,
       password: request.password,
+      nodeUsername: request.nodeUsername,
+      nodePassword: request.nodePassword,
       dbIndex: request.dbIndex,
       tls: request.tls,
       sshTunnel: this.sanitizeSshTunnelInput(request.sshTunnel),
@@ -1004,8 +1039,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       name: `${seed.name} · ${node.host}:${node.port}`,
       host: node.host,
       port: node.port,
-      username: seed.username,
-      password: seed.password,
+      username: seed.nodeUsername ?? seed.username,
+      password: seed.nodePassword ?? seed.password,
       dbIndex: 0,
       tls: seed.tls,
       connectionType: 'direct',

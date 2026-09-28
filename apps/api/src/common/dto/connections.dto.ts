@@ -208,6 +208,16 @@ export class CreateConnectionDto implements CreateConnectionRequest {
   @IsString()
   password?: string;
 
+  @ApiPropertyOptional({ description: 'Username for data nodes discovered through this Sentinel; defaults to username' })
+  @IsOptional()
+  @IsString()
+  nodeUsername?: string;
+
+  @ApiPropertyOptional({ description: 'Password for data nodes discovered through this Sentinel; defaults to password' })
+  @IsOptional()
+  @IsString()
+  nodePassword?: string;
+
   @ApiPropertyOptional({ description: 'Database index (0-15)', example: 0, minimum: 0, maximum: 15 })
   @IsOptional()
   @IsNumber()
