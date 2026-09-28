@@ -433,6 +433,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     return true;
   }
 
+  protected pollsSentinels(): boolean {
+    return true;
+  }
+
   private get cacheTtlMs(): number {
     return this.settingsService.getCachedSettings().anomalyCacheTtlMs;
   }

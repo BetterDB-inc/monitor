@@ -49,6 +49,10 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
     return false;
   }
 
+  protected pollsSentinels(): boolean {
+    return true;
+  }
+
   protected onConnectionRemoved(connectionId: string): void {
     this.heldRetirements.delete(connectionId);
   }
