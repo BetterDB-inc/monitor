@@ -45,7 +45,7 @@ describe('ConnectionRegistry membership', () => {
   it('adds a managed child that inherits seed credentials and TLS', async () => {
     const { registry, storage } = build();
     put(registry, seed);
-    const id = await registry.addManagedChild('seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2' });
+    const id = await registry.addManagedChild('seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' });
     const child = registry.getConfig(id)!;
     expect(child).toMatchObject({
       name: 'prod · 10.0.0.2:7002',
@@ -67,7 +67,7 @@ describe('ConnectionRegistry membership', () => {
     jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(
       () => ({ connect: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')) }) as never,
     );
-    const id = await registry.addManagedChild('seed', { host: '10.0.0.9', port: 7009, nodeId: 'n9' });
+    const id = await registry.addManagedChild('seed', { host: '10.0.0.9', port: 7009, nodeId: 'n9', source: 'cluster' });
     expect(registry.getConfig(id)?.credentialStatus).toBe('unknown');
     expect(storage.saveConnection).toHaveBeenCalled();
   });
@@ -80,10 +80,25 @@ describe('ConnectionRegistry membership', () => {
       () => ({ connect: jest.fn().mockResolvedValue(undefined), disconnect }) as never,
     );
     storage.saveConnection.mockRejectedValueOnce(new Error('disk full'));
-    await expect(registry.addManagedChild('seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2' })).rejects.toThrow('disk full');
+    await expect(registry.addManagedChild('seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' })).rejects.toThrow('disk full');
     expect(disconnect).toHaveBeenCalled();
     expect(registry.listMembers('seed')).toEqual([]);
     expect((registry as unknown as Internals).connections.size).toBe(1);
+  });
+
+  it('stamps sentinel group and role on an auto child', async () => {
+    const { registry } = build();
+    put(registry, seed);
+    const id = await registry.addManagedChild('seed', { host: '10.0.0.5', port: 6379, nodeId: 'r1', source: 'sentinel', group: 'mymaster', role: 'replica' });
+    expect(registry.getConfig(id)?.membership).toEqual({ seedId: 'seed', nodeId: 'r1', origin: 'auto', source: 'sentinel', group: 'mymaster', role: 'replica' });
+  });
+
+  it('refreshChild replaces role and keeps retiredAt absent', async () => {
+    const { registry } = build();
+    put(registry, seed);
+    const id = await registry.addManagedChild('seed', { host: '10.0.0.5', port: 6379, nodeId: 'r1', source: 'sentinel', group: 'mymaster', role: 'replica' });
+    await registry.refreshChild(id, { host: '10.0.0.5', port: 6379, nodeId: 'r1', source: 'sentinel', group: 'mymaster', role: 'primary' });
+    expect(registry.getConfig(id)?.membership?.role).toBe('primary');
   });
 
   it('hides retired auto children from list() but not adopted ones', () => {
@@ -136,7 +151,7 @@ describe('ConnectionRegistry membership', () => {
   it('reactivates a retired auto child with a fresh adapter and node id', async () => {
     const { registry, storage } = build();
     put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'old', origin: 'auto', source: 'cluster', retiredAt: 5 } });
-    await registry.reactivateChild('auto', 'new');
+    await registry.reactivateChild('auto', { host: '10.0.0.2', port: 7002, nodeId: 'new', source: 'cluster' });
     expect(registry.getConfig('auto')?.membership).toEqual({ seedId: 'seed', nodeId: 'new', origin: 'auto', source: 'cluster' });
     expect(UnifiedDatabaseAdapter).toHaveBeenCalledTimes(1);
     expect(storage.updateConnection).toHaveBeenCalledWith('auto', { membership: { seedId: 'seed', nodeId: 'new', origin: 'auto', source: 'cluster' } });
@@ -156,7 +171,7 @@ describe('ConnectionRegistry membership', () => {
         disconnect,
       }) as never,
     );
-    await registry.reactivateChild('auto', 'new');
+    await registry.reactivateChild('auto', { host: '10.0.0.2', port: 7002, nodeId: 'new', source: 'cluster' });
     expect(disconnect).toHaveBeenCalled();
     expect(internals.connections.has('auto')).toBe(false);
     expect(storage.updateConnection).not.toHaveBeenCalled();
@@ -188,7 +203,7 @@ describe('ConnectionRegistry membership', () => {
   it('adopts an existing connection without touching anything else', async () => {
     const { registry } = build();
     put(registry, { id: 'manual', name: 'my node', password: 'mine' });
-    await registry.adoptChild('manual', 'seed', 'n3');
+    await registry.adoptChild('manual', 'seed', { host: '10.0.0.2', port: 7002, nodeId: 'n3', source: 'cluster' });
     expect(registry.getConfig('manual')).toMatchObject({ name: 'my node', password: 'mine', membership: { seedId: 'seed', nodeId: 'n3', origin: 'adopted', source: 'cluster' } });
   });
 

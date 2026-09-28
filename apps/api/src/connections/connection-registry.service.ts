@@ -12,6 +12,7 @@ import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { ExternalMetricsStore } from '../external-metrics/external-metrics-store';
 import { ExternalMetricsAdapter } from '../external-metrics/external-metrics.adapter';
 import { isTrueFlag } from '../config/env-normalize';
+import type { DesiredNode } from '../topology/membership-diff';
 
 export { ENV_DEFAULT_ID } from './connection.constants';
 import { ENV_DEFAULT_ID } from './connection.constants';
@@ -26,6 +27,15 @@ function isRetiredAuto(config: DatabaseConnectionConfig): boolean {
 
 function isDefaultCandidate(config: DatabaseConnectionConfig): boolean {
   return config.membership?.origin !== 'auto' && config.membership?.retiredAt === undefined;
+}
+
+function membershipFields(node: DesiredNode): Pick<TopologyMembership, 'nodeId' | 'source' | 'group' | 'role'> {
+  return {
+    nodeId: node.nodeId,
+    source: node.source,
+    ...(node.group !== undefined ? { group: node.group } : {}),
+    ...(node.role !== undefined ? { role: node.role } : {}),
+  };
 }
 
 @Injectable()
@@ -977,7 +987,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async addManagedChild(seedId: string, node: { host: string; port: number; nodeId: string }): Promise<string> {
+  async addManagedChild(seedId: string, node: DesiredNode): Promise<string> {
     const seed = this.configs.get(seedId);
     if (!seed) {
       throw new NotFoundException(`Connection '${seedId}' not found.`);
@@ -996,7 +1006,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       isDefault: false,
       createdAt: now,
       updatedAt: now,
-      membership: { seedId, nodeId: node.nodeId, origin: 'auto', source: 'cluster' },
+      membership: { seedId, origin: 'auto', ...membershipFields(node) },
     };
     const adapter = this.createAdapter(config);
     let credentialStatus: CredentialStatus = 'valid';
@@ -1021,17 +1031,17 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       this.logger.error(`Failed to persist auto-registered node ${config.name}: ${error instanceof Error ? error.message : error}`);
       throw error;
     }
-    this.logger.log(`Auto-registered cluster node ${config.name}`);
+    this.logger.log(`Auto-registered ${node.source} node ${config.name}`);
     return config.id;
   }
 
-  async adoptChild(id: string, seedId: string, nodeId: string): Promise<void> {
-    await this.setMembership(id, { seedId, nodeId, origin: 'adopted', source: 'cluster' });
+  async adoptChild(id: string, seedId: string, node: DesiredNode): Promise<void> {
+    await this.setMembership(id, { seedId, origin: 'adopted', ...membershipFields(node) });
   }
 
-  async refreshChildNodeId(id: string, nodeId: string): Promise<void> {
-    const membership = this.requireMembership(id);
-    await this.setMembership(id, { ...membership, nodeId });
+  async refreshChild(id: string, node: DesiredNode): Promise<void> {
+    const { seedId, origin, retiredAt } = this.requireMembership(id);
+    await this.setMembership(id, { seedId, origin, ...membershipFields(node), ...(retiredAt !== undefined ? { retiredAt } : {}) });
   }
 
   async retireChild(id: string): Promise<void> {
@@ -1050,10 +1060,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async reactivateChild(id: string, nodeId: string): Promise<void> {
+  async reactivateChild(id: string, node: DesiredNode): Promise<void> {
     const membership = this.requireMembership(id);
     const config = this.configs.get(id)!;
-    const { retiredAt: _retiredAt, ...active } = membership;
     if (membership.origin === 'auto') {
       const adapter = this.createAdapter(config);
       try {
@@ -1068,7 +1077,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       this.connections.set(id, adapter);
       this.runtimeCapabilityTracker.resetConnection(id);
     }
-    await this.setMembership(id, { ...active, nodeId });
+    await this.setMembership(id, { seedId: membership.seedId, origin: membership.origin, ...membershipFields(node) });
   }
 
   async removeChild(id: string): Promise<void> {
