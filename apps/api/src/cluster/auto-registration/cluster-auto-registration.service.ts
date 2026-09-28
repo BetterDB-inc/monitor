@@ -123,7 +123,7 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
     const settled = (): void => {
       this.pendingDiscovery.delete(seed.id);
     };
-    const call = this.discovery.discoverNodes(seed.id);
+    const call = this.discovery.discoverNodesIsolated(seed.id, DISCOVERY_TIMEOUT_MS);
     call.then(settled, settled);
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, reject) => {

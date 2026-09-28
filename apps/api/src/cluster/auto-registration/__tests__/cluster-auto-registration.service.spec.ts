@@ -38,7 +38,7 @@ function build(options: {
     list: jest.fn(() => []),
   };
   const discovery = {
-    discoverNodes: jest.fn(() =>
+    discoverNodesIsolated: jest.fn(() =>
       options.nodes instanceof Error ? Promise.reject(options.nodes) : Promise.resolve(options.nodes ?? []),
     ),
   };
@@ -125,7 +125,7 @@ describe('ClusterAutoRegistrationService', () => {
   ])('skips a %s seed', async (_label, options) => {
     const { service, discovery } = build({ nodes: clusterOf(1), ...options });
     await service.reconcile('seed');
-    expect(discovery.discoverNodes).not.toHaveBeenCalled();
+    expect(discovery.discoverNodesIsolated).not.toHaveBeenCalled();
   });
 
   it('retires all auto children when the seed is toggled off, even while disconnected', async () => {
@@ -148,7 +148,7 @@ describe('ClusterAutoRegistrationService', () => {
     const members = [child('c2', '10.0.0.2', 7002), child('c3', '10.0.0.3', 7003), child('c4', '10.0.0.4', 7004)];
     const first = build({ nodes: [discovered('n2', '10.0.0.2:7002@17002')], members });
     await first.service.reconcile('seed');
-    first.discovery.discoverNodes.mockResolvedValueOnce([discovered('n3', '10.0.0.3:7003@17003')]);
+    first.discovery.discoverNodesIsolated.mockResolvedValueOnce([discovered('n3', '10.0.0.3:7003@17003')]);
     await first.service.reconcile('seed');
     expect(first.registry.retireChild).not.toHaveBeenCalled();
   });
@@ -193,7 +193,7 @@ describe('ClusterAutoRegistrationService', () => {
       const other: DatabaseConnectionConfig = { id: 'other', name: 'other', host: 'other.local', port: 7101, isDefault: false, createdAt: 1, autoRegisterNodes: true };
       const getSeed = registry.getConfig.getMockImplementation()!;
       registry.getConfig.mockImplementation((id: string) => (id === 'other' ? other : getSeed(id)));
-      discovery.discoverNodes.mockReturnValueOnce(new Promise<DiscoveredNode[]>(() => undefined));
+      discovery.discoverNodesIsolated.mockReturnValueOnce(new Promise<DiscoveredNode[]>(() => undefined));
       const hung = service.reconcile('seed');
       const next = service.reconcile('other');
       await jest.advanceTimersByTimeAsync(15_000);
@@ -210,20 +210,20 @@ describe('ClusterAutoRegistrationService', () => {
     try {
       const { service, registry, discovery } = build({ nodes: clusterOf(1) });
       let settle: (nodes: DiscoveredNode[]) => void = () => undefined;
-      discovery.discoverNodes.mockReturnValueOnce(new Promise<DiscoveredNode[]>((resolve) => { settle = resolve; }));
+      discovery.discoverNodesIsolated.mockReturnValueOnce(new Promise<DiscoveredNode[]>((resolve) => { settle = resolve; }));
 
       const first = service.reconcile('seed');
       await jest.advanceTimersByTimeAsync(15_000);
       await first;
       await service.reconcile('seed');
       await service.reconcile('seed');
-      expect(discovery.discoverNodes).toHaveBeenCalledTimes(1);
+      expect(discovery.discoverNodesIsolated).toHaveBeenCalledTimes(1);
       expect(registry.addManagedChild).not.toHaveBeenCalled();
 
       settle([]);
       await jest.advanceTimersByTimeAsync(0);
       await service.reconcile('seed');
-      expect(discovery.discoverNodes).toHaveBeenCalledTimes(2);
+      expect(discovery.discoverNodesIsolated).toHaveBeenCalledTimes(2);
       expect(registry.addManagedChild).toHaveBeenCalledTimes(1);
     } finally {
       jest.useRealTimers();
@@ -262,7 +262,7 @@ describe('ClusterAutoRegistrationService', () => {
       removeChild: jest.fn().mockResolvedValue(undefined),
       list: jest.fn(() => []),
     };
-    const discovery = { discoverNodes: jest.fn(() => Promise.resolve([discovered('shared', '10.0.0.9:7009@17009')])) };
+    const discovery = { discoverNodesIsolated: jest.fn(() => Promise.resolve([discovered('shared', '10.0.0.9:7009@17009')])) };
     const config = { get: jest.fn(() => false) };
     const retention = { getRetentionDays: jest.fn(() => null) };
     const service = new ClusterAutoRegistrationService(registry as never, discovery as never, config as never, retention as never);

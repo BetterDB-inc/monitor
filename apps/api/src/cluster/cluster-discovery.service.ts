@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { ClusterNode } from '../common/types/metrics.types';
+import { MetricsParser } from '../database/parsers/metrics.parser';
 
 export interface DiscoveredNode {
   id: string;
@@ -60,8 +61,56 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   async discoverNodes(connectionId?: string): Promise<DiscoveredNode[]> {
     // Use connection-specific cache key (default connection uses 'default')
     const cacheKey = connectionId || this.connectionRegistry.getDefaultId() || 'default';
-    const cached = this.discoveryCacheByConnection.get(cacheKey);
+    const cached = this.freshCache(cacheKey);
+    if (cached) {
+      return cached;
+    }
 
+    try {
+      const client = this.connectionRegistry.get(connectionId);
+      return this.remember(cacheKey, await client.getClusterNodes());
+    } catch (error) {
+      this.logger.error(
+        `Failed to discover cluster nodes: ${error instanceof Error ? error.message : error}`,
+      );
+      throw error;
+    }
+  }
+
+  async discoverNodesIsolated(connectionId: string, timeoutMs: number): Promise<DiscoveredNode[]> {
+    const cached = this.freshCache(connectionId);
+    if (cached) {
+      return cached;
+    }
+
+    const { host, port, username, password, tls } = this.connectionRegistry.get(connectionId).getClient().options;
+    const client = new Valkey({
+      host,
+      port,
+      username,
+      password,
+      tls,
+      lazyConnect: true,
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: 0,
+      retryStrategy: () => null,
+      enableReadyCheck: false,
+      connectTimeout: timeoutMs,
+      commandTimeout: timeoutMs,
+      connectionName: 'BetterDB-Monitor-Discovery',
+    });
+    client.on('error', () => undefined);
+    try {
+      await client.connect();
+      const raw = await client.call('CLUSTER', 'NODES');
+      return this.remember(connectionId, MetricsParser.parseClusterNodes(raw as string));
+    } finally {
+      client.disconnect();
+    }
+  }
+
+  private freshCache(cacheKey: string): DiscoveredNode[] | null {
+    const cached = this.discoveryCacheByConnection.get(cacheKey);
     if (
       cached &&
       cached.nodes.length > 0 &&
@@ -69,53 +118,47 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     ) {
       return cached.nodes;
     }
+    return null;
+  }
 
-    try {
-      const client = this.connectionRegistry.get(connectionId);
-      const clusterNodes: ClusterNode[] = await client.getClusterNodes();
-      const discovered: DiscoveredNode[] = [];
+  private remember(cacheKey: string, clusterNodes: ClusterNode[]): DiscoveredNode[] {
+    const discovered: DiscoveredNode[] = [];
 
-      for (const node of clusterNodes) {
-        const isHealthy =
-          node.flags.includes('connected') ||
-          (!node.flags.includes('disconnected') && !node.flags.includes('fail'));
+    for (const node of clusterNodes) {
+      const isHealthy =
+        node.flags.includes('connected') ||
+        (!node.flags.includes('disconnected') && !node.flags.includes('fail'));
 
-        const isMaster = node.flags.includes('master');
-        const isReplica = node.flags.includes('slave') || node.flags.includes('replica');
+      const isMaster = node.flags.includes('master');
+      const isReplica = node.flags.includes('slave') || node.flags.includes('replica');
 
-        if (!isMaster && !isReplica) {
-          continue;
-        }
-
-        discovered.push({
-          id: node.id,
-          address: node.address,
-          role: isMaster ? 'master' : 'replica',
-          masterId: isMaster ? undefined : node.master,
-          slots: node.slots,
-          configEpoch: node.configEpoch,
-          healthy: isHealthy,
-          flags: node.flags,
-        });
+      if (!isMaster && !isReplica) {
+        continue;
       }
 
-      // Store in per-connection cache
-      this.discoveryCacheByConnection.set(cacheKey, {
-        nodes: discovered,
-        lastDiscoveryTime: Date.now(),
+      discovered.push({
+        id: node.id,
+        address: node.address,
+        role: isMaster ? 'master' : 'replica',
+        masterId: isMaster ? undefined : node.master,
+        slots: node.slots,
+        configEpoch: node.configEpoch,
+        healthy: isHealthy,
+        flags: node.flags,
       });
-
-      this.logger.log(
-        `Discovered ${discovered.length} nodes for connection ${cacheKey} (${discovered.filter(n => n.role === 'master').length} masters, ${discovered.filter(n => n.role === 'replica').length} replicas)`,
-      );
-
-      return discovered;
-    } catch (error) {
-      this.logger.error(
-        `Failed to discover cluster nodes: ${error instanceof Error ? error.message : error}`,
-      );
-      throw error;
     }
+
+    // Store in per-connection cache
+    this.discoveryCacheByConnection.set(cacheKey, {
+      nodes: discovered,
+      lastDiscoveryTime: Date.now(),
+    });
+
+    this.logger.log(
+      `Discovered ${discovered.length} nodes for connection ${cacheKey} (${discovered.filter(n => n.role === 'master').length} masters, ${discovered.filter(n => n.role === 'replica').length} replicas)`,
+    );
+
+    return discovered;
   }
 
   async getNodeConnection(nodeId: string, connectionId?: string): Promise<Valkey> {
