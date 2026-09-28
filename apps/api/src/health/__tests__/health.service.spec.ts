@@ -2,6 +2,10 @@ import { HealthService } from '../health.service';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../../connections/runtime-capability-tracker.service';
 import { ConfigHazardService } from '../../monitor/config-hazard.service';
+import { ConnectionContext } from '../../common/services/multi-connection-poller';
+import { DatabasePort } from '../../common/interfaces/database-port.interface';
+import { WebhookDispatcherService } from '../../webhooks/webhook-dispatcher.service';
+import { OtelEventDispatcherService } from '../../otel-telemetry/otel-event-dispatcher.service';
 
 describe('HealthService detailed health', () => {
   const hazardFinding = {
@@ -76,5 +80,124 @@ describe('HealthService detailed health', () => {
     const detailed = await service.getDetailedHealth('conn-1');
     expect(detailed.status).toBe('connected');
     expect(detailed.configHazards).toEqual([]);
+  });
+});
+
+describe('HealthService external connections', () => {
+  const makeService = () =>
+    new HealthService(
+      {
+        list: jest.fn().mockReturnValue([]),
+        get: jest.fn(),
+        getConfig: jest.fn().mockReturnValue({ host: 'cache.internal', port: 6379 }),
+        getDefaultId: jest.fn().mockReturnValue('ext-1'),
+      } as unknown as ConnectionRegistry,
+      { getCapabilities: jest.fn(), getDisabledReasons: jest.fn() } as unknown as RuntimeCapabilityTracker,
+    );
+
+  const ctx = (sampleVersion: number | null): ConnectionContext => ({
+    connectionId: 'ext-1',
+    connectionName: 'pushed',
+    client: { sampleVersion: () => sampleVersion } as unknown as DatabasePort,
+    host: 'cache.internal',
+    port: 6379,
+    connectionType: 'external',
+  });
+
+  it('opts in and polls every tick', () => {
+    const service = makeService();
+    expect((service as any).supportsExternalConnections()).toBe(true);
+    expect((service as any).skipUnchangedSamples()).toBe(false);
+  });
+
+  describe('getHealth before the first OTLP sample', () => {
+    const buildWithDispatchers = (sampleVersion: number | null) => {
+      const client = {
+        isConnected: jest.fn().mockReturnValue(false),
+        ping: jest.fn().mockResolvedValue(false),
+        sampleVersion: jest.fn().mockReturnValue(sampleVersion),
+      };
+      const webhooks = { dispatchHealthChange: jest.fn().mockResolvedValue(undefined) };
+      const otelEvents = { dispatch: jest.fn() };
+      const service = new HealthService(
+        {
+          list: jest.fn().mockReturnValue([]),
+          get: jest.fn().mockReturnValue(client),
+          getConfig: jest.fn().mockReturnValue({ host: 'cache.internal', port: 6379, connectionType: 'external' }),
+          getDefaultId: jest.fn().mockReturnValue('ext-1'),
+        } as unknown as ConnectionRegistry,
+        { getCapabilities: jest.fn(), getDisabledReasons: jest.fn() } as unknown as RuntimeCapabilityTracker,
+        webhooks as unknown as WebhookDispatcherService,
+        undefined,
+        undefined,
+        otelEvents as unknown as OtelEventDispatcherService,
+      );
+      return { service, webhooks, otelEvents };
+    };
+
+    it('reports waiting without dispatching instance.down', async () => {
+      const { service, webhooks, otelEvents } = buildWithDispatchers(null);
+      const health = await service.getHealth('ext-1');
+      expect(health).toEqual({
+        status: 'waiting',
+        database: { type: 'unknown', version: null, host: 'cache.internal', port: 6379 },
+        capabilities: null,
+        runtimeCapabilities: null,
+        message: 'Waiting for first OTLP sample',
+      });
+      expect(webhooks.dispatchHealthChange).not.toHaveBeenCalled();
+      expect(otelEvents.dispatch).not.toHaveBeenCalled();
+      expect((service as any).instanceUpStates.get('ext-1')).not.toBe(false);
+    });
+
+    it('still reports instance.down once a pushed connection goes stale', async () => {
+      const { service, webhooks, otelEvents } = buildWithDispatchers(123);
+      const health = await service.getHealth('ext-1');
+      expect(health.status).toBe('disconnected');
+      expect(webhooks.dispatchHealthChange).toHaveBeenCalledTimes(1);
+      expect(otelEvents.dispatch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('ignores an external connection that has never pushed', async () => {
+    const service = makeService();
+    const getHealth = jest.spyOn(service, 'getHealth').mockResolvedValue({} as never);
+    await (service as any).pollConnection(ctx(null));
+    expect(getHealth).not.toHaveBeenCalled();
+    await (service as any).pollConnection(ctx(123));
+    expect(getHealth).toHaveBeenCalledWith('ext-1');
+  });
+});
+
+describe('HealthService getAllConnectionsHealth', () => {
+  const statusesToOverall = async (statuses: Array<'connected' | 'disconnected' | 'error' | 'waiting'>) => {
+    const registry = {
+      list: jest.fn().mockReturnValue(statuses.map((_, i) => ({ id: `c${i}`, name: `conn-${i}` }))),
+    } as unknown as ConnectionRegistry;
+    const service = new HealthService(registry, {} as RuntimeCapabilityTracker);
+    jest.spyOn(service, 'getHealth').mockImplementation(async (id?: string) => ({
+      status: statuses[Number(id?.slice(1))],
+      database: { type: 'unknown', version: null, host: 'h', port: 1 },
+      capabilities: null,
+      runtimeCapabilities: null,
+    }));
+    return (await service.getAllConnectionsHealth()).overallStatus;
+  };
+
+  it('reports waiting when every connection is waiting', async () => {
+    expect(await statusesToOverall(['waiting'])).toBe('waiting');
+    expect(await statusesToOverall(['waiting', 'waiting'])).toBe('waiting');
+  });
+
+  it('ignores waiting connections next to connected ones', async () => {
+    expect(await statusesToOverall(['connected', 'waiting'])).toBe('healthy');
+  });
+
+  it('ignores waiting connections when the rest are down', async () => {
+    expect(await statusesToOverall(['disconnected', 'waiting'])).toBe('unhealthy');
+  });
+
+  it('reports degraded for a mix of connected and down beside waiting ones', async () => {
+    expect(await statusesToOverall(['connected', 'error', 'waiting'])).toBe('degraded');
   });
 });

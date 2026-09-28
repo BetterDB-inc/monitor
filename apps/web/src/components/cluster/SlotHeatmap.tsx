@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
+import { EmptyState } from '../ui/empty-state';
 import { Info } from 'lucide-react';
 import type { SlotStats, ClusterNode } from '../../types/metrics';
 import { buildSlotNodeMap, CLUSTER_TOTAL_SLOTS, CLUSTER_GRID_SIZE } from '../../types/cluster';
@@ -154,16 +155,13 @@ export function SlotHeatmap({ slotStats, nodes, hasSlotStats }: SlotHeatmapProps
           <CardTitle className="text-lg">Slot Heatmap</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="flex flex-col items-center justify-center py-12 text-center">
-            <Info className="w-12 h-12 text-muted-foreground mb-3 opacity-50" />
-            <p className="text-muted-foreground font-medium">
-              Slot statistics not available
-            </p>
-            <p className="text-sm text-muted-foreground mt-2 max-w-md">
-              This feature requires Valkey 8.0+ or Redis with CLUSTER SLOT-STATS support.
-              Connect to a compatible cluster to view per-slot key distribution.
-            </p>
-          </div>
+          <EmptyState
+            variant="inline"
+            className="py-12"
+            icon={Info}
+            title="Slot statistics not available"
+            description="This feature requires Valkey 8.0+ or Redis with CLUSTER SLOT-STATS support. Connect to a compatible cluster to view per-slot key distribution."
+          />
         </CardContent>
       </Card>
     );

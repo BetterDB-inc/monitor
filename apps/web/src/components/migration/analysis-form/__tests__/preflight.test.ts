@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import type { Connection } from '../../../../hooks/useConnection';
-import { describeDirection, isPlanComplete, planBlock, preflightNotes } from '../preflight';
+import {
+  describeDirection,
+  EXTERNAL_BLOCK_MESSAGE,
+  isPlanComplete,
+  planBlock,
+  preflightNotes,
+} from '../preflight';
 
 function conn(partial: Partial<Connection> & Pick<Connection, 'id'>): Connection {
   return {
@@ -128,6 +134,13 @@ describe('planBlock', () => {
 
   it('allows a normal cross-engine plan', () => {
     expect(planBlock(REDIS_72, VALKEY_81)).toBeNull();
+  });
+
+  it('blocks external connections as source or target', () => {
+    const source = conn({ id: 's', connectionType: 'external' });
+    const target = conn({ id: 't' });
+    expect(planBlock(source, target)).toBe(EXTERNAL_BLOCK_MESSAGE);
+    expect(planBlock(target, source)).toBe(EXTERNAL_BLOCK_MESSAGE);
   });
 });
 

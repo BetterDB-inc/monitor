@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { WebhookDelivery, Webhook } from '../../types/webhooks';
 import { webhooksApi } from '../../api/webhooks';
 import { Card } from '../ui/card';
+import { EmptyState } from '../ui/empty-state';
 import { Badge } from '../ui/badge';
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '../ui/table';
 
@@ -104,9 +105,7 @@ export function WebhookDeliveries({ webhook, onClose }: WebhookDeliveriesProps) 
       </div>
 
       {deliveries.length === 0 ? (
-        <div className="text-center py-8 text-muted-foreground">
-          No deliveries found for this webhook.
-        </div>
+        <EmptyState variant="inline" title="No deliveries found for this webhook" />
       ) : (
         <div className="overflow-x-auto">
           <Table>

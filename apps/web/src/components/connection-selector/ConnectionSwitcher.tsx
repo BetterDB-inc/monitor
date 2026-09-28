@@ -4,6 +4,7 @@ import { CheckIcon, ChevronDownIcon, SearchIcon } from 'lucide-react';
 import type { Connection } from '../../hooks/useConnection';
 import { cn } from '@/lib/utils';
 import { ConnectionSwitcherOpenContext } from './switcher-open-context';
+import { ConnectionTypeBadge } from './ConnectionTypeBadge';
 
 interface ConnectionSwitcherProps {
   connections: Connection[];
@@ -128,6 +129,7 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
                 )}
               />
               <span className="truncate">{current.name}</span>
+              <ConnectionTypeBadge connection={current} />
             </>
           ) : (
             <span className="text-muted-foreground">Select connection</span>
@@ -231,8 +233,11 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
                         Both shrink now, in proportion to their length, so the
                         long hosted URL gives ground before the name does. */}
                     <span className="min-w-0 truncate">{connection.name}</span>
-                    <span className="ml-auto min-w-0 truncate ps-2 text-xs text-muted-foreground">
-                      {connection.host}:{connection.port}
+                    <span className="ml-auto flex min-w-0 items-center ps-2 text-xs text-muted-foreground">
+                      <span className="min-w-0 truncate">
+                        {connection.host}:{connection.port}
+                      </span>
+                      <ConnectionTypeBadge connection={connection} />
                     </span>
                     {isCurrent ? <CheckIcon className="w-4 h-4 flex-shrink-0" /> : null}
                   </button>

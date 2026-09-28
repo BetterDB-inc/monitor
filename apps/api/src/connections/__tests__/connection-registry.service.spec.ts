@@ -5,6 +5,7 @@ import { ConnectionRegistry } from '../connection-registry.service';
 import { ENV_DEFAULT_ID } from '../connection.constants';
 import { RuntimeCapabilityTracker } from '../runtime-capability-tracker.service';
 import { SshTunnelService } from '../../database/ssh/ssh-tunnel.service';
+import { ExternalMetricsStore } from '../../external-metrics/external-metrics-store';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../../common/interfaces/database-port.interface';
 import { DatabaseConnectionConfig } from '@betterdb/shared';
@@ -116,6 +117,7 @@ describe('ConnectionRegistry', () => {
         ConnectionRegistry,
         RuntimeCapabilityTracker,
         SshTunnelService,
+        ExternalMetricsStore,
         { provide: 'STORAGE_CLIENT', useValue: mockStorage },
         { provide: ConfigService, useValue: mockConfigService },
       ],
@@ -207,6 +209,7 @@ describe('ConnectionRegistry', () => {
           ConnectionRegistry,
           RuntimeCapabilityTracker,
           SshTunnelService,
+          ExternalMetricsStore,
           { provide: 'STORAGE_CLIENT', useValue: mockStorage },
           { provide: ConfigService, useValue: mockConfigService },
         ],
@@ -582,6 +585,7 @@ describe('ConnectionRegistry with encryption', () => {
         ConnectionRegistry,
         RuntimeCapabilityTracker,
         SshTunnelService,
+        ExternalMetricsStore,
         { provide: 'STORAGE_CLIENT', useValue: mockStorage },
         { provide: ConfigService, useValue: mockConfigService },
       ],
@@ -736,6 +740,7 @@ describe('ConnectionRegistry with encryption', () => {
         ConnectionRegistry,
         RuntimeCapabilityTracker,
         SshTunnelService,
+        ExternalMetricsStore,
         { provide: 'STORAGE_CLIENT', useValue: mockStorage },
         { provide: ConfigService, useValue: mockConfigService },
       ],

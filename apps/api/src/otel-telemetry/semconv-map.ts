@@ -231,6 +231,8 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
   betterdb_cve_findings: gauge('betterdb.cve.findings', '{finding}'),
   betterdb_cve_kev: gauge('betterdb.cve.kev', '{finding}'),
   betterdb_cve_dataset_stale: gauge('betterdb.cve.dataset_stale', '1'),
+  betterdb_otlp_metric_points_accepted_total: counter('betterdb.otlp.metric_points.accepted', '{point}'),
+  betterdb_otlp_metric_points_dropped_total: counter('betterdb.otlp.metric_points.dropped', '{point}'),
 };
 
 function isPassThrough(name: string): boolean {

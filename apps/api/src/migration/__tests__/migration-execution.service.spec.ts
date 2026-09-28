@@ -422,3 +422,44 @@ describe('MigrationExecutionService', () => {
     });
   });
 });
+
+describe('MigrationExecutionService with external connections', () => {
+  const EXTERNAL_MESSAGE =
+    'One or more selected instances only pushes OTLP metrics. Migration needs a live connection to both instances.';
+
+  it.each([
+    ['source', 'conn-1'],
+    ['target', 'conn-2'],
+  ])('rejects an external %s before probing or starting a worker', async (_side, externalId) => {
+    const registry = createMockRegistry();
+    registry.getConfig.mockImplementation((id: string) => ({
+      id,
+      name: id,
+      host: '127.0.0.1',
+      port: 6379,
+      createdAt: Date.now(),
+      connectionType: id === externalId ? 'external' : 'direct',
+    }));
+    const service = new MigrationExecutionService(registry as any);
+    const { runCommandMigration } = require('../execution/command-migration-worker');
+    const { spawn } = require('child_process');
+    runCommandMigration.mockClear();
+    spawn.mockClear();
+
+    for (const mode of ['command', 'redis_shake', 'redis_shake_sync'] as const) {
+      const error = await service
+        .startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode })
+        .catch((err: unknown) => err);
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect((error as Error).message).toBe(EXTERNAL_MESSAGE);
+    }
+    await flushProbe();
+
+    expect(registry.mockSourceAdapter.getInfo).not.toHaveBeenCalled();
+    expect(registry.mockTargetAdapter.getInfo).not.toHaveBeenCalled();
+    expect(registry.mockSourceAdapter.getClient).not.toHaveBeenCalled();
+    expect(runCommandMigration).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    expect((service as unknown as { jobs: Map<string, unknown> }).jobs.size).toBe(0);
+  });
+});

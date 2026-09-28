@@ -15,6 +15,10 @@ import { ApiHeader } from '@nestjs/swagger';
 import { LicenseGuard } from '@proprietary/licenses/license.guard';
 import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/decorators';
+import {
+  LiveConnectionGuard,
+  UseHeaderConnectionId,
+} from '../../apps/api/src/external-metrics/live-connection.guard';
 import { BulkDeleteService } from './bulk-delete.service';
 import { BulkDeleteExecuteDto, BulkDeletePreviewDto } from './dto/bulk-delete.dto';
 import { BulkDeleteValidationError } from './bulk-delete-engine';
@@ -27,6 +31,7 @@ const FEATURE = 'bulkDelete';
  * `bulkDelete` feature. Execute is async: POST returns a job id the UI polls.
  */
 @Controller('bulk-delete')
+@UseHeaderConnectionId()
 export class BulkDeleteController {
   constructor(private readonly bulkDelete: BulkDeleteService) {}
 
@@ -36,7 +41,7 @@ export class BulkDeleteController {
    * GET /jobs/:id. No keys are removed.
    */
   @Post('preview')
-  @UseGuards(LicenseGuard)
+  @UseGuards(LicenseGuard, LiveConnectionGuard)
   @RequiresFeature(FEATURE)
   @HttpCode(HttpStatus.ACCEPTED)
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID' })
@@ -53,7 +58,7 @@ export class BulkDeleteController {
 
   /** Start an async execute run; returns a job id to poll. */
   @Post('execute')
-  @UseGuards(LicenseGuard)
+  @UseGuards(LicenseGuard, LiveConnectionGuard)
   @RequiresFeature(FEATURE)
   @HttpCode(HttpStatus.ACCEPTED)
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID' })

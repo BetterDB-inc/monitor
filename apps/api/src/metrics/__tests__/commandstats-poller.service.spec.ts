@@ -6,6 +6,8 @@ import { RetentionPolicyService } from '../../retention/retention-policy.service
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { ConnectionContext } from '../../common/services/multi-connection-poller';
 import { PrometheusService } from '../../prometheus/prometheus.service';
+import { ExternalMetricsStore } from '../../external-metrics/external-metrics-store';
+import { ExternalMetricsAdapter } from '../../external-metrics/external-metrics.adapter';
 
 describe('CommandstatsPollerService', () => {
   let service: CommandstatsPollerService;
@@ -53,7 +55,7 @@ describe('CommandstatsPollerService', () => {
 
   it('does NOT persist anything on the first poll (baseline)', async () => {
     const client = clientWithCommandstats({
-      'cmdstat_get': 'calls=100,usec=500',
+      'cmdstat_get': 'calls=100,usec=500,usec_per_call=5.00',
     });
 
     await (service as any).pollConnection(makeCtx(client));
@@ -68,13 +70,13 @@ describe('CommandstatsPollerService', () => {
     (service as any).lastPruneByConnection.set('conn-1', 0);
 
     const client = clientWithCommandstats({
-      'cmdstat_get': 'calls=100,usec=500',
+      'cmdstat_get': 'calls=100,usec=500,usec_per_call=5.00',
     });
 
     await (service as any).pollConnection(makeCtx(client));
 
     client.getInfo.mockResolvedValueOnce({
-      commandstats: { 'cmdstat_get': 'calls=150,usec=800' },
+      commandstats: { 'cmdstat_get': 'calls=150,usec=800,usec_per_call=5.33' },
     });
 
     await (service as any).pollConnection(makeCtx(client));
@@ -85,16 +87,16 @@ describe('CommandstatsPollerService', () => {
 
   it('persists deltas on the second poll', async () => {
     const client = clientWithCommandstats({
-      'cmdstat_get': 'calls=100,usec=500',
-      'cmdstat_ft.search': 'calls=10,usec=2000',
+      'cmdstat_get': 'calls=100,usec=500,usec_per_call=5.00',
+      'cmdstat_ft.search': 'calls=10,usec=2000,usec_per_call=200.00',
     });
 
     await (service as any).pollConnection(makeCtx(client));
 
     client.getInfo.mockResolvedValueOnce({
       commandstats: {
-        'cmdstat_get': 'calls=150,usec=800',
-        'cmdstat_ft.search': 'calls=15,usec=3000',
+        'cmdstat_get': 'calls=150,usec=800,usec_per_call=5.33',
+        'cmdstat_ft.search': 'calls=15,usec=3000,usec_per_call=200.00',
       },
     });
 
@@ -111,13 +113,13 @@ describe('CommandstatsPollerService', () => {
   });
 
   it('records intervalMs between consecutive polls', async () => {
-    const client = clientWithCommandstats({ 'cmdstat_get': 'calls=10,usec=100' });
+    const client = clientWithCommandstats({ 'cmdstat_get': 'calls=10,usec=100,usec_per_call=10.00' });
 
     jest.spyOn(Date, 'now').mockReturnValueOnce(1000);
     await (service as any).pollConnection(makeCtx(client));
 
     client.getInfo.mockResolvedValueOnce({
-      commandstats: { 'cmdstat_get': 'calls=20,usec=200' },
+      commandstats: { 'cmdstat_get': 'calls=20,usec=200,usec_per_call=10.00' },
     });
     jest.spyOn(Date, 'now').mockReturnValueOnce(6000);
     await (service as any).pollConnection(makeCtx(client));
@@ -127,11 +129,11 @@ describe('CommandstatsPollerService', () => {
   });
 
   it('drops commands with zero delta from the persisted batch', async () => {
-    const client = clientWithCommandstats({ 'cmdstat_get': 'calls=100,usec=500' });
+    const client = clientWithCommandstats({ 'cmdstat_get': 'calls=100,usec=500,usec_per_call=5.00' });
     await (service as any).pollConnection(makeCtx(client));
 
     client.getInfo.mockResolvedValueOnce({
-      commandstats: { 'cmdstat_get': 'calls=100,usec=500' },
+      commandstats: { 'cmdstat_get': 'calls=100,usec=500,usec_per_call=5.00' },
     });
     await (service as any).pollConnection(makeCtx(client));
 
@@ -139,11 +141,11 @@ describe('CommandstatsPollerService', () => {
   });
 
   it('treats a counter reset (current < previous) as a new baseline, writes nothing', async () => {
-    const client = clientWithCommandstats({ 'cmdstat_get': 'calls=1000,usec=5000' });
+    const client = clientWithCommandstats({ 'cmdstat_get': 'calls=1000,usec=5000,usec_per_call=5.00' });
     await (service as any).pollConnection(makeCtx(client));
 
     client.getInfo.mockResolvedValueOnce({
-      commandstats: { 'cmdstat_get': 'calls=10,usec=50' }, // reset
+      commandstats: { 'cmdstat_get': 'calls=10,usec=50,usec_per_call=5.00' }, // reset
     });
     await (service as any).pollConnection(makeCtx(client));
 
@@ -151,8 +153,8 @@ describe('CommandstatsPollerService', () => {
   });
 
   it('tracks baselines per connection independently', async () => {
-    const clientA = clientWithCommandstats({ 'cmdstat_get': 'calls=10,usec=100' });
-    const clientB = clientWithCommandstats({ 'cmdstat_get': 'calls=50,usec=500' });
+    const clientA = clientWithCommandstats({ 'cmdstat_get': 'calls=10,usec=100,usec_per_call=10.00' });
+    const clientB = clientWithCommandstats({ 'cmdstat_get': 'calls=50,usec=500,usec_per_call=10.00' });
 
     await (service as any).pollConnection(makeCtx(clientA, 'conn-A'));
     await (service as any).pollConnection(makeCtx(clientB, 'conn-B'));
@@ -160,7 +162,7 @@ describe('CommandstatsPollerService', () => {
     expect(storage.saveCommandStatsSamples).not.toHaveBeenCalled();
 
     clientA.getInfo.mockResolvedValueOnce({
-      commandstats: { 'cmdstat_get': 'calls=15,usec=150' },
+      commandstats: { 'cmdstat_get': 'calls=15,usec=150,usec_per_call=10.00' },
     });
     await (service as any).pollConnection(makeCtx(clientA, 'conn-A'));
 
@@ -247,5 +249,49 @@ describe('CommandstatsPollerService', () => {
     });
     expect(byCommand.get.callsTotal).toBe(1000);
     expect(service.getSnapshot('unknown-conn')).toEqual([]);
+  });
+
+  describe('external connections', () => {
+    it('opts in and persists deltas from pushed cmd.calls / cmd.usec', async () => {
+      expect((service as any).supportsExternalConnections()).toBe(true);
+      const store = new ExternalMetricsStore();
+      const client = new ExternalMetricsAdapter('ext-1', store);
+      const push = (calls: string, usec: string) =>
+        store.apply('ext-1', [
+          { target: { kind: 'composite', section: 'commandstats', field: 'cmdstat_get', subkey: 'calls' }, value: calls, timeMs: Date.now() },
+          { target: { kind: 'composite', section: 'commandstats', field: 'cmdstat_get', subkey: 'usec' }, value: usec, timeMs: Date.now() },
+        ]);
+      push('100', '500');
+      await (service as any).pollConnection({ ...makeCtx(client, 'ext-1'), connectionType: 'external' });
+      push('150', '800');
+      await (service as any).pollConnection({ ...makeCtx(client, 'ext-1'), connectionType: 'external' });
+      expect(storage.saveCommandStatsSamples).toHaveBeenCalledTimes(1);
+    });
+
+    it('publishes no latency for a calls-only external entry', async () => {
+      const store = new ExternalMetricsStore();
+      const client = new ExternalMetricsAdapter('ext-1', store);
+      const pushCalls = (calls: string) =>
+        store.apply('ext-1', [
+          { target: { kind: 'composite', section: 'commandstats', field: 'cmdstat_get', subkey: 'calls' }, value: calls, timeMs: Date.now() },
+        ]);
+      pushCalls('100');
+      await (service as any).pollConnection({ ...makeCtx(client, 'ext-1'), connectionType: 'external' });
+      pushCalls('150');
+      await (service as any).pollConnection({ ...makeCtx(client, 'ext-1'), connectionType: 'external' });
+
+      const published = prometheus.updateCommandstatsMetrics.mock.calls.flatMap(
+        ([, entries]) => entries as Array<{ command: string; callsTotal: number; usecPerCall?: number }>,
+      );
+      expect(published.map((e) => e.callsTotal)).toEqual([100, 150]);
+      for (const entry of published) {
+        expect(entry.usecPerCall).toBeUndefined();
+      }
+      expect(storage.saveCommandStatsSamples).not.toHaveBeenCalled();
+      const [snapshot] = service.getSnapshot('ext-1');
+      expect(snapshot.callsTotal).toBe(150);
+      expect(snapshot.usecTotal).toBeUndefined();
+      expect(snapshot.usecPerCall).toBeUndefined();
+    });
   });
 });

@@ -39,6 +39,7 @@ export class CloudAuthGuardImpl implements CanActivate {
       path.startsWith('/v1/traces') ||
       path === '/prometheus/metrics' ||
       path === '/api/prometheus/metrics' ||
+      path.startsWith('/v1/external/metrics') ||
       path.startsWith('/assets/') ||
       path.startsWith('/favicon')
     ) {
