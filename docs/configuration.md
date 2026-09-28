@@ -11,6 +11,7 @@ This document provides comprehensive configuration information for BetterDB Moni
 
 - [Multi-Connection Support](#multi-connection-support)
 - [Environment Variables](#environment-variables)
+  - [Cluster Auto-Registration](#cluster-auto-registration)
   - [Data Retention](#data-retention)
 - [Docker Usage](#docker-usage)
 - [HTTP Endpoints](#http-endpoints)
@@ -261,6 +262,12 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 | Variable                            | Required | Default | Description                                      |
 | ----------------------------------- | -------- | ------- | ------------------------------------------------ |
 | `CLIENT_ANALYTICS_POLL_INTERVAL_MS` | No       | `60000` | Client analytics polling interval (milliseconds) |
+
+### Cluster Auto-Registration
+
+| Variable                      | Required | Default | Description                                                                                                                     |
+| ------------------------------ | -------- | ------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `CLUSTER_AUTO_REGISTER_NODES` | No       | `false` | Default for whether a cluster connection auto-registers its nodes as child connections; overridable per connection. See [Cluster Auto-Registration](cluster-auto-registration.md) |
 
 ### Data Retention
 
