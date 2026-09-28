@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Delete, Param, Body, HttpException, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Param, Body, BadRequestException, HttpException, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
 import { CapabilityRetryVerdict, RuntimeCapabilities } from '@betterdb/shared';
 import { ConnectionRegistry } from './connection-registry.service';
@@ -132,6 +132,7 @@ export class ConnectionsController {
       await this.registry.setDefault(id);
       return { success: true };
     } catch (error) {
+      if (error instanceof BadRequestException) throw error;
       throw new HttpException(
         error instanceof Error ? error.message : 'Failed to set default',
         HttpStatus.NOT_FOUND,

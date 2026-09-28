@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional, NotFoundException, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { ClusterMembership, ConnectionStatus, CreateConnectionRequest, CredentialStatus, TestConnectionResponse, DatabaseConnectionConfig, DatabaseConnectionType } from '@betterdb/shared';
@@ -21,6 +21,10 @@ function sameHost(a: string, b: string): boolean {
 
 function isRetiredAuto(config: DatabaseConnectionConfig): boolean {
   return config.membership?.origin === 'auto' && config.membership.retiredAt !== undefined;
+}
+
+function isDefaultCandidate(config: DatabaseConnectionConfig): boolean {
+  return config.membership?.origin !== 'auto' && config.membership?.retiredAt === undefined;
 }
 
 @Injectable()
@@ -189,9 +193,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       }
 
       // Ensure we have a default
-      if (!this.defaultId && savedConnections.length > 0) {
-        this.defaultId = savedConnections[0].id;
-        await this.setDefault(this.defaultId);
+      const fallbackId = this.defaultId ? null : this.pickDefaultCandidate();
+      if (fallbackId) {
+        this.defaultId = fallbackId;
+        await this.setDefault(fallbackId);
       }
     }
 
@@ -629,9 +634,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
 
     if (this.defaultId === id) {
-      const remaining = Array.from(this.configs.keys());
-      if (remaining.length > 0) {
-        await this.setDefault(remaining[0]);
+      const fallbackId = this.pickDefaultCandidate();
+      if (fallbackId) {
+        await this.setDefault(fallbackId);
       } else {
         this.defaultId = null;
       }
@@ -645,6 +650,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       throw new NotFoundException(
         `Connection '${id}' not found. Use GET /connections to list available connections.`
       );
+    }
+    if (this.configs.get(id)!.membership?.origin === 'auto') {
+      throw new BadRequestException(`Connection '${id}' is an auto-registered cluster node and cannot be the default.`);
     }
 
     // Unmark old default (create new object instead of mutating)
@@ -1019,6 +1027,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       }
     }
     await this.setMembership(id, { ...membership, retiredAt: Date.now() });
+    if (this.defaultId === id) {
+      const fallbackId = this.pickDefaultCandidate();
+      if (fallbackId) await this.setDefault(fallbackId);
+    }
   }
 
   async reactivateChild(id: string, nodeId: string): Promise<void> {
@@ -1051,6 +1063,13 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       this.configs.set(id, { ...config, autoRegisterNodes });
       await this.storage.updateConnection(id, { autoRegisterNodes });
     });
+  }
+
+  private pickDefaultCandidate(): string | null {
+    for (const config of this.configs.values()) {
+      if (isDefaultCandidate(config)) return config.id;
+    }
+    return null;
   }
 
   private requireMembership(id: string): ClusterMembership {

@@ -1,5 +1,6 @@
 jest.mock('../../database/adapters/unified.adapter');
 
+import { BadRequestException } from '@nestjs/common';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connection-registry.service';
 import { UnifiedDatabaseAdapter } from '../../database/adapters/unified.adapter';
@@ -21,7 +22,12 @@ function build() {
   return { registry, storage };
 }
 
-type Internals = { configs: Map<string, DatabaseConnectionConfig>; connections: Map<string, unknown> };
+type Internals = {
+  configs: Map<string, DatabaseConnectionConfig>;
+  connections: Map<string, unknown>;
+  defaultId: string | null;
+  loadConnections: () => Promise<void>;
+};
 
 function put(registry: ConnectionRegistry, config: Partial<DatabaseConnectionConfig> & { id: string }): void {
   const full: DatabaseConnectionConfig = { name: config.id, host: 'h', port: 1, isDefault: false, createdAt: 1, ...config };
@@ -159,5 +165,43 @@ describe('ConnectionRegistry membership', () => {
     release();
     await Promise.all([first, second]);
     expect(order).toEqual(['first-start', 'first-end', 'second']);
+  });
+
+  it('refuses to make an auto child the default connection', async () => {
+    const { registry } = build();
+    put(registry, seed);
+    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto' } });
+    await expect(registry.setDefault('auto')).rejects.toBeInstanceOf(BadRequestException);
+    expect(registry.getDefaultId()).toBeNull();
+  });
+
+  it('falls back to an active non-auto connection when the default is removed', async () => {
+    const { registry } = build();
+    put(registry, { id: 'first', isDefault: true });
+    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto' } });
+    put(registry, { id: 'retired', membership: { seedId: 'seed', nodeId: 'r', origin: 'adopted', retiredAt: 5 } });
+    put(registry, { id: 'manual' });
+    (registry as unknown as Internals).defaultId = 'first';
+    await registry.removeConnection('first');
+    expect(registry.getDefaultId()).toBe('manual');
+  });
+
+  it('picks an active non-auto connection as the startup default', async () => {
+    const { registry, storage } = build();
+    storage.getConnections.mockResolvedValue([
+      { id: 'auto', name: 'auto', host: 'h', port: 1, isDefault: false, createdAt: 1, membership: { seedId: 'seed', nodeId: 'a', origin: 'auto' } },
+      { id: 'seed', name: 'seed', host: 'h', port: 2, isDefault: false, createdAt: 1 },
+    ]);
+    await (registry as unknown as Internals).loadConnections();
+    expect(registry.getDefaultId()).toBe('seed');
+  });
+
+  it('moves the default off a child when it is retired', async () => {
+    const { registry } = build();
+    put(registry, seed);
+    put(registry, { id: 'adopted', membership: { seedId: 'seed', nodeId: 'b', origin: 'adopted' } });
+    await registry.setDefault('adopted');
+    await registry.retireChild('adopted');
+    expect(registry.getDefaultId()).toBe('seed');
   });
 });

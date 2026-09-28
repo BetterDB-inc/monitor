@@ -1,4 +1,4 @@
-import { HttpException, HttpStatus } from '@nestjs/common';
+import { BadRequestException, HttpException, HttpStatus } from '@nestjs/common';
 import { ConnectionsController } from '../connections.controller';
 import { ConnectionRegistry } from '../connection-registry.service';
 import {
@@ -23,6 +23,7 @@ function setup(opts: SetupOptions = {}) {
     getConfig: jest.fn().mockReturnValue(opts.hasConfig === false ? undefined : { id: 'conn-1' }),
     get: jest.fn().mockReturnValue(adapter),
     setAutoRegister: jest.fn(),
+    setDefault: jest.fn(),
     list: jest.fn().mockReturnValue([]),
     getDefaultId: jest.fn().mockReturnValue(null),
   } as unknown as ConnectionRegistry;
@@ -220,5 +221,13 @@ describe('ConnectionsController.list', () => {
     const { controller, registry } = setup();
     controller.list();
     expect(registry.list).toHaveBeenCalledWith({ includeRetired: true });
+  });
+});
+
+describe('ConnectionsController.setDefault', () => {
+  it('passes a bad request from the registry through as 400', async () => {
+    const { controller, registry } = setup();
+    jest.mocked(registry.setDefault).mockRejectedValue(new BadRequestException('auto child'));
+    await expect(controller.setDefault('auto')).rejects.toMatchObject({ status: HttpStatus.BAD_REQUEST });
   });
 });
