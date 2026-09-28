@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
-import { ConnectionStatus, CreateConnectionRequest, TestConnectionResponse, DatabaseConnectionConfig, DatabaseConnectionType } from '@betterdb/shared';
+import { ClusterMembership, ConnectionStatus, CreateConnectionRequest, CredentialStatus, TestConnectionResponse, DatabaseConnectionConfig, DatabaseConnectionType } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { UnifiedDatabaseAdapter } from '../database/adapters/unified.adapter';
@@ -19,6 +19,10 @@ function sameHost(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 
+function isRetiredAuto(config: DatabaseConnectionConfig): boolean {
+  return config.membership?.origin === 'auto' && config.membership.retiredAt !== undefined;
+}
+
 @Injectable()
 export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ConnectionRegistry.name);
@@ -27,6 +31,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   private defaultId: string | null = null;
   private readonly encryption: EnvelopeEncryptionService | null;
   private startupConnectionErrors: Array<{ name: string; host: string; port: number; error: string }> = [];
+  private readonly seedLocks = new Map<string, Promise<unknown>>();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -125,6 +130,12 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
           if (config.isDefault) {
             this.defaultId = config.id;
           }
+          continue;
+        }
+
+        if (isRetiredAuto(decryptedConfig)) {
+          this.configs.set(config.id, decryptedConfig);
+          this.connections.set(config.id, this.createAdapter(decryptedConfig));
           continue;
         }
 
@@ -575,7 +586,24 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     if (id === ENV_DEFAULT_ID) {
       throw new Error('Cannot remove the default environment connection');
     }
+    const config = this.configs.get(id);
+    if (config && !config.membership) {
+      await this.withSeedLock(id, async () => {
+        for (const member of this.listMembers(id)) {
+          if (member.membership?.origin === 'auto') {
+            await this.removeOne(member.id);
+          } else {
+            await this.setMembership(member.id, undefined);
+          }
+        }
+        await this.removeOne(id);
+      });
+      return;
+    }
+    await this.removeOne(id);
+  }
 
+  private async removeOne(id: string): Promise<void> {
     const removedConfig = this.configs.get(id);
     const connection = this.connections.get(id);
     if (connection) {
@@ -703,10 +731,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  list(): ConnectionStatus[] {
+  list(options: { includeRetired?: boolean } = {}): ConnectionStatus[] {
     const result: ConnectionStatus[] = [];
 
     for (const [id, config] of this.configs.entries()) {
+      if (!options.includeRetired && isRetiredAuto(config)) continue;
       const connection = this.connections.get(id);
       const isConnected = connection?.isConnected() ?? false;
 
@@ -719,6 +748,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
             version: caps.version,
             supportsCommandLog: caps.hasCommandLog,
             supportsSlotStats: caps.hasSlotStats,
+            clusterEnabled: caps.clusterEnabled,
           };
         } catch {
           // Capabilities unavailable
@@ -753,6 +783,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         credentialStatus: config.credentialStatus,
         credentialError: config.credentialError,
         connectionType: config.host === 'agent' ? 'agent' : (config.connectionType ?? 'direct'),
+        autoRegisterNodes: config.autoRegisterNodes,
+        membership: config.membership,
       });
     }
 
@@ -884,6 +916,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   findIdByHostPort(host: string, port: number): string | null {
     for (const [id, config] of this.configs.entries()) {
+      if (isRetiredAuto(config)) continue;
       if (sameHost(config.host, host) && config.port === port) {
         return id;
       }
@@ -894,10 +927,145 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   findByHostPort(host: string, port: number): { id: string; connectionType: DatabaseConnectionType } | null {
     let directId: string | null = null;
     for (const [id, config] of this.configs.entries()) {
+      if (isRetiredAuto(config)) continue;
       if (!sameHost(config.host, host) || config.port !== port) continue;
       if (config.connectionType === 'external') return { id, connectionType: 'external' };
       directId ??= id;
     }
     return directId ? { id: directId, connectionType: 'direct' } : null;
+  }
+
+  findConfigByHostPort(host: string, port: number): DatabaseConnectionConfig | null {
+    for (const config of this.configs.values()) {
+      if (isRetiredAuto(config)) continue;
+      if (sameHost(config.host, host) && config.port === port) return config;
+    }
+    return null;
+  }
+
+  listMembers(seedId: string): DatabaseConnectionConfig[] {
+    return Array.from(this.configs.values()).filter((config) => config.membership?.seedId === seedId);
+  }
+
+  async withSeedLock<T>(seedId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.seedLocks.get(seedId) ?? Promise.resolve();
+    const run = previous.then(fn);
+    const tail = run.catch(() => undefined);
+    this.seedLocks.set(seedId, tail);
+    try {
+      return await run;
+    } finally {
+      if (this.seedLocks.get(seedId) === tail) this.seedLocks.delete(seedId);
+    }
+  }
+
+  async addManagedChild(seedId: string, node: { host: string; port: number; nodeId: string }): Promise<string> {
+    const seed = this.configs.get(seedId);
+    if (!seed) {
+      throw new NotFoundException(`Connection '${seedId}' not found.`);
+    }
+    const now = Date.now();
+    const config: DatabaseConnectionConfig = {
+      id: randomUUID(),
+      name: `${seed.name} · ${node.host}:${node.port}`,
+      host: node.host,
+      port: node.port,
+      username: seed.username,
+      password: seed.password,
+      dbIndex: 0,
+      tls: seed.tls,
+      connectionType: 'direct',
+      isDefault: false,
+      createdAt: now,
+      updatedAt: now,
+      membership: { seedId, nodeId: node.nodeId, origin: 'auto' },
+    };
+    const adapter = this.createAdapter(config);
+    let credentialStatus: CredentialStatus = 'valid';
+    let credentialError: string | undefined;
+    try {
+      await adapter.connect();
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      const isAuthError = this.isAuthenticationError(errorMsg);
+      credentialStatus = isAuthError ? 'invalid' : 'unknown';
+      credentialError = isAuthError ? errorMsg : undefined;
+      this.logger.warn(`Auto-registered ${config.name} but could not connect: ${errorMsg}`);
+    }
+    await this.storage.saveConnection(this.encryptConfig(config));
+    this.configs.set(config.id, { ...config, credentialStatus, credentialError });
+    this.connections.set(config.id, adapter);
+    this.logger.log(`Auto-registered cluster node ${config.name}`);
+    return config.id;
+  }
+
+  async adoptChild(id: string, seedId: string, nodeId: string): Promise<void> {
+    await this.setMembership(id, { seedId, nodeId, origin: 'adopted' });
+  }
+
+  async refreshChildNodeId(id: string, nodeId: string): Promise<void> {
+    const membership = this.requireMembership(id);
+    await this.setMembership(id, { ...membership, nodeId });
+  }
+
+  async retireChild(id: string): Promise<void> {
+    const membership = this.requireMembership(id);
+    if (membership.origin === 'auto') {
+      try {
+        await this.connections.get(id)?.disconnect();
+      } catch (err) {
+        this.logger.warn(`Failed to disconnect ${id} on retire: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    await this.setMembership(id, { ...membership, retiredAt: Date.now() });
+  }
+
+  async reactivateChild(id: string, nodeId: string): Promise<void> {
+    const membership = this.requireMembership(id);
+    const config = this.configs.get(id)!;
+    const { retiredAt: _retiredAt, ...active } = membership;
+    if (membership.origin === 'auto') {
+      const adapter = this.createAdapter(config);
+      try {
+        await adapter.connect();
+      } catch (err) {
+        this.logger.warn(`Reactivated ${config.name} but could not connect: ${err instanceof Error ? err.message : err}`);
+      }
+      this.connections.set(id, adapter);
+      this.runtimeCapabilityTracker.resetConnection(id);
+    }
+    await this.setMembership(id, { ...active, nodeId });
+  }
+
+  async setAutoRegister(id: string, value: boolean | null): Promise<void> {
+    await this.withSeedLock(id, async () => {
+      const config = this.configs.get(id);
+      if (!config) {
+        throw new NotFoundException(`Connection '${id}' not found.`);
+      }
+      if (config.membership || config.connectionType === 'external' || config.host === 'agent') {
+        throw new Error('Auto-registration can only be set on a seed connection');
+      }
+      const autoRegisterNodes = value === null ? undefined : value;
+      this.configs.set(id, { ...config, autoRegisterNodes });
+      await this.storage.updateConnection(id, { autoRegisterNodes });
+    });
+  }
+
+  private requireMembership(id: string): ClusterMembership {
+    const membership = this.configs.get(id)?.membership;
+    if (!membership) {
+      throw new NotFoundException(`Connection '${id}' is not a cluster member.`);
+    }
+    return membership;
+  }
+
+  private async setMembership(id: string, membership: ClusterMembership | undefined): Promise<void> {
+    const config = this.configs.get(id);
+    if (!config) {
+      throw new NotFoundException(`Connection '${id}' not found.`);
+    }
+    this.configs.set(id, { ...config, membership });
+    await this.storage.updateConnection(id, { membership });
   }
 }
