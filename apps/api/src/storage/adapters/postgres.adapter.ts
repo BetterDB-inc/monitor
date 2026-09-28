@@ -2,7 +2,7 @@ import { Pool, PoolConfig } from 'pg';
 import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
 import { randomUUID } from 'crypto';
-import { parseSshTunnel } from '@betterdb/shared';
+import { parseSshTunnel, parseMembership } from '@betterdb/shared';
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
   AnomalyQueryOptions,
@@ -1878,6 +1878,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS ssh_tunnel TEXT;
 
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS connection_type TEXT;
+
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS auto_register_nodes BOOLEAN;
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS membership TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_connections_is_default ON connections(is_default);
 
@@ -4374,8 +4377,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     await this.pool.query(
       `
-      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, ssh_tunnel, connection_type, is_default, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, ssh_tunnel, connection_type, auto_register_nodes, membership, is_default, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
       ON CONFLICT(id) DO UPDATE SET
         name = EXCLUDED.name,
         host = EXCLUDED.host,
@@ -4387,6 +4390,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         tls = EXCLUDED.tls,
         ssh_tunnel = EXCLUDED.ssh_tunnel,
         connection_type = EXCLUDED.connection_type,
+        auto_register_nodes = EXCLUDED.auto_register_nodes,
+        membership = EXCLUDED.membership,
         is_default = EXCLUDED.is_default,
         updated_at = EXCLUDED.updated_at
     `,
@@ -4402,6 +4407,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         config.tls || false,
         config.sshTunnel ? JSON.stringify(config.sshTunnel) : null,
         config.connectionType ?? null,
+        config.autoRegisterNodes ?? null,
+        config.membership ? JSON.stringify(config.membership) : null,
         config.isDefault || false,
         config.createdAt,
         config.updatedAt || null,
@@ -4426,6 +4433,11 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       tls: row.tls,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
       connectionType: row.connection_type === 'external' ? 'external' : 'direct',
+      autoRegisterNodes:
+        row.auto_register_nodes === null || row.auto_register_nodes === undefined
+          ? undefined
+          : row.auto_register_nodes,
+      membership: parseMembership(row.membership),
       isDefault: row.is_default,
       createdAt: Number(row.created_at),
       updatedAt: row.updated_at ? Number(row.updated_at) : undefined,
@@ -4451,6 +4463,11 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       tls: row.tls,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
       connectionType: row.connection_type === 'external' ? 'external' : 'direct',
+      autoRegisterNodes:
+        row.auto_register_nodes === null || row.auto_register_nodes === undefined
+          ? undefined
+          : row.auto_register_nodes,
+      membership: parseMembership(row.membership),
       isDefault: row.is_default,
       createdAt: Number(row.created_at),
       updatedAt: row.updated_at ? Number(row.updated_at) : undefined,
@@ -4500,6 +4517,14 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (updates.isDefault !== undefined) {
       setClauses.push(`is_default = $${paramIndex++}`);
       params.push(updates.isDefault);
+    }
+    if ('autoRegisterNodes' in updates) {
+      setClauses.push(`auto_register_nodes = $${paramIndex++}`);
+      params.push(updates.autoRegisterNodes ?? null);
+    }
+    if ('membership' in updates) {
+      setClauses.push(`membership = $${paramIndex++}`);
+      params.push(updates.membership ? JSON.stringify(updates.membership) : null);
     }
 
     if (setClauses.length === 0) return;

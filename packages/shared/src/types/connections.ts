@@ -71,6 +71,15 @@ export type SshTunnelInput = Omit<SshTunnelConfig, 'secretsEncrypted'>;
 
 export type DatabaseConnectionType = 'direct' | 'external';
 
+export type ClusterMembershipOrigin = 'auto' | 'adopted';
+
+export interface ClusterMembership {
+  seedId: string;
+  nodeId: string;
+  origin: ClusterMembershipOrigin;
+  retiredAt?: number;
+}
+
 /**
  * Connection configuration for storing database connections
  */
@@ -91,6 +100,8 @@ export interface DatabaseConnectionConfig {
   createdAt: number;
   updatedAt?: number;
   connectionType?: DatabaseConnectionType;
+  autoRegisterNodes?: boolean;
+  membership?: ClusterMembership;
   /** Status of credential validation (not persisted, set at runtime) */
   credentialStatus?: CredentialStatus;
   /** Error message when credentials are invalid */
@@ -117,6 +128,28 @@ export function parseSshTunnel(value: unknown): SshTunnelConfig | undefined {
   return obj as SshTunnelConfig;
 }
 
+export function parseMembership(value: unknown): ClusterMembership | undefined {
+  if (value === null || value === undefined || value === '') return undefined;
+  let obj: unknown = value;
+  if (typeof value === 'string') {
+    try {
+      obj = JSON.parse(value);
+    } catch {
+      return undefined;
+    }
+  }
+  if (!obj || typeof obj !== 'object') return undefined;
+  const m = obj as Record<string, unknown>;
+  if (typeof m.seedId !== 'string' || typeof m.nodeId !== 'string') return undefined;
+  if (m.origin !== 'auto' && m.origin !== 'adopted') return undefined;
+  return {
+    seedId: m.seedId,
+    nodeId: m.nodeId,
+    origin: m.origin,
+    ...(typeof m.retiredAt === 'number' ? { retiredAt: m.retiredAt } : {}),
+  };
+}
+
 /**
  * Connection capabilities
  */
@@ -125,6 +158,7 @@ export interface ConnectionCapabilities {
   version: string;
   supportsCommandLog?: boolean;
   supportsSlotStats?: boolean;
+  clusterEnabled?: boolean;
 }
 
 /**
@@ -159,6 +193,8 @@ export interface ConnectionStatus {
   updatedAt?: number;
   isConnected: boolean;
   connectionType?: 'direct' | 'agent' | 'external';
+  autoRegisterNodes?: boolean;
+  membership?: ClusterMembership;
   capabilities?: ConnectionCapabilities;
   runtimeCapabilities?: import('./health').RuntimeCapabilities;
   /** Status of credential validation */

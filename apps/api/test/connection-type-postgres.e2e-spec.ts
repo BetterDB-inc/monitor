@@ -92,4 +92,14 @@ describePostgres('connection type storage — postgres', () => {
     await expect(second.initialize()).resolves.not.toThrow();
     await second.close();
   });
+
+  it('round-trips membership and the auto-register flag', async () => {
+    const membership = { seedId: 'seed', nodeId: 'abc', origin: 'adopted' as const };
+    await adapter.saveConnection({ id: 'mem', name: 'M', host: 'h', port: 7001, isDefault: false, createdAt: 3, autoRegisterNodes: true, membership });
+    expect((await adapter.getConnection('mem'))?.membership).toEqual(membership);
+    expect((await adapter.getConnection('mem'))?.autoRegisterNodes).toBe(true);
+    await adapter.updateConnection('mem', { membership: undefined, autoRegisterNodes: undefined });
+    expect((await adapter.getConnection('mem'))?.membership).toBeUndefined();
+    expect((await adapter.getConnection('mem'))?.autoRegisterNodes).toBeUndefined();
+  });
 });
