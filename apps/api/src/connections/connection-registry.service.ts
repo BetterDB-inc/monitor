@@ -330,7 +330,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    if (this.encryption && config.nodePassword) {
+    if (this.encryption && config.nodePassword && !config.nodePasswordEncrypted) {
       result = {
         ...result,
         nodePassword: this.encryption.encrypt(config.nodePassword),
@@ -447,23 +447,19 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     if (!config.nodePasswordEncrypted || !config.nodePassword) {
       return decrypted;
     }
-    return { ...decrypted, nodePassword: this.decryptNodePassword(config.name, config.nodePassword), nodePasswordEncrypted: false };
-  }
-
-  private decryptNodePassword(name: string, ciphertext: string): string | undefined {
     if (!this.encryption) {
       this.logger.error(
-        `Cannot decrypt data node password for ${name}: ENCRYPTION_KEY not set but password is encrypted. ` +
+        `Cannot decrypt data node password for ${config.name}: ENCRYPTION_KEY not set but password is encrypted. ` +
         'Discovered data nodes will use the seed credentials.'
       );
-      return undefined;
+      return { ...decrypted, nodePassword: undefined, nodePasswordEncrypted: false };
     }
     try {
-      return this.encryption.decrypt(ciphertext);
+      return { ...decrypted, nodePassword: this.encryption.decrypt(config.nodePassword), nodePasswordEncrypted: false };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Decryption failed';
-      this.logger.error(`Failed to decrypt data node password for ${name}: ${errorMsg}`);
-      return undefined;
+      this.logger.error(`Failed to decrypt data node password for ${config.name}: ${errorMsg}`);
+      return { ...decrypted, nodePassword: config.nodePassword, nodePasswordEncrypted: true };
     }
   }
 
@@ -1040,7 +1036,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       host: node.host,
       port: node.port,
       username: seed.nodeUsername ?? seed.username,
-      password: seed.nodePassword ?? seed.password,
+      password: seed.nodePasswordEncrypted ? seed.password : seed.nodePassword ?? seed.password,
       dbIndex: 0,
       tls: seed.tls,
       connectionType: 'direct',

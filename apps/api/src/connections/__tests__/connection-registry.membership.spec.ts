@@ -128,6 +128,13 @@ describe('ConnectionRegistry membership', () => {
     expect(registry.getConfig(id)).toEqual(expect.objectContaining({ username: 'u', password: 'p' }));
   });
 
+  it('falls back to the seed password when the data node password is still ciphertext', async () => {
+    const { registry } = build();
+    put(registry, { ...seed, nodeUsername: 'app', nodePassword: 'not-an-envelope', nodePasswordEncrypted: true });
+    const id = await registry.addManagedChild('seed', { host: 'h', port: 6379, nodeId: 'n', source: 'sentinel' });
+    expect(registry.getConfig(id)).toEqual(expect.objectContaining({ username: 'app', password: 'p' }));
+  });
+
   it('drops an encrypted data node password when no key is configured', async () => {
     const { registry, storage } = build();
     storage.getConnections.mockResolvedValue([{ ...seed, isDefault: true, createdAt: 1, nodePassword: 'ciphertext', nodePasswordEncrypted: true }]);

@@ -675,7 +675,7 @@ describe('ConnectionRegistry with encryption', () => {
     expect(config?.nodePasswordEncrypted).toBe(false);
   });
 
-  it('drops an undecryptable data node password without failing the seed credentials', async () => {
+  it('keeps the ciphertext for an undecryptable data node password', async () => {
     mockStorage.getConnections.mockResolvedValue([{
       id: 'broken-sentinel',
       name: 'Broken Sentinel',
@@ -690,9 +690,32 @@ describe('ConnectionRegistry with encryption', () => {
     await registry.onModuleInit();
 
     const config = registry.getConfig('broken-sentinel');
-    expect(config?.nodePassword).toBeUndefined();
+    expect(config?.nodePassword).toBe('not-an-envelope');
+    expect(config?.nodePasswordEncrypted).toBe(true);
     expect(config?.credentialStatus).not.toBe('decryption_failed');
     expect(registry.get('broken-sentinel').isConnected()).toBe(true);
+  });
+
+  it('keeps the stored ciphertext when re-saving after a failed node password decrypt', async () => {
+    mockStorage.getConnections.mockResolvedValue([{
+      id: 'broken-sentinel',
+      name: 'Broken Sentinel',
+      host: 'sentinel.example.com',
+      port: 26379,
+      nodePassword: 'not-an-envelope',
+      nodePasswordEncrypted: true,
+      isDefault: true,
+      createdAt: Date.now(),
+    }]);
+
+    await registry.onModuleInit();
+
+    const decryptedConfig = registry.getConfig('broken-sentinel')!;
+    await mockStorage.saveConnection(registry['encryptConfig'](decryptedConfig));
+
+    const saved = mockStorage.saveConnection.mock.calls.at(-1)![0];
+    expect(saved.nodePassword).toBe('not-an-envelope');
+    expect(saved.nodePasswordEncrypted).toBe(true);
   });
 
   it('encrypts SSH tunnel secrets and ignores a client-supplied secretsEncrypted flag', async () => {
