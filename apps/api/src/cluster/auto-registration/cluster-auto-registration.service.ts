@@ -127,7 +127,7 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
       id: config.id,
       connectionType: config.connectionType === 'external' ? 'external' : 'direct',
       membership: config.membership,
-      isSeed: config.autoRegisterNodes === true || this.connectionRegistry.listMembers(config.id).length > 0,
+      isSeed: this.isEnabled(config) || this.connectionRegistry.listMembers(config.id).length > 0,
     };
   }
 

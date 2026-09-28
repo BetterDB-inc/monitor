@@ -92,6 +92,19 @@ describe('ClusterAutoRegistrationService', () => {
     expect(withMembers.registry.addManagedChild).not.toHaveBeenCalled();
   });
 
+  it('treats an unset connection as a seed when the env default is on', async () => {
+    const other: DatabaseConnectionConfig = { id: 'other', name: 'other', host: '10.0.0.2', port: 7002, isDefault: false, createdAt: 1 };
+    const on = build({ seed: { autoRegisterNodes: undefined }, envDefault: 'true', nodes: clusterOf(1) });
+    on.registry.findConfigByHostPort.mockReturnValue(other);
+    await on.service.reconcile('seed');
+    expect(on.registry.adoptChild).not.toHaveBeenCalled();
+
+    const optedOut = build({ envDefault: 'true', nodes: clusterOf(1) });
+    optedOut.registry.findConfigByHostPort.mockReturnValue({ ...other, autoRegisterNodes: false });
+    await optedOut.service.reconcile('seed');
+    expect(optedOut.registry.adoptChild).toHaveBeenCalledWith('other', 'seed', 'n2');
+  });
+
   it('does nothing when discovery fails or returns no nodes', async () => {
     const members = [child('c2', '10.0.0.2', 7002)];
     for (const nodes of [new Error('CLUSTERDOWN'), []]) {
