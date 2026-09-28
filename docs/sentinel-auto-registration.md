@@ -36,13 +36,14 @@ one, once a connection is recognized as a Sentinel:
 ## Data node credentials
 
 Sentinel itself is typically unauthenticated or uses different credentials
-than the data nodes it monitors. Because of that, a Sentinel seed's own
-username and password are used only to talk to Sentinel — they are not
-reused for the discovered primaries and replicas.
+than the data nodes it monitors, so a seed can carry separate data node
+credentials for the discovered primaries and replicas.
 
 The **Add Connection** dialog shows a **Data node credentials** section
-(node username / node password) once a test confirms Sentinel mode; these
-are the credentials every auto-registered child connects with. They are
+(node username / node password) once a test confirms Sentinel mode. Each
+field falls back independently: a child uses the node username if set,
+otherwise the seed's username, and likewise for the password. Set both
+node fields when the data nodes use a different user than Sentinel. They are
 only sent when the tested connection is actually a Sentinel — changing the
 host afterwards and re-testing against a non-Sentinel target clears them
 before the connection is saved.
