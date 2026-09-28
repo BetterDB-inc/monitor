@@ -250,6 +250,7 @@ export const envSchema = z
     OTEL_METRICS_EXPORT_INTERVAL_MS: z.coerce.number().int().min(1000).default(15000),
 
     CLUSTER_AUTO_REGISTER_NODES: z.string().default('false').transform(isTrueFlag),
+    SENTINEL_AUTO_REGISTER_NODES: z.string().default('false').transform(isTrueFlag),
 
     // Cloud mode (set by the hosted deployment; gates per-tenant auth)
     CLOUD_MODE: z.string().optional(),

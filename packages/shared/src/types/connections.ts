@@ -250,6 +250,7 @@ export interface ConnectionListResponse {
   connections: ConnectionStatus[];
   currentId: string | null;
   autoRegisterNodesDefault: boolean;
+  autoRegisterSentinelNodesDefault: boolean;
 }
 
 /**

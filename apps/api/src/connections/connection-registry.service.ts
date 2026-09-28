@@ -940,6 +940,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return isTrueFlag(this.configService.get<string>('CLUSTER_AUTO_REGISTER_NODES'));
   }
 
+  getAutoRegisterSentinelNodesDefault(): boolean {
+    return isTrueFlag(this.configService.get<string>('SENTINEL_AUTO_REGISTER_NODES'));
+  }
+
   isEnvDefault(id: string): boolean {
     return id === ENV_DEFAULT_ID;
   }
