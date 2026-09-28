@@ -190,11 +190,40 @@ describe('ClusterAutoRegistrationService', () => {
     jest.useFakeTimers();
     try {
       const { service, registry, discovery } = build({ nodes: clusterOf(1) });
+      const other: DatabaseConnectionConfig = { id: 'other', name: 'other', host: 'other.local', port: 7101, isDefault: false, createdAt: 1, autoRegisterNodes: true };
+      const getSeed = registry.getConfig.getMockImplementation()!;
+      registry.getConfig.mockImplementation((id: string) => (id === 'other' ? other : getSeed(id)));
       discovery.discoverNodes.mockReturnValueOnce(new Promise<DiscoveredNode[]>(() => undefined));
       const hung = service.reconcile('seed');
-      const next = service.reconcile('seed');
+      const next = service.reconcile('other');
       await jest.advanceTimersByTimeAsync(15_000);
       await Promise.all([hung, next]);
+      expect(registry.addManagedChild).toHaveBeenCalledTimes(1);
+      expect(registry.addManagedChild).toHaveBeenCalledWith('other', expect.anything());
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('skips discovery while a timed-out one is still pending, and resumes once it settles', async () => {
+    jest.useFakeTimers();
+    try {
+      const { service, registry, discovery } = build({ nodes: clusterOf(1) });
+      let settle: (nodes: DiscoveredNode[]) => void = () => undefined;
+      discovery.discoverNodes.mockReturnValueOnce(new Promise<DiscoveredNode[]>((resolve) => { settle = resolve; }));
+
+      const first = service.reconcile('seed');
+      await jest.advanceTimersByTimeAsync(15_000);
+      await first;
+      await service.reconcile('seed');
+      await service.reconcile('seed');
+      expect(discovery.discoverNodes).toHaveBeenCalledTimes(1);
+      expect(registry.addManagedChild).not.toHaveBeenCalled();
+
+      settle([]);
+      await jest.advanceTimersByTimeAsync(0);
+      await service.reconcile('seed');
+      expect(discovery.discoverNodes).toHaveBeenCalledTimes(2);
       expect(registry.addManagedChild).toHaveBeenCalledTimes(1);
     } finally {
       jest.useRealTimers();
