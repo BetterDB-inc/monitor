@@ -169,8 +169,18 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
       id: config.id,
       connectionType: config.connectionType === 'external' ? 'external' : 'direct',
       membership: config.membership,
-      isSeed: members.length > 0 || (kind !== null ? this.isEnabled(config, kind) : this.isEnabledByAnySource(config)),
+      isSeed:
+        members.length > 0 ||
+        (kind !== null ? this.isEnabled(config, kind) : !this.isOwnerConnected(config) && this.isEnabledByAnySource(config)),
     };
+  }
+
+  private isOwnerConnected(config: DatabaseConnectionConfig): boolean {
+    try {
+      return this.connectionRegistry.get(config.id).isConnected();
+    } catch {
+      return false;
+    }
   }
 
   private isEnabledByAnySource(config: DatabaseConnectionConfig): boolean {
