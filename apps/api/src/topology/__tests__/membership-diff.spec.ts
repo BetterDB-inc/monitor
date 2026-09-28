@@ -1,5 +1,5 @@
 import type { TopologyMembership } from '@betterdb/shared';
-import type { DiscoveredNode } from '../../cluster-discovery.service';
+import type { DiscoveredNode } from '../../cluster/cluster-discovery.service';
 import {
   AddressOwner,
   MemberSnapshot,
@@ -42,25 +42,32 @@ describe('desiredFromDiscovery', () => {
       node('d', '10.0.0.4:7004@17004', ['handshake']),
       node('e', '10.0.0.5:7005@17005', ['slave']),
     ]);
-    expect(desired).toEqual([{ host: '10.0.0.5', port: 7005, nodeId: 'e' }]);
+    expect(desired).toEqual([{ host: '10.0.0.5', port: 7005, nodeId: 'e', source: 'cluster' }]);
+  });
+
+  it('stamps cluster source in desiredFromDiscovery', () => {
+    const nodes = [{ id: 'n2', address: '10.0.0.2:7002@17002', flags: ['master'], role: 'master', slots: [], configEpoch: 0, healthy: true }];
+    expect(desiredFromDiscovery({ host: 'seed', port: 7001 }, nodes as never)[0].source).toBe('cluster');
   });
 });
 
 describe('diffMembership', () => {
   it('adds unknown addresses', () => {
-    const diff = diffMembership('seed', [{ host: '10.0.0.2', port: 7002, nodeId: 'n2' }], [], none);
-    expect(diff.add).toEqual([{ host: '10.0.0.2', port: 7002, nodeId: 'n2' }]);
+    const desiredNode = { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' as const };
+    const diff = diffMembership('seed', [desiredNode], [], none);
+    expect(diff.add).toEqual([desiredNode]);
   });
 
   it('refreshes the node id when a node is replaced at the same address', () => {
-    const diff = diffMembership('seed', [{ host: '10.0.0.2', port: 7002, nodeId: 'new' }], [member('c2', '10.0.0.2:7002', { nodeId: 'old' })], none);
-    expect(diff.refreshNodeId).toEqual([{ id: 'c2', nodeId: 'new' }]);
+    const desiredNode = { host: '10.0.0.2', port: 7002, nodeId: 'new', source: 'cluster' as const };
+    const diff = diffMembership('seed', [desiredNode], [member('c2', '10.0.0.2:7002', { nodeId: 'old' })], none);
+    expect(diff.refresh).toEqual([{ id: 'c2', node: desiredNode }]);
     expect(diff.add).toEqual([]);
   });
 
   it('matches addresses case-insensitively', () => {
-    const diff = diffMembership('seed', [{ host: 'Node-2.local', port: 7002, nodeId: 'c2' }], [member('c2', 'node-2.local:7002')], none);
-    expect(diff).toMatchObject({ add: [], retire: [], refreshNodeId: [] });
+    const diff = diffMembership('seed', [{ host: 'Node-2.local', port: 7002, nodeId: 'c2', source: 'cluster' }], [member('c2', 'node-2.local:7002')], none);
+    expect(diff).toMatchObject({ add: [], retire: [], refresh: [] });
   });
 
   it('retires active members that left, but not already-retired ones', () => {
@@ -74,26 +81,28 @@ describe('diffMembership', () => {
   });
 
   it('reactivates a retired member that rejoined', () => {
-    const diff = diffMembership('seed', [{ host: '10.0.0.3', port: 7003, nodeId: 'n3' }], [member('c3', '10.0.0.3:7003', { retiredAt: 1 })], none);
-    expect(diff.reactivate).toEqual([{ id: 'c3', nodeId: 'n3' }]);
+    const desiredNode = { host: '10.0.0.3', port: 7003, nodeId: 'n3', source: 'cluster' as const };
+    const diff = diffMembership('seed', [desiredNode], [member('c3', '10.0.0.3:7003', { retiredAt: 1 })], none);
+    expect(diff.reactivate).toEqual([{ id: 'c3', node: desiredNode }]);
   });
 
   it('skips reactivation when another connection took the address', () => {
     const owner: AddressOwner = { id: 'otlp', connectionType: 'external' };
-    const diff = diffMembership('seed', [{ host: '10.0.0.3', port: 7003, nodeId: 'n3' }], [member('c3', '10.0.0.3:7003', { retiredAt: 1 })], () => owner);
+    const diff = diffMembership('seed', [{ host: '10.0.0.3', port: 7003, nodeId: 'n3', source: 'cluster' }], [member('c3', '10.0.0.3:7003', { retiredAt: 1 })], () => owner);
     expect(diff.reactivate).toEqual([]);
     expect(diff.skipped).toEqual([{ host: '10.0.0.3', port: 7003, reason: 'occupied' }]);
   });
 
   it('adopts an unclaimed direct connection at a discovered address', () => {
     const owner: AddressOwner = { id: 'manual', connectionType: 'direct' };
-    const diff = diffMembership('seed', [{ host: '10.0.0.3', port: 7003, nodeId: 'n3' }], [], () => owner);
-    expect(diff.adopt).toEqual([{ id: 'manual', nodeId: 'n3' }]);
+    const desiredNode = { host: '10.0.0.3', port: 7003, nodeId: 'n3', source: 'cluster' as const };
+    const diff = diffMembership('seed', [desiredNode], [], () => owner);
+    expect(diff.adopt).toEqual([{ id: 'manual', node: desiredNode }]);
   });
 
   it('never adopts a connection that is itself a seed', () => {
     const owner: AddressOwner = { id: 'other-seed', connectionType: 'direct', isSeed: true };
-    const diff = diffMembership('seed', [{ host: '10.0.0.3', port: 7003, nodeId: 'n3' }], [], () => owner);
+    const diff = diffMembership('seed', [{ host: '10.0.0.3', port: 7003, nodeId: 'n3', source: 'cluster' }], [], () => owner);
     expect(diff.adopt).toEqual([]);
     expect(diff.add).toEqual([]);
     expect(diff.skipped).toEqual([{ host: '10.0.0.3', port: 7003, reason: 'seed' }]);
@@ -105,14 +114,36 @@ describe('diffMembership', () => {
         ? { id: 'x', connectionType: 'direct', membership: { seedId: 'other', nodeId: 'n3', origin: 'auto', source: 'cluster' } }
         : { id: 'y', connectionType: 'external' };
     const diff = diffMembership('seed', [
-      { host: '10.0.0.3', port: 7003, nodeId: 'n3' },
-      { host: '10.0.0.4', port: 7004, nodeId: 'n4' },
+      { host: '10.0.0.3', port: 7003, nodeId: 'n3', source: 'cluster' },
+      { host: '10.0.0.4', port: 7004, nodeId: 'n4', source: 'cluster' },
     ], [], lookup);
     expect(diff.skipped).toEqual([
       { host: '10.0.0.3', port: 7003, reason: 'claimed' },
       { host: '10.0.0.4', port: 7004, reason: 'external' },
     ]);
     expect(diff.add).toEqual([]);
+  });
+
+  const sentinelNode = (host: string, port: number, role: 'primary' | 'replica', nodeId = `${host}`) =>
+    ({ host, port, nodeId, source: 'sentinel' as const, group: 'mymaster', role });
+
+  it('refreshes a member whose role changed', () => {
+    const current = [{ id: 'a', host: '10.0.0.1', port: 6379, membership: { seedId: 'seed', nodeId: '10.0.0.1', origin: 'auto' as const, source: 'sentinel' as const, group: 'mymaster', role: 'primary' as const } }];
+    const diff = diffMembership('seed', [sentinelNode('10.0.0.1', 6379, 'replica')], current, () => null);
+    expect(diff.refresh).toEqual([{ id: 'a', node: sentinelNode('10.0.0.1', 6379, 'replica') }]);
+    expect(diff.retire).toEqual([]);
+  });
+
+  it('refreshes a member whose group changed', () => {
+    const current = [{ id: 'a', host: 'h', port: 1, membership: { seedId: 'seed', nodeId: 'h', origin: 'auto' as const, source: 'sentinel' as const, group: 'old', role: 'replica' as const } }];
+    const diff = diffMembership('seed', [sentinelNode('h', 1, 'replica')], current, () => null);
+    expect(diff.refresh).toHaveLength(1);
+  });
+
+  it('does not refresh an unchanged cluster member', () => {
+    const current = [{ id: 'a', host: 'h', port: 1, membership: { seedId: 'seed', nodeId: 'n1', origin: 'auto' as const, source: 'cluster' as const } }];
+    const diff = diffMembership('seed', [{ host: 'h', port: 1, nodeId: 'n1', source: 'cluster' }], current, () => null);
+    expect(diff.refresh).toEqual([]);
   });
 });
 
