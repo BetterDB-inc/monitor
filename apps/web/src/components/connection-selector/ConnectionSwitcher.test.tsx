@@ -461,3 +461,80 @@ describe('ConnectionSwitcher cluster grouping', () => {
     expect(screen.getAllByRole('option')).toHaveLength(3);
   });
 });
+
+describe('ConnectionSwitcher sentinel grouping', () => {
+  const sentinelSeed = connection({
+    id: 's',
+    name: 'sentinel',
+    host: '10.0.1.1',
+    port: 26379,
+    capabilities: { dbType: 'valkey', version: '8', isSentinel: true },
+  });
+  const sentinelKids = [
+    connection({
+      id: 'r1',
+      name: 'sentinel · b replica',
+      host: '10.0.1.3',
+      port: 6379,
+      membership: { seedId: 's', nodeId: 'r1', origin: 'auto', source: 'sentinel', group: 'b', role: 'replica' },
+    }),
+    connection({
+      id: 'p1',
+      name: 'sentinel · b primary',
+      host: '10.0.1.2',
+      port: 6379,
+      membership: { seedId: 's', nodeId: 'p1', origin: 'auto', source: 'sentinel', group: 'b', role: 'primary' },
+    }),
+    connection({
+      id: 'p2',
+      name: 'sentinel · a primary',
+      host: '10.0.1.4',
+      port: 6379,
+      membership: { seedId: 's', nodeId: 'p2', origin: 'auto', source: 'sentinel', group: 'a', role: 'primary' },
+    }),
+    connection({
+      id: 'gone',
+      name: 'sentinel · retired',
+      host: '10.0.1.5',
+      port: 6379,
+      isConnected: false,
+      membership: {
+        seedId: 's',
+        nodeId: 'gone',
+        origin: 'auto',
+        source: 'sentinel',
+        group: 'a',
+        role: 'replica',
+        retiredAt: Date.now() - 3_600_000,
+      },
+    }),
+  ];
+
+  it('renders children grouped by group heading with primary first, retired trailing', () => {
+    open([sentinelSeed, ...sentinelKids], sentinelSeed);
+    fireEvent.click(screen.getByRole('button', { name: /4 nodes/i }));
+    const names = optionNames();
+    expect(names).toHaveLength(5);
+    expect(names[1]).toContain('a primary');
+    expect(names[2]).toContain('b primary');
+    expect(names[3]).toContain('b replica');
+    expect(names[4]).toContain('left cluster');
+  });
+
+  it('shows a primary badge on the primary member', () => {
+    open([sentinelSeed, ...sentinelKids], sentinelSeed);
+    fireEvent.click(screen.getByRole('button', { name: /4 nodes/i }));
+    const primaryOption = screen.getByRole('option', { name: /b primary/ });
+    expect(primaryOption).toHaveTextContent('primary');
+  });
+
+  it('keeps the retired sentinel member non-selectable', () => {
+    onSelect.mockClear();
+    open([sentinelSeed, ...sentinelKids], sentinelSeed);
+    fireEvent.click(screen.getByRole('button', { name: /4 nodes/i }));
+    const retired = screen.getAllByRole('option')[4];
+    expect(retired).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.click(retired);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+});

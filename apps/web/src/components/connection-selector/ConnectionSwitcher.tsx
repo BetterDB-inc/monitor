@@ -4,7 +4,8 @@ import { CheckIcon, ChevronDownIcon, ChevronRightIcon, SearchIcon } from 'lucide
 import type { Connection } from '../../hooks/useConnection';
 import { cn } from '@/lib/utils';
 import { ConnectionSwitcherOpenContext } from './switcher-open-context';
-import { ConnectionTypeBadge } from './ConnectionTypeBadge';
+import { ConnectionTypeBadge, BADGE } from './ConnectionTypeBadge';
+import { groupSentinelMembers } from './autoRegisterCopy';
 import { formatRelative, isRetiredMember, orderWithMembers } from '../../utils/connectionType';
 
 interface ConnectionSwitcherProps {
@@ -61,18 +62,54 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
   const filtered = useMemo(() => {
     const searching = query.trim() !== '';
     const currentSeed = current?.membership?.seedId;
-    return orderWithMembers(connections)
-      .filter(({ connection, depth }) => {
-        if (searching) {
-          return matches(connection, query);
+    const ordered = orderWithMembers(connections).filter(({ connection, depth }) => {
+      if (searching) {
+        return matches(connection, query);
+      }
+      if (depth === 0) {
+        return true;
+      }
+      const seedId = connection.membership!.seedId;
+      return expanded.has(seedId) || seedId === currentSeed;
+    });
+
+    const rows: Array<Connection & { depth: 0 | 1; groupHeading?: string }> = [];
+    let i = 0;
+    while (i < ordered.length) {
+      const { connection, depth } = ordered[i];
+      if (depth !== 0) {
+        rows.push({ ...connection, depth });
+        i++;
+        continue;
+      }
+      rows.push({ ...connection, depth: 0 });
+      i++;
+      const children: Connection[] = [];
+      while (i < ordered.length && ordered[i].depth === 1) {
+        children.push(ordered[i].connection);
+        i++;
+      }
+      const seedIsSentinel =
+        connection.capabilities?.isSentinel === true ||
+        children.some((c) => c.membership?.source === 'sentinel');
+      if (searching || !seedIsSentinel) {
+        for (const child of children) {
+          rows.push({ ...child, depth: 1 });
         }
-        if (depth === 0) {
-          return true;
-        }
-        const seedId = connection.membership!.seedId;
-        return expanded.has(seedId) || seedId === currentSeed;
-      })
-      .map(({ connection, depth }) => ({ ...connection, depth }));
+        continue;
+      }
+      const active = children.filter((c) => !isRetiredMember(c));
+      const retired = children.filter((c) => isRetiredMember(c));
+      for (const group of groupSentinelMembers(connection.id, active)) {
+        group.members.forEach((member, index) => {
+          rows.push({ ...member, depth: 1, groupHeading: index === 0 ? group.group : undefined });
+        });
+      }
+      for (const child of retired) {
+        rows.push({ ...child, depth: 1 });
+      }
+    }
+    return rows;
   }, [connections, query, expanded, current]);
 
   // Derived rather than corrected in an effect: `connections` can change under
@@ -227,7 +264,16 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
                 const retired = isRetiredMember(connection);
                 const childCount = childCounts.get(connection.id) ?? 0;
                 return (
-                  <div key={connection.id} className="flex items-center">
+                  <div key={connection.id}>
+                    {connection.groupHeading !== undefined ? (
+                      <div
+                        role="presentation"
+                        className="px-2 pt-2 pb-1 ps-6 text-[10px] font-medium uppercase text-muted-foreground"
+                      >
+                        {connection.groupHeading || 'ungrouped'}
+                      </div>
+                    ) : null}
+                    <div className="flex items-center">
                     {depth === 0 && childCount > 0 && query.trim() === '' ? (
                       <button
                         type="button"
@@ -299,6 +345,9 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
                           {connection.host}:{connection.port}
                         </span>
                         <ConnectionTypeBadge connection={connection} />
+                        {!retired && connection.membership?.role === 'primary' ? (
+                          <span className={BADGE}>primary</span>
+                        ) : null}
                       </span>
                       {retired ? (
                         <span className="ms-1 shrink-0 text-[10px] text-muted-foreground">
@@ -307,6 +356,7 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
                       ) : null}
                       {isCurrent ? <CheckIcon className="w-4 h-4 flex-shrink-0" /> : null}
                     </button>
+                    </div>
                   </div>
                 );
               })
