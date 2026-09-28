@@ -171,6 +171,7 @@ export interface ConnectionCapabilities {
   supportsCommandLog?: boolean;
   supportsSlotStats?: boolean;
   clusterEnabled?: boolean;
+  isSentinel?: boolean;
 }
 
 /**

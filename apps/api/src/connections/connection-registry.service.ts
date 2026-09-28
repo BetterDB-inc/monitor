@@ -735,6 +735,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
           supportsCommandLog: capabilities.hasCommandLog,
           supportsSlotStats: capabilities.hasSlotStats,
           clusterEnabled: capabilities.clusterEnabled,
+          isSentinel: capabilities.isSentinel,
         },
       };
     } catch (error) {
@@ -773,6 +774,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
             supportsCommandLog: caps.hasCommandLog,
             supportsSlotStats: caps.hasSlotStats,
             clusterEnabled: caps.clusterEnabled,
+            isSentinel: caps.isSentinel,
           };
         } catch {
           // Capabilities unavailable
