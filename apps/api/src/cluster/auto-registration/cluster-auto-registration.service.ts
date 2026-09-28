@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
@@ -26,7 +26,7 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
     connectionRegistry: ConnectionRegistry,
     private readonly discovery: ClusterDiscoveryService,
     private readonly configService: ConfigService,
-    private readonly retentionPolicy: RetentionPolicyService,
+    @Optional() private readonly retentionPolicy?: RetentionPolicyService,
   ) {
     super(connectionRegistry);
   }
@@ -162,7 +162,7 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
   }
 
   private async purgeExpired(members: DatabaseConnectionConfig[]): Promise<void> {
-    const days = this.retentionPolicy.getRetentionDays();
+    const days = this.retentionPolicy?.getRetentionDays() ?? null;
     if (days === null) return;
     const cutoff = Date.now() - days * MS_PER_DAY;
     const expired = members.filter((m) => m.membership?.origin === 'auto' && m.membership.retiredAt !== undefined && m.membership.retiredAt < cutoff);
