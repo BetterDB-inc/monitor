@@ -154,4 +154,46 @@ describe('ClusterAutoRegistrationService', () => {
     await service.reconcile('seed');
     expect(registry.removeConnection).not.toHaveBeenCalled();
   });
+
+  it('serialises reconciles across seeds so only one claims a shared address', async () => {
+    const seedA: DatabaseConnectionConfig = { id: 'a', name: 'A', host: 'a.local', port: 7001, isDefault: true, createdAt: 1, autoRegisterNodes: true };
+    const seedB: DatabaseConnectionConfig = { id: 'b', name: 'B', host: 'b.local', port: 7002, isDefault: false, createdAt: 1, autoRegisterNodes: true };
+    const configs = new Map<string, DatabaseConnectionConfig>([['a', seedA], ['b', seedB]]);
+    const registry = {
+      getConfig: jest.fn((id: string) => configs.get(id) ?? null),
+      get: jest.fn(() => ({ isConnected: () => true, getCapabilities: () => ({ clusterEnabled: true }) })),
+      listMembers: jest.fn((seedId: string) => Array.from(configs.values()).filter((c) => c.membership?.seedId === seedId)),
+      findConfigByHostPort: jest.fn(
+        (host: string, port: number) => Array.from(configs.values()).find((c) => c.host === host && c.port === port) ?? null,
+      ),
+      withSeedLock: jest.fn((_id: string, fn: () => Promise<void>) => fn()),
+      addManagedChild: jest.fn((seedId: string, node: { host: string; port: number; nodeId: string }) => {
+        const id = `child-${node.host}-${node.port}`;
+        configs.set(id, {
+          id,
+          name: id,
+          host: node.host,
+          port: node.port,
+          isDefault: false,
+          createdAt: 1,
+          membership: { seedId, nodeId: node.nodeId, origin: 'auto' },
+        });
+        return Promise.resolve(id);
+      }),
+      adoptChild: jest.fn().mockResolvedValue(undefined),
+      retireChild: jest.fn().mockResolvedValue(undefined),
+      reactivateChild: jest.fn().mockResolvedValue(undefined),
+      refreshChildNodeId: jest.fn().mockResolvedValue(undefined),
+      removeConnection: jest.fn().mockResolvedValue(undefined),
+      list: jest.fn(() => []),
+    };
+    const discovery = { discoverNodes: jest.fn(() => Promise.resolve([discovered('shared', '10.0.0.9:7009@17009')])) };
+    const config = { get: jest.fn(() => false) };
+    const retention = { getRetentionDays: jest.fn(() => null) };
+    const service = new ClusterAutoRegistrationService(registry as never, discovery as never, config as never, retention as never);
+
+    await Promise.all([service.reconcile('a'), service.reconcile('b')]);
+
+    expect(registry.addManagedChild).toHaveBeenCalledTimes(1);
+  });
 });

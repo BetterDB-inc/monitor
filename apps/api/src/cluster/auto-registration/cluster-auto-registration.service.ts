@@ -19,6 +19,7 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
   protected readonly logger = new Logger(ClusterAutoRegistrationService.name);
   private readonly heldRetirements = new Map<string, string>();
   private readonly loggedOnce = new Set<string>();
+  private reconcileChain: Promise<void> = Promise.resolve();
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -54,6 +55,15 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
   }
 
   async reconcile(seedId: string): Promise<void> {
+    const run = this.reconcileChain.then(() => this.reconcileOne(seedId));
+    this.reconcileChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async reconcileOne(seedId: string): Promise<void> {
     await this.connectionRegistry.withSeedLock(seedId, async () => {
       const seed = this.connectionRegistry.getConfig(seedId);
       if (!seed || !this.isSeedCandidate(seed)) return;
