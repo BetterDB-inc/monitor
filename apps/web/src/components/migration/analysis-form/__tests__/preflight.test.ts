@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { Connection } from '../../../../hooks/useConnection';
 import {
+  CLUSTER_MEMBER_BLOCK_MESSAGE,
   describeDirection,
   EXTERNAL_BLOCK_MESSAGE,
   isPlanComplete,
@@ -134,6 +135,12 @@ describe('planBlock', () => {
 
   it('allows a normal cross-engine plan', () => {
     expect(planBlock(REDIS_72, VALKEY_81)).toBeNull();
+  });
+
+  it('blocks a cluster member as source or target', () => {
+    const child = conn({ id: 'child', membership: { seedId: 'seed', nodeId: 'n', origin: 'auto' } });
+    expect(planBlock(REDIS_72, child)).toBe(CLUSTER_MEMBER_BLOCK_MESSAGE);
+    expect(planBlock(child, VALKEY_81)).toBe(CLUSTER_MEMBER_BLOCK_MESSAGE);
   });
 
   it('blocks external connections as source or target', () => {
