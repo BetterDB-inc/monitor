@@ -11,7 +11,7 @@ export interface TopologySource {
   readonly kind: TopologyKind;
   readonly envFlag: string;
   handles(caps: DatabaseCapabilities): boolean;
-  discover(seed: DatabaseConnectionConfig, timeoutMs: number): Promise<TopologyDiscovery>;
+  discover(seed: DatabaseConnectionConfig, timeoutMs: number): Promise<TopologyDiscovery | null>;
 }
 
 export const TOPOLOGY_SOURCES = Symbol('TOPOLOGY_SOURCES');

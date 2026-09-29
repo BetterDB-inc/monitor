@@ -187,6 +187,22 @@ describe('TopologyAutoRegistrationService', () => {
     expect(first.registry.retireChild).not.toHaveBeenCalled();
   });
 
+  it('retires departed peers when discovery returns only the seed', async () => {
+    const members = [child('c2', '10.0.0.2', 7002)];
+    const { service, registry } = build({ nodes: [discovered('self', '127.0.0.1:7001@17001', ['myself', 'master'])], members });
+    await service.reconcile('seed');
+    await service.reconcile('seed');
+    expect(registry.retireChild.mock.calls).toEqual([['c2']]);
+  });
+
+  it('leaves members unchanged when discovery returns no nodes at all', async () => {
+    const members = [child('c2', '10.0.0.2', 7002)];
+    const { service, registry } = build({ nodes: [], members });
+    await service.reconcile('seed');
+    await service.reconcile('seed');
+    expect(registry.retireChild).not.toHaveBeenCalled();
+  });
+
   it('applies a small retirement immediately', async () => {
     const members = [child('c2', '10.0.0.2', 7002), child('c3', '10.0.0.3', 7003), child('c4', '10.0.0.4', 7004)];
     const { service, registry } = build({ nodes: clusterOf(2), members });
