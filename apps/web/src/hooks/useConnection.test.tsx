@@ -64,6 +64,54 @@ describe('useConnectionState', () => {
     });
   });
 
+  it('moves off a selected member once it leaves its cluster', async () => {
+    const member: Connection = { ...connection('member'), membership: { seedId: 'seed', nodeId: 'n1', origin: 'auto' } };
+    mocks.fetchApi.mockResolvedValueOnce({ connections: [member, connection('other')], currentId: 'member' });
+
+    const { result } = renderHook(() => {
+      return useConnectionState();
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentConnection?.id).toBe('member');
+    });
+
+    const retired: Connection = { ...member, membership: { ...member.membership!, retiredAt: 1 } };
+    mocks.fetchApi.mockResolvedValueOnce({ connections: [retired, connection('other')], currentId: 'member' });
+
+    await act(async () => {
+      await result.current.refreshConnections();
+    });
+
+    expect(result.current.currentConnection?.id).toBe('other');
+  });
+
+  it('keeps a retired member the user chose to view', async () => {
+    const retired: Connection = {
+      ...connection('retired'),
+      membership: { seedId: 'seed', nodeId: 'n1', origin: 'auto', retiredAt: 1 },
+    };
+    mocks.fetchApi.mockResolvedValue({ connections: [connection('other'), retired], currentId: null });
+
+    const { result } = renderHook(() => {
+      return useConnectionState();
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentConnection?.id).toBe('other');
+    });
+
+    act(() => {
+      result.current.setConnection('retired');
+    });
+
+    await act(async () => {
+      await result.current.refreshConnections();
+    });
+
+    expect(result.current.currentConnection?.id).toBe('retired');
+  });
+
   it('clears the selection when the last connection is removed', async () => {
     mocks.fetchApi.mockResolvedValueOnce(connectionsResponse(['conn-1']));
 

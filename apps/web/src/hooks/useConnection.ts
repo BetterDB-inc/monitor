@@ -83,14 +83,11 @@ export function useConnectionState(): ConnectionContextValue {
       setAutoRegisterNodesDefault(responseData.autoRegisterNodesDefault === true);
       setAutoRegisterSentinelNodesDefault(responseData.autoRegisterSentinelNodesDefault === true);
 
-      const stillListed =
-        currentConnection !== null &&
-        data.some((c) => {
-          return c.id === currentConnection.id;
-        });
+      const fresh = currentConnection === null ? undefined : data.find((c) => c.id === currentConnection.id);
+      const justRetired =
+        fresh !== undefined && currentConnection !== null && isRetiredMember(fresh) && !isRetiredMember(currentConnection);
 
-      // Select a default when nothing is selected, or when the selection was removed elsewhere
-      if (stillListed === false) {
+      if (fresh === undefined || justRetired) {
         const selectable = data.filter((c) => !isRetiredMember(c));
         const defaultConnection =
           (responseData.currentId && selectable.find((c) => c.id === responseData.currentId)) ||
