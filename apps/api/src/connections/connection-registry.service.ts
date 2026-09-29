@@ -35,6 +35,21 @@ async function connectWithin(adapter: DatabasePort, ms: number): Promise<void> {
   throw new Error(`Connection attempt timed out after ${ms}ms`);
 }
 
+async function disconnectWithin(adapter: DatabasePort, ms: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const attempt = adapter.disconnect();
+  const deadline = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), ms);
+  });
+  try {
+    if ((await Promise.race([attempt, deadline])) !== 'timeout') return;
+  } finally {
+    clearTimeout(timer);
+  }
+  attempt.catch(() => undefined);
+  throw new Error(`Disconnect timed out after ${ms}ms`);
+}
+
 function sameHost(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
@@ -174,7 +189,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
         try {
           const adapter = this.createAdapter(decryptedConfig);
-          await adapter.connect();
+          if (decryptedConfig.membership) {
+            await connectWithin(adapter, CHILD_CONNECT_TIMEOUT_MS);
+          } else {
+            await adapter.connect();
+          }
           this.connections.set(config.id, adapter);
           // Trust-on-first-use: persist a newly-learned SSH host key so it is
           // verified on the next startup.
@@ -1065,8 +1084,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   async retireChild(id: string): Promise<void> {
     const membership = this.requireMembership(id);
     if (membership.origin === 'auto') {
+      const adapter = this.connections.get(id);
       try {
-        await this.connections.get(id)?.disconnect();
+        if (adapter) await disconnectWithin(adapter, CHILD_CONNECT_TIMEOUT_MS);
       } catch (err) {
         this.logger.warn(`Failed to disconnect ${id} on retire: ${err instanceof Error ? err.message : err}`);
       }
