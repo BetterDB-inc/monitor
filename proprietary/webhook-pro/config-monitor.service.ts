@@ -34,6 +34,10 @@ export class ConfigMonitorService extends MultiConnectionPoller implements OnMod
     return this.POLL_INTERVAL_MS;
   }
 
+  protected pollsSentinels(): boolean {
+    return true;
+  }
+
   async onModuleInit() {
     this.logger.log('Configuration monitor service initialized');
     this.start();
