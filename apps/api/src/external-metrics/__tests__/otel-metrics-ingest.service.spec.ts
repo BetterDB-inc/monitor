@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import type { ConnectionRegistry } from '../../connections/connection-registry.service';
+import { DiscoveredInstancesStore } from '../discovered-instances.store';
 import { ExternalMetricsStore } from '../external-metrics-store';
 import { OtelMetricsIngestService, toPartialSuccess } from '../otel-metrics-ingest.service';
 import type { OtlpKeyValue, OtlpMetric, OtlpMetricsRequest } from '../otlp-metrics-types';
@@ -20,10 +21,13 @@ function gauge(name: string, value: number, attrs: OtlpKeyValue[] = [], ...ts: [
   return { name, gauge: { dataPoints: [{ attributes: attrs, timeUnixNano, asInt: String(value) }] } };
 }
 
-function build(match: { id: string; connectionType: 'direct' | 'external' } | null = { id: 'ext', connectionType: 'external' }) {
+function build(
+  match: { id: string; connectionType: 'direct' | 'external' } | null = { id: 'ext', connectionType: 'external' },
+  discovered = new DiscoveredInstancesStore(true),
+) {
   const registry = { findByHostPort: jest.fn().mockReturnValue(match) } as unknown as ConnectionRegistry;
   const store = new ExternalMetricsStore();
-  return { service: new OtelMetricsIngestService(registry, store), store, registry };
+  return { service: new OtelMetricsIngestService(registry, store, undefined, discovered), store, registry, discovered };
 }
 
 describe('OtelMetricsIngestService', () => {
@@ -294,5 +298,63 @@ describe('OtelMetricsIngestService', () => {
     const service = new OtelMetricsIngestService(registry, new ExternalMetricsStore(), prometheus as never);
     service.ingest(resource(identity, [gauge('redis.uptime', 1)]), NOW_MS);
     expect(prometheus.recordOtlpIngest).toHaveBeenCalledWith(0, expect.objectContaining({ unknown_instance: 1 }));
+  });
+});
+
+describe('OtelMetricsIngestService discovery', () => {
+  let log: jest.SpyInstance;
+  let warn: jest.SpyInstance;
+
+  beforeEach(() => {
+    log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    log.mockRestore();
+    warn.mockRestore();
+  });
+
+  const named = [...identity, str('service.name', 'orders-cache'), str('db.system.name', 'valkey')];
+
+  it('records an unregistered instance and still drops its points', () => {
+    const { service, discovered } = build(null);
+    const result = service.ingest(resource(named, [gauge('redis.memory.used', 1), gauge('redis.db.keys', 2, [str('db', '0')])]), NOW_MS);
+    expect(result.dropped.unknown_instance).toBe(2);
+    expect(result.accepted).toBe(0);
+    expect(discovered.list(NOW_MS)).toEqual([
+      { host: 'cache.internal', port: 6379, suggestedName: 'orders-cache', dbSystem: 'valkey', firstSeenAt: NOW_MS, lastSeenAt: NOW_MS, droppedPoints: 2 },
+    ]);
+  });
+
+  it('logs a discovery once per instance', () => {
+    const { service } = build(null);
+    service.ingest(resource(named, [gauge('redis.memory.used', 1)]), NOW_MS);
+    service.ingest(resource(named, [gauge('redis.memory.used', 1)]), NOW_MS + 1);
+    const messages = log.mock.calls.map(([m]) => m).filter((m) => String(m).startsWith('Discovered'));
+    expect(messages).toEqual(['Discovered unregistered OTLP instance cache.internal:6379']);
+  });
+
+  it('records only the first resolved key', () => {
+    const { service, discovered } = build(null);
+    service.ingest(resource([str('service.instance.id', 'primary.internal:7000'), ...identity], [gauge('redis.memory.used', 1)]), NOW_MS);
+    expect(discovered.list(NOW_MS).map((i) => `${i.host}:${i.port}`)).toEqual(['primary.internal:7000']);
+  });
+
+  it.each([
+    ['accepted', { id: 'ext', connectionType: 'external' as const }, identity],
+    ['already_polled', { id: 'direct', connectionType: 'direct' as const }, identity],
+    ['unidentified', null, []],
+  ])('does not record %s resources', (_label, match, attrs) => {
+    const { service, discovered } = build(match);
+    service.ingest(resource(attrs, [gauge('redis.memory.used', 1)]), NOW_MS);
+    expect(discovered.list(NOW_MS)).toEqual([]);
+  });
+
+  it('does not record when discovery is disabled', () => {
+    const { service, discovered } = build(null, new DiscoveredInstancesStore(false));
+    const result = service.ingest(resource(named, [gauge('redis.memory.used', 1)]), NOW_MS);
+    expect(discovered.list(NOW_MS)).toEqual([]);
+    expect(result.dropped.unknown_instance).toBe(1);
   });
 });

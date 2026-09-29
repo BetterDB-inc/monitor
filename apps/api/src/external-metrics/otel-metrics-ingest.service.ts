@@ -1,6 +1,7 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { PrometheusService } from '../prometheus/prometheus.service';
+import { DiscoveredInstancesStore } from './discovered-instances.store';
 import { ExternalMetricsStore } from './external-metrics-store';
 import {
   attrsToRecord,
@@ -14,6 +15,7 @@ import {
   DROP_REASONS,
   DropReason,
   FieldUpdate,
+  InstanceKey,
   OtlpMetric,
   OtlpMetricsRequest,
   OtlpResourceMetrics,
@@ -75,6 +77,7 @@ export class OtelMetricsIngestService {
     private readonly registry: ConnectionRegistry,
     private readonly store: ExternalMetricsStore,
     @Optional() private readonly prometheus?: PrometheusService,
+    @Optional() private readonly discovered?: DiscoveredInstancesStore,
   ) {}
 
   ingest(request: OtlpMetricsRequest, nowMs: number = Date.now()): IngestResult {
@@ -98,7 +101,9 @@ export class OtelMetricsIngestService {
       .find((candidate) => candidate.match);
     if (!resolved?.match) {
       const [first] = keys;
-      this.drop(result, 'unknown_instance', resourcePointCount(resourceMetrics), `${first.host}:${first.port}`, nowMs);
+      const points = resourcePointCount(resourceMetrics);
+      this.recordDiscovered(first, attrs, points, nowMs);
+      this.drop(result, 'unknown_instance', points, `${first.host}:${first.port}`, nowMs);
       return;
     }
     const { key, match } = resolved;
@@ -165,6 +170,13 @@ export class OtelMetricsIngestService {
     this.drop(result, 'unmapped_metric', unmapped, instance, nowMs);
     this.drop(result, 'invalid_value', invalid, instance, nowMs);
     return mapped && metricVocabulary(name) === 'valkey';
+  }
+
+  private recordDiscovered(key: InstanceKey, attrs: Record<string, string>, points: number, nowMs: number): void {
+    if (!this.discovered?.enabled) return;
+    if (this.discovered.record(key, attrs, points, nowMs)) {
+      this.logger.log(`Discovered unregistered OTLP instance ${key.host}:${key.port}`);
+    }
   }
 
   private drop(result: IngestResult, reason: DropReason, count: number, instance: string, nowMs: number): void {
