@@ -44,6 +44,10 @@ describe('MemoryAnalyticsService', () => {
     jest.restoreAllMocks();
   });
 
+  it('keeps Sentinel connections in memory snapshot polling', () => {
+    expect((service as unknown as { pollsSentinels(): boolean }).pollsSentinels()).toBe(true);
+  });
+
   describe('pollConnection', () => {
     const makeCtx = (client: any, connectionId = 'conn-1'): ConnectionContext => ({
       connectionId,

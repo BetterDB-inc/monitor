@@ -41,6 +41,10 @@ export class MemoryAnalyticsService extends MultiConnectionPoller implements OnM
     return true;
   }
 
+  protected pollsSentinels(): boolean {
+    return true;
+  }
+
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     try {
       const info = await ctx.client.getInfoParsed();
