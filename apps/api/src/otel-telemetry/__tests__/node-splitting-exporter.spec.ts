@@ -448,6 +448,22 @@ describe('NodeSplittingExporter', () => {
       await expect(second).resolves.toEqual({ code: ExportResultCode.SUCCESS });
       expect(inner.exported).toHaveLength(MAX_CONCURRENT_EXPORTS + labels.length);
     });
+
+    it('serves nodes that waited longest before nodes that just exported', async () => {
+      const inner = heldInner();
+      const exporter = new NodeSplittingExporter(inner, () => manyResolver);
+
+      void exportOnce(exporter, manyNodes);
+      await settle();
+      void exportOnce(exporter, manyNodes);
+      await drain(inner);
+
+      const order = inner.exported.map((part) => part.resource.attributes['service.instance.id']);
+      expect(order.slice(MAX_CONCURRENT_EXPORTS, labels.length)).toEqual(
+        labels.slice(MAX_CONCURRENT_EXPORTS),
+      );
+      expect(order.slice(labels.length)).toEqual(labels.slice(0, MAX_CONCURRENT_EXPORTS));
+    });
   });
 
   it('delegates flush, shutdown and temporality selection', async () => {

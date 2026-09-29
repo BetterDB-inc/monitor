@@ -119,12 +119,16 @@ export function splitByConnection(
   }));
 }
 
+function partKey(part: ResourceMetrics): string {
+  return String(part.resource.attributes['service.instance.id'] ?? '');
+}
+
 export class NodeSplittingExporter implements PushMetricExporter {
   readonly selectAggregationTemporality?: PushMetricExporter['selectAggregationTemporality'];
   readonly selectAggregation?: PushMetricExporter['selectAggregation'];
   private readonly knownNodes = new Map<string, NodeIdentity>();
   private activeExports = 0;
-  private readonly waitingForSlot: Array<(granted: boolean) => void> = [];
+  private readonly waitingForSlot = new Map<string, (granted: boolean) => void>();
 
   constructor(
     private readonly inner: PushMetricExporter,
@@ -145,7 +149,6 @@ export class NodeSplittingExporter implements PushMetricExporter {
       resultCallback({ code: ExportResultCode.SUCCESS });
       return;
     }
-    this.dropWaitingParts();
     void Promise.all(parts.map((part) => this.exportWithSlot(part))).then((results) => {
       const failed = results.find((result) => result.code !== ExportResultCode.SUCCESS);
       resultCallback(failed ?? { code: ExportResultCode.SUCCESS });
@@ -179,7 +182,7 @@ export class NodeSplittingExporter implements PushMetricExporter {
   }
 
   private async exportWithSlot(part: ResourceMetrics): Promise<ExportResult> {
-    if (!(await this.acquireSlot())) {
+    if (!(await this.acquireSlot(partKey(part)))) {
       return { code: ExportResultCode.FAILED, error: SUPERSEDED };
     }
     try {
@@ -189,24 +192,21 @@ export class NodeSplittingExporter implements PushMetricExporter {
     }
   }
 
-  private acquireSlot(): Promise<boolean> {
+  private acquireSlot(key: string): Promise<boolean> {
     if (this.activeExports < MAX_CONCURRENT_EXPORTS) {
       this.activeExports += 1;
       return Promise.resolve(true);
     }
-    return new Promise((resolve) => this.waitingForSlot.push(resolve));
-  }
-
-  private dropWaitingParts(): void {
-    for (const grant of this.waitingForSlot.splice(0)) {
-      grant(false);
-    }
+    this.waitingForSlot.get(key)?.(false);
+    return new Promise((resolve) => this.waitingForSlot.set(key, resolve));
   }
 
   private releaseSlot(): void {
-    const next = this.waitingForSlot.shift();
-    if (next) {
-      next(true);
+    const next = this.waitingForSlot.entries().next();
+    if (!next.done) {
+      const [key, grant] = next.value;
+      this.waitingForSlot.delete(key);
+      grant(true);
     } else {
       this.activeExports -= 1;
     }
