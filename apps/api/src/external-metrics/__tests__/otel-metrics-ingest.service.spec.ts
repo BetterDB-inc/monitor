@@ -335,10 +335,27 @@ describe('OtelMetricsIngestService discovery', () => {
     expect(messages).toEqual(['Discovered unregistered OTLP instance cache.internal:6379']);
   });
 
-  it('records only the first resolved key', () => {
+  const discoveredAddresses = (discovered: DiscoveredInstancesStore) =>
+    discovered.list(NOW_MS).map((i) => `${i.host}:${i.port}`);
+
+  it('prefers the explicit endpoint over the decoded instance id', () => {
     const { service, discovered } = build(null);
-    service.ingest(resource([str('service.instance.id', 'primary.internal:7000'), ...identity], [gauge('redis.memory.used', 1)]), NOW_MS);
-    expect(discovered.list(NOW_MS).map((i) => `${i.host}:${i.port}`)).toEqual(['primary.internal:7000']);
+    service.ingest(resource([str('service.instance.id', 'redis-node-1'), str('server.address', 'redis-node-1'), { key: 'server.port', value: { intValue: '6379' } }], [gauge('redis.memory.used', 1)]), NOW_MS);
+    expect(discoveredAddresses(discovered)).toEqual(['redis-node-1:6379']);
+  });
+
+  it('keeps explicit endpoints that share an opaque instance id apart', () => {
+    const { service, discovered } = build(null);
+    for (const host of ['db-a', 'db-b']) {
+      service.ingest(resource([str('service.instance.id', 'collector-1'), str('server.address', host), { key: 'server.port', value: { intValue: '6379' } }], [gauge('redis.memory.used', 1)]), NOW_MS);
+    }
+    expect(discoveredAddresses(discovered).sort()).toEqual(['db-a:6379', 'db-b:6379']);
+  });
+
+  it('falls back to the decoded instance id without an explicit endpoint', () => {
+    const { service, discovered } = build(null);
+    service.ingest(resource([str('service.instance.id', 'primary.internal:7000')], [gauge('redis.memory.used', 1)]), NOW_MS);
+    expect(discoveredAddresses(discovered)).toEqual(['primary.internal:7000']);
   });
 
   it.each([

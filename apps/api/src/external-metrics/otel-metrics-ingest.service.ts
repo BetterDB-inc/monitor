@@ -10,6 +10,7 @@ import {
   nanosToMs,
   pointValue,
   resolveInstanceKeys,
+  explicitInstanceKey,
 } from './otlp-metric-map';
 import {
   DROP_REASONS,
@@ -100,10 +101,10 @@ export class OtelMetricsIngestService {
       .map((key) => ({ key, match: this.registry.findByHostPort(key.host, key.port) }))
       .find((candidate) => candidate.match);
     if (!resolved?.match) {
-      const [first] = keys;
+      const candidate = explicitInstanceKey(attrs) ?? keys[0];
       const points = resourcePointCount(resourceMetrics);
-      this.recordDiscovered(first, attrs, points, nowMs);
-      this.drop(result, 'unknown_instance', points, `${first.host}:${first.port}`, nowMs);
+      this.recordDiscovered(candidate, attrs, points, nowMs);
+      this.drop(result, 'unknown_instance', points, `${candidate.host}:${candidate.port}`, nowMs);
       return;
     }
     const { key, match } = resolved;

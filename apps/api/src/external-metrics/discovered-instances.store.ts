@@ -5,7 +5,7 @@ export const DISCOVERED_MAX_ENTRIES = 200;
 export const DISCOVERED_TTL_MS = 24 * 60 * 60 * 1000;
 export const DISCOVERED_MAX_HOST_LENGTH = 253;
 export const DISCOVERED_MAX_DISMISSALS = 200;
-const MAX_NAME_LENGTH = 128;
+const MAX_NAME_LENGTH = 100;
 const MAX_VERSION_LENGTH = 32;
 
 type Details = Pick<DiscoveredInstance, 'suggestedName' | 'dbSystem' | 'version'>;

@@ -46,7 +46,7 @@ describe('DiscoveredInstancesStore', () => {
     const store = new DiscoveredInstancesStore(true);
     store.record(key('a'), { 'service.name': 'n'.repeat(500), 'redis.version': 'v'.repeat(100) }, 1, T0);
     const [entry] = store.list(T0);
-    expect(entry.suggestedName).toHaveLength(128);
+    expect(entry.suggestedName).toHaveLength(100);
     expect(entry.version).toHaveLength(32);
   });
 
@@ -107,6 +107,12 @@ describe('DiscoveredInstancesStore', () => {
     store.record(key('cache'), { 'db.system.name': 'valkey', 'redis.version': '8.1.0' }, 1, T0);
     store.record(key('cache'), {}, 1, T0 + 1);
     expect(store.list(T0 + 1)[0]).toEqual(expect.objectContaining({ dbSystem: 'valkey', version: '8.1.0' }));
+  });
+
+  it('caps the host:port fallback name at the registration limit', () => {
+    const store = new DiscoveredInstancesStore(true);
+    store.record(key('h'.repeat(DISCOVERED_MAX_HOST_LENGTH)), {}, 1, T0);
+    expect(store.list(T0)[0].suggestedName).toHaveLength(100);
   });
 
   it('keeps the suggested name when a later push omits service.name', () => {
