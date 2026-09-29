@@ -17,6 +17,24 @@ import type { DesiredNode } from '../topology/membership-diff';
 export { ENV_DEFAULT_ID } from './connection.constants';
 import { ENV_DEFAULT_ID } from './connection.constants';
 
+export const CHILD_CONNECT_TIMEOUT_MS = 10_000;
+
+async function connectWithin(adapter: DatabasePort, ms: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const attempt = adapter.connect();
+  const deadline = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), ms);
+  });
+  try {
+    if ((await Promise.race([attempt, deadline])) !== 'timeout') return;
+  } finally {
+    clearTimeout(timer);
+  }
+  attempt.catch(() => undefined);
+  await adapter.disconnect().catch(() => undefined);
+  throw new Error(`Connection attempt timed out after ${ms}ms`);
+}
+
 function sameHost(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
@@ -1012,7 +1030,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     let credentialStatus: CredentialStatus = 'valid';
     let credentialError: string | undefined;
     try {
-      await adapter.connect();
+      await connectWithin(adapter, CHILD_CONNECT_TIMEOUT_MS);
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Unknown error';
       const isAuthError = this.isAuthenticationError(errorMsg);
@@ -1066,7 +1084,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     if (membership.origin === 'auto') {
       const adapter = this.createAdapter(config);
       try {
-        await adapter.connect();
+        await connectWithin(adapter, CHILD_CONNECT_TIMEOUT_MS);
       } catch (err) {
         this.logger.warn(`Reactivated ${config.name} but could not connect: ${err instanceof Error ? err.message : err}`);
       }
