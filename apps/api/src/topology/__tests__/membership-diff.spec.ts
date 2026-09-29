@@ -134,6 +134,12 @@ describe('diffMembership', () => {
     expect(diff.retire).toEqual([]);
   });
 
+  it('refreshes a member whose source changed', () => {
+    const current = [{ id: 'a', host: 'h', port: 1, membership: { seedId: 'seed', nodeId: 'h', origin: 'auto' as const, source: 'cluster' as const, group: 'mymaster', role: 'replica' as const } }];
+    const diff = diffMembership('seed', [sentinelNode('h', 1, 'replica')], current, () => null);
+    expect(diff.refresh).toEqual([{ id: 'a', node: sentinelNode('h', 1, 'replica') }]);
+  });
+
   it('refreshes a member whose group changed', () => {
     const current = [{ id: 'a', host: 'h', port: 1, membership: { seedId: 'seed', nodeId: 'h', origin: 'auto' as const, source: 'sentinel' as const, group: 'old', role: 'replica' as const } }];
     const diff = diffMembership('seed', [sentinelNode('h', 1, 'replica')], current, () => null);
