@@ -72,12 +72,12 @@ describe('ConnectionRegistry membership', () => {
     expect(storage.saveConnection).toHaveBeenCalled();
   });
 
-  it('bounds a managed child connect that never completes', async () => {
+  it('bounds a managed child connect whose connect and disconnect never complete', async () => {
     jest.useFakeTimers();
     try {
       const { registry, storage } = build();
       put(registry, seed);
-      const disconnect = jest.fn().mockResolvedValue(undefined);
+      const disconnect = jest.fn(() => new Promise(() => undefined));
       jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(
         () => ({ connect: jest.fn(() => new Promise(() => undefined)), disconnect }) as never,
       );
