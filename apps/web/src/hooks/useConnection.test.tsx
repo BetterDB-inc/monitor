@@ -46,6 +46,24 @@ describe('useConnectionState', () => {
     expect(mocks.setCurrentConnectionId).toHaveBeenLastCalledWith('conn-2');
   });
 
+  it('never falls back to a retired member when nothing is connected', async () => {
+    const retired: Connection = {
+      ...connection('retired'),
+      isConnected: false,
+      membership: { seedId: 'seed', nodeId: 'n1', origin: 'auto', source: 'cluster', retiredAt: 1 },
+    };
+    const idle: Connection = { ...connection('idle'), isConnected: false };
+    mocks.fetchApi.mockResolvedValueOnce({ connections: [retired, idle], currentId: 'retired' });
+
+    const { result } = renderHook(() => {
+      return useConnectionState();
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentConnection?.id).toBe('idle');
+    });
+  });
+
   it('clears the selection when the last connection is removed', async () => {
     mocks.fetchApi.mockResolvedValueOnce(connectionsResponse(['conn-1']));
 
