@@ -161,28 +161,12 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
   private lookup(host: string, port: number): AddressOwner | null {
     const config = this.connectionRegistry.findConfigByHostPort(host, port);
     if (!config) return null;
-    const members = this.connectionRegistry.listMembers(config.id);
-    const kind = this.kindOf(config, members);
     return {
       id: config.id,
       connectionType: config.connectionType === 'external' ? 'external' : 'direct',
       membership: config.membership,
-      isSeed:
-        members.length > 0 ||
-        (kind !== null ? this.isEnabled(config, kind) : !this.isOwnerConnected(config) && this.isEnabledByAnySource(config)),
+      isSeed: config.autoRegisterNodes === true || this.connectionRegistry.listMembers(config.id).length > 0,
     };
-  }
-
-  private isOwnerConnected(config: DatabaseConnectionConfig): boolean {
-    try {
-      return this.connectionRegistry.get(config.id).isConnected();
-    } catch {
-      return false;
-    }
-  }
-
-  private isEnabledByAnySource(config: DatabaseConnectionConfig): boolean {
-    return config.autoRegisterNodes ?? this.sources.some((s) => isTrueFlag(this.configService.get<string>(s.envFlag)));
   }
 
   private async apply(seed: DatabaseConnectionConfig, diff: MembershipDiff, members: DatabaseConnectionConfig[]): Promise<void> {

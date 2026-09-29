@@ -49,6 +49,11 @@ adopted rather than duplicated: it keeps its existing name and credentials,
 gains an **ADOPTED** badge, and is never deleted by this feature — only
 detached if the seed itself is later removed.
 
+A connection is only left alone when it is a seed in its own right: its
+auto-register toggle is explicitly on, or it already has child connections.
+A connection that merely inherits `CLUSTER_AUTO_REGISTER_NODES=true` is
+adopted by the first seed that discovers it.
+
 ## Nodes leaving and rejoining
 
 When a node drops out of the cluster, its child connection is retired: it
