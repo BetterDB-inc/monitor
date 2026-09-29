@@ -116,6 +116,35 @@ describe('useConnectionState', () => {
     }
   });
 
+  it('polls for children when Sentinel auto-registration is on by default', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mocks.fetchApi.mockResolvedValue({
+        connections: [connection('sentinels')],
+        currentId: null,
+        autoRegisterNodesDefault: false,
+        autoRegisterSentinelNodesDefault: true,
+      });
+      const { result } = renderHook(() => useConnectionState());
+      await waitFor(() => expect(result.current.connections).toHaveLength(1));
+
+      const child = { ...connection('child'), membership: { seedId: 'sentinels', nodeId: 'n', origin: 'auto' as const } };
+      mocks.fetchApi.mockResolvedValue({
+        connections: [connection('sentinels'), child],
+        currentId: null,
+        autoRegisterNodesDefault: false,
+        autoRegisterSentinelNodesDefault: true,
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(CONNECTIONS_REFRESH_MS);
+      });
+
+      expect(result.current.connections.map((c) => c.id)).toEqual(['sentinels', 'child']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not poll when no connection follows cluster topology', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {

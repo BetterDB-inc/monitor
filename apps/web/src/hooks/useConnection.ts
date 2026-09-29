@@ -145,6 +145,7 @@ export function useConnectionState(): ConnectionContextValue {
 
   const followsTopology =
     autoRegisterNodesDefault ||
+    autoRegisterSentinelNodesDefault ||
     connections.some((c) => c.autoRegisterNodes === true || c.membership !== undefined);
 
   useEffect(() => {
