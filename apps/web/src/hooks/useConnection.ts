@@ -2,6 +2,8 @@ import { createContext, useContext, useState, useEffect, useCallback, useRef } f
 import type { TopologyMembership } from '@betterdb/shared';
 import { setCurrentConnectionId, fetchApi } from '../api/client';
 
+export const CONNECTIONS_REFRESH_MS = 30_000;
+
 export interface Connection {
   id: string;
   name: string;
@@ -135,6 +137,27 @@ export function useConnectionState(): ConnectionContextValue {
   useEffect(() => {
     fetchConnections();
   }, []);
+
+  const latestFetch = useRef(fetchConnections);
+  useEffect(() => {
+    latestFetch.current = fetchConnections;
+  }, [fetchConnections]);
+
+  const followsTopology =
+    autoRegisterNodesDefault ||
+    connections.some((c) => c.autoRegisterNodes === true || c.membership !== undefined);
+
+  useEffect(() => {
+    if (!followsTopology) {
+      return;
+    }
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void latestFetch.current();
+      }
+    }, CONNECTIONS_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [followsTopology]);
 
   return {
     currentConnection,
