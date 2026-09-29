@@ -46,8 +46,10 @@ export class SentinelTopologySource implements TopologySource {
     client.on('error', () => undefined);
     try {
       await client.connect();
-      const masters = MetricsParser.parseSentinelNodes((await client.call('SENTINEL', 'MASTERS')) as unknown[]);
-      if (masters.length === 0) return null;
+      const reply = await client.call('SENTINEL', 'MASTERS');
+      if (!Array.isArray(reply)) return null;
+      const masters = MetricsParser.parseSentinelNodes(reply);
+      if (masters.length === 0 && reply.length > 0) return null;
       const nodes: DesiredNode[] = [];
       const unknownGroups: string[] = [];
       for (const master of masters) {

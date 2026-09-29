@@ -73,6 +73,18 @@ describe('TopologyAutoRegistrationService (sentinel)', () => {
     expect(registry.addManagedChild).not.toHaveBeenCalled();
   });
 
+  it('retires the last group after an empty topology is confirmed', async () => {
+    const { service, registry } = build({
+      autoRegisterNodes: true,
+      nodes: [],
+      members: [member('A', 'a', 'primary'), member('B', 'b', 'replica')],
+    });
+    await service.reconcile('seed');
+    expect(registry.retireChild).not.toHaveBeenCalled();
+    await service.reconcile('seed');
+    expect(registry.retireChild.mock.calls.map((c) => c[0]).sort()).toEqual(['A', 'B']);
+  });
+
   it('holds a mass retirement even when an unknown group has many members', async () => {
     const unknownMembers = ['u1', 'u2', 'u3', 'u4', 'u5', 'u6'].map((h) => member(h.toUpperCase(), h, 'replica', 'down'));
     const { service, registry } = build({

@@ -73,8 +73,13 @@ describe('SentinelTopologySource', () => {
     expect(client.disconnect).toHaveBeenCalled();
   });
 
-  it('reports no discovery when Sentinel monitors no groups', async () => {
+  it('treats a Sentinel that monitors no groups as an empty topology', async () => {
     const { source } = build({ MASTERS: [] });
+    await expect(source.discover(seed as never, 500)).resolves.toEqual({ nodes: [], unknownGroups: [] });
+  });
+
+  it('reports no discovery when the SENTINEL MASTERS reply is malformed', async () => {
+    const { source } = build({ MASTERS: ['garbage'] });
     await expect(source.discover(seed as never, 500)).resolves.toBeNull();
   });
 
