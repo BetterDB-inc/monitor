@@ -387,21 +387,66 @@ describe('NodeSplittingExporter', () => {
       expect(inner.exported).toHaveLength(20);
     });
 
+    function heldInner(): PushMetricExporter & {
+      exported: ResourceMetrics[];
+      inFlight: () => number;
+      releaseAll: () => void;
+    } {
+      const exported: ResourceMetrics[] = [];
+      const pending: Array<() => void> = [];
+      return {
+        exported,
+        inFlight: () => pending.length,
+        releaseAll: () => {
+          while (pending.length > 0) pending.shift()!();
+        },
+        export: (metrics: ResourceMetrics, callback: (result: ExportResult) => void) => {
+          pending.push(() => {
+            exported.push(metrics);
+            callback({ code: ExportResultCode.SUCCESS });
+          });
+        },
+        forceFlush: () => Promise.resolve(),
+        shutdown: () => Promise.resolve(),
+      };
+    }
+
+    const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+    async function drain(inner: ReturnType<typeof heldInner>): Promise<void> {
+      for (let round = 0; round < 10; round += 1) {
+        inner.releaseAll();
+        await settle();
+      }
+    }
+
     it('shares the cap across export cycles that overlap', async () => {
-      const inner = asyncInner(MAX_CONCURRENT_EXPORTS);
+      const inner = heldInner();
       const exporter = new NodeSplittingExporter(inner, () => manyResolver);
 
-      const results = await Promise.all([
-        exportOnce(exporter, manyNodes),
-        exportOnce(exporter, manyNodes),
-      ]);
+      const first = exportOnce(exporter, manyNodes);
+      const second = exportOnce(exporter, manyNodes);
+      await settle();
 
-      expect(results).toEqual([
-        { code: ExportResultCode.SUCCESS },
-        { code: ExportResultCode.SUCCESS },
-      ]);
-      expect(inner.peak()).toBeLessThanOrEqual(MAX_CONCURRENT_EXPORTS);
-      expect(inner.exported).toHaveLength(40);
+      expect(inner.inFlight()).toBe(MAX_CONCURRENT_EXPORTS);
+      await drain(inner);
+      await Promise.all([first, second]);
+    });
+
+    it('drops parts of an older cycle still waiting for a slot when a new cycle starts', async () => {
+      const inner = heldInner();
+      const exporter = new NodeSplittingExporter(inner, () => manyResolver);
+
+      const first = exportOnce(exporter, manyNodes);
+      await settle();
+      const second = exportOnce(exporter, manyNodes);
+      await drain(inner);
+
+      await expect(first).resolves.toEqual(
+        expect.objectContaining({ code: ExportResultCode.FAILED }),
+      );
+      await expect(second).resolves.toEqual({ code: ExportResultCode.SUCCESS });
+      expect(inner.exported).toHaveLength(MAX_CONCURRENT_EXPORTS + labels.length);
     });
   });
 
