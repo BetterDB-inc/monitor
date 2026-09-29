@@ -1,4 +1,4 @@
-import { UnifiedDatabaseAdapter } from './unified.adapter';
+import { QUIT_TIMEOUT_MS, UnifiedDatabaseAdapter } from './unified.adapter';
 
 // getInfo is exercised in isolation with a mocked client. Object.create bypasses
 // the real constructor (which would open a live Valkey connection).
@@ -97,6 +97,31 @@ describe('UnifiedDatabaseAdapter.getCapabilities — sentinel detection', () => 
     const capabilities = adapter.getCapabilities();
 
     expect(capabilities.isSentinel).toBe(false);
+  });
+});
+
+describe('UnifiedDatabaseAdapter.disconnect', () => {
+  it('closes the socket when QUIT gets no answer', async () => {
+    jest.useFakeTimers();
+    try {
+      const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+      const client = { quit: jest.fn(() => new Promise(() => undefined)), disconnect: jest.fn() };
+      (adapter as unknown as { _client: typeof client })._client = client;
+      const pending = adapter.disconnect();
+      await jest.advanceTimersByTimeAsync(QUIT_TIMEOUT_MS);
+      await pending;
+      expect(client.disconnect).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not force-close after a clean QUIT', async () => {
+    const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+    const client = { quit: jest.fn().mockResolvedValue('OK'), disconnect: jest.fn() };
+    (adapter as unknown as { _client: typeof client })._client = client;
+    await adapter.disconnect();
+    expect(client.disconnect).not.toHaveBeenCalled();
   });
 });
 
