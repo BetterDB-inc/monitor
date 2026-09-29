@@ -65,7 +65,7 @@ export class SentinelTopologySource implements TopologySource {
           unknownGroups.push(master.name);
         }
       }
-      return { nodes, unknownGroups };
+      return { nodes, unknownGroups: [...new Set([...unknownGroups, ...this.groupsWithDuplicateAddresses(nodes)])] };
     } finally {
       client.disconnect();
     }
@@ -75,6 +75,17 @@ export class SentinelTopologySource implements TopologySource {
     if (!Array.isArray(reply)) return null;
     const parsed = MetricsParser.parseSentinelNodes(reply);
     return parsed.length === 0 && reply.length > 0 ? null : parsed;
+  }
+
+  private groupsWithDuplicateAddresses(nodes: DesiredNode[]): string[] {
+    const groupsByAddress = new Map<string, DesiredNode[]>();
+    for (const node of nodes) {
+      const address = `${node.host.toLowerCase()}:${node.port}`;
+      groupsByAddress.set(address, [...(groupsByAddress.get(address) ?? []), node]);
+    }
+    return [...groupsByAddress.values()]
+      .filter((shared) => shared.length > 1)
+      .flatMap((shared) => shared.flatMap((node) => (node.group ? [node.group] : [])));
   }
 
   private toNode(group: string, host: string, port: number, runid: string, role: 'primary' | 'replica'): DesiredNode {

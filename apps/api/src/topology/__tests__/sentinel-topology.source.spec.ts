@@ -67,6 +67,26 @@ describe('SentinelTopologySource', () => {
     expect(result.nodes.map((n) => n.group)).toEqual(['a', 'b']);
   });
 
+  it('marks a group unknown when failover makes its snapshot list an address twice', async () => {
+    const { source } = build({
+      MASTERS: [flat({ name: 'a', ip: 'h1', port: '1', runid: 'p', flags: 'master' }), flat({ name: 'b', ip: 'h2', port: '2', runid: 'q', flags: 'master' })],
+      'REPLICAS a': [flat({ name: 'H1:1', ip: 'H1', port: '1', runid: 'p', flags: 'slave' })],
+      'REPLICAS b': [flat({ name: 'h3:3', ip: 'h3', port: '3', runid: 'r', flags: 'slave' })],
+    });
+    const result = (await source.discover(seed as never, 10_000))!;
+    expect(result.unknownGroups).toEqual(['a']);
+  });
+
+  it('marks every group that shares a duplicated address unknown', async () => {
+    const { source } = build({
+      MASTERS: [flat({ name: 'a', ip: 'h1', port: '1', runid: 'p', flags: 'master' }), flat({ name: 'b', ip: 'h2', port: '2', runid: 'q', flags: 'master' })],
+      'REPLICAS a': [flat({ name: 'h2:2', ip: 'h2', port: '2', runid: 'q', flags: 'slave' })],
+      'REPLICAS b': [],
+    });
+    const result = (await source.discover(seed as never, 10_000))!;
+    expect(result.unknownGroups.sort()).toEqual(['a', 'b']);
+  });
+
   it.each([
     ['a non-array', 'OK'],
     ['an unparseable', ['garbage']],
