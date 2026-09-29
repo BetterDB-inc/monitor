@@ -369,7 +369,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
         hasCommandLog: false,
         hasClusterSlotStats: false,
         hasLatencyMonitor: false,
-        hasAclLog: false,
+        hasAclLog: majorVersion >= 6,
         hasMemoryDoctor: false,
         hasConfig: false,
         hasVectorSearch: false,

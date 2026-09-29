@@ -86,6 +86,7 @@ describe('UnifiedDatabaseAdapter.getCapabilities — sentinel detection', () => 
     expect(capabilities.clusterEnabled).toBe(false);
     expect(capabilities.hasConfig).toBe(false);
     expect(capabilities.hasVectorSearch).toBe(false);
+    expect(capabilities.hasAclLog).toBe(true);
     expect(config).not.toHaveBeenCalled();
     expect(call).not.toHaveBeenCalled();
   });
