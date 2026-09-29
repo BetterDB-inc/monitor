@@ -113,7 +113,9 @@ export class ConnectionsController {
   @ApiOperation({ summary: 'Hide a discovered instance for 24 hours' })
   @ApiResponse({ status: 204, description: 'Dismissed' })
   dismissDiscovered(@Body() dto: DismissDiscoveredDto): void {
-    this.discovered?.dismiss(dto.host, dto.port, Date.now());
+    if (this.discovered && !this.discovered.dismiss(dto.host, dto.port, Date.now())) {
+      throw new HttpException('Too many dismissed instances', HttpStatus.CONFLICT);
+    }
   }
 
   @Post()

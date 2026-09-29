@@ -4,6 +4,7 @@ import type { InstanceKey } from './otlp-metrics-types';
 export const DISCOVERED_MAX_ENTRIES = 200;
 export const DISCOVERED_TTL_MS = 24 * 60 * 60 * 1000;
 export const DISCOVERED_MAX_HOST_LENGTH = 253;
+export const DISCOVERED_MAX_DISMISSALS = 200;
 const MAX_NAME_LENGTH = 128;
 const MAX_VERSION_LENGTH = 32;
 
@@ -13,11 +14,12 @@ function addressKey(host: string, port: number): string {
   return `${host.toLowerCase()}:${port}`;
 }
 
-function describe(key: InstanceKey, attrs: Record<string, string>): Details {
+function describe(attrs: Record<string, string>): Partial<Details> {
+  const name = attrs['service.name'];
   const system = attrs['db.system.name'];
   const version = attrs['redis.version'];
   return {
-    suggestedName: (attrs['service.name'] || `${key.host}:${key.port}`).slice(0, MAX_NAME_LENGTH),
+    ...(name ? { suggestedName: name.slice(0, MAX_NAME_LENGTH) } : {}),
     ...(system === 'redis' || system === 'valkey' ? { dbSystem: system } : {}),
     ...(version ? { version: version.slice(0, MAX_VERSION_LENGTH) } : {}),
   };
@@ -37,7 +39,7 @@ export class DiscoveredInstancesStore {
       if (nowMs < dismissedUntil) return false;
       this.dismissed.delete(id);
     }
-    const details = describe(key, attrs);
+    const details = describe(attrs);
     const existing = this.entries.get(id);
     if (existing) {
       this.entries.set(id, {
@@ -52,6 +54,7 @@ export class DiscoveredInstancesStore {
     this.entries.set(id, {
       host: key.host,
       port: key.port,
+      suggestedName: `${key.host}:${key.port}`.slice(0, MAX_NAME_LENGTH),
       ...details,
       firstSeenAt: nowMs,
       lastSeenAt: nowMs,
@@ -64,20 +67,27 @@ export class DiscoveredInstancesStore {
     for (const [id, entry] of this.entries) {
       if (nowMs - entry.lastSeenAt > DISCOVERED_TTL_MS) this.entries.delete(id);
     }
-    for (const [id, until] of this.dismissed) {
-      if (until <= nowMs) this.dismissed.delete(id);
-    }
+    this.purgeExpiredDismissals(nowMs);
     return [...this.entries.values()].sort((a, b) => b.lastSeenAt - a.lastSeenAt);
   }
 
-  dismiss(host: string, port: number, nowMs: number): void {
+  dismiss(host: string, port: number, nowMs: number): boolean {
     const id = addressKey(host, port);
+    this.purgeExpiredDismissals(nowMs);
+    if (!this.dismissed.has(id) && this.dismissed.size >= DISCOVERED_MAX_DISMISSALS) return false;
     this.entries.delete(id);
     this.dismissed.set(id, nowMs + DISCOVERED_TTL_MS);
+    return true;
   }
 
   forget(host: string, port: number): void {
     this.entries.delete(addressKey(host, port));
+  }
+
+  private purgeExpiredDismissals(nowMs: number): void {
+    for (const [id, until] of this.dismissed) {
+      if (until <= nowMs) this.dismissed.delete(id);
+    }
   }
 
   private evictLeastRecentlySeen(): void {

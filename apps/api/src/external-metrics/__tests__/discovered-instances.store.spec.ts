@@ -1,4 +1,5 @@
 import {
+  DISCOVERED_MAX_DISMISSALS,
   DISCOVERED_MAX_ENTRIES,
   DISCOVERED_MAX_HOST_LENGTH,
   DISCOVERED_TTL_MS,
@@ -106,5 +107,28 @@ describe('DiscoveredInstancesStore', () => {
     store.record(key('cache'), { 'db.system.name': 'valkey', 'redis.version': '8.1.0' }, 1, T0);
     store.record(key('cache'), {}, 1, T0 + 1);
     expect(store.list(T0 + 1)[0]).toEqual(expect.objectContaining({ dbSystem: 'valkey', version: '8.1.0' }));
+  });
+
+  it('keeps the suggested name when a later push omits service.name', () => {
+    const store = new DiscoveredInstancesStore(true);
+    store.record(key('cache'), { 'service.name': 'orders' }, 1, T0);
+    store.record(key('cache'), {}, 1, T0 + 1);
+    expect(store.list(T0 + 1)[0].suggestedName).toBe('orders');
+  });
+
+  it('refuses new dismissals beyond the cap but still refreshes existing ones', () => {
+    const store = new DiscoveredInstancesStore(true);
+    for (let i = 0; i < DISCOVERED_MAX_DISMISSALS; i += 1) {
+      expect(store.dismiss(`h${i}`, 6379, T0)).toBe(true);
+    }
+    expect(store.dismiss('overflow', 6379, T0)).toBe(false);
+    expect(store.record(key('overflow'), {}, 1, T0)).toBe(true);
+    expect(store.dismiss('H0', 6379, T0 + 1)).toBe(true);
+  });
+
+  it('frees dismissal slots once they expire', () => {
+    const store = new DiscoveredInstancesStore(true);
+    for (let i = 0; i < DISCOVERED_MAX_DISMISSALS; i += 1) store.dismiss(`h${i}`, 6379, T0);
+    expect(store.dismiss('late', 6379, T0 + DISCOVERED_TTL_MS)).toBe(true);
   });
 });

@@ -5,7 +5,10 @@ import {
   CAPABILITY_TEST_COMMAND,
   RuntimeCapabilityTracker,
 } from '../runtime-capability-tracker.service';
-import { DiscoveredInstancesStore } from '../../external-metrics/discovered-instances.store';
+import {
+  DISCOVERED_MAX_DISMISSALS,
+  DiscoveredInstancesStore,
+} from '../../external-metrics/discovered-instances.store';
 import { validate } from 'class-validator';
 import { plainToInstance } from 'class-transformer';
 import { DismissDiscoveredDto } from '../../common/dto/connections.dto';
@@ -238,6 +241,14 @@ describe('ConnectionsController discovered instances', () => {
     discovered.record({ host: 'cache', port: 6379 }, {}, 1, Date.now());
     make(discovered).dismissDiscovered({ host: 'cache', port: 6379 });
     expect(discovered.list(Date.now())).toEqual([]);
+  });
+
+  it('rejects a dismissal with 409 when too many are held', () => {
+    const discovered = new DiscoveredInstancesStore(true);
+    for (let i = 0; i < DISCOVERED_MAX_DISMISSALS; i += 1) discovered.dismiss(`h${i}`, 6379, Date.now());
+    expect(() => make(discovered).dismissDiscovered({ host: 'cache', port: 6379 })).toThrow(
+      expect.objectContaining({ status: HttpStatus.CONFLICT }),
+    );
   });
 
   it.each([
