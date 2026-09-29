@@ -121,6 +121,8 @@ export class NodeSplittingExporter implements PushMetricExporter {
   readonly selectAggregationTemporality?: PushMetricExporter['selectAggregationTemporality'];
   readonly selectAggregation?: PushMetricExporter['selectAggregation'];
   private readonly knownNodes = new Map<string, NodeIdentity>();
+  private activeExports = 0;
+  private readonly waitingForSlot: Array<() => void> = [];
 
   constructor(
     private readonly inner: PushMetricExporter,
@@ -141,17 +143,7 @@ export class NodeSplittingExporter implements PushMetricExporter {
       resultCallback({ code: ExportResultCode.SUCCESS });
       return;
     }
-    const results: ExportResult[] = [];
-    let next = 0;
-    const worker = async (): Promise<void> => {
-      while (next < parts.length) {
-        const index = next;
-        next += 1;
-        results[index] = await this.exportPart(parts[index]);
-      }
-    };
-    const workers = Array.from({ length: Math.min(MAX_CONCURRENT_EXPORTS, parts.length) }, worker);
-    void Promise.all(workers).then(() => {
+    void Promise.all(parts.map((part) => this.exportWithSlot(part))).then((results) => {
       const failed = results.find((result) => result.code !== ExportResultCode.SUCCESS);
       resultCallback(failed ?? { code: ExportResultCode.SUCCESS });
     });
@@ -181,6 +173,32 @@ export class NodeSplittingExporter implements PushMetricExporter {
     }
     this.knownNodes.set(label, identity);
     return identity;
+  }
+
+  private async exportWithSlot(part: ResourceMetrics): Promise<ExportResult> {
+    await this.acquireSlot();
+    try {
+      return await this.exportPart(part);
+    } finally {
+      this.releaseSlot();
+    }
+  }
+
+  private acquireSlot(): Promise<void> {
+    if (this.activeExports < MAX_CONCURRENT_EXPORTS) {
+      this.activeExports += 1;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => this.waitingForSlot.push(resolve));
+  }
+
+  private releaseSlot(): void {
+    const next = this.waitingForSlot.shift();
+    if (next) {
+      next();
+    } else {
+      this.activeExports -= 1;
+    }
   }
 
   private exportPart(part: ResourceMetrics): Promise<ExportResult> {

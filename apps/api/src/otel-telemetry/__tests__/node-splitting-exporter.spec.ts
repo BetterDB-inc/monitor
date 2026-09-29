@@ -386,6 +386,23 @@ describe('NodeSplittingExporter', () => {
       });
       expect(inner.exported).toHaveLength(20);
     });
+
+    it('shares the cap across export cycles that overlap', async () => {
+      const inner = asyncInner(MAX_CONCURRENT_EXPORTS);
+      const exporter = new NodeSplittingExporter(inner, () => manyResolver);
+
+      const results = await Promise.all([
+        exportOnce(exporter, manyNodes),
+        exportOnce(exporter, manyNodes),
+      ]);
+
+      expect(results).toEqual([
+        { code: ExportResultCode.SUCCESS },
+        { code: ExportResultCode.SUCCESS },
+      ]);
+      expect(inner.peak()).toBeLessThanOrEqual(MAX_CONCURRENT_EXPORTS);
+      expect(inner.exported).toHaveLength(40);
+    });
   });
 
   it('delegates flush, shutdown and temporality selection', async () => {
