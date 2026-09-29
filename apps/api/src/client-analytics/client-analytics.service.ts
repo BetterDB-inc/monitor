@@ -30,6 +30,10 @@ export class ClientAnalyticsService extends MultiConnectionPoller implements OnM
     return this.settingsService.getCachedSettings().clientAnalyticsPollIntervalMs;
   }
 
+  protected pollsSentinels(): boolean {
+    return true;
+  }
+
   async onModuleInit(): Promise<void> {
     this.start();
   }

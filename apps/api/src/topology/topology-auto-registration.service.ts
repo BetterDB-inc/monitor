@@ -1,15 +1,14 @@
-import { Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import type { DatabaseConnectionConfig } from '@betterdb/shared';
-import { ConnectionRegistry } from '../../connections/connection-registry.service';
-import { isTrueFlag } from '../../config/env-normalize';
-import { ConnectionContext, MultiConnectionPoller } from '../../common/services/multi-connection-poller';
-import { MS_PER_DAY, RetentionPolicyService } from '../../retention/retention-policy.service';
-import { ClusterDiscoveryService, DiscoveredNode } from '../cluster-discovery.service';
+import type { DatabaseConnectionConfig, TopologyKind } from '@betterdb/shared';
+import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { isTrueFlag } from '../config/env-normalize';
+import { ConnectionContext, MultiConnectionPoller } from '../common/services/multi-connection-poller';
+import { MS_PER_DAY, RetentionPolicyService } from '../retention/retention-policy.service';
+import { TOPOLOGY_SOURCES, TopologyDiscovery, TopologySource } from './topology-source';
 import {
   AddressOwner,
   MembershipDiff,
-  desiredFromDiscovery,
   diffMembership,
   exceedsRetirementThreshold,
   retirementKey,
@@ -18,8 +17,8 @@ import {
 const DISCOVERY_TIMEOUT_MS = 10_000;
 
 @Injectable()
-export class ClusterAutoRegistrationService extends MultiConnectionPoller implements OnModuleInit {
-  protected readonly logger = new Logger(ClusterAutoRegistrationService.name);
+export class TopologyAutoRegistrationService extends MultiConnectionPoller implements OnModuleInit {
+  protected readonly logger = new Logger(TopologyAutoRegistrationService.name);
   private readonly heldRetirements = new Map<string, string>();
   private readonly loggedOnce = new Set<string>();
   private readonly pendingDiscovery = new Set<string>();
@@ -27,7 +26,7 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
 
   constructor(
     connectionRegistry: ConnectionRegistry,
-    private readonly discovery: ClusterDiscoveryService,
+    @Inject(TOPOLOGY_SOURCES) private readonly sources: TopologySource[],
     private readonly configService: ConfigService,
     @Optional() private readonly retentionPolicy?: RetentionPolicyService,
   ) {
@@ -48,6 +47,10 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
 
   protected skipUnchangedSamples(): boolean {
     return false;
+  }
+
+  protected pollsSentinels(): boolean {
+    return true;
   }
 
   protected onConnectionRemoved(connectionId: string): void {
@@ -75,19 +78,27 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
       const members = this.connectionRegistry.listMembers(seedId);
       await this.purgeExpired(members);
 
-      if (!this.isEnabled(seed)) {
+      const kind = this.kindOf(seed, members);
+      if (!kind) return;
+
+      if (!this.isEnabled(seed, kind)) {
         const active = members.filter((m) => m.membership?.origin === 'auto' && m.membership.retiredAt === undefined);
         await this.applyEach(active.map((m) => m.id), (id) => this.connectionRegistry.retireChild(id), 'retire');
         this.heldRetirements.delete(seedId);
         return;
       }
 
-      const nodes = await this.discover(seed);
-      if (!nodes || nodes.length === 0) return;
+      const source = this.sourceFor(seed);
+      if (!source) return;
+      const discovery = await this.discover(seed, source);
+      if (!discovery) return;
 
-      const current = members.flatMap((m) => (m.membership ? [{ id: m.id, host: m.host, port: m.port, membership: m.membership }] : []));
-      const diff = diffMembership(seedId, desiredFromDiscovery(seed, nodes), current, (host, port) => this.lookup(host, port));
-      await this.apply(seed, diff, members);
+      const unknown = new Set(discovery.unknownGroups);
+      const known = members.filter((m) => !(m.membership?.group !== undefined && unknown.has(m.membership.group)));
+      const current = known.flatMap((m) => (m.membership ? [{ id: m.id, host: m.host, port: m.port, membership: m.membership }] : []));
+      const desired = discovery.nodes.filter((n) => n.group === undefined || !unknown.has(n.group));
+      const diff = diffMembership(seedId, desired, current, (host, port) => this.lookup(host, port));
+      await this.apply(seed, diff, known);
     });
   }
 
@@ -97,33 +108,41 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
     return true;
   }
 
-  private isEnabled(seed: DatabaseConnectionConfig): boolean {
-    return seed.autoRegisterNodes ?? isTrueFlag(this.configService.get<string>('CLUSTER_AUTO_REGISTER_NODES'));
+  private sourceFor(config: DatabaseConnectionConfig): TopologySource | null {
+    let caps;
+    try {
+      const client = this.connectionRegistry.get(config.id);
+      if (!client.isConnected()) return null;
+      caps = client.getCapabilities();
+    } catch {
+      return null;
+    }
+    return this.sources.find((s) => s.handles(caps)) ?? null;
   }
 
-  private async discover(seed: DatabaseConnectionConfig): Promise<DiscoveredNode[] | null> {
+  private kindOf(config: DatabaseConnectionConfig, members: DatabaseConnectionConfig[]): TopologyKind | null {
+    return this.sourceFor(config)?.kind ?? members.find((m) => m.membership)?.membership?.source ?? null;
+  }
+
+  private isEnabled(config: DatabaseConnectionConfig, kind: TopologyKind): boolean {
+    const source = this.sources.find((s) => s.kind === kind);
+    return config.autoRegisterNodes ?? (source ? isTrueFlag(this.configService.get<string>(source.envFlag)) : false);
+  }
+
+  private async discover(seed: DatabaseConnectionConfig, source: TopologySource): Promise<TopologyDiscovery | null> {
     if (seed.sshTunnel?.enabled) {
       this.logOnce(`ssh:${seed.id}`, `Skipping auto-registration for ${seed.name}: SSH-tunnelled seeds are not supported`);
       return null;
     }
-    const client = this.connectionRegistry.get(seed.id);
-    if (!client.isConnected()) return null;
-    let clusterEnabled = false;
-    try {
-      clusterEnabled = client.getCapabilities().clusterEnabled === true;
-    } catch {
-      return null;
-    }
-    if (!clusterEnabled) return null;
     if (this.pendingDiscovery.has(seed.id)) {
-      this.logger.debug(`Skipping discovery for ${seed.name}: the previous CLUSTER NODES has not returned yet`);
+      this.logger.debug(`Skipping discovery for ${seed.name}: the previous discovery has not returned yet`);
       return null;
     }
     this.pendingDiscovery.add(seed.id);
     const settled = (): void => {
       this.pendingDiscovery.delete(seed.id);
     };
-    const call = this.discovery.discoverNodesIsolated(seed.id, DISCOVERY_TIMEOUT_MS);
+    const call = source.discover(seed, DISCOVERY_TIMEOUT_MS);
     call.then(settled, settled);
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, reject) => {
@@ -132,7 +151,7 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
     try {
       return await Promise.race([call, timeout]);
     } catch (error) {
-      this.logger.warn(`Cluster discovery failed for ${seed.name}; leaving members unchanged: ${error instanceof Error ? error.message : error}`);
+      this.logger.warn(`${source.kind} discovery failed for ${seed.name}; leaving members unchanged: ${error instanceof Error ? error.message : error}`);
       return null;
     } finally {
       clearTimeout(timer);
@@ -155,9 +174,17 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
       this.logOnce(`skip:${seed.id}:${skip.host}:${skip.port}:${skip.reason}`, `Not registering ${skip.host}:${skip.port} under ${seed.name}: ${skip.reason}`);
     }
     await this.applyEach(diff.add, (node) => this.connectionRegistry.addManagedChild(seed.id, node).then(() => undefined), 'add');
-    await this.applyEach(diff.adopt, (a) => this.connectionRegistry.adoptChild(a.id, seed.id, a.nodeId), 'adopt');
-    await this.applyEach(diff.reactivate, (r) => this.connectionRegistry.reactivateChild(r.id, r.nodeId), 'reactivate');
-    await this.applyEach(diff.refreshNodeId, (r) => this.connectionRegistry.refreshChildNodeId(r.id, r.nodeId), 'refresh');
+    await this.applyEach(diff.adopt, (a) => this.connectionRegistry.adoptChild(a.id, seed.id, a.node), 'adopt');
+    await this.applyEach(diff.reactivate, (r) => this.connectionRegistry.reactivateChild(r.id, r.node), 'reactivate');
+
+    for (const { id, node } of diff.refresh) {
+      if (node.source !== 'sentinel' || node.role !== 'primary') continue;
+      const previous = members.find((m) => m.membership && m.membership.group === node.group && m.membership.role === 'primary' && m.id !== id);
+      if (previous) {
+        this.logger.log(`Sentinel group ${node.group} primary changed ${previous.host}:${previous.port} → ${node.host}:${node.port}`);
+      }
+    }
+    await this.applyEach(diff.refresh, (r) => this.connectionRegistry.refreshChild(r.id, r.node), 'refresh');
 
     const retire = this.gateRetirements(seed, diff.retire, members);
     await this.applyEach(retire, (id) => this.connectionRegistry.retireChild(id), 'retire');
@@ -192,9 +219,9 @@ export class ClusterAutoRegistrationService extends MultiConnectionPoller implem
     for (const item of items) {
       try {
         await op(item);
-        this.logger.log(`Cluster membership ${label}: ${JSON.stringify(item)}`);
+        this.logger.log(`Topology membership ${label}: ${JSON.stringify(item)}`);
       } catch (error) {
-        this.logger.warn(`Cluster membership ${label} failed for ${JSON.stringify(item)}: ${error instanceof Error ? error.message : error}`);
+        this.logger.warn(`Topology membership ${label} failed for ${JSON.stringify(item)}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }

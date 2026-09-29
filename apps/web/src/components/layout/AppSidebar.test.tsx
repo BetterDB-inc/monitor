@@ -76,7 +76,7 @@ function renderSidebar(): void {
 describe('AppSidebar cluster nav gating', () => {
   it('hides seed-only items and links to the cluster when a child node is selected', () => {
     mockCurrent(
-      { id: 'k', name: 'prod · 10.0.0.2:7002', membership: { seedId: 's', nodeId: 'n', origin: 'auto' } },
+      { id: 'k', name: 'prod · 10.0.0.2:7002', membership: { seedId: 's', nodeId: 'n', origin: 'auto', source: 'cluster' } },
       [{ id: 's', name: 'prod' }],
     );
     renderSidebar();

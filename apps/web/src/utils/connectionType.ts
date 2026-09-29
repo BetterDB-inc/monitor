@@ -21,6 +21,10 @@ export function isRetiredMember(connection: WithMembership): boolean {
   return connection?.membership?.retiredAt !== undefined;
 }
 
+export function retiredLabel(connection: WithMembership): string {
+  return connection?.membership?.source === 'sentinel' ? 'left group' : 'left cluster';
+}
+
 export function isClusterChild(connection: WithMembership): boolean {
   return connection?.membership !== undefined;
 }

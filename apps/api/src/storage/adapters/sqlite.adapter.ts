@@ -4119,6 +4119,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         connection_type TEXT,
         auto_register_nodes INTEGER,
         membership TEXT,
+        node_username TEXT,
+        node_password TEXT,
+        node_password_encrypted INTEGER,
         is_default INTEGER DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER
@@ -4143,6 +4146,15 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!columns.some((c) => c.name === 'membership')) {
       this.db.exec('ALTER TABLE connections ADD COLUMN membership TEXT');
     }
+    if (!columns.some((c) => c.name === 'node_username')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN node_username TEXT');
+    }
+    if (!columns.some((c) => c.name === 'node_password')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN node_password TEXT');
+    }
+    if (!columns.some((c) => c.name === 'node_password_encrypted')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN node_password_encrypted INTEGER');
+    }
   }
 
   async saveConnection(config: DatabaseConnectionConfig): Promise<void> {
@@ -4151,8 +4163,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     this.ensureConnectionsSchema();
 
     const stmt = this.db.prepare(`
-      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, ssh_tunnel, connection_type, auto_register_nodes, membership, is_default, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, node_username, node_password, node_password_encrypted, db_index, tls, ssh_tunnel, connection_type, auto_register_nodes, membership, is_default, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         host = excluded.host,
@@ -4160,6 +4172,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         username = excluded.username,
         password = excluded.password,
         password_encrypted = excluded.password_encrypted,
+        node_username = excluded.node_username,
+        node_password = excluded.node_password,
+        node_password_encrypted = excluded.node_password_encrypted,
         db_index = excluded.db_index,
         tls = excluded.tls,
         ssh_tunnel = excluded.ssh_tunnel,
@@ -4178,6 +4193,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       config.username || null,
       config.password || null,
       config.passwordEncrypted ? 1 : 0,
+      config.nodeUsername || null,
+      config.nodePassword || null,
+      config.nodePassword ? (config.nodePasswordEncrypted ? 1 : 0) : null,
       config.dbIndex || 0,
       config.tls ? 1 : 0,
       config.sshTunnel ? JSON.stringify(config.sshTunnel) : null,
@@ -4211,6 +4229,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       username: row.username || undefined,
       password: row.password || undefined,
       passwordEncrypted: row.password_encrypted === 1,
+      nodeUsername: row.node_username || undefined,
+      nodePassword: row.node_password || undefined,
+      nodePasswordEncrypted: row.node_password_encrypted === 1 ? true : undefined,
       dbIndex: row.db_index,
       tls: row.tls === 1,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
@@ -4245,6 +4266,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       username: row.username || undefined,
       password: row.password || undefined,
       passwordEncrypted: row.password_encrypted === 1,
+      nodeUsername: row.node_username || undefined,
+      nodePassword: row.node_password || undefined,
+      nodePasswordEncrypted: row.node_password_encrypted === 1 ? true : undefined,
       dbIndex: row.db_index,
       tls: row.tls === 1,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),

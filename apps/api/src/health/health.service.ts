@@ -67,6 +67,10 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
     return false;
   }
 
+  protected pollsSentinels(): boolean {
+    return true;
+  }
+
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     if (ctx.connectionType === 'external' && (ctx.client.sampleVersion?.() ?? null) === null) {
       return;

@@ -50,7 +50,7 @@ describe('useConnectionState', () => {
     const retired: Connection = {
       ...connection('retired'),
       isConnected: false,
-      membership: { seedId: 'seed', nodeId: 'n1', origin: 'auto', retiredAt: 1 },
+      membership: { seedId: 'seed', nodeId: 'n1', origin: 'auto', source: 'cluster', retiredAt: 1 },
     };
     const idle: Connection = { ...connection('idle'), isConnected: false };
     mocks.fetchApi.mockResolvedValueOnce({ connections: [retired, idle], currentId: 'retired' });
@@ -177,6 +177,35 @@ describe('useConnectionState', () => {
       });
 
       expect(result.current.connections.map((c) => c.id)).toEqual(['seed', 'child']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('polls for children when Sentinel auto-registration is on by default', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mocks.fetchApi.mockResolvedValue({
+        connections: [connection('sentinels')],
+        currentId: null,
+        autoRegisterNodesDefault: false,
+        autoRegisterSentinelNodesDefault: true,
+      });
+      const { result } = renderHook(() => useConnectionState());
+      await waitFor(() => expect(result.current.connections).toHaveLength(1));
+
+      const child = { ...connection('child'), membership: { seedId: 'sentinels', nodeId: 'n', origin: 'auto' as const } };
+      mocks.fetchApi.mockResolvedValue({
+        connections: [connection('sentinels'), child],
+        currentId: null,
+        autoRegisterNodesDefault: false,
+        autoRegisterSentinelNodesDefault: true,
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(CONNECTIONS_REFRESH_MS);
+      });
+
+      expect(result.current.connections.map((c) => c.id)).toEqual(['sentinels', 'child']);
     } finally {
       vi.useRealTimers();
     }

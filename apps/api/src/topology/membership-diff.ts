@@ -1,23 +1,31 @@
-import type { ClusterMembership } from '@betterdb/shared';
-import type { DiscoveredNode } from '../cluster-discovery.service';
+import type { TopologyKind, TopologyMembership, TopologyRole } from '@betterdb/shared';
+import type { DiscoveredNode } from '../cluster/cluster-discovery.service';
 
 export interface DesiredNode {
   host: string;
   port: number;
   nodeId: string;
+  source: TopologyKind;
+  group?: string;
+  role?: TopologyRole;
+}
+
+export interface MemberPatch {
+  id: string;
+  node: DesiredNode;
 }
 
 export interface MemberSnapshot {
   id: string;
   host: string;
   port: number;
-  membership: ClusterMembership;
+  membership: TopologyMembership;
 }
 
 export interface AddressOwner {
   id: string;
   connectionType: 'direct' | 'external';
-  membership?: ClusterMembership;
+  membership?: TopologyMembership;
   isSeed?: boolean;
 }
 
@@ -27,9 +35,9 @@ export type SkipReason = 'claimed' | 'external' | 'occupied' | 'seed';
 
 export interface MembershipDiff {
   add: DesiredNode[];
-  adopt: Array<{ id: string; nodeId: string }>;
-  reactivate: Array<{ id: string; nodeId: string }>;
-  refreshNodeId: Array<{ id: string; nodeId: string }>;
+  adopt: MemberPatch[];
+  reactivate: MemberPatch[];
+  refresh: MemberPatch[];
   retire: string[];
   skipped: Array<{ host: string; port: number; reason: SkipReason }>;
 }
@@ -57,7 +65,7 @@ export function desiredFromDiscovery(seed: { host: string; port: number }, nodes
     if (node.flags.some((flag) => EXCLUDED_FLAGS.includes(flag))) continue;
     const parsed = parseNodeAddress(node.address);
     if (!parsed || addressKey(parsed.host, parsed.port) === seedKey) continue;
-    desired.push({ ...parsed, nodeId: node.id });
+    desired.push({ ...parsed, nodeId: node.id, source: 'cluster' });
   }
   return desired;
 }
@@ -68,9 +76,12 @@ export function diffMembership(
   current: MemberSnapshot[],
   lookup: AddressLookup,
 ): MembershipDiff {
-  const diff: MembershipDiff = { add: [], adopt: [], reactivate: [], refreshNodeId: [], retire: [], skipped: [] };
+  const diff: MembershipDiff = { add: [], adopt: [], reactivate: [], refresh: [], retire: [], skipped: [] };
   const currentByAddress = new Map(current.map((member) => [addressKey(member.host, member.port), member]));
   const desiredKeys = new Set<string>();
+
+  const changed = (membership: TopologyMembership, node: DesiredNode): boolean =>
+    membership.nodeId !== node.nodeId || membership.source !== node.source || membership.group !== node.group || membership.role !== node.role;
 
   for (const node of desired) {
     const key = addressKey(node.host, node.port);
@@ -82,10 +93,10 @@ export function diffMembership(
         if (owner && owner.id !== member.id) {
           diff.skipped.push({ host: node.host, port: node.port, reason: 'occupied' });
         } else {
-          diff.reactivate.push({ id: member.id, nodeId: node.nodeId });
+          diff.reactivate.push({ id: member.id, node });
         }
-      } else if (member.membership.nodeId !== node.nodeId) {
-        diff.refreshNodeId.push({ id: member.id, nodeId: node.nodeId });
+      } else if (changed(member.membership, node)) {
+        diff.refresh.push({ id: member.id, node });
       }
       continue;
     }
@@ -99,7 +110,7 @@ export function diffMembership(
     } else if (owner.isSeed) {
       diff.skipped.push({ host: node.host, port: node.port, reason: 'seed' });
     } else if (!owner.membership) {
-      diff.adopt.push({ id: owner.id, nodeId: node.nodeId });
+      diff.adopt.push({ id: owner.id, node });
     }
   }
 
