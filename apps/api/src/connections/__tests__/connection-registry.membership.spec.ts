@@ -2,7 +2,7 @@ jest.mock('../../database/adapters/unified.adapter');
 
 import { BadRequestException } from '@nestjs/common';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
-import { ConnectionRegistry } from '../connection-registry.service';
+import { CHILD_CONNECT_TIMEOUT_MS, ConnectionRegistry } from '../connection-registry.service';
 import { UnifiedDatabaseAdapter } from '../../database/adapters/unified.adapter';
 import { ExternalMetricsStore } from '../../external-metrics/external-metrics-store';
 
@@ -70,6 +70,45 @@ describe('ConnectionRegistry membership', () => {
     const id = await registry.addManagedChild('seed', { host: '10.0.0.9', port: 7009, nodeId: 'n9' });
     expect(registry.getConfig(id)?.credentialStatus).toBe('unknown');
     expect(storage.saveConnection).toHaveBeenCalled();
+  });
+
+  it('bounds a managed child connect that never completes', async () => {
+    jest.useFakeTimers();
+    try {
+      const { registry, storage } = build();
+      put(registry, seed);
+      const disconnect = jest.fn().mockResolvedValue(undefined);
+      jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(
+        () => ({ connect: jest.fn(() => new Promise(() => undefined)), disconnect }) as never,
+      );
+      const pending = registry.addManagedChild('seed', { host: '10.0.0.9', port: 7009, nodeId: 'n9' });
+      await jest.advanceTimersByTimeAsync(CHILD_CONNECT_TIMEOUT_MS);
+      const id = await pending;
+      expect(disconnect).toHaveBeenCalled();
+      expect(registry.getConfig(id)?.credentialStatus).toBe('unknown');
+      expect(storage.saveConnection).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('bounds a reactivation connect that never completes', async () => {
+    jest.useFakeTimers();
+    try {
+      const { registry } = build();
+      put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'old', origin: 'auto', retiredAt: 5 } });
+      const disconnect = jest.fn().mockResolvedValue(undefined);
+      jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(
+        () => ({ connect: jest.fn(() => new Promise(() => undefined)), disconnect }) as never,
+      );
+      const pending = registry.reactivateChild('auto', 'new');
+      await jest.advanceTimersByTimeAsync(CHILD_CONNECT_TIMEOUT_MS);
+      await pending;
+      expect(disconnect).toHaveBeenCalled();
+      expect(registry.getConfig('auto')?.membership).toEqual({ seedId: 'seed', nodeId: 'new', origin: 'auto' });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('disconnects and forgets a managed child when persisting it fails', async () => {
