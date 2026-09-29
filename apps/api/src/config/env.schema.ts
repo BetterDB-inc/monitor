@@ -206,6 +206,7 @@ export const envSchema = z
       .transform((v) => !isNegativeEnvValue(v)),
     OTEL_INGEST_TOKEN: z.string().optional(),
     OTEL_METRICS_STALE_AFTER_MS: otelMetricsStaleAfterMsSchema,
+    OTLP_DISCOVER_INSTANCES: z.string().default('true').transform(isTrueFlag),
 
     PROMETHEUS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).optional(),
     PROMETHEUS_STALENESS_MS: z.coerce.number().int().min(1000).optional(),
