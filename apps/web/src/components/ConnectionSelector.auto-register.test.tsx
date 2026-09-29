@@ -203,6 +203,28 @@ describe('ConnectionSelector - auto-register toggle', () => {
     expect(body.nodePassword).toBe('node-pass');
   });
 
+  it('keeps node credentials when only the name changes after a sentinel test', async () => {
+    routeFetch({ sentinel: true });
+    render(<ConnectionSelector />);
+    const disclosureSummary = await openAddDialogWithSentinelTest();
+    fireEvent.click(disclosureSummary);
+    const nodeUsernameInput = screen
+      .getByText('Node username')
+      .closest('div')!
+      .querySelector('input') as HTMLInputElement;
+    fireEvent.change(nodeUsernameInput, { target: { value: 'node-user' } });
+    fireEvent.change(screen.getByPlaceholderText('Production Redis'), { target: { value: 'Renamed' } });
+    expect(screen.getByText('Node username')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Save'));
+    await waitFor(() => expect(mockRefreshConnections).toHaveBeenCalled());
+    const createCall = vi
+      .mocked(fetchApi)
+      .mock.calls.find(([url, init]) => url === '/connections' && (init as RequestInit)?.method === 'POST');
+    const body = JSON.parse((createCall![1] as RequestInit).body as string);
+    expect(body.name).toBe('Renamed');
+    expect(body.nodeUsername).toBe('node-user');
+  });
+
   it('drops stale node credentials when a re-test comes back non-Sentinel', async () => {
     let sentinel = true;
     vi.mocked(fetchApi).mockImplementation(async (url: string, init?: RequestInit) => {

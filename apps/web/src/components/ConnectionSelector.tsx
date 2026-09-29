@@ -184,7 +184,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       value = value.replace(/^https?:\/\//, '').replace(/\/$/, '');
     }
     setFormData((prev) => ({ ...prev, [field]: value }));
-    if (field !== 'nodeUsername' && field !== 'nodePassword') {
+    if (field !== 'name' && field !== 'nodeUsername' && field !== 'nodePassword') {
       setTestResult(null);
     }
   };
