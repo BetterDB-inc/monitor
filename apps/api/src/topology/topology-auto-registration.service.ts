@@ -87,7 +87,7 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
       const source = this.sourceFor(seed);
       if (!source) return;
       const discovery = await this.discover(seed, source);
-      if (!discovery || discovery.nodes.length === 0) return;
+      if (!discovery) return;
 
       const unknown = new Set(discovery.unknownGroups);
       const current = members.flatMap((m) =>
