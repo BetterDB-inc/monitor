@@ -1,5 +1,6 @@
 import {
   DISCOVERED_MAX_ENTRIES,
+  DISCOVERED_MAX_HOST_LENGTH,
   DISCOVERED_TTL_MS,
   DiscoveredInstancesStore,
 } from '../discovered-instances.store';
@@ -90,5 +91,20 @@ describe('DiscoveredInstancesStore', () => {
     store.record(key('a'), {}, 1, T0);
     store.record(key('b'), {}, 1, T0 + 5);
     expect(store.list(T0 + 5).map((i) => i.host)).toEqual(['b', 'a']);
+  });
+
+  it('does not record hosts longer than the DNS maximum', () => {
+    const store = new DiscoveredInstancesStore(true);
+    expect(store.record(key('a'.repeat(DISCOVERED_MAX_HOST_LENGTH + 1)), {}, 1, T0)).toBe(false);
+    expect(store.list(T0)).toEqual([]);
+    expect(store.record(key('a'.repeat(DISCOVERED_MAX_HOST_LENGTH)), {}, 1, T0)).toBe(true);
+    expect(store.list(T0)).toHaveLength(1);
+  });
+
+  it('keeps previously seen dbSystem and version when a later push omits them', () => {
+    const store = new DiscoveredInstancesStore(true);
+    store.record(key('cache'), { 'db.system.name': 'valkey', 'redis.version': '8.1.0' }, 1, T0);
+    store.record(key('cache'), {}, 1, T0 + 1);
+    expect(store.list(T0 + 1)[0]).toEqual(expect.objectContaining({ dbSystem: 'valkey', version: '8.1.0' }));
   });
 });

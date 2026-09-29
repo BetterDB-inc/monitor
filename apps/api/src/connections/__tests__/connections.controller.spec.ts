@@ -9,6 +9,7 @@ import { DiscoveredInstancesStore } from '../../external-metrics/discovered-inst
 import { validate } from 'class-validator';
 import { plainToInstance } from 'class-transformer';
 import { DismissDiscoveredDto } from '../../common/dto/connections.dto';
+import type { DatabaseConnectionConfig } from '@betterdb/shared';
 
 interface AdapterStub {
   call: jest.Mock;
@@ -199,8 +200,14 @@ describe('ConnectionsController.retryCapability — HttpException shapes', () =>
 });
 
 describe('ConnectionsController discovered instances', () => {
-  const make = (discovered?: DiscoveredInstancesStore) =>
-    new ConnectionsController({} as never, {} as never, discovered);
+  const buildRegistry = () =>
+    new ConnectionRegistry({} as never, {} as never, {} as never, {} as never, {} as never);
+  const make = (discovered?: DiscoveredInstancesStore, registry = buildRegistry()) =>
+    new ConnectionsController(registry, {} as never, discovered);
+  const seedConfig = (registry: ConnectionRegistry, host: string, port: number) => {
+    const config: DatabaseConnectionConfig = { id: 'seeded-1', name: 'Seeded', host, port, isDefault: false, createdAt: 1 };
+    (registry as unknown as { configs: Map<string, DatabaseConnectionConfig> }).configs.set(config.id, config);
+  };
 
   it('lists discovered instances when enabled', () => {
     const discovered = new DiscoveredInstancesStore(true);
@@ -208,6 +215,15 @@ describe('ConnectionsController discovered instances', () => {
     const response = make(discovered).listDiscovered();
     expect(response.enabled).toBe(true);
     expect(response.instances.map((i) => i.host)).toEqual(['cache']);
+  });
+
+  it('hides discovered instances whose address is already registered', () => {
+    const discovered = new DiscoveredInstancesStore(true);
+    discovered.record({ host: 'cache', port: 6379 }, {}, 1, Date.now());
+    discovered.record({ host: 'other', port: 6379 }, {}, 1, Date.now());
+    const registry = buildRegistry();
+    seedConfig(registry, 'CACHE', 6379);
+    expect(make(discovered, registry).listDiscovered().instances.map((i) => i.host)).toEqual(['other']);
   });
 
   it.each([
@@ -229,6 +245,8 @@ describe('ConnectionsController discovered instances', () => {
     [{ host: 'cache', port: 0 }],
     [{ host: 'cache', port: 70000 }],
     [{ host: 'cache' }],
+    [{ host: 'a'.repeat(254), port: 6379 }],
+    [{ host: 'cache', port: 1.5 }],
   ])('rejects an invalid dismiss body %j', async (body) => {
     const errors = await validate(plainToInstance(DismissDiscoveredDto, body));
     expect(errors.length).toBeGreaterThan(0);

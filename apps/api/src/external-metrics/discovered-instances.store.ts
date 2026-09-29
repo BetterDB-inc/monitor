@@ -3,6 +3,7 @@ import type { InstanceKey } from './otlp-metrics-types';
 
 export const DISCOVERED_MAX_ENTRIES = 200;
 export const DISCOVERED_TTL_MS = 24 * 60 * 60 * 1000;
+export const DISCOVERED_MAX_HOST_LENGTH = 253;
 const MAX_NAME_LENGTH = 128;
 const MAX_VERSION_LENGTH = 32;
 
@@ -29,6 +30,7 @@ export class DiscoveredInstancesStore {
   constructor(readonly enabled: boolean) {}
 
   record(key: InstanceKey, attrs: Record<string, string>, points: number, nowMs: number): boolean {
+    if (key.host.length > DISCOVERED_MAX_HOST_LENGTH) return false;
     const id = addressKey(key.host, key.port);
     const dismissedUntil = this.dismissed.get(id);
     if (dismissedUntil !== undefined) {

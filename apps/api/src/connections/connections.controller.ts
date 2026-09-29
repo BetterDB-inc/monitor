@@ -100,7 +100,12 @@ export class ConnectionsController {
   @ApiResponse({ status: 200, description: 'Discovered instances, most recently seen first' })
   listDiscovered(): DiscoveredInstancesResponse {
     if (!this.discovered?.enabled) return { enabled: false, instances: [] };
-    return { enabled: true, instances: this.discovered.list(Date.now()) };
+    return {
+      enabled: true,
+      instances: this.discovered
+        .list(Date.now())
+        .filter((instance) => this.registry.findIdByHostPort(instance.host, instance.port) === null),
+    };
   }
 
   @Post('discovered/dismiss')
