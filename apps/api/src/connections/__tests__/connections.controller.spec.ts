@@ -5,6 +5,10 @@ import {
   CAPABILITY_TEST_COMMAND,
   RuntimeCapabilityTracker,
 } from '../runtime-capability-tracker.service';
+import { DiscoveredInstancesStore } from '../../external-metrics/discovered-instances.store';
+import { validate } from 'class-validator';
+import { plainToInstance } from 'class-transformer';
+import { DismissDiscoveredDto } from '../../common/dto/connections.dto';
 
 interface AdapterStub {
   call: jest.Mock;
@@ -191,5 +195,42 @@ describe('ConnectionsController.retryCapability — HttpException shapes', () =>
     } catch (err) {
       expect(err).toBeInstanceOf(HttpException);
     }
+  });
+});
+
+describe('ConnectionsController discovered instances', () => {
+  const make = (discovered?: DiscoveredInstancesStore) =>
+    new ConnectionsController({} as never, {} as never, discovered);
+
+  it('lists discovered instances when enabled', () => {
+    const discovered = new DiscoveredInstancesStore(true);
+    discovered.record({ host: 'cache', port: 6379 }, {}, 1, Date.now());
+    const response = make(discovered).listDiscovered();
+    expect(response.enabled).toBe(true);
+    expect(response.instances.map((i) => i.host)).toEqual(['cache']);
+  });
+
+  it.each([
+    ['disabled', new DiscoveredInstancesStore(false)],
+    ['absent', undefined],
+  ])('reports disabled when the store is %s', (_label, discovered) => {
+    expect(make(discovered).listDiscovered()).toEqual({ enabled: false, instances: [] });
+  });
+
+  it('dismisses an instance', () => {
+    const discovered = new DiscoveredInstancesStore(true);
+    discovered.record({ host: 'cache', port: 6379 }, {}, 1, Date.now());
+    make(discovered).dismissDiscovered({ host: 'cache', port: 6379 });
+    expect(discovered.list(Date.now())).toEqual([]);
+  });
+
+  it.each([
+    [{ host: '', port: 6379 }],
+    [{ host: 'cache', port: 0 }],
+    [{ host: 'cache', port: 70000 }],
+    [{ host: 'cache' }],
+  ])('rejects an invalid dismiss body %j', async (body) => {
+    const errors = await validate(plainToInstance(DismissDiscoveredDto, body));
+    expect(errors.length).toBeGreaterThan(0);
   });
 });

@@ -195,6 +195,19 @@ export class CreateConnectionDto implements CreateConnectionRequest {
   connectionType?: 'direct' | 'external';
 }
 
+export class DismissDiscoveredDto {
+  @ApiProperty({ description: 'Discovered instance host', example: 'cache.internal' })
+  @IsString()
+  @MinLength(1)
+  host: string;
+
+  @ApiProperty({ description: 'Discovered instance port', example: 6379 })
+  @IsNumber()
+  @Min(1)
+  @Max(65535)
+  port: number;
+}
+
 /**
  * DTO for test connection response
  */
