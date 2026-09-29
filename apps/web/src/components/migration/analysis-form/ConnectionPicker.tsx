@@ -8,7 +8,7 @@ import {
   DialogTitle,
 } from '../../ui/dialog';
 import { Input } from '../../ui/input';
-import { connectionTypeSuffix } from '../../../utils/connectionType';
+import { connectionTypeSuffix, isClusterChild } from '../../../utils/connectionType';
 import { EngineBadge } from './EngineBadge';
 import type { EndpointRole } from './EndpointPanel';
 
@@ -35,6 +35,9 @@ function unavailableReason(
   }
   if (connection.connectionType === 'external') {
     return 'OTLP push — cannot be migrated';
+  }
+  if (isClusterChild(connection)) {
+    return 'Cluster node — pick its seed';
   }
   if (role === 'target' && connection.isConnected === false) {
     return 'Offline — cannot accept writes';
