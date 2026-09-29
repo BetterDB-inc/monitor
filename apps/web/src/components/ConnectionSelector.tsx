@@ -9,7 +9,9 @@ import { agentTokensApi, GeneratedToken, TokenListItem } from '../api/agent-toke
 import { databasesApi, Database, DatabaseStatus, DatabaseCredentials } from '../api/databases';
 import { workspaceApi, CloudUser } from '../api/workspace';
 import type { Connection } from '../hooks/useConnection';
-import type { AgentConnectionInfo } from '@betterdb/shared';
+import type { AgentConnectionInfo, DiscoveredInstance } from '@betterdb/shared';
+import { useDiscoveredInstances } from '../hooks/useDiscoveredInstances';
+import { DiscoveredInstancesSection } from './connection-selector/DiscoveredInstancesSection';
 import { ConnectionSwitcher } from './connection-selector/ConnectionSwitcher';
 import { ConnectionTypeBadge } from './connection-selector/ConnectionTypeBadge';
 import { OtlpPushTab } from './connection-selector/OtlpPushTab';
@@ -108,6 +110,22 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   const { currentConnection, connections, loading, error, setConnection, refreshConnections } =
     useConnection();
   const [showAddDialog, setShowAddDialog] = useState(false);
+  const [otlpPrefill, setOtlpPrefill] = useState<DiscoveredInstance | null>(null);
+  const discovered = useDiscoveredInstances(locked !== true);
+
+  const registerDiscovered = (instance: DiscoveredInstance) => {
+    setOtlpPrefill(instance);
+    setAddTab('otlp');
+    setShowAddDialog(true);
+  };
+
+  const dismissDiscovered = (instance: DiscoveredInstance) => {
+    discovered.dismiss(instance).catch(() => undefined);
+  };
+
+  useEffect(() => {
+    if (!showAddDialog) setOtlpPrefill(null);
+  }, [showAddDialog]);
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -397,8 +415,20 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
             connections={connections}
             current={currentConnection}
             onSelect={(id) => setConnection(id)}
+            discovered={discovered.instances}
+            onRegister={registerDiscovered}
+            onDismiss={dismissDiscovered}
+            discoveredError={discovered.dismissError}
           />
         )}
+        {connections.length <= 1 ? (
+          <DiscoveredInstancesSection
+            instances={discovered.instances}
+            onRegister={registerDiscovered}
+            onDismiss={dismissDiscovered}
+            error={discovered.dismissError}
+          />
+        ) : null}
       </div>
 
       {/* Add Connection Dialog */}
@@ -488,8 +518,15 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
             />
           ) : addTab === 'otlp' ? (
             <OtlpPushTab
+              key={otlpPrefill ? `${otlpPrefill.host}:${otlpPrefill.port}` : 'blank'}
               isFirstConnection={connections.length === 0}
-              onCreated={refreshConnections}
+              initialName={otlpPrefill?.suggestedName}
+              initialHost={otlpPrefill?.host}
+              initialPort={otlpPrefill?.port}
+              onCreated={async () => {
+                await refreshConnections();
+                await discovered.invalidate();
+              }}
               onDone={() => {
                 setShowAddDialog(false);
                 setAddTab('direct');

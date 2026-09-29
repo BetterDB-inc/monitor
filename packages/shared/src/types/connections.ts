@@ -231,3 +231,19 @@ export interface AllConnectionsHealthResponse {
   timestamp: number;
   message?: string;
 }
+
+export interface DiscoveredInstance {
+  host: string;
+  port: number;
+  suggestedName: string;
+  dbSystem?: 'redis' | 'valkey';
+  version?: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  droppedPoints: number;
+}
+
+export interface DiscoveredInstancesResponse {
+  enabled: boolean;
+  instances: DiscoveredInstance[];
+}

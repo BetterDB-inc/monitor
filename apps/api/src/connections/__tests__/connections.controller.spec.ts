@@ -1,10 +1,19 @@
 import { HttpException, HttpStatus } from '@nestjs/common';
 import { ConnectionsController } from '../connections.controller';
+import { ROLES_KEY } from '../../auth/guards/roles.decorator';
 import { ConnectionRegistry } from '../connection-registry.service';
 import {
   CAPABILITY_TEST_COMMAND,
   RuntimeCapabilityTracker,
 } from '../runtime-capability-tracker.service';
+import {
+  DISCOVERED_MAX_DISMISSALS,
+  DiscoveredInstancesStore,
+} from '../../external-metrics/discovered-instances.store';
+import { validate } from 'class-validator';
+import { plainToInstance } from 'class-transformer';
+import { DismissDiscoveredDto } from '../../common/dto/connections.dto';
+import type { DatabaseConnectionConfig } from '@betterdb/shared';
 
 interface AdapterStub {
   call: jest.Mock;
@@ -191,5 +200,72 @@ describe('ConnectionsController.retryCapability — HttpException shapes', () =>
     } catch (err) {
       expect(err).toBeInstanceOf(HttpException);
     }
+  });
+});
+
+describe('ConnectionsController discovered instances', () => {
+  const buildRegistry = () =>
+    new ConnectionRegistry({} as never, {} as never, {} as never, {} as never, {} as never);
+  const make = (discovered?: DiscoveredInstancesStore, registry = buildRegistry()) =>
+    new ConnectionsController(registry, {} as never, discovered);
+  const seedConfig = (registry: ConnectionRegistry, host: string, port: number) => {
+    const config: DatabaseConnectionConfig = { id: 'seeded-1', name: 'Seeded', host, port, isDefault: false, createdAt: 1 };
+    (registry as unknown as { configs: Map<string, DatabaseConnectionConfig> }).configs.set(config.id, config);
+  };
+
+  it('restricts listing and dismissing discovered instances to admins', () => {
+    expect(Reflect.getMetadata(ROLES_KEY, ConnectionsController.prototype.listDiscovered)).toEqual(['admin']);
+    expect(Reflect.getMetadata(ROLES_KEY, ConnectionsController.prototype.dismissDiscovered)).toEqual(['admin']);
+  });
+
+  it('lists discovered instances when enabled', () => {
+    const discovered = new DiscoveredInstancesStore(true);
+    discovered.record({ host: 'cache', port: 6379 }, {}, 1, Date.now());
+    const response = make(discovered).listDiscovered();
+    expect(response.enabled).toBe(true);
+    expect(response.instances.map((i) => i.host)).toEqual(['cache']);
+  });
+
+  it('hides discovered instances whose address is already registered', () => {
+    const discovered = new DiscoveredInstancesStore(true);
+    discovered.record({ host: 'cache', port: 6379 }, {}, 1, Date.now());
+    discovered.record({ host: 'other', port: 6379 }, {}, 1, Date.now());
+    const registry = buildRegistry();
+    seedConfig(registry, 'CACHE', 6379);
+    expect(make(discovered, registry).listDiscovered().instances.map((i) => i.host)).toEqual(['other']);
+  });
+
+  it.each([
+    ['disabled', new DiscoveredInstancesStore(false)],
+    ['absent', undefined],
+  ])('reports disabled when the store is %s', (_label, discovered) => {
+    expect(make(discovered).listDiscovered()).toEqual({ enabled: false, instances: [] });
+  });
+
+  it('dismisses an instance', () => {
+    const discovered = new DiscoveredInstancesStore(true);
+    discovered.record({ host: 'cache', port: 6379 }, {}, 1, Date.now());
+    make(discovered).dismissDiscovered({ host: 'cache', port: 6379 });
+    expect(discovered.list(Date.now())).toEqual([]);
+  });
+
+  it('rejects a dismissal with 409 when too many are held', () => {
+    const discovered = new DiscoveredInstancesStore(true);
+    for (let i = 0; i < DISCOVERED_MAX_DISMISSALS; i += 1) discovered.dismiss(`h${i}`, 6379, Date.now());
+    expect(() => make(discovered).dismissDiscovered({ host: 'cache', port: 6379 })).toThrow(
+      expect.objectContaining({ status: HttpStatus.CONFLICT }),
+    );
+  });
+
+  it.each([
+    [{ host: '', port: 6379 }],
+    [{ host: 'cache', port: 0 }],
+    [{ host: 'cache', port: 70000 }],
+    [{ host: 'cache' }],
+    [{ host: 'a'.repeat(254), port: 6379 }],
+    [{ host: 'cache', port: 1.5 }],
+  ])('rejects an invalid dismiss body %j', async (body) => {
+    const errors = await validate(plainToInstance(DismissDiscoveredDto, body));
+    expect(errors.length).toBeGreaterThan(0);
   });
 });

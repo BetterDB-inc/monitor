@@ -56,6 +56,14 @@ vi.mock('./ui/dialog', () => ({
   DialogTitle: ({ children }: { children: React.ReactNode }) => <h2>{children}</h2>,
 }));
 
+vi.mock('../hooks/useDiscoveredInstances', () => ({
+  useDiscoveredInstances: () => ({
+    instances: [],
+    dismiss: vi.fn(),
+    invalidate: vi.fn(),
+  }),
+}));
+
 import { ConnectionSelector } from './ConnectionSelector';
 
 describe('ConnectionSelector - single connection row', () => {

@@ -1,15 +1,21 @@
 import { useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Popover } from 'radix-ui';
 import { CheckIcon, ChevronDownIcon, SearchIcon } from 'lucide-react';
+import type { DiscoveredInstance } from '@betterdb/shared';
 import type { Connection } from '../../hooks/useConnection';
 import { cn } from '@/lib/utils';
 import { ConnectionSwitcherOpenContext } from './switcher-open-context';
 import { ConnectionTypeBadge } from './ConnectionTypeBadge';
+import { DiscoveredInstancesSection } from './DiscoveredInstancesSection';
 
 interface ConnectionSwitcherProps {
   connections: Connection[];
   current: Connection | null | undefined;
   onSelect: (id: string) => void;
+  discovered?: DiscoveredInstance[];
+  onRegister?: (instance: DiscoveredInstance) => void;
+  onDismiss?: (instance: DiscoveredInstance) => void;
+  discoveredError?: string | null;
 }
 
 /**
@@ -26,7 +32,15 @@ function matches(connection: Connection, query: string): boolean {
   return haystack.includes(needle);
 }
 
-export function ConnectionSwitcher({ connections, current, onSelect }: ConnectionSwitcherProps) {
+export function ConnectionSwitcher({
+  connections,
+  current,
+  onSelect,
+  discovered,
+  onRegister,
+  onDismiss,
+  discoveredError,
+}: ConnectionSwitcherProps) {
   const shared = useContext(ConnectionSwitcherOpenContext);
   const [localOpen, setLocalOpen] = useState(false);
   const open = shared?.open ?? localOpen;
@@ -245,6 +259,17 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
               })
             )}
           </div>
+          {discovered && onRegister && onDismiss ? (
+            <DiscoveredInstancesSection
+              instances={discovered}
+              onRegister={(instance) => {
+                setOpen(false);
+                onRegister(instance);
+              }}
+              onDismiss={onDismiss}
+              error={discoveredError}
+            />
+          ) : null}
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>

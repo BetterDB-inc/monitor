@@ -10,6 +10,7 @@ import { EnvelopeEncryptionService, getEncryptionService } from '../common/utils
 import { RuntimeCapabilityTracker } from './runtime-capability-tracker.service';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { ExternalMetricsStore } from '../external-metrics/external-metrics-store';
+import { DiscoveredInstancesStore } from '../external-metrics/discovered-instances.store';
 import { ExternalMetricsAdapter } from '../external-metrics/external-metrics.adapter';
 
 export { ENV_DEFAULT_ID } from './connection.constants';
@@ -35,6 +36,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     private readonly sshTunnelService: SshTunnelService,
     private readonly externalMetricsStore: ExternalMetricsStore,
     @Optional() private readonly usageTelemetry?: UsageTelemetryService,
+    @Optional() private readonly discoveredInstances?: DiscoveredInstancesStore,
   ) {
     this.encryption = getEncryptionService();
     if (this.encryption) {
@@ -562,6 +564,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       });
 
       this.logger.log(`Added connection: ${config.name} (${config.host}:${config.port})`);
+      this.discoveredInstances?.forget(config.host, config.port);
       return id;
     } catch (error) {
       // Storage failed - disconnect the adapter to prevent leaks
