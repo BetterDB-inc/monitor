@@ -81,7 +81,7 @@ describe('ConnectionRegistry membership', () => {
       jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(
         () => ({ connect: jest.fn(() => new Promise(() => undefined)), disconnect }) as never,
       );
-      const pending = registry.addManagedChild('seed', { host: '10.0.0.9', port: 7009, nodeId: 'n9' });
+      const pending = registry.addManagedChild('seed', { host: '10.0.0.9', port: 7009, nodeId: 'n9', source: 'cluster' });
       await jest.advanceTimersByTimeAsync(CHILD_CONNECT_TIMEOUT_MS);
       const id = await pending;
       expect(disconnect).toHaveBeenCalled();
@@ -96,16 +96,16 @@ describe('ConnectionRegistry membership', () => {
     jest.useFakeTimers();
     try {
       const { registry } = build();
-      put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'old', origin: 'auto', retiredAt: 5 } });
+      put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'old', origin: 'auto', source: 'cluster', retiredAt: 5 } });
       const disconnect = jest.fn().mockResolvedValue(undefined);
       jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(
         () => ({ connect: jest.fn(() => new Promise(() => undefined)), disconnect }) as never,
       );
-      const pending = registry.reactivateChild('auto', 'new');
+      const pending = registry.reactivateChild('auto', { host: '10.0.0.2', port: 7002, nodeId: 'new', source: 'cluster' });
       await jest.advanceTimersByTimeAsync(CHILD_CONNECT_TIMEOUT_MS);
       await pending;
       expect(disconnect).toHaveBeenCalled();
-      expect(registry.getConfig('auto')?.membership).toEqual({ seedId: 'seed', nodeId: 'new', origin: 'auto' });
+      expect(registry.getConfig('auto')?.membership).toEqual({ seedId: 'seed', nodeId: 'new', origin: 'auto', source: 'cluster' });
     } finally {
       jest.useRealTimers();
     }

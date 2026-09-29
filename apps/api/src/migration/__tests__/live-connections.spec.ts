@@ -9,7 +9,7 @@ import {
 const configs: Record<string, Partial<DatabaseConnectionConfig>> = {
   seed: { id: 'seed', connectionType: 'direct' },
   other: { id: 'other', connectionType: 'direct' },
-  child: { id: 'child', connectionType: 'direct', membership: { seedId: 'seed', nodeId: 'n', origin: 'auto' } },
+  child: { id: 'child', connectionType: 'direct', membership: { seedId: 'seed', nodeId: 'n', origin: 'auto', source: 'cluster' } },
   pushed: { id: 'pushed', connectionType: 'external' },
 };
 const registry = { getConfig: (id: string) => (configs[id] ?? null) as DatabaseConnectionConfig | null };
