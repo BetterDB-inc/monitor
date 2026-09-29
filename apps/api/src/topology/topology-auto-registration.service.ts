@@ -94,14 +94,11 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
       if (!discovery) return;
 
       const unknown = new Set(discovery.unknownGroups);
-      const current = members.flatMap((m) =>
-        m.membership && !(m.membership.group !== undefined && unknown.has(m.membership.group))
-          ? [{ id: m.id, host: m.host, port: m.port, membership: m.membership }]
-          : [],
-      );
+      const known = members.filter((m) => !(m.membership?.group !== undefined && unknown.has(m.membership.group)));
+      const current = known.flatMap((m) => (m.membership ? [{ id: m.id, host: m.host, port: m.port, membership: m.membership }] : []));
       const desired = discovery.nodes.filter((n) => n.group === undefined || !unknown.has(n.group));
       const diff = diffMembership(seedId, desired, current, (host, port) => this.lookup(host, port));
-      await this.apply(seed, diff, members);
+      await this.apply(seed, diff, known);
     });
   }
 

@@ -72,4 +72,16 @@ describe('TopologyAutoRegistrationService (sentinel)', () => {
     expect(registry.retireChild).not.toHaveBeenCalled();
     expect(registry.addManagedChild).not.toHaveBeenCalled();
   });
+
+  it('holds a mass retirement even when an unknown group has many members', async () => {
+    const unknownMembers = ['u1', 'u2', 'u3', 'u4', 'u5', 'u6'].map((h) => member(h.toUpperCase(), h, 'replica', 'down'));
+    const { service, registry } = build({
+      autoRegisterNodes: true,
+      nodes: [{ ...primary('a'), group: 'other' }],
+      unknownGroups: ['down'],
+      members: [member('A', 'a', 'primary', 'other'), member('B', 'b', 'replica', 'other'), member('C', 'c', 'replica', 'other'), ...unknownMembers],
+    });
+    await service.reconcile('seed');
+    expect(registry.retireChild).not.toHaveBeenCalled();
+  });
 });
