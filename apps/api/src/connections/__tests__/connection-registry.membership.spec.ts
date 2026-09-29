@@ -183,6 +183,50 @@ describe('ConnectionRegistry membership', () => {
     expect(registry.list({ includeRetired: true }).map((c) => c.id)).toEqual(['seed', 'auto', 'adopted']);
   });
 
+  it('uses data node credentials for children when the seed has them', async () => {
+    const { registry, storage } = build();
+    const seedId = await registry.addConnection({ name: 's', host: 's1', port: 26379, username: 'sentinel-user', password: 'sentinel-pass', nodeUsername: 'app', nodePassword: 'secret' });
+    expect(registry.getConfig(seedId)).toMatchObject({ nodeUsername: 'app', nodePassword: 'secret' });
+    expect(storage.saveConnection).toHaveBeenCalledWith(expect.objectContaining({ id: seedId, nodeUsername: 'app', nodePassword: 'secret' }));
+    expect(storage.saveConnection.mock.calls[0][0].nodePasswordEncrypted).toBeFalsy();
+    const id = await registry.addManagedChild(seedId, { host: 'h', port: 6379, nodeId: 'n', source: 'sentinel', group: 'g', role: 'replica' });
+    expect(registry.getConfig(id)).toEqual(expect.objectContaining({ username: 'app', password: 'secret' }));
+    expect(registry.getConfig(id)?.nodePassword).toBeUndefined();
+  });
+
+  it('falls back to the seed credentials', async () => {
+    const { registry } = build();
+    const seedId = await registry.addConnection({ name: 's', host: 's1', port: 26379, username: 'u', password: 'p' });
+    const id = await registry.addManagedChild(seedId, { host: 'h', port: 6379, nodeId: 'n', source: 'sentinel' });
+    expect(registry.getConfig(id)).toEqual(expect.objectContaining({ username: 'u', password: 'p' }));
+  });
+
+  it('falls back to the seed password when the data node password is still ciphertext', async () => {
+    const { registry } = build();
+    put(registry, { ...seed, nodeUsername: 'app', nodePassword: 'not-an-envelope', nodePasswordEncrypted: true });
+    const id = await registry.addManagedChild('seed', { host: 'h', port: 6379, nodeId: 'n', source: 'sentinel' });
+    expect(registry.getConfig(id)).toEqual(expect.objectContaining({ username: 'app', password: 'p' }));
+  });
+
+  it('drops an encrypted data node password when no key is configured', async () => {
+    const { registry, storage } = build();
+    storage.getConnections.mockResolvedValue([{ ...seed, isDefault: true, createdAt: 1, nodePassword: 'ciphertext', nodePasswordEncrypted: true }]);
+    await (registry as unknown as Internals).loadConnections();
+    const config = registry.getConfig('seed');
+    expect(config?.nodePassword).toBeUndefined();
+    expect(config?.password).toBe('p');
+    expect(config?.credentialStatus).not.toBe('decryption_failed');
+  });
+
+  it('never exposes the data node password in list()', () => {
+    const { registry } = build();
+    put(registry, { ...seed, nodeUsername: 'app', nodePassword: 'secret', nodePasswordEncrypted: true });
+    const status = registry.list()[0];
+    expect(status).not.toHaveProperty('nodePassword');
+    expect(status).not.toHaveProperty('nodePasswordEncrypted');
+    expect(JSON.stringify(registry.list())).not.toContain('secret');
+  });
+
   it('exposes membership and the auto-register flag in list()', () => {
     const { registry } = build();
     put(registry, { ...seed, autoRegisterNodes: true });

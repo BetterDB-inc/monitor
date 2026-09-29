@@ -1,11 +1,18 @@
 import Valkey from 'iovalkey';
 import { execSync } from 'child_process';
 import { join } from 'path';
+import { Test } from '@nestjs/testing';
+import type { INestApplicationContext } from '@nestjs/common';
 import { MetricsParser } from '../src/database/parsers/metrics.parser';
 import {
   detectSentinelDrift,
   isSentinelMode,
 } from '../../../proprietary/anomaly-detection/sentinel-drift-detector';
+import { ConfigModule } from '../src/config/config.module';
+import { ConnectionsModule } from '../src/connections/connections.module';
+import { TopologyModule } from '../src/topology/topology.module';
+import { ConnectionRegistry } from '../src/connections/connection-registry.service';
+import { TopologyAutoRegistrationService } from '../src/topology/topology-auto-registration.service';
 
 /**
  * Sentinel topology E2E (valkey-io/valkey#2158).
@@ -75,6 +82,18 @@ async function waitForSentinel(client: Valkey): Promise<void> {
     await sleep(1_000);
   }
   throw new Error('Sentinel did not report a usable replica master pointer in time');
+}
+
+/** Polls `predicate` every 500ms until it resolves true or `timeoutMs` elapses. */
+async function waitFor(predicate: () => Promise<boolean>, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) {
+      return;
+    }
+    await sleep(500);
+  }
+  throw new Error('Condition was not met in time');
 }
 
 (RUN ? describe : describe.skip)('Sentinel topology E2E', () => {
@@ -181,5 +200,56 @@ async function waitForSentinel(client: Valkey): Promise<void> {
         return finding.reason === 'stale_master_pointer';
       }),
     ).toBe(false);
+  });
+
+  describe('node auto-registration and failover following', () => {
+    let appContext: INestApplicationContext;
+    let registry: ConnectionRegistry;
+    let service: TopologyAutoRegistrationService;
+    let seedId: string;
+
+    beforeAll(async () => {
+      process.env.BETTERDB_TELEMETRY = 'false';
+      const moduleRef = await Test.createTestingModule({
+        imports: [ConfigModule, ConnectionsModule, TopologyModule],
+      }).compile();
+      appContext = await moduleRef.init();
+
+      registry = appContext.get(ConnectionRegistry);
+      service = appContext.get(TopologyAutoRegistrationService);
+      seedId = await registry.addConnection({ name: 'sentinel', host: '127.0.0.1', port: SENTINEL_PORT });
+      await registry.setAutoRegister(seedId, true);
+    }, 60_000);
+
+    afterAll(async () => {
+      await appContext?.close();
+      delete process.env.BETTERDB_TELEMETRY;
+    });
+
+    // The compose stack runs with `announce-hostnames yes` (see docker-compose.sentinel-e2e.yml),
+    // so Sentinel reports the master under a Docker-internal hostname and the replica under a
+    // raw container IP — neither reachable from the host running this test. addManagedChild()
+    // still registers a child for each regardless of whether it can connect, so the assertions
+    // here stay scoped to what reconcile() derives from Sentinel's own replies (ids and roles),
+    // not to whether the registered children can actually be reached.
+    it('registers the monitored nodes and follows a failover', async () => {
+      await service.reconcile(seedId);
+      const before = registry.listMembers(seedId);
+      expect(before.map((m) => m.membership?.role).sort()).toEqual(['primary', 'replica']);
+
+      const beforePrimary = before.find((m) => m.membership?.role === 'primary');
+      expect(beforePrimary).toBeDefined();
+
+      await client.call('SENTINEL', 'FAILOVER', MASTER_NAME);
+      await waitFor(async () => {
+        await service.reconcile(seedId);
+        const primary = registry.listMembers(seedId).find((m) => m.membership?.role === 'primary');
+        return primary !== undefined && primary.id !== beforePrimary!.id;
+      }, 30_000);
+
+      const after = registry.listMembers(seedId);
+      expect(after.map((m) => m.id).sort()).toEqual(before.map((m) => m.id).sort());
+      expect(after.map((m) => m.membership?.role).sort()).toEqual(['primary', 'replica']);
+    }, 60_000);
   });
 });

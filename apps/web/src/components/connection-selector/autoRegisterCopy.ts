@@ -31,6 +31,33 @@ export function showsAutoRegisterToggle(connection: Connection): boolean {
     !connection.membership &&
     connection.connectionType !== 'external' &&
     connection.connectionType !== 'agent' &&
-    connection.capabilities?.clusterEnabled === true
+    (connection.capabilities?.clusterEnabled === true || connection.capabilities?.isSentinel === true)
   );
+}
+
+export function autoRegisterDefaultFor(
+  connection: Pick<Connection, 'capabilities'>,
+  defaults: { cluster: boolean; sentinel: boolean },
+): boolean {
+  return connection.capabilities?.isSentinel === true ? defaults.sentinel : defaults.cluster;
+}
+
+export function groupSentinelMembers(
+  seedId: string,
+  all: Connection[],
+): Array<{ group: string; members: Connection[] }> {
+  const groups = new Map<string, Connection[]>();
+  for (const c of all) {
+    if (c.membership?.seedId !== seedId) continue;
+    const key = c.membership.source === 'sentinel' ? (c.membership.group ?? '') : '';
+    groups.set(key, [...(groups.get(key) ?? []), c]);
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => (a === '' ? 1 : b === '' ? -1 : a.localeCompare(b)))
+    .map(([group, members]) => ({
+      group,
+      members: [...members].sort(
+        (x, y) => Number(y.membership?.role === 'primary') - Number(x.membership?.role === 'primary'),
+      ),
+    }));
 }

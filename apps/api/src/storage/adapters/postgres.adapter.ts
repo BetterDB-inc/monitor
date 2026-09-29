@@ -1881,6 +1881,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS auto_register_nodes BOOLEAN;
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS membership TEXT;
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_username TEXT;
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_password TEXT;
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_password_encrypted BOOLEAN;
 
       CREATE INDEX IF NOT EXISTS idx_connections_is_default ON connections(is_default);
 
@@ -4377,8 +4380,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     await this.pool.query(
       `
-      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, ssh_tunnel, connection_type, auto_register_nodes, membership, is_default, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, node_username, node_password, node_password_encrypted, db_index, tls, ssh_tunnel, connection_type, auto_register_nodes, membership, is_default, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
       ON CONFLICT(id) DO UPDATE SET
         name = EXCLUDED.name,
         host = EXCLUDED.host,
@@ -4386,6 +4389,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         username = EXCLUDED.username,
         password = EXCLUDED.password,
         password_encrypted = EXCLUDED.password_encrypted,
+        node_username = EXCLUDED.node_username,
+        node_password = EXCLUDED.node_password,
+        node_password_encrypted = EXCLUDED.node_password_encrypted,
         db_index = EXCLUDED.db_index,
         tls = EXCLUDED.tls,
         ssh_tunnel = EXCLUDED.ssh_tunnel,
@@ -4403,6 +4409,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         config.username || null,
         config.password || null,
         config.passwordEncrypted || false,
+        config.nodeUsername || null,
+        config.nodePassword || null,
+        config.nodePassword ? config.nodePasswordEncrypted === true : null,
         config.dbIndex || 0,
         config.tls || false,
         config.sshTunnel ? JSON.stringify(config.sshTunnel) : null,
@@ -4429,6 +4438,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       username: row.username || undefined,
       password: row.password || undefined,
       passwordEncrypted: row.password_encrypted || false,
+      nodeUsername: row.node_username || undefined,
+      nodePassword: row.node_password || undefined,
+      nodePasswordEncrypted: row.node_password_encrypted === true ? true : undefined,
       dbIndex: row.db_index,
       tls: row.tls,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
@@ -4459,6 +4471,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       username: row.username || undefined,
       password: row.password || undefined,
       passwordEncrypted: row.password_encrypted || false,
+      nodeUsername: row.node_username || undefined,
+      nodePassword: row.node_password || undefined,
+      nodePasswordEncrypted: row.node_password_encrypted === true ? true : undefined,
       dbIndex: row.db_index,
       tls: row.tls,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),

@@ -358,6 +358,27 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     const redisSupportsSlotStats =
       !isValkey && (majorVersion > 8 || (majorVersion === 8 && minorVersion >= 2));
 
+    const isSentinel = InfoParser.isSentinelMode(
+      (info.server ?? info) as Record<string, unknown>,
+    );
+    if (isSentinel) {
+      this.capabilities = {
+        dbType: isValkey ? 'valkey' : 'redis',
+        version,
+        hasSlotStats: false,
+        hasCommandLog: false,
+        hasClusterSlotStats: false,
+        hasLatencyMonitor: false,
+        hasAclLog: majorVersion >= 6,
+        hasMemoryDoctor: false,
+        hasConfig: false,
+        hasVectorSearch: false,
+        clusterEnabled: false,
+        isSentinel: true,
+      };
+      return;
+    }
+
     // Probe whether CONFIG is available (disabled on managed services like AWS ElastiCache)
     let hasConfig = true;
     try {
@@ -401,6 +422,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       hasConfig,
       hasVectorSearch,
       clusterEnabled,
+      isSentinel: false,
     };
   }
 

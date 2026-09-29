@@ -268,7 +268,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   private assertValidExternalRequest(request: CreateConnectionRequest): void {
-    if (request.password || request.username || request.tls || request.sshTunnel?.enabled) {
+    if (request.password || request.username || request.nodePassword || request.nodeUsername || request.tls || request.sshTunnel?.enabled) {
       throw new Error('OTLP push connections take no credentials, TLS or SSH tunnel');
     }
     if (this.findIdByHostPort(request.host, request.port)) {
@@ -364,6 +364,14 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         ...result,
         password: this.encryption.encrypt(config.password),
         passwordEncrypted: true,
+      };
+    }
+
+    if (this.encryption && config.nodePassword && !config.nodePasswordEncrypted) {
+      result = {
+        ...result,
+        nodePassword: this.encryption.encrypt(config.nodePassword),
+        nodePasswordEncrypted: true,
       };
     }
 
@@ -471,12 +479,36 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private decryptConfig(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
+    const decrypted = this.decryptSeedPassword(config);
+    if (!config.nodePasswordEncrypted || !config.nodePassword) {
+      return decrypted;
+    }
+    if (!this.encryption) {
+      this.logger.error(
+        `Cannot decrypt data node password for ${config.name}: ENCRYPTION_KEY not set but password is encrypted. ` +
+        'Discovered data nodes will use the seed credentials.'
+      );
+      return { ...decrypted, nodePassword: undefined, nodePasswordEncrypted: false };
+    }
+    try {
+      return { ...decrypted, nodePassword: this.encryption.decrypt(config.nodePassword), nodePasswordEncrypted: false };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Decryption failed';
+      this.logger.error(
+        `Could not decrypt the data node password for ${config.name}: ${errorMsg}. ` +
+        "Discovered data nodes will use the seed's password."
+      );
+      return { ...decrypted, nodePassword: config.nodePassword, nodePasswordEncrypted: true };
+    }
+  }
+
   /**
    * Decrypt password in config for use.
    * Returns a new config object with decrypted password.
    * Sets credentialStatus to 'decryption_failed' if decryption fails.
    */
-  private decryptConfig(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
+  private decryptSeedPassword(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
     const sshTunnel = this.decryptSshTunnel(config.sshTunnel);
 
     if (!config.passwordEncrypted || !config.password) {
@@ -568,6 +600,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       port: request.port,
       username: request.username,
       password: request.password,
+      nodeUsername: request.nodeUsername,
+      nodePassword: request.nodePassword,
       dbIndex: request.dbIndex,
       tls: request.tls,
       sshTunnel: this.sanitizeSshTunnelInput(request.sshTunnel),
@@ -772,6 +806,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
           supportsCommandLog: capabilities.hasCommandLog,
           supportsSlotStats: capabilities.hasSlotStats,
           clusterEnabled: capabilities.clusterEnabled,
+          isSentinel: capabilities.isSentinel,
         },
       };
     } catch (error) {
@@ -810,6 +845,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
             supportsCommandLog: caps.hasCommandLog,
             supportsSlotStats: caps.hasSlotStats,
             clusterEnabled: caps.clusterEnabled,
+            isSentinel: caps.isSentinel,
           };
         } catch {
           // Capabilities unavailable
@@ -975,6 +1011,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return isTrueFlag(this.configService.get<string>('CLUSTER_AUTO_REGISTER_NODES'));
   }
 
+  getAutoRegisterSentinelNodesDefault(): boolean {
+    return isTrueFlag(this.configService.get<string>('SENTINEL_AUTO_REGISTER_NODES'));
+  }
+
   isEnvDefault(id: string): boolean {
     return id === ENV_DEFAULT_ID;
   }
@@ -1035,8 +1075,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       name: `${seed.name} · ${node.host}:${node.port}`,
       host: node.host,
       port: node.port,
-      username: seed.username,
-      password: seed.password,
+      username: seed.nodeUsername ?? seed.username,
+      password: seed.nodePasswordEncrypted ? seed.password : seed.nodePassword ?? seed.password,
       dbIndex: 0,
       tls: seed.tls,
       connectionType: 'direct',

@@ -27,6 +27,7 @@ function setup(opts: SetupOptions = {}) {
     list: jest.fn().mockReturnValue([]),
     getDefaultId: jest.fn().mockReturnValue(null),
     getAutoRegisterNodesDefault: jest.fn().mockReturnValue(true),
+    getAutoRegisterSentinelNodesDefault: jest.fn().mockReturnValue(false),
   } as unknown as ConnectionRegistry;
   const tracker = new RuntimeCapabilityTracker();
   const controller = new ConnectionsController(registry, tracker);
@@ -227,6 +228,11 @@ describe('ConnectionsController.list', () => {
   it('exposes the env default for auto-registration', () => {
     const { controller } = setup();
     expect(controller.list().autoRegisterNodesDefault).toBe(true);
+  });
+
+  it('exposes the env default for Sentinel auto-registration', () => {
+    const { controller } = setup();
+    expect(controller.list().autoRegisterSentinelNodesDefault).toBe(false);
   });
 });
 

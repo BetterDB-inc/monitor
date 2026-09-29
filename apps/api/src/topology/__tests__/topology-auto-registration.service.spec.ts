@@ -127,6 +127,18 @@ describe('TopologyAutoRegistrationService', () => {
     expect(optedOut.registry.adoptChild).toHaveBeenCalledWith('other', 'seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' });
   });
 
+  it('adopts a connected standalone unset connection instead of skipping it as a seed', async () => {
+    const other: DatabaseConnectionConfig = { id: 'other', name: 'other', host: '10.0.0.2', port: 7002, isDefault: false, createdAt: 1 };
+    const on = build({ seed: { autoRegisterNodes: undefined }, envDefault: 'true', nodes: clusterOf(1) });
+    on.registry.get.mockImplementation(((id: string) => ({
+      isConnected: () => true,
+      getCapabilities: () => ({ clusterEnabled: id !== 'other' }),
+    })) as never);
+    on.registry.findConfigByHostPort.mockReturnValue(other);
+    await on.service.reconcile('seed');
+    expect(on.registry.adoptChild).toHaveBeenCalledWith('other', 'seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' });
+  });
+
   it('does nothing when discovery fails or returns no nodes', async () => {
     const members = [child('c2', '10.0.0.2', 7002)];
     for (const nodes of [new Error('CLUSTERDOWN'), []]) {

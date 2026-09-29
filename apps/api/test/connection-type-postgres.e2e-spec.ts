@@ -102,4 +102,15 @@ describePostgres('connection type storage — postgres', () => {
     expect((await adapter.getConnection('mem'))?.membership).toBeUndefined();
     expect((await adapter.getConnection('mem'))?.autoRegisterNodes).toBeUndefined();
   });
+
+  it('round-trips data node credentials and reads them absent when unset', async () => {
+    const expected = { nodeUsername: 'app', nodePassword: '{"v":1}', nodePasswordEncrypted: true };
+    await adapter.saveConnection({ id: 'node-creds', name: 'N', host: 'h', port: 26379, isDefault: false, createdAt: 4, ...expected });
+    expect(await adapter.getConnection('node-creds')).toMatchObject(expected);
+    expect((await adapter.getConnections()).find((c) => c.id === 'node-creds')).toMatchObject(expected);
+    const plain = await adapter.getConnection('dir');
+    expect(plain?.nodeUsername).toBeUndefined();
+    expect(plain?.nodePassword).toBeUndefined();
+    expect(plain?.nodePasswordEncrypted).toBeUndefined();
+  });
 });

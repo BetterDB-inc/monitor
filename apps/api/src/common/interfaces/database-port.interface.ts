@@ -39,6 +39,7 @@ export interface DatabaseCapabilities {
   hasConfig: boolean;
   hasVectorSearch: boolean;
   clusterEnabled?: boolean;
+  isSentinel?: boolean;
 }
 
 export interface DatabasePort {

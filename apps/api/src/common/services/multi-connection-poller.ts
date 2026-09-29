@@ -107,6 +107,18 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
     return true;
   }
 
+  protected pollsSentinels(): boolean {
+    return false;
+  }
+
+  protected isSentinelConnection(id: string): boolean {
+    try {
+      return this.connectionRegistry.get(id).getCapabilities().isSentinel === true;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Start the multi-connection polling loop.
    * Call this in onModuleInit().
@@ -188,9 +200,11 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
       const pollDisconnected = this.shouldPollDisconnected();
       const pollExternal = this.supportsExternalConnections();
       const skipUnchanged = this.skipUnchangedSamples();
+      const pollSentinels = this.pollsSentinels();
       const pollPromises = connections
         .filter((conn) => conn.isConnected || pollDisconnected)
         .filter((conn) => conn.connectionType !== 'external' || pollExternal)
+        .filter((conn) => pollSentinels || !this.isSentinelConnection(conn.id))
         .map(async (conn) => {
           try {
             const client = this.connectionRegistry.get(conn.id);
