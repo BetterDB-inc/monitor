@@ -93,12 +93,12 @@ describe('TopologyAutoRegistrationService', () => {
     expect(withMembers.registry.addManagedChild).not.toHaveBeenCalled();
   });
 
-  it('treats an unset connection as a seed when the env default is on', async () => {
+  it('adopts an unset connection without members when the env default is on', async () => {
     const other: DatabaseConnectionConfig = { id: 'other', name: 'other', host: '10.0.0.2', port: 7002, isDefault: false, createdAt: 1 };
     const on = build({ seed: { autoRegisterNodes: undefined }, envDefault: 'true', nodes: clusterOf(1) });
     on.registry.findConfigByHostPort.mockReturnValue(other);
     await on.service.reconcile('seed');
-    expect(on.registry.adoptChild).not.toHaveBeenCalled();
+    expect(on.registry.adoptChild).toHaveBeenCalledWith('other', 'seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' });
 
     const optedOut = build({ envDefault: 'true', nodes: clusterOf(1) });
     optedOut.registry.findConfigByHostPort.mockReturnValue({ ...other, autoRegisterNodes: false });
@@ -106,7 +106,7 @@ describe('TopologyAutoRegistrationService', () => {
     expect(optedOut.registry.adoptChild).toHaveBeenCalledWith('other', 'seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' });
   });
 
-  it('treats a disconnected unset connection as a seed when the env default is on', async () => {
+  it('adopts a disconnected unset connection without members when the env default is on', async () => {
     const other: DatabaseConnectionConfig = { id: 'other', name: 'other', host: '10.0.0.2', port: 7002, isDefault: false, createdAt: 1 };
     const disconnectedOther = (registry: ReturnType<typeof build>['registry']) =>
       registry.get.mockImplementation(((id: string) => ({
@@ -118,7 +118,7 @@ describe('TopologyAutoRegistrationService', () => {
     disconnectedOther(on.registry);
     on.registry.findConfigByHostPort.mockReturnValue(other);
     await on.service.reconcile('seed');
-    expect(on.registry.adoptChild).not.toHaveBeenCalled();
+    expect(on.registry.adoptChild).toHaveBeenCalledWith('other', 'seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' });
 
     const optedOut = build({ envDefault: 'true', nodes: clusterOf(1) });
     disconnectedOther(optedOut.registry);
