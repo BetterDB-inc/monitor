@@ -1753,10 +1753,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const cached = this.aclSnapshot.get(ctx.connectionId);
     const countdown = this.aclDriftRecheck.get(ctx.connectionId) ?? 0;
     const cacheUsable = cached !== undefined && cached.groupKey === groupKey;
+    const effectiveClusterKey = clusterKey || cached?.clusterKey || '';
 
     if (cacheUsable && countdown > 0) {
-      if (cached.clusterKey !== clusterKey) {
-        this.aclSnapshot.set(ctx.connectionId, { ...cached, clusterKey });
+      if (cached.clusterKey !== effectiveClusterKey) {
+        this.aclSnapshot.set(ctx.connectionId, { ...cached, clusterKey: effectiveClusterKey });
       }
       this.aclDriftRecheck.set(ctx.connectionId, countdown - 1);
       return { previousDigest: null };
@@ -1800,7 +1801,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     this.aclSnapshot.set(ctx.connectionId, {
       groupKey,
-      clusterKey,
+      clusterKey: effectiveClusterKey,
       name: ctx.connectionName,
       digest,
       userDigests,
