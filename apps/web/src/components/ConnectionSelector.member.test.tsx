@@ -65,6 +65,14 @@ vi.mock('../hooks/useCanMutate', () => ({
   useCanMutate: () => false,
 }));
 
+vi.mock('../hooks/useDiscoveredInstances', () => ({
+  useDiscoveredInstances: () => ({
+    instances: [],
+    dismiss: vi.fn(),
+    invalidate: vi.fn(),
+  }),
+}));
+
 import { ConnectionSelector } from './ConnectionSelector';
 
 describe('ConnectionSelector - read-only member', () => {
