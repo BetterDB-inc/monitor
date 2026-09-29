@@ -103,7 +103,7 @@ export class OtelMetricsIngestService {
     if (!resolved?.match) {
       const candidate = explicitInstanceKey(attrs) ?? keys[0];
       const points = resourcePointCount(resourceMetrics);
-      this.recordDiscovered(candidate, attrs, points, nowMs);
+      if (points > 0) this.recordDiscovered(candidate, attrs, points, nowMs);
       this.drop(result, 'unknown_instance', points, `${candidate.host}:${candidate.port}`, nowMs);
       return;
     }

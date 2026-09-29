@@ -368,6 +368,12 @@ describe('OtelMetricsIngestService discovery', () => {
     expect(discovered.list(NOW_MS)).toEqual([]);
   });
 
+  it('does not record a resource without metric points', () => {
+    const { service, discovered } = build(null);
+    service.ingest(resource(named, []), NOW_MS);
+    expect(discovered.list(NOW_MS)).toEqual([]);
+  });
+
   it('does not record when discovery is disabled', () => {
     const { service, discovered } = build(null, new DiscoveredInstancesStore(false));
     const result = service.ingest(resource(named, [gauge('redis.memory.used', 1)]), NOW_MS);
