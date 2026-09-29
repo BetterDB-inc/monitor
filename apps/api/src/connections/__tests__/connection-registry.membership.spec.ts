@@ -92,6 +92,40 @@ describe('ConnectionRegistry membership', () => {
     }
   });
 
+  it('bounds retirement when the child disconnect never completes', async () => {
+    jest.useFakeTimers();
+    try {
+      const { registry } = build();
+      put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto' } });
+      (registry as unknown as Internals).connections.set('auto', { disconnect: jest.fn(() => new Promise(() => undefined)) });
+      const pending = registry.retireChild('auto');
+      await jest.advanceTimersByTimeAsync(CHILD_CONNECT_TIMEOUT_MS);
+      await pending;
+      expect(registry.getConfig('auto')?.membership?.retiredAt).toEqual(expect.any(Number));
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('bounds the startup connect of a managed child that never answers', async () => {
+    jest.useFakeTimers();
+    try {
+      const { registry, storage } = build();
+      storage.getConnections.mockResolvedValue([
+        { id: 'auto', name: 'auto', host: 'h', port: 1, isDefault: false, createdAt: 1, membership: { seedId: 'seed', nodeId: 'a', origin: 'auto' } },
+      ]);
+      jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(
+        () => ({ connect: jest.fn(() => new Promise(() => undefined)), disconnect: jest.fn().mockResolvedValue(undefined) }) as never,
+      );
+      const pending = (registry as unknown as Internals).loadConnections();
+      await jest.advanceTimersByTimeAsync(CHILD_CONNECT_TIMEOUT_MS);
+      await pending;
+      expect(registry.getConfig('auto')?.credentialStatus).toBe('unknown');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('bounds a reactivation connect that never completes', async () => {
     jest.useFakeTimers();
     try {
