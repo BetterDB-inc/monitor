@@ -96,7 +96,7 @@ describe('ConnectionRegistry membership', () => {
     jest.useFakeTimers();
     try {
       const { registry } = build();
-      put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto' } });
+      put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', source: 'cluster' } });
       (registry as unknown as Internals).connections.set('auto', { disconnect: jest.fn(() => new Promise(() => undefined)) });
       const pending = registry.retireChild('auto');
       await jest.advanceTimersByTimeAsync(CHILD_CONNECT_TIMEOUT_MS);
@@ -112,7 +112,7 @@ describe('ConnectionRegistry membership', () => {
     try {
       const { registry, storage } = build();
       storage.getConnections.mockResolvedValue([
-        { id: 'auto', name: 'auto', host: 'h', port: 1, isDefault: false, createdAt: 1, membership: { seedId: 'seed', nodeId: 'a', origin: 'auto' } },
+        { id: 'auto', name: 'auto', host: 'h', port: 1, isDefault: false, createdAt: 1, membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', source: 'cluster' } },
       ]);
       jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(
         () => ({ connect: jest.fn(() => new Promise(() => undefined)), disconnect: jest.fn().mockResolvedValue(undefined) }) as never,
