@@ -81,7 +81,7 @@ export function diffMembership(
   const desiredKeys = new Set<string>();
 
   const changed = (membership: TopologyMembership, node: DesiredNode): boolean =>
-    membership.nodeId !== node.nodeId || membership.group !== node.group || membership.role !== node.role;
+    membership.nodeId !== node.nodeId || membership.source !== node.source || membership.group !== node.group || membership.role !== node.role;
 
   for (const node of desired) {
     const key = addressKey(node.host, node.port);
