@@ -94,13 +94,11 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
       if (!discovery) return;
 
       const unknown = new Set(discovery.unknownGroups);
-      const current = members.flatMap((m) =>
-        m.membership && !(m.membership.group !== undefined && unknown.has(m.membership.group))
-          ? [{ id: m.id, host: m.host, port: m.port, membership: m.membership }]
-          : [],
-      );
-      const diff = diffMembership(seedId, discovery.nodes, current, (host, port) => this.lookup(host, port));
-      await this.apply(seed, diff, members);
+      const known = members.filter((m) => !(m.membership?.group !== undefined && unknown.has(m.membership.group)));
+      const current = known.flatMap((m) => (m.membership ? [{ id: m.id, host: m.host, port: m.port, membership: m.membership }] : []));
+      const desired = discovery.nodes.filter((n) => n.group === undefined || !unknown.has(n.group));
+      const diff = diffMembership(seedId, desired, current, (host, port) => this.lookup(host, port));
+      await this.apply(seed, diff, known);
     });
   }
 
@@ -178,6 +176,14 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
     await this.applyEach(diff.add, (node) => this.connectionRegistry.addManagedChild(seed.id, node).then(() => undefined), 'add');
     await this.applyEach(diff.adopt, (a) => this.connectionRegistry.adoptChild(a.id, seed.id, a.node), 'adopt');
     await this.applyEach(diff.reactivate, (r) => this.connectionRegistry.reactivateChild(r.id, r.node), 'reactivate');
+
+    for (const { id, node } of diff.refresh) {
+      if (node.source !== 'sentinel' || node.role !== 'primary') continue;
+      const previous = members.find((m) => m.membership && m.membership.group === node.group && m.membership.role === 'primary' && m.id !== id);
+      if (previous) {
+        this.logger.log(`Sentinel group ${node.group} primary changed ${previous.host}:${previous.port} → ${node.host}:${node.port}`);
+      }
+    }
     await this.applyEach(diff.refresh, (r) => this.connectionRegistry.refreshChild(r.id, r.node), 'refresh');
 
     const retire = this.gateRetirements(seed, diff.retire, members);

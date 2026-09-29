@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { Connection } from '../../hooks/useConnection';
-import { deleteConfirmation, disableConfirmation, showsAutoRegisterToggle } from './autoRegisterCopy';
+import {
+  autoRegisterDefaultFor,
+  deleteConfirmation,
+  disableConfirmation,
+  groupSentinelMembers,
+  showsAutoRegisterToggle,
+} from './autoRegisterCopy';
 
 const seed: Connection = { id: 's', name: 'prod', host: 'h', port: 7001, isConnected: true, capabilities: { dbType: 'valkey', version: '8', clusterEnabled: true } };
 const auto = (id: string, retiredAt?: number): Connection => ({ id, name: id, host: 'h', port: 1, isConnected: true, membership: { seedId: 's', nodeId: id, origin: 'auto', source: 'cluster', retiredAt } });
@@ -34,5 +40,50 @@ describe('auto-register copy', () => {
     expect(showsAutoRegisterToggle({ ...seed, capabilities: { dbType: 'valkey', version: '8', clusterEnabled: false } })).toBe(false);
     expect(showsAutoRegisterToggle(auto('a'))).toBe(false);
     expect(showsAutoRegisterToggle({ ...seed, connectionType: 'external' })).toBe(false);
+  });
+
+  it('shows the toggle for sentinel seeds', () => {
+    const sentinel: Connection = { id: 's', name: 's', host: 's1', port: 26379, isConnected: true, capabilities: { dbType: 'valkey', version: '8', isSentinel: true } };
+    expect(showsAutoRegisterToggle(sentinel)).toBe(true);
+  });
+
+  it('picks the per-kind default', () => {
+    const sentinel: Connection = { id: 's', name: 's', host: 's1', port: 26379, isConnected: true, capabilities: { dbType: 'valkey', version: '8', isSentinel: true } };
+    const cluster: Connection = { id: 'c', name: 'c', host: 'c1', port: 7001, isConnected: true, capabilities: { dbType: 'valkey', version: '8', clusterEnabled: true } };
+    const defaults = { cluster: true, sentinel: false };
+    expect(autoRegisterDefaultFor(sentinel, defaults)).toBe(false);
+    expect(autoRegisterDefaultFor(cluster, defaults)).toBe(true);
+  });
+
+  it('groups sentinel members by group with the primary first', () => {
+    const m = (id: string, group: string, role: 'primary' | 'replica'): Connection => ({
+      id,
+      name: id,
+      host: id,
+      port: 6379,
+      isConnected: true,
+      membership: { seedId: 's', nodeId: id, origin: 'auto', source: 'sentinel', group, role },
+    });
+    expect(
+      groupSentinelMembers('s', [m('r1', 'b', 'replica'), m('p1', 'b', 'primary'), m('p2', 'a', 'primary')]),
+    ).toEqual([
+      { group: 'a', members: [m('p2', 'a', 'primary')] },
+      { group: 'b', members: [m('p1', 'b', 'primary'), m('r1', 'b', 'replica')] },
+    ]);
+  });
+
+  it('keeps a non-sentinel member of a sentinel seed visible under an "other" group', () => {
+    const primary: Connection = {
+      id: 'p1', name: 'p1', host: 'p1', port: 6379, isConnected: true,
+      membership: { seedId: 's', nodeId: 'p1', origin: 'auto', source: 'sentinel', group: 'a', role: 'primary' },
+    };
+    const claimed: Connection = {
+      id: 'c1', name: 'c1', host: 'c1', port: 6379, isConnected: true,
+      membership: { seedId: 's', nodeId: 'c1', origin: 'adopted', source: 'cluster' },
+    };
+    expect(groupSentinelMembers('s', [primary, claimed])).toEqual([
+      { group: 'a', members: [primary] },
+      { group: '', members: [claimed] },
+    ]);
   });
 });

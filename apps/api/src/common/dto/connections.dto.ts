@@ -167,7 +167,10 @@ export class ConnectionStatusDto implements ConnectionStatus {
   @ApiPropertyOptional({ description: 'Connection capabilities (only when connected)', type: ConnectionCapabilitiesDto })
   capabilities?: ConnectionCapabilities;
 
-  @ApiPropertyOptional({ description: 'Auto-register cluster nodes for this seed; undefined follows CLUSTER_AUTO_REGISTER_NODES', example: true })
+  @ApiPropertyOptional({
+    description: 'Auto-register discovered nodes (cluster or Sentinel); undefined/null follows CLUSTER_AUTO_REGISTER_NODES or SENTINEL_AUTO_REGISTER_NODES',
+    example: true,
+  })
   autoRegisterNodes?: boolean;
 
   @ApiPropertyOptional({ description: 'Cluster membership details when this connection was registered as a cluster node', type: TopologyMembershipDto })
@@ -204,6 +207,16 @@ export class CreateConnectionDto implements CreateConnectionRequest {
   @IsOptional()
   @IsString()
   password?: string;
+
+  @ApiPropertyOptional({ description: 'Username for data nodes discovered through this Sentinel; defaults to username' })
+  @IsOptional()
+  @IsString()
+  nodeUsername?: string;
+
+  @ApiPropertyOptional({ description: 'Password for data nodes discovered through this Sentinel; defaults to password' })
+  @IsOptional()
+  @IsString()
+  nodePassword?: string;
 
   @ApiPropertyOptional({ description: 'Database index (0-15)', example: 0, minimum: 0, maximum: 15 })
   @IsOptional()
@@ -263,6 +276,9 @@ export class ConnectionListResponseDto implements ConnectionListResponse {
 
   @ApiProperty({ description: 'Auto-register default applied to seeds that have not set the flag (CLUSTER_AUTO_REGISTER_NODES)', example: false })
   autoRegisterNodesDefault: boolean;
+
+  @ApiProperty({ description: 'Auto-register default applied to Sentinel seeds that have not set the flag (SENTINEL_AUTO_REGISTER_NODES)', example: false })
+  autoRegisterSentinelNodesDefault: boolean;
 }
 
 /**
@@ -283,7 +299,7 @@ export class ConnectionIdResponseDto {
 
 export class SetAutoRegisterDto {
   @ApiProperty({
-    description: 'Auto-register cluster nodes; null follows CLUSTER_AUTO_REGISTER_NODES',
+    description: 'Auto-register discovered nodes (cluster or Sentinel); undefined/null follows CLUSTER_AUTO_REGISTER_NODES or SENTINEL_AUTO_REGISTER_NODES',
     nullable: true,
     type: Boolean,
   })

@@ -15,6 +15,7 @@ export interface Connection {
     dbType: 'valkey' | 'redis';
     version: string;
     clusterEnabled?: boolean;
+    isSentinel?: boolean;
   };
   connectionType?: 'direct' | 'agent' | 'external';
   autoRegisterNodes?: boolean;
@@ -37,6 +38,7 @@ export interface ConnectionContextValue {
   /** Whether there are no connections configured */
   hasNoConnections: boolean;
   autoRegisterNodesDefault?: boolean;
+  autoRegisterSentinelNodesDefault?: boolean;
 }
 
 export const ConnectionContext = createContext<ConnectionContextValue | null>(null);
@@ -59,6 +61,7 @@ export function useConnectionState(): ConnectionContextValue {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [autoRegisterNodesDefault, setAutoRegisterNodesDefault] = useState(false);
+  const [autoRegisterSentinelNodesDefault, setAutoRegisterSentinelNodesDefault] = useState(false);
   const initialLoadDone = useRef(false);
 
   const fetchConnections = useCallback(async () => {
@@ -73,10 +76,12 @@ export function useConnectionState(): ConnectionContextValue {
         connections: Connection[];
         currentId: string | null;
         autoRegisterNodesDefault?: boolean;
+        autoRegisterSentinelNodesDefault?: boolean;
       }>('/connections');
       const data: Connection[] = responseData.connections || [];
       setConnections(data);
       setAutoRegisterNodesDefault(responseData.autoRegisterNodesDefault === true);
+      setAutoRegisterSentinelNodesDefault(responseData.autoRegisterSentinelNodesDefault === true);
 
       const fresh = currentConnection === null ? undefined : data.find((c) => c.id === currentConnection.id);
       const justRetired =
@@ -139,6 +144,7 @@ export function useConnectionState(): ConnectionContextValue {
 
   const followsTopology =
     autoRegisterNodesDefault ||
+    autoRegisterSentinelNodesDefault ||
     connections.some((c) => c.autoRegisterNodes === true || c.membership !== undefined);
 
   useEffect(() => {
@@ -162,5 +168,6 @@ export function useConnectionState(): ConnectionContextValue {
     refreshConnections: fetchConnections,
     hasNoConnections: !loading && connections.length === 0,
     autoRegisterNodesDefault,
+    autoRegisterSentinelNodesDefault,
   };
 }

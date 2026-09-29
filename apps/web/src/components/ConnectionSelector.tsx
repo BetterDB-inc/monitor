@@ -14,11 +14,12 @@ import { ConnectionSwitcher } from './connection-selector/ConnectionSwitcher';
 import { ConnectionTypeBadge } from './connection-selector/ConnectionTypeBadge';
 import { OtlpPushTab } from './connection-selector/OtlpPushTab';
 import {
+  autoRegisterDefaultFor,
   deleteConfirmation,
   disableConfirmation,
   showsAutoRegisterToggle,
 } from './connection-selector/autoRegisterCopy';
-import { isRetiredMember, orderWithMembers } from '../utils/connectionType';
+import { isRetiredMember, orderWithMembers, retiredLabel } from '../utils/connectionType';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 
 interface SshFormData {
@@ -41,6 +42,8 @@ interface ConnectionFormData {
   port: number;
   username: string;
   password: string;
+  nodeUsername: string;
+  nodePassword: string;
   dbIndex: number;
   tls: boolean;
   ssh: SshFormData;
@@ -95,6 +98,8 @@ const defaultFormData: ConnectionFormData = {
   port: 6379,
   username: '',
   password: '',
+  nodeUsername: '',
+  nodePassword: '',
   dbIndex: 0,
   tls: false,
   ssh: defaultSshFormData,
@@ -121,6 +126,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
     setConnection,
     refreshConnections,
     autoRegisterNodesDefault = false,
+    autoRegisterSentinelNodesDefault = false,
   } = useConnection();
   const [showAddDialog, setShowAddDialog] = useState(false);
 
@@ -166,6 +172,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
     success: boolean;
     message: string;
     clusterEnabled?: boolean;
+    isSentinel?: boolean;
   } | null>(null);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -177,7 +184,9 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       value = value.replace(/^https?:\/\//, '').replace(/\/$/, '');
     }
     setFormData((prev) => ({ ...prev, [field]: value }));
-    setTestResult(null);
+    if (field !== 'name' && field !== 'nodeUsername' && field !== 'nodePassword') {
+      setTestResult(null);
+    }
   };
 
   const handleSshChange = (field: keyof SshFormData, value: string | number | boolean) => {
@@ -228,7 +237,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
         success: boolean;
         message?: string;
         error?: string;
-        capabilities?: { clusterEnabled?: boolean };
+        capabilities?: { clusterEnabled?: boolean; isSentinel?: boolean };
       }>('/connections/test', {
         method: 'POST',
         body: JSON.stringify({
@@ -246,7 +255,11 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
         success: result.success,
         message: result.success ? 'Connection successful!' : result.error || 'Connection failed',
         clusterEnabled: result.capabilities?.clusterEnabled,
+        isSentinel: result.capabilities?.isSentinel,
       });
+      if (result.capabilities?.isSentinel !== true) {
+        setFormData((prev) => ({ ...prev, nodeUsername: '', nodePassword: '' }));
+      }
     } catch (err) {
       setTestResult({
         success: false,
@@ -281,6 +294,8 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
           port: formData.port,
           username: formData.username || undefined,
           password: formData.password || undefined,
+          nodeUsername: testResult?.isSentinel ? formData.nodeUsername || undefined : undefined,
+          nodePassword: testResult?.isSentinel ? formData.nodePassword || undefined : undefined,
           dbIndex: formData.dbIndex,
           tls: formData.tls,
           sshTunnel: buildSshTunnelPayload(formData.ssh),
@@ -288,10 +303,13 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
         }),
       });
       const autoRegisterNodes = formData.autoRegisterNodes;
+      const formDefault = testResult?.isSentinel
+        ? autoRegisterSentinelNodesDefault
+        : autoRegisterNodesDefault;
       setShowAddDialog(false);
       setFormData(emptyFormData);
       setTestResult(null);
-      if (autoRegisterNodes !== null && autoRegisterNodes !== autoRegisterNodesDefault) {
+      if (autoRegisterNodes !== null && autoRegisterNodes !== formDefault) {
         await fetchApi(`/connections/${id}/auto-register`, {
           method: 'PATCH',
           body: JSON.stringify({ enabled: autoRegisterNodes }),
@@ -847,16 +865,50 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                   </div>
                 )}
 
-                {testResult?.success && testResult.clusterEnabled && (
+                {testResult?.success && testResult.isSentinel && (
+                  <details className="border rounded-md">
+                    <summary className="cursor-pointer px-3 py-2 text-sm font-medium">
+                      Data node credentials
+                    </summary>
+                    <div className="px-3 pb-3 space-y-3 border-t pt-3">
+                      <div>
+                        <label className="block text-sm font-medium mb-1">Node username</label>
+                        <input
+                          type="text"
+                          value={formData.nodeUsername}
+                          onChange={(e) => handleInputChange('nodeUsername', e.target.value)}
+                          placeholder="default"
+                          className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium mb-1">Node password</label>
+                        <input
+                          type="password"
+                          value={formData.nodePassword}
+                          onChange={(e) => handleInputChange('nodePassword', e.target.value)}
+                          className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                        />
+                      </div>
+                    </div>
+                  </details>
+                )}
+
+                {testResult?.success && (testResult.clusterEnabled || testResult.isSentinel) && (
                   <label className="flex items-center gap-2 text-sm">
                     <input
                       type="checkbox"
-                      checked={formData.autoRegisterNodes ?? autoRegisterNodesDefault}
+                      checked={
+                        formData.autoRegisterNodes ??
+                        (testResult.isSentinel ? autoRegisterSentinelNodesDefault : autoRegisterNodesDefault)
+                      }
                       onChange={(e) =>
                         setFormData({ ...formData, autoRegisterNodes: e.target.checked })
                       }
                     />
-                    Auto-register cluster nodes
+                    {testResult.isSentinel
+                      ? 'Auto-register monitored nodes'
+                      : 'Auto-register cluster nodes'}
                   </label>
                 )}
               </div>
@@ -935,15 +987,23 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                       <div className="text-xs text-muted-foreground">
                         {conn.host}:{conn.port}
                       </div>
-                      {retired && <div className="text-xs text-muted-foreground">left cluster</div>}
+                      {retired && <div className="text-xs text-muted-foreground">{retiredLabel(conn)}</div>}
                       {showsAutoRegisterToggle(conn) && (
                         <label className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
                           <input
                             type="checkbox"
-                            checked={conn.autoRegisterNodes ?? autoRegisterNodesDefault}
+                            checked={
+                              conn.autoRegisterNodes ??
+                              autoRegisterDefaultFor(conn, {
+                                cluster: autoRegisterNodesDefault,
+                                sentinel: autoRegisterSentinelNodesDefault,
+                              })
+                            }
                             onChange={(e) => handleToggleAutoRegister(conn, e.target.checked)}
                           />
-                          Auto-register cluster nodes
+                          {conn.capabilities?.isSentinel
+                            ? 'Auto-register monitored nodes'
+                            : 'Auto-register cluster nodes'}
                           {conn.autoRegisterNodes === undefined ? ' (default)' : ''}
                         </label>
                       )}

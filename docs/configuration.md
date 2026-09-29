@@ -268,6 +268,7 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 | Variable                      | Required | Default | Description                                                                                                                     |
 | ------------------------------ | -------- | ------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `CLUSTER_AUTO_REGISTER_NODES` | No       | `false` | Default for whether a cluster connection auto-registers its nodes as child connections; overridable per connection. See [Cluster Auto-Registration](cluster-auto-registration.md) |
+| `SENTINEL_AUTO_REGISTER_NODES` | No       | `false` | Default for whether a Sentinel connection auto-registers the primaries and replicas it monitors; overridable per connection. See [Sentinel Auto-Registration](sentinel-auto-registration.md) |
 
 ### Data Retention
 
