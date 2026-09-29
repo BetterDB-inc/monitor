@@ -111,7 +111,7 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
     return false;
   }
 
-  private isSentinelConnection(id: string): boolean {
+  protected isSentinelConnection(id: string): boolean {
     try {
       return this.connectionRegistry.get(id).getCapabilities().isSentinel === true;
     } catch {
