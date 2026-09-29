@@ -489,7 +489,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         `Cannot decrypt data node password for ${config.name}: ENCRYPTION_KEY not set but password is encrypted. ` +
         'Discovered data nodes will use the seed credentials.'
       );
-      return { ...decrypted, nodePassword: undefined, nodePasswordEncrypted: false };
+      return { ...decrypted, nodePassword: config.nodePassword, nodePasswordEncrypted: true };
     }
     try {
       return { ...decrypted, nodePassword: this.encryption.decrypt(config.nodePassword), nodePasswordEncrypted: false };

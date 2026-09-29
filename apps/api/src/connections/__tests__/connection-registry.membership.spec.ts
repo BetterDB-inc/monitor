@@ -208,14 +208,15 @@ describe('ConnectionRegistry membership', () => {
     expect(registry.getConfig(id)).toEqual(expect.objectContaining({ username: 'app', password: 'p' }));
   });
 
-  it('drops an encrypted data node password when no key is configured', async () => {
+  it('keeps an encrypted data node password when no key is configured', async () => {
     const { registry, storage } = build();
-    storage.getConnections.mockResolvedValue([{ ...seed, isDefault: true, createdAt: 1, nodePassword: 'ciphertext', nodePasswordEncrypted: true }]);
+    storage.getConnections.mockResolvedValue([{ ...seed, isDefault: true, createdAt: 1, nodeUsername: 'app', nodePassword: 'ciphertext', nodePasswordEncrypted: true }]);
     await (registry as unknown as Internals).loadConnections();
     const config = registry.getConfig('seed');
-    expect(config?.nodePassword).toBeUndefined();
-    expect(config?.password).toBe('p');
+    expect(config).toMatchObject({ nodePassword: 'ciphertext', nodePasswordEncrypted: true, password: 'p' });
     expect(config?.credentialStatus).not.toBe('decryption_failed');
+    const id = await registry.addManagedChild('seed', { host: 'h', port: 6379, nodeId: 'n', source: 'sentinel' });
+    expect(registry.getConfig(id)).toEqual(expect.objectContaining({ username: 'app', password: 'p' }));
   });
 
   it('never exposes the data node password in list()', () => {
