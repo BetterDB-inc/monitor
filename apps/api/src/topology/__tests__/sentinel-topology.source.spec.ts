@@ -3,7 +3,7 @@ import { SentinelTopologySource } from '../sentinel-topology.source';
 const flat = (fields: Record<string, string>) => Object.entries(fields).flat();
 const seed = { id: 'seed', name: 'sentinels', host: 's1', port: 26379, isDefault: true, createdAt: 1 };
 
-function build(replies: Record<string, unknown[] | Error>) {
+function build(replies: Record<string, unknown>) {
   const client = {
     connect: jest.fn().mockResolvedValue(undefined),
     disconnect: jest.fn(),
@@ -65,6 +65,19 @@ describe('SentinelTopologySource', () => {
     const result = (await source.discover(seed as never, 10_000))!;
     expect(result.unknownGroups).toEqual(['a']);
     expect(result.nodes.map((n) => n.group)).toEqual(['a', 'b']);
+  });
+
+  it.each([
+    ['a non-array', 'OK'],
+    ['an unparseable', ['garbage']],
+  ])('marks a group unknown when its replicas reply is %s', async (_label, reply) => {
+    const { source } = build({
+      MASTERS: [flat({ name: 'a', ip: 'h1', port: '1', runid: 'p', flags: 'master' })],
+      'REPLICAS a': reply,
+    });
+    const result = (await source.discover(seed as never, 10_000))!;
+    expect(result.unknownGroups).toEqual(['a']);
+    expect(result.nodes.map((n) => n.role)).toEqual(['primary']);
   });
 
   it('rejects when SENTINEL MASTERS fails and always disconnects', async () => {

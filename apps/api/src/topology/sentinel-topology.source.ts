@@ -46,18 +46,18 @@ export class SentinelTopologySource implements TopologySource {
     client.on('error', () => undefined);
     try {
       await client.connect();
-      const reply = await client.call('SENTINEL', 'MASTERS');
-      if (!Array.isArray(reply)) return null;
-      const masters = MetricsParser.parseSentinelNodes(reply);
-      if (masters.length === 0 && reply.length > 0) return null;
+      const masters = this.parseNodes(await client.call('SENTINEL', 'MASTERS'));
+      if (masters === null) return null;
       const nodes: DesiredNode[] = [];
       const unknownGroups: string[] = [];
       for (const master of masters) {
         nodes.push(this.toNode(master.name, master.ip, master.port, master.runid, 'primary'));
         try {
-          const replicas = MetricsParser.parseSentinelNodes(
-            (await client.call('SENTINEL', 'REPLICAS', master.name)) as unknown[],
-          );
+          const replicas = this.parseNodes(await client.call('SENTINEL', 'REPLICAS', master.name));
+          if (replicas === null) {
+            unknownGroups.push(master.name);
+            continue;
+          }
           for (const replica of replicas) {
             nodes.push(this.toNode(master.name, replica.ip, replica.port, replica.runid, 'replica'));
           }
@@ -69,6 +69,12 @@ export class SentinelTopologySource implements TopologySource {
     } finally {
       client.disconnect();
     }
+  }
+
+  private parseNodes(reply: unknown): ReturnType<typeof MetricsParser.parseSentinelNodes> | null {
+    if (!Array.isArray(reply)) return null;
+    const parsed = MetricsParser.parseSentinelNodes(reply);
+    return parsed.length === 0 && reply.length > 0 ? null : parsed;
   }
 
   private toNode(group: string, host: string, port: number, runid: string, role: 'primary' | 'replica'): DesiredNode {
