@@ -13,7 +13,7 @@ export function useDiscoveredInstances(enabled: boolean) {
     queryKey: QUERY_KEY,
     queryFn: () => fetchApi<DiscoveredInstancesResponse>('/connections/discovered'),
     enabled,
-    refetchInterval: REFETCH_INTERVAL_MS,
+    refetchInterval: (query) => (query.state.data?.enabled === false ? false : REFETCH_INTERVAL_MS),
   });
 
   const invalidate = useCallback(async () => {

@@ -120,8 +120,12 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   };
 
   const dismissDiscovered = (instance: DiscoveredInstance) => {
-    void discovered.dismiss(instance);
+    discovered.dismiss(instance).catch(() => undefined);
   };
+
+  useEffect(() => {
+    if (!showAddDialog) setOtlpPrefill(null);
+  }, [showAddDialog]);
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -431,7 +435,6 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
         onOpenChange={(open) => {
           setShowAddDialog(open);
           if (!open) {
-            setOtlpPrefill(null);
             setFormData(emptyFormData);
             setTestResult(null);
             setValkeyMaxmemory(null);
@@ -525,7 +528,6 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
               onDone={() => {
                 setShowAddDialog(false);
                 setAddTab('direct');
-                setOtlpPrefill(null);
               }}
             />
           ) : addTab === 'direct' ? (

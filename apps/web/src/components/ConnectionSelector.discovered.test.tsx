@@ -57,8 +57,10 @@ vi.mock('./ui/dialog', () => ({
   DialogTitle: ({ children }: { children: React.ReactNode }) => <h2>{children}</h2>,
 }));
 
+const mutateState = vi.hoisted(() => ({ canMutate: true }));
+
 vi.mock('../hooks/useCanMutate', () => ({
-  useCanMutate: () => true,
+  useCanMutate: () => mutateState.canMutate,
 }));
 
 const discoveredState = vi.hoisted(() => ({
@@ -67,8 +69,10 @@ const discoveredState = vi.hoisted(() => ({
   invalidate: vi.fn().mockResolvedValue(undefined),
 }));
 
+const mockUseDiscoveredInstances = vi.hoisted(() => vi.fn());
+
 vi.mock('../hooks/useDiscoveredInstances', () => ({
-  useDiscoveredInstances: () => discoveredState,
+  useDiscoveredInstances: mockUseDiscoveredInstances,
 }));
 
 import { ConnectionSelector } from './ConnectionSelector';
@@ -98,6 +102,10 @@ describe('ConnectionSelector - discovered instances', () => {
     vi.clearAllMocks();
     connectionState.connections = [single];
     discoveredState.instances = [instance];
+    mutateState.canMutate = true;
+    mockUseDiscoveredInstances.mockImplementation((enabled: boolean) =>
+      enabled ? discoveredState : { ...discoveredState, instances: [] },
+    );
   });
 
   it('shows the section below a single connection', () => {
@@ -140,5 +148,42 @@ describe('ConnectionSelector - discovered instances', () => {
     fireEvent.click(screen.getByRole('button', { name: /discovered via OTLP/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss orders-cache' }));
     expect(discoveredState.dismiss).toHaveBeenCalledWith(instance);
+  });
+
+  it('opens the OTLP tab blank after a prefilled dialog is closed by another route', () => {
+    render(<ConnectionSelector />);
+    fireEvent.click(screen.getByRole('button', { name: /discovered via OTLP/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Register orders-cache' }));
+    expect(screen.getByDisplayValue('cache.internal')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Direct Connection' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    fireEvent.click(screen.getByTitle('Add connection'));
+    fireEvent.click(screen.getByRole('button', { name: 'OTLP push' }));
+    expect(screen.queryByDisplayValue('orders-cache')).toBeNull();
+    expect(screen.queryByDisplayValue('cache.internal')).toBeNull();
+  });
+
+  it('swallows a failed dismiss', async () => {
+    const failure = Promise.reject(new Error('boom'));
+    const caught = vi.fn();
+    const originalCatch = failure.catch.bind(failure);
+    failure.catch = ((handler: (reason: unknown) => unknown) => {
+      caught();
+      return originalCatch(handler);
+    }) as typeof failure.catch;
+    discoveredState.dismiss.mockReturnValueOnce(failure);
+    render(<ConnectionSelector />);
+    fireEvent.click(screen.getByRole('button', { name: /discovered via OTLP/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss orders-cache' }));
+    expect(caught).toHaveBeenCalled();
+  });
+
+  it('does not offer discovery when the user cannot mutate', () => {
+    mutateState.canMutate = false;
+    render(<ConnectionSelector />);
+    expect(mockUseDiscoveredInstances).toHaveBeenCalledWith(false);
+    expect(mockUseDiscoveredInstances).not.toHaveBeenCalledWith(true);
+    expect(screen.queryByRole('button', { name: /Register/ })).toBeNull();
   });
 });

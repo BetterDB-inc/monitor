@@ -31,6 +31,22 @@ describe('useDiscoveredInstances', () => {
     expect(result.current.instances).toEqual([]);
   });
 
+  it.each([
+    [false, 1],
+    [true, 2],
+  ])('when the server reports enabled=%s it fetches %i time(s) across a poll interval', async (enabled, calls) => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      vi.mocked(fetchApi).mockResolvedValue({ enabled, instances: [] });
+      renderHook(() => useDiscoveredInstances(true), { wrapper });
+      await waitFor(() => expect(fetchApi).toHaveBeenCalledTimes(1));
+      await act(() => vi.advanceTimersByTimeAsync(31_000));
+      expect(fetchApi).toHaveBeenCalledTimes(calls);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not fetch when not allowed', () => {
     renderHook(() => useDiscoveredInstances(false), { wrapper });
     expect(fetchApi).not.toHaveBeenCalled();
