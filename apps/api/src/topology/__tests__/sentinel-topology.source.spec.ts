@@ -43,7 +43,7 @@ describe('SentinelTopologySource', () => {
     const { source } = build({
       MASTERS: [flat({ name: 'g', ip: 'h', port: '1', runid: '', flags: 'master' })],
     });
-    const { nodes } = await source.discover(seed as never, 10_000);
+    const { nodes } = (await source.discover(seed as never, 10_000))!;
     expect(nodes[0].nodeId).toBe('g/h:1');
   });
 
@@ -52,7 +52,7 @@ describe('SentinelTopologySource', () => {
       MASTERS: [flat({ name: 'g', ip: 'h', port: '1', runid: 'p', flags: 'master' })],
       'REPLICAS g': [flat({ name: 'r:2', ip: 'r', port: '2', runid: 'x', flags: 'slave,s_down,disconnected' })],
     });
-    const { nodes } = await source.discover(seed as never, 10_000);
+    const { nodes } = (await source.discover(seed as never, 10_000))!;
     expect(nodes.map((n) => n.host)).toEqual(['h', 'r']);
   });
 
@@ -62,7 +62,7 @@ describe('SentinelTopologySource', () => {
       'REPLICAS a': new Error('NOPERM'),
       'REPLICAS b': [],
     });
-    const result = await source.discover(seed as never, 10_000);
+    const result = (await source.discover(seed as never, 10_000))!;
     expect(result.unknownGroups).toEqual(['a']);
     expect(result.nodes.map((n) => n.group)).toEqual(['a', 'b']);
   });
@@ -71,6 +71,11 @@ describe('SentinelTopologySource', () => {
     const { source, client } = build({ MASTERS: new Error('boom') });
     await expect(source.discover(seed as never, 10_000)).rejects.toThrow('boom');
     expect(client.disconnect).toHaveBeenCalled();
+  });
+
+  it('reports no discovery when Sentinel monitors no groups', async () => {
+    const { source } = build({ MASTERS: [] });
+    await expect(source.discover(seed as never, 500)).resolves.toBeNull();
   });
 
   it('opens a dedicated time-limited client with the seed credentials', async () => {

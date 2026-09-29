@@ -26,7 +26,7 @@ export class SentinelTopologySource implements TopologySource {
     return caps.isSentinel === true;
   }
 
-  async discover(seed: DatabaseConnectionConfig, timeoutMs: number): Promise<TopologyDiscovery> {
+  async discover(seed: DatabaseConnectionConfig, timeoutMs: number): Promise<TopologyDiscovery | null> {
     const { host, port, username, password, tls } = this.connectionRegistry.get(seed.id).getClient().options;
     const client = this.clientFactory({
       host,
@@ -47,6 +47,7 @@ export class SentinelTopologySource implements TopologySource {
     try {
       await client.connect();
       const masters = MetricsParser.parseSentinelNodes((await client.call('SENTINEL', 'MASTERS')) as unknown[]);
+      if (masters.length === 0) return null;
       const nodes: DesiredNode[] = [];
       const unknownGroups: string[] = [];
       for (const master of masters) {
