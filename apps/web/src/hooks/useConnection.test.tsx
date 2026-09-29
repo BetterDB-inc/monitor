@@ -50,7 +50,7 @@ describe('useConnectionState', () => {
     const retired: Connection = {
       ...connection('retired'),
       isConnected: false,
-      membership: { seedId: 'seed', nodeId: 'n1', origin: 'auto', retiredAt: 1 },
+      membership: { seedId: 'seed', nodeId: 'n1', origin: 'auto', source: 'cluster', retiredAt: 1 },
     };
     const idle: Connection = { ...connection('idle'), isConnected: false };
     mocks.fetchApi.mockResolvedValueOnce({ connections: [retired, idle], currentId: 'retired' });
