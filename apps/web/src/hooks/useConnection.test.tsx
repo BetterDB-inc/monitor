@@ -86,6 +86,40 @@ describe('useConnectionState', () => {
     expect(result.current.currentConnection?.id).toBe('other');
   });
 
+  it('refreshes the selected connection when it changes in place', async () => {
+    mocks.fetchApi.mockResolvedValueOnce({ connections: [connection('conn-1')], currentId: 'conn-1' });
+
+    const { result } = renderHook(() => {
+      return useConnectionState();
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentConnection?.id).toBe('conn-1');
+    });
+    const before = result.current.currentConnection;
+
+    const adopted: Connection = {
+      ...connection('conn-1'),
+      isConnected: false,
+      membership: { seedId: 'seed', nodeId: 'n1', origin: 'adopted', source: 'cluster' },
+    };
+    mocks.fetchApi.mockResolvedValueOnce({ connections: [adopted], currentId: 'conn-1' });
+    await act(async () => {
+      await result.current.refreshConnections();
+    });
+
+    expect(result.current.currentConnection).toEqual(adopted);
+
+    mocks.fetchApi.mockResolvedValueOnce({ connections: [{ ...adopted }], currentId: 'conn-1' });
+    const refreshed = result.current.currentConnection;
+    await act(async () => {
+      await result.current.refreshConnections();
+    });
+
+    expect(result.current.currentConnection).toBe(refreshed);
+    expect(refreshed).not.toBe(before);
+  });
+
   it('keeps a retired member the user chose to view', async () => {
     const retired: Connection = {
       ...connection('retired'),

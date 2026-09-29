@@ -80,7 +80,7 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
           >
             Analytics Deep Dive
           </NavItem>
-          {!isChild && (
+          {(!isChild || !seed) && (
             <NavItem to="/cluster" active={location.pathname === '/cluster'}>
               Cluster
             </NavItem>

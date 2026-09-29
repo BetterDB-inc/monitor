@@ -87,7 +87,11 @@ export function useConnectionState(): ConnectionContextValue {
       const justRetired =
         fresh !== undefined && currentConnection !== null && isRetiredMember(fresh) && !isRetiredMember(currentConnection);
 
-      if (fresh === undefined || justRetired) {
+      if (fresh !== undefined && !justRetired) {
+        if (JSON.stringify(fresh) !== JSON.stringify(currentConnection)) {
+          setCurrentConnection(fresh);
+        }
+      } else {
         const selectable = data.filter((c) => !isRetiredMember(c));
         const defaultConnection =
           (responseData.currentId && selectable.find((c) => c.id === responseData.currentId)) ||

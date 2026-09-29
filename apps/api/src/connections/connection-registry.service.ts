@@ -888,6 +888,14 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return result;
   }
 
+  private withLiveTopology(id: string, config: DatabaseConnectionConfig): DatabaseConnectionConfig {
+    const live = this.configs.get(id);
+    if (!live) {
+      return config;
+    }
+    return { ...config, membership: live.membership, autoRegisterNodes: live.autoRegisterNodes };
+  }
+
   async reconnect(id: string): Promise<void> {
     let config = this.configs.get(id);
     if (!config) {
@@ -907,7 +915,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         config = this.decryptConfig(storedConfig);
         if (config.credentialStatus === 'decryption_failed') {
           // Still failing - update in-memory config with latest error and bail
-          this.configs.set(id, config);
+          this.configs.set(id, this.withLiveTopology(id, config));
           throw new Error(`Password decryption still failing: ${config.credentialError}`);
         }
         // Decryption succeeded this time - continue with connection attempt
@@ -936,16 +944,18 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       this.connections.set(id, newAdapter);
       this.runtimeCapabilityTracker.resetConnection(id);
 
+      const current = this.withLiveTopology(id, config);
+
       // Trust-on-first-use: persist a newly-learned SSH host key.
-      if (this.captureLearnedHostKey(config, newAdapter)) {
-        await this.storage.saveConnection(this.encryptConfig(config)).catch((err) => {
-          this.logger.warn(`Failed to persist learned SSH host key for ${config.name}: ${err instanceof Error ? err.message : err}`);
+      if (this.captureLearnedHostKey(current, newAdapter)) {
+        await this.storage.saveConnection(this.encryptConfig(current)).catch((err) => {
+          this.logger.warn(`Failed to persist learned SSH host key for ${current.name}: ${err instanceof Error ? err.message : err}`);
         });
       }
 
       // Update credential status to valid after successful reconnection
       this.configs.set(id, {
-        ...config,
+        ...this.withLiveTopology(id, current),
         credentialStatus: 'valid',
         credentialError: undefined,
       });
@@ -957,7 +967,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
       // Update credential status on failure
       this.configs.set(id, {
-        ...config,
+        ...this.withLiveTopology(id, config),
         credentialStatus: isAuthError ? 'invalid' : config.credentialStatus,
         credentialError: isAuthError ? errorMsg : config.credentialError,
       });

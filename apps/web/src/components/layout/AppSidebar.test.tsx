@@ -86,6 +86,16 @@ describe('AppSidebar cluster nav gating', () => {
     expect(screen.getByRole('button', { name: 'View cluster → prod' })).toBeInTheDocument();
   });
 
+  it('falls back to the Cluster link when a child has no seed in the list', () => {
+    mockCurrent(
+      { id: 'k', name: 'prod · 10.0.0.2:7002', membership: { seedId: 'gone', nodeId: 'n', origin: 'auto', source: 'cluster' } },
+      [],
+    );
+    renderSidebar();
+    expect(screen.getByRole('link', { name: /^Cluster/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /View cluster/ })).toBeNull();
+  });
+
   it('shows seed-only items for a seed', () => {
     mockCurrent({ id: 's', name: 'prod' }, []);
     renderSidebar();

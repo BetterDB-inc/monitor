@@ -452,6 +452,23 @@ describe('ConnectionRegistry', () => {
       expect(conn.isConnected()).toBe(true);
     });
 
+    it('keeps an auto-register toggle changed while it was connecting', async () => {
+      let finishConnect: () => void = () => undefined;
+      const { UnifiedDatabaseAdapter } = require('../../database/adapters/unified.adapter');
+      UnifiedDatabaseAdapter.mockImplementationOnce(() => ({
+        connect: jest.fn(() => new Promise<void>((resolve) => { finishConnect = resolve; })),
+        disconnect: jest.fn().mockResolvedValue(undefined),
+        isConnected: jest.fn().mockReturnValue(true),
+      }));
+
+      const reconnecting = registry.reconnect(ENV_DEFAULT_ID);
+      await registry.setAutoRegister(ENV_DEFAULT_ID, true);
+      finishConnect();
+      await reconnecting;
+
+      expect(registry.getConfig(ENV_DEFAULT_ID)?.autoRegisterNodes).toBe(true);
+    });
+
     it('should throw NotFoundException when connection not found', async () => {
       await expect(registry.reconnect('non-existent')).rejects.toThrow(NotFoundException);
       await expect(registry.reconnect('non-existent')).rejects.toThrow(/Connection 'non-existent' not found/);
