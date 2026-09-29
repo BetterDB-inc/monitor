@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import type { ClusterMembership } from '@betterdb/shared';
 import { setCurrentConnectionId, fetchApi } from '../api/client';
+import { isRetiredMember } from '../utils/connectionType';
 
 export const CONNECTIONS_REFRESH_MS = 30_000;
 
@@ -85,10 +86,11 @@ export function useConnectionState(): ConnectionContextValue {
 
       // Select a default when nothing is selected, or when the selection was removed elsewhere
       if (stillListed === false) {
+        const selectable = data.filter((c) => !isRetiredMember(c));
         const defaultConnection =
-          (responseData.currentId && data.find((c) => c.id === responseData.currentId)) ||
-          data.find((c) => c.isConnected) ||
-          data[0] ||
+          (responseData.currentId && selectable.find((c) => c.id === responseData.currentId)) ||
+          selectable.find((c) => c.isConnected) ||
+          selectable[0] ||
           null;
         setCurrentConnection(defaultConnection);
         setCurrentConnectionId(defaultConnection?.id ?? null);
