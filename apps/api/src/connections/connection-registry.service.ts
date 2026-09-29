@@ -30,7 +30,7 @@ async function connectWithin(adapter: DatabasePort, ms: number): Promise<void> {
     clearTimeout(timer);
   }
   attempt.catch(() => undefined);
-  await adapter.disconnect().catch(() => undefined);
+  void adapter.disconnect().catch(() => undefined);
   throw new Error(`Connection attempt timed out after ${ms}ms`);
 }
 
