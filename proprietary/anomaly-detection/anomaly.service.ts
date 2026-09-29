@@ -68,9 +68,13 @@ import {
   sentinelDriftSignatureMaster,
 } from './sentinel-drift-detector';
 import {
+  AclClusterDrift,
   AclDrift,
   AclDriftNode,
+  aclClusterDriftSignature,
   aclDriftSignature,
+  clusterKeyFromNodes,
+  detectAclClusterDrift,
   detectAclDrift,
   nodeAclDigest,
 } from './acl-drift-detector';
@@ -254,11 +258,18 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // no fan-out" shape as configSnapshot.
   private aclSnapshot = new Map<
     string,
-    { groupKey: string; name?: string; digest: string; userDigests: Record<string, string> }
+    {
+      groupKey: string;
+      clusterKey: string;
+      name?: string;
+      digest: string;
+      userDigests: Record<string, string>;
+    }
   >();
   private aclDriftRecheck = new Map<string, number>();
   // Group-level dedupe (a drift is a property of the GROUP, not a connection).
   private activeAclDriftSignatures = new Set<string>();
+  private activeAclClusterDriftSignatures = new Set<string>();
   // Connections whose ACL read is currently denied — reported once, then held so
   // an unreadable ACL surface doesn't alert every poll.
   private aclUnverified = new Set<string>();
@@ -1102,6 +1113,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
       // Cluster state transition detection
       const clusterEnabled = info['cluster_enabled'];
+      let aclClusterNodes: ClusterNode[] | undefined;
       if (live && clusterEnabled === '1') {
         // Raft (Cluster V2) vs gossip is decided from CLUSTER INFO. Default to the
         // last known mode so a transient CLUSTER INFO failure can't flip a Raft
@@ -1237,6 +1249,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           // it runs in BOTH topology modes.
           await this.detectOrphanedSlotKeys(ctx, timestamp, nodes);
         }
+        aclClusterNodes = nodes;
       }
 
       // Persistence-child stall detection (stuck BGSAVE / AOF rewrite) — state-based, not z-score
@@ -1266,10 +1279,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       if (live) await this.detectAuthFailureBurst(ctx, timestamp);
 
       // Cross-node ACL drift + live-reload confirmation (valkey-io/valkey#4355):
-      // one node in a replication group serving a different ruleset than its
-      // peers, or a node whose ruleset changed. Same shared-snapshot shape as
-      // config drift — no fan-out, so a hung peer cannot stall this poll.
-      if (live) await this.detectAclDrift(info, ctx, timestamp);
+      // shard-internal, cross-shard, or a node whose ruleset changed. Same
+      // shared-snapshot shape as config drift — no fan-out, so a hung peer
+      // cannot stall this poll. Reuses the CLUSTER NODES view above; when it is
+      // unavailable the cross-shard pass skips while the shard pass still runs.
+      if (live) await this.detectAclDrift(info, ctx, timestamp, aclClusterNodes);
 
       // Sentinel endpoint drift (valkey-io/valkey#2158): a replica carried under
       // an ephemeral pod IP where the group announces hostnames, or a node
@@ -1731,6 +1745,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private async refreshAclSnapshot(
     ctx: ConnectionContext,
     replid: string,
+    clusterKey: string,
     timestamp: number,
   ): Promise<{ previousDigest: string | null } | null> {
     const deniedUntil = this.aclDeniedUntil.get(ctx.connectionId);
@@ -1744,6 +1759,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const cacheUsable = cached !== undefined && cached.groupKey === groupKey;
 
     if (cacheUsable && countdown > 0) {
+      if (cached.clusterKey !== clusterKey) {
+        this.aclSnapshot.set(ctx.connectionId, { ...cached, clusterKey });
+      }
       this.aclDriftRecheck.set(ctx.connectionId, countdown - 1);
       return { previousDigest: null };
     }
@@ -1786,6 +1804,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     this.aclSnapshot.set(ctx.connectionId, {
       groupKey,
+      clusterKey,
       name: ctx.connectionName,
       digest,
       userDigests,
@@ -1797,14 +1816,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   /**
    * ACL drift and live-reload confirmation (valkey-io/valkey#4355).
    *
-   * Two findings share one metric because they answer the same operator
-   * question — "is this node serving the ruleset I think it is?":
+   * Three findings share one metric — "is this node serving the ruleset I think it is?":
    *
-   *  - **Cross-node drift** (WARNING): nodes in one replication group disagree.
-   *    One node is enforcing different authorization than its peers, which shows
-   *    up as auth failures the moment a failover moves traffic to it.
-   *  - **Reload confirmation** (INFO): a single node's digest changed. Expected
-   *    right after an `ACL LOAD`; unexplained otherwise, and worth a look.
+   *  - **Shard drift** (WARNING): nodes in one replication group disagree.
+   *  - **Cross-shard drift** (WARNING): shards of one cluster disagree, e.g. an
+   *    `ACL LOAD` that missed a primary. Grouped by gossip-derived clusterKey so
+   *    unrelated monitored clusters never compare against each other.
+   *  - **Reload confirmation** (INFO): a single node's digest changed.
    *
    * Built the same "shared snapshot" way as config drift: no live fan-out to
    * sibling nodes, so a hung peer can never stall this poll.
@@ -1813,16 +1831,18 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     info: Record<string, string>,
     ctx: ConnectionContext,
     timestamp: number,
+    clusterNodes?: ClusterNode[],
   ): Promise<void> {
     try {
       const replid = info['master_replid'];
       const roleStr = info['role'];
       const isReplicating = roleStr === 'master' || roleStr === 'slave' || roleStr === 'replica';
+      const clusterKey = clusterKeyFromNodes(clusterNodes);
 
       if (!replid || !isReplicating) {
         this.aclSnapshot.delete(ctx.connectionId);
       } else {
-        const refreshed = await this.refreshAclSnapshot(ctx, replid, timestamp);
+        const refreshed = await this.refreshAclSnapshot(ctx, replid, clusterKey, timestamp);
         if (refreshed?.previousDigest) {
           await this.addAnomaly(
             this.buildAclReloadEvent(ctx, timestamp, refreshed.previousDigest),
@@ -1837,72 +1857,93 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
             connectionId,
             name: snap.name,
             groupKey: snap.groupKey,
+            clusterKey: snap.clusterKey,
             digest: snap.digest,
             userDigests: snap.userDigests,
           };
         },
       );
-      const drifts = detectAclDrift(nodes);
-      const currentSignatures = new Set(drifts.map(aclDriftSignature));
 
-      // Reconciled SYNCHRONOUSLY (no await inside) for the same reason as config
-      // drift: this runs from EVERY connection's poll, those polls run
-      // concurrently, and they share activeAclDriftSignatures.
-      const newDrifts: AclDrift[] = [];
-      for (const drift of drifts) {
-        const signature = aclDriftSignature(drift);
-        if (this.activeAclDriftSignatures.has(signature)) {
-          continue;
-        }
-        this.activeAclDriftSignatures.add(signature);
-        newDrifts.push(drift);
-      }
-      for (const signature of this.activeAclDriftSignatures) {
-        if (!currentSignatures.has(signature)) {
-          this.activeAclDriftSignatures.delete(signature);
-        }
-      }
+      const newDrifts = this.claimAclDrifts(
+        detectAclDrift(nodes),
+        aclDriftSignature,
+        this.activeAclDriftSignatures,
+      );
+      await this.emitAclDrifts(
+        newDrifts,
+        (drift) => this.buildAclDriftEvent(timestamp, drift),
+        aclDriftSignature,
+        this.activeAclDriftSignatures,
+      );
 
-      // The signature is CLAIMED synchronously above so concurrent polls cannot both
-      // emit the same drift, but the claim is only kept if the emit succeeds. A
-      // throw here would otherwise leave the signature marked active and silently
-      // suppress the drift until it clears and recurs — unacceptable for a security
-      // alert. Releasing the claim on failure lets the next poll retry it.
-      for (const drift of newDrifts) {
-        const event = this.buildAclDriftEvent(timestamp, drift);
-        this.logger.warn(`Anomaly detected: ${event.message}`);
-        // Attributed to the first node of the group, which is frequently NOT the
-        // connection whose poll ran this scan.
-        const attributedCtx = this.buildConnectionContext(drift.nodes[0].connectionId);
-        // Release and CONTINUE, not release and re-throw. Re-throwing abandoned the
-        // rest of the batch, leaving those drifts holding the claim they took in the
-        // reconcile step without ever emitting — the original bug, narrowed to the
-        // tail of a multi-drift poll. Each finding gets its own attempt.
-        //
-        // The release has to key off `persisted`, not off a rejection. addAnomaly
-        // CATCHES storage failures so one detector's write error cannot abort the
-        // rest of the poll, which means the real failure mode resolves normally with
-        // `persisted` unset — a rejection-only release would never fire for it and
-        // the drift would stay suppressed until it cleared and recurred. The catch
-        // is kept for a throw from anywhere else in the emit path.
-        let emitFailure: string | null = null;
-        try {
-          await this.addAnomaly(event, attributedCtx);
-          if (event.persisted !== true) {
-            emitFailure = 'anomaly was not persisted';
-          }
-        } catch (emitErr) {
-          emitFailure = emitErr instanceof Error ? emitErr.message : String(emitErr);
-        }
-        if (emitFailure !== null) {
-          this.activeAclDriftSignatures.delete(aclDriftSignature(drift));
-          this.logger.debug(`ACL drift emit failed, released for retry: ${emitFailure}`);
-        }
-      }
+      const newClusterDrifts = this.claimAclDrifts(
+        detectAclClusterDrift(nodes),
+        aclClusterDriftSignature,
+        this.activeAclClusterDriftSignatures,
+      );
+      await this.emitAclDrifts(
+        newClusterDrifts,
+        (drift) => this.buildAclClusterDriftEvent(timestamp, drift),
+        aclClusterDriftSignature,
+        this.activeAclClusterDriftSignatures,
+      );
     } catch (err) {
       this.logger.debug(
         `Failed to check ACL drift for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
       );
+    }
+  }
+
+  // Claims signatures synchronously (polls run concurrently on shared sets) and
+  // sweeps cleared ones. Returns only newly-seen drifts.
+  private claimAclDrifts<T>(
+    drifts: T[],
+    signature: (drift: T) => string,
+    active: Set<string>,
+  ): T[] {
+    const current = new Set(drifts.map(signature));
+    const fresh: T[] = [];
+    for (const drift of drifts) {
+      const sig = signature(drift);
+      if (!active.has(sig)) {
+        active.add(sig);
+        fresh.push(drift);
+      }
+    }
+    for (const sig of active) {
+      if (!current.has(sig)) {
+        active.delete(sig);
+      }
+    }
+    return fresh;
+  }
+
+  // Emits each drift; a failed emit releases its claim for retry. Release keys
+  // off `persisted` because addAnomaly catches storage errors instead of throwing.
+  private async emitAclDrifts<T extends { nodes: Array<{ connectionId: string }> }>(
+    drifts: T[],
+    buildEvent: (drift: T) => AnomalyEvent,
+    signature: (drift: T) => string,
+    active: Set<string>,
+  ): Promise<void> {
+    for (const drift of drifts) {
+      const event = buildEvent(drift);
+      this.logger.warn(`Anomaly detected: ${event.message}`);
+      // Attributed to the first node of the group, frequently NOT this poll's connection.
+      const attributedCtx = this.buildConnectionContext(drift.nodes[0].connectionId);
+      let emitFailure: string | null = null;
+      try {
+        await this.addAnomaly(event, attributedCtx);
+        if (event.persisted !== true) {
+          emitFailure = 'anomaly was not persisted';
+        }
+      } catch (emitErr) {
+        emitFailure = emitErr instanceof Error ? emitErr.message : String(emitErr);
+      }
+      if (emitFailure !== null) {
+        active.delete(signature(drift));
+        this.logger.debug(`ACL drift emit failed, released for retry: ${emitFailure}`);
+      }
     }
   }
 
@@ -1932,11 +1973,43 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       stdDev: 0,
       threshold: 1,
       message:
-        `WARNING: Nodes in the same replication group are serving different ACL rulesets ` +
+        `WARNING [shard-internal]: Nodes in the same replication group are serving different ACL rulesets ` +
         `(${nodeLabel}). Users that differ: ${userLabel}. An ACL LOAD or CONFIG-managed push ` +
         `applies per node, so one node can quietly keep an older ruleset (valkey#4355) — the ` +
         `divergence only surfaces as auth failures once a failover moves traffic to it. ` +
         `Re-run \`ACL LOAD\` on the lagging node, or reconcile its ACL file, then confirm the ` +
+        `digests match.`,
+      resolved: false,
+      connectionId: drift.nodes[0].connectionId,
+    };
+  }
+
+  /** Cross-shard ACL disagreement: shards of one cluster serve different rulesets. */
+  private buildAclClusterDriftEvent(timestamp: number, drift: AclClusterDrift): AnomalyEvent {
+    const nodeLabel = drift.nodes
+      .map((node) => {
+        return `${node.name ?? node.connectionId} = ${node.digest}`;
+      })
+      .join(', ');
+    const userLabel =
+      drift.usernames.length > 0 ? drift.usernames.join(', ') : 'no individually-named user';
+
+    return {
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.ACL_DRIFT,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: drift.groupKeys.length,
+      baseline: 1,
+      zScore: 0,
+      stdDev: 0,
+      threshold: 1,
+      message:
+        `WARNING [cross-shard]: Shards in the same cluster are serving different ACL rulesets ` +
+        `(${nodeLabel}). Users that differ: ${userLabel}. An ACL LOAD applies per node, so a push ` +
+        `that missed a primary leaves its whole shard on the old ruleset (valkey#4355). ` +
+        `Re-run \`ACL LOAD\` on every primary, or reconcile the ACL files, then confirm the ` +
         `digests match.`,
       resolved: false,
       connectionId: drift.nodes[0].connectionId,
