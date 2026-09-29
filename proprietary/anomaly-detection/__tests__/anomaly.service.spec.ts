@@ -5316,6 +5316,23 @@ describe('AnomalyService', () => {
       });
     }
 
+    /** Seed a slice carrying a gossip-derived cluster identity. */
+    function seedClusterPeer(
+      connectionId: string,
+      lines: string[],
+      replid: string,
+      clusterKey = 'cluster:test',
+    ): void {
+      const { digest, userDigests } = nodeAclDigest(lines);
+      (service as any).aclSnapshot.set(connectionId, {
+        groupKey: `replid:${replid}`,
+        clusterKey,
+        name: connectionId,
+        digest,
+        userDigests,
+      });
+    }
+
     it('stays silent when the group agrees', async () => {
       seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE]);
       await poll();
@@ -5416,6 +5433,40 @@ describe('AnomalyService', () => {
       seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER], 'other-replid');
       await poll();
       expect(driftEvents()).toEqual([]);
+    });
+
+    it('emits a cross-shard WARNING when shards of one cluster diverge', async () => {
+      seedClusterPeer('conn-peer-a', [DEFAULT_LINE, APP_LINE], 'shard-one');
+      seedClusterPeer('conn-peer-b', [DEFAULT_LINE, APP_LINE_WIDER], 'shard-two');
+      await poll();
+
+      const events = driftEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('cross-shard');
+      expect(events[0].message).toContain('app');
+      expect(events[0].message).toContain('4355');
+    });
+
+    it('does not compare shards across unrelated clusters', async () => {
+      seedClusterPeer('conn-peer-a', [DEFAULT_LINE, APP_LINE], 'shard-one', 'cluster:a');
+      seedClusterPeer('conn-peer-b', [DEFAULT_LINE, APP_LINE_WIDER], 'shard-two', 'cluster:b');
+      await poll();
+      expect(driftEvents()).toEqual([]);
+    });
+
+    it('stays silent cross-shard when only one shard of the cluster is monitored', async () => {
+      seedClusterPeer('conn-peer', [DEFAULT_LINE, APP_LINE], 'shared-replid');
+      await poll();
+      expect(driftEvents()).toEqual([]);
+    });
+
+    it('dedupes a persistent cross-shard drift across polls', async () => {
+      seedClusterPeer('conn-peer-a', [DEFAULT_LINE, APP_LINE], 'shard-one');
+      seedClusterPeer('conn-peer-b', [DEFAULT_LINE, APP_LINE_WIDER], 'shard-two');
+      await poll();
+      await poll();
+      expect(driftEvents()).toHaveLength(1);
     });
 
     it('emits an INFO reload confirmation when this node adopts a new ruleset', async () => {
