@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useConnectionState, type Connection } from './useConnection';
+import { CONNECTIONS_REFRESH_MS, useConnectionState, type Connection } from './useConnection';
 
 const mocks = vi.hoisted(() => {
   return { fetchApi: vi.fn(), setCurrentConnectionId: vi.fn() };
@@ -89,5 +89,46 @@ describe('useConnectionState', () => {
     });
 
     expect(result.current.currentConnection?.id).toBe('conn-2');
+  });
+
+  it('picks up children added by background topology reconciliation', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mocks.fetchApi.mockResolvedValue({
+        connections: [{ ...connection('seed'), autoRegisterNodes: true }],
+        currentId: null,
+      });
+      const { result } = renderHook(() => useConnectionState());
+      await waitFor(() => expect(result.current.connections).toHaveLength(1));
+
+      const child = { ...connection('child'), membership: { seedId: 'seed', nodeId: 'n', origin: 'auto' as const } };
+      mocks.fetchApi.mockResolvedValue({
+        connections: [{ ...connection('seed'), autoRegisterNodes: true }, child],
+        currentId: null,
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(CONNECTIONS_REFRESH_MS);
+      });
+
+      expect(result.current.connections.map((c) => c.id)).toEqual(['seed', 'child']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not poll when no connection follows cluster topology', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mocks.fetchApi.mockResolvedValue(connectionsResponse(['conn-1']));
+      const { result } = renderHook(() => useConnectionState());
+      await waitFor(() => expect(result.current.connections).toHaveLength(1));
+      const calls = mocks.fetchApi.mock.calls.length;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(CONNECTIONS_REFRESH_MS * 2);
+      });
+      expect(mocks.fetchApi.mock.calls.length).toBe(calls);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
