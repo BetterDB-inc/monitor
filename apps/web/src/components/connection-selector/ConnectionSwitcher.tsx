@@ -6,7 +6,7 @@ import { cn } from '@/lib/utils';
 import { ConnectionSwitcherOpenContext } from './switcher-open-context';
 import { ConnectionTypeBadge, BADGE } from './ConnectionTypeBadge';
 import { groupSentinelMembers } from './autoRegisterCopy';
-import { formatRelative, isRetiredMember, orderWithMembers } from '../../utils/connectionType';
+import { formatRelative, isRetiredMember, orderWithMembers, retiredLabel } from '../../utils/connectionType';
 
 interface ConnectionSwitcherProps {
   connections: Connection[];
@@ -351,7 +351,7 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
                       </span>
                       {retired ? (
                         <span className="ms-1 shrink-0 text-[10px] text-muted-foreground">
-                          left cluster · {formatRelative(connection.membership!.retiredAt!)}
+                          {retiredLabel(connection)} · {formatRelative(connection.membership!.retiredAt!)}
                         </span>
                       ) : null}
                       {isCurrent ? <CheckIcon className="w-4 h-4 flex-shrink-0" /> : null}

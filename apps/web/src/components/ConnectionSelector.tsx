@@ -19,7 +19,7 @@ import {
   disableConfirmation,
   showsAutoRegisterToggle,
 } from './connection-selector/autoRegisterCopy';
-import { isRetiredMember, orderWithMembers } from '../utils/connectionType';
+import { isRetiredMember, orderWithMembers, retiredLabel } from '../utils/connectionType';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 
 interface SshFormData {
@@ -987,7 +987,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                       <div className="text-xs text-muted-foreground">
                         {conn.host}:{conn.port}
                       </div>
-                      {retired && <div className="text-xs text-muted-foreground">left cluster</div>}
+                      {retired && <div className="text-xs text-muted-foreground">{retiredLabel(conn)}</div>}
                       {showsAutoRegisterToggle(conn) && (
                         <label className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
                           <input

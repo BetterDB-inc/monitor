@@ -518,7 +518,7 @@ describe('ConnectionSwitcher sentinel grouping', () => {
     expect(names[1]).toContain('a primary');
     expect(names[2]).toContain('b primary');
     expect(names[3]).toContain('b replica');
-    expect(names[4]).toContain('left cluster');
+    expect(names[4]).toContain('left group');
   });
 
   it('shows a primary badge on the primary member', () => {

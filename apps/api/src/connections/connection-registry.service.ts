@@ -268,7 +268,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   private assertValidExternalRequest(request: CreateConnectionRequest): void {
-    if (request.password || request.username || request.tls || request.sshTunnel?.enabled) {
+    if (request.password || request.username || request.nodePassword || request.nodeUsername || request.tls || request.sshTunnel?.enabled) {
       throw new Error('OTLP push connections take no credentials, TLS or SSH tunnel');
     }
     if (this.findIdByHostPort(request.host, request.port)) {
