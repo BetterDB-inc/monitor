@@ -92,12 +92,12 @@ describe('ClusterAutoRegistrationService', () => {
     expect(withMembers.registry.addManagedChild).not.toHaveBeenCalled();
   });
 
-  it('treats an unset connection as a seed when the env default is on', async () => {
+  it('adopts an unset connection without members when the env default is on', async () => {
     const other: DatabaseConnectionConfig = { id: 'other', name: 'other', host: '10.0.0.2', port: 7002, isDefault: false, createdAt: 1 };
     const on = build({ seed: { autoRegisterNodes: undefined }, envDefault: 'true', nodes: clusterOf(1) });
     on.registry.findConfigByHostPort.mockReturnValue(other);
     await on.service.reconcile('seed');
-    expect(on.registry.adoptChild).not.toHaveBeenCalled();
+    expect(on.registry.adoptChild).toHaveBeenCalledWith('other', 'seed', 'n2');
 
     const optedOut = build({ envDefault: 'true', nodes: clusterOf(1) });
     optedOut.registry.findConfigByHostPort.mockReturnValue({ ...other, autoRegisterNodes: false });
