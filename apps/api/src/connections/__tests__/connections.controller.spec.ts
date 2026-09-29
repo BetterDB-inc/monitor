@@ -213,8 +213,9 @@ describe('ConnectionsController discovered instances', () => {
     (registry as unknown as { configs: Map<string, DatabaseConnectionConfig> }).configs.set(config.id, config);
   };
 
-  it('restricts the discovered list to admins', () => {
+  it('restricts listing and dismissing discovered instances to admins', () => {
     expect(Reflect.getMetadata(ROLES_KEY, ConnectionsController.prototype.listDiscovered)).toEqual(['admin']);
+    expect(Reflect.getMetadata(ROLES_KEY, ConnectionsController.prototype.dismissDiscovered)).toEqual(['admin']);
   });
 
   it('lists discovered instances when enabled', () => {

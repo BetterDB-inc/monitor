@@ -111,6 +111,7 @@ export class ConnectionsController {
   }
 
   @Post('discovered/dismiss')
+  @Roles('admin')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Hide a discovered instance for 24 hours' })
   @ApiResponse({ status: 204, description: 'Dismissed' })
