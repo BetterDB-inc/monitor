@@ -44,6 +44,7 @@
     "test:integration:valkey": "TEST_DB_PORT=6380 pnpm --filter api test:integration:valkey",
     "test:migration-topology": "pnpm --filter api test:migration-topology",
     "test:sentinel-topology": "pnpm --filter api test:sentinel-topology",
+    "test:sentinel-loop-stall": "pnpm --filter api test:sentinel-loop-stall",
     "lint": "turbo lint",
     "clean": "turbo clean && rm -rf node_modules",
     "cli:build": "pnpm --filter @betterdb/monitor build",

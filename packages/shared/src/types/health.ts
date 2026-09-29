@@ -79,7 +79,8 @@ export interface ConfigHazardFinding {
     | 'default-user-aof-data-loss'
     | 'appendfsync-always-blocking'
     | 'appendfsync-everysec-backlog'
-    | 'cluster-crc-disabled';
+    | 'cluster-crc-disabled'
+    | 'sentinel-dns-resolution-blocking';
   severity: 'info' | 'warning';
   /**
    * 'hazard' = dangerous config confirmed (symptoms observed where applicable);

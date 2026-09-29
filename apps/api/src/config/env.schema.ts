@@ -190,6 +190,15 @@ export const envSchema = z
     MONITOR_PERSISTENCE_WARN_SEC: z.coerce.number().int().min(1).default(120),
     MONITOR_PERSISTENCE_CRIT_SEC: z.coerce.number().int().min(1).default(600),
 
+    // Sentinel loop-stall / TILT RTT-proxy thresholds (valkey-sentinel-tilt-repro).
+    // Defaults bracket the 2000ms sentinel_tilt_trigger: warn well below it so the
+    // leading indicator has room to fire, high at the trigger.
+    SENTINEL_LOOP_STALL_WARN_MS: z.coerce.number().int().min(1).default(1500),
+    SENTINEL_LOOP_STALL_HIGH_MS: z.coerce.number().int().min(1).default(2000),
+    SENTINEL_LOOP_STALL_WINDOW: z.coerce.number().int().min(1).default(10),
+    SENTINEL_LOOP_STALL_MIN_BREACHES: z.coerce.number().int().min(1).default(3),
+    SENTINEL_LOOP_STALL_MISDIRECTED_STREAK: z.coerce.number().int().min(1).default(15),
+
     // OTLP trace ingestion (AI observability Phase 2)
     OTEL_INGEST_ENABLED: z
       .string()

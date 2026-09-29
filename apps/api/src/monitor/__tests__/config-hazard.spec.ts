@@ -1,9 +1,11 @@
 import {
   AppendfsyncHazardInput,
   ConfigHazardInput,
+  SentinelDnsHazardInput,
   evaluateAclAofHazard,
   evaluateAppendfsyncHazard,
   evaluateClusterCrcHazard,
+  evaluateSentinelDnsResolutionHazard,
 } from '../config-hazard';
 
 // ACL GETUSER shapes mirror acl-checker.ts: RESP2 flat pair array or RESP3 record.
@@ -259,5 +261,72 @@ describe('evaluateClusterCrcHazard', () => {
     expect(finding?.id).toBe('cluster-crc-disabled');
     expect(finding?.status).toBe('unverified');
     expect(finding?.severity).toBe('warning');
+  });
+});
+
+describe('evaluateSentinelDnsResolutionHazard', () => {
+  const base: SentinelDnsHazardInput = {
+    isSentinel: true,
+    resolveHostnames: 'yes',
+    monitoredAddresses: ['sentinel-primary'],
+    announceIp: null,
+    announceHostnames: null,
+  };
+
+  it('flags Sentinel with resolve-hostnames yes and a hostname monitored target', () => {
+    const finding = evaluateSentinelDnsResolutionHazard(base);
+    expect(finding?.id).toBe('sentinel-dns-resolution-blocking');
+    expect(finding?.severity).toBe('warning');
+    expect(finding?.status).toBe('advisory');
+  });
+
+  it('flags on announce-hostnames yes even when monitored targets are IPs', () => {
+    const finding = evaluateSentinelDnsResolutionHazard({
+      ...base,
+      monitoredAddresses: ['10.0.0.1'],
+      announceHostnames: 'yes',
+    });
+    expect(finding?.id).toBe('sentinel-dns-resolution-blocking');
+  });
+
+  it('flags when announce-ip itself is a hostname', () => {
+    const finding = evaluateSentinelDnsResolutionHazard({
+      ...base,
+      monitoredAddresses: ['10.0.0.1'],
+      announceIp: 'valkey-0.valkey-headless',
+    });
+    expect(finding?.id).toBe('sentinel-dns-resolution-blocking');
+  });
+
+  it('stays silent on a non-Sentinel server', () => {
+    expect(evaluateSentinelDnsResolutionHazard({ ...base, isSentinel: false })).toBeNull();
+  });
+
+  it('stays silent when resolve-hostnames is off', () => {
+    expect(evaluateSentinelDnsResolutionHazard({ ...base, resolveHostnames: 'no' })).toBeNull();
+  });
+
+  it('stays silent when resolve-hostnames is unreadable (predictive, no false positive)', () => {
+    expect(evaluateSentinelDnsResolutionHazard({ ...base, resolveHostnames: null })).toBeNull();
+  });
+
+  it('stays silent when every monitored/announced target is an IP literal', () => {
+    expect(
+      evaluateSentinelDnsResolutionHazard({
+        ...base,
+        monitoredAddresses: ['10.0.0.1', '10.0.0.2', '::1'],
+        announceIp: '10.0.0.9',
+        announceHostnames: 'no',
+      }),
+    ).toBeNull();
+  });
+
+  it('does not read Sentinel\'s "?" placeholder or empty values as a hostname', () => {
+    expect(
+      evaluateSentinelDnsResolutionHazard({
+        ...base,
+        monitoredAddresses: ['?', ''],
+      }),
+    ).toBeNull();
   });
 });

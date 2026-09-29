@@ -48,7 +48,9 @@ describe('ConfigHazardService', () => {
     client.getConfigValue.mockResolvedValue('no');
     const findings = await service.getHazards('conn-1');
     expect(findings).toHaveLength(0);
-    expect(client.call).not.toHaveBeenCalled();
+    // The server-mode gate issues an INFO server read first, but the ACL GETUSER
+    // probe must still be skipped when AOF is off.
+    expect(client.call).not.toHaveBeenCalledWith('ACL', ['GETUSER', 'default']);
   });
 
   it('maps a denied ACL GETUSER to an unverified finding', async () => {
@@ -68,7 +70,9 @@ describe('ConfigHazardService', () => {
     expect(findings).toHaveLength(1);
     expect(findings[0].id).toBe('cluster-crc-disabled');
     expect(findings[0].status).toBe('advisory');
-    expect(client.call).not.toHaveBeenCalled();
+    // The server-mode gate issues an INFO server read; the AOF-only ACL GETUSER
+    // probe must still be skipped when AOF is off.
+    expect(client.call).not.toHaveBeenCalledWith('ACL', ['GETUSER', 'default']);
   });
 
   it('preserves an AOF finding when the cluster CRC read fails', async () => {
@@ -348,6 +352,68 @@ describe('ConfigHazardService', () => {
         'appendfsync-always-blocking',
         'default-user-aof-data-loss',
       ]);
+    });
+  });
+
+  describe('Sentinel DNS-resolution hazard', () => {
+    function setupSentinel(opts: {
+      resolveHostnames?: string | null;
+      announceIp?: string | null;
+      announceHostnames?: string | null;
+      masterIp?: string;
+    }): void {
+      client.getConfigValue.mockImplementation((param: string) => {
+        if (param === 'resolve-hostnames') {
+          return Promise.resolve(opts.resolveHostnames ?? 'yes');
+        }
+        if (param === 'announce-ip') {
+          return Promise.resolve(opts.announceIp ?? null);
+        }
+        if (param === 'announce-hostnames') {
+          return Promise.resolve(opts.announceHostnames ?? null);
+        }
+        return Promise.resolve(null);
+      });
+      client.call.mockImplementation((cmd: string, args: string[]) => {
+        if (cmd === 'INFO') {
+          return Promise.resolve('# Server\r\nserver_mode:sentinel\r\n');
+        }
+        if (cmd === 'SENTINEL' && args[0] === 'MASTERS') {
+          return Promise.resolve([
+            [
+              'name',
+              'mymaster',
+              'ip',
+              opts.masterIp ?? 'sentinel-primary',
+              'port',
+              '6379',
+              'flags',
+              'master',
+            ],
+          ]);
+        }
+        if (cmd === 'SENTINEL' && args[0] === 'REPLICAS') {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve(null);
+      });
+    }
+
+    it('flags a Sentinel with resolve-hostnames yes and a hostname monitored master', async () => {
+      setupSentinel({});
+      const findings = await service.getHazards('conn-sentinel');
+      expect(findings).toHaveLength(1);
+      expect(findings[0].id).toBe('sentinel-dns-resolution-blocking');
+      expect(findings[0].status).toBe('advisory');
+      // The AOF/cluster probes must never run against a Sentinel.
+      expect(client.call).not.toHaveBeenCalledWith('ACL', ['GETUSER', 'default']);
+      expect(client.getConfigValue).not.toHaveBeenCalledWith('appendonly');
+    });
+
+    it('stays silent for a Sentinel monitoring by IP with resolve-hostnames off', async () => {
+      setupSentinel({ resolveHostnames: 'no', masterIp: '10.0.0.10' });
+      const findings = await service.getHazards('conn-sentinel');
+      expect(findings).toHaveLength(0);
     });
   });
 });
