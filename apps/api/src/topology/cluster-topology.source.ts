@@ -16,8 +16,9 @@ export class ClusterTopologySource implements TopologySource {
     return caps.clusterEnabled === true;
   }
 
-  async discover(seed: DatabaseConnectionConfig, timeoutMs: number): Promise<TopologyDiscovery> {
+  async discover(seed: DatabaseConnectionConfig, timeoutMs: number): Promise<TopologyDiscovery | null> {
     const nodes = await this.discovery.discoverNodesIsolated(seed.id, timeoutMs);
+    if (nodes.length === 0) return null;
     return { nodes: desiredFromDiscovery(seed, nodes), unknownGroups: [] };
   }
 }
