@@ -68,6 +68,16 @@ import {
   sentinelDriftSignatureMaster,
 } from './sentinel-drift-detector';
 import {
+  DEFAULT_SENTINEL_LOOP_STALL_THRESHOLDS,
+  SENTINEL_TILT_TRIGGER_MS,
+  SentinelLoopStallFinding,
+  SentinelLoopStallState,
+  SentinelLoopStallThresholds,
+  createSentinelLoopStallState,
+  evaluateSentinelLoopStall,
+  sentinelLoopStallSignature,
+} from './sentinel-loop-stall-detector';
+import {
   AclDrift,
   AclDriftNode,
   aclDriftSignature,
@@ -94,7 +104,12 @@ import {
 import { parseRaftState, isRaftSeeking } from './raft-health-detector';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
-import { ClusterNode, ClusterShard, SlotStats } from '@app/common/types/metrics.types';
+import {
+  ClusterNode,
+  ClusterShard,
+  SlotStats,
+  SentinelNodeInfo,
+} from '@app/common/types/metrics.types';
 import {
   FAILOVER_CHURN_MIN_CHANGES,
   FailoverChurnStateMap,
@@ -269,6 +284,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private sentinelDriftFirstSeen = new Map<string, Map<string, number>>();
   private activeSentinelDrifts = new Map<string, Set<string>>();
   private sentinelLastProbe = new Map<string, number>();
+  // Sentinel loop-stall / TILT (valkey-sentinel-tilt-repro): per-connection episode
+  // + RTT-window state, the persistence-gate maps, whether this connection was last
+  // seen as a Sentinel (so a wedged INFO timeout can still be attributed to the
+  // loop), and the most recent SENTINEL MASTERS view — shared with detectSentinel
+  // Drift so the classifier can read `s_down` flags without a second fan-out.
+  private sentinelLoopStallState = new Map<string, SentinelLoopStallState>();
+  private sentinelLoopStallFirstSeen = new Map<string, Map<string, number>>();
+  private activeSentinelLoopStalls = new Map<string, Set<string>>();
+  private sentinelModeLast = new Map<string, boolean>();
+  private sentinelMastersSnapshot = new Map<string, SentinelNodeInfo[]>();
   // Replica-slot-state (valkey#1664) state, same discipline as stuck-replica:
   // `firstSeen` gates on persistence so a transient reshard snapshot doesn't
   // alert, `active` dedupes once the gate has fired.
@@ -390,6 +415,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private readonly persistenceStallSec: number;
   private readonly persistenceWarnSec: number;
   private readonly persistenceCritSec: number;
+  // Sentinel loop-stall RTT-proxy thresholds, resolved once at construction so
+  // operators can tune them via env (defaults tie to sentinel_tilt_trigger).
+  private readonly sentinelLoopStall: SentinelLoopStallThresholds;
   private readonly correlationIntervalMs = 5000;
   private correlationInterval: NodeJS.Timeout | null = null;
   private prometheusSummaryInterval: NodeJS.Timeout | null = null;
@@ -423,6 +451,33 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.persistenceStallSec = this.configService.get<number>('MONITOR_PERSISTENCE_STALL_SEC', 60);
     this.persistenceWarnSec = this.configService.get<number>('MONITOR_PERSISTENCE_WARN_SEC', 120);
     this.persistenceCritSec = this.configService.get<number>('MONITOR_PERSISTENCE_CRIT_SEC', 600);
+
+    const d = DEFAULT_SENTINEL_LOOP_STALL_THRESHOLDS;
+    this.sentinelLoopStall = {
+      warnRttMs: this.numberEnv('SENTINEL_LOOP_STALL_WARN_MS', d.warnRttMs),
+      highRttMs: this.numberEnv('SENTINEL_LOOP_STALL_HIGH_MS', d.highRttMs),
+      rttWindow: this.numberEnv('SENTINEL_LOOP_STALL_WINDOW', d.rttWindow),
+      rttMinBreaches: this.numberEnv('SENTINEL_LOOP_STALL_MIN_BREACHES', d.rttMinBreaches),
+      misdirectedMinStreak: this.numberEnv(
+        'SENTINEL_LOOP_STALL_MISDIRECTED_STREAK',
+        d.misdirectedMinStreak,
+      ),
+    };
+  }
+
+  /**
+   * Reads a numeric setting from configuration, coercing the raw env string and
+   * falling back to `fallback` when unset, empty, or non-numeric. ConfigService
+   * returns process.env values as strings, so a plain `get<number>` would hand a
+   * string to arithmetic; this normalizes to a real number.
+   */
+  private numberEnv(key: string, fallback: number): number {
+    const raw = this.configService.get<string | number>(key);
+    if (raw === undefined || raw === null || raw === '') {
+      return fallback;
+    }
+    const n = typeof raw === 'number' ? raw : Number(raw);
+    return Number.isFinite(n) ? n : fallback;
   }
 
   protected getIntervalMs(): number {
@@ -612,6 +667,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.sentinelDriftFirstSeen.delete(connectionId);
     this.activeSentinelDrifts.delete(connectionId);
     this.sentinelLastProbe.delete(connectionId);
+    this.sentinelLoopStallState.delete(connectionId);
+    this.sentinelLoopStallFirstSeen.delete(connectionId);
+    this.activeSentinelLoopStalls.delete(connectionId);
+    this.sentinelModeLast.delete(connectionId);
+    this.sentinelMastersSnapshot.delete(connectionId);
     this.replicaSlotFirstSeen.delete(connectionId);
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
@@ -686,11 +746,23 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     try {
       // Timed around the socket call only: this round-trip doubles as the
-      // control-plane probe latency sample for detectControlPlaneSaturation.
+      // control-plane probe latency sample for detectControlPlaneSaturation and the
+      // loop-stall RTT proxy for Sentinels.
       const probeStart = performance.now();
-      const infoResponse = await ctx.client.getInfoParsed();
+      let infoResponse: Awaited<ReturnType<typeof ctx.client.getInfoParsed>>;
+      try {
+        infoResponse = await ctx.client.getInfoParsed();
+      } catch (infoErr) {
+        // A Sentinel whose event loop is fully wedged stops answering INFO while the
+        // TCP socket stays up - the worst valkey TILT case. Record it as a loop
+        // stall rather than letting it read as a dead connection, then rethrow so
+        // the poll still fails exactly as it did before.
+        await this.handleSentinelInfoTimeout(ctx, Date.now(), infoErr);
+        throw infoErr;
+      }
       const probeRttMs = performance.now() - probeStart;
       const info = this.convertInfoToRecord(infoResponse);
+      const sentinelMode = isSentinelMode(info);
       const timestamp = Date.now();
       let cpuUtilizationSample: number | null = null;
       let cpuCounterReset = false;
@@ -1263,6 +1335,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // configured as a replica of itself. Sentinel deployments only.
       await this.detectSentinelDrift(ctx, timestamp, info);
 
+      // Sentinel loop-stall / TILT (valkey-sentinel-tilt-repro): a blocking
+      // getaddrinfo on Sentinel's single-threaded loop stalls it past the 2000ms
+      // TILT trigger. Runs after detectSentinelDrift so it can reuse that poll's
+      // cached SENTINEL MASTERS view for the loop-starvation vs misdirected-DNS
+      // classification. Sentinel connections only.
+      await this.detectSentinelLoopStall(ctx, timestamp, info, probeRttMs, sentinelMode);
+
       // Cross-node config drift (valkey-io/valkey#1193): CONFIG SET only ever
       // applies to the single node it's sent to today, so nodes in the same
       // replication group can silently drift on a critical setting (e.g. one
@@ -1290,12 +1369,15 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // Control-plane saturation (valkey-io/valkey#3927): sustained CPU
       // saturation paired with control-plane impact evidence. Runs last so
       // this poll's detector emissions can corroborate.
+      // On a Sentinel the loop-stall detector OWNS the RTT signal (an RTT spike on a
+      // single-threaded Sentinel IS a loop stall, reported there), so withhold it
+      // here to avoid both detectors firing for the same event.
       await this.detectControlPlaneSaturation(
         info,
         ctx,
         timestamp,
         cpuUtilizationSample,
-        probeRttMs,
+        sentinelMode ? null : probeRttMs,
         cpuCounterReset,
       );
 
@@ -1559,6 +1641,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     try {
       const masters = await ctx.client.getSentinelMasters();
+      // Share this view with the loop-stall classifier: it reads the masters'
+      // `s_down`/`o_down` flags to tell a stall (loop starvation) apart from a
+      // master-down-with-healthy-loop (misdirected resolution), and this is the
+      // only place we fan out SENTINEL MASTERS. Refreshed on the 15s probe cadence;
+      // sdown is slow-moving, so a slightly stale snapshot is acceptable.
+      this.sentinelMastersSnapshot.set(ctx.connectionId, masters);
       const findings: SentinelDrift[] = [];
       const unreadMasters = new Set<string>();
       for (const master of masters) {
@@ -1659,6 +1747,249 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       zScore: 0,
       stdDev: 0,
       threshold: 0,
+      message,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
+  }
+
+  private static readonly SENTINEL_TILT_WRITEUP =
+    'https://github.com/BetterDB-inc/valkey-sentinel-tilt-repro';
+
+  /**
+   * The remediation for the blocking-DNS stall, shared by every loop-starvation
+   * message. Regular hyphens only.
+   */
+  private static readonly SENTINEL_LOOP_STALL_REMEDIATION =
+    'This is blocking hostname resolution on the Sentinel main loop; address ' +
+    'monitored/announced targets by IP or serve those names from a local cache; ' +
+    'peers resolving announced FQDNs are the ones that stall.';
+
+  /**
+   * Sentinel loop-stall / TILT detection (valkey-sentinel-tilt-repro). Valkey
+   * Sentinel is single-threaded, so a blocking `getaddrinfo` on the main loop (from
+   * `resolve-hostnames yes` against FQDN targets) stalls it past the 2000ms TILT
+   * trigger. Three signals feed one pure detector:
+   *
+   * - Direct TILT from `sentinel_tilt_since_seconds` (fallback `sentinel_tilt`) —
+   *   highest confidence, with the authoritative duration.
+   * - The INFO round-trip (`probeRttMs`) as a K-of-N leading indicator, and a
+   *   timeout-with-live-TCP as the total-wedge worst case.
+   * - Classification against the cached SENTINEL MASTERS view: a stall is loop
+   *   starvation (likely blocking DNS); a master down while the loop is healthy is
+   *   misdirected/unreachable resolution (split-horizon).
+   *
+   * Runs every poll (the tilt fields and RTT are already in hand), gated by
+   * `isSentinelMode`. On a Sentinel the loop-stall detector OWNS the RTT signal, so
+   * `pollConnection` withholds `probeRttMs` from control-plane saturation to avoid a
+   * double report.
+   */
+  private async detectSentinelLoopStall(
+    ctx: ConnectionContext,
+    timestamp: number,
+    info: Record<string, string>,
+    probeRttMs: number | null,
+    sentinelMode: boolean,
+  ): Promise<void> {
+    this.sentinelModeLast.set(ctx.connectionId, sentinelMode);
+    if (sentinelMode === false) {
+      return;
+    }
+
+    const tiltSinceSeconds = this.parseNumber(info.sentinel_tilt_since_seconds);
+    const tiltFlagNum = this.parseNumber(info.sentinel_tilt);
+    const tiltFlag = tiltFlagNum === null ? null : tiltFlagNum === 1;
+
+    const findings = this.evaluateLoopStall(ctx, timestamp, {
+      tiltSinceSeconds,
+      tiltFlag,
+      probeRttMs,
+      commandTimedOut: false,
+    });
+    await this.emitSentinelLoopStallFindings(ctx, timestamp, findings);
+  }
+
+  /**
+   * Total-wedge path: INFO stopped answering while the TCP socket stayed up. Only
+   * meaningful for a connection last seen as a Sentinel, and only for a timeout (a
+   * refused/reset socket is a genuinely down connection, not a stalled loop). Emits
+   * a wedge finding and lets `pollConnection` rethrow, so the poll still fails as it
+   * did before — we only add the interpretation, we do not swallow the error.
+   */
+  private async handleSentinelInfoTimeout(
+    ctx: ConnectionContext,
+    timestamp: number,
+    error: unknown,
+  ): Promise<void> {
+    if (this.sentinelModeLast.get(ctx.connectionId) !== true) {
+      return;
+    }
+    if (AnomalyService.isCommandTimeoutError(error) === false) {
+      return;
+    }
+    try {
+      const findings = this.evaluateLoopStall(ctx, timestamp, {
+        tiltSinceSeconds: null,
+        tiltFlag: null,
+        probeRttMs: null,
+        commandTimedOut: true,
+      });
+      await this.emitSentinelLoopStallFindings(ctx, timestamp, findings);
+    } catch (err) {
+      this.logger.debug(
+        `Sentinel wedge handling failed for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  /** Folds one observation into the per-connection loop-stall state. */
+  private evaluateLoopStall(
+    ctx: ConnectionContext,
+    timestamp: number,
+    obs: {
+      tiltSinceSeconds: number | null;
+      tiltFlag: boolean | null;
+      probeRttMs: number | null;
+      commandTimedOut: boolean;
+    },
+  ): SentinelLoopStallFinding[] {
+    const state =
+      this.sentinelLoopStallState.get(ctx.connectionId) ?? createSentinelLoopStallState();
+    this.sentinelLoopStallState.set(ctx.connectionId, state);
+
+    const masters = this.sentinelMastersSnapshot.get(ctx.connectionId) ?? [];
+    return evaluateSentinelLoopStall(state, {
+      timestamp,
+      tiltSinceSeconds: obs.tiltSinceSeconds,
+      tiltFlag: obs.tiltFlag,
+      probeRttMs: obs.probeRttMs,
+      commandTimedOut: obs.commandTimedOut,
+      masterDown: AnomalyService.sentinelMasterDown(masters),
+      thresholds: this.sentinelLoopStall,
+    });
+  }
+
+  private async emitSentinelLoopStallFindings(
+    ctx: ConnectionContext,
+    timestamp: number,
+    findings: SentinelLoopStallFinding[],
+  ): Promise<void> {
+    await this.applyTopologyPersistenceGate<SentinelLoopStallFinding>({
+      ctx,
+      timestamp,
+      findings,
+      signatureOf: sentinelLoopStallSignature,
+      firstSeenByConn: this.sentinelLoopStallFirstSeen,
+      activeByConn: this.activeSentinelLoopStalls,
+      // Debounce is inside the pure detector (TILT is authoritative, the RTT proxy
+      // is K-of-N, the misdirected signal is a streak), so the gate only dedupes an
+      // episode and re-arms once it clears.
+      minPersistMs: 0,
+      metricType: MetricType.SENTINEL_LOOP_STALL,
+      buildEvent: (finding) => {
+        return this.buildSentinelLoopStallEvent(ctx, timestamp, finding);
+      },
+    });
+  }
+
+  /** Whether any monitored master is flagged down (`s_down`/`o_down`) by Sentinel. */
+  private static sentinelMasterDown(masters: SentinelNodeInfo[]): boolean {
+    return masters.some((master) => {
+      return master.flags.includes('s_down') || master.flags.includes('o_down');
+    });
+  }
+
+  /**
+   * Whether an error is a command TIMEOUT rather than a connection failure. Only a
+   * timeout — socket open, no reply in time — is the wedged-loop signature; a
+   * refused/reset/closed socket is a genuinely down connection and must not read as
+   * a loop stall.
+   */
+  private static isCommandTimeoutError(error: unknown): boolean {
+    const message = (error instanceof Error ? error.message : String(error ?? '')).toLowerCase();
+    if (message === '') {
+      return false;
+    }
+    const looksDown =
+      message.includes('econnrefused') ||
+      message.includes('econnreset') ||
+      message.includes('enotfound') ||
+      message.includes('connection is closed') ||
+      message.includes('connection closed');
+    if (looksDown) {
+      return false;
+    }
+    return message.includes('timeout') || message.includes('timed out') || message.includes('etimedout');
+  }
+
+  private buildSentinelLoopStallEvent(
+    ctx: ConnectionContext,
+    timestamp: number,
+    finding: SentinelLoopStallFinding,
+  ): AnomalyEvent {
+    const node = `${ctx.connectionName} (${ctx.host}:${ctx.port})`;
+    const writeup = `Writeup and reproduction: ${AnomalyService.SENTINEL_TILT_WRITEUP}.`;
+    const remediation = AnomalyService.SENTINEL_LOOP_STALL_REMEDIATION;
+    const classification =
+      finding.classification === 'misdirected_resolution'
+        ? 'Classification: misdirected/unreachable resolution (split-horizon).'
+        : 'Classification: loop starvation (likely blocking DNS).';
+
+    let message: string;
+    switch (finding.kind) {
+      case 'tilt': {
+        const duration =
+          finding.tiltDurationSeconds !== null
+            ? `${finding.tiltDurationSeconds}s`
+            : 'an unknown duration';
+        message =
+          `CRITICAL: Sentinel ${node} is in TILT for ${duration} (past the ` +
+          `${SENTINEL_TILT_TRIGGER_MS}ms trigger). TILT suppresses +sdown, so real failures go ` +
+          `unactioned while it lasts. ${remediation} ${classification} ${writeup}`;
+        break;
+      }
+      case 'timeout_wedge': {
+        message =
+          `CRITICAL: Sentinel ${node} stopped answering INFO while its TCP connection stayed up ` +
+          `- the single-threaded event loop is fully wedged (worst-case blocking resolution). ` +
+          `This is not a dead connection. ${remediation} ${classification} ${writeup}`;
+        break;
+      }
+      case 'rtt_stall': {
+        const observed =
+          finding.observedRttMs !== null ? `${Math.round(finding.observedRttMs)}ms` : 'elevated';
+        const sev = finding.severity === 'critical' ? 'CRITICAL' : 'WARNING';
+        message =
+          `${sev}: Sentinel ${node} INFO round-trip is stalling (${finding.breachCount} of the ` +
+          `last ${this.sentinelLoopStall.rttWindow} polls over ${this.sentinelLoopStall.warnRttMs}ms, ` +
+          `worst ${observed}), approaching the ${SENTINEL_TILT_TRIGGER_MS}ms TILT trigger. The ` +
+          `single-threaded loop is being starved. ${remediation} ${classification} ${writeup}`;
+        break;
+      }
+      case 'misdirected_resolution':
+      default: {
+        message =
+          `WARNING: Sentinel ${node} reports a monitored master down (+sdown) while its event ` +
+          `loop is healthy (no TILT, INFO latency flat). This is misdirected or unreachable ` +
+          `resolution (split-horizon), NOT a loop stall - Sentinel is resolving the target to an ` +
+          `address it cannot reach. Reconcile the announced/monitored addresses so they resolve ` +
+          `to a reachable endpoint from Sentinel's network view. ${writeup}`;
+        break;
+      }
+    }
+
+    return {
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.SENTINEL_LOOP_STALL,
+      anomalyType: AnomalyType.SPIKE,
+      severity:
+        finding.severity === 'critical' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING,
+      value: finding.tiltDurationSeconds ?? finding.observedRttMs ?? 1,
+      baseline: 0,
+      zScore: 0,
+      stdDev: 0,
+      threshold: finding.kind === 'rtt_stall' ? this.sentinelLoopStall.warnRttMs : 0,
       message,
       resolved: false,
       connectionId: ctx.connectionId,
@@ -2977,7 +3308,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     ctx: ConnectionContext,
     timestamp: number,
     cpuUtilization: number | null,
-    probeRttMs: number,
+    probeRttMs: number | null,
     cpuCounterReset: boolean,
   ): Promise<void> {
     const state = this.controlPlaneState.get(ctx.connectionId) ?? createControlPlaneState();

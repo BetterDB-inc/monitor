@@ -62,6 +62,8 @@ export enum MetricType {
   ACL_DRIFT = 'acl_drift',
   /** Sentinel carries a replica/master under a raw IP where the group announces hostnames, or a node replicating from itself (valkey#2158) — state-based. */
   SENTINEL_ENDPOINT_DRIFT = 'sentinel_endpoint_drift',
+  /** Sentinel event-loop stall / TILT from blocking hostname resolution on the main loop (valkey-sentinel-tilt-repro) — state-based. */
+  SENTINEL_LOOP_STALL = 'sentinel_loop_stall',
 }
 
 /**
@@ -91,6 +93,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.AUTH_FAILURE_BURST,
   MetricType.ACL_DRIFT,
   MetricType.SENTINEL_ENDPOINT_DRIFT,
+  MetricType.SENTINEL_LOOP_STALL,
   MetricType.EVICTED_CLIENTS,
   MetricType.RAFT_HEALTH,
   MetricType.FAILOVER_CHURN,

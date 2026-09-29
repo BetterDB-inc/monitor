@@ -1,10 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { MetricsParser } from '../database/parsers/metrics.parser';
 import {
   ConfigHazardFinding,
   evaluateAclAofHazard,
   evaluateAppendfsyncHazard,
   evaluateClusterCrcHazard,
+  evaluateSentinelDnsResolutionHazard,
 } from './config-hazard';
 
 interface CachedFindings {
@@ -72,6 +74,15 @@ export class ConfigHazardService {
         `Config-hazard probe skipped for ${connectionId}: ${(err as Error).message}`,
       );
       return { findings: [], cacheable: false };
+    }
+
+    // Sentinel is a different animal: the AOF/cluster hazards below do not apply to
+    // it, but a distinct one does (blocking hostname resolution on its single loop).
+    // Branch on the server mode first so a Sentinel is not probed for AOF/cluster
+    // (which would only ever return spurious unverified findings there).
+    if (await this.isSentinelMode(client)) {
+      const finding = await this.probeSentinelDns(connectionId, client);
+      return { findings: finding !== null ? [finding] : [], cacheable: true };
     }
 
     let appendonly: string | null;
@@ -264,6 +275,86 @@ export class ConfigHazardService {
       delayedFsyncRisingStreak,
       aofLastWriteStatus,
       latencyEvents,
+    });
+  }
+
+  /**
+   * Whether the probed server reports itself as a Sentinel. The mode field is
+   * engine/config dependent (Valkey `server_mode`, Redis / extended-compat
+   * `redis_mode`, legacy `valkey_mode`), so all three are checked. INFO failures
+   * degrade to "not a Sentinel" rather than throwing — the normal AOF/cluster path
+   * then runs, which is the correct default for any non-Sentinel server.
+   */
+  private async isSentinelMode(client: ProbeClientLike): Promise<boolean> {
+    try {
+      const raw = await client.call('INFO', ['server']);
+      if (typeof raw !== 'string') {
+        return false;
+      }
+      const fields = this.parseInfoFields(raw);
+      return [fields['server_mode'], fields['redis_mode'], fields['valkey_mode']].some((mode) => {
+        return mode === 'sentinel';
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Predictive Sentinel DNS-resolution hazard (valkey-sentinel-tilt-repro). Gathers
+   * `resolve-hostnames`, the announce settings, and the monitored/replica addresses
+   * from SENTINEL MASTERS / REPLICAS, best-effort, and hands them to the pure
+   * evaluator. Any single read failing degrades that input rather than the probe.
+   */
+  private async probeSentinelDns(
+    connectionId: string,
+    client: ProbeClientLike,
+  ): Promise<ConfigHazardFinding | null> {
+    const readConfig = async (parameter: string): Promise<string | null> => {
+      try {
+        return await client.getConfigValue(parameter);
+      } catch (err) {
+        this.logger.debug(
+          `CONFIG GET ${parameter} failed for ${connectionId}: ${(err as Error).message}`,
+        );
+        return null;
+      }
+    };
+
+    const resolveHostnames = await readConfig('resolve-hostnames');
+    const announceIp = await readConfig('announce-ip');
+    const announceHostnames = await readConfig('announce-hostnames');
+
+    const monitoredAddresses: string[] = [];
+    try {
+      const rawMasters = await client.call('SENTINEL', ['MASTERS']);
+      const masters = MetricsParser.parseSentinelNodes(Array.isArray(rawMasters) ? rawMasters : []);
+      for (const master of masters) {
+        monitoredAddresses.push(master.ip);
+        try {
+          const rawReplicas = await client.call('SENTINEL', ['REPLICAS', master.name]);
+          const replicas = MetricsParser.parseSentinelNodes(
+            Array.isArray(rawReplicas) ? rawReplicas : [],
+          );
+          for (const replica of replicas) {
+            monitoredAddresses.push(replica.ip);
+          }
+        } catch (replicaErr) {
+          this.logger.debug(
+            `SENTINEL REPLICAS ${master.name} failed for ${connectionId}: ${(replicaErr as Error).message}`,
+          );
+        }
+      }
+    } catch (err) {
+      this.logger.debug(`SENTINEL MASTERS failed for ${connectionId}: ${(err as Error).message}`);
+    }
+
+    return evaluateSentinelDnsResolutionHazard({
+      isSentinel: true,
+      resolveHostnames,
+      monitoredAddresses,
+      announceIp,
+      announceHostnames,
     });
   }
 
