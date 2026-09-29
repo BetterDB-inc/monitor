@@ -418,6 +418,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
             discovered={discovered.instances}
             onRegister={registerDiscovered}
             onDismiss={dismissDiscovered}
+            discoveredError={discovered.dismissError}
           />
         )}
         {connections.length <= 1 ? (
@@ -425,6 +426,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
             instances={discovered.instances}
             onRegister={registerDiscovered}
             onDismiss={dismissDiscovered}
+            error={discovered.dismissError}
           />
         ) : null}
       </div>

@@ -68,4 +68,22 @@ describe('useDiscoveredInstances', () => {
     });
     await waitFor(() => expect(result.current.instances).toEqual([]));
   });
+
+  it('exposes a dismiss failure and clears it on the next success', async () => {
+    vi.mocked(fetchApi).mockImplementation(async (url: string) => {
+      if (url === '/connections/discovered') return { enabled: true, instances: [instance] };
+      throw new Error('Too many dismissed instances');
+    });
+    const { result } = renderHook(() => useDiscoveredInstances(true), { wrapper });
+    await waitFor(() => expect(result.current.instances).toHaveLength(1));
+    await act(() => result.current.dismiss(instance).catch(() => undefined));
+    expect(result.current.dismissError).toBe('Too many dismissed instances');
+    await waitFor(() => expect(result.current.instances).toHaveLength(1));
+
+    vi.mocked(fetchApi).mockImplementation(async (url: string) =>
+      url === '/connections/discovered' ? { enabled: true, instances: [] } : undefined,
+    );
+    await act(() => result.current.dismiss(instance));
+    expect(result.current.dismissError).toBeNull();
+  });
 });

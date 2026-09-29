@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { DiscoveredInstance, DiscoveredInstancesResponse } from '@betterdb/shared';
 import { fetchApi } from '../api/client';
@@ -8,6 +8,7 @@ const REFETCH_INTERVAL_MS = 30_000;
 
 export function useDiscoveredInstances(enabled: boolean) {
   const queryClient = useQueryClient();
+  const [dismissError, setDismissError] = useState<string | null>(null);
 
   const { data } = useQuery<DiscoveredInstancesResponse, Error>({
     queryKey: QUERY_KEY,
@@ -37,6 +38,10 @@ export function useDiscoveredInstances(enabled: boolean) {
           method: 'POST',
           body: JSON.stringify({ host: instance.host, port: instance.port }),
         });
+        setDismissError(null);
+      } catch (error) {
+        setDismissError(error instanceof Error ? error.message : 'Failed to dismiss instance');
+        throw error;
       } finally {
         await invalidate();
       }
@@ -47,6 +52,7 @@ export function useDiscoveredInstances(enabled: boolean) {
   return {
     instances: enabled && data?.enabled ? data.instances : [],
     dismiss,
+    dismissError,
     invalidate,
   };
 }

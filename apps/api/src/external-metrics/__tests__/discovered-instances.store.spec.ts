@@ -87,6 +87,15 @@ describe('DiscoveredInstancesStore', () => {
     expect(store.record(key('cache'), {}, 1, T0 + 1)).toBe(true);
   });
 
+  it('forget clears a lingering dismissal', () => {
+    const store = new DiscoveredInstancesStore(true);
+    store.record(key('cache'), {}, 1, T0);
+    store.dismiss('cache', 6379, T0);
+    store.forget('cache', 6379);
+    expect(store.record(key('cache'), {}, 1, T0 + 1)).toBe(true);
+    expect(store.list(T0 + 1)).toHaveLength(1);
+  });
+
   it('sorts by lastSeenAt descending', () => {
     const store = new DiscoveredInstancesStore(true);
     store.record(key('a'), {}, 1, T0);

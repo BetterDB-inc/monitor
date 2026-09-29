@@ -15,6 +15,7 @@ interface ConnectionSwitcherProps {
   discovered?: DiscoveredInstance[];
   onRegister?: (instance: DiscoveredInstance) => void;
   onDismiss?: (instance: DiscoveredInstance) => void;
+  discoveredError?: string | null;
 }
 
 /**
@@ -38,6 +39,7 @@ export function ConnectionSwitcher({
   discovered,
   onRegister,
   onDismiss,
+  discoveredError,
 }: ConnectionSwitcherProps) {
   const shared = useContext(ConnectionSwitcherOpenContext);
   const [localOpen, setLocalOpen] = useState(false);
@@ -265,6 +267,7 @@ export function ConnectionSwitcher({
                 onRegister(instance);
               }}
               onDismiss={onDismiss}
+              error={discoveredError}
             />
           ) : null}
         </Popover.Content>

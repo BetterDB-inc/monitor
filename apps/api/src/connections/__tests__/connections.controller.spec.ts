@@ -1,5 +1,6 @@
 import { HttpException, HttpStatus } from '@nestjs/common';
 import { ConnectionsController } from '../connections.controller';
+import { ROLES_KEY } from '../../auth/guards/roles.decorator';
 import { ConnectionRegistry } from '../connection-registry.service';
 import {
   CAPABILITY_TEST_COMMAND,
@@ -211,6 +212,10 @@ describe('ConnectionsController discovered instances', () => {
     const config: DatabaseConnectionConfig = { id: 'seeded-1', name: 'Seeded', host, port, isDefault: false, createdAt: 1 };
     (registry as unknown as { configs: Map<string, DatabaseConnectionConfig> }).configs.set(config.id, config);
   };
+
+  it('restricts the discovered list to admins', () => {
+    expect(Reflect.getMetadata(ROLES_KEY, ConnectionsController.prototype.listDiscovered)).toEqual(['admin']);
+  });
 
   it('lists discovered instances when enabled', () => {
     const discovered = new DiscoveredInstancesStore(true);

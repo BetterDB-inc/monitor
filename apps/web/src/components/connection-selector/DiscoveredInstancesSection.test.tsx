@@ -56,4 +56,16 @@ describe('DiscoveredInstancesSection', () => {
     expect(screen.getByText('<img src=x onerror=alert(1)>')).toBeInTheDocument();
     expect(document.querySelector('img')).toBeNull();
   });
+
+  it('shows a dismiss error', () => {
+    render(
+      <DiscoveredInstancesSection
+        instances={[instance]}
+        onRegister={vi.fn()}
+        onDismiss={vi.fn()}
+        error="Too many dismissed instances"
+      />,
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent('Too many dismissed instances');
+  });
 });

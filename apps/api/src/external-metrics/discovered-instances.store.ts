@@ -81,7 +81,9 @@ export class DiscoveredInstancesStore {
   }
 
   forget(host: string, port: number): void {
-    this.entries.delete(addressKey(host, port));
+    const id = addressKey(host, port);
+    this.entries.delete(id);
+    this.dismissed.delete(id);
   }
 
   private purgeExpiredDismissals(nowMs: number): void {

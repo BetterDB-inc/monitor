@@ -8,6 +8,7 @@ interface DiscoveredInstancesSectionProps {
   instances: DiscoveredInstance[];
   onRegister: (instance: DiscoveredInstance) => void;
   onDismiss: (instance: DiscoveredInstance) => void;
+  error?: string | null;
 }
 
 function systemLabel(instance: DiscoveredInstance): string | null {
@@ -16,7 +17,7 @@ function systemLabel(instance: DiscoveredInstance): string | null {
   return instance.version ? `${name} ${instance.version}` : name;
 }
 
-export function DiscoveredInstancesSection({ instances, onRegister, onDismiss }: DiscoveredInstancesSectionProps) {
+export function DiscoveredInstancesSection({ instances, onRegister, onDismiss, error }: DiscoveredInstancesSectionProps) {
   const [expanded, setExpanded] = useState(false);
   if (instances.length === 0) return null;
 
@@ -31,6 +32,11 @@ export function DiscoveredInstancesSection({ instances, onRegister, onDismiss }:
         <span>{instances.length} discovered via OTLP</span>
         <ChevronDownIcon className={cn('w-3 h-3 transition-transform', expanded && 'rotate-180')} />
       </button>
+      {error ? (
+        <p role="alert" className="px-2 py-1 text-xs text-destructive">
+          {error}
+        </p>
+      ) : null}
       {expanded ? (
         <ul className="max-h-48 overflow-y-auto">
           {instances.map((instance) => {

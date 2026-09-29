@@ -1,6 +1,7 @@
 import { Controller, Get, Post, Delete, Param, Body, HttpException, HttpStatus, HttpCode, Optional } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
 import { CapabilityRetryVerdict, DiscoveredInstancesResponse, RuntimeCapabilities } from '@betterdb/shared';
+import { Roles } from '../auth/guards/roles.decorator';
 import { DiscoveredInstancesStore } from '../external-metrics/discovered-instances.store';
 import { ConnectionRegistry } from './connection-registry.service';
 import {
@@ -93,6 +94,7 @@ export class ConnectionsController {
   }
 
   @Get('discovered')
+  @Roles('admin')
   @ApiOperation({
     summary: 'List unregistered instances seen pushing OTLP metrics',
     description: 'In-memory list, reset on restart. Empty with enabled=false when OTLP_DISCOVER_INSTANCES is off.',
