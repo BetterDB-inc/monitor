@@ -1,4 +1,5 @@
 import { SentinelNodeInfo } from '@app/common/types/metrics.types';
+import { InfoParser } from '@app/database/parsers/info.parser';
 
 /**
  * Sentinel endpoint drift (valkey-io/valkey#2158).
@@ -35,10 +36,7 @@ import { SentinelNodeInfo } from '@app/common/types/metrics.types';
  * long modelled it. Any of them reading 'sentinel' means Sentinel.
  */
 export function isSentinelMode(info: Record<string, string>): boolean {
-  const candidates = [info['server_mode'], info['redis_mode'], info['valkey_mode']];
-  return candidates.some((mode) => {
-    return mode === 'sentinel';
-  });
+  return InfoParser.isSentinelMode(info);
 }
 
 export type SentinelDriftReason = 'ip_for_hostname' | 'stale_master_pointer' | 'self_replication';

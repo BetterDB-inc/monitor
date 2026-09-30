@@ -11,6 +11,7 @@ class TestPoller extends MultiConnectionPoller {
   external = false;
   skipUnchanged = true;
   failNext = false;
+  sentinels = false;
 
   protected getIntervalMs(): number {
     return 1000;
@@ -34,6 +35,10 @@ class TestPoller extends MultiConnectionPoller {
 
   protected skipUnchangedSamples(): boolean {
     return this.skipUnchanged;
+  }
+
+  protected pollsSentinels(): boolean {
+    return this.sentinels;
   }
 
   tickNow(): Promise<void> {
@@ -124,5 +129,41 @@ describe('MultiConnectionPoller external handling', () => {
     setStatuses([status('d', 'direct'), status('e', 'external')]);
     await poller.tickNow();
     expect(polledIds().filter((id) => id === 'e')).toHaveLength(2);
+  });
+});
+
+describe('MultiConnectionPoller sentinel handling', () => {
+  function sentinelSetup(throwing = false) {
+    const statuses = [status('d', 'direct'), status('s', 'direct')];
+    const clients: Record<string, Partial<DatabasePort>> = {
+      d: { getCapabilities: () => ({ isSentinel: false }) as never },
+      s: {
+        getCapabilities: () => {
+          if (throwing) throw new Error('not yet');
+          return { isSentinel: true } as never;
+        },
+      },
+    };
+    const registry = { list: () => statuses, get: (id: string) => clients[id] } as unknown as ConnectionRegistry;
+    return new TestPoller(registry);
+  }
+
+  it('skips sentinel connections by default', async () => {
+    const poller = sentinelSetup();
+    await poller.tickNow();
+    expect(poller.polled.map((c) => c.connectionId)).toEqual(['d']);
+  });
+
+  it('polls sentinel connections when the subclass opts in', async () => {
+    const poller = sentinelSetup();
+    poller.sentinels = true;
+    await poller.tickNow();
+    expect(poller.polled.map((c) => c.connectionId)).toEqual(['d', 's']);
+  });
+
+  it('polls a connection whose capabilities are unavailable', async () => {
+    const poller = sentinelSetup(true);
+    await poller.tickNow();
+    expect(poller.polled.map((c) => c.connectionId)).toEqual(['d', 's']);
   });
 });

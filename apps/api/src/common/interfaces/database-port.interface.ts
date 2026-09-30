@@ -38,6 +38,8 @@ export interface DatabaseCapabilities {
   hasMemoryDoctor: boolean;
   hasConfig: boolean;
   hasVectorSearch: boolean;
+  clusterEnabled?: boolean;
+  isSentinel?: boolean;
 }
 
 export interface DatabasePort {

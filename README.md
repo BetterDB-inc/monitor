@@ -97,6 +97,7 @@ Requires Node.js >= 20.0.0 and a Valkey or Redis instance to monitor. For SQLite
 - **MONITOR capture sessions** - record real traffic on demand: live tail, filter, replay, export to JSON/CSV, and cross-reference against connection history.
 - **Hot key tracking** - top keys by access frequency with rank movement over time. Key Analytics (Pro, free in early access) adds type, TTL, and size distributions from live sampling.
 - **Cluster visibility** - topology graphs, SLOT-STATS heatmaps, per-slot CPU and key distribution.
+- **Cluster auto-registration** - a cluster connection can auto-register every node as its own monitored connection, kept in sync as the cluster scales. See [docs/cluster-auto-registration.md](docs/cluster-auto-registration.md).
 - **CPU & I/O thread metrics** - per-thread visibility that no Redis tool can provide.
 - **Client analytics** - see exactly which service is responsible for what, attributed by client name and pattern.
 - **ACL audit trail** - track who accessed what, persisted for compliance and post-incident debugging.

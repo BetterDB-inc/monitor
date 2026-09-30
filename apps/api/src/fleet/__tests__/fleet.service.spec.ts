@@ -15,13 +15,13 @@ function infoFixture(overrides: Record<string, unknown> = {}) {
 }
 
 describe('FleetService', () => {
-  let registry: { list: jest.Mock };
+  let registry: { list: jest.Mock; getConfig: jest.Mock };
   let health: { getHealth: jest.Mock };
   let metrics: { getInfoParsed: jest.Mock };
   let service: FleetService;
 
   beforeEach(() => {
-    registry = { list: jest.fn() };
+    registry = { list: jest.fn(), getConfig: jest.fn() };
     health = { getHealth: jest.fn() };
     metrics = { getInfoParsed: jest.fn() };
     service = new FleetService(
@@ -218,5 +218,19 @@ describe('FleetService', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it('attaches the seed name for an auto-registered cluster child', async () => {
+    registry.list.mockReturnValue([
+      { id: 'child-1', name: 'Child', host: 'h1', port: 6379, membership: { seedId: 'seed', nodeId: 'n1', origin: 'auto', source: 'cluster' } },
+    ]);
+    registry.getConfig.mockReturnValue({ name: 'prod' });
+    health.getHealth.mockResolvedValue({ status: 'connected', database: { type: 'valkey', version: '8.0', host: 'h1', port: 6379 } });
+    metrics.getInfoParsed.mockResolvedValue(infoFixture());
+
+    const summary = await service.collectUncached();
+
+    expect(registry.getConfig).toHaveBeenCalledWith('seed');
+    expect(summary.instances[0].clusterSeedName).toBe('prod');
   });
 });

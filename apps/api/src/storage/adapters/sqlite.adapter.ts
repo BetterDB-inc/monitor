@@ -3,7 +3,7 @@ import { chunkedSqliteDelete } from './sqlite-chunked-delete';
 import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
-import { parseSshTunnel } from '@betterdb/shared';
+import { parseSshTunnel, parseMembership } from '@betterdb/shared';
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
   StoragePort,
@@ -4100,7 +4100,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   // Connection Management Methods
-  async saveConnection(config: DatabaseConnectionConfig): Promise<void> {
+  private ensureConnectionsSchema(): void {
     if (!this.db) throw new Error('Database not initialized');
 
     // Ensure connections table exists
@@ -4117,6 +4117,11 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         tls INTEGER DEFAULT 0,
         ssh_tunnel TEXT,
         connection_type TEXT,
+        auto_register_nodes INTEGER,
+        membership TEXT,
+        node_username TEXT,
+        node_password TEXT,
+        node_password_encrypted INTEGER,
         is_default INTEGER DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER
@@ -4135,10 +4140,31 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!columns.some((c) => c.name === 'connection_type')) {
       this.db.exec('ALTER TABLE connections ADD COLUMN connection_type TEXT');
     }
+    if (!columns.some((c) => c.name === 'auto_register_nodes')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN auto_register_nodes INTEGER');
+    }
+    if (!columns.some((c) => c.name === 'membership')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN membership TEXT');
+    }
+    if (!columns.some((c) => c.name === 'node_username')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN node_username TEXT');
+    }
+    if (!columns.some((c) => c.name === 'node_password')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN node_password TEXT');
+    }
+    if (!columns.some((c) => c.name === 'node_password_encrypted')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN node_password_encrypted INTEGER');
+    }
+  }
+
+  async saveConnection(config: DatabaseConnectionConfig): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    this.ensureConnectionsSchema();
 
     const stmt = this.db.prepare(`
-      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, ssh_tunnel, connection_type, is_default, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, node_username, node_password, node_password_encrypted, db_index, tls, ssh_tunnel, connection_type, auto_register_nodes, membership, is_default, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         host = excluded.host,
@@ -4146,10 +4172,15 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         username = excluded.username,
         password = excluded.password,
         password_encrypted = excluded.password_encrypted,
+        node_username = excluded.node_username,
+        node_password = excluded.node_password,
+        node_password_encrypted = excluded.node_password_encrypted,
         db_index = excluded.db_index,
         tls = excluded.tls,
         ssh_tunnel = excluded.ssh_tunnel,
         connection_type = excluded.connection_type,
+        auto_register_nodes = excluded.auto_register_nodes,
+        membership = excluded.membership,
         is_default = excluded.is_default,
         updated_at = excluded.updated_at
     `);
@@ -4162,10 +4193,15 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       config.username || null,
       config.password || null,
       config.passwordEncrypted ? 1 : 0,
+      config.nodeUsername || null,
+      config.nodePassword || null,
+      config.nodePassword ? (config.nodePasswordEncrypted ? 1 : 0) : null,
       config.dbIndex || 0,
       config.tls ? 1 : 0,
       config.sshTunnel ? JSON.stringify(config.sshTunnel) : null,
       config.connectionType ?? null,
+      config.autoRegisterNodes === undefined ? null : config.autoRegisterNodes ? 1 : 0,
+      config.membership ? JSON.stringify(config.membership) : null,
       config.isDefault ? 1 : 0,
       config.createdAt,
       config.updatedAt || null,
@@ -4193,10 +4229,18 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       username: row.username || undefined,
       password: row.password || undefined,
       passwordEncrypted: row.password_encrypted === 1,
+      nodeUsername: row.node_username || undefined,
+      nodePassword: row.node_password || undefined,
+      nodePasswordEncrypted: row.node_password_encrypted === 1 ? true : undefined,
       dbIndex: row.db_index,
       tls: row.tls === 1,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
       connectionType: row.connection_type === 'external' ? 'external' : 'direct',
+      autoRegisterNodes:
+        row.auto_register_nodes === null || row.auto_register_nodes === undefined
+          ? undefined
+          : row.auto_register_nodes === 1,
+      membership: parseMembership(row.membership),
       isDefault: row.is_default === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at || undefined,
@@ -4222,10 +4266,18 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       username: row.username || undefined,
       password: row.password || undefined,
       passwordEncrypted: row.password_encrypted === 1,
+      nodeUsername: row.node_username || undefined,
+      nodePassword: row.node_password || undefined,
+      nodePasswordEncrypted: row.node_password_encrypted === 1 ? true : undefined,
       dbIndex: row.db_index,
       tls: row.tls === 1,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
       connectionType: row.connection_type === 'external' ? 'external' : 'direct',
+      autoRegisterNodes:
+        row.auto_register_nodes === null || row.auto_register_nodes === undefined
+          ? undefined
+          : row.auto_register_nodes === 1,
+      membership: parseMembership(row.membership),
       isDefault: row.is_default === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at || undefined,
@@ -4240,6 +4292,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async updateConnection(id: string, updates: Partial<DatabaseConnectionConfig>): Promise<void> {
     if (!this.db) throw new Error('Database not initialized');
+
+    this.ensureConnectionsSchema();
 
     const setClauses: string[] = [];
     const params: any[] = [];
@@ -4275,6 +4329,14 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (updates.isDefault !== undefined) {
       setClauses.push('is_default = ?');
       params.push(updates.isDefault ? 1 : 0);
+    }
+    if ('autoRegisterNodes' in updates) {
+      setClauses.push('auto_register_nodes = ?');
+      params.push(updates.autoRegisterNodes === undefined ? null : updates.autoRegisterNodes ? 1 : 0);
+    }
+    if ('membership' in updates) {
+      setClauses.push('membership = ?');
+      params.push(updates.membership ? JSON.stringify(updates.membership) : null);
     }
 
     if (setClauses.length === 0) return;

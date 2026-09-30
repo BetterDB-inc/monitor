@@ -7,6 +7,13 @@ import { SettingsService } from '@app/settings/settings.service';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { ConnectionContext } from '@app/common/services/multi-connection-poller';
 
+describe('ConfigMonitorService Sentinel polling', () => {
+  it('keeps Sentinel connections in the scheduled ACL and CONFIG checks', () => {
+    const monitor = Object.create(ConfigMonitorService.prototype) as unknown as { pollsSentinels(): boolean };
+    expect(monitor.pollsSentinels()).toBe(true);
+  });
+});
+
 describe('ConfigMonitorService', () => {
   let service: ConfigMonitorService;
   let webhookEventsEnterpriseService: jest.Mocked<WebhookEventsEnterpriseService>;

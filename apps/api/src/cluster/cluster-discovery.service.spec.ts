@@ -1,6 +1,18 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import Valkey from 'iovalkey';
 import { ClusterDiscoveryService, DiscoveredNode } from './cluster-discovery.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+
+jest.mock('iovalkey', () => {
+  return jest.fn().mockImplementation(() => ({
+    status: 'ready',
+    connect: jest.fn().mockResolvedValue(undefined),
+    quit: jest.fn().mockResolvedValue(undefined),
+    disconnect: jest.fn(),
+    ping: jest.fn().mockResolvedValue('PONG'),
+    on: jest.fn(),
+  }));
+});
 
 describe('ClusterDiscoveryService', () => {
   let service: ClusterDiscoveryService;
@@ -171,6 +183,12 @@ describe('ClusterDiscoveryService', () => {
 
       await expect(service.discoverNodes()).rejects.toThrow('Connection failed');
     });
+
+    it('exposes the raw node flags', async () => {
+      const nodes = await service.discoverNodes();
+      expect(nodes[0].flags).toEqual(['master', 'myself']);
+      expect(nodes[1].flags).toEqual(['slave']);
+    });
   });
 
   describe('getNodeConnection', () => {
@@ -235,6 +253,78 @@ describe('ClusterDiscoveryService', () => {
       await expect(service.getNodeConnection(nodes[0].id)).rejects.toThrow(
         'Invalid node address'
       );
+    });
+  });
+
+  describe('getNodeConnection TLS', () => {
+    it('passes the seed client TLS options to node clients without the seed servername', async () => {
+      mockDbClient.getClient.mockReturnValue({
+        options: { username: 'u', password: 'p', tls: { servername: 'seed.example', ca: 'seed-ca', rejectUnauthorized: true } },
+      });
+      await service.getNodeConnection('node2-id-def456', 'test-connection').catch(() => undefined);
+      expect(jest.mocked(Valkey)).toHaveBeenCalledWith(
+        expect.objectContaining({ tls: { ca: 'seed-ca', rejectUnauthorized: true } }),
+      );
+    });
+
+    it('leaves TLS off for node clients when the seed has none', async () => {
+      mockDbClient.getClient.mockReturnValue({ options: { username: 'u', password: 'p' } });
+      await service.getNodeConnection('node2-id-def456', 'test-connection').catch(() => undefined);
+      expect(jest.mocked(Valkey)).toHaveBeenCalledWith(expect.objectContaining({ tls: undefined }));
+    });
+  });
+
+  describe('discoverNodesIsolated', () => {
+    const seedOptions = { host: 'seed.example', port: 7001, username: 'u', password: 'p', tls: { servername: 'seed.example' } };
+
+    function dedicatedClient(call: jest.Mock) {
+      let rejectPending: (error: Error) => void = () => undefined;
+      const client = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        call: jest.fn((...args: unknown[]) => {
+          const result = call(...args);
+          return new Promise((resolve, reject) => {
+            rejectPending = reject;
+            Promise.resolve(result).then(resolve, reject);
+          });
+        }),
+        disconnect: jest.fn(() => rejectPending(new Error('Connection is closed.'))),
+        on: jest.fn(),
+      };
+      jest.mocked(Valkey).mockImplementationOnce(() => client as never);
+      return client;
+    }
+
+    beforeEach(() => {
+      mockDbClient.getClient.mockReturnValue({ options: seedOptions });
+    });
+
+    it('runs CLUSTER NODES on a dedicated client with the seed options and closes it', async () => {
+      const client = dedicatedClient(
+        jest.fn().mockResolvedValue('abc 10.0.0.2:7002@17002 master - 0 0 1 connected 0-16383\n'),
+      );
+      const nodes = await service.discoverNodesIsolated('test-connection', 10_000);
+      expect(nodes).toEqual([expect.objectContaining({ id: 'abc', address: '10.0.0.2:7002@17002', role: 'master' })]);
+      expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
+        expect.objectContaining({ host: 'seed.example', port: 7001, username: 'u', password: 'p', tls: { servername: 'seed.example' } }),
+      );
+      expect(client.call).toHaveBeenCalledWith('CLUSTER', 'NODES');
+      expect(client.disconnect).toHaveBeenCalled();
+      expect(mockDbClient.getClusterNodes).not.toHaveBeenCalled();
+    });
+
+    it('bounds the dial and the command with timers that do not depend on the peer', async () => {
+      dedicatedClient(jest.fn().mockResolvedValue(''));
+      await service.discoverNodesIsolated('test-connection', 10_000);
+      expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
+        expect.objectContaining({ connectTimeout: 10_000, commandTimeout: 10_000, enableReadyCheck: false, retryStrategy: expect.any(Function) }),
+      );
+    });
+
+    it('closes the dedicated client when CLUSTER NODES times out', async () => {
+      const client = dedicatedClient(jest.fn().mockRejectedValue(new Error('Command timed out')));
+      await expect(service.discoverNodesIsolated('test-connection', 10_000)).rejects.toThrow('Command timed out');
+      expect(client.disconnect).toHaveBeenCalled();
     });
   });
 

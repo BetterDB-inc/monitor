@@ -424,3 +424,171 @@ describe('ConnectionSwitcher', () => {
     expect(onRegister).toHaveBeenCalledWith(discovered[0]);
   });
 });
+
+describe('ConnectionSwitcher cluster grouping', () => {
+  const seed = connection({ id: 's', name: 'prod', host: '10.0.0.1', port: 7001 });
+  const kids = [
+    connection({
+      id: 'k2',
+      name: 'prod · 10.0.0.2:7002',
+      host: '10.0.0.2',
+      port: 7002,
+      membership: { seedId: 's', nodeId: 'n2', origin: 'auto', source: 'cluster' },
+    }),
+    connection({
+      id: 'k3',
+      name: 'prod · 10.0.0.3:7003',
+      host: '10.0.0.3',
+      port: 7003,
+      isConnected: false,
+      membership: { seedId: 's', nodeId: 'n3', origin: 'auto', source: 'cluster', retiredAt: Date.now() - 3_600_000 },
+    }),
+  ];
+
+  it('collapses children under their seed with a count', () => {
+    open([seed, ...kids], seed);
+    expect(screen.getAllByRole('option')).toHaveLength(1);
+    expect(screen.getByRole('button', { name: /2 nodes/i })).toBeInTheDocument();
+  });
+
+  it('expands to show children, retired last and labelled', () => {
+    open([seed, ...kids], seed);
+    fireEvent.click(screen.getByRole('button', { name: /2 nodes/i }));
+    const names = optionNames();
+    expect(names).toHaveLength(3);
+    expect(names[1]).toContain('Auto');
+    expect(names[2]).toContain('left cluster');
+  });
+
+  it('shows matching children when searching without expanding', () => {
+    open([seed, ...kids], seed);
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: '7002' } });
+    expect(optionNames()).toEqual([expect.stringContaining('10.0.0.2:7002')]);
+  });
+
+  it('does not select a retired child by click or Enter', () => {
+    onSelect.mockClear();
+    open([seed, ...kids], seed);
+    fireEvent.click(screen.getByRole('button', { name: /2 nodes/i }));
+    const retired = screen.getAllByRole('option')[2];
+    expect(retired).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.click(retired);
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: '7003' } });
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Enter' });
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('still selects an adopted child that left the cluster', () => {
+    onSelect.mockClear();
+    const adopted = connection({
+      id: 'k4',
+      name: 'manual-7004',
+      host: '10.0.0.4',
+      port: 7004,
+      membership: { seedId: 's', nodeId: 'n4', origin: 'adopted', source: 'cluster', retiredAt: Date.now() - 3_600_000 },
+    });
+    open([seed, adopted], seed);
+    fireEvent.click(screen.getByRole('button', { name: /1 node/i }));
+    const option = screen.getAllByRole('option')[1];
+    expect(option).not.toHaveAttribute('aria-disabled');
+    expect(option.textContent).toContain('left cluster');
+    fireEvent.click(option);
+    expect(onSelect).toHaveBeenCalledWith('k4');
+  });
+
+  it('shows the siblings of the current child expanded', () => {
+    open([seed, ...kids], kids[0]);
+    expect(screen.getAllByRole('option')).toHaveLength(3);
+  });
+});
+
+describe('ConnectionSwitcher sentinel grouping', () => {
+  const sentinelSeed = connection({
+    id: 's',
+    name: 'sentinel',
+    host: '10.0.1.1',
+    port: 26379,
+    capabilities: { dbType: 'valkey', version: '8', isSentinel: true },
+  });
+  const sentinelKids = [
+    connection({
+      id: 'r1',
+      name: 'sentinel · b replica',
+      host: '10.0.1.3',
+      port: 6379,
+      membership: { seedId: 's', nodeId: 'r1', origin: 'auto', source: 'sentinel', group: 'b', role: 'replica' },
+    }),
+    connection({
+      id: 'p1',
+      name: 'sentinel · b primary',
+      host: '10.0.1.2',
+      port: 6379,
+      membership: { seedId: 's', nodeId: 'p1', origin: 'auto', source: 'sentinel', group: 'b', role: 'primary' },
+    }),
+    connection({
+      id: 'p2',
+      name: 'sentinel · a primary',
+      host: '10.0.1.4',
+      port: 6379,
+      membership: { seedId: 's', nodeId: 'p2', origin: 'auto', source: 'sentinel', group: 'a', role: 'primary' },
+    }),
+    connection({
+      id: 'gone',
+      name: 'sentinel · retired',
+      host: '10.0.1.5',
+      port: 6379,
+      isConnected: false,
+      membership: {
+        seedId: 's',
+        nodeId: 'gone',
+        origin: 'auto',
+        source: 'sentinel',
+        group: 'a',
+        role: 'replica',
+        retiredAt: Date.now() - 3_600_000,
+      },
+    }),
+  ];
+
+  it('renders children grouped by group heading with primary first, retired trailing', () => {
+    open([sentinelSeed, ...sentinelKids], sentinelSeed);
+    fireEvent.click(screen.getByRole('button', { name: /4 nodes/i }));
+    const names = optionNames();
+    expect(names).toHaveLength(5);
+    expect(names[1]).toContain('a primary');
+    expect(names[2]).toContain('b primary');
+    expect(names[3]).toContain('b replica');
+    expect(names[4]).toContain('left group');
+  });
+
+  it('shows a primary badge on the primary member', () => {
+    open([sentinelSeed, ...sentinelKids], sentinelSeed);
+    fireEvent.click(screen.getByRole('button', { name: /4 nodes/i }));
+    const primaryOption = screen.getByRole('option', { name: /b primary/ });
+    expect(primaryOption).toHaveTextContent('primary');
+  });
+
+  it('keeps the retired sentinel member non-selectable', () => {
+    onSelect.mockClear();
+    open([sentinelSeed, ...sentinelKids], sentinelSeed);
+    fireEvent.click(screen.getByRole('button', { name: /4 nodes/i }));
+    const retired = screen.getAllByRole('option')[4];
+    expect(retired).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.click(retired);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('still shows a non-sentinel child of a sentinel seed', () => {
+    const claimed = connection({
+      id: 'c1',
+      name: 'sentinel · claimed',
+      host: '10.0.1.9',
+      port: 6379,
+      membership: { seedId: 's', nodeId: 'c1', origin: 'adopted', source: 'cluster' },
+    });
+    open([sentinelSeed, ...sentinelKids, claimed], sentinelSeed);
+    fireEvent.click(screen.getByRole('button', { name: /5 nodes/i }));
+    const names = optionNames();
+    expect(names.some((name) => name.includes('claimed'))).toBe(true);
+  });
+});

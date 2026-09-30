@@ -1,7 +1,7 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional, NotFoundException, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
-import { ConnectionStatus, CreateConnectionRequest, TestConnectionResponse, DatabaseConnectionConfig, DatabaseConnectionType } from '@betterdb/shared';
+import { TopologyMembership, ConnectionStatus, CreateConnectionRequest, CredentialStatus, TestConnectionResponse, DatabaseConnectionConfig, DatabaseConnectionType } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { UnifiedDatabaseAdapter } from '../database/adapters/unified.adapter';
@@ -12,12 +12,64 @@ import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { ExternalMetricsStore } from '../external-metrics/external-metrics-store';
 import { DiscoveredInstancesStore } from '../external-metrics/discovered-instances.store';
 import { ExternalMetricsAdapter } from '../external-metrics/external-metrics.adapter';
+import { isTrueFlag } from '../config/env-normalize';
+import type { DesiredNode } from '../topology/membership-diff';
 
 export { ENV_DEFAULT_ID } from './connection.constants';
 import { ENV_DEFAULT_ID } from './connection.constants';
 
+export const CHILD_CONNECT_TIMEOUT_MS = 10_000;
+
+async function connectWithin(adapter: DatabasePort, ms: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const attempt = adapter.connect();
+  const deadline = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), ms);
+  });
+  try {
+    if ((await Promise.race([attempt, deadline])) !== 'timeout') return;
+  } finally {
+    clearTimeout(timer);
+  }
+  attempt.catch(() => undefined);
+  void adapter.disconnect().catch(() => undefined);
+  throw new Error(`Connection attempt timed out after ${ms}ms`);
+}
+
+async function disconnectWithin(adapter: DatabasePort, ms: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const attempt = adapter.disconnect();
+  const deadline = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), ms);
+  });
+  try {
+    if ((await Promise.race([attempt, deadline])) !== 'timeout') return;
+  } finally {
+    clearTimeout(timer);
+  }
+  attempt.catch(() => undefined);
+  throw new Error(`Disconnect timed out after ${ms}ms`);
+}
+
 function sameHost(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
+}
+
+function isRetiredAuto(config: DatabaseConnectionConfig): boolean {
+  return config.membership?.origin === 'auto' && config.membership.retiredAt !== undefined;
+}
+
+function isDefaultCandidate(config: DatabaseConnectionConfig): boolean {
+  return config.membership?.origin !== 'auto' && config.membership?.retiredAt === undefined;
+}
+
+function membershipFields(node: DesiredNode): Pick<TopologyMembership, 'nodeId' | 'source' | 'group' | 'role'> {
+  return {
+    nodeId: node.nodeId,
+    source: node.source,
+    ...(node.group !== undefined ? { group: node.group } : {}),
+    ...(node.role !== undefined ? { role: node.role } : {}),
+  };
 }
 
 @Injectable()
@@ -28,6 +80,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   private defaultId: string | null = null;
   private readonly encryption: EnvelopeEncryptionService | null;
   private startupConnectionErrors: Array<{ name: string; host: string; port: number; error: string }> = [];
+  private readonly seedLocks = new Map<string, Promise<unknown>>();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -130,9 +183,19 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
           continue;
         }
 
+        if (isRetiredAuto(decryptedConfig)) {
+          this.configs.set(config.id, decryptedConfig);
+          this.connections.set(config.id, this.createAdapter(decryptedConfig));
+          continue;
+        }
+
         try {
           const adapter = this.createAdapter(decryptedConfig);
-          await adapter.connect();
+          if (decryptedConfig.membership) {
+            await connectWithin(adapter, CHILD_CONNECT_TIMEOUT_MS);
+          } else {
+            await adapter.connect();
+          }
           this.connections.set(config.id, adapter);
           // Trust-on-first-use: persist a newly-learned SSH host key so it is
           // verified on the next startup.
@@ -180,9 +243,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       }
 
       // Ensure we have a default
-      if (!this.defaultId && savedConnections.length > 0) {
-        this.defaultId = savedConnections[0].id;
-        await this.setDefault(this.defaultId);
+      const fallbackId = this.defaultId ? null : this.pickDefaultCandidate();
+      if (fallbackId) {
+        this.defaultId = fallbackId;
+        await this.setDefault(fallbackId);
       }
     }
 
@@ -206,7 +270,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   private assertValidExternalRequest(request: CreateConnectionRequest): void {
-    if (request.password || request.username || request.tls || request.sshTunnel?.enabled) {
+    if (request.password || request.username || request.nodePassword || request.nodeUsername || request.tls || request.sshTunnel?.enabled) {
       throw new Error('OTLP push connections take no credentials, TLS or SSH tunnel');
     }
     if (this.findIdByHostPort(request.host, request.port)) {
@@ -302,6 +366,14 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         ...result,
         password: this.encryption.encrypt(config.password),
         passwordEncrypted: true,
+      };
+    }
+
+    if (this.encryption && config.nodePassword && !config.nodePasswordEncrypted) {
+      result = {
+        ...result,
+        nodePassword: this.encryption.encrypt(config.nodePassword),
+        nodePasswordEncrypted: true,
       };
     }
 
@@ -409,12 +481,36 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private decryptConfig(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
+    const decrypted = this.decryptSeedPassword(config);
+    if (!config.nodePasswordEncrypted || !config.nodePassword) {
+      return decrypted;
+    }
+    if (!this.encryption) {
+      this.logger.error(
+        `Cannot decrypt data node password for ${config.name}: ENCRYPTION_KEY not set but password is encrypted. ` +
+        'Discovered data nodes will use the seed credentials.'
+      );
+      return { ...decrypted, nodePassword: config.nodePassword, nodePasswordEncrypted: true };
+    }
+    try {
+      return { ...decrypted, nodePassword: this.encryption.decrypt(config.nodePassword), nodePasswordEncrypted: false };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Decryption failed';
+      this.logger.error(
+        `Could not decrypt the data node password for ${config.name}: ${errorMsg}. ` +
+        "Discovered data nodes will use the seed's password."
+      );
+      return { ...decrypted, nodePassword: config.nodePassword, nodePasswordEncrypted: true };
+    }
+  }
+
   /**
    * Decrypt password in config for use.
    * Returns a new config object with decrypted password.
    * Sets credentialStatus to 'decryption_failed' if decryption fails.
    */
-  private decryptConfig(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
+  private decryptSeedPassword(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
     const sshTunnel = this.decryptSshTunnel(config.sshTunnel);
 
     if (!config.passwordEncrypted || !config.password) {
@@ -506,6 +602,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       port: request.port,
       username: request.username,
       password: request.password,
+      nodeUsername: request.nodeUsername,
+      nodePassword: request.nodePassword,
       dbIndex: request.dbIndex,
       tls: request.tls,
       sshTunnel: this.sanitizeSshTunnelInput(request.sshTunnel),
@@ -578,7 +676,28 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     if (id === ENV_DEFAULT_ID) {
       throw new Error('Cannot remove the default environment connection');
     }
+    const config = this.configs.get(id);
+    if (config && !config.membership) {
+      await this.withSeedLock(id, async () => {
+        for (const member of this.listMembers(id)) {
+          if (member.membership?.origin === 'auto') {
+            await this.removeOne(member.id);
+          } else {
+            await this.setMembership(member.id, undefined);
+          }
+        }
+        await this.removeOne(id);
+      });
+      return;
+    }
+    if (config?.membership) {
+      await this.withSeedLock(config.membership.seedId, () => this.removeOne(id));
+      return;
+    }
+    await this.removeOne(id);
+  }
 
+  private async removeOne(id: string): Promise<void> {
     const removedConfig = this.configs.get(id);
     const connection = this.connections.get(id);
     if (connection) {
@@ -604,9 +723,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
 
     if (this.defaultId === id) {
-      const remaining = Array.from(this.configs.keys());
-      if (remaining.length > 0) {
-        await this.setDefault(remaining[0]);
+      const fallbackId = this.pickDefaultCandidate();
+      if (fallbackId) {
+        await this.setDefault(fallbackId);
       } else {
         this.defaultId = null;
       }
@@ -620,6 +739,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       throw new NotFoundException(
         `Connection '${id}' not found. Use GET /connections to list available connections.`
       );
+    }
+    if (this.configs.get(id)!.membership?.origin === 'auto') {
+      throw new BadRequestException(`Connection '${id}' is an auto-registered cluster node and cannot be the default.`);
     }
 
     // Unmark old default (create new object instead of mutating)
@@ -686,6 +808,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
           version: capabilities.version,
           supportsCommandLog: capabilities.hasCommandLog,
           supportsSlotStats: capabilities.hasSlotStats,
+          clusterEnabled: capabilities.clusterEnabled,
+          isSentinel: capabilities.isSentinel,
         },
       };
     } catch (error) {
@@ -706,10 +830,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  list(): ConnectionStatus[] {
+  list(options: { includeRetired?: boolean } = {}): ConnectionStatus[] {
     const result: ConnectionStatus[] = [];
 
     for (const [id, config] of this.configs.entries()) {
+      if (!options.includeRetired && isRetiredAuto(config)) continue;
       const connection = this.connections.get(id);
       const isConnected = connection?.isConnected() ?? false;
 
@@ -722,6 +847,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
             version: caps.version,
             supportsCommandLog: caps.hasCommandLog,
             supportsSlotStats: caps.hasSlotStats,
+            clusterEnabled: caps.clusterEnabled,
+            isSentinel: caps.isSentinel,
           };
         } catch {
           // Capabilities unavailable
@@ -756,10 +883,20 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         credentialStatus: config.credentialStatus,
         credentialError: config.credentialError,
         connectionType: config.host === 'agent' ? 'agent' : (config.connectionType ?? 'direct'),
+        autoRegisterNodes: config.autoRegisterNodes,
+        membership: config.membership,
       });
     }
 
     return result;
+  }
+
+  private withLiveTopology(id: string, config: DatabaseConnectionConfig): DatabaseConnectionConfig {
+    const live = this.configs.get(id);
+    if (!live) {
+      return config;
+    }
+    return { ...config, membership: live.membership, autoRegisterNodes: live.autoRegisterNodes };
   }
 
   async reconnect(id: string): Promise<void> {
@@ -781,7 +918,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         config = this.decryptConfig(storedConfig);
         if (config.credentialStatus === 'decryption_failed') {
           // Still failing - update in-memory config with latest error and bail
-          this.configs.set(id, config);
+          this.configs.set(id, this.withLiveTopology(id, config));
           throw new Error(`Password decryption still failing: ${config.credentialError}`);
         }
         // Decryption succeeded this time - continue with connection attempt
@@ -794,7 +931,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     const newAdapter = this.createAdapter(config);
 
     try {
-      await newAdapter.connect();
+      if (config.membership) {
+        await connectWithin(newAdapter, CHILD_CONNECT_TIMEOUT_MS);
+      } else {
+        await newAdapter.connect();
+      }
 
       // Only disconnect old adapter after new one successfully connects.
       // Disconnect unconditionally (not just when isConnected): the old adapter
@@ -810,16 +951,18 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       this.connections.set(id, newAdapter);
       this.runtimeCapabilityTracker.resetConnection(id);
 
+      const current = this.withLiveTopology(id, config);
+
       // Trust-on-first-use: persist a newly-learned SSH host key.
-      if (this.captureLearnedHostKey(config, newAdapter)) {
-        await this.storage.saveConnection(this.encryptConfig(config)).catch((err) => {
-          this.logger.warn(`Failed to persist learned SSH host key for ${config.name}: ${err instanceof Error ? err.message : err}`);
+      if (this.captureLearnedHostKey(current, newAdapter)) {
+        await this.storage.saveConnection(this.encryptConfig(current)).catch((err) => {
+          this.logger.warn(`Failed to persist learned SSH host key for ${current.name}: ${err instanceof Error ? err.message : err}`);
         });
       }
 
       // Update credential status to valid after successful reconnection
       this.configs.set(id, {
-        ...config,
+        ...this.withLiveTopology(id, current),
         credentialStatus: 'valid',
         credentialError: undefined,
       });
@@ -831,7 +974,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
       // Update credential status on failure
       this.configs.set(id, {
-        ...config,
+        ...this.withLiveTopology(id, config),
         credentialStatus: isAuthError ? 'invalid' : config.credentialStatus,
         credentialError: isAuthError ? errorMsg : config.credentialError,
       });
@@ -881,12 +1024,21 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return this.startupConnectionErrors;
   }
 
+  getAutoRegisterNodesDefault(): boolean {
+    return isTrueFlag(this.configService.get<string>('CLUSTER_AUTO_REGISTER_NODES'));
+  }
+
+  getAutoRegisterSentinelNodesDefault(): boolean {
+    return isTrueFlag(this.configService.get<string>('SENTINEL_AUTO_REGISTER_NODES'));
+  }
+
   isEnvDefault(id: string): boolean {
     return id === ENV_DEFAULT_ID;
   }
 
   findIdByHostPort(host: string, port: number): string | null {
     for (const [id, config] of this.configs.entries()) {
+      if (isRetiredAuto(config)) continue;
       if (sameHost(config.host, host) && config.port === port) {
         return id;
       }
@@ -897,10 +1049,173 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   findByHostPort(host: string, port: number): { id: string; connectionType: DatabaseConnectionType } | null {
     let directId: string | null = null;
     for (const [id, config] of this.configs.entries()) {
+      if (isRetiredAuto(config)) continue;
       if (!sameHost(config.host, host) || config.port !== port) continue;
       if (config.connectionType === 'external') return { id, connectionType: 'external' };
       directId ??= id;
     }
     return directId ? { id: directId, connectionType: 'direct' } : null;
+  }
+
+  findConfigByHostPort(host: string, port: number): DatabaseConnectionConfig | null {
+    for (const config of this.configs.values()) {
+      if (isRetiredAuto(config)) continue;
+      if (sameHost(config.host, host) && config.port === port) return config;
+    }
+    return null;
+  }
+
+  listMembers(seedId: string): DatabaseConnectionConfig[] {
+    return Array.from(this.configs.values()).filter((config) => config.membership?.seedId === seedId);
+  }
+
+  async withSeedLock<T>(seedId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.seedLocks.get(seedId) ?? Promise.resolve();
+    const run = previous.then(fn);
+    const tail = run.catch(() => undefined);
+    this.seedLocks.set(seedId, tail);
+    try {
+      return await run;
+    } finally {
+      if (this.seedLocks.get(seedId) === tail) this.seedLocks.delete(seedId);
+    }
+  }
+
+  async addManagedChild(seedId: string, node: DesiredNode): Promise<string> {
+    const seed = this.configs.get(seedId);
+    if (!seed) {
+      throw new NotFoundException(`Connection '${seedId}' not found.`);
+    }
+    const now = Date.now();
+    const config: DatabaseConnectionConfig = {
+      id: randomUUID(),
+      name: `${seed.name} · ${node.host}:${node.port}`,
+      host: node.host,
+      port: node.port,
+      username: seed.nodeUsername ?? seed.username,
+      password: seed.nodePasswordEncrypted ? seed.password : seed.nodePassword ?? seed.password,
+      dbIndex: 0,
+      tls: seed.tls,
+      connectionType: 'direct',
+      isDefault: false,
+      createdAt: now,
+      updatedAt: now,
+      membership: { seedId, origin: 'auto', ...membershipFields(node) },
+    };
+    const adapter = this.createAdapter(config);
+    let credentialStatus: CredentialStatus = 'valid';
+    let credentialError: string | undefined;
+    try {
+      await connectWithin(adapter, CHILD_CONNECT_TIMEOUT_MS);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      const isAuthError = this.isAuthenticationError(errorMsg);
+      credentialStatus = isAuthError ? 'invalid' : 'unknown';
+      credentialError = isAuthError ? errorMsg : undefined;
+      this.logger.warn(`Auto-registered ${config.name} but could not connect: ${errorMsg}`);
+    }
+    try {
+      await this.storage.saveConnection(this.encryptConfig(config));
+      this.configs.set(config.id, { ...config, credentialStatus, credentialError });
+      this.connections.set(config.id, adapter);
+    } catch (error) {
+      this.configs.delete(config.id);
+      this.connections.delete(config.id);
+      await adapter.disconnect().catch(() => { });
+      this.logger.error(`Failed to persist auto-registered node ${config.name}: ${error instanceof Error ? error.message : error}`);
+      throw error;
+    }
+    this.logger.log(`Auto-registered ${node.source} node ${config.name}`);
+    return config.id;
+  }
+
+  async adoptChild(id: string, seedId: string, node: DesiredNode): Promise<void> {
+    await this.setMembership(id, { seedId, origin: 'adopted', ...membershipFields(node) });
+  }
+
+  async refreshChild(id: string, node: DesiredNode): Promise<void> {
+    const { seedId, origin, retiredAt } = this.requireMembership(id);
+    await this.setMembership(id, { seedId, origin, ...membershipFields(node), ...(retiredAt !== undefined ? { retiredAt } : {}) });
+  }
+
+  async retireChild(id: string): Promise<void> {
+    const membership = this.requireMembership(id);
+    if (membership.origin === 'auto') {
+      const adapter = this.connections.get(id);
+      try {
+        if (adapter) await disconnectWithin(adapter, CHILD_CONNECT_TIMEOUT_MS);
+      } catch (err) {
+        this.logger.warn(`Failed to disconnect ${id} on retire: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    await this.setMembership(id, { ...membership, retiredAt: Date.now() });
+    if (this.defaultId === id) {
+      const fallbackId = this.pickDefaultCandidate();
+      if (fallbackId) await this.setDefault(fallbackId);
+    }
+  }
+
+  async reactivateChild(id: string, node: DesiredNode): Promise<void> {
+    const membership = this.requireMembership(id);
+    const config = this.configs.get(id)!;
+    if (membership.origin === 'auto') {
+      const adapter = this.createAdapter(config);
+      try {
+        await connectWithin(adapter, CHILD_CONNECT_TIMEOUT_MS);
+      } catch (err) {
+        this.logger.warn(`Reactivated ${config.name} but could not connect: ${err instanceof Error ? err.message : err}`);
+      }
+      if (!this.configs.has(id)) {
+        await adapter.disconnect().catch(() => { });
+        return;
+      }
+      this.connections.set(id, adapter);
+      this.runtimeCapabilityTracker.resetConnection(id);
+    }
+    await this.setMembership(id, { seedId: membership.seedId, origin: membership.origin, ...membershipFields(node) });
+  }
+
+  async removeChild(id: string): Promise<void> {
+    this.requireMembership(id);
+    await this.removeOne(id);
+  }
+
+  async setAutoRegister(id: string, value: boolean | null): Promise<void> {
+    await this.withSeedLock(id, async () => {
+      const config = this.configs.get(id);
+      if (!config) {
+        throw new NotFoundException(`Connection '${id}' not found.`);
+      }
+      if (config.membership || config.connectionType === 'external' || config.host === 'agent') {
+        throw new Error('Auto-registration can only be set on a seed connection');
+      }
+      const autoRegisterNodes = value === null ? undefined : value;
+      this.configs.set(id, { ...config, autoRegisterNodes });
+      await this.storage.updateConnection(id, { autoRegisterNodes });
+    });
+  }
+
+  private pickDefaultCandidate(): string | null {
+    for (const config of this.configs.values()) {
+      if (isDefaultCandidate(config)) return config.id;
+    }
+    return null;
+  }
+
+  private requireMembership(id: string): TopologyMembership {
+    const membership = this.configs.get(id)?.membership;
+    if (!membership) {
+      throw new NotFoundException(`Connection '${id}' is not a cluster member.`);
+    }
+    return membership;
+  }
+
+  private async setMembership(id: string, membership: TopologyMembership | undefined): Promise<void> {
+    const config = this.configs.get(id);
+    if (!config) {
+      throw new NotFoundException(`Connection '${id}' not found.`);
+    }
+    this.configs.set(id, { ...config, membership });
+    await this.storage.updateConnection(id, { membership });
   }
 }

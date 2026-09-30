@@ -62,6 +62,8 @@ describe('ConnectionRegistry external connections', () => {
   it.each([
     [{ password: 'secret' }],
     [{ username: 'default' }],
+    [{ nodePassword: 'secret' }],
+    [{ nodeUsername: 'default' }],
     [{ tls: true }],
     [{ sshTunnel: { enabled: true, host: 'bastion', port: 22, username: 'u', authMethod: 'password' as const } }],
   ])('rejects credentials and transport options %o', async (extra) => {

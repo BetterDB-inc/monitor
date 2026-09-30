@@ -33,6 +33,10 @@ export class AuditService extends MultiConnectionPoller implements OnModuleInit 
     return this.settingsService.getCachedSettings().auditPollIntervalMs;
   }
 
+  protected pollsSentinels(): boolean {
+    return true;
+  }
+
   async onModuleInit(): Promise<void> {
     if (!this.storageClient.isReady()) {
       this.logger.error('Storage client is not ready');

@@ -240,6 +240,9 @@ export function Fleet() {
                   <div className="text-xs text-muted-foreground">
                     {row.host}:{row.port}
                   </div>
+                  {row.clusterSeedName ? (
+                    <div className="text-xs text-muted-foreground">node of {row.clusterSeedName}</div>
+                  ) : null}
                   {row.error && (
                     <div className="text-xs text-destructive truncate max-w-56">{row.error}</div>
                   )}

@@ -73,6 +73,24 @@ function isIpAddress(host: string): boolean {
   return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':');
 }
 
+export const QUIT_TIMEOUT_MS = 2_000;
+
+async function closeClient(client: Valkey): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const quit = client.quit().then(
+    () => 'quit' as const,
+    () => 'failed' as const,
+  );
+  const deadline = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), QUIT_TIMEOUT_MS);
+  });
+  try {
+    if ((await Promise.race([quit, deadline])) !== 'quit') client.disconnect();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export class UnifiedDatabaseAdapter implements DatabasePort {
   private readonly logger = new Logger(UnifiedDatabaseAdapter.name);
   // Backing field is genuinely nullable: a tunnelled adapter has no client
@@ -277,16 +295,11 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
   async disconnect(): Promise<void> {
     if (this.cliClient) {
-      await this.cliClient.quit().catch(() => {});
+      await closeClient(this.cliClient);
       this.cliClient = null;
     }
     if (this._client) {
-      // iovalkey rejects quit() when the client is already closed / never
-      // connected. Swallow it (falling back to a hard disconnect) so a failed
-      // quit can never skip the tunnel teardown below and leak the SSH session.
-      await this._client.quit().catch(() => {
-        this._client?.disconnect();
-      });
+      await closeClient(this._client);
     }
     await this.teardownTunnel();
     this.connected = false;
@@ -345,6 +358,27 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     const redisSupportsSlotStats =
       !isValkey && (majorVersion > 8 || (majorVersion === 8 && minorVersion >= 2));
 
+    const isSentinel = InfoParser.isSentinelMode(
+      (info.server ?? info) as Record<string, unknown>,
+    );
+    if (isSentinel) {
+      this.capabilities = {
+        dbType: isValkey ? 'valkey' : 'redis',
+        version,
+        hasSlotStats: false,
+        hasCommandLog: false,
+        hasClusterSlotStats: false,
+        hasLatencyMonitor: false,
+        hasAclLog: majorVersion >= 6,
+        hasMemoryDoctor: false,
+        hasConfig: false,
+        hasVectorSearch: false,
+        clusterEnabled: false,
+        isSentinel: true,
+      };
+      return;
+    }
+
     // Probe whether CONFIG is available (disabled on managed services like AWS ElastiCache)
     let hasConfig = true;
     try {
@@ -367,6 +401,15 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // Search module not loaded
     }
 
+    let clusterEnabled = false;
+    try {
+      const clusterInfo = await this.getInfo(['cluster']);
+      clusterEnabled =
+        (clusterInfo.cluster as Record<string, unknown> | undefined)?.cluster_enabled === '1';
+    } catch {
+      clusterEnabled = false;
+    }
+
     this.capabilities = {
       dbType: isValkey ? 'valkey' : 'redis',
       version,
@@ -378,6 +421,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       hasMemoryDoctor: true,
       hasConfig,
       hasVectorSearch,
+      clusterEnabled,
+      isSentinel: false,
     };
   }
 

@@ -1,5 +1,9 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import type { TopologyMembership } from '@betterdb/shared';
 import { setCurrentConnectionId, fetchApi } from '../api/client';
+import { isUnavailableMember } from '../utils/connectionType';
+
+export const CONNECTIONS_REFRESH_MS = 30_000;
 
 export interface Connection {
   id: string;
@@ -10,8 +14,12 @@ export interface Connection {
   capabilities?: {
     dbType: 'valkey' | 'redis';
     version: string;
+    clusterEnabled?: boolean;
+    isSentinel?: boolean;
   };
   connectionType?: 'direct' | 'agent' | 'external';
+  autoRegisterNodes?: boolean;
+  membership?: TopologyMembership;
 }
 
 export interface ConnectionContextValue {
@@ -29,6 +37,8 @@ export interface ConnectionContextValue {
   refreshConnections: () => Promise<void>;
   /** Whether there are no connections configured */
   hasNoConnections: boolean;
+  autoRegisterNodesDefault?: boolean;
+  autoRegisterSentinelNodesDefault?: boolean;
 }
 
 export const ConnectionContext = createContext<ConnectionContextValue | null>(null);
@@ -50,7 +60,11 @@ export function useConnectionState(): ConnectionContextValue {
   const [currentConnection, setCurrentConnection] = useState<Connection | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [autoRegisterNodesDefault, setAutoRegisterNodesDefault] = useState(false);
+  const [autoRegisterSentinelNodesDefault, setAutoRegisterSentinelNodesDefault] = useState(false);
   const initialLoadDone = useRef(false);
+  const selected = useRef<Connection | null>(null);
+  selected.current = currentConnection;
 
   const fetchConnections = useCallback(async () => {
     try {
@@ -60,22 +74,32 @@ export function useConnectionState(): ConnectionContextValue {
       setError(null);
 
       // Fetch connections from API using centralized client
-      const responseData = await fetchApi<{ connections: Connection[]; currentId: string | null }>('/connections');
+      const responseData = await fetchApi<{
+        connections: Connection[];
+        currentId: string | null;
+        autoRegisterNodesDefault?: boolean;
+        autoRegisterSentinelNodesDefault?: boolean;
+      }>('/connections');
       const data: Connection[] = responseData.connections || [];
       setConnections(data);
+      setAutoRegisterNodesDefault(responseData.autoRegisterNodesDefault === true);
+      setAutoRegisterSentinelNodesDefault(responseData.autoRegisterSentinelNodesDefault === true);
 
-      const stillListed =
-        currentConnection !== null &&
-        data.some((c) => {
-          return c.id === currentConnection.id;
-        });
+      const current = selected.current;
+      const fresh = current === null ? undefined : data.find((c) => c.id === current.id);
+      const justRetired =
+        fresh !== undefined && current !== null && isUnavailableMember(fresh) && !isUnavailableMember(current);
 
-      // Select a default when nothing is selected, or when the selection was removed elsewhere
-      if (stillListed === false) {
+      if (fresh !== undefined && !justRetired) {
+        if (JSON.stringify(fresh) !== JSON.stringify(current)) {
+          setCurrentConnection(fresh);
+        }
+      } else {
+        const selectable = data.filter((c) => !isUnavailableMember(c));
         const defaultConnection =
-          (responseData.currentId && data.find((c) => c.id === responseData.currentId)) ||
-          data.find((c) => c.isConnected) ||
-          data[0] ||
+          (responseData.currentId && selectable.find((c) => c.id === responseData.currentId)) ||
+          selectable.find((c) => c.isConnected) ||
+          selectable[0] ||
           null;
         setCurrentConnection(defaultConnection);
         setCurrentConnectionId(defaultConnection?.id ?? null);
@@ -87,11 +111,12 @@ export function useConnectionState(): ConnectionContextValue {
       setLoading(false);
       initialLoadDone.current = true;
     }
-  }, [currentConnection]);
+  }, []);
 
   const setConnection = useCallback((connectionId: string) => {
     const connection = connections.find(c => c.id === connectionId);
     if (connection) {
+      selected.current = connection;
       setCurrentConnection(connection);
       setCurrentConnectionId(connection.id);
       fetchApi('/telemetry/event', {
@@ -120,6 +145,28 @@ export function useConnectionState(): ConnectionContextValue {
     fetchConnections();
   }, []);
 
+  const latestFetch = useRef(fetchConnections);
+  useEffect(() => {
+    latestFetch.current = fetchConnections;
+  }, [fetchConnections]);
+
+  const followsTopology =
+    autoRegisterNodesDefault ||
+    autoRegisterSentinelNodesDefault ||
+    connections.some((c) => c.autoRegisterNodes === true || c.membership !== undefined);
+
+  useEffect(() => {
+    if (!followsTopology) {
+      return;
+    }
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void latestFetch.current();
+      }
+    }, CONNECTIONS_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [followsTopology]);
+
   return {
     currentConnection,
     connections,
@@ -128,5 +175,7 @@ export function useConnectionState(): ConnectionContextValue {
     setConnection,
     refreshConnections: fetchConnections,
     hasNoConnections: !loading && connections.length === 0,
+    autoRegisterNodesDefault,
+    autoRegisterSentinelNodesDefault,
   };
 }

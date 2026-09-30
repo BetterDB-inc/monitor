@@ -71,6 +71,22 @@ export type SshTunnelInput = Omit<SshTunnelConfig, 'secretsEncrypted'>;
 
 export type DatabaseConnectionType = 'direct' | 'external';
 
+export type TopologyKind = 'cluster' | 'sentinel';
+
+export type TopologyRole = 'primary' | 'replica';
+
+export type TopologyMembershipOrigin = 'auto' | 'adopted';
+
+export interface TopologyMembership {
+  seedId: string;
+  nodeId: string;
+  origin: TopologyMembershipOrigin;
+  source: TopologyKind;
+  group?: string;
+  role?: TopologyRole;
+  retiredAt?: number;
+}
+
 /**
  * Connection configuration for storing database connections
  */
@@ -83,6 +99,12 @@ export interface DatabaseConnectionConfig {
   password?: string;
   /** Whether the password is encrypted (envelope encryption) */
   passwordEncrypted?: boolean;
+  /** Username for data nodes discovered through this Sentinel; defaults to username */
+  nodeUsername?: string;
+  /** Password for data nodes discovered through this Sentinel; defaults to password (secret) */
+  nodePassword?: string;
+  /** Whether nodePassword is encrypted (envelope encryption) */
+  nodePasswordEncrypted?: boolean;
   dbIndex?: number;
   tls?: boolean;
   /** Optional SSH tunnel used to reach the database. */
@@ -91,6 +113,8 @@ export interface DatabaseConnectionConfig {
   createdAt: number;
   updatedAt?: number;
   connectionType?: DatabaseConnectionType;
+  autoRegisterNodes?: boolean;
+  membership?: TopologyMembership;
   /** Status of credential validation (not persisted, set at runtime) */
   credentialStatus?: CredentialStatus;
   /** Error message when credentials are invalid */
@@ -117,6 +141,33 @@ export function parseSshTunnel(value: unknown): SshTunnelConfig | undefined {
   return obj as SshTunnelConfig;
 }
 
+export function parseMembership(value: unknown): TopologyMembership | undefined {
+  if (value === null || value === undefined || value === '') return undefined;
+  let obj: unknown = value;
+  if (typeof value === 'string') {
+    try {
+      obj = JSON.parse(value);
+    } catch {
+      return undefined;
+    }
+  }
+  if (!obj || typeof obj !== 'object') return undefined;
+  const m = obj as Record<string, unknown>;
+  if (typeof m.seedId !== 'string' || typeof m.nodeId !== 'string') return undefined;
+  if (m.origin !== 'auto' && m.origin !== 'adopted') return undefined;
+  const source = m.source ?? 'cluster';
+  if (source !== 'cluster' && source !== 'sentinel') return undefined;
+  return {
+    seedId: m.seedId,
+    nodeId: m.nodeId,
+    origin: m.origin,
+    source,
+    ...(typeof m.group === 'string' ? { group: m.group } : {}),
+    ...(m.role === 'primary' || m.role === 'replica' ? { role: m.role } : {}),
+    ...(typeof m.retiredAt === 'number' ? { retiredAt: m.retiredAt } : {}),
+  };
+}
+
 /**
  * Connection capabilities
  */
@@ -125,6 +176,8 @@ export interface ConnectionCapabilities {
   version: string;
   supportsCommandLog?: boolean;
   supportsSlotStats?: boolean;
+  clusterEnabled?: boolean;
+  isSentinel?: boolean;
 }
 
 /**
@@ -159,6 +212,8 @@ export interface ConnectionStatus {
   updatedAt?: number;
   isConnected: boolean;
   connectionType?: 'direct' | 'agent' | 'external';
+  autoRegisterNodes?: boolean;
+  membership?: TopologyMembership;
   capabilities?: ConnectionCapabilities;
   runtimeCapabilities?: import('./health').RuntimeCapabilities;
   /** Status of credential validation */
@@ -176,6 +231,8 @@ export interface CreateConnectionRequest {
   port: number;
   username?: string;
   password?: string;
+  nodeUsername?: string;
+  nodePassword?: string;
   dbIndex?: number;
   tls?: boolean;
   /** Optional SSH tunnel used to reach the database. */
@@ -200,6 +257,8 @@ export interface TestConnectionResponse {
 export interface ConnectionListResponse {
   connections: ConnectionStatus[];
   currentId: string | null;
+  autoRegisterNodesDefault: boolean;
+  autoRegisterSentinelNodesDefault: boolean;
 }
 
 /**

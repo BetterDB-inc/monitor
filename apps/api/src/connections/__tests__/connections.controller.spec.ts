@@ -1,4 +1,4 @@
-import { HttpException, HttpStatus } from '@nestjs/common';
+import { BadRequestException, HttpException, HttpStatus } from '@nestjs/common';
 import { ConnectionsController } from '../connections.controller';
 import { ROLES_KEY } from '../../auth/guards/roles.decorator';
 import { ConnectionRegistry } from '../connection-registry.service';
@@ -31,6 +31,12 @@ function setup(opts: SetupOptions = {}) {
   const registry = {
     getConfig: jest.fn().mockReturnValue(opts.hasConfig === false ? undefined : { id: 'conn-1' }),
     get: jest.fn().mockReturnValue(adapter),
+    setAutoRegister: jest.fn(),
+    setDefault: jest.fn(),
+    list: jest.fn().mockReturnValue([]),
+    getDefaultId: jest.fn().mockReturnValue(null),
+    getAutoRegisterNodesDefault: jest.fn().mockReturnValue(true),
+    getAutoRegisterSentinelNodesDefault: jest.fn().mockReturnValue(false),
   } as unknown as ConnectionRegistry;
   const tracker = new RuntimeCapabilityTracker();
   const controller = new ConnectionsController(registry, tracker);
@@ -200,6 +206,50 @@ describe('ConnectionsController.retryCapability — HttpException shapes', () =>
     } catch (err) {
       expect(err).toBeInstanceOf(HttpException);
     }
+  });
+});
+
+describe('ConnectionsController.setAutoRegister', () => {
+  it('forwards the flag to the registry', async () => {
+    const { controller, registry } = setup();
+    await controller.setAutoRegister('seed', { enabled: true });
+    expect(registry.setAutoRegister).toHaveBeenCalledWith('seed', true);
+  });
+
+  it('maps a registry rejection to 400', async () => {
+    const { controller, registry } = setup();
+    (registry.setAutoRegister as jest.Mock).mockRejectedValueOnce(
+      new Error('Auto-registration can only be set on a seed connection'),
+    );
+    await expect(controller.setAutoRegister('child', { enabled: true })).rejects.toMatchObject({
+      status: 400,
+    });
+  });
+});
+
+describe('ConnectionsController.list', () => {
+  it('lists retired children for the UI', () => {
+    const { controller, registry } = setup();
+    controller.list();
+    expect(registry.list).toHaveBeenCalledWith({ includeRetired: true });
+  });
+
+  it('exposes the env default for auto-registration', () => {
+    const { controller } = setup();
+    expect(controller.list().autoRegisterNodesDefault).toBe(true);
+  });
+
+  it('exposes the env default for Sentinel auto-registration', () => {
+    const { controller } = setup();
+    expect(controller.list().autoRegisterSentinelNodesDefault).toBe(false);
+  });
+});
+
+describe('ConnectionsController.setDefault', () => {
+  it('passes a bad request from the registry through as 400', async () => {
+    const { controller, registry } = setup();
+    jest.mocked(registry.setDefault).mockRejectedValue(new BadRequestException('auto child'));
+    await expect(controller.setDefault('auto')).rejects.toMatchObject({ status: HttpStatus.BAD_REQUEST });
   });
 });
 

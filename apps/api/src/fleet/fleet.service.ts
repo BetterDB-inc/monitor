@@ -104,7 +104,13 @@ export class FleetService {
       };
     });
 
-    const counted = instances.filter(
+    const withSeeds = instances.map((instance, index) => {
+      const seedId = listed[index].membership?.seedId;
+      const seedName = seedId ? this.connectionRegistry.getConfig(seedId)?.name : undefined;
+      return seedName ? { ...instance, clusterSeedName: seedName } : instance;
+    });
+
+    const counted = withSeeds.filter(
       (instance, index) => !(settled[index].status === 'fulfilled' && waiting.has(instance.connectionId)),
     );
     const upCount = counted.filter((i) => i.status === 'up').length;
@@ -117,7 +123,7 @@ export class FleetService {
             ? 'degraded'
             : 'unhealthy';
 
-    return { overallStatus, instances, timestamp: Date.now() };
+    return { overallStatus, instances: withSeeds, timestamp: Date.now() };
   }
 
   private async collectOne(
