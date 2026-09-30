@@ -294,6 +294,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private activeSentinelLoopStalls = new Map<string, Set<string>>();
   private sentinelModeLast = new Map<string, boolean>();
   private sentinelMastersSnapshot = new Map<string, SentinelNodeInfo[]>();
+  // Monitor-clock ms the masters snapshot above was last refreshed, and the value
+  // the loop-stall misdirected streak last consumed. The snapshot refreshes on the
+  // slow SENTINEL probe cadence (~15s), so the streak advances only when a NEW
+  // snapshot arrives — a stale one must not drive the classification (see
+  // evaluateLoopStall).
+  private sentinelMastersSnapshotAt = new Map<string, number>();
+  private sentinelMastersConsumedAt = new Map<string, number>();
   // Replica-slot-state (valkey#1664) state, same discipline as stuck-replica:
   // `firstSeen` gates on persistence so a transient reshard snapshot doesn't
   // alert, `active` dedupes once the gate has fired.
@@ -672,6 +679,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.activeSentinelLoopStalls.delete(connectionId);
     this.sentinelModeLast.delete(connectionId);
     this.sentinelMastersSnapshot.delete(connectionId);
+    this.sentinelMastersSnapshotAt.delete(connectionId);
+    this.sentinelMastersConsumedAt.delete(connectionId);
     this.replicaSlotFirstSeen.delete(connectionId);
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
@@ -1627,6 +1636,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     info: Record<string, string>,
   ): Promise<void> {
     if (isSentinelMode(info) === false) {
+      // No longer (or never) a Sentinel: drop any snapshot so the loop-stall
+      // classifier cannot keep counting a stale `s_down` toward a misdirected alert.
+      this.sentinelMastersSnapshot.delete(ctx.connectionId);
+      this.sentinelMastersSnapshotAt.delete(ctx.connectionId);
       return;
     }
 
@@ -1647,6 +1660,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // only place we fan out SENTINEL MASTERS. Refreshed on the 15s probe cadence;
       // sdown is slow-moving, so a slightly stale snapshot is acceptable.
       this.sentinelMastersSnapshot.set(ctx.connectionId, masters);
+      this.sentinelMastersSnapshotAt.set(ctx.connectionId, timestamp);
       const findings: SentinelDrift[] = [];
       const unreadMasters = new Set<string>();
       for (const master of masters) {
@@ -1685,6 +1699,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         },
       });
     } catch (sentinelErr) {
+      // The probe failed, so the snapshot is either absent or stale. Drop it rather
+      // than let the loop-stall classifier keep counting an old `s_down` toward a
+      // misdirected alert from evidence we can no longer confirm.
+      this.sentinelMastersSnapshot.delete(ctx.connectionId);
+      this.sentinelMastersSnapshotAt.delete(ctx.connectionId);
       this.logger.debug(
         `Failed to check Sentinel topology for ${ctx.connectionName}: ${sentinelErr instanceof Error ? sentinelErr.message : sentinelErr}`,
       );
@@ -1857,14 +1876,29 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       this.sentinelLoopStallState.get(ctx.connectionId) ?? createSentinelLoopStallState();
     this.sentinelLoopStallState.set(ctx.connectionId, state);
 
-    const masters = this.sentinelMastersSnapshot.get(ctx.connectionId) ?? [];
+    // The masters snapshot refreshes on the slow SENTINEL probe cadence (~15s) while
+    // we poll far more often. Feed the misdirected streak a fresh observation ONLY
+    // when a new snapshot has arrived since it last consumed one; otherwise pass null
+    // so the streak holds. This stops a single stale `s_down` from advancing the
+    // streak to threshold on its own (which would misclassify a normal failover).
+    const snapshot = this.sentinelMastersSnapshot.get(ctx.connectionId);
+    const snapshotAt = this.sentinelMastersSnapshotAt.get(ctx.connectionId);
+    let masterDownObserved: boolean | null = null;
+    if (snapshot !== undefined && snapshotAt !== undefined) {
+      const consumedAt = this.sentinelMastersConsumedAt.get(ctx.connectionId);
+      if (consumedAt !== snapshotAt) {
+        this.sentinelMastersConsumedAt.set(ctx.connectionId, snapshotAt);
+        masterDownObserved = AnomalyService.sentinelMasterDown(snapshot);
+      }
+    }
+
     return evaluateSentinelLoopStall(state, {
       timestamp,
       tiltSinceSeconds: obs.tiltSinceSeconds,
       tiltFlag: obs.tiltFlag,
       probeRttMs: obs.probeRttMs,
       commandTimedOut: obs.commandTimedOut,
-      masterDown: AnomalyService.sentinelMasterDown(masters),
+      masterDownObserved,
       thresholds: this.sentinelLoopStall,
     });
   }
@@ -1914,6 +1948,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       message.includes('econnrefused') ||
       message.includes('econnreset') ||
       message.includes('enotfound') ||
+      // Host/network unreachable and connect-level timeouts are a DOWN connection,
+      // not a wedged loop: the loop-wedge signature is a socket that is already up
+      // and stops answering, whereas these never complete the TCP connect.
+      message.includes('ehostunreach') ||
+      message.includes('enetunreach') ||
+      message.includes('connect etimedout') ||
+      message.includes('connect timeout') ||
       message.includes('connection is closed') ||
       message.includes('connection closed');
     if (looksDown) {

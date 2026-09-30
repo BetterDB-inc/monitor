@@ -60,9 +60,10 @@ export interface SentinelLoopStallThresholds {
   /** Minimum breaches K within the window before an RTT stall is raised. */
   rttMinBreaches: number;
   /**
-   * Consecutive polls a "master down but loop healthy" condition must persist
-   * before it is classified as misdirected resolution — so a normal transient
-   * failover `+sdown` does not alert.
+   * Consecutive FRESH Sentinel-view observations (not polls) of a "master down but
+   * loop healthy" condition before it is classified as misdirected resolution — so a
+   * normal transient failover `+sdown` does not alert, and a single stale snapshot
+   * cannot drive it on its own.
    */
   misdirectedMinStreak: number;
 }
@@ -78,11 +79,13 @@ export const DEFAULT_SENTINEL_LOOP_STALL_THRESHOLDS: SentinelLoopStallThresholds
   highRttMs: SENTINEL_TILT_TRIGGER_MS,
   rttWindow: 10,
   rttMinBreaches: 3,
-  // ~15 polls of sustained down-with-healthy-loop. Long enough that a normal
-  // in-progress failover (master down until a replica is promoted, usually
-  // seconds) clears the streak before it fires, while a persistent split-horizon
-  // sdown that never recovers still trips it.
-  misdirectedMinStreak: 15,
+  // Consecutive FRESH Sentinel-view observations (each ~15s apart), not polls:
+  // 3 ≈ 45s of re-verified, sustained down-with-healthy-loop. Long enough that a
+  // normal in-progress failover (master down until a replica is promoted, usually
+  // seconds) clears before it fires, while a persistent split-horizon sdown that
+  // never recovers still trips it. Counting fresh observations rather than polls
+  // keeps one stale snapshot from advancing the streak on its own.
+  misdirectedMinStreak: 3,
 };
 
 export interface SentinelLoopStallInput {
@@ -102,8 +105,13 @@ export interface SentinelLoopStallInput {
    * wedge. Must not be read as "connection down".
    */
   commandTimedOut: boolean;
-  /** Any monitored master carries `s_down`/`o_down` in its Sentinel flags. */
-  masterDown: boolean;
+  /**
+   * Fresh observation of whether any monitored master carries `s_down`/`o_down`:
+   * `true`/`false` from a NEWLY refreshed Sentinel view, or `null` when this poll had
+   * no fresh view. The `SENTINEL MASTERS` snapshot refreshes on a slower cadence than
+   * we poll, so a `null` here holds the streak — stale evidence must not advance it.
+   */
+  masterDownObserved: boolean | null;
   thresholds: SentinelLoopStallThresholds;
 }
 
@@ -255,9 +263,11 @@ export function evaluateSentinelLoopStall(
   }
 
   // 4) Misdirected resolution — a master is down yet the loop is healthy (no TILT,
-  //    RTT not stalling). The OTHER failure mode. Required to persist so a normal
-  //    transient failover `+sdown` does not alert.
-  if (input.masterDown) {
+  //    RTT not stalling). The OTHER failure mode. Required to persist across fresh
+  //    observations so a normal transient failover `+sdown` does not alert. A `null`
+  //    observation (no fresh Sentinel view this poll) HOLDS the streak: stale
+  //    evidence must neither advance nor clear it — only fresh evidence moves it.
+  if (input.masterDownObserved === true) {
     state.misdirectedStreak += 1;
     if (state.misdirectedStreak >= thresholds.misdirectedMinStreak) {
       return [
@@ -271,7 +281,7 @@ export function evaluateSentinelLoopStall(
         },
       ];
     }
-  } else {
+  } else if (input.masterDownObserved === false) {
     state.misdirectedStreak = 0;
   }
 

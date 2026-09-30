@@ -81,8 +81,7 @@ export class ConfigHazardService {
     // Branch on the server mode first so a Sentinel is not probed for AOF/cluster
     // (which would only ever return spurious unverified findings there).
     if (await this.isSentinelMode(client)) {
-      const finding = await this.probeSentinelDns(connectionId, client);
-      return { findings: finding !== null ? [finding] : [], cacheable: true };
+      return this.probeSentinelDns(connectionId, client);
     }
 
     let appendonly: string | null;
@@ -309,11 +308,16 @@ export class ConfigHazardService {
   private async probeSentinelDns(
     connectionId: string,
     client: ProbeClientLike,
-  ): Promise<ConfigHazardFinding | null> {
+  ): Promise<ProbeResult> {
+    // Track read failures separately from genuinely-empty values: an incomplete probe
+    // (a transient CONFIG GET / SENTINEL MASTERS failure) must NOT be cached as clean,
+    // or a later successful read cannot restore the advisory until the cache expires.
+    let readFailed = false;
     const readConfig = async (parameter: string): Promise<string | null> => {
       try {
         return await client.getConfigValue(parameter);
       } catch (err) {
+        readFailed = true;
         this.logger.debug(
           `CONFIG GET ${parameter} failed for ${connectionId}: ${(err as Error).message}`,
         );
@@ -340,22 +344,27 @@ export class ConfigHazardService {
             monitoredAddresses.push(replica.ip);
           }
         } catch (replicaErr) {
+          // A missing replica set could hide a hostname target, so the address view
+          // is incomplete — do not cache this cycle's result as authoritative.
+          readFailed = true;
           this.logger.debug(
             `SENTINEL REPLICAS ${master.name} failed for ${connectionId}: ${(replicaErr as Error).message}`,
           );
         }
       }
     } catch (err) {
+      readFailed = true;
       this.logger.debug(`SENTINEL MASTERS failed for ${connectionId}: ${(err as Error).message}`);
     }
 
-    return evaluateSentinelDnsResolutionHazard({
+    const finding = evaluateSentinelDnsResolutionHazard({
       isSentinel: true,
       resolveHostnames,
       monitoredAddresses,
       announceIp,
       announceHostnames,
     });
+    return { findings: finding !== null ? [finding] : [], cacheable: !readFailed };
   }
 
   private parseInfoFields(raw: string): Record<string, string> {

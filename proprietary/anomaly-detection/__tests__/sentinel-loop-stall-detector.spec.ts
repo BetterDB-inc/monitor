@@ -21,7 +21,7 @@ function input(partial: Partial<SentinelLoopStallInput> = {}): SentinelLoopStall
     tiltFlag: false,
     probeRttMs: 5,
     commandTimedOut: false,
-    masterDown: false,
+    masterDownObserved: null,
     thresholds: DEFAULT_SENTINEL_LOOP_STALL_THRESHOLDS,
     ...partial,
   };
@@ -161,19 +161,19 @@ describe('evaluateSentinelLoopStall — total wedge', () => {
 });
 
 describe('evaluateSentinelLoopStall — misdirected resolution (split-horizon)', () => {
-  it('classifies sdown with a healthy flat loop as misdirected, after the streak', () => {
+  it('classifies sdown with a healthy flat loop as misdirected, after the streak of fresh observations', () => {
     const state = createSentinelLoopStallState();
     const thresholds = DEFAULT_SENTINEL_LOOP_STALL_THRESHOLDS;
 
-    // Below the streak: silent.
+    // Below the streak: silent. Each `true` is one FRESH observation.
     for (let i = 1; i < thresholds.misdirectedMinStreak; i += 1) {
       expect(
-        evaluateSentinelLoopStall(state, input({ masterDown: true, probeRttMs: 10 })),
+        evaluateSentinelLoopStall(state, input({ masterDownObserved: true, probeRttMs: 10 })),
       ).toEqual([]);
     }
     const findings = evaluateSentinelLoopStall(
       state,
-      input({ masterDown: true, probeRttMs: 10 }),
+      input({ masterDownObserved: true, probeRttMs: 10 }),
     );
     expect(findings).toHaveLength(1);
     expect(findings[0]).toMatchObject({
@@ -183,13 +183,31 @@ describe('evaluateSentinelLoopStall — misdirected resolution (split-horizon)',
     });
   });
 
+  it('holds the streak on a null (stale) observation so a stale snapshot cannot advance it', () => {
+    const state = createSentinelLoopStallState();
+    // Two fresh down observations, then many stale polls (null) between refreshes.
+    evaluateSentinelLoopStall(state, input({ masterDownObserved: true, probeRttMs: 10 }));
+    evaluateSentinelLoopStall(state, input({ masterDownObserved: true, probeRttMs: 10 }));
+    expect(state.misdirectedStreak).toBe(2);
+    const held = driveN(state, { masterDownObserved: null, probeRttMs: 10 }, 20);
+    expect(held).toEqual([]);
+    expect(state.misdirectedStreak).toBe(2);
+    // Only the next FRESH down observation advances it to the threshold.
+    const findings = evaluateSentinelLoopStall(
+      state,
+      input({ masterDownObserved: true, probeRttMs: 10 }),
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0].kind).toBe('misdirected_resolution');
+  });
+
   it('resets the streak on a recovered master so a transient failover sdown never alerts', () => {
     const state = createSentinelLoopStallState();
-    driveN(state, { masterDown: true, probeRttMs: 10 }, 3);
-    // Master recovers before the streak completes.
-    evaluateSentinelLoopStall(state, input({ masterDown: false, probeRttMs: 10 }));
+    driveN(state, { masterDownObserved: true, probeRttMs: 10 }, 2);
+    // Master recovers (a fresh `false`) before the streak completes.
+    evaluateSentinelLoopStall(state, input({ masterDownObserved: false, probeRttMs: 10 }));
     expect(state.misdirectedStreak).toBe(0);
-    const findings = driveN(state, { masterDown: true, probeRttMs: 10 }, 3);
+    const findings = driveN(state, { masterDownObserved: true, probeRttMs: 10 }, 2);
     expect(findings).toEqual([]);
   });
 
@@ -197,7 +215,7 @@ describe('evaluateSentinelLoopStall — misdirected resolution (split-horizon)',
     const state = createSentinelLoopStallState();
     // sdown AND an RTT stall: a stall outranks the split-horizon reading, and the
     // misdirected streak must not accumulate underneath it.
-    const findings = driveN(state, { masterDown: true, probeRttMs: 1_600 }, 3);
+    const findings = driveN(state, { masterDownObserved: true, probeRttMs: 1_600 }, 3);
     expect(findings[0].kind).toBe('rtt_stall');
     expect(state.misdirectedStreak).toBe(0);
   });
@@ -206,7 +224,7 @@ describe('evaluateSentinelLoopStall — misdirected resolution (split-horizon)',
     const state = createSentinelLoopStallState();
     const findings = evaluateSentinelLoopStall(
       state,
-      input({ masterDown: true, tiltSinceSeconds: 5 }),
+      input({ masterDownObserved: true, tiltSinceSeconds: 5 }),
     );
     expect(findings[0].kind).toBe('tilt');
     expect(state.misdirectedStreak).toBe(0);

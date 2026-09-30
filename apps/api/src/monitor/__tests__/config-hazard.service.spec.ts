@@ -415,5 +415,28 @@ describe('ConfigHazardService', () => {
       const findings = await service.getHazards('conn-sentinel');
       expect(findings).toHaveLength(0);
     });
+
+    it('does not cache an incomplete Sentinel probe when SENTINEL MASTERS fails', async () => {
+      // resolve-hostnames yes but the masters read fails: the address view is
+      // incomplete (a hostname target could be hidden), so the cycle must not be
+      // cached as authoritative — the next poll has to re-probe.
+      client.getConfigValue.mockImplementation((param: string) => {
+        if (param === 'resolve-hostnames') return Promise.resolve('yes');
+        if (param === 'announce-hostnames') return Promise.resolve('no');
+        return Promise.resolve(null);
+      });
+      let masters = 0;
+      client.call.mockImplementation((cmd: string, args: string[]) => {
+        if (cmd === 'INFO') return Promise.resolve('# Server\r\nserver_mode:sentinel\r\n');
+        if (cmd === 'SENTINEL' && args[0] === 'MASTERS') {
+          masters += 1;
+          return Promise.reject(new Error('LOADING Redis is loading the dataset'));
+        }
+        return Promise.resolve(null);
+      });
+      await service.getHazards('conn-sentinel');
+      await service.getHazards('conn-sentinel');
+      expect(masters).toBe(2);
+    });
   });
 });

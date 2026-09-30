@@ -197,7 +197,7 @@ export const envSchema = z
     SENTINEL_LOOP_STALL_HIGH_MS: z.coerce.number().int().min(1).default(2000),
     SENTINEL_LOOP_STALL_WINDOW: z.coerce.number().int().min(1).default(10),
     SENTINEL_LOOP_STALL_MIN_BREACHES: z.coerce.number().int().min(1).default(3),
-    SENTINEL_LOOP_STALL_MISDIRECTED_STREAK: z.coerce.number().int().min(1).default(15),
+    SENTINEL_LOOP_STALL_MISDIRECTED_STREAK: z.coerce.number().int().min(1).default(3),
 
     // OTLP trace ingestion (AI observability Phase 2)
     OTEL_INGEST_ENABLED: z
@@ -255,6 +255,26 @@ export const envSchema = z
     ENCRYPTION_KEY: z.string().min(16).optional(),
   })
   .superRefine((data, ctx) => {
+    // The Sentinel loop-stall RTT proxy is coherent only when warn < high and the
+    // K-of-N window can actually hold K breaches. Each field is valid alone, but a
+    // bad combination silently disables the detector, so fail fast at startup.
+    if (data.SENTINEL_LOOP_STALL_WARN_MS >= data.SENTINEL_LOOP_STALL_HIGH_MS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'SENTINEL_LOOP_STALL_WARN_MS must be below SENTINEL_LOOP_STALL_HIGH_MS (warn is the leading indicator; high is the critical threshold)',
+        path: ['SENTINEL_LOOP_STALL_WARN_MS'],
+      });
+    }
+    if (data.SENTINEL_LOOP_STALL_MIN_BREACHES > data.SENTINEL_LOOP_STALL_WINDOW) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'SENTINEL_LOOP_STALL_MIN_BREACHES must not exceed SENTINEL_LOOP_STALL_WINDOW, or the window can never hold enough breaches and rtt_stall never fires',
+        path: ['SENTINEL_LOOP_STALL_MIN_BREACHES'],
+      });
+    }
+
     // Require STORAGE_URL when using postgres
     if (
       (data.STORAGE_TYPE === 'postgres' || data.STORAGE_TYPE === 'postgresql') &&

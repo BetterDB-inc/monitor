@@ -12,6 +12,36 @@ describe('envSchema', () => {
     process.env = originalEnv;
   });
 
+  describe('SENTINEL_LOOP_STALL cross-field validation', () => {
+    it('accepts the defaults (warn < high, breaches <= window)', () => {
+      expect(envSchema.safeParse({}).success).toBe(true);
+    });
+
+    it('rejects WARN_MS at or above HIGH_MS', () => {
+      const result = envSchema.safeParse({
+        SENTINEL_LOOP_STALL_WARN_MS: '2000',
+        SENTINEL_LOOP_STALL_HIGH_MS: '2000',
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects MIN_BREACHES greater than WINDOW', () => {
+      const result = envSchema.safeParse({
+        SENTINEL_LOOP_STALL_WINDOW: '5',
+        SENTINEL_LOOP_STALL_MIN_BREACHES: '6',
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it('accepts MIN_BREACHES equal to WINDOW', () => {
+      const result = envSchema.safeParse({
+        SENTINEL_LOOP_STALL_WINDOW: '5',
+        SENTINEL_LOOP_STALL_MIN_BREACHES: '5',
+      });
+      expect(result.success).toBe(true);
+    });
+  });
+
   describe('default values', () => {
     it('should provide defaults for all required fields', () => {
       const result = envSchema.safeParse({});

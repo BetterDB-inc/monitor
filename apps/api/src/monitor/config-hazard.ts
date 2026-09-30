@@ -339,6 +339,15 @@ const SENTINEL_DNS_HAZARD_MESSAGE =
   'from a local cache; peers resolving announced FQDNs are the ones that stall. ' +
   'Writeup and reproduction: https://github.com/BetterDB-inc/valkey-sentinel-tilt-repro.';
 
+const SENTINEL_DNS_HAZARD_UNVERIFIED_MESSAGE =
+  'Sentinel is running with `resolve-hostnames yes` and no monitored/announced target ' +
+  'could be confirmed as an IP literal: `announce-hostnames` is not `yes`, so SENTINEL ' +
+  'MASTERS/REPLICAS report resolved IPs and would hide any configured hostname behind a ' +
+  'literal. If any target is a hostname, Sentinel resolves it with a blocking getaddrinfo ' +
+  'on its single-threaded loop and slow DNS can stall it past the 2000ms TILT trigger. ' +
+  'Verify the monitored/announced targets are IP literals, or address them by IP. ' +
+  'Writeup and reproduction: https://github.com/BetterDB-inc/valkey-sentinel-tilt-repro.';
+
 /**
  * Predictive Sentinel DNS-resolution hazard (valkey-sentinel-tilt-repro). Fires
  * BEFORE any stall: the risky combination is Sentinel mode + `resolve-hostnames yes`
@@ -361,19 +370,34 @@ export function evaluateSentinelDnsResolutionHazard(
   const monitoredHostname = input.monitoredAddresses.some((addr) => {
     return isHostnameValue(addr);
   });
-  const announceHostname =
-    input.announceHostnames === 'yes' ||
-    (input.announceIp !== null && isHostnameValue(input.announceIp));
+  // `announce-hostnames yes` only changes how EXISTING addresses are formatted in
+  // replies; it does not introduce a hostname to resolve. So the announced hostname
+  // signal is a hostname literal in `announce-ip`, NOT the announce-hostnames flag.
+  const announceHostname = input.announceIp !== null && isHostnameValue(input.announceIp);
 
-  if (monitoredHostname === false && announceHostname === false) {
-    return null;
+  if (monitoredHostname || announceHostname) {
+    return {
+      id: 'sentinel-dns-resolution-blocking',
+      severity: 'warning',
+      status: 'advisory',
+      message: SENTINEL_DNS_HAZARD_MESSAGE,
+    };
   }
 
+  // No hostname observed — but that is conclusive only when Sentinel would have
+  // REPORTED a configured hostname. `SENTINEL MASTERS`/`REPLICAS` echo the configured
+  // target as a hostname only under `announce-hostnames yes`; otherwise they report
+  // the RESOLVED IP, hiding a hostname target behind a literal. With `resolve-hostnames
+  // yes` and no such confirmation, we cannot rule the hazard out, so report it as
+  // unverified rather than a false clean (a missed advisory is better than a false one).
+  if (input.announceHostnames === 'yes') {
+    return null;
+  }
   return {
     id: 'sentinel-dns-resolution-blocking',
     severity: 'warning',
-    status: 'advisory',
-    message: SENTINEL_DNS_HAZARD_MESSAGE,
+    status: 'unverified',
+    message: SENTINEL_DNS_HAZARD_UNVERIFIED_MESSAGE,
   };
 }
 
