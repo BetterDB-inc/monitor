@@ -219,7 +219,10 @@ const RUN_SCENARIOS = RUN && typeof HARNESS_DIR === 'string' && HARNESS_DIR.leng
           tiltFlag: tiltFlag !== undefined ? tiltFlag === '1' : null,
           probeRttMs: rttMs,
           commandTimedOut,
-          masterDown,
+          // This harness reads SENTINEL MASTERS fresh on every 500ms poll, so each
+          // observation is fresh (never null) — unlike the service, which feeds a
+          // 15s snapshot and gates freshness itself.
+          masterDownObserved: masterDown,
           thresholds: DEFAULT_SENTINEL_LOOP_STALL_THRESHOLDS,
         });
         for (const f of findings) {

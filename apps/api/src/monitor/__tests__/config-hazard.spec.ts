@@ -280,13 +280,18 @@ describe('evaluateSentinelDnsResolutionHazard', () => {
     expect(finding?.status).toBe('advisory');
   });
 
-  it('flags on announce-hostnames yes even when monitored targets are IPs', () => {
-    const finding = evaluateSentinelDnsResolutionHazard({
-      ...base,
-      monitoredAddresses: ['10.0.0.1'],
-      announceHostnames: 'yes',
-    });
-    expect(finding?.id).toBe('sentinel-dns-resolution-blocking');
+  it('does not flag on announce-hostnames yes alone when every target is an IP literal', () => {
+    // announce-hostnames only changes how existing addresses are FORMATTED in replies;
+    // it does not introduce a hostname. With it on, an all-IP reply is trustworthy, so
+    // this must be a confident clean, not a false-positive advisory.
+    expect(
+      evaluateSentinelDnsResolutionHazard({
+        ...base,
+        monitoredAddresses: ['10.0.0.1'],
+        announceIp: '10.0.0.9',
+        announceHostnames: 'yes',
+      }),
+    ).toBeNull();
   });
 
   it('flags when announce-ip itself is a hostname', () => {
@@ -310,22 +315,41 @@ describe('evaluateSentinelDnsResolutionHazard', () => {
     expect(evaluateSentinelDnsResolutionHazard({ ...base, resolveHostnames: null })).toBeNull();
   });
 
-  it('stays silent when every monitored/announced target is an IP literal', () => {
+  it('stays silent when every target is an IP literal AND announce-hostnames yes confirms the reply shows hostnames', () => {
+    // announce-hostnames yes means a configured hostname WOULD appear in the reply, so
+    // an all-IP view is conclusive — no hazard.
     expect(
       evaluateSentinelDnsResolutionHazard({
         ...base,
         monitoredAddresses: ['10.0.0.1', '10.0.0.2', '::1'],
         announceIp: '10.0.0.9',
-        announceHostnames: 'no',
+        announceHostnames: 'yes',
       }),
     ).toBeNull();
   });
 
+  it('reports unverified when only IPs are observed but announce-hostnames is not yes (resolved IPs may hide a hostname)', () => {
+    // With announce-hostnames no/unset, SENTINEL MASTERS/REPLICAS report resolved IPs,
+    // so an all-IP view cannot rule out a configured hostname — report unverified, not
+    // a false clean.
+    const finding = evaluateSentinelDnsResolutionHazard({
+      ...base,
+      monitoredAddresses: ['10.0.0.1', '10.0.0.2', '::1'],
+      announceIp: '10.0.0.9',
+      announceHostnames: 'no',
+    });
+    expect(finding?.id).toBe('sentinel-dns-resolution-blocking');
+    expect(finding?.status).toBe('unverified');
+  });
+
   it('does not read Sentinel\'s "?" placeholder or empty values as a hostname', () => {
+    // announce-hostnames yes so the all-non-hostname view is conclusive: "?"/"" must
+    // not be treated as hostnames, so this is a confident clean.
     expect(
       evaluateSentinelDnsResolutionHazard({
         ...base,
         monitoredAddresses: ['?', ''],
+        announceHostnames: 'yes',
       }),
     ).toBeNull();
   });
