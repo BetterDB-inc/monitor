@@ -1,6 +1,6 @@
 jest.mock('../../database/adapters/unified.adapter');
 
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, Logger } from '@nestjs/common';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import { CHILD_CONNECT_TIMEOUT_MS, ConnectionRegistry } from '../connection-registry.service';
 import { UnifiedDatabaseAdapter } from '../../database/adapters/unified.adapter';
@@ -191,6 +191,109 @@ describe('ConnectionRegistry membership', () => {
     const id = await registry.addManagedChild('seed', { host: '10.0.0.5', port: 6379, nodeId: 'r1', source: 'sentinel', group: 'mymaster', role: 'replica' });
     await registry.refreshChild(id, { host: '10.0.0.5', port: 6379, nodeId: 'r1', source: 'sentinel', group: 'mymaster', role: 'primary' });
     expect(registry.getConfig(id)?.membership?.role).toBe('primary');
+  });
+
+  it('stores the announced hostname and verifies the child against it', async () => {
+    const { registry, storage } = build();
+    put(registry, seed);
+    const id = await registry.addManagedChild('seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster', hostname: 'node-2.cluster.local' });
+    expect(registry.getConfig(id)?.membership?.hostname).toBe('node-2.cluster.local');
+    expect(storage.saveConnection).toHaveBeenCalledWith(expect.objectContaining({ membership: expect.objectContaining({ hostname: 'node-2.cluster.local' }) }));
+    expect(UnifiedDatabaseAdapter).toHaveBeenCalledWith(expect.objectContaining({ host: '10.0.0.2', tls: true, tlsServername: 'node-2.cluster.local' }));
+  });
+
+  it('reconnects a TLS child against its new hostname when the hostname changes', async () => {
+    const { registry } = build();
+    put(registry, seed);
+    const stale = { connect: jest.fn().mockResolvedValue(undefined), disconnect: jest.fn().mockResolvedValue(undefined), getCapabilities: () => ({}) };
+    const fresh = { connect: jest.fn().mockResolvedValue(undefined), disconnect: jest.fn().mockResolvedValue(undefined), getCapabilities: () => ({}) };
+    jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(() => stale as never).mockImplementationOnce(() => fresh as never);
+    const id = await registry.addManagedChild('seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' });
+    await registry.refreshChild(id, { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster', hostname: 'node-2.cluster.local' });
+    expect(registry.getConfig(id)?.membership?.hostname).toBe('node-2.cluster.local');
+    expect(UnifiedDatabaseAdapter).toHaveBeenLastCalledWith(expect.objectContaining({ tlsServername: 'node-2.cluster.local' }));
+    expect(stale.disconnect).toHaveBeenCalled();
+    expect((registry as unknown as Internals).connections.get(id)).toBe(fresh);
+  });
+
+  it('drops the stored hostname when the node stops announcing one', async () => {
+    const { registry } = build();
+    put(registry, seed);
+    const id = await registry.addManagedChild('seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster', hostname: 'node-2.cluster.local' });
+    await registry.refreshChild(id, { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' });
+    expect(registry.getConfig(id)?.membership).toEqual({ seedId: 'seed', nodeId: 'n2', origin: 'auto', source: 'cluster' });
+  });
+
+  it('keeps the refreshed membership when the hostname reconnect fails', async () => {
+    const { registry } = build();
+    put(registry, seed);
+    const id = await registry.addManagedChild('seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' });
+    jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(
+      () => ({ connect: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')), disconnect: jest.fn().mockResolvedValue(undefined) }) as never,
+    );
+    await expect(
+      registry.refreshChild(id, { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster', hostname: 'node-2.cluster.local' }),
+    ).resolves.toBeUndefined();
+    expect(registry.getConfig(id)?.membership?.hostname).toBe('node-2.cluster.local');
+  });
+
+  it.each([
+    ['the hostname is unchanged', { tls: true }, { hostname: 'node-2.cluster.local' }, 'node-2.cluster.local'],
+    ['the child does not use TLS', { tls: false }, {}, 'node-2.cluster.local'],
+    ['the child is retired', { tls: true }, { retiredAt: 5 }, 'node-2.cluster.local'],
+    ['the connection was adopted', { tls: true }, { origin: 'adopted' as const }, 'node-2.cluster.local'],
+  ])('does not reconnect on refresh when %s', async (_case, config, membership, hostname) => {
+    const { registry } = build();
+    put(registry, { id: 'auto', ...config, membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', source: 'cluster', ...membership } });
+    await registry.refreshChild('auto', { host: 'h', port: 1, nodeId: 'b', source: 'cluster', hostname });
+    expect(registry.getConfig('auto')?.membership).toMatchObject({ nodeId: 'b', hostname });
+    expect(UnifiedDatabaseAdapter).not.toHaveBeenCalled();
+  });
+
+  it('reactivates a retired child against the hostname it now announces', async () => {
+    const { registry } = build();
+    put(registry, { id: 'auto', tls: true, membership: { seedId: 'seed', nodeId: 'old', origin: 'auto', source: 'cluster', retiredAt: 5 } });
+    await registry.reactivateChild('auto', { host: 'h', port: 1, nodeId: 'new', source: 'cluster', hostname: 'node-2.cluster.local' });
+    expect(UnifiedDatabaseAdapter).toHaveBeenCalledWith(expect.objectContaining({ tlsServername: 'node-2.cluster.local' }));
+    expect(registry.getConfig('auto')?.membership?.hostname).toBe('node-2.cluster.local');
+  });
+
+  describe('certificate hint', () => {
+    const altnameError = new Error("Hostname/IP does not match certificate's altnames: IP: 10.0.0.2 is not in the cert's list");
+
+    async function warningFor(node: Parameters<ConnectionRegistry['addManagedChild']>[1], error: Error): Promise<string> {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      try {
+        const { registry } = build();
+        put(registry, seed);
+        jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(() => ({ connect: jest.fn().mockRejectedValue(error) }) as never);
+        await registry.addManagedChild('seed', node);
+        return warn.mock.calls.map(([message]) => String(message)).join('\n');
+      } finally {
+        warn.mockRestore();
+      }
+    }
+
+    it('points a cluster at cluster-announce-hostname when the certificate does not cover the announced IP', async () => {
+      const warning = await warningFor({ host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' }, altnameError);
+      expect(warning).toContain('cluster-announce-hostname');
+    });
+
+    it('points a Sentinel group at hostname announcement', async () => {
+      const warning = await warningFor({ host: '10.0.0.2', port: 6379, nodeId: 'r1', source: 'sentinel', group: 'mymaster', role: 'replica' }, altnameError);
+      expect(warning).toContain('announce-hostnames');
+    });
+
+    it('adds no hint when the node already announces a hostname', async () => {
+      const warning = await warningFor({ host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster', hostname: 'node-2.cluster.local' }, altnameError);
+      expect(warning).not.toContain('cluster-announce-hostname');
+    });
+
+    it('adds no hint to an unrelated connect failure', async () => {
+      const warning = await warningFor({ host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' }, new Error('ECONNREFUSED'));
+      expect(warning).toContain('ECONNREFUSED');
+      expect(warning).not.toContain('cluster-announce-hostname');
+    });
   });
 
   it('hides retired auto children from list() but not adopted ones', () => {

@@ -83,6 +83,13 @@ but show as disconnected.
 
 ## Limits
 
+- Over TLS, a child is verified against the address Sentinel reports for
+  it. Sentinel reports IPs by default, so certificates issued for hostnames
+  only fail verification and the children stay disconnected. Have Sentinel
+  report hostnames instead (`sentinel resolve-hostnames yes` and
+  `sentinel announce-hostnames yes`, with `replica-announce-ip` set to a
+  hostname on the data nodes), or use certificates that list the node IPs.
+
 - Sentinel seeds connected over an SSH tunnel are not supported for
   auto-registration, for the same reason as cluster seeds: only the direct
   connection to the seed is tunnelled, so discovered node addresses can't

@@ -184,6 +184,12 @@ describe('ClusterDiscoveryService', () => {
       await expect(service.discoverNodes()).rejects.toThrow('Connection failed');
     });
 
+    it('exposes the hostname a node announces', async () => {
+      mockDbClient.getClusterNodes.mockResolvedValue([mockClusterNodes[0], { ...mockClusterNodes[1], hostname: 'node-2.cluster.local' }]);
+      const nodes = await service.discoverNodes();
+      expect(nodes.map((n) => n.hostname)).toEqual([undefined, 'node-2.cluster.local']);
+    });
+
     it('exposes the raw node flags', async () => {
       const nodes = await service.discoverNodes();
       expect(nodes[0].flags).toEqual(['master', 'myself']);
@@ -264,6 +270,20 @@ describe('ClusterDiscoveryService', () => {
       await service.getNodeConnection('node2-id-def456', 'test-connection').catch(() => undefined);
       expect(jest.mocked(Valkey)).toHaveBeenCalledWith(
         expect.objectContaining({ tls: { ca: 'seed-ca', rejectUnauthorized: true } }),
+      );
+    });
+
+    it('verifies a node client against the hostname the node announces', async () => {
+      mockDbClient.getClusterNodes.mockResolvedValue([mockClusterNodes[0], { ...mockClusterNodes[1], hostname: 'node-2.cluster.local' }]);
+      mockDbClient.getClient.mockReturnValue({
+        options: { username: 'u', password: 'p', tls: { servername: 'seed.example', ca: 'seed-ca' } },
+      });
+      await service.getNodeConnection('node2-id-def456', 'test-connection').catch(() => undefined);
+      expect(jest.mocked(Valkey)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          host: '192.168.1.11',
+          tls: { ca: 'seed-ca', servername: 'node-2.cluster.local', checkServerIdentity: expect.any(Function) },
+        }),
       );
     });
 

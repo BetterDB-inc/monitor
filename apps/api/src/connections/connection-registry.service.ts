@@ -20,6 +20,15 @@ import { ENV_DEFAULT_ID } from './connection.constants';
 
 export const CHILD_CONNECT_TIMEOUT_MS = 10_000;
 
+function certificateHint(errorMsg: string, node: DesiredNode): string {
+  if (node.hostname !== undefined || !/altnames|ERR_TLS_CERT_ALTNAME_INVALID/i.test(errorMsg)) {
+    return '';
+  }
+  return node.source === 'cluster'
+    ? ' The certificate does not cover the announced IP; set cluster-announce-hostname on the nodes so they are verified by hostname.'
+    : ' The certificate does not cover the announced IP; have Sentinel announce hostnames (resolve-hostnames and announce-hostnames).';
+}
+
 async function connectWithin(adapter: DatabasePort, ms: number): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   const attempt = adapter.connect();
@@ -69,6 +78,7 @@ function membershipFields(node: DesiredNode): Pick<TopologyMembership, 'nodeId' 
     source: node.source,
     ...(node.group !== undefined ? { group: node.group } : {}),
     ...(node.role !== undefined ? { role: node.role } : {}),
+    ...(node.hostname !== undefined ? { hostname: node.hostname } : {}),
   };
 }
 
@@ -348,6 +358,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       password: config.password || '',
       connectionName,
       tls: config.tls,
+      tlsServername: config.membership?.origin === 'auto' ? config.membership.hostname : undefined,
       connectionId: config.id,
       sshTunnel: config.sshTunnel,
       sshTunnelService: config.sshTunnel?.enabled ? this.sshTunnelService : undefined,
@@ -1112,7 +1123,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       const isAuthError = this.isAuthenticationError(errorMsg);
       credentialStatus = isAuthError ? 'invalid' : 'unknown';
       credentialError = isAuthError ? errorMsg : undefined;
-      this.logger.warn(`Auto-registered ${config.name} but could not connect: ${errorMsg}`);
+      this.logger.warn(`Auto-registered ${config.name} but could not connect: ${errorMsg}${certificateHint(errorMsg, node)}`);
     }
     try {
       await this.storage.saveConnection(this.encryptConfig(config));
@@ -1134,8 +1145,17 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   async refreshChild(id: string, node: DesiredNode): Promise<void> {
-    const { seedId, origin, retiredAt } = this.requireMembership(id);
+    const { seedId, origin, retiredAt, hostname } = this.requireMembership(id);
     await this.setMembership(id, { seedId, origin, ...membershipFields(node), ...(retiredAt !== undefined ? { retiredAt } : {}) });
+    const config = this.configs.get(id);
+    if (hostname === node.hostname || origin !== 'auto' || retiredAt !== undefined || !config?.tls) {
+      return;
+    }
+    try {
+      await this.reconnect(id);
+    } catch (err) {
+      this.logger.warn(`Could not reconnect ${config.name} after its hostname changed: ${err instanceof Error ? err.message : err}`);
+    }
   }
 
   async retireChild(id: string): Promise<void> {
@@ -1159,7 +1179,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     const membership = this.requireMembership(id);
     const config = this.configs.get(id)!;
     if (membership.origin === 'auto') {
-      const adapter = this.createAdapter(config);
+      const adapter = this.createAdapter({ ...config, membership: { ...membership, hostname: node.hostname } });
       try {
         await connectWithin(adapter, CHILD_CONNECT_TIMEOUT_MS);
       } catch (err) {
