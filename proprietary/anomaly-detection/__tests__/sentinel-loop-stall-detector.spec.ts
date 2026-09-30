@@ -201,6 +201,34 @@ describe('evaluateSentinelLoopStall — misdirected resolution (split-horizon)',
     expect(findings[0].kind).toBe('misdirected_resolution');
   });
 
+  it('keeps a confirmed finding active across null observations so the gate does not re-fire it', () => {
+    const state = createSentinelLoopStallState();
+    // Reach the threshold with fresh down observations.
+    const confirmed = driveN(
+      state,
+      { masterDownObserved: true, probeRttMs: 10 },
+      DEFAULT_SENTINEL_LOOP_STALL_THRESHOLDS.misdirectedMinStreak,
+    );
+    expect(confirmed[0].kind).toBe('misdirected_resolution');
+    // Stale (null) polls between snapshot refreshes MUST keep returning the finding;
+    // a gap would let the persistence gate clear it and re-emit on the next fresh down.
+    for (let i = 0; i < 20; i += 1) {
+      const held = evaluateSentinelLoopStall(
+        state,
+        input({ masterDownObserved: null, probeRttMs: 10 }),
+      );
+      expect(held).toHaveLength(1);
+      expect(held[0].kind).toBe('misdirected_resolution');
+    }
+    // A fresh recovery ends the finding and re-arms.
+    const recovered = evaluateSentinelLoopStall(
+      state,
+      input({ masterDownObserved: false, probeRttMs: 10 }),
+    );
+    expect(recovered).toEqual([]);
+    expect(state.misdirectedStreak).toBe(0);
+  });
+
   it('resets the streak on a recovered master so a transient failover sdown never alerts', () => {
     const state = createSentinelLoopStallState();
     driveN(state, { masterDownObserved: true, probeRttMs: 10 }, 2);

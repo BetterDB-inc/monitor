@@ -199,10 +199,12 @@ const RUN_SCENARIOS = RUN && typeof HARNESS_DIR === 'string' && HARNESS_DIR.leng
         } catch {
           commandTimedOut = true;
         }
-        let masterDown = false;
+        // null = no fresh view this poll (probe failed): must not read as a recovery,
+        // which would reset the misdirected streak. A boolean only after a good probe.
+        let masterDownObserved: boolean | null = null;
         try {
           const raw = (await client.call('SENTINEL', 'MASTERS')) as unknown[];
-          masterDown = MetricsParser.parseSentinelNodes(raw).some((m) => {
+          masterDownObserved = MetricsParser.parseSentinelNodes(raw).some((m) => {
             return m.flags.includes('s_down') || m.flags.includes('o_down');
           });
         } catch {
@@ -219,10 +221,9 @@ const RUN_SCENARIOS = RUN && typeof HARNESS_DIR === 'string' && HARNESS_DIR.leng
           tiltFlag: tiltFlag !== undefined ? tiltFlag === '1' : null,
           probeRttMs: rttMs,
           commandTimedOut,
-          // This harness reads SENTINEL MASTERS fresh on every 500ms poll, so each
-          // observation is fresh (never null) — unlike the service, which feeds a
-          // 15s snapshot and gates freshness itself.
-          masterDownObserved: masterDown,
+          // Fresh boolean per poll when SENTINEL MASTERS answers; null when that probe
+          // failed (unlike the service, which feeds a 15s snapshot and gates freshness).
+          masterDownObserved,
           thresholds: DEFAULT_SENTINEL_LOOP_STALL_THRESHOLDS,
         });
         for (const f of findings) {

@@ -269,6 +269,7 @@ describe('evaluateSentinelDnsResolutionHazard', () => {
     isSentinel: true,
     resolveHostnames: 'yes',
     monitoredAddresses: ['sentinel-primary'],
+    monitoredAddressesComplete: true,
     announceIp: null,
     announceHostnames: null,
   };
@@ -337,6 +338,20 @@ describe('evaluateSentinelDnsResolutionHazard', () => {
       monitoredAddresses: ['10.0.0.1', '10.0.0.2', '::1'],
       announceIp: '10.0.0.9',
       announceHostnames: 'no',
+    });
+    expect(finding?.id).toBe('sentinel-dns-resolution-blocking');
+    expect(finding?.status).toBe('unverified');
+  });
+
+  it('reports unverified when the address probe is incomplete, even with announce-hostnames yes', () => {
+    // MASTERS/REPLICAS partially failed, so an absent hostname is not conclusive even
+    // though announce-hostnames yes would otherwise make the all-IP view trustworthy.
+    const finding = evaluateSentinelDnsResolutionHazard({
+      ...base,
+      monitoredAddresses: ['10.0.0.1'],
+      monitoredAddressesComplete: false,
+      announceIp: '10.0.0.9',
+      announceHostnames: 'yes',
     });
     expect(finding?.id).toBe('sentinel-dns-resolution-blocking');
     expect(finding?.status).toBe('unverified');
