@@ -98,6 +98,11 @@ describe('collectionPlan', () => {
     const plan = collectionPlan(seed, [seed, auto, adopted, down, retired, foreign, sentinelChild]);
     expect(plan).toEqual({ kind: 'cluster', members: [auto, adopted] });
   });
+
+  it('still treats the seed as a cluster when none of its nodes are reachable', () => {
+    const down = connection('down', { membership: member(), isConnected: false });
+    expect(collectionPlan(seed, [seed, down])).toEqual({ kind: 'cluster', members: [] });
+  });
 });
 
 describe('mergePatternSnapshots', () => {
@@ -309,6 +314,24 @@ describe('KeyAnalyticsService with topology members', () => {
       clients[id].collectKeyAnalytics.mockRejectedValue(new Error('LOADING'));
     }
     await expect(poll('seed')).rejects.toThrow('LOADING');
+    expect(storage.saveKeyPatternSnapshots).not.toHaveBeenCalled();
+  });
+
+  it('fails instead of reporting an empty keyspace when no primary can be found', async () => {
+    const { poll, clients, storage } = cluster();
+    for (const client of Object.values(clients)) {
+      client.getRole.mockRejectedValue(new Error('NOPERM'));
+    }
+    await expect(poll('seed')).rejects.toThrow('No reachable primary found for seed');
+    expect(storage.saveKeyPatternSnapshots).not.toHaveBeenCalled();
+  });
+
+  it('does not store a replica seed as the whole cluster while its nodes are down', async () => {
+    const connections = [connection('seed'), connection('primary-2', { membership: member(), isConnected: false })];
+    const clients = { seed: fakeClient('slave', scanOf(100)), 'primary-2': fakeClient('master', scanOf(300)) };
+    const { poll, storage } = build(connections, clients);
+    await expect(poll('seed')).rejects.toThrow('No reachable primary');
+    expect(clients.seed.collectKeyAnalytics).not.toHaveBeenCalled();
     expect(storage.saveKeyPatternSnapshots).not.toHaveBeenCalled();
   });
 

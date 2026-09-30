@@ -16,14 +16,9 @@ export function collectionPlan(connection: ConnectionStatus, all: ConnectionStat
   if (connection.membership) {
     return { kind: 'single' };
   }
-  const members = all.filter((candidate) => {
+  const nodes = all.filter((candidate) => {
     const membership = candidate.membership;
-    return (
-      membership?.seedId === connection.id &&
-      membership.source === 'cluster' &&
-      membership.retiredAt === undefined &&
-      isScannable(candidate)
-    );
+    return membership?.seedId === connection.id && membership.source === 'cluster' && membership.retiredAt === undefined;
   });
-  return members.length > 0 ? { kind: 'cluster', members } : { kind: 'single' };
+  return nodes.length > 0 ? { kind: 'cluster', members: nodes.filter(isScannable) } : { kind: 'single' };
 }

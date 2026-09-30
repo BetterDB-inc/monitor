@@ -157,6 +157,9 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
       return [await ctx.client.collectKeyAnalytics(options)];
     }
     const nodes = await this.primaries(this.clusterNodes({ name: ctx.connectionName, client: ctx.client }, plan.members));
+    if (nodes.length === 0) {
+      throw new Error(`No reachable primary found for ${ctx.connectionName}`);
+    }
     const scans = await Promise.allSettled(nodes.map((node) => node.client.collectKeyAnalytics(options)));
     const results: KeyAnalyticsResult[] = [];
     const failures: unknown[] = [];
