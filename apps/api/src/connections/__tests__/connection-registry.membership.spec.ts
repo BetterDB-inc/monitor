@@ -254,19 +254,63 @@ describe('ConnectionRegistry membership', () => {
     const { registry, storage } = build();
     put(registry, seed);
     const stale = { connect: jest.fn().mockResolvedValue(undefined), disconnect: jest.fn().mockResolvedValue(undefined), getCapabilities: () => ({}) };
+    const unsaved = { connect: jest.fn().mockResolvedValue(undefined), disconnect: jest.fn().mockResolvedValue(undefined), getCapabilities: () => ({}) };
     const fresh = { connect: jest.fn().mockResolvedValue(undefined), disconnect: jest.fn().mockResolvedValue(undefined), getCapabilities: () => ({}) };
-    jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(() => stale as never).mockImplementationOnce(() => fresh as never);
+    jest
+      .mocked(UnifiedDatabaseAdapter)
+      .mockImplementationOnce(() => stale as never)
+      .mockImplementationOnce(() => unsaved as never)
+      .mockImplementationOnce(() => fresh as never);
     const id = await registry.addManagedChild('seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' });
     const desired = { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' as const, hostname: 'node-2.cluster.local' };
     storage.updateConnection.mockRejectedValueOnce(new Error('SQLITE_BUSY'));
 
     await expect(registry.refreshChild(id, desired)).rejects.toThrow('SQLITE_BUSY');
     expect(registry.getConfig(id)?.membership?.hostname).toBeUndefined();
-    expect((registry as unknown as Internals).connections.get(id)).toBe(stale);
+    expect((registry as unknown as Internals).connections.get(id)).toBe(unsaved);
 
     await registry.refreshChild(id, desired);
     expect(registry.getConfig(id)?.membership?.hostname).toBe('node-2.cluster.local');
     expect((registry as unknown as Internals).connections.get(id)).toBe(fresh);
+  });
+
+  it('retries the hostname reconnect when both the reconnect and the following write fail', async () => {
+    const { registry, storage } = build();
+    put(registry, seed);
+    const stale = { connect: jest.fn().mockResolvedValue(undefined), disconnect: jest.fn().mockResolvedValue(undefined), getCapabilities: () => ({}) };
+    const failing = { connect: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')), disconnect: jest.fn().mockResolvedValue(undefined) };
+    const fresh = { connect: jest.fn().mockResolvedValue(undefined), disconnect: jest.fn().mockResolvedValue(undefined), getCapabilities: () => ({}) };
+    jest
+      .mocked(UnifiedDatabaseAdapter)
+      .mockImplementationOnce(() => stale as never)
+      .mockImplementationOnce(() => failing as never)
+      .mockImplementationOnce(() => fresh as never);
+    const id = await registry.addManagedChild('seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster', hostname: 'old.cluster.local' });
+    const desired = { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' as const, hostname: 'node-2.cluster.local' };
+    storage.updateConnection.mockClear();
+    storage.updateConnection.mockRejectedValueOnce(new Error('SQLITE_BUSY'));
+
+    await expect(registry.refreshChild(id, desired)).rejects.toThrow('SQLITE_BUSY');
+    expect(registry.getConfig(id)?.membership?.hostname).toBe('old.cluster.local');
+    expect(storage.updateConnection).not.toHaveBeenCalledWith(id, { membership: expect.objectContaining({ hostname: 'node-2.cluster.local' }) });
+
+    await registry.refreshChild(id, desired);
+    expect(registry.getConfig(id)?.membership?.hostname).toBe('node-2.cluster.local');
+    expect(storage.updateConnection).toHaveBeenLastCalledWith(id, { membership: expect.objectContaining({ hostname: 'node-2.cluster.local' }) });
+    expect((registry as unknown as Internals).connections.get(id)).toBe(fresh);
+  });
+
+  it('never stores a hostname the child could not be reconnected against', async () => {
+    const { registry, storage } = build();
+    put(registry, seed);
+    jest
+      .mocked(UnifiedDatabaseAdapter)
+      .mockImplementationOnce(() => ({ connect: jest.fn().mockResolvedValue(undefined), disconnect: jest.fn().mockResolvedValue(undefined), getCapabilities: () => ({}) }) as never)
+      .mockImplementationOnce(() => ({ connect: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')), disconnect: jest.fn().mockResolvedValue(undefined) }) as never);
+    const id = await registry.addManagedChild('seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster', hostname: 'old.cluster.local' });
+    await registry.refreshChild(id, { host: '10.0.0.2', port: 7002, nodeId: 'n3', source: 'cluster', hostname: 'node-2.cluster.local' });
+    expect(storage.updateConnection).not.toHaveBeenCalledWith(id, { membership: expect.objectContaining({ hostname: 'node-2.cluster.local' }) });
+    expect(storage.updateConnection).toHaveBeenLastCalledWith(id, { membership: expect.objectContaining({ nodeId: 'n3', hostname: 'old.cluster.local' }) });
   });
 
   it('leaves no hostname behind when the first hostname reconnect fails', async () => {

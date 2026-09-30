@@ -1145,24 +1145,29 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   async refreshChild(id: string, node: DesiredNode): Promise<void> {
-    const { seedId, origin, retiredAt, hostname } = this.requireMembership(id);
+    const previous = this.requireMembership(id);
+    const { seedId, origin, retiredAt, hostname } = previous;
     const membershipOf = (target: DesiredNode): TopologyMembership => ({
       seedId,
       origin,
       ...membershipFields(target),
       ...(retiredAt !== undefined ? { retiredAt } : {}),
     });
-    await this.setMembership(id, membershipOf(node));
     const config = this.configs.get(id);
     if (hostname === node.hostname || origin !== 'auto' || retiredAt !== undefined || !config?.tls) {
+      await this.setMembership(id, membershipOf(node));
       return;
     }
+    this.publishMembership(id, membershipOf(node));
+    let reconnected = true;
     try {
       await this.reconnect(id);
     } catch (err) {
+      reconnected = false;
       this.logger.warn(`Could not reconnect ${config.name} after its hostname changed: ${err instanceof Error ? err.message : err}`);
-      await this.setMembership(id, membershipOf({ ...node, hostname }));
     }
+    this.publishMembership(id, previous);
+    await this.setMembership(id, membershipOf(reconnected ? node : { ...node, hostname }));
   }
 
   async retireChild(id: string): Promise<void> {
@@ -1242,6 +1247,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       throw new NotFoundException(`Connection '${id}' not found.`);
     }
     await this.storage.updateConnection(id, { membership });
+    this.publishMembership(id, membership);
+  }
+
+  private publishMembership(id: string, membership: TopologyMembership | undefined): void {
     const config = this.configs.get(id);
     if (config) {
       this.configs.set(id, { ...config, membership });
