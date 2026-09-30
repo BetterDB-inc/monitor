@@ -1146,7 +1146,13 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async refreshChild(id: string, node: DesiredNode): Promise<void> {
     const { seedId, origin, retiredAt, hostname } = this.requireMembership(id);
-    await this.setMembership(id, { seedId, origin, ...membershipFields(node), ...(retiredAt !== undefined ? { retiredAt } : {}) });
+    const membershipOf = (target: DesiredNode): TopologyMembership => ({
+      seedId,
+      origin,
+      ...membershipFields(target),
+      ...(retiredAt !== undefined ? { retiredAt } : {}),
+    });
+    await this.setMembership(id, membershipOf(node));
     const config = this.configs.get(id);
     if (hostname === node.hostname || origin !== 'auto' || retiredAt !== undefined || !config?.tls) {
       return;
@@ -1155,6 +1161,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       await this.reconnect(id);
     } catch (err) {
       this.logger.warn(`Could not reconnect ${config.name} after its hostname changed: ${err instanceof Error ? err.message : err}`);
+      await this.setMembership(id, membershipOf({ ...node, hostname }));
     }
   }
 

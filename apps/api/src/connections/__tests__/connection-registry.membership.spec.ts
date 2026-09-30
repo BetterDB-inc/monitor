@@ -219,22 +219,48 @@ describe('ConnectionRegistry membership', () => {
   it('drops the stored hostname when the node stops announcing one', async () => {
     const { registry } = build();
     put(registry, seed);
+    const working = () => ({ connect: jest.fn().mockResolvedValue(undefined), disconnect: jest.fn().mockResolvedValue(undefined), getCapabilities: () => ({}) }) as never;
+    jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(working).mockImplementationOnce(working);
     const id = await registry.addManagedChild('seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster', hostname: 'node-2.cluster.local' });
     await registry.refreshChild(id, { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' });
     expect(registry.getConfig(id)?.membership).toEqual({ seedId: 'seed', nodeId: 'n2', origin: 'auto', source: 'cluster' });
   });
 
-  it('keeps the refreshed membership when the hostname reconnect fails', async () => {
+  it('keeps the previous hostname when the hostname reconnect fails so the next sync retries', async () => {
     const { registry } = build();
     put(registry, seed);
-    const id = await registry.addManagedChild('seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' });
-    jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(
-      () => ({ connect: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')), disconnect: jest.fn().mockResolvedValue(undefined) }) as never,
-    );
-    await expect(
-      registry.refreshChild(id, { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster', hostname: 'node-2.cluster.local' }),
-    ).resolves.toBeUndefined();
+    const stale = { connect: jest.fn().mockResolvedValue(undefined), disconnect: jest.fn().mockResolvedValue(undefined), getCapabilities: () => ({}) };
+    const failing = { connect: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')), disconnect: jest.fn().mockResolvedValue(undefined) };
+    const fresh = { connect: jest.fn().mockResolvedValue(undefined), disconnect: jest.fn().mockResolvedValue(undefined), getCapabilities: () => ({}) };
+    jest
+      .mocked(UnifiedDatabaseAdapter)
+      .mockImplementationOnce(() => stale as never)
+      .mockImplementationOnce(() => failing as never)
+      .mockImplementationOnce(() => fresh as never);
+    const id = await registry.addManagedChild('seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster', hostname: 'old.cluster.local' });
+    const desired = { host: '10.0.0.2', port: 7002, nodeId: 'n3', source: 'cluster' as const, hostname: 'node-2.cluster.local' };
+
+    await expect(registry.refreshChild(id, desired)).resolves.toBeUndefined();
+    expect(registry.getConfig(id)?.membership).toMatchObject({ nodeId: 'n3', hostname: 'old.cluster.local' });
+    expect((registry as unknown as Internals).connections.get(id)).toBe(stale);
+
+    await registry.refreshChild(id, desired);
+    expect(UnifiedDatabaseAdapter).toHaveBeenLastCalledWith(expect.objectContaining({ tlsServername: 'node-2.cluster.local' }));
     expect(registry.getConfig(id)?.membership?.hostname).toBe('node-2.cluster.local');
+    expect((registry as unknown as Internals).connections.get(id)).toBe(fresh);
+  });
+
+  it('leaves no hostname behind when the first hostname reconnect fails', async () => {
+    const { registry } = build();
+    put(registry, seed);
+    jest
+      .mocked(UnifiedDatabaseAdapter)
+      .mockImplementationOnce(() => ({ connect: jest.fn().mockResolvedValue(undefined), disconnect: jest.fn().mockResolvedValue(undefined), getCapabilities: () => ({}) }) as never)
+      .mockImplementationOnce(() => ({ connect: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')), disconnect: jest.fn().mockResolvedValue(undefined) }) as never);
+    const id = await registry.addManagedChild('seed', { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster' });
+    await registry.refreshChild(id, { host: '10.0.0.2', port: 7002, nodeId: 'n2', source: 'cluster', hostname: 'node-2.cluster.local' });
+    expect(UnifiedDatabaseAdapter).toHaveBeenLastCalledWith(expect.objectContaining({ tlsServername: 'node-2.cluster.local' }));
+    expect(registry.getConfig(id)?.membership).toEqual({ seedId: 'seed', nodeId: 'n2', origin: 'auto', source: 'cluster' });
   });
 
   it.each([
