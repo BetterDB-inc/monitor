@@ -324,6 +324,11 @@ export interface SentinelDnsHazardInput {
    * its main loop.
    */
   monitoredAddresses: string[];
+  /**
+   * Whether the address enumeration (SENTINEL MASTERS + every REPLICAS) completed. When
+   * false, `monitoredAddresses` is partial and an absent hostname is not conclusive.
+   */
+  monitoredAddressesComplete: boolean;
   /** Value of `announce-ip`, or null when unset — a hostname here is announced to peers. */
   announceIp: string | null;
   /** Value of `announce-hostnames` (`yes`/`no`), or null when unreadable. */
@@ -384,13 +389,14 @@ export function evaluateSentinelDnsResolutionHazard(
     };
   }
 
-  // No hostname observed — but that is conclusive only when Sentinel would have
-  // REPORTED a configured hostname. `SENTINEL MASTERS`/`REPLICAS` echo the configured
-  // target as a hostname only under `announce-hostnames yes`; otherwise they report
-  // the RESOLVED IP, hiding a hostname target behind a literal. With `resolve-hostnames
-  // yes` and no such confirmation, we cannot rule the hazard out, so report it as
-  // unverified rather than a false clean (a missed advisory is better than a false one).
-  if (input.announceHostnames === 'yes') {
+  // No hostname observed — but that is conclusive only when (a) the address probe
+  // actually completed, so `monitoredAddresses` is the full set, AND (b) Sentinel would
+  // have REPORTED a configured hostname. `SENTINEL MASTERS`/`REPLICAS` echo the
+  // configured target as a hostname only under `announce-hostnames yes`; otherwise they
+  // report the RESOLVED IP, hiding a hostname target behind a literal. Missing either
+  // guarantee, we cannot rule the hazard out, so report it as unverified rather than a
+  // false clean (a missed advisory is better than a false one).
+  if (input.announceHostnames === 'yes' && input.monitoredAddressesComplete) {
     return null;
   }
   return {

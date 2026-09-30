@@ -268,21 +268,32 @@ export function evaluateSentinelLoopStall(
   //    observation (no fresh Sentinel view this poll) HOLDS the streak: stale
   //    evidence must neither advance nor clear it — only fresh evidence moves it.
   if (input.masterDownObserved === true) {
-    state.misdirectedStreak += 1;
-    if (state.misdirectedStreak >= thresholds.misdirectedMinStreak) {
-      return [
-        {
-          kind: 'misdirected_resolution',
-          severity: 'warning',
-          classification: 'misdirected_resolution',
-          tiltDurationSeconds: null,
-          observedRttMs: worstRtt,
-          breachCount: warnBreaches,
-        },
-      ];
-    }
+    // Cap at the threshold: once confirmed, there is nothing to gain from letting the
+    // counter grow without bound while the condition persists.
+    state.misdirectedStreak = Math.min(
+      state.misdirectedStreak + 1,
+      thresholds.misdirectedMinStreak,
+    );
   } else if (input.masterDownObserved === false) {
     state.misdirectedStreak = 0;
+  }
+
+  // Emit whenever the streak is at/above threshold — INCLUDING on null (stale) polls
+  // once it has been confirmed. The persistence gate clears an active finding the
+  // instant a poll returns none, so a gap here would let the very next fresh
+  // observation re-emit a duplicate warning on every snapshot refresh. A fresh
+  // `false` observation resets the streak and ends the finding, which re-arms it.
+  if (state.misdirectedStreak >= thresholds.misdirectedMinStreak) {
+    return [
+      {
+        kind: 'misdirected_resolution',
+        severity: 'warning',
+        classification: 'misdirected_resolution',
+        tiltDurationSeconds: null,
+        observedRttMs: worstRtt,
+        breachCount: warnBreaches,
+      },
+    ];
   }
 
   return [];

@@ -330,6 +330,9 @@ export class ConfigHazardService {
     const announceHostnames = await readConfig('announce-hostnames');
 
     const monitoredAddresses: string[] = [];
+    // False if the address enumeration is partial (MASTERS or any REPLICAS failed), so
+    // the evaluator does not read an absent hostname as conclusive.
+    let monitoredAddressesComplete = true;
     try {
       const rawMasters = await client.call('SENTINEL', ['MASTERS']);
       const masters = MetricsParser.parseSentinelNodes(Array.isArray(rawMasters) ? rawMasters : []);
@@ -345,8 +348,10 @@ export class ConfigHazardService {
           }
         } catch (replicaErr) {
           // A missing replica set could hide a hostname target, so the address view
-          // is incomplete — do not cache this cycle's result as authoritative.
+          // is incomplete — do not cache this cycle's result as authoritative, and do
+          // not let the evaluator read the absent hostname as conclusive.
           readFailed = true;
+          monitoredAddressesComplete = false;
           this.logger.debug(
             `SENTINEL REPLICAS ${master.name} failed for ${connectionId}: ${(replicaErr as Error).message}`,
           );
@@ -354,6 +359,7 @@ export class ConfigHazardService {
       }
     } catch (err) {
       readFailed = true;
+      monitoredAddressesComplete = false;
       this.logger.debug(`SENTINEL MASTERS failed for ${connectionId}: ${(err as Error).message}`);
     }
 
@@ -361,6 +367,7 @@ export class ConfigHazardService {
       isSentinel: true,
       resolveHostnames,
       monitoredAddresses,
+      monitoredAddressesComplete,
       announceIp,
       announceHostnames,
     });
