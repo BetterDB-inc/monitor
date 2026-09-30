@@ -478,6 +478,24 @@ describe('ConnectionSwitcher cluster grouping', () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
+  it('still selects an adopted child that left the cluster', () => {
+    onSelect.mockClear();
+    const adopted = connection({
+      id: 'k4',
+      name: 'manual-7004',
+      host: '10.0.0.4',
+      port: 7004,
+      membership: { seedId: 's', nodeId: 'n4', origin: 'adopted', source: 'cluster', retiredAt: Date.now() - 3_600_000 },
+    });
+    open([seed, adopted], seed);
+    fireEvent.click(screen.getByRole('button', { name: /1 node/i }));
+    const option = screen.getAllByRole('option')[1];
+    expect(option).not.toHaveAttribute('aria-disabled');
+    expect(option.textContent).toContain('left cluster');
+    fireEvent.click(option);
+    expect(onSelect).toHaveBeenCalledWith('k4');
+  });
+
   it('shows the siblings of the current child expanded', () => {
     open([seed, ...kids], kids[0]);
     expect(screen.getAllByRole('option')).toHaveLength(3);

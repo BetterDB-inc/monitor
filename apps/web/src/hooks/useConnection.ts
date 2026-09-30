@@ -1,7 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import type { TopologyMembership } from '@betterdb/shared';
 import { setCurrentConnectionId, fetchApi } from '../api/client';
-import { isRetiredMember } from '../utils/connectionType';
+import { isUnavailableMember } from '../utils/connectionType';
 
 export const CONNECTIONS_REFRESH_MS = 30_000;
 
@@ -63,6 +63,8 @@ export function useConnectionState(): ConnectionContextValue {
   const [autoRegisterNodesDefault, setAutoRegisterNodesDefault] = useState(false);
   const [autoRegisterSentinelNodesDefault, setAutoRegisterSentinelNodesDefault] = useState(false);
   const initialLoadDone = useRef(false);
+  const selected = useRef<Connection | null>(null);
+  selected.current = currentConnection;
 
   const fetchConnections = useCallback(async () => {
     try {
@@ -83,16 +85,17 @@ export function useConnectionState(): ConnectionContextValue {
       setAutoRegisterNodesDefault(responseData.autoRegisterNodesDefault === true);
       setAutoRegisterSentinelNodesDefault(responseData.autoRegisterSentinelNodesDefault === true);
 
-      const fresh = currentConnection === null ? undefined : data.find((c) => c.id === currentConnection.id);
+      const current = selected.current;
+      const fresh = current === null ? undefined : data.find((c) => c.id === current.id);
       const justRetired =
-        fresh !== undefined && currentConnection !== null && isRetiredMember(fresh) && !isRetiredMember(currentConnection);
+        fresh !== undefined && current !== null && isUnavailableMember(fresh) && !isUnavailableMember(current);
 
       if (fresh !== undefined && !justRetired) {
-        if (JSON.stringify(fresh) !== JSON.stringify(currentConnection)) {
+        if (JSON.stringify(fresh) !== JSON.stringify(current)) {
           setCurrentConnection(fresh);
         }
       } else {
-        const selectable = data.filter((c) => !isRetiredMember(c));
+        const selectable = data.filter((c) => !isUnavailableMember(c));
         const defaultConnection =
           (responseData.currentId && selectable.find((c) => c.id === responseData.currentId)) ||
           selectable.find((c) => c.isConnected) ||
@@ -108,11 +111,12 @@ export function useConnectionState(): ConnectionContextValue {
       setLoading(false);
       initialLoadDone.current = true;
     }
-  }, [currentConnection]);
+  }, []);
 
   const setConnection = useCallback((connectionId: string) => {
     const connection = connections.find(c => c.id === connectionId);
     if (connection) {
+      selected.current = connection;
       setCurrentConnection(connection);
       setCurrentConnectionId(connection.id);
       fetchApi('/telemetry/event', {

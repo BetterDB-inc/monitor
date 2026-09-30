@@ -21,7 +21,7 @@ import {
   disableConfirmation,
   showsAutoRegisterToggle,
 } from './connection-selector/autoRegisterCopy';
-import { isRetiredMember, orderWithMembers, retiredLabel } from '../utils/connectionType';
+import { isRetiredMember, isUnavailableMember, orderWithMembers, retiredLabel } from '../utils/connectionType';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 
 interface SshFormData {
@@ -1003,12 +1003,13 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
           <div className="space-y-2 max-h-96 overflow-y-auto">
             {orderWithMembers(connections).map(({ connection: conn, depth }) => {
               const retired = isRetiredMember(conn);
+              const unavailable = isUnavailableMember(conn);
               return (
                 <div
                   key={conn.id}
                   className={`flex items-center justify-between p-3 border rounded-md ${
                     depth === 1 ? 'ms-6' : ''
-                  } ${retired ? 'opacity-60' : ''} ${
+                  } ${unavailable ? 'opacity-60' : ''} ${
                     currentConnection?.id === conn.id ? 'border-primary bg-primary/5' : ''
                   }`}
                 >
@@ -1047,7 +1048,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                     </div>
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
-                    {!retired && currentConnection?.id !== conn.id && (
+                    {!unavailable && currentConnection?.id !== conn.id && (
                       <button
                         onClick={() => {
                           setConnection(conn.id);

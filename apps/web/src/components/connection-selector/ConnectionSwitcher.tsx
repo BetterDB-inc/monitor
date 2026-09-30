@@ -8,7 +8,7 @@ import { ConnectionSwitcherOpenContext } from './switcher-open-context';
 import { ConnectionTypeBadge, BADGE } from './ConnectionTypeBadge';
 import { DiscoveredInstancesSection } from './DiscoveredInstancesSection';
 import { groupSentinelMembers } from './autoRegisterCopy';
-import { formatRelative, isRetiredMember, orderWithMembers, retiredLabel } from '../../utils/connectionType';
+import { formatRelative, isRetiredMember, isUnavailableMember, orderWithMembers, retiredLabel } from '../../utils/connectionType';
 
 interface ConnectionSwitcherProps {
   connections: Connection[];
@@ -166,7 +166,7 @@ export function ConnectionSwitcher({
     if (event.key === 'Enter') {
       event.preventDefault();
       const choice = filtered[effectiveIndex];
-      if (choice === undefined || isRetiredMember(choice)) {
+      if (choice === undefined || isUnavailableMember(choice)) {
         return;
       }
       handleSelect(choice.id);
@@ -276,6 +276,7 @@ export function ConnectionSwitcher({
                 const isCurrent = connection.id === current?.id;
                 const { depth } = connection;
                 const retired = isRetiredMember(connection);
+                const unavailable = isUnavailableMember(connection);
                 const childCount = childCounts.get(connection.id) ?? 0;
                 return (
                   <div key={connection.id}>
@@ -320,7 +321,7 @@ export function ConnectionSwitcher({
                       type="button"
                       role="option"
                       aria-selected={isCurrent}
-                      aria-disabled={retired || undefined}
+                      aria-disabled={unavailable || undefined}
                       onMouseEnter={() => {
                         if (keyboardNav.current) {
                           return;
@@ -328,14 +329,14 @@ export function ConnectionSwitcher({
                         setActiveIndex(index);
                       }}
                       onClick={() => {
-                        if (!retired) {
+                        if (!unavailable) {
                           handleSelect(connection.id);
                         }
                       }}
                       className={cn(
                         'w-full flex items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-left',
                         depth === 1 && 'ps-6',
-                        retired && 'opacity-60',
+                        unavailable && 'opacity-60',
                         index === effectiveIndex && 'bg-accent',
                       )}
                     >

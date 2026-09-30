@@ -120,6 +120,71 @@ describe('useConnectionState', () => {
     expect(refreshed).not.toBe(before);
   });
 
+  it('stays on an adopted connection after it leaves its cluster', async () => {
+    const adopted: Connection = {
+      ...connection('adopted'),
+      membership: { seedId: 'seed', nodeId: 'n1', origin: 'adopted', source: 'cluster' },
+    };
+    mocks.fetchApi.mockResolvedValueOnce({ connections: [adopted, connection('other')], currentId: 'adopted' });
+
+    const { result } = renderHook(() => {
+      return useConnectionState();
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentConnection?.id).toBe('adopted');
+    });
+
+    const retired: Connection = { ...adopted, membership: { ...adopted.membership!, retiredAt: 1 } };
+    mocks.fetchApi.mockResolvedValueOnce({ connections: [retired, connection('other')], currentId: 'adopted' });
+
+    await act(async () => {
+      await result.current.refreshConnections();
+    });
+
+    expect(result.current.currentConnection).toEqual(retired);
+  });
+
+  it('keeps a switch made while a refresh was in flight', async () => {
+    mocks.fetchApi.mockResolvedValueOnce(connectionsResponse(['conn-1', 'conn-2']));
+
+    const { result } = renderHook(() => {
+      return useConnectionState();
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentConnection?.id).toBe('conn-1');
+    });
+
+    let finish: (value: unknown) => void = () => undefined;
+    mocks.fetchApi.mockImplementation((url: string) => {
+      if (url !== '/connections') {
+        return Promise.resolve({});
+      }
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    });
+
+    let refresh: Promise<void> = Promise.resolve();
+    act(() => {
+      refresh = result.current.refreshConnections();
+    });
+    act(() => {
+      result.current.setConnection('conn-2');
+    });
+
+    await act(async () => {
+      finish({
+        connections: [{ ...connection('conn-1'), isConnected: false }, connection('conn-2')],
+        currentId: null,
+      });
+      await refresh;
+    });
+
+    expect(result.current.currentConnection?.id).toBe('conn-2');
+  });
+
   it('keeps a retired member the user chose to view', async () => {
     const retired: Connection = {
       ...connection('retired'),

@@ -126,6 +126,25 @@ describe('ConnectionRegistry membership', () => {
     }
   });
 
+  it('bounds a manual reconnect of a member that never answers', async () => {
+    jest.useFakeTimers();
+    try {
+      const { registry } = build();
+      put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', source: 'cluster' } });
+      const disconnect = jest.fn().mockResolvedValue(undefined);
+      jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(
+        () => ({ connect: jest.fn(() => new Promise(() => undefined)), disconnect }) as never,
+      );
+      const pending = registry.reconnect('auto');
+      const outcome = expect(pending).rejects.toThrow(/timed out/);
+      await jest.advanceTimersByTimeAsync(CHILD_CONNECT_TIMEOUT_MS);
+      await outcome;
+      expect(disconnect).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('bounds a reactivation connect that never completes', async () => {
     jest.useFakeTimers();
     try {

@@ -931,7 +931,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     const newAdapter = this.createAdapter(config);
 
     try {
-      await newAdapter.connect();
+      if (config.membership) {
+        await connectWithin(newAdapter, CHILD_CONNECT_TIMEOUT_MS);
+      } else {
+        await newAdapter.connect();
+      }
 
       // Only disconnect old adapter after new one successfully connects.
       // Disconnect unconditionally (not just when isConnected): the old adapter
