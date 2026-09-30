@@ -206,6 +206,10 @@ export const envSchema = z
       .transform((v) => !isNegativeEnvValue(v)),
     OTEL_INGEST_TOKEN: z.string().optional(),
     OTEL_METRICS_STALE_AFTER_MS: otelMetricsStaleAfterMsSchema,
+    OTLP_DISCOVER_INSTANCES: z
+      .string()
+      .default('true')
+      .transform((v) => !isNegativeEnvValue(v)),
 
     PROMETHEUS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).optional(),
     PROMETHEUS_STALENESS_MS: z.coerce.number().int().min(1000).optional(),
@@ -248,6 +252,7 @@ export const envSchema = z
       .transform((v) => v !== 'false'),
     OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().or(z.literal('')).optional(),
     OTEL_METRICS_EXPORT_INTERVAL_MS: z.coerce.number().int().min(1000).default(15000),
+    OTEL_METRICS_EXPORT_MODE: z.string().optional(),
 
     CLUSTER_AUTO_REGISTER_NODES: z.string().default('false'),
     SENTINEL_AUTO_REGISTER_NODES: z.string().default('false'),

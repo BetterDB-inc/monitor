@@ -1,6 +1,8 @@
-import { Controller, Get, Post, Patch, Delete, Param, Body, BadRequestException, HttpException, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Param, Body, BadRequestException, HttpException, HttpStatus, HttpCode, Optional } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
-import { CapabilityRetryVerdict, RuntimeCapabilities } from '@betterdb/shared';
+import { CapabilityRetryVerdict, DiscoveredInstancesResponse, RuntimeCapabilities } from '@betterdb/shared';
+import { Roles } from '../auth/guards/roles.decorator';
+import { DiscoveredInstancesStore } from '../external-metrics/discovered-instances.store';
 import { ConnectionRegistry } from './connection-registry.service';
 import {
   CAPABILITY_TEST_COMMAND,
@@ -8,6 +10,7 @@ import {
 } from './runtime-capability-tracker.service';
 import {
   CreateConnectionDto,
+  DismissDiscoveredDto,
   ConnectionListResponseDto,
   CurrentConnectionResponseDto,
   TestConnectionResponseDto,
@@ -63,6 +66,7 @@ export class ConnectionsController {
   constructor(
     private readonly registry: ConnectionRegistry,
     private readonly capabilityTracker: RuntimeCapabilityTracker,
+    @Optional() private readonly discovered?: DiscoveredInstancesStore,
   ) {}
 
   @Get()
@@ -90,6 +94,34 @@ export class ConnectionsController {
     return {
       id: this.registry.getDefaultId(),
     };
+  }
+
+  @Get('discovered')
+  @Roles('admin')
+  @ApiOperation({
+    summary: 'List unregistered instances seen pushing OTLP metrics',
+    description: 'In-memory list, reset on restart. Empty with enabled=false when OTLP_DISCOVER_INSTANCES is off.',
+  })
+  @ApiResponse({ status: 200, description: 'Discovered instances, most recently seen first' })
+  listDiscovered(): DiscoveredInstancesResponse {
+    if (!this.discovered?.enabled) return { enabled: false, instances: [] };
+    return {
+      enabled: true,
+      instances: this.discovered
+        .list(Date.now())
+        .filter((instance) => this.registry.findIdByHostPort(instance.host, instance.port) === null),
+    };
+  }
+
+  @Post('discovered/dismiss')
+  @Roles('admin')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Hide a discovered instance for 24 hours' })
+  @ApiResponse({ status: 204, description: 'Dismissed' })
+  dismissDiscovered(@Body() dto: DismissDiscoveredDto): void {
+    if (this.discovered && !this.discovered.dismiss(dto.host, dto.port, Date.now())) {
+      throw new HttpException('Too many dismissed instances', HttpStatus.CONFLICT);
+    }
   }
 
   @Post()

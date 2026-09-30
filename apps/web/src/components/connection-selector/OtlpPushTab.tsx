@@ -39,14 +39,20 @@ export function OtlpPushTab({
   isFirstConnection,
   onCreated,
   onDone,
+  initialName = '',
+  initialHost = '',
+  initialPort = 6379,
 }: {
   isFirstConnection: boolean;
   onCreated: () => Promise<void>;
   onDone: () => void;
+  initialName?: string;
+  initialHost?: string;
+  initialPort?: number;
 }) {
-  const [name, setName] = useState('');
-  const [host, setHost] = useState('');
-  const [port, setPort] = useState(6379);
+  const [name, setName] = useState(initialName);
+  const [host, setHost] = useState(initialHost);
+  const [port, setPort] = useState(initialPort);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);

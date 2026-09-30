@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsNumber, IsBoolean, IsOptional, IsIn, Min, Max, MinLength, MaxLength, ValidateNested, ValidateIf } from 'class-validator';
+import { IsString, IsNumber, IsInt, IsBoolean, IsOptional, IsIn, Min, Max, MinLength, MaxLength, ValidateNested, ValidateIf } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ENV_DEFAULT_ID } from '../../connections/connection.constants';
 import type {
@@ -245,6 +245,20 @@ export class CreateConnectionDto implements CreateConnectionRequest {
   @IsOptional()
   @IsIn(['direct', 'external'])
   connectionType?: 'direct' | 'external';
+}
+
+export class DismissDiscoveredDto {
+  @ApiProperty({ description: 'Discovered instance host', example: 'cache.internal' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(253)
+  host: string;
+
+  @ApiProperty({ description: 'Discovered instance port', example: 6379 })
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  port: number;
 }
 
 /**

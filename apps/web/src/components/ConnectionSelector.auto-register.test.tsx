@@ -61,6 +61,14 @@ vi.mock('../hooks/useCanMutate', () => ({
   useCanMutate: () => true,
 }));
 
+vi.mock('../hooks/useDiscoveredInstances', () => ({
+  useDiscoveredInstances: () => ({
+    instances: [],
+    dismiss: vi.fn(),
+    invalidate: vi.fn(),
+  }),
+}));
+
 import { ConnectionSelector } from './ConnectionSelector';
 import { fetchApi } from '../api/client';
 

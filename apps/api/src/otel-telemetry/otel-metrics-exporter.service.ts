@@ -5,20 +5,59 @@ import type {
   Meter,
   ObservableGauge,
   ObservableCounter,
+  ObservableUpDownCounter,
 } from '@opentelemetry/api';
-import { MeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
+import {
+  MeterProvider,
+  PeriodicExportingMetricReader,
+  type PushMetricExporter,
+} from '@opentelemetry/sdk-metrics';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-proto';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
+import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { PrometheusService } from '../prometheus/prometheus.service';
+import { planInstruments, collectDataPoints, type PromMetricJson } from './prom-otel-bridge';
 import {
-  planInstruments,
-  collectDataPoints,
-  type InstrumentSpec,
-  type PromMetricJson,
-} from './prom-otel-bridge';
+  planSemconvInstruments,
+  collectSemconvPoints,
+  type SemconvCollection,
+  type SemconvInstrumentSpec,
+} from './semconv-map';
+import { NodeSplittingExporter, buildNodeResolver } from './node-splitting-exporter';
 
-type MirrorInstrument = ObservableGauge | ObservableCounter;
+type MirrorInstrument = ObservableGauge | ObservableCounter | ObservableUpDownCounter;
+
+type ExportMode = 'mirror' | 'semconv';
+
+interface ExportStrategy {
+  meterName: string;
+  plan(snapshot: PromMetricJson[]): SemconvInstrumentSpec[];
+  collect(metric: PromMetricJson): SemconvCollection;
+}
+
+const MIRROR_STRATEGY: ExportStrategy = {
+  meterName: 'betterdb-prometheus-mirror',
+  plan: (snapshot) => planInstruments(snapshot),
+  collect: (metric) => ({
+    points: collectDataPoints(metric).map((point) => ({ instrument: metric.name, ...point })),
+    skipped: 0,
+  }),
+};
+
+const SEMCONV_STRATEGY: ExportStrategy = {
+  meterName: 'betterdb-semconv',
+  plan: planSemconvInstruments,
+  collect: collectSemconvPoints,
+};
+
+function parseExportMode(raw: unknown): ExportMode | null {
+  const value = raw === undefined || raw === null ? '' : String(raw).trim().toLowerCase();
+  if (value === '' || value === 'mirror') {
+    return 'mirror';
+  }
+  return value === 'semconv' ? 'semconv' : null;
+}
 
 /**
  * Mirrors the existing prom-client registry to an OTLP metrics endpoint on an
@@ -37,10 +76,13 @@ export class OtelMetricsExporterService implements OnModuleInit, OnModuleDestroy
   private readonly instruments = new Map<string, MirrorInstrument>();
   private observedInstruments: MirrorInstrument[] = [];
   private observeCallback?: BatchObservableCallback;
+  private strategy: ExportStrategy = MIRROR_STRATEGY;
+  private readonly skipLogged = new Set<string>();
 
   constructor(
     private readonly configService: ConfigService,
     private readonly prometheusService: PrometheusService,
+    private readonly connectionRegistry: ConnectionRegistry,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -51,10 +93,18 @@ export class OtelMetricsExporterService implements OnModuleInit, OnModuleDestroy
       return;
     }
 
+    const mode = this.resolveExportMode();
+    this.strategy = mode === 'semconv' ? SEMCONV_STRATEGY : MIRROR_STRATEGY;
     const intervalMs = this.configService.get<number>('OTEL_METRICS_EXPORT_INTERVAL_MS', 15000);
-    const exporter = new OTLPMetricExporter({
+    const otlpExporter = new OTLPMetricExporter({
       url: `${endpoint.replace(/\/$/, '')}/v1/metrics`,
     });
+    const exporter: PushMetricExporter =
+      mode === 'semconv'
+        ? new NodeSplittingExporter(otlpExporter, () =>
+            buildNodeResolver(this.connectionRegistry.list()),
+          )
+        : otlpExporter;
     const reader = new PeriodicExportingMetricReader({
       exporter,
       exportIntervalMillis: intervalMs,
@@ -64,8 +114,19 @@ export class OtelMetricsExporterService implements OnModuleInit, OnModuleDestroy
       readers: [reader],
     });
 
-    await this.registerMirror(this.provider.getMeter('betterdb-prometheus-mirror'));
-    this.logger.log(`OTel metrics mirror active → ${endpoint} (every ${intervalMs}ms)`);
+    await this.registerMirror(this.provider.getMeter(this.strategy.meterName));
+    const label = mode === 'semconv' ? 'semconv export' : 'mirror';
+    this.logger.log(`OTel metrics ${label} active → ${endpoint} (every ${intervalMs}ms)`);
+  }
+
+  private resolveExportMode(): ExportMode {
+    const raw = this.configService.get<string>('OTEL_METRICS_EXPORT_MODE');
+    const mode = parseExportMode(raw);
+    if (mode) {
+      return mode;
+    }
+    this.logger.warn(`Unknown OTEL_METRICS_EXPORT_MODE "${raw}"; using mirror`);
+    return 'mirror';
   }
 
   private async collectSnapshot(): Promise<PromMetricJson[]> {
@@ -80,7 +141,9 @@ export class OtelMetricsExporterService implements OnModuleInit, OnModuleDestroy
     if (this.instruments.size === 0) {
       // The SDK rejects a batch callback with no instruments, so there would be
       // nothing to re-sync from later and the mirror would stay inert.
-      this.logger.warn('OTel metrics mirror found no mirrorable metrics; nothing will be exported');
+      this.logger.warn(
+        'OTel metrics export found no exportable metrics; nothing will be exported',
+      );
       return;
     }
 
@@ -94,16 +157,28 @@ export class OtelMetricsExporterService implements OnModuleInit, OnModuleDestroy
         this.reobserve(meter);
       }
       for (const metric of current) {
-        const instrument = this.instruments.get(metric.name);
-        if (!instrument) {
-          continue;
+        const { points, skipped } = this.strategy.collect(metric);
+        if (skipped > 0) {
+          this.logSkipped(metric.name, skipped);
         }
-        for (const point of collectDataPoints(metric)) {
+        for (const point of points) {
+          const instrument = this.instruments.get(point.instrument);
+          if (!instrument) {
+            continue;
+          }
           result.observe(instrument, point.value, point.attributes);
         }
       }
     };
     this.reobserve(meter);
+  }
+
+  private logSkipped(family: string, count: number): void {
+    if (this.skipLogged.has(family)) {
+      return;
+    }
+    this.skipLogged.add(family);
+    this.logger.debug(`Skipped ${count} unconvertible ${family} point(s) in the semconv export`);
   }
 
   /**
@@ -112,7 +187,7 @@ export class OtelMetricsExporterService implements OnModuleInit, OnModuleDestroy
    */
   private syncInstruments(meter: Meter, snapshot: PromMetricJson[]): boolean {
     let added = false;
-    for (const spec of planInstruments(snapshot)) {
+    for (const spec of this.strategy.plan(snapshot)) {
       if (this.instruments.has(spec.name)) {
         continue;
       }
@@ -136,7 +211,7 @@ export class OtelMetricsExporterService implements OnModuleInit, OnModuleDestroy
     meter.addBatchObservableCallback(this.observeCallback, this.observedInstruments);
   }
 
-  private createInstrument(meter: Meter, spec: InstrumentSpec): MirrorInstrument {
+  private createInstrument(meter: Meter, spec: SemconvInstrumentSpec): MirrorInstrument {
     // Only pass unit when we could derive one; an empty unit is meaningful noise
     // in OTLP metadata, so omit the key entirely in that case.
     const options = spec.unit
@@ -144,6 +219,9 @@ export class OtelMetricsExporterService implements OnModuleInit, OnModuleDestroy
       : { description: spec.description };
     if (spec.kind === 'counter') {
       return meter.createObservableCounter(spec.name, options);
+    }
+    if (spec.kind === 'updown') {
+      return meter.createObservableUpDownCounter(spec.name, options);
     }
     return meter.createObservableGauge(spec.name, options);
   }

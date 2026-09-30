@@ -5,6 +5,7 @@ import { ConnectionRegistry } from '../connection-registry.service';
 import { UnifiedDatabaseAdapter } from '../../database/adapters/unified.adapter';
 import { ExternalMetricsStore } from '../../external-metrics/external-metrics-store';
 import { ExternalMetricsAdapter } from '../../external-metrics/external-metrics.adapter';
+import { DiscoveredInstancesStore } from '../../external-metrics/discovered-instances.store';
 
 function build() {
   const storage = {
@@ -18,14 +19,17 @@ function build() {
     getCapabilities: jest.fn().mockReturnValue(null),
   };
   const store = new ExternalMetricsStore();
+  const discovered = new DiscoveredInstancesStore(true);
   const registry = new ConnectionRegistry(
     storage as never,
     {} as never,
     tracker as never,
     {} as never,
     store,
+    undefined,
+    discovered,
   );
-  return { registry, storage, tracker, store };
+  return { registry, storage, tracker, store, discovered };
 }
 
 function seedDirect(registry: ConnectionRegistry, host: string, port: number): void {
@@ -151,5 +155,35 @@ describe('ConnectionRegistry external connections', () => {
     store.apply(id, [{ target: { kind: 'scalar', section: 'memory', field: 'used_memory' }, value: '1', timeMs: Date.now() }]);
     await registry.removeConnection(id);
     expect(store.latestVersion(id)).toBeNull();
+  });
+
+  it('forgets a discovered address once it is registered', async () => {
+    const { registry, discovered } = build();
+    discovered.record({ host: 'Cache.Internal', port: 6379 }, {}, 1, Date.now());
+    discovered.record({ host: 'other', port: 6379 }, {}, 1, Date.now());
+    await registry.addConnection(external);
+    expect(discovered.list(Date.now()).map((i) => i.host)).toEqual(['other']);
+  });
+
+  it('keeps a discovered address when the create fails', async () => {
+    const { registry, discovered } = build();
+    discovered.record({ host: 'cache.internal', port: 6379 }, {}, 1, Date.now());
+    await expect(registry.addConnection({ ...external, password: 'secret' } as never)).rejects.toThrow();
+    expect(discovered.list(Date.now())).toHaveLength(1);
+  });
+
+  it('forgets a discovered address registered as a direct connection', async () => {
+    jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(
+      () =>
+        ({
+          connect: jest.fn().mockResolvedValue(undefined),
+          disconnect: jest.fn().mockResolvedValue(undefined),
+          getCapabilities: jest.fn().mockReturnValue({ dbType: 'valkey', version: '9.0.0' }),
+        }) as never,
+    );
+    const { registry, discovered } = build();
+    discovered.record({ host: 'direct.internal', port: 6380 }, {}, 1, Date.now());
+    await registry.addConnection({ name: 'Polled', host: 'direct.internal', port: 6380 });
+    expect(discovered.list(Date.now())).toEqual([]);
   });
 });

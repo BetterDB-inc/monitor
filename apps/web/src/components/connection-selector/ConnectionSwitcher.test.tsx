@@ -401,6 +401,28 @@ describe('ConnectionSwitcher', () => {
 
     expect(screen.getByRole('combobox')).not.toHaveTextContent('OTLP');
   });
+
+  it('shows discovered instances outside the option list and closes on register', () => {
+    const onRegister = vi.fn();
+    const discovered = [
+      { host: 'd', port: 1, suggestedName: 'disc', firstSeenAt: 0, lastSeenAt: Date.now(), droppedPoints: 1 },
+    ];
+    render(
+      <ConnectionSwitcher
+        connections={CONNECTIONS}
+        current={CONNECTIONS[0]}
+        onSelect={onSelect}
+        discovered={discovered}
+        onRegister={onRegister}
+        onDismiss={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole('combobox'));
+    fireEvent.click(screen.getByRole('button', { name: /discovered via OTLP/ }));
+    expect(screen.getAllByRole('option')).toHaveLength(CONNECTIONS.length);
+    fireEvent.click(screen.getByRole('button', { name: 'Register disc' }));
+    expect(onRegister).toHaveBeenCalledWith(discovered[0]);
+  });
 });
 
 describe('ConnectionSwitcher cluster grouping', () => {

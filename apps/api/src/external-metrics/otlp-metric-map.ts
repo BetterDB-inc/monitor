@@ -151,6 +151,12 @@ function splitInstanceId(id: string): InstanceKey | null {
   return match ? toInstanceKey(match[1], match[2]) : null;
 }
 
+export function explicitInstanceKey(attrs: Record<string, string>): InstanceKey | null {
+  const host = attrs['server.address'];
+  const port = attrs['server.port'];
+  return host && port !== undefined ? toInstanceKey(host, port) : null;
+}
+
 export function resolveInstanceKeys(attrs: Record<string, string>): InstanceKey[] {
   const keys: InstanceKey[] = [];
   const add = (key: InstanceKey | null) => {
@@ -158,9 +164,7 @@ export function resolveInstanceKeys(attrs: Record<string, string>): InstanceKey[
   };
   const instanceId = attrs['service.instance.id'];
   if (instanceId) add(splitInstanceId(instanceId));
-  const host = attrs['server.address'];
-  const port = attrs['server.port'];
-  if (host && port !== undefined) add(toInstanceKey(host, port));
+  add(explicitInstanceKey(attrs));
   return keys;
 }
 
