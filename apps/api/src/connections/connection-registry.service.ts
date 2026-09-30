@@ -1238,11 +1238,13 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   private async setMembership(id: string, membership: TopologyMembership | undefined): Promise<void> {
-    const config = this.configs.get(id);
-    if (!config) {
+    if (!this.configs.has(id)) {
       throw new NotFoundException(`Connection '${id}' not found.`);
     }
-    this.configs.set(id, { ...config, membership });
     await this.storage.updateConnection(id, { membership });
+    const config = this.configs.get(id);
+    if (config) {
+      this.configs.set(id, { ...config, membership });
+    }
   }
 }
