@@ -338,6 +338,15 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     }
 
     const isValkey = InfoParser.isValkey(info);
+    // Sentinel mode is reported in the Server section (spelled differently per
+    // engine: server_mode on Valkey unless extended-redis-compat, else redis_mode;
+    // redis_mode on Redis). Captured here so a wedged Sentinel is still identifiable
+    // later without a fresh INFO. See AnomalyService.connectionIsSentinel.
+    const server = (info.server ?? {}) as Record<string, string>;
+    const isSentinel =
+      server.server_mode === 'sentinel' ||
+      server.redis_mode === 'sentinel' ||
+      server.valkey_mode === 'sentinel';
     const versionParts = version.split('.').map((v) => parseInt(v, 10));
     const majorVersion = versionParts[0] || 0;
     const minorVersion = versionParts[1] || 0;
@@ -378,6 +387,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       hasMemoryDoctor: true,
       hasConfig,
       hasVectorSearch,
+      isSentinel,
     };
   }
 

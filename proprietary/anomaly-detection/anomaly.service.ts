@@ -1812,6 +1812,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   ): Promise<void> {
     this.sentinelModeLast.set(ctx.connectionId, sentinelMode);
     if (sentinelMode === false) {
+      // No longer (or never) a Sentinel. Clear any active loop-stall finding by
+      // running the gate with no findings (it resolves signatures that are not
+      // re-emitted this pass), and drop the per-connection episode/RTT state so a
+      // later return to Sentinel mode starts clean. Without this, an alert that was
+      // active when the node stopped reporting Sentinel mode (a live reconfig
+      // without a reconnect) would stay pinned until the connection is removed.
+      this.sentinelLoopStallState.delete(ctx.connectionId);
+      await this.emitSentinelLoopStallFindings(ctx, timestamp, []);
       return;
     }
 
@@ -1840,7 +1848,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     timestamp: number,
     error: unknown,
   ): Promise<void> {
-    if (this.sentinelModeLast.get(ctx.connectionId) !== true) {
+    // A Sentinel that is already wedged when we first connect never produces a
+    // successful INFO, so `sentinelModeLast` is never set from a live poll and the
+    // very first timeout would otherwise be ignored - missing the exact worst case
+    // this feature targets. Fall back to the capability detected at connect time
+    // (detectCapabilities ran INFO server then). A live non-Sentinel reading
+    // (known === false) always wins and suppresses the wedge path.
+    const known = this.sentinelModeLast.get(ctx.connectionId);
+    const isSentinel =
+      known === true || (known === undefined && AnomalyService.connectionIsSentinel(ctx));
+    if (isSentinel === false) {
       return;
     }
     if (AnomalyService.isCommandTimeoutError(error) === false) {
@@ -1926,6 +1943,20 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     });
   }
 
+  /**
+   * Whether the connection was detected as a Sentinel at connect time. Reads the
+   * capability captured during `detectCapabilities` (which ran `INFO server` then),
+   * so a Sentinel already wedged by the time we poll is still recognized without a
+   * fresh INFO. Safe against capabilities not yet being available.
+   */
+  private static connectionIsSentinel(ctx: ConnectionContext): boolean {
+    try {
+      return ctx.client.getCapabilities().isSentinel === true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Whether any monitored master is flagged down (`s_down`/`o_down`) by Sentinel. */
   private static sentinelMasterDown(masters: SentinelNodeInfo[]): boolean {
     return masters.some((master) => {
@@ -2009,12 +2040,20 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       }
       case 'misdirected_resolution':
       default: {
+        // We cannot tell a genuinely down master apart from an up-but-unreachably-
+        // resolved one from INFO + SENTINEL MASTERS alone: both show +sdown with a
+        // healthy loop. So present both possibilities instead of asserting the DNS
+        // cause (which would send an operator to "fix DNS" during a real outage).
+        // The sustained streak already rules out a normal in-progress failover.
         message =
-          `WARNING: Sentinel ${node} reports a monitored master down (+sdown) while its event ` +
-          `loop is healthy (no TILT, INFO latency flat). This is misdirected or unreachable ` +
-          `resolution (split-horizon), NOT a loop stall - Sentinel is resolving the target to an ` +
-          `address it cannot reach. Reconcile the announced/monitored addresses so they resolve ` +
-          `to a reachable endpoint from Sentinel's network view. ${writeup}`;
+          `WARNING: Sentinel ${node} has reported a monitored master down (+sdown) for a sustained ` +
+          `window while its own event loop is healthy (no TILT, INFO latency flat). The loop is ` +
+          `not the problem. Two causes look identical from here: the master is genuinely down, or ` +
+          `- if this Sentinel resolves hostnames and the master is actually reachable - Sentinel is ` +
+          `resolving the target to an address it cannot reach (misdirected/unreachable resolution, ` +
+          `split-horizon). Confirm whether the master is up and whether its recorded address is ` +
+          `reachable from Sentinel's network view; if it is reachable, reconcile the ` +
+          `announced/monitored addresses. ${writeup}`;
         break;
       }
     }

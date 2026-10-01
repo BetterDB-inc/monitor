@@ -136,6 +136,21 @@ describe('evaluateSentinelLoopStall — RTT proxy', () => {
     const healthy = driveN(state, { probeRttMs: 20 }, 10);
     expect(healthy).toEqual([]);
   });
+
+  it('does not emit a spurious rtt_stall on the poll that observes TILT recovery', () => {
+    const state = createSentinelLoopStallState();
+    // In-TILT polls where INFO still answers but slowly (above the warn threshold)
+    // fill the RTT window with breaches while `tilt` is the finding that fires.
+    driveN(state, { tiltSinceSeconds: 5, probeRttMs: 1_900 }, 4);
+    // TILT clears and the loop is healthy again on the same poll. The window is reset
+    // on exit, so the stale in-TILT breaches must not resurface as an rtt_stall.
+    const recovery = evaluateSentinelLoopStall(
+      state,
+      input({ tiltSinceSeconds: -1, probeRttMs: 20 }),
+    );
+    expect(recovery).toEqual([]);
+    expect(state.rttSamples).toEqual([]);
+  });
 });
 
 describe('evaluateSentinelLoopStall — total wedge', () => {
@@ -289,5 +304,23 @@ describe('sentinelLoopStallSignature', () => {
         breachCount: 4,
       }),
     );
+  });
+
+  it('includes severity so a warning->critical rtt_stall escalation is not deduped', () => {
+    const base = {
+      kind: 'rtt_stall' as const,
+      classification: 'loop_starvation_dns' as const,
+      tiltDurationSeconds: null,
+      breachCount: 3,
+    };
+    const warn = sentinelLoopStallSignature({ ...base, severity: 'warning', observedRttMs: 1_600 });
+    const critical = sentinelLoopStallSignature({
+      ...base,
+      severity: 'critical',
+      observedRttMs: 2_100,
+    });
+    // Different signatures => the gate treats the escalation as a new finding and
+    // re-emits it, instead of deduping the critical away behind the active warning.
+    expect(warn).not.toBe(critical);
   });
 });

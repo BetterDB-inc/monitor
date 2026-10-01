@@ -193,20 +193,30 @@ export function evaluateSentinelLoopStall(
       state.rttSamples.shift();
     }
   }
+
+  // TILT episode edges. Resolved BEFORE the RTT breach counts below, because leaving
+  // TILT clears the window and the recovery poll's breach counts must reflect that -
+  // otherwise the stale in-TILT samples would still trip an rtt_stall on the very
+  // poll that observed recovery.
+  const nowInTilt = isInTilt(input);
+  if (nowInTilt && !state.inTilt) {
+    state.tiltEpisodeStartMs = input.timestamp;
+  } else if (!nowInTilt && state.inTilt) {
+    // Leaving TILT: drop the RTT samples accumulated during the stall. The in-TILT
+    // round-trips are high, and if left in the window they would trip a spurious
+    // rtt_stall on the healthy polls right after recovery (lingering for up to N
+    // polls until they age out) - a false "still stalling" warning on a loop that
+    // just healed.
+    state.tiltEpisodeStartMs = null;
+    state.rttSamples = [];
+  }
+  state.inTilt = nowInTilt;
+
   const warnBreaches = state.rttSamples.filter((v) => v >= thresholds.warnRttMs).length;
   const highBreaches = state.rttSamples.filter((v) => v >= thresholds.highRttMs).length;
   const worstRtt = state.rttSamples.length > 0 ? Math.max(...state.rttSamples) : null;
   const rttStalling = warnBreaches >= thresholds.rttMinBreaches;
   const rttSevere = highBreaches >= thresholds.rttMinBreaches;
-
-  // TILT episode edges.
-  const nowInTilt = isInTilt(input);
-  if (nowInTilt && !state.inTilt) {
-    state.tiltEpisodeStartMs = input.timestamp;
-  } else if (!nowInTilt && state.inTilt) {
-    state.tiltEpisodeStartMs = null;
-  }
-  state.inTilt = nowInTilt;
 
   // 1) Active TILT — highest confidence. The RTT stall, if any, is the same event
   //    seen through a different lens, so it is folded in here rather than emitted
@@ -235,6 +245,10 @@ export function evaluateSentinelLoopStall(
   //    form of the RTT stall; report before it is mistaken for a dead connection.
   if (input.commandTimedOut) {
     state.misdirectedStreak = 0;
+    // A wedge is a severe stall; clear the window so pre-wedge breaches do not
+    // resurface as an rtt_stall once INFO starts answering again (same reasoning as
+    // the TILT-exit reset above).
+    state.rttSamples = [];
     return [
       {
         kind: 'timeout_wedge',
@@ -301,11 +315,16 @@ export function evaluateSentinelLoopStall(
 
 /**
  * Stable per-connection signature. One Sentinel connection has one event loop, so
- * the kind alone dedupes an episode across polls while a change of kind (e.g. an
- * RTT stall escalating into a wedge, or a new TILT episode after recovery) alerts
- * again. Percent-encoded for symmetry with sentinel-drift-detector, though `kind`
- * is a fixed enum and never contains the separator.
+ * the kind plus severity dedupes an episode across polls while a change of kind
+ * (e.g. an RTT stall escalating into a wedge, or a new TILT episode after recovery)
+ * OR a severity escalation (an rtt_stall crossing from warning into critical as the
+ * loop approaches the TILT trigger) alerts again. Severity is part of the signature
+ * precisely so that escalation is not deduped away as "the same finding". Percent-
+ * encoded for symmetry with sentinel-drift-detector, though neither field contains
+ * the separator.
  */
 export function sentinelLoopStallSignature(finding: SentinelLoopStallFinding): string {
-  return ['sentinel-loop-stall', finding.kind].map(encodeURIComponent).join('|');
+  return ['sentinel-loop-stall', finding.kind, finding.severity]
+    .map(encodeURIComponent)
+    .join('|');
 }
