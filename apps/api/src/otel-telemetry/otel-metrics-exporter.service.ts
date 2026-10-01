@@ -7,11 +7,7 @@ import type {
   ObservableCounter,
   ObservableUpDownCounter,
 } from '@opentelemetry/api';
-import {
-  MeterProvider,
-  PeriodicExportingMetricReader,
-  type PushMetricExporter,
-} from '@opentelemetry/sdk-metrics';
+import { MeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-proto';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
@@ -25,6 +21,7 @@ import {
   type SemconvInstrumentSpec,
 } from './semconv-map';
 import { NodeSplittingExporter, buildNodeResolver } from './node-splitting-exporter';
+import { SeriesExpiringExporter, SeriesLastSeen, seriesBoundMs } from './series-expiry';
 
 type MirrorInstrument = ObservableGauge | ObservableCounter | ObservableUpDownCounter;
 
@@ -78,6 +75,7 @@ export class OtelMetricsExporterService implements OnModuleInit, OnModuleDestroy
   private observeCallback?: BatchObservableCallback;
   private strategy: ExportStrategy = MIRROR_STRATEGY;
   private readonly skipLogged = new Set<string>();
+  private lastSeen?: SeriesLastSeen;
 
   constructor(
     private readonly configService: ConfigService,
@@ -99,16 +97,28 @@ export class OtelMetricsExporterService implements OnModuleInit, OnModuleDestroy
     const otlpExporter = new OTLPMetricExporter({
       url: `${endpoint.replace(/\/$/, '')}/v1/metrics`,
     });
-    const exporter: PushMetricExporter =
+    const lastSeen = new SeriesLastSeen(
+      seriesBoundMs(this.prometheusService.getStalenessMs(), intervalMs),
+    );
+    this.lastSeen = lastSeen;
+    const reader =
       mode === 'semconv'
-        ? new NodeSplittingExporter(otlpExporter, () =>
-            buildNodeResolver(this.connectionRegistry.list()),
-          )
-        : otlpExporter;
-    const reader = new PeriodicExportingMetricReader({
-      exporter,
-      exportIntervalMillis: intervalMs,
-    });
+        ? new PeriodicExportingMetricReader({
+            exporter: new SeriesExpiringExporter(
+              new NodeSplittingExporter(
+                otlpExporter,
+                () => buildNodeResolver(this.connectionRegistry.list()),
+                intervalMs,
+              ),
+              lastSeen,
+            ),
+            exportIntervalMillis: intervalMs,
+            exportTimeoutMillis: intervalMs,
+          })
+        : new PeriodicExportingMetricReader({
+            exporter: new SeriesExpiringExporter(otlpExporter, lastSeen),
+            exportIntervalMillis: intervalMs,
+          });
     this.provider = new MeterProvider({
       resource: resourceFromAttributes({ [ATTR_SERVICE_NAME]: 'betterdb-monitor' }),
       readers: [reader],
@@ -167,6 +177,7 @@ export class OtelMetricsExporterService implements OnModuleInit, OnModuleDestroy
             continue;
           }
           result.observe(instrument, point.value, point.attributes);
+          this.lastSeen?.observe(point.instrument, point.attributes);
         }
       }
     };

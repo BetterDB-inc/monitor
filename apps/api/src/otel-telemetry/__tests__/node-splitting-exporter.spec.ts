@@ -464,6 +464,72 @@ describe('NodeSplittingExporter', () => {
       );
       expect(order.slice(labels.length)).toEqual(labels.slice(0, MAX_CONCURRENT_EXPORTS));
     });
+
+    describe('with an export timeout', () => {
+      const EXPORT_TIMEOUT_MS = 50;
+
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it('reports success before the reader timeout while many nodes are still exporting', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] });
+        const inner = heldInner();
+        const exporter = new NodeSplittingExporter(inner, () => manyResolver, EXPORT_TIMEOUT_MS);
+        const callback = jest.fn();
+
+        exporter.export(manyNodes, callback);
+        await settle();
+        jest.advanceTimersByTime(EXPORT_TIMEOUT_MS - 1);
+
+        expect(callback).toHaveBeenCalledTimes(1);
+        expect(callback).toHaveBeenCalledWith({ code: ExportResultCode.SUCCESS });
+        await drain(inner);
+        expect(inner.exported).toHaveLength(labels.length);
+        expect(callback).toHaveBeenCalledTimes(1);
+      });
+
+      it('reports a failure that settles before the deadline in the same cycle', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] });
+        const error = new Error('collector down');
+        const inner = asyncInner();
+        inner.export = (_metrics, callback) => callback({ code: ExportResultCode.FAILED, error });
+        const exporter = new NodeSplittingExporter(inner, () => manyResolver, EXPORT_TIMEOUT_MS);
+
+        await expect(exportOnce(exporter, manyNodes)).resolves.toEqual({
+          code: ExportResultCode.FAILED,
+          error,
+        });
+      });
+
+      it('reports a failure that settles after the deadline with the next cycle', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] });
+        const error = new Error('collector down');
+        const pending: Array<(result: ExportResult) => void> = [];
+        const inner = heldInner();
+        inner.export = (_metrics, callback) => {
+          pending.push(callback);
+        };
+        const exporter = new NodeSplittingExporter(inner, () => resolver, EXPORT_TIMEOUT_MS);
+
+        const first = exportOnce(exporter, twoNodes);
+        await settle();
+        jest.advanceTimersByTime(EXPORT_TIMEOUT_MS);
+        await expect(first).resolves.toEqual({ code: ExportResultCode.SUCCESS });
+
+        pending.splice(0).forEach((callback) => callback({ code: ExportResultCode.FAILED, error }));
+        await settle();
+        inner.export = (_metrics, callback) => callback({ code: ExportResultCode.SUCCESS });
+
+        await expect(exportOnce(exporter, twoNodes)).resolves.toEqual({
+          code: ExportResultCode.FAILED,
+          error,
+        });
+        await expect(exportOnce(exporter, twoNodes)).resolves.toEqual({
+          code: ExportResultCode.SUCCESS,
+        });
+      });
+    });
   });
 
   it('delegates flush, shutdown and temporality selection', async () => {

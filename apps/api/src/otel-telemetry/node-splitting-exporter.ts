@@ -13,6 +13,8 @@ export const CONNECTION_ATTRIBUTE = 'connection';
 
 export const MAX_CONCURRENT_EXPORTS = 8;
 
+const CYCLE_BUDGET_FRACTION = 0.9;
+
 const AGENT_HOST = 'agent';
 
 const SUPERSEDED = new Error('Export superseded by a newer collection before a slot was free');
@@ -119,6 +121,10 @@ export function splitByConnection(
   }));
 }
 
+function isFailure(result: ExportResult): boolean {
+  return result.code !== ExportResultCode.SUCCESS;
+}
+
 function partKey(part: ResourceMetrics): string {
   return String(part.resource.attributes['service.instance.id'] ?? '');
 }
@@ -129,13 +135,19 @@ export class NodeSplittingExporter implements PushMetricExporter {
   private readonly knownNodes = new Map<string, NodeIdentity>();
   private activeExports = 0;
   private readonly waitingForSlot = new Map<string, (granted: boolean) => void>();
+  private readonly cycleBudgetMs?: number;
+  private lateFailure?: ExportResult;
 
   constructor(
     private readonly inner: PushMetricExporter,
     private readonly createResolver: () => NodeResolver,
+    exportTimeoutMs?: number,
   ) {
     this.selectAggregationTemporality = inner.selectAggregationTemporality?.bind(inner);
     this.selectAggregation = inner.selectAggregation?.bind(inner);
+    if (exportTimeoutMs !== undefined) {
+      this.cycleBudgetMs = Math.floor(exportTimeoutMs * CYCLE_BUDGET_FRACTION);
+    }
   }
 
   export(metrics: ResourceMetrics, resultCallback: (result: ExportResult) => void): void {
@@ -145,14 +157,35 @@ export class NodeSplittingExporter implements PushMetricExporter {
       (label) => this.remember(label, current(label)),
       (label) => this.knownNodes.has(label),
     );
+    const results: ExportResult[] = [];
+    let reported = false;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const report = (): void => {
+      if (reported) {
+        return;
+      }
+      reported = true;
+      clearTimeout(deadline);
+      const failed = this.lateFailure ?? results.find(isFailure);
+      this.lateFailure = undefined;
+      resultCallback(failed ?? { code: ExportResultCode.SUCCESS });
+    };
+    const record = (result: ExportResult): void => {
+      if (!reported) {
+        results.push(result);
+      } else if (isFailure(result)) {
+        this.lateFailure ??= result;
+      }
+    };
     if (parts.length === 0) {
-      resultCallback({ code: ExportResultCode.SUCCESS });
+      report();
       return;
     }
-    void Promise.all(parts.map((part) => this.exportWithSlot(part))).then((results) => {
-      const failed = results.find((result) => result.code !== ExportResultCode.SUCCESS);
-      resultCallback(failed ?? { code: ExportResultCode.SUCCESS });
-    });
+    if (this.cycleBudgetMs !== undefined) {
+      deadline = setTimeout(report, this.cycleBudgetMs);
+      deadline.unref?.();
+    }
+    void Promise.all(parts.map((part) => this.exportWithSlot(part).then(record))).then(report);
   }
 
   forceFlush(): Promise<void> {
