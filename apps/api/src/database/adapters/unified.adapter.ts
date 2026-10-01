@@ -48,7 +48,7 @@ import type {
   KeyDetail,
   KeyPatternData,
 } from '@betterdb/shared';
-import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT } from '@betterdb/shared';
+import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_SECONDS } from '@betterdb/shared';
 
 import type { SshTunnelConfig } from '@betterdb/shared';
 import { SshTunnelService } from '../ssh/ssh-tunnel.service';
@@ -813,6 +813,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
           totalCardinality: 0,
           maxCardinality: 0,
           totalIdleTime: 0,
+          staleCount: 0,
           withTtl: 0,
           withoutTtl: 0,
           ttlValues: [],
@@ -896,6 +897,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
               : null;
           if (idle !== null) {
             stats.totalIdleTime += idle;
+            if (idle > STALE_KEY_IDLE_SECONDS) {
+              stats.staleCount = (stats.staleCount ?? 0) + 1;
+            }
           }
 
           const freq =
