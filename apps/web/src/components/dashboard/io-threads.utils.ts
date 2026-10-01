@@ -2,8 +2,8 @@ import type { StoredMemorySnapshot } from '../../types/metrics';
 
 export interface IoThreadPoint {
   time: string;
-  reads: number;
-  writes: number;
+  reads: number | null;
+  writes: number | null;
 }
 
 /** Decide whether to show the chart vs the single-threaded info card. */
@@ -12,8 +12,13 @@ export function shouldShowIoChart(
   hasEverSeenActivity: boolean,
   data: IoThreadPoint[],
 ): boolean {
-  const dataHasActivity = data.some(d => d.reads > 0 || d.writes > 0);
+  const dataHasActivity = data.some(d => (d.reads ?? 0) > 0 || (d.writes ?? 0) > 0);
   return isMultiThreaded || hasEverSeenActivity || dataHasActivity;
+}
+
+function ratePerSec(current: number | null, previous: number | null, dtSec: number): number | null {
+  if (current == null || previous == null) return null;
+  return parseFloat((Math.max(0, current - previous) / dtSec).toFixed(1));
 }
 
 /**
@@ -32,8 +37,8 @@ export function deriveStoredIoDeltas(
     if (dtSec <= 0) return { time: formatTime(s.timestamp), reads: 0, writes: 0 };
     return {
       time: formatTime(s.timestamp),
-      reads: parseFloat((Math.max(0, (s.ioThreadedReads ?? 0) - (prev.ioThreadedReads ?? 0)) / dtSec).toFixed(1)),
-      writes: parseFloat((Math.max(0, (s.ioThreadedWrites ?? 0) - (prev.ioThreadedWrites ?? 0)) / dtSec).toFixed(1)),
+      reads: ratePerSec(s.ioThreadedReads, prev.ioThreadedReads, dtSec),
+      writes: ratePerSec(s.ioThreadedWrites, prev.ioThreadedWrites, dtSec),
     };
   });
 }

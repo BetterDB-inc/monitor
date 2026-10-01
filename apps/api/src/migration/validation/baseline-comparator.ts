@@ -39,19 +39,23 @@ export async function compareBaseline(
   let sumOps = 0;
   let sumMem = 0;
   let sumFrag = 0;
+  let fragCount = 0;
   let sumCpu = 0;
 
   for (const snap of snapshots) {
     sumOps += snap.opsPerSec;
     sumMem += snap.usedMemory;
-    sumFrag += snap.memFragmentationRatio;
+    if (snap.memFragmentationRatio !== null) {
+      sumFrag += snap.memFragmentationRatio;
+      fragCount++;
+    }
     sumCpu += snap.cpuSys;
   }
 
   const count = snapshots.length;
   const avgOps = sumOps / count;
   const avgMem = sumMem / count;
-  const avgFrag = sumFrag / count;
+  const avgFrag = fragCount > 0 ? sumFrag / fragCount : null;
   const avgCpu = sumCpu / count;
 
   // 4. Get current target metrics
@@ -98,11 +102,11 @@ export async function compareBaseline(
 
 function buildMetric(
   name: string,
-  sourceBaseline: number,
+  sourceBaseline: number | null,
   targetCurrent: number,
   evaluateStatus: (percentDelta: number, targetValue: number) => BaselineMetricStatus,
 ): BaselineMetric {
-  if (sourceBaseline === 0) {
+  if (sourceBaseline === null || sourceBaseline === 0) {
     return {
       name,
       sourceBaseline,

@@ -203,8 +203,10 @@ describe('MemoryAnalyticsService', () => {
               usedMemoryPeak: 2000,
               memFragmentationRatio: 1.5,
               maxmemory: 0,
-              allocatorFragRatio: 0,
+              allocatorFragRatio: null,
               opsPerSec: 42,
+              ioThreadedReads: null,
+              ioThreadedWrites: null,
               connectionId: 'ext-1',
             }),
           ],
@@ -212,7 +214,7 @@ describe('MemoryAnalyticsService', () => {
         );
       });
 
-      it('saves a snapshot when only used_memory is pushed, writing 0 for the missing core fields', async () => {
+      it('saves a snapshot when only used_memory is pushed, writing null for the fields not pushed', async () => {
         const store = new ExternalMetricsStore();
         push(store, { 'memory.used_memory': '1000' });
         await (service as any).pollConnection(externalCtx(store));
@@ -220,12 +222,29 @@ describe('MemoryAnalyticsService', () => {
           [
             expect.objectContaining({
               usedMemory: 1000,
-              usedMemoryRss: 0,
-              usedMemoryPeak: 0,
-              memFragmentationRatio: 0,
+              usedMemoryRss: null,
+              usedMemoryPeak: null,
+              memFragmentationRatio: null,
+              allocatorFragRatio: null,
+              ioThreadedReads: null,
+              ioThreadedWrites: null,
               connectionId: 'ext-1',
             }),
           ],
+          'ext-1',
+        );
+      });
+
+      it('keeps a pushed zero as zero rather than null', async () => {
+        const store = new ExternalMetricsStore();
+        push(store, {
+          'memory.used_memory': '1000',
+          'memory.allocator_frag_ratio': '0',
+          'stats.io_threaded_reads_processed': '0',
+        });
+        await (service as any).pollConnection(externalCtx(store));
+        expect(storage.saveMemorySnapshots).toHaveBeenCalledWith(
+          [expect.objectContaining({ allocatorFragRatio: 0, ioThreadedReads: 0, ioThreadedWrites: null })],
           'ext-1',
         );
       });

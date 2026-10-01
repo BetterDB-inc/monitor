@@ -4,7 +4,7 @@ import { useSearchParams } from 'react-router-dom';
 import { useConnection } from '../hooks/useConnection';
 import { metricForecastingApi } from '../api/metric-forecasting';
 import { metricsApi } from '../api/metrics';
-import { METRIC_EXTRACTORS } from './metric-forecasting-extractors';
+import { extractMetricPoints } from './metric-forecasting-extractors';
 import {
   METRIC_KIND_META,
   ALL_METRIC_KINDS,
@@ -95,10 +95,10 @@ export function MetricForecasting() {
         startTime: now - settings!.rollingWindowMs,
         limit: 1500,
       });
-      const extractor = METRIC_EXTRACTORS[activeTab];
-      return [...snapshots]
-        .sort((a, b) => a.timestamp - b.timestamp)
-        .map((s) => ({ time: s.timestamp, value: extractor(s), label: formatTime(s.timestamp) }));
+      return extractMetricPoints(snapshots, activeTab).map((p) => ({
+        ...p,
+        label: formatTime(p.time),
+      }));
     },
     enabled: !!connectionId && !!settings,
     refetchInterval: 30_000,

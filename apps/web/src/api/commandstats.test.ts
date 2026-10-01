@@ -32,6 +32,10 @@ describe('avgLatencyUs', () => {
   it('returns 0 when callsDelta is 0', () => {
     expect(avgLatencyUs(sample({ usecDelta: 5_000, callsDelta: 0 }))).toBe(0);
   });
+
+  it('returns null when usecDelta was not pushed', () => {
+    expect(avgLatencyUs(sample({ usecDelta: null, callsDelta: 100 }))).toBeNull();
+  });
 });
 
 describe('toChartSeries', () => {
@@ -47,6 +51,13 @@ describe('toChartSeries', () => {
     expect(series[1].opsPerSec).toBeCloseTo(1.5, 6);
     expect(series[2].opsPerSec).toBeCloseTo(2, 6);
     expect(series[0].avgLatencyUs).toBe(100);
+  });
+
+  it('keeps ops/sec and leaves latency as a gap for samples without usec', () => {
+    const [point] = toChartSeries([sample({ callsDelta: 20, intervalMs: 10_000, usecDelta: null })]);
+
+    expect(point.opsPerSec).toBeCloseTo(2, 6);
+    expect(point.avgLatencyUs).toBeNull();
   });
 
   it('returns empty array for empty input', () => {

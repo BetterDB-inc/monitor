@@ -1666,16 +1666,16 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         timestamp BIGINT NOT NULL,
         used_memory BIGINT NOT NULL,
-        used_memory_rss BIGINT NOT NULL,
-        used_memory_peak BIGINT NOT NULL,
-        mem_fragmentation_ratio DOUBLE PRECISION NOT NULL,
+        used_memory_rss BIGINT,
+        used_memory_peak BIGINT,
+        mem_fragmentation_ratio DOUBLE PRECISION,
         maxmemory BIGINT NOT NULL DEFAULT 0,
-        allocator_frag_ratio DOUBLE PRECISION NOT NULL DEFAULT 0,
+        allocator_frag_ratio DOUBLE PRECISION DEFAULT 0,
         ops_per_sec BIGINT NOT NULL DEFAULT 0,
         cpu_sys DOUBLE PRECISION NOT NULL DEFAULT 0,
         cpu_user DOUBLE PRECISION NOT NULL DEFAULT 0,
-        io_threaded_reads BIGINT NOT NULL DEFAULT 0,
-        io_threaded_writes BIGINT NOT NULL DEFAULT 0,
+        io_threaded_reads BIGINT DEFAULT 0,
+        io_threaded_writes BIGINT DEFAULT 0,
         connection_id TEXT NOT NULL DEFAULT 'env-default'
       );
 
@@ -1687,12 +1687,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         connection_id TEXT NOT NULL,
         command TEXT NOT NULL,
         calls_total BIGINT NOT NULL DEFAULT 0,
-        usec_total BIGINT NOT NULL DEFAULT 0,
-        usec_per_call DOUBLE PRECISION NOT NULL DEFAULT 0,
-        rejected_calls BIGINT NOT NULL DEFAULT 0,
-        failed_calls BIGINT NOT NULL DEFAULT 0,
+        usec_total BIGINT DEFAULT 0,
+        usec_per_call DOUBLE PRECISION DEFAULT 0,
+        rejected_calls BIGINT DEFAULT 0,
+        failed_calls BIGINT DEFAULT 0,
         calls_delta BIGINT NOT NULL,
-        usec_delta BIGINT NOT NULL,
+        usec_delta BIGINT,
         interval_ms INTEGER NOT NULL,
         captured_at BIGINT NOT NULL
       );
@@ -1853,6 +1853,19 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS cpu_user DOUBLE PRECISION NOT NULL DEFAULT 0;
       ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS io_threaded_reads BIGINT NOT NULL DEFAULT 0;
       ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS io_threaded_writes BIGINT NOT NULL DEFAULT 0;
+
+      ALTER TABLE memory_snapshots ALTER COLUMN used_memory_rss DROP NOT NULL;
+      ALTER TABLE memory_snapshots ALTER COLUMN used_memory_peak DROP NOT NULL;
+      ALTER TABLE memory_snapshots ALTER COLUMN mem_fragmentation_ratio DROP NOT NULL;
+      ALTER TABLE memory_snapshots ALTER COLUMN allocator_frag_ratio DROP NOT NULL;
+      ALTER TABLE memory_snapshots ALTER COLUMN io_threaded_reads DROP NOT NULL;
+      ALTER TABLE memory_snapshots ALTER COLUMN io_threaded_writes DROP NOT NULL;
+
+      ALTER TABLE command_stats_samples ALTER COLUMN usec_total DROP NOT NULL;
+      ALTER TABLE command_stats_samples ALTER COLUMN usec_per_call DROP NOT NULL;
+      ALTER TABLE command_stats_samples ALTER COLUMN rejected_calls DROP NOT NULL;
+      ALTER TABLE command_stats_samples ALTER COLUMN failed_calls DROP NOT NULL;
+      ALTER TABLE command_stats_samples ALTER COLUMN usec_delta DROP NOT NULL;
 
       -- Database Connections Table (stores multi-database connection configs)
       CREATE TABLE IF NOT EXISTS connections (
@@ -3534,8 +3547,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         snapshot.opsPerSec ?? 0,
         snapshot.cpuSys ?? 0,
         snapshot.cpuUser ?? 0,
-        snapshot.ioThreadedReads ?? 0,
-        snapshot.ioThreadedWrites ?? 0,
+        snapshot.ioThreadedReads ?? null,
+        snapshot.ioThreadedWrites ?? null,
         connectionId,
       );
     }
@@ -3594,16 +3607,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       id: row.id,
       timestamp: Number(row.timestamp),
       usedMemory: Number(row.used_memory),
-      usedMemoryRss: Number(row.used_memory_rss),
-      usedMemoryPeak: Number(row.used_memory_peak),
-      memFragmentationRatio: Number(row.mem_fragmentation_ratio),
+      usedMemoryRss: row.used_memory_rss === null ? null : Number(row.used_memory_rss),
+      usedMemoryPeak: row.used_memory_peak === null ? null : Number(row.used_memory_peak),
+      memFragmentationRatio:
+        row.mem_fragmentation_ratio === null ? null : Number(row.mem_fragmentation_ratio),
       maxmemory: Number(row.maxmemory),
-      allocatorFragRatio: Number(row.allocator_frag_ratio),
+      allocatorFragRatio:
+        row.allocator_frag_ratio === null ? null : Number(row.allocator_frag_ratio),
       opsPerSec: Number(row.ops_per_sec ?? 0),
       cpuSys: Number(row.cpu_sys ?? 0),
       cpuUser: Number(row.cpu_user ?? 0),
-      ioThreadedReads: Number(row.io_threaded_reads ?? 0),
-      ioThreadedWrites: Number(row.io_threaded_writes ?? 0),
+      ioThreadedReads: row.io_threaded_reads === null ? null : Number(row.io_threaded_reads),
+      ioThreadedWrites: row.io_threaded_writes === null ? null : Number(row.io_threaded_writes),
       connectionId: row.connection_id,
     }));
   }
@@ -3692,12 +3707,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       connectionId: row.connection_id,
       command: row.command,
       callsTotal: Number(row.calls_total),
-      usecTotal: Number(row.usec_total),
-      usecPerCall: Number(row.usec_per_call),
-      rejectedCalls: Number(row.rejected_calls),
-      failedCalls: Number(row.failed_calls),
+      usecTotal: row.usec_total === null ? null : Number(row.usec_total),
+      usecPerCall: row.usec_per_call === null ? null : Number(row.usec_per_call),
+      rejectedCalls: row.rejected_calls === null ? null : Number(row.rejected_calls),
+      failedCalls: row.failed_calls === null ? null : Number(row.failed_calls),
       callsDelta: Number(row.calls_delta),
-      usecDelta: Number(row.usec_delta),
+      usecDelta: row.usec_delta === null ? null : Number(row.usec_delta),
       intervalMs: Number(row.interval_ms),
       capturedAt: Number(row.captured_at),
     }));
