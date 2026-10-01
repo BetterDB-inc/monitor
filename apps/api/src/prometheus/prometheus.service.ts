@@ -1709,6 +1709,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const newDbLabels = new Set<string>();
     let totalKeys = 0;
     let totalExpiring = 0;
+    let sawExpires = false;
 
     for (const [dbKey, dbInfo] of Object.entries(keyspace as Record<string, unknown>)) {
       // parseInfoToTyped emits typed objects for db* entries; anything still
@@ -1716,17 +1717,30 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       if (!dbInfo || typeof dbInfo !== 'object') continue;
       newDbLabels.add(dbKey);
 
-      const parsedInfo = dbInfo as { keys: number; expires: number; avg_ttl: number };
+      const parsedInfo = dbInfo as { keys: number; expires?: number; avg_ttl?: number };
       this.dbKeys.labels(connLabel, dbKey).set(parsedInfo.keys || 0);
-      this.dbKeysExpiring.labels(connLabel, dbKey).set(parsedInfo.expires || 0);
-      this.dbAvgTtlSeconds.labels(connLabel, dbKey).set((parsedInfo.avg_ttl || 0) / 1000);
+      if (absentAsZero || parsedInfo.expires !== undefined) {
+        this.dbKeysExpiring.labels(connLabel, dbKey).set(parsedInfo.expires || 0);
+        sawExpires = true;
+      } else {
+        this.dbKeysExpiring.remove(connLabel, dbKey);
+      }
+      if (absentAsZero || parsedInfo.avg_ttl !== undefined) {
+        this.dbAvgTtlSeconds.labels(connLabel, dbKey).set((parsedInfo.avg_ttl || 0) / 1000);
+      } else {
+        this.dbAvgTtlSeconds.remove(connLabel, dbKey);
+      }
       totalKeys += parsedInfo.keys || 0;
       totalExpiring += parsedInfo.expires || 0;
     }
 
     const hasTotals = absentAsZero || newDbLabels.size > 0;
     this.setOrRemove(this.keyspaceKeys, connLabel, hasTotals ? totalKeys : null);
-    this.setOrRemove(this.keyspaceKeysExpiring, connLabel, hasTotals ? totalExpiring : null);
+    this.setOrRemove(
+      this.keyspaceKeysExpiring,
+      connLabel,
+      absentAsZero ? totalExpiring : sawExpires ? totalExpiring : null,
+    );
 
     // Remove stale db labels for this connection
     for (const staleDb of state.currentKeyspaceDbLabels) {
