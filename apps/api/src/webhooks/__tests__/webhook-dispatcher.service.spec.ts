@@ -757,6 +757,33 @@ describe('WebhookDispatcherService', () => {
       expect(events).toEqual([WebhookEventType.INSTANCE_DOWN, WebhookEventType.INSTANCE_UP]);
     });
 
+    it('waits for a direct dispatch already in flight before flushing later buffered events', async () => {
+      let resolveFirstLookup: (webhooks: ReturnType<typeof makeWebhook>[]) => void = () => {};
+      webhooksService.getWebhooksByEvent
+        .mockImplementationOnce(
+          () => new Promise((resolve) => (resolveFirstLookup = resolve)),
+        )
+        .mockRejectedValueOnce(storageError)
+        .mockResolvedValue([makeWebhook('a')]);
+      storageClient.createDelivery
+        .mockRejectedValueOnce(storageError)
+        .mockImplementation(async (input) => deliveryFor(input));
+
+      const first = service.dispatchEvent(WebhookEventType.INSTANCE_DOWN, {});
+      await service.dispatchEvent(WebhookEventType.INSTANCE_UP, {});
+
+      await jest.advanceTimersByTimeAsync(1_000);
+      expect(sendWebhook).not.toHaveBeenCalled();
+
+      resolveFirstLookup([makeWebhook('a')]);
+      await first;
+      await jest.advanceTimersByTimeAsync(1_000);
+
+      const events = sendWebhook.mock.calls.map(([, , payload]) => payload.event);
+      expect(events).toEqual([WebhookEventType.INSTANCE_DOWN, WebhookEventType.INSTANCE_UP]);
+      expect(service.getStorageRetryBufferStats().bufferedEvents).toBe(0);
+    });
+
     it('drops the oldest buffered event when the buffer is full', async () => {
       webhooksService.getWebhooksByEvent.mockRejectedValue(storageError);
 

@@ -29,6 +29,7 @@ interface AlertState {
 }
 
 interface PendingEvent {
+  sequence: number;
   eventType: WebhookEventType;
   data: Record<string, unknown>;
   connectionId?: string;
@@ -49,6 +50,9 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   private readonly UNCONFIRMED_DELIVERY_LOOKBACK = 100;
   private storageRetryBuffer: PendingEvent[] = [];
   private inFlightEvent: PendingEvent | null = null;
+  private readonly inFlightDirectDispatches = new Set<Promise<boolean>>();
+  private nextEventSequence = 0;
+  private flushing = false;
   private flushTimer: NodeJS.Timeout | null = null;
   private consecutiveFlushFailures = 0;
   private droppedEventCount = 0;
@@ -173,6 +177,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     targetWebhookIds?: string[],
   ): PendingEvent {
     return {
+      sequence: this.nextEventSequence++,
       eventType,
       data,
       connectionId,
@@ -191,6 +196,16 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       return this.bufferEvent(event);
     }
 
+    const dispatch = this.deliverDirectly(event, webhooks);
+    this.inFlightDirectDispatches.add(dispatch);
+    try {
+      return await dispatch;
+    } finally {
+      this.inFlightDirectDispatches.delete(dispatch);
+    }
+  }
+
+  private async deliverDirectly(event: PendingEvent, webhooks?: Webhook[]): Promise<boolean> {
     const outcome = await this.deliverEvent(event, webhooks);
     if (outcome.storageUnavailable && !this.bufferEvent(event)) {
       return false;
@@ -272,7 +287,11 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       );
     }
 
-    this.storageRetryBuffer.push(event);
+    let insertAt = this.storageRetryBuffer.length;
+    while (insertAt > 0 && this.storageRetryBuffer[insertAt - 1].sequence > event.sequence) {
+      insertAt--;
+    }
+    this.storageRetryBuffer.splice(insertAt, 0, event);
     this.logger.warn(
       `Buffered ${event.eventType} event for retry after a storage failure (${this.storageRetryBuffer.length} buffered)`,
     );
@@ -295,10 +314,19 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   }
 
   private async flushStorageRetryBuffer(): Promise<void> {
-    if (this.inFlightEvent || this.destroyed) {
+    if (this.flushing || this.destroyed) {
       return;
     }
+    this.flushing = true;
+    try {
+      await Promise.allSettled([...this.inFlightDirectDispatches]);
+      await this.drainStorageRetryBuffer();
+    } finally {
+      this.flushing = false;
+    }
+  }
 
+  private async drainStorageRetryBuffer(): Promise<void> {
     let flushed = 0;
     while (this.storageRetryBuffer.length > 0 && !this.destroyed) {
       const event = this.storageRetryBuffer[0];

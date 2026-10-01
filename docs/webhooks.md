@@ -653,8 +653,8 @@ curl -X POST http://localhost:3001/api/webhooks/deliveries/{deliveryId}/retry
 Every delivery is written to storage before the HTTP request is sent, and the retry processor works from those rows. If storage is unavailable when an event fires (the subscribed-webhook lookup or the delivery write fails), the event is held in an in-memory buffer instead of being dropped:
 
 - The buffer is retried with exponential backoff: 1 second, doubling on each failed attempt, capped at 1 minute.
-- Once storage recovers, buffered events are dispatched in the order they fired, with their original timestamps. Events raised while the buffer is non-empty are queued behind it, so for example an `instance.up` is never delivered before the `instance.down` that preceded it.
-- If one webhook's delivery row was written and another's was not, only the missing one is retried. If a write failed ambiguously (the row may have been stored), the retry checks the webhook's recent deliveries for the same payload ID before writing again, so a delivery is never duplicated.
+- Once storage recovers, buffered events are dispatched in the order they fired, with their original timestamps. Events raised while the buffer is non-empty are queued behind it, and a retry waits for any dispatch that was already in flight when the outage began, so for example an `instance.up` is never delivered before the `instance.down` that preceded it.
+- If one webhook's delivery row was written and another's was not, only the missing one is retried. If a write failed ambiguously (the row may have been stored), the retry checks the webhook's 100 most recent deliveries for the same payload ID before writing again. If more than 100 newer deliveries for that webhook were written in the meantime (heavy concurrent traffic), an ambiguously written row can fall outside that window and the event can be delivered twice.
 - The buffer holds at most 1,000 events. When it is full the oldest event is dropped and an error is logged.
 - The buffer lives in process memory. Events still buffered when the process stops or restarts are lost (a warning with the count is logged on shutdown).
 
