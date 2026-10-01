@@ -67,7 +67,7 @@ function formatNumber(num: number): string {
   return num.toString();
 }
 
-function formatOptionalCount(num?: number): string {
+function formatOptionalCount(num?: number | null): string {
   if (num === undefined || num === null) return 'N/A';
   return formatNumber(num);
 }
@@ -410,7 +410,7 @@ export function KeyAnalytics() {
                 </CardHeader>
                 <CardContent>
                   <div className="text-2xl font-bold text-amber-600">
-                    {summary ? formatNumber(summary.staleKeyCount) : '0'}
+                    {summary ? formatOptionalCount(summary.staleKeyCount) : '0'}
                   </div>
                   <div className="text-xs text-muted-foreground mt-1">idle &gt; 24 hours</div>
                 </CardContent>

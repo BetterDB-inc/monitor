@@ -33,7 +33,7 @@ export interface KeyAnalyticsSummary {
   totalPatterns: number;
   totalKeys: number;
   totalMemoryBytes: number;
-  staleKeyCount: number;
+  staleKeyCount: number | null;
   hotKeyCount: number;
   coldKeyCount: number;
   keysExpiringSoon: number;
@@ -43,7 +43,7 @@ export interface KeyAnalyticsSummary {
       keyCount: number;
       memoryBytes: number;
       avgMemoryBytes: number;
-      staleCount: number;
+      staleCount: number | null;
       hotCount: number;
       coldCount: number;
     }
