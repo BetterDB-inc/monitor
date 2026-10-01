@@ -2814,7 +2814,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         keyCount: row.key_count,
         memoryBytes: parseInt(row.total_memory_bytes),
         avgMemoryBytes: row.avg_memory_bytes,
-        staleCount: row.stale_key_count ?? 0,
+        staleCount: row.stale_key_count ?? null,
         hotCount: row.hot_key_count ?? 0,
         coldCount: row.cold_key_count ?? 0,
       };
@@ -2840,7 +2840,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       totalPatterns: parseInt(summary.total_patterns) || 0,
       totalKeys: parseInt(summary.total_keys) || 0,
       totalMemoryBytes: parseInt(summary.total_memory_bytes) || 0,
-      staleKeyCount: parseInt(summary.stale_key_count) || 0,
+      staleKeyCount: summary.stale_key_count == null ? null : parseInt(summary.stale_key_count),
       hotKeyCount: parseInt(summary.hot_key_count) || 0,
       coldKeyCount: parseInt(summary.cold_key_count) || 0,
       keysExpiringSoon: parseInt(summary.keys_expiring_soon) || 0,

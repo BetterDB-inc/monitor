@@ -2701,7 +2701,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         keyCount: row.key_count,
         memoryBytes: row.total_memory_bytes,
         avgMemoryBytes: row.avg_memory_bytes,
-        staleCount: row.stale_key_count ?? 0,
+        staleCount: row.stale_key_count ?? null,
         hotCount: row.hot_key_count ?? 0,
         coldCount: row.cold_key_count ?? 0,
       };
@@ -2723,7 +2723,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       totalPatterns: summary.total_patterns ?? 0,
       totalKeys: summary.total_keys ?? 0,
       totalMemoryBytes: summary.total_memory_bytes ?? 0,
-      staleKeyCount: summary.stale_key_count ?? 0,
+      staleKeyCount: summary.stale_key_count ?? null,
       hotKeyCount: summary.hot_key_count ?? 0,
       coldKeyCount: summary.cold_key_count ?? 0,
       keysExpiringSoon: summary.keys_expiring_soon ?? 0,
