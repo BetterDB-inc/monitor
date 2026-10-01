@@ -926,7 +926,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       const storedConfig = storedConfigs.find(c => c.id === id);
 
       if (storedConfig) {
-        config = this.decryptConfig(storedConfig);
+        config = this.withLiveTopology(id, this.decryptConfig(storedConfig));
         if (config.credentialStatus === 'decryption_failed') {
           // Still failing - update in-memory config with latest error and bail
           this.configs.set(id, this.withLiveTopology(id, config));

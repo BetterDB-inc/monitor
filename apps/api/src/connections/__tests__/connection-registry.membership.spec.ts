@@ -313,6 +313,20 @@ describe('ConnectionRegistry membership', () => {
     expect(storage.updateConnection).toHaveBeenLastCalledWith(id, { membership: expect.objectContaining({ nodeId: 'n3', hostname: 'old.cluster.local' }) });
   });
 
+  it('reconnects against the new hostname when the credentials recover in the same refresh', async () => {
+    const { registry, storage } = build();
+    const membership = { seedId: 'seed', nodeId: 'n2', origin: 'auto' as const, source: 'cluster' as const, hostname: 'old.cluster.local' };
+    put(registry, { id: 'auto', tls: true, credentialStatus: 'decryption_failed', membership });
+    storage.getConnections.mockResolvedValue([{ id: 'auto', name: 'auto', host: 'h', port: 1, isDefault: false, createdAt: 1, tls: true, membership }]);
+    const fresh = { connect: jest.fn().mockResolvedValue(undefined), disconnect: jest.fn().mockResolvedValue(undefined), getCapabilities: () => ({}) };
+    jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(() => fresh as never);
+
+    await registry.refreshChild('auto', { host: 'h', port: 1, nodeId: 'n2', source: 'cluster', hostname: 'node-2.cluster.local' });
+
+    expect(UnifiedDatabaseAdapter).toHaveBeenLastCalledWith(expect.objectContaining({ tlsServername: 'node-2.cluster.local' }));
+    expect(registry.getConfig('auto')).toMatchObject({ credentialStatus: 'valid', membership: { hostname: 'node-2.cluster.local' } });
+  });
+
   it('leaves no hostname behind when the first hostname reconnect fails', async () => {
     const { registry } = build();
     put(registry, seed);
