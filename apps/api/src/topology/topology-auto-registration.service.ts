@@ -178,7 +178,13 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
     }
     await this.applyEach(
       diff.add,
-      (node) => this.claimingAddress(node, () => this.connectionRegistry.addManagedChild(seed.id, node).then(() => undefined)),
+      (node) =>
+        this.claimingAddress(node, async () => {
+          if (this.connectionRegistry.findConfigByHostPort(node.host, node.port)) {
+            throw new Error(`${node.host}:${node.port} was registered while this sync was running; reconsidering on the next sync`);
+          }
+          await this.connectionRegistry.addManagedChild(seed.id, node);
+        }),
       'add',
       limits,
     );
