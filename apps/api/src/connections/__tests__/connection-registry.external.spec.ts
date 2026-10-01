@@ -165,6 +165,30 @@ describe('ConnectionRegistry external connections', () => {
     expect(discovered.list(Date.now()).map((i) => i.host)).toEqual(['other']);
   });
 
+  it('forgets the pushed address when the registered host was edited', async () => {
+    const { registry, discovered } = build();
+    discovered.record({ host: 'pushed.internal', port: 6379 }, {}, 1, Date.now());
+    discovered.record({ host: 'other', port: 6379 }, {}, 1, Date.now());
+    await registry.addConnection({ ...external, discoveredHost: 'Pushed.Internal', discoveredPort: 6379 });
+    expect(discovered.list(Date.now()).map((i) => i.host)).toEqual(['other']);
+    expect(discovered.record({ host: 'pushed.internal', port: 6379 }, {}, 1, Date.now())).toBe(false);
+  });
+
+  it('does not suppress the registered address when the pushed address is the same', async () => {
+    const { registry, discovered } = build();
+    await registry.addConnection({ ...external, discoveredHost: 'CACHE.internal', discoveredPort: 6379 });
+    expect(discovered.record({ host: 'cache.internal', port: 6379 }, {}, 1, Date.now())).toBe(true);
+  });
+
+  it('ignores the pushed address for direct connections', async () => {
+    const { registry, discovered } = build();
+    discovered.record({ host: 'pushed.internal', port: 6379 }, {}, 1, Date.now());
+    await registry
+      .addConnection({ name: 'Polled', host: 'direct.internal', port: 6380, discoveredHost: 'pushed.internal', discoveredPort: 6379 })
+      .catch(() => undefined);
+    expect(discovered.list(Date.now()).map((i) => i.host)).toEqual(['pushed.internal']);
+  });
+
   it('keeps a discovered address when the create fails', async () => {
     const { registry, discovered } = build();
     discovered.record({ host: 'cache.internal', port: 6379 }, {}, 1, Date.now());

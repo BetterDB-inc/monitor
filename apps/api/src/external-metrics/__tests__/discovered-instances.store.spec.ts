@@ -87,6 +87,16 @@ describe('DiscoveredInstancesStore', () => {
     expect(store.record(key('cache'), {}, 1, T0 + 1)).toBe(true);
   });
 
+  it('forgetPushed removes the entry and keeps the pushed address from reappearing', () => {
+    const store = new DiscoveredInstancesStore(true);
+    store.record(key('cache'), {}, 1, T0);
+    store.forgetPushed('CACHE', 6379, T0);
+    expect(store.list(T0)).toEqual([]);
+    expect(store.record(key('cache'), {}, 1, T0 + 1)).toBe(false);
+    expect(store.list(T0 + 1)).toEqual([]);
+    expect(store.record(key('cache'), {}, 1, T0 + DISCOVERED_TTL_MS)).toBe(true);
+  });
+
   it('forget clears a lingering dismissal', () => {
     const store = new DiscoveredInstancesStore(true);
     store.record(key('cache'), {}, 1, T0);

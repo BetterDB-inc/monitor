@@ -86,6 +86,11 @@ export class DiscoveredInstancesStore {
     this.dismissed.delete(id);
   }
 
+  forgetPushed(host: string, port: number, nowMs: number): void {
+    this.forget(host, port);
+    this.dismiss(host, port, nowMs);
+  }
+
   private purgeExpiredDismissals(nowMs: number): void {
     for (const [id, until] of this.dismissed) {
       if (until <= nowMs) this.dismissed.delete(id);

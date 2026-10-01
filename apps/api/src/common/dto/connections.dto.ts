@@ -245,6 +245,19 @@ export class CreateConnectionDto implements CreateConnectionRequest {
   @IsOptional()
   @IsIn(['direct', 'external'])
   connectionType?: 'direct' | 'external';
+
+  @ApiPropertyOptional({ description: 'Host the OTLP collector pushes under, when it differs from host (external only)', maxLength: 253 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(253)
+  discoveredHost?: string;
+
+  @ApiPropertyOptional({ description: 'Port the OTLP collector pushes under, when it differs from port (external only)', minimum: 1, maximum: 65535 })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  discoveredPort?: number;
 }
 
 export class DismissDiscoveredDto {
