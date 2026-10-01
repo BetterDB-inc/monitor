@@ -15,6 +15,13 @@ import {
 } from './membership-diff';
 
 const DISCOVERY_TIMEOUT_MS = 10_000;
+const SEED_RECONCILE_BUDGET_MS = 30_000;
+const MEMBERSHIP_CONCURRENCY = 4;
+
+interface ApplyLimits {
+  concurrency: number;
+  deadline: number;
+}
 
 @Injectable()
 export class TopologyAutoRegistrationService extends MultiConnectionPoller implements OnModuleInit {
@@ -22,7 +29,7 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
   private readonly heldRetirements = new Map<string, string>();
   private readonly loggedOnce = new Set<string>();
   private readonly pendingDiscovery = new Set<string>();
-  private reconcileChain: Promise<void> = Promise.resolve();
+  private readonly claimedAddresses = new Set<string>();
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -62,16 +69,12 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
   }
 
   async reconcile(seedId: string): Promise<void> {
-    const run = this.reconcileChain.then(() => this.reconcileOne(seedId));
-    this.reconcileChain = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
+    return this.reconcileOne(seedId);
   }
 
   private async reconcileOne(seedId: string): Promise<void> {
     await this.connectionRegistry.withSeedLock(seedId, async () => {
+      const limits: ApplyLimits = { concurrency: MEMBERSHIP_CONCURRENCY, deadline: Date.now() + SEED_RECONCILE_BUDGET_MS };
       const seed = this.connectionRegistry.getConfig(seedId);
       if (!seed || !this.isSeedCandidate(seed)) return;
 
@@ -98,7 +101,7 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
       const current = known.flatMap((m) => (m.membership ? [{ id: m.id, host: m.host, port: m.port, membership: m.membership }] : []));
       const desired = discovery.nodes.filter((n) => n.group === undefined || !unknown.has(n.group));
       const diff = diffMembership(seedId, desired, current, (host, port) => this.lookup(host, port));
-      await this.apply(seed, diff, known);
+      await this.apply(seed, diff, known, limits);
     });
   }
 
@@ -169,13 +172,18 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
     };
   }
 
-  private async apply(seed: DatabaseConnectionConfig, diff: MembershipDiff, members: DatabaseConnectionConfig[]): Promise<void> {
+  private async apply(seed: DatabaseConnectionConfig, diff: MembershipDiff, members: DatabaseConnectionConfig[], limits: ApplyLimits): Promise<void> {
     for (const skip of diff.skipped) {
       this.logOnce(`skip:${seed.id}:${skip.host}:${skip.port}:${skip.reason}`, `Not registering ${skip.host}:${skip.port} under ${seed.name}: ${skip.reason}`);
     }
-    await this.applyEach(diff.add, (node) => this.connectionRegistry.addManagedChild(seed.id, node).then(() => undefined), 'add');
-    await this.applyEach(diff.adopt, (a) => this.connectionRegistry.adoptChild(a.id, seed.id, a.node), 'adopt');
-    await this.applyEach(diff.reactivate, (r) => this.connectionRegistry.reactivateChild(r.id, r.node), 'reactivate');
+    await this.applyEach(
+      diff.add,
+      (node) => this.claimingAddress(node, () => this.connectionRegistry.addManagedChild(seed.id, node).then(() => undefined)),
+      'add',
+      limits,
+    );
+    await this.applyEach(diff.adopt, (a) => this.claimingAddress(a.node, () => this.connectionRegistry.adoptChild(a.id, seed.id, a.node)), 'adopt', limits);
+    await this.applyEach(diff.reactivate, (r) => this.connectionRegistry.reactivateChild(r.id, r.node), 'reactivate', limits);
 
     for (const { id, node } of diff.refresh) {
       if (node.source !== 'sentinel' || node.role !== 'primary') continue;
@@ -184,10 +192,10 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
         this.logger.log(`Sentinel group ${node.group} primary changed ${previous.host}:${previous.port} → ${node.host}:${node.port}`);
       }
     }
-    await this.applyEach(diff.refresh, (r) => this.connectionRegistry.refreshChild(r.id, r.node), 'refresh');
+    await this.applyEach(diff.refresh, (r) => this.connectionRegistry.refreshChild(r.id, r.node), 'refresh', limits);
 
     const retire = this.gateRetirements(seed, diff.retire, members);
-    await this.applyEach(retire, (id) => this.connectionRegistry.retireChild(id), 'retire');
+    await this.applyEach(retire, (id) => this.connectionRegistry.retireChild(id), 'retire', limits);
   }
 
   private gateRetirements(seed: DatabaseConnectionConfig, retire: string[], members: DatabaseConnectionConfig[]): string[] {
@@ -215,14 +223,41 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
     await this.applyEach(expired.map((m) => m.id), (id) => this.connectionRegistry.removeChild(id), 'purge');
   }
 
-  private async applyEach<T>(items: T[], op: (item: T) => Promise<void>, label: string): Promise<void> {
-    for (const item of items) {
-      try {
-        await op(item);
-        this.logger.log(`Topology membership ${label}: ${JSON.stringify(item)}`);
-      } catch (error) {
-        this.logger.warn(`Topology membership ${label} failed for ${JSON.stringify(item)}: ${error instanceof Error ? error.message : error}`);
+  private async claimingAddress(node: { host: string; port: number }, op: () => Promise<void>): Promise<void> {
+    const key = `${node.host.toLowerCase()}:${node.port}`;
+    if (this.claimedAddresses.has(key)) {
+      throw new Error(`${key} is being registered by another seed; retrying on the next sync`);
+    }
+    this.claimedAddresses.add(key);
+    try {
+      await op();
+    } finally {
+      this.claimedAddresses.delete(key);
+    }
+  }
+
+  private async applyEach<T>(items: T[], op: (item: T) => Promise<void>, label: string, limits?: ApplyLimits): Promise<void> {
+    let next = 0;
+    let deferred = 0;
+    const worker = async (): Promise<void> => {
+      while (next < items.length) {
+        if (limits && Date.now() >= limits.deadline) {
+          deferred += items.length - next;
+          next = items.length;
+          return;
+        }
+        const item = items[next++];
+        try {
+          await op(item);
+          this.logger.log(`Topology membership ${label}: ${JSON.stringify(item)}`);
+        } catch (error) {
+          this.logger.warn(`Topology membership ${label} failed for ${JSON.stringify(item)}: ${error instanceof Error ? error.message : error}`);
+        }
       }
+    };
+    await Promise.all(Array.from({ length: Math.min(limits?.concurrency ?? 1, items.length) }, worker));
+    if (deferred > 0) {
+      this.logger.warn(`Topology membership ${label}: deferred ${deferred} of ${items.length} to the next sync after exhausting the ${SEED_RECONCILE_BUDGET_MS}ms reconcile budget`);
     }
   }
 

@@ -280,7 +280,7 @@ describe('TopologyAutoRegistrationService', () => {
     }
   });
 
-  it('serialises reconciles across seeds so only one claims a shared address', async () => {
+  it('registers a shared address once when two seeds discover it concurrently', async () => {
     const seedA: DatabaseConnectionConfig = { id: 'a', name: 'A', host: 'a.local', port: 7001, isDefault: true, createdAt: 1, autoRegisterNodes: true };
     const seedB: DatabaseConnectionConfig = { id: 'b', name: 'B', host: 'b.local', port: 7002, isDefault: false, createdAt: 1, autoRegisterNodes: true };
     const configs = new Map<string, DatabaseConnectionConfig>([['a', seedA], ['b', seedB]]);
@@ -320,5 +320,79 @@ describe('TopologyAutoRegistrationService', () => {
     await Promise.all([service.reconcile('a'), service.reconcile('b')]);
 
     expect(registry.addManagedChild).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not make other seeds wait behind a seed that is stuck connecting new nodes', async () => {
+    jest.useFakeTimers();
+    try {
+      const { service, registry } = build({ nodes: clusterOf(3) });
+      const other: DatabaseConnectionConfig = { id: 'other', name: 'other', host: 'other.local', port: 7101, isDefault: false, createdAt: 1, autoRegisterNodes: true };
+      const getSeed = registry.getConfig.getMockImplementation()!;
+      registry.getConfig.mockImplementation((id: string) => (id === 'other' ? other : getSeed(id)));
+      registry.addManagedChild.mockImplementation((seedId: string) =>
+        seedId === 'seed' ? new Promise((resolve) => setTimeout(() => resolve('slow'), 10_000)) : Promise.resolve('fast'),
+      );
+      let otherDone = false;
+      const slow = service.reconcile('seed');
+      const fast = service.reconcile('other').then(() => { otherDone = true; });
+      await jest.advanceTimersByTimeAsync(0);
+      expect(otherDone).toBe(true);
+      await jest.advanceTimersByTimeAsync(10_000);
+      await Promise.all([slow, fast]);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('connects new nodes concurrently within a bounded pool', async () => {
+    jest.useFakeTimers();
+    try {
+      const { service, registry } = build({ nodes: clusterOf(8) });
+      let inFlight = 0;
+      let peak = 0;
+      registry.addManagedChild.mockImplementation(() => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        return new Promise((resolve) => setTimeout(() => { inFlight -= 1; resolve('id'); }, 10_000));
+      });
+      const run = service.reconcile('seed');
+      await jest.advanceTimersByTimeAsync(20_000);
+      await run;
+      expect(registry.addManagedChild).toHaveBeenCalledTimes(8);
+      expect(peak).toBe(4);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('stops starting new connections once the seed budget is spent and finishes the rest on the next sync', async () => {
+    jest.useFakeTimers();
+    try {
+      const { service, registry, setMembers } = build({ nodes: clusterOf(20) });
+      const added: DatabaseConnectionConfig[] = [];
+      registry.addManagedChild.mockImplementation((_seedId: string, node: { host: string; port: number; nodeId: string }) =>
+        new Promise((resolve) =>
+          setTimeout(() => {
+            added.push(child(`c-${node.nodeId}`, node.host, node.port, { nodeId: node.nodeId }));
+            setMembers([...added]);
+            resolve(`c-${node.nodeId}`);
+          }, 10_000),
+        ),
+      );
+      const first = service.reconcile('seed');
+      await jest.advanceTimersByTimeAsync(60_000);
+      await first;
+      expect(registry.addManagedChild).toHaveBeenCalledTimes(12);
+      expect(added).toHaveLength(12);
+
+      registry.addManagedChild.mockClear();
+      const second = service.reconcile('seed');
+      await jest.advanceTimersByTimeAsync(60_000);
+      await second;
+      expect(registry.addManagedChild).toHaveBeenCalledTimes(8);
+      expect(added).toHaveLength(20);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
