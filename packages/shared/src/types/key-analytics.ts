@@ -96,6 +96,7 @@ export interface KeyPatternData {
   totalCardinality: number;
   maxCardinality: number;
   totalIdleTime: number;
+  staleCount?: number;
   withTtl: number;
   withoutTtl: number;
   ttlValues: number[];

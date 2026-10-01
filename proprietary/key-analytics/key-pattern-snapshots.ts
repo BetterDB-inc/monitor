@@ -29,7 +29,7 @@ export function buildPatternSnapshots(result: KeyAnalyticsResult, timestamp: num
     const minTtl = stats.ttlValues.length > 0 ? Math.min(...stats.ttlValues) : undefined;
     const maxTtl = stats.ttlValues.length > 0 ? Math.max(...stats.ttlValues) : undefined;
 
-    const staleCount = avgIdleTime > 86400 ? Math.round((avgIdleTime / 86400) * stats.count) : 0;
+    const staleCount = stats.staleCount === undefined ? undefined : Math.round(stats.staleCount / samplingRatio);
     const expiringSoon = stats.ttlValues.filter((t) => t < 3600).length;
     const expiringSoonCount = Math.round((expiringSoon / (stats.ttlValues.length || 1)) * stats.withTtl);
 
