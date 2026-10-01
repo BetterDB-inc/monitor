@@ -1,7 +1,10 @@
 import {
   AclDriftNode,
+  aclClusterDriftSignature,
   aclDriftSignature,
   aclUserDigest,
+  clusterKeyFromNodes,
+  detectAclClusterDrift,
   detectAclDrift,
   nodeAclDigest,
   parseAclLine,
@@ -181,6 +184,113 @@ describe('detectAclDrift', () => {
     expect(serialized).not.toContain('secret:*');
     expect(serialized).not.toContain('#a3b1');
     expect(serialized).not.toContain('+@all');
+  });
+});
+
+describe('clusterKeyFromNodes', () => {
+  const live = (id: string, flags = 'master') => ({ id, flags });
+
+  it('is stable regardless of gossip ordering', () => {
+    const a = clusterKeyFromNodes([live('n1'), live('n2'), live('n3')]);
+    const b = clusterKeyFromNodes([live('n3'), live('n1'), live('n2')]);
+    expect(a).toBe(b);
+    expect(a).toMatch(/^cluster:/);
+  });
+
+  it('differs between unrelated clusters', () => {
+    expect(clusterKeyFromNodes([live('n1'), live('n2')])).not.toBe(
+      clusterKeyFromNodes([live('n1'), live('other')]),
+    );
+  });
+
+  it('is empty when the view is missing or has no live node', () => {
+    expect(clusterKeyFromNodes(undefined)).toBe('');
+    expect(clusterKeyFromNodes([])).toBe('');
+    expect(clusterKeyFromNodes([{ id: 'n1', flags: 'handshake' }])).toBe('');
+    expect(clusterKeyFromNodes([{ id: 'n1', flags: 'fail' }])).toBe('');
+  });
+
+  it('ignores unsettled and dead entries', () => {
+    const base = clusterKeyFromNodes([live('n1'), live('n2')]);
+    expect(
+      clusterKeyFromNodes([
+        live('n1'),
+        live('n2'),
+        { id: 'joining', flags: 'handshake' },
+        { id: 'dead', flags: 'fail' },
+      ]),
+    ).toBe(base);
+  });
+});
+
+describe('detectAclClusterDrift', () => {
+  const inCluster = (
+    connectionId: string,
+    lines: string[],
+    groupKey: string,
+    clusterKey = 'cluster:test',
+  ): AclDriftNode => ({ ...nodeFrom(connectionId, lines, groupKey), clusterKey });
+
+  it('fires and names the user when one shard diverges', () => {
+    const nodes = [
+      inCluster('conn-a', [DEFAULT_LINE, APP_LINE], 'replid:one'),
+      inCluster('conn-b', [DEFAULT_LINE, APP_LINE], 'replid:one'),
+      inCluster('conn-c', [DEFAULT_LINE, APP_LINE_WIDER], 'replid:two'),
+    ];
+    const [drift] = detectAclClusterDrift(nodes);
+    expect(drift.usernames).toEqual(['app']);
+    expect(drift.groupKeys).toEqual(['replid:one', 'replid:two']);
+    expect(drift.nodes.map((n) => n.connectionId)).toEqual(['conn-a', 'conn-b', 'conn-c']);
+  });
+
+  it('stays silent when every shard agrees', () => {
+    expect(
+      detectAclClusterDrift([
+        inCluster('conn-a', [DEFAULT_LINE, APP_LINE], 'replid:one'),
+        inCluster('conn-b', [DEFAULT_LINE, APP_LINE], 'replid:two'),
+      ]),
+    ).toEqual([]);
+  });
+
+  it('stays silent with a single monitored shard', () => {
+    expect(
+      detectAclClusterDrift([
+        inCluster('conn-a', [DEFAULT_LINE, APP_LINE], 'replid:one'),
+        inCluster('conn-b', [DEFAULT_LINE, APP_LINE_WIDER], 'replid:one'),
+      ]),
+    ).toEqual([]);
+  });
+
+  it('never compares unrelated clusters', () => {
+    expect(
+      detectAclClusterDrift([
+        inCluster('conn-a', [DEFAULT_LINE, APP_LINE], 'replid:one', 'cluster:a'),
+        inCluster('conn-b', [DEFAULT_LINE, APP_LINE_WIDER], 'replid:two', 'cluster:b'),
+      ]),
+    ).toEqual([]);
+  });
+
+  it('ignores nodes with no cluster key', () => {
+    expect(
+      detectAclClusterDrift([
+        { ...nodeFrom('conn-a', [DEFAULT_LINE, APP_LINE], 'replid:one') },
+        { ...nodeFrom('conn-b', [DEFAULT_LINE, APP_LINE_WIDER], 'replid:two') },
+      ]),
+    ).toEqual([]);
+  });
+
+  it('carries no rule material and signs stably', () => {
+    const nodes = [
+      inCluster('conn-a', [DEFAULT_LINE, APP_LINE], 'replid:one'),
+      inCluster('conn-b', [DEFAULT_LINE, APP_LINE_WIDER], 'replid:two'),
+    ];
+    const serialized = JSON.stringify(detectAclClusterDrift(nodes));
+    expect(serialized).not.toContain('secret:*');
+    expect(serialized).not.toContain('#a3b1');
+    const [drift] = detectAclClusterDrift(nodes);
+    expect(aclClusterDriftSignature(drift)).toBe(
+      aclClusterDriftSignature(detectAclClusterDrift([...nodes].reverse())[0]),
+    );
   });
 });
 

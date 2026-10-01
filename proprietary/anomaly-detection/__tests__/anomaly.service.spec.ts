@@ -10,7 +10,7 @@ import { ConnectionRegistry } from '@app/connections/connection-registry.service
 import { ConnectionContext } from '@app/common/services/multi-connection-poller';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
-import { nodeAclDigest } from '../acl-drift-detector';
+import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
 import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
@@ -5316,6 +5316,23 @@ describe('AnomalyService', () => {
       });
     }
 
+    /** Seed a slice carrying a gossip-derived cluster identity. */
+    function seedClusterPeer(
+      connectionId: string,
+      lines: string[],
+      replid: string,
+      clusterKey = 'cluster:test',
+    ): void {
+      const { digest, userDigests } = nodeAclDigest(lines);
+      (service as any).aclSnapshot.set(connectionId, {
+        groupKey: `replid:${replid}`,
+        clusterKey,
+        name: connectionId,
+        digest,
+        userDigests,
+      });
+    }
+
     it('stays silent when the group agrees', async () => {
       seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE]);
       await poll();
@@ -5416,6 +5433,110 @@ describe('AnomalyService', () => {
       seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER], 'other-replid');
       await poll();
       expect(driftEvents()).toEqual([]);
+    });
+
+    it('emits a cross-shard WARNING when shards of one cluster diverge', async () => {
+      seedClusterPeer('conn-peer-a', [DEFAULT_LINE, APP_LINE], 'shard-one');
+      seedClusterPeer('conn-peer-b', [DEFAULT_LINE, APP_LINE_WIDER], 'shard-two');
+      await poll();
+
+      const events = driftEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('cross-shard');
+      expect(events[0].message).toContain('app');
+      expect(events[0].message).toContain('4355');
+    });
+
+    it('does not compare shards across unrelated clusters', async () => {
+      seedClusterPeer('conn-peer-a', [DEFAULT_LINE, APP_LINE], 'shard-one', 'cluster:a');
+      seedClusterPeer('conn-peer-b', [DEFAULT_LINE, APP_LINE_WIDER], 'shard-two', 'cluster:b');
+      await poll();
+      expect(driftEvents()).toEqual([]);
+    });
+
+    it('stays silent cross-shard when only one shard of the cluster is monitored', async () => {
+      seedClusterPeer('conn-peer', [DEFAULT_LINE, APP_LINE], 'shared-replid');
+      await poll();
+      expect(driftEvents()).toEqual([]);
+    });
+
+    it('dedupes a persistent cross-shard drift across polls', async () => {
+      seedClusterPeer('conn-peer-a', [DEFAULT_LINE, APP_LINE], 'shard-one');
+      seedClusterPeer('conn-peer-b', [DEFAULT_LINE, APP_LINE_WIDER], 'shard-two');
+      await poll();
+      await poll();
+      expect(driftEvents()).toHaveLength(1);
+    });
+
+    /** Two live primaries with disjoint slots, so no other topology detector fires. */
+    function gossipPair(): Array<Record<string, unknown>> {
+      const node = (id: string, flags: string[], slots: number[][]) => ({
+        id,
+        address: `10.0.0.${id === 'node-a' ? '1' : '2'}:6379@16379`,
+        flags,
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots,
+      });
+      return [
+        node('node-a', ['myself', 'master'], [[0, 8191]]),
+        node('node-b', ['master'], [[8192, 16383]]),
+      ];
+    }
+
+    function enableClusterMode(gossipNodes: Array<Record<string, unknown>>): void {
+      const info = replInfo();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+        ...info,
+        stats: { ...info.stats, cluster_enabled: '1' },
+      });
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue({ cluster_state: 'ok' });
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(gossipNodes);
+    }
+
+    it('derives the polling node clusterKey from CLUSTER NODES', async () => {
+      const gossipNodes = gossipPair();
+      enableClusterMode(gossipNodes);
+      const clusterKey = clusterKeyFromNodes(gossipNodes as never);
+      expect(clusterKey).not.toBe('');
+
+      // conn-1 (shared-replid, default ACL lines) vs a diverged second shard.
+      seedClusterPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER], 'shard-two', clusterKey);
+      await poll();
+
+      expect((service as any).aclSnapshot.get('conn-1')?.clusterKey).toBe(clusterKey);
+      const events = driftEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].message).toContain('cross-shard');
+    });
+
+    it('retains the clusterKey and dedupe across a CLUSTER NODES blip', async () => {
+      const gossipNodes = gossipPair();
+      enableClusterMode(gossipNodes);
+      const clusterKey = clusterKeyFromNodes(gossipNodes as never);
+      seedClusterPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER], 'shard-two', clusterKey);
+
+      await poll();
+      expect(driftEvents()).toHaveLength(1);
+
+      // Blip: topology fetch fails while the ACL read succeeds, exercising the
+      // fresh-fetch store path (countdown forced to 0).
+      (dbClient.getClusterNodes as jest.Mock).mockRejectedValue(new Error('CLUSTER NODES failed'));
+      (service as any).aclDriftRecheck.set('conn-1', 0);
+      await poll();
+
+      expect((service as any).aclSnapshot.get('conn-1')?.clusterKey).toBe(clusterKey);
+      expect(driftEvents()).toHaveLength(1);
+
+      // Recovery must not re-fire the still-active drift.
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(gossipNodes);
+      (service as any).aclDriftRecheck.set('conn-1', 0);
+      await poll();
+      expect(driftEvents()).toHaveLength(1);
     });
 
     it('emits an INFO reload confirmation when this node adopts a new ruleset', async () => {
