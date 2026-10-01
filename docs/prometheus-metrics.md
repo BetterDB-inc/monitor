@@ -333,7 +333,7 @@ Basic server identification and uptime.
 
 **Label Example**: `version="8.0.1"`, `role="master"`, `os="Linux 5.15.0"`
 
-**Externally monitored (OTLP-push) connections**: `betterdb_instance_info` is a presence gauge. It is exported as soon as any of version, role or OS has been pushed, and a label that was not pushed is exported as `unknown` (for example `version="unknown",role="unknown",os="Linux"`). It is removed again when none of the three is pushed any more.
+**Externally monitored (OTLP-push) connections**: `betterdb_instance_info` is a presence gauge. It requires at least one server-section field to be pushed (for example `server.os`, the version, or `server.uptime_in_seconds`), because a push containing only `replication.role` does not export it. Once the server section is present, it is exported when any of version, role or OS has been pushed, and a label that was not pushed is exported as `unknown` (for example `version="unknown",role="unknown",os="Linux"`). It is removed again when none of the three is pushed any more.
 
 ### Memory Metrics
 
