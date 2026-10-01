@@ -648,6 +648,18 @@ curl http://localhost:3001/api/webhooks/{id}/deliveries
 curl -X POST http://localhost:3001/api/webhooks/deliveries/{deliveryId}/retry
 ```
 
+### Storage Failures Before Delivery
+
+Every delivery is written to storage before the HTTP request is sent, and the retry processor works from those rows. If storage is unavailable when an event fires (the subscribed-webhook lookup or the delivery write fails), the event is held in an in-memory buffer instead of being dropped:
+
+- The buffer is retried with exponential backoff: 1 second, doubling on each failed attempt, capped at 1 minute.
+- Once storage recovers, buffered events are dispatched in the order they fired, with their original timestamps. Events raised while the buffer is non-empty are queued behind it, so for example an `instance.up` is never delivered before the `instance.down` that preceded it.
+- If one webhook's delivery row was written and another's was not, only the missing one is retried. If a write failed ambiguously (the row may have been stored), the retry checks the webhook's recent deliveries for the same payload ID before writing again, so a delivery is never duplicated.
+- The buffer holds at most 1,000 events. When it is full the oldest event is dropped and an error is logged.
+- The buffer lives in process memory. Events still buffered when the process stops or restarts are lost (a warning with the count is logged on shutdown).
+
+`GET /api/webhooks/stats/retry-queue` reports `bufferedEvents` (currently held in the buffer) and `droppedEvents` (dropped because the buffer was full, since the process started). The same endpoint reads storage, so it may fail while storage is down; the dispatcher logs each buffered and dropped event.
+
 ### Success Criteria
 
 A webhook delivery is considered successful when:
@@ -1026,7 +1038,9 @@ GET /api/webhooks/stats/retry-queue
 ```json
 {
   "pendingRetries": 5,
-  "nextRetryTime": 1706457665000
+  "nextRetryTime": 1706457665000,
+  "bufferedEvents": 0,
+  "droppedEvents": 0
 }
 ```
 
