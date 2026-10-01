@@ -211,6 +211,34 @@ describe('ConnectionSelector - auto-register toggle', () => {
     expect(body.nodePassword).toBe('node-pass');
   });
 
+  it('sends an empty node username when data nodes should use no username', async () => {
+    routeFetch({ sentinel: true });
+    render(<ConnectionSelector />);
+    const disclosureSummary = await openAddDialogWithSentinelTest();
+    fireEvent.click(disclosureSummary);
+    fireEvent.click(screen.getByLabelText('Connect to data nodes without a username'));
+    fireEvent.click(screen.getByText('Save'));
+    await waitFor(() => expect(mockRefreshConnections).toHaveBeenCalled());
+    const createCall = vi
+      .mocked(fetchApi)
+      .mock.calls.find(([url, init]) => url === '/connections' && (init as RequestInit)?.method === 'POST');
+    const body = JSON.parse((createCall![1] as RequestInit).body as string);
+    expect(body.nodeUsername).toBe('');
+  });
+
+  it('omits the node username when it is left blank so data nodes inherit the seed username', async () => {
+    routeFetch({ sentinel: true });
+    render(<ConnectionSelector />);
+    await openAddDialogWithSentinelTest();
+    fireEvent.click(screen.getByText('Save'));
+    await waitFor(() => expect(mockRefreshConnections).toHaveBeenCalled());
+    const createCall = vi
+      .mocked(fetchApi)
+      .mock.calls.find(([url, init]) => url === '/connections' && (init as RequestInit)?.method === 'POST');
+    const body = JSON.parse((createCall![1] as RequestInit).body as string);
+    expect('nodeUsername' in body).toBe(false);
+  });
+
   it('keeps node credentials when only the name changes after a sentinel test', async () => {
     routeFetch({ sentinel: true });
     render(<ConnectionSelector />);

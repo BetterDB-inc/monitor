@@ -63,6 +63,15 @@ describe('connection membership storage — sqlite', () => {
     await adapter.close();
   });
 
+  it('preserves an explicitly empty data node username', async () => {
+    const adapter = new SqliteAdapter({ filepath: tempDbPath() });
+    await adapter.initialize();
+    await adapter.saveConnection(config({ nodeUsername: '' }));
+    expect((await adapter.getConnection('c1'))?.nodeUsername).toBe('');
+    expect((await adapter.getConnections())[0].nodeUsername).toBe('');
+    await adapter.close();
+  });
+
   it('reads a connection without data node credentials with the fields absent', async () => {
     const adapter = new SqliteAdapter({ filepath: tempDbPath() });
     await adapter.initialize();

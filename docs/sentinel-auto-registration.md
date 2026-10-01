@@ -48,6 +48,21 @@ only sent when the tested connection is actually a Sentinel — changing the
 host afterwards and re-testing against a non-Sentinel target clears them
 before the connection is saved.
 
+Leaving the node username blank means "inherit the seed username". To
+connect to the data nodes without a username (the `default` user, password
+only) while Sentinel itself uses a username, tick **Connect to data nodes
+without a username**; the API receives `nodeUsername: ""`, which is stored
+as an explicit empty value and is not replaced by the seed username. Over the
+API, omit `nodeUsername` to inherit the seed username and send `""` for no
+username.
+
+## Metrics
+
+Sentinel connections themselves are not polled for INFO-derived series, so
+they do not appear in `/api/prometheus/metrics` or in the other keyspace and
+INFO pollers. The auto-registered data nodes are ordinary connections and are
+exported like any other. See [Prometheus metrics](prometheus-metrics.md).
+
 ## Failover behaviour
 
 When Sentinel promotes a replica, the next sync (at most 30 seconds later)
