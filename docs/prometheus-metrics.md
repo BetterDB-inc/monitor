@@ -411,7 +411,7 @@ Per-database key statistics.
 
 **Label Example**: `db="db0"`, `db="db1"`
 
-**Externally monitored (OTLP-push) connections**: `betterdb_db_keys_expiring` and `betterdb_db_avg_ttl_seconds` are exported only for databases whose expiry and average TTL were pushed; they are omitted, never reported as 0, when only the key count was pushed. `betterdb_keyspace_keys_expiring` is omitted when no database pushed an expiry count.
+**Externally monitored (OTLP-push) connections**: `betterdb_db_keys_expiring` is exported for databases whose expiry count was pushed, and `betterdb_db_avg_ttl_seconds` for databases whose average TTL was pushed. Each is omitted, never reported as 0, when its value was not pushed. `betterdb_keyspace_keys_expiring` is omitted when no database pushed an expiry count.
 
 ### Persistence Metrics
 
