@@ -12,6 +12,7 @@ import { ExternalConnectionUnsupportedError } from './external-connection-unsupp
 
 export const ALLOW_EXTERNAL_CONNECTION_KEY = 'allowExternalConnection';
 export const HEADER_CONNECTION_ID_KEY = 'headerConnectionId';
+export const PATH_INSTANCE_ID_KEY = 'pathInstanceId';
 
 interface GuardedRequest {
   headers?: Record<string, unknown>;
@@ -23,7 +24,12 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value !== '' ? value : undefined;
 }
 
-function resolveConnectionId(request: GuardedRequest, headerBound: boolean): string | undefined {
+function resolveConnectionId(
+  request: GuardedRequest,
+  headerBound: boolean,
+  pathInstanceBound: boolean,
+): string | undefined {
+  if (pathInstanceBound) return nonEmptyString(request.params?.id);
   if (headerBound) return nonEmptyString(request.headers?.[CONNECTION_ID_HEADER]);
   const body =
     typeof request.body === 'object' && request.body !== null
@@ -44,6 +50,10 @@ export function UseHeaderConnectionId(): CustomDecorator<string> {
   return SetMetadata(HEADER_CONNECTION_ID_KEY, true);
 }
 
+export function UsePathInstanceId(): CustomDecorator<string> {
+  return SetMetadata(PATH_INSTANCE_ID_KEY, true);
+}
+
 @Injectable()
 export class LiveConnectionGuard implements CanActivate {
   constructor(
@@ -56,6 +66,7 @@ export class LiveConnectionGuard implements CanActivate {
     const connectionId = resolveConnectionId(
       context.switchToHttp().getRequest<GuardedRequest>(),
       this.hasMetadata(HEADER_CONNECTION_ID_KEY, context),
+      this.hasMetadata(PATH_INSTANCE_ID_KEY, context),
     );
     if (this.registry.getConfig(connectionId)?.connectionType === 'external') {
       throw new ExternalConnectionUnsupportedError(context.getHandler().name);
