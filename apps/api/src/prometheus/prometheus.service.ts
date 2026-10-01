@@ -69,7 +69,14 @@ import { DropReason } from '../external-metrics/otlp-metrics-types';
  */
 const DEMOTED_NODE_READ_TIMEOUT_MS = 2_000;
 
-const SWEEP_EXCLUSIONS: ReadonlySet<string> = new Set([POLL_STALE_METRIC]);
+const SWEEP_EXCLUSIONS: ReadonlySet<string> = new Set([
+  POLL_STALE_METRIC,
+  'betterdb_anomaly_events_current',
+  'betterdb_anomaly_by_severity',
+  'betterdb_anomaly_by_metric',
+  'betterdb_correlated_groups_by_severity',
+  'betterdb_correlated_groups_by_pattern',
+]);
 const NO_EXCLUSIONS: ReadonlySet<string> = new Set();
 
 // Per-connection state for tracking previous values and stale labels
@@ -406,19 +413,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.logger.debug(`Cleaned up metrics state for removed connection: ${connectionId}`);
   }
 
-  /**
-   * Get a human-readable connection label (host:port format)
-   */
-  private getConnectionLabel(connectionId: string): string {
+  private getConnectionLabel(connectionId: string): string | null {
     try {
       const config = this.connectionRegistry.getConfig(connectionId);
-      if (config) {
-        return `${config.host}:${config.port}`;
-      }
+      return config ? `${config.host}:${config.port}` : null;
     } catch {
-      // Fallback to connectionId
+      return null;
     }
-    return connectionId;
   }
 
   /**
@@ -952,6 +953,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
 
     const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
     const state = this.getConnectionState(connectionId);
 
     if (this.isExternalConnection(connectionId)) {
@@ -1230,11 +1234,17 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
 
     const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
     const state = this.getConnectionState(connectionId);
     const config = this.connectionRegistry.getConfig(connectionId);
     const external = this.isExternalConnection(connectionId);
     const absentAsZero = !external;
-    this.freshness.observe(connectionId, connLabel, Date.now());
+    const previousLabel = this.freshness.observe(connectionId, connLabel, Date.now());
+    if (previousLabel !== undefined) {
+      this.releaseLabel(previousLabel);
+    }
 
     try {
       const info = await this.readInfo(connectionId, client);
@@ -2481,6 +2491,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   incrementPollCounter(connectionId?: string): void {
     const connLabel = connectionId ? this.getConnectionLabel(connectionId) : 'system';
+    if (connLabel === null) {
+      return;
+    }
     this.pollsTotal.labels(connLabel).inc();
   }
 
@@ -2495,6 +2508,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }>,
   ): void {
     const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
     const state = this.getConnectionState(connectionId);
     const currentIndexLabels = new Set<string>();
 
@@ -2524,6 +2540,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     entries: Array<{ replica: string; ratio: number }>,
   ): void {
     const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
     const state = this.getConnectionState(connectionId);
     const currentLabels = new Set<string>();
 
@@ -2549,6 +2568,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }>,
   ): void {
     const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
     const state = this.getConnectionState(connectionId);
     const currentLabels = new Set<string>();
 
@@ -2582,6 +2604,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }>,
   ): void {
     const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
     const state = this.getConnectionState(connectionId);
     const currentLabels = new Set<string>();
 
@@ -2609,6 +2634,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     breaches: ReadonlyArray<{ indexName: string; breached: boolean }>,
   ): void {
     const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
     const state = this.getConnectionState(connectionId);
     const currentLabels = new Set<string>();
 
@@ -2627,6 +2655,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   startPollTimer(service: string, connectionId?: string): () => void {
     const connLabel = connectionId ? this.getConnectionLabel(connectionId) : 'system';
+    if (connLabel === null) {
+      return () => undefined;
+    }
     return this.pollDuration.startTimer({ connection: connLabel, service });
   }
 
@@ -2637,6 +2668,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     connectionId?: string,
   ): void {
     const connLabel = connectionId ? this.getConnectionLabel(connectionId) : 'unknown';
+    if (connLabel === null) {
+      return;
+    }
     this.anomalyEventsTotal.inc({
       connection: connLabel,
       severity,
@@ -2647,6 +2681,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   incrementCorrelatedGroup(pattern: string, severity: string, connectionId?: string): void {
     const connLabel = connectionId ? this.getConnectionLabel(connectionId) : 'unknown';
+    if (connLabel === null) {
+      return;
+    }
     this.correlatedGroupsTotal.inc({ connection: connLabel, pattern, severity });
   }
 
@@ -2663,6 +2700,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const effectiveConnectionId =
       connectionId || this.connectionRegistry.getDefaultId() || 'unknown';
     const connLabel = this.getConnectionLabel(effectiveConnectionId);
+    if (connLabel === null) {
+      return;
+    }
     const state = this.getConnectionState(effectiveConnectionId);
 
     for (const sev of ['info', 'warning', 'critical']) {
@@ -2708,6 +2748,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const effectiveConnectionId =
       connectionId || this.connectionRegistry.getDefaultId() || 'unknown';
     const connLabel = this.getConnectionLabel(effectiveConnectionId);
+    if (connLabel === null) {
+      return;
+    }
     for (const buf of buffers) {
       this.anomalyDetectionBufferReady.labels(connLabel, buf.metricType).set(buf.ready ? 1 : 0);
       this.anomalyDetectionBufferMean.labels(connLabel, buf.metricType).set(buf.mean);
@@ -2720,15 +2763,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
    */
   cleanupConnectionMetrics(connectionId: string): void {
     const state = this.perConnectionState.get(connectionId);
-    if (state?.lastCveConnLabel) {
-      this.removeCveSeries(state.lastCveConnLabel);
-    } else {
-      try {
-        this.removeCveSeries(this.getConnectionLabel(connectionId));
-      } catch {
-        // Registry lookup can fail for an already-removed connection; the
-        // tracked lastCveConnLabel path above covers the common case.
-      }
+    const cveLabel = state?.lastCveConnLabel ?? this.getConnectionLabel(connectionId);
+    if (cveLabel !== null) {
+      this.removeCveSeries(cveLabel);
     }
     this.perConnectionState.delete(connectionId);
     // Drop any in-flight metric update so a reused connection ID cannot join
@@ -2739,7 +2776,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.infoReadsInFlight.delete(connectionId);
     this.retireEpoch(connectionId);
     const label = this.freshness.forget(connectionId);
-    if (label === undefined || this.freshness.hasLabel(label)) {
+    if (label !== undefined) {
+      this.releaseLabel(label);
+    }
+  }
+
+  private releaseLabel(label: string): void {
+    if (this.freshness.hasLabel(label)) {
       return;
     }
     this.dropSeriesForRemovedLabel(label);
