@@ -173,7 +173,7 @@ export class NodeSplittingExporter implements PushMetricExporter {
     const record = (result: ExportResult): void => {
       if (!reported) {
         results.push(result);
-      } else if (isFailure(result)) {
+      } else if (isFailure(result) && result.error !== SUPERSEDED) {
         this.lateFailure ??= result;
       }
     };

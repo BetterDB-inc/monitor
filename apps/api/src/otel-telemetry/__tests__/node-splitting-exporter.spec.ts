@@ -502,6 +502,22 @@ describe('NodeSplittingExporter', () => {
         });
       });
 
+      it('does not fail the next cycle when it supersedes nodes a timed-out cycle left waiting', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] });
+        const inner = heldInner();
+        const exporter = new NodeSplittingExporter(inner, () => manyResolver, EXPORT_TIMEOUT_MS);
+
+        const first = exportOnce(exporter, manyNodes);
+        await settle();
+        jest.advanceTimersByTime(EXPORT_TIMEOUT_MS);
+        await expect(first).resolves.toEqual({ code: ExportResultCode.SUCCESS });
+
+        const second = exportOnce(exporter, manyNodes);
+        await drain(inner);
+
+        await expect(second).resolves.toEqual({ code: ExportResultCode.SUCCESS });
+      });
+
       it('reports a failure that settles after the deadline with the next cycle', async () => {
         jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] });
         const error = new Error('collector down');
