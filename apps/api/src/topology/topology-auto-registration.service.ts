@@ -188,7 +188,19 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
       'add',
       limits,
     );
-    await this.applyEach(diff.adopt, (a) => this.claimingAddress(a.node, () => this.connectionRegistry.adoptChild(a.id, seed.id, a.node)), 'adopt', limits);
+    await this.applyEach(
+      diff.adopt,
+      (a) =>
+        this.claimingAddress(a.node, async () => {
+          const owner = this.connectionRegistry.getConfig(a.id)?.membership?.seedId;
+          if (owner !== undefined && owner !== seed.id) {
+            throw new Error(`${a.node.host}:${a.node.port} was adopted by another seed while this sync was running; leaving it there`);
+          }
+          await this.connectionRegistry.adoptChild(a.id, seed.id, a.node);
+        }),
+      'adopt',
+      limits,
+    );
     await this.applyEach(diff.reactivate, (r) => this.connectionRegistry.reactivateChild(r.id, r.node), 'reactivate', limits);
 
     for (const { id, node } of diff.refresh) {

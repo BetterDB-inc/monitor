@@ -446,4 +446,52 @@ describe('TopologyAutoRegistrationService', () => {
 
     expect(Array.from(configs.values()).filter((c) => c.host === '10.0.0.9' && c.port === 7009)).toHaveLength(1);
   });
+
+  it('does not take over a standalone connection another seed adopted after this seed planned its diff', async () => {
+    const standalone: DatabaseConnectionConfig = { id: 'solo', name: 'solo', host: '10.0.0.9', port: 7009, isDefault: false, createdAt: 1 };
+    const seedA: DatabaseConnectionConfig = { id: 'a', name: 'A', host: 'a.local', port: 7001, isDefault: true, createdAt: 1, autoRegisterNodes: true };
+    const seedB: DatabaseConnectionConfig = { id: 'b', name: 'B', host: 'b.local', port: 7002, isDefault: false, createdAt: 1, autoRegisterNodes: true };
+    const configs = new Map<string, DatabaseConnectionConfig>([['a', seedA], ['b', seedB], ['solo', standalone]]);
+    let releaseB: () => void = () => undefined;
+    const gateB = new Promise<void>((resolve) => { releaseB = resolve; });
+    let finishA: () => void = () => undefined;
+    const registry = {
+      getConfig: jest.fn((id: string) => configs.get(id) ?? null),
+      get: jest.fn(() => ({ isConnected: () => true, getCapabilities: () => ({ clusterEnabled: true }) })),
+      listMembers: jest.fn((seedId: string) => Array.from(configs.values()).filter((c) => c.membership?.seedId === seedId)),
+      findConfigByHostPort: jest.fn((host: string, port: number) => Array.from(configs.values()).find((c) => c.host === host && c.port === port) ?? null),
+      withSeedLock: jest.fn((_id: string, fn: () => Promise<void>) => fn()),
+      addManagedChild: jest.fn(async (_seedId: string, node: { port: number }) => {
+        if (node.port !== 7009) await gateB;
+        return 'x';
+      }),
+      adoptChild: jest.fn(async (id: string, seedId: string, node: { nodeId: string }) => {
+        if (seedId === 'a') await new Promise<void>((resolve) => { finishA = resolve; });
+        configs.set(id, { ...configs.get(id)!, membership: { seedId, nodeId: node.nodeId, origin: 'adopted', source: 'cluster' } });
+      }),
+      retireChild: jest.fn().mockResolvedValue(undefined),
+      reactivateChild: jest.fn().mockResolvedValue(undefined),
+      refreshChild: jest.fn().mockResolvedValue(undefined),
+      removeChild: jest.fn().mockResolvedValue(undefined),
+      list: jest.fn(() => []),
+    };
+    const sharedOnly = [discovered('shared', '10.0.0.9:7009@17009')];
+    const withFillers = [...clusterOf(4), ...sharedOnly];
+    let calls = 0;
+    const discovery = { discoverNodesIsolated: jest.fn(() => Promise.resolve(calls++ === 0 ? sharedOnly : withFillers)) };
+    const config = { get: jest.fn(() => 'true') };
+    const retention = { getRetentionDays: jest.fn(() => null) };
+    const service = new TopologyAutoRegistrationService(registry as never, [new ClusterTopologySource(discovery as never)], config as never, retention as never);
+
+    const runA = service.reconcile('a');
+    await new Promise((resolve) => setImmediate(resolve));
+    const runB = service.reconcile('b');
+    await new Promise((resolve) => setImmediate(resolve));
+    finishA();
+    await new Promise((resolve) => setImmediate(resolve));
+    releaseB();
+    await Promise.all([runA, runB]);
+
+    expect(configs.get('solo')?.membership?.seedId).toBe('a');
+  });
 });
