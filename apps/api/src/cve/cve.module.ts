@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ClusterModule } from '../cluster/cluster.module';
+import { ExternalMetricsStoreModule } from '../external-metrics/external-metrics-store.module';
 import { StorageModule } from '../storage/storage.module';
 import { CVE_ENRICHMENT_SOURCES, CVE_MITRE_SOURCE, CVE_SOURCES, ghsaToken } from './cve.constants';
 import { CveController } from './cve.controller';
@@ -23,7 +24,7 @@ const httpFetch: FetchLike = (input, init) => {
 };
 
 @Module({
-  imports: [StorageModule, ClusterModule],
+  imports: [StorageModule, ClusterModule, ExternalMetricsStoreModule],
   controllers: [CveController],
   providers: [
     CveService,
