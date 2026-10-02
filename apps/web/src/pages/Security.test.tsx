@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
+import { ApiError } from '../api/client';
 import Security from './Security';
 import {
   HEALTHY_DATASET,
@@ -403,5 +404,32 @@ describe('Security page', () => {
 
     expect(within(list).getByText('10.0.0.4:6379')).toBeInTheDocument();
     expect(within(list).getByText(/unreachable/i)).toBeInTheDocument();
+  });
+
+  it('shows the version-pending card instead of a failed scan while no version has been pushed', async () => {
+    mocks.scan.mockRejectedValue(
+      new ApiError('x', 409, {
+        code: 'cve_version_pending',
+        product: 'valkey',
+        attribute: 'valkey.version',
+        message: 'x',
+      }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('version-pending')).toBeInTheDocument();
+    expect(screen.queryByTestId('failed-scan')).not.toBeInTheDocument();
+  });
+
+  it('keeps the failed-scan card for any other error', async () => {
+    mocks.scan.mockRejectedValue(new ApiError('CVE dataset is not available yet', 503));
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('failed-scan')).toBeInTheDocument();
+    expect(screen.queryByTestId('version-pending')).not.toBeInTheDocument();
   });
 });
