@@ -256,6 +256,28 @@ describe('OtelMetricsIngestService', () => {
     expect(store.engineVersion('ext')).toEqual({ product: 'valkey', version: '8.1.1' });
   });
 
+  it('notifies the engine once, as Valkey, for a first push carrying both versions', () => {
+    const { service, store } = build();
+    const changes: string[] = [];
+    store.onEngineChange((connectionId) => {
+      changes.push(connectionId);
+    });
+    service.ingest(
+      resource(
+        [
+          ...identity,
+          str('redis.version', '7.2.4'),
+          str('valkey.version', '8.1.0'),
+          str('db.system.name', 'valkey'),
+        ],
+        [gauge('redis.uptime', 1)],
+      ),
+      NOW_MS,
+    );
+    expect(changes).toEqual(['ext']);
+    expect(store.engineVersion('ext')).toEqual({ product: 'valkey', version: '8.1.0' });
+  });
+
   it('ignores an older point without counting it as dropped', () => {
     const { service, store } = build();
     service.ingest(resource(identity, [gauge('redis.uptime', 9)]), NOW_MS);

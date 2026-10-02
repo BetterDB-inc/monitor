@@ -410,10 +410,11 @@ describe('ExternalMetricsStore engine version', () => {
       expect(changes).toEqual([]);
     });
 
-    it('does not fire on clear', () => {
+    it('does not notify when a connection is cleared', () => {
       store.setRedisVersion('c', '7.2.4');
+      const before = changes.length;
       store.clear('c');
-      expect(changes).toEqual(['c']);
+      expect(changes).toHaveLength(before);
     });
 
     it('stops notifying a listener that unsubscribed', () => {
