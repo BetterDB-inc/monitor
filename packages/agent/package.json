@@ -13,6 +13,7 @@
   "scripts": {
     "build": "tsc --noEmit && node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "test": "jest"

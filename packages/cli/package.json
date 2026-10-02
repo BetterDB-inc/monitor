@@ -18,6 +18,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "lint": "eslint .",
     "prepublishOnly": "pnpm run build"
   },
   "dependencies": {
