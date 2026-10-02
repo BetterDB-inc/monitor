@@ -145,7 +145,7 @@ async function waitForSentinelReady(client: Valkey): Promise<void> {
         tiltFlag: tiltFlag !== undefined ? tiltFlag === '1' : null,
         probeRttMs: rttMs,
         commandTimedOut: false,
-        masterDown: false,
+        masterDownObserved: false,
         thresholds: DEFAULT_SENTINEL_LOOP_STALL_THRESHOLDS,
       });
       expect(findings).toEqual([]);
