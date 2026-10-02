@@ -129,11 +129,35 @@ Use `metrics_endpoint`, not the plain `endpoint` — `endpoint` appends the stan
 | `rdb.changes_since_last_save`           | —                                                                                   | `persistence.rdb_changes_since_last_save`                                                                         |
 | `db.keys` / `db.expires` / `db.avg_ttl` | `db`                                                                                | composite `keyspace.db<N>` → `keys` / `expires` / `avg_ttl`                                                       |
 | `cmd.calls` / `cmd.usec`                | `cmd`                                                                               | composite `commandstats.cmdstat_<cmd>` → `calls` / `usec`                                                         |
-| resource `redis.version`                | —                                                                                   | `server.redis_version`, plus capabilities                                                                         |
+| resource `redis.version`                | —                                                                                   | `server.redis_version`, plus capabilities and CVE scanning for Redis                                              |
+| resource `valkey.version`               | —                                                                                   | `server.valkey_version` once the connection is detected as Valkey, plus capabilities and CVE scanning for Valkey  |
 
 **What works.** Memory history and forecasting, anomaly detection (INFO-based detectors, limited to the fields the collector pushes), health and instance-down webhooks, and commandstats all run against pushed data the same as a polled connection.
 
-**What doesn't.** Every view that needs a live command against the instance stays unavailable: slow log, clients, latency, key analytics, cluster, security/audit, vector search, and the other live-only pages. They show: "Not available for OTLP-ingested connections — this view needs a live connection." Migration is a related but separate case — it's blocked at the source/target picker instead, with its own message ("One or more selected instances only pushes OTLP metrics. Migration needs a live connection to both instances."), since an OTLP-ingested connection is never a valid migration source or target.
+**CVE scanning.** The Security page, the `betterdb_cve_*` metrics and new-CVE webhooks work for OTLP push connections. Instead of reading `INFO`, the scan uses the engine version the collector reports. A Redis is matched on the `redis.version` resource attribute, which `redisreceiver` sets by default. Valkey reports a fixed `redis_version` of 7.2.4 for client compatibility, so a connection detected as Valkey (`db.system.name=valkey`, or `valkey.*` metric names) is matched only on a `valkey.version` resource attribute. Set both with a `resource` processor, and update `value` when you upgrade:
+
+```yaml
+processors:
+  resource/valkey:
+    attributes:
+      - key: valkey.version
+        value: '8.1.1'
+        action: upsert
+      - key: db.system.name
+        value: valkey
+        action: upsert
+
+service:
+  pipelines:
+    metrics:
+      receivers: [redis]
+      processors: [resource/valkey]
+      exporters: [otlphttp/betterdb]
+```
+
+A connection is scanned as soon as its version first arrives or changes, and again every 6 hours. Until a version arrives nothing is scanned or saved, and the Security page names the missing attribute. Modules are never pushed, so module advisories are reported as unverifiable. Without either Valkey signal, a Valkey instance is scanned as Redis 7.2.4. Pushed versions live in memory, so after a restart the last stored scan stays on screen until the next push.
+
+**What doesn't.** Every view that needs a live command against the instance stays unavailable: slow log, clients, latency, key analytics, cluster, audit trail, vector search, and the other live-only pages. They show: "Not available for OTLP-ingested connections — this view needs a live connection." Migration is a related but separate case — it's blocked at the source/target picker instead, with its own message ("One or more selected instances only pushes OTLP metrics. Migration needs a live connection to both instances."), since an OTLP-ingested connection is never a valid migration source or target.
 
 **Prometheus.** OTLP-push connections are exported at `/api/prometheus/metrics` like polled ones, with one difference: a series exists only for a field the collector actually pushed. A field that was never pushed, or stopped being pushed, has no series rather than a `0`. Cluster, slot-stats, raw slow log, ACL and client-analytics series are never produced for these connections, and webhooks or compliance alerts that depend on an unpushed field (for example `maxclients` or `maxmemory_policy`) don't fire. Ingest itself is counted by `betterdb_otlp_metric_points_accepted_total` and `betterdb_otlp_metric_points_dropped_total{reason}` (full export profile only).
 
