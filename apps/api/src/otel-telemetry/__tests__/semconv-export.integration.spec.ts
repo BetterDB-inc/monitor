@@ -1,4 +1,5 @@
 import { ConfigService } from '@nestjs/config';
+import { collectDefaultMetrics } from 'prom-client';
 import { ExportResultCode, type ExportResult } from '@opentelemetry/core';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-proto';
 import type { MetricData, ResourceMetrics } from '@opentelemetry/sdk-metrics';
@@ -11,7 +12,10 @@ function config(values: Record<string, unknown>): ConfigService {
   } as unknown as ConfigService;
 }
 
-async function exportOnce(env: Record<string, unknown> = {}): Promise<ResourceMetrics[]> {
+async function exportOnce(
+  env: Record<string, unknown> = {},
+  withProcessMetrics = false,
+): Promise<ResourceMetrics[]> {
   const exported: ResourceMetrics[] = [];
   jest
     .spyOn(OTLPMetricExporter.prototype, 'export')
@@ -23,6 +27,9 @@ async function exportOnce(env: Record<string, unknown> = {}): Promise<ResourceMe
   jest.spyOn(OTLPMetricExporter.prototype, 'shutdown').mockResolvedValue(undefined);
 
   const { service: prometheus, registry } = buildPrometheus(env);
+  if (withProcessMetrics) {
+    collectDefaultMetrics({ register: prometheus['exportRegistry'], prefix: 'betterdb_' });
+  }
   await pollAll(prometheus);
   const exporter = new OtelMetricsExporterService(
     config({
@@ -92,6 +99,28 @@ describe('semconv export through the real SDK pipeline', () => {
         .flatMap((m) => dataPointAttributes(m))
         .some((attrs) => attrs.connection === ORPHAN_ID),
     ).toBe(true);
+  });
+
+  it('exports monitor process metrics under process and V8 conventions', async () => {
+    const monitor = byInstance(await exportOnce({}, true)).get('monitor')!;
+    const names = metricNames(monitor);
+    expect(names).toEqual(
+      expect.arrayContaining([
+        'process.cpu.time',
+        'process.memory.usage',
+        'process.uptime',
+        'v8js.memory.heap.used',
+        'nodejs.eventloop.delay.p99',
+        'betterdb_nodejs_eventloop_lag_seconds',
+      ]),
+    );
+    expect(names).not.toContain('betterdb_process_resident_memory_bytes');
+    const heap = monitor.scopeMetrics
+      .flatMap((scope) => scope.metrics)
+      .find((m) => m.descriptor.name === 'v8js.memory.heap.used')!;
+    expect(dataPointAttributes(heap).map((attrs) => attrs['v8js.heap.space.name'])).toContain(
+      'old_space',
+    );
   });
 
   it('still limits the export to the vitals profile', async () => {

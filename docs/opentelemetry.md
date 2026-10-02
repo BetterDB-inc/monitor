@@ -186,7 +186,7 @@ Any other value logs a warning and uses `mirror`. `METRICS_EXPORT_PROFILE` appli
 | `server.port` | port |
 | `valkey.version` | server version (omitted until detected) |
 
-Monitor process metrics (`betterdb_process_*`, `betterdb_nodejs_*`) stay on the `betterdb-monitor` resource under their Prometheus names. A point whose connection is not registered also lands there and keeps its `connection` attribute. Agent connections have no `host:port` of their own, so their points land there too.
+Monitor process metrics (`betterdb_process_*`, `betterdb_nodejs_*`) stay on the `betterdb-monitor` resource. Families with an OpenTelemetry process, V8 or Node.js convention are renamed (see **Monitor process** below); the rest keep their Prometheus names. A point whose connection is not registered also lands there and keeps its `connection` attribute. Agent connections have no `host:port` of their own, so their points land there too.
 
 After a connection is removed, its points are no longer exported: they are dropped, not moved to the `betterdb-monitor` resource. Otherwise the OpenTelemetry SDK keeps reporting the last value of a series that stops being observed until Monitor restarts.
 
@@ -297,6 +297,23 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_cve_dataset_stale` | `betterdb.cve.dataset_stale` | `1` |
 | `betterdb_otlp_metric_points_accepted_total` | `betterdb.otlp.metric_points.accepted` | `{point}` |
 | `betterdb_otlp_metric_points_dropped_total` | `betterdb.otlp.metric_points.dropped` | `{point}` |
+
+**Monitor process**
+
+| Prometheus family | Semconv metric | Unit |
+| --- | --- | --- |
+| `betterdb_process_cpu_user_seconds_total` | `process.cpu.time{cpu.mode=user}` | `s` |
+| `betterdb_process_cpu_system_seconds_total` | `process.cpu.time{cpu.mode=system}` | `s` |
+| `betterdb_process_resident_memory_bytes` | `process.memory.usage` | `By` |
+| `betterdb_process_virtual_memory_bytes` (Linux) | `process.memory.virtual` | `By` |
+| `betterdb_process_open_fds` (Linux) | `process.unix.file_descriptor.count` | `{file_descriptor}` |
+| `betterdb_process_start_time_seconds` | `process.uptime` | `s` |
+| `betterdb_nodejs_heap_space_size_used_bytes` | `v8js.memory.heap.used` | `By` |
+| `betterdb_nodejs_heap_space_size_total_bytes` | `v8js.memory.heap.limit` | `By` |
+| `betterdb_nodejs_heap_space_size_available_bytes` | `v8js.memory.heap.space.available_size` | `By` |
+| `betterdb_nodejs_eventloop_lag_{min,max,mean,stddev,p50,p90,p99}_seconds` | `nodejs.eventloop.delay.{min,max,mean,stddev,p50,p90,p99}` | `s` |
+
+The heap families carry `v8js.heap.space.name` (`old` → `old_space`), and `process.uptime` is the time since the start timestamp. Other process families, such as `betterdb_process_cpu_seconds_total` (the sum of the two CPU modes), `betterdb_process_max_fds`, `betterdb_nodejs_eventloop_lag_seconds` and the heap totals, keep their Prometheus names. `betterdb_nodejs_gc_duration_seconds` is a histogram, so it is not exported.
 
 Conversions: `db` values drop the `db` prefix (`db0` → `0`), `valkey.db.avg_ttl` is in milliseconds, the two CPU families become `valkey.cpu.time` with `state=sys|user`, `betterdb_instance_info` becomes `valkey.role{role=primary|replica}` (the version moves to the resource), `command` is renamed `cmd`, and the three inference percentile families become `betterdb.inference.bucket.latency{percentile}`. `betterdb_keyspace_keys` and `betterdb_keyspace_keys_expiring` are not exported in this mode because they are sums of `valkey.db.*`. `betterdb_poll_duration_seconds` is a histogram, so it is not exported in either mode.
 
