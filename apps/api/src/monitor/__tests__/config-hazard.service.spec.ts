@@ -362,21 +362,21 @@ describe('ConfigHazardService', () => {
       announceHostnames?: string | null;
       masterIp?: string;
     }): void {
-      client.getConfigValue.mockImplementation((param: string) => {
-        if (param === 'resolve-hostnames') {
-          return Promise.resolve(opts.resolveHostnames ?? 'yes');
-        }
-        if (param === 'announce-ip') {
-          return Promise.resolve(opts.announceIp ?? null);
-        }
-        if (param === 'announce-hostnames') {
-          return Promise.resolve(opts.announceHostnames ?? null);
-        }
-        return Promise.resolve(null);
-      });
+      // Sentinel settings are read via SENTINEL CONFIG GET (flat [name, value] reply),
+      // not the plain CONFIG GET / getConfigValue path.
+      const sentinelConfig: Record<string, string | null> = {
+        'resolve-hostnames': opts.resolveHostnames ?? 'yes',
+        'announce-ip': opts.announceIp ?? null,
+        'announce-hostnames': opts.announceHostnames ?? null,
+      };
       client.call.mockImplementation((cmd: string, args: string[]) => {
         if (cmd === 'INFO') {
           return Promise.resolve('# Server\r\nserver_mode:sentinel\r\n');
+        }
+        if (cmd === 'SENTINEL' && args[0] === 'CONFIG' && args[1] === 'GET') {
+          const param = args[2];
+          const value = sentinelConfig[param];
+          return Promise.resolve(value != null ? [param, value] : []);
         }
         if (cmd === 'SENTINEL' && args[0] === 'MASTERS') {
           return Promise.resolve([
@@ -420,14 +420,15 @@ describe('ConfigHazardService', () => {
       // resolve-hostnames yes but the masters read fails: the address view is
       // incomplete (a hostname target could be hidden), so the cycle must not be
       // cached as authoritative — the next poll has to re-probe.
-      client.getConfigValue.mockImplementation((param: string) => {
-        if (param === 'resolve-hostnames') return Promise.resolve('yes');
-        if (param === 'announce-hostnames') return Promise.resolve('no');
-        return Promise.resolve(null);
-      });
       let masters = 0;
       client.call.mockImplementation((cmd: string, args: string[]) => {
         if (cmd === 'INFO') return Promise.resolve('# Server\r\nserver_mode:sentinel\r\n');
+        if (cmd === 'SENTINEL' && args[0] === 'CONFIG' && args[1] === 'GET') {
+          const param = args[2];
+          if (param === 'resolve-hostnames') return Promise.resolve(['resolve-hostnames', 'yes']);
+          if (param === 'announce-hostnames') return Promise.resolve(['announce-hostnames', 'no']);
+          return Promise.resolve([]);
+        }
         if (cmd === 'SENTINEL' && args[0] === 'MASTERS') {
           masters += 1;
           return Promise.reject(new Error('LOADING Redis is loading the dataset'));

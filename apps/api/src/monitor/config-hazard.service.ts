@@ -313,13 +313,29 @@ export class ConfigHazardService {
     // (a transient CONFIG GET / SENTINEL MASTERS failure) must NOT be cached as clean,
     // or a later successful read cannot restore the advisory until the cache expires.
     let readFailed = false;
+    // Sentinel settings (resolve-hostnames, announce-ip, announce-hostnames) are not
+    // served through the plain CONFIG GET - that exposes the standard server config
+    // and returns nothing for these on a Sentinel, which would silently nil out the
+    // hazard inputs so the advisory could never fire on a real Sentinel. Read them
+    // through SENTINEL CONFIG GET, whose reply is a flat [name, value, ...] array
+    // (same shape as CONFIG GET), consistent with the SENTINEL MASTERS call below.
     const readConfig = async (parameter: string): Promise<string | null> => {
       try {
-        return await client.getConfigValue(parameter);
+        const raw = await client.call('SENTINEL', ['CONFIG', 'GET', parameter]);
+        if (!Array.isArray(raw)) {
+          return null;
+        }
+        for (let i = 0; i + 1 < raw.length; i += 2) {
+          if (String(raw[i]) === parameter) {
+            const value = String(raw[i + 1]);
+            return value === '' ? null : value;
+          }
+        }
+        return null;
       } catch (err) {
         readFailed = true;
         this.logger.debug(
-          `CONFIG GET ${parameter} failed for ${connectionId}: ${(err as Error).message}`,
+          `SENTINEL CONFIG GET ${parameter} failed for ${connectionId}: ${(err as Error).message}`,
         );
         return null;
       }
