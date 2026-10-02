@@ -40,7 +40,7 @@ export class CveService {
     }
 
     const stored = await this.scanService.getLatest(connectionId);
-    if (stored !== null) {
+    if (stored !== null && this.scanService.storedMatchesEngine(connectionId, stored)) {
       return stored;
     }
 

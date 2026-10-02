@@ -51,13 +51,14 @@ const DATASET: StoredCveDataset = {
 };
 
 describe('CveController', () => {
-  const scanService = { getLatest: jest.fn(), scan: jest.fn() };
+  const scanService = { getLatest: jest.fn(), scan: jest.fn(), storedMatchesEngine: jest.fn() };
   const refreshService = { getDataset: jest.fn() };
   const connectionRegistry = { get: jest.fn(), getDefaultId: jest.fn() };
   let controller: CveController;
 
   beforeEach(async () => {
     jest.resetAllMocks();
+    scanService.storedMatchesEngine.mockReturnValue(true);
     const moduleRef = await Test.createTestingModule({
       controllers: [CveController],
       providers: [
@@ -172,6 +173,17 @@ describe('CveController', () => {
 
     await expect(controller.getScan('conn-1')).resolves.toEqual(SCAN);
     expect(scanService.scan).not.toHaveBeenCalled();
+  });
+
+  it('rescans instead of serving a stored result recorded for another engine', async () => {
+    scanService.getLatest.mockResolvedValue(SCAN);
+    scanService.storedMatchesEngine.mockReturnValue(false);
+    scanService.scan.mockRejectedValue(
+      new CveEngineVersionPendingError('valkey', 'valkey.version'),
+    );
+
+    await expect(controller.getScan('conn-1')).rejects.toBeInstanceOf(ConflictException);
+    expect(scanService.storedMatchesEngine).toHaveBeenCalledWith('conn-1', SCAN);
   });
 
   it('reports dataset age and per-source health', async () => {
