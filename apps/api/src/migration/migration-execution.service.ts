@@ -7,12 +7,14 @@ import * as os from 'os';
 import Valkey from 'iovalkey';
 import type { MigrationExecutionRequest, MigrationExecutionResult, StartExecutionResponse, ExecutionMode } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { MigrationService } from './migration.service';
+import { getBlockingIssues } from './analysis/compatibility-checker';
 import type { ExecutionJob } from './execution/execution-job';
 import { findRedisShakeBinary } from './execution/redisshake-runner';
 import { buildScanReaderToml, buildSyncReaderToml } from './execution/toml-builder';
 import { parseLogLine, classifyRedisShakeFailure, stripAnsi } from './execution/log-parser';
 import { runCommandMigration } from './execution/command-migration-worker';
-import { shouldExcludeFunctions } from './fork-compat';
+import { shouldExcludeFunctions, isRdbRestoreCompatible } from './fork-compat';
 import { probeSourceFunctionsClusterAware, parseNodeAddress } from './function-presence';
 import { assertLiveMigrationPair } from './live-connections';
 
@@ -43,9 +45,11 @@ export class MigrationExecutionService {
   private jobs = new Map<string, ExecutionJob>();
   private readonly MAX_JOBS = 10;
   private readonly MAX_LOG_LINES = 500;
+  private readonly ANALYSIS_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
+    private readonly migrationService: MigrationService,
   ) {}
 
   async startExecution(req: MigrationExecutionRequest): Promise<StartExecutionResponse> {
@@ -67,6 +71,18 @@ export class MigrationExecutionService {
     }
 
     assertLiveMigrationPair(this.connectionRegistry, req.sourceConnectionId, req.targetConnectionId);
+
+    this.enforceSafetyGate(req);
+
+    if (mode === 'redis_shake') {
+      const sourceDbType = sourceAdapter.getCapabilities().dbType;
+      const targetDbType = targetAdapter.getCapabilities().dbType;
+      if (!isRdbRestoreCompatible(sourceDbType, targetDbType)) {
+        throw new BadRequestException(
+          `Cross-engine redis_shake migration (${sourceDbType} → ${targetDbType}) is not supported due to RDB version incompatibility: RESTORE would fail mid-run. Use command or redis_shake_sync mode instead.`,
+        );
+      }
+    }
 
     // 3. Detect if source/target is cluster
     const sourceInfo = await sourceAdapter.getInfo(['cluster']);
@@ -520,6 +536,79 @@ export class MigrationExecutionService {
       );
     }
   }
+
+  /** Fail-closed gate: missing/stale analysis or blocking issues reject execution unless forced with a reason. */
+  private enforceSafetyGate(req: MigrationExecutionRequest): void {
+    if (!this.migrationService) {
+      throw new ServiceUnavailableException(
+        'Safety gate unavailable: MigrationService not wired. Refusing to execute without a blocking-compatibility check.',
+      );
+    }
+    const latest = this.migrationService.findLatestCompletedAnalysis(
+      req.sourceConnectionId,
+      req.targetConnectionId,
+    );
+
+    if (!latest) {
+      throw new BadRequestException({
+        code: 'ANALYSIS_REQUIRED',
+        detail:
+          'No completed migration analysis found for this source/target pair. Run POST /migration/analysis first.',
+      });
+    }
+
+    const completedAt = latest.completedAt ?? latest.createdAt ?? Date.now();
+    if (Date.now() - completedAt > this.ANALYSIS_TTL_MS) {
+      throw new BadRequestException({
+        code: 'ANALYSIS_STALE',
+        analysisId: latest.id,
+        detail:
+          'Latest migration analysis is older than 24h. Re-run POST /migration/analysis before execution.',
+      });
+    }
+
+    const blocking = getBlockingIssues(latest.incompatibilities);
+    if (blocking.length === 0) return;
+
+    const forced = req.force === true;
+    const reason = sanitizeForceReason(req.forceReason);
+
+    if (!forced) {
+      throw new BadRequestException({
+        code: 'BLOCKING_INCOMPATIBILITIES',
+        analysisId: latest.id,
+        blocking,
+        detail: `Migration blocked by ${blocking.length} blocking incompatibility(ies): ${blocking.map(b => `${b.category}:${b.title}`).join('; ')}. Re-run analysis or retry with force:true + forceReason.`,
+      });
+    }
+
+    if (reason.length === 0) {
+      throw new BadRequestException({
+        code: 'FORCE_REASON_REQUIRED',
+        analysisId: latest.id,
+        blocking,
+        detail: 'force:true requires a non-empty forceReason justifying the bypass.',
+      });
+    }
+
+    this.logger.warn(
+      `Forced execution bypassing ${blocking.length} blocking issue(s) ` +
+      `analysisId=${latest.id} ` +
+      `categories=[${blocking.map(b => b.category).join(',')}] ` +
+      `reason=${reason}`,
+    );
+  }
+}
+
+// Cap + strip control chars so a client-supplied reason can't forge log lines or bloat logs.
+const MAX_FORCE_REASON_LOG_LENGTH = 500;
+
+function sanitizeForceReason(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value
+    .replace(/[\x00-\x1F\x7F]+/g, ' ')
+    .trim()
+    .slice(0, MAX_FORCE_REASON_LOG_LENGTH);
 }
 
 // Redact credentials from RedisShake log lines before serving to the frontend

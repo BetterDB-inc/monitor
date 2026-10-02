@@ -44,14 +44,15 @@ function sourceFunctionCall(kind: SourceFunctions): jest.Mock {
   return jest.fn().mockResolvedValue(kind === 'present' ? [['library_name', 'mylib']] : []);
 }
 
-function createMockRegistry(overrides?: { sourceClusterEnabled?: boolean; targetClusterEnabled?: boolean; targetDbType?: 'valkey' | 'redis'; sourceFunctions?: SourceFunctions }) {
+function createMockRegistry(overrides?: { sourceClusterEnabled?: boolean; targetClusterEnabled?: boolean; sourceDbType?: 'valkey' | 'redis'; targetDbType?: 'valkey' | 'redis'; sourceFunctions?: SourceFunctions }) {
   const sourceCluster = overrides?.sourceClusterEnabled ?? false;
   const targetCluster = overrides?.targetClusterEnabled ?? false;
+  const sourceDbType = overrides?.sourceDbType ?? 'valkey';
   const targetDbType = overrides?.targetDbType ?? 'valkey';
   const sourceFunctions = overrides?.sourceFunctions ?? 'absent';
 
   const mockSourceAdapter = {
-    getCapabilities: jest.fn().mockReturnValue({ dbType: 'valkey', version: '8.1.0' }),
+    getCapabilities: jest.fn().mockReturnValue({ dbType: sourceDbType, version: '8.1.0' }),
     getInfo: jest.fn().mockResolvedValue({ cluster: { cluster_enabled: sourceCluster ? '1' : '0' } }),
     // getClient now carries `call` so the probe exercises a real FUNCTION LIST path
     // rather than throwing TypeError and passing through the error branch by accident.
@@ -82,6 +83,40 @@ function createMockRegistry(overrides?: { sourceClusterEnabled?: boolean; target
   };
 }
 
+// Fail-closed gate: tests inject a clean analysis so they take the production path.
+function createMockMigrationService(
+  analysis?: Record<string, unknown> | null,
+) {
+  const fresh = {
+    id: 'analysis-1',
+    status: 'completed',
+    progress: 100,
+    createdAt: Date.now(),
+    completedAt: Date.now(),
+    sourceConnectionId: 'conn-1',
+    targetConnectionId: 'conn-2',
+    incompatibilities: [],
+    blockingCount: 0,
+    warningCount: 0,
+    ...(analysis ?? {}),
+  };
+  return {
+    findLatestCompletedAnalysis: jest
+      .fn()
+      .mockReturnValue(analysis === null ? undefined : fresh),
+  };
+}
+
+function createExecutionService(
+  registry: ReturnType<typeof createMockRegistry>,
+  analysis?: Record<string, unknown> | null,
+): MigrationExecutionService {
+  return new MigrationExecutionService(
+    registry as any,
+    createMockMigrationService(analysis) as any,
+  );
+}
+
 // startExecution now fires the function-presence probe detached (so the POST returns
 // before it connects to the source masters), pushing the notice a beat later. Draining
 // the microtask + immediate queue lets that probe settle before we assert on notices.
@@ -93,7 +128,7 @@ describe('MigrationExecutionService', () => {
 
   beforeEach(() => {
     registry = createMockRegistry();
-    service = new MigrationExecutionService(registry as any);
+    service = createExecutionService(registry);
   });
 
   describe('startExecution', () => {
@@ -145,7 +180,7 @@ describe('MigrationExecutionService', () => {
       const { runCommandMigration } = require('../execution/command-migration-worker');
 
       const clusterRegistry = createMockRegistry({ targetClusterEnabled: true });
-      const clusterService = new MigrationExecutionService(clusterRegistry as any);
+      const clusterService = createExecutionService(clusterRegistry);
 
       await clusterService.startExecution({
         sourceConnectionId: 'conn-1',
@@ -218,20 +253,20 @@ describe('MigrationExecutionService', () => {
     });
 
     it('excludes functions when source and target are different engines', async () => {
-      const { buildScanReaderToml } = require('../execution/toml-builder');
-      (buildScanReaderToml as jest.Mock).mockClear();
+      const { buildSyncReaderToml } = require('../execution/toml-builder');
+      (buildSyncReaderToml as jest.Mock).mockClear();
 
       const crossForkRegistry = createMockRegistry({ targetDbType: 'redis' });
-      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+      const crossForkService = createExecutionService(crossForkRegistry);
 
       await crossForkService.startExecution({
         sourceConnectionId: 'conn-1',
         targetConnectionId: 'conn-2',
-        mode: 'redis_shake',
+        mode: 'redis_shake_sync',
       });
 
-      // buildScanReaderToml's options object must carry excludeFunctions: true for valkey→redis
-      const call = (buildScanReaderToml as jest.Mock).mock.calls.at(-1)!;
+      // buildSyncReaderToml's options object must carry excludeFunctions: true for valkey→redis
+      const call = (buildSyncReaderToml as jest.Mock).mock.calls.at(-1)!;
       expect(call[2]).toEqual(expect.objectContaining({ excludeFunctions: true }));
     });
 
@@ -239,12 +274,12 @@ describe('MigrationExecutionService', () => {
       // 'present': a real library exists on the source, so the notice must fire — and
       // fire because FUNCTION LIST returned a library, not because the probe errored.
       const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'present' });
-      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+      const crossForkService = createExecutionService(crossForkRegistry);
 
       const { id } = await crossForkService.startExecution({
         sourceConnectionId: 'conn-1',
         targetConnectionId: 'conn-2',
-        mode: 'redis_shake',
+        mode: 'redis_shake_sync',
       });
 
       await flushProbe();
@@ -258,12 +293,12 @@ describe('MigrationExecutionService', () => {
       // before it completes. A UI that stops polling once the job is terminal can never
       // miss it, even if the migration finishes quickly.
       const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'present' });
-      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+      const crossForkService = createExecutionService(crossForkRegistry);
 
       const { id } = await crossForkService.startExecution({
         sourceConnectionId: 'conn-1',
         targetConnectionId: 'conn-2',
-        mode: 'redis_shake',
+        mode: 'redis_shake_sync',
       });
 
       // Let the mocked process run to close (resolves at 20ms) so the job is terminal.
@@ -283,12 +318,12 @@ describe('MigrationExecutionService', () => {
       const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'present' });
       const flushall = jest.fn().mockResolvedValue('OK');
       crossForkRegistry.mockTargetAdapter.getClient = jest.fn().mockReturnValue({ flushall, quit: jest.fn() });
-      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+      const crossForkService = createExecutionService(crossForkRegistry);
 
       const { id } = await crossForkService.startExecution({
         sourceConnectionId: 'conn-1',
         targetConnectionId: 'conn-2',
-        mode: 'redis_shake',
+        mode: 'redis_shake_sync',
         redisShakeOptions: { emptyDbBeforeSync: true },
       });
 
@@ -306,12 +341,12 @@ describe('MigrationExecutionService', () => {
       // 'throw' -> 'unknown': the filter is written regardless, so an indeterminate
       // probe must not silently drop the warning.
       const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'throw' });
-      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+      const crossForkService = createExecutionService(crossForkRegistry);
 
       const { id } = await crossForkService.startExecution({
         sourceConnectionId: 'conn-1',
         targetConnectionId: 'conn-2',
-        mode: 'redis_shake',
+        mode: 'redis_shake_sync',
       });
 
       await flushProbe();
@@ -321,12 +356,12 @@ describe('MigrationExecutionService', () => {
 
     it('keeps the exclusion notice even after the log cap rolls over', async () => {
       const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'present' });
-      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+      const crossForkService = createExecutionService(crossForkRegistry);
 
       const { id } = await crossForkService.startExecution({
         sourceConnectionId: 'conn-1',
         targetConnectionId: 'conn-2',
-        mode: 'redis_shake',
+        mode: 'redis_shake_sync',
       });
 
       await flushProbe();
@@ -348,17 +383,98 @@ describe('MigrationExecutionService', () => {
       // get a scary "functions excluded" notice about functions it never had. This is
       // the suppression gate the previous review asked for.
       const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'absent' });
-      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+      const crossForkService = createExecutionService(crossForkRegistry);
 
       const { id } = await crossForkService.startExecution({
         sourceConnectionId: 'conn-1',
         targetConnectionId: 'conn-2',
-        mode: 'redis_shake',
+        mode: 'redis_shake_sync',
       });
 
       await flushProbe();
       const result = crossForkService.getExecution(id);
       expect(result!.notices ?? []).toHaveLength(0);
+    });
+
+    describe('RDB preflight (v11 vs v12)', () => {
+      it('blocks Valkey -> Redis via redis_shake before spawn', async () => {
+        const { buildScanReaderToml } = require('../execution/toml-builder');
+        const { spawn } = require('child_process');
+        (buildScanReaderToml as jest.Mock).mockClear();
+        (spawn as jest.Mock).mockClear();
+
+        const crossRegistry = createMockRegistry({ sourceDbType: 'valkey', targetDbType: 'redis' });
+        const crossService = createExecutionService(crossRegistry);
+
+        await expect(
+          crossService.startExecution({
+            sourceConnectionId: 'conn-1',
+            targetConnectionId: 'conn-2',
+            mode: 'redis_shake',
+          }),
+        ).rejects.toThrow(/use command or redis_shake_sync/i);
+
+        expect(buildScanReaderToml).not.toHaveBeenCalled();
+        expect(spawn).not.toHaveBeenCalled();
+      });
+
+      it('blocks Redis -> Valkey via redis_shake before spawn', async () => {
+        const crossRegistry = createMockRegistry({ sourceDbType: 'redis', targetDbType: 'valkey' });
+        const crossService = createExecutionService(crossRegistry);
+
+        await expect(
+          crossService.startExecution({
+            sourceConnectionId: 'conn-1',
+            targetConnectionId: 'conn-2',
+            mode: 'redis_shake',
+          }),
+        ).rejects.toThrow(/use command or redis_shake_sync/i);
+      });
+
+      it('blocks cross-engine when mode defaults to redis_shake', async () => {
+        const crossRegistry = createMockRegistry({ sourceDbType: 'redis', targetDbType: 'valkey' });
+        const crossService = createExecutionService(crossRegistry);
+
+        await expect(
+          crossService.startExecution({
+            sourceConnectionId: 'conn-1',
+            targetConnectionId: 'conn-2',
+          }),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      it('allows same-engine redis_shake (Redis -> Redis, Valkey -> Valkey)', async () => {
+        for (const engine of ['redis', 'valkey'] as const) {
+          const sameRegistry = createMockRegistry({ sourceDbType: engine, targetDbType: engine });
+          const sameService = createExecutionService(sameRegistry);
+
+          const result = await sameService.startExecution({
+            sourceConnectionId: 'conn-1',
+            targetConnectionId: 'conn-2',
+            mode: 'redis_shake',
+          });
+          expect(result.id).toBeDefined();
+        }
+      });
+
+      it('leaves redis_shake_sync and command unaffected cross-engine', async () => {
+        const { runCommandMigration } = require('../execution/command-migration-worker');
+
+        for (const mode of ['redis_shake_sync', 'command'] as const) {
+          const crossRegistry = createMockRegistry({ sourceDbType: 'valkey', targetDbType: 'redis' });
+          const crossService = createExecutionService(crossRegistry);
+
+          const result = await crossService.startExecution({
+            sourceConnectionId: 'conn-1',
+            targetConnectionId: 'conn-2',
+            mode,
+          });
+          expect(result.id).toBeDefined();
+        }
+
+        await new Promise(r => setTimeout(r, 20));
+        expect(runCommandMigration).toHaveBeenCalled();
+      });
     });
   });
 
@@ -440,7 +556,11 @@ describe('MigrationExecutionService with external connections', () => {
       createdAt: Date.now(),
       connectionType: id === externalId ? 'external' : 'direct',
     }));
-    const service = new MigrationExecutionService(registry as any);
+    // Live-pair check runs before the safety gate, so a stub gate suffices here.
+    const service = new MigrationExecutionService(
+      registry as any,
+      { findLatestCompletedAnalysis: () => undefined } as any,
+    );
     const { runCommandMigration } = require('../execution/command-migration-worker');
     const { spawn } = require('child_process');
     runCommandMigration.mockClear();

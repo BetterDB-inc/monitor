@@ -21,6 +21,18 @@ export function shouldExcludeFunctions(sourceDbType: EngineType, targetDbType: E
 }
 
 /**
+ * Whether scan-mode `redis_shake` can copy between these engines.
+ *
+ * Scan mode moves data via `DUMP`/`RESTORE`, whose payload carries an RDB
+ * version byte (Redis 7.4+ = v12, Valkey = v11) the target must understand, so
+ * a cross-engine restore fails mid-run. Same engine is compatible, cross-engine
+ * is not. Sync/command modes bypass `RESTORE` and are unaffected.
+ */
+export function isRdbRestoreCompatible(sourceDbType: EngineType, targetDbType: EngineType): boolean {
+  return sourceDbType === targetDbType;
+}
+
+/**
  * Whether the source holds server-side function libraries.
  *
  * - 'present': `FUNCTION LIST` returned at least one library.
