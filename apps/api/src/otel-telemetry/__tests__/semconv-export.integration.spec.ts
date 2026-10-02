@@ -3,7 +3,7 @@ import { ExportResultCode, type ExportResult } from '@opentelemetry/core';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-proto';
 import type { MetricData, ResourceMetrics } from '@opentelemetry/sdk-metrics';
 import { OtelMetricsExporterService } from '../otel-metrics-exporter.service';
-import { ORPHAN_ID, buildPrometheus, pollAll } from './prometheus-harness';
+import { ORPHAN_LABEL, buildPrometheus, pollAll } from './prometheus-harness';
 
 function config(values: Record<string, unknown>): ConfigService {
   return {
@@ -90,7 +90,7 @@ describe('semconv export through the real SDK pipeline', () => {
       monitor.scopeMetrics
         .flatMap((scope) => scope.metrics)
         .flatMap((m) => dataPointAttributes(m))
-        .some((attrs) => attrs.connection === ORPHAN_ID),
+        .some((attrs) => attrs.connection === ORPHAN_LABEL),
     ).toBe(true);
   });
 
