@@ -309,7 +309,7 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_process_open_fds` (Linux) | `process.unix.file_descriptor.count` | `{file_descriptor}` |
 | `betterdb_process_start_time_seconds` | `process.uptime` | `s` |
 | `betterdb_nodejs_heap_space_size_used_bytes` | `v8js.memory.heap.used` | `By` |
-| `betterdb_nodejs_heap_space_size_total_bytes` | `v8js.memory.heap.limit` | `By` |
+| `betterdb_nodejs_heap_space_size_total_bytes` | `v8js.memory.heap.space.size` | `By` |
 | `betterdb_nodejs_heap_space_size_available_bytes` | `v8js.memory.heap.space.available_size` | `By` |
 | `betterdb_nodejs_eventloop_lag_{min,max,mean,stddev,p50,p90,p99}_seconds` | `nodejs.eventloop.delay.{min,max,mean,stddev,p50,p90,p99}` | `s` |
 

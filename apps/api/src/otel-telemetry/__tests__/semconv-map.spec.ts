@@ -214,7 +214,7 @@ describe('planSemconvInstruments', () => {
       { name: 'process.unix.file_descriptor.count', kind: 'updown', unit: '{file_descriptor}' },
       { name: 'process.uptime', kind: 'gauge', unit: 's' },
       { name: 'v8js.memory.heap.used', kind: 'updown', unit: 'By' },
-      { name: 'v8js.memory.heap.limit', kind: 'updown', unit: 'By' },
+      { name: 'v8js.memory.heap.space.size', kind: 'updown', unit: 'By' },
       { name: 'v8js.memory.heap.space.available_size', kind: 'updown', unit: 'By' },
       { name: 'nodejs.eventloop.delay.p99', kind: 'gauge', unit: 's' },
     ]);

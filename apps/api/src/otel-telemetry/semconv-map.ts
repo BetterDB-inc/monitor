@@ -275,7 +275,7 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
     gauge('process.uptime', 's', uptime),
   ),
   betterdb_nodejs_heap_space_size_used_bytes: updown('v8js.memory.heap.used', 'By', heapSpace),
-  betterdb_nodejs_heap_space_size_total_bytes: updown('v8js.memory.heap.limit', 'By', heapSpace),
+  betterdb_nodejs_heap_space_size_total_bytes: updown('v8js.memory.heap.space.size', 'By', heapSpace),
   betterdb_nodejs_heap_space_size_available_bytes: updown(
     'v8js.memory.heap.space.available_size',
     'By',
