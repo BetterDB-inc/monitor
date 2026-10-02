@@ -1,12 +1,15 @@
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { ConflictException, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import type { CveDatasetStatus, CveScanResult, CveSourceStatus } from '@betterdb/shared';
 import { CVE_SCAN_MIN_FORCE_INTERVAL_MS, cveDisabledByConfig, ghsaToken } from './cve.constants';
 import { CveRefreshService } from './cve-refresh.service';
 import {
   CveConnectionUnreachableError,
   CveDatasetUnavailableError,
+  CveEngineVersionPendingError,
   CveScanService,
 } from './cve-scan.service';
+
+export const CVE_VERSION_PENDING_CODE = 'cve_version_pending';
 
 export const CVE_DISABLED_MESSAGE =
   'CVE inspection is turned off on this install (CVE_ENABLED=false), so nothing was scanned.';
@@ -111,6 +114,15 @@ export class CveService {
 
       if (error instanceof CveConnectionUnreachableError) {
         throw new ServiceUnavailableException(error.message);
+      }
+
+      if (error instanceof CveEngineVersionPendingError) {
+        throw new ConflictException({
+          code: CVE_VERSION_PENDING_CODE,
+          product: error.product,
+          attribute: error.attribute,
+          message: error.message,
+        });
       }
 
       throw error;
