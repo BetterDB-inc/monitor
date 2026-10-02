@@ -21,8 +21,13 @@ import {
   versionPendingOf,
 } from '../components/pages/security/scan-error';
 import { VersionPendingCard } from '../components/pages/security/VersionPendingCard';
-import { scanFailureCopy } from '../components/pages/security/scan-failure-copy';
+import {
+  EXTERNAL_SCAN_NOTE,
+  scanFailureCopy,
+} from '../components/pages/security/scan-failure-copy';
+import { useConnection } from '../hooks/useConnection';
 import { useCveDataset, useCveScan, useRefreshCveScan } from '../hooks/useCveScan';
+import { isExternalConnection } from '../utils/connectionType';
 
 const PRODUCT_LABEL: Record<string, string> = { valkey: 'Valkey', redis: 'Redis' };
 const EMPTY_GROUPS: NodeGroups = { unique: [], shared: [], unversioned: [], badge: 0 };
@@ -47,6 +52,8 @@ export function Security() {
   const scan = useCveScan();
   const dataset = useCveDataset();
   const refresh = useRefreshCveScan();
+  const { currentConnection } = useConnection();
+  const external = isExternalConnection(currentConnection);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   const refreshError = refresh.isError
@@ -86,7 +93,7 @@ export function Security() {
     }
 
     const failure = parseScanFailure(scan.error, SCAN_FAILED_MESSAGE);
-    const copy = scanFailureCopy(failure.summary, failure.nodes);
+    const copy = scanFailureCopy(failure.summary, failure.nodes, external);
 
     return (
       <div className="flex min-h-full flex-col gap-6">
@@ -128,7 +135,7 @@ export function Security() {
     const nodes = result.notScanned.map((entry) => {
       return { address: entry.address, reason: entry.reason };
     });
-    const copy = scanFailureCopy(NO_NODE_MESSAGE, nodes);
+    const copy = scanFailureCopy(NO_NODE_MESSAGE, nodes, external);
 
     return (
       <div className="flex min-h-full flex-col gap-6">
@@ -186,6 +193,7 @@ export function Security() {
   const header = (
     <HeaderStrip
       subtitle={subtitle}
+      note={external ? EXTERNAL_SCAN_NOTE : null}
       severityCounts={clusterSeverity(result.nodes)}
       scopeLabel={result.nodes.length > 1 ? `across ${result.nodes.length} nodes` : null}
       refreshing={refresh.isPending}
