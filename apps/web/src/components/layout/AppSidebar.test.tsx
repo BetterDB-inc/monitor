@@ -86,6 +86,27 @@ describe('AppSidebar cluster nav gating', () => {
     expect(screen.getByRole('button', { name: 'View cluster → prod' })).toBeInTheDocument();
   });
 
+  it('keeps Key Analytics on a Sentinel primary, where the data node is the only place to scan', () => {
+    mockCurrent(
+      { id: 'p', name: 'ha · 10.0.0.5:6379', membership: { seedId: 's', nodeId: 'n', origin: 'auto', source: 'sentinel', group: 'mymaster', role: 'primary' } },
+      [{ id: 's', name: 'ha' }],
+    );
+    renderSidebar();
+    expect(screen.getByRole('link', { name: /^Key Analytics/ })).toBeInTheDocument();
+  });
+
+  it.each([
+    ['a Sentinel replica', { role: 'replica' as const }],
+    ['a Sentinel primary that left its group', { role: 'primary' as const, retiredAt: 5 }],
+  ])('hides Key Analytics on %s', (_case, membership) => {
+    mockCurrent(
+      { id: 'r', name: 'ha · 10.0.0.6:6379', membership: { seedId: 's', nodeId: 'n', origin: 'adopted', source: 'sentinel', group: 'mymaster', ...membership } },
+      [{ id: 's', name: 'ha' }],
+    );
+    renderSidebar();
+    expect(screen.queryByRole('link', { name: /^Key Analytics/ })).toBeNull();
+  });
+
   it('falls back to the Cluster link when a child has no seed in the list', () => {
     mockCurrent(
       { id: 'k', name: 'prod · 10.0.0.2:7002', membership: { seedId: 'gone', nodeId: 'n', origin: 'auto', source: 'cluster' } },

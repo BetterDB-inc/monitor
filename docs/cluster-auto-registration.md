@@ -82,6 +82,13 @@ Cluster, Key Analytics and Migration continue to operate against the seed
 connection only — they are not duplicated per node. Child connections show
 a "View cluster → &lt;seed&gt;" link back to the seed instead.
 
+Key Analytics on the seed covers the whole cluster: each collection scans
+the seed node and every connected child that is currently a primary, and
+stores one merged result under the seed. Replicas are not scanned, and no
+child is scanned on its own. The sample size applies per primary. Without
+auto-registration a cluster connection still scans only the node it is
+connected to.
+
 ## See also
 
 [Sentinel Node Auto-Registration](sentinel-auto-registration.md) covers

@@ -18,7 +18,7 @@ function hotKey(over: Partial<HotKeyEntry>): HotKeyEntry {
 
 function makeService(getHotKeys: jest.Mock): KeyAnalyticsService {
   const storage = { getHotKeys } as unknown as StoragePort;
-  const registry = {} as unknown as ConnectionRegistry;
+  const registry = { list: () => [] } as unknown as ConnectionRegistry;
   const license = {
     hasFeature: () => true,
     getLicenseTier: () => 'pro',
@@ -112,7 +112,7 @@ describe('KeyAnalyticsService.collect composite persistence', () => {
       saveHotKeys,
       saveKeyPatternSnapshots: jest.fn().mockResolvedValue(undefined),
     } as unknown as StoragePort;
-    const registry = {} as unknown as ConnectionRegistry;
+    const registry = { list: () => [] } as unknown as ConnectionRegistry;
     const license = {
       hasFeature: () => true,
       getLicenseTier: () => 'pro',

@@ -141,6 +141,13 @@ export function parseSshTunnel(value: unknown): SshTunnelConfig | undefined {
   return obj as SshTunnelConfig;
 }
 
+export function hasOwnKeyAnalytics(membership: TopologyMembership | undefined): boolean {
+  if (!membership) {
+    return true;
+  }
+  return membership.source === 'sentinel' && membership.role === 'primary' && membership.retiredAt === undefined;
+}
+
 export function parseMembership(value: unknown): TopologyMembership | undefined {
   if (value === null || value === undefined || value === '') return undefined;
   let obj: unknown = value;

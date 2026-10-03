@@ -87,3 +87,34 @@ export function parseKeySizeDistribution(raw: string): KeySizeDistribution {
 
   return { databases, available: Object.keys(databases).length > 0 };
 }
+
+const BUCKET_UNITS = ['', 'K', 'M', 'G', 'T', 'P', 'E'];
+
+function bucketValue(bucket: string): number {
+  const match = /^(\d+)([KMGTPE]?)$/.exec(bucket);
+  if (!match) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Number(match[1]) * 1024 ** BUCKET_UNITS.indexOf(match[2]);
+}
+
+export function mergeKeySizeDistributions(distributions: KeySizeDistribution[]): KeySizeDistribution {
+  const databases: KeySizeDistribution['databases'] = {};
+  for (const distribution of distributions) {
+    for (const [db, types] of Object.entries(distribution.databases)) {
+      for (const [type, { metric, buckets }] of Object.entries(types)) {
+        const merged = ((databases[db] ??= {})[type] ??= { metric, buckets: [] });
+        for (const { bucket, count } of buckets) {
+          const existing = merged.buckets.find((candidate) => candidate.bucket === bucket);
+          if (existing) {
+            existing.count += count;
+          } else {
+            merged.buckets.push({ bucket, count });
+          }
+        }
+        merged.buckets.sort((a, b) => bucketValue(a.bucket) - bucketValue(b.bucket));
+      }
+    }
+  }
+  return { databases, available: distributions.some((distribution) => distribution.available) };
+}
