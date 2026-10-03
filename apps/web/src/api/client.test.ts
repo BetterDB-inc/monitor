@@ -143,6 +143,35 @@ describe('fetchApi error handling', () => {
   });
 });
 
+describe('fetchApi error payload', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    setCurrentConnectionId(null);
+  });
+
+  it('keeps the JSON body on an ApiError so callers can read typed fields', async () => {
+    const body = {
+      code: 'cve_version_pending',
+      product: 'valkey',
+      attribute: 'valkey.version',
+      message: 'The collector has not pushed valkey.version for this connection yet',
+    };
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify(body), {
+        status: 409,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    const error = await fetchApi('/cve/scan').catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(409);
+    expect((error as ApiError).payload).toEqual(body);
+    expect((error as Error).message).toBe(body.message);
+  });
+});
+
 describe('fetchApi timeoutMs', () => {
   const jsonResponse = (body: string) =>
     new Response(body, { status: 200, headers: { 'Content-Type': 'application/json' } });

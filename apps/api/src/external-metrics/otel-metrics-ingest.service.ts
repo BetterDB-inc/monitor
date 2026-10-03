@@ -114,9 +114,11 @@ export class OtelMetricsIngestService {
       return;
     }
 
-    const serverVersion = attrs['redis.version'];
-    if (serverVersion) this.store.setServerVersion(match.id, serverVersion);
     if (attrs['db.system.name'] === 'valkey') this.store.markValkey(match.id);
+    const redisVersion = attrs['redis.version'];
+    if (redisVersion) this.store.setRedisVersion(match.id, redisVersion);
+    const valkeyVersion = attrs['valkey.version'];
+    if (valkeyVersion) this.store.setValkeyVersion(match.id, valkeyVersion);
 
     const updates: FieldUpdate[] = [];
     let sawValkeyVocabulary = false;

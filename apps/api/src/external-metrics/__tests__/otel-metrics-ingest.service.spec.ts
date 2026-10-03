@@ -226,7 +226,7 @@ describe('OtelMetricsIngestService', () => {
   it('records the server version and the valkey flag', () => {
     const redis = build();
     redis.service.ingest(resource([...identity, str('redis.version', '7.2.4')], [gauge('redis.uptime', 1)]), NOW_MS);
-    expect(redis.store.serverVersion('ext')).toBe('7.2.4');
+    expect(redis.store.redisVersion('ext')).toBe('7.2.4');
     expect(redis.store.isValkey('ext')).toBe(false);
 
     const byMetric = build();
@@ -236,6 +236,46 @@ describe('OtelMetricsIngestService', () => {
     const byResource = build();
     byResource.service.ingest(resource([...identity, str('db.system.name', 'valkey')], [gauge('redis.uptime', 1)]), NOW_MS);
     expect(byResource.store.isValkey('ext')).toBe(true);
+  });
+
+  it('records valkey.version as the Valkey version and keeps redis.version as the Redis version', () => {
+    const { service, store } = build();
+    service.ingest(
+      resource(
+        [
+          ...identity,
+          str('redis.version', '7.2.4'),
+          str('valkey.version', '8.1.1'),
+          str('db.system.name', 'valkey'),
+        ],
+        [gauge('redis.uptime', 1)],
+      ),
+      NOW_MS,
+    );
+    expect(store.redisVersion('ext')).toBe('7.2.4');
+    expect(store.engineVersion('ext')).toEqual({ product: 'valkey', version: '8.1.1' });
+  });
+
+  it('notifies the engine once, as Valkey, for a first push carrying both versions', () => {
+    const { service, store } = build();
+    const changes: string[] = [];
+    store.onEngineChange((connectionId) => {
+      changes.push(connectionId);
+    });
+    service.ingest(
+      resource(
+        [
+          ...identity,
+          str('redis.version', '7.2.4'),
+          str('valkey.version', '8.1.0'),
+          str('db.system.name', 'valkey'),
+        ],
+        [gauge('redis.uptime', 1)],
+      ),
+      NOW_MS,
+    );
+    expect(changes).toEqual(['ext']);
+    expect(store.engineVersion('ext')).toEqual({ product: 'valkey', version: '8.1.0' });
   });
 
   it('ignores an older point without counting it as dropped', () => {

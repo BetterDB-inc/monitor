@@ -2,6 +2,7 @@ import { ExternalMetricsStore } from '../external-metrics-store';
 import { ExternalMetricsAdapter } from '../external-metrics.adapter';
 import { ExternalConnectionUnsupportedError } from '../external-connection-unsupported.error';
 import type { FieldUpdate } from '../otlp-metrics-types';
+import { InfoParser } from '../../database/parsers/info.parser';
 
 const T0 = 1_700_000_000_000;
 
@@ -110,7 +111,7 @@ describe('ExternalMetricsAdapter', () => {
     });
 
     it('leaves the server section without uptime days when uptime was not pushed', async () => {
-      store.setServerVersion('c', '7.2.4');
+      store.setRedisVersion('c', '7.2.4');
       store.apply('c', [scalar('memory', 'used_memory', '1')]);
       expect((await adapter.getInfo(['server'])).server).toEqual({ redis_version: '7.2.4' });
     });
@@ -136,9 +137,27 @@ describe('ExternalMetricsAdapter', () => {
       hasConfig: false,
       hasVectorSearch: false,
     });
-    store.setServerVersion('c', '8.0.1');
+    store.setValkeyVersion('c', '8.0.1');
     store.markValkey('c');
     expect(adapter.getCapabilities()).toMatchObject({ dbType: 'valkey', version: '8.0.1' });
+  });
+
+  it('reports the Valkey version, not the compatibility redis_version, for a Valkey connection', () => {
+    store.setRedisVersion('c', '7.2.4');
+    store.markValkey('c');
+    expect(adapter.getCapabilities()).toMatchObject({ dbType: 'valkey', version: 'unknown' });
+    store.setValkeyVersion('c', '8.1.1');
+    expect(adapter.getCapabilities()).toMatchObject({ dbType: 'valkey', version: '8.1.1' });
+  });
+
+  it('lets INFO consumers resolve a pushed Valkey as Valkey', async () => {
+    store.setRedisVersion('c', '7.2.4');
+    store.setValkeyVersion('c', '8.1.1');
+    store.markValkey('c');
+    store.apply('c', [scalar('memory', 'used_memory', '1')]);
+    const info = await adapter.getInfo(['server']);
+    expect(InfoParser.isValkey(info)).toBe(true);
+    expect(InfoParser.getVersion(info)).toBe('8.1.1');
   });
 
   it.each([

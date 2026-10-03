@@ -291,9 +291,7 @@ function AppLayoutInner(): ReactElement {
                 path="/security"
                 element={
                   <NoConnectionsGuard>
-                    <LiveConnectionGuard>
-                      <Security />
-                    </LiveConnectionGuard>
+                    <Security />
                   </NoConnectionsGuard>
                 }
               />

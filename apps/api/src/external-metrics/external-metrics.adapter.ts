@@ -90,9 +90,10 @@ export class ExternalMetricsAdapter implements DatabasePort {
   }
 
   getCapabilities(): DatabaseCapabilities {
+    const engine = this.store.engineVersion(this.connectionId);
     return {
-      dbType: this.store.isValkey(this.connectionId) ? 'valkey' : 'redis',
-      version: this.store.serverVersion(this.connectionId) ?? 'unknown',
+      dbType: engine.product,
+      version: engine.version ?? 'unknown',
       hasCommandLog: false,
       hasSlotStats: false,
       hasClusterSlotStats: false,

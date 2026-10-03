@@ -38,8 +38,8 @@ const cases: ControllerCase[] = [
   {
     controller: CveController,
     handlers: {
-      getScan: 'live',
-      refreshScan: 'live',
+      getScan: 'open',
+      refreshScan: 'open',
       getDataset: 'open',
     },
   },
