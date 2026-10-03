@@ -179,10 +179,17 @@ export class WebhooksController {
       properties: {
         pendingRetries: { type: 'number', example: 5 },
         nextRetryTime: { type: 'number', example: 1704934800000, nullable: true },
+        bufferedEvents: { type: 'number', example: 0 },
+        droppedEvents: { type: 'number', example: 0 },
       },
     },
   })
-  async getRetryStats(): Promise<{ pendingRetries: number; nextRetryTime: number | null }> {
+  async getRetryStats(): Promise<{
+    pendingRetries: number;
+    nextRetryTime: number | null;
+    bufferedEvents: number;
+    droppedEvents: number;
+  }> {
     return this.processorService.getRetryStats();
   }
 }
