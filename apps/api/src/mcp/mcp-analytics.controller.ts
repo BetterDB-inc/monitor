@@ -21,6 +21,10 @@ import { ValidateInstanceIdPipe, mapMcpError } from './mcp-helpers';
 import { MetricForecastingService } from '../metric-forecasting/metric-forecasting.service';
 import { VectorSearchService } from '../vector-search/vector-search.service';
 import { InferenceLatencyService } from '../inference-latency/inference-latency.service';
+import {
+  LiveConnectionGuard,
+  UsePathInstanceId,
+} from '../external-metrics/live-connection.guard';
 import { MetricKindValidationPipe } from '../metric-forecasting/pipes/metric-kind-validation.pipe';
 
 @Controller('mcp')
@@ -53,6 +57,8 @@ export class McpAnalyticsController {
   }
 
   @Get('instance/:id/vector-indexes')
+  @UseGuards(LiveConnectionGuard)
+  @UsePathInstanceId()
   async getVectorIndexes(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
       const names = await this.vectorSearchService.getIndexList(id);
@@ -86,6 +92,8 @@ export class McpAnalyticsController {
   }
 
   @Get('instance/:id/inference-latency')
+  @UseGuards(LiveConnectionGuard)
+  @UsePathInstanceId()
   async getInferenceLatency(
     @Param('id', ValidateInstanceIdPipe) id: string,
     @Query('windowMs') windowMs?: string,

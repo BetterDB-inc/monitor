@@ -22,8 +22,15 @@ import { toNumber } from '../../metrics/commandstats-parser';
  */
 export const KEYSPACE_DB_KEY = /^db\d+$/;
 
+export interface ParseInfoOptions {
+  omitAbsentKeyspaceFields?: boolean;
+}
+
 export class MetricsParser {
-  static parseInfoToTyped(info: Record<string, unknown>): InfoResponse {
+  static parseInfoToTyped(
+    info: Record<string, unknown>,
+    options: ParseInfoOptions = {},
+  ): InfoResponse {
     const result: Record<string, unknown> = { ...info };
 
     if (info.keyspace) {
@@ -36,11 +43,13 @@ export class MetricsParser {
           // raw string so malformed input stays distinguishable from an empty
           // database instead of masquerading as keys:0.
           if (!Number.isFinite(keys)) return null;
-          const entry: KeyspaceDbInfo = {
-            keys,
-            expires: toNumber(fields.expires),
-            avg_ttl: toNumber(fields.avg_ttl),
-          };
+          const entry = { keys } as KeyspaceDbInfo;
+          if (!options.omitAbsentKeyspaceFields || fields.expires !== undefined) {
+            entry.expires = toNumber(fields.expires);
+          }
+          if (!options.omitAbsentKeyspaceFields || fields.avg_ttl !== undefined) {
+            entry.avg_ttl = toNumber(fields.avg_ttl);
+          }
           // Preserve additional numeric fields (e.g. subexpiry on Redis 7.4+).
           for (const [field, value] of Object.entries(fields)) {
             if (field in entry) continue;

@@ -40,6 +40,36 @@ describe('OtlpPushTab', () => {
     });
   });
 
+  it('sends the discovered address so an edited host still clears the discovered row', async () => {
+    fetchApi.mockResolvedValue({ id: 'new' });
+    const onCreated = vi.fn().mockResolvedValue(undefined);
+    render(
+      <OtlpPushTab
+        isFirstConnection={false}
+        onCreated={onCreated}
+        onDone={vi.fn()}
+        initialName="orders-cache"
+        initialHost="cache.internal"
+        initialPort={6380}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText('Host *'), { target: { value: 'cache.public' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add OTLP connection' }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalled());
+    expect(fetchApi).toHaveBeenCalledWith('/connections', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'orders-cache',
+        host: 'cache.public',
+        port: 6380,
+        connectionType: 'external',
+        setAsDefault: false,
+        discoveredHost: 'cache.internal',
+        discoveredPort: 6380,
+      }),
+    });
+  });
+
   it('disables Save when the port is not an integer', () => {
     render(<OtlpPushTab isFirstConnection={false} onCreated={vi.fn()} onDone={vi.fn()} />);
     fireEvent.change(screen.getByLabelText('Name *'), { target: { value: 'Pushed' } });

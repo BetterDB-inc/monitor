@@ -86,7 +86,9 @@ export class ExternalMetricsAdapter implements DatabasePort {
   }
 
   async getInfoParsed(sections?: string[]): Promise<InfoResponse> {
-    return MetricsParser.parseInfoToTyped(await this.getInfo(sections));
+    return MetricsParser.parseInfoToTyped(await this.getInfo(sections), {
+      omitAbsentKeyspaceFields: true,
+    });
   }
 
   getCapabilities(): DatabaseCapabilities {

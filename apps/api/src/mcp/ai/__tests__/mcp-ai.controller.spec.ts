@@ -4,6 +4,7 @@ import { Test } from '@nestjs/testing';
 import { McpAiController } from '../mcp-ai.controller';
 import { AiObservabilityService } from '../../../ai-observability/ai-observability.service';
 import { TraceCorrelationService } from '../../../ai-observability/trace-correlation.service';
+import { LiveConnectionGuard } from '../../../external-metrics/live-connection.guard';
 import { AgentTokenGuard } from '../../../common/guards/agent-token.guard';
 
 describe('McpAiController', () => {
@@ -35,6 +36,8 @@ describe('McpAiController', () => {
       ],
     })
       .overrideGuard(AgentTokenGuard)
+      .useValue({ canActivate: () => true })
+      .overrideGuard(LiveConnectionGuard)
       .useValue({ canActivate: () => true })
       .compile();
     controller = mod.get(McpAiController);

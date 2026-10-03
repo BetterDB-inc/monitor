@@ -5,6 +5,7 @@ import { McpAnalyticsController } from '../mcp-analytics.controller';
 import { MetricForecastingService } from '../../metric-forecasting/metric-forecasting.service';
 import { VectorSearchService } from '../../vector-search/vector-search.service';
 import { InferenceLatencyService } from '../../inference-latency/inference-latency.service';
+import { LiveConnectionGuard } from '../../external-metrics/live-connection.guard';
 import { AgentTokenGuard } from '../../common/guards/agent-token.guard';
 import { CapabilityUnavailableError } from '../../common/errors/capability-unavailable.error';
 
@@ -37,6 +38,8 @@ describe('McpAnalyticsController', () => {
       providers,
     })
       .overrideGuard(AgentTokenGuard)
+      .useValue({ canActivate: () => true })
+      .overrideGuard(LiveConnectionGuard)
       .useValue({ canActivate: () => true })
       .compile();
     return mod.get(McpAnalyticsController);

@@ -333,6 +333,8 @@ Basic server identification and uptime.
 
 **Label Example**: `version="8.0.1"`, `role="master"`, `os="Linux 5.15.0"`
 
+**Externally monitored (OTLP-push) connections**: `betterdb_instance_info` is a presence gauge. It requires at least one server-section field to be pushed (for example `server.os`, the version, or `server.uptime_in_seconds`), because a push containing only `replication.role` does not export it. Once the server section is present, it is exported when any of version, role or OS has been pushed, and a label that was not pushed is exported as `unknown` (for example `version="unknown",role="unknown",os="Linux"`). It is removed again when none of the three is pushed any more.
+
 ### Memory Metrics
 
 Detailed memory usage and fragmentation tracking.
@@ -408,6 +410,8 @@ Per-database key statistics.
 | `betterdb_keyspace_keys_expiring` | gauge | -      | Keys with an expiration across all databases | `45000`  |
 
 **Label Example**: `db="db0"`, `db="db1"`
+
+**Externally monitored (OTLP-push) connections**: `betterdb_db_keys_expiring` is exported for databases whose expiry count was pushed, and `betterdb_db_avg_ttl_seconds` for databases whose average TTL was pushed. Each is omitted, never reported as 0, when its value was not pushed. `betterdb_keyspace_keys_expiring` is omitted when no database pushed an expiry count.
 
 ### Persistence Metrics
 
