@@ -19,6 +19,7 @@ export const NODES: HarnessNode[] = [
 ];
 
 export const ORPHAN_ID = 'conn-orphan';
+export const ORPHAN_LABEL = '10.0.0.9:6390';
 
 function nodeInfo(): Record<string, unknown> {
   return {
@@ -75,6 +76,7 @@ export function buildPrometheus(env: Record<string, unknown> = {}): {
   const byId = new Map(NODES.map((node) => [node.id, node]));
   const registry = {
     getConfig: jest.fn((id: string) => {
+      if (id === ORPHAN_ID) return { host: '10.0.0.9', port: 6390 };
       const node = byId.get(id);
       return node ? { host: node.host, port: node.port } : null;
     }),

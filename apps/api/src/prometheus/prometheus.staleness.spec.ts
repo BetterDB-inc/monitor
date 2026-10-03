@@ -165,6 +165,103 @@ describe('PrometheusService staleness bounds', () => {
     expect(text).not.toContain(`connection="${LABEL}"`);
   });
 
+  it('drops the old series when a connection is re-addressed', async () => {
+    await update('conn-1');
+    setMemory(LABEL, 100);
+    await service.getMetrics();
+
+    configs['conn-1'] = { host: '10.0.0.9', port: 6379 };
+    await update('conn-1');
+    setMemory('10.0.0.9:6379', 300);
+    await jest.advanceTimersByTimeAsync(0);
+
+    const text = await service.getMetrics();
+
+    expect(text).not.toContain(`connection="${LABEL}"`);
+    expect(text).toContain('betterdb_memory_used_bytes{connection="10.0.0.9:6379"} 300');
+  });
+
+  it('sweeps a write under the old label that lands after the re-address', async () => {
+    await update('conn-1');
+    configs['conn-1'] = { host: '10.0.0.9', port: 6379 };
+    await update('conn-1');
+    await jest.advanceTimersByTimeAsync(0);
+
+    setMemory(LABEL, 400);
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+
+    const text = await service.getMetrics();
+
+    expect(text).not.toContain(`connection="${LABEL}"`);
+  });
+
+  it('keeps the old label when another connection still exports under it', async () => {
+    await update('conn-1');
+    await update('conn-3');
+    setMemory(LABEL, 100);
+
+    configs['conn-1'] = { host: '10.0.0.9', port: 6379 };
+    await update('conn-1');
+    await jest.runAllTimersAsync();
+
+    const text = await service.getMetrics();
+
+    expect(text).toContain(`betterdb_memory_used_bytes{connection="${LABEL}"} 100`);
+  });
+
+  it('keeps anomaly summary gauges while the connection is stale', async () => {
+    await update('conn-1');
+    service.updateAnomalySummary(
+      {
+        bySeverity: { critical: 2 },
+        byMetric: { memory: 2 },
+        byPattern: { memory_pressure: 1 },
+        groupsBySeverity: { critical: 1 },
+        unresolvedBySeverity: { critical: 2 },
+      },
+      'conn-1',
+    );
+    setMemory(LABEL, 100);
+
+    jest.advanceTimersByTime(BOUND_MS + 1);
+    const text = await service.getMetrics();
+
+    expect(text).not.toContain(`betterdb_memory_used_bytes{connection="${LABEL}"}`);
+    expect(text).toContain(`betterdb_anomaly_events_current{connection="${LABEL}",severity="critical"} 2`);
+    expect(text).toContain(`betterdb_anomaly_by_severity{connection="${LABEL}",severity="critical"} 2`);
+    expect(text).toContain(`betterdb_anomaly_by_metric{connection="${LABEL}",metric_type="memory"} 2`);
+    expect(text).toContain(`betterdb_correlated_groups_by_severity{connection="${LABEL}",severity="critical"} 1`);
+    expect(text).toContain(`betterdb_correlated_groups_by_pattern{connection="${LABEL}",pattern="memory_pressure"} 1`);
+
+    service.cleanupConnectionMetrics('conn-1');
+    await jest.runAllTimersAsync();
+
+    expect(await service.getMetrics()).not.toContain(`connection="${LABEL}"`);
+  });
+
+  it('does not export series for a connection that no longer exists', async () => {
+    service.incrementAnomalyEvent('critical', 'memory', 'spike', 'deleted');
+    service.incrementCorrelatedGroup('memory_pressure', 'critical', 'deleted');
+    service.updateAnomalySummary(
+      { bySeverity: { critical: 1 }, byMetric: {}, byPattern: {}, groupsBySeverity: {}, unresolvedBySeverity: {} },
+      'deleted',
+    );
+    service.updateAnomalyBufferStats([{ metricType: 'memory', mean: 1, stdDev: 0, ready: true }], 'deleted');
+    service.updateCommandstatsMetrics('deleted', [{ command: 'get', callsTotal: 1, usecPerCall: 2 }]);
+    service.updateVectorIndexMetrics('deleted', [
+      { indexName: 'idx', numDocs: 1, memorySizeMb: 1, indexingFailures: 0, percentIndexed: 100 },
+    ]);
+    service.updateReplBufferPressure('deleted', [{ replica: 'r', ratio: 0.5 }]);
+    service.updateInferenceLatencyMetrics('deleted', [{ bucket: 'b', p50: 1, p95: 2, p99: 3, unhealthy: false }]);
+    service.updateInferenceSlaBreachMetrics('deleted', [{ indexName: 'idx', breached: true }]);
+    service.incrementPollCounter('deleted');
+    service.startPollTimer('anomaly', 'deleted')();
+
+    const text = await service.getMetrics();
+
+    expect(text).not.toContain('connection="deleted"');
+  });
+
   it('skips storage-based metrics while stale', async () => {
     const acl = jest
       .spyOn(service as never, 'updateAclMetrics' as never)
