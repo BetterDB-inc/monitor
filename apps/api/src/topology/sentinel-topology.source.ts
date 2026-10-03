@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import Valkey, { RedisOptions as ValkeyOptions } from 'iovalkey';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import type { DatabaseCapabilities } from '../common/interfaces/database-port.interface';
@@ -16,6 +16,7 @@ const defaultFactory: SentinelClientFactory = (options) => new Valkey(options);
 export class SentinelTopologySource implements TopologySource {
   readonly kind = 'sentinel' as const;
   readonly envFlag = 'SENTINEL_AUTO_REGISTER_NODES';
+  private readonly logger = new Logger(SentinelTopologySource.name);
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
@@ -46,8 +47,12 @@ export class SentinelTopologySource implements TopologySource {
     client.on('error', () => undefined);
     try {
       await client.connect();
-      const masters = this.parseNodes(await client.call('SENTINEL', 'MASTERS'));
-      if (masters === null) return null;
+      const reported = this.parseNodes(await client.call('SENTINEL', 'MASTERS'));
+      if (reported === null) return null;
+      const masters = reported.filter((master) => master.name);
+      if (masters.length < reported.length) {
+        this.logger.warn(`Ignoring ${reported.length - masters.length} SENTINEL MASTERS entries without a name reported by ${seed.name}`);
+      }
       const nodes: DesiredNode[] = [];
       const unknownGroups: string[] = [];
       for (const master of masters) {

@@ -108,9 +108,16 @@ describePostgres('connection type storage — postgres', () => {
     await adapter.saveConnection({ id: 'node-creds', name: 'N', host: 'h', port: 26379, isDefault: false, createdAt: 4, ...expected });
     expect(await adapter.getConnection('node-creds')).toMatchObject(expected);
     expect((await adapter.getConnections()).find((c) => c.id === 'node-creds')).toMatchObject(expected);
-    const plain = await adapter.getConnection('dir');
+    await adapter.saveConnection({ id: 'plain-node', name: 'P', host: 'h', port: 6381, isDefault: false, createdAt: 5 });
+    const plain = await adapter.getConnection('plain-node');
     expect(plain?.nodeUsername).toBeUndefined();
     expect(plain?.nodePassword).toBeUndefined();
     expect(plain?.nodePasswordEncrypted).toBeUndefined();
+  });
+
+  it('preserves an explicitly empty data node username', async () => {
+    await adapter.saveConnection({ id: 'empty-node-user', name: 'E', host: 'h', port: 26380, isDefault: false, createdAt: 6, nodeUsername: '' });
+    expect((await adapter.getConnection('empty-node-user'))?.nodeUsername).toBe('');
+    expect((await adapter.getConnections()).find((c) => c.id === 'empty-node-user')?.nodeUsername).toBe('');
   });
 });
