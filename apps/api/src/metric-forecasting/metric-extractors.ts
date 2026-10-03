@@ -1,7 +1,7 @@
 import type { MetricKind } from '@betterdb/shared';
 import type { StoredMemorySnapshot } from '../common/interfaces/storage-port.interface';
 
-export type MetricExtractor = (snapshot: StoredMemorySnapshot) => number;
+export type MetricExtractor = (snapshot: StoredMemorySnapshot) => number | null;
 
 export const METRIC_EXTRACTORS: Record<MetricKind, MetricExtractor> = {
   opsPerSec: (s) => s.opsPerSec,

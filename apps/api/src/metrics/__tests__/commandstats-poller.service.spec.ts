@@ -287,11 +287,72 @@ describe('CommandstatsPollerService', () => {
       for (const entry of published) {
         expect(entry.usecPerCall).toBeUndefined();
       }
-      expect(storage.saveCommandStatsSamples).not.toHaveBeenCalled();
       const [snapshot] = service.getSnapshot('ext-1');
       expect(snapshot.callsTotal).toBe(150);
       expect(snapshot.usecTotal).toBeUndefined();
       expect(snapshot.usecPerCall).toBeUndefined();
+      expect(snapshot.rejectedCalls).toBeUndefined();
+      expect(snapshot.failedCalls).toBeUndefined();
     });
+
+    it('saves a calls-only external entry with null for the fields not pushed', async () => {
+      const store = new ExternalMetricsStore();
+      const client = new ExternalMetricsAdapter('ext-1', store);
+      const pushCalls = (calls: string) =>
+        store.apply('ext-1', [
+          { target: { kind: 'composite', section: 'commandstats', field: 'cmdstat_get', subkey: 'calls' }, value: calls, timeMs: Date.now() },
+        ]);
+      pushCalls('100');
+      await (service as any).pollConnection({ ...makeCtx(client, 'ext-1'), connectionType: 'external' });
+      pushCalls('150');
+      await (service as any).pollConnection({ ...makeCtx(client, 'ext-1'), connectionType: 'external' });
+
+      expect(storage.saveCommandStatsSamples).toHaveBeenCalledWith(
+        [
+          expect.objectContaining({
+            command: 'get',
+            callsTotal: 150,
+            callsDelta: 50,
+            usecTotal: null,
+            usecPerCall: null,
+            usecDelta: null,
+            rejectedCalls: null,
+            failedCalls: null,
+          }),
+        ],
+        'ext-1',
+      );
+    });
+
+    it('stores null rejected and failed calls when an external entry pushes calls and usec only', async () => {
+      const store = new ExternalMetricsStore();
+      const client = new ExternalMetricsAdapter('ext-1', store);
+      const push = (calls: string, usec: string) =>
+        store.apply('ext-1', [
+          { target: { kind: 'composite', section: 'commandstats', field: 'cmdstat_get', subkey: 'calls' }, value: calls, timeMs: Date.now() },
+          { target: { kind: 'composite', section: 'commandstats', field: 'cmdstat_get', subkey: 'usec' }, value: usec, timeMs: Date.now() },
+        ]);
+      push('100', '500');
+      await (service as any).pollConnection({ ...makeCtx(client, 'ext-1'), connectionType: 'external' });
+      push('150', '800');
+      await (service as any).pollConnection({ ...makeCtx(client, 'ext-1'), connectionType: 'external' });
+
+      const [[batch]] = storage.saveCommandStatsSamples.mock.calls;
+      expect(batch[0]).toMatchObject({ usecTotal: 800, usecDelta: 300, rejectedCalls: null, failedCalls: null });
+    });
+  });
+
+  it('keeps writing 0 rejected and failed calls for a live server that does not report them', async () => {
+    const client = clientWithCommandstats({ cmdstat_get: 'calls=100,usec=500,usec_per_call=5.00' });
+    await (service as any).pollConnection(makeCtx(client));
+    client.getInfo.mockResolvedValueOnce({
+      commandstats: { cmdstat_get: 'calls=150,usec=800,usec_per_call=5.33' },
+    });
+    await (service as any).pollConnection(makeCtx(client));
+
+    const [[batch]] = storage.saveCommandStatsSamples.mock.calls;
+    expect(batch[0]).toMatchObject({ rejectedCalls: 0, failedCalls: 0, usecDelta: 300 });
+    const [snapshot] = service.getSnapshot('conn-1');
+    expect(snapshot).toMatchObject({ rejectedCalls: 0, failedCalls: 0 });
   });
 });

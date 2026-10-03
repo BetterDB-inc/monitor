@@ -19,8 +19,8 @@ export interface CommandStatsSnapshotEntry {
   callsTotal: number;
   usecTotal?: number;
   usecPerCall?: number;
-  rejectedCalls: number;
-  failedCalls: number;
+  rejectedCalls?: number;
+  failedCalls?: number;
   capturedAt: number;
 }
 
@@ -90,7 +90,15 @@ export class CommandstatsPollerService extends MultiConnectionPoller implements 
     }
 
     const section = (raw.commandstats ?? raw['Commandstats']) as Record<string, string> | undefined;
-    const current = parseCommandStatsSection(section);
+    const parsed = parseCommandStatsSection(section);
+    const current =
+      ctx.connectionType === 'external'
+        ? parsed
+        : parsed.map((s) => ({
+            ...s,
+            rejectedCalls: s.rejectedCalls ?? 0,
+            failedCalls: s.failedCalls ?? 0,
+          }));
 
     const currentByCommand = new Map(current.map((s) => [s.command, s]));
 
@@ -116,12 +124,12 @@ export class CommandstatsPollerService extends MultiConnectionPoller implements 
     const batch: Array<{
       command: string;
       callsTotal: number;
-      usecTotal: number;
-      usecPerCall: number;
-      rejectedCalls: number;
-      failedCalls: number;
+      usecTotal: number | null;
+      usecPerCall: number | null;
+      rejectedCalls: number | null;
+      failedCalls: number | null;
       callsDelta: number;
-      usecDelta: number;
+      usecDelta: number | null;
       intervalMs: number;
       capturedAt: number;
     }> = [];
@@ -138,21 +146,20 @@ export class CommandstatsPollerService extends MultiConnectionPoller implements 
         break;
       }
       const { usec, usecPerCall } = sample;
-      if (usec === undefined || usecPerCall === undefined || prev.usec === undefined) continue;
-      const usecDelta = usec - prev.usec;
-      if (usecDelta < 0) {
+      const usecDelta = usec === undefined || prev.usec === undefined ? null : usec - prev.usec;
+      if (usecDelta !== null && usecDelta < 0) {
         hadReset = true;
         break;
       }
-      if (callsDelta === 0 && usecDelta === 0) continue;
+      if (callsDelta === 0 && (usecDelta ?? 0) === 0) continue;
 
       batch.push({
         command: sample.command,
         callsTotal: sample.calls,
-        usecTotal: usec,
-        usecPerCall,
-        rejectedCalls: sample.rejectedCalls,
-        failedCalls: sample.failedCalls,
+        usecTotal: usec ?? null,
+        usecPerCall: usecPerCall ?? null,
+        rejectedCalls: sample.rejectedCalls ?? null,
+        failedCalls: sample.failedCalls ?? null,
         callsDelta,
         usecDelta,
         intervalMs,

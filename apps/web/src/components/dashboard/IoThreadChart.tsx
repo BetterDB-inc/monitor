@@ -11,7 +11,7 @@ import { Cpu } from 'lucide-react';
 import { shouldShowIoChart } from './io-threads.utils';
 
 interface Props {
-  data: Array<{ time: string; reads: number; writes: number }>;
+  data: Array<{ time: string; reads: number | null; writes: number | null }>;
   isMultiThreaded: boolean;
   hasEverSeenActivity: boolean;
 }
@@ -76,7 +76,7 @@ export function IoThreadChart({ data, isMultiThreaded, hasEverSeenActivity }: Pr
                 tick={{ fontSize: 12 }}
                 tickLine={false}
               />
-              <Tooltip />
+              <Tooltip formatter={(value) => (typeof value === 'number' ? value : '—')} />
               <Area
                 type="monotone"
                 dataKey="reads"

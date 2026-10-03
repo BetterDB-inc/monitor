@@ -5,8 +5,8 @@ export interface CommandStatsSample {
   calls: number;
   usec?: number;
   usecPerCall?: number;
-  rejectedCalls: number;
-  failedCalls: number;
+  rejectedCalls?: number;
+  failedCalls?: number;
 }
 
 export function toNumber(raw: string | undefined): number {
@@ -42,14 +42,16 @@ export function parseCommandStatsSection(
 
     const usec = optionalNumber(fields.usec);
     const usecPerCall = optionalNumber(fields.usec_per_call);
+    const rejectedCalls = optionalNumber(fields.rejected_calls);
+    const failedCalls = optionalNumber(fields.failed_calls);
 
     samples.push({
       command,
       calls: toNumber(fields.calls),
       ...(usec !== undefined && { usec }),
       ...(usecPerCall !== undefined && { usecPerCall }),
-      rejectedCalls: toNumber(fields.rejected_calls),
-      failedCalls: toNumber(fields.failed_calls),
+      ...(rejectedCalls !== undefined && { rejectedCalls }),
+      ...(failedCalls !== undefined && { failedCalls }),
     });
   }
 

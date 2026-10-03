@@ -181,16 +181,16 @@ export interface StoredMemorySnapshot {
   id: string;
   timestamp: number;
   usedMemory: number;
-  usedMemoryRss: number;
-  usedMemoryPeak: number;
-  memFragmentationRatio: number;
+  usedMemoryRss: number | null;
+  usedMemoryPeak: number | null;
+  memFragmentationRatio: number | null;
   maxmemory: number;
-  allocatorFragRatio: number;
+  allocatorFragRatio: number | null;
   opsPerSec: number;
   cpuSys: number;
   cpuUser: number;
-  ioThreadedReads: number;
-  ioThreadedWrites: number;
+  ioThreadedReads: number | null;
+  ioThreadedWrites: number | null;
   connectionId?: string;
 }
 

@@ -213,7 +213,10 @@ export function VectorAi() {
                   <YAxis tick={{ fontSize: 10 }} width={60} />
                   <Tooltip
                     labelFormatter={(v) => new Date(Number(v)).toLocaleString()}
-                    formatter={(value) => [Number(value).toFixed(0), 'µs']}
+                    formatter={(value) => [
+                      typeof value === 'number' ? value.toFixed(0) : '—',
+                      'µs',
+                    ]}
                   />
                   <Line
                     type="monotone"
