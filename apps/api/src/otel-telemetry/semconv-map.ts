@@ -85,6 +85,21 @@ const role: Convert = (_value, labels) => {
   return { value: 1, attributes: { ...omit(labels, ['version', 'os']), role: mapped } };
 };
 
+const heapSpace: Convert = (value, labels) => {
+  if (!labels.space) {
+    return null;
+  }
+  return {
+    value,
+    attributes: { ...omit(labels, ['space']), 'v8js.heap.space.name': `${labels.space}_space` },
+  };
+};
+
+const uptime: Convert = (value, labels) => ({
+  value: Date.now() / 1000 - value,
+  attributes: renameLabels(labels),
+});
+
 function gauge(name: string, unit: string, convert: Convert = keep): SemconvRule {
   return { name, kind: 'gauge', unit, convert };
 }
@@ -104,6 +119,17 @@ function described(description: string, rule: SemconvRule): SemconvRule {
 const CPU_TIME = 'CPU time consumed by the server, by state';
 
 const INFERENCE_LATENCY = 'Inference bucket latency by percentile';
+
+const PROCESS_CPU_TIME = 'CPU time consumed by the monitor process, by mode';
+
+const EVENT_LOOP_DELAY_STATS = ['min', 'max', 'mean', 'stddev', 'p50', 'p90', 'p99'] as const;
+
+const EVENT_LOOP_DELAY_RULES: Record<string, SemconvRule> = Object.fromEntries(
+  EVENT_LOOP_DELAY_STATS.map((stat) => [
+    `betterdb_nodejs_eventloop_lag_${stat}_seconds`,
+    gauge(`nodejs.eventloop.delay.${stat}`, 's'),
+  ]),
+);
 
 export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
   betterdb_memory_used_bytes: gauge('valkey.memory.used', 'By'),
@@ -233,6 +259,29 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
   betterdb_cve_dataset_stale: gauge('betterdb.cve.dataset_stale', '1'),
   betterdb_otlp_metric_points_accepted_total: counter('betterdb.otlp.metric_points.accepted', '{point}'),
   betterdb_otlp_metric_points_dropped_total: counter('betterdb.otlp.metric_points.dropped', '{point}'),
+  betterdb_process_cpu_user_seconds_total: described(
+    PROCESS_CPU_TIME,
+    counter('process.cpu.time', 's', withAttributes({ 'cpu.mode': 'user' })),
+  ),
+  betterdb_process_cpu_system_seconds_total: described(
+    PROCESS_CPU_TIME,
+    counter('process.cpu.time', 's', withAttributes({ 'cpu.mode': 'system' })),
+  ),
+  betterdb_process_resident_memory_bytes: updown('process.memory.usage', 'By'),
+  betterdb_process_virtual_memory_bytes: updown('process.memory.virtual', 'By'),
+  betterdb_process_open_fds: updown('process.unix.file_descriptor.count', '{file_descriptor}'),
+  betterdb_process_start_time_seconds: described(
+    'Time the monitor process has been running',
+    gauge('process.uptime', 's', uptime),
+  ),
+  betterdb_nodejs_heap_space_size_used_bytes: updown('v8js.memory.heap.used', 'By', heapSpace),
+  betterdb_nodejs_heap_space_size_total_bytes: updown('v8js.memory.heap.space.size', 'By', heapSpace),
+  betterdb_nodejs_heap_space_size_available_bytes: updown(
+    'v8js.memory.heap.space.available_size',
+    'By',
+    heapSpace,
+  ),
+  ...EVENT_LOOP_DELAY_RULES,
 };
 
 function isPassThrough(name: string): boolean {

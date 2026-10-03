@@ -4,10 +4,16 @@ import {
   collectSemconvPoints,
   planSemconvInstruments,
 } from '../semconv-map';
+import { Registry, collectDefaultMetrics } from 'prom-client';
 import type { PromMetricJson } from '../prom-otel-bridge';
 import { buildPrometheus } from './prometheus-harness';
 
 const CONN = '10.0.0.1:6379';
+
+const PLATFORM_DEPENDENT = new Set([
+  'betterdb_process_virtual_memory_bytes',
+  'betterdb_process_open_fds',
+]);
 
 function family(
   name: string,
@@ -157,20 +163,20 @@ describe('planSemconvInstruments', () => {
     ).toEqual([]);
   });
 
-  it('passes monitor process families through under their own names', () => {
+  it('passes monitor process families without a convention through under their own names', () => {
     expect(
       planSemconvInstruments([
-        family('betterdb_process_resident_memory_bytes', []),
+        family('betterdb_process_max_fds', []),
         family('betterdb_process_cpu_seconds_total', [], 'counter'),
         family('betterdb_nodejs_eventloop_lag_seconds', []),
         family('betterdb_nodejs_gc_duration_seconds', [], 'histogram'),
       ]),
     ).toEqual([
       {
-        name: 'betterdb_process_resident_memory_bytes',
+        name: 'betterdb_process_max_fds',
         kind: 'gauge',
-        unit: 'By',
-        description: 'betterdb_process_resident_memory_bytes help',
+        unit: '',
+        description: 'betterdb_process_max_fds help',
       },
       {
         name: 'betterdb_process_cpu_seconds_total',
@@ -184,6 +190,33 @@ describe('planSemconvInstruments', () => {
         unit: 's',
         description: 'betterdb_nodejs_eventloop_lag_seconds help',
       },
+    ]);
+  });
+
+  it('plans process and V8 conventions for the monitor process families', () => {
+    expect(
+      planSemconvInstruments([
+        family('betterdb_process_cpu_user_seconds_total', [], 'counter'),
+        family('betterdb_process_cpu_system_seconds_total', [], 'counter'),
+        family('betterdb_process_resident_memory_bytes', []),
+        family('betterdb_process_virtual_memory_bytes', []),
+        family('betterdb_process_open_fds', []),
+        family('betterdb_process_start_time_seconds', []),
+        family('betterdb_nodejs_heap_space_size_used_bytes', []),
+        family('betterdb_nodejs_heap_space_size_total_bytes', []),
+        family('betterdb_nodejs_heap_space_size_available_bytes', []),
+        family('betterdb_nodejs_eventloop_lag_p99_seconds', []),
+      ]).map(({ name, kind, unit }) => ({ name, kind, unit })),
+    ).toEqual([
+      { name: 'process.cpu.time', kind: 'counter', unit: 's' },
+      { name: 'process.memory.usage', kind: 'updown', unit: 'By' },
+      { name: 'process.memory.virtual', kind: 'updown', unit: 'By' },
+      { name: 'process.unix.file_descriptor.count', kind: 'updown', unit: '{file_descriptor}' },
+      { name: 'process.uptime', kind: 'gauge', unit: 's' },
+      { name: 'v8js.memory.heap.used', kind: 'updown', unit: 'By' },
+      { name: 'v8js.memory.heap.space.size', kind: 'updown', unit: 'By' },
+      { name: 'v8js.memory.heap.space.available_size', kind: 'updown', unit: 'By' },
+      { name: 'nodejs.eventloop.delay.p99', kind: 'gauge', unit: 's' },
     ]);
   });
 });
@@ -270,6 +303,56 @@ describe('collectSemconvPoints', () => {
     expect(one('betterdb_memory_used_bytes', Number.NaN)).toEqual({ points: [], skipped: 0 });
   });
 
+  it('adds the cpu mode to process cpu time', () => {
+    expect(
+      collectSemconvPoints(family('betterdb_process_cpu_system_seconds_total', [{ value: 3 }], 'counter')),
+    ).toEqual({
+      points: [{ instrument: 'process.cpu.time', value: 3, attributes: { 'cpu.mode': 'system' } }],
+      skipped: 0,
+    });
+    expect(
+      collectSemconvPoints(family('betterdb_process_cpu_user_seconds_total', [{ value: 4 }], 'counter'))
+        .points[0].attributes,
+    ).toEqual({ 'cpu.mode': 'user' });
+  });
+
+  it('names the V8 heap space the way the convention does', () => {
+    expect(
+      collectSemconvPoints(
+        family('betterdb_nodejs_heap_space_size_used_bytes', [{ value: 512, labels: { space: 'old' } }]),
+      ),
+    ).toEqual({
+      points: [
+        {
+          instrument: 'v8js.memory.heap.used',
+          value: 512,
+          attributes: { 'v8js.heap.space.name': 'old_space' },
+        },
+      ],
+      skipped: 0,
+    });
+  });
+
+  it('skips a heap space point without a space label', () => {
+    expect(
+      collectSemconvPoints(family('betterdb_nodejs_heap_space_size_total_bytes', [{ value: 512 }])),
+    ).toEqual({ points: [], skipped: 1 });
+  });
+
+  it('reports uptime from the process start time', () => {
+    jest.useFakeTimers({ now: 1_700_000_100_000 });
+    try {
+      expect(
+        collectSemconvPoints(family('betterdb_process_start_time_seconds', [{ value: 1_700_000_000 }])),
+      ).toEqual({
+        points: [{ instrument: 'process.uptime', value: 100, attributes: {} }],
+        skipped: 0,
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('returns nothing for an excluded family', () => {
     expect(one('betterdb_keyspace_keys', 15)).toEqual({ points: [], skipped: 0 });
   });
@@ -285,7 +368,17 @@ describe('family coverage', () => {
 
   it('has no table entry for a family the Prometheus service does not register', async () => {
     const { service } = buildPrometheus();
-    const names = new Set((await service.collectMetricsAsJson()).map((metric) => metric.name));
-    expect(Object.keys(SEMCONV_RULES).filter((name) => !names.has(name))).toEqual([]);
+    const defaults = new Registry();
+    collectDefaultMetrics({ register: defaults, prefix: 'betterdb_' });
+    const names = new Set(
+      [...(await service.collectMetricsAsJson()), ...(await defaults.getMetricsAsJSON())].map(
+        (metric) => metric.name,
+      ),
+    );
+    expect(
+      Object.keys(SEMCONV_RULES)
+        .filter((name) => !PLATFORM_DEPENDENT.has(name))
+        .filter((name) => !names.has(name)),
+    ).toEqual([]);
   });
 });
