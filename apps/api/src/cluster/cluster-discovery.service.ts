@@ -3,6 +3,7 @@ import Valkey from 'iovalkey';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { ClusterNode } from '../common/types/metrics.types';
 import { MetricsParser } from '../database/parsers/metrics.parser';
+import { tlsIdentityOptions } from '../database/adapters/tls-servername';
 
 export interface DiscoveredNode {
   id: string;
@@ -13,6 +14,7 @@ export interface DiscoveredNode {
   configEpoch: number;
   healthy: boolean;
   flags: string[];
+  hostname?: string;
 }
 
 export interface NodeConnection {
@@ -145,6 +147,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         configEpoch: node.configEpoch,
         healthy: isHealthy,
         flags: node.flags,
+        ...(node.hostname ? { hostname: node.hostname } : {}),
       });
     }
 
@@ -228,8 +231,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     const primaryClient = dbClient.getClient();
     const username = primaryClient.options.username || '';
     const password = primaryClient.options.password || '';
-    const { servername: _servername, ...nodeTls } = primaryClient.options.tls ?? {};
-    const tls = primaryClient.options.tls ? nodeTls : undefined;
+    const { servername: _servername, checkServerIdentity: _checkServerIdentity, ...nodeTls } = primaryClient.options.tls ?? {};
+    const tls = primaryClient.options.tls ? { ...nodeTls, ...tlsIdentityOptions(host, node.hostname) } : undefined;
 
     const client = new Valkey({
       host,

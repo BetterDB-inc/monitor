@@ -20,6 +20,15 @@ import { ENV_DEFAULT_ID } from './connection.constants';
 
 export const CHILD_CONNECT_TIMEOUT_MS = 10_000;
 
+function certificateHint(errorMsg: string, node: DesiredNode): string {
+  if (node.hostname !== undefined || !/altnames|ERR_TLS_CERT_ALTNAME_INVALID/i.test(errorMsg)) {
+    return '';
+  }
+  return node.source === 'cluster'
+    ? ' The certificate does not cover the announced IP; set cluster-announce-hostname on the nodes so they are verified by hostname.'
+    : ' The certificate does not cover the announced IP; have Sentinel announce hostnames (resolve-hostnames and announce-hostnames).';
+}
+
 async function connectWithin(adapter: DatabasePort, ms: number): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   const attempt = adapter.connect();
@@ -69,6 +78,7 @@ function membershipFields(node: DesiredNode): Pick<TopologyMembership, 'nodeId' 
     source: node.source,
     ...(node.group !== undefined ? { group: node.group } : {}),
     ...(node.role !== undefined ? { role: node.role } : {}),
+    ...(node.hostname !== undefined ? { hostname: node.hostname } : {}),
   };
 }
 
@@ -348,6 +358,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       password: config.password || '',
       connectionName,
       tls: config.tls,
+      tlsServername: config.membership?.origin === 'auto' ? config.membership.hostname : undefined,
       connectionId: config.id,
       sshTunnel: config.sshTunnel,
       sshTunnelService: config.sshTunnel?.enabled ? this.sshTunnelService : undefined,
@@ -915,7 +926,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       const storedConfig = storedConfigs.find(c => c.id === id);
 
       if (storedConfig) {
-        config = this.decryptConfig(storedConfig);
+        config = this.withLiveTopology(id, this.decryptConfig(storedConfig));
         if (config.credentialStatus === 'decryption_failed') {
           // Still failing - update in-memory config with latest error and bail
           this.configs.set(id, this.withLiveTopology(id, config));
@@ -1112,7 +1123,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       const isAuthError = this.isAuthenticationError(errorMsg);
       credentialStatus = isAuthError ? 'invalid' : 'unknown';
       credentialError = isAuthError ? errorMsg : undefined;
-      this.logger.warn(`Auto-registered ${config.name} but could not connect: ${errorMsg}`);
+      this.logger.warn(`Auto-registered ${config.name} but could not connect: ${errorMsg}${certificateHint(errorMsg, node)}`);
     }
     try {
       await this.storage.saveConnection(this.encryptConfig(config));
@@ -1134,8 +1145,29 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   async refreshChild(id: string, node: DesiredNode): Promise<void> {
-    const { seedId, origin, retiredAt } = this.requireMembership(id);
-    await this.setMembership(id, { seedId, origin, ...membershipFields(node), ...(retiredAt !== undefined ? { retiredAt } : {}) });
+    const previous = this.requireMembership(id);
+    const { seedId, origin, retiredAt, hostname } = previous;
+    const membershipOf = (target: DesiredNode): TopologyMembership => ({
+      seedId,
+      origin,
+      ...membershipFields(target),
+      ...(retiredAt !== undefined ? { retiredAt } : {}),
+    });
+    const config = this.configs.get(id);
+    if (hostname === node.hostname || origin !== 'auto' || retiredAt !== undefined || !config?.tls) {
+      await this.setMembership(id, membershipOf(node));
+      return;
+    }
+    this.publishMembership(id, membershipOf(node));
+    let reconnected = true;
+    try {
+      await this.reconnect(id);
+    } catch (err) {
+      reconnected = false;
+      this.logger.warn(`Could not reconnect ${config.name} after its hostname changed: ${err instanceof Error ? err.message : err}`);
+    }
+    this.publishMembership(id, previous);
+    await this.setMembership(id, membershipOf(reconnected ? node : { ...node, hostname }));
   }
 
   async retireChild(id: string): Promise<void> {
@@ -1159,7 +1191,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     const membership = this.requireMembership(id);
     const config = this.configs.get(id)!;
     if (membership.origin === 'auto') {
-      const adapter = this.createAdapter(config);
+      const adapter = this.createAdapter({ ...config, membership: { ...membership, hostname: node.hostname } });
       try {
         await connectWithin(adapter, CHILD_CONNECT_TIMEOUT_MS);
       } catch (err) {
@@ -1211,11 +1243,17 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   private async setMembership(id: string, membership: TopologyMembership | undefined): Promise<void> {
-    const config = this.configs.get(id);
-    if (!config) {
+    if (!this.configs.has(id)) {
       throw new NotFoundException(`Connection '${id}' not found.`);
     }
-    this.configs.set(id, { ...config, membership });
     await this.storage.updateConnection(id, { membership });
+    this.publishMembership(id, membership);
+  }
+
+  private publishMembership(id: string, membership: TopologyMembership | undefined): void {
+    const config = this.configs.get(id);
+    if (config) {
+      this.configs.set(id, { ...config, membership });
+    }
   }
 }

@@ -14,6 +14,17 @@ describe('parseMembership', () => {
     expect(parseMembership({ seedId: 's', nodeId: 'n', origin: 'auto', source: 'sentinel', group: 3, role: 'leader' })).toEqual({ seedId: 's', nodeId: 'n', origin: 'auto', source: 'sentinel' });
   });
 
+  it('keeps the announced hostname', () => {
+    const raw = { seedId: 's', nodeId: 'n', origin: 'auto', source: 'cluster', hostname: 'node-1.cluster.local' };
+    expect(parseMembership(JSON.stringify(raw))).toEqual(raw);
+  });
+
+  it('drops an empty or non-string hostname', () => {
+    const base = { seedId: 's', nodeId: 'n', origin: 'auto', source: 'cluster' };
+    expect(parseMembership({ ...base, hostname: '' })).toEqual(base);
+    expect(parseMembership({ ...base, hostname: 7 })).toEqual(base);
+  });
+
   it('rejects an unknown source', () => {
     expect(parseMembership({ seedId: 's', nodeId: 'n', origin: 'auto', source: 'otlp' })).toBeUndefined();
   });

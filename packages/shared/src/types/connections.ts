@@ -84,6 +84,7 @@ export interface TopologyMembership {
   source: TopologyKind;
   group?: string;
   role?: TopologyRole;
+  hostname?: string;
   retiredAt?: number;
 }
 
@@ -164,6 +165,7 @@ export function parseMembership(value: unknown): TopologyMembership | undefined 
     source,
     ...(typeof m.group === 'string' ? { group: m.group } : {}),
     ...(m.role === 'primary' || m.role === 'replica' ? { role: m.role } : {}),
+    ...(typeof m.hostname === 'string' && m.hostname !== '' ? { hostname: m.hostname } : {}),
     ...(typeof m.retiredAt === 'number' ? { retiredAt: m.retiredAt } : {}),
   };
 }
