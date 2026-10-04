@@ -252,6 +252,27 @@ describe('detectAclClusterDrift', () => {
     ).toEqual([]);
   });
 
+  it('stays silent when the divergence is within one shard', () => {
+    expect(
+      detectAclClusterDrift([
+        inCluster('conn-a', [DEFAULT_LINE, APP_LINE], 'replid:one'),
+        inCluster('conn-b', [DEFAULT_LINE, APP_LINE_WIDER], 'replid:one'),
+        inCluster('conn-c', [DEFAULT_LINE, APP_LINE], 'replid:two'),
+      ]),
+    ).toEqual([]);
+  });
+
+  it('still fires when shards disagree as units despite a mid-convergence shard', () => {
+    const [drift] = detectAclClusterDrift([
+      inCluster('conn-a', [DEFAULT_LINE, APP_LINE], 'replid:one'),
+      inCluster('conn-b', [DEFAULT_LINE, APP_LINE], 'replid:two'),
+      inCluster('conn-c', [DEFAULT_LINE, APP_LINE_WIDER], 'replid:two'),
+      inCluster('conn-d', [DEFAULT_LINE, APP_LINE_WIDER], 'replid:three'),
+    ]);
+    expect(drift.groupKeys).toEqual(['replid:one', 'replid:three', 'replid:two']);
+    expect(drift.usernames).toEqual(['app']);
+  });
+
   it('stays silent with a single monitored shard', () => {
     expect(
       detectAclClusterDrift([

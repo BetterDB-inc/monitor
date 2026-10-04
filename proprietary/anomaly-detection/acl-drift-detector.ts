@@ -287,7 +287,9 @@ export function clusterKeyFromNodes(
 /**
  * Finds clusters whose shards disagree on ACL state. Groups by clusterKey, then
  * requires at least two distinct shard groupKeys — a single monitored shard can
- * never drift against itself. Nodes without a clusterKey are excluded.
+ * never drift against itself. Nodes without a clusterKey are excluded. Shards
+ * are compared as units: when every shard shares a digest, the divergence is
+ * within a shard and the shard pass already covers it.
  */
 export function detectAclClusterDrift(nodes: AclDriftNode[]): AclClusterDrift[] {
   const clusters = new Map<string, AclDriftNode[]>();
@@ -306,7 +308,15 @@ export function detectAclClusterDrift(nodes: AclDriftNode[]): AclClusterDrift[] 
     if (groupKeys.length < 2) {
       continue;
     }
-    if (new Set(cluster.map((node) => node.digest)).size === 1) {
+    const byShard = new Map<string, Set<string>>();
+    for (const node of cluster) {
+      const digests = byShard.get(node.groupKey) ?? new Set<string>();
+      digests.add(node.digest);
+      byShard.set(node.groupKey, digests);
+    }
+    const [first, ...rest] = [...byShard.values()];
+    const common = new Set([...first].filter((digest) => rest.every((set) => set.has(digest))));
+    if (common.size > 0) {
       continue;
     }
     drifts.push({

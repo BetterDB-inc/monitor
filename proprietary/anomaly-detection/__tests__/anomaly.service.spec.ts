@@ -5446,6 +5446,9 @@ describe('AnomalyService', () => {
       expect(events[0].message).toContain('cross-shard');
       expect(events[0].message).toContain('app');
       expect(events[0].message).toContain('4355');
+      expect(events[0].message).not.toContain('secret:*');
+      expect(events[0].message).not.toContain('#a3b1');
+      expect(events[0].message).not.toContain('+@all');
     });
 
     it('does not compare shards across unrelated clusters', async () => {
