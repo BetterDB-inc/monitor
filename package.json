@@ -44,17 +44,23 @@
     "test:integration:valkey": "TEST_DB_PORT=6380 pnpm --filter api test:integration:valkey",
     "test:migration-topology": "pnpm --filter api test:migration-topology",
     "test:sentinel-topology": "pnpm --filter api test:sentinel-topology",
-    "lint": "turbo lint",
+    "lint": "turbo lint && eslint --config proprietary/eslint.config.mjs proprietary",
+    "lint:fix": "turbo lint -- --fix && eslint --config proprietary/eslint.config.mjs proprietary --fix",
+    "format:check": "prettier --check . --cache --cache-strategy content",
+    "format": "prettier --write . --cache --cache-strategy content",
     "clean": "turbo clean && rm -rf node_modules",
     "cli:build": "pnpm --filter @betterdb/monitor build",
     "cli:dev": "node packages/cli/bin/betterdb.js"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "concurrently": "^9.2.1",
     "eslint": "^10.1.0",
+    "globals": "^17.4.0",
     "prettier": "^3.8.1",
     "turbo": "^2.9.14",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.57.2"
   },
   "packageManager": "pnpm@9.15.0",
   "engines": {

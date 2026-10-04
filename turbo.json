@@ -12,7 +12,8 @@
       "persistent": true
     },
     "lint": {
-      "dependsOn": ["^lint"]
+      "cache": false,
+      "outputs": []
     },
     "clean": {
       "cache": false

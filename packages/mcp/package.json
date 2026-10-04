@@ -30,6 +30,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "lint": "eslint .",
     "dev": "tsc --watch",
     "start": "node dist/index.js"
   },

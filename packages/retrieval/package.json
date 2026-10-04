@@ -29,6 +29,7 @@
   ],
   "scripts": {
     "build": "tsc && node scripts/inject-telemetry-defaults.mjs",
+    "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
