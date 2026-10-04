@@ -271,7 +271,21 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     return this.observedHostKeyFingerprint;
   }
 
+  private connectPromise: Promise<void> | null = null;
+
   async connect(): Promise<void> {
+    if (this.connectPromise) {
+      return this.connectPromise;
+    }
+    this.connectPromise = this.doConnect();
+    try {
+      await this.connectPromise;
+    } finally {
+      this.connectPromise = null;
+    }
+  }
+
+  private async doConnect(): Promise<void> {
     try {
       if (this.usesTunnel && !this.tunnelActive) {
         await this.establishTunnel();
