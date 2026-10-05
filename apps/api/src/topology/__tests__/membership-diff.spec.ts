@@ -45,6 +45,17 @@ describe('desiredFromDiscovery', () => {
     expect(desired).toEqual([{ host: '10.0.0.5', port: 7005, nodeId: 'e', source: 'cluster' }]);
   });
 
+  it('carries the hostname a node announces', () => {
+    const desired = desiredFromDiscovery({ host: 'seed', port: 7001 }, [
+      { ...node('a', '10.0.0.2:7002@17002'), hostname: 'node-2.cluster.local' },
+      node('b', '10.0.0.3:7003@17003'),
+    ]);
+    expect(desired).toEqual([
+      { host: '10.0.0.2', port: 7002, nodeId: 'a', source: 'cluster', hostname: 'node-2.cluster.local' },
+      { host: '10.0.0.3', port: 7003, nodeId: 'b', source: 'cluster' },
+    ]);
+  });
+
   it('stamps cluster source in desiredFromDiscovery', () => {
     const nodes = [{ id: 'n2', address: '10.0.0.2:7002@17002', flags: ['master'], role: 'master', slots: [], configEpoch: 0, healthy: true }];
     expect(desiredFromDiscovery({ host: 'seed', port: 7001 }, nodes as never)[0].source).toBe('cluster');
@@ -63,6 +74,20 @@ describe('diffMembership', () => {
     const diff = diffMembership('seed', [desiredNode], [member('c2', '10.0.0.2:7002', { nodeId: 'old' })], none);
     expect(diff.refresh).toEqual([{ id: 'c2', node: desiredNode }]);
     expect(diff.add).toEqual([]);
+  });
+
+  it('refreshes a member whose announced hostname appeared, changed or went away', () => {
+    const bare = { host: '10.0.0.2', port: 7002, nodeId: 'c2', source: 'cluster' as const };
+    const named = { ...bare, hostname: 'node-2.cluster.local' };
+    expect(diffMembership('seed', [named], [member('c2', '10.0.0.2:7002')], none).refresh).toEqual([{ id: 'c2', node: named }]);
+    expect(diffMembership('seed', [named], [member('c2', '10.0.0.2:7002', { hostname: 'old.cluster.local' })], none).refresh).toEqual([{ id: 'c2', node: named }]);
+    expect(diffMembership('seed', [bare], [member('c2', '10.0.0.2:7002', { hostname: 'node-2.cluster.local' })], none).refresh).toEqual([{ id: 'c2', node: bare }]);
+  });
+
+  it('does not refresh a member whose announced hostname is unchanged', () => {
+    const named = { host: '10.0.0.2', port: 7002, nodeId: 'c2', source: 'cluster' as const, hostname: 'node-2.cluster.local' };
+    const diff = diffMembership('seed', [named], [member('c2', '10.0.0.2:7002', { hostname: 'node-2.cluster.local' })], none);
+    expect(diff).toMatchObject({ add: [], retire: [], refresh: [] });
   });
 
   it('matches addresses case-insensitively', () => {

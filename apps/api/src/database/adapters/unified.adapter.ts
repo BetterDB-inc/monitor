@@ -52,6 +52,7 @@ import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT } from '@betterdb
 
 import type { SshTunnelConfig } from '@betterdb/shared';
 import { SshTunnelService } from '../ssh/ssh-tunnel.service';
+import { tlsIdentityOptions } from './tls-servername';
 
 export interface UnifiedDatabaseAdapterConfig {
   host: string;
@@ -60,17 +61,14 @@ export interface UnifiedDatabaseAdapterConfig {
   password: string;
   connectionName?: string;
   tls?: boolean;
+  /** Hostname the TLS certificate is verified against when `host` is a bare IP. */
+  tlsServername?: string;
   /** Optional SSH tunnel used to reach the database (secrets already decrypted). */
   sshTunnel?: SshTunnelConfig;
   /** Tunnel manager; required when sshTunnel is enabled. */
   sshTunnelService?: SshTunnelService;
   /** Stable id used to key the tunnel (defaults to a generated id). */
   connectionId?: string;
-}
-
-function isIpAddress(host: string): boolean {
-  // IPv4 or anything containing ':' (IPv6). SNI servername must be a hostname.
-  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':');
 }
 
 export const QUIT_TIMEOUT_MS = 2_000;
@@ -141,11 +139,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // ("Protocol error, got 'H'"). Send the hostname as servername unless it
       // is a bare IP, which SNI does not allow. Through a tunnel the socket
       // points at localhost, but the certificate is still for the real host.
-      tls: this.config.tls
-        ? isIpAddress(this.config.host)
-          ? {}
-          : { servername: this.config.host }
-        : undefined,
+      // An auto-registered node reached by IP also accepts a certificate
+      // issued for the hostname its cluster announces for it.
+      tls: this.config.tls ? tlsIdentityOptions(this.config.host, this.config.tlsServername) : undefined,
     });
   }
 

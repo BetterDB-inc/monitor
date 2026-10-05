@@ -8,6 +8,7 @@ export interface DesiredNode {
   source: TopologyKind;
   group?: string;
   role?: TopologyRole;
+  hostname?: string;
 }
 
 export interface MemberPatch {
@@ -65,7 +66,7 @@ export function desiredFromDiscovery(seed: { host: string; port: number }, nodes
     if (node.flags.some((flag) => EXCLUDED_FLAGS.includes(flag))) continue;
     const parsed = parseNodeAddress(node.address);
     if (!parsed || addressKey(parsed.host, parsed.port) === seedKey) continue;
-    desired.push({ ...parsed, nodeId: node.id, source: 'cluster' });
+    desired.push({ ...parsed, nodeId: node.id, source: 'cluster', ...(node.hostname ? { hostname: node.hostname } : {}) });
   }
   return desired;
 }
@@ -81,7 +82,11 @@ export function diffMembership(
   const desiredKeys = new Set<string>();
 
   const changed = (membership: TopologyMembership, node: DesiredNode): boolean =>
-    membership.nodeId !== node.nodeId || membership.source !== node.source || membership.group !== node.group || membership.role !== node.role;
+    membership.nodeId !== node.nodeId ||
+    membership.source !== node.source ||
+    membership.group !== node.group ||
+    membership.role !== node.role ||
+    membership.hostname !== node.hostname;
 
   for (const node of desired) {
     const key = addressKey(node.host, node.port);

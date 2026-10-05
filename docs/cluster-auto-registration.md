@@ -38,6 +38,25 @@ as disconnected. Configure `cluster-announce-ip` and `cluster-announce-port`
 on the cluster nodes so they announce addresses the monitor can actually
 reach.
 
+### TLS certificates
+
+`CLUSTER NODES` always reports nodes by IP address. When a node also
+announces a hostname (`cluster-announce-hostname`), its child connection
+still dials the IP but accepts a certificate issued for either that hostname
+or the IP, so certificates issued for hostnames only work without extra
+configuration. If a node starts announcing a hostname later, or changes it,
+the child picks it up on the next sync and reconnects.
+
+This applies to auto-registered children only. An adopted connection keeps
+verifying against the host it was created with.
+
+A node that announces no hostname is verified against its IP, which only
+succeeds when the certificate lists that IP as a subject alternative name.
+Clusters whose certificates cover hostnames only and whose nodes announce no
+hostname are not supported: the children register but stay disconnected, and
+the monitor log names the setting to change. Set `cluster-announce-hostname`
+on each node to fix it.
+
 Seeds connected over an SSH tunnel are not supported for auto-registration;
 only the direct connection to the seed is tunnelled, so discovered peer
 addresses can't be reached through it.
