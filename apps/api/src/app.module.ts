@@ -46,6 +46,7 @@ let AnomalyModule: any = null;
 let LatencyRegressionModule: any = null;
 let WebhookProModule: any = null;
 let InferenceLatencyProModule: any = null;
+let ScalingReadinessProModule: any = null;
 let CacheProposalsModule: any = null;
 let MemoryProposalsModule: any = null;
 let AgentModule: any = null;
@@ -113,6 +114,14 @@ try {
   const inferenceLatencyProModule = require('../../../proprietary/inference-latency-pro/inference-latency-pro.module');
   InferenceLatencyProModule = inferenceLatencyProModule.InferenceLatencyProModule;
   console.log('[InferenceLatencyPro] Proprietary module loaded');
+} catch {
+  // Proprietary module not available
+}
+
+try {
+  const scalingReadinessProModule = require('../../../proprietary/scaling-readiness-pro/scaling-readiness-pro.module');
+  ScalingReadinessProModule = scalingReadinessProModule.ScalingReadinessProModule;
+  console.log('[ScalingReadinessPro] Proprietary module loaded');
 } catch {
   // Proprietary module not available
 }
@@ -231,6 +240,7 @@ const proprietaryImports = [
   LatencyRegressionModule,
   WebhookProModule,
   InferenceLatencyProModule,
+  ScalingReadinessProModule,
   CacheProposalsModule,
   MemoryProposalsModule,
   AiModule,
