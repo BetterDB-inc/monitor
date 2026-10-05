@@ -9,9 +9,11 @@ import { BAND_STYLES } from './band';
 export function ScalingReadinessCardView({
   readiness,
   isLoading,
+  isError,
 }: {
   readiness: ScalingReadiness | undefined;
   isLoading: boolean;
+  isError?: boolean;
 }) {
   const band = readiness?.band ? BAND_STYLES[readiness.band] : null;
   return (
@@ -25,6 +27,8 @@ export function ScalingReadinessCardView({
       <CardContent>
         {isLoading && !readiness ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : isError && !readiness ? (
+          <p className="text-sm text-destructive">Could not load scaling readiness</p>
         ) : readiness?.score == null || !band ? (
           <p className="text-sm text-muted-foreground">{readiness?.summary ?? 'Not enough data yet'}</p>
         ) : (
@@ -42,11 +46,11 @@ export function ScalingReadinessCardView({
 export function ScalingReadinessCard() {
   const { currentConnection } = useConnection();
   const connectionId = currentConnection?.id;
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError } = useQuery({
     queryKey: ['scaling-readiness', connectionId],
     queryFn: ({ signal }) => scalingReadinessApi.get(signal),
     enabled: !!connectionId,
     refetchInterval: 60_000,
   });
-  return <ScalingReadinessCardView readiness={data} isLoading={isLoading} />;
+  return <ScalingReadinessCardView readiness={data} isLoading={isLoading} isError={isError} />;
 }

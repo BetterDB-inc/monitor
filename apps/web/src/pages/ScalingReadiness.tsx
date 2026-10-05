@@ -6,7 +6,7 @@ import { ReadinessBreakdown, ReadinessHeader } from '../components/pages/scaling
 export function ScalingReadiness() {
   const { currentConnection } = useConnection();
   const connectionId = currentConnection?.id;
-  const { data: readiness, isLoading } = useQuery({
+  const { data: readiness, isLoading, isError } = useQuery({
     queryKey: ['scaling-readiness', connectionId],
     queryFn: ({ signal }) => scalingReadinessApi.get(signal),
     enabled: !!connectionId,
@@ -23,6 +23,8 @@ export function ScalingReadiness() {
           <ReadinessHeader readiness={readiness} />
           <ReadinessBreakdown dimensions={readiness.dimensions} />
         </>
+      ) : isError ? (
+        <p className="text-sm text-destructive">Could not load scaling readiness</p>
       ) : null}
     </div>
   );

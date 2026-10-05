@@ -39,6 +39,12 @@ describe('ScalingReadinessCardView', () => {
     expect(screen.queryByText('62')).not.toBeInTheDocument();
   });
 
+  it('shows an error instead of not-enough-data when loading failed', () => {
+    render(<ScalingReadinessCardView readiness={undefined} isLoading={false} isError />);
+    expect(screen.getByText('Could not load scaling readiness')).toBeInTheDocument();
+    expect(screen.queryByText('Not enough data yet')).not.toBeInTheDocument();
+  });
+
   it('shows a loading state', () => {
     render(<ScalingReadinessCardView readiness={undefined} isLoading />);
     expect(screen.getByText('Loading…')).toBeInTheDocument();
