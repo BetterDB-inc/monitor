@@ -6,6 +6,7 @@ const SEVERITY_LABELS = ['critical', 'high', 'medium', 'low'];
 
 interface HeaderStripProps {
   subtitle: string;
+  note?: string | null;
   severityCounts: CveSeverityCounts | null;
   severityUnknown?: boolean;
   scopeLabel: string | null;
@@ -16,6 +17,7 @@ interface HeaderStripProps {
 
 export function HeaderStrip({
   subtitle,
+  note = null,
   severityCounts,
   severityUnknown = false,
   scopeLabel,
@@ -30,6 +32,11 @@ export function HeaderStrip({
         <p data-testid="header-subtitle" className="text-muted-foreground text-sm">
           {subtitle}
         </p>
+        {note ? (
+          <p data-testid="header-note" className="text-muted-foreground text-xs">
+            {note}
+          </p>
+        ) : null}
       </div>
       <div className="flex flex-col items-end gap-2">
         <div className="flex flex-wrap items-center gap-2">

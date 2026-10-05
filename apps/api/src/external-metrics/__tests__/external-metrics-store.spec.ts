@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { ExternalMetricsStore } from '../external-metrics-store';
 import { envSchema } from '../../config/env.schema';
 import type { FieldUpdate } from '../otlp-metrics-types';
@@ -214,7 +215,7 @@ describe('ExternalMetricsStore', () => {
     });
 
     it('ignores the server version when nothing else is fresh', () => {
-      store.setServerVersion('c', '7.2.4');
+      store.setRedisVersion('c', '7.2.4');
       store.apply('c', [composite('keyspace', 'db0', 'expires', '3')]);
       expect(store.isFresh('c', T0)).toBe(false);
     });
@@ -291,28 +292,156 @@ describe('ExternalMetricsStore', () => {
   });
 
   it('adds redis_version to server only while some field is fresh', () => {
-    store.setServerVersion('c', '7.2.4');
+    store.setRedisVersion('c', '7.2.4');
     expect(store.snapshot('c', T0)).toEqual({});
     store.apply('c', [scalar('server', 'uptime_in_seconds', '9')]);
     expect(store.snapshot('c', T0).server).toEqual({ uptime_in_seconds: '9', redis_version: '7.2.4' });
-    expect(store.serverVersion('c')).toBe('7.2.4');
+    expect(store.redisVersion('c')).toBe('7.2.4');
   });
 
   it('tracks the valkey flag and clears everything', () => {
     store.apply('c', [scalar('memory', 'used_memory', '1')]);
     store.markValkey('c');
-    store.setServerVersion('c', '8.0.0');
+    store.setRedisVersion('c', '8.0.0');
     expect(store.isValkey('c')).toBe(true);
     store.clear('c');
     expect(store.snapshot('c', T0)).toEqual({});
     expect(store.latestVersion('c')).toBeNull();
     expect(store.isValkey('c')).toBe(false);
-    expect(store.serverVersion('c')).toBeNull();
+    expect(store.redisVersion('c')).toBeNull();
   });
 
   it('returns empty results for an unknown connection', () => {
     expect(store.snapshot('nope', T0)).toEqual({});
     expect(store.isFresh('nope', T0)).toBe(false);
     expect(store.latestVersion('nope')).toBeNull();
+  });
+});
+
+describe('ExternalMetricsStore engine version', () => {
+  let store: ExternalMetricsStore;
+
+  beforeEach(() => {
+    store = new ExternalMetricsStore();
+  });
+
+  it('resolves a Redis connection from redis.version', () => {
+    store.setRedisVersion('c', '7.2.4');
+    expect(store.engineVersion('c')).toEqual({ product: 'redis', version: '7.2.4' });
+  });
+
+  it('resolves a Valkey connection only from valkey.version', () => {
+    store.setRedisVersion('c', '7.2.4');
+    store.markValkey('c');
+    expect(store.engineVersion('c')).toEqual({ product: 'valkey', version: null });
+    store.setValkeyVersion('c', '8.1.1');
+    expect(store.engineVersion('c')).toEqual({ product: 'valkey', version: '8.1.1' });
+  });
+
+  it('switches to the Valkey version when Valkey is detected after the version arrived', () => {
+    store.setValkeyVersion('c', '8.1.1');
+    expect(store.engineVersion('c')).toEqual({ product: 'redis', version: null });
+    store.markValkey('c');
+    expect(store.engineVersion('c')).toEqual({ product: 'valkey', version: '8.1.1' });
+  });
+
+  it('reports an unknown connection as Redis with no version', () => {
+    expect(store.engineVersion('nope')).toEqual({ product: 'redis', version: null });
+  });
+
+  it('adds valkey_version beside redis_version for a Valkey connection', () => {
+    store.setRedisVersion('c', '7.2.4');
+    store.setValkeyVersion('c', '8.1.1');
+    store.markValkey('c');
+    store.apply('c', [scalar('server', 'uptime_in_seconds', '9')], T0);
+    expect(store.snapshot('c', T0).server).toEqual({
+      uptime_in_seconds: '9',
+      redis_version: '7.2.4',
+      valkey_version: '8.1.1',
+    });
+  });
+
+  it('omits valkey_version until the connection is detected as Valkey', () => {
+    store.setValkeyVersion('c', '8.1.1');
+    store.apply('c', [scalar('server', 'uptime_in_seconds', '9')], T0);
+    expect(store.snapshot('c', T0).server).toEqual({ uptime_in_seconds: '9' });
+  });
+
+  describe('onEngineChange', () => {
+    let changes: string[];
+
+    beforeEach(() => {
+      changes = [];
+      store.onEngineChange((connectionId) => {
+        changes.push(connectionId);
+      });
+    });
+
+    it('fires when the first version arrives', () => {
+      store.setRedisVersion('c', '7.2.4');
+      expect(changes).toEqual(['c']);
+    });
+
+    it('fires when the version changes', () => {
+      store.setRedisVersion('c', '7.2.4');
+      store.setRedisVersion('c', '7.4.0');
+      expect(changes).toEqual(['c', 'c']);
+    });
+
+    it('fires when the product flips to Valkey', () => {
+      store.setRedisVersion('c', '7.2.4');
+      store.setValkeyVersion('c', '8.1.1');
+      expect(changes).toEqual(['c']);
+      store.markValkey('c');
+      expect(changes).toEqual(['c', 'c']);
+    });
+
+    it('does not fire for the same version again', () => {
+      store.setRedisVersion('c', '7.2.4');
+      store.setRedisVersion('c', '7.2.4');
+      store.markValkey('c');
+      store.markValkey('c');
+      expect(changes).toEqual(['c']);
+    });
+
+    it('does not fire while the resolved version is null', () => {
+      store.markValkey('c');
+      store.setRedisVersion('c', '7.2.4');
+      expect(changes).toEqual([]);
+    });
+
+    it('does not notify when a connection is cleared', () => {
+      store.setRedisVersion('c', '7.2.4');
+      const before = changes.length;
+      store.clear('c');
+      expect(changes).toHaveLength(before);
+    });
+
+    it('stops notifying a listener that unsubscribed', () => {
+      const seen: string[] = [];
+      const unsubscribe = store.onEngineChange((connectionId) => {
+        seen.push(connectionId);
+      });
+      unsubscribe();
+      store.setRedisVersion('c', '7.2.4');
+      expect(seen).toEqual([]);
+      expect(changes).toEqual(['c']);
+    });
+  });
+
+  it('isolates a listener that throws from other listeners and from the caller', () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const seen: string[] = [];
+    store.onEngineChange(() => {
+      throw new Error('boom');
+    });
+    store.onEngineChange((connectionId) => {
+      seen.push(connectionId);
+    });
+
+    expect(() => store.setRedisVersion('c', '7.2.4')).not.toThrow();
+    expect(seen).toEqual(['c']);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('boom'));
+    warn.mockRestore();
   });
 });

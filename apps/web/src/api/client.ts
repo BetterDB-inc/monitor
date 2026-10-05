@@ -84,11 +84,13 @@ export class UnauthorizedError extends Error {
 
 export class ApiError extends Error {
   public readonly status: number;
+  public readonly payload: unknown;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, payload: unknown = null) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.payload = payload;
   }
 }
 
@@ -368,6 +370,7 @@ export async function fetchApi<T>(endpoint: string, options?: FetchApiOptions): 
       throw new ApiError(
         errorMessage || `API error: ${response.status} ${response.statusText}`,
         response.status,
+        errorPayload,
       );
     }
 

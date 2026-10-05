@@ -22,6 +22,7 @@ export class CveController {
   ) {}
 
   @Get('scan')
+  @AllowExternalConnection()
   @ApiOperation({ summary: 'CVEs matching this connection, per node for a cluster' })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   async getScan(@ConnectionId() connectionId?: string): Promise<CveScanResult> {
@@ -31,6 +32,7 @@ export class CveController {
   }
 
   @Post('scan/refresh')
+  @AllowExternalConnection()
   @ApiOperation({ summary: 'Force a rescan of this connection against the current dataset' })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   async refreshScan(@ConnectionId() connectionId?: string): Promise<CveScanResult> {

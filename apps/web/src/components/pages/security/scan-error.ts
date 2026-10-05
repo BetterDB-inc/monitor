@@ -1,3 +1,5 @@
+import { ApiError } from '../../../api/client';
+
 const CONNECTION_HINT = /\s*Use GET \/connections to list available connections\.?/;
 const MISSING_CONNECTION = /^Connection '[^']*' not found/;
 const UNREACHABLE_PREFIX = 'No node in this connection could be scanned: ';
@@ -84,4 +86,36 @@ export function parseScanFailure(error: Error | null | undefined, fallback: stri
   }
 
   return { summary: 'No node in this connection could be scanned.', nodes };
+}
+
+export const VERSION_PENDING_CODE = 'cve_version_pending';
+
+export type ScanEngineProduct = 'redis' | 'valkey';
+
+export interface VersionPending {
+  product: ScanEngineProduct;
+  attribute: string;
+}
+
+export function versionPendingOf(error: Error | null | undefined): VersionPending | null {
+  if (!(error instanceof ApiError) || error.status !== 409) {
+    return null;
+  }
+
+  const payload = error.payload;
+
+  if (typeof payload !== 'object' || payload === null) {
+    return null;
+  }
+
+  const body = payload as Record<string, unknown>;
+
+  if (body.code !== VERSION_PENDING_CODE) {
+    return null;
+  }
+
+  const product: ScanEngineProduct = body.product === 'valkey' ? 'valkey' : 'redis';
+  const attribute = typeof body.attribute === 'string' ? body.attribute : `${product}.version`;
+
+  return { product, attribute };
 }

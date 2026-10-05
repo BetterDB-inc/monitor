@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import type { FieldUpdate } from './otlp-metrics-types';
 import { otelMetricsStaleAfterMsSchema } from '../config/env.schema';
 
@@ -36,11 +36,26 @@ export interface ApplyResult {
   rejected: number;
 }
 
+export type EngineProduct = 'redis' | 'valkey';
+
+export interface EngineVersion {
+  product: EngineProduct;
+  version: string | null;
+}
+
+export const ENGINE_VERSION_ATTRIBUTE: Record<EngineProduct, string> = {
+  redis: 'redis.version',
+  valkey: 'valkey.version',
+};
+
+type EngineChangeListener = (connectionId: string) => void;
+
 interface ConnectionSample {
   scalars: Map<string, Stamped & { section: string; field: string }>;
   composites: Map<string, Map<string, CompositeEntry>>;
   version: number | null;
-  serverVersion: string | null;
+  redisVersion: string | null;
+  valkeyVersion: string | null;
   valkey: boolean;
 }
 
@@ -48,12 +63,23 @@ function isSame(existing: Stamped, update: FieldUpdate): boolean {
   return existing.timeMs === update.timeMs && existing.value === update.value;
 }
 
+function resolveEngine(sample: ConnectionSample): EngineVersion {
+  if (sample.valkey) return { product: 'valkey', version: sample.valkeyVersion };
+  return { product: 'redis', version: sample.redisVersion };
+}
+
+function engineKey(engine: EngineVersion): string {
+  return `${engine.product}|${engine.version ?? ''}`;
+}
+
 @Injectable()
 export class ExternalMetricsStore {
   readonly staleAfterMs = otelMetricsStaleAfterMsSchema.parse(
     process.env.OTEL_METRICS_STALE_AFTER_MS,
   );
+  private readonly logger = new Logger(ExternalMetricsStore.name);
   private readonly samples = new Map<string, ConnectionSample>();
+  private readonly engineListeners = new Set<EngineChangeListener>();
   private revision = 0;
 
   apply(connectionId: string, updates: FieldUpdate[], nowMs: number = Date.now()): ApplyResult {
@@ -126,7 +152,10 @@ export class ExternalMetricsStore {
         if (rendered !== null) put(entry.section, entry.field, rendered);
       }
     }
-    if (sample.serverVersion && Object.keys(out).length > 0) put('server', 'redis_version', sample.serverVersion);
+    if (Object.keys(out).length > 0) {
+      if (sample.redisVersion) put('server', 'redis_version', sample.redisVersion);
+      if (sample.valkey && sample.valkeyVersion) put('server', 'valkey_version', sample.valkeyVersion);
+    }
     return out;
   }
 
@@ -147,16 +176,38 @@ export class ExternalMetricsStore {
     return this.samples.get(connectionId)?.version ?? null;
   }
 
-  setServerVersion(connectionId: string, version: string): void {
-    this.getOrCreate(connectionId).serverVersion = version;
+  setRedisVersion(connectionId: string, version: string): void {
+    this.updateEngine(connectionId, (sample) => {
+      sample.redisVersion = version;
+    });
   }
 
-  serverVersion(connectionId: string): string | null {
-    return this.samples.get(connectionId)?.serverVersion ?? null;
+  redisVersion(connectionId: string): string | null {
+    return this.samples.get(connectionId)?.redisVersion ?? null;
+  }
+
+  setValkeyVersion(connectionId: string, version: string): void {
+    this.updateEngine(connectionId, (sample) => {
+      sample.valkeyVersion = version;
+    });
   }
 
   markValkey(connectionId: string): void {
-    this.getOrCreate(connectionId).valkey = true;
+    this.updateEngine(connectionId, (sample) => {
+      sample.valkey = true;
+    });
+  }
+
+  engineVersion(connectionId: string): EngineVersion {
+    const sample = this.samples.get(connectionId);
+    return sample ? resolveEngine(sample) : { product: 'redis', version: null };
+  }
+
+  onEngineChange(listener: EngineChangeListener): () => void {
+    this.engineListeners.add(listener);
+    return () => {
+      this.engineListeners.delete(listener);
+    };
   }
 
   isValkey(connectionId: string): boolean {
@@ -165,6 +216,26 @@ export class ExternalMetricsStore {
 
   clear(connectionId: string): void {
     this.samples.delete(connectionId);
+  }
+
+  private updateEngine(connectionId: string, mutate: (sample: ConnectionSample) => void): void {
+    const sample = this.getOrCreate(connectionId);
+    const before = engineKey(resolveEngine(sample));
+    mutate(sample);
+    const after = resolveEngine(sample);
+    if (after.version === null || engineKey(after) === before) return;
+    this.notifyEngineChange(connectionId);
+  }
+
+  private notifyEngineChange(connectionId: string): void {
+    for (const listener of this.engineListeners) {
+      try {
+        listener(connectionId);
+      } catch (error: unknown) {
+        const reason = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Engine change listener failed for connection ${connectionId}: ${reason}`);
+      }
+    }
   }
 
   private fresh(stamped: Stamped, nowMs: number): boolean {
@@ -200,7 +271,14 @@ export class ExternalMetricsStore {
   private getOrCreate(connectionId: string): ConnectionSample {
     let sample = this.samples.get(connectionId);
     if (!sample) {
-      sample = { scalars: new Map(), composites: new Map(), version: null, serverVersion: null, valkey: false };
+      sample = {
+        scalars: new Map(),
+        composites: new Map(),
+        version: null,
+        redisVersion: null,
+        valkeyVersion: null,
+        valkey: false,
+      };
       this.samples.set(connectionId, sample);
     }
     return sample;
