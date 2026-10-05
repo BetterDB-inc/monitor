@@ -12,7 +12,7 @@ interface DiscoveredInstancesSectionProps {
 }
 
 function systemLabel(instance: DiscoveredInstance): string | null {
-  if (!instance.dbSystem) return null;
+  if (!instance.dbSystem) return instance.version ?? null;
   const name = instance.dbSystem === 'valkey' ? 'Valkey' : 'Redis';
   return instance.version ? `${name} ${instance.version}` : name;
 }
