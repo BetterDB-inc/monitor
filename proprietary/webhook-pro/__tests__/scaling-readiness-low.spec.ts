@@ -55,6 +55,7 @@ describe('WebhookEventsProService - dispatchScalingReadinessLow', () => {
         summary: data.summary,
         dimensions: data.dimensions,
         timestamp: 123,
+        message: `Scaling readiness 32 dropped to 40 or below: ${data.summary}`,
       }),
       'conn-1',
     );

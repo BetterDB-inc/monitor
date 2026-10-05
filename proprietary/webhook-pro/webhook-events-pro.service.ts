@@ -539,7 +539,7 @@ export class WebhookEventsProService implements OnModuleInit {
         bindingDimension: data.bindingDimension,
         summary: data.summary,
         dimensions: data.dimensions,
-        message: `Scaling readiness ${data.score} dropped below ${data.threshold}: ${data.summary}`,
+        message: `Scaling readiness ${data.score} dropped to ${data.threshold} or below: ${data.summary}`,
         timestamp: data.timestamp,
         instance: data.instance,
       },

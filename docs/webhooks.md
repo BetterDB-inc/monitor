@@ -75,7 +75,7 @@ Advanced monitoring events for anomaly detection and performance tracking:
 | `latency.spike` | Latency spike detected | Command latency spikes above baseline |
 | `connection.spike` | Connection spike detected | Connection count spikes above baseline |
 | `cve.critical_detected` | New critical CVEs | CVE scan finds new critical findings vs previous scan |
-| `scaling_readiness.low` | Scaling readiness low | Scaling readiness score dropped below the connection's alert threshold |
+| `scaling_readiness.low` | Scaling readiness low | Scaling readiness score dropped to or below the connection's alert threshold |
 
 ### Enterprise Tier
 
@@ -373,7 +373,7 @@ Fires once when a connection's scaling readiness score drops to or below its ale
     { "key": "memory", "score": 12, "excludedReason": null },
     { "key": "connections", "score": null, "excludedReason": "Not reported over OTLP" }
   ],
-  "message": "Scaling readiness 32 dropped below 40: Memory is your binding constraint (91% of 4 GB).",
+  "message": "Scaling readiness 32 dropped to 40 or below: Memory is your binding constraint (91% of 4 GB).",
   "timestamp": 1735689600000
 }
 ```
