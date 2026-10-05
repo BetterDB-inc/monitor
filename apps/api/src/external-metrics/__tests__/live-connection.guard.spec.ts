@@ -7,6 +7,7 @@ import {
   AllowExternalConnection,
   LiveConnectionGuard,
   UseHeaderConnectionId,
+  UsePathInstanceId,
 } from '../live-connection.guard';
 
 interface RequestParts {
@@ -156,6 +157,41 @@ describe('LiveConnectionGuard', () => {
         params: { connectionId: 'ext-1' },
         body: { connectionId: 'ext-1' },
       });
+
+      expect(guard.canActivate(context)).toBe(true);
+    });
+  });
+
+  describe('path-instance routes', () => {
+    const configs: Record<string, { connectionType: 'external' | 'direct' }> = {
+      'ext-1': { connectionType: 'external' },
+      'direct-1': { connectionType: 'direct' },
+    };
+    const klass = class McpLikeController {};
+
+    beforeEach(() => {
+      registry.getConfig.mockImplementation((id?: string) => configs[id ?? 'direct-1'] ?? null);
+    });
+
+    it('rejects an external connection named by the :id route param', () => {
+      const handler = function getVectorIndexes() {};
+      UsePathInstanceId()({}, 'getVectorIndexes', { value: handler } as PropertyDescriptor);
+      const context = contextFor(handler, klass, undefined, { params: { id: 'ext-1' } });
+
+      expect(() => guard.canActivate(context)).toThrow(ExternalConnectionUnsupportedError);
+    });
+
+    it('allows a direct connection named by the :id route param', () => {
+      const handler = function getVectorIndexes() {};
+      UsePathInstanceId()({}, 'getVectorIndexes', { value: handler } as PropertyDescriptor);
+      const context = contextFor(handler, klass, 'ext-1', { params: { id: 'direct-1' } });
+
+      expect(guard.canActivate(context)).toBe(true);
+    });
+
+    it('ignores the :id route param on routes that did not opt in', () => {
+      const handler = function getThing() {};
+      const context = contextFor(handler, klass, undefined, { params: { id: 'ext-1' } });
 
       expect(guard.canActivate(context)).toBe(true);
     });

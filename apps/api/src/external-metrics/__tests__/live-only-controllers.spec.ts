@@ -3,6 +3,8 @@ import { GUARDS_METADATA } from '@nestjs/common/constants';
 import { BulkDeleteController } from '@proprietary/bulk-delete/bulk-delete.controller';
 import { AiObservabilityController } from '../../ai-observability/ai-observability.controller';
 import { CveController } from '../../cve/cve.controller';
+import { McpAiController } from '../../mcp/ai/mcp-ai.controller';
+import { McpAnalyticsController } from '../../mcp/mcp-analytics.controller';
 import { MetricsController } from '../../metrics/metrics.controller';
 import { MonitorController } from '../../monitor/monitor.controller';
 import { VectorSearchController } from '../../vector-search/vector-search.controller';
@@ -10,6 +12,7 @@ import {
   ALLOW_EXTERNAL_CONNECTION_KEY,
   HEADER_CONNECTION_ID_KEY,
   LiveConnectionGuard,
+  PATH_INSTANCE_ID_KEY,
 } from '../live-connection.guard';
 
 type Expectation = 'live' | 'open';
@@ -86,6 +89,24 @@ const cases: ControllerCase[] = [
     },
   },
   {
+    controller: McpAnalyticsController,
+    handlers: {
+      getVectorIndexes: 'live',
+      getInferenceLatency: 'live',
+      getForecast: 'open',
+    },
+  },
+  {
+    controller: McpAiController,
+    handlers: {
+      getInstances: 'live',
+      correlateTrace: 'live',
+      getHistory: 'open',
+      getTraces: 'open',
+      getTraceSpans: 'open',
+    },
+  },
+  {
     controller: MetricsController,
     handlers: {
       getSlowLog: 'live',
@@ -142,5 +163,15 @@ describe('live-only controllers', () => {
     AiObservabilityController,
   ])('%p resolves the guarded connection from the header it binds', (controller) => {
     expect(Reflect.getMetadata(HEADER_CONNECTION_ID_KEY, controller)).toBe(true);
+  });
+
+  it.each([
+    [McpAnalyticsController, 'getVectorIndexes'],
+    [McpAnalyticsController, 'getInferenceLatency'],
+    [McpAiController, 'getInstances'],
+    [McpAiController, 'correlateTrace'],
+  ])('%p.%s resolves the guarded connection from the :id path param', (controller, name) => {
+    const handler = (controller.prototype as unknown as Record<string, object>)[name];
+    expect(Reflect.getMetadata(PATH_INSTANCE_ID_KEY, handler)).toBe(true);
   });
 });

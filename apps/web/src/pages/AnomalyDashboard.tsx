@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react';
+import { QueryErrorState, findExternalUnsupportedError } from '../components/QueryErrorState';
 import { useSearchParams } from 'react-router-dom';
 import { Feature } from '@betterdb/shared';
 import { usePolling } from '../hooks/usePolling';
@@ -225,13 +226,13 @@ export function AnomalyDashboard() {
   const startTime = dateRange?.from ? dateRange.from.getTime() : undefined;
   const endTime = dateRange?.to ? dateRange.to.getTime() : undefined;
 
-  const { data: summary } = usePolling<AnomalySummary>({
+  const { data: summary, error: summaryError } = usePolling<AnomalySummary>({
     fetcher: () => metricsApi.getAnomalySummary({ startTime, endTime }),
     interval: 5000,
     refetchKey: currentConnection?.id,
   });
 
-  const { data: events } = usePolling<AnomalyEvent[]>({
+  const { data: events, error: eventsError } = usePolling<AnomalyEvent[]>({
     fetcher: () => metricsApi.getAnomalyEvents({ startTime, endTime }),
     interval: 5000,
     refetchKey: currentConnection?.id,
@@ -271,13 +272,13 @@ export function AnomalyDashboard() {
     refetchKey: currentConnection?.id,
   });
 
-  const { data: groups } = usePolling<CorrelatedGroup[]>({
+  const { data: groups, error: groupsError } = usePolling<CorrelatedGroup[]>({
     fetcher: () => metricsApi.getAnomalyGroups({ startTime, endTime }),
     interval: 5000,
     refetchKey: currentConnection?.id,
   });
 
-  const { data: buffers } = usePolling<MetricBaselineBuffer[]>({
+  const { data: buffers, error: buffersError } = usePolling<MetricBaselineBuffer[]>({
     fetcher: () => metricsApi.getAnomalyBuffers(),
     interval: 10000,
     refetchKey: currentConnection?.id,
@@ -324,8 +325,16 @@ export function AnomalyDashboard() {
       .slice(0, 8);
   }, [summary]);
 
+  const unsupportedError = findExternalUnsupportedError(
+    summaryError,
+    eventsError,
+    groupsError,
+    buffersError,
+  );
+
   return (
     <div className="space-y-6">
+      <QueryErrorState error={unsupportedError} />
       <DataLossAlertBanner events={dataLossEvents ?? undefined} />
       <LatencyRegressionBanner events={latencyRegressionEvents ?? undefined} />
       <RaftHealthBanner events={raftHealthEvents ?? undefined} />

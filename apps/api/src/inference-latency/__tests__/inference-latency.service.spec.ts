@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import { ExternalConnectionUnsupportedError } from '../../external-metrics/external-connection-unsupported.error';
 import { Test, TestingModule } from '@nestjs/testing';
 import { NotFoundException } from '@nestjs/common';
 import { InferenceLatencyService, InferenceLatencyValidationError } from '../inference-latency.service';
@@ -192,6 +193,19 @@ describe('InferenceLatencyService.getProfile', () => {
     const profile = await svc.getProfile('conn-1');
 
     expect(profile.thresholdUs).toBe(0);
+  });
+
+  it('propagates the unsupported error instead of reporting thresholdUs 0', async () => {
+    const registry = buildRegistry({ thresholdValue: null });
+    (registry.get('conn-1').getConfigValue as jest.Mock).mockRejectedValue(
+      new ExternalConnectionUnsupportedError('getConfigValue'),
+    );
+    const storage = buildStorage();
+    const svc = await buildModule(registry, storage, buildPrometheus());
+
+    await expect(svc.getProfile('conn-1')).rejects.toBeInstanceOf(
+      ExternalConnectionUnsupportedError,
+    );
   });
 
   it('marks an FT.SEARCH bucket unhealthy when p50 exceeds the threshold', async () => {

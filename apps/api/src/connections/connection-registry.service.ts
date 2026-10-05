@@ -674,6 +674,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
       this.logger.log(`Added connection: ${config.name} (${config.host}:${config.port})`);
       this.discoveredInstances?.forget(config.host, config.port);
+      this.forgetPushedIdentity(request);
       return id;
     } catch (error) {
       // Storage failed - disconnect the adapter to prevent leaks
@@ -681,6 +682,15 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       this.logger.error(`Failed to persist connection ${config.name}: ${error instanceof Error ? error.message : error}`);
       throw error;
     }
+  }
+
+  private forgetPushedIdentity(request: CreateConnectionRequest): void {
+    const { discoveredHost, discoveredPort } = request;
+    if (request.connectionType !== 'external' || !discoveredHost || !discoveredPort) return;
+    const samePushedAddress =
+      discoveredHost.toLowerCase() === request.host.toLowerCase() && discoveredPort === request.port;
+    if (samePushedAddress) return;
+    this.discoveredInstances?.forgetPushed(discoveredHost, discoveredPort, Date.now());
   }
 
   async removeConnection(id: string): Promise<void> {

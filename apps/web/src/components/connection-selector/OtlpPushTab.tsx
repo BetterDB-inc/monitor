@@ -79,6 +79,8 @@ export function OtlpPushTab({
           port,
           connectionType: 'external',
           setAsDefault: isFirstConnection,
+          discoveredHost: initialHost || undefined,
+          discoveredPort: initialHost ? initialPort : undefined,
         }),
       });
       await onCreated();

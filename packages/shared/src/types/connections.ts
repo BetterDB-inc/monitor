@@ -248,6 +248,9 @@ export interface CreateConnectionRequest {
   sshTunnel?: SshTunnelInput;
   setAsDefault?: boolean;
   connectionType?: DatabaseConnectionType;
+  /** Address the OTLP collector pushes under when it differs from host:port (external only). */
+  discoveredHost?: string;
+  discoveredPort?: number;
 }
 
 /**

@@ -552,6 +552,25 @@ describe('MetricsParser.parseInfoToTyped', () => {
     });
   });
 
+  it('zero-fills absent keyspace sub-fields by default', () => {
+    const result = MetricsParser.parseInfoToTyped({ keyspace: { db0: 'keys=5' } });
+
+    expect(result.keyspace).toEqual({ db0: { keys: 5, expires: 0, avg_ttl: 0 } });
+  });
+
+  it('omits absent keyspace sub-fields when asked to', () => {
+    const result = MetricsParser.parseInfoToTyped(
+      { keyspace: { db0: 'keys=5', db1: 'keys=3,expires=1', db2: 'keys=2,expires=0,avg_ttl=0' } },
+      { omitAbsentKeyspaceFields: true },
+    );
+
+    expect(result.keyspace).toEqual({
+      db0: { keys: 5 },
+      db1: { keys: 3, expires: 1 },
+      db2: { keys: 2, expires: 0, avg_ttl: 0 },
+    });
+  });
+
   it('parses commandstats lines, including optional rejected/failed calls', () => {
     const result = MetricsParser.parseInfoToTyped({
       commandstats: {

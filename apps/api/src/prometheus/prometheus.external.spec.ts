@@ -248,6 +248,55 @@ describe('PrometheusService external connections', () => {
       expect(text.match(series('connected_clients', EXT_LABEL))?.[1]).toBe('4');
     });
 
+    describe('keyspace sub-fields', () => {
+      it('exports only db keys when expires and avg_ttl were not pushed', async () => {
+        push({ 'keyspace.db0.keys': '5' });
+
+        await pollTick();
+        const text = await registryText();
+
+        expect(text.match(series('db_keys', EXT_LABEL))?.[1]).toBe('5');
+        expect(text.match(series('keyspace_keys', EXT_LABEL))?.[1]).toBe('5');
+        expect(text).not.toMatch(anySeries('db_keys_expiring', EXT_LABEL));
+        expect(text).not.toMatch(anySeries('db_avg_ttl', EXT_LABEL));
+        expect(text).not.toMatch(series('keyspace_keys_expiring', EXT_LABEL));
+      });
+
+      it('exports expires and avg_ttl when they were pushed', async () => {
+        push({
+          'keyspace.db0.keys': '5',
+          'keyspace.db0.expires': '2',
+          'keyspace.db0.avg_ttl': '3000',
+        });
+
+        await pollTick();
+        const text = await registryText();
+
+        expect(text.match(series('db_keys_expiring', EXT_LABEL))?.[1]).toBe('2');
+        expect(text.match(series('db_avg_ttl_seconds', EXT_LABEL))?.[1]).toBe('3');
+        expect(text.match(series('keyspace_keys_expiring', EXT_LABEL))?.[1]).toBe('2');
+      });
+
+      it('removes expires and avg_ttl once they stop being pushed', async () => {
+        push({
+          'keyspace.db0.keys': '5',
+          'keyspace.db0.expires': '2',
+          'keyspace.db0.avg_ttl': '3000',
+        });
+        await pollTick();
+
+        store.clear('ext-1');
+        push({ 'keyspace.db0.keys': '6' });
+        await pollTick();
+        const text = await registryText();
+
+        expect(text.match(series('db_keys', EXT_LABEL))?.[1]).toBe('6');
+        expect(text).not.toMatch(anySeries('db_keys_expiring', EXT_LABEL));
+        expect(text).not.toMatch(anySeries('db_avg_ttl', EXT_LABEL));
+        expect(text).not.toMatch(series('keyspace_keys_expiring', EXT_LABEL));
+      });
+    });
+
     describe('replication without a pushed role', () => {
       it('exports the pushed offset and connected slaves', async () => {
         push({ 'replication.master_repl_offset': '4242', 'replication.connected_slaves': '2' });
@@ -317,6 +366,69 @@ describe('PrometheusService external connections', () => {
 
         expect(await registryText()).not.toMatch(anySeries('instance_info', EXT_LABEL));
       });
+    });
+
+    it('removes server and persistence series when their sections stop being pushed', async () => {
+      push({
+        'server.uptime_in_seconds': '9',
+        'persistence.rdb_changes_since_last_save': '3',
+        'persistence.rdb_last_save_time': '1700000000',
+        'persistence.rdb_last_bgsave_status': 'ok',
+        'persistence.aof_enabled': '1',
+        'persistence.aof_last_bgrewrite_status': 'ok',
+      });
+      await pollTick();
+      let text = await registryText();
+      expect(text).toMatch(series('rdb_last_bgsave_ok', EXT_LABEL));
+      expect(text).toMatch(series('aof_enabled', EXT_LABEL));
+
+      store.clear('ext-1');
+      push({ 'memory.used_memory': '1' });
+      await pollTick();
+      text = await registryText();
+
+      expect(text).not.toMatch(series('uptime_in_seconds', EXT_LABEL));
+      expect(text).not.toMatch(series('rdb_changes_since_last_save', EXT_LABEL));
+      expect(text).not.toMatch(series('rdb_last_save_timestamp_seconds', EXT_LABEL));
+      expect(text).not.toMatch(series('rdb_last_bgsave_ok', EXT_LABEL));
+      expect(text).not.toMatch(series('aof_enabled', EXT_LABEL));
+      expect(text).not.toMatch(series('aof_last_bgrewrite_ok', EXT_LABEL));
+    });
+
+    it('removes individual persistence flags when only some fields stop being pushed', async () => {
+      push({
+        'persistence.rdb_last_bgsave_status': 'ok',
+        'persistence.aof_enabled': '1',
+      });
+      await pollTick();
+
+      store.clear('ext-1');
+      push({ 'persistence.aof_enabled': '1' });
+      await pollTick();
+      const text = await registryText();
+
+      expect(text).not.toMatch(series('rdb_last_bgsave_ok', EXT_LABEL));
+      expect(text.match(series('aof_enabled', EXT_LABEL))?.[1]).toBe('1');
+    });
+
+    it('drops master_link_up while the replica role is still pushed', async () => {
+      push({
+        'server.os': 'Linux',
+        'replication.role': 'slave',
+        'replication.master_link_status': 'up',
+        'replication.master_last_io_seconds_ago': '1',
+      });
+      await pollTick();
+      expect(await registryText()).toMatch(series('master_link_up', EXT_LABEL));
+
+      store.clear('ext-1');
+      push({ 'server.os': 'Linux', 'replication.role': 'slave' });
+      await pollTick();
+      const text = await registryText();
+
+      expect(text).not.toMatch(series('master_link_up', EXT_LABEL));
+      expect(text).not.toMatch(series('master_last_io_seconds_ago', EXT_LABEL));
+      expect(text).toMatch(/^betterdb_instance_info\{[^}]*role="slave"[^}]*\} 1$/m);
     });
 
     it('does not fire connection_critical without a pushed maxclients', async () => {
@@ -403,6 +515,30 @@ describe('PrometheusService external connections', () => {
       push({ 'memory.used_memory': '1024' });
 
       expectNoLiveAnalyticsSeries(await service.getMetrics());
+    });
+
+    it('removes by-reason, by-user and by-name children and clears the label sets', async () => {
+      const state = service['getConnectionState']('ext-1');
+      service['aclDeniedByReason'].labels(EXT_LABEL, 'auth').set(1);
+      service['aclDeniedByUser'].labels(EXT_LABEL, 'alice').set(1);
+      service['clientConnectionsByName'].labels(EXT_LABEL, 'worker').set(1);
+      service['clientConnectionsByUser'].labels(EXT_LABEL, 'bob').set(1);
+      state.currentAclReasonLabels = new Set(['auth']);
+      state.currentAclUserLabels = new Set(['alice']);
+      state.currentClientNameLabels = new Set(['worker']);
+      state.currentClientUserLabels = new Set(['bob']);
+      push({ 'memory.used_memory': '1024' });
+
+      const text = await service.getMetrics();
+
+      expect(text).not.toMatch(anySeries('acl_denied_by_reason', EXT_LABEL));
+      expect(text).not.toMatch(anySeries('acl_denied_by_user', EXT_LABEL));
+      expect(text).not.toMatch(anySeries('client_connections_by_name', EXT_LABEL));
+      expect(text).not.toMatch(anySeries('client_connections_by_user', EXT_LABEL));
+      expect(state.currentAclReasonLabels.size).toBe(0);
+      expect(state.currentAclUserLabels.size).toBe(0);
+      expect(state.currentClientNameLabels.size).toBe(0);
+      expect(state.currentClientUserLabels.size).toBe(0);
     });
 
     it('removes a pushed field once it goes stale in the store', async () => {

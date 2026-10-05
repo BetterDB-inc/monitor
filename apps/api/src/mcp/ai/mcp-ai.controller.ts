@@ -1,5 +1,9 @@
 import { Controller, Get, Logger, Param, Query, UseGuards } from '@nestjs/common';
 import { AgentTokenGuard } from '../../common/guards/agent-token.guard';
+import {
+  LiveConnectionGuard,
+  UsePathInstanceId,
+} from '../../external-metrics/live-connection.guard';
 import { ValidateInstanceIdPipe, mapMcpError, safeLimit } from '../mcp-helpers';
 
 const MAX_HISTORY_HOURS = 168;
@@ -20,6 +24,8 @@ export class McpAiController {
   ) {}
 
   @Get('instance/:id/ai/instances')
+  @UseGuards(LiveConnectionGuard)
+  @UsePathInstanceId()
   async getInstances(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
       const instances = await this.aiObservability.getInstances(id);
@@ -77,6 +83,8 @@ export class McpAiController {
   }
 
   @Get('instance/:id/ai/traces/:traceId/correlate')
+  @UseGuards(LiveConnectionGuard)
+  @UsePathInstanceId()
   async correlateTrace(
     @Param('id', ValidateInstanceIdPipe) id: string,
     @Param('traceId') traceId: string,
