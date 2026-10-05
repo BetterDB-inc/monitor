@@ -16,6 +16,7 @@ function makePrometheus(snapshot: unknown[] = []): PrometheusService & {
 } {
   return {
     collectMetricsAsJson: jest.fn().mockResolvedValue(snapshot),
+    getStalenessMs: () => 15000,
   } as unknown as PrometheusService & { collectMetricsAsJson: jest.Mock };
 }
 

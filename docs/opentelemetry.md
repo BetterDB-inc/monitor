@@ -162,7 +162,7 @@ Set `OTEL_EXPORTER_OTLP_ENDPOINT` and Monitor mirrors its Prometheus registry to
 
 A caveat worth knowing: counters and gauges are mirrored, but **histograms and summaries are skipped** because they do not map cleanly onto the OTLP instruments here. So the OTLP mirror is a subset. For the complete set, including histograms and every `betterdb_*` family, scrape the Prometheus endpoint at `/api/prometheus/metrics` (see **[Prometheus Integration](prometheus-integration.md)** and the **[full metrics reference](prometheus-metrics.md)**).
 
-The mirror reads the same registry as `/api/prometheus/metrics`, so stale-connection series are dropped from it on the same staleness bound (see `PROMETHEUS_STALENESS_MS`).
+The export reads the same registry as `/api/prometheus/metrics`. In both export modes, a series that leaves that registry, such as a stale or removed connection's series or the previous `role` after a failover, stops being exported once it has gone unobserved for the Prometheus staleness bound (see `PROMETHEUS_STALENESS_MS`), or for two export intervals if that is longer. If the series comes back, it is exported again from the next push.
 
 Tune the push interval with `OTEL_METRICS_EXPORT_INTERVAL_MS` (default `15000`).
 
@@ -188,9 +188,9 @@ Any other value logs a warning and uses `mirror`. `METRICS_EXPORT_PROFILE` appli
 
 Monitor process metrics (`betterdb_process_*`, `betterdb_nodejs_*`) stay on the `betterdb-monitor` resource under their Prometheus names. A point whose connection is not registered also lands there and keeps its `connection` attribute. Agent connections have no `host:port` of their own, so their points land there too.
 
-After a connection is removed, its points are no longer exported: they are dropped, not moved to the `betterdb-monitor` resource. Otherwise the OpenTelemetry SDK keeps reporting the last value of a series that stops being observed until Monitor restarts.
+After a connection is removed, its points are no longer exported: they are dropped, not moved to the `betterdb-monitor` resource.
 
-Monitor sends one OTLP request per node plus one for the monitor each interval, at most eight at a time.
+Monitor sends one OTLP request per node plus one for the monitor each interval, at most eight at a time. Each push reports its result before the export interval runs out. Requests still running at that point continue, and if one of them fails, the failure is reported with the next push.
 
 **Metric names in `semconv` mode**
 

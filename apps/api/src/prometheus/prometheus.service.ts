@@ -124,6 +124,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private readonly slotStatsTopN: number;
   private readonly exportRegistry: Registry;
   private readonly pollIntervalMs: number;
+  private readonly stalenessMs: number;
   private readonly freshness: FreshnessTracker;
   private pollStale: Gauge;
 
@@ -314,14 +315,14 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const configuredStaleness = this.configService.get<number>('PROMETHEUS_STALENESS_MS');
     const requestedStaleness =
       configuredStaleness === undefined ? undefined : Number(configuredStaleness);
-    const stalenessMs = resolveStalenessMs(this.pollIntervalMs, requestedStaleness);
-    if (requestedStaleness !== undefined && requestedStaleness !== stalenessMs) {
+    this.stalenessMs = resolveStalenessMs(this.pollIntervalMs, requestedStaleness);
+    if (requestedStaleness !== undefined && requestedStaleness !== this.stalenessMs) {
       this.logger.warn(
         `PROMETHEUS_STALENESS_MS=${requestedStaleness} is below the floor for a ` +
-          `${this.pollIntervalMs}ms poll interval; using ${stalenessMs}ms instead`,
+          `${this.pollIntervalMs}ms poll interval; using ${this.stalenessMs}ms instead`,
       );
     }
-    this.freshness = new FreshnessTracker(stalenessMs);
+    this.freshness = new FreshnessTracker(this.stalenessMs);
     this.exportProfile = parseExportProfile(this.configService.get('METRICS_EXPORT_PROFILE'));
     this.slotStatsTopN = resolveSlotStatsTopN(
       this.configService.get('METRICS_SLOT_STATS_TOP_N'),
@@ -2436,6 +2437,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       .split('\n')
       .filter((line) => !line.match(/\s+[Nn]a[Nn]\s*$/))
       .join('\n');
+  }
+
+  getStalenessMs(): number {
+    return this.stalenessMs;
   }
 
   getContentType(): string {
