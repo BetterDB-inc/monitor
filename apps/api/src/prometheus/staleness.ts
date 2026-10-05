@@ -20,13 +20,15 @@ export class FreshnessTracker {
 
   constructor(private readonly boundMs: number) {}
 
-  observe(connectionId: string, label: string, now: number): void {
+  observe(connectionId: string, label: string, now: number): string | undefined {
     const entry = this.entries.get(connectionId);
-    if (entry) {
-      entry.label = label;
-      return;
+    if (!entry) {
+      this.entries.set(connectionId, { label, lastSuccessAt: now });
+      return undefined;
     }
-    this.entries.set(connectionId, { label, lastSuccessAt: now });
+    const previous = entry.label;
+    entry.label = label;
+    return previous === label ? undefined : previous;
   }
 
   markFresh(connectionId: string, label: string, now: number): void {

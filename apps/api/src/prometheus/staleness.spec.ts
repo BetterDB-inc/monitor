@@ -87,6 +87,14 @@ describe('FreshnessTracker', () => {
     expect(tracker.labelsByFreshness(10_000).fresh.size).toBe(0);
   });
 
+  it('reports the previous label when a connection is observed under a new one', () => {
+    const tracker = new FreshnessTracker(BOUND);
+    expect(tracker.observe('conn-1', 'h:1', 0)).toBeUndefined();
+    expect(tracker.observe('conn-1', 'h:1', 1_000)).toBeUndefined();
+    expect(tracker.observe('conn-1', 'h:2', 2_000)).toBe('h:1');
+    expect(tracker.hasLabel('h:1')).toBe(false);
+  });
+
   it('forgets a connection and reports its label', () => {
     const tracker = new FreshnessTracker(BOUND);
     tracker.observe('conn-1', 'h:1', 0);
