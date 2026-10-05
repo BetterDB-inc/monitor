@@ -63,6 +63,14 @@ Failover webhooks are unaffected by this feature: they still fire from the
 existing failover-detection path, independent of whether auto-registration
 is turned on.
 
+## Key Analytics
+
+Key Analytics runs on each group's primary and is opened from that primary's
+connection; replicas hold the same keys and are not scanned. After a
+failover, collection moves to the new primary's connection, so its history
+starts there while the old primary's history stays under its own connection
+until it ages out.
+
 ## One Sentinel per quorum
 
 If more than one Sentinel seed monitors the same group, only the first one

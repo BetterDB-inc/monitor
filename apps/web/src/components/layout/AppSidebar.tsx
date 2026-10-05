@@ -15,7 +15,7 @@ import {
   SidebarHeader,
   SidebarSeparator,
 } from '@/components/ui/sidebar.tsx';
-import { Feature } from '@betterdb/shared';
+import { Feature, hasOwnKeyAnalytics } from '@betterdb/shared';
 import { CommunityBanner } from '@/components/layout/CommunityBanner.tsx';
 import { ExternalLink } from 'lucide-react';
 
@@ -104,7 +104,7 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
           >
             Anomaly Detection
           </NavItem>
-          {!isChild && (
+          {hasOwnKeyAnalytics(currentConnection?.membership) && (
             <NavItem
               to="/key-analytics"
               active={location.pathname === '/key-analytics'}
