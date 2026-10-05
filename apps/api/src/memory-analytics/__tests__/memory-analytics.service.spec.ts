@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { MemoryAnalyticsService } from '../memory-analytics.service';
+import { MemoryAnalyticsService, sumKeyspaceKeys } from '../memory-analytics.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { ConnectionContext } from '../../common/services/multi-connection-poller';
@@ -301,6 +301,62 @@ describe('MemoryAnalyticsService', () => {
         expect(storage.saveMemorySnapshots).toHaveBeenCalledTimes(1);
       });
     });
+
+    it('records connected clients, maxclients and total keys', async () => {
+      const client = {
+        getInfoParsed: jest.fn().mockResolvedValue({
+          memory: { used_memory: '100', maxmemory: '1000' },
+          clients: { connected_clients: '12', maxclients: '10000' },
+          keyspace: {
+            db0: { keys: 5, expires: 0, avg_ttl: 0 },
+            db3: { keys: 7, expires: 1, avg_ttl: 0 },
+          },
+        }),
+      };
+      await (service as any).pollConnection(makeCtx(client));
+      const [[snapshots]] = storage.saveMemorySnapshots.mock.calls;
+      expect(snapshots[0]).toMatchObject({ connectedClients: 12, maxclients: 10000, totalKeys: 12 });
+    });
+
+    it('records zero keys when the keyspace section is present but empty', async () => {
+      const client = {
+        getInfoParsed: jest.fn().mockResolvedValue({
+          memory: { used_memory: '100' },
+          clients: { connected_clients: '1', maxclients: '10' },
+          keyspace: {},
+        }),
+      };
+      await (service as any).pollConnection(makeCtx(client));
+      expect(storage.saveMemorySnapshots.mock.calls[0][0][0].totalKeys).toBe(0);
+    });
+
+    it('records null capacity fields when the sections are absent', async () => {
+      const client = {
+        getInfoParsed: jest.fn().mockResolvedValue({ memory: { used_memory: '100' } }),
+      };
+      await (service as any).pollConnection(makeCtx(client));
+      expect(storage.saveMemorySnapshots.mock.calls[0][0][0]).toMatchObject({
+        connectedClients: null,
+        maxclients: null,
+        totalKeys: null,
+      });
+    });
+
+    it('keeps maxclients null for external connections', async () => {
+      const client = {
+        getInfoParsed: jest.fn().mockResolvedValue({
+          memory: { used_memory: '100' },
+          clients: { connected_clients: '9' },
+          keyspace: { db0: { keys: 4, expires: 0, avg_ttl: 0 } },
+        }),
+      };
+      await (service as any).pollConnection({ ...makeCtx(client), connectionType: 'external' });
+      expect(storage.saveMemorySnapshots.mock.calls[0][0][0]).toMatchObject({
+        connectedClients: 9,
+        maxclients: null,
+        totalKeys: 4,
+      });
+    });
   });
 
   describe('onConnectionRemoved', () => {
@@ -376,5 +432,11 @@ describe('MemoryAnalyticsService', () => {
       expect(storage.getMemorySnapshots).toHaveBeenCalledWith({ limit: 50 });
       expect(result).toEqual(mockSnapshots);
     });
+  });
+
+  describe('sumKeyspaceKeys', () => {
+    it('returns null without a keyspace section', () => expect(sumKeyspaceKeys(undefined)).toBeNull());
+    it('ignores non-db and raw string entries', () =>
+      expect(sumKeyspaceKeys({ db0: { keys: 2, expires: 0, avg_ttl: 0 }, foo: 'bar' } as any)).toBe(2));
   });
 });
