@@ -1,3 +1,4 @@
+import { Feature } from '@betterdb/shared';
 import { ScalingReadinessProService } from '../scaling-readiness-pro.service';
 
 const NOW = 1_700_000_000_000;
@@ -13,7 +14,7 @@ const readiness = (score: number | null) => ({
   dimensions: [{ key: 'memory', score: 12, weight: 30, contribution: 3.6, detail: 'd', excludedReason: null }],
 });
 
-function setup(score: number | null, settings: unknown = null, webhooks: unknown = undefined) {
+function setup(score: number | null, settings: unknown = null, webhooks: unknown = undefined, licensed = true) {
   const storage = {
     saveScalingReadinessScore: jest.fn().mockResolvedValue(undefined),
     getScalingReadinessScores: jest.fn().mockResolvedValue([]),
@@ -31,10 +32,11 @@ function setup(score: number | null, settings: unknown = null, webhooks: unknown
   const webhookPro = webhooks === undefined
     ? { dispatchScalingReadinessLow: jest.fn().mockResolvedValue(undefined) }
     : webhooks;
+  const license = { hasFeature: jest.fn().mockReturnValue(licensed) };
   const service = new ScalingReadinessProService(
-    storage as any, readinessService as any, registry as any, webhookPro as any,
+    storage as any, readinessService as any, registry as any, webhookPro as any, license as any,
   );
-  return { service, storage, readinessService, webhookPro: webhookPro as any };
+  return { service, storage, readinessService, registry, license, webhookPro: webhookPro as any };
 }
 
 describe('ScalingReadinessProService', () => {
@@ -74,6 +76,29 @@ describe('ScalingReadinessProService', () => {
     readinessService.compute.mockResolvedValue({ ...readiness(32), computedAt: NOW + 60_000 });
     await service.tick();
     expect(storage.saveScalingReadinessScore).toHaveBeenCalledTimes(2);
+  });
+
+  it('skips the tick without the history license feature', async () => {
+    const { service, readinessService, license } = setup(55, null, undefined, false);
+    await service.tick();
+    expect(license.hasFeature).toHaveBeenCalledWith(Feature.SCALING_READINESS_HISTORY);
+    expect(readinessService.compute).not.toHaveBeenCalled();
+  });
+
+  it('still alerts when saving the score fails', async () => {
+    const { service, storage, webhookPro } = setup(32);
+    storage.saveScalingReadinessScore.mockRejectedValue(new Error('disk full'));
+    await service.tick();
+    expect(webhookPro.dispatchScalingReadinessLow).toHaveBeenCalledTimes(1);
+  });
+
+  it('resolves when listing connections throws', async () => {
+    const { service, registry, readinessService } = setup(55);
+    registry.list.mockImplementation(() => {
+      throw new Error('registry down');
+    });
+    await expect(service.tick()).resolves.toBeUndefined();
+    expect(readinessService.compute).not.toHaveBeenCalled();
   });
 
   it('skips null scores', async () => {

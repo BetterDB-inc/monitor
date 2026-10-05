@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } f
 import { randomUUID } from 'crypto';
 import {
   DEFAULT_SCALING_READINESS_ALERT_THRESHOLD,
+  Feature,
   WEBHOOK_EVENTS_PRO_SERVICE,
   type IWebhookEventsProService,
   type ScalingReadiness,
@@ -12,6 +13,7 @@ import {
 import type { StoragePort } from '@app/common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { ScalingReadinessService } from '@app/scaling-readiness/scaling-readiness.service';
+import { LicenseService } from '@proprietary/licenses';
 
 const TICK_INTERVAL_MS = 60_000;
 const HISTORY_FETCH_LIMIT = 50_000;
@@ -31,6 +33,8 @@ export class ScalingReadinessProService implements OnModuleInit, OnModuleDestroy
     @Optional()
     @Inject(WEBHOOK_EVENTS_PRO_SERVICE)
     private readonly webhookEventsProService?: IWebhookEventsProService,
+    @Optional()
+    private readonly licenseService?: LicenseService,
   ) {}
 
   onModuleInit(): void {
@@ -46,40 +50,59 @@ export class ScalingReadinessProService implements OnModuleInit, OnModuleDestroy
 
   async tick(): Promise<void> {
     if (this.running) return;
+    if (this.licenseService?.hasFeature(Feature.SCALING_READINESS_HISTORY) !== true) return;
     this.running = true;
     try {
       const connections = this.connectionRegistry.list().filter((c) => c.isConnected);
       for (const connection of connections) {
-        try {
-          await this.processConnection(connection.id);
-        } catch (error) {
-          this.logger.error(
-            `Scaling readiness tick failed for ${connection.id}: ${error instanceof Error ? error.message : 'Unknown error'}`,
-          );
-        }
+        await this.processConnection(connection.id);
       }
+    } catch (error) {
+      this.logger.error(`Scaling readiness tick failed: ${this.describe(error)}`);
     } finally {
       this.running = false;
     }
   }
 
+  private describe(error: unknown): string {
+    return error instanceof Error ? error.message : 'Unknown error';
+  }
+
   private async processConnection(connectionId: string): Promise<void> {
-    const result = await this.readiness.compute(connectionId);
+    let result: ScalingReadiness;
+    try {
+      result = await this.readiness.compute(connectionId);
+    } catch (error) {
+      this.logger.error(`Scaling readiness compute failed for ${connectionId}: ${this.describe(error)}`);
+      return;
+    }
+    if (result.score === null || result.band === null) return;
+    try {
+      await this.storeScore(connectionId, result);
+    } catch (error) {
+      this.logger.error(`Scaling readiness save failed for ${connectionId}: ${this.describe(error)}`);
+    }
+    try {
+      await this.checkAlert(connectionId, result);
+    } catch (error) {
+      this.logger.error(`Scaling readiness alert failed for ${connectionId}: ${this.describe(error)}`);
+    }
+  }
+
+  private async storeScore(connectionId: string, result: ScalingReadiness): Promise<void> {
     if (result.score === null || result.band === null) return;
     const last = this.lastStoredAt.get(connectionId);
-    if (last === undefined || result.computedAt > last) {
-      await this.storage.saveScalingReadinessScore({
-        id: randomUUID(),
-        connectionId,
-        timestamp: result.computedAt,
-        score: result.score,
-        band: result.band,
-        bindingDimension: result.bindingDimension,
-        dimensions: result.dimensions,
-      });
-      this.lastStoredAt.set(connectionId, result.computedAt);
-    }
-    await this.checkAlert(connectionId, result);
+    if (last !== undefined && result.computedAt <= last) return;
+    await this.storage.saveScalingReadinessScore({
+      id: randomUUID(),
+      connectionId,
+      timestamp: result.computedAt,
+      score: result.score,
+      band: result.band,
+      bindingDimension: result.bindingDimension,
+      dimensions: result.dimensions,
+    });
+    this.lastStoredAt.set(connectionId, result.computedAt);
   }
 
   private async checkAlert(connectionId: string, result: ScalingReadiness): Promise<void> {
