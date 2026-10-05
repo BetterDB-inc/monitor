@@ -22,6 +22,7 @@ export class ScalingReadinessProService implements OnModuleInit, OnModuleDestroy
   private readonly logger = new Logger(ScalingReadinessProService.name);
   private interval: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private readonly lastStoredAt = new Map<string, number>();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -65,15 +66,19 @@ export class ScalingReadinessProService implements OnModuleInit, OnModuleDestroy
   private async processConnection(connectionId: string): Promise<void> {
     const result = await this.readiness.compute(connectionId);
     if (result.score === null || result.band === null) return;
-    await this.storage.saveScalingReadinessScore({
-      id: randomUUID(),
-      connectionId,
-      timestamp: Date.now(),
-      score: result.score,
-      band: result.band,
-      bindingDimension: result.bindingDimension,
-      dimensions: result.dimensions,
-    });
+    const last = this.lastStoredAt.get(connectionId);
+    if (last === undefined || result.computedAt > last) {
+      await this.storage.saveScalingReadinessScore({
+        id: randomUUID(),
+        connectionId,
+        timestamp: result.computedAt,
+        score: result.score,
+        band: result.band,
+        bindingDimension: result.bindingDimension,
+        dimensions: result.dimensions,
+      });
+      this.lastStoredAt.set(connectionId, result.computedAt);
+    }
     await this.checkAlert(connectionId, result);
   }
 

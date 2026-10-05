@@ -51,6 +51,31 @@ describe('ScalingReadinessProService', () => {
     );
   });
 
+  it('stores the row at the compute time', async () => {
+    const { service, storage, readinessService } = setup(55);
+    readinessService.compute.mockResolvedValue({ ...readiness(55), computedAt: NOW - 30_000 });
+    await service.tick();
+    expect(storage.saveScalingReadinessScore).toHaveBeenCalledWith(
+      expect.objectContaining({ timestamp: NOW - 30_000 }),
+    );
+  });
+
+  it('stores a cached compute once but still checks the alert', async () => {
+    const { service, storage, webhookPro } = setup(32);
+    await service.tick();
+    await service.tick();
+    expect(storage.saveScalingReadinessScore).toHaveBeenCalledTimes(1);
+    expect(webhookPro.dispatchScalingReadinessLow).toHaveBeenCalledTimes(2);
+  });
+
+  it('stores again when the compute time advances', async () => {
+    const { service, storage, readinessService } = setup(32);
+    await service.tick();
+    readinessService.compute.mockResolvedValue({ ...readiness(32), computedAt: NOW + 60_000 });
+    await service.tick();
+    expect(storage.saveScalingReadinessScore).toHaveBeenCalledTimes(2);
+  });
+
   it('skips null scores', async () => {
     const { service, storage, webhookPro } = setup(null);
     await service.tick();
