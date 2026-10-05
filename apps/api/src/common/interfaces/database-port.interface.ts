@@ -50,6 +50,7 @@ export interface DatabasePort {
   ping(): Promise<boolean>;
   getInfo(sections?: string[]): Promise<Record<string, unknown>>;
   getCapabilities(): DatabaseCapabilities;
+  refreshCapabilities?(): Promise<void>;
   getInfoParsed(sections?: string[]): Promise<InfoResponse>;
   getSlowLog(
     count?: number,

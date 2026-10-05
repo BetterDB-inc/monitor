@@ -267,7 +267,21 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     return this.observedHostKeyFingerprint;
   }
 
+  private connectPromise: Promise<void> | null = null;
+
   async connect(): Promise<void> {
+    if (this.connectPromise) {
+      return this.connectPromise;
+    }
+    this.connectPromise = this.doConnect();
+    try {
+      await this.connectPromise;
+    } finally {
+      this.connectPromise = null;
+    }
+  }
+
+  private async doConnect(): Promise<void> {
     try {
       if (this.usesTunnel && !this.tunnelActive) {
         await this.establishTunnel();
@@ -336,6 +350,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       throw new Error('Capabilities not yet detected. Call connect() first.');
     }
     return this.capabilities;
+  }
+
+  async refreshCapabilities(): Promise<void> {
+    await this.detectCapabilities();
   }
 
   private async detectCapabilities(): Promise<void> {
