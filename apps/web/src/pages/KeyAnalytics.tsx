@@ -67,6 +67,11 @@ function formatNumber(num: number): string {
   return num.toString();
 }
 
+function formatOptionalCount(num?: number | null): string {
+  if (num === undefined || num === null) return 'N/A';
+  return formatNumber(num);
+}
+
 /** Recharts Tooltip `ValueType` includes arrays; coerce for numeric charts. */
 function numericFromTooltipValue(value: TooltipValueType | undefined): number {
   if (value === undefined) {
@@ -405,7 +410,7 @@ export function KeyAnalytics() {
                 </CardHeader>
                 <CardContent>
                   <div className="text-2xl font-bold text-amber-600">
-                    {summary ? formatNumber(summary.staleKeyCount) : '0'}
+                    {summary ? formatOptionalCount(summary.staleKeyCount) : '0'}
                   </div>
                   <div className="text-xs text-muted-foreground mt-1">idle &gt; 24 hours</div>
                 </CardContent>
@@ -563,7 +568,7 @@ export function KeyAnalytics() {
                             <td
                               className={`p-2 ${(pattern.staleKeyCount || 0) > 0 ? 'text-amber-600 font-semibold' : ''}`}
                             >
-                              {formatNumber(pattern.staleKeyCount || 0)}
+                              {formatOptionalCount(pattern.staleKeyCount)}
                             </td>
                           </tr>
                         ))}
@@ -647,7 +652,7 @@ export function KeyAnalytics() {
                         <div>
                           <div className="text-xs text-muted-foreground">Stale Keys</div>
                           <div className="text-lg font-bold text-amber-600">
-                            {formatNumber(pattern.staleKeyCount || 0)}
+                            {formatOptionalCount(pattern.staleKeyCount)}
                           </div>
                         </div>
                         {pattern.avgAccessFrequency !== undefined &&
@@ -660,13 +665,13 @@ export function KeyAnalytics() {
                                 </div>
                               </div>
                               <div>
-                                <div className="text-xs text-muted-foreground">Hot Keys</div>
+                                <div className="text-xs text-muted-foreground">Hot Keys (in sample)</div>
                                 <div className="text-lg font-bold text-destructive">
                                   {formatNumber(pattern.hotKeyCount || 0)}
                                 </div>
                               </div>
                               <div>
-                                <div className="text-xs text-muted-foreground">Cold Keys</div>
+                                <div className="text-xs text-muted-foreground">Cold Keys (in sample)</div>
                                 <div className="text-lg font-bold text-primary">
                                   {formatNumber(pattern.coldKeyCount || 0)}
                                 </div>

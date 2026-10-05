@@ -142,3 +142,61 @@ describe('UnifiedDatabaseAdapter.getInfoParsed', () => {
     expect(result.stats?.keyspace_hits).toBe('42');
   });
 });
+
+describe('UnifiedDatabaseAdapter.collectKeyAnalytics — stale keys', () => {
+  const DAY = 86400;
+
+  function makeScanAdapter(idleByKey: Record<string, number>) {
+    const keys = Object.keys(idleByKey);
+    const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+    const pipeline = () => {
+      let key = '';
+      const chain = {
+        memory: (_sub: string, name: string) => {
+          key = name;
+          return chain;
+        },
+        object: () => chain,
+        ttl: () => chain,
+        type: () => chain,
+        strlen: () => chain,
+        llen: () => chain,
+        hlen: () => chain,
+        scard: () => chain,
+        zcard: () => chain,
+        xlen: () => chain,
+        exec: async () => [
+          [null, 100],
+          [null, idleByKey[key]],
+          [null, null],
+          [null, -1],
+          [null, 'string'],
+          [null, 5],
+        ],
+      };
+      return chain;
+    };
+    (adapter as unknown as { _client: unknown })._client = {
+      dbsize: jest.fn().mockResolvedValue(keys.length),
+      scan: jest.fn().mockResolvedValue(['0', keys]),
+      pipeline,
+    };
+    return adapter;
+  }
+
+  it('counts the sampled keys idle beyond a day, even when the average idle time exceeds a day', async () => {
+    const adapter = makeScanAdapter({
+      'session:1': 10,
+      'session:2': 20,
+      'session:3': 30,
+      'session:4': 10 * DAY,
+      'session:5': DAY,
+    });
+
+    const result = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    const [sessions] = result.patterns;
+    expect(sessions.totalIdleTime / sessions.count).toBeGreaterThan(DAY);
+    expect(sessions.staleCount).toBe(1);
+  });
+});
