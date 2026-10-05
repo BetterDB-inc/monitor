@@ -45,6 +45,7 @@ interface ConnectionFormData {
   username: string;
   password: string;
   nodeUsername: string;
+  nodeNoUsername: boolean;
   nodePassword: string;
   dbIndex: number;
   tls: boolean;
@@ -101,6 +102,7 @@ const defaultFormData: ConnectionFormData = {
   username: '',
   password: '',
   nodeUsername: '',
+  nodeNoUsername: false,
   nodePassword: '',
   dbIndex: 0,
   tls: false,
@@ -202,7 +204,12 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       value = value.replace(/^https?:\/\//, '').replace(/\/$/, '');
     }
     setFormData((prev) => ({ ...prev, [field]: value }));
-    if (field !== 'name' && field !== 'nodeUsername' && field !== 'nodePassword') {
+    if (
+      field !== 'name' &&
+      field !== 'nodeUsername' &&
+      field !== 'nodeNoUsername' &&
+      field !== 'nodePassword'
+    ) {
       setTestResult(null);
     }
   };
@@ -276,7 +283,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
         isSentinel: result.capabilities?.isSentinel,
       });
       if (result.capabilities?.isSentinel !== true) {
-        setFormData((prev) => ({ ...prev, nodeUsername: '', nodePassword: '' }));
+        setFormData((prev) => ({ ...prev, nodeUsername: '', nodeNoUsername: false, nodePassword: '' }));
       }
     } catch (err) {
       setTestResult({
@@ -312,7 +319,11 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
           port: formData.port,
           username: formData.username || undefined,
           password: formData.password || undefined,
-          nodeUsername: testResult?.isSentinel ? formData.nodeUsername || undefined : undefined,
+          nodeUsername: testResult?.isSentinel
+            ? formData.nodeNoUsername
+              ? ''
+              : formData.nodeUsername || undefined
+            : undefined,
           nodePassword: testResult?.isSentinel ? formData.nodePassword || undefined : undefined,
           dbIndex: formData.dbIndex,
           tls: formData.tls,
@@ -913,10 +924,19 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                         <input
                           type="text"
                           value={formData.nodeUsername}
+                          disabled={formData.nodeNoUsername}
                           onChange={(e) => handleInputChange('nodeUsername', e.target.value)}
                           placeholder="default"
                           className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
                         />
+                        <label className="flex items-center gap-2 text-sm mt-2">
+                          <input
+                            type="checkbox"
+                            checked={formData.nodeNoUsername}
+                            onChange={(e) => handleInputChange('nodeNoUsername', e.target.checked)}
+                          />
+                          Connect to data nodes without a username
+                        </label>
                       </div>
                       <div>
                         <label className="block text-sm font-medium mb-1">Node password</label>

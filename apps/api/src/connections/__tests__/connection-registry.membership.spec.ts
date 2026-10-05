@@ -426,6 +426,15 @@ describe('ConnectionRegistry membership', () => {
     expect(registry.getConfig(id)).toEqual(expect.objectContaining({ username: 'u', password: 'p' }));
   });
 
+  it('connects data nodes without a username when the seed node username is empty', async () => {
+    const { registry } = build();
+    const seedId = await registry.addConnection({ name: 's', host: 's1', port: 26379, username: 'sentinel-user', password: 'p', nodeUsername: '' });
+    expect(registry.getConfig(seedId)?.nodeUsername).toBe('');
+    const id = await registry.addManagedChild(seedId, { host: 'h', port: 6379, nodeId: 'n', source: 'sentinel' });
+    expect(registry.getConfig(id)?.username).toBe('');
+    expect(registry.getConfig(id)?.password).toBe('p');
+  });
+
   it('falls back to the seed password when the data node password is still ciphertext', async () => {
     const { registry } = build();
     put(registry, { ...seed, nodeUsername: 'app', nodePassword: 'not-an-envelope', nodePasswordEncrypted: true });

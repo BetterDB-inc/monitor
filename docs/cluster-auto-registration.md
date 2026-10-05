@@ -11,6 +11,11 @@ connection ("child"). Each child is named `<seed name> · host:port`, and the
 set is kept in sync with the live cluster every 30 seconds: nodes that join
 are added, nodes that leave are retired.
 
+Each seed's sync has a 30 second budget and connects up to four new nodes at a
+time, so one seed with many unreachable nodes neither delays other seeds nor
+holds its own lock for long. Nodes not reached within the budget are picked up
+on the next sync. This applies to Sentinel seeds as well.
+
 ## Turning it on
 
 Auto-registration is controlled by the `CLUSTER_AUTO_REGISTER_NODES`

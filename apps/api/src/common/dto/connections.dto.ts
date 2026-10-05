@@ -208,7 +208,7 @@ export class CreateConnectionDto implements CreateConnectionRequest {
   @IsString()
   password?: string;
 
-  @ApiPropertyOptional({ description: 'Username for data nodes discovered through this Sentinel; defaults to username' })
+  @ApiPropertyOptional({ description: 'Username for data nodes discovered through this Sentinel; defaults to username; an empty string means no username' })
   @IsOptional()
   @IsString()
   nodeUsername?: string;

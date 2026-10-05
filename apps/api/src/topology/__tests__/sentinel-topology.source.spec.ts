@@ -47,6 +47,22 @@ describe('SentinelTopologySource', () => {
     expect(nodes[0].nodeId).toBe('g/h:1');
   });
 
+  it('skips masters without a name and warns once per discovery', async () => {
+    const { source } = build({
+      MASTERS: [
+        flat({ name: '', ip: '10.0.0.8', port: '6379', runid: 'a', flags: 'master' }),
+        flat({ ip: '10.0.0.9', port: '6379', runid: 'b', flags: 'master' }),
+        flat({ name: 'mymaster', ip: '10.0.0.1', port: '6379', runid: 'p1', flags: 'master' }),
+      ],
+      'REPLICAS mymaster': [],
+    });
+    const warn = jest.spyOn((source as unknown as { logger: { warn: () => void } }).logger, 'warn').mockImplementation(() => undefined);
+    const discovery = (await source.discover(seed as never, 10_000))!;
+    expect(discovery.nodes.map((n) => n.group)).toEqual(['mymaster']);
+    expect(discovery.unknownGroups).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps nodes that sentinel reports as down', async () => {
     const { source } = build({
       MASTERS: [flat({ name: 'g', ip: 'h', port: '1', runid: 'p', flags: 'master' })],

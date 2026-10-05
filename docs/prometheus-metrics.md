@@ -47,6 +47,8 @@ Content-Type: text/plain; version=0.0.4; charset=utf-8
 
 All custom metrics are prefixed with `betterdb_`. Standard Node.js process metrics from `prom-client` are also included with the same prefix.
 
+Sentinel connections are not polled for INFO series (the keyspace and INFO pollers skip them), so a Sentinel seed has no `betterdb_*` series of its own in the scrape. The data nodes it auto-registers are exported like any other connection. See [Sentinel auto-registration](sentinel-auto-registration.md).
+
 **Scrape Interval**: Recommended 15s
 **Metrics Update**: Metrics are computed on-demand during each scrape
 
