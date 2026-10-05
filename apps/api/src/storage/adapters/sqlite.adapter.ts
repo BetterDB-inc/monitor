@@ -4,6 +4,16 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
 import { parseSshTunnel, parseMembership } from '@betterdb/shared';
+import type {
+  StoredScalingReadinessScore,
+  ScalingReadinessScoreQuery,
+} from '../../common/interfaces/storage-port.interface';
+import type {
+  ReadinessBand,
+  ReadinessDimension,
+  ReadinessDimensionKey,
+  ScalingReadinessSettings,
+} from '@betterdb/shared';
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
   StoragePort,
@@ -1564,6 +1574,27 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (connection_id, metric_kind)
+      );
+
+      CREATE TABLE IF NOT EXISTS scaling_readiness_scores (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        score INTEGER NOT NULL,
+        band TEXT NOT NULL,
+        binding_dimension TEXT,
+        dimensions TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_scaling_readiness_conn_ts
+        ON scaling_readiness_scores(connection_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_scaling_readiness_ts
+        ON scaling_readiness_scores(timestamp);
+
+      CREATE TABLE IF NOT EXISTS scaling_readiness_settings (
+        connection_id TEXT PRIMARY KEY,
+        alert_enabled INTEGER NOT NULL DEFAULT 1,
+        alert_threshold INTEGER NOT NULL DEFAULT 40,
+        updated_at INTEGER NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS webhooks (
@@ -3510,6 +3541,122 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
 
     return chunkedSqliteDelete(this.db, 'memory_snapshots', 'timestamp < ?', [cutoffTimestamp]);
+  }
+
+  async saveScalingReadinessScore(score: StoredScalingReadinessScore): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db
+      .prepare(
+        `INSERT INTO scaling_readiness_scores
+          (id, connection_id, timestamp, score, band, binding_dimension, dimensions)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        score.id,
+        score.connectionId,
+        score.timestamp,
+        score.score,
+        score.band,
+        score.bindingDimension,
+        JSON.stringify(score.dimensions),
+      );
+  }
+
+  async getScalingReadinessScores(
+    query: ScalingReadinessScoreQuery,
+  ): Promise<StoredScalingReadinessScore[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM (
+           SELECT * FROM scaling_readiness_scores
+           WHERE connection_id = ? AND timestamp >= ? AND timestamp <= ?
+           ORDER BY timestamp DESC LIMIT ?
+         ) ORDER BY timestamp ASC`,
+      )
+      .all(
+        query.connectionId,
+        query.from ?? 0,
+        query.to ?? Number.MAX_SAFE_INTEGER,
+        query.limit ?? 2000,
+      ) as Array<{
+      id: string;
+      connection_id: string;
+      timestamp: number;
+      score: number;
+      band: ReadinessBand;
+      binding_dimension: ReadinessDimensionKey | null;
+      dimensions: string;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      connectionId: r.connection_id,
+      timestamp: r.timestamp,
+      score: r.score,
+      band: r.band,
+      bindingDimension: r.binding_dimension,
+      dimensions: JSON.parse(r.dimensions) as ReadinessDimension[],
+    }));
+  }
+
+  async pruneOldScalingReadinessScores(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      return chunkedSqliteDelete(
+        this.db,
+        'scaling_readiness_scores',
+        'timestamp < ? AND connection_id = ?',
+        [cutoffTimestamp, connectionId],
+      );
+    }
+
+    return chunkedSqliteDelete(this.db, 'scaling_readiness_scores', 'timestamp < ?', [
+      cutoffTimestamp,
+    ]);
+  }
+
+  async getScalingReadinessSettings(
+    connectionId: string,
+  ): Promise<ScalingReadinessSettings | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db
+      .prepare('SELECT * FROM scaling_readiness_settings WHERE connection_id = ?')
+      .get(connectionId) as
+      | { connection_id: string; alert_enabled: number; alert_threshold: number; updated_at: number }
+      | undefined;
+    if (!row) return null;
+    return {
+      connectionId: row.connection_id,
+      alertEnabled: row.alert_enabled === 1,
+      alertThreshold: row.alert_threshold,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async saveScalingReadinessSettings(
+    settings: ScalingReadinessSettings,
+  ): Promise<ScalingReadinessSettings> {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db
+      .prepare(
+        `INSERT INTO scaling_readiness_settings (connection_id, alert_enabled, alert_threshold, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(connection_id) DO UPDATE SET
+           alert_enabled = excluded.alert_enabled,
+           alert_threshold = excluded.alert_threshold,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        settings.connectionId,
+        settings.alertEnabled ? 1 : 0,
+        settings.alertThreshold,
+        settings.updatedAt,
+      );
+    return settings;
   }
 
   // Command Stats Sample Methods

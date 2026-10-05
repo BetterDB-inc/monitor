@@ -32,6 +32,7 @@ export async function runRetentionSweep(
     { name: 'latency_snapshots', fn: () => storage.pruneOldLatencySnapshots(cutoff) },
     { name: 'latency_histograms', fn: () => storage.pruneOldLatencyHistograms(cutoff) },
     { name: 'memory_snapshots', fn: () => storage.pruneOldMemorySnapshots(cutoff) },
+    { name: 'scaling_readiness_scores', fn: () => storage.pruneOldScalingReadinessScores(cutoff) },
     { name: 'capture_chunks', fn: () => storage.pruneOldCaptureChunks(cutoff) },
     { name: 'capture_sessions', fn: () => storage.pruneOldCaptureSessions(cutoff) },
     { name: 'capture_triggers', fn: () => storage.pruneOldCaptureTriggers(cutoff) },
