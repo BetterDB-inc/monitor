@@ -98,6 +98,39 @@ describe('ScalingReadinessService', () => {
     expect(client.getConfigValue).toHaveBeenCalledTimes(1);
   });
 
+  it('re-reads an inactive io-threads result after a minute', async () => {
+    const { service, client } = setup({ snapshots: [snap(0)] });
+    await service.compute('c');
+    jest.setSystemTime(NOW + 61_000);
+    await service.compute('c');
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-reads the thread lookup after a minute when it failed', async () => {
+    const { service, client } = setup({
+      snapshots: [snap(0)],
+      info: { server: { io_threads_active: '1' } },
+      ioThreads: new Error('NOPERM'),
+    });
+    await service.compute('c');
+    jest.setSystemTime(NOW + 61_000);
+    await service.compute('c');
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares one compute between concurrent calls', async () => {
+    const { service, storage } = setup({ snapshots: twoDays() });
+    await Promise.all([service.compute('c'), service.compute('c')]);
+    expect(storage.getMemorySnapshots).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not cache a failed compute', async () => {
+    const { service, storage } = setup({ snapshots: twoDays() });
+    storage.getMemorySnapshots.mockRejectedValueOnce(new Error('boom'));
+    await expect(service.compute('c')).rejects.toThrow('boom');
+    await expect(service.compute('c')).resolves.toMatchObject({ connectionId: 'c' });
+  });
+
   it('falls back to one thread when CONFIG GET is denied', async () => {
     const { service } = setup({
       snapshots: [snap(0)],
