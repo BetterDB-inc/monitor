@@ -16,7 +16,10 @@ vi.mock('../components/pages/scaling-readiness', () => ({
   ReadinessAlertSettings: () => <div data-testid="alert-settings" />,
   ReadinessProLocked: () => <div data-testid="locked" />,
 }));
-vi.mock('../components/ui/date-range-picker', () => ({ DateRangePicker: () => null }));
+vi.mock('../components/ui/date-range-picker', () => ({ DateRangePicker: ({ placeholder }: { placeholder?: string }) => (
+    <span data-testid="picker">{placeholder}</span>
+  ),
+}));
 
 import { ScalingReadiness } from './ScalingReadiness';
 
@@ -47,6 +50,12 @@ describe('ScalingReadiness page', () => {
     expect(screen.getByTestId('history')).toBeInTheDocument();
     expect(screen.getByTestId('alert-settings')).toBeInTheDocument();
     expect(screen.queryByTestId('locked')).not.toBeInTheDocument();
+  });
+
+  it('labels the default history range as the last 7 days', () => {
+    hasFeature.mockReturnValue(true);
+    render(<ScalingReadiness />);
+    expect(screen.getByTestId('picker')).toHaveTextContent('Last 7 days');
   });
 
   it('does not query Pro endpoints for Community', () => {

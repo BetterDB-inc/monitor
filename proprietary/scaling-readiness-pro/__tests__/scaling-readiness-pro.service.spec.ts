@@ -114,6 +114,45 @@ describe('ScalingReadinessProService', () => {
     expect(await service.getHistory('conn-1', 1, 10)).toEqual({
       points: [{ timestamp: 5, score: 60, band: 'yellow', bindingDimension: 'cpu', dimensions: [] }],
     });
-    expect(storage.getScalingReadinessScores).toHaveBeenCalledWith({ connectionId: 'conn-1', from: 1, to: 10 });
+    expect(storage.getScalingReadinessScores).toHaveBeenCalledWith({
+      connectionId: 'conn-1', from: 1, to: 10, limit: 50000,
+    });
+  });
+
+  const row = (i: number, score: number) => ({
+    id: `r${i}`, connectionId: 'conn-1', timestamp: i * 60_000, score,
+    band: 'green', bindingDimension: 'memory', dimensions: [],
+  });
+
+  it('returns rows unchanged when within the point budget', async () => {
+    const { service, storage } = setup(55);
+    const rows = Array.from({ length: 1000 }, (_, i) => row(i, 50 + (i % 7)));
+    storage.getScalingReadinessScores.mockResolvedValue(rows);
+    const history = await service.getHistory('conn-1', 0, 1e12);
+    expect(history.points.map((p) => p.timestamp)).toEqual(rows.map((r) => r.timestamp));
+  });
+
+  it('downsamples long ranges keeping the lowest score per bucket', async () => {
+    const { service, storage } = setup(55);
+    const rows = Array.from({ length: 3000 }, (_, i) => row(i, i % 3 === 1 ? 10 : 80));
+    storage.getScalingReadinessScores.mockResolvedValue(rows);
+    const history = await service.getHistory('conn-1', 0, 1e12);
+    const points = history.points;
+    expect(points.length).toBeLessThanOrEqual(1000);
+    expect(points.length).toBeGreaterThan(900);
+    const timestamps = points.map((p) => p.timestamp);
+    expect([...timestamps].sort((a, b) => a - b)).toEqual(timestamps);
+    expect(timestamps[0]).toBeLessThanOrEqual(2 * 60_000);
+    expect(timestamps[timestamps.length - 1]).toBeGreaterThanOrEqual(2997 * 60_000);
+    expect(points.filter((p) => p.score === 10).length).toBeGreaterThan(points.length * 0.9);
+  });
+
+  it('keeps the earliest row on equal scores within a bucket', async () => {
+    const { service, storage } = setup(55);
+    const rows = Array.from({ length: 2000 }, (_, i) => row(i, 60));
+    storage.getScalingReadinessScores.mockResolvedValue(rows);
+    const { points } = await service.getHistory('conn-1', 0, 1e12);
+    expect(points[0].timestamp).toBe(0);
+    expect(points.length).toBeLessThanOrEqual(1000);
   });
 });

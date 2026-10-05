@@ -14,6 +14,8 @@ import { ConnectionRegistry } from '@app/connections/connection-registry.service
 import { ScalingReadinessService } from '@app/scaling-readiness/scaling-readiness.service';
 
 const TICK_INTERVAL_MS = 60_000;
+const HISTORY_FETCH_LIMIT = 50_000;
+const HISTORY_MAX_POINTS = 1_000;
 
 @Injectable()
 export class ScalingReadinessProService implements OnModuleInit, OnModuleDestroy {
@@ -98,9 +100,14 @@ export class ScalingReadinessProService implements OnModuleInit, OnModuleDestroy
   }
 
   async getHistory(connectionId: string, from: number, to: number): Promise<ScalingReadinessHistory> {
-    const rows = await this.storage.getScalingReadinessScores({ connectionId, from, to });
+    const rows = await this.storage.getScalingReadinessScores({
+      connectionId,
+      from,
+      to,
+      limit: HISTORY_FETCH_LIMIT,
+    });
     return {
-      points: rows.map((r) => ({
+      points: this.downsample(rows).map((r) => ({
         timestamp: r.timestamp,
         score: r.score,
         band: r.band,
@@ -108,6 +115,21 @@ export class ScalingReadinessProService implements OnModuleInit, OnModuleDestroy
         dimensions: r.dimensions,
       })),
     };
+  }
+
+  private downsample<T extends { timestamp: number; score: number }>(rows: T[]): T[] {
+    if (rows.length <= HISTORY_MAX_POINTS) return rows;
+    const start = rows[0].timestamp;
+    const span = rows[rows.length - 1].timestamp - start;
+    if (span <= 0) return rows.slice(0, 1);
+    const bucketWidth = span / HISTORY_MAX_POINTS;
+    const lowest = new Map<number, T>();
+    for (const row of rows) {
+      const bucket = Math.min(HISTORY_MAX_POINTS - 1, Math.floor((row.timestamp - start) / bucketWidth));
+      const current = lowest.get(bucket);
+      if (!current || row.score < current.score) lowest.set(bucket, row);
+    }
+    return [...lowest.entries()].sort((a, b) => a[0] - b[0]).map(([, row]) => row);
   }
 
   async getSettings(connectionId: string): Promise<ScalingReadinessSettings> {

@@ -106,7 +106,7 @@ export function ScalingReadiness() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0">
               <CardTitle>History</CardTitle>
-              <DateRangePicker value={dateRange} onChange={setDateRange} />
+              <DateRangePicker value={dateRange} onChange={setDateRange} placeholder="Last 7 days" />
             </CardHeader>
             <CardContent>
               <ReadinessHistoryChart points={history?.points ?? []} />
