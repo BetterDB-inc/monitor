@@ -60,6 +60,16 @@ describe('cpuInput', () => {
       score: expect.closeTo(50, 6),
       detail: '140% CPU across 2 threads',
     }));
+  it('excludes when every sample is empty', () =>
+    expect(cpuInput([snap(), snap()], 1, null)).toEqual({ excludedReason: 'No CPU samples yet' }));
+  it('ignores empty samples when averaging', () =>
+    expect(
+      cpuInput(
+        [snap(), snap(), snap({ cpuSys: 100, cpuUser: 40 }), snap({ cpuSys: 100, cpuUser: 40 })],
+        2,
+        null,
+      ),
+    ).toEqual({ score: expect.closeTo(50, 6), detail: '140% CPU across 2 threads' }));
   it('appends the thread note', () =>
     expect((cpuInput([snap({ cpuSys: 10 })], 1, 'thread count could not be read') as any).detail).toBe(
       '10% CPU across 1 thread (thread count could not be read)',

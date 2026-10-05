@@ -57,8 +57,9 @@ export function cpuInput(
   threads: number,
   threadNote: string | null,
 ): DimensionInput {
-  if (recent.length === 0) return { excludedReason: 'No CPU samples yet' };
-  const mean = recent.reduce((sum, s) => sum + s.cpuSys + s.cpuUser, 0) / recent.length;
+  const samples = recent.map((s) => s.cpuSys + s.cpuUser).filter((total) => total !== 0);
+  if (samples.length === 0) return { excludedReason: 'No CPU samples yet' };
+  const mean = samples.reduce((sum, total) => sum + total, 0) / samples.length;
   const threadText = `${threads} thread${threads === 1 ? '' : 's'}`;
   return {
     score: utilizationHeadroom(mean / 100 / threads, 0.9),
