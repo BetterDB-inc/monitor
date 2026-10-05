@@ -9,7 +9,7 @@ import {
 } from 'recharts';
 
 interface Props {
-  data: Array<{ time: string; used: number; peak: number }>;
+  data: Array<{ time: string; used: number; peak: number | null }>;
 }
 
 export function MemoryChart({ data }: Props) {
@@ -32,10 +32,9 @@ export function MemoryChart({ data }: Props) {
               tickFormatter={(value) => `${(value / 1024 / 1024).toFixed(0)}MB`}
             />
             <Tooltip
-              formatter={(value) => {
-                const num = typeof value === 'number' ? value : 0;
-                return [`${(num / 1024 / 1024).toFixed(2)} MB`];
-              }}
+              formatter={(value) =>
+                typeof value === 'number' ? [`${(value / 1024 / 1024).toFixed(2)} MB`] : ['—']
+              }
             />
             <Area
               type="monotone"

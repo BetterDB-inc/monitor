@@ -78,20 +78,24 @@ export class MemoryAnalyticsService extends MultiConnectionPoller implements OnM
         }
       }
 
+      const absent = ctx.connectionType === 'external' ? null : '0';
+      const int = (raw: string | null): number | null => (raw === null ? null : parseInt(raw, 10));
+      const float = (raw: string | null): number | null => (raw === null ? null : parseFloat(raw));
+
       const snapshot: StoredMemorySnapshot = {
         id: randomUUID(),
         timestamp: now,
         usedMemory: parseInt(mem?.used_memory ?? '0', 10),
-        usedMemoryRss: parseInt(mem?.used_memory_rss ?? '0', 10),
-        usedMemoryPeak: parseInt(mem?.used_memory_peak ?? '0', 10),
-        memFragmentationRatio: parseFloat(mem?.mem_fragmentation_ratio ?? '0'),
+        usedMemoryRss: int(mem?.used_memory_rss ?? absent),
+        usedMemoryPeak: int(mem?.used_memory_peak ?? absent),
+        memFragmentationRatio: float(mem?.mem_fragmentation_ratio ?? absent),
         maxmemory: parseInt(mem?.maxmemory ?? '0', 10),
-        allocatorFragRatio: parseFloat(mem?.allocator_frag_ratio ?? '0'),
+        allocatorFragRatio: float(mem?.allocator_frag_ratio ?? absent),
         opsPerSec: parseInt(info.stats?.instantaneous_ops_per_sec ?? '0', 10),
         cpuSys,
         cpuUser,
-        ioThreadedReads: parseInt(info.stats?.io_threaded_reads_processed ?? '0', 10),
-        ioThreadedWrites: parseInt(info.stats?.io_threaded_writes_processed ?? '0', 10),
+        ioThreadedReads: int(info.stats?.io_threaded_reads_processed ?? absent),
+        ioThreadedWrites: int(info.stats?.io_threaded_writes_processed ?? absent),
         connectionId: ctx.connectionId,
       };
 

@@ -313,12 +313,12 @@ export interface StoredCommandStatsSample {
   connectionId: string;
   command: string;
   callsTotal: number;
-  usecTotal: number;
-  usecPerCall: number;
-  rejectedCalls: number;
-  failedCalls: number;
+  usecTotal: number | null;
+  usecPerCall: number | null;
+  rejectedCalls: number | null;
+  failedCalls: number | null;
   callsDelta: number;
-  usecDelta: number;
+  usecDelta: number | null;
   intervalMs: number;
   capturedAt: number;
 }
@@ -364,16 +364,16 @@ export interface StoredMemorySnapshot {
   id: string; // UUID
   timestamp: number; // When we captured this snapshot (ms)
   usedMemory: number;
-  usedMemoryRss: number;
-  usedMemoryPeak: number;
-  memFragmentationRatio: number;
+  usedMemoryRss: number | null;
+  usedMemoryPeak: number | null;
+  memFragmentationRatio: number | null;
   maxmemory: number;
-  allocatorFragRatio: number;
+  allocatorFragRatio: number | null;
   opsPerSec: number;
   cpuSys: number;
   cpuUser: number;
-  ioThreadedReads: number;
-  ioThreadedWrites: number;
+  ioThreadedReads: number | null;
+  ioThreadedWrites: number | null;
   connectionId?: string;
 }
 

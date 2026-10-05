@@ -79,7 +79,7 @@ export function Dashboard() {
     );
   };
 
-  const storedMemoryHistory: Array<{ time: string; used: number; peak: number }> | null =
+  const storedMemoryHistory: Array<{ time: string; used: number; peak: number | null }> | null =
     sortedStoredSnapshots
       ? sortedStoredSnapshots.map((s) => ({
           time: formatStoredTime(s.timestamp),

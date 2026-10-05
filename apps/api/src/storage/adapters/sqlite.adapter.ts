@@ -265,6 +265,100 @@ function addCaptureSessionsTargetNodeColumn(db: Database.Database): void {
   }
 }
 
+const MEMORY_SNAPSHOTS_COLUMNS = `
+  id TEXT PRIMARY KEY,
+  timestamp INTEGER NOT NULL,
+  used_memory INTEGER NOT NULL,
+  used_memory_rss INTEGER,
+  used_memory_peak INTEGER,
+  mem_fragmentation_ratio REAL,
+  maxmemory INTEGER NOT NULL DEFAULT 0,
+  allocator_frag_ratio REAL DEFAULT 0,
+  ops_per_sec INTEGER NOT NULL DEFAULT 0,
+  cpu_sys REAL NOT NULL DEFAULT 0,
+  cpu_user REAL NOT NULL DEFAULT 0,
+  io_threaded_reads INTEGER DEFAULT 0,
+  io_threaded_writes INTEGER DEFAULT 0,
+  connection_id TEXT NOT NULL DEFAULT 'env-default'
+`;
+
+const MEMORY_SNAPSHOTS_INDEXES = `
+  CREATE INDEX IF NOT EXISTS idx_memory_snap_timestamp ON memory_snapshots(timestamp DESC);
+  CREATE INDEX IF NOT EXISTS idx_memory_snap_connection_id ON memory_snapshots(connection_id);
+`;
+
+const MEMORY_SNAPSHOTS_NULLABLE = [
+  'used_memory_rss',
+  'used_memory_peak',
+  'mem_fragmentation_ratio',
+  'allocator_frag_ratio',
+  'io_threaded_reads',
+  'io_threaded_writes',
+] as const;
+
+const COMMAND_STATS_SAMPLES_COLUMNS = `
+  id TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL,
+  command TEXT NOT NULL,
+  calls_total INTEGER NOT NULL DEFAULT 0,
+  usec_total INTEGER DEFAULT 0,
+  usec_per_call REAL DEFAULT 0,
+  rejected_calls INTEGER DEFAULT 0,
+  failed_calls INTEGER DEFAULT 0,
+  calls_delta INTEGER NOT NULL,
+  usec_delta INTEGER,
+  interval_ms INTEGER NOT NULL,
+  captured_at INTEGER NOT NULL
+`;
+
+const COMMAND_STATS_SAMPLES_INDEXES = `
+  CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at
+    ON command_stats_samples(connection_id, command, captured_at);
+  CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at_global
+    ON command_stats_samples(captured_at);
+`;
+
+const COMMAND_STATS_SAMPLES_NULLABLE = [
+  'usec_total',
+  'usec_per_call',
+  'rejected_calls',
+  'failed_calls',
+  'usec_delta',
+] as const;
+
+function rebuildWithNullableColumns(
+  db: Database.Database,
+  table: string,
+  columnsDdl: string,
+  indexesDdl: string,
+  nullable: readonly string[],
+): void {
+  const existing = db.prepare(`PRAGMA table_info(${table})`).all() as {
+    name: string;
+    notnull: number;
+  }[];
+  if (!existing.some((c) => nullable.includes(c.name) && c.notnull === 1)) {
+    return;
+  }
+
+  const rebuilt = `${table}_rebuild`;
+  db.transaction(() => {
+    db.exec(`DROP TABLE IF EXISTS ${rebuilt}`);
+    db.exec(`CREATE TABLE ${rebuilt} (${columnsDdl})`);
+    const target = new Set(
+      (db.prepare(`PRAGMA table_info(${rebuilt})`).all() as { name: string }[]).map((c) => c.name),
+    );
+    const shared = existing
+      .map((c) => c.name)
+      .filter((name) => target.has(name))
+      .join(', ');
+    db.exec(`INSERT INTO ${rebuilt} (${shared}) SELECT ${shared} FROM ${table}`);
+    db.exec(`DROP TABLE ${table}`);
+    db.exec(`ALTER TABLE ${rebuilt} RENAME TO ${table}`);
+    db.exec(indexesDdl);
+  })();
+}
+
 /**
  * Either a local file or a remote libSQL endpoint, never both. A remote
  * database is opened by URL and never touches the filesystem, so a config
@@ -1579,45 +1673,11 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       CREATE INDEX IF NOT EXISTS idx_latency_hist_timestamp ON latency_histograms(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_latency_hist_connection_id ON latency_histograms(connection_id);
 
-      CREATE TABLE IF NOT EXISTS memory_snapshots (
-        id TEXT PRIMARY KEY,
-        timestamp INTEGER NOT NULL,
-        used_memory INTEGER NOT NULL,
-        used_memory_rss INTEGER NOT NULL,
-        used_memory_peak INTEGER NOT NULL,
-        mem_fragmentation_ratio REAL NOT NULL,
-        maxmemory INTEGER NOT NULL DEFAULT 0,
-        allocator_frag_ratio REAL NOT NULL DEFAULT 0,
-        ops_per_sec INTEGER NOT NULL DEFAULT 0,
-        cpu_sys REAL NOT NULL DEFAULT 0,
-        cpu_user REAL NOT NULL DEFAULT 0,
-        io_threaded_reads INTEGER NOT NULL DEFAULT 0,
-        io_threaded_writes INTEGER NOT NULL DEFAULT 0,
-        connection_id TEXT NOT NULL DEFAULT 'env-default'
-      );
+      CREATE TABLE IF NOT EXISTS memory_snapshots (${MEMORY_SNAPSHOTS_COLUMNS});
+      ${MEMORY_SNAPSHOTS_INDEXES}
 
-      CREATE INDEX IF NOT EXISTS idx_memory_snap_timestamp ON memory_snapshots(timestamp DESC);
-      CREATE INDEX IF NOT EXISTS idx_memory_snap_connection_id ON memory_snapshots(connection_id);
-
-      CREATE TABLE IF NOT EXISTS command_stats_samples (
-        id TEXT PRIMARY KEY,
-        connection_id TEXT NOT NULL,
-        command TEXT NOT NULL,
-        calls_total INTEGER NOT NULL DEFAULT 0,
-        usec_total INTEGER NOT NULL DEFAULT 0,
-        usec_per_call REAL NOT NULL DEFAULT 0,
-        rejected_calls INTEGER NOT NULL DEFAULT 0,
-        failed_calls INTEGER NOT NULL DEFAULT 0,
-        calls_delta INTEGER NOT NULL,
-        usec_delta INTEGER NOT NULL,
-        interval_ms INTEGER NOT NULL,
-        captured_at INTEGER NOT NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at
-        ON command_stats_samples(connection_id, command, captured_at);
-      CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at_global
-        ON command_stats_samples(captured_at);
+      CREATE TABLE IF NOT EXISTS command_stats_samples (${COMMAND_STATS_SAMPLES_COLUMNS});
+      ${COMMAND_STATS_SAMPLES_INDEXES}
 
       CREATE TABLE IF NOT EXISTS latency_stats_samples (
         id TEXT PRIMARY KEY,
@@ -1986,6 +2046,20 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     addColumnIfMissing('command_stats_samples', 'usec_per_call', 'REAL', '0');
     addColumnIfMissing('command_stats_samples', 'rejected_calls', 'INTEGER', '0');
     addColumnIfMissing('command_stats_samples', 'failed_calls', 'INTEGER', '0');
+    rebuildWithNullableColumns(
+      this.db,
+      'memory_snapshots',
+      MEMORY_SNAPSHOTS_COLUMNS,
+      MEMORY_SNAPSHOTS_INDEXES,
+      MEMORY_SNAPSHOTS_NULLABLE,
+    );
+    rebuildWithNullableColumns(
+      this.db,
+      'command_stats_samples',
+      COMMAND_STATS_SAMPLES_COLUMNS,
+      COMMAND_STATS_SAMPLES_INDEXES,
+      COMMAND_STATS_SAMPLES_NULLABLE,
+    );
     addCaptureSessionsTargetNodeColumn(this.db!);
     addMemoryProposalIntegrityColumns(this.db!);
 
@@ -3337,8 +3411,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           snapshot.opsPerSec ?? 0,
           snapshot.cpuSys ?? 0,
           snapshot.cpuUser ?? 0,
-          snapshot.ioThreadedReads ?? 0,
-          snapshot.ioThreadedWrites ?? 0,
+          snapshot.ioThreadedReads ?? null,
+          snapshot.ioThreadedWrites ?? null,
           connId,
         );
         count += result.changes;
@@ -3398,8 +3472,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       opsPerSec: row.ops_per_sec ?? 0,
       cpuSys: row.cpu_sys ?? 0,
       cpuUser: row.cpu_user ?? 0,
-      ioThreadedReads: row.io_threaded_reads ?? 0,
-      ioThreadedWrites: row.io_threaded_writes ?? 0,
+      ioThreadedReads: row.io_threaded_reads,
+      ioThreadedWrites: row.io_threaded_writes,
       connectionId: row.connection_id,
     }));
   }
