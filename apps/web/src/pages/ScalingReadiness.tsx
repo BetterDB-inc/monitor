@@ -40,6 +40,14 @@ export function ScalingReadiness() {
     [],
   );
 
+  useEffect(
+    () => () => {
+      if (debounce.current) clearTimeout(debounce.current);
+      pending.current = {};
+    },
+    [connectionId],
+  );
+
   const { data: readiness, isLoading, isError } = useQuery({
     queryKey: ['scaling-readiness', connectionId],
     queryFn: ({ signal }) => scalingReadinessApi.get(signal),

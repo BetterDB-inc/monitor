@@ -1,19 +1,27 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 
-const { hasFeature, useQuery } = vi.hoisted(() => ({ hasFeature: vi.fn(), useQuery: vi.fn() }));
+const { hasFeature, useQuery, updateSettings, connection } = vi.hoisted(() => ({
+  hasFeature: vi.fn(),
+  useQuery: vi.fn(),
+  updateSettings: vi.fn(),
+  connection: { id: 'c' },
+}));
 
 vi.mock('@tanstack/react-query', () => ({
   useQuery,
   useQueryClient: () => ({ setQueryData: vi.fn(), invalidateQueries: vi.fn() }),
 }));
 vi.mock('../hooks/useLicense', () => ({ useLicense: () => ({ hasFeature }) }));
-vi.mock('../hooks/useConnection', () => ({ useConnection: () => ({ currentConnection: { id: 'c' } }) }));
+vi.mock('../hooks/useConnection', () => ({ useConnection: () => ({ currentConnection: { id: connection.id } }) }));
+vi.mock('../api/scaling-readiness', () => ({ scalingReadinessApi: { updateSettings } }));
 vi.mock('../components/pages/scaling-readiness', () => ({
   ReadinessHeader: () => <div data-testid="header" />,
   ReadinessBreakdown: () => <div data-testid="breakdown" />,
   ReadinessHistoryChart: () => <div data-testid="history" />,
-  ReadinessAlertSettings: () => <div data-testid="alert-settings" />,
+  ReadinessAlertSettings: ({ onChange }: { onChange: (u: { alertThreshold: number }) => void }) => (
+    <button data-testid="alert-settings" onClick={() => onChange({ alertThreshold: 55 })} />
+  ),
   ReadinessProLocked: () => <div data-testid="locked" />,
 }));
 vi.mock('../components/ui/date-range-picker', () => ({ DateRangePicker: ({ placeholder }: { placeholder?: string }) => (
@@ -56,6 +64,38 @@ describe('ScalingReadiness page', () => {
     hasFeature.mockReturnValue(true);
     render(<ScalingReadiness />);
     expect(screen.getByTestId('picker')).toHaveTextContent('Last 7 days');
+  });
+
+  it('drops a pending settings edit when the connection changes', () => {
+    vi.useFakeTimers();
+    updateSettings.mockReset();
+    updateSettings.mockResolvedValue({});
+    hasFeature.mockReturnValue(true);
+    connection.id = 'c';
+    const { rerender } = render(<ScalingReadiness />);
+    fireEvent.click(screen.getByTestId('alert-settings'));
+    connection.id = 'other';
+    rerender(<ScalingReadiness />);
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(updateSettings).not.toHaveBeenCalled();
+    connection.id = 'c';
+    vi.useRealTimers();
+  });
+
+  it('saves a settings edit after the debounce on the same connection', () => {
+    vi.useFakeTimers();
+    updateSettings.mockReset();
+    updateSettings.mockResolvedValue({});
+    hasFeature.mockReturnValue(true);
+    render(<ScalingReadiness />);
+    fireEvent.click(screen.getByTestId('alert-settings'));
+    act(() => {
+      vi.advanceTimersByTime(600);
+    });
+    expect(updateSettings).toHaveBeenCalledWith({ alertThreshold: 55 });
+    vi.useRealTimers();
   });
 
   it('does not query Pro endpoints for Community', () => {
