@@ -9,18 +9,42 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import { format } from 'date-fns';
 import { formatTime } from '../metric-forecasting/formatters';
+
+const MULTI_DAY_MS = 24 * 60 * 60 * 1000;
+
+export function isMultiDaySpan(points: { timestamp: number }[]): boolean {
+  if (points.length < 2) return false;
+  return points[points.length - 1].timestamp - points[0].timestamp > MULTI_DAY_MS;
+}
+
+export function formatReadinessAxisLabel(timestamp: number, multiDay: boolean): string {
+  return multiDay ? format(timestamp, 'MMM d') : formatTime(timestamp);
+}
+
+export function formatReadinessTooltipLabel(timestamp: number, multiDay: boolean): string {
+  return multiDay ? format(timestamp, 'MMM d, HH:mm') : formatTime(timestamp);
+}
 
 export function ReadinessHistoryChart({ points }: { points: ScalingReadinessHistoryPoint[] }) {
   if (points.length === 0) {
     return <p className="text-sm text-muted-foreground">No score history in this range yet.</p>;
   }
-  const data = points.map((p) => ({ ...p, label: formatTime(p.timestamp) }));
+  const multiDay = isMultiDaySpan(points);
+  const data = points.map((p) => ({ ...p, label: formatReadinessTooltipLabel(p.timestamp, multiDay) }));
   return (
     <ResponsiveContainer width="100%" height={260}>
       <AreaChart data={data}>
         <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-        <XAxis dataKey="label" minTickGap={40} />
+        <XAxis
+          dataKey="timestamp"
+          type="number"
+          scale="time"
+          domain={['dataMin', 'dataMax']}
+          tickFormatter={(value: number) => formatReadinessAxisLabel(value, multiDay)}
+          minTickGap={40}
+        />
         <YAxis domain={[0, 100]} />
         <ReferenceLine y={70} strokeDasharray="4 4" stroke="var(--color-green-500, #22c55e)" />
         <ReferenceLine y={40} strokeDasharray="4 4" stroke="var(--color-red-500, #ef4444)" />
