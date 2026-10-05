@@ -279,6 +279,9 @@ const MEMORY_SNAPSHOTS_COLUMNS = `
   cpu_user REAL NOT NULL DEFAULT 0,
   io_threaded_reads INTEGER DEFAULT 0,
   io_threaded_writes INTEGER DEFAULT 0,
+  connected_clients INTEGER,
+  maxclients INTEGER,
+  total_keys INTEGER,
   connection_id TEXT NOT NULL DEFAULT 'env-default'
 `;
 
@@ -2053,6 +2056,16 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       MEMORY_SNAPSHOTS_INDEXES,
       MEMORY_SNAPSHOTS_NULLABLE,
     );
+    const memorySnapshotColumns = new Set(
+      (this.db.prepare('PRAGMA table_info(memory_snapshots)').all() as { name: string }[]).map(
+        (col) => col.name,
+      ),
+    );
+    for (const name of ['connected_clients', 'maxclients', 'total_keys']) {
+      if (!memorySnapshotColumns.has(name)) {
+        this.db.exec(`ALTER TABLE memory_snapshots ADD COLUMN ${name} INTEGER`);
+      }
+    }
     rebuildWithNullableColumns(
       this.db,
       'command_stats_samples',
@@ -3392,8 +3405,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO memory_snapshots (
         id, timestamp, used_memory, used_memory_rss, used_memory_peak,
         mem_fragmentation_ratio, maxmemory, allocator_frag_ratio,
-        ops_per_sec, cpu_sys, cpu_user, io_threaded_reads, io_threaded_writes, connection_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ops_per_sec, cpu_sys, cpu_user, io_threaded_reads, io_threaded_writes,
+        connected_clients, maxclients, total_keys, connection_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     let count = 0;
@@ -3413,6 +3427,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           snapshot.cpuUser ?? 0,
           snapshot.ioThreadedReads ?? null,
           snapshot.ioThreadedWrites ?? null,
+          snapshot.connectedClients ?? null,
+          snapshot.maxclients ?? null,
+          snapshot.totalKeys ?? null,
           connId,
         );
         count += result.changes;
@@ -3451,7 +3468,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const query = `
       SELECT id, timestamp, used_memory, used_memory_rss, used_memory_peak,
              mem_fragmentation_ratio, maxmemory, allocator_frag_ratio,
-             ops_per_sec, cpu_sys, cpu_user, io_threaded_reads, io_threaded_writes, connection_id
+             ops_per_sec, cpu_sys, cpu_user, io_threaded_reads, io_threaded_writes,
+             connected_clients, maxclients, total_keys, connection_id
       FROM memory_snapshots
       ${whereClause}
       ORDER BY timestamp DESC
@@ -3474,6 +3492,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       cpuUser: row.cpu_user ?? 0,
       ioThreadedReads: row.io_threaded_reads,
       ioThreadedWrites: row.io_threaded_writes,
+      connectedClients: row.connected_clients ?? null,
+      maxclients: row.maxclients ?? null,
+      totalKeys: row.total_keys ?? null,
       connectionId: row.connection_id,
     }));
   }
