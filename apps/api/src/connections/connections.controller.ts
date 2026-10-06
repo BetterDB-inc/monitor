@@ -18,6 +18,7 @@ import {
   SuccessResponseDto,
   SetAutoRegisterDto,
 } from '../common/dto/connections.dto';
+import { withTimeout } from '../common/utils/with-timeout';
 
 const RUNTIME_CAPABILITY_KEYS = Object.keys(
   CAPABILITY_TEST_COMMAND,
@@ -35,24 +36,6 @@ function isRuntimeCapabilityKey(value: string): value is keyof RuntimeCapabiliti
  * `available: 'unknown'` and the prior capability state is preserved.
  */
 const CAPABILITY_PROBE_TIMEOUT_MS = 5000;
-
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`Probe timed out after ${ms}ms`));
-    }, ms);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (err) => {
-        clearTimeout(timer);
-        reject(err);
-      },
-    );
-  });
-}
 
 @ApiTags('connections')
 @Controller('connections')
@@ -233,7 +216,7 @@ export class ConnectionsController {
       this.inflightProbes.set(probeKey, probe);
     }
     try {
-      await withTimeout(probe, CAPABILITY_PROBE_TIMEOUT_MS);
+      await withTimeout(probe, CAPABILITY_PROBE_TIMEOUT_MS, `Probe timed out after ${CAPABILITY_PROBE_TIMEOUT_MS}ms`);
       this.capabilityTracker.resetCapability(id, capability);
       return { available: true };
     } catch (error) {
