@@ -30,7 +30,13 @@ export function ScalingReadiness() {
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle');
   const debounce = useRef<ReturnType<typeof setTimeout>>(undefined);
   const statusReset = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const pending = useRef<ScalingReadinessSettingsUpdate>({});
+  const pending = useRef<{
+    connectionId: string;
+    update: ScalingReadinessSettingsUpdate;
+  } | null>(null);
+  const inFlight = useRef(new Set<string>());
+  const activeConnection = useRef(connectionId);
+  activeConnection.current = connectionId;
 
   useEffect(
     () => () => {
@@ -44,10 +50,15 @@ export function ScalingReadiness() {
     () => () => {
       if (debounce.current) clearTimeout(debounce.current);
       if (statusReset.current) clearTimeout(statusReset.current);
-      pending.current = {};
+      if (pending.current) {
+        void queryClient.invalidateQueries({
+          queryKey: ['scaling-readiness-settings', pending.current.connectionId],
+        });
+      }
+      pending.current = null;
       setSaveStatus('idle');
     },
-    [connectionId],
+    [connectionId, queryClient],
   );
 
   const { data: readiness, isLoading, isError } = useQuery({
@@ -76,26 +87,52 @@ export function ScalingReadiness() {
     enabled: !!connectionId && canUseHistory,
   });
 
+  const flush = () => {
+    const next = pending.current;
+    if (!next || inFlight.current.has(next.connectionId)) return;
+    pending.current = null;
+    const key = ['scaling-readiness-settings', next.connectionId];
+    inFlight.current.add(next.connectionId);
+    const isCurrent = () => activeConnection.current === next.connectionId;
+    const hasNewer = () => pending.current?.connectionId === next.connectionId;
+    const settle = () => {
+      inFlight.current.delete(next.connectionId);
+      if (pending.current) {
+        if (debounce.current) clearTimeout(debounce.current);
+        flush();
+      }
+    };
+    scalingReadinessApi
+      .updateSettings(next.update, next.connectionId)
+      .then(
+        (saved) => {
+          if (!hasNewer()) queryClient.setQueryData(key, saved);
+          if (isCurrent()) {
+            setSaveStatus('saved');
+            if (statusReset.current) clearTimeout(statusReset.current);
+            statusReset.current = setTimeout(() => setSaveStatus('idle'), 2000);
+          }
+        },
+        () => {
+          if (!hasNewer()) void queryClient.invalidateQueries({ queryKey: key });
+          if (isCurrent()) setSaveStatus('error');
+        },
+      )
+      .finally(settle);
+  };
+
   const updateSettings = (update: ScalingReadinessSettingsUpdate) => {
-    pending.current = { ...pending.current, ...update };
-    queryClient.setQueryData(settingsKey, (prev: ScalingReadinessSettings | undefined) =>
-      prev ? { ...prev, ...update } : prev,
+    if (!connectionId) return;
+    pending.current = {
+      connectionId,
+      update: { ...pending.current?.update, ...update },
+    };
+    queryClient.setQueryData(
+      ['scaling-readiness-settings', connectionId],
+      (prev: ScalingReadinessSettings | undefined) => (prev ? { ...prev, ...update } : prev),
     );
     if (debounce.current) clearTimeout(debounce.current);
-    debounce.current = setTimeout(async () => {
-      const toSave = pending.current;
-      pending.current = {};
-      try {
-        const saved = await scalingReadinessApi.updateSettings(toSave);
-        queryClient.setQueryData(settingsKey, saved);
-        setSaveStatus('saved');
-        if (statusReset.current) clearTimeout(statusReset.current);
-        statusReset.current = setTimeout(() => setSaveStatus('idle'), 2000);
-      } catch {
-        await queryClient.invalidateQueries({ queryKey: settingsKey });
-        setSaveStatus('error');
-      }
-    }, 500);
+    debounce.current = setTimeout(flush, 500);
   };
 
   return (

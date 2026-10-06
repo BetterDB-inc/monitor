@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 
-const { hasFeature, useQuery, updateSettings, connection } = vi.hoisted(() => ({
+const { hasFeature, useQuery, updateSettings, connection, queryClient } = vi.hoisted(() => ({
+  queryClient: { setQueryData: vi.fn(), invalidateQueries: vi.fn() },
   hasFeature: vi.fn(),
   useQuery: vi.fn(),
   updateSettings: vi.fn(),
@@ -10,7 +11,7 @@ const { hasFeature, useQuery, updateSettings, connection } = vi.hoisted(() => ({
 
 vi.mock('@tanstack/react-query', () => ({
   useQuery,
-  useQueryClient: () => ({ setQueryData: vi.fn(), invalidateQueries: vi.fn() }),
+  useQueryClient: () => queryClient,
 }));
 vi.mock('../hooks/useLicense', () => ({ useLicense: () => ({ hasFeature }) }));
 vi.mock('../hooks/useConnection', () => ({ useConnection: () => ({ currentConnection: { id: connection.id } }) }));
@@ -26,7 +27,10 @@ vi.mock('../components/pages/scaling-readiness', () => ({
     onChange: (u: { alertThreshold: number }) => void;
     saveStatus: string;
   }) => (
-    <button data-testid="alert-settings" data-save-status={saveStatus} onClick={() => onChange({ alertThreshold: 55 })} />
+    <>
+      <button data-testid="alert-settings" data-save-status={saveStatus} onClick={() => onChange({ alertThreshold: 55 })} />
+      <button data-testid="alert-edit-2" onClick={() => onChange({ alertThreshold: 66 })} />
+    </>
   ),
   ReadinessProLocked: () => <div data-testid="locked" />,
 }));
@@ -42,6 +46,8 @@ const readiness = { connectionId: 'c', computedAt: 1, score: 80, band: 'green', 
 describe('ScalingReadiness page', () => {
   beforeEach(() => {
     useQuery.mockReset();
+    queryClient.setQueryData.mockReset();
+    queryClient.invalidateQueries.mockReset();
     useQuery.mockImplementation(({ queryKey }: { queryKey: unknown[] }) => {
       if (queryKey[0] === 'scaling-readiness') return { data: readiness, isLoading: false };
       if (queryKey[0] === 'scaling-readiness-settings')
@@ -119,7 +125,7 @@ describe('ScalingReadiness page', () => {
     act(() => {
       vi.advanceTimersByTime(600);
     });
-    expect(updateSettings).toHaveBeenCalledWith({ alertThreshold: 55 });
+    expect(updateSettings).toHaveBeenCalledWith({ alertThreshold: 55 }, 'c');
     vi.useRealTimers();
   });
 
@@ -142,5 +148,75 @@ describe('ScalingReadiness page', () => {
     );
     render(<ScalingReadiness />);
     expect(screen.getByText('Could not load scaling readiness')).toBeInTheDocument();
+  });
+
+  it('sends a queued edit after the in-flight save and caches the newer value', async () => {
+    vi.useFakeTimers();
+    updateSettings.mockReset();
+    let resolveFirst: (v: unknown) => void = () => {};
+    updateSettings.mockImplementationOnce(() => new Promise((r) => (resolveFirst = r)));
+    updateSettings.mockImplementationOnce(async (u: object) => ({ saved: u }));
+    hasFeature.mockReturnValue(true);
+    connection.id = 'c';
+    render(<ScalingReadiness />);
+    fireEvent.click(screen.getByTestId('alert-settings'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByTestId('alert-edit-2'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    queryClient.setQueryData.mockClear();
+    await act(async () => {
+      resolveFirst({ saved: { alertThreshold: 55 } });
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    expect(updateSettings).toHaveBeenCalledTimes(2);
+    expect(updateSettings).toHaveBeenLastCalledWith({ alertThreshold: 66 }, 'c');
+    const writes = queryClient.setQueryData.mock.calls.filter(([, v]: any[]) => typeof v !== 'function');
+    expect(writes).toHaveLength(1);
+    expect(writes[0][1]).toEqual({ saved: { alertThreshold: 66 } });
+    vi.useRealTimers();
+  });
+
+  it('ignores a late completion after a connection switch', async () => {
+    vi.useFakeTimers();
+    updateSettings.mockReset();
+    let resolveSave: (v: unknown) => void = () => {};
+    updateSettings.mockImplementation(() => new Promise((r) => (resolveSave = r)));
+    hasFeature.mockReturnValue(true);
+    connection.id = 'c';
+    const { rerender } = render(<ScalingReadiness />);
+    fireEvent.click(screen.getByTestId('alert-settings'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    connection.id = 'other';
+    rerender(<ScalingReadiness />);
+    await act(async () => {
+      resolveSave({});
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    expect(screen.getByTestId('alert-settings')).toHaveAttribute('data-save-status', 'idle');
+    connection.id = 'c';
+    vi.useRealTimers();
+  });
+
+  it('invalidates the previous connection settings when switching with a dirty edit', () => {
+    vi.useFakeTimers();
+    hasFeature.mockReturnValue(true);
+    connection.id = 'c';
+    const { rerender } = render(<ScalingReadiness />);
+    fireEvent.click(screen.getByTestId('alert-settings'));
+    connection.id = 'other';
+    rerender(<ScalingReadiness />);
+    expect(queryClient.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ['scaling-readiness-settings', 'c'],
+    });
+    connection.id = 'c';
+    vi.useRealTimers();
   });
 });

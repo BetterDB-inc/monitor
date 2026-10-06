@@ -329,8 +329,7 @@ export async function fetchApi<T>(endpoint: string, options?: FetchApiOptions): 
     headers['Content-Type'] = 'application/json';
   }
 
-  // Inject connection ID header if set
-  if (currentConnectionId) {
+  if (currentConnectionId && !headers[CONNECTION_ID_HEADER]) {
     headers[CONNECTION_ID_HEADER] = currentConnectionId;
   }
 

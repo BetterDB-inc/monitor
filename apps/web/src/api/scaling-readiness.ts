@@ -12,9 +12,10 @@ export const scalingReadinessApi = {
     fetchApi<ScalingReadinessHistory>(`/scaling-readiness/history?from=${from}&to=${to}`, { signal }),
   getSettings: (signal?: AbortSignal) =>
     fetchApi<ScalingReadinessSettings>('/scaling-readiness/settings', { signal }),
-  updateSettings: (update: ScalingReadinessSettingsUpdate) =>
+  updateSettings: (update: ScalingReadinessSettingsUpdate, connectionId: string) =>
     fetchApi<ScalingReadinessSettings>('/scaling-readiness/settings', {
       method: 'PUT',
+      headers: { 'x-connection-id': connectionId },
       body: JSON.stringify(update),
     }),
 };
