@@ -28,8 +28,24 @@ export class TenantController {
   }
 
   @Get()
-  listTenants(@Query(new ValidationPipe({ whitelist: true, transform: true })) query: ListTenantsDto) {
+  listTenants(
+    @Query(new ValidationPipe({ whitelist: true, transform: true })) query: ListTenantsDto,
+  ) {
     return this.tenantService.listTenants(query);
+  }
+
+  @Get('by-subdomain/:subdomain/status')
+  async getTenantStatus(@Param('subdomain') subdomain: string) {
+    const tenant = await this.tenantService.getTenantBySubdomain(subdomain);
+    if (!tenant) {
+      throw new NotFoundException(`No tenant found for subdomain ${subdomain}`);
+    }
+    return {
+      subdomain: tenant.subdomain,
+      status: tenant.status,
+      ready: tenant.status === 'ready',
+      statusMessage: tenant.statusMessage,
+    };
   }
 
   @Get('by-subdomain/:subdomain')

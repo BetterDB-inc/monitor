@@ -3,6 +3,7 @@ import {
   Post,
   Body,
   UseGuards,
+  ConflictException,
   NotFoundException,
   ValidationPipe,
 } from '@nestjs/common';
@@ -26,6 +27,12 @@ export class AuthController {
     const user = await this.userService.getUserByEmail(dto.email);
     if (!user) {
       throw new NotFoundException('User not found');
+    }
+
+    if (user.tenant.status !== 'ready') {
+      throw new ConflictException(
+        `Workspace is still provisioning (status: ${user.tenant.status})`,
+      );
     }
 
     const token = this.authService.generateWorkspaceToken({
