@@ -48,10 +48,11 @@ import type {
   KeyDetail,
   KeyPatternData,
 } from '@betterdb/shared';
-import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT } from '@betterdb/shared';
+import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_SECONDS } from '@betterdb/shared';
 
 import type { SshTunnelConfig } from '@betterdb/shared';
 import { SshTunnelService } from '../ssh/ssh-tunnel.service';
+import { tlsIdentityOptions } from './tls-servername';
 
 export interface UnifiedDatabaseAdapterConfig {
   host: string;
@@ -60,6 +61,8 @@ export interface UnifiedDatabaseAdapterConfig {
   password: string;
   connectionName?: string;
   tls?: boolean;
+  /** Hostname the TLS certificate is verified against when `host` is a bare IP. */
+  tlsServername?: string;
   /** Optional SSH tunnel used to reach the database (secrets already decrypted). */
   sshTunnel?: SshTunnelConfig;
   /** Tunnel manager; required when sshTunnel is enabled. */
@@ -68,9 +71,22 @@ export interface UnifiedDatabaseAdapterConfig {
   connectionId?: string;
 }
 
-function isIpAddress(host: string): boolean {
-  // IPv4 or anything containing ':' (IPv6). SNI servername must be a hostname.
-  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':');
+export const QUIT_TIMEOUT_MS = 2_000;
+
+async function closeClient(client: Valkey): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const quit = client.quit().then(
+    () => 'quit' as const,
+    () => 'failed' as const,
+  );
+  const deadline = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), QUIT_TIMEOUT_MS);
+  });
+  try {
+    if ((await Promise.race([quit, deadline])) !== 'quit') client.disconnect();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export class UnifiedDatabaseAdapter implements DatabasePort {
@@ -123,11 +139,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // ("Protocol error, got 'H'"). Send the hostname as servername unless it
       // is a bare IP, which SNI does not allow. Through a tunnel the socket
       // points at localhost, but the certificate is still for the real host.
-      tls: this.config.tls
-        ? isIpAddress(this.config.host)
-          ? {}
-          : { servername: this.config.host }
-        : undefined,
+      // An auto-registered node reached by IP also accepts a certificate
+      // issued for the hostname its cluster announces for it.
+      tls: this.config.tls ? tlsIdentityOptions(this.config.host, this.config.tlsServername) : undefined,
     });
   }
 
@@ -253,7 +267,21 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     return this.observedHostKeyFingerprint;
   }
 
+  private connectPromise: Promise<void> | null = null;
+
   async connect(): Promise<void> {
+    if (this.connectPromise) {
+      return this.connectPromise;
+    }
+    this.connectPromise = this.doConnect();
+    try {
+      await this.connectPromise;
+    } finally {
+      this.connectPromise = null;
+    }
+  }
+
+  private async doConnect(): Promise<void> {
     try {
       if (this.usesTunnel && !this.tunnelActive) {
         await this.establishTunnel();
@@ -277,16 +305,11 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
   async disconnect(): Promise<void> {
     if (this.cliClient) {
-      await this.cliClient.quit().catch(() => {});
+      await closeClient(this.cliClient);
       this.cliClient = null;
     }
     if (this._client) {
-      // iovalkey rejects quit() when the client is already closed / never
-      // connected. Swallow it (falling back to a hard disconnect) so a failed
-      // quit can never skip the tunnel teardown below and leak the SSH session.
-      await this._client.quit().catch(() => {
-        this._client?.disconnect();
-      });
+      await closeClient(this._client);
     }
     await this.teardownTunnel();
     this.connected = false;
@@ -329,6 +352,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     return this.capabilities;
   }
 
+  async refreshCapabilities(): Promise<void> {
+    await this.detectCapabilities();
+  }
+
   private async detectCapabilities(): Promise<void> {
     const info = await this.getInfo(['server']);
     const version = InfoParser.getVersion(info);
@@ -338,21 +365,37 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     }
 
     const isValkey = InfoParser.isValkey(info);
-    // Sentinel mode is reported in the Server section (spelled differently per
-    // engine: server_mode on Valkey unless extended-redis-compat, else redis_mode;
-    // redis_mode on Redis). Captured here so a wedged Sentinel is still identifiable
-    // later without a fresh INFO. See AnomalyService.connectionIsSentinel.
-    const server = (info.server ?? {}) as Record<string, string>;
-    const isSentinel =
-      server.server_mode === 'sentinel' ||
-      server.redis_mode === 'sentinel' ||
-      server.valkey_mode === 'sentinel';
     const versionParts = version.split('.').map((v) => parseInt(v, 10));
     const majorVersion = versionParts[0] || 0;
     const minorVersion = versionParts[1] || 0;
 
     const redisSupportsSlotStats =
       !isValkey && (majorVersion > 8 || (majorVersion === 8 && minorVersion >= 2));
+
+    // Sentinel mode is reported in the Server section (spelled differently per
+    // engine: server_mode on Valkey unless extended-redis-compat, else redis_mode;
+    // redis_mode on Redis). Captured here so a wedged Sentinel is still identifiable
+    // later without a fresh INFO. See AnomalyService.connectionIsSentinel.
+    const isSentinel = InfoParser.isSentinelMode(
+      (info.server ?? info) as Record<string, unknown>,
+    );
+    if (isSentinel) {
+      this.capabilities = {
+        dbType: isValkey ? 'valkey' : 'redis',
+        version,
+        hasSlotStats: false,
+        hasCommandLog: false,
+        hasClusterSlotStats: false,
+        hasLatencyMonitor: false,
+        hasAclLog: majorVersion >= 6,
+        hasMemoryDoctor: false,
+        hasConfig: false,
+        hasVectorSearch: false,
+        clusterEnabled: false,
+        isSentinel: true,
+      };
+      return;
+    }
 
     // Probe whether CONFIG is available (disabled on managed services like AWS ElastiCache)
     let hasConfig = true;
@@ -376,6 +419,15 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // Search module not loaded
     }
 
+    let clusterEnabled = false;
+    try {
+      const clusterInfo = await this.getInfo(['cluster']);
+      clusterEnabled =
+        (clusterInfo.cluster as Record<string, unknown> | undefined)?.cluster_enabled === '1';
+    } catch {
+      clusterEnabled = false;
+    }
+
     this.capabilities = {
       dbType: isValkey ? 'valkey' : 'redis',
       version,
@@ -387,7 +439,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       hasMemoryDoctor: true,
       hasConfig,
       hasVectorSearch,
-      isSentinel,
+      clusterEnabled,
+      // Non-Sentinel path: a Sentinel connection returns early above with
+      // isSentinel: true, so reaching here means this is not a Sentinel.
+      isSentinel: false,
     };
   }
 
@@ -778,6 +833,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
           totalCardinality: 0,
           maxCardinality: 0,
           totalIdleTime: 0,
+          staleCount: 0,
           withTtl: 0,
           withoutTtl: 0,
           ttlValues: [],
@@ -861,6 +917,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
               : null;
           if (idle !== null) {
             stats.totalIdleTime += idle;
+            if (idle > STALE_KEY_IDLE_SECONDS) {
+              stats.staleCount = (stats.staleCount ?? 0) + 1;
+            }
           }
 
           const freq =

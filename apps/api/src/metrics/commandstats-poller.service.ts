@@ -17,10 +17,10 @@ interface ConnectionBaseline {
 export interface CommandStatsSnapshotEntry {
   command: string;
   callsTotal: number;
-  usecTotal: number;
-  usecPerCall: number;
-  rejectedCalls: number;
-  failedCalls: number;
+  usecTotal?: number;
+  usecPerCall?: number;
+  rejectedCalls?: number;
+  failedCalls?: number;
   capturedAt: number;
 }
 
@@ -56,6 +56,10 @@ export class CommandstatsPollerService extends MultiConnectionPoller implements 
     this.lastPruneByConnection.delete(connectionId);
   }
 
+  protected supportsExternalConnections(): boolean {
+    return true;
+  }
+
   getSnapshot(connectionId: string): CommandStatsSnapshotEntry[] {
     const baseline = this.baselines.get(connectionId);
     if (!baseline) {
@@ -86,7 +90,15 @@ export class CommandstatsPollerService extends MultiConnectionPoller implements 
     }
 
     const section = (raw.commandstats ?? raw['Commandstats']) as Record<string, string> | undefined;
-    const current = parseCommandStatsSection(section);
+    const parsed = parseCommandStatsSection(section);
+    const current =
+      ctx.connectionType === 'external'
+        ? parsed
+        : parsed.map((s) => ({
+            ...s,
+            rejectedCalls: s.rejectedCalls ?? 0,
+            failedCalls: s.failedCalls ?? 0,
+          }));
 
     const currentByCommand = new Map(current.map((s) => [s.command, s]));
 
@@ -112,12 +124,12 @@ export class CommandstatsPollerService extends MultiConnectionPoller implements 
     const batch: Array<{
       command: string;
       callsTotal: number;
-      usecTotal: number;
-      usecPerCall: number;
-      rejectedCalls: number;
-      failedCalls: number;
+      usecTotal: number | null;
+      usecPerCall: number | null;
+      rejectedCalls: number | null;
+      failedCalls: number | null;
       callsDelta: number;
-      usecDelta: number;
+      usecDelta: number | null;
       intervalMs: number;
       capturedAt: number;
     }> = [];
@@ -129,20 +141,25 @@ export class CommandstatsPollerService extends MultiConnectionPoller implements 
         continue;
       }
       const callsDelta = sample.calls - prev.calls;
-      const usecDelta = sample.usec - prev.usec;
-      if (callsDelta < 0 || usecDelta < 0) {
+      if (callsDelta < 0) {
         hadReset = true;
         break;
       }
-      if (callsDelta === 0 && usecDelta === 0) continue;
+      const { usec, usecPerCall } = sample;
+      const usecDelta = usec === undefined || prev.usec === undefined ? null : usec - prev.usec;
+      if (usecDelta !== null && usecDelta < 0) {
+        hadReset = true;
+        break;
+      }
+      if (callsDelta === 0 && (usecDelta ?? 0) === 0) continue;
 
       batch.push({
         command: sample.command,
         callsTotal: sample.calls,
-        usecTotal: sample.usec,
-        usecPerCall: sample.usecPerCall,
-        rejectedCalls: sample.rejectedCalls,
-        failedCalls: sample.failedCalls,
+        usecTotal: usec ?? null,
+        usecPerCall: usecPerCall ?? null,
+        rejectedCalls: sample.rejectedCalls ?? null,
+        failedCalls: sample.failedCalls ?? null,
         callsDelta,
         usecDelta,
         intervalMs,

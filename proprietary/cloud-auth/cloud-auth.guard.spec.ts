@@ -77,6 +77,17 @@ describe('CloudAuthGuardImpl', () => {
     expect(request.cloudUser).toMatchObject({ userId: 'u1', role: 'owner' });
   });
 
+  it('bypasses session auth for OTLP metrics ingest', () => {
+    const request: FakeRequest = {
+      url: '/v1/external/metrics',
+      headers: { host: 'acme.betterdb.com' },
+    };
+    const { context, redirect } = contextFor(request);
+    expect(new CloudAuthGuardImpl().canActivate(context)).toBe(true);
+    expect(redirect).not.toHaveBeenCalled();
+    expect(request.actor).toBeNull();
+  });
+
   it('leaves request.actor null and redirects without a session', () => {
     const request: FakeRequest = {
       url: '/api/connections',

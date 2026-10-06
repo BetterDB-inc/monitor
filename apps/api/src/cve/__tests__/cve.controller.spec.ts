@@ -1,10 +1,14 @@
-import { ServiceUnavailableException } from '@nestjs/common';
+import { ConflictException, ServiceUnavailableException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import type { CveScanResult, StoredCveDataset } from '@betterdb/shared';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { CveController } from '../cve.controller';
 import { CveRefreshService } from '../cve-refresh.service';
-import { CveDatasetUnavailableError, CveScanService } from '../cve-scan.service';
+import {
+  CveDatasetUnavailableError,
+  CveEngineVersionPendingError,
+  CveScanService,
+} from '../cve-scan.service';
 import { CveService } from '../cve.service';
 
 const SCAN: CveScanResult = {
@@ -47,13 +51,14 @@ const DATASET: StoredCveDataset = {
 };
 
 describe('CveController', () => {
-  const scanService = { getLatest: jest.fn(), scan: jest.fn() };
+  const scanService = { getLatest: jest.fn(), scan: jest.fn(), storedMatchesEngine: jest.fn() };
   const refreshService = { getDataset: jest.fn() };
   const connectionRegistry = { get: jest.fn(), getDefaultId: jest.fn() };
   let controller: CveController;
 
   beforeEach(async () => {
     jest.resetAllMocks();
+    scanService.storedMatchesEngine.mockReturnValue(true);
     const moduleRef = await Test.createTestingModule({
       controllers: [CveController],
       providers: [
@@ -133,6 +138,52 @@ describe('CveController', () => {
     await expect(controller.getScan('conn-1')).rejects.toThrow(
       'No node in this connection could be scanned',
     );
+  });
+
+  it('answers 409 naming the missing attribute while a pushed connection has no version', async () => {
+    scanService.getLatest.mockResolvedValue(null);
+    scanService.scan.mockRejectedValue(
+      new CveEngineVersionPendingError('valkey', 'valkey.version'),
+    );
+
+    const scanError = await controller.getScan('conn-1').catch((error: unknown) => {
+      return error;
+    });
+    const refreshError = await controller.refreshScan('conn-1').catch((error: unknown) => {
+      return error;
+    });
+
+    for (const error of [scanError, refreshError]) {
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getStatus()).toBe(409);
+      expect((error as ConflictException).getResponse()).toEqual({
+        code: 'cve_version_pending',
+        product: 'valkey',
+        attribute: 'valkey.version',
+        message: expect.stringContaining('valkey.version'),
+      });
+    }
+  });
+
+  it('keeps serving a stored result while the version is pending', async () => {
+    scanService.getLatest.mockResolvedValue(SCAN);
+    scanService.scan.mockRejectedValue(
+      new CveEngineVersionPendingError('redis', 'redis.version'),
+    );
+
+    await expect(controller.getScan('conn-1')).resolves.toEqual(SCAN);
+    expect(scanService.scan).not.toHaveBeenCalled();
+  });
+
+  it('rescans instead of serving a stored result recorded for another engine', async () => {
+    scanService.getLatest.mockResolvedValue(SCAN);
+    scanService.storedMatchesEngine.mockReturnValue(false);
+    scanService.scan.mockRejectedValue(
+      new CveEngineVersionPendingError('valkey', 'valkey.version'),
+    );
+
+    await expect(controller.getScan('conn-1')).rejects.toBeInstanceOf(ConflictException);
+    expect(scanService.storedMatchesEngine).toHaveBeenCalledWith('conn-1', SCAN);
   });
 
   it('reports dataset age and per-source health', async () => {

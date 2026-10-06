@@ -8,6 +8,7 @@ import {
   DialogTitle,
 } from '../../ui/dialog';
 import { Input } from '../../ui/input';
+import { connectionTypeSuffix, isClusterChild } from '../../../utils/connectionType';
 import { EngineBadge } from './EngineBadge';
 import type { EndpointRole } from './EndpointPanel';
 
@@ -31,6 +32,12 @@ function unavailableReason(
   }
   if (connection.connectionType === 'agent') {
     return 'Agent-backed — contact support';
+  }
+  if (connection.connectionType === 'external') {
+    return 'OTLP push — cannot be migrated';
+  }
+  if (isClusterChild(connection)) {
+    return 'Cluster node — pick its seed';
   }
   if (role === 'target' && connection.isConnected === false) {
     return 'Offline — cannot accept writes';
@@ -142,7 +149,7 @@ export function ConnectionPicker({
                   </span>
                   <span className="truncate font-mono text-xs text-muted-foreground">
                     {connection.host}:{connection.port}
-                    {connection.connectionType === 'agent' ? ' · via agent' : ' · direct'}
+                    {connectionTypeSuffix(connection)}
                   </span>
                 </span>
 

@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsNumber, IsBoolean, IsOptional, IsIn, Min, Max, MinLength, MaxLength, ValidateNested } from 'class-validator';
+import { IsString, IsNumber, IsInt, IsBoolean, IsOptional, IsIn, Min, Max, MinLength, MaxLength, ValidateNested, ValidateIf } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ENV_DEFAULT_ID } from '../../connections/connection.constants';
 import type {
@@ -13,6 +13,10 @@ import type {
   SshTunnelInput,
   SshAuthMethod,
   SshKeySource,
+  TopologyMembership,
+  TopologyMembershipOrigin,
+  TopologyKind,
+  TopologyRole,
 } from '@betterdb/shared';
 
 /**
@@ -92,6 +96,35 @@ export class ConnectionCapabilitiesDto implements ConnectionCapabilities {
 
   @ApiPropertyOptional({ description: 'Whether CLUSTER SLOT-STATS is supported', example: true })
   supportsSlotStats?: boolean;
+
+  @ApiPropertyOptional({ description: 'Whether cluster mode is enabled on this server', example: false })
+  clusterEnabled?: boolean;
+}
+
+/**
+ * DTO for topology membership (auto-registered or adopted cluster/sentinel node)
+ */
+export class TopologyMembershipDto implements TopologyMembership {
+  @ApiProperty({ description: 'Connection ID of the seed that owns this membership', example: ENV_DEFAULT_ID })
+  seedId: string;
+
+  @ApiProperty({ description: 'Node identifier within the topology', example: 'abc123' })
+  nodeId: string;
+
+  @ApiProperty({ description: 'How this membership was created', enum: ['auto', 'adopted'], example: 'auto' })
+  origin: TopologyMembershipOrigin;
+
+  @ApiProperty({ description: 'Topology kind this membership belongs to', enum: ['cluster', 'sentinel'], example: 'cluster' })
+  source: TopologyKind;
+
+  @ApiPropertyOptional({ description: 'Sentinel group name (master name)', example: 'mymaster' })
+  group?: string;
+
+  @ApiPropertyOptional({ description: 'Role within the topology', enum: ['primary', 'replica'], example: 'primary' })
+  role?: TopologyRole;
+
+  @ApiPropertyOptional({ description: 'Retirement timestamp (Unix ms), set when the node is no longer part of the topology', example: 1704067200000 })
+  retiredAt?: number;
 }
 
 /**
@@ -133,6 +166,15 @@ export class ConnectionStatusDto implements ConnectionStatus {
 
   @ApiPropertyOptional({ description: 'Connection capabilities (only when connected)', type: ConnectionCapabilitiesDto })
   capabilities?: ConnectionCapabilities;
+
+  @ApiPropertyOptional({
+    description: 'Auto-register discovered nodes (cluster or Sentinel); undefined/null follows CLUSTER_AUTO_REGISTER_NODES or SENTINEL_AUTO_REGISTER_NODES',
+    example: true,
+  })
+  autoRegisterNodes?: boolean;
+
+  @ApiPropertyOptional({ description: 'Cluster membership details when this connection was registered as a cluster node', type: TopologyMembershipDto })
+  membership?: TopologyMembership;
 }
 
 /**
@@ -166,6 +208,16 @@ export class CreateConnectionDto implements CreateConnectionRequest {
   @IsString()
   password?: string;
 
+  @ApiPropertyOptional({ description: 'Username for data nodes discovered through this Sentinel; defaults to username; an empty string means no username' })
+  @IsOptional()
+  @IsString()
+  nodeUsername?: string;
+
+  @ApiPropertyOptional({ description: 'Password for data nodes discovered through this Sentinel; defaults to password' })
+  @IsOptional()
+  @IsString()
+  nodePassword?: string;
+
   @ApiPropertyOptional({ description: 'Database index (0-15)', example: 0, minimum: 0, maximum: 15 })
   @IsOptional()
   @IsNumber()
@@ -188,6 +240,38 @@ export class CreateConnectionDto implements CreateConnectionRequest {
   @IsOptional()
   @IsBoolean()
   setAsDefault?: boolean;
+
+  @ApiPropertyOptional({ enum: ['direct', 'external'], description: 'direct (polled) or external (OTLP push)' })
+  @IsOptional()
+  @IsIn(['direct', 'external'])
+  connectionType?: 'direct' | 'external';
+
+  @ApiPropertyOptional({ description: 'Host the OTLP collector pushes under, when it differs from host (external only)', maxLength: 253 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(253)
+  discoveredHost?: string;
+
+  @ApiPropertyOptional({ description: 'Port the OTLP collector pushes under, when it differs from port (external only)', minimum: 1, maximum: 65535 })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  discoveredPort?: number;
+}
+
+export class DismissDiscoveredDto {
+  @ApiProperty({ description: 'Discovered instance host', example: 'cache.internal' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(253)
+  host: string;
+
+  @ApiProperty({ description: 'Discovered instance port', example: 6379 })
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  port: number;
 }
 
 /**
@@ -202,6 +286,9 @@ export class TestConnectionResponseDto implements TestConnectionResponse {
 
   @ApiPropertyOptional({ description: 'Error message if failed', example: 'Connection refused' })
   error?: string;
+
+  @ApiPropertyOptional()
+  message?: string;
 }
 
 /**
@@ -213,6 +300,12 @@ export class ConnectionListResponseDto implements ConnectionListResponse {
 
   @ApiProperty({ description: 'Current default connection ID', nullable: true, example: ENV_DEFAULT_ID })
   currentId: string | null;
+
+  @ApiProperty({ description: 'Auto-register default applied to seeds that have not set the flag (CLUSTER_AUTO_REGISTER_NODES)', example: false })
+  autoRegisterNodesDefault: boolean;
+
+  @ApiProperty({ description: 'Auto-register default applied to Sentinel seeds that have not set the flag (SENTINEL_AUTO_REGISTER_NODES)', example: false })
+  autoRegisterSentinelNodesDefault: boolean;
 }
 
 /**
@@ -229,6 +322,17 @@ export class CurrentConnectionResponseDto implements CurrentConnectionResponse {
 export class ConnectionIdResponseDto {
   @ApiProperty({ description: 'Created connection ID', example: '550e8400-e29b-41d4-a716-446655440000' })
   id: string;
+}
+
+export class SetAutoRegisterDto {
+  @ApiProperty({
+    description: 'Auto-register discovered nodes (cluster or Sentinel); undefined/null follows CLUSTER_AUTO_REGISTER_NODES or SENTINEL_AUTO_REGISTER_NODES',
+    nullable: true,
+    type: Boolean,
+  })
+  @ValidateIf((_, value) => value !== null)
+  @IsBoolean()
+  enabled: boolean | null;
 }
 
 /**

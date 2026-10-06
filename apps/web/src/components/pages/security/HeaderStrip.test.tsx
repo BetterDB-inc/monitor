@@ -89,4 +89,18 @@ describe('HeaderStrip', () => {
 
     expect(props.onRefresh).toHaveBeenCalledTimes(1);
   });
+
+  it('shows a note under the subtitle when given one', () => {
+    renderStrip({ note: 'Version from pushed metrics; modules are not checked.' });
+
+    expect(screen.getByTestId('header-note')).toHaveTextContent(
+      'Version from pushed metrics; modules are not checked.',
+    );
+  });
+
+  it('omits the note by default', () => {
+    renderStrip();
+
+    expect(screen.queryByTestId('header-note')).not.toBeInTheDocument();
+  });
 });

@@ -60,6 +60,7 @@ import {
   parseExportProfile,
   resolveSlotStatsTopN,
 } from './export-profile';
+import { DropReason } from '../external-metrics/otlp-metrics-types';
 
 /**
  * Ceiling on the demoted-node read, clamped down to the poll interval when that
@@ -68,7 +69,14 @@ import {
  */
 const DEMOTED_NODE_READ_TIMEOUT_MS = 2_000;
 
-const SWEEP_EXCLUSIONS: ReadonlySet<string> = new Set([POLL_STALE_METRIC]);
+const SWEEP_EXCLUSIONS: ReadonlySet<string> = new Set([
+  POLL_STALE_METRIC,
+  'betterdb_anomaly_events_current',
+  'betterdb_anomaly_by_severity',
+  'betterdb_anomaly_by_metric',
+  'betterdb_correlated_groups_by_severity',
+  'betterdb_correlated_groups_by_pattern',
+]);
 const NO_EXCLUSIONS: ReadonlySet<string> = new Set();
 
 // Per-connection state for tracking previous values and stale labels
@@ -116,6 +124,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private readonly slotStatsTopN: number;
   private readonly exportRegistry: Registry;
   private readonly pollIntervalMs: number;
+  private readonly stalenessMs: number;
   private readonly freshness: FreshnessTracker;
   private pollStale: Gauge;
 
@@ -273,6 +282,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private cveKev: Gauge;
   private cveDatasetStale: Gauge;
 
+  // OTLP Ingest Metrics
+  private otlpPointsAccepted: Counter;
+  private otlpPointsDropped: Counter;
+
   constructor(
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
     connectionRegistry: ConnectionRegistry,
@@ -302,14 +315,14 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const configuredStaleness = this.configService.get<number>('PROMETHEUS_STALENESS_MS');
     const requestedStaleness =
       configuredStaleness === undefined ? undefined : Number(configuredStaleness);
-    const stalenessMs = resolveStalenessMs(this.pollIntervalMs, requestedStaleness);
-    if (requestedStaleness !== undefined && requestedStaleness !== stalenessMs) {
+    this.stalenessMs = resolveStalenessMs(this.pollIntervalMs, requestedStaleness);
+    if (requestedStaleness !== undefined && requestedStaleness !== this.stalenessMs) {
       this.logger.warn(
         `PROMETHEUS_STALENESS_MS=${requestedStaleness} is below the floor for a ` +
-          `${this.pollIntervalMs}ms poll interval; using ${stalenessMs}ms instead`,
+          `${this.pollIntervalMs}ms poll interval; using ${this.stalenessMs}ms instead`,
       );
     }
-    this.freshness = new FreshnessTracker(stalenessMs);
+    this.freshness = new FreshnessTracker(this.stalenessMs);
     this.exportProfile = parseExportProfile(this.configService.get('METRICS_EXPORT_PROFILE'));
     this.slotStatsTopN = resolveSlotStatsTopN(
       this.configService.get('METRICS_SLOT_STATS_TOP_N'),
@@ -322,6 +335,14 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   protected getIntervalMs(): number {
     return this.pollIntervalMs;
+  }
+
+  protected supportsExternalConnections(): boolean {
+    return true;
+  }
+
+  protected skipUnchangedSamples(): boolean {
+    return false;
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
@@ -393,19 +414,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.logger.debug(`Cleaned up metrics state for removed connection: ${connectionId}`);
   }
 
-  /**
-   * Get a human-readable connection label (host:port format)
-   */
-  private getConnectionLabel(connectionId: string): string {
+  private getConnectionLabel(connectionId: string): string | null {
     try {
       const config = this.connectionRegistry.getConfig(connectionId);
-      if (config) {
-        return `${config.host}:${config.port}`;
-      }
+      return config ? `${config.host}:${config.port}` : null;
     } catch {
-      // Fallback to connectionId
+      return null;
     }
-    return connectionId;
   }
 
   /**
@@ -878,6 +893,26 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       'cve_dataset_stale',
       'Whether the CVE scan is partial or sources are missing: 1 stale, 0 ok',
     );
+
+    // OTLP Ingest Metrics
+    this.otlpPointsAccepted = new Counter({
+      name: 'betterdb_otlp_metric_points_accepted_total',
+      help: 'OTLP metric data points accepted into external connections',
+      registers: [this.registry],
+    });
+    this.otlpPointsDropped = new Counter({
+      name: 'betterdb_otlp_metric_points_dropped_total',
+      help: 'OTLP metric data points dropped, by reason',
+      labelNames: ['reason'],
+      registers: [this.registry],
+    });
+  }
+
+  recordOtlpIngest(accepted: number, droppedByReason: Partial<Record<DropReason, number>>): void {
+    if (accepted > 0) this.otlpPointsAccepted.inc(accepted);
+    for (const [reason, count] of Object.entries(droppedByReason)) {
+      if (count && count > 0) this.otlpPointsDropped.inc({ reason }, count);
+    }
   }
 
   /**
@@ -885,7 +920,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
    */
   async updateMetrics(): Promise<void> {
     const connections = this.connectionRegistry.list();
-    const connectedConnections = connections.filter((c) => c.isConnected);
+    const connectedConnections = connections.filter((c) => c.isConnected && !this.isSentinelConnection(c.id));
 
     // Update both INFO-based and storage-based metrics for all connections.
     // Connections refresh concurrently so a wedged node costs the pass one
@@ -919,12 +954,19 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
 
     const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
     const state = this.getConnectionState(connectionId);
 
-    await this.updateAclMetrics(connectionId, connLabel, state, epoch);
-    if (this.isSuperseded(connectionId, epoch)) return;
-    await this.updateClientMetrics(connectionId, connLabel, state, epoch);
-    if (this.isSuperseded(connectionId, epoch)) return;
+    if (this.isExternalConnection(connectionId)) {
+      this.removeLiveAnalyticsSeries(connLabel, state);
+    } else {
+      await this.updateAclMetrics(connectionId, connLabel, state, epoch);
+      if (this.isSuperseded(connectionId, epoch)) return;
+      await this.updateClientMetrics(connectionId, connLabel, state, epoch);
+      if (this.isSuperseded(connectionId, epoch)) return;
+    }
     await this.updateSlowlogMetrics(connectionId, connLabel, state);
     if (this.isSuperseded(connectionId, epoch)) return;
     await this.updateCommandlogMetrics(connectionId, connLabel, state);
@@ -932,6 +974,32 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     await this.updateMetricForecastMetrics(connectionId, connLabel, epoch);
     if (this.isSuperseded(connectionId, epoch)) return;
     await this.updateCveMetrics(connectionId, connLabel);
+  }
+
+  private isExternalConnection(connectionId: string): boolean {
+    return this.connectionRegistry.getConfig(connectionId)?.connectionType === 'external';
+  }
+
+  private removeLiveAnalyticsSeries(connLabel: string, state: ConnectionMetricState): void {
+    this.aclDeniedTotal.remove(connLabel);
+    for (const reason of state.currentAclReasonLabels) {
+      this.aclDeniedByReason.remove(connLabel, reason);
+    }
+    for (const user of state.currentAclUserLabels) {
+      this.aclDeniedByUser.remove(connLabel, user);
+    }
+    this.clientConnectionsCurrent.remove(connLabel);
+    this.clientConnectionsPeak.remove(connLabel);
+    for (const name of state.currentClientNameLabels) {
+      this.clientConnectionsByName.remove(connLabel, name);
+    }
+    for (const user of state.currentClientUserLabels) {
+      this.clientConnectionsByUser.remove(connLabel, user);
+    }
+    state.currentAclReasonLabels = new Set();
+    state.currentAclUserLabels = new Set();
+    state.currentClientNameLabels = new Set();
+    state.currentClientUserLabels = new Set();
   }
 
   private async updateCveMetrics(connectionId: string, connLabel: string): Promise<void> {
@@ -1167,9 +1235,17 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
 
     const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
     const state = this.getConnectionState(connectionId);
     const config = this.connectionRegistry.getConfig(connectionId);
-    this.freshness.observe(connectionId, connLabel, Date.now());
+    const external = this.isExternalConnection(connectionId);
+    const absentAsZero = !external;
+    const previousLabel = this.freshness.observe(connectionId, connLabel, Date.now());
+    if (previousLabel !== undefined) {
+      this.releaseLabel(previousLabel);
+    }
 
     try {
       const info = await this.readInfo(connectionId, client);
@@ -1186,14 +1262,17 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         return;
       }
 
-      this.updateServerMetrics(info, connLabel, state);
-      this.updateClientInfoMetrics(info, connLabel, connectionId, config);
-      this.updateMemoryMetrics(info, connLabel, connectionId, config);
-      this.updateStatsMetrics(info, connLabel);
-      this.updateCpuMetrics(info, connLabel);
-      this.updatePersistenceMetrics(info, connLabel);
-      this.updateReplicationMetrics(info, connLabel, connectionId, config);
-      this.updateKeyspaceMetricsFromInfo(info, connLabel, state);
+      this.updateServerMetrics(info, connLabel, state, absentAsZero);
+      this.updateClientInfoMetrics(info, connLabel, connectionId, config, absentAsZero);
+      this.updateMemoryMetrics(info, connLabel, connectionId, config, absentAsZero);
+      this.updateStatsMetrics(info, connLabel, absentAsZero);
+      this.updateCpuMetrics(info, connLabel, absentAsZero);
+      this.updatePersistenceMetrics(info, connLabel, absentAsZero);
+      this.updateReplicationMetrics(info, connLabel, connectionId, config, absentAsZero);
+      this.updateKeyspaceMetricsFromInfo(info, connLabel, state, absentAsZero);
+      if (external) {
+        return;
+      }
       await this.updateClusterMetricsFromInfo(
         client,
         info,
@@ -1216,20 +1295,103 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     info: InfoResponse,
     connLabel: string,
     state: ConnectionMetricState,
+    absentAsZero: boolean,
   ): void {
-    if (!info.server) return;
+    if (!info.server) {
+      if (!absentAsZero) {
+        this.uptimeInSeconds.remove(connLabel);
+        this.removeInstanceInfo(connLabel, state);
+      }
+      return;
+    }
 
-    const version = info.server.valkey_version || info.server.redis_version || 'unknown';
-    const role = info.replication?.role || 'unknown';
-    const os = info.server.os || 'unknown';
+    this.setInfoGauge(this.uptimeInSeconds, connLabel, info.server.uptime_in_seconds, absentAsZero);
+
+    const rawVersion = info.server.valkey_version || info.server.redis_version;
+    const rawRole = info.replication?.role;
+    const rawOs = info.server.os;
+    if (!rawVersion && !rawRole && !rawOs) {
+      this.removeInstanceInfo(connLabel, state);
+      return;
+    }
+
+    const version = rawVersion || 'unknown';
+    const role = rawRole || 'unknown';
+    const os = rawOs || 'unknown';
     const previous = state.instanceInfoLabels;
     if (previous && (previous[0] !== version || previous[1] !== role || previous[2] !== os)) {
       this.instanceInfo.remove(connLabel, ...previous);
     }
     state.instanceInfoLabels = [version, role, os];
-
-    this.uptimeInSeconds.labels(connLabel).set(parseInt(info.server.uptime_in_seconds) || 0);
     this.instanceInfo.labels(connLabel, version, role, os).set(1);
+  }
+
+  private removeInstanceInfo(connLabel: string, state: ConnectionMetricState): void {
+    if (state.instanceInfoLabels) {
+      this.instanceInfo.remove(connLabel, ...state.instanceInfoLabels);
+      state.instanceInfoLabels = null;
+    }
+  }
+
+  private readInfoNumber(
+    raw: string | undefined,
+    absentAsZero: boolean,
+    parse: (raw: string) => number = parseInt,
+  ): number | null {
+    const value = raw === undefined ? NaN : parse(raw);
+    if (Number.isNaN(value)) {
+      return absentAsZero ? 0 : null;
+    }
+    return value;
+  }
+
+  private setOrRemove(gauge: Gauge, connLabel: string, value: number | null): void {
+    if (value === null) {
+      gauge.remove(connLabel);
+      return;
+    }
+    gauge.labels(connLabel).set(value);
+  }
+
+  private setInfoGauge(
+    gauge: Gauge,
+    connLabel: string,
+    raw: string | undefined,
+    absentAsZero: boolean,
+    parse: (raw: string) => number = parseInt,
+  ): void {
+    this.setOrRemove(gauge, connLabel, this.readInfoNumber(raw, absentAsZero, parse));
+  }
+
+  private setInfoFlag(
+    gauge: Gauge,
+    connLabel: string,
+    raw: string | undefined,
+    expected: string,
+    absentAsZero: boolean,
+  ): void {
+    if (raw === undefined && !absentAsZero) {
+      gauge.remove(connLabel);
+      return;
+    }
+    gauge.labels(connLabel).set(raw === expected ? 1 : 0);
+  }
+
+  private setPresentInfoGauge(
+    gauge: Gauge,
+    connLabel: string,
+    raw: string | undefined,
+    absentAsZero: boolean,
+  ): void {
+    if (raw) {
+      gauge.labels(connLabel).set(parseInt(raw) || 0);
+    } else if (!absentAsZero) {
+      gauge.remove(connLabel);
+    }
+  }
+
+  private infoSection<T>(section: T | undefined, absentAsZero: boolean): Partial<T> | undefined {
+    return section ?? (absentAsZero ? undefined : {});
   }
 
   private updateClientInfoMetrics(
@@ -1237,20 +1399,32 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     connLabel: string,
     connectionId: string,
     _config: { host: string; port: number } | null,
+    absentAsZero: boolean,
   ): void {
-    if (!info.clients) return;
+    const clients = this.infoSection(info.clients, absentAsZero);
+    if (!clients) return;
 
-    const connectedClients = parseInt(info.clients.connected_clients) || 0;
-    const maxClients = parseInt(info.clients.maxclients) || 10000;
+    const connectedClients = this.readInfoNumber(clients.connected_clients, absentAsZero);
+    const maxClients = absentAsZero
+      ? parseInt(clients.maxclients ?? '') || 10000
+      : this.readInfoNumber(clients.maxclients, false);
 
-    this.connectedClients.labels(connLabel).set(connectedClients);
-    this.blockedClients.labels(connLabel).set(parseInt(info.clients.blocked_clients) || 0);
-    if (info.clients.tracking_clients) {
-      this.trackingClients.labels(connLabel).set(parseInt(info.clients.tracking_clients) || 0);
-    }
+    this.setOrRemove(this.connectedClients, connLabel, connectedClients);
+    this.setInfoGauge(this.blockedClients, connLabel, clients.blocked_clients, absentAsZero);
+    this.setPresentInfoGauge(
+      this.trackingClients,
+      connLabel,
+      clients.tracking_clients,
+      absentAsZero,
+    );
 
     // Webhook dispatch for connection.critical
-    if (this.webhookDispatcher && maxClients > 0) {
+    if (
+      this.webhookDispatcher &&
+      connectedClients !== null &&
+      maxClients !== null &&
+      maxClients > 0
+    ) {
       const usedPercent = (connectedClients / maxClients) * 100;
       this.webhookDispatcher
         .dispatchThresholdAlertPerWebhook(
@@ -1278,25 +1452,34 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     connLabel: string,
     connectionId: string,
     config: { host: string; port: number } | null,
+    absentAsZero: boolean,
   ): void {
-    if (!info.memory) return;
+    const memory = this.infoSection(info.memory, absentAsZero);
+    if (!memory) return;
 
-    const memoryUsed = parseInt(info.memory.used_memory) || 0;
-    const maxMemory = parseInt(info.memory.maxmemory) || 0;
-    const maxmemoryPolicy = info.memory.maxmemory_policy || 'noeviction';
+    const memoryUsed = this.readInfoNumber(memory.used_memory, absentAsZero);
+    const maxMemory = this.readInfoNumber(memory.maxmemory, absentAsZero);
+    const maxmemoryPolicy = memory.maxmemory_policy || (absentAsZero ? 'noeviction' : undefined);
 
-    this.memoryUsedBytes.labels(connLabel).set(memoryUsed);
-    this.memoryUsedRssBytes.labels(connLabel).set(parseInt(info.memory.used_memory_rss) || 0);
-    this.memoryUsedPeakBytes.labels(connLabel).set(parseInt(info.memory.used_memory_peak) || 0);
-    this.memoryMaxBytes.labels(connLabel).set(maxMemory);
-    this.memoryFragmentationRatio
-      .labels(connLabel)
-      .set(parseFloat(info.memory.mem_fragmentation_ratio) || 0);
-    this.memoryFragmentationBytes
-      .labels(connLabel)
-      .set(parseInt(info.memory.mem_fragmentation_bytes) || 0);
+    this.setOrRemove(this.memoryUsedBytes, connLabel, memoryUsed);
+    this.setInfoGauge(this.memoryUsedRssBytes, connLabel, memory.used_memory_rss, absentAsZero);
+    this.setInfoGauge(this.memoryUsedPeakBytes, connLabel, memory.used_memory_peak, absentAsZero);
+    this.setOrRemove(this.memoryMaxBytes, connLabel, maxMemory);
+    this.setInfoGauge(
+      this.memoryFragmentationRatio,
+      connLabel,
+      memory.mem_fragmentation_ratio,
+      absentAsZero,
+      parseFloat,
+    );
+    this.setInfoGauge(
+      this.memoryFragmentationBytes,
+      connLabel,
+      memory.mem_fragmentation_bytes,
+      absentAsZero,
+    );
 
-    if (this.webhookDispatcher && maxMemory > 0) {
+    if (this.webhookDispatcher && memoryUsed !== null && maxMemory !== null && maxMemory > 0) {
       const usedPercent = (memoryUsed / maxMemory) * 100;
 
       this.webhookDispatcher
@@ -1355,55 +1538,80 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
   }
 
-  private updateStatsMetrics(info: InfoResponse, connLabel: string): void {
-    if (!info.stats) return;
+  private updateStatsMetrics(info: InfoResponse, connLabel: string, absentAsZero: boolean): void {
+    const stats = this.infoSection(info.stats, absentAsZero);
+    if (!stats) return;
 
-    this.connectionsReceivedTotal
-      .labels(connLabel)
-      .set(parseInt(info.stats.total_connections_received) || 0);
-    this.commandsProcessedTotal
-      .labels(connLabel)
-      .set(parseInt(info.stats.total_commands_processed) || 0);
-    this.instantaneousOpsPerSec
-      .labels(connLabel)
-      .set(parseInt(info.stats.instantaneous_ops_per_sec) || 0);
-    this.instantaneousInputKbps
-      .labels(connLabel)
-      .set(parseFloat(info.stats.instantaneous_input_kbps) || 0);
-    this.instantaneousOutputKbps
-      .labels(connLabel)
-      .set(parseFloat(info.stats.instantaneous_output_kbps) || 0);
-    this.keyspaceHitsTotal.labels(connLabel).set(parseInt(info.stats.keyspace_hits) || 0);
-    this.keyspaceMissesTotal.labels(connLabel).set(parseInt(info.stats.keyspace_misses) || 0);
-    this.evictedKeysTotal.labels(connLabel).set(parseInt(info.stats.evicted_keys) || 0);
-    this.expiredKeysTotal.labels(connLabel).set(parseInt(info.stats.expired_keys) || 0);
-    this.pubsubChannels.labels(connLabel).set(parseInt(info.stats.pubsub_channels) || 0);
-    this.pubsubPatterns.labels(connLabel).set(parseInt(info.stats.pubsub_patterns) || 0);
+    const set = (gauge: Gauge, raw: string | undefined, parse?: (raw: string) => number) =>
+      this.setInfoGauge(gauge, connLabel, raw, absentAsZero, parse);
+    set(this.connectionsReceivedTotal, stats.total_connections_received);
+    set(this.commandsProcessedTotal, stats.total_commands_processed);
+    set(this.instantaneousOpsPerSec, stats.instantaneous_ops_per_sec);
+    set(this.instantaneousInputKbps, stats.instantaneous_input_kbps, parseFloat);
+    set(this.instantaneousOutputKbps, stats.instantaneous_output_kbps, parseFloat);
+    set(this.keyspaceHitsTotal, stats.keyspace_hits);
+    set(this.keyspaceMissesTotal, stats.keyspace_misses);
+    set(this.evictedKeysTotal, stats.evicted_keys);
+    set(this.expiredKeysTotal, stats.expired_keys);
+    set(this.pubsubChannels, stats.pubsub_channels);
+    set(this.pubsubPatterns, stats.pubsub_patterns);
   }
 
-  private updateCpuMetrics(info: InfoResponse, connLabel: string): void {
-    if (!info.cpu) return;
+  private updateCpuMetrics(info: InfoResponse, connLabel: string, absentAsZero: boolean): void {
+    const cpu = this.infoSection(info.cpu, absentAsZero);
+    if (!cpu) return;
 
-    this.cpuSysSecondsTotal.labels(connLabel).set(parseFloat(info.cpu.used_cpu_sys) || 0);
-    this.cpuUserSecondsTotal.labels(connLabel).set(parseFloat(info.cpu.used_cpu_user) || 0);
+    this.setInfoGauge(
+      this.cpuSysSecondsTotal,
+      connLabel,
+      cpu.used_cpu_sys,
+      absentAsZero,
+      parseFloat,
+    );
+    this.setInfoGauge(
+      this.cpuUserSecondsTotal,
+      connLabel,
+      cpu.used_cpu_user,
+      absentAsZero,
+      parseFloat,
+    );
   }
 
-  private updatePersistenceMetrics(info: InfoResponse, connLabel: string): void {
-    if (!info.persistence) return;
+  private updatePersistenceMetrics(
+    info: InfoResponse,
+    connLabel: string,
+    absentAsZero: boolean,
+  ): void {
+    const persistence = this.infoSection(info.persistence, absentAsZero);
+    if (!persistence) return;
 
-    this.rdbChangesSinceLastSave
-      .labels(connLabel)
-      .set(parseInt(info.persistence.rdb_changes_since_last_save) || 0);
-    this.rdbLastSaveTimestampSeconds
-      .labels(connLabel)
-      .set(parseInt(info.persistence.rdb_last_save_time) || 0);
-    this.rdbLastBgsaveOk
-      .labels(connLabel)
-      .set(info.persistence.rdb_last_bgsave_status === 'ok' ? 1 : 0);
-    this.aofEnabled.labels(connLabel).set(info.persistence.aof_enabled === '1' ? 1 : 0);
-    this.aofLastBgrewriteOk
-      .labels(connLabel)
-      .set(info.persistence.aof_last_bgrewrite_status === 'ok' ? 1 : 0);
+    this.setInfoGauge(
+      this.rdbChangesSinceLastSave,
+      connLabel,
+      persistence.rdb_changes_since_last_save,
+      absentAsZero,
+    );
+    this.setInfoGauge(
+      this.rdbLastSaveTimestampSeconds,
+      connLabel,
+      persistence.rdb_last_save_time,
+      absentAsZero,
+    );
+    this.setInfoFlag(
+      this.rdbLastBgsaveOk,
+      connLabel,
+      persistence.rdb_last_bgsave_status,
+      'ok',
+      absentAsZero,
+    );
+    this.setInfoFlag(this.aofEnabled, connLabel, persistence.aof_enabled, '1', absentAsZero);
+    this.setInfoFlag(
+      this.aofLastBgrewriteOk,
+      connLabel,
+      persistence.aof_last_bgrewrite_status,
+      'ok',
+      absentAsZero,
+    );
   }
 
   private updateReplicationMetrics(
@@ -1411,41 +1619,73 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     connLabel: string,
     connectionId: string,
     config: { host: string; port: number } | null,
+    absentAsZero: boolean,
   ): void {
     const replication = info.replication;
     const role = replication?.role;
     const isReplica = role === 'slave' || role === 'replica';
 
-    if (replication === undefined || (role !== 'master' && !isReplica)) {
+    if (replication === undefined || role === undefined) {
+      this.masterLinkUp.remove(connLabel);
+      this.masterLastIoSecondsAgo.remove(connLabel);
+      this.setPresentInfoGauge(this.connectedSlaves, connLabel, replication?.connected_slaves, false);
+      this.setPresentInfoGauge(
+        this.replicationOffset,
+        connLabel,
+        replication?.master_repl_offset,
+        absentAsZero,
+      );
+      return;
+    }
+
+    if (role !== 'master' && !isReplica) {
       this.clearRoleSpecificReplicationSeries(connLabel);
+      if (!absentAsZero) {
+        this.replicationOffset.remove(connLabel);
+      }
       return;
     }
 
     if (role === 'master') {
       this.masterLinkUp.remove(connLabel);
       this.masterLastIoSecondsAgo.remove(connLabel);
-      this.connectedSlaves
-        .labels(connLabel)
-        .set(parseInt(replication.connected_slaves || '0') || 0);
-      if (replication.master_repl_offset) {
-        this.replicationOffset.labels(connLabel).set(parseInt(replication.master_repl_offset) || 0);
-      }
+      this.setInfoGauge(
+        this.connectedSlaves,
+        connLabel,
+        replication.connected_slaves,
+        absentAsZero,
+      );
+      this.setPresentInfoGauge(
+        this.replicationOffset,
+        connLabel,
+        replication.master_repl_offset,
+        absentAsZero,
+      );
     } else {
       this.connectedSlaves.remove(connLabel);
       const masterLinkStatus = replication.master_link_status;
-      this.masterLinkUp.labels(connLabel).set(masterLinkStatus === 'up' ? 1 : 0);
+      this.setInfoFlag(this.masterLinkUp, connLabel, masterLinkStatus, 'up', absentAsZero);
 
-      const lastIoSecondsAgo = parseInt(replication.master_last_io_seconds_ago ?? '') || 0;
-      if (replication.master_last_io_seconds_ago) {
-        this.masterLastIoSecondsAgo.labels(connLabel).set(lastIoSecondsAgo);
-      }
+      const lastIoSecondsAgo = this.readInfoNumber(
+        replication.master_last_io_seconds_ago,
+        absentAsZero,
+      );
+      this.setPresentInfoGauge(
+        this.masterLastIoSecondsAgo,
+        connLabel,
+        replication.master_last_io_seconds_ago,
+        absentAsZero,
+      );
 
-      if (replication.slave_repl_offset) {
-        this.replicationOffset.labels(connLabel).set(parseInt(replication.slave_repl_offset) || 0);
-      }
+      this.setPresentInfoGauge(
+        this.replicationOffset,
+        connLabel,
+        replication.slave_repl_offset,
+        absentAsZero,
+      );
 
       // Webhook dispatch for replication.lag
-      if (this.webhookEventsProService && masterLinkStatus === 'up') {
+      if (this.webhookEventsProService && masterLinkStatus === 'up' && lastIoSecondsAgo !== null) {
         this.webhookEventsProService
           .dispatchReplicationLag({
             lagSeconds: lastIoSecondsAgo,
@@ -1472,36 +1712,59 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     info: InfoResponse,
     connLabel: string,
     state: ConnectionMetricState,
+    absentAsZero: boolean,
   ): void {
-    if (!info.keyspace) return;
+    const keyspace = this.infoSection(info.keyspace, absentAsZero);
+    if (!keyspace) return;
 
     const newDbLabels = new Set<string>();
     let totalKeys = 0;
     let totalExpiring = 0;
+    let sawExpires = false;
 
-    for (const [dbKey, dbInfo] of Object.entries(info.keyspace as Record<string, unknown>)) {
+    for (const [dbKey, dbInfo] of Object.entries(keyspace as Record<string, unknown>)) {
       // parseInfoToTyped emits typed objects for db* entries; anything still
       // a string is a non-db or unparseable line.
       if (!dbInfo || typeof dbInfo !== 'object') continue;
       newDbLabels.add(dbKey);
 
-      const parsedInfo = dbInfo as { keys: number; expires: number; avg_ttl: number };
+      const parsedInfo = dbInfo as { keys: number; expires?: number; avg_ttl?: number };
       this.dbKeys.labels(connLabel, dbKey).set(parsedInfo.keys || 0);
-      this.dbKeysExpiring.labels(connLabel, dbKey).set(parsedInfo.expires || 0);
-      this.dbAvgTtlSeconds.labels(connLabel, dbKey).set((parsedInfo.avg_ttl || 0) / 1000);
+      if (absentAsZero || parsedInfo.expires !== undefined) {
+        this.dbKeysExpiring.labels(connLabel, dbKey).set(parsedInfo.expires || 0);
+        sawExpires = true;
+      } else {
+        this.dbKeysExpiring.remove(connLabel, dbKey);
+      }
+      if (absentAsZero || parsedInfo.avg_ttl !== undefined) {
+        this.dbAvgTtlSeconds.labels(connLabel, dbKey).set((parsedInfo.avg_ttl || 0) / 1000);
+      } else {
+        this.dbAvgTtlSeconds.remove(connLabel, dbKey);
+      }
       totalKeys += parsedInfo.keys || 0;
       totalExpiring += parsedInfo.expires || 0;
     }
 
-    this.keyspaceKeys.labels(connLabel).set(totalKeys);
-    this.keyspaceKeysExpiring.labels(connLabel).set(totalExpiring);
+    const hasTotals = absentAsZero || newDbLabels.size > 0;
+    this.setOrRemove(this.keyspaceKeys, connLabel, hasTotals ? totalKeys : null);
+    this.setOrRemove(
+      this.keyspaceKeysExpiring,
+      connLabel,
+      absentAsZero ? totalExpiring : sawExpires ? totalExpiring : null,
+    );
 
     // Remove stale db labels for this connection
     for (const staleDb of state.currentKeyspaceDbLabels) {
       if (!newDbLabels.has(staleDb)) {
-        this.dbKeys.labels(connLabel, staleDb).set(0);
-        this.dbKeysExpiring.labels(connLabel, staleDb).set(0);
-        this.dbAvgTtlSeconds.labels(connLabel, staleDb).set(0);
+        if (absentAsZero) {
+          this.dbKeys.labels(connLabel, staleDb).set(0);
+          this.dbKeysExpiring.labels(connLabel, staleDb).set(0);
+          this.dbAvgTtlSeconds.labels(connLabel, staleDb).set(0);
+        } else {
+          this.dbKeys.remove(connLabel, staleDb);
+          this.dbKeysExpiring.remove(connLabel, staleDb);
+          this.dbAvgTtlSeconds.remove(connLabel, staleDb);
+        }
       }
     }
 
@@ -2190,6 +2453,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       .join('\n');
   }
 
+  getStalenessMs(): number {
+    return this.stalenessMs;
+  }
+
   getContentType(): string {
     return this.exportRegistry.contentType;
   }
@@ -2243,6 +2510,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   incrementPollCounter(connectionId?: string): void {
     const connLabel = connectionId ? this.getConnectionLabel(connectionId) : 'system';
+    if (connLabel === null) {
+      return;
+    }
     this.pollsTotal.labels(connLabel).inc();
   }
 
@@ -2257,6 +2527,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }>,
   ): void {
     const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
     const state = this.getConnectionState(connectionId);
     const currentIndexLabels = new Set<string>();
 
@@ -2286,6 +2559,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     entries: Array<{ replica: string; ratio: number }>,
   ): void {
     const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
     const state = this.getConnectionState(connectionId);
     const currentLabels = new Set<string>();
 
@@ -2307,17 +2583,24 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     samples: ReadonlyArray<{
       command: string;
       callsTotal: number;
-      usecPerCall: number;
+      usecPerCall?: number;
     }>,
   ): void {
     const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
     const state = this.getConnectionState(connectionId);
     const currentLabels = new Set<string>();
 
     for (const s of samples) {
       currentLabels.add(s.command);
       this.commandstatsCallsTotal.labels(connLabel, s.command).set(s.callsTotal);
-      this.commandstatsLatencyUs.labels(connLabel, s.command).set(s.usecPerCall);
+      if (s.usecPerCall === undefined) {
+        this.commandstatsLatencyUs.remove(connLabel, s.command);
+      } else {
+        this.commandstatsLatencyUs.labels(connLabel, s.command).set(s.usecPerCall);
+      }
     }
 
     for (const staleLabel of state.currentCommandStatsLabels) {
@@ -2340,6 +2623,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }>,
   ): void {
     const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
     const state = this.getConnectionState(connectionId);
     const currentLabels = new Set<string>();
 
@@ -2367,6 +2653,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     breaches: ReadonlyArray<{ indexName: string; breached: boolean }>,
   ): void {
     const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
     const state = this.getConnectionState(connectionId);
     const currentLabels = new Set<string>();
 
@@ -2385,6 +2674,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   startPollTimer(service: string, connectionId?: string): () => void {
     const connLabel = connectionId ? this.getConnectionLabel(connectionId) : 'system';
+    if (connLabel === null) {
+      return () => undefined;
+    }
     return this.pollDuration.startTimer({ connection: connLabel, service });
   }
 
@@ -2395,6 +2687,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     connectionId?: string,
   ): void {
     const connLabel = connectionId ? this.getConnectionLabel(connectionId) : 'unknown';
+    if (connLabel === null) {
+      return;
+    }
     this.anomalyEventsTotal.inc({
       connection: connLabel,
       severity,
@@ -2405,6 +2700,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   incrementCorrelatedGroup(pattern: string, severity: string, connectionId?: string): void {
     const connLabel = connectionId ? this.getConnectionLabel(connectionId) : 'unknown';
+    if (connLabel === null) {
+      return;
+    }
     this.correlatedGroupsTotal.inc({ connection: connLabel, pattern, severity });
   }
 
@@ -2421,6 +2719,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const effectiveConnectionId =
       connectionId || this.connectionRegistry.getDefaultId() || 'unknown';
     const connLabel = this.getConnectionLabel(effectiveConnectionId);
+    if (connLabel === null) {
+      return;
+    }
     const state = this.getConnectionState(effectiveConnectionId);
 
     for (const sev of ['info', 'warning', 'critical']) {
@@ -2466,6 +2767,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const effectiveConnectionId =
       connectionId || this.connectionRegistry.getDefaultId() || 'unknown';
     const connLabel = this.getConnectionLabel(effectiveConnectionId);
+    if (connLabel === null) {
+      return;
+    }
     for (const buf of buffers) {
       this.anomalyDetectionBufferReady.labels(connLabel, buf.metricType).set(buf.ready ? 1 : 0);
       this.anomalyDetectionBufferMean.labels(connLabel, buf.metricType).set(buf.mean);
@@ -2478,15 +2782,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
    */
   cleanupConnectionMetrics(connectionId: string): void {
     const state = this.perConnectionState.get(connectionId);
-    if (state?.lastCveConnLabel) {
-      this.removeCveSeries(state.lastCveConnLabel);
-    } else {
-      try {
-        this.removeCveSeries(this.getConnectionLabel(connectionId));
-      } catch {
-        // Registry lookup can fail for an already-removed connection; the
-        // tracked lastCveConnLabel path above covers the common case.
-      }
+    const cveLabel = state?.lastCveConnLabel ?? this.getConnectionLabel(connectionId);
+    if (cveLabel !== null) {
+      this.removeCveSeries(cveLabel);
     }
     this.perConnectionState.delete(connectionId);
     // Drop any in-flight metric update so a reused connection ID cannot join
@@ -2497,7 +2795,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.infoReadsInFlight.delete(connectionId);
     this.retireEpoch(connectionId);
     const label = this.freshness.forget(connectionId);
-    if (label === undefined || this.freshness.hasLabel(label)) {
+    if (label !== undefined) {
+      this.releaseLabel(label);
+    }
+  }
+
+  private releaseLabel(label: string): void {
+    if (this.freshness.hasLabel(label)) {
       return;
     }
     this.dropSeriesForRemovedLabel(label);

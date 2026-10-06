@@ -1,5 +1,6 @@
 import { useMemo, useCallback } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { EmptyState } from '../components/ui/empty-state';
 import { Skeleton } from '../components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { RefreshCw, Server, Info } from 'lucide-react';
@@ -130,18 +131,11 @@ export function ClusterDashboard() {
         <div>
           <h1 className="text-3xl font-bold">Cluster Overview</h1>
         </div>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="flex flex-col items-center justify-center py-12 text-center">
-              <Server className="w-16 h-16 text-muted-foreground mb-4 opacity-50" />
-              <h3 className="text-xl font-semibold mb-2">Standalone Mode</h3>
-              <p className="text-muted-foreground max-w-md">
-                This instance is running in standalone mode. Cluster features are available
-                when connected to a Valkey/Redis cluster.
-              </p>
-            </div>
-          </CardContent>
-        </Card>
+        <EmptyState
+          icon={Server}
+          title="Standalone Mode"
+          description="This instance is running in standalone mode. Cluster features are available when connected to a Valkey/Redis cluster."
+        />
       </div>
     );
   }
@@ -263,16 +257,14 @@ export function ClusterDashboard() {
                   ))}
                 </div>
               ) : hasSlotStats ? (
-                <div className="text-center py-8 text-muted-foreground">
-                  <Info className="w-12 h-12 mx-auto mb-3 opacity-50" />
-                  <p>No keys found in cluster</p>
-                </div>
+                <EmptyState variant="inline" icon={Info} title="No keys found in cluster" />
               ) : (
-                <div className="text-center py-8 text-muted-foreground">
-                  <Info className="w-12 h-12 mx-auto mb-3 opacity-50" />
-                  <p className="text-sm">Slot statistics not available</p>
-                  <p className="text-xs mt-1">Requires Valkey 8.0+</p>
-                </div>
+                <EmptyState
+                  variant="inline"
+                  icon={Info}
+                  title="Slot statistics not available"
+                  description="Requires Valkey 8.0+"
+                />
               )}
             </CardContent>
           </Card>

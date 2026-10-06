@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { MISSING_CONNECTION_MESSAGE, parseScanFailure, scanErrorMessage } from './scan-error';
+import { ApiError } from '../../../api/client';
+import {
+  MISSING_CONNECTION_MESSAGE,
+  parseScanFailure,
+  scanErrorMessage,
+  versionPendingOf,
+} from './scan-error';
 
 const FALLBACK = 'The server did not return a scan for this connection.';
 
@@ -67,5 +73,34 @@ describe('parseScanFailure', () => {
 
     expect(failure.nodes).toEqual([]);
     expect(failure.summary).toContain('nothing was discovered');
+  });
+});
+
+describe('versionPendingOf', () => {
+  const body = {
+    code: 'cve_version_pending',
+    product: 'valkey',
+    attribute: 'valkey.version',
+    message: 'x',
+  };
+
+  it('reads the product and the missing attribute from a 409 version-pending answer', () => {
+    expect(versionPendingOf(new ApiError('x', 409, body))).toEqual({
+      product: 'valkey',
+      attribute: 'valkey.version',
+    });
+  });
+
+  it('ignores a 409 with another code', () => {
+    expect(versionPendingOf(new ApiError('x', 409, { ...body, code: 'other' }))).toBeNull();
+  });
+
+  it('ignores the same body on another status', () => {
+    expect(versionPendingOf(new ApiError('x', 503, body))).toBeNull();
+  });
+
+  it('ignores a plain error and a missing error', () => {
+    expect(versionPendingOf(new Error('x'))).toBeNull();
+    expect(versionPendingOf(null)).toBeNull();
   });
 });

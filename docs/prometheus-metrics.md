@@ -47,6 +47,8 @@ Content-Type: text/plain; version=0.0.4; charset=utf-8
 
 All custom metrics are prefixed with `betterdb_`. Standard Node.js process metrics from `prom-client` are also included with the same prefix.
 
+Sentinel connections are not polled for INFO series (the keyspace and INFO pollers skip them), so a Sentinel seed has no `betterdb_*` series of its own in the scrape. The data nodes it auto-registers are exported like any other connection. See [Sentinel auto-registration](sentinel-auto-registration.md).
+
 **Scrape Interval**: Recommended 15s
 **Metrics Update**: Metrics are computed on-demand during each scrape
 
@@ -219,6 +221,8 @@ The total with `full` is 55 + 5 × 263 + 2 × 667 = **2,704 series**. Add up to 
 
 The same fleet under `vitals` exports 55 + 5 × 33 + 2 × 39 = **298 series**, and that number does not change with key count, database count, pattern churn or cluster size.
 
+The OTLP export in `semconv` mode (see [OpenTelemetry export modes](opentelemetry.md#export-modes)) carries the same series under different names, split into one resource per node, minus `betterdb_keyspace_keys`, `betterdb_keyspace_keys_expiring` and `betterdb_poll_duration_seconds`. The counts above are therefore upper bounds for it too.
+
 ## Metrics Categories
 
 ### ACL Audit Metrics
@@ -331,6 +335,8 @@ Basic server identification and uptime.
 
 **Label Example**: `version="8.0.1"`, `role="master"`, `os="Linux 5.15.0"`
 
+**Externally monitored (OTLP-push) connections**: `betterdb_instance_info` is a presence gauge. It requires at least one server-section field to be pushed (for example `server.os`, the version, or `server.uptime_in_seconds`), because a push containing only `replication.role` does not export it. Once the server section is present, it is exported when any of version, role or OS has been pushed, and a label that was not pushed is exported as `unknown` (for example `version="unknown",role="unknown",os="Linux"`). It is removed again when none of the three is pushed any more.
+
 ### Memory Metrics
 
 Detailed memory usage and fragmentation tracking.
@@ -406,6 +412,8 @@ Per-database key statistics.
 | `betterdb_keyspace_keys_expiring` | gauge | -      | Keys with an expiration across all databases | `45000`  |
 
 **Label Example**: `db="db0"`, `db="db1"`
+
+**Externally monitored (OTLP-push) connections**: `betterdb_db_keys_expiring` is exported for databases whose expiry count was pushed, and `betterdb_db_avg_ttl_seconds` for databases whose average TTL was pushed. Each is omitted, never reported as 0, when its value was not pushed. `betterdb_keyspace_keys_expiring` is omitted when no database pushed an expiry count.
 
 ### Persistence Metrics
 
@@ -493,25 +501,27 @@ Forward-looking projections of when a tracked metric will reach its configured c
 
 Latest CVE scan rollup per connection. Updated on storage-based poll.
 
-| Metric | Type | Labels | Description | Example |
-|--------|------|--------|-------------|---------|
-| `betterdb_cve_findings` | gauge | `connection`, `severity` | Current CVE findings by severity from the latest scan | `2` |
-| `betterdb_cve_kev` | gauge | `connection` | Current KEV-exploited CVE findings from the latest scan | `1` |
-| `betterdb_cve_dataset_stale` | gauge | `connection` | Whether the CVE scan is partial or sources are missing: 1 stale, 0 ok | `0` |
+| Metric                       | Type  | Labels                   | Description                                                           | Example |
+| ---------------------------- | ----- | ------------------------ | --------------------------------------------------------------------- | ------- |
+| `betterdb_cve_findings`      | gauge | `connection`, `severity` | Current CVE findings by severity from the latest scan                 | `2`     |
+| `betterdb_cve_kev`           | gauge | `connection`             | Current KEV-exploited CVE findings from the latest scan               | `1`     |
+| `betterdb_cve_dataset_stale` | gauge | `connection`             | Whether the CVE scan is partial or sources are missing: 1 stale, 0 ok | `0`     |
 
 ### Internal Metrics
 
 BetterDB Monitor application health metrics.
 
-| Metric                           | Type      | Labels       | Description                                                                                         | Example                                            |
-| -------------------------------- | --------- | ------------ | --------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `betterdb_polls_total`           | counter   | -            | Total number of poll cycles completed                                                               | `123456`                                           |
-| `betterdb_poll_duration_seconds` | histogram | `service`    | Duration of poll cycles in seconds                                                                  | buckets: 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10 |
-| `betterdb_poll_stale`            | gauge     | `connection` | `1` when the connection has had no successful `INFO` read within the staleness bound, `0` otherwise | `0`                                                |
+| Metric                                       | Type      | Labels       | Description                                                                                         | Example                                            |
+| -------------------------------------------- | --------- | ------------ | --------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `betterdb_polls_total`                       | counter   | -            | Total number of poll cycles completed                                                               | `123456`                                           |
+| `betterdb_poll_duration_seconds`             | histogram | `service`    | Duration of poll cycles in seconds                                                                  | buckets: 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10 |
+| `betterdb_poll_stale`                        | gauge     | `connection` | `1` when the connection has had no successful `INFO` read within the staleness bound, `0` otherwise | `0`                                                |
+| `betterdb_otlp_metric_points_accepted_total` | counter   | -            | OTLP metric data points accepted into external connections                                          | `1024`                                             |
+| `betterdb_otlp_metric_points_dropped_total`  | counter   | `reason`     | OTLP metric data points dropped, by reason (see [drop reasons](opentelemetry.md))                   | `3`                                                |
 
 **Service Values**: Names of polling services (audit, client-analytics, metrics, etc.)
 
-**Staleness**: If a connection has no successful `INFO` read within `PROMETHEUS_STALENESS_MS` (default: 3 × `PROMETHEUS_POLL_INTERVAL_MS`), all of its gauge series are removed from the exposition and from the OTLP mirror. A dead or wedged connection then shows up as a gap instead of a flat line. Counters and `betterdb_poll_stale` stay, so `betterdb_poll_stale == 1` tells a stale connection apart from one that was never collected. INFO-based series return on the next successful poll; series owned by other collectors (commandstats and inference latency refresh every 60s, the vector index every 30s, the anomaly summary on its own cadence) return on their own refresh cycle instead. Deleting a connection removes its gauge series on the next poll cycle, not immediately.
+**Staleness**: If a connection has no successful `INFO` read within `PROMETHEUS_STALENESS_MS` (default: 3 × `PROMETHEUS_POLL_INTERVAL_MS`), all of its gauge series are removed from the exposition and from the OTLP mirror. A dead or wedged connection then shows up as a gap instead of a flat line. Counters and `betterdb_poll_stale` stay, so `betterdb_poll_stale == 1` tells a stale connection apart from one that was never collected. The anomaly summary gauges (`betterdb_anomaly_events_current`, `betterdb_anomaly_by_severity`, `betterdb_anomaly_by_metric`, `betterdb_correlated_groups_by_severity`, `betterdb_correlated_groups_by_pattern`) are the exception: they describe recorded anomalies rather than the last poll, so they stay while the connection is stale. INFO-based series return on the next successful poll; series owned by other collectors (commandstats and inference latency refresh every 60s, the vector index every 30s) return on their own refresh cycle instead. Deleting a connection removes its gauge series on the next poll cycle, not immediately, and a connection whose `host:port` changes has the series under its old label removed the same way. For an OTLP-push connection the clock starts only once its pushed data goes stale: its series keep their last pushed values for `OTEL_METRICS_STALE_AFTER_MS` (default 5 minutes) after the last push, then disappear after the staleness bound.
 
 **Alerting note**: this is a behaviour change — alert rules that test a gauge's value directly (e.g. `betterdb_inference_unhealthy == 1`) will now resolve when a connection dies or is removed, since the series disappears instead of holding its last value. Alert on `betterdb_poll_stale == 1` as well to catch that case.
 

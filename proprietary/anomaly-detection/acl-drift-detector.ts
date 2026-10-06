@@ -26,19 +26,13 @@ import { createHash } from 'crypto';
  *   4. Node digest = XOR of every per-user digest, as 8-byte values. XOR makes the
  *      node digest independent of user ordering and matches the upstream shape.
  *
- * ## Scope: within a replication group, NOT cluster-wide
+ * ## Scope: per-shard plus cluster-wide
  *
  * `groupKey` is a shared `master_replid`, which on a cluster identifies ONE SHARD
- * (a primary and its replicas) — not the cluster. So on a clustered deployment
- * this confirms each shard is internally consistent and never compares shards
- * against each other.
- *
- * That matters because cluster ACLs are expected to be uniform cluster-wide, and
- * the likeliest real drift — an `ACL LOAD` that missed one primary — is precisely
- * cross-shard, so it lands in separate groups and is NOT detected. The scoping
- * matches config-drift's, so the two are consistent, but do not read this as
- * cluster-wide ACL verification. Closing the gap needs a cluster-wide grouping
- * path, which is not implemented here.
+ * (a primary and its replicas) — not the cluster. The shard pass confirms each
+ * shard is internally consistent. The cluster pass (`clusterKey`, derived from
+ * the live `CLUSTER NODES` id set) compares shards of the same cluster against
+ * each other, so an `ACL LOAD` that missed one primary is detected.
  *
  * ## What is deliberately NOT carried out of this module
  *
@@ -61,6 +55,12 @@ export interface AclDriftNode {
    * an empty groupKey are never compared against anything.
    */
   groupKey: string;
+  /**
+   * Cluster this node belongs to, derived from the live `CLUSTER NODES` id set.
+   * Empty when unknown (standalone, fetch failure) — excluded from cross-shard
+   * comparison. Optional for backwards compatibility with shard-only callers.
+   */
+  clusterKey?: string;
   /** username → per-user digest. */
   userDigests: Record<string, string>;
   /** XOR of every per-user digest — the node's ACL revision fingerprint. */
@@ -79,6 +79,17 @@ export interface AclDrift {
   /** Usernames that differ (or are missing) across the group. Sorted. */
   usernames: string[];
   /** Every node in the group with its digest, sorted by connection id. */
+  nodes: AclDriftNodeDigest[];
+}
+
+/** One cluster whose shards do not agree on their ACL state. */
+export interface AclClusterDrift {
+  clusterKey: string;
+  /** Distinct shard groupKeys participating, sorted. */
+  groupKeys: string[];
+  /** Usernames that differ (or are missing) across the cluster. Sorted. */
+  usernames: string[];
+  /** Every node in the cluster with its digest, sorted by connection id. */
   nodes: AclDriftNodeDigest[];
 }
 
@@ -225,35 +236,10 @@ export function detectAclDrift(nodes: AclDriftNode[]): AclDrift[] {
       continue;
     }
 
-    const allUsernames = new Set<string>();
-    for (const node of group) {
-      for (const username of Object.keys(node.userDigests)) {
-        allUsernames.add(username);
-      }
-    }
-
-    const differing: string[] = [];
-    for (const username of allUsernames) {
-      const perNode = new Set(
-        group.map((node) => {
-          return node.userDigests[username] ?? 'absent';
-        }),
-      );
-      if (perNode.size > 1) {
-        differing.push(username);
-      }
-    }
-
     drifts.push({
       groupKey,
-      usernames: differing.sort(),
-      nodes: group
-        .map((node) => {
-          return { connectionId: node.connectionId, name: node.name, digest: node.digest };
-        })
-        .sort((a, b) => {
-          return a.connectionId.localeCompare(b.connectionId);
-        }),
+      usernames: differingUsernames(group),
+      nodes: toDigests(group),
     });
   }
 
@@ -271,4 +257,116 @@ export function aclDriftSignature(drift: AclDrift): string {
     })
     .join(',');
   return `${drift.groupKey}|${drift.usernames.join(',')}|${nodePart}`;
+}
+
+/** Flags marking a CLUSTER NODES entry that has not settled or is dead. */
+const NON_LIVE_CLUSTER_FLAGS = ['handshake', 'noaddr', 'fail', 'fail?'];
+
+/**
+ * Cluster identity from a gossip view: hash of sorted live node ids. Same
+ * cluster converges to the same key; unrelated clusters never collide. Empty
+ * when the view is missing so callers skip the cross-shard pass.
+ */
+export function clusterKeyFromNodes(
+  nodes: ReadonlyArray<{ id?: string; flags?: string | ReadonlyArray<string> }> | undefined,
+): string {
+  const ids = (nodes ?? []).filter((node) => {
+    const flags = Array.isArray(node.flags) ? node.flags : [node.flags ?? ''];
+    return !!node.id && !NON_LIVE_CLUSTER_FLAGS.some((flag) => flags.includes(flag));
+  });
+  const sorted = ids
+    .map((node) => node.id as string)
+    .sort()
+    .join(',');
+  if (!sorted) {
+    return '';
+  }
+  return `cluster:${createHash('sha256').update(sorted).digest('hex').slice(0, 16)}`;
+}
+
+/**
+ * Finds clusters whose shards disagree on ACL state. Groups by clusterKey, then
+ * requires at least two distinct shard groupKeys — a single monitored shard can
+ * never drift against itself. Nodes without a clusterKey are excluded. Shards
+ * are compared as units: when every shard shares a digest, the divergence is
+ * within a shard and the shard pass already covers it.
+ */
+export function detectAclClusterDrift(nodes: AclDriftNode[]): AclClusterDrift[] {
+  const clusters = new Map<string, AclDriftNode[]>();
+  for (const node of nodes) {
+    if (!node.clusterKey || !node.groupKey) {
+      continue;
+    }
+    const cluster = clusters.get(node.clusterKey) ?? [];
+    cluster.push(node);
+    clusters.set(node.clusterKey, cluster);
+  }
+
+  const drifts: AclClusterDrift[] = [];
+  for (const [clusterKey, cluster] of clusters) {
+    const groupKeys = [...new Set(cluster.map((node) => node.groupKey))].sort();
+    if (groupKeys.length < 2) {
+      continue;
+    }
+    const byShard = new Map<string, Set<string>>();
+    for (const node of cluster) {
+      const digests = byShard.get(node.groupKey) ?? new Set<string>();
+      digests.add(node.digest);
+      byShard.set(node.groupKey, digests);
+    }
+    const [first, ...rest] = [...byShard.values()];
+    const common = new Set([...first].filter((digest) => rest.every((set) => set.has(digest))));
+    if (common.size > 0) {
+      continue;
+    }
+    drifts.push({
+      clusterKey,
+      groupKeys,
+      usernames: differingUsernames(cluster),
+      nodes: toDigests(cluster),
+    });
+  }
+
+  return drifts;
+}
+
+/** Stable signature for a cross-shard drift, namespaced apart from shard drifts. */
+export function aclClusterDriftSignature(drift: AclClusterDrift): string {
+  const nodePart = drift.nodes
+    .map((node) => {
+      return `${node.connectionId}:${node.digest}`;
+    })
+    .join(',');
+  return `${drift.clusterKey}|${drift.usernames.join(',')}|${nodePart}`;
+}
+
+function differingUsernames(group: AclDriftNode[]): string[] {
+  const all = new Set<string>();
+  for (const node of group) {
+    for (const username of Object.keys(node.userDigests)) {
+      all.add(username);
+    }
+  }
+  const differing: string[] = [];
+  for (const username of all) {
+    const perNode = new Set(
+      group.map((node) => {
+        return node.userDigests[username] ?? 'absent';
+      }),
+    );
+    if (perNode.size > 1) {
+      differing.push(username);
+    }
+  }
+  return differing.sort();
+}
+
+function toDigests(group: AclDriftNode[]): AclDriftNodeDigest[] {
+  return group
+    .map((node) => {
+      return { connectionId: node.connectionId, name: node.name, digest: node.digest };
+    })
+    .sort((a, b) => {
+      return a.connectionId.localeCompare(b.connectionId);
+    });
 }

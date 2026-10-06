@@ -64,11 +64,12 @@ export class FleetService {
       return { overallStatus: 'waiting', instances: [], timestamp: Date.now() };
     }
 
+    const waiting = new Set<string>();
     const settled = await Promise.allSettled(
       listed.map((conn) => {
         const gate = { cancelled: false };
         const result = this.withTimeout(
-          this.collectOne(conn.id, conn.name, conn.host, conn.port, () => gate.cancelled),
+          this.collectOne(conn.id, conn.name, conn.host, conn.port, () => gate.cancelled, waiting),
           FleetService.PER_INSTANCE_TIMEOUT_MS,
           `Timed out collecting fleet stats for ${conn.name}`,
         );
@@ -103,15 +104,26 @@ export class FleetService {
       };
     });
 
-    const upCount = instances.filter((i) => i.status === 'up').length;
-    const overallStatus: FleetOverallStatus =
-      upCount === instances.length
-        ? 'healthy'
-        : upCount > 0
-          ? 'degraded'
-          : 'unhealthy';
+    const withSeeds = instances.map((instance, index) => {
+      const seedId = listed[index].membership?.seedId;
+      const seedName = seedId ? this.connectionRegistry.getConfig(seedId)?.name : undefined;
+      return seedName ? { ...instance, clusterSeedName: seedName } : instance;
+    });
 
-    return { overallStatus, instances, timestamp: Date.now() };
+    const counted = withSeeds.filter(
+      (instance, index) => !(settled[index].status === 'fulfilled' && waiting.has(instance.connectionId)),
+    );
+    const upCount = counted.filter((i) => i.status === 'up').length;
+    const overallStatus: FleetOverallStatus =
+      counted.length === 0
+        ? 'waiting'
+        : upCount === counted.length
+          ? 'healthy'
+          : upCount > 0
+            ? 'degraded'
+            : 'unhealthy';
+
+    return { overallStatus, instances: withSeeds, timestamp: Date.now() };
   }
 
   private async collectOne(
@@ -120,6 +132,7 @@ export class FleetService {
     host: string,
     port: number,
     isCancelled: () => boolean = () => false,
+    waiting: Set<string> = new Set(),
   ): Promise<FleetInstanceSummary> {
     const cvePromise = this.getCveSummaryWithTimeout(connectionId);
     const [healthResult, infoResult] = await Promise.allSettled([
@@ -145,6 +158,9 @@ export class FleetService {
     }
 
     const health = healthResult.value;
+    if (health.status === 'waiting') {
+      waiting.add(connectionId);
+    }
     if (health.status !== 'connected') {
       const error = health.error ?? 'Not connected to database';
       return this.emptySummary(

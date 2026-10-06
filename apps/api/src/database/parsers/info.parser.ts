@@ -47,6 +47,12 @@ export class InfoParser {
     return 'valkey_version' in server;
   }
 
+  static isSentinelMode(info: Record<string, unknown>): boolean {
+    return [info['server_mode'], info['redis_mode'], info['valkey_mode']].some(
+      (mode) => mode === 'sentinel',
+    );
+  }
+
   /**
    * Parses a "k=v<sep>k=v<sep>…" line into a string map.
    *

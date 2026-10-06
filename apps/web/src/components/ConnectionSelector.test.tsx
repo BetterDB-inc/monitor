@@ -55,6 +55,14 @@ vi.mock('./ui/dialog', () => ({
   DialogTitle: ({ children }: { children: React.ReactNode }) => <h2>{children}</h2>,
 }));
 
+vi.mock('../hooks/useDiscoveredInstances', () => ({
+  useDiscoveredInstances: () => ({
+    instances: [],
+    dismiss: vi.fn(),
+    invalidate: vi.fn(),
+  }),
+}));
+
 import { ConnectionSelector } from './ConnectionSelector';
 import { fetchApi } from '../api/client';
 
@@ -232,6 +240,21 @@ describe('ConnectionSelector - open-add-connection event prefill', () => {
     expect(screen.getByRole('dialog')).toBeInTheDocument();
     // Still the direct-connection form
     expect(screen.getByPlaceholderText('localhost')).toBeInTheDocument();
+  });
+});
+
+describe('ConnectionSelector - add-connection tab bar', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('offers the OTLP push tab in every mode', () => {
+    render(<ConnectionSelector />);
+
+    fireEvent.click(screen.getByText('+ Add your first connection'));
+
+    expect(screen.getByRole('button', { name: 'OTLP push' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Via Agent' })).toBeNull();
   });
 });
 

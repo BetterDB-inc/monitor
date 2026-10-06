@@ -1,4 +1,5 @@
 import type { Connection } from '../../../hooks/useConnection';
+import { isClusterChild } from '../../../utils/connectionType';
 
 export type PreflightTone = 'ok' | 'info' | 'warning';
 
@@ -22,6 +23,12 @@ export interface PreflightNote {
 
 const AGENT_BLOCK_MESSAGE =
   'One or more selected instances is connected via an agent. Contact support@betterdb.com and we will help you plan the migration safely.';
+
+export const EXTERNAL_BLOCK_MESSAGE =
+  'One or more selected instances only pushes OTLP metrics. Migration needs a live connection to both instances.';
+
+export const CLUSTER_MEMBER_BLOCK_MESSAGE =
+  'One or more selected instances is a node registered under a cluster seed. Pick the cluster seed instead.';
 
 function engineName(dbType: 'valkey' | 'redis'): string {
   if (dbType === 'valkey') {
@@ -134,6 +141,14 @@ export function planBlock(source: Connection | null, target: Connection | null):
 
   if (from.connectionType === 'agent' || to.connectionType === 'agent') {
     return AGENT_BLOCK_MESSAGE;
+  }
+
+  if (from.connectionType === 'external' || to.connectionType === 'external') {
+    return EXTERNAL_BLOCK_MESSAGE;
+  }
+
+  if (isClusterChild(from) || isClusterChild(to)) {
+    return CLUSTER_MEMBER_BLOCK_MESSAGE;
   }
 
   return null;

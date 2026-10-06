@@ -10,7 +10,7 @@ import { ConnectionRegistry } from '@app/connections/connection-registry.service
 import { ConnectionContext } from '@app/common/services/multi-connection-poller';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
-import { nodeAclDigest } from '../acl-drift-detector';
+import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
 import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
@@ -20,6 +20,8 @@ import {
 } from '../types';
 import { WEBHOOK_EVENTS_PRO_SERVICE, WebhookEventType } from '@betterdb/shared';
 import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispatcher.service';
+import { ExternalMetricsStore } from '@app/external-metrics/external-metrics-store';
+import { ExternalMetricsAdapter } from '@app/external-metrics/external-metrics.adapter';
 
 describe('AnomalyService', () => {
   let service: AnomalyService;
@@ -5314,6 +5316,23 @@ describe('AnomalyService', () => {
       });
     }
 
+    /** Seed a slice carrying a gossip-derived cluster identity. */
+    function seedClusterPeer(
+      connectionId: string,
+      lines: string[],
+      replid: string,
+      clusterKey = 'cluster:test',
+    ): void {
+      const { digest, userDigests } = nodeAclDigest(lines);
+      (service as any).aclSnapshot.set(connectionId, {
+        groupKey: `replid:${replid}`,
+        clusterKey,
+        name: connectionId,
+        digest,
+        userDigests,
+      });
+    }
+
     it('stays silent when the group agrees', async () => {
       seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE]);
       await poll();
@@ -5414,6 +5433,113 @@ describe('AnomalyService', () => {
       seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER], 'other-replid');
       await poll();
       expect(driftEvents()).toEqual([]);
+    });
+
+    it('emits a cross-shard WARNING when shards of one cluster diverge', async () => {
+      seedClusterPeer('conn-peer-a', [DEFAULT_LINE, APP_LINE], 'shard-one');
+      seedClusterPeer('conn-peer-b', [DEFAULT_LINE, APP_LINE_WIDER], 'shard-two');
+      await poll();
+
+      const events = driftEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('cross-shard');
+      expect(events[0].message).toContain('app');
+      expect(events[0].message).toContain('4355');
+      expect(events[0].message).not.toContain('secret:*');
+      expect(events[0].message).not.toContain('#a3b1');
+      expect(events[0].message).not.toContain('+@all');
+    });
+
+    it('does not compare shards across unrelated clusters', async () => {
+      seedClusterPeer('conn-peer-a', [DEFAULT_LINE, APP_LINE], 'shard-one', 'cluster:a');
+      seedClusterPeer('conn-peer-b', [DEFAULT_LINE, APP_LINE_WIDER], 'shard-two', 'cluster:b');
+      await poll();
+      expect(driftEvents()).toEqual([]);
+    });
+
+    it('stays silent cross-shard when only one shard of the cluster is monitored', async () => {
+      seedClusterPeer('conn-peer', [DEFAULT_LINE, APP_LINE], 'shared-replid');
+      await poll();
+      expect(driftEvents()).toEqual([]);
+    });
+
+    it('dedupes a persistent cross-shard drift across polls', async () => {
+      seedClusterPeer('conn-peer-a', [DEFAULT_LINE, APP_LINE], 'shard-one');
+      seedClusterPeer('conn-peer-b', [DEFAULT_LINE, APP_LINE_WIDER], 'shard-two');
+      await poll();
+      await poll();
+      expect(driftEvents()).toHaveLength(1);
+    });
+
+    /** Two live primaries with disjoint slots, so no other topology detector fires. */
+    function gossipPair(): Array<Record<string, unknown>> {
+      const node = (id: string, flags: string[], slots: number[][]) => ({
+        id,
+        address: `10.0.0.${id === 'node-a' ? '1' : '2'}:6379@16379`,
+        flags,
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots,
+      });
+      return [
+        node('node-a', ['myself', 'master'], [[0, 8191]]),
+        node('node-b', ['master'], [[8192, 16383]]),
+      ];
+    }
+
+    function enableClusterMode(gossipNodes: Array<Record<string, unknown>>): void {
+      const info = replInfo();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+        ...info,
+        stats: { ...info.stats, cluster_enabled: '1' },
+      });
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue({ cluster_state: 'ok' });
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(gossipNodes);
+    }
+
+    it('derives the polling node clusterKey from CLUSTER NODES', async () => {
+      const gossipNodes = gossipPair();
+      enableClusterMode(gossipNodes);
+      const clusterKey = clusterKeyFromNodes(gossipNodes as never);
+      expect(clusterKey).not.toBe('');
+
+      // conn-1 (shared-replid, default ACL lines) vs a diverged second shard.
+      seedClusterPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER], 'shard-two', clusterKey);
+      await poll();
+
+      expect((service as any).aclSnapshot.get('conn-1')?.clusterKey).toBe(clusterKey);
+      const events = driftEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].message).toContain('cross-shard');
+    });
+
+    it('retains the clusterKey and dedupe across a CLUSTER NODES blip', async () => {
+      const gossipNodes = gossipPair();
+      enableClusterMode(gossipNodes);
+      const clusterKey = clusterKeyFromNodes(gossipNodes as never);
+      seedClusterPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER], 'shard-two', clusterKey);
+
+      await poll();
+      expect(driftEvents()).toHaveLength(1);
+
+      // Blip: topology fetch fails while the ACL read succeeds, exercising the
+      // fresh-fetch store path (countdown forced to 0).
+      (dbClient.getClusterNodes as jest.Mock).mockRejectedValue(new Error('CLUSTER NODES failed'));
+      (service as any).aclDriftRecheck.set('conn-1', 0);
+      await poll();
+
+      expect((service as any).aclSnapshot.get('conn-1')?.clusterKey).toBe(clusterKey);
+      expect(driftEvents()).toHaveLength(1);
+
+      // Recovery must not re-fire the still-active drift.
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(gossipNodes);
+      (service as any).aclDriftRecheck.set('conn-1', 0);
+      await poll();
+      expect(driftEvents()).toHaveLength(1);
     });
 
     it('emits an INFO reload confirmation when this node adopts a new ruleset', async () => {
@@ -5796,6 +5922,175 @@ describe('AnomalyService', () => {
           groupsBySeverity: { info: 0, warning: 110, critical: 30 },
         }),
       );
+    });
+  });
+
+  describe('external connections', () => {
+    const T0 = 1_700_000_000_000;
+    const SKIPPED = [
+      'detectAuthFailureBurst',
+      'detectAclDrift',
+      'detectSentinelDrift',
+      'detectConfigDrift',
+      'detectCobPressure',
+      'detectMemoryOverhead',
+      'detectControlPlaneSaturation',
+      'detectLargeReplyPressure',
+    ];
+    let store: ExternalMetricsStore;
+    let now: number;
+    let externalCtx: ConnectionContext;
+
+    const base = (i: number): Array<[string, string, string]> => [
+      ['memory', 'used_memory', String(1_000_000 + (i % 5) * 1_000)],
+      ['memory', 'used_memory_rss', '1500000'],
+      ['memory', 'used_memory_peak', '2000000'],
+      ['memory', 'mem_fragmentation_ratio', '1.2'],
+      ['clients', 'connected_clients', '10'],
+      ['clients', 'blocked_clients', '0'],
+      ['stats', 'instantaneous_ops_per_sec', '100'],
+      ['stats', 'rejected_connections', '0'],
+      ['stats', 'evicted_keys', '0'],
+      ['stats', 'keyspace_misses', '5'],
+      ['cpu', 'used_cpu_sys', String(10 + i * 0.1)],
+      ['cpu', 'used_cpu_user', String(20 + i * 0.1)],
+      ['replication', 'role', 'master'],
+      ['persistence', 'rdb_changes_since_last_save', String(i * 100)],
+    ];
+
+    const with_ = (fields: Array<[string, string, string]>, field: string, value: string) =>
+      fields.map(([s, f, v]): [string, string, string] =>
+        f === field ? [s, f, value] : [s, f, v],
+      );
+
+    const without = (fields: Array<[string, string, string]>, ...names: string[]) =>
+      fields.filter(([, f]) => !names.includes(f));
+
+    const push = (fields: Array<[string, string, string]>) => {
+      now += 15_000;
+      store.apply(
+        'ext-1',
+        fields.map(([section, field, value]) => ({
+          target: { kind: 'scalar' as const, section, field },
+          value,
+          timeMs: now,
+        })),
+      );
+    };
+
+    beforeEach(() => {
+      store = new ExternalMetricsStore();
+      now = T0;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      externalCtx = {
+        connectionId: 'ext-1',
+        connectionName: 'Pushed',
+        client: new ExternalMetricsAdapter('ext-1', store, () => now),
+        host: 'cache.internal',
+        port: 6379,
+        connectionType: 'external',
+      };
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('opts into external connections', () => {
+      expect((service as any).supportsExternalConnections()).toBe(true);
+    });
+
+    it('skips detectors that need live commands only for external connections', async () => {
+      const spies = SKIPPED.map((name) =>
+        jest.spyOn(service as any, name).mockResolvedValue(undefined),
+      );
+      push(base(0));
+      await poll(externalCtx);
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+      await poll(mockCtx);
+      for (const spy of spies) expect(spy).toHaveBeenCalled();
+    });
+
+    it('never calls an unsupported adapter method, including across a role flip', async () => {
+      const unsupported = jest.spyOn(ExternalMetricsAdapter.prototype as any, 'unsupported');
+      for (let i = 0; i < 5; i++) {
+        push(base(i));
+        await expect(poll(externalCtx)).resolves.toBeUndefined();
+      }
+      push(with_(base(5), 'role', 'slave'));
+      await expect(poll(externalCtx)).resolves.toBeUndefined();
+      expect(unsupported).not.toHaveBeenCalled();
+    });
+
+    it('never calls an unsupported adapter method when pushed fields reach live-only paths', async () => {
+      const unsupported = jest.spyOn(ExternalMetricsAdapter.prototype as any, 'unsupported');
+      const liveOnlyTriggers = (i: number): Array<[string, string, string]> => [
+        ...base(i),
+        ['server', 'redis_mode', 'sentinel'],
+        ['server', 'cluster_enabled', '1'],
+        ['stats', 'evicted_clients', String(i)],
+        ['stats', 'sync_full', String(i)],
+        ['replication', 'master_replid', 'a'.repeat(40)],
+        ['replication', 'connected_slaves', '2'],
+        ['replication', 'master_repl_offset', String(1_000 + i)],
+      ];
+      for (let i = 0; i < 5; i++) {
+        push(liveOnlyTriggers(i));
+        await expect(poll(externalCtx)).resolves.toBeUndefined();
+      }
+      expect(unsupported).not.toHaveBeenCalled();
+    });
+
+    it('raises exactly one anomaly for a pushed memory spike', async () => {
+      for (let i = 0; i < 30; i++) {
+        push(base(i));
+        await poll(externalCtx);
+      }
+      for (let i = 30; i < 33; i++) {
+        push(with_(base(i), 'used_memory', '5000000'));
+        await poll(externalCtx);
+      }
+      const memoryEvents = storage.saveAnomalyEvent.mock.calls.filter(
+        ([event]) => event.metricType === MetricType.MEMORY_USED,
+      );
+      expect(memoryEvents).toHaveLength(1);
+    });
+
+    it('emits nothing near maxclients when maxclients is not pushed', async () => {
+      for (let i = 0; i < 40; i++) {
+        push(with_(base(i), 'connected_clients', '9990'));
+        await poll(externalCtx);
+      }
+      expect(storage.saveAnomalyEvent).not.toHaveBeenCalled();
+    });
+
+    it('emits nothing for a replica without link status fields', async () => {
+      for (let i = 0; i < 40; i++) {
+        push(with_(base(i), 'role', 'slave'));
+        await poll(externalCtx);
+      }
+      expect(
+        storage.saveAnomalyEvent.mock.calls.filter(
+          ([event]) =>
+            event.connectionId === 'ext-1' &&
+            event.metricType !== undefined &&
+            /resync|link/i.test(String(event.metricType)),
+        ),
+      ).toHaveLength(0);
+    });
+
+    it('emits no fork memory risk when neither used_memory nor used_memory_rss is pushed', async () => {
+      const forkScenario = (i: number): Array<[string, string, string]> => [
+        ...without(base(i), 'used_memory', 'used_memory_rss'),
+        ['persistence', 'rdb_bgsave_in_progress', '1'],
+        ['persistence', 'current_cow_size', '950000'],
+        ['memory', 'total_system_memory', '1000000'],
+      ];
+      for (let i = 0; i < 3; i++) {
+        push(forkScenario(i));
+        await poll(externalCtx);
+      }
+      expect(storage.saveAnomalyEvent).not.toHaveBeenCalled();
     });
   });
 });

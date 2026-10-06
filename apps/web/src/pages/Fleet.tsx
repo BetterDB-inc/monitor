@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { QueryErrorState } from '../components/QueryErrorState';
 import { useNavigate } from 'react-router-dom';
 import type { FleetInstanceSummary, FleetOverallStatus } from '@betterdb/shared';
 import { fleetApi } from '../api/fleet';
@@ -116,17 +117,22 @@ export function Fleet() {
     return (
       <div className="space-y-6">
         <h1 className="text-3xl font-bold">Fleet</h1>
-        <Card className="p-6">
-          <p className="text-sm text-destructive mb-4">
-            Failed to load fleet summary: {error.message}
-          </p>
-          <button
-            onClick={() => refresh()}
-            className="px-4 py-2 text-sm border rounded-md hover:bg-muted"
-          >
-            Retry
-          </button>
-        </Card>
+        <QueryErrorState
+          error={error}
+          fallback={
+            <Card className="p-6">
+              <p className="text-sm text-destructive mb-4">
+                Failed to load fleet summary: {error.message}
+              </p>
+              <button
+                onClick={() => refresh()}
+                className="px-4 py-2 text-sm border rounded-md hover:bg-muted"
+              >
+                Retry
+              </button>
+            </Card>
+          }
+        />
       </div>
     );
   }
@@ -240,6 +246,9 @@ export function Fleet() {
                   <div className="text-xs text-muted-foreground">
                     {row.host}:{row.port}
                   </div>
+                  {row.clusterSeedName ? (
+                    <div className="text-xs text-muted-foreground">node of {row.clusterSeedName}</div>
+                  ) : null}
                   {row.error && (
                     <div className="text-xs text-destructive truncate max-w-56">{row.error}</div>
                   )}

@@ -2,7 +2,7 @@ import { Pool, PoolConfig } from 'pg';
 import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
 import { randomUUID } from 'crypto';
-import { parseSshTunnel } from '@betterdb/shared';
+import { parseSshTunnel, parseMembership } from '@betterdb/shared';
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
   AnomalyQueryOptions,
@@ -1666,16 +1666,16 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         timestamp BIGINT NOT NULL,
         used_memory BIGINT NOT NULL,
-        used_memory_rss BIGINT NOT NULL,
-        used_memory_peak BIGINT NOT NULL,
-        mem_fragmentation_ratio DOUBLE PRECISION NOT NULL,
+        used_memory_rss BIGINT,
+        used_memory_peak BIGINT,
+        mem_fragmentation_ratio DOUBLE PRECISION,
         maxmemory BIGINT NOT NULL DEFAULT 0,
-        allocator_frag_ratio DOUBLE PRECISION NOT NULL DEFAULT 0,
+        allocator_frag_ratio DOUBLE PRECISION DEFAULT 0,
         ops_per_sec BIGINT NOT NULL DEFAULT 0,
         cpu_sys DOUBLE PRECISION NOT NULL DEFAULT 0,
         cpu_user DOUBLE PRECISION NOT NULL DEFAULT 0,
-        io_threaded_reads BIGINT NOT NULL DEFAULT 0,
-        io_threaded_writes BIGINT NOT NULL DEFAULT 0,
+        io_threaded_reads BIGINT DEFAULT 0,
+        io_threaded_writes BIGINT DEFAULT 0,
         connection_id TEXT NOT NULL DEFAULT 'env-default'
       );
 
@@ -1687,12 +1687,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         connection_id TEXT NOT NULL,
         command TEXT NOT NULL,
         calls_total BIGINT NOT NULL DEFAULT 0,
-        usec_total BIGINT NOT NULL DEFAULT 0,
-        usec_per_call DOUBLE PRECISION NOT NULL DEFAULT 0,
-        rejected_calls BIGINT NOT NULL DEFAULT 0,
-        failed_calls BIGINT NOT NULL DEFAULT 0,
+        usec_total BIGINT DEFAULT 0,
+        usec_per_call DOUBLE PRECISION DEFAULT 0,
+        rejected_calls BIGINT DEFAULT 0,
+        failed_calls BIGINT DEFAULT 0,
         calls_delta BIGINT NOT NULL,
-        usec_delta BIGINT NOT NULL,
+        usec_delta BIGINT,
         interval_ms INTEGER NOT NULL,
         captured_at BIGINT NOT NULL
       );
@@ -1854,6 +1854,19 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS io_threaded_reads BIGINT NOT NULL DEFAULT 0;
       ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS io_threaded_writes BIGINT NOT NULL DEFAULT 0;
 
+      ALTER TABLE memory_snapshots ALTER COLUMN used_memory_rss DROP NOT NULL;
+      ALTER TABLE memory_snapshots ALTER COLUMN used_memory_peak DROP NOT NULL;
+      ALTER TABLE memory_snapshots ALTER COLUMN mem_fragmentation_ratio DROP NOT NULL;
+      ALTER TABLE memory_snapshots ALTER COLUMN allocator_frag_ratio DROP NOT NULL;
+      ALTER TABLE memory_snapshots ALTER COLUMN io_threaded_reads DROP NOT NULL;
+      ALTER TABLE memory_snapshots ALTER COLUMN io_threaded_writes DROP NOT NULL;
+
+      ALTER TABLE command_stats_samples ALTER COLUMN usec_total DROP NOT NULL;
+      ALTER TABLE command_stats_samples ALTER COLUMN usec_per_call DROP NOT NULL;
+      ALTER TABLE command_stats_samples ALTER COLUMN rejected_calls DROP NOT NULL;
+      ALTER TABLE command_stats_samples ALTER COLUMN failed_calls DROP NOT NULL;
+      ALTER TABLE command_stats_samples ALTER COLUMN usec_delta DROP NOT NULL;
+
       -- Database Connections Table (stores multi-database connection configs)
       CREATE TABLE IF NOT EXISTS connections (
         id TEXT PRIMARY KEY,
@@ -1876,6 +1889,14 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
       -- Migration: add ssh_tunnel column if it doesn't exist
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS ssh_tunnel TEXT;
+
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS connection_type TEXT;
+
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS auto_register_nodes BOOLEAN;
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS membership TEXT;
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_username TEXT;
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_password TEXT;
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_password_encrypted BOOLEAN;
 
       CREATE INDEX IF NOT EXISTS idx_connections_is_default ON connections(is_default);
 
@@ -2793,7 +2814,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         keyCount: row.key_count,
         memoryBytes: parseInt(row.total_memory_bytes),
         avgMemoryBytes: row.avg_memory_bytes,
-        staleCount: row.stale_key_count ?? 0,
+        staleCount: row.stale_key_count ?? null,
         hotCount: row.hot_key_count ?? 0,
         coldCount: row.cold_key_count ?? 0,
       };
@@ -2819,7 +2840,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       totalPatterns: parseInt(summary.total_patterns) || 0,
       totalKeys: parseInt(summary.total_keys) || 0,
       totalMemoryBytes: parseInt(summary.total_memory_bytes) || 0,
-      staleKeyCount: parseInt(summary.stale_key_count) || 0,
+      staleKeyCount: summary.stale_key_count == null ? null : parseInt(summary.stale_key_count),
       hotKeyCount: parseInt(summary.hot_key_count) || 0,
       coldKeyCount: parseInt(summary.cold_key_count) || 0,
       keysExpiringSoon: parseInt(summary.keys_expiring_soon) || 0,
@@ -3526,8 +3547,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         snapshot.opsPerSec ?? 0,
         snapshot.cpuSys ?? 0,
         snapshot.cpuUser ?? 0,
-        snapshot.ioThreadedReads ?? 0,
-        snapshot.ioThreadedWrites ?? 0,
+        snapshot.ioThreadedReads ?? null,
+        snapshot.ioThreadedWrites ?? null,
         connectionId,
       );
     }
@@ -3586,16 +3607,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       id: row.id,
       timestamp: Number(row.timestamp),
       usedMemory: Number(row.used_memory),
-      usedMemoryRss: Number(row.used_memory_rss),
-      usedMemoryPeak: Number(row.used_memory_peak),
-      memFragmentationRatio: Number(row.mem_fragmentation_ratio),
+      usedMemoryRss: row.used_memory_rss === null ? null : Number(row.used_memory_rss),
+      usedMemoryPeak: row.used_memory_peak === null ? null : Number(row.used_memory_peak),
+      memFragmentationRatio:
+        row.mem_fragmentation_ratio === null ? null : Number(row.mem_fragmentation_ratio),
       maxmemory: Number(row.maxmemory),
-      allocatorFragRatio: Number(row.allocator_frag_ratio),
+      allocatorFragRatio:
+        row.allocator_frag_ratio === null ? null : Number(row.allocator_frag_ratio),
       opsPerSec: Number(row.ops_per_sec ?? 0),
       cpuSys: Number(row.cpu_sys ?? 0),
       cpuUser: Number(row.cpu_user ?? 0),
-      ioThreadedReads: Number(row.io_threaded_reads ?? 0),
-      ioThreadedWrites: Number(row.io_threaded_writes ?? 0),
+      ioThreadedReads: row.io_threaded_reads === null ? null : Number(row.io_threaded_reads),
+      ioThreadedWrites: row.io_threaded_writes === null ? null : Number(row.io_threaded_writes),
       connectionId: row.connection_id,
     }));
   }
@@ -3684,12 +3707,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       connectionId: row.connection_id,
       command: row.command,
       callsTotal: Number(row.calls_total),
-      usecTotal: Number(row.usec_total),
-      usecPerCall: Number(row.usec_per_call),
-      rejectedCalls: Number(row.rejected_calls),
-      failedCalls: Number(row.failed_calls),
+      usecTotal: row.usec_total === null ? null : Number(row.usec_total),
+      usecPerCall: row.usec_per_call === null ? null : Number(row.usec_per_call),
+      rejectedCalls: row.rejected_calls === null ? null : Number(row.rejected_calls),
+      failedCalls: row.failed_calls === null ? null : Number(row.failed_calls),
       callsDelta: Number(row.calls_delta),
-      usecDelta: Number(row.usec_delta),
+      usecDelta: row.usec_delta === null ? null : Number(row.usec_delta),
       intervalMs: Number(row.interval_ms),
       capturedAt: Number(row.captured_at),
     }));
@@ -4372,8 +4395,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     await this.pool.query(
       `
-      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, ssh_tunnel, is_default, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, node_username, node_password, node_password_encrypted, db_index, tls, ssh_tunnel, connection_type, auto_register_nodes, membership, is_default, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
       ON CONFLICT(id) DO UPDATE SET
         name = EXCLUDED.name,
         host = EXCLUDED.host,
@@ -4381,9 +4404,15 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         username = EXCLUDED.username,
         password = EXCLUDED.password,
         password_encrypted = EXCLUDED.password_encrypted,
+        node_username = EXCLUDED.node_username,
+        node_password = EXCLUDED.node_password,
+        node_password_encrypted = EXCLUDED.node_password_encrypted,
         db_index = EXCLUDED.db_index,
         tls = EXCLUDED.tls,
         ssh_tunnel = EXCLUDED.ssh_tunnel,
+        connection_type = EXCLUDED.connection_type,
+        auto_register_nodes = EXCLUDED.auto_register_nodes,
+        membership = EXCLUDED.membership,
         is_default = EXCLUDED.is_default,
         updated_at = EXCLUDED.updated_at
     `,
@@ -4395,9 +4424,15 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         config.username || null,
         config.password || null,
         config.passwordEncrypted || false,
+        config.nodeUsername ?? null,
+        config.nodePassword || null,
+        config.nodePassword ? config.nodePasswordEncrypted === true : null,
         config.dbIndex || 0,
         config.tls || false,
         config.sshTunnel ? JSON.stringify(config.sshTunnel) : null,
+        config.connectionType ?? null,
+        config.autoRegisterNodes ?? null,
+        config.membership ? JSON.stringify(config.membership) : null,
         config.isDefault || false,
         config.createdAt,
         config.updatedAt || null,
@@ -4418,9 +4453,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       username: row.username || undefined,
       password: row.password || undefined,
       passwordEncrypted: row.password_encrypted || false,
+      nodeUsername: row.node_username ?? undefined,
+      nodePassword: row.node_password || undefined,
+      nodePasswordEncrypted: row.node_password_encrypted === true ? true : undefined,
       dbIndex: row.db_index,
       tls: row.tls,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
+      connectionType: row.connection_type === 'external' ? 'external' : 'direct',
+      autoRegisterNodes:
+        row.auto_register_nodes === null || row.auto_register_nodes === undefined
+          ? undefined
+          : row.auto_register_nodes,
+      membership: parseMembership(row.membership),
       isDefault: row.is_default,
       createdAt: Number(row.created_at),
       updatedAt: row.updated_at ? Number(row.updated_at) : undefined,
@@ -4442,9 +4486,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       username: row.username || undefined,
       password: row.password || undefined,
       passwordEncrypted: row.password_encrypted || false,
+      nodeUsername: row.node_username ?? undefined,
+      nodePassword: row.node_password || undefined,
+      nodePasswordEncrypted: row.node_password_encrypted === true ? true : undefined,
       dbIndex: row.db_index,
       tls: row.tls,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
+      connectionType: row.connection_type === 'external' ? 'external' : 'direct',
+      autoRegisterNodes:
+        row.auto_register_nodes === null || row.auto_register_nodes === undefined
+          ? undefined
+          : row.auto_register_nodes,
+      membership: parseMembership(row.membership),
       isDefault: row.is_default,
       createdAt: Number(row.created_at),
       updatedAt: row.updated_at ? Number(row.updated_at) : undefined,
@@ -4494,6 +4547,14 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (updates.isDefault !== undefined) {
       setClauses.push(`is_default = $${paramIndex++}`);
       params.push(updates.isDefault);
+    }
+    if ('autoRegisterNodes' in updates) {
+      setClauses.push(`auto_register_nodes = $${paramIndex++}`);
+      params.push(updates.autoRegisterNodes ?? null);
+    }
+    if ('membership' in updates) {
+      setClauses.push(`membership = $${paramIndex++}`);
+      params.push(updates.membership ? JSON.stringify(updates.membership) : null);
     }
 
     if (setClauses.length === 0) return;

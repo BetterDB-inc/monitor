@@ -38,6 +38,7 @@ export interface DatabaseCapabilities {
   hasMemoryDoctor: boolean;
   hasConfig: boolean;
   hasVectorSearch: boolean;
+  clusterEnabled?: boolean;
   /**
    * True when the server reported it was running in Sentinel mode at connect time
    * (INFO `server_mode`/`redis_mode`/`valkey_mode` == 'sentinel'). Optional so
@@ -52,9 +53,11 @@ export interface DatabasePort {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   isConnected(): boolean;
+  sampleVersion?(): number | null;
   ping(): Promise<boolean>;
   getInfo(sections?: string[]): Promise<Record<string, unknown>>;
   getCapabilities(): DatabaseCapabilities;
+  refreshCapabilities?(): Promise<void>;
   getInfoParsed(sections?: string[]): Promise<InfoResponse>;
   getSlowLog(
     count?: number,

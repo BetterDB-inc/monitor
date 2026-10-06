@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react';
+import { QueryErrorState, findExternalUnsupportedError } from '../components/QueryErrorState';
 import { useSearchParams } from 'react-router-dom';
 import { Feature } from '@betterdb/shared';
 import { usePolling } from '../hooks/usePolling';
@@ -8,6 +9,7 @@ import { metricsApi } from '../api/metrics';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 import { Button } from '../components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { EmptyState } from '../components/ui/empty-state';
 import { CaptureOnNextModal, type CaptureOnNextContext } from './anomalies/capture-on-next-modal';
 import { DataLossAlertBanner } from '../components/anomalies/DataLossAlertBanner';
 import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressionBanner';
@@ -224,13 +226,13 @@ export function AnomalyDashboard() {
   const startTime = dateRange?.from ? dateRange.from.getTime() : undefined;
   const endTime = dateRange?.to ? dateRange.to.getTime() : undefined;
 
-  const { data: summary } = usePolling<AnomalySummary>({
+  const { data: summary, error: summaryError } = usePolling<AnomalySummary>({
     fetcher: () => metricsApi.getAnomalySummary({ startTime, endTime }),
     interval: 5000,
     refetchKey: currentConnection?.id,
   });
 
-  const { data: events } = usePolling<AnomalyEvent[]>({
+  const { data: events, error: eventsError } = usePolling<AnomalyEvent[]>({
     fetcher: () => metricsApi.getAnomalyEvents({ startTime, endTime }),
     interval: 5000,
     refetchKey: currentConnection?.id,
@@ -270,13 +272,13 @@ export function AnomalyDashboard() {
     refetchKey: currentConnection?.id,
   });
 
-  const { data: groups } = usePolling<CorrelatedGroup[]>({
+  const { data: groups, error: groupsError } = usePolling<CorrelatedGroup[]>({
     fetcher: () => metricsApi.getAnomalyGroups({ startTime, endTime }),
     interval: 5000,
     refetchKey: currentConnection?.id,
   });
 
-  const { data: buffers } = usePolling<MetricBaselineBuffer[]>({
+  const { data: buffers, error: buffersError } = usePolling<MetricBaselineBuffer[]>({
     fetcher: () => metricsApi.getAnomalyBuffers(),
     interval: 10000,
     refetchKey: currentConnection?.id,
@@ -323,8 +325,16 @@ export function AnomalyDashboard() {
       .slice(0, 8);
   }, [summary]);
 
+  const unsupportedError = findExternalUnsupportedError(
+    summaryError,
+    eventsError,
+    groupsError,
+    buffersError,
+  );
+
   return (
     <div className="space-y-6">
+      <QueryErrorState error={unsupportedError} />
       <DataLossAlertBanner events={dataLossEvents ?? undefined} />
       <LatencyRegressionBanner events={latencyRegressionEvents ?? undefined} />
       <RaftHealthBanner events={raftHealthEvents ?? undefined} />
@@ -599,11 +609,12 @@ export function AnomalyDashboard() {
               );
             })
           ) : (
-            <div className="text-center py-8 text-muted-foreground">
-              <Activity className="w-12 h-12 mx-auto mb-3 opacity-50" />
-              <p>No correlated anomalies detected</p>
-              <p className="text-sm">Events will appear here when patterns are identified</p>
-            </div>
+            <EmptyState
+              variant="inline"
+              icon={Activity}
+              title="No correlated anomalies detected"
+              description="Events will appear here when patterns are identified"
+            />
           )}
         </CardContent>
       </Card>
@@ -659,11 +670,12 @@ export function AnomalyDashboard() {
               })}
             </div>
           ) : (
-            <div className="text-center py-8 text-muted-foreground">
-              <Info className="w-12 h-12 mx-auto mb-3 opacity-50" />
-              <p>No anomalies detected</p>
-              <p className="text-sm">System is operating within normal parameters</p>
-            </div>
+            <EmptyState
+              variant="inline"
+              icon={Info}
+              title="No anomalies detected"
+              description="System is operating within normal parameters"
+            />
           )}
         </CardContent>
       </Card>

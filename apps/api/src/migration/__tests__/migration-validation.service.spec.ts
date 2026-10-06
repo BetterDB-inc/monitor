@@ -243,3 +243,36 @@ describe('MigrationValidationService', () => {
     });
   });
 });
+
+describe('MigrationValidationService with external connections', () => {
+  const EXTERNAL_MESSAGE =
+    'One or more selected instances only pushes OTLP metrics. Migration needs a live connection to both instances.';
+
+  it.each([
+    ['source', 'conn-1'],
+    ['target', 'conn-2'],
+  ])('rejects an external %s before creating a validation job', async (_side, externalId) => {
+    const registry = createMockRegistry();
+    registry.getConfig.mockImplementation((id: string) => ({
+      id,
+      name: id,
+      host: '127.0.0.1',
+      port: 6379,
+      createdAt: Date.now(),
+      connectionType: id === externalId ? 'external' : 'direct',
+    }));
+    const service = new MigrationValidationService(registry as any, createMockStorage(), createMockMigrationService());
+    const runValidation = jest.spyOn(service as unknown as { runValidation: () => Promise<void> }, 'runValidation');
+
+    const error = await service
+      .startValidation({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2' })
+      .catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect((error as Error).message).toBe(EXTERNAL_MESSAGE);
+
+    expect(runValidation).not.toHaveBeenCalled();
+    expect(registry.mockAdapter.getClient).not.toHaveBeenCalled();
+    expect((service as unknown as { jobs: Map<string, unknown> }).jobs.size).toBe(0);
+  });
+});

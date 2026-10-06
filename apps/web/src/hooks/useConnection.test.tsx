@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useConnectionState, type Connection } from './useConnection';
+import { CONNECTIONS_REFRESH_MS, useConnectionState, type Connection } from './useConnection';
 
 const mocks = vi.hoisted(() => {
   return { fetchApi: vi.fn(), setCurrentConnectionId: vi.fn() };
@@ -46,6 +46,171 @@ describe('useConnectionState', () => {
     expect(mocks.setCurrentConnectionId).toHaveBeenLastCalledWith('conn-2');
   });
 
+  it('never falls back to a retired member when nothing is connected', async () => {
+    const retired: Connection = {
+      ...connection('retired'),
+      isConnected: false,
+      membership: { seedId: 'seed', nodeId: 'n1', origin: 'auto', source: 'cluster', retiredAt: 1 },
+    };
+    const idle: Connection = { ...connection('idle'), isConnected: false };
+    mocks.fetchApi.mockResolvedValueOnce({ connections: [retired, idle], currentId: 'retired' });
+
+    const { result } = renderHook(() => {
+      return useConnectionState();
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentConnection?.id).toBe('idle');
+    });
+  });
+
+  it('moves off a selected member once it leaves its cluster', async () => {
+    const member: Connection = { ...connection('member'), membership: { seedId: 'seed', nodeId: 'n1', origin: 'auto' } };
+    mocks.fetchApi.mockResolvedValueOnce({ connections: [member, connection('other')], currentId: 'member' });
+
+    const { result } = renderHook(() => {
+      return useConnectionState();
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentConnection?.id).toBe('member');
+    });
+
+    const retired: Connection = { ...member, membership: { ...member.membership!, retiredAt: 1 } };
+    mocks.fetchApi.mockResolvedValueOnce({ connections: [retired, connection('other')], currentId: 'member' });
+
+    await act(async () => {
+      await result.current.refreshConnections();
+    });
+
+    expect(result.current.currentConnection?.id).toBe('other');
+  });
+
+  it('refreshes the selected connection when it changes in place', async () => {
+    mocks.fetchApi.mockResolvedValueOnce({ connections: [connection('conn-1')], currentId: 'conn-1' });
+
+    const { result } = renderHook(() => {
+      return useConnectionState();
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentConnection?.id).toBe('conn-1');
+    });
+    const before = result.current.currentConnection;
+
+    const adopted: Connection = {
+      ...connection('conn-1'),
+      isConnected: false,
+      membership: { seedId: 'seed', nodeId: 'n1', origin: 'adopted', source: 'cluster' },
+    };
+    mocks.fetchApi.mockResolvedValueOnce({ connections: [adopted], currentId: 'conn-1' });
+    await act(async () => {
+      await result.current.refreshConnections();
+    });
+
+    expect(result.current.currentConnection).toEqual(adopted);
+
+    mocks.fetchApi.mockResolvedValueOnce({ connections: [{ ...adopted }], currentId: 'conn-1' });
+    const refreshed = result.current.currentConnection;
+    await act(async () => {
+      await result.current.refreshConnections();
+    });
+
+    expect(result.current.currentConnection).toBe(refreshed);
+    expect(refreshed).not.toBe(before);
+  });
+
+  it('stays on an adopted connection after it leaves its cluster', async () => {
+    const adopted: Connection = {
+      ...connection('adopted'),
+      membership: { seedId: 'seed', nodeId: 'n1', origin: 'adopted', source: 'cluster' },
+    };
+    mocks.fetchApi.mockResolvedValueOnce({ connections: [adopted, connection('other')], currentId: 'adopted' });
+
+    const { result } = renderHook(() => {
+      return useConnectionState();
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentConnection?.id).toBe('adopted');
+    });
+
+    const retired: Connection = { ...adopted, membership: { ...adopted.membership!, retiredAt: 1 } };
+    mocks.fetchApi.mockResolvedValueOnce({ connections: [retired, connection('other')], currentId: 'adopted' });
+
+    await act(async () => {
+      await result.current.refreshConnections();
+    });
+
+    expect(result.current.currentConnection).toEqual(retired);
+  });
+
+  it('keeps a switch made while a refresh was in flight', async () => {
+    mocks.fetchApi.mockResolvedValueOnce(connectionsResponse(['conn-1', 'conn-2']));
+
+    const { result } = renderHook(() => {
+      return useConnectionState();
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentConnection?.id).toBe('conn-1');
+    });
+
+    let finish: (value: unknown) => void = () => undefined;
+    mocks.fetchApi.mockImplementation((url: string) => {
+      if (url !== '/connections') {
+        return Promise.resolve({});
+      }
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    });
+
+    let refresh: Promise<void> = Promise.resolve();
+    act(() => {
+      refresh = result.current.refreshConnections();
+    });
+    act(() => {
+      result.current.setConnection('conn-2');
+    });
+
+    await act(async () => {
+      finish({
+        connections: [{ ...connection('conn-1'), isConnected: false }, connection('conn-2')],
+        currentId: null,
+      });
+      await refresh;
+    });
+
+    expect(result.current.currentConnection?.id).toBe('conn-2');
+  });
+
+  it('keeps a retired member the user chose to view', async () => {
+    const retired: Connection = {
+      ...connection('retired'),
+      membership: { seedId: 'seed', nodeId: 'n1', origin: 'auto', retiredAt: 1 },
+    };
+    mocks.fetchApi.mockResolvedValue({ connections: [connection('other'), retired], currentId: null });
+
+    const { result } = renderHook(() => {
+      return useConnectionState();
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentConnection?.id).toBe('other');
+    });
+
+    act(() => {
+      result.current.setConnection('retired');
+    });
+
+    await act(async () => {
+      await result.current.refreshConnections();
+    });
+
+    expect(result.current.currentConnection?.id).toBe('retired');
+  });
+
   it('clears the selection when the last connection is removed', async () => {
     mocks.fetchApi.mockResolvedValueOnce(connectionsResponse(['conn-1']));
 
@@ -89,5 +254,75 @@ describe('useConnectionState', () => {
     });
 
     expect(result.current.currentConnection?.id).toBe('conn-2');
+  });
+
+  it('picks up children added by background topology reconciliation', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mocks.fetchApi.mockResolvedValue({
+        connections: [{ ...connection('seed'), autoRegisterNodes: true }],
+        currentId: null,
+      });
+      const { result } = renderHook(() => useConnectionState());
+      await waitFor(() => expect(result.current.connections).toHaveLength(1));
+
+      const child = { ...connection('child'), membership: { seedId: 'seed', nodeId: 'n', origin: 'auto' as const } };
+      mocks.fetchApi.mockResolvedValue({
+        connections: [{ ...connection('seed'), autoRegisterNodes: true }, child],
+        currentId: null,
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(CONNECTIONS_REFRESH_MS);
+      });
+
+      expect(result.current.connections.map((c) => c.id)).toEqual(['seed', 'child']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('polls for children when Sentinel auto-registration is on by default', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mocks.fetchApi.mockResolvedValue({
+        connections: [connection('sentinels')],
+        currentId: null,
+        autoRegisterNodesDefault: false,
+        autoRegisterSentinelNodesDefault: true,
+      });
+      const { result } = renderHook(() => useConnectionState());
+      await waitFor(() => expect(result.current.connections).toHaveLength(1));
+
+      const child = { ...connection('child'), membership: { seedId: 'sentinels', nodeId: 'n', origin: 'auto' as const } };
+      mocks.fetchApi.mockResolvedValue({
+        connections: [connection('sentinels'), child],
+        currentId: null,
+        autoRegisterNodesDefault: false,
+        autoRegisterSentinelNodesDefault: true,
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(CONNECTIONS_REFRESH_MS);
+      });
+
+      expect(result.current.connections.map((c) => c.id)).toEqual(['sentinels', 'child']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not poll when no connection follows cluster topology', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mocks.fetchApi.mockResolvedValue(connectionsResponse(['conn-1']));
+      const { result } = renderHook(() => useConnectionState());
+      await waitFor(() => expect(result.current.connections).toHaveLength(1));
+      const calls = mocks.fetchApi.mock.calls.length;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(CONNECTIONS_REFRESH_MS * 2);
+      });
+      expect(mocks.fetchApi.mock.calls.length).toBe(calls);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

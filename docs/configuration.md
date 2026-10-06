@@ -11,6 +11,7 @@ This document provides comprehensive configuration information for BetterDB Moni
 
 - [Multi-Connection Support](#multi-connection-support)
 - [Environment Variables](#environment-variables)
+  - [Cluster Auto-Registration](#cluster-auto-registration)
   - [Data Retention](#data-retention)
 - [Docker Usage](#docker-usage)
 - [HTTP Endpoints](#http-endpoints)
@@ -262,6 +263,13 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 | ----------------------------------- | -------- | ------- | ------------------------------------------------ |
 | `CLIENT_ANALYTICS_POLL_INTERVAL_MS` | No       | `60000` | Client analytics polling interval (milliseconds) |
 
+### Cluster Auto-Registration
+
+| Variable                      | Required | Default | Description                                                                                                                     |
+| ------------------------------ | -------- | ------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `CLUSTER_AUTO_REGISTER_NODES` | No       | `false` | Default for whether a cluster connection auto-registers its nodes as child connections; overridable per connection. See [Cluster Auto-Registration](cluster-auto-registration.md) |
+| `SENTINEL_AUTO_REGISTER_NODES` | No       | `false` | Default for whether a Sentinel connection auto-registers the primaries and replicas it monitors; overridable per connection. See [Sentinel Auto-Registration](sentinel-auto-registration.md) |
+
 ### Data Retention
 
 | Variable               | Required | Default | Description                                                                                                                                        |
@@ -370,6 +378,11 @@ BetterDB Monitor automatically checks for new versions and displays an update ba
 | `KEY_ANALYTICS_SAMPLE_SIZE`     | No       | `10000`  | Number of keys to sample for analytics           |
 | `KEY_ANALYTICS_SCAN_BATCH_SIZE` | No       | `1000`   | Batch size for key scanning operations           |
 | `KEY_ANALYTICS_INTERVAL_MS`     | No       | `300000` | Key analytics collection interval (milliseconds) |
+
+Per-pattern counts come from the sampled keys:
+
+- **Keys**, **w/ TTL**, **Expiring Soon** and **Stale Keys** are scaled from the sample to an estimate for the whole pattern. A key is stale when its idle time (`OBJECT IDLETIME`) exceeds 24 hours; the count is taken key by key, not derived from the average idle time. Snapshots collected by an agent older than this change show the stale count as N/A; the Stale Keys summary sums the patterns with a known count and shows N/A when none has one. Snapshots stored before this change keep their original values.
+- **Hot Keys (in sample)** and **Cold Keys (in sample)** are counts within the sample, not totals: keys whose access frequency is above the pattern average, or below half of it.
 
 Key analytics history follows the standard retention policy (see [Data Retention](#data-retention)): self-hosted installs keep it until a retention window is configured; BetterDB Cloud prunes it at the tier window (Community 7 days, Pro 90, Enterprise 365).
 

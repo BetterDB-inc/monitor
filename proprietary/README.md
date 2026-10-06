@@ -30,7 +30,7 @@ License validation and feature gating infrastructure.
 ### Key Analytics (`/key-analytics`)
 Key pattern analysis with memory, TTL, and access frequency metrics.
 - Samples keys via SCAN and groups by extracted patterns
-- Tracks stale keys, hot/cold classification, expiring keys
+- Tracks stale keys (sampled keys idle over 24 hours, scaled to the pattern), hot/cold classification (counts within the sample), expiring keys
 - Tier: Pro and above
 
 ### AI Assistant (`/ai`)

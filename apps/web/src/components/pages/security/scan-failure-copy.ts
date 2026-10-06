@@ -30,7 +30,19 @@ const UNKNOWN_GUIDANCE =
 const BLANK_DETAIL =
   'The instance never answered, so no engine version was read and nothing was matched. This is not an all-clear — it is a blank.';
 
-export function scanFailureCopy(summary: string, nodes: FailedNode[]): ScanFailureCopy {
+const EXTERNAL_INSTANCE_GUIDANCE =
+  'This connection only receives pushed metrics, so a scan uses the version the collector reports. Check that the collector still pushes to this monitor with redis.version, or valkey.version for Valkey, among its resource attributes.';
+
+const EXTERNAL_BLANK_DETAIL =
+  'No usable version arrived with the pushed metrics, so nothing was matched. This is not an all-clear — it is a blank.';
+
+export const EXTERNAL_SCAN_NOTE = 'Version from pushed metrics; modules are not checked.';
+
+export function scanFailureCopy(
+  summary: string,
+  nodes: FailedNode[],
+  external = false,
+): ScanFailureCopy {
   if (summary === MISSING_CONNECTION_MESSAGE) {
     return {
       headline: 'This connection no longer exists',
@@ -81,8 +93,8 @@ export function scanFailureCopy(summary: string, nodes: FailedNode[]): ScanFailu
 
   return {
     headline: 'This connection could not be scanned',
-    detail: BLANK_DETAIL,
-    guidance: INSTANCE_GUIDANCE,
+    detail: external ? EXTERNAL_BLANK_DETAIL : BLANK_DETAIL,
+    guidance: external ? EXTERNAL_INSTANCE_GUIDANCE : INSTANCE_GUIDANCE,
     connectionAtFault: true,
   };
 }

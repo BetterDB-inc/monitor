@@ -1,14 +1,23 @@
 import { useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Popover } from 'radix-ui';
-import { CheckIcon, ChevronDownIcon, SearchIcon } from 'lucide-react';
+import { CheckIcon, ChevronDownIcon, ChevronRightIcon, SearchIcon } from 'lucide-react';
+import type { DiscoveredInstance } from '@betterdb/shared';
 import type { Connection } from '../../hooks/useConnection';
 import { cn } from '@/lib/utils';
 import { ConnectionSwitcherOpenContext } from './switcher-open-context';
+import { ConnectionTypeBadge, BADGE } from './ConnectionTypeBadge';
+import { DiscoveredInstancesSection } from './DiscoveredInstancesSection';
+import { groupSentinelMembers } from './autoRegisterCopy';
+import { formatRelative, isRetiredMember, isUnavailableMember, orderWithMembers, retiredLabel } from '../../utils/connectionType';
 
 interface ConnectionSwitcherProps {
   connections: Connection[];
   current: Connection | null | undefined;
   onSelect: (id: string) => void;
+  discovered?: DiscoveredInstance[];
+  onRegister?: (instance: DiscoveredInstance) => void;
+  onDismiss?: (instance: DiscoveredInstance) => void;
+  discoveredError?: string | null;
 }
 
 /**
@@ -25,13 +34,22 @@ function matches(connection: Connection, query: string): boolean {
   return haystack.includes(needle);
 }
 
-export function ConnectionSwitcher({ connections, current, onSelect }: ConnectionSwitcherProps) {
+export function ConnectionSwitcher({
+  connections,
+  current,
+  onSelect,
+  discovered,
+  onRegister,
+  onDismiss,
+  discoveredError,
+}: ConnectionSwitcherProps) {
   const shared = useContext(ConnectionSwitcherOpenContext);
   const [localOpen, setLocalOpen] = useState(false);
   const open = shared?.open ?? localOpen;
   const setOpen = shared?.setOpen ?? setLocalOpen;
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   // Arrow keys scroll the list, so the browser fires mouseenter on whatever row
@@ -44,11 +62,69 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
   const lastPointer = useRef<{ x: number; y: number } | null>(null);
   const optionIdPrefix = useId();
 
+  const childCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const c of connections) {
+      const seedId = c.membership?.seedId;
+      if (seedId) {
+        counts.set(seedId, (counts.get(seedId) ?? 0) + 1);
+      }
+    }
+    return counts;
+  }, [connections]);
+
   const filtered = useMemo(() => {
-    return connections.filter((connection) => {
-      return matches(connection, query);
+    const searching = query.trim() !== '';
+    const currentSeed = current?.membership?.seedId;
+    const ordered = orderWithMembers(connections).filter(({ connection, depth }) => {
+      if (searching) {
+        return matches(connection, query);
+      }
+      if (depth === 0) {
+        return true;
+      }
+      const seedId = connection.membership!.seedId;
+      return expanded.has(seedId) || seedId === currentSeed;
     });
-  }, [connections, query]);
+
+    const rows: Array<Connection & { depth: 0 | 1; groupHeading?: string }> = [];
+    let i = 0;
+    while (i < ordered.length) {
+      const { connection, depth } = ordered[i];
+      if (depth !== 0) {
+        rows.push({ ...connection, depth });
+        i++;
+        continue;
+      }
+      rows.push({ ...connection, depth: 0 });
+      i++;
+      const children: Connection[] = [];
+      while (i < ordered.length && ordered[i].depth === 1) {
+        children.push(ordered[i].connection);
+        i++;
+      }
+      const seedIsSentinel =
+        connection.capabilities?.isSentinel === true ||
+        children.some((c) => c.membership?.source === 'sentinel');
+      if (searching || !seedIsSentinel) {
+        for (const child of children) {
+          rows.push({ ...child, depth: 1 });
+        }
+        continue;
+      }
+      const active = children.filter((c) => !isRetiredMember(c));
+      const retired = children.filter((c) => isRetiredMember(c));
+      for (const group of groupSentinelMembers(connection.id, active)) {
+        group.members.forEach((member, index) => {
+          rows.push({ ...member, depth: 1, groupHeading: index === 0 ? group.group : undefined });
+        });
+      }
+      for (const child of retired) {
+        rows.push({ ...child, depth: 1 });
+      }
+    }
+    return rows;
+  }, [connections, query, expanded, current]);
 
   // Derived rather than corrected in an effect: `connections` can change under
   // an open popover (refreshConnections lands whenever it lands), and an index
@@ -90,7 +166,7 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
     if (event.key === 'Enter') {
       event.preventDefault();
       const choice = filtered[effectiveIndex];
-      if (choice === undefined) {
+      if (choice === undefined || isUnavailableMember(choice)) {
         return;
       }
       handleSelect(choice.id);
@@ -128,6 +204,7 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
                 )}
               />
               <span className="truncate">{current.name}</span>
+              <ConnectionTypeBadge connection={current} />
             </>
           ) : (
             <span className="text-muted-foreground">Select connection</span>
@@ -197,49 +274,120 @@ export function ConnectionSwitcher({ connections, current, onSelect }: Connectio
             ) : (
               filtered.map((connection, index) => {
                 const isCurrent = connection.id === current?.id;
+                const { depth } = connection;
+                const retired = isRetiredMember(connection);
+                const unavailable = isUnavailableMember(connection);
+                const childCount = childCounts.get(connection.id) ?? 0;
                 return (
-                  <button
-                    key={connection.id}
-                    id={`${optionIdPrefix}-option-${index}`}
-                    type="button"
-                    role="option"
-                    aria-selected={isCurrent}
-                    onMouseEnter={() => {
-                      if (keyboardNav.current) {
-                        return;
-                      }
-                      setActiveIndex(index);
-                    }}
-                    onClick={() => handleSelect(connection.id)}
-                    className={cn(
-                      'w-full flex items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-left',
-                      index === effectiveIndex && 'bg-accent',
-                    )}
-                  >
-                    <span
-                      data-testid={`conn-status-${connection.id}`}
-                      data-connected={String(connection.isConnected)}
+                  <div key={connection.id}>
+                    {connection.groupHeading !== undefined ? (
+                      <div
+                        role="presentation"
+                        className="px-2 pt-2 pb-1 ps-6 text-[10px] font-medium uppercase text-muted-foreground"
+                      >
+                        {connection.groupHeading || 'ungrouped'}
+                      </div>
+                    ) : null}
+                    <div className="flex items-center">
+                    {depth === 0 && childCount > 0 && query.trim() === '' ? (
+                      <button
+                        type="button"
+                        aria-label={`${childCount} nodes`}
+                        aria-expanded={expanded.has(connection.id)}
+                        onClick={() =>
+                          setExpanded((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(connection.id)) {
+                              next.delete(connection.id);
+                            } else {
+                              next.add(connection.id);
+                            }
+                            return next;
+                          })
+                        }
+                        className="flex items-center gap-0.5 px-1 text-[10px] text-muted-foreground"
+                      >
+                        <ChevronRightIcon
+                          className={cn(
+                            'w-3 h-3 transition-transform',
+                            expanded.has(connection.id) && 'rotate-90',
+                          )}
+                        />
+                        {childCount} nodes
+                      </button>
+                    ) : null}
+                    <button
+                      id={`${optionIdPrefix}-option-${index}`}
+                      type="button"
+                      role="option"
+                      aria-selected={isCurrent}
+                      aria-disabled={unavailable || undefined}
+                      onMouseEnter={() => {
+                        if (keyboardNav.current) {
+                          return;
+                        }
+                        setActiveIndex(index);
+                      }}
+                      onClick={() => {
+                        if (!unavailable) {
+                          handleSelect(connection.id);
+                        }
+                      }}
                       className={cn(
-                        'w-2 h-2 rounded-full flex-shrink-0',
-                        connection.isConnected ? 'bg-green-500' : 'bg-destructive',
+                        'w-full flex items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-left',
+                        depth === 1 && 'ps-6',
+                        unavailable && 'opacity-60',
+                        index === effectiveIndex && 'bg-accent',
                       )}
-                    />
-                    {/* `truncate` sets overflow:hidden, which drops a flex
-                        item's automatic minimum size to zero: the name would
-                        collapse to nothing while an unshrinkable host kept its
-                        full width and pushed the row into a horizontal scroll.
-                        Both shrink now, in proportion to their length, so the
-                        long hosted URL gives ground before the name does. */}
-                    <span className="min-w-0 truncate">{connection.name}</span>
-                    <span className="ml-auto min-w-0 truncate ps-2 text-xs text-muted-foreground">
-                      {connection.host}:{connection.port}
-                    </span>
-                    {isCurrent ? <CheckIcon className="w-4 h-4 flex-shrink-0" /> : null}
-                  </button>
+                    >
+                      <span
+                        data-testid={`conn-status-${connection.id}`}
+                        data-connected={String(connection.isConnected)}
+                        className={cn(
+                          'w-2 h-2 rounded-full flex-shrink-0',
+                          connection.isConnected ? 'bg-green-500' : 'bg-destructive',
+                        )}
+                      />
+                      {/* `truncate` sets overflow:hidden, which drops a flex
+                          item's automatic minimum size to zero: the name would
+                          collapse to nothing while an unshrinkable host kept its
+                          full width and pushed the row into a horizontal scroll.
+                          Both shrink now, in proportion to their length, so the
+                          long hosted URL gives ground before the name does. */}
+                      <span className="min-w-0 truncate">{connection.name}</span>
+                      <span className="ml-auto flex min-w-0 items-center ps-2 text-xs text-muted-foreground">
+                        <span className="min-w-0 truncate">
+                          {connection.host}:{connection.port}
+                        </span>
+                        <ConnectionTypeBadge connection={connection} />
+                        {!retired && connection.membership?.role === 'primary' ? (
+                          <span className={BADGE}>primary</span>
+                        ) : null}
+                      </span>
+                      {retired ? (
+                        <span className="ms-1 shrink-0 text-[10px] text-muted-foreground">
+                          {retiredLabel(connection)} · {formatRelative(connection.membership!.retiredAt!)}
+                        </span>
+                      ) : null}
+                      {isCurrent ? <CheckIcon className="w-4 h-4 flex-shrink-0" /> : null}
+                    </button>
+                    </div>
+                  </div>
                 );
               })
             )}
           </div>
+          {discovered && onRegister && onDismiss ? (
+            <DiscoveredInstancesSection
+              instances={discovered}
+              onRegister={(instance) => {
+                setOpen(false);
+                onRegister(instance);
+              }}
+              onDismiss={onDismiss}
+              error={discoveredError}
+            />
+          ) : null}
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>

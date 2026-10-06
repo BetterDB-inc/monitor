@@ -1,7 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { CveScanResult } from '@betterdb/shared';
+import { ApiError } from '../api/client';
 import Security from './Security';
 import {
   HEALTHY_DATASET,
@@ -13,7 +15,12 @@ import {
 } from './__fixtures__/cve';
 
 const mocks = vi.hoisted(() => {
-  return { scan: vi.fn(), dataset: vi.fn(), refresh: vi.fn() };
+  return {
+    scan: vi.fn(),
+    dataset: vi.fn(),
+    refresh: vi.fn(),
+    connectionType: { current: 'direct' as 'direct' | 'external' },
+  };
 });
 
 vi.mock('../api/cve', () => {
@@ -34,6 +41,7 @@ vi.mock('../hooks/useConnection', () => {
           host: '127.0.0.1',
           port: 6379,
           isConnected: true,
+          connectionType: mocks.connectionType.current,
         },
         connections: [],
         loading: false,
@@ -44,6 +52,38 @@ vi.mock('../hooks/useConnection', () => {
       };
     },
   };
+});
+
+const RESULT: CveScanResult = {
+  connectionId: 'conn-1',
+  fingerprint: 'fp-1',
+  datasetVersion: 'ds-1',
+  scannedAt: 1,
+  lastCheckedAt: 1,
+  topology: 'standalone',
+  nodes: [
+    {
+      nodeId: 'conn-1',
+      address: 'cache.internal:6379',
+      role: 'standalone',
+      product: 'valkey',
+      engineVersion: '8.1.1',
+      modules: [],
+      modulesUnknown: true,
+      findings: [],
+      unversioned: [],
+      severityCounts: { critical: 0, high: 0, medium: 0, low: 0 },
+    },
+  ],
+  notScanned: [],
+  drift: false,
+  distinctVersions: ['8.1.1'],
+  partial: true,
+  missingSources: [],
+};
+
+afterEach(() => {
+  mocks.connectionType.current = 'direct';
 });
 
 function renderPage() {
@@ -403,5 +443,54 @@ describe('Security page', () => {
 
     expect(within(list).getByText('10.0.0.4:6379')).toBeInTheDocument();
     expect(within(list).getByText(/unreachable/i)).toBeInTheDocument();
+  });
+
+  it('shows the version-pending card instead of a failed scan while no version has been pushed', async () => {
+    mocks.scan.mockRejectedValue(
+      new ApiError('x', 409, {
+        code: 'cve_version_pending',
+        product: 'valkey',
+        attribute: 'valkey.version',
+        message: 'x',
+      }),
+    );
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('version-pending')).toBeInTheDocument();
+    expect(screen.queryByTestId('failed-scan')).not.toBeInTheDocument();
+  });
+
+  it('keeps the failed-scan card for any other error', async () => {
+    mocks.scan.mockRejectedValue(new ApiError('CVE dataset is not available yet', 503));
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('failed-scan')).toBeInTheDocument();
+    expect(screen.queryByTestId('version-pending')).not.toBeInTheDocument();
+  });
+
+  it('notes that an external result comes from pushed metrics without module checks', async () => {
+    mocks.connectionType.current = 'external';
+    mocks.scan.mockResolvedValue(RESULT);
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    expect(await screen.findByTestId('header-note')).toHaveTextContent(
+      'Version from pushed metrics; modules are not checked.',
+    );
+  });
+
+  it('adds no pushed-metrics note for a live connection', async () => {
+    mocks.scan.mockResolvedValue(RESULT);
+    mocks.dataset.mockResolvedValue(HEALTHY_DATASET);
+
+    renderPage();
+
+    await screen.findByTestId('header-subtitle');
+    expect(screen.queryByTestId('header-note')).not.toBeInTheDocument();
   });
 });

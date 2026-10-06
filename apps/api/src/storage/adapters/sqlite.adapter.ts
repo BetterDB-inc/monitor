@@ -3,7 +3,7 @@ import { chunkedSqliteDelete } from './sqlite-chunked-delete';
 import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
-import { parseSshTunnel } from '@betterdb/shared';
+import { parseSshTunnel, parseMembership } from '@betterdb/shared';
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
   StoragePort,
@@ -263,6 +263,100 @@ function addCaptureSessionsTargetNodeColumn(db: Database.Database): void {
   } catch {
     // Same — fresh schemas have the column from day one.
   }
+}
+
+const MEMORY_SNAPSHOTS_COLUMNS = `
+  id TEXT PRIMARY KEY,
+  timestamp INTEGER NOT NULL,
+  used_memory INTEGER NOT NULL,
+  used_memory_rss INTEGER,
+  used_memory_peak INTEGER,
+  mem_fragmentation_ratio REAL,
+  maxmemory INTEGER NOT NULL DEFAULT 0,
+  allocator_frag_ratio REAL DEFAULT 0,
+  ops_per_sec INTEGER NOT NULL DEFAULT 0,
+  cpu_sys REAL NOT NULL DEFAULT 0,
+  cpu_user REAL NOT NULL DEFAULT 0,
+  io_threaded_reads INTEGER DEFAULT 0,
+  io_threaded_writes INTEGER DEFAULT 0,
+  connection_id TEXT NOT NULL DEFAULT 'env-default'
+`;
+
+const MEMORY_SNAPSHOTS_INDEXES = `
+  CREATE INDEX IF NOT EXISTS idx_memory_snap_timestamp ON memory_snapshots(timestamp DESC);
+  CREATE INDEX IF NOT EXISTS idx_memory_snap_connection_id ON memory_snapshots(connection_id);
+`;
+
+const MEMORY_SNAPSHOTS_NULLABLE = [
+  'used_memory_rss',
+  'used_memory_peak',
+  'mem_fragmentation_ratio',
+  'allocator_frag_ratio',
+  'io_threaded_reads',
+  'io_threaded_writes',
+] as const;
+
+const COMMAND_STATS_SAMPLES_COLUMNS = `
+  id TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL,
+  command TEXT NOT NULL,
+  calls_total INTEGER NOT NULL DEFAULT 0,
+  usec_total INTEGER DEFAULT 0,
+  usec_per_call REAL DEFAULT 0,
+  rejected_calls INTEGER DEFAULT 0,
+  failed_calls INTEGER DEFAULT 0,
+  calls_delta INTEGER NOT NULL,
+  usec_delta INTEGER,
+  interval_ms INTEGER NOT NULL,
+  captured_at INTEGER NOT NULL
+`;
+
+const COMMAND_STATS_SAMPLES_INDEXES = `
+  CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at
+    ON command_stats_samples(connection_id, command, captured_at);
+  CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at_global
+    ON command_stats_samples(captured_at);
+`;
+
+const COMMAND_STATS_SAMPLES_NULLABLE = [
+  'usec_total',
+  'usec_per_call',
+  'rejected_calls',
+  'failed_calls',
+  'usec_delta',
+] as const;
+
+function rebuildWithNullableColumns(
+  db: Database.Database,
+  table: string,
+  columnsDdl: string,
+  indexesDdl: string,
+  nullable: readonly string[],
+): void {
+  const existing = db.prepare(`PRAGMA table_info(${table})`).all() as {
+    name: string;
+    notnull: number;
+  }[];
+  if (!existing.some((c) => nullable.includes(c.name) && c.notnull === 1)) {
+    return;
+  }
+
+  const rebuilt = `${table}_rebuild`;
+  db.transaction(() => {
+    db.exec(`DROP TABLE IF EXISTS ${rebuilt}`);
+    db.exec(`CREATE TABLE ${rebuilt} (${columnsDdl})`);
+    const target = new Set(
+      (db.prepare(`PRAGMA table_info(${rebuilt})`).all() as { name: string }[]).map((c) => c.name),
+    );
+    const shared = existing
+      .map((c) => c.name)
+      .filter((name) => target.has(name))
+      .join(', ');
+    db.exec(`INSERT INTO ${rebuilt} (${shared}) SELECT ${shared} FROM ${table}`);
+    db.exec(`DROP TABLE ${table}`);
+    db.exec(`ALTER TABLE ${rebuilt} RENAME TO ${table}`);
+    db.exec(indexesDdl);
+  })();
 }
 
 /**
@@ -1579,45 +1673,11 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       CREATE INDEX IF NOT EXISTS idx_latency_hist_timestamp ON latency_histograms(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_latency_hist_connection_id ON latency_histograms(connection_id);
 
-      CREATE TABLE IF NOT EXISTS memory_snapshots (
-        id TEXT PRIMARY KEY,
-        timestamp INTEGER NOT NULL,
-        used_memory INTEGER NOT NULL,
-        used_memory_rss INTEGER NOT NULL,
-        used_memory_peak INTEGER NOT NULL,
-        mem_fragmentation_ratio REAL NOT NULL,
-        maxmemory INTEGER NOT NULL DEFAULT 0,
-        allocator_frag_ratio REAL NOT NULL DEFAULT 0,
-        ops_per_sec INTEGER NOT NULL DEFAULT 0,
-        cpu_sys REAL NOT NULL DEFAULT 0,
-        cpu_user REAL NOT NULL DEFAULT 0,
-        io_threaded_reads INTEGER NOT NULL DEFAULT 0,
-        io_threaded_writes INTEGER NOT NULL DEFAULT 0,
-        connection_id TEXT NOT NULL DEFAULT 'env-default'
-      );
+      CREATE TABLE IF NOT EXISTS memory_snapshots (${MEMORY_SNAPSHOTS_COLUMNS});
+      ${MEMORY_SNAPSHOTS_INDEXES}
 
-      CREATE INDEX IF NOT EXISTS idx_memory_snap_timestamp ON memory_snapshots(timestamp DESC);
-      CREATE INDEX IF NOT EXISTS idx_memory_snap_connection_id ON memory_snapshots(connection_id);
-
-      CREATE TABLE IF NOT EXISTS command_stats_samples (
-        id TEXT PRIMARY KEY,
-        connection_id TEXT NOT NULL,
-        command TEXT NOT NULL,
-        calls_total INTEGER NOT NULL DEFAULT 0,
-        usec_total INTEGER NOT NULL DEFAULT 0,
-        usec_per_call REAL NOT NULL DEFAULT 0,
-        rejected_calls INTEGER NOT NULL DEFAULT 0,
-        failed_calls INTEGER NOT NULL DEFAULT 0,
-        calls_delta INTEGER NOT NULL,
-        usec_delta INTEGER NOT NULL,
-        interval_ms INTEGER NOT NULL,
-        captured_at INTEGER NOT NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at
-        ON command_stats_samples(connection_id, command, captured_at);
-      CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at_global
-        ON command_stats_samples(captured_at);
+      CREATE TABLE IF NOT EXISTS command_stats_samples (${COMMAND_STATS_SAMPLES_COLUMNS});
+      ${COMMAND_STATS_SAMPLES_INDEXES}
 
       CREATE TABLE IF NOT EXISTS latency_stats_samples (
         id TEXT PRIMARY KEY,
@@ -1986,6 +2046,20 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     addColumnIfMissing('command_stats_samples', 'usec_per_call', 'REAL', '0');
     addColumnIfMissing('command_stats_samples', 'rejected_calls', 'INTEGER', '0');
     addColumnIfMissing('command_stats_samples', 'failed_calls', 'INTEGER', '0');
+    rebuildWithNullableColumns(
+      this.db,
+      'memory_snapshots',
+      MEMORY_SNAPSHOTS_COLUMNS,
+      MEMORY_SNAPSHOTS_INDEXES,
+      MEMORY_SNAPSHOTS_NULLABLE,
+    );
+    rebuildWithNullableColumns(
+      this.db,
+      'command_stats_samples',
+      COMMAND_STATS_SAMPLES_COLUMNS,
+      COMMAND_STATS_SAMPLES_INDEXES,
+      COMMAND_STATS_SAMPLES_NULLABLE,
+    );
     addCaptureSessionsTargetNodeColumn(this.db!);
     addMemoryProposalIntegrityColumns(this.db!);
 
@@ -2627,7 +2701,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         keyCount: row.key_count,
         memoryBytes: row.total_memory_bytes,
         avgMemoryBytes: row.avg_memory_bytes,
-        staleCount: row.stale_key_count ?? 0,
+        staleCount: row.stale_key_count ?? null,
         hotCount: row.hot_key_count ?? 0,
         coldCount: row.cold_key_count ?? 0,
       };
@@ -2649,7 +2723,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       totalPatterns: summary.total_patterns ?? 0,
       totalKeys: summary.total_keys ?? 0,
       totalMemoryBytes: summary.total_memory_bytes ?? 0,
-      staleKeyCount: summary.stale_key_count ?? 0,
+      staleKeyCount: summary.stale_key_count ?? null,
       hotKeyCount: summary.hot_key_count ?? 0,
       coldKeyCount: summary.cold_key_count ?? 0,
       keysExpiringSoon: summary.keys_expiring_soon ?? 0,
@@ -3337,8 +3411,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           snapshot.opsPerSec ?? 0,
           snapshot.cpuSys ?? 0,
           snapshot.cpuUser ?? 0,
-          snapshot.ioThreadedReads ?? 0,
-          snapshot.ioThreadedWrites ?? 0,
+          snapshot.ioThreadedReads ?? null,
+          snapshot.ioThreadedWrites ?? null,
           connId,
         );
         count += result.changes;
@@ -3398,8 +3472,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       opsPerSec: row.ops_per_sec ?? 0,
       cpuSys: row.cpu_sys ?? 0,
       cpuUser: row.cpu_user ?? 0,
-      ioThreadedReads: row.io_threaded_reads ?? 0,
-      ioThreadedWrites: row.io_threaded_writes ?? 0,
+      ioThreadedReads: row.io_threaded_reads,
+      ioThreadedWrites: row.io_threaded_writes,
       connectionId: row.connection_id,
     }));
   }
@@ -4100,7 +4174,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   // Connection Management Methods
-  async saveConnection(config: DatabaseConnectionConfig): Promise<void> {
+  private ensureConnectionsSchema(): void {
     if (!this.db) throw new Error('Database not initialized');
 
     // Ensure connections table exists
@@ -4116,6 +4190,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         db_index INTEGER DEFAULT 0,
         tls INTEGER DEFAULT 0,
         ssh_tunnel TEXT,
+        connection_type TEXT,
+        auto_register_nodes INTEGER,
+        membership TEXT,
+        node_username TEXT,
+        node_password TEXT,
+        node_password_encrypted INTEGER,
         is_default INTEGER DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER
@@ -4131,10 +4211,34 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!columns.some((c) => c.name === 'ssh_tunnel')) {
       this.db.exec('ALTER TABLE connections ADD COLUMN ssh_tunnel TEXT');
     }
+    if (!columns.some((c) => c.name === 'connection_type')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN connection_type TEXT');
+    }
+    if (!columns.some((c) => c.name === 'auto_register_nodes')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN auto_register_nodes INTEGER');
+    }
+    if (!columns.some((c) => c.name === 'membership')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN membership TEXT');
+    }
+    if (!columns.some((c) => c.name === 'node_username')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN node_username TEXT');
+    }
+    if (!columns.some((c) => c.name === 'node_password')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN node_password TEXT');
+    }
+    if (!columns.some((c) => c.name === 'node_password_encrypted')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN node_password_encrypted INTEGER');
+    }
+  }
+
+  async saveConnection(config: DatabaseConnectionConfig): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    this.ensureConnectionsSchema();
 
     const stmt = this.db.prepare(`
-      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, ssh_tunnel, is_default, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, node_username, node_password, node_password_encrypted, db_index, tls, ssh_tunnel, connection_type, auto_register_nodes, membership, is_default, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         host = excluded.host,
@@ -4142,9 +4246,15 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         username = excluded.username,
         password = excluded.password,
         password_encrypted = excluded.password_encrypted,
+        node_username = excluded.node_username,
+        node_password = excluded.node_password,
+        node_password_encrypted = excluded.node_password_encrypted,
         db_index = excluded.db_index,
         tls = excluded.tls,
         ssh_tunnel = excluded.ssh_tunnel,
+        connection_type = excluded.connection_type,
+        auto_register_nodes = excluded.auto_register_nodes,
+        membership = excluded.membership,
         is_default = excluded.is_default,
         updated_at = excluded.updated_at
     `);
@@ -4157,9 +4267,15 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       config.username || null,
       config.password || null,
       config.passwordEncrypted ? 1 : 0,
+      config.nodeUsername ?? null,
+      config.nodePassword || null,
+      config.nodePassword ? (config.nodePasswordEncrypted ? 1 : 0) : null,
       config.dbIndex || 0,
       config.tls ? 1 : 0,
       config.sshTunnel ? JSON.stringify(config.sshTunnel) : null,
+      config.connectionType ?? null,
+      config.autoRegisterNodes === undefined ? null : config.autoRegisterNodes ? 1 : 0,
+      config.membership ? JSON.stringify(config.membership) : null,
       config.isDefault ? 1 : 0,
       config.createdAt,
       config.updatedAt || null,
@@ -4187,9 +4303,18 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       username: row.username || undefined,
       password: row.password || undefined,
       passwordEncrypted: row.password_encrypted === 1,
+      nodeUsername: row.node_username ?? undefined,
+      nodePassword: row.node_password || undefined,
+      nodePasswordEncrypted: row.node_password_encrypted === 1 ? true : undefined,
       dbIndex: row.db_index,
       tls: row.tls === 1,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
+      connectionType: row.connection_type === 'external' ? 'external' : 'direct',
+      autoRegisterNodes:
+        row.auto_register_nodes === null || row.auto_register_nodes === undefined
+          ? undefined
+          : row.auto_register_nodes === 1,
+      membership: parseMembership(row.membership),
       isDefault: row.is_default === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at || undefined,
@@ -4215,9 +4340,18 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       username: row.username || undefined,
       password: row.password || undefined,
       passwordEncrypted: row.password_encrypted === 1,
+      nodeUsername: row.node_username ?? undefined,
+      nodePassword: row.node_password || undefined,
+      nodePasswordEncrypted: row.node_password_encrypted === 1 ? true : undefined,
       dbIndex: row.db_index,
       tls: row.tls === 1,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
+      connectionType: row.connection_type === 'external' ? 'external' : 'direct',
+      autoRegisterNodes:
+        row.auto_register_nodes === null || row.auto_register_nodes === undefined
+          ? undefined
+          : row.auto_register_nodes === 1,
+      membership: parseMembership(row.membership),
       isDefault: row.is_default === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at || undefined,
@@ -4232,6 +4366,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async updateConnection(id: string, updates: Partial<DatabaseConnectionConfig>): Promise<void> {
     if (!this.db) throw new Error('Database not initialized');
+
+    this.ensureConnectionsSchema();
 
     const setClauses: string[] = [];
     const params: any[] = [];
@@ -4267,6 +4403,14 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (updates.isDefault !== undefined) {
       setClauses.push('is_default = ?');
       params.push(updates.isDefault ? 1 : 0);
+    }
+    if ('autoRegisterNodes' in updates) {
+      setClauses.push('auto_register_nodes = ?');
+      params.push(updates.autoRegisterNodes === undefined ? null : updates.autoRegisterNodes ? 1 : 0);
+    }
+    if ('membership' in updates) {
+      setClauses.push('membership = ?');
+      params.push(updates.membership ? JSON.stringify(updates.membership) : null);
     }
 
     if (setClauses.length === 0) return;
