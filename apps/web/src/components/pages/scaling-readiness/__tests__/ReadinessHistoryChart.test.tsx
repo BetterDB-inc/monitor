@@ -7,9 +7,16 @@ const T0 = new Date(2026, 9, 1, 14, 30).getTime();
 
 describe('ReadinessHistoryChart formatting', () => {
   it('treats spans over 24h as multi-day', () => {
-    expect(isMultiDaySpan([{ timestamp: T0 }, { timestamp: T0 + DAY }])).toBe(false);
+    expect(isMultiDaySpan([{ timestamp: T0 }, { timestamp: T0 + 60 * 60 * 1000 }])).toBe(false);
+    expect(isMultiDaySpan([{ timestamp: T0 }, { timestamp: T0 + DAY }])).toBe(true);
     expect(isMultiDaySpan([{ timestamp: T0 }, { timestamp: T0 + DAY + 1 }])).toBe(true);
     expect(isMultiDaySpan([{ timestamp: T0 }])).toBe(false);
+  });
+
+  it('treats spans across local midnight as multi-day', () => {
+    const late = new Date(2026, 9, 1, 23, 30).getTime();
+    const early = new Date(2026, 9, 2, 0, 30).getTime();
+    expect(isMultiDaySpan([{ timestamp: late }, { timestamp: early }])).toBe(true);
   });
 
   it('formats axis labels as dates for multi-day spans and times otherwise', () => {

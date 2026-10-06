@@ -16,7 +16,11 @@ const MULTI_DAY_MS = 24 * 60 * 60 * 1000;
 
 export function isMultiDaySpan(points: { timestamp: number }[]): boolean {
   if (points.length < 2) return false;
-  return points[points.length - 1].timestamp - points[0].timestamp > MULTI_DAY_MS;
+  const first = points[0].timestamp;
+  const last = points[points.length - 1].timestamp;
+  return (
+    last - first > MULTI_DAY_MS || new Date(first).toDateString() !== new Date(last).toDateString()
+  );
 }
 
 export function formatReadinessAxisLabel(timestamp: number, multiDay: boolean): string {
