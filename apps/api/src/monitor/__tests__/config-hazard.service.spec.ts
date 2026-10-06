@@ -48,7 +48,9 @@ describe('ConfigHazardService', () => {
     client.getConfigValue.mockResolvedValue('no');
     const findings = await service.getHazards('conn-1');
     expect(findings).toHaveLength(0);
-    expect(client.call).not.toHaveBeenCalled();
+    // The server-mode gate issues an INFO server read first, but the ACL GETUSER
+    // probe must still be skipped when AOF is off.
+    expect(client.call).not.toHaveBeenCalledWith('ACL', ['GETUSER', 'default']);
   });
 
   it('maps a denied ACL GETUSER to an unverified finding', async () => {
@@ -68,7 +70,9 @@ describe('ConfigHazardService', () => {
     expect(findings).toHaveLength(1);
     expect(findings[0].id).toBe('cluster-crc-disabled');
     expect(findings[0].status).toBe('advisory');
-    expect(client.call).not.toHaveBeenCalled();
+    // The server-mode gate issues an INFO server read; the AOF-only ACL GETUSER
+    // probe must still be skipped when AOF is off.
+    expect(client.call).not.toHaveBeenCalledWith('ACL', ['GETUSER', 'default']);
   });
 
   it('preserves an AOF finding when the cluster CRC read fails', async () => {
@@ -348,6 +352,92 @@ describe('ConfigHazardService', () => {
         'appendfsync-always-blocking',
         'default-user-aof-data-loss',
       ]);
+    });
+  });
+
+  describe('Sentinel DNS-resolution hazard', () => {
+    function setupSentinel(opts: {
+      resolveHostnames?: string | null;
+      announceIp?: string | null;
+      announceHostnames?: string | null;
+      masterIp?: string;
+    }): void {
+      // Sentinel settings are read via SENTINEL CONFIG GET (flat [name, value] reply),
+      // not the plain CONFIG GET / getConfigValue path.
+      const sentinelConfig: Record<string, string | null> = {
+        'resolve-hostnames': opts.resolveHostnames ?? 'yes',
+        'announce-ip': opts.announceIp ?? null,
+        'announce-hostnames': opts.announceHostnames ?? null,
+      };
+      client.call.mockImplementation((cmd: string, args: string[]) => {
+        if (cmd === 'INFO') {
+          return Promise.resolve('# Server\r\nserver_mode:sentinel\r\n');
+        }
+        if (cmd === 'SENTINEL' && args[0] === 'CONFIG' && args[1] === 'GET') {
+          const param = args[2];
+          const value = sentinelConfig[param];
+          return Promise.resolve(value != null ? [param, value] : []);
+        }
+        if (cmd === 'SENTINEL' && args[0] === 'MASTERS') {
+          return Promise.resolve([
+            [
+              'name',
+              'mymaster',
+              'ip',
+              opts.masterIp ?? 'sentinel-primary',
+              'port',
+              '6379',
+              'flags',
+              'master',
+            ],
+          ]);
+        }
+        if (cmd === 'SENTINEL' && args[0] === 'REPLICAS') {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve(null);
+      });
+    }
+
+    it('flags a Sentinel with resolve-hostnames yes and a hostname monitored master', async () => {
+      setupSentinel({});
+      const findings = await service.getHazards('conn-sentinel');
+      expect(findings).toHaveLength(1);
+      expect(findings[0].id).toBe('sentinel-dns-resolution-blocking');
+      expect(findings[0].status).toBe('advisory');
+      // The AOF/cluster probes must never run against a Sentinel.
+      expect(client.call).not.toHaveBeenCalledWith('ACL', ['GETUSER', 'default']);
+      expect(client.getConfigValue).not.toHaveBeenCalledWith('appendonly');
+    });
+
+    it('stays silent for a Sentinel monitoring by IP with resolve-hostnames off', async () => {
+      setupSentinel({ resolveHostnames: 'no', masterIp: '10.0.0.10' });
+      const findings = await service.getHazards('conn-sentinel');
+      expect(findings).toHaveLength(0);
+    });
+
+    it('does not cache an incomplete Sentinel probe when SENTINEL MASTERS fails', async () => {
+      // resolve-hostnames yes but the masters read fails: the address view is
+      // incomplete (a hostname target could be hidden), so the cycle must not be
+      // cached as authoritative — the next poll has to re-probe.
+      let masters = 0;
+      client.call.mockImplementation((cmd: string, args: string[]) => {
+        if (cmd === 'INFO') return Promise.resolve('# Server\r\nserver_mode:sentinel\r\n');
+        if (cmd === 'SENTINEL' && args[0] === 'CONFIG' && args[1] === 'GET') {
+          const param = args[2];
+          if (param === 'resolve-hostnames') return Promise.resolve(['resolve-hostnames', 'yes']);
+          if (param === 'announce-hostnames') return Promise.resolve(['announce-hostnames', 'no']);
+          return Promise.resolve([]);
+        }
+        if (cmd === 'SENTINEL' && args[0] === 'MASTERS') {
+          masters += 1;
+          return Promise.reject(new Error('LOADING Redis is loading the dataset'));
+        }
+        return Promise.resolve(null);
+      });
+      await service.getHazards('conn-sentinel');
+      await service.getHazards('conn-sentinel');
+      expect(masters).toBe(2);
     });
   });
 });

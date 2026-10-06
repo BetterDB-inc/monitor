@@ -1,10 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { MetricsParser } from '../database/parsers/metrics.parser';
 import {
   ConfigHazardFinding,
   evaluateAclAofHazard,
   evaluateAppendfsyncHazard,
   evaluateClusterCrcHazard,
+  evaluateSentinelDnsResolutionHazard,
 } from './config-hazard';
 
 interface CachedFindings {
@@ -72,6 +74,14 @@ export class ConfigHazardService {
         `Config-hazard probe skipped for ${connectionId}: ${(err as Error).message}`,
       );
       return { findings: [], cacheable: false };
+    }
+
+    // Sentinel is a different animal: the AOF/cluster hazards below do not apply to
+    // it, but a distinct one does (blocking hostname resolution on its single loop).
+    // Branch on the server mode first so a Sentinel is not probed for AOF/cluster
+    // (which would only ever return spurious unverified findings there).
+    if (await this.isSentinelMode(client)) {
+      return this.probeSentinelDns(connectionId, client);
     }
 
     let appendonly: string | null;
@@ -265,6 +275,119 @@ export class ConfigHazardService {
       aofLastWriteStatus,
       latencyEvents,
     });
+  }
+
+  /**
+   * Whether the probed server reports itself as a Sentinel. The mode field is
+   * engine/config dependent (Valkey `server_mode`, Redis / extended-compat
+   * `redis_mode`, legacy `valkey_mode`), so all three are checked. INFO failures
+   * degrade to "not a Sentinel" rather than throwing — the normal AOF/cluster path
+   * then runs, which is the correct default for any non-Sentinel server.
+   */
+  private async isSentinelMode(client: ProbeClientLike): Promise<boolean> {
+    try {
+      const raw = await client.call('INFO', ['server']);
+      if (typeof raw !== 'string') {
+        return false;
+      }
+      const fields = this.parseInfoFields(raw);
+      return [fields['server_mode'], fields['redis_mode'], fields['valkey_mode']].some((mode) => {
+        return mode === 'sentinel';
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Predictive Sentinel DNS-resolution hazard (valkey-sentinel-tilt-repro). Gathers
+   * `resolve-hostnames`, the announce settings, and the monitored/replica addresses
+   * from SENTINEL MASTERS / REPLICAS, best-effort, and hands them to the pure
+   * evaluator. Any single read failing degrades that input rather than the probe.
+   */
+  private async probeSentinelDns(
+    connectionId: string,
+    client: ProbeClientLike,
+  ): Promise<ProbeResult> {
+    // Track read failures separately from genuinely-empty values: an incomplete probe
+    // (a transient CONFIG GET / SENTINEL MASTERS failure) must NOT be cached as clean,
+    // or a later successful read cannot restore the advisory until the cache expires.
+    let readFailed = false;
+    // Sentinel settings (resolve-hostnames, announce-ip, announce-hostnames) are not
+    // served through the plain CONFIG GET - that exposes the standard server config
+    // and returns nothing for these on a Sentinel, which would silently nil out the
+    // hazard inputs so the advisory could never fire on a real Sentinel. Read them
+    // through SENTINEL CONFIG GET, whose reply is a flat [name, value, ...] array
+    // (same shape as CONFIG GET), consistent with the SENTINEL MASTERS call below.
+    const readConfig = async (parameter: string): Promise<string | null> => {
+      try {
+        const raw = await client.call('SENTINEL', ['CONFIG', 'GET', parameter]);
+        if (!Array.isArray(raw)) {
+          return null;
+        }
+        for (let i = 0; i + 1 < raw.length; i += 2) {
+          if (String(raw[i]) === parameter) {
+            const value = String(raw[i + 1]);
+            return value === '' ? null : value;
+          }
+        }
+        return null;
+      } catch (err) {
+        readFailed = true;
+        this.logger.debug(
+          `SENTINEL CONFIG GET ${parameter} failed for ${connectionId}: ${(err as Error).message}`,
+        );
+        return null;
+      }
+    };
+
+    const resolveHostnames = await readConfig('resolve-hostnames');
+    const announceIp = await readConfig('announce-ip');
+    const announceHostnames = await readConfig('announce-hostnames');
+
+    const monitoredAddresses: string[] = [];
+    // False if the address enumeration is partial (MASTERS or any REPLICAS failed), so
+    // the evaluator does not read an absent hostname as conclusive.
+    let monitoredAddressesComplete = true;
+    try {
+      const rawMasters = await client.call('SENTINEL', ['MASTERS']);
+      const masters = MetricsParser.parseSentinelNodes(Array.isArray(rawMasters) ? rawMasters : []);
+      for (const master of masters) {
+        monitoredAddresses.push(master.ip);
+        try {
+          const rawReplicas = await client.call('SENTINEL', ['REPLICAS', master.name]);
+          const replicas = MetricsParser.parseSentinelNodes(
+            Array.isArray(rawReplicas) ? rawReplicas : [],
+          );
+          for (const replica of replicas) {
+            monitoredAddresses.push(replica.ip);
+          }
+        } catch (replicaErr) {
+          // A missing replica set could hide a hostname target, so the address view
+          // is incomplete — do not cache this cycle's result as authoritative, and do
+          // not let the evaluator read the absent hostname as conclusive.
+          readFailed = true;
+          monitoredAddressesComplete = false;
+          this.logger.debug(
+            `SENTINEL REPLICAS ${master.name} failed for ${connectionId}: ${(replicaErr as Error).message}`,
+          );
+        }
+      }
+    } catch (err) {
+      readFailed = true;
+      monitoredAddressesComplete = false;
+      this.logger.debug(`SENTINEL MASTERS failed for ${connectionId}: ${(err as Error).message}`);
+    }
+
+    const finding = evaluateSentinelDnsResolutionHazard({
+      isSentinel: true,
+      resolveHostnames,
+      monitoredAddresses,
+      monitoredAddressesComplete,
+      announceIp,
+      announceHostnames,
+    });
+    return { findings: finding !== null ? [finding] : [], cacheable: !readFailed };
   }
 
   private parseInfoFields(raw: string): Record<string, string> {

@@ -199,6 +199,21 @@ export const envSchema = z
     MONITOR_PERSISTENCE_WARN_SEC: z.coerce.number().int().min(1).default(120),
     MONITOR_PERSISTENCE_CRIT_SEC: z.coerce.number().int().min(1).default(600),
 
+    // Sentinel loop-stall / TILT RTT-proxy thresholds (valkey-sentinel-tilt-repro).
+    // Defaults bracket the 2000ms sentinel_tilt_trigger: warn well below it so the
+    // leading indicator has room to fire, high at the trigger.
+    SENTINEL_LOOP_STALL_WARN_MS: z.coerce.number().int().min(1).default(1500),
+    SENTINEL_LOOP_STALL_HIGH_MS: z.coerce.number().int().min(1).default(2000),
+    SENTINEL_LOOP_STALL_WINDOW: z.coerce.number().int().min(1).default(10),
+    SENTINEL_LOOP_STALL_MIN_BREACHES: z.coerce.number().int().min(1).default(3),
+    SENTINEL_LOOP_STALL_MISDIRECTED_STREAK: z.coerce.number().int().min(1).default(3),
+
+    // Hard ceiling on a single INFO round-trip in the anomaly poller. Bounds a
+    // wedged node (socket up, loop frozen) so it cannot hang polling for every
+    // connection, and makes the Sentinel timeout_wedge path reachable. Must sit
+    // above the TILT trigger so a merely-slow loop still records RTT samples.
+    ANOMALY_INFO_TIMEOUT_MS: z.coerce.number().int().min(1).default(5000),
+
     // OTLP trace ingestion (AI observability Phase 2)
     OTEL_INGEST_ENABLED: z
       .string()
@@ -264,6 +279,34 @@ export const envSchema = z
     ENCRYPTION_KEY: z.string().min(16).optional(),
   })
   .superRefine((data, ctx) => {
+    // The Sentinel loop-stall RTT proxy is coherent only when warn < high and the
+    // K-of-N window can actually hold K breaches. Each field is valid alone, but a
+    // bad combination silently disables the detector, so fail fast at startup.
+    if (data.SENTINEL_LOOP_STALL_WARN_MS >= data.SENTINEL_LOOP_STALL_HIGH_MS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'SENTINEL_LOOP_STALL_WARN_MS must be below SENTINEL_LOOP_STALL_HIGH_MS (warn is the leading indicator; high is the critical threshold)',
+        path: ['SENTINEL_LOOP_STALL_WARN_MS'],
+      });
+    }
+    if (data.SENTINEL_LOOP_STALL_MIN_BREACHES > data.SENTINEL_LOOP_STALL_WINDOW) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'SENTINEL_LOOP_STALL_MIN_BREACHES must not exceed SENTINEL_LOOP_STALL_WINDOW, or the window can never hold enough breaches and rtt_stall never fires',
+        path: ['SENTINEL_LOOP_STALL_MIN_BREACHES'],
+      });
+    }
+    if (data.ANOMALY_INFO_TIMEOUT_MS <= data.SENTINEL_LOOP_STALL_HIGH_MS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'ANOMALY_INFO_TIMEOUT_MS must exceed SENTINEL_LOOP_STALL_HIGH_MS, or a merely-slow loop is cut off as a full wedge before the RTT proxy can record it',
+        path: ['ANOMALY_INFO_TIMEOUT_MS'],
+      });
+    }
+
     // Require STORAGE_URL when using postgres
     if (
       (data.STORAGE_TYPE === 'postgres' || data.STORAGE_TYPE === 'postgresql') &&
