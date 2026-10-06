@@ -43,7 +43,9 @@ export function ScalingReadiness() {
   useEffect(
     () => () => {
       if (debounce.current) clearTimeout(debounce.current);
+      if (statusReset.current) clearTimeout(statusReset.current);
       pending.current = {};
+      setSaveStatus('idle');
     },
     [connectionId],
   );

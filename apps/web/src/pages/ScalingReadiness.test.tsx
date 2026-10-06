@@ -19,8 +19,14 @@ vi.mock('../components/pages/scaling-readiness', () => ({
   ReadinessHeader: () => <div data-testid="header" />,
   ReadinessBreakdown: () => <div data-testid="breakdown" />,
   ReadinessHistoryChart: () => <div data-testid="history" />,
-  ReadinessAlertSettings: ({ onChange }: { onChange: (u: { alertThreshold: number }) => void }) => (
-    <button data-testid="alert-settings" onClick={() => onChange({ alertThreshold: 55 })} />
+  ReadinessAlertSettings: ({
+    onChange,
+    saveStatus,
+  }: {
+    onChange: (u: { alertThreshold: number }) => void;
+    saveStatus: string;
+  }) => (
+    <button data-testid="alert-settings" data-save-status={saveStatus} onClick={() => onChange({ alertThreshold: 55 })} />
   ),
   ReadinessProLocked: () => <div data-testid="locked" />,
 }));
@@ -80,6 +86,25 @@ describe('ScalingReadiness page', () => {
       vi.advanceTimersByTime(1000);
     });
     expect(updateSettings).not.toHaveBeenCalled();
+    connection.id = 'c';
+    vi.useRealTimers();
+  });
+
+  it('resets the save status when the connection changes', async () => {
+    vi.useFakeTimers();
+    updateSettings.mockReset();
+    updateSettings.mockRejectedValue(new Error('boom'));
+    hasFeature.mockReturnValue(true);
+    connection.id = 'c';
+    const { rerender } = render(<ScalingReadiness />);
+    fireEvent.click(screen.getByTestId('alert-settings'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(screen.getByTestId('alert-settings')).toHaveAttribute('data-save-status', 'error');
+    connection.id = 'other';
+    rerender(<ScalingReadiness />);
+    expect(screen.getByTestId('alert-settings')).toHaveAttribute('data-save-status', 'idle');
     connection.id = 'c';
     vi.useRealTimers();
   });
