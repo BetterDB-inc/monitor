@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # The monitor's own exposition endpoint.
+  - job_name: 'betterdb'
+    metrics_path: '/api/prometheus/metrics'
+    static_configs:
+      - targets: ['betterdb:3001']
+
+  # The same series after a round trip through the OTLP mirror and Collector.
+  # Both jobs carry identical series; the dashboards' "Scrape job" variable
+  # selects which path to read.
+  - job_name: 'otel-collector'
+    static_configs:
+      - targets: ['otel-collector:8889']

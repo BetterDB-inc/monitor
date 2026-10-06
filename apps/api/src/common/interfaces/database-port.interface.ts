@@ -38,15 +38,19 @@ export interface DatabaseCapabilities {
   hasMemoryDoctor: boolean;
   hasConfig: boolean;
   hasVectorSearch: boolean;
+  clusterEnabled?: boolean;
+  isSentinel?: boolean;
 }
 
 export interface DatabasePort {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   isConnected(): boolean;
+  sampleVersion?(): number | null;
   ping(): Promise<boolean>;
   getInfo(sections?: string[]): Promise<Record<string, unknown>>;
   getCapabilities(): DatabaseCapabilities;
+  refreshCapabilities?(): Promise<void>;
   getInfoParsed(sections?: string[]): Promise<InfoResponse>;
   getSlowLog(
     count?: number,

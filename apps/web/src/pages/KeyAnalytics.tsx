@@ -6,6 +6,7 @@ import { extractPattern } from '@betterdb/shared';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { EmptyState } from '../components/ui/empty-state';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs';
 import {
   Table,
@@ -64,6 +65,11 @@ function formatNumber(num: number): string {
   if (num >= 1000000) return `${(num / 1000000).toFixed(2)}M`;
   if (num >= 1000) return `${(num / 1000).toFixed(2)}K`;
   return num.toString();
+}
+
+function formatOptionalCount(num?: number | null): string {
+  if (num === undefined || num === null) return 'N/A';
+  return formatNumber(num);
 }
 
 /** Recharts Tooltip `ValueType` includes arrays; coerce for numeric charts. */
@@ -404,7 +410,7 @@ export function KeyAnalytics() {
                 </CardHeader>
                 <CardContent>
                   <div className="text-2xl font-bold text-amber-600">
-                    {summary ? formatNumber(summary.staleKeyCount) : '0'}
+                    {summary ? formatOptionalCount(summary.staleKeyCount) : '0'}
                   </div>
                   <div className="text-xs text-muted-foreground mt-1">idle &gt; 24 hours</div>
                 </CardContent>
@@ -447,9 +453,7 @@ export function KeyAnalytics() {
                       </BarChart>
                     </ResponsiveContainer>
                   ) : (
-                    <div className="text-center py-12 text-muted-foreground">
-                      No pattern data available
-                    </div>
+                    <EmptyState variant="inline" className="py-12" title="No pattern data available" />
                   )}
                 </CardContent>
               </Card>
@@ -483,9 +487,7 @@ export function KeyAnalytics() {
                       </PieChart>
                     </ResponsiveContainer>
                   ) : (
-                    <div className="text-center py-12 text-muted-foreground">
-                      No pattern data available
-                    </div>
+                    <EmptyState variant="inline" className="py-12" title="No pattern data available" />
                   )}
                 </CardContent>
               </Card>
@@ -566,7 +568,7 @@ export function KeyAnalytics() {
                             <td
                               className={`p-2 ${(pattern.staleKeyCount || 0) > 0 ? 'text-amber-600 font-semibold' : ''}`}
                             >
-                              {formatNumber(pattern.staleKeyCount || 0)}
+                              {formatOptionalCount(pattern.staleKeyCount)}
                             </td>
                           </tr>
                         ))}
@@ -574,9 +576,11 @@ export function KeyAnalytics() {
                     </table>
                   </div>
                 ) : (
-                  <div className="text-center py-8 text-muted-foreground">
-                    No pattern data available. Click "Trigger Collection" to analyze keys.
-                  </div>
+                  <EmptyState
+                    variant="inline"
+                    title="No pattern data available"
+                    description='Click "Trigger Collection" to analyze keys.'
+                  />
                 )}
               </CardContent>
             </Card>
@@ -648,7 +652,7 @@ export function KeyAnalytics() {
                         <div>
                           <div className="text-xs text-muted-foreground">Stale Keys</div>
                           <div className="text-lg font-bold text-amber-600">
-                            {formatNumber(pattern.staleKeyCount || 0)}
+                            {formatOptionalCount(pattern.staleKeyCount)}
                           </div>
                         </div>
                         {pattern.avgAccessFrequency !== undefined &&
@@ -661,13 +665,13 @@ export function KeyAnalytics() {
                                 </div>
                               </div>
                               <div>
-                                <div className="text-xs text-muted-foreground">Hot Keys</div>
+                                <div className="text-xs text-muted-foreground">Hot Keys (in sample)</div>
                                 <div className="text-lg font-bold text-destructive">
                                   {formatNumber(pattern.hotKeyCount || 0)}
                                 </div>
                               </div>
                               <div>
-                                <div className="text-xs text-muted-foreground">Cold Keys</div>
+                                <div className="text-xs text-muted-foreground">Cold Keys (in sample)</div>
                                 <div className="text-lg font-bold text-primary">
                                   {formatNumber(pattern.coldKeyCount || 0)}
                                 </div>
@@ -782,9 +786,12 @@ export function KeyAnalytics() {
                     </TableBody>
                   </Table>
                 ) : !hotKeysLoading && (!hotKeys || hotKeys.length === 0) ? (
-                  <div className="text-center py-12 text-muted-foreground">
-                    No hot key data yet. Collection runs every 5 minutes.
-                  </div>
+                  <EmptyState
+                    variant="inline"
+                    className="py-12"
+                    title="No hot key data yet"
+                    description="Collection runs every 5 minutes."
+                  />
                 ) : (
                   <Table>
                     <TableHeader>
@@ -940,10 +947,12 @@ export function KeyAnalytics() {
                     </TableBody>
                   </Table>
                 ) : !largestKeys || largestKeys.length === 0 ? (
-                  <div className="text-center py-12 text-muted-foreground">
-                    No largest-key data yet. Click "Trigger Collection" (or "Deep Scan" for full
-                    coverage) to analyze keys.
-                  </div>
+                  <EmptyState
+                    variant="inline"
+                    className="py-12"
+                    title="No largest-key data yet"
+                    description='Click "Trigger Collection" (or "Deep Scan" for full coverage) to analyze keys.'
+                  />
                 ) : (
                   <Table>
                     <TableHeader>
@@ -1035,11 +1044,17 @@ export function KeyAnalytics() {
                     <Skeleton className="h-48 w-full" />
                   </div>
                 ) : !keySizes || !keySizes.available ? (
-                  <div className="text-center py-12 text-muted-foreground">
-                    No key size data available. The{' '}
-                    <code className="font-mono text-xs">keysizes</code> INFO section is only exposed
-                    by Redis 8.0+; Valkey does not currently emit it.
-                  </div>
+                  <EmptyState
+                    variant="inline"
+                    className="py-12"
+                    title="No key size data available"
+                    description={
+                      <>
+                        The <code className="font-mono text-xs">keysizes</code> INFO section is only
+                        exposed by Redis 8.0+; Valkey does not currently emit it.
+                      </>
+                    }
+                  />
                 ) : (
                   <div className="space-y-8">
                     {Object.entries(keySizes.databases).map(([db, types]) => (

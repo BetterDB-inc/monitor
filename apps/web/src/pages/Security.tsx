@@ -15,9 +15,19 @@ import { VerdictCard } from '../components/pages/security/VerdictCard';
 import { groupFindings, type NodeGroups } from '../components/pages/security/drift-groups';
 import { datasetAgeLabel, scanAgeLabel } from '../components/pages/security/header-labels';
 import { datasetCaveats, scanCompleteness } from '../components/pages/security/scan-completeness';
-import { parseScanFailure, scanErrorMessage } from '../components/pages/security/scan-error';
-import { scanFailureCopy } from '../components/pages/security/scan-failure-copy';
+import {
+  parseScanFailure,
+  scanErrorMessage,
+  versionPendingOf,
+} from '../components/pages/security/scan-error';
+import { VersionPendingCard } from '../components/pages/security/VersionPendingCard';
+import {
+  EXTERNAL_SCAN_NOTE,
+  scanFailureCopy,
+} from '../components/pages/security/scan-failure-copy';
+import { useConnection } from '../hooks/useConnection';
 import { useCveDataset, useCveScan, useRefreshCveScan } from '../hooks/useCveScan';
+import { isExternalConnection } from '../utils/connectionType';
 
 const PRODUCT_LABEL: Record<string, string> = { valkey: 'Valkey', redis: 'Redis' };
 const EMPTY_GROUPS: NodeGroups = { unique: [], shared: [], unversioned: [], badge: 0 };
@@ -42,6 +52,8 @@ export function Security() {
   const scan = useCveScan();
   const dataset = useCveDataset();
   const refresh = useRefreshCveScan();
+  const { currentConnection } = useConnection();
+  const external = isExternalConnection(currentConnection);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   const refreshError = refresh.isError
@@ -53,8 +65,35 @@ export function Security() {
   }
 
   if (scan.isError || scan.data === undefined) {
+    const pending = versionPendingOf(scan.error);
+
+    if (pending !== null) {
+      return (
+        <div className="flex min-h-full flex-col gap-6">
+          <HeaderStrip
+            subtitle="Waiting for the collector to report this connection's version."
+            severityCounts={null}
+            severityUnknown
+            scopeLabel={null}
+            refreshing={scan.isFetching}
+            refreshError={refreshError}
+            onRefresh={() => {
+              void scan.refetch();
+            }}
+          />
+          <VersionPendingCard
+            pending={pending}
+            retrying={scan.isFetching}
+            onRetry={() => {
+              void scan.refetch();
+            }}
+          />
+        </div>
+      );
+    }
+
     const failure = parseScanFailure(scan.error, SCAN_FAILED_MESSAGE);
-    const copy = scanFailureCopy(failure.summary, failure.nodes);
+    const copy = scanFailureCopy(failure.summary, failure.nodes, external);
 
     return (
       <div className="flex min-h-full flex-col gap-6">
@@ -96,7 +135,7 @@ export function Security() {
     const nodes = result.notScanned.map((entry) => {
       return { address: entry.address, reason: entry.reason };
     });
-    const copy = scanFailureCopy(NO_NODE_MESSAGE, nodes);
+    const copy = scanFailureCopy(NO_NODE_MESSAGE, nodes, external);
 
     return (
       <div className="flex min-h-full flex-col gap-6">
@@ -154,6 +193,7 @@ export function Security() {
   const header = (
     <HeaderStrip
       subtitle={subtitle}
+      note={external ? EXTERNAL_SCAN_NOTE : null}
       severityCounts={clusterSeverity(result.nodes)}
       scopeLabel={result.nodes.length > 1 ? `across ${result.nodes.length} nodes` : null}
       refreshing={refresh.isPending}

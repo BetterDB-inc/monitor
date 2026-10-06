@@ -11,6 +11,7 @@ This document provides comprehensive configuration information for BetterDB Moni
 
 - [Multi-Connection Support](#multi-connection-support)
 - [Environment Variables](#environment-variables)
+  - [Cluster Auto-Registration](#cluster-auto-registration)
   - [Data Retention](#data-retention)
 - [Docker Usage](#docker-usage)
 - [HTTP Endpoints](#http-endpoints)
@@ -245,11 +246,29 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 | `ANOMALY_CACHE_TTL_MS`           | No       | `3600000` | Anomaly detection cache TTL (milliseconds)            |
 | `ANOMALY_PROMETHEUS_INTERVAL_MS` | No       | `30000`   | Prometheus summary update interval (milliseconds)     |
 
+### Prometheus Metrics
+
+| Variable                      | Required | Default           | Description                                                                                                                                                                           |
+| ----------------------------- | -------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PROMETHEUS_POLL_INTERVAL_MS` | No       | `5000`            | How often exported metrics are refreshed (milliseconds)                                                                                                                               |
+| `PROMETHEUS_STALENESS_MS`     | No       | 3 × poll interval | Drop a connection's gauge series after this long without a successful `INFO` read (ms, ≥ 1000, raised to 3 × poll interval if lower)                                                  |
+| `METRICS_EXPORT_PROFILE`      | No       | `full`            | `vitals` exports a fixed set of series per connection (no per-db, per-slot or pattern-labelled series); `full` exports everything. Applies to the scrape endpoint and the OTLP mirror |
+| `METRICS_SLOT_STATS_TOP_N`    | No       | `100`             | Export slot stats for the top N slots by key count (0–16384, `0` disables). Ignored under `vitals`                                                                                    |
+| `PROMETHEUS_METRICS_ENABLED`  | No       | `true`            | Set to `false` to disable `/api/prometheus/metrics` entirely (the OTLP mirror keeps exporting)                                                                                        |
+| `PROMETHEUS_METRICS_TOKEN`    | No       | _(none)_          | Bearer token required to scrape the metrics endpoint; required when `CLOUD_MODE` is set and the endpoint is enabled                                                                   |
+
 ### Client Analytics
 
 | Variable                            | Required | Default | Description                                      |
 | ----------------------------------- | -------- | ------- | ------------------------------------------------ |
 | `CLIENT_ANALYTICS_POLL_INTERVAL_MS` | No       | `60000` | Client analytics polling interval (milliseconds) |
+
+### Cluster Auto-Registration
+
+| Variable                      | Required | Default | Description                                                                                                                     |
+| ------------------------------ | -------- | ------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `CLUSTER_AUTO_REGISTER_NODES` | No       | `false` | Default for whether a cluster connection auto-registers its nodes as child connections; overridable per connection. See [Cluster Auto-Registration](cluster-auto-registration.md) |
+| `SENTINEL_AUTO_REGISTER_NODES` | No       | `false` | Default for whether a Sentinel connection auto-registers the primaries and replicas it monitors; overridable per connection. See [Sentinel Auto-Registration](sentinel-auto-registration.md) |
 
 ### Data Retention
 
@@ -265,9 +284,9 @@ To keep the database from growing forever, set a retention window from **Setting
 
 ### Webhooks
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `FRONTEND_URL` | No | - | Public base URL of the web UI (e.g. `https://monitor.example.com`). Used to build "View in BetterDB" links in Slack/Discord messages; unset = messages render without the link |
+| Variable       | Required | Default | Description                                                                                                                                                                    |
+| -------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `FRONTEND_URL` | No       | -       | Public base URL of the web UI (e.g. `https://monitor.example.com`). Used to build "View in BetterDB" links in Slack/Discord messages; unset = messages render without the link |
 
 ### License Configuration
 
@@ -359,6 +378,11 @@ BetterDB Monitor automatically checks for new versions and displays an update ba
 | `KEY_ANALYTICS_SAMPLE_SIZE`     | No       | `10000`  | Number of keys to sample for analytics           |
 | `KEY_ANALYTICS_SCAN_BATCH_SIZE` | No       | `1000`   | Batch size for key scanning operations           |
 | `KEY_ANALYTICS_INTERVAL_MS`     | No       | `300000` | Key analytics collection interval (milliseconds) |
+
+Per-pattern counts come from the sampled keys:
+
+- **Keys**, **w/ TTL**, **Expiring Soon** and **Stale Keys** are scaled from the sample to an estimate for the whole pattern. A key is stale when its idle time (`OBJECT IDLETIME`) exceeds 24 hours; the count is taken key by key, not derived from the average idle time. Snapshots collected by an agent older than this change show the stale count as N/A; the Stale Keys summary sums the patterns with a known count and shows N/A when none has one. Snapshots stored before this change keep their original values.
+- **Hot Keys (in sample)** and **Cold Keys (in sample)** are counts within the sample, not totals: keys whose access frequency is above the pattern average, or below half of it.
 
 Key analytics history follows the standard retention policy (see [Data Retention](#data-retention)): self-hosted installs keep it until a retention window is configured; BetterDB Cloud prunes it at the tier window (Community 7 days, Pro 90, Enterprise 365).
 
@@ -551,6 +575,9 @@ These routes stay open without a session: `/api/health`, `/api/version`,
 `/api/system/workspace`, `/api/prometheus/metrics`, `/api/docs`, the `/api/auth` and
 `/api/invite` routes, and reads under `/api/mcp`. Writes under `/api/mcp` that apply
 changes — approving or rejecting cache and memory proposals — need a session too.
+The Prometheus metrics endpoint has its own gate on top of this: it can be turned off
+with `PROMETHEUS_METRICS_ENABLED=false` and guarded with a `PROMETHEUS_METRICS_TOKEN`
+bearer credential (see [Prometheus Metrics](./prometheus-metrics.md)).
 
 Set `WORKSPACE_DISABLED=true` to run without user control, in which case every endpoint
 is reachable without signing in.
@@ -641,6 +668,8 @@ member takes effect within that window rather than on the next request.
 | Endpoint                  | Method | Description                               |
 | ------------------------- | ------ | ----------------------------------------- |
 | `/api/prometheus/metrics` | GET    | Prometheus-formatted metrics for scraping |
+
+Returns 401 when `PROMETHEUS_METRICS_TOKEN` is set and the scrape omits it, and 404 when `PROMETHEUS_METRICS_ENABLED=false`.
 
 ## Runtime Settings
 

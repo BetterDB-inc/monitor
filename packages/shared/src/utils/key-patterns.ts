@@ -1,3 +1,5 @@
+export const STALE_KEY_IDLE_SECONDS = 86400;
+
 export function extractPattern(key: string): string {
   const parts = key.split(/[:._-]/);
   const patternParts = parts.map((part) => {

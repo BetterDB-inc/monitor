@@ -1,4 +1,4 @@
-import { shouldExcludeFunctions, probeSourceFunctions, aggregateFunctionPresence } from '../fork-compat';
+import { shouldExcludeFunctions, isRdbRestoreCompatible, probeSourceFunctions, aggregateFunctionPresence } from '../fork-compat';
 
 describe('shouldExcludeFunctions', () => {
   it('excludes only for Valkey -> Redis', () => {
@@ -6,6 +6,18 @@ describe('shouldExcludeFunctions', () => {
     expect(shouldExcludeFunctions('redis', 'valkey')).toBe(false);
     expect(shouldExcludeFunctions('valkey', 'valkey')).toBe(false);
     expect(shouldExcludeFunctions('redis', 'redis')).toBe(false);
+  });
+});
+
+describe('isRdbRestoreCompatible', () => {
+  it('allows same-engine', () => {
+    expect(isRdbRestoreCompatible('redis', 'redis')).toBe(true);
+    expect(isRdbRestoreCompatible('valkey', 'valkey')).toBe(true);
+  });
+
+  it('blocks cross-engine', () => {
+    expect(isRdbRestoreCompatible('redis', 'valkey')).toBe(false);
+    expect(isRdbRestoreCompatible('valkey', 'redis')).toBe(false);
   });
 });
 

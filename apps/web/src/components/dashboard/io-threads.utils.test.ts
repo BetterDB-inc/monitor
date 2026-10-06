@@ -91,20 +91,23 @@ describe('deriveStoredIoDeltas', () => {
     ]);
   });
 
-  it('should handle missing ioThreadedReads/Writes (defaults to 0)', () => {
+  it('should leave a gap where either side of the interval was not pushed', () => {
     const snapshots = [
-      stub({ timestamp: 0 }),
+      stub({ timestamp: 0, ioThreadedReads: null, ioThreadedWrites: 100 }),
       stub({ timestamp: 10000, ioThreadedReads: 100, ioThreadedWrites: 200 }),
+      stub({ timestamp: 20000, ioThreadedReads: 300, ioThreadedWrites: null }),
     ];
-    delete (snapshots[0] as any).ioThreadedReads;
-    delete (snapshots[0] as any).ioThreadedWrites;
 
     const result = deriveStoredIoDeltas(snapshots, fmt);
 
-    // 100 / 10s = 10/s, 200 / 10s = 20/s
     expect(result).toEqual([
-      { time: 't10000', reads: 10, writes: 20 },
+      { time: 't10000', reads: null, writes: 10 },
+      { time: 't20000', reads: 20, writes: null },
     ]);
+  });
+
+  it('should not count a gap as activity', () => {
+    expect(shouldShowIoChart(false, false, [{ time: '1', reads: null, writes: null }])).toBe(false);
   });
 
   it('should handle zero time delta gracefully', () => {

@@ -74,6 +74,34 @@ describe('SettingsService', () => {
     expect(service.getLoadedSettings()?.localRetentionDays).toBe(30);
   });
 
+  it('warns once per missing-row episode and re-arms after a direct write restores the row', async () => {
+    const saved = buildSettings({ localRetentionDays: 30 });
+    const updated = buildSettings({ localRetentionDays: 14 });
+    const storage = {
+      getSettings: jest
+        .fn()
+        .mockResolvedValueOnce(saved) // refresh #1: row exists, cache seeded
+        .mockResolvedValueOnce(null) // refresh #2: wiped — episode 1 warns
+        .mockResolvedValueOnce(null) // refresh #3: still wiped — deduped
+        .mockResolvedValueOnce(saved) // updateSettings' current-row check
+        .mockResolvedValue(null), // refresh #4: wiped again — episode 2 warns
+      updateSettings: jest.fn().mockResolvedValue(updated),
+    } as any;
+    const service = new SettingsService(storage, configStub);
+    const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+
+    await (service as any).refreshCache();
+    await (service as any).refreshCache();
+    await (service as any).refreshCache();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+
+    // The direct write restores the row; a later missing-row episode must warn
+    // again rather than stay silent on a stale flag.
+    await service.updateSettings({ localRetentionDays: 14 });
+    await (service as any).refreshCache();
+    expect(warnSpy).toHaveBeenCalledTimes(2);
+  });
+
   it('resetToDefaults preserves the retention window instead of re-seeding it from env', async () => {
     const current = buildSettings({ localRetentionDays: null });
     const storage = {

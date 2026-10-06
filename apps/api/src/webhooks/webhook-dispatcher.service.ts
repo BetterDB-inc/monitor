@@ -1,4 +1,4 @@
-import { Injectable, Inject, Logger, Optional } from '@nestjs/common';
+import { Injectable, Inject, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { LRUCache } from 'lru-cache';
 import type {
@@ -28,9 +28,35 @@ interface AlertState {
   value: number;
 }
 
+interface PendingEvent {
+  sequence: number;
+  eventType: WebhookEventType;
+  data: Record<string, unknown>;
+  connectionId?: string;
+  timestamp: number;
+  payloads: Map<string, WebhookPayload>;
+  pendingWebhookIds: Set<string> | null;
+  unconfirmedWebhookIds: Set<string>;
+}
+
+const STORAGE_UNAVAILABLE = 'storage-unavailable' as const;
+
 @Injectable()
-export class WebhookDispatcherService {
+export class WebhookDispatcherService implements OnModuleDestroy {
   private readonly logger = new Logger(WebhookDispatcherService.name);
+  private readonly STORAGE_RETRY_BUFFER_MAX_EVENTS = 1000;
+  private readonly STORAGE_RETRY_INITIAL_DELAY_MS = 1_000;
+  private readonly STORAGE_RETRY_MAX_DELAY_MS = 60_000;
+  private readonly UNCONFIRMED_DELIVERY_LOOKBACK = 100;
+  private storageRetryBuffer: PendingEvent[] = [];
+  private inFlightEvent: PendingEvent | null = null;
+  private readonly inFlightDirectDispatches = new Set<Promise<boolean>>();
+  private nextEventSequence = 0;
+  private flushing = false;
+  private flushTimer: NodeJS.Timeout | null = null;
+  private consecutiveFlushFailures = 0;
+  private droppedEventCount = 0;
+  private destroyed = false;
   private readonly DEFAULT_REQUEST_TIMEOUT_MS: number;
   private readonly BLOCKED_HEADERS = [
     'host',
@@ -106,65 +132,228 @@ export class WebhookDispatcherService {
     return { host: this.sourceHost, port: this.sourcePort };
   }
 
+  onModuleDestroy(): void {
+    this.destroyed = true;
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (this.storageRetryBuffer.length > 0) {
+      this.logger.warn(
+        `Discarding ${this.storageRetryBuffer.length} webhook event(s) buffered after storage failures on shutdown`,
+      );
+      this.storageRetryBuffer = [];
+    }
+  }
+
+  getStorageRetryBufferStats(): { bufferedEvents: number; droppedEvents: number } {
+    return {
+      bufferedEvents: this.storageRetryBuffer.length,
+      droppedEvents: this.droppedEventCount,
+    };
+  }
+
   /**
    * Dispatch a webhook event to all subscribed webhooks
-   * @returns true when every delivery succeeded, was skipped, or is owned
-   * by the retry processor (RETRYING); false only for terminal failures
-   * nothing else will retry. Never throws for delivery failures.
+   * @returns true when the event was accepted: every delivery succeeded, was
+   * skipped, is owned by the retry processor (RETRYING), or is held in the
+   * in-memory storage retry buffer because storage failed before its
+   * delivery row was written. false only for terminal failures nothing else
+   * will retry. Never throws for delivery failures.
    */
   async dispatchEvent(
     eventType: WebhookEventType,
     data: Record<string, unknown>,
     connectionId?: string,
   ): Promise<boolean> {
-    try {
-      // Get webhooks subscribed to this event, filtered by connectionId
-      // This returns webhooks that are either:
-      // - Globally scoped (no connectionId set)
-      // - Scoped to the specific connectionId
-      const webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
+    const enrichedData = connectionId ? { ...data, connectionId } : data;
+    return this.dispatchPendingEvent(this.createPendingEvent(eventType, enrichedData, connectionId));
+  }
 
-      if (webhooks.length === 0) {
-        this.logger.debug(
-          `No webhooks subscribed to event: ${eventType}${connectionId ? ` for connection ${connectionId}` : ''}`,
-        );
+  private createPendingEvent(
+    eventType: WebhookEventType,
+    data: Record<string, unknown>,
+    connectionId?: string,
+    targetWebhookIds?: string[],
+  ): PendingEvent {
+    return {
+      sequence: this.nextEventSequence++,
+      eventType,
+      data,
+      connectionId,
+      timestamp: Date.now(),
+      payloads: new Map(),
+      pendingWebhookIds: targetWebhookIds ? new Set(targetWebhookIds) : null,
+      unconfirmedWebhookIds: new Set(),
+    };
+  }
+
+  private async dispatchPendingEvent(
+    event: PendingEvent,
+    webhooks?: Webhook[],
+  ): Promise<boolean> {
+    if (this.storageRetryBuffer.length > 0) {
+      return this.bufferEvent(event);
+    }
+
+    const dispatch = this.deliverDirectly(event, webhooks);
+    this.inFlightDirectDispatches.add(dispatch);
+    try {
+      return await dispatch;
+    } finally {
+      this.inFlightDirectDispatches.delete(dispatch);
+    }
+  }
+
+  private async deliverDirectly(event: PendingEvent, webhooks?: Webhook[]): Promise<boolean> {
+    const outcome = await this.deliverEvent(event, webhooks);
+    if (outcome.storageUnavailable && !this.bufferEvent(event)) {
+      return false;
+    }
+    return !outcome.terminalFailure;
+  }
+
+  private async deliverEvent(
+    event: PendingEvent,
+    knownWebhooks?: Webhook[],
+  ): Promise<{ storageUnavailable: boolean; terminalFailure: boolean }> {
+    const { eventType, connectionId } = event;
+    let webhooks: Webhook[];
+    if (knownWebhooks) {
+      webhooks = knownWebhooks;
+    } else {
+      try {
+        webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
+      } catch (error) {
+        this.logger.error(`Failed to look up webhooks for event ${eventType}:`, error);
+        return { storageUnavailable: true, terminalFailure: false };
+      }
+    }
+
+    const pending = event.pendingWebhookIds;
+    const targets = pending ? webhooks.filter((webhook) => pending.has(webhook.id)) : webhooks;
+    event.pendingWebhookIds = new Set(targets.map((webhook) => webhook.id));
+
+    if (targets.length === 0) {
+      this.logger.debug(
+        `No webhooks subscribed to event: ${eventType}${connectionId ? ` for connection ${connectionId}` : ''}`,
+      );
+      return { storageUnavailable: false, terminalFailure: false };
+    }
+
+    this.logger.log(
+      `Dispatching ${eventType} to ${targets.length} webhook(s)${connectionId ? ` for connection ${connectionId}` : ''}`,
+    );
+
+    const settled = await Promise.allSettled(
+      targets.map((webhook) => this.dispatchToWebhook(webhook, event)),
+    );
+
+    const storageUnavailable = settled.some(
+      (result) => result.status === 'fulfilled' && result.value === STORAGE_UNAVAILABLE,
+    );
+    const failed = settled.filter((result) => {
+      if (result.status === 'rejected') {
         return true;
       }
-
-      this.logger.log(
-        `Dispatching ${eventType} to ${webhooks.length} webhook(s)${connectionId ? ` for connection ${connectionId}` : ''}`,
+      return (
+        result.value === DeliveryStatus.FAILED || result.value === DeliveryStatus.DEAD_LETTER
       );
+    });
 
-      // Enrich data with connectionId if provided
-      const enrichedData = connectionId ? { ...data, connectionId } : data;
-
-      const settled = await Promise.allSettled(
-        webhooks.map((webhook) =>
-          this.dispatchToWebhook(webhook, eventType, enrichedData, connectionId),
-        ),
+    if (failed.length > 0) {
+      this.logger.warn(
+        `Webhook dispatch for ${eventType} had ${failed.length}/${settled.length} failed deliveries`,
       );
+    }
 
-      const failed = settled.filter((result) => {
-        if (result.status === 'rejected') {
-          return true;
-        }
-        return (
-          result.value === DeliveryStatus.FAILED ||
-          result.value === DeliveryStatus.DEAD_LETTER
-        );
-      });
+    return { storageUnavailable, terminalFailure: failed.length > 0 };
+  }
 
-      if (failed.length > 0) {
-        this.logger.warn(
-          `Webhook dispatch for ${eventType} had ${failed.length}/${settled.length} failed deliveries`,
-        );
-        return false;
+  private bufferEvent(event: PendingEvent): boolean {
+    if (this.destroyed) {
+      this.logger.error(
+        `Dropping ${event.eventType} event: storage unavailable and the dispatcher is shutting down`,
+      );
+      return false;
+    }
+
+    if (this.storageRetryBuffer.length >= this.STORAGE_RETRY_BUFFER_MAX_EVENTS) {
+      const dropIndex = this.storageRetryBuffer[0] === this.inFlightEvent ? 1 : 0;
+      const [dropped] = this.storageRetryBuffer.splice(dropIndex, 1);
+      this.droppedEventCount++;
+      this.logger.error(
+        `Webhook storage retry buffer full (${this.STORAGE_RETRY_BUFFER_MAX_EVENTS} events); dropped ${dropped.eventType} event from ${new Date(dropped.timestamp).toISOString()} (${this.droppedEventCount} dropped since start)`,
+      );
+    }
+
+    let insertAt = this.storageRetryBuffer.length;
+    while (insertAt > 0 && this.storageRetryBuffer[insertAt - 1].sequence > event.sequence) {
+      insertAt--;
+    }
+    this.storageRetryBuffer.splice(insertAt, 0, event);
+    this.logger.warn(
+      `Buffered ${event.eventType} event for retry after a storage failure (${this.storageRetryBuffer.length} buffered)`,
+    );
+    this.scheduleFlush();
+    return true;
+  }
+
+  private scheduleFlush(): void {
+    if (this.flushTimer || this.destroyed) {
+      return;
+    }
+    const delay = Math.min(
+      this.STORAGE_RETRY_INITIAL_DELAY_MS * Math.pow(2, this.consecutiveFlushFailures),
+      this.STORAGE_RETRY_MAX_DELAY_MS,
+    );
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      void this.flushStorageRetryBuffer();
+    }, delay);
+  }
+
+  private async flushStorageRetryBuffer(): Promise<void> {
+    if (this.flushing || this.destroyed) {
+      return;
+    }
+    this.flushing = true;
+    try {
+      await Promise.allSettled([...this.inFlightDirectDispatches]);
+      await this.drainStorageRetryBuffer();
+    } finally {
+      this.flushing = false;
+    }
+  }
+
+  private async drainStorageRetryBuffer(): Promise<void> {
+    let flushed = 0;
+    while (this.storageRetryBuffer.length > 0 && !this.destroyed) {
+      const event = this.storageRetryBuffer[0];
+      this.inFlightEvent = event;
+      let storageUnavailable: boolean;
+      try {
+        storageUnavailable = (await this.deliverEvent(event)).storageUnavailable;
+      } finally {
+        this.inFlightEvent = null;
       }
 
-      return true;
-    } catch (error) {
-      this.logger.error(`Failed to dispatch event ${eventType}:`, error);
-      return false;
+      if (storageUnavailable) {
+        this.consecutiveFlushFailures++;
+        this.scheduleFlush();
+        return;
+      }
+
+      const index = this.storageRetryBuffer.indexOf(event);
+      if (index !== -1) {
+        this.storageRetryBuffer.splice(index, 1);
+      }
+      flushed++;
+    }
+
+    this.consecutiveFlushFailures = 0;
+    if (flushed > 0) {
+      this.logger.log(`Storage recovered; dispatched ${flushed} buffered webhook event(s)`);
     }
   }
 
@@ -298,7 +487,10 @@ export class WebhookDispatcherService {
               ...(connectionId && { connectionId }),
             };
 
-            await this.dispatchToWebhook(webhook, eventType, enrichedData, connectionId);
+            await this.dispatchPendingEvent(
+              this.createPendingEvent(eventType, enrichedData, connectionId, [webhook.id]),
+              [webhook],
+            );
           }
         }),
       );
@@ -347,44 +539,92 @@ export class WebhookDispatcherService {
 
   /**
    * Dispatch event to a single webhook
-   * @returns The delivery status, or null when skipped (disabled).
+   * @returns The delivery status, null when skipped (disabled or already
+   * handled), or STORAGE_UNAVAILABLE when the delivery row could not be written.
    */
   private async dispatchToWebhook(
     webhook: Webhook,
-    eventType: WebhookEventType,
-    data: Record<string, unknown>,
-    connectionId?: string,
-  ): Promise<DeliveryStatus | null> {
+    event: PendingEvent,
+  ): Promise<DeliveryStatus | null | typeof STORAGE_UNAVAILABLE> {
     // Skip if webhook is disabled
     if (!webhook.enabled) {
       this.logger.debug(`Skipping disabled webhook: ${webhook.id}`);
+      event.pendingWebhookIds?.delete(webhook.id);
       return null;
     }
 
-    const instanceInfo = this.getInstanceInfo(connectionId);
+    const payload = this.getOrCreatePayload(webhook.id, event);
+
+    let deliveryId: string | null;
+    try {
+      deliveryId = await this.persistDelivery(webhook.id, event, payload);
+    } catch (error) {
+      event.unconfirmedWebhookIds.add(webhook.id);
+      this.logger.error(
+        `Failed to create delivery for webhook ${webhook.id} (${event.eventType}):`,
+        error,
+      );
+      return STORAGE_UNAVAILABLE;
+    }
+
+    event.pendingWebhookIds?.delete(webhook.id);
+    if (deliveryId === null) {
+      return null;
+    }
+    return this.sendWebhook(webhook, deliveryId, payload);
+  }
+
+  private getOrCreatePayload(webhookId: string, event: PendingEvent): WebhookPayload {
+    const existing = event.payloads.get(webhookId);
+    if (existing) {
+      return existing;
+    }
+    const instanceInfo = this.getInstanceInfo(event.connectionId);
     const payload: WebhookPayload = {
       id: crypto.randomUUID(),
-      event: eventType,
-      timestamp: Date.now(),
+      event: event.eventType,
+      timestamp: event.timestamp,
       instance: {
         host: instanceInfo.host,
         port: instanceInfo.port,
-        connectionId,
+        connectionId: event.connectionId,
       },
-      data,
+      data: event.data,
     };
+    event.payloads.set(webhookId, payload);
+    return payload;
+  }
+
+  private async persistDelivery(
+    webhookId: string,
+    event: PendingEvent,
+    payload: WebhookPayload,
+  ): Promise<string | null> {
+    if (event.unconfirmedWebhookIds.has(webhookId)) {
+      const recent = await this.storageClient.getDeliveriesByWebhook(
+        webhookId,
+        this.UNCONFIRMED_DELIVERY_LOOKBACK,
+      );
+      const written = recent.find((delivery) => delivery.payload?.id === payload.id);
+      if (written) {
+        event.unconfirmedWebhookIds.delete(webhookId);
+        return written.status === DeliveryStatus.PENDING && written.attempts === 0
+          ? written.id
+          : null;
+      }
+    }
 
     // Create delivery record with connectionId for scoping
     const delivery = await this.storageClient.createDelivery({
-      webhookId: webhook.id,
-      eventType,
+      webhookId,
+      eventType: event.eventType,
       payload,
       status: DeliveryStatus.PENDING,
       attempts: 0,
-      connectionId,
+      connectionId: event.connectionId,
     });
-
-    return this.sendWebhook(webhook, delivery.id, payload);
+    event.unconfirmedWebhookIds.delete(webhookId);
+    return delivery.id;
   }
 
   /**

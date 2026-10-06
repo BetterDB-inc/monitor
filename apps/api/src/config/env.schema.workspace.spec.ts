@@ -29,4 +29,33 @@ describe('workspace env vars', () => {
       'https://mon.example.com',
     );
   });
+
+  it('treats an empty POSTHOG_HOST as unset instead of failing URL validation', () => {
+    // Regression: an empty POSTHOG_HOST injected around the container image
+    // must not fail startup env validation.
+    const parsed = envSchema.parse({ POSTHOG_HOST: '' });
+    expect(parsed.POSTHOG_HOST).toBeUndefined();
+    expect(envSchema.parse({ POSTHOG_HOST: 'https://ph.example.com' }).POSTHOG_HOST).toBe(
+      'https://ph.example.com',
+    );
+    expect(envSchema.safeParse({ POSTHOG_HOST: 'not a url' }).success).toBe(false);
+  });
+});
+
+describe('TLS boolean flags trim whitespace', () => {
+  // Regression: these flags used `=== 'true'`, so a trailing newline from a
+  // secret store (e.g. "true\n") silently meant off. They now go through
+  // isTrueFlag, which trims.
+  it('DB_TLS defaults to false and accepts whitespace-padded true', () => {
+    expect(envSchema.parse({}).DB_TLS).toBe(false);
+    expect(envSchema.parse({ DB_TLS: 'true' }).DB_TLS).toBe(true);
+    expect(envSchema.parse({ DB_TLS: ' true\n' }).DB_TLS).toBe(true);
+    expect(envSchema.parse({ DB_TLS: 'false' }).DB_TLS).toBe(false);
+  });
+
+  it('STORAGE_SSL_NO_VERIFY defaults to false and accepts whitespace-padded true', () => {
+    expect(envSchema.parse({}).STORAGE_SSL_NO_VERIFY).toBe(false);
+    expect(envSchema.parse({ STORAGE_SSL_NO_VERIFY: 'true' }).STORAGE_SSL_NO_VERIFY).toBe(true);
+    expect(envSchema.parse({ STORAGE_SSL_NO_VERIFY: ' true\n' }).STORAGE_SSL_NO_VERIFY).toBe(true);
+  });
 });

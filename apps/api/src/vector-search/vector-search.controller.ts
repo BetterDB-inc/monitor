@@ -8,6 +8,7 @@ import {
   HttpException,
   HttpStatus,
   Logger,
+  UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiHeader } from '@nestjs/swagger';
 import { VectorSearchService } from './vector-search.service';
@@ -21,9 +22,16 @@ import {
   FieldDistribution,
 } from '../common/types/metrics.types';
 import { mapMcpError } from '../mcp/mcp-helpers';
+import {
+  AllowExternalConnection,
+  LiveConnectionGuard,
+  UseHeaderConnectionId,
+} from '../external-metrics/live-connection.guard';
 
 @ApiTags('vector-search')
 @Controller('vector-search')
+@UseGuards(LiveConnectionGuard)
+@UseHeaderConnectionId()
 export class VectorSearchController {
   private readonly logger = new Logger(VectorSearchController.name);
 
@@ -80,6 +88,7 @@ export class VectorSearchController {
   }
 
   @Get('indexes/:name/snapshots')
+  @AllowExternalConnection()
   @ApiOperation({ summary: 'Get historical snapshots for a vector index' })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   async getSnapshots(

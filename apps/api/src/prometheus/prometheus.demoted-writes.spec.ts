@@ -51,7 +51,11 @@ describe('PrometheusService demoted-writes detection', () => {
     return new PrometheusService(
       {} as StoragePort,
       registry,
-      { get: jest.fn().mockReturnValue(POLL_INTERVAL_MS) } as unknown as ConfigService,
+      {
+        get: jest.fn((key: string, fallback?: unknown) =>
+          key === 'PROMETHEUS_STALENESS_MS' ? undefined : (fallback ?? POLL_INTERVAL_MS),
+        ),
+      } as unknown as ConfigService,
       {} as RuntimeCapabilityTracker,
       {} as SlowLogAnalyticsService,
       {} as CommandLogAnalyticsService,

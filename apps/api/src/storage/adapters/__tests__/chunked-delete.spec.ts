@@ -10,7 +10,7 @@ describe('chunkedSqliteDelete', () => {
     const insertMany = db.transaction((rows: number[]) => {
       for (const ts of rows) insert.run(ts);
     });
-    // 25k old rows (three chunks at the 10k chunk size) + 100 recent ones.
+    // 25k old rows (several chunks at the 2k chunk size) + 100 recent ones.
     insertMany(Array.from({ length: 25_000 }, (_, i) => i));
     insertMany(Array.from({ length: 100 }, (_, i) => 1_000_000 + i));
 

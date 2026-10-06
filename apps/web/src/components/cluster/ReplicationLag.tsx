@@ -1,4 +1,5 @@
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
+import { EmptyState } from '../ui/empty-state';
 import { Badge } from '../ui/badge';
 import { CheckCircle, AlertTriangle, XCircle, GitBranch, Info } from 'lucide-react';
 import { useReplicationLag } from '../../hooks/useReplicationLag';
@@ -15,15 +16,7 @@ export function ReplicationLag({ nodes, nodeStats }: ReplicationLagProps) {
   const hasDetailedStats = nodeStats && nodeStats.length > 0;
 
   if (lagData.length === 0) {
-    return (
-      <Card>
-        <CardContent className="p-6">
-          <div className="text-center text-muted-foreground">
-            No replication relationships found
-          </div>
-        </CardContent>
-      </Card>
-    );
+    return <EmptyState title="No replication relationships found" />;
   }
 
   const getStatusConfig = (status: ReplicationLagInfo['status']) => {

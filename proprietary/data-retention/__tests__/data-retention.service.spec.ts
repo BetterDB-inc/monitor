@@ -163,6 +163,39 @@ describe('DataRetentionService', () => {
     }
   });
 
+  // The null guard in runRetention is the only thing between a missing policy
+  // window and cutoff = Date.now() (which prunes every row). Exercise it so a
+  // later refactor that drops or inverts it can't pass green.
+  it('skips the sweep and logs an error when the policy window is null', async () => {
+    const policy = (service as any).retentionPolicy;
+    (policy.getRetentionDays as jest.Mock).mockReturnValue(null);
+    const errorSpy = jest
+      .spyOn((service as any).logger, 'error')
+      .mockImplementation(() => {});
+
+    await service.runRetention();
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    for (const method of [...allPruneMethods, ...samplePruneMethods]) {
+      expect(storage[method]).not.toHaveBeenCalled();
+    }
+  });
+
+  it('skips the sweep when only the sample window is null', async () => {
+    const policy = (service as any).retentionPolicy;
+    (policy.getSampleRetentionMs as jest.Mock).mockReturnValue(null);
+    const errorSpy = jest
+      .spyOn((service as any).logger, 'error')
+      .mockImplementation(() => {});
+
+    await service.runRetention();
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    for (const method of [...allPruneMethods, ...samplePruneMethods]) {
+      expect(storage[method]).not.toHaveBeenCalled();
+    }
+  });
+
   describe('handleRetentionCron', () => {
     it('delegates to runRetention when CLOUD_MODE is true', async () => {
       const spy = jest.spyOn(service, 'runRetention').mockResolvedValue();

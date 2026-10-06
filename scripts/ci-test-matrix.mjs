@@ -4,7 +4,8 @@
  * test suite is picked up without editing a workflow.
  *
  * Emits two GitHub Actions outputs, `node_matrix` and `python_matrix`, each a
- * JSON array of matrix entries for the suites a pull request needs to run.
+ * JSON array of matrix entries for the suites a pull request needs to run, and
+ * `dedicated_jobs`, `true` unless every change is confined to an isolated app.
  *
  * Usage:
  *   node scripts/ci-test-matrix.mjs --base <sha>   select suites affected by the diff
@@ -19,6 +20,9 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** Suites that already have a dedicated job in api-tests.yml. */
 const DEDICATED_JOB_PACKAGES = new Set(['api', '@app/entitlement', '@betterdb/ai', 'betterdb-ai']);
+
+/** Apps no dedicated job can observe, so a change confined to them skips those jobs. */
+const ISOLATED_APP_PACKAGES = new Set(['web']);
 
 /** Optional-dependency groups installed for a Python suite when it declares them. */
 const PYTHON_EXTRAS = ['dev', 'langchain', 'langgraph'];
@@ -343,6 +347,7 @@ function main() {
 
   let selected;
   let reason;
+  let dedicatedJobs = true;
 
   if (options.all === true || options.base === null) {
     selected = new Set(
@@ -363,6 +368,9 @@ function main() {
       reason = 'a change outside every package can affect any suite';
     } else {
       selected = withDependents(direct, allPackages);
+      dedicatedJobs = [...selected].some((name) => {
+        return ISOLATED_APP_PACKAGES.has(name) === false;
+      });
       reason = `${paths.length} changed file(s) against ${options.base}`;
     }
   }
@@ -379,11 +387,13 @@ function main() {
   for (const entry of pythonMatrix) {
     console.log(`  ${entry.label} — ${entry.name}`);
   }
+  console.log(`Dedicated jobs: ${dedicatedJobs ? 'run' : 'skipped'}`);
 
   if (process.env.GITHUB_OUTPUT !== undefined) {
     appendFileSync(
       process.env.GITHUB_OUTPUT,
-      `node_matrix=${JSON.stringify(nodeMatrix)}\npython_matrix=${JSON.stringify(pythonMatrix)}\n`,
+      `node_matrix=${JSON.stringify(nodeMatrix)}\npython_matrix=${JSON.stringify(pythonMatrix)}\n` +
+        `dedicated_jobs=${dedicatedJobs}\n`,
     );
   }
 }

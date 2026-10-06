@@ -53,6 +53,21 @@ function copySettingsKey<K extends keyof AppSettings & keyof SettingsUpdateReque
   updates[key] = formData[key];
 }
 
+// The single definition of "what the user has changed": the editable keys whose
+// draft value differs from what's saved. Both the Save gate (hasChanges) and the
+// update payload derive from this, so a draft that collapses back to the stored
+// value (e.g. type 30, then clear it) can never leave Save enabled or PUT {}.
+function changedKeys(
+  form: Partial<AppSettings>,
+  saved: AppSettings | null,
+): Array<keyof AppSettings & keyof SettingsUpdateRequest> {
+  if (!saved) return [];
+  return (Object.keys(form) as Array<keyof AppSettings>).filter(
+    (key): key is keyof AppSettings & keyof SettingsUpdateRequest =>
+      isUpdatableSettingsKey(key) && form[key] !== saved[key],
+  );
+}
+
 export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const { isDemo, loading: demoLoading } = useDemoState();
   const isAdmin = useCanMutate() !== false;
@@ -66,7 +81,9 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const [source, setSource] = useState<'database' | 'environment' | 'defaults'>('defaults');
   const [requiresRestart, setRequiresRestart] = useState(false);
   const [formData, setFormData] = useState<Partial<AppSettings>>({});
-  const [hasChanges, setHasChanges] = useState(false);
+  // Derived, never stored: recomputed from (formData, settings) every render so
+  // it can't fall out of sync with the draft the way a manual boolean did.
+  const hasChanges = changedKeys(formData, settings).length > 0;
 
   // Raw text of the retention input so invalid entries stay visible with an
   // error instead of silently collapsing to "keep forever".
@@ -132,7 +149,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setFormData(response.settings);
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
-      setHasChanges(false);
       syncRetentionFrom(response.settings.localRetentionDays);
     } catch (error) {
       console.error('Failed to load settings:', error);
@@ -143,7 +159,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
 
   const handleInputChange = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     setFormData((prev) => ({ ...prev, [key]: value }));
-    setHasChanges(true);
   };
 
   const handleSave = async () => {
@@ -152,12 +167,8 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     try {
       setSaving(true);
       const updates: SettingsUpdateRequest = {};
-
-      // Only include changed fields
-      (Object.keys(formData) as Array<keyof AppSettings>).forEach((key) => {
-        if (formData[key] !== settings[key] && isUpdatableSettingsKey(key)) {
-          copySettingsKey(updates, formData, key);
-        }
+      changedKeys(formData, settings).forEach((key) => {
+        copySettingsKey(updates, formData, key);
       });
 
       const response = await settingsApi.updateSettings(updates);
@@ -165,7 +176,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setFormData(response.settings);
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
-      setHasChanges(false);
       syncRetentionFrom(response.settings.localRetentionDays);
     } catch (error) {
       console.error('Failed to save settings:', error);
@@ -178,7 +188,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const handleCancel = () => {
     if (settings) {
       setFormData(settings);
-      setHasChanges(false);
       syncRetentionFrom(settings.localRetentionDays);
     }
   };
@@ -195,7 +204,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setFormData(response.settings);
       setSource(response.source);
       setRequiresRestart(response.requiresRestart);
-      setHasChanges(false);
       syncRetentionFrom(response.settings.localRetentionDays);
     } catch (error) {
       console.error('Failed to reset settings:', error);

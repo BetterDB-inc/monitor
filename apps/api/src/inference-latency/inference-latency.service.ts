@@ -23,6 +23,7 @@ import { PrometheusService } from '../prometheus/prometheus.service';
 import { LatencyEntry, bucketEntry, projectToLatencyEntry } from './bucketing';
 import { annotateIndexingEvents } from './correlation';
 import { computePercentiles } from './percentiles';
+import { ExternalConnectionUnsupportedError } from '../external-metrics/external-connection-unsupported.error';
 
 const DEFAULT_PROFILE_WINDOW_MS = 15 * 60 * 1000;
 // Prometheus gauges + SLA evaluation share the same window as the UI default
@@ -302,7 +303,10 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
 
     const thresholdDirective =
       source === 'commandlog' ? 'commandlog-execution-slower-than' : 'slowlog-log-slower-than';
-    const thresholdRaw = await connection.getConfigValue(thresholdDirective).catch(() => null);
+    const thresholdRaw = await connection.getConfigValue(thresholdDirective).catch((error) => {
+      if (error instanceof ExternalConnectionUnsupportedError) throw error;
+      return null;
+    });
     const thresholdUs = thresholdRaw === null ? 0 : Number(thresholdRaw) || 0;
 
     return {

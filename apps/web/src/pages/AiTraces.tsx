@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { EmptyState } from '../components/ui/empty-state';
 import { aiObservabilityApi } from '../api/aiObservability';
 import type { OtelTraceSummary, StoredOtelSpan, SpanCorrelation } from '@betterdb/shared';
 
@@ -246,12 +247,15 @@ export function AiTraces() {
       </div>
 
       {!tracesLoading && traces.length === 0 && (
-        <Card>
-          <CardContent className="py-8 text-center text-sm text-muted-foreground">
-            No traces yet. Configure your app's OTLP exporter to send to{' '}
-            <code>&lt;monitor-host&gt;/v1/traces</code> (JSON protocol).
-          </CardContent>
-        </Card>
+        <EmptyState
+          title="No traces yet"
+          description={
+            <>
+              Configure your app's OTLP exporter to send to{' '}
+              <code>&lt;monitor-host&gt;/v1/traces</code> (JSON protocol).
+            </>
+          }
+        />
       )}
 
       {traces.length > 0 && (

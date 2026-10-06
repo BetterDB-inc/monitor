@@ -1,0 +1,423 @@
+import { Logger } from '@nestjs/common';
+import type { ConnectionRegistry } from '../../connections/connection-registry.service';
+import { DiscoveredInstancesStore } from '../discovered-instances.store';
+import { ExternalMetricsStore } from '../external-metrics-store';
+import { OtelMetricsIngestService, toPartialSuccess } from '../otel-metrics-ingest.service';
+import type { OtlpKeyValue, OtlpMetric, OtlpMetricsRequest } from '../otlp-metrics-types';
+
+const NOW_MS = 1_700_000_000_000;
+const NOW_NS = String(BigInt(NOW_MS) * 1_000_000n);
+
+const str = (key: string, value: string): OtlpKeyValue => ({ key, value: { stringValue: value } });
+
+function resource(attrs: OtlpKeyValue[], metrics: OtlpMetric[]): OtlpMetricsRequest {
+  return { resourceMetrics: [{ resource: { attributes: attrs }, scopeMetrics: [{ metrics }] }] };
+}
+
+const identity = [str('server.address', 'cache.internal'), { key: 'server.port', value: { intValue: '6379' } }];
+
+function gauge(name: string, value: number, attrs: OtlpKeyValue[] = [], ...ts: [string?]): OtlpMetric {
+  const timeUnixNano = ts.length > 0 ? ts[0] : NOW_NS;
+  return { name, gauge: { dataPoints: [{ attributes: attrs, timeUnixNano, asInt: String(value) }] } };
+}
+
+function build(
+  match: { id: string; connectionType: 'direct' | 'external' } | null = { id: 'ext', connectionType: 'external' },
+  discovered = new DiscoveredInstancesStore(true),
+) {
+  const registry = { findByHostPort: jest.fn().mockReturnValue(match) } as unknown as ConnectionRegistry;
+  const store = new ExternalMetricsStore();
+  return { service: new OtelMetricsIngestService(registry, store, undefined, discovered), store, registry, discovered };
+}
+
+describe('OtelMetricsIngestService', () => {
+  let warn: jest.SpyInstance;
+
+  beforeEach(() => {
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  it('applies mapped points to the matched external connection', () => {
+    const { service, store, registry } = build();
+    const result = service.ingest(
+      resource(identity, [
+        gauge('redis.memory.used', 1024),
+        gauge('redis.cpu.time', 3, [str('state', 'user')]),
+        gauge('redis.db.keys', 5, [str('db', '0')]),
+      ]),
+      NOW_MS,
+    );
+    expect(registry.findByHostPort).toHaveBeenCalledWith('cache.internal', 6379);
+    expect(result.accepted).toBe(3);
+    expect(toPartialSuccess(result)).toBeNull();
+    expect(store.snapshot('ext', NOW_MS)).toEqual({
+      memory: { used_memory: '1024' },
+      cpu: { used_cpu_user: '3' },
+      keyspace: { db0: 'keys=5' },
+    });
+    expect(store.latestVersion('ext')).not.toBeNull();
+  });
+
+  it('drops every point of an unidentified resource', () => {
+    const { service } = build();
+    const result = service.ingest(resource([], [gauge('redis.memory.used', 1), gauge('redis.uptime', 2)]), NOW_MS);
+    expect(result.dropped.unidentified).toBe(2);
+    expect(result.accepted).toBe(0);
+  });
+
+  it('falls back to server.address when the instance id parses to an unregistered key', () => {
+    const { service, registry } = build();
+    (registry.findByHostPort as jest.Mock).mockImplementation((host: string, port: number) =>
+      host === 'redis-node-1' && port === 6379 ? { id: 'ext', connectionType: 'external' } : null,
+    );
+    const result = service.ingest(
+      resource(
+        [
+          str('service.instance.id', 'redis-node-1'),
+          str('server.address', 'redis-node-1'),
+          { key: 'server.port', value: { intValue: '6379' } },
+        ],
+        [gauge('redis.uptime', 1)],
+      ),
+      NOW_MS,
+    );
+    expect(result.accepted).toBe(1);
+    expect(result.dropped.unknown_instance).toBe(0);
+  });
+
+  it('drops unknown and already-polled instances', () => {
+    expect(build(null).service.ingest(resource(identity, [gauge('redis.uptime', 1)]), NOW_MS).dropped.unknown_instance).toBe(1);
+    expect(
+      build({ id: 'd', connectionType: 'direct' }).service.ingest(resource(identity, [gauge('redis.uptime', 1)]), NOW_MS)
+        .dropped.already_polled,
+    ).toBe(1);
+  });
+
+  it('counts unsupported types, delta sums, unmapped metrics and missing values', () => {
+    const { service } = build();
+    const result = service.ingest(
+      resource(identity, [
+        { name: 'redis.cmd.latency', histogram: { dataPoints: [{}, {}] } },
+        { name: 'x.summary', summary: { dataPoints: [{}] } },
+        { name: 'x.exp', exponentialHistogram: { dataPoints: [{}] } },
+        { name: 'redis.keys.expired', sum: { aggregationTemporality: 1, dataPoints: [{ timeUnixNano: NOW_NS, asInt: '1' }] } },
+        { name: 'redis.keys.evicted', sum: { aggregationTemporality: 'AGGREGATION_TEMPORALITY_DELTA', dataPoints: [{ asInt: '1' }] } },
+        gauge('redis.cluster.state', 1),
+        { name: 'redis.memory.used', gauge: { dataPoints: [{ timeUnixNano: NOW_NS }] } },
+      ]),
+      NOW_MS,
+    );
+    expect(result.dropped).toEqual({
+      unidentified: 0,
+      unknown_instance: 0,
+      already_polled: 0,
+      unsupported_type: 4,
+      unsupported_temporality: 2,
+      unmapped_metric: 1,
+      invalid_value: 1,
+      cardinality_limit: 0,
+    });
+    expect(toPartialSuccess(result)).toEqual({
+      rejectedDataPoints: 8,
+      errorMessage: 'unsupported_type=4 unsupported_temporality=2 unmapped_metric=1 invalid_value=1',
+    });
+  });
+
+  it('drops points for new commands beyond the cardinality cap', () => {
+    const { service, store } = build();
+    const commands = Array.from({ length: 1030 }, (_, i) => gauge('redis.cmd.calls', 1, [str('cmd', `c${i}`)]));
+    const result = service.ingest(resource(identity, [gauge('redis.memory.used', 1), ...commands]), NOW_MS);
+    expect(result.accepted).toBe(1025);
+    expect(result.dropped.cardinality_limit).toBe(6);
+    expect(toPartialSuccess(result)).toEqual({ rejectedDataPoints: 6, errorMessage: 'cardinality_limit=6' });
+    expect(Object.keys(store.snapshot('ext', NOW_MS).commandstats ?? {})).toHaveLength(1024);
+  });
+
+  describe('no-recorded-value flag', () => {
+    const flagged = (name: string, flags: number, timeUnixNano = NOW_NS): OtlpMetric => ({
+      name,
+      gauge: { dataPoints: [{ timeUnixNano, asInt: '0', flags }] },
+    });
+
+    it('skips a flagged point without storing, refreshing or counting it', () => {
+      const { service, store } = build();
+      const result = service.ingest(resource(identity, [flagged('redis.memory.used', 1)]), NOW_MS);
+      expect(result.accepted).toBe(0);
+      expect(toPartialSuccess(result)).toBeNull();
+      expect(store.snapshot('ext', NOW_MS)).toEqual({});
+      expect(store.isFresh('ext', NOW_MS)).toBe(false);
+      expect(store.latestVersion('ext')).toBeNull();
+    });
+
+    it('keeps the previous value, freshness and version when a flagged point follows', () => {
+      const { service, store } = build();
+      service.ingest(resource(identity, [gauge('redis.memory.used', 1024)]), NOW_MS);
+      const version = store.latestVersion('ext');
+      const later = NOW_MS + store.staleAfterMs;
+      const laterNs = String(BigInt(later) * 1_000_000n);
+      service.ingest(resource(identity, [flagged('redis.memory.used', 1, laterNs)]), later);
+      expect(store.snapshot('ext', NOW_MS).memory).toEqual({ used_memory: '1024' });
+      expect(store.latestVersion('ext')).toBe(version);
+      expect(store.isFresh('ext', later + 1)).toBe(false);
+    });
+
+    it('stores a point whose flags leave the no-recorded-value bit clear', () => {
+      const { service, store } = build();
+      const result = service.ingest(resource(identity, [flagged('redis.memory.used', 2)]), NOW_MS);
+      expect(result.accepted).toBe(1);
+      expect(store.snapshot('ext', NOW_MS).memory).toEqual({ used_memory: '0' });
+    });
+  });
+
+  it('treats prototype property names as unmapped', () => {
+    const { service, store } = build();
+    const result = service.ingest(
+      resource(identity, [
+        gauge('redis.constructor', 1),
+        gauge('redis.__proto__', 1),
+        gauge('redis.toString', 1),
+        gauge('valkey.hasOwnProperty', 1),
+        gauge('redis.db.keys', 1, [str('db', '0')]),
+        gauge('redis.role', 1, [str('role', 'toString')]),
+      ]),
+      NOW_MS,
+    );
+    expect(result.dropped.unmapped_metric).toBe(5);
+    expect(result.accepted).toBe(1);
+    expect(store.snapshot('ext', NOW_MS)).toEqual({ keyspace: { db0: 'keys=1' } });
+  });
+
+  it('accepts cumulative sums and skips role points whose value is 0', () => {
+    const { service, store } = build();
+    const result = service.ingest(
+      resource(identity, [
+        { name: 'redis.commands.processed', sum: { aggregationTemporality: 2, isMonotonic: true, dataPoints: [{ timeUnixNano: NOW_NS, asInt: '9' }] } },
+        {
+          name: 'redis.role',
+          sum: {
+            aggregationTemporality: 2,
+            dataPoints: [
+              { attributes: [str('role', 'primary')], timeUnixNano: NOW_NS, asInt: '1' },
+              { attributes: [str('role', 'replica')], timeUnixNano: NOW_NS, asInt: '0' },
+            ],
+          },
+        },
+      ]),
+      NOW_MS,
+    );
+    expect(toPartialSuccess(result)).toBeNull();
+    expect(store.snapshot('ext', NOW_MS)).toEqual({
+      stats: { total_commands_processed: '9' },
+      replication: { role: 'master' },
+    });
+  });
+
+  it('uses the receive time for points without a timestamp', () => {
+    const { service, store } = build();
+    service.ingest(resource(identity, [gauge('redis.uptime', 5, [], undefined)]), NOW_MS + 7);
+    expect(store.isFresh('ext', NOW_MS + 7 + store.staleAfterMs)).toBe(true);
+    expect(store.isFresh('ext', NOW_MS + 8 + store.staleAfterMs)).toBe(false);
+  });
+
+  it('records the server version and the valkey flag', () => {
+    const redis = build();
+    redis.service.ingest(resource([...identity, str('redis.version', '7.2.4')], [gauge('redis.uptime', 1)]), NOW_MS);
+    expect(redis.store.redisVersion('ext')).toBe('7.2.4');
+    expect(redis.store.isValkey('ext')).toBe(false);
+
+    const byMetric = build();
+    byMetric.service.ingest(resource(identity, [gauge('valkey.memory.used', 1)]), NOW_MS);
+    expect(byMetric.store.isValkey('ext')).toBe(true);
+
+    const byResource = build();
+    byResource.service.ingest(resource([...identity, str('db.system.name', 'valkey')], [gauge('redis.uptime', 1)]), NOW_MS);
+    expect(byResource.store.isValkey('ext')).toBe(true);
+  });
+
+  it('records valkey.version as the Valkey version and keeps redis.version as the Redis version', () => {
+    const { service, store } = build();
+    service.ingest(
+      resource(
+        [
+          ...identity,
+          str('redis.version', '7.2.4'),
+          str('valkey.version', '8.1.1'),
+          str('db.system.name', 'valkey'),
+        ],
+        [gauge('redis.uptime', 1)],
+      ),
+      NOW_MS,
+    );
+    expect(store.redisVersion('ext')).toBe('7.2.4');
+    expect(store.engineVersion('ext')).toEqual({ product: 'valkey', version: '8.1.1' });
+  });
+
+  it('notifies the engine once, as Valkey, for a first push carrying both versions', () => {
+    const { service, store } = build();
+    const changes: string[] = [];
+    store.onEngineChange((connectionId) => {
+      changes.push(connectionId);
+    });
+    service.ingest(
+      resource(
+        [
+          ...identity,
+          str('redis.version', '7.2.4'),
+          str('valkey.version', '8.1.0'),
+          str('db.system.name', 'valkey'),
+        ],
+        [gauge('redis.uptime', 1)],
+      ),
+      NOW_MS,
+    );
+    expect(changes).toEqual(['ext']);
+    expect(store.engineVersion('ext')).toEqual({ product: 'valkey', version: '8.1.0' });
+  });
+
+  it('ignores an older point without counting it as dropped', () => {
+    const { service, store } = build();
+    service.ingest(resource(identity, [gauge('redis.uptime', 9)]), NOW_MS);
+    const result = service.ingest(
+      resource(identity, [gauge('redis.uptime', 1, [], String(BigInt(NOW_MS - 10) * 1_000_000n))]),
+      NOW_MS,
+    );
+    expect(result.accepted).toBe(0);
+    expect(toPartialSuccess(result)).toBeNull();
+    expect(store.snapshot('ext', NOW_MS).server).toEqual({ uptime_in_seconds: '9' });
+  });
+
+  it('keeps a point stamped ten minutes ago fresh when it is received now', () => {
+    const { service, store } = build();
+    const tenMinutesAgo = String(BigInt(NOW_MS - 600_000) * 1_000_000n);
+    service.ingest(resource(identity, [gauge('redis.memory.used', 7, [], tenMinutesAgo)]), NOW_MS);
+    expect(store.isFresh('ext', NOW_MS)).toBe(true);
+    expect(store.snapshot('ext', NOW_MS)).toEqual({ memory: { used_memory: '7' } });
+    expect(store.isFresh('ext', NOW_MS + store.staleAfterMs)).toBe(true);
+    expect(store.isFresh('ext', NOW_MS + store.staleAfterMs + 1)).toBe(false);
+  });
+
+  it('clamps a future-stamped point to the receive time', () => {
+    const { service, store } = build();
+    const inAnHour = String(BigInt(NOW_MS + 3_600_000) * 1_000_000n);
+    service.ingest(resource(identity, [gauge('redis.memory.used', 1, [], inAnHour)]), NOW_MS);
+    expect(store.isFresh('ext', NOW_MS + store.staleAfterMs + 1)).toBe(false);
+
+    const later = NOW_MS + 10_000;
+    const result = service.ingest(
+      resource(identity, [gauge('redis.memory.used', 2, [], String(BigInt(later) * 1_000_000n))]),
+      later,
+    );
+    expect(result.accepted).toBe(1);
+    expect(store.snapshot('ext', later)).toEqual({ memory: { used_memory: '2' } });
+
+    expect(store.isFresh('ext', later + store.staleAfterMs + 1)).toBe(false);
+  });
+
+  it('rate-limits warnings per reason and instance to one per five minutes', () => {
+    const { service } = build(null);
+    const req = resource(identity, [gauge('redis.uptime', 1)]);
+    service.ingest(req, NOW_MS);
+    service.ingest(req, NOW_MS + 60_000);
+    expect(warn).toHaveBeenCalledTimes(1);
+    service.ingest(req, NOW_MS + 5 * 60_000);
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  it('handles an empty request', () => {
+    const { service } = build();
+    expect(toPartialSuccess(service.ingest({}, NOW_MS))).toBeNull();
+  });
+
+  it('reports each ingest to Prometheus when available', () => {
+    const prometheus = { recordOtlpIngest: jest.fn() };
+    const registry = { findByHostPort: jest.fn().mockReturnValue(null) } as unknown as ConnectionRegistry;
+    const service = new OtelMetricsIngestService(registry, new ExternalMetricsStore(), prometheus as never);
+    service.ingest(resource(identity, [gauge('redis.uptime', 1)]), NOW_MS);
+    expect(prometheus.recordOtlpIngest).toHaveBeenCalledWith(0, expect.objectContaining({ unknown_instance: 1 }));
+  });
+});
+
+describe('OtelMetricsIngestService discovery', () => {
+  let log: jest.SpyInstance;
+  let warn: jest.SpyInstance;
+
+  beforeEach(() => {
+    log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    log.mockRestore();
+    warn.mockRestore();
+  });
+
+  const named = [...identity, str('service.name', 'orders-cache'), str('db.system.name', 'valkey')];
+
+  it('records an unregistered instance and still drops its points', () => {
+    const { service, discovered } = build(null);
+    const result = service.ingest(resource(named, [gauge('redis.memory.used', 1), gauge('redis.db.keys', 2, [str('db', '0')])]), NOW_MS);
+    expect(result.dropped.unknown_instance).toBe(2);
+    expect(result.accepted).toBe(0);
+    expect(discovered.list(NOW_MS)).toEqual([
+      { host: 'cache.internal', port: 6379, suggestedName: 'orders-cache', dbSystem: 'valkey', firstSeenAt: NOW_MS, lastSeenAt: NOW_MS, droppedPoints: 2 },
+    ]);
+  });
+
+  it('logs a discovery once per instance', () => {
+    const { service } = build(null);
+    service.ingest(resource(named, [gauge('redis.memory.used', 1)]), NOW_MS);
+    service.ingest(resource(named, [gauge('redis.memory.used', 1)]), NOW_MS + 1);
+    const messages = log.mock.calls.map(([m]) => m).filter((m) => String(m).startsWith('Discovered'));
+    expect(messages).toEqual(['Discovered unregistered OTLP instance cache.internal:6379']);
+  });
+
+  const discoveredAddresses = (discovered: DiscoveredInstancesStore) =>
+    discovered.list(NOW_MS).map((i) => `${i.host}:${i.port}`);
+
+  it('prefers the explicit endpoint over the decoded instance id', () => {
+    const { service, discovered } = build(null);
+    service.ingest(resource([str('service.instance.id', 'redis-node-1'), str('server.address', 'redis-node-1'), { key: 'server.port', value: { intValue: '6379' } }], [gauge('redis.memory.used', 1)]), NOW_MS);
+    expect(discoveredAddresses(discovered)).toEqual(['redis-node-1:6379']);
+  });
+
+  it('keeps explicit endpoints that share an opaque instance id apart', () => {
+    const { service, discovered } = build(null);
+    for (const host of ['db-a', 'db-b']) {
+      service.ingest(resource([str('service.instance.id', 'collector-1'), str('server.address', host), { key: 'server.port', value: { intValue: '6379' } }], [gauge('redis.memory.used', 1)]), NOW_MS);
+    }
+    expect(discoveredAddresses(discovered).sort()).toEqual(['db-a:6379', 'db-b:6379']);
+  });
+
+  it('falls back to the decoded instance id without an explicit endpoint', () => {
+    const { service, discovered } = build(null);
+    service.ingest(resource([str('service.instance.id', 'primary.internal:7000')], [gauge('redis.memory.used', 1)]), NOW_MS);
+    expect(discoveredAddresses(discovered)).toEqual(['primary.internal:7000']);
+  });
+
+  it.each([
+    ['accepted', { id: 'ext', connectionType: 'external' as const }, identity],
+    ['already_polled', { id: 'direct', connectionType: 'direct' as const }, identity],
+    ['unidentified', null, []],
+  ])('does not record %s resources', (_label, match, attrs) => {
+    const { service, discovered } = build(match);
+    service.ingest(resource(attrs, [gauge('redis.memory.used', 1)]), NOW_MS);
+    expect(discovered.list(NOW_MS)).toEqual([]);
+  });
+
+  it('does not record a resource without metric points', () => {
+    const { service, discovered } = build(null);
+    service.ingest(resource(named, []), NOW_MS);
+    expect(discovered.list(NOW_MS)).toEqual([]);
+  });
+
+  it('does not record when discovery is disabled', () => {
+    const { service, discovered } = build(null, new DiscoveredInstancesStore(false));
+    const result = service.ingest(resource(named, [gauge('redis.memory.used', 1)]), NOW_MS);
+    expect(discovered.list(NOW_MS)).toEqual([]);
+    expect(result.dropped.unknown_instance).toBe(1);
+  });
+});

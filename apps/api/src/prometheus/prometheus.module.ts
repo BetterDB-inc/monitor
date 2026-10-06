@@ -1,6 +1,7 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { PrometheusController } from './prometheus.controller';
 import { PrometheusService } from './prometheus.service';
+import { PrometheusMetricsGuard } from './prometheus-metrics.guard';
 import { StorageModule } from '../storage/storage.module';
 import { WebhooksModule } from '../webhooks/webhooks.module';
 import { SlowLogAnalyticsModule } from '../slowlog-analytics/slowlog-analytics.module';
@@ -20,7 +21,7 @@ import { ClusterModule } from '../cluster/cluster.module';
     ClusterModule,
   ],
   controllers: [PrometheusController],
-  providers: [PrometheusService],
+  providers: [PrometheusService, PrometheusMetricsGuard],
   exports: [PrometheusService],
 })
 export class PrometheusModule {}

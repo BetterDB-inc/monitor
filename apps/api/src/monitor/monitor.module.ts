@@ -3,6 +3,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { ClusterModule } from '../cluster/cluster.module';
 import { ConnectionsModule } from '../connections/connections.module';
 import { StorageModule } from '../storage/storage.module';
+import { TopologyModule } from '../topology/topology.module';
 import { WebhooksModule } from '../webhooks/webhooks.module';
 import { AclChecker } from './acl-checker';
 import { CaptureScheduler } from './capture-scheduler';
@@ -20,6 +21,7 @@ import { TailGateway } from './tail.gateway';
     ClusterModule,
     ConnectionsModule,
     StorageModule,
+    TopologyModule,
     WebhooksModule,
     ScheduleModule.forRoot(),
   ],

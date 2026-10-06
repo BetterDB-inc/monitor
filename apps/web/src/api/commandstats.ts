@@ -5,7 +5,7 @@ export interface CommandStatsSample {
   connectionId: string;
   command: string;
   callsDelta: number;
-  usecDelta: number;
+  usecDelta: number | null;
   intervalMs: number;
   capturedAt: number;
 }
@@ -13,7 +13,7 @@ export interface CommandStatsSample {
 export interface CommandStatsChartPoint {
   capturedAt: number;
   opsPerSec: number;
-  avgLatencyUs: number;
+  avgLatencyUs: number | null;
 }
 
 export function opsPerSec(sample: CommandStatsSample): number {
@@ -21,7 +21,8 @@ export function opsPerSec(sample: CommandStatsSample): number {
   return sample.callsDelta / (sample.intervalMs / 1000);
 }
 
-export function avgLatencyUs(sample: CommandStatsSample): number {
+export function avgLatencyUs(sample: CommandStatsSample): number | null {
+  if (sample.usecDelta === null) return null;
   if (sample.callsDelta <= 0) return 0;
   return sample.usecDelta / sample.callsDelta;
 }

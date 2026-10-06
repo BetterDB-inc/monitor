@@ -22,6 +22,9 @@ vi.mock('../../../hooks/useCacheProposals', () => ({
   }),
 }));
 
+const mockUseConnection = vi.fn();
+vi.mock('../../../hooks/useConnection', () => ({ useConnection: () => mockUseConnection() }));
+
 import { PendingCard } from './PendingCard';
 
 const baseFields = {
@@ -97,6 +100,9 @@ describe('PendingCard', () => {
     rejectMutate.mockClear();
     editApproveMutate.mockClear();
     approvePending = false;
+    mockUseConnection.mockReturnValue({
+      currentConnection: { id: 'c1', connectionType: 'direct' },
+    });
   });
 
   it('renders semantic threshold body with category', () => {
@@ -184,5 +190,48 @@ describe('PendingCard', () => {
     await waitFor(() => {
       expect(approveMutate).toHaveBeenCalledWith({ id: 'p1' });
     });
+  });
+
+  it('disables Approve and Edit for an OTLP-ingested connection, but not Reject', () => {
+    mockUseConnection.mockReturnValue({
+      currentConnection: { id: 'c1', connectionType: 'external' },
+    });
+    render(<PendingCard proposal={semanticThreshold()} />);
+
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Reject' })).not.toBeDisabled();
+  });
+
+  it('describes the disabled actions with visible text keyboard users can reach', () => {
+    mockUseConnection.mockReturnValue({
+      currentConnection: { id: 'c1', connectionType: 'external' },
+    });
+    render(<PendingCard proposal={semanticThreshold()} />);
+
+    const note = screen.getByText(
+      'Not available for OTLP-ingested connections — this action needs a live connection.',
+    );
+    expect(screen.getByRole('button', { name: 'Approve' })).toHaveAttribute('aria-describedby', note.id);
+    expect(screen.getByRole('button', { name: 'Edit' })).toHaveAttribute('aria-describedby', note.id);
+  });
+
+  it('shows no restriction note for a direct connection', () => {
+    render(<PendingCard proposal={semanticThreshold()} />);
+
+    expect(screen.queryByText(/Not available for OTLP-ingested connections/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Approve' })).not.toHaveAttribute('aria-describedby');
+  });
+
+  it('explains why Approve is disabled for an OTLP-ingested connection', () => {
+    mockUseConnection.mockReturnValue({
+      currentConnection: { id: 'c1', connectionType: 'external' },
+    });
+    render(<PendingCard proposal={semanticThreshold()} />);
+
+    expect(screen.getByRole('button', { name: 'Approve' })).toHaveAttribute(
+      'data-tooltip-content',
+      'Not available for OTLP-ingested connections — this action needs a live connection.',
+    );
   });
 });

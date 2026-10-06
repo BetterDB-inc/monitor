@@ -97,6 +97,7 @@ Requires Node.js >= 20.0.0 and a Valkey or Redis instance to monitor. For SQLite
 - **MONITOR capture sessions** - record real traffic on demand: live tail, filter, replay, export to JSON/CSV, and cross-reference against connection history.
 - **Hot key tracking** - top keys by access frequency with rank movement over time. Key Analytics (Pro, free in early access) adds type, TTL, and size distributions from live sampling.
 - **Cluster visibility** - topology graphs, SLOT-STATS heatmaps, per-slot CPU and key distribution.
+- **Cluster auto-registration** - a cluster connection can auto-register every node as its own monitored connection, kept in sync as the cluster scales. See [docs/cluster-auto-registration.md](docs/cluster-auto-registration.md).
 - **CPU & I/O thread metrics** - per-thread visibility that no Redis tool can provide.
 - **Client analytics** - see exactly which service is responsible for what, attributed by client name and pattern.
 - **ACL audit trail** - track who accessed what, persisted for compliance and post-incident debugging.
@@ -203,8 +204,11 @@ docker run -d \
 | `DB_PASSWORD` | No | - | Valkey/Redis password |
 | `DB_USERNAME` | No | `default` | Valkey/Redis ACL username |
 | `DB_TYPE` | No | `auto` | Database type: `auto`, `valkey`, or `redis` |
+| `DB_TLS` | No | `false` | Set to `true` to connect to the monitored database over TLS (required by managed providers such as Aiven or ElastiCache Serverless) |
 | `STORAGE_TYPE` | No | `memory` | Storage backend: `memory` or `postgres` |
 | `STORAGE_URL` | Conditional | - | PostgreSQL connection URL (required if `STORAGE_TYPE=postgres`) |
+| `STORAGE_SSL_CA` | No | - | Path (or trusted HTTPS URL) to a CA cert used to verify the PostgreSQL server. For managed providers with their own CA (e.g. Aiven), supply the project CA here for full chain + hostname verification. Takes precedence over `STORAGE_SSL_NO_VERIFY` |
+| `STORAGE_SSL_NO_VERIFY` | No | `false` | Connect to PostgreSQL over TLS **without** verifying the server certificate (encrypted but not authenticated). Convenience for managed providers that present their own CA and force `sslmode=require` when you can't supply `STORAGE_SSL_CA`. Prefer `STORAGE_SSL_CA` in production |
 | `PORT` | No | `3001` | Application HTTP port |
 | `NODE_ENV` | No | `production` | Node environment |
 | `ANOMALY_DETECTION_ENABLED` | No | `true` | Enable anomaly detection |

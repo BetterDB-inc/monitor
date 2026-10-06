@@ -11,8 +11,9 @@ type CloudRequest = FastifyRequest & { cloudUser?: CloudSessionPayload; actor: A
 export class CloudAuthGuardImpl implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
     // Not in cloud mode — allow everything. Match the codebase convention
-    // (isCloudMode()) so a value like "false"/"0" is treated as
-    // self-hosted here and everywhere else, not as an ambiguous cloud state.
+    // (isCloudMode()) so a negative value like "false"/"0"/"no"/"off" is
+    // treated as self-hosted here and everywhere else, not as an ambiguous
+    // cloud state.
     if (!isCloudMode()) return true;
 
     const request = context.switchToHttp().getRequest<CloudRequest>();
@@ -20,8 +21,12 @@ export class CloudAuthGuardImpl implements CanActivate {
     const reply = context.switchToHttp().getResponse<FastifyReply>();
     const path = (request.url || '').split('?')[0];
 
-    // Skip auth for callback route, logout route, health checks, agent WebSocket, and static assets
-    if (path.startsWith('/auth/callback') ||
+    // Skip auth for callback route, logout route, health checks, agent WebSocket, and static assets.
+    // /prometheus/metrics is safe to bypass because PrometheusMetricsGuard
+    // requires PROMETHEUS_METRICS_TOKEN, and boot validation makes that token
+    // mandatory in cloud mode.
+    if (
+      path.startsWith('/auth/callback') ||
       path.startsWith('/api/auth/callback') ||
       path.startsWith('/auth/logout') ||
       path.startsWith('/api/auth/logout') ||
@@ -32,8 +37,12 @@ export class CloudAuthGuardImpl implements CanActivate {
       path.startsWith('/mcp/') ||
       path.startsWith('/api/mcp/') ||
       path.startsWith('/v1/traces') ||
+      path === '/prometheus/metrics' ||
+      path === '/api/prometheus/metrics' ||
+      path.startsWith('/v1/external/metrics') ||
       path.startsWith('/assets/') ||
-      path.startsWith('/favicon')) {
+      path.startsWith('/favicon')
+    ) {
       return true;
     }
 

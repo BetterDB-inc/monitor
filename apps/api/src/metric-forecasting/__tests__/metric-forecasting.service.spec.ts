@@ -292,6 +292,39 @@ describe('MetricForecastingService', () => {
       expect(forecast.trendDirection).toBe('rising');
       expect(forecast.timeToLimitMs).toBeGreaterThan(0);
     });
+
+    it('reports insufficient data when the ratio was never pushed', async () => {
+      const now = Date.now();
+      await storage.saveMemorySnapshots(
+        generateSnapshots({ count: 60, startTime: now - 60 * 60_000, intervalMs: 60_000 }).map((s) => ({
+          ...s,
+          memFragmentationRatio: null,
+        })),
+        'conn-1',
+      );
+
+      const forecast = await service.getForecast('conn-1', 'memFragmentation');
+
+      expect(forecast.insufficientData).toBe(true);
+      expect(forecast.dataPointCount).toBe(0);
+      expect(forecast.currentValue).toBe(0);
+    });
+
+    it('skips null samples instead of reading them as zero', async () => {
+      const now = Date.now();
+      const snapshots = generateSnapshots({
+        count: 60, startTime: now - 60 * 60_000, intervalMs: 60_000,
+        startFragRatio: 1.2, endFragRatio: 1.2,
+      }).map((s, i) => (i % 2 === 0 ? s : { ...s, memFragmentationRatio: null }));
+      await storage.saveMemorySnapshots(snapshots, 'conn-1');
+
+      const forecast = await service.getForecast('conn-1', 'memFragmentation');
+
+      expect(forecast.insufficientData).toBe(false);
+      expect(forecast.dataPointCount).toBe(30);
+      expect(forecast.currentValue).toBeCloseTo(1.2, 6);
+      expect(forecast.trendDirection).toBe('stable');
+    });
   });
 
   // ── Insufficient data ──

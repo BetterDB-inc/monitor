@@ -11,8 +11,19 @@ import {
 } from '@app/common/services/multi-connection-poller';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { LicenseService } from '@proprietary/licenses/license.service';
-import { KeySizeDistribution, parseKeySizeDistribution, KEY_DETAILS_TOP_N } from '@betterdb/shared';
+import {
+  ConnectionStatus,
+  KeyAnalyticsResult,
+  KeySizeDistribution,
+  KEY_DETAILS_TOP_N,
+  hasOwnKeyAnalytics,
+  mergeKeySizeDistributions,
+  parseKeySizeDistribution,
+} from '@betterdb/shared';
+import type { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { rankCompositeKeys } from './composite-key-ranker';
+import { CollectionPlan, collectionPlan, isScannable } from './key-analytics-plan';
+import { buildPatternSnapshots, mergePatternSnapshots } from './key-pattern-snapshots';
 import { randomUUID } from 'crypto';
 
 // The collectors prune keyDetails mid-scan to the top KEY_DETAILS_TOP_N keys per
@@ -33,6 +44,13 @@ const COMPOSITE_TOP_N = KEY_DETAILS_TOP_N;
 // Explicit storage fetch cap for ranked reads: adapters default a missing limit
 // to 50, which would truncate multi-snapshot sets BEFORE the memory re-rank.
 const LARGEST_KEYS_FETCH_CAP = 10_000;
+
+const NO_KEY_SIZES: KeySizeDistribution = { databases: {}, available: false };
+
+interface ScanNode {
+  name: string;
+  client: DatabasePort;
+}
 
 function dedupeByKeyMaxMemory(entries: HotKeyEntry[]): HotKeyEntry[] {
   const byKey = new Map<string, HotKeyEntry>();
@@ -95,7 +113,78 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     return this.collect(ctx, false);
   }
 
+  private planFor(connectionId: string): CollectionPlan {
+    const connections = this.connectionRegistry.list();
+    const connection = connections.find((candidate) => candidate.id === connectionId);
+    return connection ? collectionPlan(connection, connections) : { kind: 'single' };
+  }
+
+  private hidesAnalytics(connectionId?: string): boolean {
+    if (!connectionId) {
+      return false;
+    }
+    const connection = this.connectionRegistry.list({ includeRetired: true }).find((candidate) => candidate.id === connectionId);
+    return connection !== undefined && !hasOwnKeyAnalytics(connection.membership);
+  }
+
+  private clusterNodes(seed: ScanNode, members: ConnectionStatus[]): ScanNode[] {
+    const nodes = [seed];
+    for (const member of members) {
+      try {
+        nodes.push({ name: member.name, client: this.connectionRegistry.get(member.id) });
+      } catch {
+        this.logger.warn(`Key analytics skipped ${member.name}: the connection is no longer registered`);
+      }
+    }
+    return nodes;
+  }
+
+  private async primaries(nodes: ScanNode[]): Promise<ScanNode[]> {
+    const roles = await Promise.allSettled(nodes.map((node) => node.client.getRole()));
+    return nodes.filter((node, index) => {
+      const role = roles[index];
+      if (role.status === 'rejected') {
+        this.logger.warn(`Key analytics could not read the role of ${node.name}: ${role.reason instanceof Error ? role.reason.message : role.reason}`);
+        return false;
+      }
+      return role.value.role === 'master';
+    });
+  }
+
+  private async scan(ctx: ConnectionContext, plan: CollectionPlan, fullScan: boolean): Promise<KeyAnalyticsResult[]> {
+    const options = { sampleSize: this.sampleSize, scanBatchSize: this.scanBatchSize, fullScan };
+    if (plan.kind !== 'cluster') {
+      return [await ctx.client.collectKeyAnalytics(options)];
+    }
+    const nodes = await this.primaries(this.clusterNodes({ name: ctx.connectionName, client: ctx.client }, plan.members));
+    if (nodes.length === 0) {
+      throw new Error(`No reachable primary found for ${ctx.connectionName}`);
+    }
+    const scans = await Promise.allSettled(nodes.map((node) => node.client.collectKeyAnalytics(options)));
+    const results: KeyAnalyticsResult[] = [];
+    const failures: unknown[] = [];
+    scans.forEach((scanResult, index) => {
+      if (scanResult.status === 'fulfilled') {
+        results.push(scanResult.value);
+        return;
+      }
+      failures.push(scanResult.reason);
+      this.logger.warn(
+        `Key analytics scan failed on ${nodes[index].name}: ${scanResult.reason instanceof Error ? scanResult.reason.message : scanResult.reason}`,
+      );
+    });
+    if (results.length === 0 && failures.length > 0) {
+      throw failures[0];
+    }
+    return results;
+  }
+
   private async collect(ctx: ConnectionContext, fullScan: boolean): Promise<void> {
+    const plan = this.planFor(ctx.connectionId);
+    if (plan.kind === 'skip') {
+      return;
+    }
+
     if (this.isRunning.get(ctx.connectionId)) {
       this.logger.debug(
         `Key analytics collection already running for ${ctx.connectionName}, skipping`,
@@ -107,95 +196,28 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     const startTime = Date.now();
 
     try {
-      const result = await ctx.client.collectKeyAnalytics({
-        sampleSize: this.sampleSize,
-        scanBatchSize: this.scanBatchSize,
-        fullScan,
-      });
+      const results = (await this.scan(ctx, plan, fullScan)).filter((result) => result.dbSize > 0);
 
-      if (result.dbSize === 0) {
+      if (results.length === 0) {
         this.logger.log('No keys found in database, skipping analytics');
         return;
       }
 
-      // `scanned` counts key VISITS, not distinct keys: SCAN can return the same
-      // key more than once (rehashing), so during a full scan it usually exceeds
-      // the distinct `dbSize`. Per-pattern `stats.count` is inflated by the same
-      // duplicate visits, so dividing by scanned/dbSize (which is >1 here) is the
-      // correct normalization — it deflates the visit-inflated totals back to a
-      // dbSize-consistent estimate (summed over patterns it yields exactly
-      // dbSize). Do NOT clamp to 1: that would persist raw visit counts and
-      // over-count keys/memory on deep scans.
-      const samplingRatio = result.scanned / result.dbSize;
-      const snapshots: KeyPatternSnapshot[] = [];
-
-      for (const stats of result.patterns) {
-        const pattern = stats.pattern;
-        const avgMemory = stats.count > 0 ? Math.round(stats.totalMemory / stats.count) : 0;
-        const avgIdleTime = stats.count > 0 ? Math.round(stats.totalIdleTime / stats.count) : 0;
-        const avgFreq =
-          stats.accessFrequencies.length > 0
-            ? stats.accessFrequencies.reduce((a, b) => a + b, 0) / stats.accessFrequencies.length
-            : undefined;
-
-        const avgTtl =
-          stats.ttlValues.length > 0
-            ? Math.round(stats.ttlValues.reduce((a, b) => a + b, 0) / stats.ttlValues.length)
-            : undefined;
-        const minTtl = stats.ttlValues.length > 0 ? Math.min(...stats.ttlValues) : undefined;
-        const maxTtl = stats.ttlValues.length > 0 ? Math.max(...stats.ttlValues) : undefined;
-
-        const staleCount =
-          avgIdleTime > 86400 ? Math.round((avgIdleTime / 86400) * stats.count) : 0;
-        const expiringSoon = stats.ttlValues.filter((t) => t < 3600).length;
-        const expiringSoonCount = Math.round(
-          (expiringSoon / (stats.ttlValues.length || 1)) * stats.withTtl,
-        );
-
-        let hotCount: number | undefined;
-        let coldCount: number | undefined;
-        if (avgFreq !== undefined) {
-          const coldThreshold = avgFreq / 2;
-          hotCount = Math.round(
-            (stats.accessFrequencies.filter((f) => f > avgFreq).length / stats.count) * stats.count,
-          );
-          coldCount = Math.round(
-            (stats.accessFrequencies.filter((f) => f < coldThreshold).length / stats.count) *
-              stats.count,
-          );
-        }
-
-        snapshots.push({
-          id: randomUUID(),
-          timestamp: Date.now(),
-          pattern,
-          keyCount: Math.round(stats.count / samplingRatio),
-          sampledKeyCount: stats.count,
-          keysWithTtl: Math.round(stats.withTtl / samplingRatio),
-          keysExpiringSoon: Math.round(expiringSoonCount / samplingRatio),
-          totalMemoryBytes: Math.round(stats.totalMemory / samplingRatio),
-          avgMemoryBytes: avgMemory,
-          maxMemoryBytes: stats.maxMemory,
-          avgAccessFrequency: avgFreq,
-          hotKeyCount: hotCount,
-          coldKeyCount: coldCount,
-          avgIdleTimeSeconds: avgIdleTime,
-          staleKeyCount: staleCount,
-          avgTtlSeconds: avgTtl,
-          minTtlSeconds: minTtl,
-          maxTtlSeconds: maxTtl,
-        });
-      }
+      const dbSize = results.reduce((total, result) => total + result.dbSize, 0);
+      const scanned = results.reduce((total, result) => total + result.scanned, 0);
+      const timestamp = Date.now();
+      const snapshots = mergePatternSnapshots(results.map((result) => buildPatternSnapshots(result, timestamp)));
+      const keyDetails = results.flatMap((result) => result.keyDetails ?? []);
 
       await this.storage.saveKeyPatternSnapshots(snapshots, ctx.connectionId);
 
       // Collect hot keys from per-key pipeline data
-      if (result.keyDetails && result.keyDetails.length > 0) {
+      if (keyDetails.length > 0) {
         const capturedAt = Date.now();
-        const lfuKeys: Array<(typeof result.keyDetails)[number]> = [];
-        const idletimeKeys: Array<(typeof result.keyDetails)[number]> = [];
+        const lfuKeys: typeof keyDetails = [];
+        const idletimeKeys: typeof keyDetails = [];
 
-        for (const kd of result.keyDetails) {
+        for (const kd of keyDetails) {
           if (kd.freqScore !== null) {
             lfuKeys.push(kd);
           } else if (kd.idleSeconds !== null) {
@@ -228,7 +250,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
         });
 
         // Largest keys (valkey #1827): rank by cardinality (element count / byte length).
-        const largestKeys: HotKeyEntry[] = result.keyDetails
+        const largestKeys: HotKeyEntry[] = keyDetails
           .filter((kd) => kd.cardinality !== null)
           .sort((a, b) => (b.cardinality ?? 0) - (a.cardinality ?? 0))
           .slice(0, LARGEST_KEYS_TOP_N)
@@ -250,7 +272,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
         // signal lists above each miss. Derived from the same per-key data, so no
         // extra scanning; only keys placing in >= 2 dimensions are emitted.
         const compositeKeys: HotKeyEntry[] = rankCompositeKeys(
-          result.keyDetails.map((kd) => ({
+          keyDetails.map((kd) => ({
             keyName: kd.keyName,
             keyType: kd.keyType,
             freqScore: kd.freqScore,
@@ -293,8 +315,8 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
 
       const duration = Date.now() - startTime;
       this.logger.log(
-        `Key Analytics (${ctx.connectionName}): ${fullScan ? 'deep-scanned' : 'sampled'} ${result.scanned}/${result.dbSize} keys (${(Math.min(1, samplingRatio) * 100).toFixed(1)}%), ` +
-          `found ${result.patterns.length} patterns in ${duration}ms`,
+        `Key Analytics (${ctx.connectionName}): ${fullScan ? 'deep-scanned' : 'sampled'} ${scanned}/${dbSize} keys (${(Math.min(1, scanned / dbSize) * 100).toFixed(1)}%)` +
+          `${results.length > 1 ? ` across ${results.length} primaries` : ''}, found ${snapshots.length} patterns in ${duration}ms`,
       );
     } catch (error) {
       this.logger.error(`Error collecting key analytics for ${ctx.connectionName}:`, error);
@@ -305,6 +327,9 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
   }
 
   async getSummary(startTime?: number, endTime?: number, connectionId?: string) {
+    if (this.hidesAnalytics(connectionId)) {
+      return null;
+    }
     return this.storage.getKeyAnalyticsSummary(startTime, endTime, connectionId);
   }
 
@@ -315,6 +340,9 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     limit?: number;
     connectionId?: string;
   }) {
+    if (this.hidesAnalytics(options?.connectionId)) {
+      return [];
+    }
     return this.storage.getKeyPatternSnapshots(options);
   }
 
@@ -324,15 +352,24 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     endTime: number,
     connectionId?: string,
   ) {
+    if (this.hidesAnalytics(connectionId)) {
+      return [];
+    }
     return this.storage.getKeyPatternTrends(pattern, startTime, endTime, connectionId);
   }
 
   async getHotKeys(options?: HotKeyQueryOptions): Promise<HotKeyEntry[]> {
+    if (this.hidesAnalytics(options?.connectionId)) {
+      return [];
+    }
     return this.storage.getHotKeys(options);
   }
 
   /** Top-N largest keys ranked by memory usage among tracked (cardinality-signal) entries. */
   async getLargestKeys(options?: HotKeyQueryOptions): Promise<HotKeyEntry[]> {
+    if (this.hidesAnalytics(options?.connectionId)) {
+      return [];
+    }
     const { limit, ...rest } = options ?? {};
     const entries = await this.storage.getHotKeys({
       ...rest,
@@ -367,6 +404,9 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
    * work gated on the collectors retaining a global memory top-N.
    */
   async getCompositeKeys(options?: HotKeyQueryOptions): Promise<HotKeyEntry[]> {
+    if (this.hidesAnalytics(options?.connectionId)) {
+      return [];
+    }
     const composite = await this.storage.getHotKeys({ ...options, signalTypes: ['composite'] });
 
     // Unlike the other lists, a scan can legitimately find zero composite keys
@@ -415,7 +455,9 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
    */
   async triggerCollection(fullScan = false): Promise<void> {
     const connections = this.connectionRegistry.list();
-    const connectedConnections = connections.filter((conn) => conn.isConnected);
+    const connectedConnections = connections.filter(
+      (conn) => isScannable(conn) && !this.isSentinelConnection(conn.id) && collectionPlan(conn, connections).kind !== 'skip',
+    );
 
     if (connectedConnections.length === 0) {
       this.logger.warn('No connected databases found for key analytics collection');
@@ -454,20 +496,30 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
    * no key scanning). Returns `available: false` if the server lacks the section.
    */
   async getKeySizes(connectionId?: string): Promise<KeySizeDistribution> {
-    let targetId = connectionId;
-    if (!targetId) {
-      const connected = this.connectionRegistry.list().filter((conn) => conn.isConnected);
-      if (connected.length === 0) {
-        return { databases: {}, available: false };
-      }
-      targetId = connected[0].id;
+    const connections = this.connectionRegistry.list();
+    const target = connectionId
+      ? connections.find((conn) => conn.id === connectionId)
+      : connections.find((conn) => isScannable(conn) && hasOwnKeyAnalytics(conn.membership));
+    const targetId = connectionId ?? target?.id;
+    if (!targetId || this.hidesAnalytics(targetId)) {
+      return NO_KEY_SIZES;
     }
 
     const client = this.connectionRegistry.get(targetId);
     if (!client) {
-      return { databases: {}, available: false };
+      return NO_KEY_SIZES;
     }
 
+    const plan: CollectionPlan = target ? collectionPlan(target, connections) : { kind: 'single' };
+    if (plan.kind !== 'cluster') {
+      return this.keySizesOf(client);
+    }
+
+    const nodes = await this.primaries(this.clusterNodes({ name: target?.name ?? targetId, client }, plan.members));
+    return mergeKeySizeDistributions(await Promise.all(nodes.map((node) => this.keySizesOf(node.client))));
+  }
+
+  private async keySizesOf(client: DatabasePort): Promise<KeySizeDistribution> {
     try {
       const raw = (await client.call('INFO', ['keysizes'])) as string;
       return parseKeySizeDistribution(raw ?? '');
@@ -475,7 +527,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
       // Servers without the keysizes section may reject the argument outright
       // (e.g. an ERR reply) rather than returning an empty string. Treat any
       // failure as "section unavailable" so the tab shows its empty state.
-      return { databases: {}, available: false };
+      return NO_KEY_SIZES;
     }
   }
 }

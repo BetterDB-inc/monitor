@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { MAX_RETENTION_DAYS, parseRetentionDaysToken } from '@betterdb/shared';
 import { parseActivityRetentionDays } from '../activity/activity-config';
 import { isCloudModeValue } from '../common/utils/cloud-mode';
+import { isNegativeEnvValue } from '../common/utils/env-bool';
 import { DEFAULT_AUTH_BROKER_URL, isTrueFlag, normalizeOptionalUrl } from './env-normalize';
 
 function optionalUrl(value: unknown): unknown {
@@ -12,6 +13,15 @@ function optionalUrl(value: unknown): unknown {
  * Environment variable validation schema
  * Validates all environment variables at application startup
  */
+export const otelMetricsStaleAfterMsSchema = z.coerce
+  .number()
+  .int()
+  .min(60000, {
+    message:
+      'OTEL_METRICS_STALE_AFTER_MS must be at least 60000 and exceed the exporter push interval (at least 2x is recommended)',
+  })
+  .default(300000);
+
 export const envSchema = z
   .object({
     // Application
@@ -24,12 +34,21 @@ export const envSchema = z
     DB_USERNAME: z.string().default('default'),
     DB_PASSWORD: z.string().default(''),
     DB_TYPE: z.enum(['valkey', 'redis', 'auto']).default('auto'),
+    // Connect to the monitored database over TLS (managed providers such as
+    // Aiven or ElastiCache Serverless). isTrueFlag trims whitespace.
+    DB_TLS: z.string().default('false').transform(isTrueFlag),
 
     // Storage configuration
     STORAGE_TYPE: z.enum(['sqlite', 'postgres', 'postgresql', 'turso', 'memory']).default('sqlite'),
     STORAGE_URL: z.string().url().optional(),
     STORAGE_AUTH_TOKEN: z.string().optional(),
     STORAGE_SQLITE_FILEPATH: z.string().default('./data/audit.db'),
+    // PostgreSQL TLS: STORAGE_SSL_CA (file path or trusted https URL) enables
+    // full chain + hostname verification; STORAGE_SSL_NO_VERIFY connects over
+    // TLS without verifying the server certificate. STORAGE_SSL_CA takes
+    // precedence. isTrueFlag trims whitespace on the boolean.
+    STORAGE_SSL_CA: z.string().optional(),
+    STORAGE_SSL_NO_VERIFY: z.string().default('false').transform(isTrueFlag),
     DB_SCHEMA: z
       .string()
       .regex(/^[a-z_][a-z0-9_]*$/)
@@ -132,11 +151,14 @@ export const envSchema = z
     LICENSE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).optional(),
     BETTERDB_TELEMETRY: z
       .string()
-      .transform((v) => !['false', '0', 'no', 'off'].includes(v.toLowerCase()))
+      .transform((v) => !isNegativeEnvValue(v))
       .optional(),
     TELEMETRY_PROVIDER: z.enum(['http', 'posthog', 'noop']).default('posthog'),
     POSTHOG_API_KEY: z.string().optional(),
-    POSTHOG_HOST: z.url().optional(),
+    // Preprocess so a blank/empty value (e.g. an empty POSTHOG_HOST baked into
+    // or injected around the container image) is treated as unset rather than
+    // failing URL validation, matching AUTH_PUBLIC_URL above.
+    POSTHOG_HOST: z.preprocess(optionalUrl, z.string().url().optional()),
 
     // CLI configuration
     BETTERDB_UNSAFE_CLI: z
@@ -181,8 +203,46 @@ export const envSchema = z
     OTEL_INGEST_ENABLED: z
       .string()
       .default('true')
-      .transform((v) => v !== 'false'),
+      .transform((v) => !isNegativeEnvValue(v)),
     OTEL_INGEST_TOKEN: z.string().optional(),
+    OTEL_METRICS_STALE_AFTER_MS: otelMetricsStaleAfterMsSchema,
+    OTLP_DISCOVER_INSTANCES: z
+      .string()
+      .default('true')
+      .transform((v) => !isNegativeEnvValue(v)),
+
+    PROMETHEUS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).optional(),
+    PROMETHEUS_STALENESS_MS: z.coerce.number().int().min(1000).optional(),
+
+    PROMETHEUS_METRICS_ENABLED: z
+      .string()
+      .default('true')
+      .transform((v) => v.trim().toLowerCase() !== 'false'),
+    PROMETHEUS_METRICS_TOKEN: z
+      .string()
+      .optional()
+      .transform((value) => {
+        const trimmed = value?.trim();
+
+        if (trimmed === undefined || trimmed.length === 0) {
+          return undefined;
+        }
+
+        return trimmed;
+      }),
+
+    METRICS_EXPORT_PROFILE: z.preprocess(
+      (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+      z
+        .string()
+        .default('full')
+        .transform((v) => v.trim().toLowerCase())
+        .pipe(z.enum(['vitals', 'full'])),
+    ),
+    METRICS_SLOT_STATS_TOP_N: z.preprocess(
+      (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+      z.coerce.number().int().min(0).max(16384).default(100),
+    ),
 
     // OTel telemetry export (mirror of Prometheus metrics). No-op unless
     // OTEL_EXPORTER_OTLP_ENDPOINT is set.
@@ -192,6 +252,10 @@ export const envSchema = z
       .transform((v) => v !== 'false'),
     OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().or(z.literal('')).optional(),
     OTEL_METRICS_EXPORT_INTERVAL_MS: z.coerce.number().int().min(1000).default(15000),
+    OTEL_METRICS_EXPORT_MODE: z.string().optional(),
+
+    CLUSTER_AUTO_REGISTER_NODES: z.string().default('false'),
+    SENTINEL_AUTO_REGISTER_NODES: z.string().default('false'),
 
     // Cloud mode (set by the hosted deployment; gates per-tenant auth)
     CLOUD_MODE: z.string().optional(),
@@ -291,6 +355,22 @@ export const envSchema = z
         message:
           'OTEL_INGEST_TOKEN is required when CLOUD_MODE is set (guards OTLP trace ingestion)',
         path: ['OTEL_INGEST_TOKEN'],
+      });
+    }
+
+    // In cloud mode the Prometheus metrics endpoint is allowlisted past session
+    // auth, so the bearer token is the only credential guarding it. Require it
+    // when the endpoint is enabled rather than leaving metrics open to anonymous scrapes.
+    if (
+      isCloudModeValue(data.CLOUD_MODE) &&
+      data.PROMETHEUS_METRICS_ENABLED &&
+      !data.PROMETHEUS_METRICS_TOKEN
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'PROMETHEUS_METRICS_TOKEN is required when CLOUD_MODE is set (guards the metrics endpoint)',
+        path: ['PROMETHEUS_METRICS_TOKEN'],
       });
     }
   });

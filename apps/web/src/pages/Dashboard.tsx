@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { QueryErrorState, findExternalUnsupportedError } from '../components/QueryErrorState';
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
@@ -18,20 +19,20 @@ import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 export function Dashboard() {
   const { currentConnection } = useConnection();
 
-  const { data: health, loading: healthLoading } = usePolling({
+  const { data: health, loading: healthLoading, error: healthError } = usePolling({
     fetcher: metricsApi.getHealth,
     interval: 5000,
     refetchKey: currentConnection?.id,
   });
 
-  const { data: info } = usePolling({
+  const { data: info, error: infoError } = usePolling({
     fetcher: metricsApi.getInfo,
     interval: 5000,
     refetchKey: currentConnection?.id,
   });
 
   // Config hazards change rarely and are TTL-cached server-side — poll slowly.
-  const { data: detailedHealth } = usePolling({
+  const { data: detailedHealth, error: detailedHealthError } = usePolling({
     fetcher: metricsApi.getDetailedHealth,
     interval: 30000,
     refetchKey: currentConnection?.id,
@@ -78,7 +79,7 @@ export function Dashboard() {
     );
   };
 
-  const storedMemoryHistory: Array<{ time: string; used: number; peak: number }> | null =
+  const storedMemoryHistory: Array<{ time: string; used: number; peak: number | null }> | null =
     sortedStoredSnapshots
       ? sortedStoredSnapshots.map((s) => ({
           time: formatStoredTime(s.timestamp),
@@ -190,8 +191,15 @@ export function Dashboard() {
     }
   }, [info]);
 
+  const unsupportedError = findExternalUnsupportedError(
+    healthError,
+    infoError,
+    detailedHealthError,
+  );
+
   return (
     <div className="space-y-6">
+      <QueryErrorState error={unsupportedError} />
       <ConfigHazardBanner hazards={detailedHealth?.configHazards} />
 
       <div className="flex items-center justify-between">
@@ -203,7 +211,7 @@ export function Dashboard() {
       </div>
 
       <div className="flex flex-wrap gap-4">
-        <ConnectionCard health={health} loading={healthLoading} />
+        <ConnectionCard health={health} loading={healthLoading} connection={currentConnection} />
         <OverviewCards info={info} />
       </div>
 

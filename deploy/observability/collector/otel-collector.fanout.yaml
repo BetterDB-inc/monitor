@@ -1,0 +1,40 @@
+# Same intake as otel-collector.yaml, fanning the same metric stream out to
+# Prometheus exposition and a second OTLP backend.
+# Set SECONDARY_OTLP_ENDPOINT (for example https://otlp.example.com) before start.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 15
+  batch:
+    send_batch_size: 1024
+    timeout: 5s
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+  otlphttp/secondary:
+    endpoint: ${env:SECONDARY_OTLP_ENDPOINT}
+    compression: gzip
+  debug:
+    verbosity: basic
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus, otlphttp/secondary, debug]

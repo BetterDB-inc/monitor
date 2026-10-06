@@ -9,3 +9,7 @@ scrape_configs:
         labels:
           instance: 'local'
           environment: 'dev'
+    # Set when the monitor runs with PROMETHEUS_METRICS_TOKEN:
+    # authorization:
+    #   type: Bearer
+    #   credentials: '<PROMETHEUS_METRICS_TOKEN>'

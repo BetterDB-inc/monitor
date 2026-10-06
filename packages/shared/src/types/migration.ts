@@ -156,6 +156,24 @@ export interface MigrationExecutionRequest {
   syncReaderOptions?: SyncReaderOptions;
   /** Honoured for redis_shake and redis_shake_sync modes. */
   redisShakeOptions?: RedisShakeOptions;
+  /** Bypass for the safety gate; requires forceReason when true. Logged server-side. */
+  force?: boolean;
+  /** Justification for force:true. */
+  forceReason?: string;
+}
+
+/** Safety-gate error codes for POST /migration/execution. */
+export type ExecutionGateCode =
+  | 'BLOCKING_INCOMPATIBILITIES'
+  | 'ANALYSIS_REQUIRED'
+  | 'ANALYSIS_STALE'
+  | 'FORCE_REASON_REQUIRED';
+
+export interface ExecutionGateError {
+  code: ExecutionGateCode;
+  detail: string;
+  analysisId?: string;
+  blocking?: Incompatibility[];
 }
 
 /**

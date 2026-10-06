@@ -85,6 +85,9 @@ export function AnalysisForm({ onStart, isCloudMode }: Props) {
       if (connection.connectionType === 'agent') {
         return false;
       }
+      if (connection.connectionType === 'external') {
+        return false;
+      }
       if (role === 'target' && connection.isConnected === false) {
         return false;
       }

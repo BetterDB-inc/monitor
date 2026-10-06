@@ -243,7 +243,10 @@ export class WebhookProcessorService implements OnModuleInit, OnModuleDestroy {
   async getRetryStats(): Promise<{
     pendingRetries: number;
     nextRetryTime: number | null;
+    bufferedEvents: number;
+    droppedEvents: number;
   }> {
+    const bufferStats = this.dispatcherService.getStorageRetryBufferStats();
     const retriableDeliveries = await this.storageClient.getRetriableDeliveries(1000);
 
     const pendingRetries = retriableDeliveries.length;
@@ -254,6 +257,7 @@ export class WebhookProcessorService implements OnModuleInit, OnModuleDestroy {
     return {
       pendingRetries,
       nextRetryTime,
+      ...bufferStats,
     };
   }
 }

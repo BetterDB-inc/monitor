@@ -97,11 +97,13 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
     });
 
     // Reverse to ascending (query returns DESC)
-    const sorted = [...snapshots].reverse();
-
-    // Extract metric values
     const extractor = METRIC_EXTRACTORS[metricKind];
-    const latestValue = sorted.length > 0 ? extractor(sorted[sorted.length - 1]) : 0;
+    const samples = [...snapshots].reverse().flatMap((snapshot) => {
+      const value = extractor(snapshot);
+      return value === null ? [] : [{ snapshot, value }];
+    });
+    const sorted = samples.map((s) => s.snapshot);
+    const latestValue = samples.length > 0 ? samples[samples.length - 1].value : 0;
 
     // Check sufficient data
     if (sorted.length < MIN_DATA_POINTS) {
@@ -117,7 +119,7 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
     }
 
     // Linear regression on extracted metric
-    const points = sorted.map((s) => ({ x: s.timestamp, y: extractor(s) }));
+    const points = samples.map((s) => ({ x: s.snapshot.timestamp, y: s.value }));
     const { slope, intercept } = this.linearRegression(points);
 
     // Compute metrics

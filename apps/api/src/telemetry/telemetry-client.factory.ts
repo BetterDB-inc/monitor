@@ -4,6 +4,7 @@ import { TelemetryPort } from '../common/interfaces/telemetry-port.interface';
 import { NoopTelemetryClientAdapter } from './adapters/noop-telemetry-client.adapter';
 import { HttpTelemetryClientAdapter } from './adapters/http-telemetry-client.adapter';
 import { PosthogTelemetryClientAdapter } from './adapters/posthog-telemetry-client.adapter';
+import { isNegativeEnvValue } from '../common/utils/env-bool';
 
 const DEFAULT_POSTHOG_API_KEY = '__BETTERDB_POSTHOG_API_KEY__';
 const DEFAULT_POSTHOG_HOST = '__BETTERDB_POSTHOG_HOST__';
@@ -18,8 +19,7 @@ export class TelemetryClientFactory {
     const telemetryEnabled = this.configService.get('BETTERDB_TELEMETRY');
     if (
       telemetryEnabled === false ||
-      (typeof telemetryEnabled === 'string' &&
-        ['false', '0', 'no', 'off'].includes(telemetryEnabled.toLowerCase()))
+      (typeof telemetryEnabled === 'string' && isNegativeEnvValue(telemetryEnabled))
     ) {
       return new NoopTelemetryClientAdapter();
     }
