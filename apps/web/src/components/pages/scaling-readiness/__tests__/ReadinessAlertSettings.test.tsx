@@ -19,6 +19,18 @@ describe('ReadinessAlertSettings', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
+  it('restores the saved threshold when the input is left invalid', () => {
+    render(<ReadinessAlertSettings settings={settings} onChange={vi.fn()} saveStatus="idle" />);
+    const input = screen.getByLabelText('Alert threshold') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '150' } });
+    expect(input.value).toBe('150');
+    fireEvent.blur(input);
+    expect(input.value).toBe('40');
+    fireEvent.change(input, { target: { value: '' } });
+    fireEvent.blur(input);
+    expect(input.value).toBe('40');
+  });
+
   it('reports toggle changes', () => {
     const onChange = vi.fn();
     render(<ReadinessAlertSettings settings={settings} onChange={onChange} saveStatus="idle" />);

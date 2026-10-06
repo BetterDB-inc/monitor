@@ -45,6 +45,12 @@ export function ReadinessAlertSettings({
             className="w-20"
             value={threshold}
             disabled={!settings.alertEnabled}
+            onBlur={() => {
+              const value = Number(threshold);
+              if (threshold === '' || !Number.isInteger(value) || value < 1 || value > 99) {
+                setThreshold(String(settings.alertThreshold));
+              }
+            }}
             onChange={(e) => {
               setThreshold(e.target.value);
               const value = Number(e.target.value);
