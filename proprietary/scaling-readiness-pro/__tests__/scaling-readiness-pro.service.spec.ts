@@ -165,7 +165,7 @@ describe('ScalingReadinessProService', () => {
       points: [{ timestamp: 5, score: 60, band: 'yellow', bindingDimension: 'cpu', dimensions: [] }],
     });
     expect(storage.getScalingReadinessScores).toHaveBeenCalledWith({
-      connectionId: 'conn-1', from: 1, to: 10, limit: 50000,
+      connectionId: 'conn-1', from: 1, to: 10, limit: 20160,
     });
   });
 
@@ -174,19 +174,24 @@ describe('ScalingReadinessProService', () => {
     band: 'green', bindingDimension: 'memory', dimensions: [],
   });
 
+  const serve = (storage: any, rows: ReturnType<typeof row>[]) =>
+    storage.getScalingReadinessScores.mockImplementation(async (q: any) =>
+      rows.filter((r) => r.timestamp >= q.from && r.timestamp <= q.to),
+    );
+
   it('returns rows unchanged when within the point budget', async () => {
     const { service, storage } = setup(55);
     const rows = Array.from({ length: 1000 }, (_, i) => row(i, 50 + (i % 7)));
-    storage.getScalingReadinessScores.mockResolvedValue(rows);
-    const history = await service.getHistory('conn-1', 0, 1e12);
+    serve(storage, rows);
+    const history = await service.getHistory('conn-1', 0, 1000 * 60_000);
     expect(history.points.map((p) => p.timestamp)).toEqual(rows.map((r) => r.timestamp));
   });
 
   it('downsamples long ranges keeping the lowest score per bucket', async () => {
     const { service, storage } = setup(55);
     const rows = Array.from({ length: 3000 }, (_, i) => row(i, i % 3 === 1 ? 10 : 80));
-    storage.getScalingReadinessScores.mockResolvedValue(rows);
-    const history = await service.getHistory('conn-1', 0, 1e12);
+    serve(storage, rows);
+    const history = await service.getHistory('conn-1', 0, 3000 * 60_000);
     const points = history.points;
     expect(points.length).toBeLessThanOrEqual(1000);
     expect(points.length).toBeGreaterThan(900);
@@ -200,9 +205,38 @@ describe('ScalingReadinessProService', () => {
   it('keeps the earliest row on equal scores within a bucket', async () => {
     const { service, storage } = setup(55);
     const rows = Array.from({ length: 2000 }, (_, i) => row(i, 60));
-    storage.getScalingReadinessScores.mockResolvedValue(rows);
-    const { points } = await service.getHistory('conn-1', 0, 1e12);
+    serve(storage, rows);
+    const { points } = await service.getHistory('conn-1', 0, 2000 * 60_000);
     expect(points[0].timestamp).toBe(0);
     expect(points.length).toBeLessThanOrEqual(1000);
+  });
+
+  it('keeps old low scores on long ranges by fetching in windows', async () => {
+    const { service, storage } = setup(55);
+    const day = 24 * 60 * 60_000;
+    const from = 0;
+    const to = 90 * day;
+    const rows = Array.from({ length: 90 * 24 }, (_, i) => ({
+      id: `h${i}`, connectionId: 'conn-1', timestamp: i * 60 * 60_000,
+      score: i === 80 * 24 ? 5 : 90, band: 'green', bindingDimension: 'memory', dimensions: [],
+    }));
+    serve(storage, rows);
+    const { points } = await service.getHistory('conn-1', from, to);
+    expect(points.some((p) => p.score === 5 && p.timestamp === 80 * day)).toBe(true);
+    expect(points.length).toBeLessThanOrEqual(1000);
+    const calls = storage.getScalingReadinessScores.mock.calls.map(([q]: any[]) => q);
+    expect(calls).toHaveLength(Math.ceil((to - from + 1) / (7 * day)));
+    for (let i = 1; i < calls.length; i++) expect(calls[i].from).toBe(calls[i - 1].to + 1);
+    expect(calls[0].from).toBe(from);
+    expect(calls[calls.length - 1].to).toBe(to);
+  });
+
+  it('does not double count rows on window boundaries', async () => {
+    const { service, storage } = setup(55);
+    const week = 7 * 24 * 60 * 60_000;
+    const rows = [row(0, 50), { ...row(1, 50), timestamp: week }, { ...row(2, 50), timestamp: week - 1 }];
+    serve(storage, rows);
+    const { points } = await service.getHistory('conn-1', 0, 2 * week);
+    expect(points.map((p) => p.timestamp)).toEqual([0, week - 1, week]);
   });
 });

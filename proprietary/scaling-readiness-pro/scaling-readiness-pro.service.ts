@@ -10,13 +10,14 @@ import {
   type ScalingReadinessSettings,
   type ScalingReadinessSettingsUpdate,
 } from '@betterdb/shared';
-import type { StoragePort } from '@app/common/interfaces/storage-port.interface';
+import type { StoragePort, StoredScalingReadinessScore } from '@app/common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { ScalingReadinessService } from '@app/scaling-readiness/scaling-readiness.service';
 import { LicenseService } from '@proprietary/licenses';
 
 const TICK_INTERVAL_MS = 60_000;
-const HISTORY_FETCH_LIMIT = 50_000;
+const HISTORY_WINDOW_MS = 7 * 24 * 60 * 60_000;
+const HISTORY_WINDOW_LIMIT = 7 * 24 * 60 * 2;
 const HISTORY_MAX_POINTS = 1_000;
 
 @Injectable()
@@ -128,14 +129,34 @@ export class ScalingReadinessProService implements OnModuleInit, OnModuleDestroy
   }
 
   async getHistory(connectionId: string, from: number, to: number): Promise<ScalingReadinessHistory> {
-    const rows = await this.storage.getScalingReadinessScores({
-      connectionId,
-      from,
-      to,
-      limit: HISTORY_FETCH_LIMIT,
-    });
+    const bucketWidth = (to - from + 1) / HISTORY_MAX_POINTS;
+    const lowest = new Map<number, StoredScalingReadinessScore>();
+    let total = 0;
+    let all: StoredScalingReadinessScore[] | null = [];
+    for (let start = from; start <= to; start += HISTORY_WINDOW_MS) {
+      const end = Math.min(start + HISTORY_WINDOW_MS - 1, to);
+      const rows = await this.storage.getScalingReadinessScores({
+        connectionId,
+        from: start,
+        to: end,
+        limit: HISTORY_WINDOW_LIMIT,
+      });
+      for (const row of rows) {
+        total++;
+        if (all && total <= HISTORY_MAX_POINTS) all.push(row);
+        else all = null;
+        const bucket = Math.min(
+          HISTORY_MAX_POINTS - 1,
+          Math.max(0, Math.floor((row.timestamp - from) / bucketWidth)),
+        );
+        const current = lowest.get(bucket);
+        if (!current || row.score < current.score) lowest.set(bucket, row);
+      }
+    }
+    const selected =
+      all ?? [...lowest.entries()].sort((a, b) => a[0] - b[0]).map(([, row]) => row);
     return {
-      points: this.downsample(rows).map((r) => ({
+      points: selected.map((r) => ({
         timestamp: r.timestamp,
         score: r.score,
         band: r.band,
@@ -143,21 +164,6 @@ export class ScalingReadinessProService implements OnModuleInit, OnModuleDestroy
         dimensions: r.dimensions,
       })),
     };
-  }
-
-  private downsample<T extends { timestamp: number; score: number }>(rows: T[]): T[] {
-    if (rows.length <= HISTORY_MAX_POINTS) return rows;
-    const start = rows[0].timestamp;
-    const span = rows[rows.length - 1].timestamp - start;
-    if (span <= 0) return rows.slice(0, 1);
-    const bucketWidth = span / HISTORY_MAX_POINTS;
-    const lowest = new Map<number, T>();
-    for (const row of rows) {
-      const bucket = Math.min(HISTORY_MAX_POINTS - 1, Math.floor((row.timestamp - start) / bucketWidth));
-      const current = lowest.get(bucket);
-      if (!current || row.score < current.score) lowest.set(bucket, row);
-    }
-    return [...lowest.entries()].sort((a, b) => a[0] - b[0]).map(([, row]) => row);
   }
 
   async getSettings(connectionId: string): Promise<ScalingReadinessSettings> {
