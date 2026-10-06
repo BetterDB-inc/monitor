@@ -30,4 +30,21 @@ describe('ReadinessAlertSettings', () => {
     render(<ReadinessAlertSettings settings={settings} onChange={vi.fn()} saveStatus="saved" />);
     expect(screen.getByText('Saved')).toBeInTheDocument();
   });
+
+  it('shows refetched server values after typing', () => {
+    const { rerender } = render(
+      <ReadinessAlertSettings settings={settings} onChange={vi.fn()} saveStatus="idle" />,
+    );
+    const input = screen.getByLabelText('Alert threshold') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '55' } });
+    expect(input.value).toBe('55');
+    rerender(
+      <ReadinessAlertSettings
+        settings={{ ...settings, alertThreshold: 30 }}
+        onChange={vi.fn()}
+        saveStatus="error"
+      />,
+    );
+    expect(input.value).toBe('30');
+  });
 });

@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import type { ScalingReadinessSettings, ScalingReadinessSettingsUpdate } from '@betterdb/shared';
 import { Card, CardContent, CardHeader, CardTitle } from '../../ui/card';
 import { Input } from '../../ui/input';
@@ -12,6 +13,12 @@ export function ReadinessAlertSettings({
   onChange: (update: ScalingReadinessSettingsUpdate) => void;
   saveStatus: 'idle' | 'saved' | 'error';
 }) {
+  const [threshold, setThreshold] = useState(String(settings.alertThreshold));
+
+  useEffect(() => {
+    setThreshold(String(settings.alertThreshold));
+  }, [settings.alertThreshold]);
+
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between space-y-0">
@@ -36,9 +43,10 @@ export function ReadinessAlertSettings({
             min={1}
             max={99}
             className="w-20"
-            defaultValue={settings.alertThreshold}
+            value={threshold}
             disabled={!settings.alertEnabled}
             onChange={(e) => {
+              setThreshold(e.target.value);
               const value = Number(e.target.value);
               if (Number.isInteger(value) && value >= 1 && value <= 99) onChange({ alertThreshold: value });
             }}

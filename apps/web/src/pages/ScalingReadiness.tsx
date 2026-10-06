@@ -124,7 +124,6 @@ export function ScalingReadiness() {
           </Card>
           {settings ? (
             <ReadinessAlertSettings
-              key={settings.connectionId}
               settings={settings}
               onChange={updateSettings}
               saveStatus={saveStatus}
