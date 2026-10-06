@@ -306,7 +306,7 @@ describe('sentinelLoopStallSignature', () => {
     );
   });
 
-  it('includes severity so a warning->critical rtt_stall escalation is not deduped', () => {
+  it('excludes severity so a warning<->critical rtt_stall flap dedupes as one episode', () => {
     const base = {
       kind: 'rtt_stall' as const,
       classification: 'loop_starvation_dns' as const,
@@ -319,8 +319,10 @@ describe('sentinelLoopStallSignature', () => {
       severity: 'critical',
       observedRttMs: 2_100,
     });
-    // Different signatures => the gate treats the escalation as a new finding and
-    // re-emits it, instead of deduping the critical away behind the active warning.
-    expect(warn).not.toBe(critical);
+    // Same signature => a loop oscillating around highRttMs dedupes to one episode
+    // instead of stacking open WARNING and CRITICAL alerts on every flip. A genuine
+    // escalation changes the kind (rtt_stall -> timeout_wedge -> tilt), which still
+    // re-alerts.
+    expect(warn).toBe(critical);
   });
 });

@@ -315,16 +315,21 @@ export function evaluateSentinelLoopStall(
 
 /**
  * Stable per-connection signature. One Sentinel connection has one event loop, so
- * the kind plus severity dedupes an episode across polls while a change of kind
- * (e.g. an RTT stall escalating into a wedge, or a new TILT episode after recovery)
- * OR a severity escalation (an rtt_stall crossing from warning into critical as the
- * loop approaches the TILT trigger) alerts again. Severity is part of the signature
- * precisely so that escalation is not deduped away as "the same finding". Percent-
- * encoded for symmetry with sentinel-drift-detector, though neither field contains
- * the separator.
+ * the kind alone dedupes an episode across polls while a change of kind re-alerts:
+ * a real escalation of a loop stall always changes kind (rtt_stall -> timeout_wedge
+ * -> tilt), and a new TILT episode after recovery is likewise a fresh kind.
+ *
+ * Severity is deliberately NOT in the signature. The only kind whose severity
+ * varies is rtt_stall (warning below highRttMs, critical at/above it), and a loop
+ * hovering around that threshold oscillates warning<->critical every poll. Because
+ * this detector is untracked (no event-id lifecycle) the gate prunes its active set
+ * to the current poll's signatures, so a severity-bearing signature would drop the
+ * other severity each poll and re-emit on every flip, stacking open WARNING and
+ * CRITICAL alerts for a single stall episode. Keying on kind alone dedupes the
+ * episode; the emitted event still carries the triggering severity in its payload.
+ * Percent-encoded for symmetry with sentinel-drift-detector, though neither field
+ * contains the separator.
  */
 export function sentinelLoopStallSignature(finding: SentinelLoopStallFinding): string {
-  return ['sentinel-loop-stall', finding.kind, finding.severity]
-    .map(encodeURIComponent)
-    .join('|');
+  return ['sentinel-loop-stall', finding.kind].map(encodeURIComponent).join('|');
 }
