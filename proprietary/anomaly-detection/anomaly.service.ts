@@ -436,6 +436,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // Sentinel loop-stall RTT-proxy thresholds, resolved once at construction so
   // operators can tune them via env (defaults tie to sentinel_tilt_trigger).
   private readonly sentinelLoopStall: SentinelLoopStallThresholds;
+  // Hard ceiling on a single INFO round-trip. The monitored client sets no
+  // commandTimeout and MultiConnectionPoller holds `polling` until every
+  // connection settles, so without this one frozen node would hang the poll for
+  // ALL connections (see getInfoWithDeadline). Must sit above the TILT trigger
+  // and the RTT thresholds so a merely-slow loop still records RTT samples rather
+  // than reading as a full wedge.
+  private readonly infoTimeoutMs: number;
   private readonly correlationIntervalMs = 5000;
   private correlationInterval: NodeJS.Timeout | null = null;
   private prometheusSummaryInterval: NodeJS.Timeout | null = null;
@@ -481,6 +488,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         d.misdirectedMinStreak,
       ),
     };
+    this.infoTimeoutMs = this.numberEnv('ANOMALY_INFO_TIMEOUT_MS', 5000);
   }
 
   /**
@@ -771,6 +779,38 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     return total;
   }
 
+  /**
+   * Runs `getInfoParsed()` under a hard deadline. The monitored client carries no
+   * commandTimeout, so an INFO issued against a node whose event loop is frozen but
+   * whose TCP socket is still up never resolves or rejects — it just hangs. Because
+   * MultiConnectionPoller.tick() awaits `Promise.allSettled` over every connection
+   * and holds its `polling` flag until that settles, a single hung node would stall
+   * anomaly polling for ALL connections (every later tick logs "Previous poll still
+   * running" and skips). Racing a timer bounds that, and the rejection — whose
+   * message carries "timed out" so `isCommandTimeoutError` classifies it as a wedge
+   * rather than a down socket — is what makes the `timeout_wedge` path reachable
+   * outside the unit tests. The underlying `getInfoParsed()` promise may stay pending
+   * (iovalkey gives us no cancel), but it no longer blocks the poll; the next tick
+   * issues a fresh INFO.
+   */
+  private async getInfoWithDeadline(
+    ctx: ConnectionContext,
+  ): Promise<Awaited<ReturnType<typeof ctx.client.getInfoParsed>>> {
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`INFO timed out after ${this.infoTimeoutMs}ms`));
+      }, this.infoTimeoutMs);
+    });
+    try {
+      return await Promise.race([ctx.client.getInfoParsed(), deadline]);
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    }
+  }
+
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     try {
       const live = ctx.connectionType !== 'external';
@@ -780,7 +820,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       const probeStart = performance.now();
       let infoResponse: Awaited<ReturnType<typeof ctx.client.getInfoParsed>>;
       try {
-        infoResponse = await ctx.client.getInfoParsed();
+        infoResponse = await this.getInfoWithDeadline(ctx);
       } catch (infoErr) {
         // A Sentinel whose event loop is fully wedged stops answering INFO while the
         // TCP socket stays up - the worst valkey TILT case. Record it as a loop
@@ -1805,13 +1845,24 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     'https://github.com/BetterDB-inc/valkey-sentinel-tilt-repro';
 
   /**
-   * The remediation for the blocking-DNS stall, shared by every loop-starvation
-   * message. Regular hyphens only.
+   * Remediation shared by every loop-starvation message. Blocking DNS is the cause
+   * this detector was built around, but it is NOT the only way a single-threaded
+   * loop stalls - a clock step (NTP), VM pause / live migration, CPU throttling or
+   * general host overload all look identical from INFO alone, and the RTT proxy also
+   * folds in this monitor's own event-loop lag and network latency. So we name DNS
+   * as the leading, directly-actionable cause without asserting it. Gating the DNS
+   * wording on the config-hazard probe (which actually reads `resolve-hostnames`)
+   * would be stronger, but that probe lives in a separate module and is not wired in
+   * here. Regular hyphens only.
    */
   private static readonly SENTINEL_LOOP_STALL_REMEDIATION =
-    'This is blocking hostname resolution on the Sentinel main loop; address ' +
-    'monitored/announced targets by IP or serve those names from a local cache; ' +
-    'peers resolving announced FQDNs are the ones that stall.';
+    'Loop starvation like this is most often blocking hostname resolution on the ' +
+    'Sentinel main loop (resolve-hostnames yes against FQDN targets), but a clock ' +
+    'step (NTP), VM pause or live migration, CPU throttling or host overload stall ' +
+    'the loop the same way, and the INFO round-trip also includes this monitor\'s own ' +
+    'event-loop and network latency. If it is DNS, address monitored/announced targets ' +
+    'by IP or serve those names from a local cache (peers resolving announced FQDNs are ' +
+    'the ones that stall); otherwise check the host clock, scheduling and CPU.';
 
   /**
    * Sentinel loop-stall / TILT detection (valkey-sentinel-tilt-repro). Valkey
@@ -2034,7 +2085,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const classification =
       finding.classification === 'misdirected_resolution'
         ? 'Classification: misdirected/unreachable resolution (split-horizon).'
-        : 'Classification: loop starvation (likely blocking DNS).';
+        : 'Classification: loop starvation (several possible causes, below).';
 
     let message: string;
     switch (finding.kind) {
@@ -2050,10 +2101,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         break;
       }
       case 'timeout_wedge': {
+        // We time INFO out on a socket that still looked up, but we do NOT actively
+        // probe liveness here, so a host that died without resetting the socket, or a
+        // network partition, reaches this path identically. Present the wedge as the
+        // leading reading and tell the operator to corroborate before ruling out a
+        // down node - do not assert "this is not a dead connection".
         message =
-          `CRITICAL: Sentinel ${node} stopped answering INFO while its TCP connection stayed up ` +
-          `- the single-threaded event loop is fully wedged (worst-case blocking resolution). ` +
-          `This is not a dead connection. ${remediation} ${classification} ${writeup}`;
+          `CRITICAL: Sentinel ${node} stopped answering INFO within ${this.infoTimeoutMs}ms while ` +
+          `its TCP connection still appeared up. The likeliest cause is a fully wedged ` +
+          `single-threaded event loop (worst-case loop starvation), but a host that died without ` +
+          `resetting the socket, or a network partition, times out the same way from here. ` +
+          `Confirm the host is alive (for example a PING or a fresh connect over a separate path) ` +
+          `before treating this as a loop stall rather than a down node. ${remediation} ` +
+          `${classification} ${writeup}`;
         break;
       }
       case 'rtt_stall': {
@@ -2063,8 +2123,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         message =
           `${sev}: Sentinel ${node} INFO round-trip is stalling (${finding.breachCount} of the ` +
           `last ${this.sentinelLoopStall.rttWindow} polls over ${this.sentinelLoopStall.warnRttMs}ms, ` +
-          `worst ${observed}), approaching the ${SENTINEL_TILT_TRIGGER_MS}ms TILT trigger. The ` +
-          `single-threaded loop is being starved. ${remediation} ${classification} ${writeup}`;
+          `worst ${observed}), approaching the ${SENTINEL_TILT_TRIGGER_MS}ms TILT trigger. This ` +
+          `points to the single-threaded loop being starved. ${remediation} ${classification} ` +
+          `${writeup}`;
         break;
       }
       case 'misdirected_resolution':

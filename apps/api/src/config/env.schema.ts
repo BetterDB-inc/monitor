@@ -208,6 +208,12 @@ export const envSchema = z
     SENTINEL_LOOP_STALL_MIN_BREACHES: z.coerce.number().int().min(1).default(3),
     SENTINEL_LOOP_STALL_MISDIRECTED_STREAK: z.coerce.number().int().min(1).default(3),
 
+    // Hard ceiling on a single INFO round-trip in the anomaly poller. Bounds a
+    // wedged node (socket up, loop frozen) so it cannot hang polling for every
+    // connection, and makes the Sentinel timeout_wedge path reachable. Must sit
+    // above the TILT trigger so a merely-slow loop still records RTT samples.
+    ANOMALY_INFO_TIMEOUT_MS: z.coerce.number().int().min(1).default(5000),
+
     // OTLP trace ingestion (AI observability Phase 2)
     OTEL_INGEST_ENABLED: z
       .string()
@@ -290,6 +296,14 @@ export const envSchema = z
         message:
           'SENTINEL_LOOP_STALL_MIN_BREACHES must not exceed SENTINEL_LOOP_STALL_WINDOW, or the window can never hold enough breaches and rtt_stall never fires',
         path: ['SENTINEL_LOOP_STALL_MIN_BREACHES'],
+      });
+    }
+    if (data.ANOMALY_INFO_TIMEOUT_MS <= data.SENTINEL_LOOP_STALL_HIGH_MS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'ANOMALY_INFO_TIMEOUT_MS must exceed SENTINEL_LOOP_STALL_HIGH_MS, or a merely-slow loop is cut off as a full wedge before the RTT proxy can record it',
+        path: ['ANOMALY_INFO_TIMEOUT_MS'],
       });
     }
 
