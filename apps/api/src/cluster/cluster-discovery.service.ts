@@ -37,11 +37,26 @@ export interface NodeConnection {
 }
 
 /** Parse an advertised `host:port[@busport]` endpoint. */
-function parseAdvertisedEndpoint(address: string): { host: string; port: number } | null {
-  const [host, portStr] = address.split('@')[0].split(':');
+function splitHostPort(endpoint: string): { host: string; port: number } | null {
+  const withoutBus = endpoint.split('@')[0];
+  const bracketed = withoutBus.match(/^\[(.+)\]:(\d+)$/);
+  if (bracketed) {
+    const port = parseInt(bracketed[2], 10);
+    if (!bracketed[1] || isNaN(port)) return null;
+    return { host: bracketed[1], port };
+  }
+  const idx = withoutBus.lastIndexOf(':');
+  if (idx < 0) return null;
+  const host = withoutBus.slice(0, idx).replace(/^\[(.+)\]$/, '$1');
+  const portStr = withoutBus.slice(idx + 1);
+  if (!host || host.endsWith(':') || !/^\d+$/.test(portStr)) return null;
   const port = parseInt(portStr, 10);
-  if (!host || isNaN(port)) return null;
+  if (isNaN(port)) return null;
   return { host, port };
+}
+
+function parseAdvertisedEndpoint(address: string): { host: string; port: number } | null {
+  return splitHostPort(address);
 }
 
 export interface NodeHealth {
@@ -241,19 +256,19 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
     // Cluster node addresses include bus port: "host:port@busport"
     // We only need the client port, so split on '@' first
-    const [host, portStr] = node.address.split('@')[0].split(':');
-    const port = parseInt(portStr, 10);
+    const parsed = splitHostPort(node.address);
 
-    if (!host || isNaN(port)) {
+    if (!parsed) {
       throw new Error(`Invalid node address: ${node.address}`);
     }
+    const { host, port } = parsed;
 
     const dbClient = this.connectionRegistry.get(connectionId);
     const primaryClient = dbClient.getClient();
     const username = primaryClient.options.username || '';
     const password = primaryClient.options.password || '';
     const { servername: _servername, checkServerIdentity: _checkServerIdentity, ...nodeTls } = primaryClient.options.tls ?? {};
-    const tls = primaryClient.options.tls ? { ...nodeTls, ...tlsIdentityOptions(host, node.hostname) } : undefined;
+    let tls = primaryClient.options.tls ? { ...nodeTls, ...tlsIdentityOptions(host, node.hostname) } : undefined;
 
     let dialHost = host;
     let dialPort = port;
@@ -271,6 +286,10 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         `Cannot open SSH node forward to ${host}:${port} for node ${nodeId.substring(0, 12)}: ${error instanceof Error ? error.message : error}`,
       );
       throw error;
+    }
+
+    if (tls && (dialHost !== host || dialPort !== port) && !tls.servername) {
+      tls = { ...tls, servername: host };
     }
 
     const client = new Valkey({

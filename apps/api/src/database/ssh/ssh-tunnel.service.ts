@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
-import { Client } from 'ssh2';
+import { Client, type ClientChannel } from 'ssh2';
 import * as net from 'net';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -81,6 +81,13 @@ export interface SshTunnelParams {
 /** Compute the OpenSSH-style `SHA256:<base64>` fingerprint of a host key. */
 function hostKeyFingerprintOf(key: Buffer): string {
   return `SHA256:${createHash('sha256').update(key).digest('base64').replace(/=+$/, '')}`;
+}
+
+function nodeForwardKey(remoteHost: string, remotePort: number): string {
+  const host = remoteHost.includes(':') && !remoteHost.startsWith('[')
+    ? `[${remoteHost}]`
+    : remoteHost;
+  return `${host}:${remotePort}`;
 }
 
 
@@ -266,7 +273,7 @@ export class SshTunnelService implements OnModuleDestroy {
     client: Client,
     dstHost: string,
     dstPort: number,
-  ): Promise<any> {
+  ): Promise<ClientChannel> {
     return new Promise((resolve, reject) => {
       client.forwardOut('127.0.0.1', 0, dstHost, dstPort, (err, stream) => {
         if (err) {
@@ -282,7 +289,7 @@ export class SshTunnelService implements OnModuleDestroy {
   private connectOneHop(
     connectionId: string,
     hop: ResolvedHop,
-    sock: any | undefined,
+    sock: ClientChannel | undefined,
     fallbackOnHostKey: ((fingerprint: string) => void) | undefined,
   ): Promise<Client> {
     let privateKey: Buffer | undefined;
@@ -515,7 +522,7 @@ export class SshTunnelService implements OnModuleDestroy {
     try {
       for (let i = 0; i < hops.length; i++) {
         const hop = hops[i];
-        let sock: any | undefined;
+        let sock: ClientChannel | undefined;
         if (i > 0) {
           try {
             sock = await Promise.race([
@@ -523,8 +530,10 @@ export class SshTunnelService implements OnModuleDestroy {
               this.forwardOutPromise(clients[i - 1], hop.sshHost, hop.sshPort),
             ]);
           } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
             throw new Error(
-              `Connected to ${hops[i - 1].sshHost}, but ${hop.sshHost}:${hop.sshPort} refused the connection`,
+              `SSH ${hop.label}: connection to ${hop.sshHost}:${hop.sshPort} via ${hops[i - 1].label} failed: ${detail}`,
+              { cause: err },
             );
           }
           if (sock && typeof sock.on === 'function') {
@@ -613,18 +622,6 @@ export class SshTunnelService implements OnModuleDestroy {
     }
   }
 
-  private withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-    let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(message)), ms);
-      // Let the process exit naturally while only this timer is pending.
-      timer.unref?.();
-    });
-    return Promise.race([promise, timeout]).finally(() => {
-      if (timer) clearTimeout(timer);
-    });
-  }
-
   /** Open an additional loopback forward through the chain to `remoteHost:remotePort`. */
   async createNodeForward(
     connectionId: string,
@@ -635,14 +632,30 @@ export class SshTunnelService implements OnModuleDestroy {
     if (!info || info.clients.length === 0) {
       throw new Error('SSH tunnel is not established; reconnect the connection before dialling nodes.');
     }
-    const key = `${remoteHost}:${remotePort}`;
+    const key = nodeForwardKey(remoteHost, remotePort);
     const cached = info.nodePorts.get(key);
     if (cached !== undefined) {
       if (!info.nodeTombstones.has(key)) {
         return cached;
       }
+      const server = info.nodeServers.get(key);
+      const sockSet = info.nodeSockets.get(key);
+      if (sockSet) {
+        for (const sock of sockSet) sock.destroy();
+        sockSet.clear();
+      }
       info.nodePorts.delete(key);
+      info.nodeServers.delete(key);
+      info.nodeSockets.delete(key);
       info.nodeTombstones.delete(key);
+      if (server) {
+        const idx = info.servers.indexOf(server);
+        if (idx >= 0) info.servers.splice(idx, 1);
+        try {
+          server.close();
+        } catch {
+        }
+      }
     }
     const inflight = info.nodeForwardInflight.get(key);
     if (inflight) {
@@ -650,7 +663,7 @@ export class SshTunnelService implements OnModuleDestroy {
     }
     if (info.nodePorts.size + info.nodeForwardInflight.size >= SSH_MAX_NODE_FORWARDS) {
       throw new Error(
-        `Too many SSH node forwards (${info.nodePorts.size}); refusing ${key}`,
+        `Too many SSH node forwards (${info.nodePorts.size + info.nodeForwardInflight.size}); refusing ${key}`,
       );
     }
     const task = this.doCreateNodeForward(connectionId, info, remoteHost, remotePort, key);
@@ -697,13 +710,29 @@ export class SshTunnelService implements OnModuleDestroy {
     const perNodeSockets = new Set<net.Socket>();
     info.nodeSockets.set(key, perNodeSockets);
 
+    let timedOut = false;
+    let abort!: (err: Error) => void;
+    const abortSignal = new Promise<never>((_, reject) => {
+      abort = reject;
+    });
+    abortSignal.catch(() => {});
+    const timeoutMessage = `SSH node forward to ${key} timed out after ${SSH_NODE_FORWARD_TIMEOUT_MS}ms`;
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        abort(new Error(timeoutMessage));
+        reject(new Error(timeoutMessage));
+      }, SSH_NODE_FORWARD_TIMEOUT_MS);
+      timer.unref?.();
+    });
+
     const doForward = async (): Promise<number> => {
-      await this.forwardOutPromise(lastClient, remoteHost, remotePort).then(
+      const probe = this.forwardOutPromise(lastClient, remoteHost, remotePort).then(
         (stream: { end: () => void }) => {
           try {
             stream.end();
           } catch {
-            // Best-effort probe cleanup.
           }
         },
         () => {
@@ -712,7 +741,10 @@ export class SshTunnelService implements OnModuleDestroy {
           );
         },
       );
-      const neverAborts = new Promise<never>(() => {});
+      await Promise.race([abortSignal, probe]);
+      if (timedOut) {
+        throw new Error(timeoutMessage);
+      }
       let nodeServer: net.Server | undefined;
       try {
         const { server, localPort } = await this.listenForwarded(
@@ -721,7 +753,7 @@ export class SshTunnelService implements OnModuleDestroy {
           info.sockets,
           remoteHost,
           remotePort,
-          neverAborts,
+          abortSignal,
           (s) => {
             nodeServer = s;
             info.servers.push(s);
@@ -729,13 +761,26 @@ export class SshTunnelService implements OnModuleDestroy {
           perNodeSockets,
         );
         void server;
+        if (timedOut) {
+          for (const sock of perNodeSockets) sock.destroy();
+          perNodeSockets.clear();
+          nodeServer?.close();
+          const idx = nodeServer ? info.servers.indexOf(nodeServer) : -1;
+          if (idx >= 0) info.servers.splice(idx, 1);
+          if (info.nodeSockets.get(key) === perNodeSockets) {
+            info.nodeSockets.delete(key);
+          }
+          throw new Error(timeoutMessage);
+        }
         if (this.tunnels.get(connectionId) !== info) {
           for (const sock of perNodeSockets) sock.destroy();
           perNodeSockets.clear();
           nodeServer?.close();
           const idx = nodeServer ? info.servers.indexOf(nodeServer) : -1;
           if (idx >= 0) info.servers.splice(idx, 1);
-          info.nodeSockets.delete(key);
+          if (info.nodeSockets.get(key) === perNodeSockets) {
+            info.nodeSockets.delete(key);
+          }
           throw new Error('SSH tunnel is not established; reconnect the connection before dialling nodes.');
         }
         if (info.nodeTombstones.has(key)) {
@@ -744,7 +789,9 @@ export class SshTunnelService implements OnModuleDestroy {
           nodeServer?.close();
           const idx = nodeServer ? info.servers.indexOf(nodeServer) : -1;
           if (idx >= 0) info.servers.splice(idx, 1);
-          info.nodeSockets.delete(key);
+          if (info.nodeSockets.get(key) === perNodeSockets) {
+            info.nodeSockets.delete(key);
+          }
           throw new Error(`SSH node forward for ${key} was evicted while being created`);
         }
         info.nodePorts.set(key, localPort);
@@ -760,26 +807,32 @@ export class SshTunnelService implements OnModuleDestroy {
           nodeServer.close();
           const idx = info.servers.indexOf(nodeServer);
           if (idx >= 0) info.servers.splice(idx, 1);
-          info.nodeServers.delete(key);
-          info.nodeSockets.delete(key);
+          if (info.nodeServers.get(key) === nodeServer) {
+            info.nodeServers.delete(key);
+          }
+          if (info.nodeSockets.get(key) === perNodeSockets) {
+            info.nodeSockets.delete(key);
+          }
         } else {
-          info.nodeSockets.delete(key);
+          if (info.nodeSockets.get(key) === perNodeSockets) {
+            info.nodeSockets.delete(key);
+          }
         }
         throw err;
       }
     };
 
-    return this.withTimeout(
-      doForward(),
-      SSH_NODE_FORWARD_TIMEOUT_MS,
-      `SSH node forward to ${key} timed out after ${SSH_NODE_FORWARD_TIMEOUT_MS}ms`,
-    );
+    try {
+      return await Promise.race([doForward(), timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   closeNodeForward(connectionId: string, remoteHost: string, remotePort: number): void {
     const info = this.tunnels.get(connectionId);
     if (!info) return;
-    const key = `${remoteHost}:${remotePort}`;
+    const key = nodeForwardKey(remoteHost, remotePort);
     if (info.nodeForwardInflight.has(key)) {
       info.nodeTombstones.add(key);
       return;

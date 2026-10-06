@@ -653,6 +653,50 @@ describe('SshTunnelService', () => {
     await service.closeTunnel('c-timeout');
   });
 
+  it('does not orphan a forward when the bind completes just after the timeout', async () => {
+    await service.createTunnel('c-late', {
+      sshHost: 'bastion',
+      sshPort: SSH_DEFAULT_PORT,
+      sshUsername: 'user',
+      authMethod: 'password',
+      password: 'secret',
+      remoteHost: 'db.internal',
+      remotePort: DEFAULT_REDIS_PORT,
+    });
+    jest.useFakeTimers();
+    const netMock = jest.requireMock('net') as { createServer: jest.Mock };
+    const origCreateServer = netMock.createServer;
+    let listenCb: () => void = () => {};
+    netMock.createServer.mockImplementationOnce((handler: unknown) => {
+      const { EventEmitter: EE } = jest.requireActual('events') as { EventEmitter: new () => EventEmitter };
+      const server = new EE() as EventEmitter & { listen: jest.Mock; address: jest.Mock; close: jest.Mock; connectionHandler: unknown };
+      server.connectionHandler = handler;
+      server.listen = jest.fn((_p: number, _h: string, cb: () => void) => {
+        listenCb = cb;
+      });
+      server.address = jest.fn(() => ({ port: MOCK_TUNNEL_PORT }));
+      server.close = jest.fn((cb?: () => void) => { if (cb) cb(); });
+      lastServer = server;
+      return server;
+    });
+    const pending = service.createNodeForward('c-late', '10.0.1.5', DEFAULT_REDIS_PORT);
+    await jest.advanceTimersByTimeAsync(0);
+    jest.advanceTimersByTime(SSH_NODE_FORWARD_TIMEOUT_MS);
+    await expect(pending).rejects.toThrow(
+      new RegExp(`timed out after ${SSH_NODE_FORWARD_TIMEOUT_MS}ms`),
+    );
+    listenCb();
+    await jest.advanceTimersByTimeAsync(0);
+    jest.useRealTimers();
+    netMock.createServer = origCreateServer;
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    for (let i = 0; i < SSH_MAX_NODE_FORWARDS; i++) {
+      await service.createNodeForward('c-late', `10.2.0.${i}`, DEFAULT_REDIS_PORT);
+    }
+    await service.closeTunnel('c-late');
+  });
+
   it('does not register a forward if tunnel was replaced while binding', async () => {
     await service.createTunnel('c-stale', {
       sshHost: 'bastion',
