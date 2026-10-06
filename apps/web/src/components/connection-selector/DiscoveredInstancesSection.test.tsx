@@ -33,6 +33,18 @@ describe('DiscoveredInstancesSection', () => {
     expect(screen.queryByRole('option')).toBeNull();
   });
 
+  it('shows the bare version when the database system is unknown', () => {
+    render(
+      <DiscoveredInstancesSection
+        instances={[{ ...instance, dbSystem: undefined }]}
+        onRegister={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /discovered via OTLP/ }));
+    expect(screen.getByText('8.1.0')).toBeInTheDocument();
+  });
+
   it('calls register and dismiss with the instance', () => {
     const onRegister = vi.fn();
     const onDismiss = vi.fn();
