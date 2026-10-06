@@ -31,6 +31,7 @@
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "username": { "type": "string" },
         "type": { "type": "string", "enum": ["auto", "valkey", "redis"] },
+        "tls": { "type": "boolean", "description": "Connect to the monitored instance over TLS (managed providers)." },
         "password": { "type": "string" },
         "existingSecret": { "type": "string" },
         "existingSecretKey": { "type": "string" }

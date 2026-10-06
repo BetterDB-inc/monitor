@@ -68,6 +68,8 @@ spec:
               value: {{ .Values.db.username | quote }}
             - name: DB_TYPE
               value: {{ .Values.db.type | quote }}
+            - name: DB_TLS
+              value: {{ .Values.db.tls | quote }}
             {{- end }}
             {{- if or .Values.db.password .Values.db.existingSecret }}
             - name: DB_PASSWORD

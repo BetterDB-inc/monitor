@@ -27,6 +27,10 @@ db:
   username: default
   # auto | valkey | redis
   type: auto
+  # Connect to the monitored instance over TLS. Required by managed providers
+  # (AWS ElastiCache/MemoryDB, GCP Memorystore, Aiven). The TLS SNI servername
+  # is derived from db.host automatically.
+  tls: false
   # Plaintext password -> rendered into a chart-managed Secret. Prefer
   # existingSecret for anything beyond a quick trial.
   password: ""
