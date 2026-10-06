@@ -91,6 +91,9 @@ export class ScalingReadinessService {
     connectionId: string,
     snapshots: StoredMemorySnapshot[],
   ): Promise<DimensionInput> {
+    if (snapshots.every((s) => s.opsPerSec === 0)) {
+      return { excludedReason: 'No ops samples yet' };
+    }
     const forecast = await this.forecasting
       .getForecast(connectionId, 'opsPerSec')
       .catch((): MetricForecast | null => null);

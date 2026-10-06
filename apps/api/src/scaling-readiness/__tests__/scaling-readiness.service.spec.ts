@@ -166,6 +166,12 @@ describe('ScalingReadinessService', () => {
     );
   });
 
+  it('excludes the throughput trend when no ops were ever recorded', async () => {
+    const { service } = setup({ snapshots: twoDays().map((s) => ({ ...s, opsPerSec: 0 })) });
+    const r = await service.compute('c');
+    expect(r.dimensions.find((d) => d.key === 'opsTrend')!.excludedReason).toBe('No ops samples yet');
+  });
+
   it('excludes keyspace growth without key counts', async () => {
     const { service } = setup({ snapshots: twoDays().map((s) => ({ ...s, totalKeys: null })) });
     const r = await service.compute('c');
