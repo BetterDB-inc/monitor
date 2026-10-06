@@ -70,7 +70,11 @@ export function ScalingReadiness() {
 
   const to = dateRange?.to?.getTime();
   const from = dateRange?.from?.getTime();
-  const { data: history } = useQuery({
+  const {
+    data: history,
+    isLoading: historyLoading,
+    isError: historyError,
+  } = useQuery({
     queryKey: ['scaling-readiness-history', connectionId, from, to],
     queryFn: ({ signal }) => {
       const end = to ?? Date.now();
@@ -156,7 +160,13 @@ export function ScalingReadiness() {
               <DateRangePicker value={dateRange} onChange={setDateRange} placeholder="Last 7 days" />
             </CardHeader>
             <CardContent>
-              <ReadinessHistoryChart points={history?.points ?? []} />
+              {historyLoading && !history ? (
+                <p className="text-sm text-muted-foreground">Loading score history…</p>
+              ) : historyError && !history ? (
+                <p className="text-sm text-destructive">Could not load score history</p>
+              ) : (
+                <ReadinessHistoryChart points={history?.points ?? []} />
+              )}
             </CardContent>
           </Card>
           {settings ? (

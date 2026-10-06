@@ -219,4 +219,29 @@ describe('ScalingReadiness page', () => {
     connection.id = 'c';
     vi.useRealTimers();
   });
+
+  it('shows a loading state for history', () => {
+    hasFeature.mockReturnValue(true);
+    useQuery.mockImplementation(({ queryKey }: { queryKey: unknown[] }) => {
+      if (queryKey[0] === 'scaling-readiness') return { data: readiness, isLoading: false };
+      if (queryKey[0] === 'scaling-readiness-history') return { data: undefined, isLoading: true };
+      return { data: undefined };
+    });
+    render(<ScalingReadiness />);
+    expect(screen.getByText('Loading score history…')).toBeInTheDocument();
+    expect(screen.queryByTestId('history')).not.toBeInTheDocument();
+  });
+
+  it('shows an error state for history', () => {
+    hasFeature.mockReturnValue(true);
+    useQuery.mockImplementation(({ queryKey }: { queryKey: unknown[] }) => {
+      if (queryKey[0] === 'scaling-readiness') return { data: readiness, isLoading: false };
+      if (queryKey[0] === 'scaling-readiness-history')
+        return { data: undefined, isLoading: false, isError: true };
+      return { data: undefined };
+    });
+    render(<ScalingReadiness />);
+    expect(screen.getByText('Could not load score history')).toBeInTheDocument();
+    expect(screen.queryByTestId('history')).not.toBeInTheDocument();
+  });
 });
