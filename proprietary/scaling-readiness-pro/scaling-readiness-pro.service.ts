@@ -19,6 +19,7 @@ const TICK_INTERVAL_MS = 60_000;
 const HISTORY_WINDOW_MS = 7 * 24 * 60 * 60_000;
 const HISTORY_WINDOW_LIMIT = 7 * 24 * 60 * 2;
 const HISTORY_MAX_POINTS = 1_000;
+const HISTORY_MAX_RANGE_MS = 400 * 24 * 60 * 60_000;
 
 @Injectable()
 export class ScalingReadinessProService implements OnModuleInit, OnModuleDestroy {
@@ -129,6 +130,7 @@ export class ScalingReadinessProService implements OnModuleInit, OnModuleDestroy
   }
 
   async getHistory(connectionId: string, from: number, to: number): Promise<ScalingReadinessHistory> {
+    from = Math.max(from, to - HISTORY_MAX_RANGE_MS);
     const bucketWidth = (to - from + 1) / HISTORY_MAX_POINTS;
     const lowest = new Map<number, StoredScalingReadinessScore>();
     let total = 0;

@@ -239,4 +239,13 @@ describe('ScalingReadinessProService', () => {
     const { points } = await service.getHistory('conn-1', 0, 2 * week);
     expect(points.map((p) => p.timestamp)).toEqual([0, week - 1, week]);
   });
+
+  it('caps the history range at 400 days', async () => {
+    const { service, storage } = setup(55);
+    storage.getScalingReadinessScores.mockResolvedValue([]);
+    await service.getHistory('conn-1', 0, NOW);
+    const calls = storage.getScalingReadinessScores.mock.calls.map(([q]: any[]) => q);
+    expect(calls.length).toBeLessThanOrEqual(58);
+    expect(calls[0].from).toBeGreaterThanOrEqual(NOW - 400 * 24 * 60 * 60_000);
+  });
 });
