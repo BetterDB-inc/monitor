@@ -17,24 +17,15 @@ const DEFAULT_DB_PORT = 6379;
 /** How long to wait for the host.docker.internal DNS probe before giving up. */
 const HOST_RESOLVE_TIMEOUT_MS = 500;
 
-/** Loopback / "this machine" hosts that carry no cross-host intent. */
-function isLoopbackHost(host: string): boolean {
-  const h = host.trim().toLowerCase();
-  return h === 'localhost' || h === '::1' || h === '0.0.0.0' || /^127\./.test(h);
-}
-
 /**
  * Resolve the host to pre-fill for a one-click LOCAL connection. Kept pure so
  * the precedence is unit-testable; the impurity (are we in a container?) is
  * injected.
  *
  * Precedence:
- *   1. A NON-LOOPBACK DB_HOST the operator set wins outright — they told us
- *      where the database is. A loopback DB_HOST is deliberately NOT treated as
- *      an override: the published image bakes in `ENV DB_HOST=localhost`
- *      (Dockerfile.prod), which carries no host intent, and honoring it would
- *      short-circuit detection and resolve to the container itself — the very
- *      failure this endpoint exists to prevent.
+ *   1. A DB_HOST the operator set wins outright, loopback included — they told
+ *      us where the database is. The image bakes no DB_HOST, so any value
+ *      present is operator intent (e.g. `--network host -e DB_HOST=localhost`).
  *   2. When the monitor runs INSIDE a container, `localhost` is the container
  *      itself, not the operator's machine — the host's services live at
  *      `host.docker.internal`. That name resolves on the default bridge AND on
@@ -48,7 +39,7 @@ export function resolveDefaultDbHost(input: {
   containerized: boolean;
 }): DefaultDbHost {
   const explicit = input.dbHost?.trim();
-  if (explicit && !isLoopbackHost(explicit)) {
+  if (explicit) {
     return { host: explicit, source: 'env' };
   }
   if (input.containerized) {

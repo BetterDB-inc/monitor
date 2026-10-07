@@ -332,8 +332,8 @@ RUN mkdir -p /app/node_modules/@proprietary && \
     done
 
 # no-ai runtime env: database defaults, AI disabled, and NODE_PATH for workspace
-# module resolution.
-ENV DB_HOST=localhost
+# module resolution. DB_HOST is deliberately left unset so that any value present
+# was set by the operator; the app falls back to localhost on its own.
 ENV DB_PORT=6379
 ENV DB_TYPE=auto
 ENV DB_USERNAME=default
