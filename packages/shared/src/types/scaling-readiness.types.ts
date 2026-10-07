@@ -72,3 +72,4 @@ export interface ScalingReadinessHistory {
 }
 
 export const DEFAULT_SCALING_READINESS_ALERT_THRESHOLD = 40;
+export const MAX_SCALING_READINESS_ALERT_THRESHOLD = 80;

@@ -1,3 +1,4 @@
+import { MAX_SCALING_READINESS_ALERT_THRESHOLD } from '@betterdb/shared';
 import { IsBoolean, IsInt, IsOptional, Max, Min } from 'class-validator';
 
 export class UpdateScalingReadinessSettingsDto {
@@ -8,6 +9,6 @@ export class UpdateScalingReadinessSettingsDto {
   @IsOptional()
   @IsInt()
   @Min(1)
-  @Max(99)
+  @Max(MAX_SCALING_READINESS_ALERT_THRESHOLD)
   alertThreshold?: number;
 }

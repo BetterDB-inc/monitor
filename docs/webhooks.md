@@ -360,7 +360,7 @@ Notes:
 
 #### scaling_readiness.low (Pro)
 
-Fires once when a connection's scaling readiness score drops to or below its alert threshold (default 40) and re-arms after the score recovers above the hysteresis margin. Configure the threshold on the Scaling Readiness page.
+Fires once when a connection's scaling readiness score drops to or below its alert threshold (default 40, maximum 80) and re-arms after the score recovers above the hysteresis margin. Configure the threshold on the Scaling Readiness page.
 
 ```json
 {

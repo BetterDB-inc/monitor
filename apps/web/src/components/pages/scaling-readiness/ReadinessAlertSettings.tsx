@@ -1,8 +1,15 @@
 import { useEffect, useState } from 'react';
-import type { ScalingReadinessSettings, ScalingReadinessSettingsUpdate } from '@betterdb/shared';
+import {
+  MAX_SCALING_READINESS_ALERT_THRESHOLD,
+  type ScalingReadinessSettings,
+  type ScalingReadinessSettingsUpdate,
+} from '@betterdb/shared';
 import { Card, CardContent, CardHeader, CardTitle } from '../../ui/card';
 import { Input } from '../../ui/input';
 import { Switch } from '../../ui/switch';
+
+const isValidThreshold = (value: number) =>
+  Number.isInteger(value) && value >= 1 && value <= MAX_SCALING_READINESS_ALERT_THRESHOLD;
 
 export function ReadinessAlertSettings({
   settings,
@@ -41,20 +48,19 @@ export function ReadinessAlertSettings({
             aria-label="Alert threshold"
             type="number"
             min={1}
-            max={99}
+            max={MAX_SCALING_READINESS_ALERT_THRESHOLD}
             className="w-20"
             value={threshold}
             disabled={!settings.alertEnabled}
             onBlur={() => {
-              const value = Number(threshold);
-              if (threshold === '' || !Number.isInteger(value) || value < 1 || value > 99) {
+              if (threshold === '' || !isValidThreshold(Number(threshold))) {
                 setThreshold(String(settings.alertThreshold));
               }
             }}
             onChange={(e) => {
               setThreshold(e.target.value);
               const value = Number(e.target.value);
-              if (Number.isInteger(value) && value >= 1 && value <= 99) onChange({ alertThreshold: value });
+              if (isValidThreshold(value)) onChange({ alertThreshold: value });
             }}
           />
         </label>
