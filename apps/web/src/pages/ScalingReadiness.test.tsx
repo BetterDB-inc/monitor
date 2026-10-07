@@ -98,6 +98,37 @@ describe('ScalingReadiness page', () => {
     vi.useRealTimers();
   });
 
+  it('keeps a queued edit on its own connection when switching during a save', async () => {
+    vi.useFakeTimers();
+    updateSettings.mockReset();
+    let resolveFirst: (v: unknown) => void = () => {};
+    updateSettings.mockImplementationOnce(() => new Promise((r) => (resolveFirst = r)));
+    updateSettings.mockResolvedValue({});
+    hasFeature.mockReturnValue(true);
+    connection.id = 'c';
+    const { rerender } = render(<ScalingReadiness />);
+    fireEvent.click(screen.getByTestId('alert-settings'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    fireEvent.click(screen.getByTestId('alert-edit-2'));
+    connection.id = 'other';
+    rerender(<ScalingReadiness />);
+    fireEvent.click(screen.getByTestId('alert-settings'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(updateSettings).toHaveBeenLastCalledWith({ alertThreshold: 55 }, 'other');
+    await act(async () => {
+      resolveFirst({});
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    expect(updateSettings).toHaveBeenLastCalledWith({ alertThreshold: 66 }, 'c');
+    expect(updateSettings).toHaveBeenCalledTimes(3);
+    connection.id = 'c';
+    vi.useRealTimers();
+  });
+
   it('saves a pending settings edit when the page unmounts', () => {
     vi.useFakeTimers();
     updateSettings.mockReset();
