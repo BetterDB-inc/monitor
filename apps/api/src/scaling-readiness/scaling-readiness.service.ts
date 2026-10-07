@@ -22,6 +22,9 @@ const IO_THREADS_TTL_MS = 10 * 60_000;
 const IO_THREADS_RETRY_TTL_MS = 60_000;
 const CPU_SAMPLE_COUNT = 5;
 const SNAPSHOT_LIMIT = 11_000;
+const TREND_TTL_MS = 15 * 60_000;
+const STALE_AFTER_MS = 10 * 60_000;
+const STALE_REASON = 'No samples in the last 10 minutes';
 
 interface ThreadInfo {
   threads: number;
@@ -33,6 +36,7 @@ export class ScalingReadinessService {
   private readonly cache = new Map<string, ScalingReadiness>();
   private readonly threadCache = new Map<string, { value: ThreadInfo; at: number; ttl: number }>();
   private readonly inFlight = new Map<string, Promise<ScalingReadiness>>();
+  private readonly trendCache = new Map<string, { snapshots: StoredMemorySnapshot[]; at: number }>();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -58,6 +62,9 @@ export class ScalingReadinessService {
     for (const [id, entry] of this.cache) {
       if (now - entry.computedAt >= CACHE_TTL_MS) this.cache.delete(id);
     }
+    for (const [id, entry] of this.trendCache) {
+      if (now - entry.at >= TREND_TTL_MS) this.trendCache.delete(id);
+    }
     this.cache.set(connectionId, result);
     return result;
   }
@@ -68,6 +75,31 @@ export class ScalingReadinessService {
       return notApplicable(connectionId, now, 'Not applicable to Sentinel');
     }
     const external = this.connectionRegistry.getConfig(connectionId)?.connectionType === 'external';
+    const recent = await this.storage.getMemorySnapshots({
+      connectionId,
+      startTime: now - STALE_AFTER_MS,
+      limit: CPU_SAMPLE_COUNT,
+    });
+    const snapshots = await this.weekOfSnapshots(connectionId, now);
+    const latest = recent[0];
+    const stale = !latest && snapshots.length > 0;
+    const { threads, note } = await this.effectiveThreads(connectionId, client, external, now);
+
+    return scoreReadiness(connectionId, now, {
+      memory: stale ? { excludedReason: STALE_REASON } : memoryInput(latest),
+      connections: stale ? { excludedReason: STALE_REASON } : connectionsInput(latest, external),
+      cpu: stale ? { excludedReason: STALE_REASON } : cpuInput(recent, threads, note),
+      opsTrend: await this.opsTrendInput(connectionId, snapshots),
+      keyspaceGrowth: this.keyspaceInput(snapshots),
+    });
+  }
+
+  private async weekOfSnapshots(
+    connectionId: string,
+    now: number,
+  ): Promise<StoredMemorySnapshot[]> {
+    const cached = this.trendCache.get(connectionId);
+    if (cached && now - cached.at < TREND_TTL_MS) return cached.snapshots;
     const snapshots = [
       ...(await this.storage.getMemorySnapshots({
         connectionId,
@@ -75,16 +107,8 @@ export class ScalingReadinessService {
         limit: SNAPSHOT_LIMIT,
       })),
     ].reverse();
-    const latest = snapshots[snapshots.length - 1];
-    const { threads, note } = await this.effectiveThreads(connectionId, client, external, now);
-
-    return scoreReadiness(connectionId, now, {
-      memory: memoryInput(latest),
-      connections: connectionsInput(latest, external),
-      cpu: cpuInput(snapshots.slice(-CPU_SAMPLE_COUNT), threads, note),
-      opsTrend: await this.opsTrendInput(connectionId, snapshots),
-      keyspaceGrowth: this.keyspaceInput(snapshots),
-    });
+    if (snapshots.length > 0) this.trendCache.set(connectionId, { snapshots, at: now });
+    return snapshots;
   }
 
   private async opsTrendInput(
