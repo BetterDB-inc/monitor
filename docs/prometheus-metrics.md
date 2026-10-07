@@ -854,7 +854,7 @@ Or update at runtime via the `/settings` API endpoint:
 > **Note**: API calls need a signed-in session when user control is enabled — see [Authenticating API Requests](configuration.md#authenticating-api-requests).
 
 ```bash
-curl -b cookies.txt -X PUT http://localhost:3001/settings \
+curl -b cookies.txt -X PUT http://localhost:3001/api/settings \
   -H "Content-Type: application/json" \
   -d '{"anomalyPrometheusIntervalMs": 15000}'
 ```

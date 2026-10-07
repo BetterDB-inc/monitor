@@ -528,7 +528,7 @@ You can adjust these settings without restarting via the `/settings` API:
 > **Note**: API calls need a signed-in session when user control is enabled — see [Authenticating API Requests](configuration.md#authenticating-api-requests).
 
 ```bash
-curl -b cookies.txt -X PUT http://localhost:3001/settings \
+curl -b cookies.txt -X PUT http://localhost:3001/api/settings \
   -H "Content-Type: application/json" \
   -d '{
     "anomalyPollIntervalMs": 500,
@@ -771,7 +771,7 @@ DELETE /api/anomaly/resolved
 
 Check buffer readiness:
 ```bash
-curl http://localhost:3001/api/anomaly/buffers | jq '.buffers[] | select(.isReady == false)'
+curl -b cookies.txt http://localhost:3001/api/anomaly/buffers | jq '.buffers[] | select(.isReady == false)'
 ```
 
 Or via Prometheus:
@@ -980,10 +980,10 @@ ANOMALY_POLL_INTERVAL_MS=2000  # Poll every 2 seconds instead of 1
 
 **Solution**: Manually clear resolved anomalies:
 ```bash
-curl -X DELETE http://localhost:3001/api/anomaly/resolved
+curl -b cookies.txt -X DELETE http://localhost:3001/api/anomaly/resolved
 ```
 
 Or query historical data with time filters:
 ```bash
-curl "http://localhost:3001/api/anomaly/events?startTime=$(date -d '1 hour ago' +%s)000"
+curl -b cookies.txt "http://localhost:3001/api/anomaly/events?startTime=$(date -d '1 hour ago' +%s)000"
 ```
