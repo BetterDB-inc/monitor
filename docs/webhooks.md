@@ -35,7 +35,7 @@ BetterDB can send HTTP POST requests to your endpoints when monitoring events oc
 ### Via API
 
 ```bash
-curl -b cookies.txt -X POST http://localhost:3001/api/webhooks \
+curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Production Alerts",
@@ -663,10 +663,10 @@ After all retries are exhausted, the delivery moves to **dead letter** status. D
 
 ```bash
 # View webhook deliveries (including dead letters)
-curl -b cookies.txt http://localhost:3001/api/webhooks/{id}/deliveries
+curl -b cookies.txt -c cookies.txt http://localhost:3001/api/webhooks/{id}/deliveries
 
 # Manually retry a dead letter delivery
-curl -b cookies.txt -X POST http://localhost:3001/api/webhooks/deliveries/{deliveryId}/retry
+curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks/deliveries/{deliveryId}/retry
 ```
 
 ### Storage Failures Before Delivery
@@ -1075,11 +1075,11 @@ GET /api/webhooks/stats/retry-queue
 2. Confirm you're subscribed to the event type
 3. Check your license tier includes the event:
    ```bash
-   curl -b cookies.txt http://localhost:3001/api/webhooks/allowed-events
+   curl -b cookies.txt -c cookies.txt http://localhost:3001/api/webhooks/allowed-events
    ```
 4. Review delivery history for errors:
    ```bash
-   curl -b cookies.txt http://localhost:3001/api/webhooks/{id}/deliveries
+   curl -b cookies.txt -c cookies.txt http://localhost:3001/api/webhooks/{id}/deliveries
    ```
 
 **Check event is being triggered:**
@@ -1092,7 +1092,7 @@ GET /api/webhooks/stats/retry-queue
 
 ```bash
 # Test webhook connectivity
-curl -b cookies.txt -X POST http://localhost:3001/api/webhooks/{id}/test
+curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks/{id}/test
 ```
 
 ### Signature Verification Failing
@@ -1201,7 +1201,7 @@ BetterDB blocks private IP addresses to prevent SSRF attacks:
 ### Slack
 
 ```bash
-curl -b cookies.txt -X POST http://localhost:3001/api/webhooks \
+curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Slack Notifications",
@@ -1216,7 +1216,7 @@ Your endpoint should transform BetterDB payloads to Slack's format.
 ### PagerDuty
 
 ```bash
-curl -b cookies.txt -X POST http://localhost:3001/api/webhooks \
+curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks \
   -H "Content-Type: application/json" \
   -d '{
     "name": "PagerDuty Incidents",
@@ -1232,7 +1232,7 @@ curl -b cookies.txt -X POST http://localhost:3001/api/webhooks \
 ### Discord
 
 ```bash
-curl -b cookies.txt -X POST http://localhost:3001/api/webhooks \
+curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Discord Alerts",
@@ -1245,7 +1245,7 @@ curl -b cookies.txt -X POST http://localhost:3001/api/webhooks \
 ### Microsoft Teams
 
 ```bash
-curl -b cookies.txt -X POST http://localhost:3001/api/webhooks \
+curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Teams Notifications",

@@ -125,7 +125,7 @@ betterdb_commandlog_large_reply_by_pattern{pattern="LRANGE *"}
 #### Identify Large Hash Retrievals
 
 ```bash
-curl -b cookies.txt http://localhost:3001/api/metrics/commandlog/patterns?type=large-reply | jq '.patterns[] | select(.pattern | contains("HGETALL"))'
+curl -b cookies.txt -c cookies.txt http://localhost:3001/api/metrics/commandlog/patterns?type=large-reply | jq '.patterns[] | select(.pattern | contains("HGETALL"))'
 ```
 
 **Action**: Optimize by retrieving specific fields with HMGET instead of HGETALL.
@@ -133,7 +133,7 @@ curl -b cookies.txt http://localhost:3001/api/metrics/commandlog/patterns?type=l
 #### Track Bulk Write Operations
 
 ```bash
-curl -b cookies.txt http://localhost:3001/api/metrics/commandlog?type=large-request | jq '.[] | select(.command | contains("MSET"))'
+curl -b cookies.txt -c cookies.txt http://localhost:3001/api/metrics/commandlog?type=large-request | jq '.[] | select(.command | contains("MSET"))'
 ```
 
 **Action**: Rate-limit bulk operations or split into smaller batches.
@@ -239,7 +239,7 @@ stddev(betterdb_cluster_slot_keys)
 
 ```bash
 # Find largest slots
-curl -b cookies.txt "http://localhost:3001/api/metrics/cluster/slot-stats?orderBy=key-count&limit=10"
+curl -b cookies.txt -c cookies.txt "http://localhost:3001/api/metrics/cluster/slot-stats?orderBy=key-count&limit=10"
 ```
 
 **Action**: Migrate largest slots first for balanced distribution.
@@ -605,10 +605,10 @@ valkey-cli CONFIG SET commandlog-max-len 128
 2. **Explore new endpoints**:
 ```bash
 # Check for large requests
-curl -b cookies.txt http://localhost:3001/api/metrics/commandlog/patterns?type=large-request
+curl -b cookies.txt -c cookies.txt http://localhost:3001/api/metrics/commandlog/patterns?type=large-request
 
 # Analyze slot distribution (if cluster)
-curl -b cookies.txt http://localhost:3001/api/metrics/cluster/slot-stats?limit=10
+curl -b cookies.txt -c cookies.txt http://localhost:3001/api/metrics/cluster/slot-stats?limit=10
 ```
 
 3. **Update Prometheus dashboards**:
@@ -799,10 +799,10 @@ curl http://localhost:3001/api/health | jq '.database.capabilities'
 
 ```bash
 # COMMANDLOG
-curl -b cookies.txt http://localhost:3001/api/metrics/commandlog?type=large-request
+curl -b cookies.txt -c cookies.txt http://localhost:3001/api/metrics/commandlog?type=large-request
 
 # SLOT-STATS (cluster only)
-curl -b cookies.txt http://localhost:3001/api/metrics/cluster/slot-stats?limit=10
+curl -b cookies.txt -c cookies.txt http://localhost:3001/api/metrics/cluster/slot-stats?limit=10
 ```
 
 ### Prometheus Queries

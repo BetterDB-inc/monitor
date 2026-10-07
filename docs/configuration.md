@@ -36,10 +36,10 @@ BetterDB Monitor supports monitoring multiple Valkey/Redis instances from a sing
 
 ```bash
 # List all connections
-curl -b cookies.txt http://localhost:3001/api/connections
+curl -b cookies.txt -c cookies.txt http://localhost:3001/api/connections
 
 # Add a new connection
-curl -b cookies.txt -X POST http://localhost:3001/api/connections \
+curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/connections \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Production Redis",
@@ -49,7 +49,7 @@ curl -b cookies.txt -X POST http://localhost:3001/api/connections \
   }'
 
 # Test a connection before adding
-curl -b cookies.txt -X POST http://localhost:3001/api/connections/test \
+curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/connections/test \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Test",
@@ -58,10 +58,10 @@ curl -b cookies.txt -X POST http://localhost:3001/api/connections/test \
   }'
 
 # Set a connection as default
-curl -b cookies.txt -X POST http://localhost:3001/api/connections/{id}/default
+curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/connections/{id}/default
 
 # Remove a connection
-curl -b cookies.txt -X DELETE http://localhost:3001/api/connections/{id}
+curl -b cookies.txt -c cookies.txt -X DELETE http://localhost:3001/api/connections/{id}
 ```
 
 #### Via Web UI
@@ -79,10 +79,10 @@ When making API requests, include the `X-Connection-Id` header to target a speci
 
 ```bash
 # Get metrics for a specific connection
-curl -b cookies.txt -H "X-Connection-Id: prod-conn-id" http://localhost:3001/api/metrics/info
+curl -b cookies.txt -c cookies.txt -H "X-Connection-Id: prod-conn-id" http://localhost:3001/api/metrics/info
 
 # Get audit logs for a specific connection
-curl -b cookies.txt -H "X-Connection-Id: staging-conn-id" http://localhost:3001/api/audit/entries
+curl -b cookies.txt -c cookies.txt -H "X-Connection-Id: staging-conn-id" http://localhost:3001/api/audit/entries
 ```
 
 If no header is provided, the default connection is used.
@@ -96,12 +96,12 @@ Webhooks can be:
 
 ```bash
 # Create a webhook that fires for ALL connections
-curl -b cookies.txt -X POST http://localhost:3001/api/webhooks \
+curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks \
   -H "Content-Type: application/json" \
   -d '{"name": "Global Alert", "url": "https://...", "events": ["instance.down"]}'
 
 # Create a webhook only for production
-curl -b cookies.txt -X POST http://localhost:3001/api/webhooks \
+curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks \
   -H "X-Connection-Id: prod-conn-id" \
   -H "Content-Type: application/json" \
   -d '{"name": "Prod Alert", "url": "https://...", "events": ["instance.down"]}'
@@ -532,7 +532,7 @@ docker run -d \
 
 No `BETTERDB_LICENSE_KEY` is set, so the monitor runs **fully offline** — no
 outbound requests, telemetry disabled. Verify with
-`curl -b cookies.txt http://localhost:3001/api/license/status`
+`curl -b cookies.txt -c cookies.txt http://localhost:3001/api/license/status`
 (`source: offline-token`, `mode: offline`, `airGapped: true`); see
 [Authenticating API Requests](#authenticating-api-requests) for the cookie.
 
@@ -568,8 +568,8 @@ curl -c cookies.txt -X POST http://localhost:3001/api/auth/sign-in/email \
   -H "Content-Type: application/json" \
   -d '{"email": "you@example.com", "password": "your-password"}'
 
-# Reuse it on every later call
-curl -b cookies.txt http://localhost:3001/api/connections
+# Send it on every later call; -c saves a renewed session cookie back to the jar
+curl -b cookies.txt -c cookies.txt http://localhost:3001/api/connections
 ```
 
 These routes stay open without a session: `/api/health`, `/api/version`,
@@ -687,7 +687,7 @@ The following settings can be modified at runtime via the `/settings` API endpoi
 ### Example: Update Settings
 
 ```bash
-curl -b cookies.txt -X PUT http://localhost:3001/api/settings \
+curl -b cookies.txt -c cookies.txt -X PUT http://localhost:3001/api/settings \
   -H "Content-Type: application/json" \
   -d '{
     "auditPollIntervalMs": 30000,
