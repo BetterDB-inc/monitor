@@ -78,7 +78,7 @@ describe('ScalingReadiness page', () => {
     expect(screen.getByTestId('picker')).toHaveTextContent('Last 7 days');
   });
 
-  it('drops a pending settings edit when the connection changes', () => {
+  it('saves a pending settings edit to its connection when the connection changes', () => {
     vi.useFakeTimers();
     updateSettings.mockReset();
     updateSettings.mockResolvedValue({});
@@ -88,11 +88,26 @@ describe('ScalingReadiness page', () => {
     fireEvent.click(screen.getByTestId('alert-settings'));
     connection.id = 'other';
     rerender(<ScalingReadiness />);
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    expect(updateSettings).toHaveBeenCalledWith({ alertThreshold: 55 }, 'c');
     act(() => {
       vi.advanceTimersByTime(1000);
     });
-    expect(updateSettings).not.toHaveBeenCalled();
+    expect(updateSettings).toHaveBeenCalledTimes(1);
     connection.id = 'c';
+    vi.useRealTimers();
+  });
+
+  it('saves a pending settings edit when the page unmounts', () => {
+    vi.useFakeTimers();
+    updateSettings.mockReset();
+    updateSettings.mockResolvedValue({});
+    hasFeature.mockReturnValue(true);
+    connection.id = 'c';
+    const { unmount } = render(<ScalingReadiness />);
+    fireEvent.click(screen.getByTestId('alert-settings'));
+    unmount();
+    expect(updateSettings).toHaveBeenCalledWith({ alertThreshold: 55 }, 'c');
     vi.useRealTimers();
   });
 
@@ -201,21 +216,6 @@ describe('ScalingReadiness page', () => {
       await vi.advanceTimersByTimeAsync(10);
     });
     expect(screen.getByTestId('alert-settings')).toHaveAttribute('data-save-status', 'idle');
-    connection.id = 'c';
-    vi.useRealTimers();
-  });
-
-  it('invalidates the previous connection settings when switching with a dirty edit', () => {
-    vi.useFakeTimers();
-    hasFeature.mockReturnValue(true);
-    connection.id = 'c';
-    const { rerender } = render(<ScalingReadiness />);
-    fireEvent.click(screen.getByTestId('alert-settings'));
-    connection.id = 'other';
-    rerender(<ScalingReadiness />);
-    expect(queryClient.invalidateQueries).toHaveBeenCalledWith({
-      queryKey: ['scaling-readiness-settings', 'c'],
-    });
     connection.id = 'c';
     vi.useRealTimers();
   });

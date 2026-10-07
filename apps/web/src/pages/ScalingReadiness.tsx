@@ -35,6 +35,7 @@ export function ScalingReadiness() {
     update: ScalingReadinessSettingsUpdate;
   } | null>(null);
   const inFlight = useRef(new Set<string>());
+  const flushRef = useRef<() => void>(() => {});
   const activeConnection = useRef(connectionId);
   activeConnection.current = connectionId;
 
@@ -42,23 +43,10 @@ export function ScalingReadiness() {
     () => () => {
       if (debounce.current) clearTimeout(debounce.current);
       if (statusReset.current) clearTimeout(statusReset.current);
-    },
-    [],
-  );
-
-  useEffect(
-    () => () => {
-      if (debounce.current) clearTimeout(debounce.current);
-      if (statusReset.current) clearTimeout(statusReset.current);
-      if (pending.current) {
-        void queryClient.invalidateQueries({
-          queryKey: ['scaling-readiness-settings', pending.current.connectionId],
-        });
-      }
-      pending.current = null;
+      flushRef.current();
       setSaveStatus('idle');
     },
-    [connectionId, queryClient],
+    [connectionId],
   );
 
   const { data: readiness, isLoading, isError } = useQuery({
@@ -124,6 +112,7 @@ export function ScalingReadiness() {
       )
       .finally(settle);
   };
+  flushRef.current = flush;
 
   const updateSettings = (update: ScalingReadinessSettingsUpdate) => {
     if (!connectionId) return;
