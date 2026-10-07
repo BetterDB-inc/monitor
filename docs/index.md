@@ -54,7 +54,7 @@ Step-by-step connection guides for managed Redis/Valkey providers:
 
 BetterDB includes interactive API documentation powered by Swagger/OpenAPI.
 
-Once running, access it at: [http://localhost:3001/api](http://localhost:3001/api)
+Once running, access it at: [http://localhost:3001/docs](http://localhost:3001/docs)
 
 ## Links
 

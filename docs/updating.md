@@ -28,7 +28,7 @@ auto-detect (Kubernetes, custom deployments).
   version, and whether an update is available:
 
   ```bash
-  curl http://localhost:3001/version
+  curl http://localhost:3001/api/version
   ```
 
 ## Docker
