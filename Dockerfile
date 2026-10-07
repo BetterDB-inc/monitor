@@ -1,7 +1,9 @@
+# aiven:strip-begin (telemetry/version ARGs, removed from Dockerfile.aiven)
 # Monitor/app version. Passed by CI (docker-publish.yml) as --build-arg APP_VERSION
 # and applied to every stage that re-declares `ARG APP_VERSION`. Declared once here
 # as a global ARG (before the first FROM) so the default lives in a single place.
 ARG APP_VERSION=0.1.1
+# aiven:strip-end
 
 # ============================================
 # Build Stage (shared by both image variants)
@@ -44,6 +46,7 @@ COPY proprietary ./proprietary
 # Create symlink for proprietary node_modules (symlinks don't copy properly)
 RUN ln -sf ../apps/api/node_modules proprietary/node_modules
 
+# aiven:strip-begin (telemetry/version ARGs, removed from Dockerfile.aiven)
 # PostHog telemetry token (baked into frontend at build time)
 ARG VITE_PUBLIC_POSTHOG_PROJECT_TOKEN
 ARG VITE_PUBLIC_POSTHOG_HOST=https://eu.i.posthog.com
@@ -61,6 +64,7 @@ ENV VITE_PUBLIC_APP_VERSION=$APP_VERSION
 # self-hosted instances reaches the public website proxy out of the box.
 ARG VITE_REGISTRATION_URL=https://www.betterdb.com/api/register
 ENV VITE_REGISTRATION_URL=$VITE_REGISTRATION_URL
+# aiven:strip-end
 
 # Build api, web, and their dependency graphs (exclude entitlement). The "..."
 # suffix pulls in @betterdb/shared plus the agent-memory dependency chain.
@@ -206,6 +210,7 @@ RUN addgroup --system --gid 1001 nodejs && \
 # is patched (the upstream prebuilt release ships an EOL Go 1.21.13 runtime).
 COPY --chmod=755 --from=redisshake-builder /out/redis-shake /usr/local/bin/redis-shake
 
+# aiven:strip-begin (telemetry/version ARGs, removed from Dockerfile.aiven)
 # Set APP_VERSION from build argument (re-declares the global ARG for this stage)
 ARG APP_VERSION
 ENV APP_VERSION=$APP_VERSION
@@ -215,6 +220,7 @@ ARG POSTHOG_API_KEY
 ARG POSTHOG_HOST=https://eu.i.posthog.com
 ENV POSTHOG_API_KEY=$POSTHOG_API_KEY
 ENV POSTHOG_HOST=$POSTHOG_HOST
+# aiven:strip-end
 
 # Environment defaults common to both variants
 ENV NODE_ENV=production
