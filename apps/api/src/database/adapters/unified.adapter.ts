@@ -372,6 +372,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     const redisSupportsSlotStats =
       !isValkey && (majorVersion > 8 || (majorVersion === 8 && minorVersion >= 2));
 
+    // Sentinel mode is reported in the Server section (spelled differently per
+    // engine: server_mode on Valkey unless extended-redis-compat, else redis_mode;
+    // redis_mode on Redis). Captured here so a wedged Sentinel is still identifiable
+    // later without a fresh INFO. See AnomalyService.connectionIsSentinel.
     const isSentinel = InfoParser.isSentinelMode(
       (info.server ?? info) as Record<string, unknown>,
     );
@@ -436,6 +440,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       hasConfig,
       hasVectorSearch,
       clusterEnabled,
+      // Non-Sentinel path: a Sentinel connection returns early above with
+      // isSentinel: true, so reaching here means this is not a Sentinel.
       isSentinel: false,
     };
   }

@@ -39,6 +39,13 @@ export interface DatabaseCapabilities {
   hasConfig: boolean;
   hasVectorSearch: boolean;
   clusterEnabled?: boolean;
+  /**
+   * True when the server reported it was running in Sentinel mode at connect time
+   * (INFO `server_mode`/`redis_mode`/`valkey_mode` == 'sentinel'). Optional so
+   * existing capability constructors and mocks need no change; absent is treated as
+   * not-a-Sentinel. Lets a Sentinel that is already wedged when we poll still be
+   * recognized without a fresh INFO.
+   */
   isSentinel?: boolean;
 }
 
