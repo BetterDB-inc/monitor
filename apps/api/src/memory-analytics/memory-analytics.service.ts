@@ -7,6 +7,24 @@ import {
 } from '../common/interfaces/storage-port.interface';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { KeyspaceInfo } from '../common/types/metrics.types';
+
+export function sumKeyspaceKeys(keyspace: KeyspaceInfo | undefined): number | null {
+  if (!keyspace) return null;
+  let total = 0;
+  for (const [db, entry] of Object.entries(keyspace)) {
+    if (!/^db\d+$/.test(db) || typeof entry !== 'object' || entry === null) continue;
+    const keys = Number(entry.keys);
+    if (Number.isFinite(keys)) total += keys;
+  }
+  return total;
+}
+
+function intOrNull(raw: string | number | null | undefined): number | null {
+  if (raw === null || raw === undefined) return null;
+  const n = typeof raw === 'number' ? raw : parseInt(raw, 10);
+  return Number.isFinite(n) ? n : null;
+}
 
 @Injectable()
 export class MemoryAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
@@ -96,6 +114,9 @@ export class MemoryAnalyticsService extends MultiConnectionPoller implements OnM
         cpuUser,
         ioThreadedReads: int(info.stats?.io_threaded_reads_processed ?? absent),
         ioThreadedWrites: int(info.stats?.io_threaded_writes_processed ?? absent),
+        connectedClients: intOrNull(info.clients?.connected_clients),
+        maxclients: ctx.connectionType === 'external' ? null : intOrNull(info.clients?.maxclients),
+        totalKeys: sumKeyspaceKeys(info.keyspace),
         connectionId: ctx.connectionId,
       };
 

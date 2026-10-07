@@ -13,6 +13,7 @@ import { CpuChart } from '../components/dashboard/CpuChart';
 import { IoThreadChart } from '../components/dashboard/IoThreadChart';
 import { deriveStoredIoDeltas } from '../components/dashboard/io-threads.utils';
 import { EventTimeline } from '../components/dashboard/EventTimeline';
+import { ScalingReadinessCard } from '../components/pages/scaling-readiness';
 import { CapabilitiesBadges } from '../components/dashboard/CapabilitiesBadges';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 
@@ -214,6 +215,8 @@ export function Dashboard() {
         <ConnectionCard health={health} loading={healthLoading} connection={currentConnection} />
         <OverviewCards info={info} />
       </div>
+
+      <ScalingReadinessCard />
 
       <EventTimeline startTime={startTime} endTime={endTime} />
 

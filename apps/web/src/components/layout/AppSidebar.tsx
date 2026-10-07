@@ -97,6 +97,9 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
           <NavItem to="/forecasting" active={location.pathname === '/forecasting'}>
             Forecasting
           </NavItem>
+          <NavItem to="/scaling-readiness" active={location.pathname === '/scaling-readiness'}>
+            Scaling Readiness
+          </NavItem>
           <NavItem
             to="/anomalies"
             active={location.pathname === '/anomalies'}

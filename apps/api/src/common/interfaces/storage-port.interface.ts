@@ -374,6 +374,9 @@ export interface StoredMemorySnapshot {
   cpuUser: number;
   ioThreadedReads: number | null;
   ioThreadedWrites: number | null;
+  connectedClients?: number | null;
+  maxclients?: number | null;
+  totalKeys?: number | null;
   connectionId?: string;
 }
 

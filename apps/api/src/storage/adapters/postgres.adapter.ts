@@ -1853,6 +1853,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS cpu_user DOUBLE PRECISION NOT NULL DEFAULT 0;
       ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS io_threaded_reads BIGINT NOT NULL DEFAULT 0;
       ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS io_threaded_writes BIGINT NOT NULL DEFAULT 0;
+      ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS connected_clients BIGINT;
+      ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS maxclients BIGINT;
+      ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS total_keys BIGINT;
 
       ALTER TABLE memory_snapshots ALTER COLUMN used_memory_rss DROP NOT NULL;
       ALTER TABLE memory_snapshots ALTER COLUMN used_memory_peak DROP NOT NULL;
@@ -3533,7 +3536,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
-        $${paramIndex++}, $${paramIndex++}
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
+        $${paramIndex++}
       )`);
       values.push(
         snapshot.id,
@@ -3549,6 +3553,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         snapshot.cpuUser ?? 0,
         snapshot.ioThreadedReads ?? null,
         snapshot.ioThreadedWrites ?? null,
+        snapshot.connectedClients ?? null,
+        snapshot.maxclients ?? null,
+        snapshot.totalKeys ?? null,
         connectionId,
       );
     }
@@ -3557,7 +3564,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO memory_snapshots (
         id, timestamp, used_memory, used_memory_rss, used_memory_peak,
         mem_fragmentation_ratio, maxmemory, allocator_frag_ratio,
-        ops_per_sec, cpu_sys, cpu_user, io_threaded_reads, io_threaded_writes, connection_id
+        ops_per_sec, cpu_sys, cpu_user, io_threaded_reads, io_threaded_writes,
+        connected_clients, maxclients, total_keys, connection_id
       ) VALUES ${placeholders.join(', ')}
     `;
 
@@ -3594,7 +3602,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const query = `
       SELECT id, timestamp, used_memory, used_memory_rss, used_memory_peak,
              mem_fragmentation_ratio, maxmemory, allocator_frag_ratio,
-             ops_per_sec, cpu_sys, cpu_user, io_threaded_reads, io_threaded_writes, connection_id
+             ops_per_sec, cpu_sys, cpu_user, io_threaded_reads, io_threaded_writes,
+             connected_clients, maxclients, total_keys, connection_id
       FROM memory_snapshots
       ${whereClause}
       ORDER BY timestamp DESC
@@ -3619,6 +3628,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       cpuUser: Number(row.cpu_user ?? 0),
       ioThreadedReads: row.io_threaded_reads === null ? null : Number(row.io_threaded_reads),
       ioThreadedWrites: row.io_threaded_writes === null ? null : Number(row.io_threaded_writes),
+      connectedClients: row.connected_clients === null ? null : Number(row.connected_clients),
+      maxclients: row.maxclients === null ? null : Number(row.maxclients),
+      totalKeys: row.total_keys === null ? null : Number(row.total_keys),
       connectionId: row.connection_id,
     }));
   }

@@ -26,6 +26,7 @@ import { MigrationModule } from './migration/migration.module';
 import { WorkspaceAuthModule } from './auth/workspace-auth.module';
 import { McpModule } from './mcp/mcp.module';
 import { MetricForecastingModule } from './metric-forecasting/metric-forecasting.module';
+import { ScalingReadinessModule } from './scaling-readiness/scaling-readiness.module';
 import { InferenceLatencyModule } from './inference-latency/inference-latency.module';
 import { CliModule } from './cli/cli.module';
 import { PosthogProxyModule } from './posthog-proxy/posthog-proxy.module';
@@ -212,6 +213,7 @@ const baseImports = [
   AiObservabilityModule,
   MigrationModule,
   MetricForecastingModule,
+  ScalingReadinessModule,
   InferenceLatencyModule,
   CliModule,
   PosthogProxyModule,

@@ -181,6 +181,9 @@ describe('nullable pushed metrics — sqlite upgrade from NOT NULL columns', () 
         cpuUser: 0.25,
         ioThreadedReads: 7,
         ioThreadedWrites: 8,
+        connectedClients: null,
+        maxclients: null,
+        totalKeys: null,
         connectionId: 'conn-a',
       },
     ]);

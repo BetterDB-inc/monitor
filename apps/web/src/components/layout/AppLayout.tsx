@@ -33,6 +33,7 @@ import { VectorSearch } from '../../pages/VectorSearch';
 import { VectorAi } from '../../pages/VectorAi';
 import { InferenceLatency } from '../../pages/InferenceLatency';
 import { MetricForecasting } from '../../pages/MetricForecasting';
+import { ScalingReadiness } from '../../pages/ScalingReadiness';
 import { CacheProposals } from '../../pages/CacheProposals';
 import { Monitor } from '../../pages/Monitor';
 import { MonitorSession } from '../../pages/MonitorSession';
@@ -284,6 +285,14 @@ function AppLayoutInner(): ReactElement {
                 element={
                   <NoConnectionsGuard>
                     <MetricForecasting />
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/scaling-readiness"
+                element={
+                  <NoConnectionsGuard>
+                    <ScalingReadiness />
                   </NoConnectionsGuard>
                 }
               />
