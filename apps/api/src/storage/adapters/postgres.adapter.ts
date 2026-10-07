@@ -3,6 +3,14 @@ import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
 import { randomUUID } from 'crypto';
 import { parseSshTunnel, parseMembership } from '@betterdb/shared';
+import type {
+  StoredScalingReadinessScore,
+  ScalingReadinessScoreQuery,
+} from '../../common/interfaces/storage-port.interface';
+import type {
+  ReadinessDimension,
+  ScalingReadinessSettings,
+} from '@betterdb/shared';
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
   AnomalyQueryOptions,
@@ -1463,6 +1471,27 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
         updated_at BIGINT NOT NULL,
         PRIMARY KEY (connection_id, metric_kind)
+      );
+
+      CREATE TABLE IF NOT EXISTS scaling_readiness_scores (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        timestamp BIGINT NOT NULL,
+        score INTEGER NOT NULL,
+        band TEXT NOT NULL,
+        binding_dimension TEXT,
+        dimensions JSONB NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_scaling_readiness_conn_ts
+        ON scaling_readiness_scores(connection_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_scaling_readiness_ts
+        ON scaling_readiness_scores(timestamp);
+
+      CREATE TABLE IF NOT EXISTS scaling_readiness_settings (
+        connection_id TEXT PRIMARY KEY,
+        alert_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        alert_threshold INTEGER NOT NULL DEFAULT 40,
+        updated_at BIGINT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS webhooks (
@@ -3646,6 +3675,108 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
 
     return chunkedPostgresDelete(this.pool, 'memory_snapshots', 'timestamp < $1', [cutoffTimestamp]);
+  }
+
+  async saveScalingReadinessScore(score: StoredScalingReadinessScore): Promise<void> {
+    if (!this.pool) throw new Error('Database not initialized');
+    await this.pool.query(
+      `INSERT INTO scaling_readiness_scores
+        (id, connection_id, timestamp, score, band, binding_dimension, dimensions)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        score.id,
+        score.connectionId,
+        score.timestamp,
+        score.score,
+        score.band,
+        score.bindingDimension,
+        JSON.stringify(score.dimensions),
+      ],
+    );
+  }
+
+  async getScalingReadinessScores(
+    query: ScalingReadinessScoreQuery,
+  ): Promise<StoredScalingReadinessScore[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      `SELECT * FROM (
+         SELECT * FROM scaling_readiness_scores
+         WHERE connection_id = $1 AND timestamp >= $2 AND timestamp <= $3
+         ORDER BY timestamp DESC LIMIT $4
+       ) AS recent ORDER BY timestamp ASC`,
+      [
+        query.connectionId,
+        query.from ?? 0,
+        query.to ?? Number.MAX_SAFE_INTEGER,
+        query.limit ?? 2000,
+      ],
+    );
+    return result.rows.map((r) => ({
+      id: r.id,
+      connectionId: r.connection_id,
+      timestamp: Number(r.timestamp),
+      score: r.score,
+      band: r.band,
+      bindingDimension: r.binding_dimension,
+      dimensions: (typeof r.dimensions === 'string'
+        ? JSON.parse(r.dimensions)
+        : r.dimensions) as ReadinessDimension[],
+    }));
+  }
+
+  async pruneOldScalingReadinessScores(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      return chunkedPostgresDelete(
+        this.pool,
+        'scaling_readiness_scores',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
+    }
+
+    return chunkedPostgresDelete(this.pool, 'scaling_readiness_scores', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
+  }
+
+  async getScalingReadinessSettings(
+    connectionId: string,
+  ): Promise<ScalingReadinessSettings | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'SELECT * FROM scaling_readiness_settings WHERE connection_id = $1',
+      [connectionId],
+    );
+    if (result.rows.length === 0) return null;
+    const row = result.rows[0];
+    return {
+      connectionId: row.connection_id,
+      alertEnabled: row.alert_enabled,
+      alertThreshold: row.alert_threshold,
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  async saveScalingReadinessSettings(
+    settings: ScalingReadinessSettings,
+  ): Promise<ScalingReadinessSettings> {
+    if (!this.pool) throw new Error('Database not initialized');
+    await this.pool.query(
+      `INSERT INTO scaling_readiness_settings (connection_id, alert_enabled, alert_threshold, updated_at)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (connection_id) DO UPDATE SET
+         alert_enabled = EXCLUDED.alert_enabled,
+         alert_threshold = EXCLUDED.alert_threshold,
+         updated_at = EXCLUDED.updated_at`,
+      [settings.connectionId, settings.alertEnabled, settings.alertThreshold, settings.updatedAt],
+    );
+    return settings;
   }
 
   // Command Stats Sample Methods

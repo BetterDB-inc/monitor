@@ -22,6 +22,7 @@ export enum WebhookEventType {
   AUDIT_POLICY_VIOLATION = 'audit.policy.violation',
   COMPLIANCE_ALERT = 'compliance.alert',
   METRIC_FORECAST_LIMIT = 'metric_forecast.limit',
+  SCALING_READINESS_LOW = 'scaling_readiness.low',
   INFERENCE_SLA_BREACH = 'inference.sla.breach',
   CVE_CRITICAL_DETECTED = 'cve.critical_detected',
   CVE_KEV_DETECTED = 'cve.kev_detected',
@@ -59,6 +60,7 @@ export const PRO_EVENTS: WebhookEventType[] = [
   WebhookEventType.LATENCY_SPIKE,
   WebhookEventType.CONNECTION_SPIKE,
   WebhookEventType.METRIC_FORECAST_LIMIT,
+  WebhookEventType.SCALING_READINESS_LOW,
   WebhookEventType.FAILOVER_STARTED,
   WebhookEventType.FAILOVER_COMPLETED,
   WebhookEventType.DATA_LOSS_DETECTED,
@@ -85,6 +87,7 @@ export const ENTERPRISE_EVENTS: WebhookEventType[] = [
 import { Tier } from '../license/types';
 import type { CveWebhookFindingSummary } from '../types/cve';
 import type { MetricKind } from '../types/metric-forecasting.types';
+import type { ScalingReadinessLowData } from '../types/scaling-readiness.types';
 export { Tier };
 
 /**
@@ -112,6 +115,7 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.LATENCY_SPIKE]: Tier.pro,
   [WebhookEventType.CONNECTION_SPIKE]: Tier.pro,
   [WebhookEventType.METRIC_FORECAST_LIMIT]: Tier.pro,
+  [WebhookEventType.SCALING_READINESS_LOW]: Tier.pro,
   [WebhookEventType.FAILOVER_STARTED]: Tier.pro,
   [WebhookEventType.FAILOVER_COMPLETED]: Tier.pro,
   [WebhookEventType.DATA_LOSS_DETECTED]: Tier.pro,
@@ -504,6 +508,8 @@ export interface IWebhookEventsProService {
     instance?: { host: string; port: number };
     connectionId: string;
   }): Promise<void>;
+
+  dispatchScalingReadinessLow(data: ScalingReadinessLowData): Promise<void>;
 
   dispatchInferenceSlaBreach(data: {
     indexName: string;

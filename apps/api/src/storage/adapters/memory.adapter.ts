@@ -91,6 +91,17 @@ import type { InvitationRepository } from '../../common/interfaces/invitation-re
 import { ActivityMemoryRepository } from './repositories/activity.memory.repository';
 import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
 
+import type {
+  StoredScalingReadinessScore,
+  ScalingReadinessScoreQuery,
+} from '../../common/interfaces/storage-port.interface';
+import type {
+  ReadinessBand,
+  ReadinessDimension,
+  ReadinessDimensionKey,
+  ScalingReadinessSettings,
+} from '@betterdb/shared';
+
 const NULL_SUB_DISCRIMINATOR = '__betterdb_null__';
 
 function pendingProposalSubDiscriminator(
@@ -1148,6 +1159,53 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       this.memorySnapshots = this.memorySnapshots.filter((e) => e.timestamp >= cutoffTimestamp);
     }
     return before - this.memorySnapshots.length;
+  }
+
+  private scalingReadinessScores: StoredScalingReadinessScore[] = [];
+  private scalingReadinessSettings = new Map<string, ScalingReadinessSettings>();
+
+  async saveScalingReadinessScore(score: StoredScalingReadinessScore): Promise<void> {
+    this.scalingReadinessScores.push({ ...score });
+  }
+
+  async getScalingReadinessScores(
+    query: ScalingReadinessScoreQuery,
+  ): Promise<StoredScalingReadinessScore[]> {
+    return this.scalingReadinessScores
+      .filter(
+        (r) =>
+          r.connectionId === query.connectionId &&
+          (query.from === undefined || r.timestamp >= query.from) &&
+          (query.to === undefined || r.timestamp <= query.to),
+      )
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .slice(-(query.limit ?? 2000));
+  }
+
+  async pruneOldScalingReadinessScores(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    const before = this.scalingReadinessScores.length;
+    this.scalingReadinessScores = this.scalingReadinessScores.filter(
+      (r) =>
+        r.timestamp >= cutoffTimestamp ||
+        (connectionId !== undefined && r.connectionId !== connectionId),
+    );
+    return before - this.scalingReadinessScores.length;
+  }
+
+  async getScalingReadinessSettings(
+    connectionId: string,
+  ): Promise<ScalingReadinessSettings | null> {
+    return this.scalingReadinessSettings.get(connectionId) ?? null;
+  }
+
+  async saveScalingReadinessSettings(
+    settings: ScalingReadinessSettings,
+  ): Promise<ScalingReadinessSettings> {
+    this.scalingReadinessSettings.set(settings.connectionId, { ...settings });
+    return settings;
   }
 
   // Command Stats Sample Methods

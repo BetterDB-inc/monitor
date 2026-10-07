@@ -41,6 +41,7 @@ export enum Feature {
   MONITOR_ANOMALY_TRIGGER = 'monitorAnomalyTrigger',
   MONITOR_SCHEDULED_CAPTURES = 'monitorScheduledCaptures',
   MONITOR_CAPTURE_DIFF = 'monitorCaptureDiff',
+  SCALING_READINESS_HISTORY = 'scalingReadinessHistory',
   // Enterprise-only features
   SSO_SAML = 'ssoSaml',
   COMPLIANCE_EXPORT = 'complianceExport',
@@ -70,6 +71,7 @@ export const TIER_FEATURES: Record<Tier, Feature[]> = {
     Feature.MONITOR_ANOMALY_TRIGGER,
     Feature.MONITOR_SCHEDULED_CAPTURES,
     Feature.MONITOR_CAPTURE_DIFF,
+    Feature.SCALING_READINESS_HISTORY,
   ],
   [Tier.enterprise]: Object.values(Feature),
 };

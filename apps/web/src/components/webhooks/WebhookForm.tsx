@@ -79,6 +79,7 @@ const EVENT_LABELS: Record<WebhookEventType, string> = {
   'acl.modified': 'ACL Modified',
   'config.changed': 'Config Changed',
   'metric_forecast.limit': 'Metric Forecast Limit',
+  'scaling_readiness.low': 'Scaling Readiness Low',
   'inference.sla.breach': 'Inference SLA Breach',
   'cve.critical_detected': 'CVE Critical Detected',
   'cve.kev_detected': 'CVE KEV Detected',

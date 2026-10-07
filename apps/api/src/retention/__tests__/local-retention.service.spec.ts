@@ -1,5 +1,6 @@
 import { LocalRetentionService } from '../local-retention.service';
 import { MS_PER_DAY } from '../retention-policy.service';
+import { runRetentionSweep } from '../retention-sweep';
 
 const NOW = 1_700_000_000_000;
 
@@ -24,6 +25,7 @@ describe('LocalRetentionService', () => {
       pruneOldLatencySnapshots: jest.fn().mockResolvedValue(0),
       pruneOldLatencyHistograms: jest.fn().mockResolvedValue(0),
       pruneOldMemorySnapshots: jest.fn().mockResolvedValue(0),
+      pruneOldScalingReadinessScores: jest.fn().mockResolvedValue(3),
       pruneOldCaptureChunks: jest.fn().mockResolvedValue(0),
       pruneOldCaptureSessions: jest.fn().mockResolvedValue(0),
       pruneOldCaptureTriggers: jest.fn().mockResolvedValue(0),
@@ -67,6 +69,13 @@ describe('LocalRetentionService', () => {
       expect(storage[method]).toHaveBeenCalledTimes(1);
       expect(storage[method]).toHaveBeenCalledWith(expectedCutoff);
     }
+  });
+
+  it('reports pruned scaling readiness scores under their own name', async () => {
+    const results = await runRetentionSweep(storage, 1_234, { error: jest.fn() } as any);
+
+    expect(storage.pruneOldScalingReadinessScores).toHaveBeenCalledWith(1_234);
+    expect(results.scaling_readiness_scores).toBe(3);
   });
 
   it('does nothing in cloud mode even when a window is configured', async () => {

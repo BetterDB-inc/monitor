@@ -5,6 +5,7 @@ import {
   type CveCriticalDetectedData,
   type LatencyRegressionDetectedData,
   type MetricKind,
+  type ScalingReadinessLowData,
   type WebhookInstanceInfo,
 } from '@betterdb/shared';
 import { LicenseService } from '@proprietary/licenses';
@@ -513,6 +514,32 @@ export class WebhookEventsProService implements OnModuleInit {
         timeToLimitMs: data.timeToLimitMs,
         growthRate: data.growthRate,
         message: `${data.metricKind} projected to reach ceiling (${ceilingLabel}) in ~${timeHours}h at current growth rate`,
+        timestamp: data.timestamp,
+        instance: data.instance,
+      },
+      data.connectionId,
+    );
+  }
+
+  async dispatchScalingReadinessLow(data: ScalingReadinessLowData): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.log('Scaling readiness low event skipped - requires PRO license');
+      return;
+    }
+    await this.webhookDispatcher.dispatchThresholdAlert(
+      WebhookEventType.SCALING_READINESS_LOW,
+      `scaling_readiness_low:${data.connectionId}`,
+      data.score,
+      data.threshold,
+      false,
+      {
+        score: data.score,
+        threshold: data.threshold,
+        band: data.band,
+        bindingDimension: data.bindingDimension,
+        summary: data.summary,
+        dimensions: data.dimensions,
+        message: `Scaling readiness ${data.score} dropped to ${data.threshold} or below: ${data.summary}`,
         timestamp: data.timestamp,
         instance: data.instance,
       },

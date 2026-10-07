@@ -34,6 +34,12 @@ export type {
   OtelTraceSummary,
   OtelTraceQueryOptions,
 } from '@betterdb/shared';
+import type {
+  ReadinessBand,
+  ReadinessDimension,
+  ReadinessDimensionKey,
+  ScalingReadinessSettings,
+} from '@betterdb/shared';
 export type { MetricForecastSettings, MetricKind } from '@betterdb/shared';
 export type { StoredCveDataset, CveScanResult } from '@betterdb/shared';
 export type {
@@ -380,6 +386,23 @@ export interface StoredMemorySnapshot {
   connectionId?: string;
 }
 
+export interface StoredScalingReadinessScore {
+  id: string;
+  connectionId: string;
+  timestamp: number;
+  score: number;
+  band: ReadinessBand;
+  bindingDimension: ReadinessDimensionKey | null;
+  dimensions: ReadinessDimension[];
+}
+
+export interface ScalingReadinessScoreQuery {
+  connectionId: string;
+  from?: number;
+  to?: number;
+  limit?: number;
+}
+
 export interface MemorySnapshotQueryOptions {
   connectionId?: string;
   startTime?: number;
@@ -576,6 +599,12 @@ export interface StoragePort {
   saveMemorySnapshots(snapshots: StoredMemorySnapshot[], connectionId: string): Promise<number>;
   getMemorySnapshots(options?: MemorySnapshotQueryOptions): Promise<StoredMemorySnapshot[]>;
   pruneOldMemorySnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  saveScalingReadinessScore(score: StoredScalingReadinessScore): Promise<void>;
+  getScalingReadinessScores(query: ScalingReadinessScoreQuery): Promise<StoredScalingReadinessScore[]>;
+  pruneOldScalingReadinessScores(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+  getScalingReadinessSettings(connectionId: string): Promise<ScalingReadinessSettings | null>;
+  saveScalingReadinessSettings(settings: ScalingReadinessSettings): Promise<ScalingReadinessSettings>;
 
   // Command Stats Sample Methods - connectionId required for writes
   saveCommandStatsSamples(
