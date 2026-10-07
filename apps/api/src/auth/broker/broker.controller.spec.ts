@@ -281,6 +281,8 @@ describe('BrokerController', () => {
     });
     expect(built.telemetry.trackWorkspaceFirstRegister).toHaveBeenCalledWith({
       method: 'broker',
+      email: 'owner@example.com',
+      name: 'Owner',
     });
   });
 

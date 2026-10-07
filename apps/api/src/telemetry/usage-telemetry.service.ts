@@ -115,7 +115,11 @@ export class UsageTelemetryService implements OnModuleInit {
     this.sendEvent('invite_accepted', opts);
   }
 
-  async trackWorkspaceFirstRegister(opts: { method: AuthMethod }): Promise<void> {
+  async trackWorkspaceFirstRegister(opts: {
+    method: AuthMethod;
+    email: string;
+    name: string | null;
+  }): Promise<void> {
     this.sendEvent('workspace_first_register', opts);
   }
 

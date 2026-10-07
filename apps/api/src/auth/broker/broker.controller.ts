@@ -279,7 +279,11 @@ export class BrokerController {
       details: { method, provider },
     });
     if (resolved.entrance === 'register') {
-      void this.telemetry.trackWorkspaceFirstRegister({ method: 'broker' });
+      void this.telemetry.trackWorkspaceFirstRegister({
+        method: 'broker',
+        email: resolved.member.email,
+        name: resolved.member.name,
+      });
       return;
     }
     if (resolved.entrance === 'invite') {

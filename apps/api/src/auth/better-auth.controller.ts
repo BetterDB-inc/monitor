@@ -16,6 +16,7 @@ const SIGN_OUT_SUFFIX = '/sign-out';
 interface SignedInUser {
   id: string;
   email: string;
+  name: string | null;
 }
 
 function parseSignedInUser(text: string): SignedInUser | null {
@@ -28,11 +29,11 @@ function parseSignedInUser(text: string): SignedInUser | null {
     if (typeof user !== 'object' || user === null) {
       return null;
     }
-    const { id, email } = user as { id?: unknown; email?: unknown };
+    const { id, email, name } = user as { id?: unknown; email?: unknown; name?: unknown };
     if (typeof id !== 'string' || typeof email !== 'string') {
       return null;
     }
-    return { id, email };
+    return { id, email, name: typeof name === 'string' ? name : null };
   } catch {
     return null;
   }
@@ -102,7 +103,7 @@ export class BetterAuthController {
         ip: req.ip,
         details: { method },
       });
-      this.trackLogin(method);
+      this.trackLogin(method, user);
       return;
     }
     if (pathname.endsWith(SIGN_OUT_SUFFIX) === true && actorBefore !== null) {
@@ -115,9 +116,13 @@ export class BetterAuthController {
     }
   }
 
-  private trackLogin(method: 'password' | 'register'): void {
+  private trackLogin(method: 'password' | 'register', user: SignedInUser): void {
     if (method === 'register') {
-      void this.telemetry.trackWorkspaceFirstRegister({ method: 'password' });
+      void this.telemetry.trackWorkspaceFirstRegister({
+        method: 'password',
+        email: user.email,
+        name: user.name,
+      });
       return;
     }
     void this.telemetry.trackUserLogin({ method: 'password' });

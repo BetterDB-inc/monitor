@@ -482,7 +482,11 @@ describe('BetterAuthController telemetry', () => {
     const signUp = await post('/auth/sign-up/email', owner, '10.1.11.1');
     expect(signUp.statusCode).toBe(200);
     expect(telemetry.trackWorkspaceFirstRegister).toHaveBeenCalledTimes(1);
-    expect(telemetry.trackWorkspaceFirstRegister).toHaveBeenCalledWith({ method: 'password' });
+    expect(telemetry.trackWorkspaceFirstRegister).toHaveBeenCalledWith({
+      method: 'password',
+      email: owner.email,
+      name: owner.name,
+    });
     expect(telemetry.trackUserLogin).not.toHaveBeenCalled();
 
     const closed = await post(
