@@ -8,10 +8,18 @@ import { KvCacheSamplesService } from './kv-cache-samples.service';
 import { fetchMetricsText, ScrapeError } from './metrics-fetch';
 import { parseLmcacheMetrics } from './prometheus-text';
 
+const DEFAULT_INTERVAL_MS = 30000;
+const MIN_INTERVAL_MS = 1000;
+
+function resolveIntervalMs(): number {
+  const parsed = parseInt(process.env.KV_CACHE_SCRAPE_INTERVAL_MS || String(DEFAULT_INTERVAL_MS), 10);
+  return !Number.isFinite(parsed) || parsed < MIN_INTERVAL_MS ? DEFAULT_INTERVAL_MS : parsed;
+}
+
 @Injectable()
 export class KvCacheScrapeService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(KvCacheScrapeService.name);
-  private readonly intervalMs = parseInt(process.env.KV_CACHE_SCRAPE_INTERVAL_MS || '30000', 10);
+  private readonly intervalMs = resolveIntervalMs();
   private timer: NodeJS.Timeout | null = null;
   private running = false;
 

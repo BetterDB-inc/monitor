@@ -97,4 +97,45 @@ describe('KvCacheScrapeService', () => {
     await Promise.all([first, second]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+  it('scrapes again on a later tick after the first completes', async () => {
+    fetchMock.mockResolvedValue(body);
+    const { service } = setup([engine()]);
+    await service.tick(1000);
+    await service.tick(2000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('starts scraping once the licence becomes active', async () => {
+    fetchMock.mockResolvedValue(body);
+    const { service, license } = setup([engine()], false);
+    await service.tick(1000);
+    expect(fetchMock).not.toHaveBeenCalled();
+    license.hasFeature.mockReturnValue(true);
+    await service.tick(2000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  describe('interval', () => {
+    const original = process.env.KV_CACHE_SCRAPE_INTERVAL_MS;
+    afterEach(() => {
+      if (original === undefined) delete process.env.KV_CACHE_SCRAPE_INTERVAL_MS;
+      else process.env.KV_CACHE_SCRAPE_INTERVAL_MS = original;
+      jest.restoreAllMocks();
+    });
+
+    it.each([
+      ['abc', 30000],
+      ['0', 30000],
+      ['-5', 30000],
+      ['', 30000],
+      ['5000', 5000],
+    ])('uses the right interval for %p', (value, expected) => {
+      process.env.KV_CACHE_SCRAPE_INTERVAL_MS = value;
+      const spy = jest.spyOn(global, 'setInterval');
+      const { service } = setup([]);
+      service.onModuleInit();
+      service.onModuleDestroy();
+      expect(spy).toHaveBeenCalledWith(expect.any(Function), expected);
+    });
+  });
 });
