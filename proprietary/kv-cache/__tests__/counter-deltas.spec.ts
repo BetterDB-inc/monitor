@@ -73,6 +73,21 @@ describe('CounterDeltaTracker', () => {
     expect(t.drain(200_000).map((b) => [b.timestamp, b.hitTokens])).toEqual([[0, 5], [60_000, 4]]);
   });
 
+  it('rejects inherited metric names', () => {
+    const t = new CounterDeltaTracker();
+    expect(t.observe(obs({ metric: 'constructor', value: 1 }), 1_000)).toBe(false);
+    expect(t.observe(obs({ metric: 'toString', value: 2, cumulative: false }), 2_000)).toBe(false);
+    expect(t.drain(200_000, true)).toEqual([]);
+  });
+
+  it('rejects non-finite values without disturbing the next delta', () => {
+    const t = new CounterDeltaTracker();
+    t.observe(obs({ value: 100 }), 1_000);
+    expect(t.observe(obs({ value: NaN }), 2_000)).toBe(false);
+    t.observe(obs({ value: 150 }), 3_000);
+    expect(t.drain(60_000)[0].hitTokens).toBe(50);
+  });
+
   it('forgets an engine', () => {
     const t = new CounterDeltaTracker();
     t.observe(obs({ value: 0 }), 1_000);

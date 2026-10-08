@@ -44,8 +44,9 @@ export class CounterDeltaTracker {
   private readonly buckets = new Map<string, KvCacheEngineSample>();
 
   observe(observation: CounterObservation, nowMs: number): boolean {
+    if (!Object.hasOwn(METRIC_FIELDS, observation.metric)) return false;
+    if (!Number.isFinite(observation.value)) return false;
     const field = METRIC_FIELDS[observation.metric];
-    if (!field) return false;
     const delta = observation.cumulative
       ? this.cumulativeDelta(observation)
       : observation.value >= 0
