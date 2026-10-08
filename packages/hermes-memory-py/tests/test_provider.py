@@ -15,7 +15,14 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import List
 
-from betterdb_hermes_memory import RECALL_K, BetterDBMemoryProvider, register
+import betterdb_hermes_memory as provider_mod
+from betterdb_hermes_memory import (
+    RECALL_K,
+    BetterDBMemoryProvider,
+    _Config,
+    _tls_url,
+    register,
+)
 from betterdb_hermes_memory.embeddings import EmbeddingConfig, build_http_embed_fn
 from betterdb_hermes_memory.runtime import LoopRuntime
 
@@ -165,6 +172,49 @@ def test_name():
     assert provider.name == "betterdb"
 
 
+def test_is_available_false_when_secret_lookup_raises(monkeypatch):
+    # If resolving config/secrets raises in the active scope (e.g. an unresolved
+    # profile secret), availability must fail closed — never propagate the error.
+    def _boom(name, default=""):
+        raise RuntimeError("no active profile scope")
+
+    monkeypatch.setattr(provider_mod, "_get_secret", _boom)
+    provider = BetterDBMemoryProvider(config={"host": "db.internal"}, embed_fn=lambda text: None)
+    assert provider.is_available() is False
+    reason = provider.unavailable_reason()
+    assert reason and "could not be resolved" in reason.lower()
+
+
+# --------------------------------------------------------------------------- #
+# TLS via URL scheme (ssl= kwarg would crash from_url)
+# --------------------------------------------------------------------------- #
+
+def test_tls_url_upgrades_scheme():
+    assert _tls_url("valkey://host:6379/0") == "valkeys://host:6379/0"
+    assert _tls_url("redis://host:6379") == "rediss://host:6379"
+    # Already-secure schemes are untouched.
+    assert _tls_url("valkeys://host:6379") == "valkeys://host:6379"
+    assert _tls_url("rediss://host:6379") == "rediss://host:6379"
+    # A string without a scheme is returned unchanged.
+    assert _tls_url("host:6379") == "host:6379"
+
+
+def test_build_client_url_tls_selects_ssl_without_crash():
+    # tls=true + url must NOT pass ssl= to from_url (valkey-py rejects it); TLS is
+    # expressed through the upgraded scheme, which selects the SSL connection class.
+    provider = BetterDBMemoryProvider(config={})
+    provider._config = _Config({"url": "valkey://localhost:6379/0", "tls": True})
+    client = provider._build_client()  # must not raise
+    assert client.connection_pool.connection_class.__name__ == "SSLConnection"
+
+
+def test_build_client_url_without_tls_is_plaintext():
+    provider = BetterDBMemoryProvider(config={})
+    provider._config = _Config({"url": "valkey://localhost:6379/0", "tls": False})
+    client = provider._build_client()
+    assert client.connection_pool.connection_class.__name__ == "Connection"
+
+
 # --------------------------------------------------------------------------- #
 # recall -> prefetch
 # --------------------------------------------------------------------------- #
@@ -268,6 +318,15 @@ def test_initialize_registers_index_and_discovery():
     # mirroring the SDK facade (ensure_index then ensure_discovery_ready).
     assert store.index_ready is True
     assert store.discovery_ready is True
+
+
+def test_discovery_disabled_skips_registration():
+    # discovery=false opts out: the index is still built, but no discovery marker
+    # is registered.
+    provider, store = _wired(discovery=False)
+    assert store.index_ready is True
+    assert store.discovery_ready is False
+    assert provider._config.discovery is False
 
 
 # --------------------------------------------------------------------------- #
@@ -387,6 +446,27 @@ def test_http_embedder_reuses_one_client():
     asyncio.new_event_loop().run_until_complete(embedder.aclose())
     assert fake.closed is True
     assert embedder._client is None
+
+
+def test_http_embedder_does_not_rebuild_after_close():
+    # After aclose(), a late embed queued during shutdown must not resurrect a
+    # client on a dying loop — it fails fast instead.
+    embedder = build_http_embed_fn(EmbeddingConfig(api_key="sk-x"))
+    asyncio.new_event_loop().run_until_complete(embedder.aclose())
+
+    try:
+        embedder._get_client()
+        assert False, "expected RuntimeError after close"
+    except RuntimeError:
+        pass
+
+    try:
+        asyncio.new_event_loop().run_until_complete(embedder("hello"))
+        assert False, "expected RuntimeError after close"
+    except RuntimeError:
+        pass
+
+    assert embedder._client is None  # never rebuilt
 
 
 # --------------------------------------------------------------------------- #

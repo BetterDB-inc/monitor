@@ -111,12 +111,28 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
+def _tls_url(url: str) -> str:
+    """Return *url* with its scheme upgraded to the TLS variant.
+
+    valkey-py's ``from_url`` rejects an ``ssl=`` keyword, so TLS for a URL
+    connection is expressed through the scheme: ``valkeys://`` / ``rediss://``
+    select the SSL connection class. A plaintext scheme is upgraded in place; an
+    already-secure (or unrecognized) scheme is returned untouched.
+    """
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        return url
+    upgrade = {"valkey": "valkeys", "redis": "rediss"}
+    return f"{upgrade.get(scheme.lower(), scheme)}{sep}{rest}"
+
+
 class _Config:
     """Resolved provider configuration: connection + store + embeddings.
 
-    Built fresh at each availability/lifecycle check (never cached at construction)
-    so every Hermes profile reads its own live secrets rather than freezing the
-    first profile's.
+    A provider instance is bound to a single Hermes profile/session. Config and
+    secrets are resolved live at each availability check and at initialize() for
+    that profile — rather than cached at construction — so the values always
+    reflect that profile's current scope.
     """
 
     def __init__(self, block: Optional[Dict[str, Any]] = None):
@@ -133,6 +149,9 @@ class _Config:
         self.tls: bool = _as_bool(block.get("tls"), False)
         self.store_name: str = str(block.get("store_name", "") or "") or DEFAULT_STORE_NAME
         self.namespace: str = str(block.get("namespace", "") or "")
+        # Register a discovery marker so BetterDB Monitor can enumerate this tier.
+        # On by default to preserve existing behavior; set false to opt out.
+        self.discovery: bool = _as_bool(block.get("discovery"), True)
         # Whether the user *explicitly* pointed us at a connection, as opposed to
         # falling through to the silent 127.0.0.1 default. Availability must reflect
         # real configuration (see has_connection); the client still targets
@@ -171,9 +190,10 @@ class BetterDBMemoryProvider(MemoryProvider):
         # Injected store/runtime/embed_fn let tests exercise the mapping without a
         # live Valkey or an embeddings endpoint.
         #
-        # Keep only the raw override dict; a fresh _Config is resolved live at each
-        # availability check and at initialize() so each profile reads its OWN
-        # secrets instead of freezing whichever profile constructed us first.
+        # Keep only the raw override dict. This instance serves one profile/session;
+        # a fresh _Config is resolved live at each availability check and at
+        # initialize() so it reads that profile's secrets under the active scope
+        # rather than freezing whatever was in scope at construction.
         self._config_input = config
         self._config: Optional[_Config] = None  # set in initialize() for operational use
         self._store = store
@@ -197,21 +217,26 @@ class BetterDBMemoryProvider(MemoryProvider):
     def is_available(self) -> bool:
         """SDK importable, a connection target configured, and an embedding source
         resolvable. Pure config/dependency checks — never touches the network.
-        Resolves a fresh config so the active profile's live secrets are read."""
-        try:
-            import betterdb_agent_memory  # noqa: F401
-        except Exception:
-            return False
-        config = _Config(self._config_input)
-        has_embeddings = self._embed_fn is not None or config.embeddings.is_configured()
-        return config.has_connection() and has_embeddings
+        Available exactly when there is no reason to be unavailable."""
+        return not self.unavailable_reason()
 
     def unavailable_reason(self) -> str:
+        """Empty string when usable, else a human-readable reason.
+
+        Resolves a fresh config so the active profile's live secrets are read. Fails
+        closed: if the config/secret lookup itself raises (e.g. a profile secret that
+        can't be resolved in the current scope), that is reported as an unavailable
+        reason rather than propagated — neither this method nor is_available() ever
+        raises to a Hermes caller.
+        """
         try:
             import betterdb_agent_memory  # noqa: F401
         except Exception:
             return "betterdb-agent-memory is not installed (pip install betterdb-agent-memory)."
-        config = _Config(self._config_input)
+        try:
+            config = _Config(self._config_input)
+        except Exception as exc:
+            return f"BetterDB memory configuration could not be resolved: {exc}"
         if not config.has_connection():
             return "No Valkey connection configured (set memory.betterdb.host or BETTERDB_MEMORY_URL)."
         if not (self._embed_fn is not None or config.embeddings.is_configured()):
@@ -241,6 +266,9 @@ class BetterDBMemoryProvider(MemoryProvider):
              "default": DEFAULT_STORE_NAME},
             {"key": "namespace", "description": "Optional memory namespace (scopes recall/writes)",
              "default": ""},
+            {"key": "discovery",
+             "description": "Register a discovery marker so BetterDB Monitor can enumerate this tier",
+             "type": "boolean", "default": "true", "choices": ["true", "false"]},
             {"key": "embeddings_model", "description": "Embeddings model",
              "default": DEFAULT_EMBEDDINGS_MODEL},
             {"key": "embeddings_base_url",
@@ -293,37 +321,41 @@ class BetterDBMemoryProvider(MemoryProvider):
                 client=self._client,
                 name=self._config.store_name,
                 embed_fn=self._embed_fn,
-                discovery=True,  # let BetterDB Monitor enumerate this tier
+                discovery=self._config.discovery,
             )
 
         # Create the vector index up front, off the calling thread. The store is
         # unusable until the index exists, but a turn should never block on it.
         self._submit(self._store.ensure_index(), label="ensure_index")
         # Register this tier for discovery, mirroring the SDK's AgentMemory facade
-        # (ensure_discovery_ready after ensure_index under a running loop). Guarded
-        # so an injected store without the hook doesn't break initialize.
-        ensure_discovery = getattr(self._store, "ensure_discovery_ready", None)
-        if callable(ensure_discovery):
-            self._submit(ensure_discovery(), label="discovery")
+        # (ensure_discovery_ready after ensure_index under a running loop). Skipped
+        # when discovery is disabled, and guarded so an injected store without the
+        # hook doesn't break initialize.
+        if self._config.discovery:
+            ensure_discovery = getattr(self._store, "ensure_discovery_ready", None)
+            if callable(ensure_discovery):
+                self._submit(ensure_discovery(), label="discovery")
 
     def _build_client(self) -> Any:
         """Construct a ``valkey.asyncio`` client from the resolved config."""
         import valkey.asyncio as valkey  # type: ignore
 
         if self._config.url:
-            # A URL may omit auth/tls/db; apply any that were set separately so a
-            # user who provides URL + BETTERDB_MEMORY_PASSWORD isn't silently
-            # unauthenticated. valkey-py's from_url accepts these as overrides.
+            # Gap-fill: a URL may omit auth/db, so pass any separately-configured
+            # fields as from_url kwargs (a user who provides URL +
+            # BETTERDB_MEMORY_PASSWORD isn't silently unauthenticated). Note the
+            # direction of precedence — valkey-py merges the URL's own components
+            # last, so credentials/db embedded in the URL win over these kwargs;
+            # the separate fields only fill what the URL leaves out.
+            url = _tls_url(self._config.url) if self._config.tls else self._config.url
             extra: Dict[str, Any] = {}
             if self._config.password:
                 extra["password"] = self._config.password
             if self._config.username:
                 extra["username"] = self._config.username
-            if self._config.tls:
-                extra["ssl"] = True
             if self._config._explicit_db:
                 extra["db"] = self._config.db
-            return valkey.Valkey.from_url(self._config.url, **extra)
+            return valkey.Valkey.from_url(url, **extra)
         kwargs: Dict[str, Any] = {
             "host": self._config.host,
             "port": self._config.port,
@@ -547,11 +579,15 @@ class BetterDBMemoryProvider(MemoryProvider):
         client, embed_fn = self._client, self._embed_fn
         self._store = self._runtime = self._client = None
         if runtime is not None:
-            # Close the store first — its discovery/analytics teardown still needs a
-            # live client — then release the Valkey client pool and the shared
-            # embeddings HTTP client, all on the loop, and only then stop the loop.
-            # (The finding lists client-close first; store.close() needs the client,
-            # so we close the store ahead of it — same no-leak outcome.)
+            # Quiesce in-flight background work BEFORE releasing the resources it
+            # uses, so a queued embed/remember can't rebuild a client on a loop that
+            # is about to stop. Then tear down on the loop, ordered by dependency:
+            # close the store first (its discovery/analytics teardown still needs a
+            # live client), then release the Valkey client pool and the shared
+            # embeddings HTTP client, and only then stop the loop.
+            drain = getattr(runtime, "drain", None)
+            if callable(drain):
+                drain()
             self._run_quiet(runtime, store.close() if store is not None else None, "store close")
             self._run_quiet(runtime, self._aclose(client), "client close")
             self._run_quiet(runtime, self._aclose(embed_fn), "embedder close")

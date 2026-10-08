@@ -65,6 +65,7 @@ class _HttpEmbedder:
         self._config = config
         self._url = f"{config.base_url.rstrip('/')}/embeddings"
         self._client: Optional[Any] = None
+        self._closed = False
 
     def _headers(self) -> dict:
         headers = {"Content-Type": "application/json"}
@@ -73,6 +74,10 @@ class _HttpEmbedder:
         return headers
 
     def _get_client(self) -> Any:
+        # Once closed, never resurrect the client: a late embed queued during
+        # shutdown must not stand up a fresh client on a dying loop.
+        if self._closed:
+            raise RuntimeError("embedder is closed")
         # No await between the check and the assignment, and the runtime loop is
         # single-threaded, so concurrent embed coroutines can't race a second client.
         if self._client is None:
@@ -82,6 +87,8 @@ class _HttpEmbedder:
         return self._client
 
     async def __call__(self, text: str) -> List[float]:
+        if self._closed:
+            raise RuntimeError("embedder is closed")
         client = self._get_client()
         payload = {"model": self._config.model, "input": text}
         resp = await client.post(self._url, json=payload, headers=self._headers())
@@ -91,6 +98,7 @@ class _HttpEmbedder:
         return [float(x) for x in data["data"][0]["embedding"]]
 
     async def aclose(self) -> None:
+        self._closed = True
         client, self._client = self._client, None
         if client is not None:
             await client.aclose()
