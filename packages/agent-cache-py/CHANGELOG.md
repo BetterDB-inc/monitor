@@ -1,3 +1,31 @@
+## [0.12.0] - 2026-07-13
+
+### Added
+
+- **Streaming response caching for the OpenAI Agents SDK adapter**
+  (`betterdb_agent_cache.adapters.openai_agents`). `CachedModel.stream_response()`
+  is now cache-aware: on a miss the upstream event stream passes through
+  unchanged while the terminal `response.completed` is captured and persisted
+  via `cache.llm.store_multipart()` after the stream drains; on a hit the
+  stored response is replayed as synthesized Responses stream events and the
+  underlying model is not called. Streamed requests share cache entries with
+  their non-streamed twins (`get_response` key parity), so a stream can hit
+  what a non-stream call stored, and vice-versa. Store failures are fail-open
+  and never interrupt the delivered stream. This is the Python counterpart to
+  the Vercel AI SDK `wrapStream` streaming cache added to `@betterdb/agent-cache`
+  in v0.11.0.
+
+### Behavior
+
+- **Tool-call streams are not stored** — mirrors the
+  `@betterdb/agent-cache` v0.11.0 `wrapStream` convention of not caching
+  half-executed agent steps. Non-streaming `get_response()` continues to cache
+  tool calls; the streaming/non-streaming asymmetry is intentional for this
+  release and can be revisited in a follow-up.
+- Upstream stream errors propagate unchanged; partial streams are not stored.
+- Store happens after stream completion; store failures log a warning and
+  never surface to the caller.
+
 ## [0.11.0] - 2026-07-10
 
 ### Added
