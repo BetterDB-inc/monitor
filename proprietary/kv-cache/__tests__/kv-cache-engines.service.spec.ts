@@ -18,7 +18,8 @@ function setup(encrypted = true) {
   } as any;
   const encryption = encrypted ? { encrypt: (s: string) => 'enc:' + s, decrypt: (s: string) => s.slice(4) } : null;
   const connections = { getEncryptionService: jest.fn().mockReturnValue(encryption) } as any;
-  return { service: new KvCacheEnginesService(registry, connections), registry, store, connections };
+  const samples = { forgetEngine: jest.fn() } as any;
+  return { service: new KvCacheEnginesService(registry, connections, samples), registry, store, connections, samples };
 }
 
 describe('KvCacheEnginesService', () => {
@@ -122,11 +123,13 @@ describe('KvCacheEnginesService', () => {
   });
 
   it('removes engines of the connection', async () => {
-    const { service, store } = setup();
+    const { service, store, samples } = setup();
     const created = await service.create('c1', { name: 'n', source: 'scrape', scrapeUrl: 'http://x' });
     await expect(service.remove('c2', created.id)).rejects.toBeInstanceOf(NotFoundException);
+    expect(samples.forgetEngine).not.toHaveBeenCalled();
     await service.remove('c1', created.id);
     expect(store.has(created.id)).toBe(false);
+    expect(samples.forgetEngine).toHaveBeenCalledWith(created.id);
   });
 
   it('sends the re-test without auth when the header is cleared with a URL change', async () => {

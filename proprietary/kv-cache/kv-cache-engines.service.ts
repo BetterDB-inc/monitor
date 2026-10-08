@@ -5,6 +5,7 @@ import type { StoredKvCacheEngine } from '@app/common/interfaces/storage-port.in
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { KvCacheEngineRegistry } from './kv-cache-engine-registry';
 import type { CreateKvCacheEngineDto, UpdateKvCacheEngineDto } from './dto/kv-cache-engine.dto';
+import { KvCacheSamplesService } from './kv-cache-samples.service';
 import { fetchMetricsText, ScrapeError } from './metrics-fetch';
 import { parseLmcacheMetrics } from './prometheus-text';
 import { toPublicEngine } from './kv-cache-status.service';
@@ -22,6 +23,7 @@ export class KvCacheEnginesService {
   constructor(
     private readonly registry: KvCacheEngineRegistry,
     private readonly connectionRegistry: ConnectionRegistry,
+    private readonly samples: KvCacheSamplesService,
   ) {}
 
   list(connectionId: string): KvCacheEngine[] {
@@ -81,6 +83,7 @@ export class KvCacheEnginesService {
   async remove(connectionId: string, id: string): Promise<void> {
     this.owned(connectionId, id);
     await this.registry.remove(id);
+    this.samples.forgetEngine(id);
   }
 
   authHeaderFor(engine: StoredKvCacheEngine): string | null {

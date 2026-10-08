@@ -6,11 +6,12 @@ import { KvCacheController } from './kv-cache.controller';
 import { KvCacheEngineRegistry } from './kv-cache-engine-registry';
 import { KvCacheEnginesService } from './kv-cache-engines.service';
 import { KvCacheFootprintService } from './kv-cache-footprint.service';
+import { KvCacheSamplesService } from './kv-cache-samples.service';
 import { KvCacheStatusService } from './kv-cache-status.service';
 
 @Module({
   imports: [StorageModule, ConnectionsModule, LicenseModule],
   controllers: [KvCacheController],
-  providers: [KvCacheFootprintService, KvCacheStatusService, KvCacheEngineRegistry, KvCacheEnginesService],
+  providers: [KvCacheFootprintService, KvCacheStatusService, KvCacheEngineRegistry, KvCacheSamplesService, KvCacheEnginesService],
 })
 export class KvCacheModule {}
