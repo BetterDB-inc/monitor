@@ -120,6 +120,7 @@ describe('OtelMetricsIngestService', () => {
       unmapped_metric: 1,
       invalid_value: 1,
       cardinality_limit: 0,
+      unknown_engine: 0,
     });
     expect(toPartialSuccess(result)).toEqual({
       rejectedDataPoints: 8,
@@ -419,5 +420,55 @@ describe('OtelMetricsIngestService discovery', () => {
     const result = service.ingest(resource(named, [gauge('redis.memory.used', 1)]), NOW_MS);
     expect(discovered.list(NOW_MS)).toEqual([]);
     expect(result.dropped.unknown_instance).toBe(1);
+  });
+
+  describe('KV cache routing', () => {
+    const lmcacheSum = (name: string): OtlpMetric => ({
+      name,
+      sum: { dataPoints: [{ attributes: [], asInt: '5' }, { attributes: [], asInt: '6' }], aggregationTemporality: 2 },
+    });
+
+    function buildWithSink(sinkResult = { accepted: 2, dropped: { unmapped_metric: 3 } as Record<string, number> }) {
+      const registry = { findByHostPort: jest.fn() } as unknown as ConnectionRegistry;
+      const store = new ExternalMetricsStore();
+      const applySpy = jest.spyOn(store, 'apply');
+      const sink = { ingest: jest.fn().mockReturnValue(sinkResult) };
+      const service = new OtelMetricsIngestService(registry, store, undefined, undefined, sink);
+      return { service, registry, applySpy, sink };
+    }
+
+    it('routes a resource with the engine attribute to the sink', () => {
+      const { service, registry, applySpy, sink } = buildWithSink();
+      const metrics = [lmcacheSum('lmcache:num_hit_tokens_total')];
+      const result = service.ingest(resource([str('betterdb.lmcache.engine', 'eng-1')], metrics), NOW_MS);
+      expect(sink.ingest).toHaveBeenCalledWith({ 'betterdb.lmcache.engine': 'eng-1' }, metrics, NOW_MS);
+      expect(registry.findByHostPort).not.toHaveBeenCalled();
+      expect(applySpy).not.toHaveBeenCalled();
+      expect(result.accepted).toBe(2);
+      expect(result.dropped.unmapped_metric).toBe(3);
+    });
+
+    it('routes a resource whose metrics are all lmcache without the attribute', () => {
+      const { service, sink } = buildWithSink();
+      service.ingest(resource([], [lmcacheSum('lmcache:num_hit_tokens_total')]), NOW_MS);
+      expect(sink.ingest).toHaveBeenCalledTimes(1);
+    });
+
+    it('drops an lmcache resource as unknown_engine when no sink is present', () => {
+      const { service } = build();
+      const result = service.ingest(
+        resource([str('betterdb.lmcache.engine', 'eng-1')], [lmcacheSum('lmcache:num_hit_tokens_total')]),
+        NOW_MS,
+      );
+      expect(result.dropped.unknown_engine).toBe(2);
+      expect(result.accepted).toBe(0);
+    });
+
+    it('keeps the Valkey path when a sink is present', () => {
+      const { service, sink } = buildWithSink();
+      const result = service.ingest(resource([], [gauge('redis.memory.used', 1)]), NOW_MS);
+      expect(sink.ingest).not.toHaveBeenCalled();
+      expect(result.dropped.unidentified).toBe(1);
+    });
   });
 });

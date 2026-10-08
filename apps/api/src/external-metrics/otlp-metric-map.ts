@@ -168,6 +168,10 @@ export function resolveInstanceKeys(attrs: Record<string, string>): InstanceKey[
   return keys;
 }
 
+export function isDeltaTemporality(temporality: number | string | undefined): boolean {
+  return temporality === 1 || temporality === 'AGGREGATION_TEMPORALITY_DELTA';
+}
+
 export function pointValue(dp: OtlpNumberDataPoint): string | null {
   if (dp.asInt !== undefined && dp.asInt !== null) {
     const s = String(dp.asInt);
