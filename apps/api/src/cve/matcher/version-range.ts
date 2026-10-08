@@ -130,6 +130,20 @@ function lowestPatchedAt(ranges: BranchRange[]): string | undefined {
   });
 }
 
+/**
+ * True when the version sits at or above an upper bound published for its
+ * own branch, i.e. the branch says "fixed here". A wildcard range must never
+ * override that, or a broad cross-branch range would re-flag patched builds.
+ */
+function pastBranchFix(version: string, onBranch: BranchRange[]): boolean {
+  return onBranch.some((range) => {
+    return (
+      (range.vulnerableBelow !== undefined || range.vulnerableAtOrBelow !== undefined) &&
+      belowUpperBoundOf(version, range) === false
+    );
+  });
+}
+
 export function matchRanges(version: string, ranges: BranchRange[]): VersionMatch {
   const branch = branchOf(version);
   const onBranch = ranges.filter((range) => {
@@ -139,7 +153,9 @@ export function matchRanges(version: string, ranges: BranchRange[]): VersionMatc
     return range.branch === WILDCARD_BRANCH;
   });
 
-  const vulnerable = firstVulnerable(version, onBranch) ?? firstVulnerable(version, wildcard);
+  const vulnerable =
+    firstVulnerable(version, onBranch) ??
+    (pastBranchFix(version, onBranch) ? null : firstVulnerable(version, wildcard));
   if (vulnerable !== null) {
     return vulnerable;
   }

@@ -1,0 +1,18 @@
+[
+  {
+    "ghsa_id": "GHSA-4789-qfc9-5f9q",
+    "cve_id": "CVE-2025-49844",
+    "severity": "critical",
+    "cvss": { "score": 10 },
+    "cwe_ids": ["CWE-416"],
+    "summary": "Lua use-after-free may lead to remote code execution",
+    "html_url": "https://github.com/redis/redis/security/advisories/GHSA-4789-qfc9-5f9q",
+    "vulnerabilities": [
+      {
+        "package": { "ecosystem": "", "name": "redis" },
+        "vulnerable_version_range": "All",
+        "patched_versions": "6.2.20, 7.2.11, 7.4.6, 8.0.4, 8.2.2"
+      }
+    ]
+  }
+]
