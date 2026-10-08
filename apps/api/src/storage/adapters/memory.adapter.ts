@@ -94,12 +94,18 @@ import type { ActivityRepository } from '../../common/interfaces/activity-reposi
 import type {
   StoredScalingReadinessScore,
   ScalingReadinessScoreQuery,
+  StoredKvCacheEngine,
+  KvCacheRangeQuery,
+  KvCacheSampleQuery,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   ReadinessBand,
   ReadinessDimension,
   ReadinessDimensionKey,
   ScalingReadinessSettings,
+  KvCacheEngineSample,
+  KvCacheFootprintSnapshot,
+  KvCacheSettings,
 } from '@betterdb/shared';
 
 const NULL_SUB_DISCRIMINATOR = '__betterdb_null__';
@@ -1206,6 +1212,104 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   ): Promise<ScalingReadinessSettings> {
     this.scalingReadinessSettings.set(settings.connectionId, { ...settings });
     return settings;
+  }
+
+  private kvCacheSnapshots: KvCacheFootprintSnapshot[] = [];
+  private kvCacheSamples: KvCacheEngineSample[] = [];
+  private kvCacheEngines = new Map<string, StoredKvCacheEngine>();
+  private kvCacheSettings = new Map<string, KvCacheSettings>();
+
+  private inKvCacheRange(row: { connectionId: string; timestamp: number }, query: KvCacheRangeQuery): boolean {
+    return (
+      row.connectionId === query.connectionId &&
+      (query.from === undefined || row.timestamp >= query.from) &&
+      (query.to === undefined || row.timestamp <= query.to)
+    );
+  }
+
+  async saveKvCacheFootprintSnapshot(snapshot: KvCacheFootprintSnapshot): Promise<void> {
+    this.kvCacheSnapshots.push(structuredClone(snapshot));
+  }
+
+  async getKvCacheFootprintSnapshots(query: KvCacheRangeQuery): Promise<KvCacheFootprintSnapshot[]> {
+    return this.kvCacheSnapshots
+      .filter((r) => this.inKvCacheRange(r, query))
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .slice(-(query.limit ?? 2000))
+      .map((r) => structuredClone(r));
+  }
+
+  async pruneOldKvCacheFootprintSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    const before = this.kvCacheSnapshots.length;
+    this.kvCacheSnapshots = this.kvCacheSnapshots.filter(
+      (r) => r.timestamp >= cutoffTimestamp || (connectionId !== undefined && r.connectionId !== connectionId),
+    );
+    return before - this.kvCacheSnapshots.length;
+  }
+
+  async saveKvCacheEngineSamples(samples: KvCacheEngineSample[]): Promise<void> {
+    this.kvCacheSamples.push(...samples.map((s) => ({ ...s })));
+  }
+
+  async getKvCacheEngineSamples(query: KvCacheSampleQuery): Promise<KvCacheEngineSample[]> {
+    return this.kvCacheSamples
+      .filter(
+        (r) =>
+          this.inKvCacheRange(r, query) &&
+          (query.engineId === undefined || r.engineId === query.engineId) &&
+          (query.modelName === undefined || r.modelName === query.modelName),
+      )
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .slice(-(query.limit ?? 50_000))
+      .map((r) => ({ ...r }));
+  }
+
+  async pruneOldKvCacheEngineSamples(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    const before = this.kvCacheSamples.length;
+    this.kvCacheSamples = this.kvCacheSamples.filter(
+      (r) => r.timestamp >= cutoffTimestamp || (connectionId !== undefined && r.connectionId !== connectionId),
+    );
+    return before - this.kvCacheSamples.length;
+  }
+
+  async saveKvCacheEngine(engine: StoredKvCacheEngine): Promise<StoredKvCacheEngine> {
+    this.kvCacheEngines.set(engine.id, { ...engine });
+    return engine;
+  }
+
+  async getKvCacheEngines(connectionId?: string): Promise<StoredKvCacheEngine[]> {
+    return [...this.kvCacheEngines.values()]
+      .filter((e) => connectionId === undefined || e.connectionId === connectionId)
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((e) => ({ ...e }));
+  }
+
+  async getKvCacheEngine(id: string): Promise<StoredKvCacheEngine | null> {
+    const engine = this.kvCacheEngines.get(id);
+    return engine ? { ...engine } : null;
+  }
+
+  async deleteKvCacheEngine(id: string): Promise<boolean> {
+    return this.kvCacheEngines.delete(id);
+  }
+
+  async getKvCacheSettings(connectionId: string): Promise<KvCacheSettings | null> {
+    const settings = this.kvCacheSettings.get(connectionId);
+    return settings ? { ...settings } : null;
+  }
+
+  async saveKvCacheSettings(settings: KvCacheSettings): Promise<KvCacheSettings> {
+    this.kvCacheSettings.set(settings.connectionId, { ...settings });
+    return settings;
+  }
+
+  async deleteKvCacheConnectionData(connectionId: string): Promise<void> {
+    this.kvCacheSnapshots = this.kvCacheSnapshots.filter((r) => r.connectionId !== connectionId);
+    this.kvCacheSamples = this.kvCacheSamples.filter((r) => r.connectionId !== connectionId);
+    for (const [id, engine] of this.kvCacheEngines) {
+      if (engine.connectionId === connectionId) this.kvCacheEngines.delete(id);
+    }
+    this.kvCacheSettings.delete(connectionId);
   }
 
   // Command Stats Sample Methods

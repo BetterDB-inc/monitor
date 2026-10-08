@@ -6,10 +6,17 @@ import { parseSshTunnel, parseMembership } from '@betterdb/shared';
 import type {
   StoredScalingReadinessScore,
   ScalingReadinessScoreQuery,
+  StoredKvCacheEngine,
+  KvCacheRangeQuery,
+  KvCacheSampleQuery,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   ReadinessDimension,
   ScalingReadinessSettings,
+  KvCacheEngineSample,
+  KvCacheFootprintSnapshot,
+  KvCacheModelFootprint,
+  KvCacheSettings,
 } from '@betterdb/shared';
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
@@ -1491,6 +1498,76 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         connection_id TEXT PRIMARY KEY,
         alert_enabled BOOLEAN NOT NULL DEFAULT TRUE,
         alert_threshold INTEGER NOT NULL DEFAULT 40,
+        updated_at BIGINT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS kv_cache_engines (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        source TEXT NOT NULL,
+        scrape_url TEXT,
+        scrape_auth_header TEXT,
+        scrape_auth_encrypted BOOLEAN NOT NULL DEFAULT FALSE,
+        otlp_engine_id TEXT,
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at BIGINT NOT NULL,
+        last_seen_at BIGINT,
+        last_error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_kv_cache_engines_conn ON kv_cache_engines(connection_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_kv_cache_engines_otlp ON kv_cache_engines(otlp_engine_id);
+
+      CREATE TABLE IF NOT EXISTS kv_cache_engine_samples (
+        id BIGSERIAL PRIMARY KEY,
+        engine_id TEXT NOT NULL,
+        connection_id TEXT NOT NULL,
+        model_name TEXT NOT NULL,
+        timestamp BIGINT NOT NULL,
+        requested_tokens DOUBLE PRECISION NOT NULL,
+        hit_tokens DOUBLE PRECISION NOT NULL,
+        lookup_tokens DOUBLE PRECISION NOT NULL,
+        lookup_hits DOUBLE PRECISION NOT NULL,
+        remote_read_bytes DOUBLE PRECISION NOT NULL,
+        remote_write_bytes DOUBLE PRECISION NOT NULL,
+        remote_read_requests DOUBLE PRECISION NOT NULL,
+        remote_write_requests DOUBLE PRECISION NOT NULL,
+        remote_ping_errors DOUBLE PRECISION NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_kv_cache_samples_conn_ts ON kv_cache_engine_samples(connection_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_kv_cache_samples_engine_ts ON kv_cache_engine_samples(engine_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_kv_cache_samples_ts ON kv_cache_engine_samples(timestamp);
+
+      CREATE TABLE IF NOT EXISTS kv_cache_footprint_snapshots (
+        id BIGSERIAL PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        timestamp BIGINT NOT NULL,
+        detected BOOLEAN NOT NULL,
+        layout TEXT,
+        scanned_keys BIGINT NOT NULL,
+        matched_keys BIGINT NOT NULL,
+        sampled_keys BIGINT NOT NULL,
+        scan_complete BOOLEAN NOT NULL,
+        chunks_est DOUBLE PRECISION NOT NULL,
+        bytes_est DOUBLE PRECISION NOT NULL,
+        used_memory DOUBLE PRECISION NOT NULL,
+        maxmemory DOUBLE PRECISION NOT NULL,
+        maxmemory_policy TEXT NOT NULL,
+        lmcache_memory_share DOUBLE PRECISION NOT NULL,
+        no_ttl_ratio DOUBLE PRECISION NOT NULL,
+        orphan_ratio DOUBLE PRECISION,
+        evicted_keys_delta DOUBLE PRECISION,
+        other_dbs JSONB NOT NULL,
+        per_model JSONB NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_kv_cache_footprint_conn_ts ON kv_cache_footprint_snapshots(connection_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_kv_cache_footprint_ts ON kv_cache_footprint_snapshots(timestamp);
+
+      CREATE TABLE IF NOT EXISTS kv_cache_settings (
+        connection_id TEXT PRIMARY KEY,
+        hit_rate_alert_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        hit_rate_threshold DOUBLE PRECISION NOT NULL DEFAULT 0.2,
+        eviction_alert_enabled BOOLEAN NOT NULL DEFAULT TRUE,
         updated_at BIGINT NOT NULL
       );
 
@@ -3777,6 +3854,254 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       [settings.connectionId, settings.alertEnabled, settings.alertThreshold, settings.updatedAt],
     );
     return settings;
+  }
+
+
+  private kvCacheSnapshotFromRow(r: Record<string, any>): KvCacheFootprintSnapshot {
+    const json = <T>(v: unknown): T => (typeof v === 'string' ? JSON.parse(v) : v) as T;
+    const nullableNumber = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
+    return {
+      connectionId: r.connection_id,
+      timestamp: Number(r.timestamp),
+      detected: r.detected,
+      layout: r.layout,
+      scannedKeys: Number(r.scanned_keys),
+      matchedKeys: Number(r.matched_keys),
+      sampledKeys: Number(r.sampled_keys),
+      scanComplete: r.scan_complete,
+      chunksEst: Number(r.chunks_est),
+      bytesEst: Number(r.bytes_est),
+      usedMemory: Number(r.used_memory),
+      maxmemory: Number(r.maxmemory),
+      maxmemoryPolicy: r.maxmemory_policy,
+      lmcacheMemoryShare: Number(r.lmcache_memory_share),
+      noTtlRatio: Number(r.no_ttl_ratio),
+      orphanRatio: nullableNumber(r.orphan_ratio),
+      evictedKeysDelta: nullableNumber(r.evicted_keys_delta),
+      otherDbs: json<number[]>(r.other_dbs),
+      perModel: json<KvCacheModelFootprint[]>(r.per_model),
+    };
+  }
+
+  private kvCacheSampleFromRow(r: Record<string, any>): KvCacheEngineSample {
+    return {
+      engineId: r.engine_id,
+      connectionId: r.connection_id,
+      modelName: r.model_name,
+      timestamp: Number(r.timestamp),
+      requestedTokens: Number(r.requested_tokens),
+      hitTokens: Number(r.hit_tokens),
+      lookupTokens: Number(r.lookup_tokens),
+      lookupHits: Number(r.lookup_hits),
+      remoteReadBytes: Number(r.remote_read_bytes),
+      remoteWriteBytes: Number(r.remote_write_bytes),
+      remoteReadRequests: Number(r.remote_read_requests),
+      remoteWriteRequests: Number(r.remote_write_requests),
+      remotePingErrors: Number(r.remote_ping_errors),
+    };
+  }
+
+  private kvCacheEngineFromRow(r: Record<string, any>): StoredKvCacheEngine {
+    return {
+      id: r.id,
+      connectionId: r.connection_id,
+      name: r.name,
+      source: r.source,
+      scrapeUrl: r.scrape_url,
+      scrapeAuthHeader: r.scrape_auth_header,
+      scrapeAuthEncrypted: r.scrape_auth_encrypted,
+      otlpEngineId: r.otlp_engine_id,
+      enabled: r.enabled,
+      createdAt: Number(r.created_at),
+      lastSeenAt: r.last_seen_at === null ? null : Number(r.last_seen_at),
+      lastError: r.last_error,
+    };
+  }
+
+  async saveKvCacheFootprintSnapshot(s: KvCacheFootprintSnapshot): Promise<void> {
+    if (!this.pool) throw new Error('Database not initialized');
+    await this.pool.query(
+      `INSERT INTO kv_cache_footprint_snapshots
+        (connection_id, timestamp, detected, layout, scanned_keys, matched_keys, sampled_keys,
+         scan_complete, chunks_est, bytes_est, used_memory, maxmemory, maxmemory_policy,
+         lmcache_memory_share, no_ttl_ratio, orphan_ratio, evicted_keys_delta, other_dbs, per_model)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
+      [
+        s.connectionId, s.timestamp, s.detected, s.layout, s.scannedKeys, s.matchedKeys,
+        s.sampledKeys, s.scanComplete, s.chunksEst, s.bytesEst, s.usedMemory, s.maxmemory,
+        s.maxmemoryPolicy, s.lmcacheMemoryShare, s.noTtlRatio, s.orphanRatio, s.evictedKeysDelta,
+        JSON.stringify(s.otherDbs), JSON.stringify(s.perModel),
+      ],
+    );
+  }
+
+  async getKvCacheFootprintSnapshots(query: KvCacheRangeQuery): Promise<KvCacheFootprintSnapshot[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      `SELECT * FROM (
+         SELECT * FROM kv_cache_footprint_snapshots
+         WHERE connection_id = $1 AND timestamp >= $2 AND timestamp <= $3
+         ORDER BY timestamp DESC, id DESC LIMIT $4
+       ) AS recent ORDER BY timestamp ASC, id ASC`,
+      [query.connectionId, query.from ?? 0, query.to ?? Number.MAX_SAFE_INTEGER, query.limit ?? 2000],
+    );
+    return result.rows.map((r) => this.kvCacheSnapshotFromRow(r));
+  }
+
+  async pruneOldKvCacheFootprintSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    if (connectionId) {
+      return chunkedPostgresDelete(this.pool, 'kv_cache_footprint_snapshots', 'timestamp < $1 AND connection_id = $2', [cutoffTimestamp, connectionId]);
+    }
+    return chunkedPostgresDelete(this.pool, 'kv_cache_footprint_snapshots', 'timestamp < $1', [cutoffTimestamp]);
+  }
+
+  async saveKvCacheEngineSamples(samples: KvCacheEngineSample[]): Promise<void> {
+    if (!this.pool || samples.length === 0) return;
+    const columns = 13;
+    for (let offset = 0; offset < samples.length; offset += 500) {
+      const chunk = samples.slice(offset, offset + 500);
+      const values: unknown[] = [];
+      const placeholders = chunk.map((s, i) => {
+        values.push(
+          s.engineId, s.connectionId, s.modelName, s.timestamp, s.requestedTokens, s.hitTokens,
+          s.lookupTokens, s.lookupHits, s.remoteReadBytes, s.remoteWriteBytes, s.remoteReadRequests,
+          s.remoteWriteRequests, s.remotePingErrors,
+        );
+        const base = i * columns;
+        return `(${Array.from({ length: columns }, (_, c) => `$${base + c + 1}`).join(', ')})`;
+      });
+      await this.pool.query(
+        `INSERT INTO kv_cache_engine_samples
+          (engine_id, connection_id, model_name, timestamp, requested_tokens, hit_tokens, lookup_tokens,
+           lookup_hits, remote_read_bytes, remote_write_bytes, remote_read_requests, remote_write_requests,
+           remote_ping_errors)
+         VALUES ${placeholders.join(', ')}`,
+        values,
+      );
+    }
+  }
+
+  async getKvCacheEngineSamples(query: KvCacheSampleQuery): Promise<KvCacheEngineSample[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const params: unknown[] = [query.connectionId, query.from ?? 0, query.to ?? Number.MAX_SAFE_INTEGER];
+    const where = ['connection_id = $1', 'timestamp >= $2', 'timestamp <= $3'];
+    if (query.engineId !== undefined) {
+      params.push(query.engineId);
+      where.push(`engine_id = $${params.length}`);
+    }
+    if (query.modelName !== undefined) {
+      params.push(query.modelName);
+      where.push(`model_name = $${params.length}`);
+    }
+    params.push(query.limit ?? 50_000);
+    const result = await this.pool.query(
+      `SELECT * FROM (
+         SELECT * FROM kv_cache_engine_samples WHERE ${where.join(' AND ')}
+         ORDER BY timestamp DESC, id DESC LIMIT $${params.length}
+       ) AS recent ORDER BY timestamp ASC, id ASC`,
+      params,
+    );
+    return result.rows.map((r) => this.kvCacheSampleFromRow(r));
+  }
+
+  async pruneOldKvCacheEngineSamples(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    if (connectionId) {
+      return chunkedPostgresDelete(this.pool, 'kv_cache_engine_samples', 'timestamp < $1 AND connection_id = $2', [cutoffTimestamp, connectionId]);
+    }
+    return chunkedPostgresDelete(this.pool, 'kv_cache_engine_samples', 'timestamp < $1', [cutoffTimestamp]);
+  }
+
+  async saveKvCacheEngine(e: StoredKvCacheEngine): Promise<StoredKvCacheEngine> {
+    if (!this.pool) throw new Error('Database not initialized');
+    await this.pool.query(
+      `INSERT INTO kv_cache_engines
+        (id, connection_id, name, source, scrape_url, scrape_auth_header, scrape_auth_encrypted,
+         otlp_engine_id, enabled, created_at, last_seen_at, last_error)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       ON CONFLICT (id) DO UPDATE SET
+         name = EXCLUDED.name,
+         scrape_url = EXCLUDED.scrape_url,
+         scrape_auth_header = EXCLUDED.scrape_auth_header,
+         scrape_auth_encrypted = EXCLUDED.scrape_auth_encrypted,
+         otlp_engine_id = EXCLUDED.otlp_engine_id,
+         enabled = EXCLUDED.enabled,
+         last_seen_at = EXCLUDED.last_seen_at,
+         last_error = EXCLUDED.last_error`,
+      [
+        e.id, e.connectionId, e.name, e.source, e.scrapeUrl, e.scrapeAuthHeader,
+        e.scrapeAuthEncrypted, e.otlpEngineId, e.enabled, e.createdAt, e.lastSeenAt, e.lastError,
+      ],
+    );
+    return e;
+  }
+
+  async getKvCacheEngines(connectionId?: string): Promise<StoredKvCacheEngine[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result =
+      connectionId === undefined
+        ? await this.pool.query('SELECT * FROM kv_cache_engines ORDER BY created_at ASC')
+        : await this.pool.query('SELECT * FROM kv_cache_engines WHERE connection_id = $1 ORDER BY created_at ASC', [connectionId]);
+    return result.rows.map((r) => this.kvCacheEngineFromRow(r));
+  }
+
+  async getKvCacheEngine(id: string): Promise<StoredKvCacheEngine | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query('SELECT * FROM kv_cache_engines WHERE id = $1', [id]);
+    return result.rows.length === 0 ? null : this.kvCacheEngineFromRow(result.rows[0]);
+  }
+
+  async deleteKvCacheEngine(id: string): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query('DELETE FROM kv_cache_engines WHERE id = $1', [id]);
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async getKvCacheSettings(connectionId: string): Promise<KvCacheSettings | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query('SELECT * FROM kv_cache_settings WHERE connection_id = $1', [connectionId]);
+    if (result.rows.length === 0) return null;
+    const row = result.rows[0];
+    return {
+      connectionId: row.connection_id,
+      hitRateAlertEnabled: row.hit_rate_alert_enabled,
+      hitRateThreshold: Number(row.hit_rate_threshold),
+      evictionAlertEnabled: row.eviction_alert_enabled,
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  async saveKvCacheSettings(settings: KvCacheSettings): Promise<KvCacheSettings> {
+    if (!this.pool) throw new Error('Database not initialized');
+    await this.pool.query(
+      `INSERT INTO kv_cache_settings (connection_id, hit_rate_alert_enabled, hit_rate_threshold, eviction_alert_enabled, updated_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (connection_id) DO UPDATE SET
+         hit_rate_alert_enabled = EXCLUDED.hit_rate_alert_enabled,
+         hit_rate_threshold = EXCLUDED.hit_rate_threshold,
+         eviction_alert_enabled = EXCLUDED.eviction_alert_enabled,
+         updated_at = EXCLUDED.updated_at`,
+      [settings.connectionId, settings.hitRateAlertEnabled, settings.hitRateThreshold, settings.evictionAlertEnabled, settings.updatedAt],
+    );
+    return settings;
+  }
+
+  async deleteKvCacheConnectionData(connectionId: string): Promise<void> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const table of ['kv_cache_footprint_snapshots', 'kv_cache_engine_samples', 'kv_cache_engines', 'kv_cache_settings']) {
+        await client.query(`DELETE FROM ${table} WHERE connection_id = $1`, [connectionId]);
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   // Command Stats Sample Methods

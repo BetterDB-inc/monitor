@@ -26,6 +26,8 @@ describe('LocalRetentionService', () => {
       pruneOldLatencyHistograms: jest.fn().mockResolvedValue(0),
       pruneOldMemorySnapshots: jest.fn().mockResolvedValue(0),
       pruneOldScalingReadinessScores: jest.fn().mockResolvedValue(3),
+      pruneOldKvCacheFootprintSnapshots: jest.fn().mockResolvedValue(4),
+      pruneOldKvCacheEngineSamples: jest.fn().mockResolvedValue(5),
       pruneOldCaptureChunks: jest.fn().mockResolvedValue(0),
       pruneOldCaptureSessions: jest.fn().mockResolvedValue(0),
       pruneOldCaptureTriggers: jest.fn().mockResolvedValue(0),
@@ -76,6 +78,15 @@ describe('LocalRetentionService', () => {
 
     expect(storage.pruneOldScalingReadinessScores).toHaveBeenCalledWith(1_234);
     expect(results.scaling_readiness_scores).toBe(3);
+  });
+
+  it('reports pruned kv cache rows under their own names', async () => {
+    const results = await runRetentionSweep(storage, 1_234, { error: jest.fn() } as any);
+
+    expect(storage.pruneOldKvCacheFootprintSnapshots).toHaveBeenCalledWith(1_234);
+    expect(storage.pruneOldKvCacheEngineSamples).toHaveBeenCalledWith(1_234);
+    expect(results.kv_cache_footprint_snapshots).toBe(4);
+    expect(results.kv_cache_engine_samples).toBe(5);
   });
 
   it('does nothing in cloud mode even when a window is configured', async () => {
