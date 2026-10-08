@@ -1,0 +1,11 @@
+# HELP lmcache:num_requested_tokens_total Total number of tokens requested
+# TYPE lmcache:num_requested_tokens_total counter
+lmcache:num_requested_tokens_total{model_name="Qwen/Qwen2.5-0.5B-Instruct",role="worker",served_model_name="qwen",worker_id="0"} 1000.0
+lmcache:num_requested_tokens_created{model_name="Qwen/Qwen2.5-0.5B-Instruct",role="worker",served_model_name="qwen",worker_id="0"} 1.7599e+09
+# HELP lmcache:num_hit_tokens_total Total number of hit tokens
+# TYPE lmcache:num_hit_tokens_total counter
+lmcache:num_hit_tokens_total{model_name="Qwen/Qwen2.5-0.5B-Instruct",role="worker",served_model_name="qwen",worker_id="0"} 700.0
+lmcache:lookup_hit_rate{model_name="Qwen/Qwen2.5-0.5B-Instruct",role="worker",served_model_name="qwen",worker_id="0"} NaN
+vllm:num_requests_running{model_name="Qwen/Qwen2.5-0.5B-Instruct"} 3.0
+lmcache:remote_ping_errors_total{model_name="a\"b\\c\nd",role="worker",served_model_name="",worker_id="1"} 2 1759900000000
+lmcache:num_remote_read_bytes_total{model_name="m",role="worker",served_model_name="m",worker_id="0"} +Inf
