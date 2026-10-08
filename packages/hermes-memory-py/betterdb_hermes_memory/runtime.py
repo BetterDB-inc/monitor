@@ -23,7 +23,6 @@ import asyncio
 import concurrent.futures
 import logging
 import threading
-import time
 from concurrent.futures import Future
 from typing import Any, Awaitable, Callable, Optional
 
@@ -120,17 +119,18 @@ class LoopRuntime:
         except Exception as exc:
             logger.warning("betterdb memory loop drain failed: %s", exc)
 
-    def stop(self, *, timeout: float = 5.0) -> None:
-        """Drain in-flight work, stop the loop, join the thread, then close.
+    def stop(self, *, timeout: float = 5.0, drain: bool = True) -> None:
+        """Stop the loop, join the thread, then close. Safe to call repeatedly.
 
-        Safe to call more than once. The loop is only ``close()``d after the thread
-        has actually exited — closing a still-running loop would raise — and a join
-        that times out is logged rather than silently leaving the loop orphaned.
+        The loop is ``close()``d only after the thread has actually exited —
+        closing a still-running loop would raise — and a join that times out is
+        logged rather than leaving the loop silently orphaned.
 
-        *timeout* is a single budget shared by the drain and the join (they cannot
-        stack to a multiple of it). If called from the loop thread itself, the drain
-        and join are skipped — joining the current thread would deadlock — and we
-        only request the loop to stop.
+        The drain and the join each get half of *timeout*, so draining can't
+        starve the join and the two can't stack past *timeout*. Pass
+        ``drain=False`` when the caller already drained (then the whole half-budget
+        is spent only on the join). Called from the loop thread, both are skipped —
+        joining the current thread would deadlock — and we only request the stop.
         """
         with self._lock:
             loop, thread = self._loop, self._thread
@@ -141,14 +141,14 @@ class LoopRuntime:
             if threading.current_thread() is thread:
                 loop.call_soon_threadsafe(loop.stop)
                 return  # never join self; the thread unwinds run_forever on its own
-            deadline = time.monotonic() + timeout
-            try:
-                drain = asyncio.run_coroutine_threadsafe(self._drain(), loop)
-                drain.result(timeout=max(0.0, deadline - time.monotonic()))
-            except Exception as exc:
-                logger.warning("betterdb memory loop drain failed: %s", exc)
+            if drain:
+                try:
+                    fut = asyncio.run_coroutine_threadsafe(self._drain(), loop)
+                    fut.result(timeout=timeout / 2)
+                except Exception as exc:
+                    logger.warning("betterdb memory loop drain failed: %s", exc)
             loop.call_soon_threadsafe(loop.stop)
-            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            thread.join(timeout=timeout / 2)
             if thread.is_alive():
                 logger.warning(
                     "betterdb memory loop thread did not exit within %.1fs; leaving loop open",

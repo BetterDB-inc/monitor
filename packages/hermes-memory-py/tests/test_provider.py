@@ -111,7 +111,7 @@ class FakeRuntime:
     def run(self, coro, *, timeout=None):
         return self._drive(coro)
 
-    def stop(self, *, timeout=5.0) -> None:
+    def stop(self, *, timeout=5.0, drain=True) -> None:
         self.stopped = True
 
 
@@ -313,9 +313,10 @@ def test_tool_schemas_declared():
 # --------------------------------------------------------------------------- #
 
 def test_initialize_registers_index_and_discovery():
-    provider, store = _wired()
-    # initialize() (run by _wired) must create the index AND register discovery,
-    # mirroring the SDK facade (ensure_index then ensure_discovery_ready).
+    # discovery is opt-in (default off), so enable it here; initialize() must then
+    # create the index AND register discovery, mirroring the SDK facade
+    # (ensure_index then ensure_discovery_ready).
+    provider, store = _wired(discovery=True)
     assert store.index_ready is True
     assert store.discovery_ready is True
 
@@ -407,6 +408,16 @@ def test_shutdown_closes_client_store_and_embedder():
     assert embedder.closed is True     # embeddings http client released
     assert store.closed is True        # store torn down
     assert runtime.stopped is True     # loop stopped last
+
+
+def test_shutdown_clears_embedder_so_reinit_rebuilds():
+    # aclose() marks an embedder closed for good; shutdown must clear self._embed_fn
+    # so a later initialize() builds a fresh one rather than reusing the dead handle
+    # (which would raise "embedder is closed" on every call).
+    provider, _ = _wired()
+    assert provider._embed_fn is not None
+    provider.shutdown()
+    assert provider._embed_fn is None
 
 
 def test_http_embedder_reuses_one_client():

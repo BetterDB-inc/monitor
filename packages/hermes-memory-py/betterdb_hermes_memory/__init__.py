@@ -150,8 +150,8 @@ class _Config:
         self.store_name: str = str(block.get("store_name", "") or "") or DEFAULT_STORE_NAME
         self.namespace: str = str(block.get("namespace", "") or "")
         # Register a discovery marker so BetterDB Monitor can enumerate this tier.
-        # On by default to preserve existing behavior; set false to opt out.
-        self.discovery: bool = _as_bool(block.get("discovery"), True)
+        # Off by default (opt-in); set true to let Monitor see this tier.
+        self.discovery: bool = _as_bool(block.get("discovery"), False)
         # Whether the user *explicitly* pointed us at a connection, as opposed to
         # falling through to the silent 127.0.0.1 default. Availability must reflect
         # real configuration (see has_connection); the client still targets
@@ -190,10 +190,8 @@ class BetterDBMemoryProvider(MemoryProvider):
         # Injected store/runtime/embed_fn let tests exercise the mapping without a
         # live Valkey or an embeddings endpoint.
         #
-        # Keep only the raw override dict. This instance serves one profile/session;
-        # a fresh _Config is resolved live at each availability check and at
-        # initialize() so it reads that profile's secrets under the active scope
-        # rather than freezing whatever was in scope at construction.
+        # Keep only the raw override dict; _Config is resolved live (see its
+        # docstring for why) rather than frozen here.
         self._config_input = config
         self._config: Optional[_Config] = None  # set in initialize() for operational use
         self._store = store
@@ -267,8 +265,8 @@ class BetterDBMemoryProvider(MemoryProvider):
             {"key": "namespace", "description": "Optional memory namespace (scopes recall/writes)",
              "default": ""},
             {"key": "discovery",
-             "description": "Register a discovery marker so BetterDB Monitor can enumerate this tier",
-             "type": "boolean", "default": "true", "choices": ["true", "false"]},
+             "description": "Register a discovery marker so BetterDB Monitor can enumerate this tier (opt-in)",
+             "type": "boolean", "default": "false", "choices": ["true", "false"]},
             {"key": "embeddings_model", "description": "Embeddings model",
              "default": DEFAULT_EMBEDDINGS_MODEL},
             {"key": "embeddings_base_url",
@@ -347,7 +345,13 @@ class BetterDBMemoryProvider(MemoryProvider):
             # direction of precedence — valkey-py merges the URL's own components
             # last, so credentials/db embedded in the URL win over these kwargs;
             # the separate fields only fill what the URL leaves out.
-            url = _tls_url(self._config.url) if self._config.tls else self._config.url
+            url = self._config.url
+            if self._config.tls:
+                url = _tls_url(url)
+                if not url.startswith(("valkeys://", "rediss://")):
+                    logger.warning(
+                        "betterdb memory: tls is set but the url scheme %r cannot be upgraded to "
+                        "TLS; connecting without TLS", self._config.url.partition("://")[0])
             extra: Dict[str, Any] = {}
             if self._config.password:
                 extra["password"] = self._config.password
@@ -577,7 +581,9 @@ class BetterDBMemoryProvider(MemoryProvider):
     def shutdown(self) -> None:
         store, runtime = self._store, self._runtime
         client, embed_fn = self._client, self._embed_fn
-        self._store = self._runtime = self._client = None
+        # Null the embedder too: aclose() marks it closed for good, so a later
+        # initialize() must build a fresh one rather than reuse the dead handle.
+        self._store = self._runtime = self._client = self._embed_fn = None
         if runtime is not None:
             # Quiesce in-flight background work BEFORE releasing the resources it
             # uses, so a queued embed/remember can't rebuild a client on a loop that
@@ -591,7 +597,7 @@ class BetterDBMemoryProvider(MemoryProvider):
             self._run_quiet(runtime, store.close() if store is not None else None, "store close")
             self._run_quiet(runtime, self._aclose(client), "client close")
             self._run_quiet(runtime, self._aclose(embed_fn), "embedder close")
-            runtime.stop()
+            runtime.stop(drain=False)  # already drained above
 
     @staticmethod
     def _aclose(obj: Any) -> Any:

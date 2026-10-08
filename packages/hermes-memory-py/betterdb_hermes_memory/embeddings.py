@@ -87,9 +87,7 @@ class _HttpEmbedder:
         return self._client
 
     async def __call__(self, text: str) -> List[float]:
-        if self._closed:
-            raise RuntimeError("embedder is closed")
-        client = self._get_client()
+        client = self._get_client()  # raises if the embedder is closed
         payload = {"model": self._config.model, "input": text}
         resp = await client.post(self._url, json=payload, headers=self._headers())
         resp.raise_for_status()
