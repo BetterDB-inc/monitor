@@ -646,6 +646,7 @@ export interface StoragePort {
   getCveDataset(): Promise<StoredCveDataset | null>;
   saveCveScanResult(result: CveScanResult): Promise<void>;
   getCveScanResult(connectionId: string): Promise<CveScanResult | null>;
+  deleteCveScanResult(connectionId: string): Promise<void>;
 
   // Monitor Capture Session Methods - connectionId required for writes, optional filter for reads
   saveCaptureSession(session: StoredCaptureSession, connectionId: string): Promise<string>;

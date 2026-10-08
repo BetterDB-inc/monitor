@@ -4342,6 +4342,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return JSON.parse(row.result) as CveScanResult;
   }
 
+  async deleteCveScanResult(connectionId: string): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    this.db.prepare('DELETE FROM cve_scan_results WHERE connection_id = ?').run(connectionId);
+  }
+
   // Connection Management Methods
   private ensureConnectionsSchema(): void {
     if (!this.db) throw new Error('Database not initialized');

@@ -1552,6 +1552,12 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return structuredClone(newest);
   }
 
+  async deleteCveScanResult(connectionId: string): Promise<void> {
+    this.cveScanResults = this.cveScanResults.filter((entry) => {
+      return entry.connectionId !== connectionId;
+    });
+  }
+
   // Connection Management Methods (in-memory storage)
   private connections: Map<string, DatabaseConnectionConfig> = new Map();
 

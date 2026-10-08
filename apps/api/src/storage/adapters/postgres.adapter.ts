@@ -4533,6 +4533,14 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return (typeof row.result === 'string' ? JSON.parse(row.result) : row.result) as CveScanResult;
   }
 
+  async deleteCveScanResult(connectionId: string): Promise<void> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    await this.pool.query('DELETE FROM cve_scan_results WHERE connection_id = $1', [
+      this.stripNulCharacters(connectionId),
+    ]);
+  }
+
   // Connection Management Methods
   async saveConnection(config: DatabaseConnectionConfig): Promise<void> {
     if (!this.pool) throw new Error('Database not initialized');
