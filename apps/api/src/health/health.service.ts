@@ -24,6 +24,7 @@ import {
   MultiConnectionPoller,
   ConnectionContext,
 } from '../common/services/multi-connection-poller';
+import { withTimeout } from '../common/utils/with-timeout';
 
 @Injectable()
 export class HealthService extends MultiConnectionPoller implements OnModuleInit, OnModuleDestroy {
@@ -89,7 +90,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
   private tryReconnect(connectionId: string): Promise<void> {
     const existing = this.reconnectLocks.get(connectionId);
     if (existing) {
-      return this.withTimeout(existing, this.RECONNECT_TIMEOUT_MS).catch(() => {});
+      return withTimeout(existing, this.RECONNECT_TIMEOUT_MS).catch(() => {});
     }
     const raw = (async () => {
       try {
@@ -109,18 +110,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
         }
       })
       .catch(() => {});
-    return this.withTimeout(raw, this.RECONNECT_TIMEOUT_MS).catch(() => {});
-  }
-
-  private withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-    let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('Timed out')), ms);
-      timer.unref?.();
-    });
-    return Promise.race([promise, timeout]).finally(() => {
-      if (timer) clearTimeout(timer);
-    });
+    return withTimeout(raw, this.RECONNECT_TIMEOUT_MS).catch(() => {});
   }
 
   onModuleInit(): void {
@@ -251,7 +241,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
           throw new Error('Capabilities not yet detected. Call connect() first.');
         }
         try {
-          await this.withTimeout(refresh(), this.RECONNECT_TIMEOUT_MS);
+          await withTimeout(refresh(), this.RECONNECT_TIMEOUT_MS);
           capabilities = client.getCapabilities();
         } catch {
           this.logger.debug(`Capability refresh failed for ${targetId}; ping succeeded`);

@@ -10,6 +10,7 @@ import { HealthService } from '../health/health.service';
 import { MetricsService } from '../metrics/metrics.service';
 import type { InfoResponse } from '../common/types/metrics.types';
 import type { StoragePort } from '../common/interfaces/storage-port.interface';
+import { withTimeout } from '../common/utils/with-timeout';
 
 /**
  * Fleet-wide rollup for the multi-instance "are we green?" view.
@@ -68,7 +69,7 @@ export class FleetService {
     const settled = await Promise.allSettled(
       listed.map((conn) => {
         const gate = { cancelled: false };
-        const result = this.withTimeout(
+        const result = withTimeout(
           this.collectOne(conn.id, conn.name, conn.host, conn.port, () => gate.cancelled, waiting),
           FleetService.PER_INSTANCE_TIMEOUT_MS,
           `Timed out collecting fleet stats for ${conn.name}`,
@@ -217,7 +218,7 @@ export class FleetService {
   }
 
   private getCveSummaryWithTimeout(connectionId: string): Promise<FleetCveSummary | null> {
-    return this.withTimeout(
+    return withTimeout(
       this.getCveSummary(connectionId),
       FleetService.CVE_TIMEOUT_MS,
       `Timed out reading CVE summary for ${connectionId}`,
@@ -286,17 +287,6 @@ export class FleetService {
       error,
       cve,
     };
-  }
-
-  private withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-    let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(message)), ms);
-      timer.unref?.();
-    });
-    return Promise.race([promise, timeout]).finally(() => {
-      if (timer) clearTimeout(timer);
-    });
   }
 }
 
