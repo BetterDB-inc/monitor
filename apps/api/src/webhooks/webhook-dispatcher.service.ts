@@ -360,7 +360,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   /**
    * Check if alert should fire (with hysteresis to prevent flapping)
    */
-  private shouldFireAlert(
+  shouldFireAlert(
     alertKey: string,
     currentValue: number,
     threshold: number,
