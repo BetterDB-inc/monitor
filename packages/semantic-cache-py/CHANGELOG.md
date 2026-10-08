@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Cache spans were missing from BetterDB Monitor's AI Traces.** The default
+  `TelemetryOptions.tracer_name` was `"betterdb-semantic-cache"`, but Monitor's
+  OTLP ingest keeps only spans from `@betterdb/*` instrumentation scopes, so every
+  cache span recorded inside an application trace was dropped. The default is now
+  `"@betterdb/semantic-cache"`, matching the TypeScript package. Pass
+  `tracer_name=` explicitly to keep the old scope name.
+
 ## [0.11.0] - unreleased
 
 ### Fixed

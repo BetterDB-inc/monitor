@@ -22,7 +22,10 @@ class EmbeddingCacheOptions:
 
 @dataclass
 class TelemetryOptions:
-    tracer_name: str = "betterdb-semantic-cache"
+    # Must start with "@betterdb/": BetterDB Monitor's OTLP ingest keeps only
+    # spans from @betterdb/* instrumentation scopes (plus roots), so any other
+    # default silently drops every non-root cache span from AI Traces.
+    tracer_name: str = "@betterdb/semantic-cache"
     metrics_prefix: str = "semantic_cache"
     registry: Any = None  # prometheus_client.CollectorRegistry
 
