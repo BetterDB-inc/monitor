@@ -2,3 +2,6 @@ packages:
   - 'apps/*'
   - 'packages/*'
   - 'proprietary/*'
+  # Local-only MCP tooling that is not part of the repo; excluded so a stray
+  # checkout of it doesn't get pulled into the workspace / lockfile.
+  - '!packages/codebase-search'
