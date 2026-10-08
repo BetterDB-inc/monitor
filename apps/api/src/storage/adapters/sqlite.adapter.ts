@@ -123,7 +123,8 @@ import { InvitationSqliteRepository } from './repositories/invitation.sqlite.rep
 import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
 import { ActivitySqliteRepository } from './repositories/activity.sqlite.repository';
 import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
-import { decodeCveSnapshots, encodeCveSnapshots } from './cve-snapshots.codec';
+import { encodeCveSnapshots } from './cve-snapshots.codec';
+import { readCveDataset, readCveScanResult } from './cve-storage.schema';
 
 /**
  * Idempotent migration for the memory_proposals columns added with the
@@ -4285,12 +4286,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       return null;
     }
 
-    return {
+    return readCveDataset({
       datasetVersion: row.dataset_version,
       refreshedAt: row.refreshed_at,
-      advisories: JSON.parse(row.advisories) as StoredCveDataset['advisories'],
-      snapshots: decodeCveSnapshots(JSON.parse(row.snapshots)),
-    };
+      advisories: row.advisories,
+      snapshots: row.snapshots,
+    });
   }
 
   async saveCveScanResult(result: CveScanResult): Promise<void> {
@@ -4339,7 +4340,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       return null;
     }
 
-    return JSON.parse(row.result) as CveScanResult;
+    return readCveScanResult(row.result);
   }
 
   async deleteCveScanResult(connectionId: string): Promise<void> {
