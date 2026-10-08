@@ -53,20 +53,27 @@ export class KvCacheEnginesService {
 
   async update(connectionId: string, id: string, dto: UpdateKvCacheEngineDto): Promise<KvCacheEngine> {
     const engine = this.owned(connectionId, id);
-    const next: StoredKvCacheEngine = { ...engine };
+    let probe: { lastError: string | null; lastSeenAt: number } | null = null;
+    if (engine.source === 'scrape') {
+      const urlChanged = dto.scrapeUrl !== undefined && dto.scrapeUrl !== engine.scrapeUrl;
+      const newHeader = typeof dto.scrapeAuthHeader === 'string' && dto.scrapeAuthHeader !== '';
+      if (urlChanged && dto.scrapeAuthHeader === undefined && engine.scrapeAuthHeader && !this.sameOrigin(engine.scrapeUrl, dto.scrapeUrl)) {
+        throw new BadRequestException('Re-enter the scrape auth header when changing the scrape URL origin');
+      }
+      const url = dto.scrapeUrl ?? engine.scrapeUrl;
+      if ((urlChanged || newHeader) && url) {
+        const header = dto.scrapeAuthHeader === undefined ? this.authHeaderFor(engine) : dto.scrapeAuthHeader || null;
+        probe = { lastError: await this.testScrape(url, header), lastSeenAt: Date.now() };
+      }
+    }
+    const fresh = this.owned(connectionId, id);
+    const next: StoredKvCacheEngine = { ...fresh };
     if (dto.name !== undefined) next.name = dto.name;
     if (dto.enabled !== undefined) next.enabled = dto.enabled;
-    if (engine.source === 'scrape') {
-      const url = dto.scrapeUrl ?? engine.scrapeUrl;
-      const urlChanged = dto.scrapeUrl !== undefined && dto.scrapeUrl !== engine.scrapeUrl;
-      const newHeader = typeof dto.scrapeAuthHeader === 'string';
-      if ((urlChanged || newHeader) && url) {
-        const header = newHeader ? (dto.scrapeAuthHeader as string) : this.authHeaderFor(engine);
-        next.lastError = await this.testScrape(url, header);
-        next.lastSeenAt = Date.now();
-      }
-      if (urlChanged) next.scrapeUrl = dto.scrapeUrl ?? null;
-      if (dto.scrapeAuthHeader !== undefined) Object.assign(next, this.storeAuthHeader(dto.scrapeAuthHeader));
+    if (fresh.source === 'scrape') {
+      if (dto.scrapeUrl !== undefined) next.scrapeUrl = dto.scrapeUrl;
+      if (dto.scrapeAuthHeader !== undefined) Object.assign(next, this.storeAuthHeader(dto.scrapeAuthHeader || null));
+      if (probe) Object.assign(next, probe);
     }
     return toPublicEngine(await this.registry.save(next));
   }
@@ -90,6 +97,14 @@ export class KvCacheEnginesService {
     }
     this.warnUndecryptable(engine.id);
     return null;
+  }
+
+  private sameOrigin(a: string | null, b: string | undefined): boolean {
+    try {
+      return new URL(a ?? '').origin === new URL(b ?? '').origin;
+    } catch {
+      return false;
+    }
   }
 
   private warnUndecryptable(id: string): void {

@@ -52,6 +52,25 @@ describe('fetchMetricsText', () => {
     await expect(fetchMetricsText('http://x', null, streamed)).rejects.toThrow('response too large');
   });
 
+  it('maps a body that never ends to timeout when the signal aborts', async () => {
+    const controller = new AbortController();
+    const timeoutSpy = jest.spyOn(AbortSignal, 'timeout').mockReturnValue(controller.signal);
+    const fetchImpl = jest.fn().mockImplementation(async (_url: string, init: { signal: AbortSignal }) => {
+      const stream = new ReadableStream({
+        start(streamController) {
+          init.signal.addEventListener('abort', () => streamController.error(Object.assign(new Error('t'), { name: 'TimeoutError' })));
+        },
+      });
+      setTimeout(() => controller.abort(), 10);
+      return new Response(stream, { status: 200 });
+    });
+    try {
+      await expect(fetchMetricsText('http://x', null, fetchImpl)).rejects.toThrow('timeout');
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
   it('blocks addresses the guard rejects', async () => {
     (assertSafeOutboundUrl as jest.Mock).mockRejectedValue(new Error('nope'));
     const fetchImpl = jest.fn();

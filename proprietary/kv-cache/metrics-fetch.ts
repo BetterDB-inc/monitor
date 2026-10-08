@@ -47,5 +47,11 @@ export async function fetchMetricsText(url: string, authHeader: string | null, f
   }
   if (response.status >= 300 && response.status < 400) throw new ScrapeError(`redirect not followed (HTTP ${response.status})`);
   if (!response.ok) throw new ScrapeError(`HTTP ${response.status}`);
-  return readCapped(response);
+  try {
+    return await readCapped(response);
+  } catch (error) {
+    if (error instanceof ScrapeError) throw error;
+    const name = (error as Error)?.name;
+    throw new ScrapeError(name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'connection failed');
+  }
 }

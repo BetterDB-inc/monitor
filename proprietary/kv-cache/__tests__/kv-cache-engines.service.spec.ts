@@ -114,11 +114,11 @@ describe('KvCacheEnginesService', () => {
     await service.update('c1', created.id, { enabled: false });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(store.get(created.id).enabled).toBe(false);
-    await service.update('c1', created.id, { scrapeUrl: 'http://y' });
-    expect(fetchMock).toHaveBeenCalledWith('http://y', 'Bearer t');
+    await service.update('c1', created.id, { scrapeUrl: 'http://x/y' });
+    expect(fetchMock).toHaveBeenCalledWith('http://x/y', 'Bearer t');
     fetchMock.mockRejectedValue(new ScrapeError('timeout'));
-    await expect(service.update('c1', created.id, { scrapeUrl: 'http://z' })).rejects.toThrow('Test scrape failed: timeout');
-    expect(store.get(created.id).scrapeUrl).toBe('http://y');
+    await expect(service.update('c1', created.id, { scrapeUrl: 'http://x/z' })).rejects.toThrow('Test scrape failed: timeout');
+    expect(store.get(created.id).scrapeUrl).toBe('http://x/y');
   });
 
   it('removes engines of the connection', async () => {
@@ -126,6 +126,56 @@ describe('KvCacheEnginesService', () => {
     const created = await service.create('c1', { name: 'n', source: 'scrape', scrapeUrl: 'http://x' });
     await expect(service.remove('c2', created.id)).rejects.toBeInstanceOf(NotFoundException);
     await service.remove('c1', created.id);
+    expect(store.has(created.id)).toBe(false);
+  });
+
+  it('sends the re-test without auth when the header is cleared with a URL change', async () => {
+    const { service, store } = setup();
+    const created = await service.create('c1', { name: 'n', source: 'scrape', scrapeUrl: 'http://x', scrapeAuthHeader: 'Bearer t' });
+    fetchMock.mockClear();
+    await service.update('c1', created.id, { scrapeUrl: 'http://other', scrapeAuthHeader: null });
+    expect(fetchMock).toHaveBeenCalledWith('http://other', null);
+    expect(store.get(created.id)).toMatchObject({ scrapeUrl: 'http://other', scrapeAuthHeader: null });
+  });
+
+  it('treats an empty header as a clear', async () => {
+    const { service, store } = setup();
+    const created = await service.create('c1', { name: 'n', source: 'scrape', scrapeUrl: 'http://x', scrapeAuthHeader: 'Bearer t' });
+    fetchMock.mockClear();
+    await service.update('c1', created.id, { scrapeUrl: 'http://x/other', scrapeAuthHeader: '' });
+    expect(fetchMock).toHaveBeenCalledWith('http://x/other', null);
+    expect(store.get(created.id)).toMatchObject({ scrapeAuthHeader: null, scrapeAuthEncrypted: false });
+  });
+
+  it('rejects an origin change that would carry the stored header over', async () => {
+    const { service, store } = setup();
+    const created = await service.create('c1', { name: 'n', source: 'scrape', scrapeUrl: 'http://x/metrics', scrapeAuthHeader: 'Bearer t' });
+    fetchMock.mockClear();
+    await expect(service.update('c1', created.id, { scrapeUrl: 'http://evil/metrics' })).rejects.toThrow(
+      'Re-enter the scrape auth header when changing the scrape URL origin',
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(store.get(created.id).scrapeUrl).toBe('http://x/metrics');
+    await service.update('c1', created.id, { scrapeUrl: 'http://x/other' });
+    expect(fetchMock).toHaveBeenCalledWith('http://x/other', 'Bearer t');
+  });
+
+  it('accepts an origin change with a new header', async () => {
+    const { service, store } = setup();
+    const created = await service.create('c1', { name: 'n', source: 'scrape', scrapeUrl: 'http://x', scrapeAuthHeader: 'Bearer t' });
+    await service.update('c1', created.id, { scrapeUrl: 'http://y', scrapeAuthHeader: 'Bearer n' });
+    expect(fetchMock).toHaveBeenLastCalledWith('http://y', 'Bearer n');
+    expect(store.get(created.id)).toMatchObject({ scrapeUrl: 'http://y', scrapeAuthHeader: 'enc:Bearer n' });
+  });
+
+  it('fails when the engine is removed during the test scrape', async () => {
+    const { service, store } = setup();
+    const created = await service.create('c1', { name: 'n', source: 'scrape', scrapeUrl: 'http://x' });
+    fetchMock.mockImplementation(async () => {
+      store.delete(created.id);
+      return LMCACHE_BODY;
+    });
+    await expect(service.update('c1', created.id, { scrapeUrl: 'http://x/2' })).rejects.toBeInstanceOf(NotFoundException);
     expect(store.has(created.id)).toBe(false);
   });
 });
