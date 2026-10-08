@@ -6,14 +6,18 @@ import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-proto';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 import { buildEventAttributes } from './event-attributes';
+import { isNegativeEnvValue } from '../common/utils/env-bool';
 
 /**
  * Emits discrete monitoring events (e.g. anomaly.detected, cluster.failover) as
  * OTel log records over OTLP, mirroring the events already dispatched to
  * webhooks. Callers pass the same payload built for the webhook at each site;
  * no detection logic lives here. No-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set
- * and OTEL_TELEMETRY_ENABLED. Provided globally so any service can inject it
- * @Optional() without a module import cycle.
+ * and OTEL_TELEMETRY_ENABLED. OTEL_EVENTS_ENABLED=false disables just this
+ * dispatcher while keeping the metrics mirror — needed when the endpoint is a
+ * metrics-only OTLP receiver (e.g. Prometheus) that would 404 every /v1/logs
+ * POST. Provided globally so any service can inject it @Optional() without a
+ * module import cycle.
  */
 @Injectable()
 export class OtelEventDispatcherService implements OnModuleInit, OnModuleDestroy {
@@ -25,8 +29,13 @@ export class OtelEventDispatcherService implements OnModuleInit, OnModuleDestroy
 
   onModuleInit(): void {
     const enabled = String(this.configService.get('OTEL_TELEMETRY_ENABLED', 'true')) !== 'false';
+    // Accept the same "off" spellings (false/0/no/off) as the sibling OTel
+    // flags, not just literal 'false'.
+    const eventsEnabled = !isNegativeEnvValue(
+      this.configService.get<string>('OTEL_EVENTS_ENABLED'),
+    );
     const endpoint = this.configService.get<string>('OTEL_EXPORTER_OTLP_ENDPOINT');
-    if (!enabled || !endpoint) {
+    if (!enabled || !eventsEnabled || !endpoint) {
       this.logger.log('OTel event dispatch disabled (set OTEL_EXPORTER_OTLP_ENDPOINT to enable)');
       return;
     }

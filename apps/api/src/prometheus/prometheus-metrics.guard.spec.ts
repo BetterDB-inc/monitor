@@ -66,6 +66,25 @@ describe('PrometheusMetricsGuard', () => {
     ).toBe(true);
   });
 
+  it('allows the published public token alongside the primary', () => {
+    const guard = guardWith({
+      PROMETHEUS_METRICS_TOKEN: 's3cret',
+      PROMETHEUS_METRICS_PUBLIC_TOKEN: 'published',
+    });
+    expect(guard.canActivate(contextFor('Bearer published'))).toBe(true);
+    expect(guard.canActivate(contextFor('Bearer s3cret'))).toBe(true);
+  });
+
+  it('allows the published public token in cloud mode', () => {
+    process.env.CLOUD_MODE = 'true';
+    const guard = guardWith({
+      PROMETHEUS_METRICS_TOKEN: 's3cret',
+      PROMETHEUS_METRICS_PUBLIC_TOKEN: 'published',
+    });
+    expect(guard.canActivate(contextFor('Bearer published'))).toBe(true);
+    expect(() => guard.canActivate(contextFor('Bearer nope'))).toThrow(HttpException);
+  });
+
   it('returns 401 in cloud mode with no token configured', () => {
     process.env.CLOUD_MODE = 'true';
     expect.assertions(1);

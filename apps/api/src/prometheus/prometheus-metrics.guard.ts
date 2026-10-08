@@ -23,6 +23,7 @@ export class PrometheusMetricsGuard implements CanActivate {
     const access = resolveMetricsAccess({
       enabled: this.configService.get('PROMETHEUS_METRICS_ENABLED'),
       token: this.configService.get<string>('PROMETHEUS_METRICS_TOKEN'),
+      publicToken: this.configService.get<string>('PROMETHEUS_METRICS_PUBLIC_TOKEN'),
       cloudMode: isCloudMode(),
       authorization: Array.isArray(header) ? header[0] : header,
     });
