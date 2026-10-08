@@ -61,7 +61,7 @@ export async function assertSafeOutboundUrl(rawUrl: string, options: OutboundUrl
       throw new BadRequestException(`Cannot use private IP addresses as ${label}`);
     }
 
-    if (parsed.hostname.includes('127.') || parsed.hostname.includes('localhost')) {
+    if (parsed.hostname.startsWith('127.') || parsed.hostname.includes('localhost')) {
       throw new BadRequestException('Suspicious hostname detected');
     }
 
