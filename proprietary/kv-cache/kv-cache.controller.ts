@@ -1,10 +1,12 @@
-import { BadRequestException, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiHeader, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
-import { Feature, type KvCacheFootprintSnapshot, type KvCacheStatus } from '@betterdb/shared';
+import { Feature, type KvCacheEngine, type KvCacheFootprintSnapshot, type KvCacheStatus } from '@betterdb/shared';
 import { LicenseGuard } from '@proprietary/licenses';
 import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
 import { ConnectionId } from '@app/common/decorators';
 import { ENV_DEFAULT_ID } from '@app/connections/connection-registry.service';
+import { CreateKvCacheEngineDto, UpdateKvCacheEngineDto } from './dto/kv-cache-engine.dto';
+import { KvCacheEnginesService } from './kv-cache-engines.service';
 import { KvCacheFootprintService } from './kv-cache-footprint.service';
 import { KvCacheStatusService } from './kv-cache-status.service';
 
@@ -23,6 +25,7 @@ export class KvCacheController {
   constructor(
     private readonly status: KvCacheStatusService,
     private readonly footprint: KvCacheFootprintService,
+    private readonly engines: KvCacheEnginesService,
   ) {}
 
   @Get('status')
@@ -57,5 +60,46 @@ export class KvCacheController {
   ): Promise<KvCacheFootprintSnapshot[]> {
     const range = parseRange(from, to);
     return this.status.getFootprintHistory(connectionId || ENV_DEFAULT_ID, range.from, range.to);
+  }
+
+  @Get('engines')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.KV_CACHE_MONITORING)
+  @ApiOperation({ summary: 'List linked LMCache engines (Pro)' })
+  @ApiHeader({ name: 'x-connection-id', required: false })
+  listEngines(@ConnectionId() connectionId?: string): KvCacheEngine[] {
+    return this.engines.list(connectionId || ENV_DEFAULT_ID);
+  }
+
+  @Post('engines')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.KV_CACHE_MONITORING)
+  @ApiOperation({ summary: 'Link an LMCache engine by scrape URL or OTLP engine id (Pro)' })
+  @ApiHeader({ name: 'x-connection-id', required: false })
+  createEngine(@Body() dto: CreateKvCacheEngineDto, @ConnectionId() connectionId?: string): Promise<KvCacheEngine> {
+    return this.engines.create(connectionId || ENV_DEFAULT_ID, dto);
+  }
+
+  @Patch('engines/:id')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.KV_CACHE_MONITORING)
+  @ApiOperation({ summary: 'Update a linked LMCache engine (Pro)' })
+  @ApiHeader({ name: 'x-connection-id', required: false })
+  updateEngine(
+    @Param('id') id: string,
+    @Body() dto: UpdateKvCacheEngineDto,
+    @ConnectionId() connectionId?: string,
+  ): Promise<KvCacheEngine> {
+    return this.engines.update(connectionId || ENV_DEFAULT_ID, id, dto);
+  }
+
+  @Delete('engines/:id')
+  @HttpCode(204)
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.KV_CACHE_MONITORING)
+  @ApiOperation({ summary: 'Unlink an LMCache engine (Pro)' })
+  @ApiHeader({ name: 'x-connection-id', required: false })
+  removeEngine(@Param('id') id: string, @ConnectionId() connectionId?: string): Promise<void> {
+    return this.engines.remove(connectionId || ENV_DEFAULT_ID, id);
   }
 }

@@ -89,6 +89,16 @@ describe('KvCacheFootprintService', () => {
     (service as any).onConnectionRemoved('c1');
     expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
   });
+
+  it('notifies removal listeners with the connection id', () => {
+    const { service } = setup();
+    const listener = jest.fn();
+    const failing = jest.fn(() => { throw new Error('x'); });
+    service.onConnectionRemoval(failing);
+    service.onConnectionRemoval(listener);
+    (service as any).onConnectionRemoved('c1');
+    expect(listener).toHaveBeenCalledWith('c1');
+  });
 });
 
 describe('resolvePositiveInt', () => {

@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type { KvCacheEngine, KvCacheFootprintSnapshot, KvCacheStatus } from '@betterdb/shared';
 import type { StoragePort, StoredKvCacheEngine } from '@app/common/interfaces/storage-port.interface';
+import { KvCacheEngineRegistry } from './kv-cache-engine-registry';
 import { KvCacheFootprintService } from './kv-cache-footprint.service';
 
 export const FOOTPRINT_HISTORY_MAX_RANGE_MS = 31 * 24 * 60 * 60_000;
@@ -16,16 +17,16 @@ export class KvCacheStatusService {
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly footprint: KvCacheFootprintService,
+    private readonly engines: KvCacheEngineRegistry,
   ) {}
 
   async getStatus(connectionId: string): Promise<KvCacheStatus> {
     const [latest] = await this.storage.getKvCacheFootprintSnapshots({ connectionId, limit: 1 });
-    const engines = await this.storage.getKvCacheEngines(connectionId);
     return {
       hasLmcache: latest?.detected === true,
       latest: latest ?? null,
       sampleKey: this.footprint.getSampleKey(connectionId),
-      engines: engines.map(toPublicEngine),
+      engines: this.engines.list(connectionId).map(toPublicEngine),
     };
   }
 
