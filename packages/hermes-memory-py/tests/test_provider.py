@@ -7,13 +7,17 @@ here needs a live Valkey or an embeddings endpoint.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
+import logging
+import time
 from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import List
 
 from betterdb_hermes_memory import RECALL_K, BetterDBMemoryProvider, register
-from betterdb_hermes_memory.embeddings import EmbeddingConfig
+from betterdb_hermes_memory.embeddings import EmbeddingConfig, build_http_embed_fn
+from betterdb_hermes_memory.runtime import LoopRuntime
 
 
 # --------------------------------------------------------------------------- #
@@ -34,16 +38,21 @@ class FakeHit:
 
 
 class FakeStore:
-    def __init__(self, hits: List[FakeHit] | None = None):
+    def __init__(self, hits: List[FakeHit] | None = None, remember_error: Exception | None = None):
         self._hits = hits or []
+        self._remember_error = remember_error
         self.remembered: list = []
         self.recalled: list = []
         self.forgotten: list = []
         self.index_ready = False
+        self.discovery_ready = False
         self.closed = False
 
     async def ensure_index(self) -> None:
         self.index_ready = True
+
+    async def ensure_discovery_ready(self) -> None:
+        self.discovery_ready = True
 
     async def recall(self, query, *, k=None, agent_id=None, thread_id=None, namespace=None, **kw):
         self.recalled.append({"query": query, "k": k, "agent_id": agent_id, "namespace": namespace})
@@ -51,6 +60,8 @@ class FakeStore:
 
     async def remember(self, content, *, importance=None, tags=None, source=None,
                        agent_id=None, thread_id=None, namespace=None, **kw):
+        if self._remember_error is not None:
+            raise self._remember_error
         self.remembered.append({
             "content": content, "importance": importance, "tags": tags,
             "source": source, "agent_id": agent_id, "thread_id": thread_id,
@@ -97,14 +108,20 @@ class FakeRuntime:
         self.stopped = True
 
 
-def _wired(store: FakeStore | None = None, **cfg):
+def _wired(store: FakeStore | None = None, *, initialize: bool = True, **cfg):
     store = store if store is not None else FakeStore()
     provider = BetterDBMemoryProvider(
-        config=cfg or {},
+        # An explicit host makes the wired provider genuinely "configured" (the bare
+        # 127.0.0.1 default no longer counts — see has_connection meaningfulness).
+        config={"host": "127.0.0.1", **cfg},
         store=store,
         runtime=FakeRuntime(),
         embed_fn=lambda text: None,  # presence satisfies is_available; never called here
     )
+    if initialize:
+        # Run the real lifecycle so self._config is resolved live, exactly as Hermes
+        # drives it; config is no longer frozen at construction.
+        provider.initialize("s1", agent_id="hermes")
     return provider, store
 
 
@@ -120,14 +137,27 @@ def test_embedding_config_readiness():
 
 def test_is_available_true_with_embed_fn():
     provider, _ = _wired()
-    # Default localhost connection + injected embed_fn + SDK importable -> available.
+    # Explicit host connection + injected embed_fn + SDK importable -> available.
     assert provider.is_available() is True
 
 
 def test_is_available_false_without_embeddings():
-    provider = BetterDBMemoryProvider(config={})  # no embed_fn, default (unconfigured) embeddings
+    # Host configured but no embeddings -> unavailable, and the reason names embeddings.
+    provider = BetterDBMemoryProvider(config={"host": "127.0.0.1"})
     assert provider.is_available() is False
     assert "embeddings" in provider.unavailable_reason().lower()
+
+
+def test_has_connection_meaningful_when_unconfigured():
+    # No url and no explicit host/port: the silent 127.0.0.1 default must NOT count
+    # as configured, so the provider is unavailable with the real "no Valkey" reason.
+    provider = BetterDBMemoryProvider(config={}, embed_fn=lambda text: None)
+    assert provider.is_available() is False
+    assert "no valkey" in provider.unavailable_reason().lower()
+
+    # An explicit host flips it: now a connection is configured.
+    configured = BetterDBMemoryProvider(config={"host": "db.internal"}, embed_fn=lambda text: None)
+    assert configured.is_available() is True
 
 
 def test_name():
@@ -226,6 +256,173 @@ def test_tool_schemas_declared():
     provider, _ = _wired()
     names = {t["name"] for t in provider.get_tool_schemas()}
     assert names == {"betterdb_remember", "betterdb_recall", "betterdb_forget"}
+
+
+# --------------------------------------------------------------------------- #
+# Lifecycle: index + discovery registration
+# --------------------------------------------------------------------------- #
+
+def test_initialize_registers_index_and_discovery():
+    provider, store = _wired()
+    # initialize() (run by _wired) must create the index AND register discovery,
+    # mirroring the SDK facade (ensure_index then ensure_discovery_ready).
+    assert store.index_ready is True
+    assert store.discovery_ready is True
+
+
+# --------------------------------------------------------------------------- #
+# Background failures surface (not silent)
+# --------------------------------------------------------------------------- #
+
+def test_failed_background_write_logs_warning(caplog):
+    store = FakeStore(remember_error=RuntimeError("valkey down"))
+    provider, store = _wired(store)
+    with caplog.at_level(logging.WARNING, logger="betterdb_hermes_memory"):
+        provider.sync_turn("remember this", "ok", session_id="s1")
+    assert any("remember" in r.message and "valkey down" in r.message
+               for r in caplog.records), caplog.records
+
+
+# --------------------------------------------------------------------------- #
+# importance: safe parse + clamp
+# --------------------------------------------------------------------------- #
+
+def test_tool_remember_importance_default_and_clamp():
+    def _imp(args):
+        store = FakeStore()
+        provider, store = _wired(store)
+        provider.handle_tool_call("betterdb_remember", {"content": "c", **args})
+        return store.remembered[0]["importance"]
+
+    assert _imp({}) == 0.7                      # missing -> default
+    assert _imp({"importance": None}) == 0.7     # None -> default
+    assert _imp({"importance": "oops"}) == 0.7   # non-numeric -> default
+    assert _imp({"importance": "0.3"}) == 0.3    # numeric string parses
+    assert _imp({"importance": 5}) == 1.0        # clamp high
+    assert _imp({"importance": -2}) == 0.0       # clamp low
+
+
+# --------------------------------------------------------------------------- #
+# Tool timeout surfaces a clear message (not {"error": ""})
+# --------------------------------------------------------------------------- #
+
+def test_tool_timeout_message():
+    class TimeoutRuntime(FakeRuntime):
+        def run(self, coro, *, timeout=None):
+            coro.close()  # avoid "coroutine was never awaited" warning
+            raise concurrent.futures.TimeoutError()
+
+    store = FakeStore()
+    provider = BetterDBMemoryProvider(
+        config={"host": "127.0.0.1"}, store=store, runtime=TimeoutRuntime(),
+        embed_fn=lambda text: None,
+    )
+    provider.initialize("s1")
+    out = json.loads(provider.handle_tool_call("betterdb_remember", {"content": "x"}))
+    assert "timed out" in out["error"].lower()
+    assert out["error"] != ""
+
+
+# --------------------------------------------------------------------------- #
+# Shutdown closes the client pool and the embeddings client
+# --------------------------------------------------------------------------- #
+
+def test_shutdown_closes_client_store_and_embedder():
+    class FakeAsyncClient:
+        def __init__(self):
+            self.closed = False
+
+        async def aclose(self):
+            self.closed = True
+
+    client, embedder = FakeAsyncClient(), FakeAsyncClient()
+    store = FakeStore()
+    provider, store = _wired(store)
+    provider._client = client
+    provider._embed_fn = embedder  # stand-in with aclose()
+    runtime = provider._runtime
+
+    provider.shutdown()
+
+    assert client.closed is True       # valkey pool released
+    assert embedder.closed is True     # embeddings http client released
+    assert store.closed is True        # store torn down
+    assert runtime.stopped is True     # loop stopped last
+
+
+def test_http_embedder_reuses_one_client():
+    class FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"embedding": [0.1, 0.2]}]}
+
+    class FakeClient:
+        def __init__(self):
+            self.posts = 0
+            self.closed = False
+
+        async def post(self, *a, **k):
+            self.posts += 1
+            return FakeResp()
+
+        async def aclose(self):
+            self.closed = True
+
+    embedder = build_http_embed_fn(EmbeddingConfig(api_key="sk-x"))
+    fake = FakeClient()
+    embedder._client = fake  # pre-seed so no real network / client construction
+
+    async def _drive():
+        a = await embedder("hello")
+        b = await embedder("world")
+        return a, b
+
+    a, b = asyncio.new_event_loop().run_until_complete(_drive())
+    assert a == [0.1, 0.2] and b == [0.1, 0.2]
+    assert fake.posts == 2          # two embeds...
+    assert embedder._client is fake  # ...reusing the SAME client
+
+    asyncio.new_event_loop().run_until_complete(embedder.aclose())
+    assert fake.closed is True
+    assert embedder._client is None
+
+
+# --------------------------------------------------------------------------- #
+# LoopRuntime: timeout cancellation + graceful stop
+# --------------------------------------------------------------------------- #
+
+def test_loop_runtime_run_cancels_on_timeout():
+    runtime = LoopRuntime()
+    runtime.start()
+    try:
+        cancelled = {"hit": False}
+
+        async def slow():
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                cancelled["hit"] = True
+                raise
+
+        try:
+            runtime.run(slow(), timeout=0.2)
+            assert False, "expected timeout"
+        except concurrent.futures.TimeoutError:
+            pass
+        time.sleep(0.2)  # let the cancellation propagate on the loop
+        assert cancelled["hit"] is True
+    finally:
+        runtime.stop()
+
+
+def test_loop_runtime_stop_is_graceful_and_idempotent():
+    runtime = LoopRuntime()
+    runtime.start()
+    assert runtime.run(asyncio.sleep(0, result=42)) == 42
+    runtime.stop()
+    runtime.stop()  # second call is a no-op, not an error
 
 
 # --------------------------------------------------------------------------- #

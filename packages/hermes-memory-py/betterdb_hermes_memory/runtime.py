@@ -13,15 +13,36 @@ This keeps two promises the provider cares about:
 * Background work (prefetch recall, turn writes) submits a coroutine and never
   touches the calling thread's loop.
 * A blocking call can wait with a timeout, so a wedged network round-trip can't
-  hang a turn forever.
+  hang a turn forever — and on timeout the coroutine is cancelled so a late write
+  can't still land after the tool has reported failure.
 """
 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import logging
 import threading
 from concurrent.futures import Future
-from typing import Any, Awaitable, Optional
+from typing import Any, Awaitable, Callable, Optional
+
+logger = logging.getLogger(__name__)
+
+
+def _spawn_thread(target: Callable[[], Any], *, name: str, daemon: bool = True) -> threading.Thread:
+    """Create the loop thread under the spawner's Hermes profile scope when possible.
+
+    Per ``plugins/AGENTS.md`` every memory-provider background worker must go
+    through ``spawn_context_thread`` so it inherits the profile's HERMES_HOME /
+    secret scope. When Hermes is not importable (standalone / tests) we fall back
+    to a plain daemon thread.
+    """
+    try:
+        from agent.memory_provider import spawn_context_thread  # type: ignore
+
+        return spawn_context_thread(target, name=name, daemon=daemon)
+    except Exception:
+        return threading.Thread(target=target, name=name, daemon=daemon)
 
 
 class LoopRuntime:
@@ -38,9 +59,7 @@ class LoopRuntime:
             if self._thread is not None and self._thread.is_alive():
                 return
             self._loop = asyncio.new_event_loop()
-            self._thread = threading.Thread(
-                target=self._run, name="betterdb-memory-loop", daemon=True
-            )
+            self._thread = _spawn_thread(self._run, name="betterdb-memory-loop", daemon=True)
             self._thread.start()
 
     def _run(self) -> None:
@@ -59,21 +78,56 @@ class LoopRuntime:
         return asyncio.run_coroutine_threadsafe(coro, self._loop)
 
     def run(self, coro: Awaitable[Any], *, timeout: Optional[float] = None) -> Any:
-        """Submit *coro* and block for its result (up to *timeout* seconds)."""
-        return self.submit(coro).result(timeout=timeout)
+        """Submit *coro* and block for its result (up to *timeout* seconds).
+
+        On timeout the underlying task is cancelled before re-raising, so a wedged
+        write can't still commit after the caller has given up and reported failure.
+        """
+        future = self.submit(coro)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            # Cancelling the concurrent future cancels the asyncio task that
+            # run_coroutine_threadsafe scheduled, thread-safely, on the loop.
+            future.cancel()
+            raise
+
+    async def _drain(self) -> None:
+        """Cancel and await every other task on the loop so nothing is abandoned."""
+        current = asyncio.current_task()
+        pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     def stop(self, *, timeout: float = 5.0) -> None:
-        """Stop the loop and join the thread. Safe to call more than once."""
+        """Drain in-flight work, stop the loop, join the thread, then close.
+
+        Safe to call more than once. The loop is only ``close()``d after the thread
+        has actually exited — closing a still-running loop would raise — and a join
+        that times out is logged rather than silently leaving the loop orphaned.
+        """
         with self._lock:
             loop, thread = self._loop, self._thread
             self._loop = self._thread = None
         if loop is None:
             return
-        loop.call_soon_threadsafe(loop.stop)
-        if thread is not None:
+        if thread is not None and thread.is_alive():
+            try:
+                drain = asyncio.run_coroutine_threadsafe(self._drain(), loop)
+                drain.result(timeout=timeout)
+            except Exception as exc:
+                logger.warning("betterdb memory loop drain failed: %s", exc)
+            loop.call_soon_threadsafe(loop.stop)
             thread.join(timeout=timeout)
-        # Closing from the owner thread is fine once run_forever() has returned.
+            if thread.is_alive():
+                logger.warning(
+                    "betterdb memory loop thread did not exit within %.1fs; leaving loop open",
+                    timeout,
+                )
+                return  # never close a loop whose thread is still running it
         try:
             loop.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("betterdb memory loop close failed: %s", exc)

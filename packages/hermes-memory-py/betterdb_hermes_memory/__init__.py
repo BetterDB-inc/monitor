@@ -19,10 +19,11 @@ connection fields) plus scoped secrets for the password and the embeddings key.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider, RecallStatus
 
@@ -54,18 +55,20 @@ INDICATOR_GLYPH = "\U0001f9e0"  # 🧠
 def _get_secret(name: str, default: str = "") -> str:
     """Scoped secret when running inside Hermes, else the plain env var.
 
-    Imported lazily so the package is usable (and testable) without Hermes on the
-    path — ``os.environ`` is the fallback.
+    The ``agent.secret_scope`` import is lazy so the package stays usable (and
+    testable) without Hermes on the path. Only ``ImportError`` falls back to
+    ``os.environ`` — that is the standalone / test case. A failure raised BY the
+    scoped lookup (e.g. an unresolved profile secret inside Hermes) propagates so
+    we fail closed instead of silently reading an ambient env var from the wrong
+    profile.
     """
     try:
         from agent.secret_scope import get_secret  # type: ignore
-
-        value = get_secret(name, default)
-    except Exception:
+    except ImportError:
         import os
 
-        value = os.environ.get(name, default)
-    return value or default
+        return os.environ.get(name, default) or default
+    return get_secret(name, default) or default
 
 
 def _load_config_block() -> Dict[str, Any]:
@@ -94,20 +97,49 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
+def _as_float(value: Any, default: float) -> float:
+    """Parse *value* to float, falling back to *default* on None/missing/non-numeric."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
 class _Config:
-    """Resolved provider configuration: connection + store + embeddings."""
+    """Resolved provider configuration: connection + store + embeddings.
+
+    Built fresh at each availability/lifecycle check (never cached at construction)
+    so every Hermes profile reads its own live secrets rather than freezing the
+    first profile's.
+    """
 
     def __init__(self, block: Optional[Dict[str, Any]] = None):
         block = block if block is not None else _load_config_block()
+        raw_host = str(block.get("host", "") or "")
+        raw_port = block.get("port")
+        raw_db = block.get("db")
         self.url: str = _get_secret("BETTERDB_MEMORY_URL", "") or str(block.get("url", "") or "")
-        self.host: str = str(block.get("host", "") or "") or DEFAULT_HOST
-        self.port: int = _as_int(block.get("port"), DEFAULT_PORT)
-        self.db: int = _as_int(block.get("db"), 0)
+        self.host: str = raw_host or DEFAULT_HOST
+        self.port: int = _as_int(raw_port, DEFAULT_PORT)
+        self.db: int = _as_int(raw_db, 0)
         self.username: str = str(block.get("username", "") or "")
         self.password: str = _get_secret("BETTERDB_MEMORY_PASSWORD", "")
         self.tls: bool = _as_bool(block.get("tls"), False)
         self.store_name: str = str(block.get("store_name", "") or "") or DEFAULT_STORE_NAME
         self.namespace: str = str(block.get("namespace", "") or "")
+        # Whether the user *explicitly* pointed us at a connection, as opposed to
+        # falling through to the silent 127.0.0.1 default. Availability must reflect
+        # real configuration (see has_connection); the client still targets
+        # DEFAULT_HOST when nothing is set.
+        self._explicit_host: bool = bool(raw_host)
+        self._explicit_port: bool = raw_port is not None
+        self._explicit_db: bool = raw_db is not None
         self.embeddings = EmbeddingConfig(
             model=str(block.get("embeddings_model", "") or "") or DEFAULT_EMBEDDINGS_MODEL,
             base_url=str(block.get("embeddings_base_url", "") or "") or DEFAULT_EMBEDDINGS_BASE_URL,
@@ -115,7 +147,10 @@ class _Config:
         )
 
     def has_connection(self) -> bool:
-        return bool(self.url) or bool(self.host)
+        """True only when a connection was actually configured — a ``url`` or an
+        explicit host/port. The implicit 127.0.0.1 default does NOT count, so the
+        "no Valkey configured" availability branch can render for a bare install."""
+        return bool(self.url) or self._explicit_host or self._explicit_port
 
 
 # --------------------------------------------------------------------------- #
@@ -135,7 +170,12 @@ class BetterDBMemoryProvider(MemoryProvider):
     ):
         # Injected store/runtime/embed_fn let tests exercise the mapping without a
         # live Valkey or an embeddings endpoint.
-        self._config = _Config(config)
+        #
+        # Keep only the raw override dict; a fresh _Config is resolved live at each
+        # availability check and at initialize() so each profile reads its OWN
+        # secrets instead of freezing whichever profile constructed us first.
+        self._config_input = config
+        self._config: Optional[_Config] = None  # set in initialize() for operational use
         self._store = store
         self._runtime = runtime
         self._embed_fn = embed_fn
@@ -147,7 +187,6 @@ class BetterDBMemoryProvider(MemoryProvider):
         self._recall_block: str = ""
         self._recall_count: int = 0
         self._last_status: Optional[RecallStatus] = None
-        self._pending: List[Any] = []  # in-flight futures, pruned opportunistically
 
     @property
     def name(self) -> str:
@@ -157,26 +196,29 @@ class BetterDBMemoryProvider(MemoryProvider):
 
     def is_available(self) -> bool:
         """SDK importable, a connection target configured, and an embedding source
-        resolvable. Pure config/dependency checks — never touches the network."""
+        resolvable. Pure config/dependency checks — never touches the network.
+        Resolves a fresh config so the active profile's live secrets are read."""
         try:
             import betterdb_agent_memory  # noqa: F401
         except Exception:
             return False
-        has_embeddings = self._embed_fn is not None or self._config.embeddings.is_configured()
-        return self._config.has_connection() and has_embeddings
+        config = _Config(self._config_input)
+        has_embeddings = self._embed_fn is not None or config.embeddings.is_configured()
+        return config.has_connection() and has_embeddings
 
     def unavailable_reason(self) -> str:
         try:
             import betterdb_agent_memory  # noqa: F401
         except Exception:
             return "betterdb-agent-memory is not installed (pip install betterdb-agent-memory)."
-        if not self._config.has_connection():
+        config = _Config(self._config_input)
+        if not config.has_connection():
             return "No Valkey connection configured (set memory.betterdb.host or BETTERDB_MEMORY_URL)."
-        if not (self._embed_fn is not None or self._config.embeddings.is_configured()):
+        if not (self._embed_fn is not None or config.embeddings.is_configured()):
             return (
                 "Embeddings are not configured. betterdb-agent-memory does not ship an "
                 "embedding model, so this provider needs an OpenAI-compatible endpoint. "
-                "Set memory.betterdb.embeddings_api_key (OpenAI/Azure), or point "
+                "Set memory.betterdb.embeddings_api_key (OpenAI), or point "
                 "memory.betterdb.embeddings_base_url at a local server (Ollama, vLLM, LM Studio)."
             )
         return ""
@@ -206,7 +248,7 @@ class BetterDBMemoryProvider(MemoryProvider):
                             "Ollama, vLLM or LM Studio to run locally without a key.",
              "default": DEFAULT_EMBEDDINGS_BASE_URL},
             {"key": "embeddings_api_key",
-             "description": "API key for the embeddings endpoint (OpenAI/Azure/gateway). "
+             "description": "API key for the embeddings endpoint (OpenAI or a compatible gateway). "
                             "Local servers like Ollama or vLLM usually need none.",
              "secret": True, "env_var": "BETTERDB_MEMORY_EMBEDDINGS_API_KEY", "required": False,
              "url": "https://platform.openai.com/api-keys"},
@@ -234,6 +276,10 @@ class BetterDBMemoryProvider(MemoryProvider):
         self._agent_id = kwargs.get("agent_id") or kwargs.get("agent_identity") or "hermes"
         self._agent_context = kwargs.get("agent_context", "primary") or "primary"
 
+        # Resolve config live under the active profile's scope and keep it for
+        # operational use (client build, scoping) for the life of the provider.
+        self._config = _Config(self._config_input)
+
         if self._runtime is None:
             self._runtime = LoopRuntime()
         self._runtime.start()
@@ -253,13 +299,31 @@ class BetterDBMemoryProvider(MemoryProvider):
         # Create the vector index up front, off the calling thread. The store is
         # unusable until the index exists, but a turn should never block on it.
         self._submit(self._store.ensure_index(), label="ensure_index")
+        # Register this tier for discovery, mirroring the SDK's AgentMemory facade
+        # (ensure_discovery_ready after ensure_index under a running loop). Guarded
+        # so an injected store without the hook doesn't break initialize.
+        ensure_discovery = getattr(self._store, "ensure_discovery_ready", None)
+        if callable(ensure_discovery):
+            self._submit(ensure_discovery(), label="discovery")
 
     def _build_client(self) -> Any:
         """Construct a ``valkey.asyncio`` client from the resolved config."""
         import valkey.asyncio as valkey  # type: ignore
 
         if self._config.url:
-            return valkey.Valkey.from_url(self._config.url)
+            # A URL may omit auth/tls/db; apply any that were set separately so a
+            # user who provides URL + BETTERDB_MEMORY_PASSWORD isn't silently
+            # unauthenticated. valkey-py's from_url accepts these as overrides.
+            extra: Dict[str, Any] = {}
+            if self._config.password:
+                extra["password"] = self._config.password
+            if self._config.username:
+                extra["username"] = self._config.username
+            if self._config.tls:
+                extra["ssl"] = True
+            if self._config._explicit_db:
+                extra["db"] = self._config.db
+            return valkey.Valkey.from_url(self._config.url, **extra)
         kwargs: Dict[str, Any] = {
             "host": self._config.host,
             "port": self._config.port,
@@ -283,9 +347,12 @@ class BetterDBMemoryProvider(MemoryProvider):
         """
         if not self._store or not self._runtime or not query.strip():
             return
+        # Recall is best-effort and owns its own result handling (debug-level, since
+        # a failure simply injects nothing), so skip the generic warning reporter.
         future = self._submit(
             self._store.recall(query, k=RECALL_K, agent_id=self._agent_id, **self._scope_kwargs()),
             label="recall",
+            report=False,
         )
         if future is None:
             return
@@ -293,6 +360,8 @@ class BetterDBMemoryProvider(MemoryProvider):
         def _on_done(fut: Any) -> None:
             try:
                 hits = fut.result()
+            except concurrent.futures.CancelledError:
+                return
             except Exception as exc:  # recall is best-effort; a failure injects nothing
                 logger.debug("betterdb recall failed: %s", exc)
                 return
@@ -434,7 +503,7 @@ class BetterDBMemoryProvider(MemoryProvider):
                 mem_id = self._runtime.run(
                     self._store.remember(
                         args["content"],
-                        importance=float(args["importance"]) if "importance" in args else 0.7,
+                        importance=_clamp01(_as_float(args.get("importance"), 0.7)),
                         tags=args.get("tags"),
                         source="tool",
                         agent_id=self._agent_id,
@@ -465,21 +534,43 @@ class BetterDBMemoryProvider(MemoryProvider):
             return tool_error(f"Unknown tool: {tool_name}")
         except KeyError as exc:
             return tool_error(f"Missing required argument: {exc}")
+        except (concurrent.futures.TimeoutError, TimeoutError):
+            # str(TimeoutError()) is "" — surface a real message, not {"error": ""}.
+            return tool_error("BetterDB memory timed out after 10s")
         except Exception as exc:
             return tool_error(str(exc))
 
     # -- shutdown ---------------------------------------------------------- #
 
     def shutdown(self) -> None:
-        store, runtime, self._store, self._runtime = self._store, self._runtime, None, None
-        if store is not None and runtime is not None:
-            try:
-                runtime.run(store.close(), timeout=5.0)
-            except Exception as exc:
-                logger.debug("betterdb store close failed: %s", exc)
+        store, runtime = self._store, self._runtime
+        client, embed_fn = self._client, self._embed_fn
+        self._store = self._runtime = self._client = None
         if runtime is not None:
+            # Close the store first — its discovery/analytics teardown still needs a
+            # live client — then release the Valkey client pool and the shared
+            # embeddings HTTP client, all on the loop, and only then stop the loop.
+            # (The finding lists client-close first; store.close() needs the client,
+            # so we close the store ahead of it — same no-leak outcome.)
+            self._run_quiet(runtime, store.close() if store is not None else None, "store close")
+            self._run_quiet(runtime, self._aclose(client), "client close")
+            self._run_quiet(runtime, self._aclose(embed_fn), "embedder close")
             runtime.stop()
-        self._client = None
+
+    @staticmethod
+    def _aclose(obj: Any) -> Any:
+        """Return ``obj.aclose()`` coroutine when available, else None (skipped)."""
+        aclose = getattr(obj, "aclose", None)
+        return aclose() if callable(aclose) else None
+
+    @staticmethod
+    def _run_quiet(runtime: Any, coro: Any, label: str) -> None:
+        if coro is None:
+            return
+        try:
+            runtime.run(coro, timeout=5.0)
+        except Exception as exc:
+            logger.warning("betterdb %s failed: %s", label, exc)
 
     # -- internals --------------------------------------------------------- #
 
@@ -490,18 +581,34 @@ class BetterDBMemoryProvider(MemoryProvider):
     def _scope_kwargs(self) -> Dict[str, Any]:
         return {"namespace": self._config.namespace} if self._config.namespace else {}
 
-    def _submit(self, coro: Any, *, label: str) -> Any:
-        """Fire-and-forget a coroutine onto the runtime loop; prune finished futures."""
+    def _submit(self, coro: Any, *, label: str, report: bool = True) -> Any:
+        """Fire-and-forget a coroutine onto the runtime loop.
+
+        Unless *report* is False, attach a done-callback that surfaces a failed
+        background job at ``logger.warning`` — otherwise these writes/index builds
+        fail silently. Callers that own their own result handling (recall) pass
+        ``report=False``.
+        """
         if not self._runtime:
             return None
         try:
             future = self._runtime.submit(coro)
         except Exception as exc:
-            logger.debug("betterdb %s submit failed: %s", label, exc)
+            logger.warning("betterdb %s submit failed: %s", label, exc)
             return None
-        self._pending = [f for f in self._pending if not f.done()]
-        self._pending.append(future)
+        if report:
+            future.add_done_callback(lambda f: self._report_background(f, label))
         return future
+
+    @staticmethod
+    def _report_background(future: Any, label: str) -> None:
+        """Done-callback: log a background job's failure (never swallow it silently)."""
+        try:
+            future.result()
+        except concurrent.futures.CancelledError:
+            return
+        except Exception as exc:
+            logger.warning("betterdb %s failed: %s", label, exc)
 
 
 def register(ctx) -> None:

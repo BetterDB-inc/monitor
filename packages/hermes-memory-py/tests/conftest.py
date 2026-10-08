@@ -7,7 +7,9 @@ exercise the provider in isolation — no Hermes checkout and no live Valkey.
 
 from __future__ import annotations
 
+import contextvars
 import sys
+import threading
 import types
 from dataclasses import dataclass
 
@@ -30,8 +32,17 @@ def _install_hermes_stubs() -> None:
         """Minimal stand-in: the real base is an ABC with optional hook defaults.
         The provider under test overrides everything it uses, so a plain base is enough."""
 
+    def spawn_context_thread(target, *, name, daemon=True, args=(), kwargs=None):
+        """Mirror the real helper: run *target* under a copy of the caller's context."""
+        ctx = contextvars.copy_context()
+        return threading.Thread(
+            target=lambda: ctx.run(target, *(args or ()), **(kwargs or {})),
+            name=name, daemon=daemon,
+        )
+
     mp.RecallStatus = RecallStatus
     mp.MemoryProvider = MemoryProvider
+    mp.spawn_context_thread = spawn_context_thread
     agent_pkg.memory_provider = mp
 
     tools_pkg = types.ModuleType("tools")
