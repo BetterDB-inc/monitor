@@ -1,0 +1,211 @@
+# Public read-only Grafana for the live demo, served at
+# https://demo-grafana.app.betterdb.com through the shared tenant ALB.
+# Anonymous visitors get the Viewer role on the provisioned BetterDB
+# dashboards; the admin login form stays available for operators (password in
+# the grafana-admin Secret, created manually — see README).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: demo-observability
+data:
+  prometheus.yaml: |
+    apiVersion: 1
+
+    datasources:
+      - name: Prometheus
+        uid: betterdb-prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        jsonData:
+          timeInterval: 15s
+          # Anonymous viewers can query through /api/ds/query; cap how long a
+          # single request may hold Prometheus (paired with Prometheus's own
+          # --query.* limits).
+          queryTimeout: 30s
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: demo-observability
+data:
+  betterdb.yaml: |
+    apiVersion: 1
+
+    providers:
+      - name: BetterDB
+        type: file
+        folder: BetterDB
+        allowUiUpdates: false
+        options:
+          path: /var/lib/grafana/dashboards
+          foldersFromFilesStructure: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: demo-observability
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 472
+        runAsGroup: 472
+        fsGroup: 472
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.6.0
+          ports:
+            - containerPort: 3000
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: GF_SERVER_ROOT_URL
+              value: https://demo-grafana.app.betterdb.com
+            # Public read-only access.
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: Viewer
+            - name: GF_USERS_ALLOW_SIGN_UP
+              value: "false"
+            - name: GF_USERS_ALLOW_ORG_CREATE
+              value: "false"
+            - name: GF_USERS_VIEWERS_CAN_EDIT
+              value: "false"
+            # Dashboards only — Explore widens the ad-hoc query surface for
+            # anonymous visitors (the published scrape token already covers
+            # power users who want raw PromQL/data).
+            - name: GF_EXPLORE_ENABLED
+              value: "false"
+            - name: GF_SNAPSHOTS_EXTERNAL_ENABLED
+              value: "false"
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-admin
+                  key: password
+            - name: GF_SECURITY_COOKIE_SECURE
+              value: "true"
+            - name: GF_SECURITY_DISABLE_GRAVATAR
+              value: "true"
+            - name: GF_ANALYTICS_REPORTING_ENABLED
+              value: "false"
+            - name: GF_ANALYTICS_CHECK_FOR_UPDATES
+              value: "false"
+            - name: GF_NEWS_NEWS_FEED_ENABLED
+              value: "false"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          volumeMounts:
+            - name: storage
+              mountPath: /var/lib/grafana
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+      volumes:
+        # Everything that matters is provisioned from ConfigMaps; Grafana's
+        # own state (sqlite, plugins) is disposable.
+        - name: storage
+          emptyDir: {}
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboard-provider
+          configMap:
+            name: grafana-dashboard-provider
+        # Created from the shipped dashboard pack:
+        #   kubectl create configmap grafana-dashboards -n demo-observability \
+        #     --from-file=deploy/observability/dashboards/
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: demo-observability
+spec:
+  selector:
+    app: grafana
+  ports:
+    - port: 80
+      targetPort: 3000
+---
+# Rides the same shared ALB as the tenant ingresses (same group.name), so no
+# new load balancer. The host must be a direct child of app.betterdb.com —
+# the ACM wildcard covers exactly one label.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+  namespace: demo-observability
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    # REPLACE with the ACM cert ARN used by the tenant ingresses
+    # (terraform output acm_certificate_arn).
+    alb.ingress.kubernetes.io/certificate-arn: ACM_CERT_ARN
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    # REPLACE with the current tenant ALB group (entitlement ALB_GROUP_NAME).
+    alb.ingress.kubernetes.io/group.name: ALB_GROUP_NAME
+    alb.ingress.kubernetes.io/healthcheck-path: /api/health
+    # The WAF rate limits (metrics scrape + this Grafana host) are attached
+    # post-apply via `kubectl annotate` with the ARN from
+    # `terraform output tenant_alb_waf_acl_arn` — see README step 6. REQUIRED
+    # before the demo token is published. The association must live on an
+    # ingress (not terraform): the ALB controller owns WAF association for
+    # ALBs it manages.
+spec:
+  ingressClassName: alb
+  rules:
+    - host: demo-grafana.app.betterdb.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: 80

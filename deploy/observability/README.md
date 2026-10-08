@@ -4,6 +4,12 @@ An OpenTelemetry Collector config, a Grafana dashboard pack, and a
 docker-compose demo that shows BetterDB Monitor, the Collector, Prometheus,
 and Grafana running side by side against a seeded Valkey instance.
 
+A hosted instance of this pack runs against the public demo workspace —
+read-only Grafana at `https://demo-grafana.app.betterdb.com` and a published
+scrape credential for `https://demo.app.betterdb.com/api/prometheus/metrics`
+(see [docs/live-demo.md](../../docs/live-demo.md)). The dashboards there are
+these JSON files, unmodified.
+
 ## What's here
 
 - `collector/otel-collector.yaml` — base Collector config: OTLP receiver on

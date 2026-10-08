@@ -1,0 +1,128 @@
+# Namespace for the public demo observability stack (Prometheus + Grafana).
+# One-time shared infra, applied manually — see README.md. Deliberately NOT
+# labeled app.kubernetes.io/managed-by=betterdb-entitlement so the entitlement
+# reconciler never touches it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-observability
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: demo-observability-quota
+  namespace: demo-observability
+spec:
+  hard:
+    requests.cpu: "1"
+    requests.memory: 1536Mi
+    limits.cpu: "2"
+    limits.memory: 3Gi
+    pods: "4"
+---
+# Grafana is the only publicly reachable component: ALB (kube-system) in,
+# Prometheus + DNS out.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: grafana
+  namespace: demo-observability
+spec:
+  podSelector:
+    matchLabels:
+      app: grafana
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # The Ingress uses target-type: ip, so ALB data-plane and health-check
+    # traffic arrives from ALB ENI addresses in the VPC — a namespaceSelector
+    # can never match those; the ipBlock is what admits the ALB. NOTE: under
+    # the VPC CNI every pod IP is also in this CIDR, so this rule does NOT
+    # restrict Grafana to the ALB — any in-VPC pod can reach :3000. That's
+    # acceptable because Grafana is intentionally public (anonymous Viewer +
+    # admin password + the ALB-path WAF limit); the real job of this policy is
+    # the egress restriction below. Tighten to the ALB public-subnet CIDRs if
+    # stricter source control is ever needed.
+    - from:
+        - ipBlock:
+            cidr: 10.0.0.0/16 # VPC CIDR (terraform var.vpc_cidr)
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 3000
+  egress:
+    # DNS is granted by the shared allow-dns policy below.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 9090
+---
+# Prometheus is cluster-internal: queried by Grafana, pushed to (OTLP) by the
+# demo tenant, and it scrapes the demo tenant's metrics endpoint.
+# REPLACE tenant-DEMO_SUBDOMAIN with the real demo tenant namespace (see README).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prometheus
+  namespace: demo-observability
+spec:
+  podSelector:
+    matchLabels:
+      app: prometheus
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: grafana
+      ports:
+        - protocol: TCP
+          port: 9090
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tenant-DEMO_SUBDOMAIN
+      ports:
+        - protocol: TCP
+          port: 9090
+  egress:
+    # DNS is granted by the shared allow-dns policy below.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tenant-DEMO_SUBDOMAIN
+      ports:
+        - protocol: TCP
+          port: 3001
+---
+# DNS egress for the grafana + prometheus pods. A single additive policy
+# instead of repeating the kube-system :53 block in each pod's policy
+# (NetworkPolicies are additive, and YAML anchors can't span the --- document
+# boundary). Scoped to those two apps (not podSelector {}) so a later-added or
+# `kubectl run` debug pod isn't silently flipped to egress-isolated.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: demo-observability
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [grafana, prometheus]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
