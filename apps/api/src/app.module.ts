@@ -47,6 +47,7 @@ let LatencyRegressionModule: any = null;
 let WebhookProModule: any = null;
 let InferenceLatencyProModule: any = null;
 let ScalingReadinessProModule: any = null;
+let KvCacheModule: any = null;
 let CacheProposalsModule: any = null;
 let MemoryProposalsModule: any = null;
 let AgentModule: any = null;
@@ -122,6 +123,14 @@ try {
   const scalingReadinessProModule = require('../../../proprietary/scaling-readiness-pro/scaling-readiness-pro.module');
   ScalingReadinessProModule = scalingReadinessProModule.ScalingReadinessProModule;
   console.log('[ScalingReadinessPro] Proprietary module loaded');
+} catch {
+  // Proprietary module not available
+}
+
+try {
+  const kvCacheModule = require('../../../proprietary/kv-cache/kv-cache.module');
+  KvCacheModule = kvCacheModule.KvCacheModule;
+  console.log('[KvCache] Proprietary module loaded');
 } catch {
   // Proprietary module not available
 }
@@ -241,6 +250,7 @@ const proprietaryImports = [
   WebhookProModule,
   InferenceLatencyProModule,
   ScalingReadinessProModule,
+  KvCacheModule,
   CacheProposalsModule,
   MemoryProposalsModule,
   AiModule,
