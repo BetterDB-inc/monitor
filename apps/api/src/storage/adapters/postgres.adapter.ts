@@ -118,6 +118,7 @@ import { InvitationPostgresRepository } from './repositories/invitation.postgres
 import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
 import { ActivityPostgresRepository } from './repositories/activity.postgres.repository';
 import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
+import { decodeCveSnapshots, encodeCveSnapshots } from './cve-snapshots.codec';
 
 // Domain-specific repositories (webhooks, slowlog extracted). Remaining domains to extract:
 // ACL, anomaly, commandlog, latency, memory, hotkeys, settings,
@@ -4450,7 +4451,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         this.stripNulCharacters(dataset.datasetVersion),
         dataset.refreshedAt,
         JSON.stringify(this.sanitizeNulBytes(dataset.advisories)),
-        JSON.stringify(this.sanitizeNulBytes(dataset.snapshots)),
+        JSON.stringify(this.sanitizeNulBytes(encodeCveSnapshots(dataset.snapshots))),
       ],
     );
   }
@@ -4477,9 +4478,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       advisories: (typeof row.advisories === 'string'
         ? JSON.parse(row.advisories)
         : row.advisories) as StoredCveDataset['advisories'],
-      snapshots: (typeof row.snapshots === 'string'
-        ? JSON.parse(row.snapshots)
-        : row.snapshots) as StoredCveDataset['snapshots'],
+      snapshots: decodeCveSnapshots(
+        typeof row.snapshots === 'string' ? JSON.parse(row.snapshots) : row.snapshots,
+      ),
     };
   }
 

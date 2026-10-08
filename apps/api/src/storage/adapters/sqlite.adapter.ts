@@ -123,6 +123,7 @@ import { InvitationSqliteRepository } from './repositories/invitation.sqlite.rep
 import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
 import { ActivitySqliteRepository } from './repositories/activity.sqlite.repository';
 import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
+import { decodeCveSnapshots, encodeCveSnapshots } from './cve-snapshots.codec';
 
 /**
  * Idempotent migration for the memory_proposals columns added with the
@@ -4263,7 +4264,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         dataset.datasetVersion,
         dataset.refreshedAt,
         JSON.stringify(dataset.advisories),
-        JSON.stringify(dataset.snapshots),
+        JSON.stringify(encodeCveSnapshots(dataset.snapshots)),
       );
   }
 
@@ -4288,7 +4289,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       datasetVersion: row.dataset_version,
       refreshedAt: row.refreshed_at,
       advisories: JSON.parse(row.advisories) as StoredCveDataset['advisories'],
-      snapshots: JSON.parse(row.snapshots) as StoredCveDataset['snapshots'],
+      snapshots: decodeCveSnapshots(JSON.parse(row.snapshots)),
     };
   }
 
