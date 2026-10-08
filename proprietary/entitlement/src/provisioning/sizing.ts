@@ -34,6 +34,26 @@ export function formatMi(mi: number): string {
   return mi % 1024 === 0 ? `${mi / 1024}Gi` : `${mi}Mi`;
 }
 
+export interface AppPodBudget {
+  requestCpuM: number;
+  requestMemMi: number;
+  limitCpuM: number;
+  limitMemMi: number;
+}
+
+/**
+ * The Monitor app pod's resource budget. Single source for both the
+ * Deployment's resources and the namespace ResourceQuota, which must agree or
+ * quota admission rejects the pod. The demo tenant gets double the standard
+ * budget: it serves public scrapers and the OTLP metrics mirror on top of
+ * normal UI traffic.
+ */
+export function appPodBudget(isDemo: boolean): AppPodBudget {
+  return isDemo
+    ? { requestCpuM: 500, requestMemMi: 512, limitCpuM: 1000, limitMemMi: 1024 }
+    : { requestCpuM: 250, requestMemMi: 256, limitCpuM: 500, limitMemMi: 512 };
+}
+
 /**
  * The chart's default container memory limit in MiB (values.yaml
  * resources.limits.memory: 512Mi). Applied when no maxmemory override is set,
