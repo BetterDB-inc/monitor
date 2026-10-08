@@ -6,7 +6,7 @@ import { LicenseService } from '@proprietary/licenses';
 
 describe('WebhookEventsEnterpriseService - dispatchComplianceAlert edge semantics', () => {
   let service: WebhookEventsEnterpriseService;
-  let webhookDispatcher: { dispatchThresholdAlert: jest.Mock };
+  let webhookDispatcher: { dispatchThresholdAlertPerWebhook: jest.Mock };
   let licenseService: { getLicenseTier: jest.Mock };
 
   const testData = {
@@ -22,7 +22,7 @@ describe('WebhookEventsEnterpriseService - dispatchComplianceAlert edge semantic
 
   beforeEach(async () => {
     webhookDispatcher = {
-      dispatchThresholdAlert: jest.fn().mockResolvedValue(true),
+      dispatchThresholdAlertPerWebhook: jest.fn().mockResolvedValue(true),
     };
     licenseService = {
       getLicenseTier: jest.fn().mockReturnValue('enterprise'),
@@ -43,20 +43,20 @@ describe('WebhookEventsEnterpriseService - dispatchComplianceAlert edge semantic
     const fired = await service.dispatchComplianceAlert(testData);
 
     expect(fired).toBe(true);
-    expect(webhookDispatcher.dispatchThresholdAlert).toHaveBeenCalledTimes(1);
+    expect(webhookDispatcher.dispatchThresholdAlertPerWebhook).toHaveBeenCalledTimes(1);
 
-    const [eventType, alertKey] = webhookDispatcher.dispatchThresholdAlert.mock.calls[0];
+    const [eventType, alertKey] = webhookDispatcher.dispatchThresholdAlertPerWebhook.mock.calls[0];
     expect(eventType).toBe(WebhookEventType.COMPLIANCE_ALERT);
     expect(alertKey).toBe('compliance_alert');
   });
 
   it('returns false when the dispatcher suppresses a repeat via hysteresis', async () => {
-    webhookDispatcher.dispatchThresholdAlert.mockResolvedValue(false);
+    webhookDispatcher.dispatchThresholdAlertPerWebhook.mockResolvedValue(false);
 
     const fired = await service.dispatchComplianceAlert(testData);
 
     expect(fired).toBe(false);
-    expect(webhookDispatcher.dispatchThresholdAlert).toHaveBeenCalledTimes(1);
+    expect(webhookDispatcher.dispatchThresholdAlertPerWebhook).toHaveBeenCalledTimes(1);
   });
 
   it('returns false without dispatching when not Enterprise tier', async () => {
@@ -65,6 +65,6 @@ describe('WebhookEventsEnterpriseService - dispatchComplianceAlert edge semantic
     const fired = await service.dispatchComplianceAlert(testData);
 
     expect(fired).toBe(false);
-    expect(webhookDispatcher.dispatchThresholdAlert).not.toHaveBeenCalled();
+    expect(webhookDispatcher.dispatchThresholdAlertPerWebhook).not.toHaveBeenCalled();
   });
 });
