@@ -67,11 +67,11 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
       return false;
     }
 
-    return this.webhookDispatcher.dispatchThresholdAlert(
+    return this.webhookDispatcher.dispatchThresholdAlertPerWebhook(
       WebhookEventType.COMPLIANCE_ALERT,
       'compliance_alert',
       data.memoryUsedPercent || 0,
-      80, // threshold
+      'complianceMemoryPercent',
       true, // isAbove
       {
         complianceType: data.complianceType,
