@@ -56,8 +56,7 @@ export class KvCacheScrapeService implements OnModuleInit, OnModuleDestroy {
   private async scrape(engine: StoredKvCacheEngine, now: number): Promise<void> {
     try {
       const text = await fetchMetricsText(engine.scrapeUrl as string, this.engines.authHeaderFor(engine));
-      const current = this.registry.get(engine.id);
-      if (!current?.enabled || current.scrapeUrl !== engine.scrapeUrl) return;
+      if (!this.stillCurrent(engine)) return;
       const parsed = parseLmcacheMetrics(text);
       for (const { metric, labels, value } of parsed) {
         this.samples.observe(
@@ -78,6 +77,7 @@ export class KvCacheScrapeService implements OnModuleInit, OnModuleDestroy {
         lastError: parsed.length === 0 ? 'no lmcache metrics found' : null,
       });
     } catch (error) {
+      if (!this.stillCurrent(engine)) return;
       if (error instanceof ScrapeError) {
         this.registry.recordResult(engine.id, { lastError: error.message });
         return;
@@ -85,5 +85,10 @@ export class KvCacheScrapeService implements OnModuleInit, OnModuleDestroy {
       this.logger.debug(`Scrape of engine ${engine.id} failed: ${error instanceof Error ? error.message : String(error)}`);
       this.registry.recordResult(engine.id, { lastError: 'scrape failed' });
     }
+  }
+
+  private stillCurrent(engine: StoredKvCacheEngine): boolean {
+    const current = this.registry.get(engine.id);
+    return !!current?.enabled && current.scrapeUrl === engine.scrapeUrl;
   }
 }
