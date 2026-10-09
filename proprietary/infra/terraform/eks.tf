@@ -5,7 +5,7 @@ module "eks" {
   cluster_name    = "${var.project_name}-cluster"
   cluster_version = "1.31"
 
-  vpc_id     = module.vpc.vpc_id
+  vpc_id = module.vpc.vpc_id
   subnet_ids = concat(
     module.vpc.private_subnets,
     [
@@ -19,6 +19,32 @@ module "eks" {
 
   # Enable OIDC provider (needed for Karpenter and ALB controller IAM roles)
   enable_irsa = true
+
+  # Manage the VPC CNI as an EKS addon so its config lives in terraform. The
+  # cluster bootstraps a self-managed vpc-cni at creation (it carries Helm
+  # chart labels but has no real Helm release); adopting it as a managed addon
+  # with OVERWRITE is what lets us pin POD_MTU.
+  #
+  # POD_MTU=1500 clamps pod interfaces to 1500 bytes while node ENIs keep the
+  # jumbo default (AWS_VPC_ENI_MTU=9001). Without it pods inherit 9001 and large
+  # pod-to-pod responses (the ~100KB Prometheus /metrics scrape) hit a PMTUD
+  # blackhole on node paths that only carry 1500-byte frames: the handshake and
+  # small requests succeed, then the big data packets are silently dropped until
+  # timeout. Clamping only the pod MTU fixes it without touching node-level
+  # jumbo traffic (node-to-node, EBS, VPC endpoints).
+  cluster_addons = {
+    vpc-cni = {
+      addon_version               = "v1.20.4-eksbuild.2" # matches the running CNI image
+      resolve_conflicts_on_create = "OVERWRITE"          # adopt the bootstrapped self-managed DaemonSet
+      resolve_conflicts_on_update = "OVERWRITE"
+      configuration_values = jsonencode({
+        env = {
+          POD_MTU         = "1500"
+          AWS_VPC_ENI_MTU = "9001"
+        }
+      })
+    }
+  }
 
   # Small system node group for Karpenter, CoreDNS, ALB controller
   eks_managed_node_groups = {
