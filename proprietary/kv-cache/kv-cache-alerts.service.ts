@@ -25,6 +25,7 @@ const EVICTION_REASONS: KvCacheEvictionReason[] = ['unevictable', 'evicting'];
 export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(KvCacheAlertsService.name);
   private timer: NodeJS.Timeout | null = null;
+  private readonly exportedConnections = new Set<string>();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -40,7 +41,10 @@ export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit(): void {
     this.footprint.onSnapshot((snapshot) => this.onSnapshot(snapshot));
-    this.footprint.onConnectionRemoval((connectionId) => this.prometheus?.clearKvCache(connectionId));
+    this.footprint.onConnectionRemoval((connectionId) => {
+      this.exportedConnections.delete(connectionId);
+      this.prometheus?.clearKvCache(connectionId);
+    });
     this.timer = setInterval(() => void this.evaluateHitRates(), EVALUATE_INTERVAL_MS);
     this.timer.unref();
   }
@@ -101,7 +105,10 @@ export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
   async evaluateHitRates(now = Date.now()): Promise<void> {
     try {
       if (!this.license.hasFeature(Feature.KV_CACHE_MONITORING)) return;
-      const connectionIds = new Set(this.registry.list().map((engine) => engine.connectionId));
+      const connectionIds = new Set([
+        ...this.registry.list().map((engine) => engine.connectionId),
+        ...this.exportedConnections,
+      ]);
       for (const connectionId of connectionIds) {
         try {
           await this.evaluateConnection(connectionId, now);
@@ -119,19 +126,17 @@ export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
     const settings = await this.getSettings(connectionId);
     const instance = this.instanceFor(connectionId);
     const windows = windowHitRates(rows);
-    this.prometheus?.setKvCacheHitRates(
-      connectionId,
-      windows
-        .filter((window) => window.hitRate !== null && this.registry.get(window.engineId)?.enabled)
-        .map((window) => ({
-          engine: this.registry.get(window.engineId)!.name,
-          model: window.model,
-          hitRate: window.hitRate!,
-        })),
+    const resolved = windows.map((window) => ({ window, engine: this.registry.get(window.engineId) }));
+    const rates = resolved.flatMap(({ window, engine }) =>
+      engine?.enabled && window.hitRate !== null
+        ? [{ engine: engine.name, model: window.model, hitRate: window.hitRate }]
+        : [],
     );
+    this.prometheus?.setKvCacheHitRates(connectionId, rates);
+    if (rates.length > 0) this.exportedConnections.add(connectionId);
+    else this.exportedConnections.delete(connectionId);
     if (!this.webhookEventsPro) return;
-    for (const window of windows) {
-      const engine = this.registry.get(window.engineId);
+    for (const { window, engine } of resolved) {
       if (!engine?.enabled || window.hitRate === null || !shouldCheckHitRate(window, settings)) continue;
       try {
         await this.webhookEventsPro.dispatchKvCacheHitRateLow({

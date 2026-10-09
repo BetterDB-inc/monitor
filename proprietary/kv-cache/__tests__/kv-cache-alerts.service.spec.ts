@@ -304,6 +304,19 @@ describe('KvCacheAlertsService Prometheus export', () => {
     expect(prometheus.setKvCacheHitRates).toHaveBeenCalledWith('c1', []);
   });
 
+  it('exports an empty list once the last engine of a connection is removed', async () => {
+    const { service, prometheus, registry } = setup();
+    await service.evaluateHitRates(1);
+    registry.list.mockReturnValue([]);
+    registry.get.mockReturnValue(null);
+    prometheus.setKvCacheHitRates.mockClear();
+    await service.evaluateHitRates(2);
+    expect(prometheus.setKvCacheHitRates).toHaveBeenCalledWith('c1', []);
+    prometheus.setKvCacheHitRates.mockClear();
+    await service.evaluateHitRates(3);
+    expect(prometheus.setKvCacheHitRates).not.toHaveBeenCalled();
+  });
+
   it('does not export hit rates when unlicensed', async () => {
     const { service, prometheus } = setup({ licensed: false });
     await service.evaluateHitRates(1);

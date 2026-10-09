@@ -90,6 +90,15 @@ describe('PrometheusService KV cache metrics', () => {
     expect(text).toContain('betterdb_kv_cache_hit_rate{connection="10.0.0.2:6379",engine="vllm-b",model="qwen"} 0.3');
   });
 
+  it('clears KV cache series when the connection is cleaned up', async () => {
+    service.setKvCacheFootprint('conn-1', [footprint('llama', 10, 1000)]);
+    service.setKvCacheHitRates('conn-1', [{ engine: 'vllm-a', model: 'llama', hitRate: 0.5 }]);
+    service.cleanupConnectionMetrics('conn-1');
+    const text = await exposition();
+    expect(text).not.toContain('betterdb_kv_cache_chunks{');
+    expect(text).not.toContain('betterdb_kv_cache_hit_rate{');
+  });
+
   it('ignores unknown connections', async () => {
     service.setKvCacheFootprint('missing', [footprint('llama', 10, 1000)]);
     service.setKvCacheHitRates('missing', [{ engine: 'a', model: 'm', hitRate: 0.1 }]);
