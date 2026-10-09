@@ -1386,23 +1386,28 @@ export class ProvisioningService {
       await this.appsApi.createNamespacedDeployment({ namespace, body });
     } catch (error: any) {
       if (this.isAlreadyExistsError(error)) {
-        // Converge the existing Deployment to the current spec instead of
-        // skipping: a warn-and-continue here left pre-existing tenants
-        // without later-introduced env/resources (e.g. the demo tenant's
-        // published metrics token and OTLP mirror), silently diverging from
-        // what provisioning reported.
-        // Unconditional replace (no resourceVersion): the provisioner is the
-        // sole owner of this Deployment, so we want "make it exactly this"
-        // rather than optimistic concurrency. Copying a resourceVersion read
-        // moments earlier would 409 if the Deployment controller wrote a
-        // status update in the gap (e.g. while a Recreate rollout churns
-        // pods), and that 409 would escape this catch and fail provisioning.
-        this.logger.log(`Deployment already exists in ${namespace}, replacing with current spec`);
-        await this.appsApi.replaceNamespacedDeployment({
-          name: 'betterdb',
-          namespace,
-          body,
-        });
+        // Converge an existing Deployment to the current spec instead of
+        // skipping: a warn-and-continue here left pre-existing tenants without
+        // later-introduced env/resources (e.g. the demo tenant's published
+        // metrics token and OTLP mirror), silently diverging from what
+        // provisioning reported.
+        //
+        // Strategic-merge PATCH of the app container rather than a full
+        // replace: it needs no resourceVersion (so there's no read→replace 409
+        // race), and it leaves fields the provisioner doesn't own — pod-template
+        // annotations like the metrics-token restart marker, replicas — intact,
+        // so re-provision doesn't churn the pod. env merges by name, so the new
+        // demo vars are added without disturbing the rest.
+        this.logger.log(`Deployment already exists in ${namespace}, converging app container`);
+        const container = body.spec!.template!.spec!.containers![0];
+        await this.appsApi.patchNamespacedDeployment(
+          {
+            name: 'betterdb',
+            namespace,
+            body: { spec: { template: { spec: { containers: [container] } } } },
+          },
+          k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.StrategicMergePatch),
+        );
       } else {
         throw error;
       }
