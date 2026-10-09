@@ -88,6 +88,14 @@ describe('KvCacheScrapeService', () => {
     }
   });
 
+  it('drops a scrape error when the engine was repointed during the fetch', async () => {
+    fetchMock.mockRejectedValue(new ScrapeError('HTTP 401'));
+    const { service, registry } = setup([engine()]);
+    registry.get.mockReturnValue(engine({ scrapeUrl: 'http://engine-9:9090/metrics' }));
+    await service.tick(1000);
+    expect(registry.recordResult).not.toHaveBeenCalled();
+  });
+
   it('records a generic error for unexpected failures', async () => {
     fetchMock.mockRejectedValue(new Error('secret-host leaked'));
     const { service, registry } = setup([engine()]);
