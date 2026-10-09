@@ -14,7 +14,8 @@ describe('KvCacheController', () => {
     remove: jest.fn().mockResolvedValue(undefined),
   };
   const samples = { getSamples: jest.fn().mockResolvedValue({ buckets: [], rangeHitRate: null }) };
-  const controller = new KvCacheController(status as any, footprint as any, engines as any, samples as any);
+  const alerts = { getSettings: jest.fn().mockResolvedValue({}), updateSettings: jest.fn().mockResolvedValue({}) };
+  const controller = new KvCacheController(status as any, footprint as any, engines as any, samples as any, alerts as any);
 
   it('defaults the connection', async () => {
     await controller.getStatus(undefined);
@@ -53,9 +54,16 @@ describe('KvCacheController', () => {
     await expect(controller.getSamples('200', '100', undefined, undefined, 'c1')).rejects.toBeInstanceOf(BadRequestException);
   });
 
+  it('routes settings calls to the connection', async () => {
+    await controller.getSettings(undefined);
+    expect(alerts.getSettings).toHaveBeenCalledWith(ENV_DEFAULT_ID);
+    await controller.updateSettings({ hitRateThreshold: 0.3 }, 'c1');
+    expect(alerts.updateSettings).toHaveBeenCalledWith('c1', { hitRateThreshold: 0.3 });
+  });
+
   it('requires the KV cache feature on every route', () => {
     const reflector = new Reflector();
-    for (const handler of ['getStatus', 'refreshFootprint', 'getFootprintHistory', 'getSamples', 'listEngines', 'createEngine', 'updateEngine', 'removeEngine'] as const) {
+    for (const handler of ['getStatus', 'refreshFootprint', 'getFootprintHistory', 'getSamples', 'listEngines', 'createEngine', 'updateEngine', 'removeEngine', 'getSettings', 'updateSettings'] as const) {
       expect(reflector.get('requiredFeature', KvCacheController.prototype[handler])).toEqual(Feature.KV_CACHE_MONITORING);
     }
   });

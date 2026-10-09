@@ -1,11 +1,13 @@
-import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { ApiHeader, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
-import { Feature, type KvCacheEngine, type KvCacheFootprintSnapshot, type KvCacheSamplesResponse, type KvCacheStatus } from '@betterdb/shared';
+import { Feature, type KvCacheEngine, type KvCacheFootprintSnapshot, type KvCacheSamplesResponse, type KvCacheSettings, type KvCacheStatus } from '@betterdb/shared';
 import { LicenseGuard } from '@proprietary/licenses';
 import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
 import { ConnectionId } from '@app/common/decorators';
 import { ENV_DEFAULT_ID } from '@app/connections/connection-registry.service';
 import { CreateKvCacheEngineDto, UpdateKvCacheEngineDto } from './dto/kv-cache-engine.dto';
+import { UpdateKvCacheSettingsDto } from './dto/kv-cache-settings.dto';
+import { KvCacheAlertsService } from './kv-cache-alerts.service';
 import { KvCacheEnginesService } from './kv-cache-engines.service';
 import { KvCacheFootprintService } from './kv-cache-footprint.service';
 import { KvCacheSamplesService } from './kv-cache-samples.service';
@@ -28,6 +30,7 @@ export class KvCacheController {
     private readonly footprint: KvCacheFootprintService,
     private readonly engines: KvCacheEnginesService,
     private readonly samples: KvCacheSamplesService,
+    private readonly alerts: KvCacheAlertsService,
   ) {}
 
   @Get('status')
@@ -123,5 +126,23 @@ export class KvCacheController {
   @ApiHeader({ name: 'x-connection-id', required: false })
   removeEngine(@Param('id') id: string, @ConnectionId() connectionId?: string): Promise<void> {
     return this.engines.remove(connectionId || ENV_DEFAULT_ID, id);
+  }
+
+  @Get('settings')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.KV_CACHE_MONITORING)
+  @ApiOperation({ summary: 'KV cache alert settings for the connection (Pro)' })
+  @ApiHeader({ name: 'x-connection-id', required: false })
+  getSettings(@ConnectionId() connectionId?: string): Promise<KvCacheSettings> {
+    return this.alerts.getSettings(connectionId || ENV_DEFAULT_ID);
+  }
+
+  @Put('settings')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.KV_CACHE_MONITORING)
+  @ApiOperation({ summary: 'Update KV cache alert settings for the connection (Pro)' })
+  @ApiHeader({ name: 'x-connection-id', required: false })
+  updateSettings(@Body() dto: UpdateKvCacheSettingsDto, @ConnectionId() connectionId?: string): Promise<KvCacheSettings> {
+    return this.alerts.updateSettings(connectionId || ENV_DEFAULT_ID, dto);
   }
 }
