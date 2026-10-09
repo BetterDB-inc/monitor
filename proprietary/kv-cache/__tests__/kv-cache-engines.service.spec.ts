@@ -86,6 +86,25 @@ describe('KvCacheEnginesService', () => {
     expect(registry.save).toHaveBeenCalledTimes(4);
   });
 
+  it('rejects a concurrent create with the same name while the first is still scraping', async () => {
+    let finish: (body: string) => void = () => undefined;
+    fetchMock.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
+    const { service, store } = setup();
+    const first = service.create('c1', { name: 'vllm', source: 'scrape', scrapeUrl: 'http://x' });
+    await expect(service.create('c1', { name: 'vllm', source: 'otlp' })).rejects.toBeInstanceOf(ConflictException);
+    finish(LMCACHE_BODY);
+    await expect(first).resolves.toMatchObject({ name: 'vllm' });
+    expect(store.size).toBe(1);
+    await expect(service.create('c1', { name: 'vllm', source: 'otlp' })).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('releases a reserved name when the create fails', async () => {
+    fetchMock.mockRejectedValueOnce(new ScrapeError('HTTP 401'));
+    const { service } = setup();
+    await expect(service.create('c1', { name: 'vllm', source: 'scrape', scrapeUrl: 'http://x' })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.create('c1', { name: 'vllm', source: 'otlp' })).resolves.toMatchObject({ name: 'vllm' });
+  });
+
   it('resolves the stored auth header', () => {
     const base = { id: 'e', scrapeAuthHeader: 'Bearer t', scrapeAuthEncrypted: false } as any;
     expect(setup(false).service.authHeaderFor(base)).toBe('Bearer t');
