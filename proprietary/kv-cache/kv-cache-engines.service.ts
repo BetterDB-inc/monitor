@@ -19,6 +19,7 @@ type StoredAuth = Pick<StoredKvCacheEngine, 'scrapeAuthHeader' | 'scrapeAuthEncr
 @Injectable()
 export class KvCacheEnginesService {
   private readonly logger = new Logger(KvCacheEnginesService.name);
+  private readonly reservedNames = new Set<string>();
 
   constructor(
     private readonly registry: KvCacheEngineRegistry,
@@ -31,7 +32,15 @@ export class KvCacheEnginesService {
   }
 
   async create(connectionId: string, dto: CreateKvCacheEngineDto): Promise<KvCacheEngine> {
-    this.assertUniqueName(connectionId, dto.name);
+    const release = this.reserveName(connectionId, dto.name);
+    try {
+      return await this.createReserved(connectionId, dto);
+    } finally {
+      release();
+    }
+  }
+
+  private async createReserved(connectionId: string, dto: CreateKvCacheEngineDto): Promise<KvCacheEngine> {
     const base = {
       id: randomUUID(),
       connectionId,
@@ -71,7 +80,7 @@ export class KvCacheEnginesService {
       }
     }
     const fresh = this.owned(connectionId, id);
-    if (dto.name !== undefined) this.assertUniqueName(connectionId, dto.name, id);
+    const release = dto.name === undefined ? () => undefined : this.reserveName(connectionId, dto.name, id);
     const next: StoredKvCacheEngine = { ...fresh };
     if (dto.name !== undefined) next.name = dto.name;
     if (dto.enabled !== undefined) next.enabled = dto.enabled;
@@ -80,7 +89,12 @@ export class KvCacheEnginesService {
       if (dto.scrapeAuthHeader !== undefined) Object.assign(next, this.storeAuthHeader(dto.scrapeAuthHeader || null));
       if (probe) Object.assign(next, probe);
     }
-    const saved = await this.registry.save(next);
+    let saved: StoredKvCacheEngine;
+    try {
+      saved = await this.registry.save(next);
+    } finally {
+      release();
+    }
     if (fresh.enabled !== saved.enabled || fresh.scrapeUrl !== saved.scrapeUrl) this.samples.resetBaselines(id);
     return toPublicEngine(saved);
   }
@@ -108,8 +122,17 @@ export class KvCacheEnginesService {
   }
 
   private assertUniqueName(connectionId: string, name: string, exceptId?: string): void {
-    const taken = this.registry.list(connectionId).some((engine) => engine.id !== exceptId && engine.name === name);
+    const taken =
+      this.reservedNames.has(JSON.stringify([connectionId, name])) ||
+      this.registry.list(connectionId).some((engine) => engine.id !== exceptId && engine.name === name);
     if (taken) throw new ConflictException(`An engine named "${name}" is already linked to this connection`);
+  }
+
+  private reserveName(connectionId: string, name: string, exceptId?: string): () => void {
+    this.assertUniqueName(connectionId, name, exceptId);
+    const key = JSON.stringify([connectionId, name]);
+    this.reservedNames.add(key);
+    return () => this.reservedNames.delete(key);
   }
 
   private sameOrigin(a: string | null, b: string | undefined): boolean {
