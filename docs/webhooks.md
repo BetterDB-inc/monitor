@@ -76,6 +76,8 @@ Advanced monitoring events for anomaly detection and performance tracking:
 | `connection.spike` | Connection spike detected | Connection count spikes above baseline |
 | `cve.critical_detected` | New critical CVEs | CVE scan finds new critical findings vs previous scan |
 | `scaling_readiness.low` | Scaling readiness low | Scaling readiness score dropped to or below the connection's alert threshold |
+| `kv_cache.hit_rate_low` | KV cache hit rate low | An LMCache engine's token hit rate over the last 15 minutes dropped to or below the connection's threshold |
+| `kv_cache.eviction_risk` | KV cache eviction risk | LMCache keys cannot be evicted under a `volatile-*` policy, or Valkey is evicting while LMCache holds most of its memory |
 
 ### Enterprise Tier
 
@@ -375,6 +377,47 @@ Fires once when a connection's scaling readiness score drops to or below its ale
   ],
   "message": "Scaling readiness 32 dropped to 40 or below: Memory is your binding constraint (91% of 4 GB).",
   "timestamp": 1735689600000
+}
+```
+
+#### kv_cache.hit_rate_low (Pro)
+
+Fires once per engine and model when the LMCache token hit rate over the last 15 minutes drops to or below the connection's threshold (default 0.2, maximum 0.9). A window is checked only when it holds at least 10,000 requested tokens. It re-arms after the hit rate recovers above the hysteresis margin, which for this below-threshold alert is `threshold × (2 − hysteresisFactor)`. Configure the threshold on the KV Cache page; see [KV Cache Monitoring](kv-cache-monitoring).
+
+```json
+{
+  "connectionId": "conn-1",
+  "engineId": "9d1f6c52-3a7e-4b1c-8f2d-5e0a4c7b9d13",
+  "engineName": "vllm-prod",
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "hitRate": 0.12,
+  "threshold": 0.2,
+  "requestedTokens": 184320,
+  "windowMs": 900000,
+  "message": "LMCache hit rate for meta-llama/Llama-3.1-8B-Instruct on vllm-prod is 12.0% (threshold 20.0%)",
+  "timestamp": 1735689600000,
+  "instance": { "host": "valkey.example.com", "port": 6379 }
+}
+```
+
+#### kv_cache.eviction_risk (Pro)
+
+Fires once per connection and reason when a footprint collection finds LMCache at risk of losing or being unable to shed keys, and re-arms when the condition clears. `reason` is `unevictable` (the policy starts with `volatile-` and at least 90% of the sampled LMCache keys have no TTL) or `evicting` (keys were evicted since the last collection, `used_memory` is at least 90% of `maxmemory`, and LMCache holds at least half of `used_memory`). `evictedKeysDelta` is `null` on the first collection after startup. `lmcacheMemoryShare` and `noTtlRatio` are fractions between 0 and 1.
+
+```json
+{
+  "connectionId": "conn-1",
+  "reason": "unevictable",
+  "active": true,
+  "policy": "volatile-lru",
+  "usedMemory": 3758096384,
+  "maxmemory": 4294967296,
+  "lmcacheMemoryShare": 0.92,
+  "noTtlRatio": 1,
+  "evictedKeysDelta": null,
+  "message": "LMCache keys have no TTL under volatile-lru; Valkey cannot evict them",
+  "timestamp": 1735689600000,
+  "instance": { "host": "valkey.example.com", "port": 6379 }
 }
 ```
 

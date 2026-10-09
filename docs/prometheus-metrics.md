@@ -19,6 +19,7 @@ Complete reference for all metrics exposed by BetterDB Monitor at the `/api/prom
   - [COMMANDLOG Metrics](#commandlog-metrics-valkey-81)
   - [Vector Index Metrics](#vector-index-metrics)
   - [Commandstats Metrics](#commandstats-metrics)
+  - [KV Cache Metrics](#kv-cache-metrics)
   - [Inference Latency Metrics](#inference-latency-metrics)
   - [Server Info Metrics](#server-info-metrics)
   - [Memory Metrics](#memory-metrics)
@@ -171,6 +172,8 @@ A family marked **removed** tracks only its current label values: a value that d
 | `betterdb_client_connections_by_name`, `betterdb_client_connections_by_user`                 | K + L        | Distinct client names (K) and users (L) seen in client snapshots since BetterDB started.                                                                                      | zeroed       |
 | `betterdb_slowlog_pattern_count`, `_avg_duration_us`, `_percentage`                          | 3 × S        | S is the number of distinct command/key patterns seen since start. Each poll reads the latest 128 slowlog entries, so one poll adds at most 128.                              | zeroed       |
 | `betterdb_commandlog_large_request_by_pattern`, `betterdb_commandlog_large_reply_by_pattern` | Q + Q′       | Q and Q′ are the distinct large-request and large-reply patterns seen since start. Each poll reads the latest 128 entries of each type, so one poll adds at most 128 to each. | zeroed       |
+| `betterdb_kv_cache_hit_rate` | E × M | E is the number of enabled LMCache engines and M the models each reports a hit rate for in the last 15 minutes. | removed |
+| `betterdb_kv_cache_chunks`, `betterdb_kv_cache_bytes` | 2 × M | M is the number of models found in the sampled LMCache keys. | removed |
 | `betterdb_anomaly_events_total` (counter)                                                    | ≤ 240        | 3 severities × 40 metric types × 2 anomaly types.                                                                                                                             | counter      |
 | `betterdb_correlated_groups_total` (counter)                                                 | ≤ 36         | 12 correlation patterns × 3 severities.                                                                                                                                       | counter      |
 
@@ -506,6 +509,16 @@ Latest CVE scan rollup per connection. Updated on storage-based poll.
 | `betterdb_cve_findings`      | gauge | `connection`, `severity` | Current CVE findings by severity from the latest scan                 | `2`     |
 | `betterdb_cve_kev`           | gauge | `connection`             | Current KEV-exploited CVE findings from the latest scan               | `1`     |
 | `betterdb_cve_dataset_stale` | gauge | `connection`             | Whether the CVE scan is partial or sources are missing: 1 stale, 0 ok | `0`     |
+
+### KV Cache Metrics
+
+LMCache footprint and hit rate per connection (Pro). Footprint series update on each footprint collection; hit-rate series update once a minute. Not exported under the `vitals` profile. See [KV Cache Monitoring](kv-cache-monitoring).
+
+| Metric                       | Type  | Labels                          | Description                                     | Example  |
+| ---------------------------- | ----- | ------------------------------- | ----------------------------------------------- | -------- |
+| `betterdb_kv_cache_hit_rate` | gauge | `connection`, `engine`, `model` | LMCache token hit rate over the last 15 minutes | `0.62`   |
+| `betterdb_kv_cache_chunks`   | gauge | `connection`, `model`           | Estimated LMCache chunks stored                 | `12480`  |
+| `betterdb_kv_cache_bytes`    | gauge | `connection`, `model`           | Estimated bytes held by LMCache keys            | `4.4e10` |
 
 ### Internal Metrics
 
