@@ -4,7 +4,7 @@ import { useCanMutate } from '../../hooks/useCanMutate';
 import { useCapabilities } from '../../hooks/useCapabilities';
 import { useCacheProposalsUnread } from '../../hooks/useCacheProposals';
 import { useConnection } from '../../hooks/useConnection';
-import { useKvCacheStatus } from '../../hooks/useKvCacheStatus';
+import { kvCacheInUse, useKvCacheStatus } from '../../hooks/useKvCacheStatus';
 import { useLicense } from '../../hooks/useLicense';
 import { ConnectionSelector } from '../ConnectionSelector';
 import { CloudUser } from '../../api/workspace';
@@ -33,7 +33,7 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
   const { hasFeature } = useLicense();
   const kvCacheStatus = useKvCacheStatus();
   const showKvCache =
-    !hasFeature(Feature.KV_CACHE_MONITORING) || kvCacheStatus.data?.hasLmcache === true;
+    !hasFeature(Feature.KV_CACHE_MONITORING) || kvCacheInUse(kvCacheStatus.data);
   const { unreadCount: cacheProposalsUnread } = useCacheProposalsUnread();
   const isDemo = useIsDemo();
   const canMutate = useCanMutate();

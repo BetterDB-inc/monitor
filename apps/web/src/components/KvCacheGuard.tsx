@@ -1,5 +1,5 @@
 import { Feature } from '@betterdb/shared';
-import { useKvCacheStatus } from '../hooks/useKvCacheStatus';
+import { kvCacheInUse, useKvCacheStatus } from '../hooks/useKvCacheStatus';
 import { useLicense } from '../hooks/useLicense';
 import { KvCacheNotDetected, KvCacheProLocked } from './pages/kv-cache';
 import { Skeleton } from './ui/skeleton';
@@ -26,7 +26,7 @@ export function KvCacheGuard({ children }: Props) {
       </div>
     );
   }
-  if (!status.data.hasLmcache) {
+  if (!kvCacheInUse(status.data)) {
     return <KvCacheNotDetected latest={status.data.latest} />;
   }
   return <>{children}</>;

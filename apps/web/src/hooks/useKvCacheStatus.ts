@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { Feature } from '@betterdb/shared';
+import { Feature, type KvCacheStatus } from '@betterdb/shared';
 import { kvCacheApi, kvCacheKeys } from '../api/kv-cache';
 import { useConnection } from './useConnection';
 import { useLicense } from './useLicense';
@@ -16,3 +16,6 @@ export function useKvCacheStatus() {
     refetchInterval: 60_000,
   });
 }
+
+export const kvCacheInUse = (status: KvCacheStatus | undefined) =>
+  !!status && (status.hasLmcache || status.engines.length > 0);

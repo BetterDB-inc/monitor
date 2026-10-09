@@ -121,4 +121,10 @@ describe('KvCacheGuard', () => {
     renderGuard();
     expect(await screen.findByTestId('children')).toBeInTheDocument();
   });
+
+  it('renders children when engines are linked but no keys are detected', async () => {
+    getStatus.mockResolvedValue({ hasLmcache: false, latest, sampleKey: null, engines: [{ id: 'e1' }] });
+    renderGuard();
+    expect(await screen.findByTestId('children')).toBeInTheDocument();
+  });
 });
