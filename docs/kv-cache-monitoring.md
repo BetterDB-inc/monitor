@@ -113,6 +113,9 @@ a bounded SCAN plus a sample, extrapolated to the whole keyspace.
 3. If the SCAN stopped early, the matched counts are scaled by
    `DBSIZE / scanned keys`. Bytes are the mean sampled `MEMORY USAGE`
    multiplied by the (scaled) matched key count. Both are estimates.
+   `COUNT` is only a hint and `MATCH` hides the keys it filters out, so
+   "scanned keys" is the number of SCAN calls × 1000, not an exact count.
+   A full SCAN uses `DBSIZE` and is not scaled.
 
 | Variable                         | Default  | Description                                                          |
 | -------------------------------- | -------- | -------------------------------------------------------------------- |
