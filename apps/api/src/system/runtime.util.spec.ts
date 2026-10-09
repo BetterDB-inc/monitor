@@ -17,17 +17,15 @@ describe('resolveDefaultDbHost', () => {
     });
   });
 
-  it('ignores a loopback DB_HOST so the baked image default cannot defeat detection', () => {
-    // Dockerfile.prod bakes `ENV DB_HOST=localhost`, which carries no host
-    // intent; inside a container it must still resolve to host.docker.internal.
+  it('honors a loopback DB_HOST the operator set', () => {
     expect(resolveDefaultDbHost({ dbHost: 'localhost', containerized: true })).toEqual({
-      host: 'host.docker.internal',
-      source: 'docker',
+      host: 'localhost',
+      source: 'env',
     });
     for (const loopback of ['localhost', '127.0.0.1', '127.0.0.5', '::1', '0.0.0.0']) {
       expect(resolveDefaultDbHost({ dbHost: loopback, containerized: false })).toEqual({
-        host: '127.0.0.1',
-        source: 'local',
+        host: loopback,
+        source: 'env',
       });
     }
   });
