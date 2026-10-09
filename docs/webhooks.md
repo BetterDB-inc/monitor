@@ -382,7 +382,7 @@ Fires once when a connection's scaling readiness score drops to or below its ale
 
 #### kv_cache.hit_rate_low (Pro)
 
-Fires once per engine and model when the LMCache token hit rate over the last 15 minutes drops to or below the connection's threshold (default 0.2, maximum 0.9). A window is checked only when it holds at least 10,000 requested tokens. It re-arms after the hit rate recovers above the hysteresis margin, which for this below-threshold alert is `threshold × (2 − hysteresisFactor)`. Configure the threshold on the KV Cache page; see [KV Cache Monitoring](kv-cache-monitoring).
+Fires once per engine and model when the LMCache token hit rate over the last 15 minutes drops to or below the connection's threshold (default 0.2, maximum 0.9). A window is checked only when it holds at least 10,000 requested tokens. It re-arms after the hit rate recovers above `threshold × 1.1` (the fixed global hysteresis factor of 0.9, mirrored for a below-threshold alert), so a 0.2 threshold re-arms above 0.22. A webhook's own `alertConfig.hysteresisFactor` does not apply to this event. Configure the threshold on the KV Cache page; see [KV Cache Monitoring](kv-cache-monitoring).
 
 ```json
 {
@@ -402,7 +402,7 @@ Fires once per engine and model when the LMCache token hit rate over the last 15
 
 #### kv_cache.eviction_risk (Pro)
 
-Fires once per connection and reason when a footprint collection finds LMCache at risk of losing or being unable to shed keys, and re-arms when the condition clears. `reason` is `unevictable` (the policy starts with `volatile-` and at least 90% of the sampled LMCache keys have no TTL) or `evicting` (keys were evicted since the last collection, `used_memory` is at least 90% of `maxmemory`, and LMCache holds at least half of `used_memory`). `evictedKeysDelta` is `null` on the first collection after startup. `lmcacheMemoryShare` and `noTtlRatio` are fractions between 0 and 1.
+Fires once per connection and reason when a footprint collection finds LMCache at risk of losing or being unable to shed keys, and re-arms when the condition clears (`active` returns to `false`). `reason` is `unevictable` (the policy starts with `volatile-` and at least 90% of the sampled LMCache keys have no TTL) or `evicting` (keys were evicted since the last collection, `used_memory` is at least 90% of `maxmemory`, and LMCache holds at least half of `used_memory`). `evictedKeysDelta` is `null` on the first collection after startup. `lmcacheMemoryShare` and `noTtlRatio` are fractions between 0 and 1.
 
 ```json
 {

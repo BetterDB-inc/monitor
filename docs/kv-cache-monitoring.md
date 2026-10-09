@@ -38,6 +38,31 @@ The page also lists advisories and lets you edit the alert settings for the
 connection. When LMCache is not detected, it says so and lists other databases
 that hold keys.
 
+Page controls:
+
+- A date range picker for the charts, defaulting to the last 6 hours.
+- **Refresh**, which re-collects the footprint now.
+- The alert settings sheet (see [Per-connection switches](#per-connection-switches)).
+- **Rescan now** on the not-detected view, which collects the footprint again.
+- An engines table with an **Enabled** switch, the time each engine was last
+  seen, and its last error.
+- **Delete** on an engine, behind a confirm dialog. It removes the engine and
+  its stored samples and cannot be undone.
+
+### Advisories
+
+The page shows an advisory for each of these conditions:
+
+- **LMCache keys can never be evicted.** The `maxmemory-policy` starts with
+  `volatile-` and at least 90% of the sampled LMCache keys have no TTL. Fix it
+  by setting `valkey_enable_ttl` (with `valkey_ttl_sec`) on the `valkey://`
+  connector, or by switching to an `allkeys-*` policy.
+- **Orphaned `kv_bytes` keys.** Some sampled `kv_bytes` keys have no matching
+  `metadata` key (`redis://` layout). `redis://` removes them only when it
+  tries to read them.
+- **Keys in other databases.** Other databases hold keys, but only the
+  connection's own database is scanned.
+
 ## Detection
 
 BetterDB does not need any LMCache-specific setup on Valkey to detect it. It
@@ -53,11 +78,11 @@ names can contain `/`. The `dtype` must be one of `bfloat16`, `float16`,
 
 The three LMCache remote connectors write different key layouts:
 
-| Connector (scheme)           | Keys per chunk | Key suffix                              | TTL                                                                             | Client `lib-name`          |
-| ---------------------------- | -------------- | --------------------------------------- | ------------------------------------------------------------------------------- | -------------------------- |
-| `redis://` (redis-py)        | 2              | `kv_bytes` and `metadata`, no separator | never                                                                           | `redis-py`                 |
-| `valkey://` (GLIDE sync)     | 1              | none                                    | only with `valkey_enable_ttl` (`valkey_ttl_sec`, default 24 hours)              | `GlidePySync(lmcache:*)`   |
-| `resp://` (native C++)       | 1              | none                                    | never                                                                           | none sent                  |
+| Connector (scheme)       | Keys per chunk | Key suffix                              | TTL                                                                | Client `lib-name`        |
+| ------------------------ | -------------- | --------------------------------------- | ------------------------------------------------------------------ | ------------------------ |
+| `redis://` (redis-py)    | 2              | `kv_bytes` and `metadata`, no separator | never                                                              | `redis-py`               |
+| `valkey://` (GLIDE sync) | 1              | none                                    | only with `valkey_enable_ttl` (`valkey_ttl_sec`, default 24 hours) | `GlidePySync(lmcache:*)` |
+| `resp://` (native C++)   | 1              | none                                    | never                                                              | none sent                |
 
 BetterDB reports the layout as `two_key`, `single_key` or `mixed`.
 
@@ -68,8 +93,9 @@ LMCache is considered present on a connection when either of these holds:
 
 Only the database the connection is configured for is scanned. LMCache's
 `resp://` connector has no database selection and always writes to DB 0, so a
-connection pointed at another database will not see those keys. The page lists the other databases that hold keys when nothing is detected. On a cluster connection,
-BetterDB scans the primaries.
+connection pointed at another database will not see those keys. The page lists
+the other databases that hold keys. On a cluster connection, BetterDB scans the
+primaries.
 
 ## Footprint
 
@@ -85,12 +111,12 @@ a bounded SCAN plus a sample, extrapolated to the whole keyspace.
    `DBSIZE / scanned keys`. Bytes are the mean sampled `MEMORY USAGE`
    multiplied by the (scaled) matched key count. Both are estimates.
 
-| Variable                         | Default  | Description                                                                |
-| -------------------------------- | -------- | -------------------------------------------------------------------------- |
-| `KV_CACHE_FOOTPRINT_INTERVAL_MS` | `300000` | How often the footprint is collected for each connection (5 minutes)       |
-| `KV_CACHE_SCAN_MAX_KEYS`         | `200000` | Maximum number of keys visited by SCAN per collection                      |
-| `KV_CACHE_MATCH_MAX_KEYS`        | `2000`   | Maximum number of matched keys kept per collection                         |
-| `KV_CACHE_SAMPLE_KEYS`           | `500`    | Number of matched keys sampled with `MEMORY USAGE` and `TTL`               |
+| Variable                         | Default  | Description                                                          |
+| -------------------------------- | -------- | -------------------------------------------------------------------- |
+| `KV_CACHE_FOOTPRINT_INTERVAL_MS` | `300000` | How often the footprint is collected for each connection (5 minutes) |
+| `KV_CACHE_SCAN_MAX_KEYS`         | `200000` | Maximum number of keys visited by SCAN per collection                |
+| `KV_CACHE_MATCH_MAX_KEYS`        | `2000`   | Maximum number of matched keys kept per collection                   |
+| `KV_CACHE_SAMPLE_KEYS`           | `500`    | Number of matched keys sampled with `MEMORY USAGE` and `TTL`         |
 
 Per-model chunks and bytes come from the same sample, split in proportion to
 what the sample contains. The share of keys without a TTL and the LMCache
@@ -192,8 +218,13 @@ The `Authorization` header is needed only when `OTEL_INGEST_TOKEN` is set on
 Monitor. If it is not set, remove the `headers` block.
 
 The `betterdb.lmcache.engine` resource attribute is what routes the points:
-its value must equal the engine id on the page. Only cumulative sums are
-accepted, as LMCache's counters are.
+its value must equal the engine id on the page. Only sums are accepted, with
+cumulative or delta temporality; gauges, histograms and summaries are dropped
+as `unsupported_type`.
+
+A resource without the attribute is also routed to KV cache when every metric
+in it has a name starting with `lmcache:`. Such points cannot match an engine,
+so they are dropped as `unknown_engine`.
 
 Points whose `betterdb.lmcache.engine` value does not match a linked engine
 are dropped with the reason `unknown_engine`. The same reason is used when the
@@ -226,17 +257,17 @@ connection's threshold:
 - A window is checked only when it holds at least 10,000 requested tokens, so
   a quiet engine does not alert on a handful of requests.
 - Like other threshold alerts it fires once, and re-arms after the hit rate
-  recovers above `threshold × (2 − hysteresisFactor)`. The factor is the
-  webhook's `alertConfig.hysteresisFactor`, default `0.9`, so a threshold of
-  0.2 re-arms above 0.22.
+  recovers above `threshold × 1.1` (a fixed hysteresis factor of 0.9 is
+  applied as `threshold × (2 − 0.9)`). A threshold of 0.2 re-arms above 0.22.
+  A per-webhook `alertConfig.hysteresisFactor` does not change this.
 
 ### Eviction risk (`kv_cache.eviction_risk`)
 
 Evaluated on every footprint collection. It reports two reasons, each as its own
 alert that fires when it becomes active and clears when it stops being active:
 
-| Reason        | Active when                                                                                                                                  |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Reason        | Active when                                                                                                                                       |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `unevictable` | `maxmemory-policy` starts with `volatile-` and at least 90% of the sampled LMCache keys have no TTL, so Valkey has nothing it is allowed to evict |
 | `evicting`    | keys were evicted since the previous collection, `used_memory` is at least 90% of `maxmemory`, and LMCache holds at least half of `used_memory`   |
 
@@ -255,11 +286,11 @@ by default.
 Three Prometheus series, at `/api/prometheus/metrics` in the `full` export
 profile (they are not part of `vitals`):
 
-| Metric                     | OTel name                    | Labels                         | Description                                          |
-| -------------------------- | ---------------------------- | ------------------------------ | ---------------------------------------------------- |
-| `betterdb_kv_cache_hit_rate` | `betterdb.kv_cache.hit_rate` | `connection`, `engine`, `model` | LMCache token hit rate over the last 15 minutes      |
-| `betterdb_kv_cache_chunks`   | `betterdb.kv_cache.chunks`   | `connection`, `model`           | Estimated LMCache chunks stored                      |
-| `betterdb_kv_cache_bytes`    | `betterdb.kv_cache.bytes`    | `connection`, `model`           | Estimated bytes held by LMCache keys                 |
+| Metric                       | OTel name                    | Labels                          | Description                                     |
+| ---------------------------- | ---------------------------- | ------------------------------- | ----------------------------------------------- |
+| `betterdb_kv_cache_hit_rate` | `betterdb.kv_cache.hit_rate` | `connection`, `engine`, `model` | LMCache token hit rate over the last 15 minutes |
+| `betterdb_kv_cache_chunks`   | `betterdb.kv_cache.chunks`   | `connection`, `model`           | Estimated LMCache chunks stored                 |
+| `betterdb_kv_cache_bytes`    | `betterdb.kv_cache.bytes`    | `connection`, `model`           | Estimated bytes held by LMCache keys            |
 
 See [Prometheus Metrics](prometheus-metrics#kv-cache-metrics) for the full
 reference. Hit-rate series exist only for enabled engines whose window has
@@ -267,15 +298,15 @@ requested tokens; they are removed when that stops being true.
 
 ## Configuration
 
-| Variable                          | Default  | Description                                                                                  |
-| --------------------------------- | -------- | -------------------------------------------------------------------------------------------- |
-| `KV_CACHE_FOOTPRINT_INTERVAL_MS`  | `300000` | Footprint collection interval                                                                |
-| `KV_CACHE_SCAN_MAX_KEYS`          | `200000` | SCAN budget per collection                                                                   |
-| `KV_CACHE_MATCH_MAX_KEYS`         | `2000`   | Matched-key cap per collection                                                               |
-| `KV_CACHE_SAMPLE_KEYS`            | `500`    | Keys sampled for size and TTL                                                                |
-| `KV_CACHE_SCRAPE_INTERVAL_MS`     | `30000`  | Engine scrape interval. An invalid or sub-second value falls back to the default             |
-| `KV_CACHE_SCRAPE_BLOCK_PRIVATE`   | `false`  | `true` also refuses private and loopback scrape targets                        |
-| `OTEL_INGEST_TOKEN`               | unset    | When set, OTLP pushes (including LMCache engines) must send `Authorization: Bearer <token>`  |
+| Variable                         | Default  | Description                                                                                 |
+| -------------------------------- | -------- | ------------------------------------------------------------------------------------------- |
+| `KV_CACHE_FOOTPRINT_INTERVAL_MS` | `300000` | Footprint collection interval                                                               |
+| `KV_CACHE_SCAN_MAX_KEYS`         | `200000` | SCAN budget per collection                                                                  |
+| `KV_CACHE_MATCH_MAX_KEYS`        | `2000`   | Matched-key cap per collection                                                              |
+| `KV_CACHE_SAMPLE_KEYS`           | `500`    | Keys sampled for size and TTL                                                               |
+| `KV_CACHE_SCRAPE_INTERVAL_MS`    | `30000`  | Engine scrape interval. An invalid or sub-second value falls back to the default            |
+| `KV_CACHE_SCRAPE_BLOCK_PRIVATE`  | `false`  | `true` also refuses private and loopback scrape targets                                     |
+| `OTEL_INGEST_TOKEN`              | unset    | When set, OTLP pushes (including LMCache engines) must send `Authorization: Bearer <token>` |
 
 ## Known LMCache quirks
 
