@@ -61,6 +61,8 @@ const EVENT_LABELS: Record<WebhookEventType, string> = {
   'memory.critical': 'Memory Critical',
   'connection.critical': 'Connection Critical',
   'client.blocked': 'Client Blocked',
+  'writes.rejected': 'Writes Rejected',
+  'writes.recovered': 'Writes Recovered',
   'anomaly.detected': 'Anomaly Detected',
   'slowlog.threshold': 'Slowlog Threshold',
   'replication.lag': 'Replication Lag',
