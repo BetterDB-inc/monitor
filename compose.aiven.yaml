@@ -29,8 +29,9 @@ services:
   betterdb-monitor:
     build:
       context: .
-      # Aiven-specific build variant: same as ./Dockerfile but without the
+      # Aiven-specific build variant generated from ./Dockerfile without the
       # telemetry/version ARGs, so they don't clutter the Runtime deploy screen.
+      # Regenerate with: node scripts/generate-dockerfile-aiven.mjs
       dockerfile: Dockerfile.aiven
       target: production-no-ai
       # args:

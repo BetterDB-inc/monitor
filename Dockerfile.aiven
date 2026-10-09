@@ -1,14 +1,19 @@
 # ============================================
 # Dockerfile.aiven — Aiven Runtime build variant
 # ============================================
-# Identical to ./Dockerfile except it omits the telemetry/version build ARGs
-# (APP_VERSION, POSTHOG_API_KEY, POSTHOG_HOST, VITE_PUBLIC_POSTHOG_*,
-# VITE_PUBLIC_APP_VERSION, VITE_REGISTRATION_URL). Those only matter for the
-# published betterdb/monitor image, where CI injects them at build time. On a
-# from-source Aiven Runtime build they are never populated, so they would only
-# show up as empty, confusing fields on Aiven's deploy screen. compose.aiven.yaml
-# points its build at this file. Keep it in sync with ./Dockerfile otherwise.
+# GENERATED from ./Dockerfile by scripts/generate-dockerfile-aiven.mjs.
+# Do not edit by hand: change ./Dockerfile and re-run the script. CI fails
+# when this file is out of date.
 #
+# It omits the telemetry/version build ARGs (APP_VERSION, POSTHOG_API_KEY,
+# POSTHOG_HOST, VITE_PUBLIC_POSTHOG_*, VITE_PUBLIC_APP_VERSION,
+# VITE_REGISTRATION_URL), marked with aiven:strip-begin/end in ./Dockerfile.
+# They only matter for the published betterdb/monitor image, where CI injects
+# them at build time. On a from-source Aiven Runtime build they are never
+# populated, so they would only show up as empty, confusing fields on Aiven's
+# deploy screen. compose.aiven.yaml points its build at this file.
+
+# ============================================
 # Build Stage (shared by both image variants)
 # ============================================
 FROM node:26-alpine AS builder
