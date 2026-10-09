@@ -9,6 +9,8 @@ import { UpdateBanner } from '../UpdateBanner';
 import { NoConnectionsGuard } from '../NoConnectionsGuard';
 import { LiveConnectionGuard } from '../LiveConnectionGuard';
 import { VectorSearchGuard } from '../VectorSearchGuard';
+import { KvCacheGuard } from '../KvCacheGuard';
+import { KvCache } from '../../pages/KvCache';
 import { CliPanel } from '../CliPanel';
 import { Dashboard } from '../../pages/Dashboard';
 import { Fleet } from '../../pages/Fleet';
@@ -293,6 +295,18 @@ function AppLayoutInner(): ReactElement {
                 element={
                   <NoConnectionsGuard>
                     <ScalingReadiness />
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/kv-cache"
+                element={
+                  <NoConnectionsGuard>
+                    <LiveConnectionGuard>
+                      <KvCacheGuard>
+                        <KvCache />
+                      </KvCacheGuard>
+                    </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }
               />
