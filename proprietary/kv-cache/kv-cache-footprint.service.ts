@@ -21,15 +21,26 @@ interface NodeReading {
 
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
+const MIN_FOOTPRINT_INTERVAL_MS = 60000;
+
+export function resolvePositiveInt(raw: string | undefined, fallback: number, floor: number): number {
+  const parsed = parseInt(raw ?? String(fallback), 10);
+  return !Number.isFinite(parsed) || parsed < floor ? fallback : parsed;
+}
+
 @Injectable()
 export class KvCacheFootprintService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(KvCacheFootprintService.name);
-  private readonly intervalMs = parseInt(process.env.KV_CACHE_FOOTPRINT_INTERVAL_MS || '300000', 10);
+  private readonly intervalMs = resolvePositiveInt(
+    process.env.KV_CACHE_FOOTPRINT_INTERVAL_MS,
+    300000,
+    MIN_FOOTPRINT_INTERVAL_MS,
+  );
   private readonly budgets = {
-    maxScanned: parseInt(process.env.KV_CACHE_SCAN_MAX_KEYS || '200000', 10),
-    maxMatched: parseInt(process.env.KV_CACHE_MATCH_MAX_KEYS || '2000', 10),
+    maxScanned: resolvePositiveInt(process.env.KV_CACHE_SCAN_MAX_KEYS, 200000, 1),
+    maxMatched: resolvePositiveInt(process.env.KV_CACHE_MATCH_MAX_KEYS, 2000, 1),
   };
-  private readonly sampleSize = parseInt(process.env.KV_CACHE_SAMPLE_KEYS || '500', 10);
+  private readonly sampleSize = resolvePositiveInt(process.env.KV_CACHE_SAMPLE_KEYS, 500, 1);
   private readonly running = new Set<string>();
   private readonly lastEvicted = new Map<string, number>();
   private readonly sampleKeys = new Map<string, string>();
@@ -44,10 +55,6 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   }
 
   async onModuleInit(): Promise<void> {
-    if (!this.license.hasFeature(Feature.KV_CACHE_MONITORING)) {
-      this.logger.log('KV cache monitoring requires a Pro license - footprint collector disabled');
-      return;
-    }
     this.start();
   }
 
@@ -56,6 +63,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    if (!this.license.hasFeature(Feature.KV_CACHE_MONITORING)) return;
     await this.collect(ctx);
   }
 
