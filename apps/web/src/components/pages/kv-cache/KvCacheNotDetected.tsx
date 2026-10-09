@@ -1,7 +1,5 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { KvCacheFootprintSnapshot } from '@betterdb/shared';
-import { kvCacheApi, kvCacheKeys } from '../../../api/kv-cache';
-import { useConnection } from '../../../hooks/useConnection';
+import { useRescanKvCache } from '../../../hooks/useRescanKvCache';
 import { Card, CardContent, CardHeader, CardTitle } from '../../ui/card';
 import { Button } from '../../ui/button';
 
@@ -13,14 +11,7 @@ interface Props {
 }
 
 export function KvCacheNotDetected({ latest }: Props) {
-  const queryClient = useQueryClient();
-  const { currentConnection } = useConnection();
-  const connectionId = currentConnection?.id ?? null;
-
-  const rescan = useMutation({
-    mutationFn: () => kvCacheApi.refreshFootprint(),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: kvCacheKeys.status(connectionId) }),
-  });
+  const rescan = useRescanKvCache();
 
   return (
     <div className="flex items-center justify-center py-8">

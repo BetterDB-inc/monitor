@@ -88,6 +88,34 @@ describe('KvCacheGuard', () => {
     await waitFor(() => expect(refreshFootprint).toHaveBeenCalledTimes(1));
   });
 
+  it('keeps rendering children when a background refetch fails', async () => {
+    getStatus.mockResolvedValueOnce({ hasLmcache: true, latest, sampleKey: null, engines: [] });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <KvCacheGuard>
+            <div data-testid="children" />
+          </KvCacheGuard>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByTestId('children')).toBeInTheDocument();
+    getStatus.mockRejectedValue(new Error('boom'));
+    await client.refetchQueries({ queryKey: ['kv-cache', 'status'] });
+    await waitFor(() =>
+      expect(client.getQueryState(['kv-cache', 'status', 'c1'])?.status).toBe('error'),
+    );
+    expect(screen.getByTestId('children')).toBeInTheDocument();
+    expect(screen.queryByText(/Could not load KV cache status/)).toBeNull();
+  });
+
+  it('shows the error state when the first load fails', async () => {
+    getStatus.mockRejectedValue(new Error('boom'));
+    renderGuard();
+    expect(await screen.findByText(/Could not load KV cache status/)).toBeInTheDocument();
+  });
+
   it('renders children when LMCache is detected', async () => {
     getStatus.mockResolvedValue({ hasLmcache: true, latest, sampleKey: null, engines: [] });
     renderGuard();

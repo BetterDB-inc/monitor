@@ -15,7 +15,7 @@ export function KvCacheGuard({ children }: Props) {
   if (!hasFeature(Feature.KV_CACHE_MONITORING)) {
     return <KvCacheProLocked />;
   }
-  if (status.isError) {
+  if (status.isError && !status.data) {
     return <p className="text-sm text-destructive">Could not load KV cache status</p>;
   }
   if (!status.data) {
