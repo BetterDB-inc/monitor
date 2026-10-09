@@ -407,3 +407,51 @@ export interface IndexInfo {
   dimension: number;
   indexingState: string;
 }
+
+export interface EntryAnalyticsOptions {
+  /** Number of hottest entries to return. Default: 10. */
+  topN?: number;
+  /**
+   * An entry is "cold" if it has not been accessed within this many days.
+   * A never-hit entry is always counted as cold. Default: 7.
+   */
+  coldAfterDays?: number;
+}
+
+/** Lightweight summary of a single cache entry for analytics output. */
+export interface EntrySummary {
+  /** Valkey key of the entry. */
+  key: string;
+  /** Number of times this entry has been returned as a hit. */
+  hitCount: number;
+  /** Epoch ms of the last hit, or 0 if never hit. */
+  lastAccessedAt: number;
+  /** Epoch ms the entry was stored. */
+  insertedAt: number;
+  /** Category tag, or '' if none. */
+  category: string;
+  /** Model tag, or '' if none. */
+  model: string;
+}
+
+export interface EntryAnalyticsResult {
+  /**
+   * Number of entries examined. Exact on the FT.SEARCH path; on the SCAN
+   * fallback (indexes created before 0.14.0) this is capped at
+   * `ENTRY_ANALYTICS_LIMIT` (10,000) and is a sample.
+   */
+  totalEntries: number;
+  /** Entries with hitCount === 0. */
+  neverHitCount: number;
+  /** Entries with hitCount >= 1. */
+  hitAtLeastOnceCount: number;
+  /**
+   * Entries considered cold: never hit, OR last accessed longer ago than
+   * coldAfterDays. Includes neverHitCount.
+   */
+  coldEntryCount: number;
+  /** The topN hottest entries, descending by hitCount. */
+  topEntries: EntrySummary[];
+  /** The coldAfterDays cutoff that was applied. */
+  coldAfterDays: number;
+}

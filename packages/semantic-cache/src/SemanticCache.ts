@@ -17,6 +17,9 @@ import type {
   EmbedderDescriptor,
   EmbeddingModelChangeAction,
   SemanticCacheLogger,
+  EntryAnalyticsOptions,
+  EntryAnalyticsResult,
+  EntrySummary,
 } from './types';
 import { TTL_SECONDS_MAX, TTL_SECONDS_MIN } from './constants';
 import {
@@ -54,6 +57,8 @@ import {
 
 const INVALIDATE_BATCH_SIZE = 1000;
 const CLUSTER_DELETE_CONCURRENCY = 32;
+const CLUSTER_USAGE_CONCURRENCY = 32;
+const ENTRY_ANALYTICS_LIMIT = 10000;
 
 /**
  * Namespace tag for the embedding cache.
@@ -74,6 +79,35 @@ const PACKAGE_VERSION = (require('../package.json') as { version: string }).vers
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+type PipelineResults = Array<[error: Error | null, result: unknown]> | null;
+
+/**
+ * Counts keys whose usage-tracking commands failed. `exec()` resolves even
+ * when individual commands error (e.g. WRONGTYPE), reporting them as
+ * `[err, result]` tuples; a null result means nothing ran.
+ */
+function countFailedUsageKeys(
+  results: PipelineResults,
+  keyCount: number,
+  commandsPerKey: number,
+): { failed: number; error: unknown } {
+  if (results === null) {
+    return { failed: keyCount, error: new Error('pipeline returned no results') };
+  }
+  let failed = 0;
+  let error: unknown;
+  for (let k = 0; k < keyCount; k++) {
+    const keyError = results
+      .slice(k * commandsPerKey, (k + 1) * commandsPerKey)
+      .find(([err]) => err !== null)?.[0];
+    if (keyError) {
+      failed++;
+      error ??= keyError;
+    }
+  }
+  return { failed, error };
 }
 
 function parseHitCostMicros(raw: string | undefined | null): number | null {
@@ -126,6 +160,7 @@ export class SemanticCache {
   private _initialized = false;
   private _dimension = 0;
   private _hasBinaryRefs = false;
+  private _hasUsageFields = false;
   private _initPromise: Promise<void> | null = null;
   private _initGeneration = 0;
 
@@ -633,8 +668,8 @@ export class SemanticCache {
         .labels({ cache_name: this.name, result: metricResult, category: categoryLabel })
         .inc();
 
-      if (this.defaultTtl !== undefined && matchedKey) {
-        await this.client.expire(matchedKey, this.defaultTtl);
+      if (matchedKey) {
+        await this.recordEntryUsage(matchedKey);
       }
 
       // Cost saved
@@ -723,6 +758,8 @@ export class SemanticCache {
         model,
         category,
         inserted_at: Date.now().toString(),
+        hit_count: '0',
+        last_accessed_at: '0',
         metadata: JSON.stringify(options?.metadata ?? {}),
         embedding: encodeFloat32(embedding),
       };
@@ -817,6 +854,8 @@ export class SemanticCache {
         model,
         category,
         inserted_at: Date.now().toString(),
+        hit_count: '0',
+        last_accessed_at: '0',
         metadata: JSON.stringify(options?.metadata ?? {}),
         embedding: encodeFloat32(embedding),
         content_blocks: JSON.stringify(blocks),
@@ -939,6 +978,7 @@ export class SemanticCache {
 
       const results: CacheCheckResult[] = [];
       const categoryLabel = category || 'none';
+      const hitKeys: string[] = [];
 
       for (let i = 0; i < prompts.length; i++) {
         const pipelineEntry = pipelineResults?.[i];
@@ -997,8 +1037,8 @@ export class SemanticCache {
           .inc();
 
         const matchedKey = parsed[0].key;
-        if (this.defaultTtl !== undefined && matchedKey) {
-          await this.client.expire(matchedKey, this.defaultTtl);
+        if (matchedKey) {
+          hitKeys.push(matchedKey);
         }
 
         let costSaved: number | undefined;
@@ -1031,6 +1071,8 @@ export class SemanticCache {
         if (contentBlocks) result.contentBlocks = contentBlocks;
         results.push(result);
       }
+
+      await this.recordEntryUsageBatch(hitKeys);
 
       return results;
     });
@@ -1327,6 +1369,67 @@ export class SemanticCache {
   }
 
   /**
+   * Per-entry usage analytics: how many entries have ever been hit, which are
+   * hottest, and how many are cold (never hit, or not accessed recently).
+   *
+   * When the FT index includes the hit_count / last_accessed_at sortable
+   * fields (created at or after the version that introduced them), counts use
+   * server-side FT.SEARCH with LIMIT 0 0 (no materialization); top entries use
+   * SORTBY hit_count DESC with LIMIT 0 topN. For an older index it falls back
+   * to a SCAN + HGETALL sweep — correct but slower. Run flush() +
+   * initialize() to rebuild the index and enable the fast path.
+   *
+   * On a legacy index (created before this version), stats reflect a sample of
+   * up to 10,000 entries in implementation-defined scan order — totalEntries is
+   * the sample size, not the absolute entry count. Run flush() + initialize()
+   * to rebuild the index and get exact server-side counts.
+   */
+  async entryAnalytics(options?: EntryAnalyticsOptions): Promise<EntryAnalyticsResult> {
+    this.assertInitialized('entryAnalytics');
+    return this.traced('entryAnalytics', async (span) => {
+      const topN = options?.topN ?? 10;
+      const coldAfterDays = options?.coldAfterDays ?? 7;
+      const coldCutoff = Date.now() - coldAfterDays * 24 * 60 * 60 * 1000;
+
+      let totalEntries: number;
+      let neverHitCount: number;
+      let coldEntryCount: number;
+      let topEntries: EntrySummary[];
+
+      if (this._hasUsageFields) {
+        try {
+          ({ totalEntries, neverHitCount, coldEntryCount, topEntries } =
+            await this.collectAnalyticsViaSearch(coldCutoff, topN));
+        } catch {
+          ({ totalEntries, neverHitCount, coldEntryCount, topEntries } =
+            await this.collectAnalyticsViaScan(coldCutoff, topN));
+        }
+      } else {
+        ({ totalEntries, neverHitCount, coldEntryCount, topEntries } =
+          await this.collectAnalyticsViaScan(coldCutoff, topN));
+      }
+
+      const hitAtLeastOnceCount = Math.max(0, totalEntries - neverHitCount);
+
+      span.setAttributes({
+        'cache.name': this.name,
+        'cache.entry_total': totalEntries,
+        'cache.entry_never_hit': neverHitCount,
+        'cache.entry_cold': coldEntryCount,
+      });
+
+      return {
+        totalEntries,
+        neverHitCount,
+        hitAtLeastOnceCount,
+        coldEntryCount,
+        topEntries,
+        coldAfterDays,
+      };
+    });
+  }
+
+  /**
    * Refresh threshold config from Valkey. Returns true on a successful HGETALL,
    * false if the call threw.
    *
@@ -1483,12 +1586,13 @@ export class SemanticCache {
       if (this._initGeneration !== gen) {
         return;
       }
-      const { dim, hasBinaryRefs } = await this.ensureIndexAndGetDimension();
+      const { dim, hasBinaryRefs, hasUsageFields } = await this.ensureIndexAndGetDimension();
       if (this._initGeneration !== gen) {
         return;
       }
       this._dimension = dim;
       this._hasBinaryRefs = hasBinaryRefs;
+      this._hasUsageFields = hasUsageFields;
       // registerDiscovery() may throw SemanticCacheUsageError on a name
       // collision. Mark the cache initialized only after discovery succeeds
       // so a colliding caller cannot subsequently call check()/store()
@@ -1662,16 +1766,20 @@ export class SemanticCache {
       .catch(() => {});
   }
 
-  private async ensureIndexAndGetDimension(): Promise<{ dim: number; hasBinaryRefs: boolean }> {
-    // Try reading an existing index
+  private async ensureIndexAndGetDimension(): Promise<{
+    dim: number;
+    hasBinaryRefs: boolean;
+    hasUsageFields: boolean;
+  }> {
     try {
       const info = (await this.client.call('FT.INFO', this.indexName)) as unknown[];
       const dim = parseDimensionFromInfo(info);
-      const hasBinaryRefs = this.parseHasBinaryRefsFromInfo(info);
-      if (dim > 0) return { dim, hasBinaryRefs };
+      const hasBinaryRefs = this.parseHasFieldFromInfo(info, 'binary_refs');
+      const hasUsageFields = this.parseHasFieldFromInfo(info, 'hit_count');
+      if (dim > 0) return { dim, hasBinaryRefs, hasUsageFields };
       // Couldn't parse dimension from FT.INFO - fall back to probe
       const probeDim = (await this.embed('probe')).vector.length;
-      return { dim: probeDim, hasBinaryRefs };
+      return { dim: probeDim, hasBinaryRefs, hasUsageFields };
     } catch (err) {
       if (err instanceof EmbeddingError) throw err;
       if (!isIndexNotFoundError(err)) {
@@ -1679,7 +1787,7 @@ export class SemanticCache {
       }
     }
 
-    // Index doesn't exist - probe dimension and create it
+    // Index doesn't exist - probe dimension and create it fresh
     const dim = (await this.embed('probe')).vector.length;
     try {
       await this.client.call(
@@ -1712,6 +1820,12 @@ export class SemanticCache {
         'NUMERIC',
         'seed',
         'NUMERIC',
+        'hit_count',
+        'NUMERIC',
+        'SORTABLE',
+        'last_accessed_at',
+        'NUMERIC',
+        'SORTABLE',
         'embedding',
         'VECTOR',
         'HNSW',
@@ -1726,11 +1840,12 @@ export class SemanticCache {
     } catch (err) {
       throw new ValkeyCommandError('FT.CREATE', err);
     }
-    return { dim, hasBinaryRefs: true };
+    // Fresh index we just created has both usage fields by definition.
+    return { dim, hasBinaryRefs: true, hasUsageFields: true };
   }
 
-  /** Check if the index schema has a binary_refs field. */
-  private parseHasBinaryRefsFromInfo(info: unknown[]): boolean {
+  /** Check if the index schema has a given identifier field. */
+  private parseHasFieldFromInfo(info: unknown[], fieldName: string): boolean {
     for (let i = 0; i < info.length - 1; i += 2) {
       const key = String(info[i]);
       if (key !== 'attributes' && key !== 'fields') continue;
@@ -1739,13 +1854,243 @@ export class SemanticCache {
       for (const attr of attributes) {
         if (!Array.isArray(attr)) continue;
         for (let j = 0; j < attr.length - 1; j++) {
-          if (String(attr[j]) === 'identifier' && String(attr[j + 1]) === 'binary_refs') {
+          if (String(attr[j]) === 'identifier' && String(attr[j + 1]) === fieldName) {
             return true;
           }
         }
       }
     }
     return false;
+  }
+
+  private rowToEntrySummary(key: string, fields: Record<string, string>): EntrySummary {
+    return {
+      key,
+      hitCount: Number.parseInt(fields['hit_count'] ?? '0', 10) || 0,
+      lastAccessedAt: Number.parseInt(fields['last_accessed_at'] ?? '0', 10) || 0,
+      insertedAt: Number.parseInt(fields['inserted_at'] ?? '0', 10) || 0,
+      category: fields['category'] ?? '',
+      model: fields['model'] ?? '',
+    };
+  }
+
+  private async collectAnalyticsViaSearch(
+    coldCutoff: number,
+    topN: number,
+  ): Promise<{
+    totalEntries: number;
+    neverHitCount: number;
+    coldEntryCount: number;
+    topEntries: EntrySummary[];
+  }> {
+    const countOf = async (filter: string): Promise<number> => {
+      const resp = (await this.client.call(
+        'FT.SEARCH',
+        this.indexName,
+        filter,
+        'LIMIT',
+        '0',
+        '0',
+      )) as unknown[];
+      return Number(resp?.[0] ?? 0);
+    };
+
+    // Deliberate: a numeric range never matches a hash that lacks the field, so
+    // entries written before 0.14.0 (no hit_count / last_accessed_at until
+    // their first hit after an upgrade) are missed by the never-hit and cold
+    // counts below, while the SCAN fallback treats them as 0. Until such
+    // entries are hit, this path understates neverHitCount/coldEntryCount and
+    // overstates hitAtLeastOnceCount. Documented in the README upgrade notes.
+    const [totalEntries, neverHitCount, coldEntryCount] = await Promise.all([
+      countOf('*'),
+      countOf('@hit_count:[0 0]'),
+      // Cold = strictly older than the cutoff. Match the scan path's `< coldCutoff`
+      // exactly by using RediSearch's exclusive upper-bound syntax `[a (b]`.
+      // (Two paths, same semantics: an entry at exactly `coldCutoff` is not cold.)
+      countOf(`@last_accessed_at:[0 (${coldCutoff}]`),
+    ]);
+
+    let topResp: unknown;
+    try {
+      topResp = await this.client.call(
+        'FT.SEARCH',
+        this.indexName,
+        '*',
+        'RETURN',
+        '5',
+        'hit_count',
+        'last_accessed_at',
+        'inserted_at',
+        'category',
+        'model',
+        'SORTBY',
+        'hit_count',
+        'DESC',
+        'LIMIT',
+        '0',
+        String(topN),
+        'DIALECT',
+        '2',
+      );
+    } catch {
+      throw new Error('search-path-failed');
+    }
+    const topEntries = parseFtSearchResponse(topResp).map((row) =>
+      this.rowToEntrySummary(row.key, row.fields),
+    );
+
+    return { totalEntries, neverHitCount, coldEntryCount, topEntries };
+  }
+
+  private async collectAnalyticsViaScan(
+    coldCutoff: number,
+    topN: number,
+  ): Promise<{
+    totalEntries: number;
+    neverHitCount: number;
+    coldEntryCount: number;
+    topEntries: EntrySummary[];
+  }> {
+    const NEEDED_FIELDS = [
+      'hit_count',
+      'last_accessed_at',
+      'inserted_at',
+      'category',
+      'model',
+    ] as const;
+    const summaries: EntrySummary[] = [];
+    const pattern = `${this.entryPrefix}*`;
+    let limitReached = false;
+    await clusterScan(this.client, pattern, async (keys, nodeClient) => {
+      if (limitReached) return;
+
+      // Clamp batch to the remaining capacity so we never pipeline more than needed
+      const remaining = ENTRY_ANALYTICS_LIMIT - summaries.length;
+      const batch = keys.length <= remaining ? keys : keys.slice(0, remaining);
+      if (batch.length < keys.length) limitReached = true;
+
+      // One pipeline round trip per SCAN batch.
+      // HMGET fetches only the 5 fields rowToEntrySummary reads — avoids
+      // pulling embedding vectors (~6 KB each), response text, and prompt.
+      const pipeline = nodeClient.pipeline();
+      for (const key of batch) {
+        pipeline.hmget(key, ...NEEDED_FIELDS);
+      }
+      const results = (await pipeline.exec()) as Array<[Error | null, (string | null)[]]>;
+
+      for (let i = 0; i < batch.length; i++) {
+        const [err, values] = results[i] ?? [new Error('no result'), null];
+        if (err || !values) continue;
+        const fields: Record<string, string> = {};
+        NEEDED_FIELDS.forEach((f, j) => {
+          if (values[j] != null) fields[f] = values[j]!;
+        });
+        summaries.push(this.rowToEntrySummary(batch[i], fields));
+      }
+    });
+
+    const totalEntries = summaries.length;
+    const neverHitCount = summaries.filter((e) => e.hitCount === 0).length;
+    const coldEntryCount = summaries.filter(
+      (e) => e.hitCount === 0 || e.lastAccessedAt < coldCutoff,
+    ).length;
+    const topEntries = [...summaries].sort((a, b) => b.hitCount - a.hitCount).slice(0, topN);
+
+    return { totalEntries, neverHitCount, coldEntryCount, topEntries };
+  }
+
+  /**
+   * Best-effort, batched (non-atomic) update of per-entry usage counters and
+   * TTL refresh for a single hit. Delegates to {@link recordEntryUsageBatch}
+   * so single and batched hits share routing and failure handling.
+   */
+  private async recordEntryUsage(matchedKey: string): Promise<void> {
+    await this.recordEntryUsageBatch([matchedKey]);
+  }
+
+  /**
+   * Best-effort, batched (non-atomic) update of per-entry usage counters
+   * (`HINCRBY hit_count` + `HSET last_accessed_at`) and TTL refresh
+   * (`EXPIRE`, when `defaultTtl` is set) for every matched key.
+   *
+   * Routing: standalone clients send one pipeline for the whole batch. Entry
+   * keys carry no hash tag, so on a cluster they land on different slots and
+   * a multi-key pipeline is rejected outright; there each key gets its own
+   * pipeline (all commands share one key, hence one slot), sent in chunks of
+   * {@link CLUSTER_USAGE_CONCURRENCY} with `Promise.allSettled` so one failed
+   * key never blocks the others.
+   *
+   * Tradeoff — write amplification: every cache hit becomes a Valkey write,
+   * folded into a single round trip on standalone. Latency stays flat, but at
+   * high QPS on a small hot working set this adds real AOF and replication
+   * load on the hottest entries. `hit_count` is the primary signal for
+   * `entryAnalytics()` accuracy; `last_accessed_at` only drives cold-entry
+   * detection and could reasonably be sampled if this becomes a problem — see
+   * the README "Performance & tradeoffs" note under `entryAnalytics`.
+   *
+   * Never throws: usage tracking and TTL refresh are non-critical on a hit
+   * path. A failed key may miss an increment and its TTL may not refresh —
+   * the entry still expires on its previously-set schedule.
+   */
+  private async recordEntryUsageBatch(matchedKeys: string[]): Promise<void> {
+    if (matchedKeys.length === 0) return;
+    const now = Date.now().toString();
+    const commandsPerKey = this.defaultTtl !== undefined ? 3 : 2;
+    let failed = 0;
+    let firstError: unknown;
+
+    const tally = (keyCount: number, outcome: PromiseSettledResult<PipelineResults>): void => {
+      const { failed: f, error } =
+        outcome.status === 'rejected'
+          ? { failed: keyCount, error: outcome.reason as unknown }
+          : countFailedUsageKeys(outcome.value, keyCount, commandsPerKey);
+      failed += f;
+      if (firstError === undefined && error !== undefined) firstError = error;
+    };
+
+    if (!isClusterClient(this.client)) {
+      const [outcome] = await Promise.allSettled([this.execEntryUsage(matchedKeys, now)]);
+      tally(matchedKeys.length, outcome);
+    } else {
+      for (let i = 0; i < matchedKeys.length; i += CLUSTER_USAGE_CONCURRENCY) {
+        const chunk = matchedKeys.slice(i, i + CLUSTER_USAGE_CONCURRENCY);
+        const settled = await Promise.allSettled(
+          chunk.map((key) => this.execEntryUsage([key], now)),
+        );
+        for (const outcome of settled) {
+          tally(1, outcome);
+        }
+      }
+    }
+
+    // One warn per batch, not per key, so a broken cluster cannot flood logs.
+    if (failed > 0) {
+      try {
+        this.logger.warn(
+          `@betterdb/semantic-cache '${this.name}': failed to record entry usage for ` +
+            `${failed}/${matchedKeys.length} key(s); hit_count/last_accessed_at and TTL ` +
+            `refresh were skipped: ${errMsg(firstError)}`,
+        );
+      } catch {
+        // A throwing custom logger must not fail the hit.
+      }
+    }
+  }
+
+  /**
+   * Queues and sends the usage-tracking commands for `keys` in one pipeline.
+   * Async so a synchronous throw while queueing surfaces as a rejection.
+   */
+  private async execEntryUsage(keys: string[], now: string): Promise<PipelineResults> {
+    const pipeline = this.client.pipeline();
+    for (const key of keys) {
+      pipeline.hincrby(key, 'hit_count', 1);
+      pipeline.hset(key, 'last_accessed_at', now);
+      if (this.defaultTtl !== undefined) {
+        pipeline.expire(key, this.defaultTtl);
+      }
+    }
+    return pipeline.exec();
   }
 
   /** Resolve a prompt (string or ContentBlock[]) into text + binary refs. */
