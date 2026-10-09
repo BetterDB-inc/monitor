@@ -1,0 +1,820 @@
+{
+  "uid": "betterdb-monitor-internals",
+  "title": "BetterDB \u00b7 Monitor Internals",
+  "tags": [
+    "betterdb",
+    "monitor"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data source",
+        "multi": false,
+        "name": "ds",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "betterdb",
+          "value": "betterdb"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${ds}"
+        },
+        "definition": "label_values(betterdb_nodejs_version_info, job)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Scrape job",
+        "multi": false,
+        "name": "job",
+        "options": [],
+        "query": {
+          "query": "label_values(betterdb_nodejs_version_info, job)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Process CPU/sec",
+      "description": "CPU seconds consumed per second by the Monitor process.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "rate(betterdb_process_cpu_user_seconds_total{job=~\"$job\"}[5m])",
+          "legendFormat": "user"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "rate(betterdb_process_cpu_system_seconds_total{job=~\"$job\"}[5m])",
+          "legendFormat": "sys"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "rate(betterdb_process_cpu_seconds_total{job=~\"$job\"}[5m])",
+          "legendFormat": "total"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Process memory",
+      "description": "Resident, heap, and virtual memory of the Monitor process.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_process_resident_memory_bytes{job=~\"$job\"}",
+          "legendFormat": "rss"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_process_heap_bytes{job=~\"$job\"}",
+          "legendFormat": "heap"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_process_virtual_memory_bytes{job=~\"$job\"}",
+          "legendFormat": "virtual"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "File descriptors",
+      "description": "Open file descriptors against the process limit.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_process_open_fds{job=~\"$job\"}",
+          "legendFormat": "open"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_process_max_fds{job=~\"$job\"}",
+          "legendFormat": "max"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Process uptime",
+      "description": "Seconds since the Monitor process started.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "time() - betterdb_process_start_time_seconds{job=~\"$job\"}",
+          "legendFormat": "uptime"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Node heap",
+      "description": "V8 heap total vs used, plus external (off-heap) memory.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_heap_size_total_bytes{job=~\"$job\"}",
+          "legendFormat": "total"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_heap_size_used_bytes{job=~\"$job\"}",
+          "legendFormat": "used"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_external_memory_bytes{job=~\"$job\"}",
+          "legendFormat": "external"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Node heap spaces",
+      "description": "Per-space V8 heap total, used, and available.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_heap_space_size_total_bytes{job=~\"$job\"}",
+          "legendFormat": "{{space}} total"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_heap_space_size_used_bytes{job=~\"$job\"}",
+          "legendFormat": "{{space}} used"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_heap_space_size_available_bytes{job=~\"$job\"}",
+          "legendFormat": "{{space}} avail"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Event loop lag",
+      "description": "Node.js event-loop lag. Rising p99 lag means the Monitor is CPU-bound and metric collection may slow.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_eventloop_lag_seconds{job=~\"$job\"}",
+          "legendFormat": "current"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_eventloop_lag_mean_seconds{job=~\"$job\"}",
+          "legendFormat": "mean"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_eventloop_lag_min_seconds{job=~\"$job\"}",
+          "legendFormat": "min"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_eventloop_lag_max_seconds{job=~\"$job\"}",
+          "legendFormat": "max"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_eventloop_lag_stddev_seconds{job=~\"$job\"}",
+          "legendFormat": "stddev"
+        },
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_eventloop_lag_p50_seconds{job=~\"$job\"}",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "G",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_eventloop_lag_p90_seconds{job=~\"$job\"}",
+          "legendFormat": "p90"
+        },
+        {
+          "refId": "H",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_eventloop_lag_p99_seconds{job=~\"$job\"}",
+          "legendFormat": "p99"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Active handles / requests / resources",
+      "description": "Libuv active handles, requests, and resources (current and cumulative).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_active_handles{job=~\"$job\"}",
+          "legendFormat": "handles"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_active_handles_total{job=~\"$job\"}",
+          "legendFormat": "handles total"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_active_requests{job=~\"$job\"}",
+          "legendFormat": "requests"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_active_requests_total{job=~\"$job\"}",
+          "legendFormat": "requests total"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_active_resources{job=~\"$job\"}",
+          "legendFormat": "resources"
+        },
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_active_resources_total{job=~\"$job\"}",
+          "legendFormat": "resources total"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      }
+    },
+    {
+      "id": 9,
+      "type": "heatmap",
+      "title": "GC duration (heatmap)",
+      "description": "Distribution of garbage-collection pause durations.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "sum by (le) (rate(betterdb_nodejs_gc_duration_seconds_bucket{job=~\"$job\"}[5m]))",
+          "legendFormat": "{{le}}",
+          "format": "heatmap"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "GC average duration",
+      "description": "Mean GC pause = rate(sum)/rate(count).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "rate(betterdb_nodejs_gc_duration_seconds_sum{job=~\"$job\"}[5m]) / clamp_min(rate(betterdb_nodejs_gc_duration_seconds_count{job=~\"$job\"}[5m]), 0.0001)",
+          "legendFormat": "avg"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      }
+    },
+    {
+      "id": 11,
+      "type": "heatmap",
+      "title": "Poll duration (heatmap)",
+      "description": "Distribution of how long each monitored-instance poll takes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "sum by (le) (rate(betterdb_poll_duration_seconds_bucket{job=~\"$job\"}[5m]))",
+          "legendFormat": "{{le}}",
+          "format": "heatmap"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Poll average duration",
+      "description": "Mean poll duration = rate(sum)/rate(count). Climbing here precedes scrape timeouts.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "rate(betterdb_poll_duration_seconds_sum{job=~\"$job\"}[5m]) / clamp_min(rate(betterdb_poll_duration_seconds_count{job=~\"$job\"}[5m]), 0.0001)",
+          "legendFormat": "avg"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Polls/sec",
+      "description": "Monitored-instance poll rate.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "rate(betterdb_polls_total{job=~\"$job\"}[5m])",
+          "legendFormat": "polls"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Stale polls",
+      "description": "Polls currently flagged stale (data older than the poll interval).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_poll_stale{job=~\"$job\"}",
+          "legendFormat": "stale"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "OTLP metric points/sec",
+      "description": "Rate of OTLP metric points the Monitor exports to the collector.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "rate(betterdb_otlp_metric_points_accepted_total{job=~\"$job\"}[5m])",
+          "legendFormat": "accepted"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      }
+    },
+    {
+      "id": 16,
+      "type": "table",
+      "title": "Node.js version",
+      "description": "Runtime version of the Monitor process.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_nodejs_version_info{job=~\"$job\"}",
+          "legendFormat": "{{version}}",
+          "format": "table",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      }
+    }
+  ]
+}

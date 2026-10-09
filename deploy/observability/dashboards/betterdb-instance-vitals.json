@@ -1,7 +1,10 @@
 {
   "uid": "betterdb-instance-vitals",
-  "title": "BetterDB · Instance Vitals",
-  "tags": ["betterdb", "valkey"],
+  "title": "BetterDB \u00b7 Instance Vitals",
+  "tags": [
+    "betterdb",
+    "valkey"
+  ],
   "schemaVersion": 39,
   "version": 1,
   "refresh": "30s",
@@ -513,6 +516,159 @@
         "w": 24,
         "x": 0,
         "y": 40
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Network throughput",
+      "description": "Inbound and outbound kilobytes per second handled by the server.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "KBs",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_instantaneous_input_kbps{job=~\"$job\",connection=~\"$connection\"}",
+          "legendFormat": "{{connection}} in"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_instantaneous_output_kbps{job=~\"$job\",connection=~\"$connection\"}",
+          "legendFormat": "{{connection}} out"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Peak memory",
+      "description": "Highest memory the server has used since start.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_memory_used_peak_bytes{job=~\"$job\",connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Fragmentation (bytes)",
+      "description": "Absolute bytes of allocator fragmentation (RSS minus used).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_memory_fragmentation_bytes{job=~\"$job\",connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Commands processed/sec",
+      "description": "Total command throughput derived from the cumulative counter.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "rate(betterdb_commands_processed_total{job=~\"$job\",connection=~\"$connection\"}[5m])",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
       }
     }
   ]

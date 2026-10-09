@@ -1,7 +1,10 @@
 {
   "uid": "betterdb-anomalies",
-  "title": "BetterDB · Anomalies",
-  "tags": ["betterdb", "valkey"],
+  "title": "BetterDB \u00b7 Anomalies",
+  "tags": [
+    "betterdb",
+    "valkey"
+  ],
   "schemaVersion": 39,
   "version": 1,
   "refresh": "30s",
@@ -463,6 +466,78 @@
         "w": 24,
         "x": 0,
         "y": 32
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Correlated groups (total)",
+      "description": "Active groups of anomalies the correlator has linked together.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_correlated_groups_total{job=~\"$job\",connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Correlated groups by severity",
+      "description": "Correlated anomaly groups split by severity.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_correlated_groups_by_severity{job=~\"$job\",connection=~\"$connection\"}",
+          "legendFormat": "{{severity}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
       }
     }
   ]
