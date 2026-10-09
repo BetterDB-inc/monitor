@@ -26,16 +26,6 @@ const VALKEY_NAME_PATTERN = /^[a-z][a-z0-9-]{1,38}[a-z0-9]$/;
 const DEMO_OBSERVABILITY_NAMESPACE = 'demo-observability';
 const DEMO_OBSERVABILITY_PROMETHEUS_PORT = 9090;
 
-// Env vars injected only for the demo tenant. On re-provision of a tenant that
-// has been un-flagged (isDemo: false), these must be actively removed — a
-// strategic-merge env patch only ever adds/updates by name — so the published
-// token and OTLP mirror don't linger on a now-ordinary tenant.
-const DEMO_ONLY_ENV = [
-  'DEMO_HOSTNAME',
-  'PROMETHEUS_METRICS_PUBLIC_TOKEN',
-  'OTEL_EXPORTER_OTLP_ENDPOINT',
-  'OTEL_EVENTS_ENABLED',
-];
 
 // The public SNI host is an opaque, stable label derived from the instance id
 // rather than its name: this keeps it globally unique on the shared wildcard
@@ -1098,51 +1088,69 @@ export class ProvisioningService {
     // published credential never breaks the demo-observability scrape config.
     const prometheusMetricsPublicToken = isDemo ? crypto.randomBytes(32).toString('hex') : undefined;
 
+    // The full key set the Deployment references (all as non-optional
+    // secretKeyRefs). Shared by the create and the re-provision backfill paths.
+    const stringData: Record<string, string> = {
+      STORAGE_URL: storageUrl,
+      // Cloud auth secrets
+      CLOUD_MODE: 'true',
+      AUTH_PUBLIC_KEY: this.authPublicKey,
+      SESSION_SECRET: sessionSecret,
+      OTEL_INGEST_TOKEN: otelIngestToken,
+      PROMETHEUS_METRICS_TOKEN: prometheusMetricsToken,
+      ...(prometheusMetricsPublicToken
+        ? { PROMETHEUS_METRICS_PUBLIC_TOKEN: prometheusMetricsPublicToken }
+        : {}),
+      // Entitlement API config (for workspace management)
+      ENTITLEMENT_API_URL: this.entitlementApiUrl,
+      ENTITLEMENT_API_KEY: this.entitlementApiKey,
+    };
+
     try {
       await this.coreApi.createNamespacedSecret({
         namespace,
-        body: {
-          metadata: {
-            name: 'db-credentials',
-          },
-          type: 'Opaque',
-          stringData: {
-            STORAGE_URL: storageUrl,
-            // Cloud auth secrets
-            CLOUD_MODE: 'true',
-            AUTH_PUBLIC_KEY: this.authPublicKey,
-            SESSION_SECRET: sessionSecret,
-            OTEL_INGEST_TOKEN: otelIngestToken,
-            PROMETHEUS_METRICS_TOKEN: prometheusMetricsToken,
-            ...(prometheusMetricsPublicToken
-              ? { PROMETHEUS_METRICS_PUBLIC_TOKEN: prometheusMetricsPublicToken }
-              : {}),
-            // Entitlement API config (for workspace management)
-            ENTITLEMENT_API_URL: this.entitlementApiUrl,
-            ENTITLEMENT_API_KEY: this.entitlementApiKey,
-          },
-        },
+        body: { metadata: { name: 'db-credentials' }, type: 'Opaque', stringData },
       });
     } catch (error: any) {
-      if (this.isAlreadyExistsError(error)) {
-        this.logger.warn(`Secret db-credentials already exists in ${namespace}, continuing...`);
-        // A retry of a tenant whose secret predates the metrics-endpoint gate can
-        // reuse a Secret that lacks PROMETHEUS_METRICS_TOKEN. The Deployment
-        // created below references that key (non-optional), so without it the pod
-        // fails to start. Backfill it before we get there.
-        await this.ensureMetricsTokenInSecret(namespace);
-        if (isDemo) {
-          // Same backfill for the demo-only published token.
-          await this.ensureMetricsTokenInSecret(namespace, 'PROMETHEUS_METRICS_PUBLIC_TOKEN');
-        }
-        // For a non-demo tenant the published token is pruned later, after
-        // createDeployment has settled a spec that no longer references it —
-        // dropping the Secret key here would leave the running Deployment's
-        // non-optional secretKeyRef pointing at a missing key.
-      } else {
+      if (!this.isAlreadyExistsError(error)) {
         throw error;
       }
+      // Re-provision: the Secret already exists. Backfill any keys it is
+      // missing. An older tenant's Secret can predate the current schema (e.g.
+      // lack CLOUD_MODE / AUTH_PUBLIC_KEY / SESSION_SECRET / ENTITLEMENT_API_*),
+      // and the Deployment references every key as a non-optional secretKeyRef —
+      // a missing one wedges the new pod in CreateContainerConfigError. Only ADD
+      // absent keys; never overwrite existing ones, so a running tenant's tokens
+      // and SESSION_SECRET are not rotated out from under it. (A non-demo
+      // tenant's stale PROMETHEUS_METRICS_PUBLIC_TOKEN is pruned later in
+      // createDeployment, once the spec no longer references it.)
+      this.logger.warn(`Secret db-credentials already exists in ${namespace}, backfilling missing keys...`);
+      await this.backfillSecretKeys(namespace, stringData);
     }
+  }
+
+  // Adds any of `desired`'s keys that are absent from the db-credentials Secret,
+  // leaving existing values untouched. Brings an older tenant's Secret up to the
+  // current key set on re-provision without rotating live credentials.
+  private async backfillSecretKeys(namespace: string, desired: Record<string, string>): Promise<void> {
+    const secret = await this.coreApi.readNamespacedSecret({ name: 'db-credentials', namespace });
+    const present = new Set(Object.keys(secret.data ?? {}));
+    const missing: Record<string, string> = {};
+    for (const [key, value] of Object.entries(desired)) {
+      if (!present.has(key)) {
+        missing[key] = value;
+      }
+    }
+    if (Object.keys(missing).length === 0) {
+      return;
+    }
+    await this.coreApi.patchNamespacedSecret(
+      { name: 'db-credentials', namespace, body: { stringData: missing } },
+      k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch),
+    );
+    this.logger.log(
+      `Backfilled missing db-credentials keys in ${namespace}: ${Object.keys(missing).join(', ')}`,
+    );
   }
 
   private async createResourceQuota(
@@ -1400,48 +1408,46 @@ export class ProvisioningService {
     try {
       await this.appsApi.createNamespacedDeployment({ namespace, body });
     } catch (error: any) {
-      if (this.isAlreadyExistsError(error)) {
-        // Converge an existing Deployment to the current spec instead of
-        // skipping: a warn-and-continue here left pre-existing tenants without
-        // later-introduced env/resources (e.g. the demo tenant's published
-        // metrics token and OTLP mirror), silently diverging from what
-        // provisioning reported.
-        //
-        // Strategic-merge PATCH scoped to the fields this provisioner owns —
-        // env, resources, replicas — rather than a full replace. It needs no
-        // resourceVersion (so there's no read→replace 409 race) and leaves
-        // everything else (pod-template annotations like the metrics-token
-        // restart marker, the running image) intact, so re-provision neither
-        // churns the pod nor rolls an out-of-band image back to the DB tag.
-        // env merges by name (new demo vars added); demo-only vars are
-        // explicitly deleted when the tenant isn't a demo so a published token
-        // can't linger. replicas is set back to the desired running count: a
-        // deprovision that scaled the app to 0 and then failed leaves the
-        // tenant in 'error' (re-provisionable) at replicas 0, and without this
-        // the converge would leave it there and waitForDeploymentReady would
-        // time out.
-        this.logger.log(`Deployment already exists in ${namespace}, converging app container`);
-        const container = body.spec!.template!.spec!.containers![0];
-        const env: any[] = [...(container.env ?? [])];
-        if (!isDemo) {
-          for (const name of DEMO_ONLY_ENV) {
-            env.push({ name, $patch: 'delete' });
-          }
-        }
-        const patchBody = {
-          spec: {
-            replicas: body.spec!.replicas,
-            template: {
-              spec: { containers: [{ name: container.name, env, resources: container.resources }] },
-            },
-          },
-        } as unknown as k8s.V1Deployment;
-        await this.appsApi.patchNamespacedDeployment(
-          { name: 'betterdb', namespace, body: patchBody },
-          k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.StrategicMergePatch),
-        );
-      } else {
+      if (!this.isAlreadyExistsError(error)) {
         throw error;
+      }
+      // Converge an existing Deployment to the current spec instead of
+      // skipping: a warn-and-continue here left pre-existing tenants without
+      // later-introduced env/resources (e.g. the demo tenant's published
+      // metrics token and OTLP mirror), silently diverging from what
+      // provisioning reported.
+      //
+      // Read-modify-replace, NOT a strategic-merge patch: a merge patch of the
+      // env list merges entries by name, so any env var whose source flips
+      // between `value` and `valueFrom` ends up carrying both, which the API
+      // rejects with a 422. Replacing the container's env wholesale on the live
+      // object avoids that, and naturally drops demo-only vars a now-non-demo
+      // tenant shouldn't keep (the desired env simply omits them). We touch
+      // only env, resources and replicas — the live image, pod-template
+      // annotations (e.g. the metrics-token restart marker) and probes are
+      // preserved. Retry on a 409 from a concurrent status write.
+      this.logger.log(`Deployment already exists in ${namespace}, converging app container`);
+      const desired = body.spec!.template!.spec!.containers![0];
+      for (let attempt = 0; ; attempt++) {
+        const existing = await this.appsApi.readNamespacedDeployment({ name: 'betterdb', namespace });
+        const c = existing.spec?.template?.spec?.containers?.find((x) => x.name === 'betterdb');
+        if (!c) {
+          throw new Error(`betterdb container not found in ${namespace}`);
+        }
+        c.env = desired.env;
+        c.resources = desired.resources;
+        existing.spec!.replicas = body.spec!.replicas;
+        try {
+          await this.appsApi.replaceNamespacedDeployment({ name: 'betterdb', namespace, body: existing });
+          break;
+        } catch (e: any) {
+          // isAlreadyExistsError also matches a 409 Conflict (stale
+          // resourceVersion) on replace; re-read and retry a few times.
+          if (this.isAlreadyExistsError(e) && attempt < 3) {
+            continue;
+          }
+          throw e;
+        }
       }
     }
 
