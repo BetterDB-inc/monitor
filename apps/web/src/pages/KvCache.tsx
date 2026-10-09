@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { kvCacheApi, kvCacheKeys } from '../api/kv-cache';
+import { useCanMutate } from '../hooks/useCanMutate';
 import { useConnection } from '../hooks/useConnection';
 import { useKvCacheStatus } from '../hooks/useKvCacheStatus';
 import { useRescanKvCache } from '../hooks/useRescanKvCache';
@@ -24,6 +25,7 @@ export function KvCache() {
   const connectionId = currentConnection?.id ?? null;
   const status = useKvCacheStatus();
   const rescan = useRescanKvCache();
+  const canMutate = useCanMutate();
   const [dateRange, setDateRange] = useState<DateRange | undefined>(undefined);
 
   const from = dateRange?.from?.getTime();
@@ -71,7 +73,7 @@ export function KvCache() {
         <h1 className="text-2xl font-bold">KV Cache</h1>
         <div className="flex items-center gap-3">
           <DateRangePicker value={dateRange} onChange={setDateRange} placeholder="Last 6 hours" />
-          <KvCacheSettingsSheet />
+          {canMutate && <KvCacheSettingsSheet />}
           <Button variant="outline" onClick={() => rescan.mutate()} disabled={rescan.isPending}>
             Refresh
           </Button>

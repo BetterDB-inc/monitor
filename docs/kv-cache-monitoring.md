@@ -203,6 +203,10 @@ receivers:
           scrape_interval: 30s
           static_configs:
             - targets: ['vllm:8000']
+          metric_relabel_configs:
+            - source_labels: [__name__]
+              regex: 'lmcache:.*'
+              action: keep
 processors:
   resource:
     attributes:
@@ -223,7 +227,10 @@ service:
 ```
 
 Point `targets` at the LMCache metrics endpoint and `<betterdb-url>` at the
-BetterDB API origin. Use `metrics_endpoint`, not `endpoint`, as described in
+BetterDB API origin. The `metric_relabel_configs` rule keeps only `lmcache:`
+metrics, so the rest of the vLLM endpoint is not forwarded and counted as
+dropped. The receiver's own `up` and `scrape_*` series are not affected by it
+and, being gauges, are still dropped as `unsupported_type`. Use `metrics_endpoint`, not `endpoint`, as described in
 [OpenTelemetry (OTLP)](opentelemetry#metrics-ingestion).
 
 The `Authorization` header is needed only when `OTEL_INGEST_TOKEN` is set on

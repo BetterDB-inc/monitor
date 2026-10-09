@@ -3,6 +3,7 @@ import { useMutation } from '@tanstack/react-query';
 import { formatDistanceToNow } from 'date-fns';
 import type { KvCacheEngine } from '@betterdb/shared';
 import { kvCacheApi } from '../../../api/kv-cache';
+import { useCanMutate } from '../../../hooks/useCanMutate';
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../../ui/card';
@@ -21,6 +22,7 @@ import { useInvalidateEngines } from './useInvalidateEngines';
 
 export function KvCacheEngines({ engines }: { engines: KvCacheEngine[] }) {
   const invalidate = useInvalidateEngines();
+  const canMutate = useCanMutate();
   const [linkOpen, setLinkOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<KvCacheEngine | null>(null);
 
@@ -47,13 +49,17 @@ export function KvCacheEngines({ engines }: { engines: KvCacheEngine[] }) {
     <Card>
       <CardHeader className="flex flex-row items-center justify-between space-y-0">
         <CardTitle>Engines</CardTitle>
-        <Button variant="outline" onClick={() => setLinkOpen(true)}>
-          Link engine
-        </Button>
+        {canMutate && (
+          <Button variant="outline" onClick={() => setLinkOpen(true)}>
+            Link engine
+          </Button>
+        )}
       </CardHeader>
       <CardContent>
         {engines.length === 0 ? (
-          <p className="text-sm text-muted-foreground">Link an engine to see hit rate</p>
+          <p className="text-sm text-muted-foreground">
+            {canMutate ? 'Link an engine to see hit rate' : 'No engines linked'}
+          </p>
         ) : (
           <Table>
             <TableHeader>
@@ -64,7 +70,7 @@ export function KvCacheEngines({ engines }: { engines: KvCacheEngine[] }) {
                 <TableHead>Enabled</TableHead>
                 <TableHead>Last seen</TableHead>
                 <TableHead>Last error</TableHead>
-                <TableHead />
+                {canMutate && <TableHead />}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -79,7 +85,7 @@ export function KvCacheEngines({ engines }: { engines: KvCacheEngine[] }) {
                     <Switch
                       aria-label={`Enable ${engine.name}`}
                       checked={engine.enabled}
-                      disabled={toggle.isPending}
+                      disabled={!canMutate || toggle.isPending}
                       onCheckedChange={(enabled: boolean) =>
                         toggle.mutate({ id: engine.id, enabled })
                       }
@@ -93,11 +99,13 @@ export function KvCacheEngines({ engines }: { engines: KvCacheEngine[] }) {
                   <TableCell>
                     {engine.lastError ? <Badge variant="destructive">{engine.lastError}</Badge> : null}
                   </TableCell>
-                  <TableCell>
-                    <Button variant="ghost" size="sm" onClick={() => setPendingDelete(engine)}>
-                      Delete
-                    </Button>
-                  </TableCell>
+                  {canMutate && (
+                    <TableCell>
+                      <Button variant="ghost" size="sm" onClick={() => setPendingDelete(engine)}>
+                        Delete
+                      </Button>
+                    </TableCell>
+                  )}
                 </TableRow>
               ))}
             </TableBody>
