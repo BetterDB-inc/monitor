@@ -273,7 +273,7 @@ X-Webhook-Event: <event-type>
 
 Fired when the server starts and stops refusing writes. None of these conditions moves memory, CPU or latency, so they are read from the `persistence` and `errorstats` INFO sections the metrics poll already fetches.
 
-`writes.rejected` opens with `severity: "warning"` as soon as persistence fails (`rdb_last_bgsave_status:err`, which makes the server reply `MISCONF` to writes under the default `stop-writes-on-bgsave-error yes`, or `aof_last_write_status:err`), before any client has been refused. When it opens because clients already received errors, `severity` is `"critical"` and `rejectedSinceLastPoll` holds the per-code counts. `writes.recovered` fires once persistence is healthy and no new rejection errors arrived on the same poll.
+`writes.rejected` opens with `severity: "warning"` as soon as persistence fails (`rdb_last_bgsave_status:err`, which makes the server reply `MISCONF` to writes under the default `stop-writes-on-bgsave-error yes`, or `aof_last_write_status:err`), before any client has been refused. When it opens because clients already received errors, `severity` is `"critical"` and `rejectedSinceLastPoll` holds the per-code counts. `writes.recovered` fires once persistence is reported healthy (both `rdb_last_bgsave_status` and `aof_last_write_status` ok) and no new rejection errors arrived on the same poll; a poll with missing persistence data never closes the edge.
 
 | Cause | Meaning |
 |-------|---------|

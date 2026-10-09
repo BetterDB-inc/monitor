@@ -76,6 +76,40 @@ describe('evaluateWriteRejection', () => {
     ).toMatchObject({ transition: 'rejected', severity: 'warning', rejectingForMs: 0 });
   });
 
+  it('keeps the edge open through a poll without persistence data', () => {
+    const state = createWriteRejectionState();
+    evaluateWriteRejection(state, bgsaveFailed, stats({ MISCONF: 0 }), 0);
+    expect(
+      evaluateWriteRejection(state, undefined, stats({ MISCONF: 0 }), 5_000).transition,
+    ).toBeNull();
+    expect(state).toMatchObject({ rejecting: true, rejectingSince: 0, lastSeverity: 'warning' });
+    expect(evaluateWriteRejection(state, healthy, stats({ MISCONF: 0 }), 10_000)).toMatchObject({
+      transition: 'recovered',
+      rejectingForMs: 10_000,
+    });
+  });
+
+  it('does not recover while aof_last_write_status is missing', () => {
+    const state = createWriteRejectionState();
+    evaluateWriteRejection(state, bgsaveFailed, stats({}), 0);
+    expect(
+      evaluateWriteRejection(state, { rdb_last_bgsave_status: 'ok' }, stats({}), 5_000).transition,
+    ).toBeNull();
+    expect(state.rejecting).toBe(true);
+  });
+
+  it('recovers an OOM edge on a server that stops reporting errorstats', () => {
+    const state = createWriteRejectionState();
+    evaluateWriteRejection(state, healthy, stats({ OOM: 1 }), 0);
+    expect(evaluateWriteRejection(state, healthy, stats({ OOM: 20 }), 5_000).transition).toBe(
+      'rejected',
+    );
+    expect(evaluateWriteRejection(state, healthy, undefined, 10_000)).toMatchObject({
+      transition: 'recovered',
+      rejectingForMs: 5_000,
+    });
+  });
+
   it('treats a code missing from a present errorstats section as zero', () => {
     const state = createWriteRejectionState();
     evaluateWriteRejection(state, healthy, stats({ MISCONF: 3 }), 0);

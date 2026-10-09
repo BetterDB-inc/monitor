@@ -171,6 +171,25 @@ describe('PrometheusService write-rejection wiring', () => {
     });
   });
 
+  it('does not send writes.recovered for a poll that lacks the persistence section', async () => {
+    await poll('conn-a', info(BGSAVE_FAILED));
+    jest.setSystemTime(Date.now() + POLL_INTERVAL_MS);
+    infoReads['conn-a'].mockResolvedValueOnce({ errorstats: {} });
+    await service['runUpdateMetricsForConnection']('conn-a');
+    expect(writeEvents('conn-a').map(([event]) => event)).toEqual([
+      WebhookEventType.WRITES_REJECTED,
+    ]);
+
+    await poll('conn-a', info(HEALTHY));
+    await poll('conn-a', info(HEALTHY));
+
+    const recovered = writeEvents('conn-a').filter(
+      ([event]) => event === WebhookEventType.WRITES_RECOVERED,
+    );
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0][1]).toMatchObject({ rejectingForMs: POLL_INTERVAL_MS * 2 });
+  });
+
   it('re-sends writes.rejected once, flagged escalated, when clients start receiving MISCONF', async () => {
     await poll('conn-a', info(HEALTHY, { MISCONF: 0 }));
     await poll('conn-a', info(BGSAVE_FAILED, { MISCONF: 0 }));
