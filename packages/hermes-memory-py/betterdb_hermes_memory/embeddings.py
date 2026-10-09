@@ -132,7 +132,13 @@ class _HttpEmbedder:
         if self._client is None:
             import httpx  # lazy: keep module import network-free
 
-            self._client = httpx.AsyncClient(timeout=30.0)
+            # A plaintext http:// endpoint only passed the is_insecure() gate because
+            # it is local. httpx honours HTTP_PROXY by default (trust_env), which could
+            # route even http://localhost through a remote proxy and leak the input in
+            # the clear — so bypass env proxies for plaintext. https keeps trust_env on
+            # for normal corporate-proxy / env-CA support.
+            plaintext = self._config.base_url.strip().lower().startswith("http://")
+            self._client = httpx.AsyncClient(timeout=30.0, trust_env=not plaintext)
         return self._client
 
     async def __call__(self, text: str) -> List[float]:
