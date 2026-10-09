@@ -23,6 +23,8 @@ export enum WebhookEventType {
   COMPLIANCE_ALERT = 'compliance.alert',
   METRIC_FORECAST_LIMIT = 'metric_forecast.limit',
   SCALING_READINESS_LOW = 'scaling_readiness.low',
+  KV_CACHE_HIT_RATE_LOW = 'kv_cache.hit_rate_low',
+  KV_CACHE_EVICTION_RISK = 'kv_cache.eviction_risk',
   INFERENCE_SLA_BREACH = 'inference.sla.breach',
   CVE_CRITICAL_DETECTED = 'cve.critical_detected',
   CVE_KEV_DETECTED = 'cve.kev_detected',
@@ -61,6 +63,8 @@ export const PRO_EVENTS: WebhookEventType[] = [
   WebhookEventType.CONNECTION_SPIKE,
   WebhookEventType.METRIC_FORECAST_LIMIT,
   WebhookEventType.SCALING_READINESS_LOW,
+  WebhookEventType.KV_CACHE_HIT_RATE_LOW,
+  WebhookEventType.KV_CACHE_EVICTION_RISK,
   WebhookEventType.FAILOVER_STARTED,
   WebhookEventType.FAILOVER_COMPLETED,
   WebhookEventType.DATA_LOSS_DETECTED,
@@ -87,6 +91,7 @@ export const ENTERPRISE_EVENTS: WebhookEventType[] = [
 import { Tier } from '../license/types';
 import type { CveWebhookFindingSummary } from '../types/cve';
 import type { MetricKind } from '../types/metric-forecasting.types';
+import type { KvCacheEvictionRiskData, KvCacheHitRateLowData } from '../types/kv-cache.types';
 import type { ScalingReadinessLowData } from '../types/scaling-readiness.types';
 export { Tier };
 
@@ -116,6 +121,8 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.CONNECTION_SPIKE]: Tier.pro,
   [WebhookEventType.METRIC_FORECAST_LIMIT]: Tier.pro,
   [WebhookEventType.SCALING_READINESS_LOW]: Tier.pro,
+  [WebhookEventType.KV_CACHE_HIT_RATE_LOW]: Tier.pro,
+  [WebhookEventType.KV_CACHE_EVICTION_RISK]: Tier.pro,
   [WebhookEventType.FAILOVER_STARTED]: Tier.pro,
   [WebhookEventType.FAILOVER_COMPLETED]: Tier.pro,
   [WebhookEventType.DATA_LOSS_DETECTED]: Tier.pro,
@@ -510,6 +517,10 @@ export interface IWebhookEventsProService {
   }): Promise<void>;
 
   dispatchScalingReadinessLow(data: ScalingReadinessLowData): Promise<void>;
+
+  dispatchKvCacheHitRateLow(data: KvCacheHitRateLowData): Promise<void>;
+
+  dispatchKvCacheEvictionRisk(data: KvCacheEvictionRiskData): Promise<void>;
 
   dispatchInferenceSlaBreach(data: {
     indexName: string;

@@ -45,6 +45,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   private readonly lastEvicted = new Map<string, number>();
   private readonly sampleKeys = new Map<string, string>();
   private readonly listeners: SnapshotListener[] = [];
+  private readonly removalListeners: Array<(connectionId: string) => void> = [];
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -74,6 +75,17 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     void this.storage
       .deleteKvCacheConnectionData(connectionId)
       .catch((error) => this.logger.warn(`Could not delete KV cache data for ${connectionId}: ${errorMessage(error)}`));
+    for (const listener of this.removalListeners) {
+      try {
+        listener(connectionId);
+      } catch (error) {
+        this.logger.warn(`KV cache removal listener failed: ${errorMessage(error)}`);
+      }
+    }
+  }
+
+  onConnectionRemoval(listener: (connectionId: string) => void): void {
+    this.removalListeners.push(listener);
   }
 
   onSnapshot(listener: SnapshotListener): void {

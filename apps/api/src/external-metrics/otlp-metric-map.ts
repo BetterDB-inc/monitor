@@ -1,5 +1,7 @@
 import type { InfoTarget, InstanceKey, OtlpKeyValue, OtlpNumberDataPoint } from './otlp-metrics-types';
 
+export const NO_RECORDED_VALUE = 1;
+
 export interface MappedPoint {
   target: InfoTarget;
   value: string;
@@ -166,6 +168,10 @@ export function resolveInstanceKeys(attrs: Record<string, string>): InstanceKey[
   if (instanceId) add(splitInstanceId(instanceId));
   add(explicitInstanceKey(attrs));
   return keys;
+}
+
+export function isDeltaTemporality(temporality: number | string | undefined): boolean {
+  return temporality === 1 || temporality === 'AGGREGATION_TEMPORALITY_DELTA';
 }
 
 export function pointValue(dp: OtlpNumberDataPoint): string | null {

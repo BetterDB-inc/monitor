@@ -77,17 +77,30 @@ describe('KvCacheFootprintService', () => {
 
   it('runs connection removal cleanup while unlicensed', async () => {
     const { service, storage, registry } = setup(undefined, false);
+    const listener = jest.fn();
+    service.onConnectionRemoval(listener);
     await (service as any).tick();
     registry.list.mockReturnValue([]);
     await (service as any).tick();
     expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
     expect(storage.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
+    expect(listener).toHaveBeenCalledWith('c1');
   });
 
   it('deletes stored data when a connection is removed', () => {
     const { service, storage } = setup();
     (service as any).onConnectionRemoved('c1');
     expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
+  });
+
+  it('notifies removal listeners with the connection id', () => {
+    const { service } = setup();
+    const listener = jest.fn();
+    const failing = jest.fn(() => { throw new Error('x'); });
+    service.onConnectionRemoval(failing);
+    service.onConnectionRemoval(listener);
+    (service as any).onConnectionRemoved('c1');
+    expect(listener).toHaveBeenCalledWith('c1');
   });
 });
 

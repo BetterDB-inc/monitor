@@ -642,6 +642,7 @@ export interface StoragePort {
   saveKvCacheEngineSamples(samples: KvCacheEngineSample[]): Promise<void>;
   getKvCacheEngineSamples(query: KvCacheSampleQuery): Promise<KvCacheEngineSample[]>;
   pruneOldKvCacheEngineSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+  deleteKvCacheEngineSamples(engineId: string): Promise<void>;
   saveKvCacheEngine(engine: StoredKvCacheEngine): Promise<StoredKvCacheEngine>;
   getKvCacheEngines(connectionId?: string): Promise<StoredKvCacheEngine[]>;
   getKvCacheEngine(id: string): Promise<StoredKvCacheEngine | null>;

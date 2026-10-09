@@ -1,13 +1,16 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { PrometheusService } from '../prometheus/prometheus.service';
 import { DiscoveredInstancesStore } from './discovered-instances.store';
 import { ExternalMetricsStore } from './external-metrics-store';
+import { isKvCacheResource, KV_CACHE_OTLP_SINK, KvCacheOtlpSink } from './kv-cache-otlp-sink';
 import {
   attrsToRecord,
+  isDeltaTemporality,
   mapDataPoint,
   metricVocabulary,
   nanosToMs,
+  NO_RECORDED_VALUE,
   pointValue,
   resolveInstanceKeys,
   explicitInstanceKey,
@@ -35,11 +38,6 @@ function emptyDropCounts(): Record<DropReason, number> {
   return Object.fromEntries(DROP_REASONS.map((reason) => [reason, 0])) as Record<DropReason, number>;
 }
 
-const NO_RECORDED_VALUE = 1;
-
-function isDelta(temporality: number | string | undefined): boolean {
-  return temporality === 1 || temporality === 'AGGREGATION_TEMPORALITY_DELTA';
-}
 
 function metricPointCount(metric: OtlpMetric): number {
   const points =
@@ -79,6 +77,7 @@ export class OtelMetricsIngestService {
     private readonly store: ExternalMetricsStore,
     @Optional() private readonly prometheus?: PrometheusService,
     @Optional() private readonly discovered?: DiscoveredInstancesStore,
+    @Optional() @Inject(KV_CACHE_OTLP_SINK) private readonly kvCacheSink?: KvCacheOtlpSink,
   ) {}
 
   ingest(request: OtlpMetricsRequest, nowMs: number = Date.now()): IngestResult {
@@ -92,6 +91,11 @@ export class OtelMetricsIngestService {
 
   private ingestResource(resourceMetrics: OtlpResourceMetrics, nowMs: number, result: IngestResult): void {
     const attrs = attrsToRecord(resourceMetrics.resource?.attributes);
+    const metrics = (resourceMetrics.scopeMetrics ?? []).flatMap((scope) => scope.metrics ?? []);
+    if (isKvCacheResource(attrs, metrics)) {
+      this.routeToKvCache(attrs, metrics, resourceMetrics, nowMs, result);
+      return;
+    }
     const keys = resolveInstanceKeys(attrs);
     if (keys.length === 0) {
       this.drop(result, 'unidentified', resourcePointCount(resourceMetrics), 'unidentified resource', nowMs);
@@ -133,6 +137,24 @@ export class OtelMetricsIngestService {
     this.drop(result, 'cardinality_limit', applied.rejected, instance, nowMs);
   }
 
+  private routeToKvCache(
+    attrs: Record<string, string>,
+    metrics: OtlpMetric[],
+    resourceMetrics: OtlpResourceMetrics,
+    nowMs: number,
+    result: IngestResult,
+  ): void {
+    if (!this.kvCacheSink) {
+      this.drop(result, 'unknown_engine', resourcePointCount(resourceMetrics), 'kv cache engine', nowMs);
+      return;
+    }
+    const routed = this.kvCacheSink.ingest(attrs, metrics, nowMs);
+    result.accepted += routed.accepted;
+    for (const [reason, count] of Object.entries(routed.dropped)) {
+      this.drop(result, reason as DropReason, count ?? 0, 'kv cache engine', nowMs);
+    }
+  }
+
   private collectMetric(
     metric: OtlpMetric,
     instance: string,
@@ -144,7 +166,7 @@ export class OtelMetricsIngestService {
       this.drop(result, 'unsupported_type', metricPointCount(metric), instance, nowMs);
       return false;
     }
-    if (metric.sum && isDelta(metric.sum.aggregationTemporality)) {
+    if (metric.sum && isDeltaTemporality(metric.sum.aggregationTemporality)) {
       this.drop(result, 'unsupported_temporality', metricPointCount(metric), instance, nowMs);
       return false;
     }
