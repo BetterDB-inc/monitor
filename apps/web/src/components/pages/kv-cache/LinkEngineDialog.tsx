@@ -28,7 +28,8 @@ export function LinkEngineDialog({
 }) {
   const invalidate = useInvalidateEngines();
   const [source, setSource] = useState<Source>('scrape');
-  const [name, setName] = useState('');
+  const [scrapeName, setScrapeName] = useState('');
+  const [otlpName, setOtlpName] = useState('');
   const [scrapeUrl, setScrapeUrl] = useState('');
   const [authHeader, setAuthHeader] = useState('');
   const [otlpId, setOtlpId] = useState('');
@@ -48,7 +49,8 @@ export function LinkEngineDialog({
   });
 
   const reset = () => {
-    setName('');
+    setScrapeName('');
+    setOtlpName('');
     setScrapeUrl('');
     setAuthHeader('');
     setOtlpId('');
@@ -63,13 +65,13 @@ export function LinkEngineDialog({
   };
 
   const submitScrape = () => {
-    const body: KvCacheEngineCreate = { name: name.trim(), source: 'scrape', scrapeUrl: scrapeUrl.trim() };
+    const body: KvCacheEngineCreate = { name: scrapeName.trim(), source: 'scrape', scrapeUrl: scrapeUrl.trim() };
     if (authHeader.trim()) body.scrapeAuthHeader = authHeader.trim();
     create.mutate(body);
   };
 
   const submitOtlp = () => {
-    const body: KvCacheEngineCreate = { name: name.trim(), source: 'otlp' };
+    const body: KvCacheEngineCreate = { name: otlpName.trim(), source: 'otlp' };
     if (otlpId.trim()) body.otlpEngineId = otlpId.trim();
     create.mutate(body);
   };
@@ -131,7 +133,7 @@ export function LinkEngineDialog({
               <TabsTrigger value="otlp">OTLP</TabsTrigger>
             </TabsList>
             <TabsContent value="scrape" className="space-y-3">
-              <Field label="Name" value={name} onChange={setName} />
+              <Field label="Name" value={scrapeName} onChange={setScrapeName} />
               <Field
                 label="Metrics URL"
                 value={scrapeUrl}
@@ -149,18 +151,18 @@ export function LinkEngineDialog({
               <DialogFooter>
                 <Button
                   onClick={submitScrape}
-                  disabled={create.isPending || !name.trim() || !scrapeUrl.trim()}
+                  disabled={create.isPending || !scrapeName.trim() || !scrapeUrl.trim()}
                 >
                   Save
                 </Button>
               </DialogFooter>
             </TabsContent>
             <TabsContent value="otlp" className="space-y-3">
-              <Field label="Name" value={name} onChange={setName} />
+              <Field label="Name" value={otlpName} onChange={setOtlpName} />
               <Field label="Engine id (optional)" value={otlpId} onChange={setOtlpId} />
               {error ? <p className="text-sm text-destructive">{error}</p> : null}
               <DialogFooter>
-                <Button onClick={submitOtlp} disabled={create.isPending || !name.trim()}>
+                <Button onClick={submitOtlp} disabled={create.isPending || !otlpName.trim()}>
                   Create
                 </Button>
               </DialogFooter>

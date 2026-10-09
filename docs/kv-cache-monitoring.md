@@ -45,9 +45,12 @@ Page controls:
 - The alert settings sheet (see [Per-connection switches](#per-connection-switches)).
 - **Rescan now** on the not-detected view, which collects the footprint again.
 - An engines table with an **Enabled** switch, the time each engine was last
-  seen, and its last error.
+  seen, and its last error. Turning an engine off or on, or changing its
+  scrape URL, restarts its counters from the next reading, so traffic from
+  while it was off is never counted.
 - **Delete** on an engine, behind a confirm dialog. It removes the engine and
-  its stored samples and cannot be undone.
+  deletes all of its stored samples, so it drops out of the charts and hit
+  rates at once. It cannot be undone.
 
 ### Advisories
 
@@ -117,6 +120,10 @@ a bounded SCAN plus a sample, extrapolated to the whole keyspace.
 | `KV_CACHE_SCAN_MAX_KEYS`         | `200000` | Maximum number of keys visited by SCAN per collection                |
 | `KV_CACHE_MATCH_MAX_KEYS`        | `2000`   | Maximum number of matched keys kept per collection                   |
 | `KV_CACHE_SAMPLE_KEYS`           | `500`    | Number of matched keys sampled with `MEMORY USAGE` and `TTL`         |
+
+An unset, non-numeric or too-small value falls back to the default. The
+interval must be at least `60000` (1 minute), and each key budget must be at
+least `1`.
 
 Per-model chunks and bytes come from the same sample, split in proportion to
 what the sample contains. The share of keys without a TTL and the LMCache
@@ -298,15 +305,15 @@ requested tokens; they are removed when that stops being true.
 
 ## Configuration
 
-| Variable                         | Default  | Description                                                                                 |
-| -------------------------------- | -------- | ------------------------------------------------------------------------------------------- |
-| `KV_CACHE_FOOTPRINT_INTERVAL_MS` | `300000` | Footprint collection interval                                                               |
-| `KV_CACHE_SCAN_MAX_KEYS`         | `200000` | SCAN budget per collection                                                                  |
-| `KV_CACHE_MATCH_MAX_KEYS`        | `2000`   | Matched-key cap per collection                                                              |
-| `KV_CACHE_SAMPLE_KEYS`           | `500`    | Keys sampled for size and TTL                                                               |
-| `KV_CACHE_SCRAPE_INTERVAL_MS`    | `30000`  | Engine scrape interval. An invalid or sub-second value falls back to the default            |
-| `KV_CACHE_SCRAPE_BLOCK_PRIVATE`  | `false`  | `true` also refuses private and loopback scrape targets                                     |
-| `OTEL_INGEST_TOKEN`              | unset    | When set, OTLP pushes (including LMCache engines) must send `Authorization: Bearer <token>` |
+| Variable                         | Default  | Description                                                                                    |
+| -------------------------------- | -------- | ---------------------------------------------------------------------------------------------- |
+| `KV_CACHE_FOOTPRINT_INTERVAL_MS` | `300000` | Footprint collection interval. An invalid value or one below `60000` falls back to the default |
+| `KV_CACHE_SCAN_MAX_KEYS`         | `200000` | SCAN budget per collection. An invalid value or one below `1` falls back to the default        |
+| `KV_CACHE_MATCH_MAX_KEYS`        | `2000`   | Matched-key cap per collection. An invalid value or one below `1` falls back to the default    |
+| `KV_CACHE_SAMPLE_KEYS`           | `500`    | Keys sampled for size and TTL. An invalid value or one below `1` falls back to the default     |
+| `KV_CACHE_SCRAPE_INTERVAL_MS`    | `30000`  | Engine scrape interval. An invalid or sub-second value falls back to the default               |
+| `KV_CACHE_SCRAPE_BLOCK_PRIVATE`  | `false`  | `true` also refuses private and loopback scrape targets                                        |
+| `OTEL_INGEST_TOKEN`              | unset    | When set, OTLP pushes (including LMCache engines) must send `Authorization: Bearer <token>`    |
 
 ## Known LMCache quirks
 

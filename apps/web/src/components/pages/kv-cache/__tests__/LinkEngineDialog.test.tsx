@@ -62,4 +62,21 @@ describe('LinkEngineDialog', () => {
     expect(pre.textContent).toContain('value: lmc-abc123');
     expect(pre.textContent).toContain('http://localhost:3001/v1/external/metrics');
   });
+
+  it('keeps a separate name for each tab', async () => {
+    createEngine.mockResolvedValue({ id: 'e1', otlpEngineId: 'lmc-abc123', source: 'otlp' });
+    renderDialog();
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'scraped' } });
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'OTLP' }));
+    expect(screen.getByLabelText('Name')).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'pushed' } });
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'Scrape' }));
+    expect(screen.getByLabelText('Name')).toHaveValue('scraped');
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'OTLP' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    await waitFor(() =>
+      expect(createEngine).toHaveBeenCalledWith({ name: 'pushed', source: 'otlp' }),
+    );
+  });
 });
