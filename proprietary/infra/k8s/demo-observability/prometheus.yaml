@@ -34,8 +34,16 @@ data:
       # The demo tenant's own exposition endpoint, authenticated with the
       # PRIMARY metrics token (the published public token is for visitors;
       # rotating it must not break this scrape).
-      - job_name: 'betterdb'
+      # The pull/scrape path. Distinct job name from the OTLP-push series
+      # (which arrive as job="betterdb-monitor", from the app's OTLP
+      # service.name) so the two ingestion paths are unambiguous.
+      - job_name: 'betterdb-scrape'
         metrics_path: '/api/prometheus/metrics'
+        # The tenant's /metrics can take ~15s when it polls unreachable
+        # monitored databases, so give the scrape generous headroom over the
+        # 10s default (timeout must be <= interval).
+        scrape_interval: 60s
+        scrape_timeout: 45s
         authorization:
           type: Bearer
           credentials_file: /etc/prometheus-secrets/scrape-token/token

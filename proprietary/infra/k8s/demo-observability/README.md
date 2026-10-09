@@ -89,11 +89,13 @@ kubectl create secret generic grafana-admin -n demo-observability \
 
 ### 4. Dashboards
 
-The shipped pack is provisioned as-is — no fork of the JSON:
+The shipped pack is provisioned with one demo-only override — the `job`
+template variable defaults to `betterdb-monitor` (the OTLP push path) so
+visitors land on a populated dashboard. The shipped JSON is not edited; the
+override is applied to copies. See the script header for details:
 
 ```bash
-kubectl create configmap grafana-dashboards -n demo-observability \
-  --from-file=../../../../deploy/observability/dashboards/
+./build-dashboards-configmap.sh
 ```
 
 ### 5. Prometheus + Grafana
@@ -185,9 +187,7 @@ kubectl rollout restart deployment/prometheus -n demo-observability
 ### Update dashboards after a pack release
 
 ```bash
-kubectl create configmap grafana-dashboards -n demo-observability \
-  --from-file=../../../../deploy/observability/dashboards/ \
-  --dry-run=client -o yaml | kubectl apply -f -
+./build-dashboards-configmap.sh
 kubectl rollout restart deployment/grafana -n demo-observability
 ```
 
