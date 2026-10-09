@@ -23,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   omitted when the embedder is undescribed.
 - Optional `logger` option (default: `console`) for the operational warnings
   above. Pass `{ warn: () => {} }` to silence them.
+- **Per-entry hit analytics** — every entry now tracks `hit_count` and
+  `last_accessed_at`, updated on each cache hit (batched into the existing
+  TTL-refresh pipeline on standalone). New `entryAnalytics()`
+  method reports total / never-hit / cold entry counts and the hottest entries.
+  When the index includes usage fields, counts use server-side `FT.SEARCH` with
+  `LIMIT 0 0` (exact, no materialization); `topEntries` uses
+  `SORTBY hit_count DESC` with `LIMIT 0 topN`. Older indexes fall back to
+  `SCAN` + pipelined `HMGET` (5 fields only) over a sample of up to 10,000
+  entries. New `entry_analytics` capability on the discovery marker.
+  `EntryAnalyticsOptions`, `EntryAnalyticsResult`, and `EntrySummary`
+  exported from the package root.
 
 ### Changed
 
@@ -38,6 +49,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`{name}:embed:{tag}:{hash}`). Existing embedding-cache entries are not
   read after upgrade and expire on their own TTL; cached *responses* are
   untouched.
+- Cache hits now incur one Valkey round trip for usage tracking even when
+  `defaultTtl` is not configured (one pipeline per matched key on cluster).
+  Previously a hit was a pure read. These writes are best-effort and
+  non-atomic; failures are logged once per batch via `logger.warn` and never
+  fail the hit.
+- Cold = `last_accessed_at` strictly older than the cutoff, consistently on
+  both the `FT.SEARCH` and `SCAN` paths.
+- The FT index schema gains `hit_count NUMERIC SORTABLE` and
+  `last_accessed_at NUMERIC SORTABLE`. Existing indexes keep working on the
+  `SCAN` fallback. To enable the fast analytics path without losing cached
+  entries, drop the index without `DD` and re-initialize a not-yet-initialized
+  instance — Valkey Search keeps the documents and backfills the new index:
+
+  ```typescript
+  await client.call('FT.DROPINDEX', '<indexName>'); // no DD: keeps entries
+  await cache.initialize();                        // recreates index, backfills
+  ```
+
+  Existing entries have no `hit_count` or `last_accessed_at` until their first
+  hit after the upgrade (`HINCRBY` auto-creates the counter). Until then the
+  `SCAN` fallback counts them as never-hit and cold, but the `FT.SEARCH` fast
+  path does not count them in `neverHitCount` or `coldEntryCount`, so
+  `hitAtLeastOnceCount` can be overstated.
+  See the README section "Upgrading an index created before 0.14.0".
+
+  **Warning:** `flush()` deletes every cached entry and embedding — only use
+  it if you are fine with a cold cache.
 
 ## [0.11.0] - 2026-07-12
 
