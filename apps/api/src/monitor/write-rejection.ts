@@ -71,6 +71,17 @@ function countOf(errorstats: ErrorStatsInfo, code: WriteRejectionCode): number |
 }
 
 /**
+ * Recovery needs the server to report both statuses as ok. A poll that lacks
+ * them proves nothing, so it keeps the edge open rather than closing it.
+ * errorstats is not required: servers before Redis 6.2 never report it.
+ */
+function persistenceHealthy(persistence: Partial<PersistenceInfo> | undefined): boolean {
+  return (
+    persistence?.rdb_last_bgsave_status === 'ok' && persistence?.aof_last_write_status === 'ok'
+  );
+}
+
+/**
  * One poll. Two independent signals, so the edge opens even before the first
  * client hits the error (quiet period) and is confirmed once one does:
  *
@@ -83,7 +94,7 @@ function countOf(errorstats: ErrorStatsInfo, code: WriteRejectionCode): number |
  * re-baselines instead of reading as a negative delta. A poll without the
  * errorstats section keeps the previous baseline, so the next poll that has
  * it still sees the whole delta. Recovery needs both signals clean on the
- * same poll.
+ * same poll, with persistence reported healthy rather than merely absent.
  *
  * While the edge is open, it escalates once when severity first reaches
  * critical and once per cause not yet reported; staying critical, or causes
@@ -139,7 +150,7 @@ export function evaluateWriteRejection(
       state.lastCauses = [...state.lastCauses, ...newCauses];
       transition = 'escalated';
     }
-  } else if (active === false && state.rejecting === true) {
+  } else if (active === false && state.rejecting === true && persistenceHealthy(persistence)) {
     transition = 'recovered';
   }
 
