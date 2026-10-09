@@ -73,10 +73,14 @@ export function KvCache() {
         <h1 className="text-2xl font-bold">KV Cache</h1>
         <div className="flex items-center gap-3">
           <DateRangePicker value={dateRange} onChange={setDateRange} placeholder="Last 6 hours" />
-          {canMutate && <KvCacheSettingsSheet />}
-          <Button variant="outline" onClick={() => rescan.mutate()} disabled={rescan.isPending}>
-            Refresh
-          </Button>
+          {canMutate && (
+            <>
+              <KvCacheSettingsSheet />
+              <Button variant="outline" onClick={() => rescan.mutate()} disabled={rescan.isPending}>
+                Refresh
+              </Button>
+            </>
+          )}
         </div>
       </div>
       {latest && (

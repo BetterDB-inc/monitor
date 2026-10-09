@@ -1,4 +1,5 @@
 import type { KvCacheFootprintSnapshot } from '@betterdb/shared';
+import { useCanMutate } from '../../../hooks/useCanMutate';
 import { useRescanKvCache } from '../../../hooks/useRescanKvCache';
 import { Card, CardContent, CardHeader, CardTitle } from '../../ui/card';
 import { Button } from '../../ui/button';
@@ -12,6 +13,7 @@ interface Props {
 
 export function KvCacheNotDetected({ latest }: Props) {
   const rescan = useRescanKvCache();
+  const canMutate = useCanMutate();
 
   return (
     <div className="flex items-center justify-center py-8">
@@ -53,9 +55,11 @@ export function KvCacheNotDetected({ latest }: Props) {
             </p>
           )}
           <div className="flex items-center gap-3 pt-2">
-            <Button onClick={() => rescan.mutate()} disabled={rescan.isPending}>
-              Rescan now
-            </Button>
+            {canMutate && (
+              <Button onClick={() => rescan.mutate()} disabled={rescan.isPending}>
+                Rescan now
+              </Button>
+            )}
             <a
               href={DOCS_URL}
               target="_blank"
