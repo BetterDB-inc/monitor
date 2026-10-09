@@ -39,7 +39,7 @@ and an embedding source is resolvable.
 Copy the package into your Hermes plugins directory and select it:
 
 ```bash
-cp -r betterdb_hermes_memory ~/.hermes/plugins/betterdb
+cp -r packages/hermes-memory-py/betterdb_hermes_memory ~/.hermes/plugins/betterdb
 # then, in Hermes config, set:  memory.provider: betterdb
 ```
 

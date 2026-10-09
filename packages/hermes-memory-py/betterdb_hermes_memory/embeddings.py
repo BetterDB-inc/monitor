@@ -51,6 +51,14 @@ class EmbeddingConfig:
         # key; only the hosted default is gated on a credential.
         return bool(self.base_url) and self.base_url.rstrip("/") != DEFAULT_EMBEDDINGS_BASE_URL.rstrip("/")
 
+    def is_insecure(self) -> bool:
+        """True when an API key would ride a plaintext http:// endpoint.
+
+        The Bearer credential must not leave over cleartext; a keyless http://
+        endpoint (a local Ollama/vLLM) is fine.
+        """
+        return bool(self.api_key) and self.base_url.strip().lower().startswith("http://")
+
 
 class _HttpEmbedder:
     """Callable ``embed_fn`` backed by an OpenAI-compatible endpoint.
@@ -78,6 +86,10 @@ class _HttpEmbedder:
         # shutdown must not stand up a fresh client on a dying loop.
         if self._closed:
             raise RuntimeError("embedder is closed")
+        if self._config.is_insecure():
+            raise RuntimeError(
+                "refusing to send the embeddings API key over plaintext http://; "
+                "use https:// or drop the key for a local endpoint")
         # No await between the check and the assignment, and the runtime loop is
         # single-threaded, so concurrent embed coroutines can't race a second client.
         if self._client is None:

@@ -204,6 +204,7 @@ class BetterDBMemoryProvider(MemoryProvider):
         self._lock = threading.Lock()  # guards the prefetch cache below
         self._recall_block: str = ""
         self._recall_count: int = 0
+        self._recall_session: str = ""  # the session the cached block was recalled for
         self._last_status: Optional[RecallStatus] = None
 
     @property
@@ -243,6 +244,12 @@ class BetterDBMemoryProvider(MemoryProvider):
                 "embedding model, so this provider needs an OpenAI-compatible endpoint. "
                 "Set memory.betterdb.embeddings_api_key (OpenAI), or point "
                 "memory.betterdb.embeddings_base_url at a local server (Ollama, vLLM, LM Studio)."
+            )
+        if config.embeddings.is_insecure():
+            return (
+                "Refusing to send the embeddings API key over plaintext http://. Use an "
+                "https:// embeddings_base_url, or drop embeddings_api_key for a local "
+                "keyless endpoint."
             )
         return ""
 
@@ -349,9 +356,10 @@ class BetterDBMemoryProvider(MemoryProvider):
             if self._config.tls:
                 url = _tls_url(url)
                 if not url.startswith(("valkeys://", "rediss://")):
-                    logger.warning(
-                        "betterdb memory: tls is set but the url scheme %r cannot be upgraded to "
-                        "TLS; connecting without TLS", self._config.url.partition("://")[0])
+                    raise ValueError(
+                        "betterdb memory: tls is enabled but the url scheme "
+                        f"{self._config.url.partition('://')[0]!r} cannot be upgraded to TLS "
+                        "(e.g. unix://); use a TLS-capable scheme or disable tls")
             extra: Dict[str, Any] = {}
             if self._config.password:
                 extra["password"] = self._config.password
@@ -383,6 +391,9 @@ class BetterDBMemoryProvider(MemoryProvider):
         """
         if not self._store or not self._runtime or not query.strip():
             return
+        if session_id:
+            self._session_id = session_id
+        sid = session_id or self._session_id
         # Recall is best-effort and owns its own result handling (debug-level, since
         # a failure simply injects nothing), so skip the generic warning reporter.
         future = self._submit(
@@ -405,14 +416,26 @@ class BetterDBMemoryProvider(MemoryProvider):
             with self._lock:
                 self._recall_block = block
                 self._recall_count = count
+                self._recall_session = sid
 
         future.add_done_callback(_on_done)
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        """Return (and clear) the cached recall block. Fast — no network here."""
+        """Return (and clear) the cached recall block. Fast — no network here.
+
+        A block recalled for a different session is dropped rather than injected —
+        the provider instance outlives a single chat (``/new``, ``/resume``), so a
+        stale block must not leak into the next one.
+        """
+        if session_id:
+            self._session_id = session_id
+        sid = session_id or self._session_id
         with self._lock:
-            block, count = self._recall_block, self._recall_count
-            self._recall_block, self._recall_count = "", 0
+            if self._recall_session == sid:
+                block, count = self._recall_block, self._recall_count
+            else:
+                block, count = "", 0
+            self._recall_block, self._recall_count, self._recall_session = "", 0, ""
             self._last_status = (
                 RecallStatus(provider_label="BetterDB", count=count, glyph=INDICATOR_GLYPH)
                 if block
@@ -422,6 +445,23 @@ class BetterDBMemoryProvider(MemoryProvider):
 
     def recall_status(self) -> Optional[RecallStatus]:
         return self._last_status
+
+    def on_session_switch(
+        self, new_session_id: str, *, parent_session_id: str = "", reset: bool = False,
+        rewound: bool = False, **kwargs: Any,
+    ) -> None:
+        """The agent's session_id rotated (/new, /resume, /branch, compression).
+
+        The provider instance is reused across these, so adopt the new session and
+        drop any recall cached for the old one — otherwise a write lands under the
+        previous session or the last chat's recall block leaks into this one.
+        """
+        if not new_session_id:
+            return
+        self._session_id = new_session_id
+        with self._lock:
+            self._recall_block, self._recall_count, self._recall_session = "", 0, ""
+            self._last_status = None
 
     @staticmethod
     def _format_recall(hits: List[Any]) -> tuple[str, int]:
@@ -446,6 +486,8 @@ class BetterDBMemoryProvider(MemoryProvider):
         turn_author: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Persist a completed turn in the background. Returns immediately."""
+        if session_id:
+            self._session_id = session_id
         if not self._should_write() or not user_content.strip():
             return
         content = f"User: {user_content.strip()}"

@@ -15,6 +15,8 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import List
 
+import pytest
+
 import betterdb_hermes_memory as provider_mod
 from betterdb_hermes_memory import (
     RECALL_K,
@@ -140,6 +142,54 @@ def test_embedding_config_readiness():
     assert EmbeddingConfig().is_configured() is False  # default hosted endpoint, no key
     assert EmbeddingConfig(api_key="sk-x").is_configured() is True
     assert EmbeddingConfig(base_url="http://localhost:11434/v1").is_configured() is True
+
+
+def test_embedding_is_insecure():
+    # A key over plaintext http:// is insecure; https or a keyless local http is fine.
+    assert EmbeddingConfig(base_url="http://x/v1", api_key="k").is_insecure() is True
+    assert EmbeddingConfig(base_url="https://x/v1", api_key="k").is_insecure() is False
+    assert EmbeddingConfig(base_url="http://localhost:11434/v1").is_insecure() is False
+
+
+def test_http_embedder_refuses_api_key_over_plaintext():
+    embedder = build_http_embed_fn(EmbeddingConfig(base_url="http://x/v1", api_key="k"))
+    with pytest.raises(RuntimeError, match="plaintext"):
+        asyncio.run(embedder("hello"))  # fails before any network call
+
+
+def test_build_client_unix_tls_fails_closed():
+    # tls can't be applied to unix:// — refuse rather than connect in cleartext.
+    provider, _ = _wired(url="unix:///run/valkey.sock", tls=True)
+    with pytest.raises(ValueError, match="cannot be upgraded to TLS"):
+        provider._build_client()
+
+
+def test_on_session_switch_adopts_session_and_clears_cache():
+    provider, _ = _wired()
+    provider._session_id = "old"
+    with provider._lock:
+        provider._recall_block = "## BetterDB Memory\n- x"
+        provider._recall_count = 1
+        provider._recall_session = "old"
+    provider.on_session_switch("new")
+    assert provider._session_id == "new"
+    assert provider._recall_block == ""
+    assert provider._recall_session == ""
+
+
+def test_prefetch_drops_block_from_another_session():
+    provider, _ = _wired()
+
+    def cache_for(sid):
+        with provider._lock:
+            provider._recall_block = "## BetterDB Memory\n- x"
+            provider._recall_count = 1
+            provider._recall_session = sid
+
+    cache_for("sessionA")
+    assert provider.prefetch("q", session_id="sessionB") == ""  # not this chat's block
+    cache_for("sessionA")
+    assert provider.prefetch("q", session_id="sessionA").startswith("## BetterDB Memory")
 
 
 def test_is_available_true_with_embed_fn():
