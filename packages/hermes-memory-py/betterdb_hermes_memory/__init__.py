@@ -152,6 +152,10 @@ class _Config:
         # Register a discovery marker so BetterDB Monitor can enumerate this tier.
         # Off by default (opt-in); set true to let Monitor see this tier.
         self.discovery: bool = _as_bool(block.get("discovery"), False)
+        # BetterDB SDK usage analytics (PostHog). Off by default (opt-in) and
+        # independent of discovery; set true to let the SDK emit aggregate usage
+        # counts. Passed through as MemoryStore(analytics=...).
+        self.telemetry: bool = _as_bool(block.get("telemetry"), False)
         # Whether the user *explicitly* pointed us at a connection, as opposed to
         # falling through to the silent 127.0.0.1 default. Availability must reflect
         # real configuration (see has_connection); the client still targets
@@ -201,10 +205,21 @@ class BetterDBMemoryProvider(MemoryProvider):
         self._session_id: str = ""
         self._agent_id: str = "hermes"
         self._agent_context: str = "primary"
-        self._lock = threading.Lock()  # guards the prefetch cache below
+        # Per-user scope on a shared-profile gateway. Many users can share one
+        # agent_id + static namespace, so the user id is folded into the effective
+        # namespace to keep one user's memories from leaking into another's.
+        self._user_id: str = ""
+        self._lock = threading.Lock()  # guards the prefetch cache + write tracking below
         self._recall_block: str = ""
         self._recall_count: int = 0
         self._recall_session: str = ""  # the session the cached block was recalled for
+        # Monotonic prefetch sequence: each queued recall captures the value at
+        # submit time; a late-finishing older recall whose captured seq is no longer
+        # the latest is dropped so it can't overwrite a newer cached block.
+        self._prefetch_seq: int = 0
+        # In-flight write futures, so shutdown can wait for the final turn's write to
+        # land before the runtime drain cancels it. Guarded by self._lock.
+        self._writes: list = []
         self._last_status: Optional[RecallStatus] = None
 
     @property
@@ -247,9 +262,9 @@ class BetterDBMemoryProvider(MemoryProvider):
             )
         if config.embeddings.is_insecure():
             return (
-                "Refusing to send the embeddings API key over plaintext http://. Use an "
-                "https:// embeddings_base_url, or drop embeddings_api_key for a local "
-                "keyless endpoint."
+                "Refusing to send embeddings input over plaintext http:// to a remote host "
+                "(it would leak the text, and any API key, in the clear). Use an https:// "
+                "embeddings_base_url, or a local endpoint (localhost / a private address)."
             )
         return ""
 
@@ -273,6 +288,9 @@ class BetterDBMemoryProvider(MemoryProvider):
              "default": ""},
             {"key": "discovery",
              "description": "Register a discovery marker so BetterDB Monitor can enumerate this tier (opt-in)",
+             "type": "boolean", "default": "false", "choices": ["true", "false"]},
+            {"key": "telemetry",
+             "description": "Enable BetterDB usage analytics in the memory SDK (opt-in, off by default)",
              "type": "boolean", "default": "false", "choices": ["true", "false"]},
             {"key": "embeddings_model", "description": "Embeddings model",
              "default": DEFAULT_EMBEDDINGS_MODEL},
@@ -308,6 +326,9 @@ class BetterDBMemoryProvider(MemoryProvider):
         self._session_id = session_id
         self._agent_id = kwargs.get("agent_id") or kwargs.get("agent_identity") or "hermes"
         self._agent_context = kwargs.get("agent_context", "primary") or "primary"
+        # Gateways serving many users behind one shared profile pass the end user's
+        # id here; fold it into the scope so recall/writes stay per-user.
+        self._user_id = kwargs.get("user_id") or kwargs.get("user_id_alt") or ""
 
         # Resolve config live under the active profile's scope and keep it for
         # operational use (client build, scoping) for the life of the provider.
@@ -327,6 +348,7 @@ class BetterDBMemoryProvider(MemoryProvider):
                 name=self._config.store_name,
                 embed_fn=self._embed_fn,
                 discovery=self._config.discovery,
+                analytics=self._config.telemetry,
             )
 
         # Create the vector index up front, off the calling thread. The store is
@@ -394,6 +416,11 @@ class BetterDBMemoryProvider(MemoryProvider):
         if session_id:
             self._session_id = session_id
         sid = session_id or self._session_id
+        # Stamp this recall with the next sequence number so _on_done can tell
+        # whether it is still the most recent prefetch by the time it finishes.
+        with self._lock:
+            self._prefetch_seq += 1
+            seq = self._prefetch_seq
         # Recall is best-effort and owns its own result handling (debug-level, since
         # a failure simply injects nothing), so skip the generic warning reporter.
         future = self._submit(
@@ -414,6 +441,11 @@ class BetterDBMemoryProvider(MemoryProvider):
                 return
             block, count = self._format_recall(hits)
             with self._lock:
+                # Drop a stale result: a newer prefetch has superseded this one, or
+                # the session rotated out from under it. Either way its block must
+                # not overwrite what is cached now.
+                if seq != self._prefetch_seq or sid != self._session_id:
+                    return
                 self._recall_block = block
                 self._recall_count = count
                 self._recall_session = sid
@@ -518,7 +550,7 @@ class BetterDBMemoryProvider(MemoryProvider):
     ) -> None:
         if not self._store or not self._runtime:
             return
-        self._submit(
+        future = self._submit(
             self._store.remember(
                 content,
                 source=source,
@@ -529,6 +561,14 @@ class BetterDBMemoryProvider(MemoryProvider):
             ),
             label="remember",
         )
+        if future is None:
+            return
+        # Track the write so shutdown can wait for it before the drain cancels
+        # in-flight tasks — otherwise the final turn of `hermes -q` / CLI exit /
+        # gateway eviction is lost. Prune completed futures while holding the lock.
+        with self._lock:
+            self._writes = [f for f in self._writes if not f.done()]
+            self._writes.append(future)
 
     # -- tools ------------------------------------------------------------- #
 
@@ -607,6 +647,16 @@ class BetterDBMemoryProvider(MemoryProvider):
                 ]
                 return json.dumps({"results": results, "count": len(results)})
             if tool_name == "betterdb_forget":
+                # Verify ownership before deleting: on a shared-profile gateway the
+                # same store holds many users' memories, so refuse to delete an id
+                # that belongs to another agent/user scope.
+                item = self._runtime.run(self._store.get(args["id"]), timeout=10.0)
+                if item is None:
+                    return json.dumps({"removed": False, "status": "not found"})
+                if item.agent_id != self._agent_id or (item.namespace or "") != (
+                    self._effective_namespace() or ""
+                ):
+                    return tool_error("refusing to delete a memory from another scope")
                 removed = self._runtime.run(self._store.forget(args["id"]), timeout=10.0)
                 return json.dumps({"removed": bool(removed)})
             return tool_error(f"Unknown tool: {tool_name}")
@@ -626,7 +676,21 @@ class BetterDBMemoryProvider(MemoryProvider):
         # Null the embedder too: aclose() marks it closed for good, so a later
         # initialize() must build a fresh one rather than reuse the dead handle.
         self._store = self._runtime = self._client = self._embed_fn = None
+        with self._lock:
+            writes, self._writes = self._writes, []
         if runtime is not None:
+            # Let the final turn's write land before anything cancels it. drain()
+            # below cancels in-flight tasks, so wait here first — bounded by a total
+            # 5s deadline across all tracked writes — swallowing failures (a write
+            # that errors or is already gone must not block teardown).
+            import time
+
+            deadline = time.monotonic() + 5.0
+            for future in writes:
+                try:
+                    future.result(timeout=max(0.0, deadline - time.monotonic()))
+                except Exception:
+                    pass
             # Quiesce in-flight background work BEFORE releasing the resources it
             # uses, so a queued embed/remember can't rebuild a client on a loop that
             # is about to stop. Then tear down on the loop, ordered by dependency:
@@ -662,8 +726,16 @@ class BetterDBMemoryProvider(MemoryProvider):
         # Only the primary agent context persists; subagent/cron/flush runs read.
         return self._agent_context == "primary"
 
+    def _effective_namespace(self) -> Optional[str]:
+        """The namespace recall/writes are scoped to: the configured namespace and
+        the per-user id joined with ":" (whichever are non-empty), or None when
+        both are empty."""
+        parts = [p for p in (self._config.namespace, self._user_id) if p]
+        return ":".join(parts) if parts else None
+
     def _scope_kwargs(self) -> Dict[str, Any]:
-        return {"namespace": self._config.namespace} if self._config.namespace else {}
+        ns = self._effective_namespace()
+        return {"namespace": ns} if ns else {}
 
     def _submit(self, coro: Any, *, label: str, report: bool = True) -> Any:
         """Fire-and-forget a coroutine onto the runtime loop.

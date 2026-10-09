@@ -24,13 +24,44 @@ reuses the connection pool / TLS session instead of standing up a fresh one.
 
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, List, Optional
+from urllib.parse import urlsplit
 
 EmbedFn = Callable[[str], Awaitable[List[float]]]
 
 DEFAULT_EMBEDDINGS_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_EMBEDDINGS_MODEL = "text-embedding-3-small"
+
+
+def _host_of(url: str) -> str:
+    """Extract the host from a URL, lowercased ("" if it has none)."""
+    try:
+        return (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _is_local_host(host: str) -> bool:
+    """True when *host* stays on the local machine or a private LAN.
+
+    Covers loopback (``localhost`` / ``127.0.0.1`` / ``::1``), the RFC1918 private
+    ranges (``10.x``, ``172.16-31.x``, ``192.168.x``) and ``.local`` / ``.internal``
+    hostnames. Plaintext http:// to such a host never leaves a trusted network, so
+    it is treated as safe; anything else is a remote/public host.
+    """
+    if not host:
+        return False
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    if host.endswith(".local") or host.endswith(".internal"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback
 
 
 @dataclass
@@ -52,12 +83,18 @@ class EmbeddingConfig:
         return bool(self.base_url) and self.base_url.rstrip("/") != DEFAULT_EMBEDDINGS_BASE_URL.rstrip("/")
 
     def is_insecure(self) -> bool:
-        """True when an API key would ride a plaintext http:// endpoint.
+        """True when request input would ride plaintext http:// to a remote host.
 
-        The Bearer credential must not leave over cleartext; a keyless http://
-        endpoint (a local Ollama/vLLM) is fine.
+        Plaintext http:// exposes both the embedded text and any Bearer credential
+        in the clear, so it is refused for a remote/public host whether or not a key
+        is set — a keyless endpoint still leaks the user's input. http:// to a local
+        host (loopback, an RFC1918 private address, or a ``.local`` / ``.internal``
+        hostname) stays on the machine/LAN and is allowed; https:// is always fine.
         """
-        return bool(self.api_key) and self.base_url.strip().lower().startswith("http://")
+        url = self.base_url.strip()
+        if not url.lower().startswith("http://"):
+            return False
+        return not _is_local_host(_host_of(url))
 
 
 class _HttpEmbedder:
@@ -88,8 +125,8 @@ class _HttpEmbedder:
             raise RuntimeError("embedder is closed")
         if self._config.is_insecure():
             raise RuntimeError(
-                "refusing to send the embeddings API key over plaintext http://; "
-                "use https:// or drop the key for a local endpoint")
+                "refusing to send embeddings input over plaintext http:// to a remote "
+                "host; use https:// or a local endpoint (localhost / a private address)")
         # No await between the check and the assignment, and the runtime loop is
         # single-threaded, so concurrent embed coroutines can't race a second client.
         if self._client is None:
