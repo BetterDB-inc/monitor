@@ -1,7 +1,10 @@
 {
   "uid": "betterdb-cluster-slots",
   "title": "BetterDB \u00b7 Cluster Slots",
-  "tags": ["betterdb", "valkey"],
+  "tags": [
+    "betterdb",
+    "valkey"
+  ],
   "schemaVersion": 39,
   "version": 1,
   "refresh": "30s",
@@ -374,6 +377,21 @@
         "x": 0,
         "y": 12
       }
+    }
+  ],
+  "links": [
+    {
+      "title": "BetterDB dashboards",
+      "type": "dashboards",
+      "tags": [
+        "betterdb"
+      ],
+      "asDropdown": true,
+      "targetBlank": false,
+      "includeVars": true,
+      "keepTime": true,
+      "icon": "external link",
+      "keepTags": false
     }
   ]
 }

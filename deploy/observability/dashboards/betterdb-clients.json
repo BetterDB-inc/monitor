@@ -375,5 +375,20 @@
         "y": 24
       }
     }
+  ],
+  "links": [
+    {
+      "title": "BetterDB dashboards",
+      "type": "dashboards",
+      "tags": [
+        "betterdb"
+      ],
+      "asDropdown": true,
+      "targetBlank": false,
+      "includeVars": true,
+      "keepTime": true,
+      "icon": "external link",
+      "keepTags": false
+    }
   ]
 }
