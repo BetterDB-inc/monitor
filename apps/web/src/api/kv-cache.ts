@@ -58,6 +58,11 @@ export const kvCacheApi = {
 };
 
 export const kvCacheKeys = {
+  historyAll: (connectionId: string | null | undefined) => [
+    'kv-cache',
+    'history',
+    connectionId ?? null,
+  ],
   status: (connectionId: string | null | undefined) => ['kv-cache', 'status', connectionId ?? null],
   history: (connectionId: string | null | undefined, from: number, to: number) => [
     'kv-cache',

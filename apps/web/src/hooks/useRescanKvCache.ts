@@ -9,6 +9,10 @@ export function useRescanKvCache() {
 
   return useMutation({
     mutationFn: () => kvCacheApi.refreshFootprint(),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: kvCacheKeys.status(connectionId) }),
+    onSuccess: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: kvCacheKeys.status(connectionId) }),
+        queryClient.invalidateQueries({ queryKey: kvCacheKeys.historyAll(connectionId) }),
+      ]),
   });
 }

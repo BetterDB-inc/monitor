@@ -57,7 +57,9 @@ export function KvCacheCards({ latest, history, engines, recentHitRate, buckets 
   const evictions = evictionsPerMinute(history);
   const memoryShare = latest.maxmemory > 0 ? latest.bytesEst / latest.maxmemory : null;
   const footprintDetails = [
-    `${formatPercent(latest.lmcacheMemoryShare)} of used memory`,
+    latest.lmcacheMemoryShare != null
+      ? `${formatPercent(latest.lmcacheMemoryShare)} of used memory`
+      : null,
     memoryShare !== null ? `${formatPercent(memoryShare)} of maxmemory` : null,
   ].filter((part): part is string => part !== null);
 

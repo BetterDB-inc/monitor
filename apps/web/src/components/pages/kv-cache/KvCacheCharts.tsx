@@ -48,17 +48,20 @@ function rowsByTimestamp(rows: Map<number, Row>): Row[] {
 }
 
 function hitRateRows(buckets: KvCacheSampleBucket[], engineNames: Map<string, string>) {
-  const series = new Set<string>();
+  const series = new Map<string, string>();
   const rows = new Map<number, Row>();
   for (const bucket of buckets) {
     if (bucket.hitRate === null) continue;
-    const name = `${engineNames.get(bucket.engineId) ?? bucket.engineId} | ${bucket.modelName}`;
-    series.add(name);
+    const key = `${bucket.engineId}|${bucket.modelName}`;
+    series.set(key, `${engineNames.get(bucket.engineId) ?? bucket.engineId} | ${bucket.modelName}`);
     const row = rows.get(bucket.timestamp) ?? { timestamp: bucket.timestamp };
-    row[name] = bucket.hitRate;
+    row[key] = bucket.hitRate;
     rows.set(bucket.timestamp, row);
   }
-  return { series: [...series], rows: rowsByTimestamp(rows) };
+  return {
+    series: [...series].map(([key, label]) => ({ key, label })),
+    rows: rowsByTimestamp(rows),
+  };
 }
 
 function remoteBytesRows(buckets: KvCacheSampleBucket[]) {
@@ -82,6 +85,9 @@ function footprintRows(history: KvCacheFootprintSnapshot[]) {
     }
     return row;
   });
+  for (const row of rows) {
+    for (const model of series) row[model] = row[model] ?? 0;
+  }
   return { series: [...series], rows };
 }
 
@@ -130,11 +136,12 @@ export function KvCacheCharts({ buckets, history, engines }: Props) {
             formatter={(value) => formatPercent(Number(value))}
           />
           <Legend />
-          {hitRate.series.map((name, index) => (
+          {hitRate.series.map(({ key, label }, index) => (
             <Line
-              key={name}
+              key={key}
               type="monotone"
-              dataKey={name}
+              dataKey={key}
+              name={label}
               stroke={COLORS[index % COLORS.length]}
               dot={false}
               connectNulls

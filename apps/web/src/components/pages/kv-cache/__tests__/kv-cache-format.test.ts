@@ -65,6 +65,17 @@ describe('advisoriesFor', () => {
     expect(result[0].body).toContain('valkey_ttl_sec');
   });
 
+  it('flags the exact 0.9 no-TTL boundary and not 0.89', () => {
+    expect(
+      advisoriesFor(snapshot({ maxmemoryPolicy: 'volatile-lru', noTtlRatio: 0.9 })).map(
+        (a) => a.kind,
+      ),
+    ).toEqual(['unevictable']);
+    expect(advisoriesFor(snapshot({ maxmemoryPolicy: 'volatile-lru', noTtlRatio: 0.89 }))).toEqual(
+      [],
+    );
+  });
+
   it('does not flag a volatile policy below the no-TTL threshold', () => {
     expect(advisoriesFor(snapshot({ maxmemoryPolicy: 'volatile-lru', noTtlRatio: 0.5 }))).toEqual(
       [],
@@ -107,6 +118,14 @@ describe('evictionsPerMinute', () => {
 
   it('is null with a single snapshot', () => {
     expect(evictionsPerMinute([snapshot({ evictedKeysDelta: 5 })])).toBeNull();
+  });
+
+  it('is null when both snapshots share a timestamp', () => {
+    const history = [
+      snapshot({ timestamp: 60_000, evictedKeysDelta: 1 }),
+      snapshot({ timestamp: 60_000, evictedKeysDelta: 5 }),
+    ];
+    expect(evictionsPerMinute(history)).toBeNull();
   });
 
   it('is null when the latest delta is null', () => {
