@@ -190,6 +190,24 @@ def test_http_embedder_refuses_api_key_over_plaintext():
         asyncio.run(embedder("hello"))  # fails before any network call
 
 
+def test_local_plaintext_client_bypasses_env_proxy():
+    # A permitted local http endpoint must not trust env proxies (HTTP_PROXY could
+    # route it off-box in the clear); https keeps normal env/proxy support.
+    local = build_http_embed_fn(EmbeddingConfig(base_url="http://localhost:11434/v1"))
+    client = local._get_client()
+    try:
+        assert client._trust_env is False
+    finally:
+        asyncio.run(local.aclose())
+
+    remote = build_http_embed_fn(EmbeddingConfig(base_url="https://api.openai.com/v1", api_key="k"))
+    client = remote._get_client()
+    try:
+        assert client._trust_env is True
+    finally:
+        asyncio.run(remote.aclose())
+
+
 def test_build_client_unix_tls_fails_closed():
     # tls can't be applied to unix:// — refuse rather than connect in cleartext.
     provider, _ = _wired(url="unix:///run/valkey.sock", tls=True)
