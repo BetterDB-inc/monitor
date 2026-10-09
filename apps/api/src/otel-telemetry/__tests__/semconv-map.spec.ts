@@ -110,6 +110,7 @@ describe('planSemconvInstruments', () => {
     ['betterdb_anomaly_by_severity', 'betterdb.anomaly.by_severity', 'gauge', '{event}'],
     ['betterdb_anomaly_by_metric', 'betterdb.anomaly.by_metric', 'gauge', '{event}'],
     ['betterdb_correlated_groups_total', 'betterdb.anomaly.correlated_groups', 'counter', '{group}'],
+    ['betterdb_detector_config_updates_total', 'betterdb.anomaly.detector_config_updates', 'counter', '{update}'],
     ['betterdb_correlated_groups_by_severity', 'betterdb.anomaly.correlated_groups_by_severity', 'gauge', '{group}'],
     ['betterdb_correlated_groups_by_pattern', 'betterdb.anomaly.correlated_groups_by_pattern', 'gauge', '{group}'],
     ['betterdb_anomaly_buffer_ready', 'betterdb.anomaly.buffer.ready', 'gauge', '1'],

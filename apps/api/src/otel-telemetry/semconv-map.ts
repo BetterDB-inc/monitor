@@ -242,6 +242,10 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
   betterdb_anomaly_by_severity: gauge('betterdb.anomaly.by_severity', '{event}'),
   betterdb_anomaly_by_metric: gauge('betterdb.anomaly.by_metric', '{event}'),
   betterdb_correlated_groups_total: counter('betterdb.anomaly.correlated_groups', '{group}'),
+  betterdb_detector_config_updates_total: counter(
+    'betterdb.anomaly.detector_config_updates',
+    '{update}',
+  ),
   betterdb_correlated_groups_by_severity: gauge(
     'betterdb.anomaly.correlated_groups_by_severity',
     '{group}',

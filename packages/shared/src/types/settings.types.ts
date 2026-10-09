@@ -1,3 +1,4 @@
+import type { AnomalyDetectorConfigMap } from './anomaly-detector-settings.types';
 import type { InferenceSlaConfig } from './inference-latency';
 
 /**
@@ -53,6 +54,7 @@ export interface AppSettings {
 
   inferenceSlaConfig: InferenceSlaConfig;
 
+  anomalyDetectorConfig: AnomalyDetectorConfigMap;
   /**
    * Self-hosted only: age (in days) beyond which stored monitoring history is
    * deleted by the daily local retention sweep. null disables the sweep and

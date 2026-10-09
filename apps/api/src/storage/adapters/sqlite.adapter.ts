@@ -577,6 +577,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         type: 'INTEGER NOT NULL DEFAULT 7200000',
       },
       { name: 'inference_sla_config', type: "TEXT NOT NULL DEFAULT '{}'" },
+      { name: 'anomaly_detector_config', type: "TEXT NOT NULL DEFAULT '{}'" },
       { name: 'local_retention_days', type: 'INTEGER' },
     ];
     for (const col of appSettingsMigrations) {
@@ -1562,6 +1563,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
         throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
         inference_sla_config TEXT NOT NULL DEFAULT '{}',
+        anomaly_detector_config TEXT NOT NULL DEFAULT '{}',
         local_retention_days INTEGER,
         updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
         created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
@@ -2984,9 +2986,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         id, audit_poll_interval_ms, client_analytics_poll_interval_ms,
         anomaly_poll_interval_ms, anomaly_cache_ttl_ms, anomaly_prometheus_interval_ms,
         throughput_forecasting_enabled, throughput_forecasting_default_rolling_window_ms, throughput_forecasting_default_alert_threshold_ms,
-        inference_sla_config, local_retention_days,
+        inference_sla_config, anomaly_detector_config, local_retention_days,
         updated_at, created_at
-      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         audit_poll_interval_ms = excluded.audit_poll_interval_ms,
         client_analytics_poll_interval_ms = excluded.client_analytics_poll_interval_ms,
@@ -2997,6 +2999,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         throughput_forecasting_default_rolling_window_ms = excluded.throughput_forecasting_default_rolling_window_ms,
         throughput_forecasting_default_alert_threshold_ms = excluded.throughput_forecasting_default_alert_threshold_ms,
         inference_sla_config = excluded.inference_sla_config,
+        anomaly_detector_config = excluded.anomaly_detector_config,
         local_retention_days = excluded.local_retention_days,
         updated_at = excluded.updated_at
     `);
@@ -3011,6 +3014,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       settings.metricForecastingDefaultRollingWindowMs,
       settings.metricForecastingDefaultAlertThresholdMs,
       JSON.stringify(settings.inferenceSlaConfig ?? {}),
+      JSON.stringify(settings.anomalyDetectorConfig ?? {}),
       settings.localRetentionDays ?? null,
       now,
       settings.createdAt || now,
