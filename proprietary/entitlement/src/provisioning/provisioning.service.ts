@@ -1392,19 +1392,28 @@ export class ProvisioningService {
         // metrics token and OTLP mirror), silently diverging from what
         // provisioning reported.
         //
-        // Strategic-merge PATCH of the app container rather than a full
-        // replace: it needs no resourceVersion (so there's no read→replace 409
-        // race), and it leaves fields the provisioner doesn't own — pod-template
-        // annotations like the metrics-token restart marker, replicas — intact,
-        // so re-provision doesn't churn the pod. env merges by name, so the new
-        // demo vars are added without disturbing the rest.
+        // Strategic-merge PATCH of the app container (plus replicas) rather
+        // than a full replace: it needs no resourceVersion (so there's no
+        // read→replace 409 race), and it leaves pod-template annotations like
+        // the metrics-token restart marker intact, so re-provision doesn't
+        // churn the pod. env merges by name, so the new demo vars are added
+        // without disturbing the rest. replicas is set back to the desired
+        // running count: a deprovision that scaled the app to 0 and then
+        // failed leaves the tenant in 'error' (re-provisionable) at replicas 0,
+        // and without this the converge would leave it there and
+        // waitForDeploymentReady would time out.
         this.logger.log(`Deployment already exists in ${namespace}, converging app container`);
         const container = body.spec!.template!.spec!.containers![0];
         await this.appsApi.patchNamespacedDeployment(
           {
             name: 'betterdb',
             namespace,
-            body: { spec: { template: { spec: { containers: [container] } } } },
+            body: {
+              spec: {
+                replicas: body.spec!.replicas,
+                template: { spec: { containers: [container] } },
+              },
+            },
           },
           k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.StrategicMergePatch),
         );
