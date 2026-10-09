@@ -171,6 +171,34 @@ describe('PrometheusService write-rejection wiring', () => {
     });
   });
 
+  it('re-sends writes.rejected once, flagged escalated, when clients start receiving MISCONF', async () => {
+    await poll('conn-a', info(HEALTHY, { MISCONF: 0 }));
+    await poll('conn-a', info(BGSAVE_FAILED, { MISCONF: 0 }));
+    await poll('conn-a', info(BGSAVE_FAILED, { MISCONF: 40 }));
+    await poll('conn-a', info(BGSAVE_FAILED, { MISCONF: 95 }));
+
+    const events = writeEvents('conn-a');
+    expect(events.map(([event]) => event)).toEqual([
+      WebhookEventType.WRITES_REJECTED,
+      WebhookEventType.WRITES_REJECTED,
+    ]);
+    expect(events[0][1]).toMatchObject({ severity: 'warning' });
+    expect(events[0][1]).not.toHaveProperty('escalated');
+    expect(events[1][1]).toMatchObject({
+      severity: 'critical',
+      escalated: true,
+      causes: ['rdb_bgsave_failed'],
+      rejectedSinceLastPoll: { MISCONF: 40 },
+      rejectingForMs: POLL_INTERVAL_MS,
+    });
+    expect(otelDispatch).toHaveBeenCalledTimes(2);
+    expect(otelDispatch.mock.calls[1]).toEqual([
+      WebhookEventType.WRITES_REJECTED,
+      expect.objectContaining({ severity: 'critical', escalated: true }),
+      'conn-a',
+    ]);
+  });
+
   it('never dispatches for an external connection', async () => {
     await poll('ext-1', info(HEALTHY, { OOM: 0 }));
     await poll('ext-1', info(BGSAVE_FAILED, { OOM: 50 }));

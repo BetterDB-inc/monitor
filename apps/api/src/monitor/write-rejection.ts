@@ -21,32 +21,53 @@ const CAUSE_BY_CODE: Record<Exclude<WriteRejectionCode, 'MISCONF'>, WriteRejecti
   NOREPLICAS: 'min_replicas_not_met',
 };
 
+export type WriteRejectionSeverity = 'critical' | 'warning';
+
 export interface WriteRejectionState {
   /** Previous poll's cumulative errorstat counts, keyed by code. */
   lastCounts: Partial<Record<WriteRejectionCode, number>>;
   /** Whether a writes.rejected edge is currently open for this connection. */
   rejecting: boolean;
   rejectingSince: number | null;
+  /** Highest severity already reported for the open edge; null while closed. */
+  lastSeverity: WriteRejectionSeverity | null;
+  /** Every cause already reported for the open edge; empty while closed. */
+  lastCauses: WriteRejectionCause[];
 }
 
 export function createWriteRejectionState(): WriteRejectionState {
-  return { lastCounts: {}, rejecting: false, rejectingSince: null };
+  return {
+    lastCounts: {},
+    rejecting: false,
+    rejectingSince: null,
+    lastSeverity: null,
+    lastCauses: [],
+  };
 }
 
 export interface WriteRejectionEvaluation {
-  /** 'rejected' / 'recovered' on an edge; null when nothing changed. */
-  transition: 'rejected' | 'recovered' | null;
+  /**
+   * 'rejected' when the edge opens, 'escalated' when an open edge turns
+   * critical or gains a cause, 'recovered' when it closes; null otherwise.
+   */
+  transition: 'rejected' | 'escalated' | 'recovered' | null;
   /** 'critical' once clients actually received the error, 'warning' while only at risk. */
-  severity: 'critical' | 'warning';
+  severity: WriteRejectionSeverity;
   causes: WriteRejectionCause[];
   /** Errors returned to clients since the previous poll, by code. */
   rejectedSinceLastPoll: Partial<Record<WriteRejectionCode, number>>;
   rejectingForMs: number | null;
 }
 
-function countOf(errorstats: ErrorStatsInfo | undefined, code: WriteRejectionCode): number | null {
-  const entry = errorstats?.[`errorstat_${code}`];
-  return entry !== undefined && typeof entry === 'object' ? entry.count : null;
+/**
+ * Cumulative count for one code. The server lists only codes it has returned
+ * at least once, so an absent entry in a present section means 0. null for an
+ * entry the parser could not read, which leaves that code's baseline alone.
+ */
+function countOf(errorstats: ErrorStatsInfo, code: WriteRejectionCode): number | null {
+  const entry = errorstats[`errorstat_${code}`];
+  if (entry === undefined) return 0;
+  return typeof entry === 'object' ? entry.count : null;
 }
 
 /**
@@ -59,8 +80,14 @@ function countOf(errorstats: ErrorStatsInfo | undefined, code: WriteRejectionCod
  *  - errorstats deltas: errorstat_MISCONF/OOM/READONLY/NOREPLICAS rising.
  *
  * Counters are cumulative and reset on restart or CONFIG RESETSTAT, so a drop
- * re-baselines instead of reading as a negative delta. Recovery needs both
- * signals clean on the same poll.
+ * re-baselines instead of reading as a negative delta. A poll without the
+ * errorstats section keeps the previous baseline, so the next poll that has
+ * it still sees the whole delta. Recovery needs both signals clean on the
+ * same poll.
+ *
+ * While the edge is open, it escalates once when severity first reaches
+ * critical and once per cause not yet reported; staying critical, or causes
+ * repeating or shrinking, stays quiet.
  */
 export function evaluateWriteRejection(
   state: WriteRejectionState,
@@ -74,33 +101,44 @@ export function evaluateWriteRejection(
   if (persistence?.rdb_last_bgsave_status === 'err') causes.add('rdb_bgsave_failed');
   if (persistence?.aof_last_write_status === 'err') causes.add('aof_write_failed');
 
-  for (const code of WRITE_REJECTION_CODES) {
-    const count = countOf(errorstats, code);
-    const previous = state.lastCounts[code];
-    if (count === null) {
-      delete state.lastCounts[code];
-      continue;
-    }
-    state.lastCounts[code] = count;
-    if (previous === undefined || count < previous) continue; // first sight or counter reset
-    const delta = count - previous;
-    if (delta === 0) continue;
-    rejectedSinceLastPoll[code] = delta;
-    if (code === 'MISCONF') {
-      if (causes.size === 0) causes.add('rdb_bgsave_failed');
-    } else {
-      causes.add(CAUSE_BY_CODE[code]);
+  if (errorstats !== undefined) {
+    for (const code of WRITE_REJECTION_CODES) {
+      const count = countOf(errorstats, code);
+      if (count === null) continue;
+      const previous = state.lastCounts[code];
+      state.lastCounts[code] = count;
+      if (previous === undefined || count < previous) continue; // first sight or counter reset
+      const delta = count - previous;
+      if (delta === 0) continue;
+      rejectedSinceLastPoll[code] = delta;
+      if (code === 'MISCONF') {
+        if (causes.size === 0) causes.add('rdb_bgsave_failed');
+      } else {
+        causes.add(CAUSE_BY_CODE[code]);
+      }
     }
   }
 
-  const clientsAffected = Object.keys(rejectedSinceLastPoll).length > 0;
+  const severity: WriteRejectionSeverity =
+    Object.keys(rejectedSinceLastPoll).length > 0 ? 'critical' : 'warning';
   const active = causes.size > 0;
   let transition: WriteRejectionEvaluation['transition'] = null;
 
   if (active && state.rejecting === false) {
     state.rejecting = true;
     state.rejectingSince = now;
+    state.lastSeverity = severity;
+    state.lastCauses = [...causes];
     transition = 'rejected';
+  } else if (active && state.rejecting === true) {
+    const reported = new Set(state.lastCauses);
+    const newCauses = [...causes].filter((cause) => !reported.has(cause));
+    const turnedCritical = severity === 'critical' && state.lastSeverity === 'warning';
+    if (turnedCritical || newCauses.length > 0) {
+      if (turnedCritical) state.lastSeverity = 'critical';
+      state.lastCauses = [...state.lastCauses, ...newCauses];
+      transition = 'escalated';
+    }
   } else if (active === false && state.rejecting === true) {
     transition = 'recovered';
   }
@@ -109,11 +147,13 @@ export function evaluateWriteRejection(
   if (transition === 'recovered') {
     state.rejecting = false;
     state.rejectingSince = null;
+    state.lastSeverity = null;
+    state.lastCauses = [];
   }
 
   return {
     transition,
-    severity: clientsAffected ? 'critical' : 'warning',
+    severity,
     causes: [...causes],
     rejectedSinceLastPoll,
     rejectingForMs,

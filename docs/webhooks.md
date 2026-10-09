@@ -283,14 +283,28 @@ Fired when the server starts and stops refusing writes. None of these conditions
 | `write_to_replica` | `READONLY` — clients writing to a replica, typically stale topology after failover |
 | `min_replicas_not_met` | `NOREPLICAS` — `min-replicas-to-write` not satisfied |
 
-The first poll only records a baseline, so historical error counts never alert, and a counter drop (restart, `CONFIG RESETSTAT`) re-baselines instead of firing. `errorstats` needs Redis 6.2+ or Valkey; on older servers only the persistence causes are detected.
+On the first poll error counters are only baselined, so historical counts never alert; a persistence failure is still detected immediately. A counter drop (restart, `CONFIG RESETSTAT`) re-baselines instead of firing. `errorstats` needs Redis 6.2+ or Valkey; on older servers only the persistence causes are detected.
+
+If clients start receiving errors (or a new cause appears) while an edge is open, `writes.rejected` is sent once more with `escalated: true`. Its `severity` is `"critical"` when clients are receiving errors; a new persistence cause with no client errors yet keeps `"warning"`. It is not re-sent while the edge stays critical with the same causes.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `causes` | string[] | Active causes on this poll (see table above); empty on `writes.recovered` |
+| `severity` | `"warning"` \| `"critical"` | `critical` when clients received a rejection error since the last poll |
+| `rejectedSinceLastPoll` | object | Rejection errors returned to clients since the last poll, by code (`MISCONF`, `OOM`, `READONLY`, `NOREPLICAS`) |
+| `rejectingForMs` | number | Time since the edge opened; on `writes.recovered`, how long writes were rejected |
+| `escalated` | boolean | Present and `true` only on a repeated `writes.rejected` for an edge that is already open |
+| `message` | string | Human-readable summary |
+
+Escalation of an open edge, after clients start receiving `MISCONF`:
 
 ```json
 {
   "causes": ["rdb_bgsave_failed"],
   "severity": "critical",
   "rejectedSinceLastPoll": { "MISCONF": 250 },
-  "rejectingForMs": 0,
+  "rejectingForMs": 5000,
+  "escalated": true,
   "message": "Writes are being rejected (rdb_bgsave_failed) and clients are receiving errors",
   "timestamp": 1706457600000,
   "instance": { "host": "localhost", "port": 6379 }

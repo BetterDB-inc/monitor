@@ -1606,7 +1606,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     );
     if (result.transition === null) return;
 
-    const rejected = result.transition === 'rejected';
+    // An escalation re-sends writes.rejected, flagged, rather than a new event type.
+    const escalated = result.transition === 'escalated';
+    const rejected = result.transition === 'rejected' || escalated;
     const eventType = rejected
       ? WebhookEventType.WRITES_REJECTED
       : WebhookEventType.WRITES_RECOVERED;
@@ -1615,6 +1617,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       severity: result.severity,
       rejectedSinceLastPoll: result.rejectedSinceLastPoll,
       ...(result.rejectingForMs === null ? {} : { rejectingForMs: result.rejectingForMs }),
+      ...(escalated ? { escalated: true } : {}),
     };
     const message = rejected
       ? `Writes are being rejected (${result.causes.join(', ')})${result.severity === 'critical' ? ' and clients are receiving errors' : ''}`

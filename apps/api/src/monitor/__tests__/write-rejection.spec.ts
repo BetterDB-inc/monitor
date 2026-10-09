@@ -27,9 +27,71 @@ describe('evaluateWriteRejection', () => {
     evaluateWriteRejection(state, bgsaveFailed, stats({ MISCONF: 0 }), 1_000);
     const result = evaluateWriteRejection(state, bgsaveFailed, stats({ MISCONF: 250 }), 6_000);
     expect(result).toMatchObject({
-      transition: null,
+      transition: 'escalated',
       severity: 'critical',
+      causes: ['rdb_bgsave_failed'],
       rejectedSinceLastPoll: { MISCONF: 250 },
+      rejectingForMs: 5_000,
+    });
+  });
+
+  it('stays quiet while the edge remains critical with the same causes', () => {
+    const state = createWriteRejectionState();
+    evaluateWriteRejection(state, bgsaveFailed, stats({ MISCONF: 0 }), 0);
+    evaluateWriteRejection(state, bgsaveFailed, stats({ MISCONF: 250 }), 5_000);
+    const result = evaluateWriteRejection(state, bgsaveFailed, stats({ MISCONF: 600 }), 10_000);
+    expect(result).toMatchObject({ transition: null, severity: 'critical' });
+  });
+
+  it('escalates when an open BGSAVE edge gains an OOM cause', () => {
+    const state = createWriteRejectionState();
+    evaluateWriteRejection(state, healthy, stats({ OOM: 0 }), 0);
+    expect(evaluateWriteRejection(state, bgsaveFailed, stats({ OOM: 0 }), 5_000).transition).toBe(
+      'rejected',
+    );
+    const result = evaluateWriteRejection(state, bgsaveFailed, stats({ OOM: 12 }), 10_000);
+    expect(result.transition).toBe('escalated');
+    expect(result.causes).toEqual(
+      expect.arrayContaining(['rdb_bgsave_failed', 'maxmemory_reached']),
+    );
+  });
+
+  it('does not escalate when causes shrink while the edge stays open', () => {
+    const state = createWriteRejectionState();
+    const both = { rdb_last_bgsave_status: 'err', aof_last_write_status: 'err' };
+    evaluateWriteRejection(state, both, stats({}), 0);
+    expect(evaluateWriteRejection(state, bgsaveFailed, stats({}), 5_000).transition).toBeNull();
+  });
+
+  it('resets on recovery so the next failure opens a fresh edge', () => {
+    const state = createWriteRejectionState();
+    evaluateWriteRejection(state, bgsaveFailed, stats({ MISCONF: 0 }), 0);
+    evaluateWriteRejection(state, bgsaveFailed, stats({ MISCONF: 9 }), 5_000);
+    expect(evaluateWriteRejection(state, healthy, stats({ MISCONF: 9 }), 10_000).transition).toBe(
+      'recovered',
+    );
+    expect(state).toMatchObject({ lastSeverity: null, lastCauses: [] });
+    expect(
+      evaluateWriteRejection(state, bgsaveFailed, stats({ MISCONF: 9 }), 15_000),
+    ).toMatchObject({ transition: 'rejected', severity: 'warning', rejectingForMs: 0 });
+  });
+
+  it('treats a code missing from a present errorstats section as zero', () => {
+    const state = createWriteRejectionState();
+    evaluateWriteRejection(state, healthy, stats({ MISCONF: 3 }), 0);
+    expect(evaluateWriteRejection(state, healthy, stats({ OOM: 5 }), 5_000)).toMatchObject({
+      transition: 'rejected',
+      rejectedSinceLastPoll: { OOM: 5 },
+    });
+  });
+
+  it('keeps the baseline across a poll without the errorstats section', () => {
+    const state = createWriteRejectionState();
+    evaluateWriteRejection(state, healthy, stats({ OOM: 4 }), 0);
+    expect(evaluateWriteRejection(state, healthy, undefined, 5_000).transition).toBeNull();
+    expect(evaluateWriteRejection(state, healthy, stats({ OOM: 9 }), 10_000)).toMatchObject({
+      transition: 'rejected',
+      rejectedSinceLastPoll: { OOM: 5 },
     });
   });
 
@@ -68,9 +130,10 @@ describe('evaluateWriteRejection', () => {
   it('recovers only when persistence is healthy and no new errors arrived', () => {
     const state = createWriteRejectionState();
     evaluateWriteRejection(state, bgsaveFailed, stats({ MISCONF: 0 }), 0);
+    // Persistence is healthy again, but clients were refused before it recovered.
     expect(
       evaluateWriteRejection(state, healthy, stats({ MISCONF: 7 }), 5_000).transition,
-    ).toBeNull();
+    ).toBe('escalated');
     const recovered = evaluateWriteRejection(state, healthy, stats({ MISCONF: 7 }), 10_000);
     expect(recovered).toMatchObject({ transition: 'recovered', rejectingForMs: 10_000 });
   });
