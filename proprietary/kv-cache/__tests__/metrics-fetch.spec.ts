@@ -33,6 +33,15 @@ describe('fetchMetricsText', () => {
     );
   });
 
+  it('cancels the body of a rejected response', async () => {
+    for (const init of [{ status: 500 }, { status: 302 }, { headers: { 'content-length': '6000000' } }]) {
+      const response = respond({ ...init, body: 'x' });
+      const cancel = jest.spyOn(response.body as ReadableStream, 'cancel');
+      await expect(fetchMetricsText('http://x', null, jest.fn().mockResolvedValue(response))).rejects.toBeInstanceOf(ScrapeError);
+      expect(cancel).toHaveBeenCalled();
+    }
+  });
+
   it('maps fetch failures to timeout and connection failed', async () => {
     const timeout = jest.fn().mockRejectedValue(Object.assign(new Error('t'), { name: 'TimeoutError' }));
     await expect(fetchMetricsText('http://x', null, timeout)).rejects.toThrow('timeout');

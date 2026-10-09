@@ -1,5 +1,7 @@
 import type { InfoTarget, InstanceKey, OtlpKeyValue, OtlpNumberDataPoint } from './otlp-metrics-types';
 
+export const NO_RECORDED_VALUE = 1;
+
 export interface MappedPoint {
   target: InfoTarget;
   value: string;

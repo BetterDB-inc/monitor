@@ -56,6 +56,8 @@ export class KvCacheScrapeService implements OnModuleInit, OnModuleDestroy {
   private async scrape(engine: StoredKvCacheEngine, now: number): Promise<void> {
     try {
       const text = await fetchMetricsText(engine.scrapeUrl as string, this.engines.authHeaderFor(engine));
+      const current = this.registry.get(engine.id);
+      if (!current?.enabled || current.scrapeUrl !== engine.scrapeUrl) return;
       const parsed = parseLmcacheMetrics(text);
       for (const { metric, labels, value } of parsed) {
         this.samples.observe(

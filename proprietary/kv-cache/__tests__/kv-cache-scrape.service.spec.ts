@@ -20,7 +20,11 @@ const engine = (over: Record<string, unknown> = {}) => ({
 const body = 'lmcache:num_hit_tokens_total{model_name="m",worker_id="0",role="worker"} 42\n';
 
 function setup(engines: unknown[], licensed = true) {
-  const registry = { list: jest.fn().mockReturnValue(engines), recordResult: jest.fn() };
+  const registry = {
+    list: jest.fn().mockReturnValue(engines),
+    get: jest.fn((id: string) => (engines as { id: string }[]).find((e) => e.id === id) ?? null),
+    recordResult: jest.fn(),
+  };
   const samples = { observe: jest.fn() };
   const engineService = { authHeaderFor: jest.fn().mockReturnValue(null) };
   const license = { hasFeature: jest.fn().mockReturnValue(licensed) };
@@ -71,6 +75,17 @@ describe('KvCacheScrapeService', () => {
     await service.tick(1000);
     expect(registry.recordResult).toHaveBeenCalledWith('e1', { lastError: 'HTTP 401' });
     expect(samples.observe).toHaveBeenCalledWith(expect.objectContaining({ engineId: 'e2' }), 1000);
+  });
+
+  it('discards a response when the engine was removed, disabled or repointed during the fetch', async () => {
+    fetchMock.mockResolvedValue(body);
+    for (const current of [null, engine({ enabled: false }), engine({ scrapeUrl: 'http://engine-9:9090/metrics' })]) {
+      const { service, registry, samples } = setup([engine()]);
+      registry.get.mockReturnValue(current);
+      await service.tick(1000);
+      expect(samples.observe).not.toHaveBeenCalled();
+      expect(registry.recordResult).not.toHaveBeenCalled();
+    }
   });
 
   it('records a generic error for unexpected failures', async () => {

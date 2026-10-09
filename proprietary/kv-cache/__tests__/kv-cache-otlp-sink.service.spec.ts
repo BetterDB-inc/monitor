@@ -78,6 +78,14 @@ describe('KvCacheOtlpSinkService', () => {
     expect(registry.recordResult).toHaveBeenCalledWith('e1', { lastSeenAt: NOW, lastError: null });
   });
 
+  it('skips points flagged as having no recorded value', () => {
+    const { service, samples } = setup();
+    const metrics = [sum('lmcache:num_hit_tokens_total', [{ ...point('0', 10), flags: 1 } as ReturnType<typeof point>, point('1', 20)])];
+    expect(service.ingest(attrs, metrics, NOW)).toEqual({ accepted: 1, dropped: {} });
+    expect(samples.observe).toHaveBeenCalledTimes(1);
+    expect(samples.observe.mock.calls[0][0]).toMatchObject({ series: '1|worker', value: 20 });
+  });
+
   it('marks delta temporality sums as not cumulative', () => {
     const { service, samples } = setup();
     service.ingest(attrs, [sum('lmcache:num_hit_tokens_total', [point('0', 3)], 1)], NOW);

@@ -5,7 +5,7 @@ import {
   KvCacheOtlpSinkResult,
   LMCACHE_ENGINE_ATTRIBUTE,
 } from '@app/external-metrics/kv-cache-otlp-sink';
-import { attrsToRecord, isDeltaTemporality, nanosToMs, pointValue } from '@app/external-metrics/otlp-metric-map';
+import { attrsToRecord, isDeltaTemporality, nanosToMs, NO_RECORDED_VALUE, pointValue } from '@app/external-metrics/otlp-metric-map';
 import type { DropReason, OtlpMetric } from '@app/external-metrics/otlp-metrics-types';
 import { LicenseService } from '@proprietary/licenses/license.service';
 import { METRIC_FIELDS } from './counter-deltas';
@@ -60,6 +60,7 @@ export class KvCacheOtlpSinkService implements KvCacheOtlpSink {
       }
       const cumulative = !isDeltaTemporality(metric.sum.aggregationTemporality);
       for (const dataPoint of metric.sum.dataPoints ?? []) {
+        if ((dataPoint.flags ?? 0) & NO_RECORDED_VALUE) continue;
         const raw = pointValue(dataPoint);
         const value = raw === null ? NaN : Number(raw);
         if (!Number.isFinite(value)) {
