@@ -14,6 +14,7 @@ const BLOCKED_IP_PATTERNS = [
   /^10\./,
   /^172\.(1[6-9]|2[0-9]|3[01])\./,
   /^192\.168\./,
+  /^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./,
   /^169\.254\./,
   /^::1$/,
   /^fe[89ab][0-9a-f]:/i,
@@ -83,10 +84,10 @@ export async function assertSafeOutboundUrl(rawUrl: string, options: OutboundUrl
       throw new BadRequestException('Suspicious hostname detected');
     }
 
-    if (isProduction && !isIP(host)) {
+    if (!isIP(host)) {
       try {
-        const addresses = await dns.resolve(parsed.hostname);
-        for (const addr of addresses) {
+        const answers = await dns.lookup(host, { all: true, verbatim: true });
+        for (const { address: addr } of answers) {
           if (isBlockedIp(addr, allowPrivateNetworks)) {
             throw new BadRequestException(`${capitalize(label)} resolves to blocked IP address: ${addr}`);
           }

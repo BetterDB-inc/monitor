@@ -9,8 +9,13 @@ export function scrapeAllowsPrivateNetworks(): boolean {
   return process.env.KV_CACHE_SCRAPE_BLOCK_PRIVATE !== 'true';
 }
 
+async function reject(response: Response, message: string): Promise<never> {
+  await response.body?.cancel().catch(() => undefined);
+  throw new ScrapeError(message);
+}
+
 async function readCapped(response: Response): Promise<string> {
-  if (Number(response.headers.get('content-length') ?? 0) > SCRAPE_MAX_BYTES) throw new ScrapeError('response too large');
+  if (Number(response.headers.get('content-length') ?? 0) > SCRAPE_MAX_BYTES) return reject(response, 'response too large');
   const reader = response.body?.getReader();
   if (!reader) return '';
   const chunks: Uint8Array[] = [];
@@ -45,8 +50,8 @@ export async function fetchMetricsText(url: string, authHeader: string | null, f
     const name = (error as Error)?.name;
     throw new ScrapeError(name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'connection failed');
   }
-  if (response.status >= 300 && response.status < 400) throw new ScrapeError(`redirect not followed (HTTP ${response.status})`);
-  if (!response.ok) throw new ScrapeError(`HTTP ${response.status}`);
+  if (response.status >= 300 && response.status < 400) await reject(response, `redirect not followed (HTTP ${response.status})`);
+  if (!response.ok) await reject(response, `HTTP ${response.status}`);
   try {
     return await readCapped(response);
   } catch (error) {

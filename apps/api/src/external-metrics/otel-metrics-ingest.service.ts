@@ -10,6 +10,7 @@ import {
   mapDataPoint,
   metricVocabulary,
   nanosToMs,
+  NO_RECORDED_VALUE,
   pointValue,
   resolveInstanceKeys,
   explicitInstanceKey,
@@ -37,7 +38,6 @@ function emptyDropCounts(): Record<DropReason, number> {
   return Object.fromEntries(DROP_REASONS.map((reason) => [reason, 0])) as Record<DropReason, number>;
 }
 
-const NO_RECORDED_VALUE = 1;
 
 function metricPointCount(metric: OtlpMetric): number {
   const points =

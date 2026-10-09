@@ -17,6 +17,9 @@ describe('outbound url guard', () => {
     expect(isBlockedIp('8.8.8.8')).toBe(false);
     expect(isBlockedIp('[::1]', true)).toBe(true);
     expect(isBlockedIp('127.0.0.1', true)).toBe(true);
+    expect(isBlockedIp('100.100.100.200')).toBe(true);
+    expect(isBlockedIp('100.63.255.255')).toBe(false);
+    expect(isBlockedIp('100.128.0.1')).toBe(false);
   });
 
   it('rejects non-http protocols with the existing message', async () => {
@@ -34,7 +37,7 @@ describe('outbound url guard', () => {
 
   it('lets the scraper reach private networks but never link-local', async () => {
     process.env.NODE_ENV = 'production';
-    jest.spyOn(dns, 'resolve').mockResolvedValue(['10.1.2.3'] as any);
+    jest.spyOn(dns, 'lookup').mockResolvedValue([{ address: '10.1.2.3', family: 4 }] as any);
     await expect(assertSafeOutboundUrl('http://10.1.2.3:8000/metrics', { label: 'metrics URL', allowPrivateNetworks: true })).resolves.toBeInstanceOf(URL);
     await expect(assertSafeOutboundUrl('http://10.1.2.3:8000/metrics', { label: 'metrics URL' })).rejects.toBeInstanceOf(BadRequestException);
     await expect(assertSafeOutboundUrl('http://169.254.169.254/latest', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toBeInstanceOf(BadRequestException);
@@ -42,7 +45,7 @@ describe('outbound url guard', () => {
 
   it('accepts private addresses that merely contain 127 when private networks are allowed', async () => {
     process.env.NODE_ENV = 'production';
-    jest.spyOn(dns, 'resolve').mockResolvedValue(['10.127.0.5'] as any);
+    jest.spyOn(dns, 'lookup').mockResolvedValue([{ address: '10.127.0.5', family: 4 }] as any);
     await expect(assertSafeOutboundUrl('http://10.127.0.5:8000/metrics', { label: 'metrics URL', allowPrivateNetworks: true })).resolves.toBeInstanceOf(URL);
     await expect(assertSafeOutboundUrl('http://192.168.127.10/metrics', { label: 'metrics URL', allowPrivateNetworks: true })).resolves.toBeInstanceOf(URL);
   });
@@ -75,7 +78,7 @@ describe('outbound url guard', () => {
 
   it('does not resolve DNS for IP literals', async () => {
     process.env.NODE_ENV = 'production';
-    const resolve = jest.spyOn(dns, 'resolve');
+    const resolve = jest.spyOn(dns, 'lookup');
     await expect(assertSafeOutboundUrl('http://10.1.2.3:8000/metrics', { label: 'metrics URL', allowPrivateNetworks: true })).resolves.toBeInstanceOf(URL);
     await expect(assertSafeOutboundUrl('http://8.8.8.8/x', { label: 'webhook URL' })).resolves.toBeInstanceOf(URL);
     expect(resolve).not.toHaveBeenCalled();
@@ -83,13 +86,13 @@ describe('outbound url guard', () => {
 
   it('rejects a DNS answer in loopback space even when private networks are allowed', async () => {
     process.env.NODE_ENV = 'production';
-    jest.spyOn(dns, 'resolve').mockResolvedValue(['127.0.0.1'] as any);
+    jest.spyOn(dns, 'lookup').mockResolvedValue([{ address: '127.0.0.1', family: 4 }] as any);
     await expect(assertSafeOutboundUrl('http://metrics.example.com/x', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toThrow('Metrics URL resolves to blocked IP address: 127.0.0.1');
   });
 
   it('rejects a DNS answer in link-local space even when private networks are allowed', async () => {
     process.env.NODE_ENV = 'production';
-    jest.spyOn(dns, 'resolve').mockResolvedValue(['169.254.169.254'] as any);
+    jest.spyOn(dns, 'lookup').mockResolvedValue([{ address: '169.254.169.254', family: 4 }] as any);
     await expect(assertSafeOutboundUrl('http://metrics.example.com/x', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toThrow('Metrics URL resolves to blocked IP address: 169.254.169.254');
   });
 
@@ -97,9 +100,24 @@ describe('outbound url guard', () => {
     process.env.NODE_ENV = 'production';
     await expect(assertSafeOutboundUrl('http://10.0.0.1/x', { label: 'webhook URL' })).rejects.toThrow('Cannot use private IP addresses as webhook URL');
     await expect(assertSafeOutboundUrl('not a url', { label: 'webhook URL' })).rejects.toThrow('Invalid webhook URL');
-    jest.spyOn(dns, 'resolve').mockResolvedValue(['10.9.9.9'] as any);
+    jest.spyOn(dns, 'lookup').mockResolvedValue([{ address: '10.9.9.9', family: 4 }] as any);
     await expect(assertSafeOutboundUrl('http://example.com/x', { label: 'webhook URL' })).rejects.toThrow('Webhook URL resolves to blocked IP address: 10.9.9.9');
-    jest.spyOn(dns, 'resolve').mockRejectedValue(new Error('nx'));
+    jest.spyOn(dns, 'lookup').mockRejectedValue(new Error('nx'));
     await expect(assertSafeOutboundUrl('http://example.com/x', { label: 'webhook URL' })).rejects.toThrow('Failed to resolve webhook URL hostname');
+  });
+
+  it('checks DNS answers outside production too', async () => {
+    process.env.NODE_ENV = 'development';
+    jest.spyOn(dns, 'lookup').mockResolvedValue([{ address: '169.254.169.254', family: 4 }] as any);
+    await expect(assertSafeOutboundUrl('http://metadata.example.com/x', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toThrow('Metrics URL resolves to blocked IP address: 169.254.169.254');
+  });
+
+  it('rejects a hostname whose AAAA answer is blocked', async () => {
+    process.env.NODE_ENV = 'production';
+    jest.spyOn(dns, 'lookup').mockResolvedValue([
+      { address: '8.8.8.8', family: 4 },
+      { address: 'fe80::1', family: 6 },
+    ] as any);
+    await expect(assertSafeOutboundUrl('http://metrics.example.com/x', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toThrow('Metrics URL resolves to blocked IP address: fe80::1');
   });
 });
