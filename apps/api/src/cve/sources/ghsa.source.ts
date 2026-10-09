@@ -146,7 +146,7 @@ function highestVersion(versions: string[]): string | null {
 /**
  * `patched_versions` only names the branches that received a fix. When the
  * vendor's affected range is NOT itself a per-branch enumeration ("All",
- * empty, ">= 6.0.0", "<= 9.0.2"), every other branch below the newest fix is
+ * ">= 6.0.0", "<= 9.0.2"), every other branch below the newest fix is
  * affected with no fix available, typically EOL lines such as Redis 7.0.x.
  * Emit one wildcard range for those branches. matchRanges() never lets a
  * wildcard override a fix published for the version's own branch.
@@ -169,7 +169,8 @@ function unlistedBranchFallback(
     return null;
   }
 
-  const allVersions = range.length === 0 || ALL_VERSIONS_PATTERN.test(range);
+  // A missing range is unknown, not "all versions": only an explicit marker counts.
+  const allVersions = ALL_VERSIONS_PATTERN.test(range);
   const lower = range.match(LOWER_BOUND_PATTERN);
   if (allVersions === false && upperBounds.length === 0 && lower === null) {
     return null; // unparseable prose: never guess a range
