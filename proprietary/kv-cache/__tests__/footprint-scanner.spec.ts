@@ -20,7 +20,13 @@ describe('scanLmcacheKeys', () => {
   it('stops at the matched budget', async () => {
     const client = scanClient([['7', [k(0), k(1), k(2)]]]);
     const result = await scanLmcacheKeys(client, { maxScanned: 200_000, maxMatched: 2 }, 10_000);
-    expect(result).toEqual({ scannedKeys: 1000, matchedKeys: [k(0), k(1)], scanComplete: false });
+    expect(result).toEqual({ scannedKeys: 666, matchedKeys: [k(0), k(1)], scanComplete: false });
+  });
+
+  it('shrinks the scanned count in proportion when a completed scan is truncated', async () => {
+    const client = scanClient([['0', [k(0), k(1), k(2), k(3)]]]);
+    const result = await scanLmcacheKeys(client, { maxScanned: 200_000, maxMatched: 2 }, 1500);
+    expect(result).toEqual({ scannedKeys: 750, matchedKeys: [k(0), k(1)], scanComplete: false });
   });
 
   it('stops at the scanned budget', async () => {

@@ -29,10 +29,12 @@ export async function scanLmcacheKeys(client: DatabasePort, budgets: ScanBudgets
       if (classifyKey(key)) matched.push(key);
     }
   } while (cursor !== '0' && iterations * SCAN_COUNT < budgets.maxScanned && matched.length < budgets.maxMatched);
-  const scannedKeys = cursor === '0' ? dbSize : Math.min(iterations * SCAN_COUNT, dbSize);
+  const walked = cursor === '0' ? dbSize : Math.min(iterations * SCAN_COUNT, dbSize);
+  const kept = matched.slice(0, budgets.maxMatched);
+  const scannedKeys = kept.length < matched.length ? Math.max(1, Math.floor((walked * kept.length) / matched.length)) : walked;
   return {
     scannedKeys,
-    matchedKeys: matched.slice(0, budgets.maxMatched),
+    matchedKeys: kept,
     scanComplete: cursor === '0' && matched.length <= budgets.maxMatched,
   };
 }
