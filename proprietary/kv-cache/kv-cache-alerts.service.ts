@@ -94,14 +94,18 @@ export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async evaluateHitRates(now = Date.now()): Promise<void> {
-    if (!this.webhookEventsPro || !this.license.hasFeature(Feature.KV_CACHE_MONITORING)) return;
-    const connectionIds = new Set(this.registry.list().filter((engine) => engine.enabled).map((engine) => engine.connectionId));
-    for (const connectionId of connectionIds) {
-      try {
-        await this.evaluateConnection(connectionId, now);
-      } catch (error) {
-        this.logger.warn(`Hit rate alert evaluation failed for ${connectionId}: ${error instanceof Error ? error.message : error}`);
+    try {
+      if (!this.webhookEventsPro || !this.license.hasFeature(Feature.KV_CACHE_MONITORING)) return;
+      const connectionIds = new Set(this.registry.list().filter((engine) => engine.enabled).map((engine) => engine.connectionId));
+      for (const connectionId of connectionIds) {
+        try {
+          await this.evaluateConnection(connectionId, now);
+        } catch (error) {
+          this.logger.warn(`Hit rate alert evaluation failed for ${connectionId}: ${error instanceof Error ? error.message : error}`);
+        }
       }
+    } catch (error) {
+      this.logger.warn(`Hit rate alert evaluation failed: ${error instanceof Error ? error.message : error}`);
     }
   }
 
@@ -111,19 +115,23 @@ export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
     const instance = this.instanceFor(connectionId);
     for (const window of windowHitRates(rows)) {
       const engine = this.registry.get(window.engineId);
-      if (!engine || window.hitRate === null || !shouldCheckHitRate(window, settings)) continue;
-      await this.webhookEventsPro?.dispatchKvCacheHitRateLow({
-        connectionId,
-        engineId: window.engineId,
-        engineName: engine.name,
-        model: window.model,
-        hitRate: window.hitRate,
-        threshold: settings.hitRateThreshold,
-        requestedTokens: window.requestedTokens,
-        windowMs: KV_CACHE_HIT_RATE_WINDOW_MS,
-        timestamp: now,
-        ...(instance ? { instance } : {}),
-      });
+      if (!engine?.enabled || window.hitRate === null || !shouldCheckHitRate(window, settings)) continue;
+      try {
+        await this.webhookEventsPro?.dispatchKvCacheHitRateLow({
+          connectionId,
+          engineId: window.engineId,
+          engineName: engine.name,
+          model: window.model,
+          hitRate: window.hitRate,
+          threshold: settings.hitRateThreshold,
+          requestedTokens: window.requestedTokens,
+          windowMs: KV_CACHE_HIT_RATE_WINDOW_MS,
+          timestamp: now,
+          ...(instance ? { instance } : {}),
+        });
+      } catch (error) {
+        this.logger.warn(`Hit rate alert dispatch failed for ${window.engineId}/${window.model}: ${error instanceof Error ? error.message : error}`);
+      }
     }
   }
 

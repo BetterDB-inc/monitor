@@ -68,6 +68,14 @@ describe('KvCacheAlertsService settings', () => {
     });
   });
 
+  it('keeps the stored value when an update field is undefined', async () => {
+    const { service } = setup({
+      stored: { connectionId: 'c1', hitRateAlertEnabled: true, hitRateThreshold: 0.3, evictionAlertEnabled: true, updatedAt: 1 },
+    });
+    const saved = await service.updateSettings('c1', { hitRateThreshold: undefined });
+    expect(saved.hitRateThreshold).toBe(0.3);
+  });
+
   it('merges updates onto the current settings and stamps the time', async () => {
     const { service, storage } = setup({
       stored: { connectionId: 'c1', hitRateAlertEnabled: true, hitRateThreshold: 0.2, evictionAlertEnabled: true, updatedAt: 1 },
@@ -178,5 +186,29 @@ describe('KvCacheAlertsService hit rate', () => {
     await service.evaluateHitRates(1);
     expect(pro.dispatchKvCacheHitRateLow).toHaveBeenCalledTimes(1);
     expect(pro.dispatchKvCacheHitRateLow).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'c2', engineId: 'e2' }));
+  });
+
+  it('only dispatches for the enabled engine when a sibling is disabled', async () => {
+    const engines = [engine(), engine({ id: 'e2', name: 'off', enabled: false })];
+    const { service, pro } = setup({ engines, rows: [row(), row({ engineId: 'e2' })] });
+    await service.evaluateHitRates(1);
+    expect(pro.dispatchKvCacheHitRateLow).toHaveBeenCalledTimes(1);
+    expect(pro.dispatchKvCacheHitRateLow).toHaveBeenCalledWith(expect.objectContaining({ engineId: 'e1' }));
+  });
+
+  it('continues with the next window after a failed dispatch', async () => {
+    const engines = [engine(), engine({ id: 'e2', name: 'second' })];
+    const { service, pro } = setup({ engines, rows: [row(), row({ engineId: 'e2' })] });
+    pro.dispatchKvCacheHitRateLow.mockRejectedValueOnce(new Error('boom'));
+    await service.evaluateHitRates(1);
+    expect(pro.dispatchKvCacheHitRateLow).toHaveBeenCalledTimes(2);
+  });
+
+  it('never rejects when the registry throws', async () => {
+    const { service, registry } = setup();
+    registry.list.mockImplementation(() => {
+      throw new Error('boom');
+    });
+    await expect(service.evaluateHitRates(1)).resolves.toBeUndefined();
   });
 });
