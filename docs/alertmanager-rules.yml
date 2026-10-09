@@ -120,3 +120,14 @@ groups:
         annotations:
           summary: "CVE dataset stale on {{ $labels.connection }}"
           description: "CVE scan is partial or missing sources; counts are a floor and new findings may be delayed. Check data sources and unreachable nodes."
+
+      # Level alert: under the default stop-writes-on-bgsave-error yes, every
+      # write is refused with MISCONF until a BGSAVE succeeds again
+      - alert: BetterDBPersistenceFailing
+        expr: betterdb_rdb_last_bgsave_ok == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RDB background save failing on {{ $labels.connection }}"
+          description: "Last BGSAVE failed. With stop-writes-on-bgsave-error yes (the default) the server rejects writes with MISCONF. Check disk space, permissions and fork memory."

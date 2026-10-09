@@ -61,6 +61,11 @@ import {
   resolveSlotStatsTopN,
 } from './export-profile';
 import { DropReason } from '../external-metrics/otlp-metrics-types';
+import {
+  createWriteRejectionState,
+  evaluateWriteRejection,
+  WriteRejectionState,
+} from '../monitor/write-rejection';
 
 /**
  * Ceiling on the demoted-node read, clamped down to the poll interval when that
@@ -86,6 +91,7 @@ interface ConnectionMetricState {
   previousCrcMismatch: number | null;
   previousTopology: TopologySnapshot | null;
   demotionWatch: DemotionWatch;
+  writeRejection: WriteRejectionState;
   currentKeyspaceDbLabels: Set<string>;
   currentClusterSlotLabels: Set<string>;
   // Storage-based metric labels (per-connection)
@@ -434,6 +440,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         previousCrcMismatch: null,
         previousTopology: null,
         demotionWatch: new Map(),
+        writeRejection: createWriteRejectionState(),
         currentKeyspaceDbLabels: new Set(),
         currentClusterSlotLabels: new Set(),
         // Storage-based metric labels
@@ -1268,6 +1275,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.updateStatsMetrics(info, connLabel, absentAsZero);
       this.updateCpuMetrics(info, connLabel, absentAsZero);
       this.updatePersistenceMetrics(info, connLabel, absentAsZero);
+      if (!external) {
+        this.dispatchWriteRejection(info, state, connectionId, config);
+      }
       this.updateReplicationMetrics(info, connLabel, connectionId, config, absentAsZero);
       this.updateKeyspaceMetricsFromInfo(info, connLabel, state, absentAsZero);
       if (external) {
@@ -1575,6 +1585,66 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       absentAsZero,
       parseFloat,
     );
+  }
+
+  /**
+   * writes.rejected / writes.recovered: the server refusing writes (MISCONF,
+   * OOM, READONLY, NOREPLICAS) moves no memory, CPU or latency signal, so it is
+   * read from the persistence status and errorstats deltas already in INFO.
+   */
+  private dispatchWriteRejection(
+    info: InfoResponse,
+    state: ConnectionMetricState,
+    connectionId: string,
+    config: { host: string; port: number } | null,
+  ): void {
+    const result = evaluateWriteRejection(
+      state.writeRejection,
+      info.persistence,
+      info.errorstats,
+      Date.now(),
+    );
+    if (result.transition === null) return;
+
+    const rejected = result.transition === 'rejected';
+    const eventType = rejected
+      ? WebhookEventType.WRITES_REJECTED
+      : WebhookEventType.WRITES_RECOVERED;
+    const attributes = {
+      causes: result.causes,
+      severity: result.severity,
+      rejectedSinceLastPoll: result.rejectedSinceLastPoll,
+      ...(result.rejectingForMs === null ? {} : { rejectingForMs: result.rejectingForMs }),
+    };
+    const message = rejected
+      ? `Writes are being rejected (${result.causes.join(', ')})${result.severity === 'critical' ? ' and clients are receiving errors' : ''}`
+      : `Writes accepted again after ${Math.round((result.rejectingForMs ?? 0) / 1000)}s`;
+
+    if (rejected) {
+      this.logger.error(`${message} on ${connectionId}`);
+    } else {
+      this.logger.log(`${message} on ${connectionId}`);
+    }
+
+    try {
+      this.otelEvents?.dispatch(eventType, attributes, connectionId);
+    } catch (err) {
+      this.logger.error(`Failed to dispatch ${eventType} OTLP event`, err);
+    }
+    this.webhookDispatcher
+      ?.dispatchEvent(
+        eventType,
+        {
+          ...attributes,
+          message,
+          timestamp: Date.now(),
+          instance: { host: config?.host || 'localhost', port: config?.port || 6379 },
+        },
+        connectionId,
+      )
+      .catch((err) => {
+        this.logger.error(`Failed to dispatch ${eventType} webhook`, err);
+      });
   }
 
   private updatePersistenceMetrics(
