@@ -10,7 +10,9 @@ import {
   KvCacheAdvisories,
   KvCacheCards,
   KvCacheCharts,
+  KvCacheEngines,
   KvCacheModelTable,
+  KvCacheSettingsSheet,
   advisoriesFor,
 } from '../components/pages/kv-cache';
 
@@ -69,6 +71,7 @@ export function KvCache() {
         <h1 className="text-2xl font-bold">KV Cache</h1>
         <div className="flex items-center gap-3">
           <DateRangePicker value={dateRange} onChange={setDateRange} placeholder="Last 6 hours" />
+          <KvCacheSettingsSheet />
           <Button variant="outline" onClick={() => rescan.mutate()} disabled={rescan.isPending}>
             Refresh
           </Button>
@@ -88,6 +91,7 @@ export function KvCache() {
           <KvCacheModelTable latest={latest} buckets={buckets} />
         </>
       )}
+      <KvCacheEngines engines={engines} />
     </div>
   );
 }

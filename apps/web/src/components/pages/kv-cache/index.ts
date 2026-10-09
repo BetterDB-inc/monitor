@@ -5,3 +5,7 @@ export { KvCacheModelTable } from './KvCacheModelTable';
 export { KvCacheNotDetected } from './KvCacheNotDetected';
 export { KvCacheProLocked } from './KvCacheProLocked';
 export { advisoriesFor } from './kv-cache-format';
+export { KvCacheEngines } from './KvCacheEngines';
+export { KvCacheSettingsSheet } from './KvCacheSettingsSheet';
+export { LinkEngineDialog } from './LinkEngineDialog';
+export { collectorSnippet } from './collector-snippet';
