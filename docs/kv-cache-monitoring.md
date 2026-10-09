@@ -115,7 +115,9 @@ a bounded SCAN plus a sample, extrapolated to the whole keyspace.
    multiplied by the (scaled) matched key count. Both are estimates.
    `COUNT` is only a hint and `MATCH` hides the keys it filters out, so
    "scanned keys" is the number of SCAN calls × 1000, not an exact count.
-   A full SCAN uses `DBSIZE` and is not scaled.
+   A full SCAN uses `DBSIZE` and is not scaled. If more keys match than
+   `KV_CACHE_MATCH_MAX_KEYS`, the scanned count is reduced by the share of
+   matches kept, so the dropped matches are still counted.
 
 | Variable                         | Default  | Description                                                          |
 | -------------------------------- | -------- | -------------------------------------------------------------------- |
