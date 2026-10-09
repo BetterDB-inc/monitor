@@ -26,6 +26,17 @@ const VALKEY_NAME_PATTERN = /^[a-z][a-z0-9-]{1,38}[a-z0-9]$/;
 const DEMO_OBSERVABILITY_NAMESPACE = 'demo-observability';
 const DEMO_OBSERVABILITY_PROMETHEUS_PORT = 9090;
 
+// Env vars injected only for the demo tenant. On re-provision of a tenant that
+// has been un-flagged (isDemo: false), these must be actively removed — a
+// strategic-merge env patch only ever adds/updates by name — so the published
+// token and OTLP mirror don't linger on a now-ordinary tenant.
+const DEMO_ONLY_ENV = [
+  'DEMO_HOSTNAME',
+  'PROMETHEUS_METRICS_PUBLIC_TOKEN',
+  'OTEL_EXPORTER_OTLP_ENDPOINT',
+  'OTEL_EVENTS_ENABLED',
+];
+
 // The public SNI host is an opaque, stable label derived from the instance id
 // rather than its name: this keeps it globally unique on the shared wildcard
 // endpoint (no cross-tenant collisions) without leaking the friendly name.
@@ -1123,6 +1134,11 @@ export class ProvisioningService {
         if (isDemo) {
           // Same backfill for the demo-only published token.
           await this.ensureMetricsTokenInSecret(namespace, 'PROMETHEUS_METRICS_PUBLIC_TOKEN');
+        } else {
+          // A tenant that has been un-flagged must not keep the published
+          // token around; drop it so the demoted tenant can't be scraped with
+          // the public credential.
+          await this.pruneSecretKey(namespace, 'PROMETHEUS_METRICS_PUBLIC_TOKEN');
         }
       } else {
         throw error;
@@ -1392,29 +1408,37 @@ export class ProvisioningService {
         // metrics token and OTLP mirror), silently diverging from what
         // provisioning reported.
         //
-        // Strategic-merge PATCH of the app container (plus replicas) rather
-        // than a full replace: it needs no resourceVersion (so there's no
-        // read→replace 409 race), and it leaves pod-template annotations like
-        // the metrics-token restart marker intact, so re-provision doesn't
-        // churn the pod. env merges by name, so the new demo vars are added
-        // without disturbing the rest. replicas is set back to the desired
-        // running count: a deprovision that scaled the app to 0 and then
-        // failed leaves the tenant in 'error' (re-provisionable) at replicas 0,
-        // and without this the converge would leave it there and
-        // waitForDeploymentReady would time out.
+        // Strategic-merge PATCH scoped to the fields this provisioner owns —
+        // env, resources, replicas — rather than a full replace. It needs no
+        // resourceVersion (so there's no read→replace 409 race) and leaves
+        // everything else (pod-template annotations like the metrics-token
+        // restart marker, the running image) intact, so re-provision neither
+        // churns the pod nor rolls an out-of-band image back to the DB tag.
+        // env merges by name (new demo vars added); demo-only vars are
+        // explicitly deleted when the tenant isn't a demo so a published token
+        // can't linger. replicas is set back to the desired running count: a
+        // deprovision that scaled the app to 0 and then failed leaves the
+        // tenant in 'error' (re-provisionable) at replicas 0, and without this
+        // the converge would leave it there and waitForDeploymentReady would
+        // time out.
         this.logger.log(`Deployment already exists in ${namespace}, converging app container`);
         const container = body.spec!.template!.spec!.containers![0];
-        await this.appsApi.patchNamespacedDeployment(
-          {
-            name: 'betterdb',
-            namespace,
-            body: {
-              spec: {
-                replicas: body.spec!.replicas,
-                template: { spec: { containers: [container] } },
-              },
+        const env: any[] = [...(container.env ?? [])];
+        if (!isDemo) {
+          for (const name of DEMO_ONLY_ENV) {
+            env.push({ name, $patch: 'delete' });
+          }
+        }
+        const patchBody = {
+          spec: {
+            replicas: body.spec!.replicas,
+            template: {
+              spec: { containers: [{ name: container.name, env, resources: container.resources }] },
             },
           },
+        } as unknown as k8s.V1Deployment;
+        await this.appsApi.patchNamespacedDeployment(
+          { name: 'betterdb', namespace, body: patchBody },
           k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.StrategicMergePatch),
         );
       } else {
@@ -1792,6 +1816,26 @@ export class ProvisioningService {
       k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch),
     );
     return true;
+  }
+
+  // Removes a key from the db-credentials Secret if present (JSON merge patch:
+  // a null value deletes the entry). Used to drop the published metrics token
+  // from a tenant that is no longer a demo.
+  private async pruneSecretKey(namespace: string, key: string): Promise<void> {
+    try {
+      await this.coreApi.patchNamespacedSecret(
+        {
+          name: 'db-credentials',
+          namespace,
+          body: { data: { [key]: null } } as unknown as k8s.V1Secret,
+        },
+        k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch),
+      );
+    } catch (error: any) {
+      if (!this.isNotFoundError(error)) {
+        throw error;
+      }
+    }
   }
 
   private async ensurePrometheusMetricsToken(namespace: string): Promise<boolean> {

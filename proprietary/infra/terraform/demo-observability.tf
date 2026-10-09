@@ -112,43 +112,34 @@ resource "aws_wafv2_web_acl" "tenant_alb" {
                 field_to_match {
                   uri_path {}
                 }
+                # Normalize before matching. Fastify (find-my-way) percent-decodes
+                # the path before routing, so without URL_DECODE a request like
+                # /api/prometheus/%6detrics reaches the handler while slipping past
+                # a raw match — and thus past this rate limit.
                 text_transformation {
                   priority = 0
-                  type     = "NONE"
+                  type     = "URL_DECODE"
+                }
+                text_transformation {
+                  priority = 1
+                  type     = "LOWERCASE"
                 }
               }
             }
             statement {
-              or_statement {
-                statement {
-                  byte_match_statement {
-                    search_string         = "demo.app.betterdb.com"
-                    positional_constraint = "EXACTLY"
-                    field_to_match {
-                      single_header {
-                        name = "host"
-                      }
-                    }
-                    text_transformation {
-                      priority = 0
-                      type     = "LOWERCASE"
-                    }
+              # Both hostnames the demo pod answers on, with an optional :port so
+              # a Host header like demo.app.betterdb.com:443 can't bypass an exact
+              # match. Subdomains are DNS labels, so no regex metacharacters leak in.
+              regex_match_statement {
+                regex_string = "^(demo|${var.demo_tenant_subdomain})\\.app\\.betterdb\\.com(:[0-9]+)?$"
+                field_to_match {
+                  single_header {
+                    name = "host"
                   }
                 }
-                statement {
-                  byte_match_statement {
-                    search_string         = "${var.demo_tenant_subdomain}.app.betterdb.com"
-                    positional_constraint = "EXACTLY"
-                    field_to_match {
-                      single_header {
-                        name = "host"
-                      }
-                    }
-                    text_transformation {
-                      priority = 0
-                      type     = "LOWERCASE"
-                    }
-                  }
+                text_transformation {
+                  priority = 0
+                  type     = "LOWERCASE"
                 }
               }
             }
