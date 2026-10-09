@@ -13,8 +13,9 @@ function setup(initial = [engine('a', 'c1', 'lmc-a'), engine('b', 'c2')]) {
   } as any;
   let removal: (id: string) => void = () => undefined;
   const footprint = { onConnectionRemoval: jest.fn((l) => (removal = l)) } as any;
-  const registry = new KvCacheEngineRegistry(storage, footprint);
-  return { registry, storage, removal: (id: string) => removal(id) };
+  const samples = { forgetEngine: jest.fn() } as any;
+  const registry = new KvCacheEngineRegistry(storage, footprint, samples);
+  return { registry, storage, samples, removal: (id: string) => removal(id) };
 }
 
 describe('KvCacheEngineRegistry', () => {
@@ -66,9 +67,11 @@ describe('KvCacheEngineRegistry', () => {
   });
 
   it('drops only the removed connection engines on broadcast', async () => {
-    const { registry, removal } = setup();
+    const { registry, samples, removal } = setup();
     await registry.onModuleInit();
     removal('c1');
     expect(registry.list().map((e) => e.id)).toEqual(['b']);
+    expect(samples.forgetEngine).toHaveBeenCalledTimes(1);
+    expect(samples.forgetEngine).toHaveBeenCalledWith('a');
   });
 });

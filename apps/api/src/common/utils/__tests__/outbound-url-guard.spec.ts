@@ -15,6 +15,8 @@ describe('outbound url guard', () => {
     expect(isBlockedIp('169.254.169.254', true)).toBe(true);
     expect(isBlockedIp('fe80::1', true)).toBe(true);
     expect(isBlockedIp('8.8.8.8')).toBe(false);
+    expect(isBlockedIp('[::1]', true)).toBe(true);
+    expect(isBlockedIp('127.0.0.1', true)).toBe(true);
   });
 
   it('rejects non-http protocols with the existing message', async () => {
@@ -47,7 +49,28 @@ describe('outbound url guard', () => {
 
   it('still rejects loopback addresses when private networks are allowed', async () => {
     process.env.NODE_ENV = 'production';
-    await expect(assertSafeOutboundUrl('http://127.0.0.2/metrics', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toThrow('Suspicious hostname detected');
+    await expect(assertSafeOutboundUrl('http://127.0.0.2/metrics', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(assertSafeOutboundUrl('http://[::1]:9400/metrics', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(assertSafeOutboundUrl('http://[fe80::1]/metrics', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('treats IPv6 loopback as localhost outside production', async () => {
+    process.env.NODE_ENV = 'development';
+    await expect(assertSafeOutboundUrl('http://[::1]:9400/metrics', { label: 'metrics URL' })).resolves.toBeInstanceOf(URL);
+  });
+
+  it('does not resolve DNS for IP literals', async () => {
+    process.env.NODE_ENV = 'production';
+    const resolve = jest.spyOn(dns, 'resolve');
+    await expect(assertSafeOutboundUrl('http://10.1.2.3:8000/metrics', { label: 'metrics URL', allowPrivateNetworks: true })).resolves.toBeInstanceOf(URL);
+    await expect(assertSafeOutboundUrl('http://8.8.8.8/x', { label: 'webhook URL' })).resolves.toBeInstanceOf(URL);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it('rejects a DNS answer in loopback space even when private networks are allowed', async () => {
+    process.env.NODE_ENV = 'production';
+    jest.spyOn(dns, 'resolve').mockResolvedValue(['127.0.0.1'] as any);
+    await expect(assertSafeOutboundUrl('http://metrics.example.com/x', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toThrow('Metrics URL resolves to blocked IP address: 127.0.0.1');
   });
 
   it('rejects a DNS answer in link-local space even when private networks are allowed', async () => {
