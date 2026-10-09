@@ -1,5 +1,6 @@
 import { BadRequestException, Logger } from '@nestjs/common';
 import { promises as dns } from 'dns';
+import { isIP } from 'net';
 
 export interface OutboundUrlOptions {
   label: string;
@@ -21,12 +22,18 @@ const BLOCKED_IP_PATTERNS = [
 
 const ALWAYS_BLOCKED = [/^169\.254\./, /^fe80:/i];
 
+const LOOPBACK = [/^127\./, /^0\.0\.0\.0$/, /^::1?$/, /^::ffff:127\./i];
+
+const bareHost = (hostname: string) => hostname.replace(/^\[|\]$/g, '').toLowerCase();
+
 const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
 export function isBlockedIp(ip: string, allowPrivateNetworks = false): boolean {
-  if (ALWAYS_BLOCKED.some((pattern) => pattern.test(ip))) return true;
+  const address = bareHost(ip);
+  if (ALWAYS_BLOCKED.some((pattern) => pattern.test(address))) return true;
+  if (LOOPBACK.some((pattern) => pattern.test(address))) return true;
   if (allowPrivateNetworks) return false;
-  return BLOCKED_IP_PATTERNS.some((pattern) => pattern.test(ip));
+  return BLOCKED_IP_PATTERNS.some((pattern) => pattern.test(address));
 }
 
 export async function assertSafeOutboundUrl(rawUrl: string, options: OutboundUrlOptions): Promise<URL> {
@@ -43,10 +50,8 @@ export async function assertSafeOutboundUrl(rawUrl: string, options: OutboundUrl
     }
 
     const isProduction = process.env.NODE_ENV === 'production';
-    const isLocalhost = parsed.hostname === 'localhost' ||
-      parsed.hostname === '0.0.0.0' ||
-      parsed.hostname === '127.0.0.1' ||
-      parsed.hostname.startsWith('127.');
+    const host = bareHost(parsed.hostname);
+    const isLocalhost = host === 'localhost' || LOOPBACK.some((pattern) => pattern.test(host));
 
     if (isLocalhost && !isProduction) {
       logger.debug(`Allowing localhost ${label} in ${process.env.NODE_ENV || 'development'} mode: ${rawUrl}`);
@@ -65,7 +70,7 @@ export async function assertSafeOutboundUrl(rawUrl: string, options: OutboundUrl
       throw new BadRequestException('Suspicious hostname detected');
     }
 
-    if (isProduction) {
+    if (isProduction && !isIP(host)) {
       try {
         const addresses = await dns.resolve(parsed.hostname);
         for (const addr of addresses) {

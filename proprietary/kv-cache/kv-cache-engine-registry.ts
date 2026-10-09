@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import type { StoragePort, StoredKvCacheEngine } from '@app/common/interfaces/storage-port.interface';
 import { KvCacheFootprintService } from './kv-cache-footprint.service';
+import { KvCacheSamplesService } from './kv-cache-samples.service';
 
 @Injectable()
 export class KvCacheEngineRegistry implements OnModuleInit {
@@ -10,13 +11,16 @@ export class KvCacheEngineRegistry implements OnModuleInit {
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly footprint: KvCacheFootprintService,
+    private readonly samples: KvCacheSamplesService,
   ) {}
 
   async onModuleInit(): Promise<void> {
     for (const engine of await this.storage.getKvCacheEngines()) this.engines.set(engine.id, engine);
     this.footprint.onConnectionRemoval((connectionId) => {
       for (const [id, engine] of this.engines) {
-        if (engine.connectionId === connectionId) this.engines.delete(id);
+        if (engine.connectionId !== connectionId) continue;
+        this.engines.delete(id);
+        this.samples.forgetEngine(id);
       }
     });
   }

@@ -62,8 +62,12 @@ export class KvCacheSamplesService implements OnModuleInit, OnModuleDestroy {
     this.tracker.forgetBaselines(engineId);
   }
 
-  async deleteEngine(engineId: string): Promise<void> {
+  forgetEngine(engineId: string): void {
     this.tracker.forgetEngine(engineId);
+  }
+
+  async deleteEngine(engineId: string): Promise<void> {
+    this.forgetEngine(engineId);
     await this.storage.deleteKvCacheEngineSamples(engineId);
   }
 
