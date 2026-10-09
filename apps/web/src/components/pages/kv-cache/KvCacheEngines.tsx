@@ -38,6 +38,11 @@ export function KvCacheEngines({ engines }: { engines: KvCacheEngine[] }) {
     },
   });
 
+  const closeDelete = () => {
+    setPendingDelete(null);
+    remove.reset();
+  };
+
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between space-y-0">
@@ -103,7 +108,7 @@ export function KvCacheEngines({ engines }: { engines: KvCacheEngine[] }) {
       <Dialog
         open={pendingDelete !== null}
         onOpenChange={(open) => {
-          if (!open) setPendingDelete(null);
+          if (!open) closeDelete();
         }}
       >
         <DialogContent>
@@ -117,7 +122,7 @@ export function KvCacheEngines({ engines }: { engines: KvCacheEngine[] }) {
             <p className="text-sm text-destructive">{remove.error.message}</p>
           ) : null}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setPendingDelete(null)}>
+            <Button variant="outline" onClick={closeDelete}>
               Cancel
             </Button>
             <Button

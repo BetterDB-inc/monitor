@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import type { KvCacheEngine, KvCacheEngineCreate } from '@betterdb/shared';
+import { apiOrigin } from '../../../api/client';
 import { kvCacheApi } from '../../../api/kv-cache';
 import { Button } from '../../ui/button';
 import {
@@ -74,7 +75,7 @@ export function LinkEngineDialog({
   };
 
   const snippet = created?.otlpEngineId
-    ? collectorSnippet(created.otlpEngineId, window.location.origin)
+    ? collectorSnippet(created.otlpEngineId, apiOrigin())
     : null;
 
   const copy = async () => {

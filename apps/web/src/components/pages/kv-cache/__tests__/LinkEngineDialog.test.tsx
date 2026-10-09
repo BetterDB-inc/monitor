@@ -60,6 +60,6 @@ describe('LinkEngineDialog', () => {
     );
     const pre = await screen.findByTestId('collector-snippet');
     expect(pre.textContent).toContain('value: lmc-abc123');
-    expect(pre.textContent).toContain(`${window.location.origin}/v1/external/metrics`);
+    expect(pre.textContent).toContain('http://localhost:3001/v1/external/metrics');
   });
 });
