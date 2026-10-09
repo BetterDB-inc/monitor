@@ -31,6 +31,7 @@ export class KvCacheEnginesService {
   }
 
   async create(connectionId: string, dto: CreateKvCacheEngineDto): Promise<KvCacheEngine> {
+    this.assertUniqueName(connectionId, dto.name);
     const base = {
       id: randomUUID(),
       connectionId,
@@ -55,6 +56,7 @@ export class KvCacheEnginesService {
 
   async update(connectionId: string, id: string, dto: UpdateKvCacheEngineDto): Promise<KvCacheEngine> {
     const engine = this.owned(connectionId, id);
+    if (dto.name !== undefined) this.assertUniqueName(connectionId, dto.name, id);
     let probe: { lastError: string | null; lastSeenAt: number } | null = null;
     if (engine.source === 'scrape') {
       const urlChanged = dto.scrapeUrl !== undefined && dto.scrapeUrl !== engine.scrapeUrl;
@@ -69,6 +71,7 @@ export class KvCacheEnginesService {
       }
     }
     const fresh = this.owned(connectionId, id);
+    if (dto.name !== undefined) this.assertUniqueName(connectionId, dto.name, id);
     const next: StoredKvCacheEngine = { ...fresh };
     if (dto.name !== undefined) next.name = dto.name;
     if (dto.enabled !== undefined) next.enabled = dto.enabled;
@@ -102,6 +105,11 @@ export class KvCacheEnginesService {
     }
     this.warnUndecryptable(engine.id);
     return null;
+  }
+
+  private assertUniqueName(connectionId: string, name: string, exceptId?: string): void {
+    const taken = this.registry.list(connectionId).some((engine) => engine.id !== exceptId && engine.name === name);
+    if (taken) throw new ConflictException(`An engine named "${name}" is already linked to this connection`);
   }
 
   private sameOrigin(a: string | null, b: string | undefined): boolean {

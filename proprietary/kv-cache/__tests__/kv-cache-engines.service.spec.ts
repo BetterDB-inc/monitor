@@ -70,9 +70,20 @@ describe('KvCacheEnginesService', () => {
     expect(generated.otlpEngineId).toMatch(/^lmc-[0-9a-f]{12}$/);
     expect(store.get(generated.id)).toMatchObject({ scrapeUrl: null, scrapeAuthHeader: null });
     expect(fetchMock).not.toHaveBeenCalled();
-    await service.create('c1', { name: 'n', source: 'otlp', otlpEngineId: 'mine' });
+    await service.create('c1', { name: 'n2', source: 'otlp', otlpEngineId: 'mine' });
     await expect(service.create('c2', { name: 'n', source: 'otlp', otlpEngineId: 'mine' })).rejects.toBeInstanceOf(ConflictException);
-    await expect(service.create('c1', { name: 'n', source: 'otlp', otlpEngineId: 'bad id!' })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.create('c1', { name: 'n3', source: 'otlp', otlpEngineId: 'bad id!' })).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects a duplicate engine name on the same connection', async () => {
+    const { service, registry } = setup();
+    const first = await service.create('c1', { name: 'vllm', source: 'otlp' });
+    await expect(service.create('c1', { name: 'vllm', source: 'scrape', scrapeUrl: 'http://x' })).rejects.toBeInstanceOf(ConflictException);
+    await expect(service.create('c2', { name: 'vllm', source: 'otlp' })).resolves.toMatchObject({ name: 'vllm' });
+    const second = await service.create('c1', { name: 'sglang', source: 'otlp' });
+    await expect(service.update('c1', second.id, { name: 'vllm' })).rejects.toBeInstanceOf(ConflictException);
+    await expect(service.update('c1', first.id, { name: 'vllm' })).resolves.toMatchObject({ name: 'vllm' });
+    expect(registry.save).toHaveBeenCalledTimes(4);
   });
 
   it('resolves the stored auth header', () => {
