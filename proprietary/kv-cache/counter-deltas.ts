@@ -80,11 +80,15 @@ export class CounterDeltaTracker {
   }
 
   forgetEngine(engineId: string): void {
-    for (const id of [...this.last.keys()]) {
-      if (id.startsWith(`${engineId}|`)) this.last.delete(id);
-    }
+    this.forgetBaselines(engineId);
     for (const [id, bucket] of this.buckets) {
       if (bucket.engineId === engineId) this.buckets.delete(id);
+    }
+  }
+
+  forgetBaselines(engineId: string): void {
+    for (const id of [...this.last.keys()]) {
+      if (id.startsWith(`${engineId}|`)) this.last.delete(id);
     }
   }
 
@@ -101,8 +105,8 @@ export class CounterDeltaTracker {
     }
     this.last.set(id, { value: observation.value, startMs: observation.startMs });
     if (!previous) return null;
-    return observation.value >= previous.value
-      ? observation.value - previous.value
-      : observation.value;
+    const restarted =
+      observation.startMs !== undefined && previous.startMs !== undefined && observation.startMs !== previous.startMs;
+    return restarted || observation.value < previous.value ? observation.value : observation.value - previous.value;
   }
 }

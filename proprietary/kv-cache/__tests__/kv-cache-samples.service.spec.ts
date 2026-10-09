@@ -33,6 +33,7 @@ function setup() {
   const storage = {
     saveKvCacheEngineSamples: jest.fn().mockResolvedValue(undefined),
     getKvCacheEngineSamples: jest.fn().mockResolvedValue([]),
+    deleteKvCacheEngineSamples: jest.fn().mockResolvedValue(undefined),
   };
   return { storage, service: new KvCacheSamplesService(storage as any) };
 }
@@ -105,12 +106,23 @@ describe('KvCacheSamplesService', () => {
     warn.mockRestore();
   });
 
-  it('drops pending buckets of a forgotten engine', async () => {
+  it('drops pending buckets and stored samples of a deleted engine', async () => {
     const { service, storage } = setup();
     service.observe(observation(10), 61_000);
-    service.forgetEngine('e1');
+    await service.deleteEngine('e1');
+    expect(storage.deleteKvCacheEngineSamples).toHaveBeenCalledWith('e1');
     await service.flush(120_000);
     expect(storage.saveKvCacheEngineSamples).not.toHaveBeenCalled();
+  });
+
+  it('resets baselines without dropping pending buckets', async () => {
+    const { service, storage } = setup();
+    service.observe(observation(100, true), 61_000);
+    service.observe(observation(110, true), 62_000);
+    service.resetBaselines('e1');
+    service.observe(observation(5000, true), 63_000);
+    await service.flush(120_000);
+    expect(storage.saveKvCacheEngineSamples).toHaveBeenCalledWith([expect.objectContaining({ requestedTokens: 10 })]);
   });
 
   it('caps the range and computes the range hit rate across engines', async () => {

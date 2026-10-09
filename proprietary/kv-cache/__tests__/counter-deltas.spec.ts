@@ -37,6 +37,14 @@ describe('CounterDeltaTracker', () => {
     expect(t.drain(60_000)[0].hitTokens).toBe(60);
   });
 
+  it('counts the whole value when the series restarts above the old baseline', () => {
+    const t = new CounterDeltaTracker();
+    t.observe(obs({ value: 100, startMs: 5 }), 1_000);
+    t.observe(obs({ value: 140, startMs: 9 }), 2_000);
+    t.observe(obs({ value: 150, startMs: 9 }), 3_000);
+    expect(t.drain(60_000)[0].hitTokens).toBe(150);
+  });
+
   it('sums workers into one bucket per engine and model', () => {
     const t = new CounterDeltaTracker();
     for (const series of ['0|worker', '1|worker']) {
@@ -96,5 +104,15 @@ describe('CounterDeltaTracker', () => {
     expect(t.drain(200_000, true)).toEqual([]);
     t.observe(obs({ value: 50 }), 3_000);
     expect(t.drain(200_000, true)).toEqual([]);
+  });
+
+  it('forgets baselines but keeps pending buckets', () => {
+    const t = new CounterDeltaTracker();
+    t.observe(obs({ value: 0 }), 1_000);
+    t.observe(obs({ value: 5 }), 2_000);
+    t.forgetBaselines('e1');
+    t.observe(obs({ value: 500 }), 3_000);
+    t.observe(obs({ value: 510 }), 4_000);
+    expect(t.drain(200_000, true)[0].hitTokens).toBe(15);
   });
 });

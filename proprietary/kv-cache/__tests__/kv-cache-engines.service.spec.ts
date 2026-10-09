@@ -18,7 +18,7 @@ function setup(encrypted = true) {
   } as any;
   const encryption = encrypted ? { encrypt: (s: string) => 'enc:' + s, decrypt: (s: string) => s.slice(4) } : null;
   const connections = { getEncryptionService: jest.fn().mockReturnValue(encryption) } as any;
-  const samples = { forgetEngine: jest.fn() } as any;
+  const samples = { deleteEngine: jest.fn().mockResolvedValue(undefined), resetBaselines: jest.fn() } as any;
   return { service: new KvCacheEnginesService(registry, connections, samples), registry, store, connections, samples };
 }
 
@@ -126,10 +126,35 @@ describe('KvCacheEnginesService', () => {
     const { service, store, samples } = setup();
     const created = await service.create('c1', { name: 'n', source: 'scrape', scrapeUrl: 'http://x' });
     await expect(service.remove('c2', created.id)).rejects.toBeInstanceOf(NotFoundException);
-    expect(samples.forgetEngine).not.toHaveBeenCalled();
+    expect(samples.deleteEngine).not.toHaveBeenCalled();
     await service.remove('c1', created.id);
     expect(store.has(created.id)).toBe(false);
-    expect(samples.forgetEngine).toHaveBeenCalledWith(created.id);
+    expect(samples.deleteEngine).toHaveBeenCalledWith(created.id);
+  });
+
+  it('resets counter baselines when an engine is disabled', async () => {
+    const { service, samples } = setup();
+    const created = await service.create('c1', { name: 'n', source: 'otlp' });
+    await service.update('c1', created.id, { name: 'renamed' });
+    expect(samples.resetBaselines).not.toHaveBeenCalled();
+    await service.update('c1', created.id, { enabled: false });
+    expect(samples.resetBaselines).toHaveBeenCalledWith(created.id);
+  });
+
+  it('resets counter baselines when an engine is enabled again', async () => {
+    const { service, samples } = setup();
+    const created = await service.create('c1', { name: 'n', source: 'otlp', enabled: false });
+    await service.update('c1', created.id, { enabled: true });
+    expect(samples.resetBaselines).toHaveBeenCalledWith(created.id);
+  });
+
+  it('resets counter baselines when the scrape URL changes', async () => {
+    const { service, samples } = setup();
+    const created = await service.create('c1', { name: 'n', source: 'scrape', scrapeUrl: 'http://x' });
+    await service.update('c1', created.id, { scrapeUrl: 'http://x' });
+    expect(samples.resetBaselines).not.toHaveBeenCalled();
+    await service.update('c1', created.id, { scrapeUrl: 'http://y/metrics' });
+    expect(samples.resetBaselines).toHaveBeenCalledWith(created.id);
   });
 
   it('sends the re-test without auth when the header is cleared with a URL change', async () => {

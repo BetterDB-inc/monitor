@@ -77,13 +77,15 @@ export class KvCacheEnginesService {
       if (dto.scrapeAuthHeader !== undefined) Object.assign(next, this.storeAuthHeader(dto.scrapeAuthHeader || null));
       if (probe) Object.assign(next, probe);
     }
-    return toPublicEngine(await this.registry.save(next));
+    const saved = await this.registry.save(next);
+    if (fresh.enabled !== saved.enabled || fresh.scrapeUrl !== saved.scrapeUrl) this.samples.resetBaselines(id);
+    return toPublicEngine(saved);
   }
 
   async remove(connectionId: string, id: string): Promise<void> {
     this.owned(connectionId, id);
     await this.registry.remove(id);
-    this.samples.forgetEngine(id);
+    await this.samples.deleteEngine(id);
   }
 
   authHeaderFor(engine: StoredKvCacheEngine): string | null {

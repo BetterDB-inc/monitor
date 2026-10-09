@@ -4013,6 +4013,11 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return chunkedPostgresDelete(this.pool, 'kv_cache_engine_samples', 'timestamp < $1', [cutoffTimestamp]);
   }
 
+  async deleteKvCacheEngineSamples(engineId: string): Promise<void> {
+    if (!this.pool) throw new Error('Database not initialized');
+    await chunkedPostgresDelete(this.pool, 'kv_cache_engine_samples', 'engine_id = $1', [engineId]);
+  }
+
   async saveKvCacheEngine(e: StoredKvCacheEngine): Promise<StoredKvCacheEngine> {
     if (!this.pool) throw new Error('Database not initialized');
     await this.pool.query(
