@@ -16,20 +16,33 @@ const BLOCKED_IP_PATTERNS = [
   /^192\.168\./,
   /^169\.254\./,
   /^::1$/,
-  /^fe80:/,
-  /^fc00:/,
+  /^fe[89ab][0-9a-f]:/i,
+  /^f[cd][0-9a-f]{2}:/i,
 ];
 
-const ALWAYS_BLOCKED = [/^169\.254\./, /^fe80:/i];
+const ALWAYS_BLOCKED = [/^169\.254\./, /^fe[89ab][0-9a-f]:/i];
 
-const LOOPBACK = [/^127\./, /^0\.0\.0\.0$/, /^::1?$/, /^::ffff:127\./i];
+const LOOPBACK = [/^127\./, /^0\.0\.0\.0$/, /^::1?$/];
+
+const MAPPED_DOTTED = /^::ffff:(?:0:)?(\d{1,3}(?:\.\d{1,3}){3})$/;
+const MAPPED_HEX = /^::ffff:(?:0:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/;
 
 const bareHost = (hostname: string) => hostname.replace(/^\[|\]$/g, '').toLowerCase();
+
+function unmapIpv4(address: string): string {
+  const dotted = MAPPED_DOTTED.exec(address);
+  if (dotted) return dotted[1];
+  const hex = MAPPED_HEX.exec(address);
+  if (!hex) return address;
+  const high = parseInt(hex[1], 16);
+  const low = parseInt(hex[2], 16);
+  return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+}
 
 const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
 export function isBlockedIp(ip: string, allowPrivateNetworks = false): boolean {
-  const address = bareHost(ip);
+  const address = unmapIpv4(bareHost(ip));
   if (ALWAYS_BLOCKED.some((pattern) => pattern.test(address))) return true;
   if (LOOPBACK.some((pattern) => pattern.test(address))) return true;
   if (allowPrivateNetworks) return false;
@@ -50,7 +63,7 @@ export async function assertSafeOutboundUrl(rawUrl: string, options: OutboundUrl
     }
 
     const isProduction = process.env.NODE_ENV === 'production';
-    const host = bareHost(parsed.hostname);
+    const host = unmapIpv4(bareHost(parsed.hostname));
     const isLocalhost = host === 'localhost' || LOOPBACK.some((pattern) => pattern.test(host));
 
     if (isLocalhost && !isProduction) {

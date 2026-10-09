@@ -54,6 +54,20 @@ describe('outbound url guard', () => {
     await expect(assertSafeOutboundUrl('http://[fe80::1]/metrics', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toBeInstanceOf(BadRequestException);
   });
 
+  it('unwraps IPv4-mapped IPv6 addresses before classifying them', async () => {
+    expect(isBlockedIp('::ffff:169.254.169.254', true)).toBe(true);
+    expect(isBlockedIp('[::ffff:a9fe:a9fe]', true)).toBe(true);
+    expect(isBlockedIp('::ffff:7f00:1', true)).toBe(true);
+    expect(isBlockedIp('::ffff:0a00:0001')).toBe(true);
+    expect(isBlockedIp('::ffff:0a00:0001', true)).toBe(false);
+    expect(isBlockedIp('::ffff:808:808')).toBe(false);
+    expect(isBlockedIp('fd12::1')).toBe(true);
+    expect(isBlockedIp('febf::1', true)).toBe(true);
+    process.env.NODE_ENV = 'production';
+    await expect(assertSafeOutboundUrl('http://[::ffff:169.254.169.254]/latest', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(assertSafeOutboundUrl('http://[::ffff:7f00:1]/metrics', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toBeInstanceOf(BadRequestException);
+  });
+
   it('treats IPv6 loopback as localhost outside production', async () => {
     process.env.NODE_ENV = 'development';
     await expect(assertSafeOutboundUrl('http://[::1]:9400/metrics', { label: 'metrics URL' })).resolves.toBeInstanceOf(URL);
