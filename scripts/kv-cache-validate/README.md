@@ -34,6 +34,10 @@ the lookups in two halves 60 seconds apart, prints the expected hit rate, the
 stored chunk count and the first key, then holds for `--hold` seconds
 (default 600).
 
+The metrics server binds to `127.0.0.1`. Pass `--bind 0.0.0.0` when BetterDB
+runs in a container and has to reach the script from outside the host's
+loopback.
+
 ## Check
 
 1. Link `http://localhost:9400/metrics` as a scrape engine on the KV Cache page

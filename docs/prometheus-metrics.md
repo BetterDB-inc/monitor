@@ -205,6 +205,7 @@ This example uses `full` with 5 standalone primaries and 2 cluster primaries, as
 - all 4 ACL reasons
 - 4 forecasts
 - no anomaly events
+- no linked LMCache engines, so no KV-cache series
 
 | Term                | Standalone primary | Cluster primary |
 | ------------------- | ------------------ | --------------- |

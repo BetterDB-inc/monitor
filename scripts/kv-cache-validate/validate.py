@@ -44,6 +44,12 @@ def parse_args():
     parser.add_argument("--hit-ratio", type=float, default=0.7)
     parser.add_argument("--lookups", type=int, default=200)
     parser.add_argument("--port", type=int, default=9400)
+    parser.add_argument(
+        "--bind",
+        default="127.0.0.1",
+        help="Address for the metrics server. Use 0.0.0.0 when BetterDB runs "
+        "in a container.",
+    )
     parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
     parser.add_argument(
         "--extra",
@@ -127,7 +133,10 @@ def lookup_half(loop, connector, model, counters, stored_hashes, args, start, en
 
 def main():
     args = parse_args()
-    extra = json.loads(args.extra) if args.extra else {}
+    try:
+        extra = json.loads(args.extra) if args.extra else {}
+    except json.JSONDecodeError as error:
+        sys.exit(f"--extra is not valid JSON: {error}")
     chunks = args.chunks
     if args.url.startswith("redis://") and chunks > REDIS_CHUNK_CAP:
         print(
@@ -176,8 +185,8 @@ def main():
 
     registry = CollectorRegistry()
     counters = build_counters(args.model, registry)
-    start_http_server(args.port, registry=registry)
-    print(f"serving metrics on http://localhost:{args.port}/metrics")
+    start_http_server(args.port, addr=args.bind, registry=registry)
+    print(f"serving metrics on http://{args.bind}:{args.port}/metrics")
 
     midpoint = args.lookups // 2
     hits = lookup_half(
