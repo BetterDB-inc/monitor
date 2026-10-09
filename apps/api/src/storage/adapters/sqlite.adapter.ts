@@ -1563,6 +1563,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
         throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
         inference_sla_config TEXT NOT NULL DEFAULT '{}',
+        anomaly_detector_config TEXT NOT NULL DEFAULT '{}',
         local_retention_days INTEGER,
         updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
         created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)

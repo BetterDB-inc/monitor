@@ -312,6 +312,7 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_anomaly_by_severity` | `betterdb.anomaly.by_severity` | `{event}` |
 | `betterdb_anomaly_by_metric` | `betterdb.anomaly.by_metric` | `{event}` |
 | `betterdb_correlated_groups_total` | `betterdb.anomaly.correlated_groups` | `{group}` |
+| `betterdb_detector_config_updates_total` | `betterdb.anomaly.detector_config_updates` | `{update}` |
 | `betterdb_correlated_groups_by_severity` | `betterdb.anomaly.correlated_groups_by_severity` | `{group}` |
 | `betterdb_correlated_groups_by_pattern` | `betterdb.anomaly.correlated_groups_by_pattern` | `{group}` |
 | `betterdb_anomaly_buffer_ready` | `betterdb.anomaly.buffer.ready` | `1` |

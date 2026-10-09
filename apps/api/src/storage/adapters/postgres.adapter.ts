@@ -1452,6 +1452,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
         throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
         inference_sla_config JSONB NOT NULL DEFAULT '{}'::JSONB,
+        anomaly_detector_config JSONB NOT NULL DEFAULT '{}'::JSONB,
         local_retention_days INTEGER,
         updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
         created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
