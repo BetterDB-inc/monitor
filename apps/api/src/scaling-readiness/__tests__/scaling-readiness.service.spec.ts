@@ -28,7 +28,14 @@ function setup(options: {
     }),
   };
   const storage = {
-    getMemorySnapshots: jest.fn().mockResolvedValue([...(options.snapshots ?? [])].reverse()),
+    getMemorySnapshots: jest
+      .fn()
+      .mockImplementation(async ({ startTime, limit }: { startTime: number; limit: number }) =>
+        [...(options.snapshots ?? [])]
+          .reverse()
+          .filter((s) => s.timestamp >= startTime)
+          .slice(0, limit),
+      ),
   };
   const registry = {
     get: jest.fn().mockReturnValue(client),
@@ -58,6 +65,31 @@ describe('ScalingReadinessService', () => {
     expect(r.score).toBeNull();
     expect(r.summary).toBe('Not applicable to Sentinel');
     expect(storage.getMemorySnapshots).not.toHaveBeenCalled();
+  });
+
+  it('reads the 7-day trend once per 15 minutes', async () => {
+    const { service, storage } = setup({ snapshots: twoDays() });
+    const weekReads = () =>
+      storage.getMemorySnapshots.mock.calls.filter(([o]) => o.limit === 11_000).length;
+    await service.compute('c');
+    jest.setSystemTime(NOW + 61_000);
+    await service.compute('c');
+    expect(storage.getMemorySnapshots).toHaveBeenCalledTimes(3);
+    expect(weekReads()).toBe(1);
+    jest.setSystemTime(NOW + 15 * 60_000);
+    await service.compute('c');
+    expect(weekReads()).toBe(2);
+  });
+
+  it('excludes memory, connections and CPU when the latest sample is stale', async () => {
+    const { service } = setup({ snapshots: [snap(2 * DAY_MS), snap(DAY_MS), snap(11 * 60_000)] });
+    const r = await service.compute('c');
+    for (const key of ['memory', 'connections', 'cpu']) {
+      expect(r.dimensions.find((d) => d.key === key)!.excludedReason).toBe(
+        'No samples in the last 10 minutes',
+      );
+    }
+    expect(r.dimensions.find((d) => d.key === 'keyspaceGrowth')!.excludedReason).toBeNull();
   });
 
   it('reads the last 7 days of snapshots for the connection', async () => {
@@ -121,7 +153,7 @@ describe('ScalingReadinessService', () => {
   it('shares one compute between concurrent calls', async () => {
     const { service, storage } = setup({ snapshots: twoDays() });
     await Promise.all([service.compute('c'), service.compute('c')]);
-    expect(storage.getMemorySnapshots).toHaveBeenCalledTimes(1);
+    expect(storage.getMemorySnapshots).toHaveBeenCalledTimes(2);
   });
 
   it('does not cache a failed compute', async () => {
@@ -183,9 +215,9 @@ describe('ScalingReadinessService', () => {
     await service.compute('c');
     jest.setSystemTime(NOW + 59_000);
     await service.compute('c');
-    expect(storage.getMemorySnapshots).toHaveBeenCalledTimes(1);
+    expect(storage.getMemorySnapshots).toHaveBeenCalledTimes(2);
     jest.setSystemTime(NOW + 61_000);
     await service.compute('c');
-    expect(storage.getMemorySnapshots).toHaveBeenCalledTimes(2);
+    expect(storage.getMemorySnapshots).toHaveBeenCalledTimes(3);
   });
 });
