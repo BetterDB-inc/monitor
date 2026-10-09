@@ -53,6 +53,16 @@ export function KvCache() {
     refetchInterval,
   });
 
+  const liveHistory = useQuery({
+    queryKey: kvCacheKeys.history(connectionId, 0, 0),
+    queryFn: ({ signal }) => {
+      const end = Date.now();
+      return kvCacheApi.getFootprintHistory(end - DEFAULT_RANGE_MS, end, signal);
+    },
+    enabled: connectionId !== null,
+    refetchInterval: 60_000,
+  });
+
   const recent = useQuery({
     queryKey: kvCacheKeys.samples(connectionId, { recent: RECENT_HIT_RATE_MS }),
     queryFn: ({ signal }) => {
@@ -87,7 +97,7 @@ export function KvCache() {
         <>
           <KvCacheCards
             latest={latest}
-            history={history.data ?? []}
+            history={liveHistory.data ?? []}
             engines={engines}
             recentHitRate={recent.data?.rangeHitRate ?? null}
             recentBuckets={recent.data?.buckets ?? []}
