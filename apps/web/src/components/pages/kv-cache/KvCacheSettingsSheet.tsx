@@ -33,6 +33,7 @@ export function KvCacheSettingsSheet() {
 
   const save = useMutation({
     mutationFn: (update: KvCacheSettingsUpdate) => kvCacheApi.updateSettings(update),
+    scope: { id: `kv-cache-settings:${connectionId}` },
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: kvCacheKeys.settings(connectionId) }),
   });
