@@ -13,7 +13,7 @@ interface Props {
   history: KvCacheFootprintSnapshot[];
   engines: KvCacheEngine[];
   recentHitRate: number | null;
-  buckets: KvCacheSampleBucket[];
+  recentBuckets: KvCacheSampleBucket[];
 }
 
 interface StatCardProps {
@@ -52,8 +52,8 @@ function hitRateSparkline(buckets: KvCacheSampleBucket[]) {
     .map(([timestamp, { hit, requested }]) => ({ timestamp, hitRate: hit / requested }));
 }
 
-export function KvCacheCards({ latest, history, engines, recentHitRate, buckets }: Props) {
-  const sparkline = hitRateSparkline(buckets);
+export function KvCacheCards({ latest, history, engines, recentHitRate, recentBuckets }: Props) {
+  const sparkline = hitRateSparkline(recentBuckets);
   const evictions = evictionsPerMinute(history);
   const memoryShare = latest.maxmemory > 0 ? latest.bytesEst / latest.maxmemory : null;
   const footprintDetails = [

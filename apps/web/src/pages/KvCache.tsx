@@ -84,7 +84,7 @@ export function KvCache() {
             history={history.data ?? []}
             engines={engines}
             recentHitRate={recent.data?.rangeHitRate ?? null}
-            buckets={buckets}
+            recentBuckets={recent.data?.buckets ?? []}
           />
           <KvCacheAdvisories advisories={advisoriesFor(latest)} />
           <KvCacheCharts buckets={buckets} history={history.data ?? []} engines={engines} />
