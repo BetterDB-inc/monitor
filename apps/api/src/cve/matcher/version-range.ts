@@ -131,16 +131,14 @@ function lowestPatchedAt(ranges: BranchRange[]): string | undefined {
 }
 
 /**
- * True when the version sits at or above an upper bound published for its
- * own branch, i.e. the branch says "fixed here". A wildcard range must never
- * override that, or a broad cross-branch range would re-flag patched builds.
+ * True when the version sits at or above a fix published for its own branch,
+ * i.e. the branch says "fixed here". A wildcard range must never override
+ * that, or a broad cross-branch range would re-flag patched builds. An upper
+ * bound without a patchedAt is not a fix and does not suppress the wildcard.
  */
 function pastBranchFix(version: string, onBranch: BranchRange[]): boolean {
   return onBranch.some((range) => {
-    return (
-      (range.vulnerableBelow !== undefined || range.vulnerableAtOrBelow !== undefined) &&
-      belowUpperBoundOf(version, range) === false
-    );
+    return range.patchedAt !== undefined && compareVersions(version, range.patchedAt) >= 0;
   });
 }
 
