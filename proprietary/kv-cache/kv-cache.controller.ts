@@ -3,7 +3,6 @@ import { ApiHeader, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { Feature, type KvCacheFootprintSnapshot, type KvCacheStatus } from '@betterdb/shared';
 import { LicenseGuard } from '@proprietary/licenses';
 import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
-import { AllowMembers } from '@app/auth/guards/roles.decorator';
 import { ConnectionId } from '@app/common/decorators';
 import { ENV_DEFAULT_ID } from '@app/connections/connection-registry.service';
 import { KvCacheFootprintService } from './kv-cache-footprint.service';
@@ -35,7 +34,6 @@ export class KvCacheController {
     return this.status.getStatus(connectionId || ENV_DEFAULT_ID);
   }
 
-  @AllowMembers()
   @Post('footprint/refresh')
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.KV_CACHE_MONITORING)
