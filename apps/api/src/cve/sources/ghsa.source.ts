@@ -6,7 +6,7 @@ import type {
   CveSeverity,
 } from '@betterdb/shared';
 import { GHSA_REPOS } from '../cve.constants';
-import { branchOf } from '../matcher/version-range';
+import { branchOf, compareVersions } from '../matcher/version-range';
 import {
   fetchLinkedJson,
   type LinkedJson,
@@ -133,6 +133,54 @@ interface AffectedRanges {
   confidence: CveConfidence;
 }
 
+const ALL_VERSIONS_PATTERN = /^\s*(all|any|\*)\s*$/i;
+const ANY_UPPER_BOUND_PATTERN = /<=?\s*\d+\.\d+\.\d+/g;
+const AND_BELOW_PATTERN = /\band below\b/i;
+
+function highestVersion(versions: string[]): string | null {
+  return versions.reduce<string | null>((highest, candidate) => {
+    return highest === null || compareVersions(candidate, highest) > 0 ? candidate : highest;
+  }, null);
+}
+
+/**
+ * `patched_versions` only names the branches that received a fix. When the
+ * vendor's affected range is NOT itself a per-branch enumeration ("All",
+ * ">= 6.0.0", "<= 9.0.2"), every other branch below the newest fix is
+ * affected with no fix available, typically EOL lines such as Redis 7.0.x.
+ * Emit one wildcard range for those branches. matchRanges() never lets a
+ * wildcard override a fix published for the version's own branch.
+ */
+function unlistedBranchFallback(
+  patchedVersions: string,
+  vulnerableVersionRange: string | undefined,
+): BranchRange | null {
+  const highestPatched = highestVersion(patchedVersions.match(VERSION_PATTERN) ?? []);
+  if (highestPatched === null) {
+    return null;
+  }
+
+  const range = vulnerableVersionRange ?? '';
+  const upperBounds = range.match(ANY_UPPER_BOUND_PATTERN) ?? [];
+
+  // "<= 9.1.0, <= 9.0.4, ..." or "7.2.10 and below, 8.0.5 and below": the
+  // vendor enumerated every affected branch, so there is nothing to infer.
+  if (upperBounds.length > 1 || AND_BELOW_PATTERN.test(range)) {
+    return null;
+  }
+
+  // A missing range is unknown, not "all versions": only an explicit marker counts.
+  const allVersions = ALL_VERSIONS_PATTERN.test(range);
+  const lower = range.match(LOWER_BOUND_PATTERN);
+  if (allVersions === false && upperBounds.length === 0 && lower === null) {
+    return null; // unparseable prose: never guess a range
+  }
+
+  const upper = upperBoundOf(range) ?? { vulnerableBelow: highestPatched };
+
+  return { branch: '*', ...upper, ...(lower ? { vulnerableFrom: lower[1] } : {}) };
+}
+
 function toAffectedRanges(vulnerabilities: GhsaVulnerability[]): AffectedRanges {
   const exact: BranchRange[] = [];
   const unpatched: BranchRange[] = [];
@@ -143,6 +191,10 @@ function toAffectedRanges(vulnerabilities: GhsaVulnerability[]): AffectedRanges 
 
     if (patchedVersions) {
       exact.push(...exactRangesFromPatchedVersions(patchedVersions, vulnerableVersionRange));
+      const fallback = unlistedBranchFallback(patchedVersions, vulnerableVersionRange);
+      if (fallback) {
+        exact.push(fallback);
+      }
       continue;
     }
 

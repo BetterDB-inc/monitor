@@ -59,7 +59,8 @@ describe('GhsaSource', () => {
 
     expect(advisory).toBeDefined();
     expect(advisory?.confidence).toBe('exact');
-    expect(advisory?.affected).toHaveLength(4);
+    expect(advisory?.affected).toHaveLength(5);
+    expect(advisory?.affected).toContainEqual({ branch: '*', vulnerableAtOrBelow: '9.0.2' });
     expect(advisory?.affected).toContainEqual({
       branch: '8.1',
       vulnerableBelow: '8.1.6',
