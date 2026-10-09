@@ -302,9 +302,11 @@ function AppLayoutInner(): ReactElement {
                 path="/kv-cache"
                 element={
                   <NoConnectionsGuard>
-                    <KvCacheGuard>
-                      <KvCache />
-                    </KvCacheGuard>
+                    <LiveConnectionGuard>
+                      <KvCacheGuard>
+                        <KvCache />
+                      </KvCacheGuard>
+                    </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }
               />
