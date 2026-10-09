@@ -2,7 +2,7 @@ import { Injectable, Logger, NotFoundException, BadRequestException } from '@nes
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmailService } from '../email/email.service';
-import { computeValkeySizing, valkeyMemoryLimitMi, formatMi } from './sizing';
+import { appPodBudget, computeValkeySizing, valkeyMemoryLimitMi, formatMi } from './sizing';
 import { TenantStatus, ValkeyInstanceStatus } from '@prisma/client';
 import * as k8s from '@kubernetes/client-node';
 import * as fs from 'fs';
@@ -18,6 +18,24 @@ const execFileAsync = promisify(execFile);
 // instance id, not the name (see valkeyHostLabel), so names need not be
 // globally unique.
 const VALKEY_NAME_PATTERN = /^[a-z][a-z0-9-]{1,38}[a-z0-9]$/;
+
+// Namespace of the shared demo observability stack
+// (proprietary/infra/k8s/demo-observability/). Single source for the demo
+// tenant's NetworkPolicy peers and the default OTLP mirror endpoint — these
+// must agree or the mirror's traffic is silently dropped by the CNI.
+const DEMO_OBSERVABILITY_NAMESPACE = 'demo-observability';
+const DEMO_OBSERVABILITY_PROMETHEUS_PORT = 9090;
+
+// Env vars injected only for the demo tenant. On re-provision of a tenant that
+// has been un-flagged (isDemo: false), these must be actively removed — a
+// strategic-merge env patch only ever adds/updates by name — so the published
+// token and OTLP mirror don't linger on a now-ordinary tenant.
+const DEMO_ONLY_ENV = [
+  'DEMO_HOSTNAME',
+  'PROMETHEUS_METRICS_PUBLIC_TOKEN',
+  'OTEL_EXPORTER_OTLP_ENDPOINT',
+  'OTEL_EVENTS_ENABLED',
+];
 
 // The public SNI host is an opaque, stable label derived from the instance id
 // rather than its name: this keeps it globally unique on the shared wildcard
@@ -73,6 +91,9 @@ export class ProvisioningService {
 
   // Auth public key (passed to tenant pods for JWT verification)
   private readonly authPublicKey: string;
+
+  // OTLP endpoint for the demo tenant's metrics mirror
+  private readonly demoOtlpEndpoint: string;
 
   // Entitlement API config (passed to tenant pods for workspace management)
   private readonly entitlementApiUrl: string;
@@ -131,6 +152,19 @@ export class ProvisioningService {
       this.logger.warn('AUTH_PUBLIC_KEY not set - tenant pods will not be able to verify auth tokens');
     }
 
+    // OTLP endpoint the demo tenant mirrors its metrics to (the demo
+    // observability stack's Prometheus native OTLP receiver; the app's
+    // exporter appends /v1/metrics). See proprietary/infra/k8s/demo-observability/.
+    // NOTE: if you override this, also update the demo tenant's egress
+    // NetworkPolicy (tenantIsolationSpec, DEMO_OBSERVABILITY_NAMESPACE /
+    // DEMO_OBSERVABILITY_PROMETHEUS_PORT) — the policy only permits egress to
+    // the default namespace:port, so a mismatched override is silently dropped
+    // by the CNI.
+    this.demoOtlpEndpoint = this.config.get<string>(
+      'DEMO_OTLP_ENDPOINT',
+      `http://prometheus.${DEMO_OBSERVABILITY_NAMESPACE}.svc.cluster.local:${DEMO_OBSERVABILITY_PROMETHEUS_PORT}/api/v1/otlp`,
+    );
+
     // Load entitlement API config (passed to tenant pods for workspace management)
     this.entitlementApiUrl = this.config.get<string>('ENTITLEMENT_API_URL', 'http://entitlement.system.svc.cluster.local:3002');
     this.entitlementApiKey = this.config.get<string>('ENTITLEMENT_API_KEY', '');
@@ -186,15 +220,18 @@ export class ProvisioningService {
       // Step 3: Create K8s Secret with DB credentials
       this.logger.log(`[${tenant.subdomain}] Creating K8s secret: db-credentials`);
       const storageUrl = this.buildStorageUrl();
-      await this.createDbSecret(namespace, storageUrl);
+      await this.createDbSecret(namespace, storageUrl, tenant.isDemo);
 
       // Step 4: Create PostgreSQL schema via K8s Job (needs namespace to exist)
       this.logger.log(`[${tenant.subdomain}] Creating PostgreSQL schema via K8s Job: ${schemaName}`);
       await this.createSchemaViaJob(namespace, schemaName);
 
-      // Step 5: Create K8s NetworkPolicy (tenant isolation)
+      // Step 5: Create/converge K8s NetworkPolicy (tenant isolation).
+      // ensureTenantNetworkPolicy both creates it when absent and brings an
+      // existing one up to the current spec, so re-provisions pick up
+      // later-added rules (e.g. the demo tenant's demo-observability rules).
       this.logger.log(`[${tenant.subdomain}] Creating K8s network policy`);
-      await this.createNetworkPolicy(namespace);
+      await this.ensureTenantNetworkPolicy(namespace, tenant.isDemo);
 
       // Step 6: Create K8s ResourceQuota. Keep the Valkey headroom if this
       // tenant already has a managed instance, so re-provisioning the tenant
@@ -209,6 +246,7 @@ export class ProvisioningService {
       await this.createResourceQuota(
         namespace,
         existingValkey ? { maxmemory: existingValkey.maxmemory } : false,
+        tenant.isDemo,
       );
 
       // Step 7: Create K8s Deployment
@@ -390,8 +428,8 @@ export class ProvisioningService {
       // Existing tenants were provisioned before Valkey support: widen the
       // quota to fit the Valkey pod and open the isolation policy so the
       // shared Traefik proxy can route to it. Both are idempotent.
-      await this.createResourceQuota(namespace, { maxmemory: instance.maxmemory });
-      await this.ensureTenantNetworkPolicy(namespace);
+      await this.createResourceQuota(namespace, { maxmemory: instance.maxmemory }, tenant.isDemo);
+      await this.ensureTenantNetworkPolicy(namespace, tenant.isDemo);
 
       // Generate the credential and create the Secret the chart will reference.
       const password = crypto.randomBytes(24).toString('base64url');
@@ -1045,7 +1083,7 @@ export class ProvisioningService {
     this.logger.warn(`Namespace ${namespace} deletion timed out, continuing anyway`);
   }
 
-  private async createDbSecret(namespace: string, storageUrl: string): Promise<void> {
+  private async createDbSecret(namespace: string, storageUrl: string, isDemo: boolean): Promise<void> {
     // Generate a unique per-tenant session secret for cookie signing
     const sessionSecret = crypto.randomBytes(32).toString('hex');
     // Per-tenant bearer token guarding OTLP trace ingestion (POST /v1/traces).
@@ -1055,6 +1093,10 @@ export class ProvisioningService {
     // (GET /api/prometheus/metrics). The monitor image fails closed on boot when
     // CLOUD_MODE is set without it.
     const prometheusMetricsToken = crypto.randomBytes(32).toString('hex');
+    // Demo tenant only: a second accepted metrics token meant for publication
+    // in the live-demo docs. Kept separate from the primary so rotating the
+    // published credential never breaks the demo-observability scrape config.
+    const prometheusMetricsPublicToken = isDemo ? crypto.randomBytes(32).toString('hex') : undefined;
 
     try {
       await this.coreApi.createNamespacedSecret({
@@ -1072,6 +1114,9 @@ export class ProvisioningService {
             SESSION_SECRET: sessionSecret,
             OTEL_INGEST_TOKEN: otelIngestToken,
             PROMETHEUS_METRICS_TOKEN: prometheusMetricsToken,
+            ...(prometheusMetricsPublicToken
+              ? { PROMETHEUS_METRICS_PUBLIC_TOKEN: prometheusMetricsPublicToken }
+              : {}),
             // Entitlement API config (for workspace management)
             ENTITLEMENT_API_URL: this.entitlementApiUrl,
             ENTITLEMENT_API_KEY: this.entitlementApiKey,
@@ -1086,6 +1131,14 @@ export class ProvisioningService {
         // created below references that key (non-optional), so without it the pod
         // fails to start. Backfill it before we get there.
         await this.ensureMetricsTokenInSecret(namespace);
+        if (isDemo) {
+          // Same backfill for the demo-only published token.
+          await this.ensureMetricsTokenInSecret(namespace, 'PROMETHEUS_METRICS_PUBLIC_TOKEN');
+        }
+        // For a non-demo tenant the published token is pruned later, after
+        // createDeployment has settled a spec that no longer references it —
+        // dropping the Secret key here would leave the running Deployment's
+        // non-optional secretKeyRef pointing at a missing key.
       } else {
         throw error;
       }
@@ -1095,33 +1148,36 @@ export class ProvisioningService {
   private async createResourceQuota(
     namespace: string,
     valkey: { maxmemory: string | null } | false = false,
+    isDemo = false,
   ): Promise<void> {
-    // Base budget covers the Monitor app pod (250m/256Mi req, 500m/512Mi lim)
-    // plus a transient schema job (50m/64Mi req, 100m/128Mi lim).
+    // Base budget covers the Monitor app pod (appPodBudget in sizing.ts, the
+    // same source createDeployment renders into the pod spec) plus a
+    // transient schema job (50m/64Mi req, 100m/128Mi lim).
     //
     // When a managed Valkey pod shares the namespace, add headroom for it. Its
     // memory *limit* is not fixed: the chart is rendered with
     // resources.limits.memory = 2x maxmemory (see sizing.ts), which for the
     // selectable 1gb/2gb tiers is 2Gi/4Gi — far above the old hardcoded 2Gi
     // total. Size the quota's limits.memory to the pod the chart will actually
-    // request (app 512Mi + schema-job 128Mi + valkey 2x-maxmemory) so the
+    // request (app limit + schema-job 128Mi + valkey 2x-maxmemory) so the
     // StatefulSet isn't rejected with "exceeded quota". CPU and memory requests
     // don't scale with maxmemory (chart defaults 100m/256Mi), so those stay put.
+    const app = appPodBudget(isDemo);
     const quotaSpec = {
       hard: valkey
         ? {
-            'requests.cpu': '450m',
-            'requests.memory': '640Mi',
-            'limits.cpu': '1200m',
-            // 512Mi (app) + 128Mi (schema job) + valkey pod limit.
-            'limits.memory': formatMi(512 + 128 + valkeyMemoryLimitMi(valkey.maxmemory)),
+            'requests.cpu': `${app.requestCpuM + 200}m`,
+            'requests.memory': formatMi(app.requestMemMi + 384),
+            'limits.cpu': `${app.limitCpuM + 700}m`,
+            // app limit + 128Mi (schema job) + valkey pod limit.
+            'limits.memory': formatMi(app.limitMemMi + 128 + valkeyMemoryLimitMi(valkey.maxmemory)),
             'pods': '3', // app + schema job + valkey
           }
         : {
-            'requests.cpu': '300m',
-            'requests.memory': '320Mi',
-            'limits.cpu': '600m',
-            'limits.memory': '640Mi',
+            'requests.cpu': `${app.requestCpuM + 50}m`,
+            'requests.memory': formatMi(app.requestMemMi + 64),
+            'limits.cpu': `${app.limitCpuM + 100}m`,
+            'limits.memory': formatMi(app.limitMemMi + 128),
             'pods': '2', // Allow 2 pods: 1 for app + 1 for schema jobs
           },
     };
@@ -1150,11 +1206,9 @@ export class ProvisioningService {
 
   private async createDeployment(namespace: string, subdomain: string, imageTag: string, dbSchema: string, isDemo: boolean): Promise<void> {
     const image = `${this.ecrImage}:${imageTag}`;
+    const budget = appPodBudget(isDemo);
 
-    try {
-      await this.appsApi.createNamespacedDeployment({
-        namespace,
-        body: {
+    const body: k8s.V1Deployment = {
           metadata: {
             name: 'betterdb',
             labels: {
@@ -1204,7 +1258,30 @@ export class ProvisioningService {
                       { name: 'STORAGE_TYPE', value: 'postgres' },
                       { name: 'DB_SCHEMA', value: dbSchema },
                       { name: 'NODE_TLS_REJECT_UNAUTHORIZED', value: '0' },
-                      ...(isDemo ? [{ name: 'DEMO_HOSTNAME', value: this.demoHostname() }] : []),
+                      ...(isDemo
+                        ? [
+                            { name: 'DEMO_HOSTNAME', value: this.demoHostname() },
+                            // Published scrape credential for the public live
+                            // demo (second accepted metrics token).
+                            {
+                              name: 'PROMETHEUS_METRICS_PUBLIC_TOKEN',
+                              valueFrom: {
+                                secretKeyRef: {
+                                  name: 'db-credentials',
+                                  key: 'PROMETHEUS_METRICS_PUBLIC_TOKEN',
+                                },
+                              },
+                            },
+                            // Mirror metrics over OTLP into the demo
+                            // observability stack's Prometheus (mirror is the
+                            // app's default export mode). Its native OTLP
+                            // receiver is metrics-only, so disable the
+                            // event/log dispatcher that shares this endpoint
+                            // (every /v1/logs POST would 404).
+                            { name: 'OTEL_EXPORTER_OTLP_ENDPOINT', value: this.demoOtlpEndpoint },
+                            { name: 'OTEL_EVENTS_ENABLED', value: 'false' },
+                          ]
+                        : []),
                       ...(!isDemo && process.env.COOKIE_DOMAIN ? [{ name: 'COOKIE_DOMAIN', value: process.env.COOKIE_DOMAIN }] : []),
                       {
                         name: 'STORAGE_URL',
@@ -1281,14 +1358,16 @@ export class ProvisioningService {
                         },
                       },
                     ],
+                    // Rendered from the same appPodBudget the ResourceQuota
+                    // is sized from, so pod spec and quota cannot drift.
                     resources: {
                       requests: {
-                        cpu: '250m',
-                        memory: '256Mi',
+                        cpu: `${budget.requestCpuM}m`,
+                        memory: formatMi(budget.requestMemMi),
                       },
                       limits: {
-                        cpu: '500m',
-                        memory: '512Mi',
+                        cpu: `${budget.limitCpuM}m`,
+                        memory: formatMi(budget.limitMemMi),
                       },
                     },
                     readinessProbe: {
@@ -1316,14 +1395,64 @@ export class ProvisioningService {
               },
             },
           },
-        },
-      });
+        };
+
+    try {
+      await this.appsApi.createNamespacedDeployment({ namespace, body });
     } catch (error: any) {
       if (this.isAlreadyExistsError(error)) {
-        this.logger.warn(`Deployment already exists in ${namespace}, continuing...`);
+        // Converge an existing Deployment to the current spec instead of
+        // skipping: a warn-and-continue here left pre-existing tenants without
+        // later-introduced env/resources (e.g. the demo tenant's published
+        // metrics token and OTLP mirror), silently diverging from what
+        // provisioning reported.
+        //
+        // Strategic-merge PATCH scoped to the fields this provisioner owns —
+        // env, resources, replicas — rather than a full replace. It needs no
+        // resourceVersion (so there's no read→replace 409 race) and leaves
+        // everything else (pod-template annotations like the metrics-token
+        // restart marker, the running image) intact, so re-provision neither
+        // churns the pod nor rolls an out-of-band image back to the DB tag.
+        // env merges by name (new demo vars added); demo-only vars are
+        // explicitly deleted when the tenant isn't a demo so a published token
+        // can't linger. replicas is set back to the desired running count: a
+        // deprovision that scaled the app to 0 and then failed leaves the
+        // tenant in 'error' (re-provisionable) at replicas 0, and without this
+        // the converge would leave it there and waitForDeploymentReady would
+        // time out.
+        this.logger.log(`Deployment already exists in ${namespace}, converging app container`);
+        const container = body.spec!.template!.spec!.containers![0];
+        const env: any[] = [...(container.env ?? [])];
+        if (!isDemo) {
+          for (const name of DEMO_ONLY_ENV) {
+            env.push({ name, $patch: 'delete' });
+          }
+        }
+        const patchBody = {
+          spec: {
+            replicas: body.spec!.replicas,
+            template: {
+              spec: { containers: [{ name: container.name, env, resources: container.resources }] },
+            },
+          },
+        } as unknown as k8s.V1Deployment;
+        await this.appsApi.patchNamespacedDeployment(
+          { name: 'betterdb', namespace, body: patchBody },
+          k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.StrategicMergePatch),
+        );
       } else {
         throw error;
       }
+    }
+
+    // Prune the published token from the Secret for a non-demo tenant — only
+    // now, once the Deployment spec (created fresh or converged above) no
+    // longer references the key, so we never leave a non-optional secretKeyRef
+    // pointing at a deleted key. Security is already enforced by the guard
+    // (public token honored only when DEMO_HOSTNAME is set) and the env delete;
+    // this just keeps the Secret clean.
+    if (!isDemo) {
+      await this.pruneSecretKey(namespace, 'PROMETHEUS_METRICS_PUBLIC_TOKEN');
     }
   }
 
@@ -1446,7 +1575,7 @@ export class ProvisioningService {
   // Network Policy (Tenant Isolation)
   // ============================================
 
-  private tenantIsolationSpec(): Record<string, any> {
+  private tenantIsolationSpec(isDemo = false): Record<string, any> {
     return {
       podSelector: {}, // Applies to ALL pods in the namespace
       policyTypes: ['Ingress', 'Egress'],
@@ -1477,8 +1606,44 @@ export class ProvisioningService {
           ],
           ports: [{ protocol: 'TCP', port: 6379 }],
         },
+        ...(isDemo
+          ? [
+              {
+                // Demo tenant only: the demo-observability Prometheus scrapes
+                // /api/prometheus/metrics on the app port.
+                _from: [
+                  {
+                    namespaceSelector: {
+                      matchLabels: {
+                        'kubernetes.io/metadata.name': DEMO_OBSERVABILITY_NAMESPACE,
+                      },
+                    },
+                  },
+                ],
+                ports: [{ protocol: 'TCP', port: 3001 }],
+              },
+            ]
+          : []),
       ],
       egress: [
+        ...(isDemo
+          ? [
+              {
+                // Demo tenant only: OTLP metrics mirror pushed to the
+                // demo-observability Prometheus native OTLP receiver.
+                to: [
+                  {
+                    namespaceSelector: {
+                      matchLabels: {
+                        'kubernetes.io/metadata.name': DEMO_OBSERVABILITY_NAMESPACE,
+                      },
+                    },
+                  },
+                ],
+                ports: [{ protocol: 'TCP', port: DEMO_OBSERVABILITY_PROMETHEUS_PORT }],
+              },
+            ]
+          : []),
         {
           // DNS resolution
           to: [
@@ -1562,29 +1727,11 @@ export class ProvisioningService {
     };
   }
 
-  private async createNetworkPolicy(namespace: string): Promise<void> {
-    try {
-      await this.networkingApi.createNamespacedNetworkPolicy({
-        namespace,
-        body: {
-          metadata: { name: 'tenant-isolation' },
-          spec: this.tenantIsolationSpec(),
-        },
-      });
-    } catch (error: any) {
-      if (this.isAlreadyExistsError(error)) {
-        this.logger.warn(`NetworkPolicy already exists in ${namespace}, continuing...`);
-      } else {
-        throw error;
-      }
-    }
-  }
-
   // Idempotently brings a namespace's isolation policy up to the current spec
-  // (creating it if absent). Used by the Valkey provision path so tenants that
-  // predate the Traefik ingress rule get it without a full reconcile run.
-  private async ensureTenantNetworkPolicy(namespace: string): Promise<void> {
-    const spec = this.tenantIsolationSpec();
+  // (creating it if absent). Used by the provision path and the Valkey path so
+  // tenants that predate a rule get it without a full reconcile run.
+  private async ensureTenantNetworkPolicy(namespace: string, isDemo = false): Promise<void> {
+    const spec = this.tenantIsolationSpec(isDemo);
     try {
       // Read first so the PUT carries the current resourceVersion (a replace
       // with a missing/stale resourceVersion is rejected with 409).
@@ -1623,17 +1770,18 @@ export class ProvisioningService {
       labelSelector: 'app.kubernetes.io/managed-by=betterdb-entitlement',
     });
 
+    // The demo tenant's policy carries extra demo-observability rules; resolve
+    // its namespace once so the reconcile preserves them.
+    const demoTenant = await this.prisma.tenant.findFirst({ where: { isDemo: true } });
+    const demoNamespace = demoTenant ? `tenant-${demoTenant.subdomain}` : undefined;
+
     for (const ns of namespaces.items) {
       const name = ns.metadata!.name!;
       try {
-        await this.networkingApi.replaceNamespacedNetworkPolicy({
-          name: 'tenant-isolation',
-          namespace: name,
-          body: {
-            metadata: { name: 'tenant-isolation' },
-            spec: this.tenantIsolationSpec(),
-          },
-        });
+        // Reuse the create-if-absent + read-then-replace converge path so a
+        // namespace missing the policy is repaired (not failed), and the PUT
+        // carries a current resourceVersion.
+        await this.ensureTenantNetworkPolicy(name, name === demoNamespace);
         this.logger.log(`[${name}] NetworkPolicy updated`);
         updated.push(name);
       } catch (error: any) {
@@ -1656,12 +1804,15 @@ export class ProvisioningService {
   // Secret only if absent (so we never rotate a token a running pod is using).
   // Returns true when it wrote a new token. Not concurrency-safe: the reconcile
   // endpoint is a one-shot admin migration meant to be run serially.
-  private async ensureMetricsTokenInSecret(namespace: string): Promise<boolean> {
+  private async ensureMetricsTokenInSecret(
+    namespace: string,
+    key: 'PROMETHEUS_METRICS_TOKEN' | 'PROMETHEUS_METRICS_PUBLIC_TOKEN' = 'PROMETHEUS_METRICS_TOKEN',
+  ): Promise<boolean> {
     const secret = await this.coreApi.readNamespacedSecret({
       name: 'db-credentials',
       namespace,
     });
-    if (secret.data?.PROMETHEUS_METRICS_TOKEN) {
+    if (secret.data?.[key]) {
       return false;
     }
     const token = crypto.randomBytes(32).toString('hex');
@@ -1669,11 +1820,31 @@ export class ProvisioningService {
       {
         name: 'db-credentials',
         namespace,
-        body: { stringData: { PROMETHEUS_METRICS_TOKEN: token } },
+        body: { stringData: { [key]: token } },
       },
       k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch),
     );
     return true;
+  }
+
+  // Removes a key from the db-credentials Secret if present (JSON merge patch:
+  // a null value deletes the entry). Used to drop the published metrics token
+  // from a tenant that is no longer a demo.
+  private async pruneSecretKey(namespace: string, key: string): Promise<void> {
+    try {
+      await this.coreApi.patchNamespacedSecret(
+        {
+          name: 'db-credentials',
+          namespace,
+          body: { data: { [key]: null } } as unknown as k8s.V1Secret,
+        },
+        k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch),
+      );
+    } catch (error: any) {
+      if (!this.isNotFoundError(error)) {
+        throw error;
+      }
+    }
   }
 
   private async ensurePrometheusMetricsToken(namespace: string): Promise<boolean> {

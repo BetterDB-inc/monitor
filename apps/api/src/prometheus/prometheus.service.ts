@@ -124,6 +124,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private readonly slotStatsTopN: number;
   private readonly exportRegistry: Registry;
   private readonly pollIntervalMs: number;
+  // Start time of the last scrape-triggered refresh (stamped before the pass,
+  // so overlapping scrapes debounce); scrapes within pollIntervalMs of it
+  // serve the poller-maintained registry instead.
+  private lastScrapeRefreshAt = 0;
   private readonly stalenessMs: number;
   private readonly freshness: FreshnessTracker;
   private pollStale: Gauge;
@@ -919,6 +923,17 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
    * Update metrics for ALL registered connections (used by /metrics endpoint).
    */
   async updateMetrics(): Promise<void> {
+    // The background poller already refreshes INFO-based metrics every
+    // pollIntervalMs, so a scrape arriving sooner than that gains nothing
+    // from another full backend pass — without this gate, every additional
+    // scraper (the endpoint supports published scrape credentials) multiplies
+    // live Valkey/Postgres load for data at most pollIntervalMs fresher.
+    const now = Date.now();
+    if (now - this.lastScrapeRefreshAt < this.pollIntervalMs) {
+      return;
+    }
+    this.lastScrapeRefreshAt = now;
+
     const connections = this.connectionRegistry.list();
     const connectedConnections = connections.filter((c) => c.isConnected && !this.isSentinelConnection(c.id));
 

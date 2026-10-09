@@ -66,6 +66,38 @@ describe('PrometheusMetricsGuard', () => {
     ).toBe(true);
   });
 
+  it('allows the published public token on a demo instance', () => {
+    const guard = guardWith({
+      PROMETHEUS_METRICS_TOKEN: 's3cret',
+      PROMETHEUS_METRICS_PUBLIC_TOKEN: 'published',
+      DEMO_HOSTNAME: 'demo.app.betterdb.com',
+    });
+    expect(guard.canActivate(contextFor('Bearer published'))).toBe(true);
+    expect(guard.canActivate(contextFor('Bearer s3cret'))).toBe(true);
+  });
+
+  it('rejects the public token when the instance is not a demo (no DEMO_HOSTNAME)', () => {
+    // A former demo tenant that was un-flagged must not honor the published
+    // token even if the env/secret lingers.
+    const guard = guardWith({
+      PROMETHEUS_METRICS_TOKEN: 's3cret',
+      PROMETHEUS_METRICS_PUBLIC_TOKEN: 'published',
+    });
+    expect(() => guard.canActivate(contextFor('Bearer published'))).toThrow(HttpException);
+    expect(guard.canActivate(contextFor('Bearer s3cret'))).toBe(true);
+  });
+
+  it('allows the published public token in cloud mode on a demo instance', () => {
+    process.env.CLOUD_MODE = 'true';
+    const guard = guardWith({
+      PROMETHEUS_METRICS_TOKEN: 's3cret',
+      PROMETHEUS_METRICS_PUBLIC_TOKEN: 'published',
+      DEMO_HOSTNAME: 'demo.app.betterdb.com',
+    });
+    expect(guard.canActivate(contextFor('Bearer published'))).toBe(true);
+    expect(() => guard.canActivate(contextFor('Bearer nope'))).toThrow(HttpException);
+  });
+
   it('returns 401 in cloud mode with no token configured', () => {
     process.env.CLOUD_MODE = 'true';
     expect.assertions(1);

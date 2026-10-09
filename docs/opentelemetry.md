@@ -357,6 +357,7 @@ When an OTLP endpoint is configured, Monitor also emits discrete monitoring even
 | `OTLP_DISCOVER_INSTANCES`         | `true`   | Record pushes from unregistered host:ports and list them in the connection switcher. On unless set to `false`, `0`, `no` or `off`.               |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`     | unset    | Base URL of your OTLP/HTTP collector. Setting it enables the metrics and event exports; `/v1/metrics` and `/v1/logs` are appended automatically. |
 | `OTEL_TELEMETRY_ENABLED`          | `true`   | Set `false` to disable the metrics and event exports even when an endpoint is set.                                                               |
+| `OTEL_EVENTS_ENABLED`             | `true`   | Set `false` to keep the metrics mirror but disable just the event/log export (`/v1/logs`). Needed when the endpoint is a metrics-only receiver (e.g. Prometheus's native OTLP receiver), which would 404 every event. Off on `false`, `0`, `no` or `off`. |
 | `OTEL_METRICS_EXPORT_INTERVAL_MS` | `15000`  | Metrics mirror push interval in milliseconds (minimum `1000`).                                                                                   |
 | `OTEL_METRICS_EXPORT_MODE`        | `mirror` | `mirror` or `semconv`. See [Export modes](#export-modes).                                                                                        |
 

@@ -865,6 +865,7 @@ By default the endpoint is open and unauthenticated, matching every scrape examp
 
 - `PROMETHEUS_METRICS_ENABLED` — set to `false` to return 404 from `/api/prometheus/metrics`; the OTLP mirror keeps exporting regardless.
 - `PROMETHEUS_METRICS_TOKEN` — when set, a scrape must send `Authorization: Bearer <token>`; a missing or wrong token returns 401.
+- `PROMETHEUS_METRICS_PUBLIC_TOKEN` — optional second accepted token intended for publication (e.g. a shared demo credential). Either token authorizes a scrape; note that configuring *only* this token also switches a previously open endpoint to bearer-required.
 
 In `CLOUD_MODE`, `PROMETHEUS_METRICS_TOKEN` is required whenever the endpoint is enabled: startup fails validation if it's unset, and an enabled endpoint with no token configured answers 401 at request time.
 

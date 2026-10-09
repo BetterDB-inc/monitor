@@ -256,6 +256,7 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 | `METRICS_SLOT_STATS_TOP_N`    | No       | `100`             | Export slot stats for the top N slots by key count (0–16384, `0` disables). Ignored under `vitals`                                                                                    |
 | `PROMETHEUS_METRICS_ENABLED`  | No       | `true`            | Set to `false` to disable `/api/prometheus/metrics` entirely (the OTLP mirror keeps exporting)                                                                                        |
 | `PROMETHEUS_METRICS_TOKEN`    | No       | _(none)_          | Bearer token required to scrape the metrics endpoint; required when `CLOUD_MODE` is set and the endpoint is enabled                                                                   |
+| `PROMETHEUS_METRICS_PUBLIC_TOKEN` | No   | _(none)_          | Optional second accepted scrape token, meant to be published (e.g. a live demo). Configuring either token switches the endpoint to bearer-required; rotating this one never affects scrapes using the primary |
 
 ### Client Analytics
 

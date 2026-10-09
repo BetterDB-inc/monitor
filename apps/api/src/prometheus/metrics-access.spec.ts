@@ -84,4 +84,33 @@ describe('resolveMetricsAccess', () => {
     expect(resolveMetricsAccess({ ...base, token: '   ' })).toBe('allow');
     expect(resolveMetricsAccess({ ...base, token: '   ', cloudMode: true })).toBe('unauthorized');
   });
+
+  it('accepts either the primary or the public token', () => {
+    const both = { ...base, token: 'primary', publicToken: 'published' };
+    expect(resolveMetricsAccess({ ...both, authorization: 'Bearer primary' })).toBe('allow');
+    expect(resolveMetricsAccess({ ...both, authorization: 'Bearer published' })).toBe('allow');
+    expect(resolveMetricsAccess({ ...both, authorization: 'Bearer nope' })).toBe('unauthorized');
+  });
+
+  it('requires a token when only the public token is configured', () => {
+    expect(resolveMetricsAccess({ ...base, publicToken: 'published' })).toBe('unauthorized');
+    expect(
+      resolveMetricsAccess({ ...base, publicToken: 'published', authorization: 'Bearer published' }),
+    ).toBe('allow');
+  });
+
+  it('accepts either token in cloud mode (the shipped demo configuration)', () => {
+    const cloud = { ...base, cloudMode: true, token: 'primary', publicToken: 'published' };
+    expect(resolveMetricsAccess({ ...cloud, authorization: 'Bearer published' })).toBe('allow');
+    expect(resolveMetricsAccess({ ...cloud, authorization: 'Bearer primary' })).toBe('allow');
+    expect(resolveMetricsAccess({ ...cloud, authorization: undefined })).toBe('unauthorized');
+    expect(resolveMetricsAccess({ ...cloud, authorization: 'Bearer nope' })).toBe('unauthorized');
+  });
+
+  it('treats a blank public token as unset', () => {
+    expect(resolveMetricsAccess({ ...base, publicToken: '   ' })).toBe('allow');
+    expect(
+      resolveMetricsAccess({ ...base, token: 's3cret', publicToken: '   ', authorization: 'Bearer s3cret' }),
+    ).toBe('allow');
+  });
 });

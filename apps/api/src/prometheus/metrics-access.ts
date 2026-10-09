@@ -5,6 +5,10 @@ export type MetricsAccess = 'allow' | 'disabled' | 'unauthorized';
 export interface MetricsAccessInput {
   enabled: unknown;
   token: string | undefined;
+  // Secondary token intended for publication (e.g. the hosted live demo).
+  // Either token grants access, so the published one can be rotated without
+  // touching the scrape configs that use the primary.
+  publicToken?: string | undefined;
   cloudMode: boolean;
   authorization: string | undefined;
 }
@@ -32,9 +36,13 @@ export function resolveMetricsAccess(input: MetricsAccessInput): MetricsAccess {
   if (!isMetricsEndpointEnabled(input.enabled)) {
     return 'disabled';
   }
-  const token = input.token?.trim();
-  if (!token) {
+  const tokens = [input.token, input.publicToken]
+    .map((value) => value?.trim())
+    .filter((value): value is string => !!value);
+  if (tokens.length === 0) {
     return input.cloudMode ? 'unauthorized' : 'allow';
   }
-  return matchesBearerToken(input.authorization, token) ? 'allow' : 'unauthorized';
+  return tokens.some((token) => matchesBearerToken(input.authorization, token))
+    ? 'allow'
+    : 'unauthorized';
 }

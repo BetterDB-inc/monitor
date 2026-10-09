@@ -10,9 +10,12 @@ import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
 import { ENV_DEFAULT_ID } from '../src/connections/connection.constants';
 
+// POSTGRES_HOST_PORT is the compose host-port override (set when a second
+// checkout runs its own postgres on a different port); honor it so this seed
+// script targets the same database the compose stack published.
 const STORAGE_URL =
   process.env.STORAGE_URL ||
-  `postgresql://${process.env.STORAGE_POSTGRES_USER || 'betterdb'}:${process.env.STORAGE_POSTGRES_PASSWORD || 'devpassword'}@${process.env.STORAGE_POSTGRES_HOST || 'localhost'}:${process.env.STORAGE_POSTGRES_PORT || '5432'}/${process.env.STORAGE_POSTGRES_DATABASE || 'betterdb'}`;
+  `postgresql://${process.env.STORAGE_POSTGRES_USER || 'betterdb'}:${process.env.STORAGE_POSTGRES_PASSWORD || 'devpassword'}@${process.env.STORAGE_POSTGRES_HOST || 'localhost'}:${process.env.STORAGE_POSTGRES_PORT || process.env.POSTGRES_HOST_PORT || '5432'}/${process.env.STORAGE_POSTGRES_DATABASE || 'betterdb'}`;
 
 // Auto-detected at runtime from the most recently active connection
 let CONNECTION_ID = process.env.CONNECTION_ID || ENV_DEFAULT_ID;

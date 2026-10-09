@@ -59,10 +59,17 @@ services:
     restart: unless-stopped
 
   postgres:
+    # No pinned container_name: the entitlement test harness manages this
+    # service via compose, and a global name blocked container creation in a
+    # second checkout (e.g. monitor + monitor-master) even when the first
+    # checkout's container was merely stopped. Compose names it
+    # <project>-postgres-1 per checkout instead. To RUN two checkouts'
+    # postgres concurrently, the host port must also differ — override it
+    # with POSTGRES_HOST_PORT (the entitlement test harness honors the same
+    # variable).
     image: postgres:16-alpine
-    container_name: betterdb-monitor-postgres
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     environment:
       POSTGRES_USER: betterdb
       POSTGRES_PASSWORD: devpassword

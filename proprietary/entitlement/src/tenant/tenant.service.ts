@@ -8,6 +8,14 @@ const RESERVED_SUBDOMAINS = [
   'support', 'help', 'demo',
 ];
 
+// The public demo stack owns sibling hostnames under app.betterdb.com (the
+// ACM wildcard covers one label, so e.g. demo-grafana must be a sibling of
+// tenant subdomains). Reserve the whole prefix so future demo-* hostnames
+// never race a tenant registration.
+function isReservedSubdomain(subdomain: string): boolean {
+  return RESERVED_SUBDOMAINS.includes(subdomain) || subdomain.startsWith('demo-');
+}
+
 @Injectable()
 export class TenantService {
   private readonly logger = new Logger(TenantService.name);
@@ -25,7 +33,7 @@ export class TenantService {
     }
 
     // Check reserved subdomains
-    if (RESERVED_SUBDOMAINS.includes(subdomain)) {
+    if (isReservedSubdomain(subdomain)) {
       throw new BadRequestException(`Subdomain '${subdomain}' is reserved`);
     }
 

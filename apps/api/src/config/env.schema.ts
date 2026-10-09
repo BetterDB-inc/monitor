@@ -9,6 +9,21 @@ function optionalUrl(value: unknown): unknown {
   return normalizeOptionalUrl(value) ?? undefined;
 }
 
+// Optional string whose blank/whitespace-only values collapse to undefined
+// (secrets and tokens injected by env often arrive as empty strings).
+const optionalTrimmedString = z
+  .string()
+  .optional()
+  .transform((value) => {
+    const trimmed = value?.trim();
+
+    if (trimmed === undefined || trimmed.length === 0) {
+      return undefined;
+    }
+
+    return trimmed;
+  });
+
 /**
  * Environment variable validation schema
  * Validates all environment variables at application startup
@@ -103,18 +118,7 @@ export const envSchema = z
       .string()
       .default('true')
       .transform((v) => v !== 'false'),
-    CVE_GITHUB_TOKEN: z
-      .string()
-      .optional()
-      .transform((value) => {
-        const trimmed = value?.trim();
-
-        if (trimmed === undefined || trimmed.length === 0) {
-          return undefined;
-        }
-
-        return trimmed;
-      }),
+    CVE_GITHUB_TOKEN: optionalTrimmedString,
 
     // Self-hosted user control (workspace auth)
     WORKSPACE_DISABLED: z.string().default('false').transform(isTrueFlag),
@@ -233,18 +237,11 @@ export const envSchema = z
       .string()
       .default('true')
       .transform((v) => v.trim().toLowerCase() !== 'false'),
-    PROMETHEUS_METRICS_TOKEN: z
-      .string()
-      .optional()
-      .transform((value) => {
-        const trimmed = value?.trim();
-
-        if (trimmed === undefined || trimmed.length === 0) {
-          return undefined;
-        }
-
-        return trimmed;
-      }),
+    PROMETHEUS_METRICS_TOKEN: optionalTrimmedString,
+    // Secondary metrics token meant for publication (live demo scrape access).
+    // Either token is accepted; rotating this one never breaks internal scrapes
+    // configured with PROMETHEUS_METRICS_TOKEN.
+    PROMETHEUS_METRICS_PUBLIC_TOKEN: optionalTrimmedString,
 
     METRICS_EXPORT_PROFILE: z.preprocess(
       (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
@@ -265,6 +262,14 @@ export const envSchema = z
       .string()
       .default('true')
       .transform((v) => v !== 'false'),
+    // Gates only the OTel event/log dispatcher (OTLP /v1/logs). Set to false
+    // when the OTLP endpoint is a metrics-only receiver (e.g. Prometheus's
+    // native OTLP receiver) so the metrics mirror can run without every event
+    // export 404ing.
+    OTEL_EVENTS_ENABLED: z
+      .string()
+      .default('true')
+      .transform((v) => !isNegativeEnvValue(v)),
     OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().or(z.literal('')).optional(),
     OTEL_METRICS_EXPORT_INTERVAL_MS: z.coerce.number().int().min(1000).default(15000),
     OTEL_METRICS_EXPORT_MODE: z.string().optional(),
