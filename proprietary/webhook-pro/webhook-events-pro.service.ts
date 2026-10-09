@@ -68,19 +68,19 @@ export class WebhookEventsProService implements OnModuleInit {
       return;
     }
 
-    await this.webhookDispatcher.dispatchThresholdAlert(
+    await this.webhookDispatcher.dispatchThresholdAlertPerWebhook(
       WebhookEventType.SLOWLOG_THRESHOLD,
       'slowlog_threshold',
       data.slowlogCount,
-      data.threshold,
+      'slowlogCount',
       true, // isAbove
-      {
+      (threshold) => ({
         slowlogCount: data.slowlogCount,
-        threshold: data.threshold,
-        message: `Slowlog count (${data.slowlogCount}) exceeds threshold (${data.threshold})`,
+        threshold,
+        message: `Slowlog count (${data.slowlogCount}) exceeds threshold (${threshold})`,
         timestamp: data.timestamp,
         instance: data.instance,
-      },
+      }),
       data.connectionId,
     );
   }
@@ -102,20 +102,20 @@ export class WebhookEventsProService implements OnModuleInit {
       return;
     }
 
-    await this.webhookDispatcher.dispatchThresholdAlert(
+    await this.webhookDispatcher.dispatchThresholdAlertPerWebhook(
       WebhookEventType.REPLICATION_LAG,
       'replication_lag',
       data.lagSeconds,
-      data.threshold,
+      'replicationLagSeconds',
       true, // isAbove
-      {
+      (threshold) => ({
         lagSeconds: data.lagSeconds,
-        threshold: data.threshold,
+        threshold,
         masterLinkStatus: data.masterLinkStatus,
-        message: `Replication lag (${data.lagSeconds}s) exceeds threshold (${data.threshold}s)`,
+        message: `Replication lag (${data.lagSeconds}s) exceeds threshold (${threshold}s)`,
         timestamp: data.timestamp,
         instance: data.instance,
-      },
+      }),
       data.connectionId,
     );
   }

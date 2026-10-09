@@ -67,11 +67,21 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
       return false;
     }
 
-    return this.webhookDispatcher.dispatchThresholdAlert(
+    // The OTLP edge is tracked separately from webhook delivery so it still
+    // fires (with its own per-connection hysteresis) when no compliance.alert
+    // webhook is subscribed.
+    const otlpEdge = this.webhookDispatcher.shouldFireAlert(
+      `compliance_alert_otlp:${data.connectionId ?? 'default'}`,
+      data.memoryUsedPercent || 0,
+      80, // threshold
+      true, // isAbove
+    );
+
+    await this.webhookDispatcher.dispatchThresholdAlertPerWebhook(
       WebhookEventType.COMPLIANCE_ALERT,
       'compliance_alert',
       data.memoryUsedPercent || 0,
-      80, // threshold
+      'complianceMemoryPercent',
       true, // isAbove
       {
         complianceType: data.complianceType,
@@ -84,6 +94,8 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
       },
       data.connectionId,
     );
+
+    return otlpEdge;
   }
 
   /**

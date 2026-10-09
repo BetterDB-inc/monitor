@@ -1521,11 +1521,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       // Compliance alert for enterprise tier. OTLP mirrors the webhook's edge
       // semantics: dispatchComplianceAlert resolves true only when the alert
       // edge fired (hysteresis) and the license tier allows it.
-      if (
-        usedPercent > 80 &&
-        maxmemoryPolicy === 'noeviction' &&
-        this.webhookEventsEnterpriseService
-      ) {
+      // Evaluated on every poll (not only above 80%) so each webhook's
+      // complianceMemoryPercent decides, and recovery re-arms the alert.
+      if (maxmemoryPolicy === 'noeviction' && this.webhookEventsEnterpriseService) {
         this.webhookEventsEnterpriseService
           .dispatchComplianceAlert({
             complianceType: 'data_retention',

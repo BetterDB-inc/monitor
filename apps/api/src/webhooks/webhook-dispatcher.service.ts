@@ -360,7 +360,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   /**
    * Check if alert should fire (with hysteresis to prevent flapping)
    */
-  private shouldFireAlert(
+  shouldFireAlert(
     alertKey: string,
     currentValue: number,
     threshold: number,
@@ -439,9 +439,10 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     currentValue: number,
     thresholdKey: keyof WebhookThresholds,
     isAbove: boolean,
-    data: Record<string, unknown>,
+    data: Record<string, unknown> | ((threshold: number) => Record<string, unknown>),
     connectionId?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    let firedAny = false;
     try {
       // Get webhooks subscribed to this event, filtered by connectionId
       const webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
@@ -450,7 +451,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
         this.logger.debug(
           `No webhooks subscribed to event: ${eventType}${connectionId ? ` for connection ${connectionId}` : ''}`,
         );
-        return;
+        return false;
       }
 
       // Dispatch to each webhook with its own threshold
@@ -479,9 +480,11 @@ export class WebhookDispatcherService implements OnModuleDestroy {
               `Threshold alert triggered for webhook ${webhook.id}: ${eventType} (${currentValue} ${isAbove ? '>=' : '<='} ${threshold})`,
             );
 
+            firedAny = true;
             // Add threshold info to data
+            const base = typeof data === 'function' ? data(threshold) : data;
             const enrichedData = {
-              ...data,
+              ...base,
               threshold,
               thresholdKey,
               ...(connectionId && { connectionId }),
@@ -497,6 +500,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     } catch (error) {
       this.logger.error(`Failed to dispatch per-webhook threshold alert ${eventType}:`, error);
     }
+    return firedAny;
   }
 
   /**
