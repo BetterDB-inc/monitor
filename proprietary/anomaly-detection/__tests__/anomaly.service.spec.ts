@@ -18,7 +18,8 @@ import {
   AnomalyType,
   AnomalyPattern,
 } from '../types';
-import { WEBHOOK_EVENTS_PRO_SERVICE, WebhookEventType } from '@betterdb/shared';
+import { AppSettings, WEBHOOK_EVENTS_PRO_SERVICE, WebhookEventType } from '@betterdb/shared';
+import { DETECTOR_DEFAULTS } from '@app/anomaly/anomaly.types';
 import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispatcher.service';
 import { ExternalMetricsStore } from '@app/external-metrics/external-metrics-store';
 import { ExternalMetricsAdapter } from '@app/external-metrics/external-metrics.adapter';
@@ -742,6 +743,16 @@ describe('AnomalyService', () => {
       await poll();
       const detectors: Map<MetricType, any> = (service as any).detectors.get('conn-1');
       const config = detectors.get(MetricType.CPU_UTILIZATION).getConfig();
+      expect(config.detectDrops).toBe(true);
+    });
+
+    it('CPU detector uses DEFAULT_SPIKE_CONFIG thresholds, not connections', async () => {
+      const { DEFAULT_SPIKE_CONFIG } = await import('@app/anomaly/anomaly.types');
+      await poll();
+      const detectors: Map<MetricType, any> = (service as any).detectors.get('conn-1');
+      const config = detectors.get(MetricType.CPU_UTILIZATION).getConfig();
+      expect(config.warningZScore).toBe(DEFAULT_SPIKE_CONFIG.warningZScore);
+      expect(config.criticalZScore).toBe(DEFAULT_SPIKE_CONFIG.criticalZScore);
       expect(config.detectDrops).toBe(true);
     });
   });
@@ -6091,6 +6102,122 @@ describe('AnomalyService', () => {
         await poll(externalCtx);
       }
       expect(storage.saveAnomalyEvent).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── Detector config hot-reload (real SettingsService) ─────────────────────
+
+  describe('detector config hot-reload via SettingsService', () => {
+    let settingsService: SettingsService;
+    let liveService: AnomalyService;
+
+    beforeEach(async () => {
+      let stored: AppSettings = {
+        id: 1,
+        auditPollIntervalMs: 60000,
+        clientAnalyticsPollIntervalMs: 60000,
+        anomalyPollIntervalMs: 1000,
+        anomalyCacheTtlMs: 300000,
+        anomalyPrometheusIntervalMs: 30000,
+        metricForecastingEnabled: true,
+        metricForecastingDefaultRollingWindowMs: 21600000,
+        metricForecastingDefaultAlertThresholdMs: 7200000,
+        inferenceSlaConfig: {},
+        anomalyDetectorConfig: {},
+        localRetentionDays: null,
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      const settingsStorage = {
+        getSettings: jest.fn(async () => stored),
+        updateSettings: jest.fn(async (updates: Partial<AppSettings>) => {
+          stored = { ...stored, ...updates };
+          return stored;
+        }),
+        saveSettings: jest.fn(),
+      };
+      settingsService = new SettingsService(
+        settingsStorage as any,
+        { get: jest.fn((_key: string, defaultValue: unknown) => defaultValue) } as any,
+      );
+      (settingsService as any).cachedSettings = stored;
+
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          AnomalyService,
+          {
+            provide: ConnectionRegistry,
+            useValue: { list: jest.fn().mockReturnValue([]), get: jest.fn() },
+          },
+          { provide: 'STORAGE_CLIENT', useValue: storage },
+          {
+            provide: ConfigService,
+            useValue: { get: jest.fn((_key: string, def?: unknown) => def) },
+          },
+          { provide: PrometheusService, useValue: prometheusService },
+          { provide: SettingsService, useValue: settingsService },
+          { provide: SlowLogAnalyticsService, useValue: slowLogAnalytics },
+          { provide: CommandLogAnalyticsService, useValue: commandLogAnalytics },
+          { provide: WEBHOOK_EVENTS_PRO_SERVICE, useValue: webhookEventsProService },
+          { provide: OtelEventDispatcherService, useValue: otelEvents },
+        ],
+      }).compile();
+
+      liveService = module.get<AnomalyService>(AnomalyService);
+      await liveService.onModuleInit();
+      await (liveService as any).pollConnection(mockCtx);
+    });
+
+    afterEach(async () => {
+      await liveService.onModuleDestroy();
+    });
+
+    const liveDetector = (metric: MetricType) =>
+      (liveService as any).detectors.get('conn-1').get(metric);
+    const liveBuffer = (metric: MetricType) =>
+      (liveService as any).buffers.get('conn-1').get(metric);
+
+    it('applies a PATCH to the live detector without resetting its buffer', async () => {
+      const detector = liveDetector(MetricType.CONNECTIONS);
+      const buffer = liveBuffer(MetricType.CONNECTIONS);
+      const samplesBefore = buffer.getSampleCount();
+      expect(samplesBefore).toBeGreaterThan(0);
+
+      await settingsService.updateDetectorConfig({ connections: { warningZScore: 2.7 } });
+
+      expect(liveDetector(MetricType.CONNECTIONS)).toBe(detector);
+      expect(detector.getConfig().warningZScore).toBe(2.7);
+      expect(liveBuffer(MetricType.CONNECTIONS)).toBe(buffer);
+      expect(buffer.getSampleCount()).toBe(samplesBefore);
+    });
+
+    it('leaves detectors with their own hardcoded thresholds untouched', async () => {
+      const rejected = liveDetector(MetricType.REJECTED_CONNECTIONS);
+      const before = rejected.getConfig();
+
+      await settingsService.updateDetectorConfig({ connections: { warningZScore: 2.7 } });
+
+      expect(rejected.getConfig()).toEqual(before);
+      expect(rejected.getConfig().warningThreshold).toBe(5);
+    });
+
+    it('resetDetectorConfig() restores the default on the live detector', async () => {
+      await settingsService.updateDetectorConfig({ connections: { warningZScore: 2.7 } });
+      await settingsService.resetDetectorConfig();
+
+      expect(liveDetector(MetricType.CONNECTIONS).getConfig().warningZScore).toBe(
+        DETECTOR_DEFAULTS.connections.warningZScore,
+      );
+    });
+
+    it('stops receiving updates after onModuleDestroy', async () => {
+      await liveService.onModuleDestroy();
+
+      await settingsService.updateDetectorConfig({ connections: { warningZScore: 2.7 } });
+
+      expect(liveDetector(MetricType.CONNECTIONS).getConfig().warningZScore).toBe(
+        DETECTOR_DEFAULTS.connections.warningZScore,
+      );
     });
   });
 });

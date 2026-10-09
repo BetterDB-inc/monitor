@@ -458,12 +458,13 @@ Real-time anomaly detection system metrics.
 
 #### Event Metrics
 
-| Metric                            | Type    | Labels                                    | Description                        | Example |
-| --------------------------------- | ------- | ----------------------------------------- | ---------------------------------- | ------- |
-| `betterdb_anomaly_events_total`   | counter | `severity`, `metric_type`, `anomaly_type` | Total anomaly events detected      | `42`    |
-| `betterdb_anomaly_events_current` | gauge   | `severity`                                | Unresolved anomalies by severity   | `3`     |
-| `betterdb_anomaly_by_severity`    | gauge   | `severity`                                | Anomalies in last hour by severity | `12`    |
-| `betterdb_anomaly_by_metric`      | gauge   | `metric_type`                             | Anomalies in last hour by metric   | `8`     |
+| Metric                                   | Type    | Labels                                    | Description                                               | Example |
+| ---------------------------------------- | ------- | ----------------------------------------- | --------------------------------------------------------- | ------- |
+| `betterdb_anomaly_events_total`          | counter | `severity`, `metric_type`, `anomaly_type` | Total anomaly events detected                             | `42`    |
+| `betterdb_anomaly_events_current`        | gauge   | `severity`                                | Unresolved anomalies by severity                          | `3`     |
+| `betterdb_anomaly_by_severity`           | gauge   | `severity`                                | Anomalies in last hour by severity                        | `12`    |
+| `betterdb_anomaly_by_metric`             | gauge   | `metric_type`                             | Anomalies in last hour by metric                          | `8`     |
+| `betterdb_detector_config_updates_total` | counter | -                                         | Successful PATCH updates to `/settings/anomaly/detectors` | `3`     |
 
 **Label Values**:
 
