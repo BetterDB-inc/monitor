@@ -35,7 +35,12 @@ function setup(opts: { licensed?: boolean; engines?: unknown[]; stored?: unknown
   };
   const connectionRegistry = { getConfig: jest.fn().mockReturnValue({ host: 'h', port: 6379 }) };
   let listener: ((s: KvCacheFootprintSnapshot) => void) | undefined;
-  const footprint = { onSnapshot: jest.fn().mockImplementation((l) => (listener = l)) };
+  let removalListener: ((id: string) => void) | undefined;
+  const footprint = {
+    onSnapshot: jest.fn().mockImplementation((l) => (listener = l)),
+    onConnectionRemoval: jest.fn().mockImplementation((l) => (removalListener = l)),
+  };
+  const prometheus = { setKvCacheFootprint: jest.fn(), setKvCacheHitRates: jest.fn(), clearKvCache: jest.fn() };
   const registry = {
     list: jest.fn().mockReturnValue(opts.engines ?? [engine()]),
     get: jest.fn().mockImplementation((id: string) => (opts.engines ?? [engine()]).find((e: any) => e.id === id) ?? null),
@@ -52,8 +57,20 @@ function setup(opts: { licensed?: boolean; engines?: unknown[]; stored?: unknown
     registry as any,
     license as any,
     pro as any,
+    prometheus as any,
   );
-  return { storage, connectionRegistry, footprint, registry, license, pro, service, emit: (s: KvCacheFootprintSnapshot) => listener?.(s) };
+  return {
+    storage,
+    connectionRegistry,
+    footprint,
+    registry,
+    license,
+    pro,
+    prometheus,
+    service,
+    emit: (s: KvCacheFootprintSnapshot) => listener?.(s),
+    remove: (id: string) => removalListener?.(id),
+  };
 }
 
 describe('KvCacheAlertsService settings', () => {
@@ -158,10 +175,10 @@ describe('KvCacheAlertsService hit rate', () => {
   });
 
   it('skips disabled engines', async () => {
-    const { service, pro, storage } = setup({ engines: [engine({ enabled: false })] });
+    const { service, pro, prometheus } = setup({ engines: [engine({ enabled: false })] });
     await service.evaluateHitRates(1);
-    expect(storage.getKvCacheEngineSamples).not.toHaveBeenCalled();
     expect(pro.dispatchKvCacheHitRateLow).not.toHaveBeenCalled();
+    expect(prometheus.setKvCacheHitRates).toHaveBeenCalledWith('c1', []);
   });
 
   it('skips samples of engines that are no longer registered', async () => {
@@ -210,5 +227,94 @@ describe('KvCacheAlertsService hit rate', () => {
       throw new Error('boom');
     });
     await expect(service.evaluateHitRates(1)).resolves.toBeUndefined();
+  });
+});
+
+describe('KvCacheAlertsService Prometheus export', () => {
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  const perModel = [{ model: 'm', dtype: 'bfloat16', chunksEst: 3, bytesEst: 300 }];
+
+  it('sets footprint gauges from a snapshot', async () => {
+    const { service, prometheus, emit } = setup();
+    service.onModuleInit();
+    emit(snapshot({ perModel }));
+    await flush();
+    service.onModuleDestroy();
+    expect(prometheus.setKvCacheFootprint).toHaveBeenCalledWith('c1', perModel);
+  });
+
+  it('sets footprint gauges even when eviction alerts are disabled', async () => {
+    const { service, prometheus } = setup({
+      stored: { connectionId: 'c1', hitRateAlertEnabled: true, hitRateThreshold: 0.2, evictionAlertEnabled: false, updatedAt: 1 },
+    });
+    await service.onSnapshot(snapshot({ perModel }));
+    expect(prometheus.setKvCacheFootprint).toHaveBeenCalledWith('c1', perModel);
+  });
+
+  it('does not set footprint gauges when unlicensed', async () => {
+    const { service, prometheus } = setup({ licensed: false });
+    await service.onSnapshot(snapshot({ perModel }));
+    expect(prometheus.setKvCacheFootprint).not.toHaveBeenCalled();
+  });
+
+  it('sets hit rates with the engine name', async () => {
+    const { service, prometheus } = setup();
+    await service.evaluateHitRates(1);
+    expect(prometheus.setKvCacheHitRates).toHaveBeenCalledWith('c1', [{ engine: 'vllm', model: 'm', hitRate: 0.1 }]);
+  });
+
+  it('sets hit rates when hit rate alerts are disabled', async () => {
+    const { service, prometheus, pro } = setup({
+      stored: { connectionId: 'c1', hitRateAlertEnabled: false, hitRateThreshold: 0.2, evictionAlertEnabled: true, updatedAt: 1 },
+    });
+    await service.evaluateHitRates(1);
+    expect(pro.dispatchKvCacheHitRateLow).not.toHaveBeenCalled();
+    expect(prometheus.setKvCacheHitRates).toHaveBeenCalledWith('c1', [{ engine: 'vllm', model: 'm', hitRate: 0.1 }]);
+  });
+
+  it('sets hit rates even when dispatch fails', async () => {
+    const { service, prometheus, pro } = setup();
+    pro.dispatchKvCacheHitRateLow.mockRejectedValue(new Error('boom'));
+    await service.evaluateHitRates(1);
+    expect(prometheus.setKvCacheHitRates).toHaveBeenCalledWith('c1', [{ engine: 'vllm', model: 'm', hitRate: 0.1 }]);
+  });
+
+  it('exports an empty list when there are no windows', async () => {
+    const { service, prometheus } = setup({ rows: [] });
+    await service.evaluateHitRates(1);
+    expect(prometheus.setKvCacheHitRates).toHaveBeenCalledWith('c1', []);
+  });
+
+  it('excludes windows with a null hit rate', async () => {
+    const { service, prometheus } = setup({ rows: [row({ requestedTokens: 0, hitTokens: 0 })] });
+    await service.evaluateHitRates(1);
+    expect(prometheus.setKvCacheHitRates).toHaveBeenCalledWith('c1', []);
+  });
+
+  it('excludes windows of disabled engines', async () => {
+    const engines = [engine(), engine({ id: 'e2', name: 'off', enabled: false })];
+    const { service, prometheus } = setup({ engines, rows: [row(), row({ engineId: 'e2' })] });
+    await service.evaluateHitRates(1);
+    expect(prometheus.setKvCacheHitRates).toHaveBeenCalledWith('c1', [{ engine: 'vllm', model: 'm', hitRate: 0.1 }]);
+  });
+
+  it('excludes windows of engines that are no longer registered', async () => {
+    const { service, prometheus } = setup({ rows: [row({ engineId: 'gone' })] });
+    await service.evaluateHitRates(1);
+    expect(prometheus.setKvCacheHitRates).toHaveBeenCalledWith('c1', []);
+  });
+
+  it('does not export hit rates when unlicensed', async () => {
+    const { service, prometheus } = setup({ licensed: false });
+    await service.evaluateHitRates(1);
+    expect(prometheus.setKvCacheHitRates).not.toHaveBeenCalled();
+  });
+
+  it('clears the connection series on connection removal', () => {
+    const { service, prometheus, remove } = setup();
+    service.onModuleInit();
+    remove('c1');
+    service.onModuleDestroy();
+    expect(prometheus.clearKvCache).toHaveBeenCalledWith('c1');
   });
 });

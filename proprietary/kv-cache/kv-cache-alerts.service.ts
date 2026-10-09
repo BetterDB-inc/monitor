@@ -12,6 +12,7 @@ import {
 } from '@betterdb/shared';
 import type { StoragePort } from '@app/common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
+import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { LicenseService } from '@proprietary/licenses/license.service';
 import { evictionConditions, shouldCheckHitRate, windowHitRates } from './kv-cache-alert-rules';
 import { KvCacheEngineRegistry } from './kv-cache-engine-registry';
@@ -34,10 +35,12 @@ export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
     @Optional()
     @Inject(WEBHOOK_EVENTS_PRO_SERVICE)
     private readonly webhookEventsPro?: IWebhookEventsProService,
+    @Optional() private readonly prometheus?: PrometheusService,
   ) {}
 
   onModuleInit(): void {
     this.footprint.onSnapshot((snapshot) => this.onSnapshot(snapshot));
+    this.footprint.onConnectionRemoval((connectionId) => this.prometheus?.clearKvCache(connectionId));
     this.timer = setInterval(() => void this.evaluateHitRates(), EVALUATE_INTERVAL_MS);
     this.timer.unref();
   }
@@ -68,7 +71,9 @@ export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
 
   async onSnapshot(snapshot: KvCacheFootprintSnapshot): Promise<void> {
     try {
-      if (!this.webhookEventsPro || !this.license.hasFeature(Feature.KV_CACHE_MONITORING)) return;
+      if (!this.license.hasFeature(Feature.KV_CACHE_MONITORING)) return;
+      this.prometheus?.setKvCacheFootprint(snapshot.connectionId, snapshot.perModel);
+      if (!this.webhookEventsPro) return;
       const settings = await this.getSettings(snapshot.connectionId);
       if (!settings.evictionAlertEnabled) return;
       const conditions = evictionConditions(snapshot);
@@ -95,8 +100,8 @@ export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
 
   async evaluateHitRates(now = Date.now()): Promise<void> {
     try {
-      if (!this.webhookEventsPro || !this.license.hasFeature(Feature.KV_CACHE_MONITORING)) return;
-      const connectionIds = new Set(this.registry.list().filter((engine) => engine.enabled).map((engine) => engine.connectionId));
+      if (!this.license.hasFeature(Feature.KV_CACHE_MONITORING)) return;
+      const connectionIds = new Set(this.registry.list().map((engine) => engine.connectionId));
       for (const connectionId of connectionIds) {
         try {
           await this.evaluateConnection(connectionId, now);
@@ -113,11 +118,23 @@ export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
     const rows = await this.storage.getKvCacheEngineSamples({ connectionId, from: now - KV_CACHE_HIT_RATE_WINDOW_MS, to: now });
     const settings = await this.getSettings(connectionId);
     const instance = this.instanceFor(connectionId);
-    for (const window of windowHitRates(rows)) {
+    const windows = windowHitRates(rows);
+    this.prometheus?.setKvCacheHitRates(
+      connectionId,
+      windows
+        .filter((window) => window.hitRate !== null && this.registry.get(window.engineId)?.enabled)
+        .map((window) => ({
+          engine: this.registry.get(window.engineId)!.name,
+          model: window.model,
+          hitRate: window.hitRate!,
+        })),
+    );
+    if (!this.webhookEventsPro) return;
+    for (const window of windows) {
       const engine = this.registry.get(window.engineId);
       if (!engine?.enabled || window.hitRate === null || !shouldCheckHitRate(window, settings)) continue;
       try {
-        await this.webhookEventsPro?.dispatchKvCacheHitRateLow({
+        await this.webhookEventsPro.dispatchKvCacheHitRateLow({
           connectionId,
           engineId: window.engineId,
           engineName: engine.name,
