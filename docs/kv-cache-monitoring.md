@@ -306,7 +306,8 @@ profile (they are not part of `vitals`):
 
 See [Prometheus Metrics](prometheus-metrics#kv-cache-metrics) for the full
 reference. Hit-rate series exist only for enabled engines whose window has
-requested tokens; they are removed when that stops being true.
+requested tokens; they are removed when that stops being true. The `engine`
+label is the engine name, which must be unique per connection.
 
 ## Configuration
 
