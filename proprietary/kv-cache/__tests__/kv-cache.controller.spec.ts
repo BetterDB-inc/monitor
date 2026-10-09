@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Feature } from '@betterdb/shared';
+import { ALLOW_MEMBERS_KEY } from '@app/auth/guards/roles.decorator';
 import { ENV_DEFAULT_ID } from '@app/connections/connection-registry.service';
 import { KvCacheController } from '../kv-cache.controller';
 
@@ -66,5 +67,10 @@ describe('KvCacheController', () => {
     for (const handler of ['getStatus', 'refreshFootprint', 'getFootprintHistory', 'getSamples', 'listEngines', 'createEngine', 'updateEngine', 'removeEngine', 'getSettings', 'updateSettings'] as const) {
       expect(reflector.get('requiredFeature', KvCacheController.prototype[handler])).toEqual(Feature.KV_CACHE_MONITORING);
     }
+  });
+
+  it('lets workspace members trigger a footprint refresh', () => {
+    const reflector = new Reflector();
+    expect(reflector.get(ALLOW_MEMBERS_KEY, KvCacheController.prototype.refreshFootprint)).toBe(true);
   });
 });
