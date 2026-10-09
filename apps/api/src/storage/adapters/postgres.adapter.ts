@@ -118,6 +118,8 @@ import { InvitationPostgresRepository } from './repositories/invitation.postgres
 import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
 import { ActivityPostgresRepository } from './repositories/activity.postgres.repository';
 import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
+import { encodeCveSnapshots } from './cve-snapshots.codec';
+import { readCveDataset, readCveScanResult } from './cve-storage.schema';
 
 // Domain-specific repositories (webhooks, slowlog extracted). Remaining domains to extract:
 // ACL, anomaly, commandlog, latency, memory, hotkeys, settings,
@@ -4450,7 +4452,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         this.stripNulCharacters(dataset.datasetVersion),
         dataset.refreshedAt,
         JSON.stringify(this.sanitizeNulBytes(dataset.advisories)),
-        JSON.stringify(this.sanitizeNulBytes(dataset.snapshots)),
+        JSON.stringify(this.sanitizeNulBytes(encodeCveSnapshots(dataset.snapshots))),
       ],
     );
   }
@@ -4471,16 +4473,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       return null;
     }
 
-    return {
+    return readCveDataset({
       datasetVersion: row.dataset_version,
       refreshedAt: Number(row.refreshed_at),
-      advisories: (typeof row.advisories === 'string'
-        ? JSON.parse(row.advisories)
-        : row.advisories) as StoredCveDataset['advisories'],
-      snapshots: (typeof row.snapshots === 'string'
-        ? JSON.parse(row.snapshots)
-        : row.snapshots) as StoredCveDataset['snapshots'],
-    };
+      advisories: row.advisories,
+      snapshots: row.snapshots,
+    });
   }
 
   async saveCveScanResult(result: CveScanResult): Promise<void> {
@@ -4529,7 +4527,15 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       return null;
     }
 
-    return (typeof row.result === 'string' ? JSON.parse(row.result) : row.result) as CveScanResult;
+    return readCveScanResult(row.result);
+  }
+
+  async deleteCveScanResult(connectionId: string): Promise<void> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    await this.pool.query('DELETE FROM cve_scan_results WHERE connection_id = $1', [
+      this.stripNulCharacters(connectionId),
+    ]);
   }
 
   // Connection Management Methods
