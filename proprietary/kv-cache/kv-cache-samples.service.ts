@@ -40,6 +40,7 @@ export class KvCacheSamplesService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(KvCacheSamplesService.name);
   private readonly tracker = new CounterDeltaTracker();
   private timer: NodeJS.Timeout | null = null;
+  private flushing: Promise<void> = Promise.resolve();
 
   constructor(@Inject('STORAGE_CLIENT') private readonly storage: StoragePort) {}
 
@@ -68,12 +69,19 @@ export class KvCacheSamplesService implements OnModuleInit, OnModuleDestroy {
 
   async deleteEngine(engineId: string): Promise<void> {
     this.forgetEngine(engineId);
+    await this.flushing;
     await this.storage.deleteKvCacheEngineSamples(engineId);
   }
 
-  async flush(nowMs: number = Date.now(), includeOpen = false): Promise<void> {
+  flush(nowMs: number = Date.now(), includeOpen = false): Promise<void> {
     const rows = this.tracker.drain(nowMs, includeOpen);
-    if (rows.length === 0) return;
+    if (rows.length === 0) return Promise.resolve();
+    const write = this.flushing.then(() => this.write(rows));
+    this.flushing = write;
+    return write;
+  }
+
+  private async write(rows: KvCacheEngineSample[]): Promise<void> {
     try {
       await this.storage.saveKvCacheEngineSamples(rows);
     } catch (error) {

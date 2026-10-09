@@ -7,6 +7,7 @@ import { KvCacheSamplesService } from './kv-cache-samples.service';
 export class KvCacheEngineRegistry implements OnModuleInit {
   private readonly logger = new Logger(KvCacheEngineRegistry.name);
   private readonly engines = new Map<string, StoredKvCacheEngine>();
+  private readonly writes = new Map<string, Promise<unknown>>();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -41,16 +42,20 @@ export class KvCacheEngineRegistry implements OnModuleInit {
     return null;
   }
 
-  async save(engine: StoredKvCacheEngine): Promise<StoredKvCacheEngine> {
-    const saved = await this.storage.saveKvCacheEngine(engine);
-    this.engines.set(saved.id, saved);
-    return saved;
+  save(engine: StoredKvCacheEngine): Promise<StoredKvCacheEngine> {
+    return this.serialize(engine.id, async () => {
+      const saved = await this.storage.saveKvCacheEngine(engine);
+      this.engines.set(saved.id, saved);
+      return saved;
+    });
   }
 
-  async remove(id: string): Promise<boolean> {
-    const removed = await this.storage.deleteKvCacheEngine(id);
-    this.engines.delete(id);
-    return removed;
+  remove(id: string): Promise<boolean> {
+    return this.serialize(id, async () => {
+      const removed = await this.storage.deleteKvCacheEngine(id);
+      this.engines.delete(id);
+      return removed;
+    });
   }
 
   recordResult(id: string, result: { lastSeenAt?: number; lastError: string | null }): void {
@@ -62,8 +67,19 @@ export class KvCacheEngineRegistry implements OnModuleInit {
       lastError: result.lastError,
     };
     this.engines.set(id, updated);
-    void this.storage
-      .saveKvCacheEngine(updated)
-      .catch((error) => this.logger.warn(`Could not persist KV cache engine ${id}: ${error instanceof Error ? error.message : String(error)}`));
+    void this.serialize(id, async () => {
+      const latest = this.engines.get(id);
+      if (latest) await this.storage.saveKvCacheEngine(latest);
+    }).catch((error) => this.logger.warn(`Could not persist KV cache engine ${id}: ${error instanceof Error ? error.message : String(error)}`));
+  }
+
+  private serialize<T>(id: string, task: () => Promise<T>): Promise<T> {
+    const run = (this.writes.get(id) ?? Promise.resolve()).then(task);
+    const tail = run.catch(() => undefined);
+    this.writes.set(id, tail);
+    void tail.then(() => {
+      if (this.writes.get(id) === tail) this.writes.delete(id);
+    });
+    return run;
   }
 }

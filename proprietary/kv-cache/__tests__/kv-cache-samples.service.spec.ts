@@ -115,6 +115,21 @@ describe('KvCacheSamplesService', () => {
     expect(storage.saveKvCacheEngineSamples).not.toHaveBeenCalled();
   });
 
+  it('deletes stored samples only after an in-flight flush lands', async () => {
+    const { service, storage } = setup();
+    const order: string[] = [];
+    let finishSave: () => void = () => undefined;
+    storage.saveKvCacheEngineSamples.mockImplementationOnce(() => new Promise<void>((resolve) => (finishSave = () => { order.push('save'); resolve(); })));
+    storage.deleteKvCacheEngineSamples.mockImplementationOnce(async () => { order.push('delete'); });
+    service.observe(observation(10), 61_000);
+    const flushing = service.flush(120_000);
+    const deleting = service.deleteEngine('e1');
+    await new Promise((resolve) => setImmediate(resolve));
+    finishSave();
+    await Promise.all([flushing, deleting]);
+    expect(order).toEqual(['save', 'delete']);
+  });
+
   it('resets baselines without dropping pending buckets', async () => {
     const { service, storage } = setup();
     service.observe(observation(100, true), 61_000);

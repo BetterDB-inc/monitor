@@ -45,6 +45,7 @@ describe('KvCacheEngineRegistry', () => {
     await registry.onModuleInit();
     registry.recordResult('a', { lastSeenAt: 99, lastError: 'boom' });
     expect(registry.get('a')).toMatchObject({ lastSeenAt: 99, lastError: 'boom' });
+    await new Promise((resolve) => setImmediate(resolve));
     expect(storage.saveKvCacheEngine).toHaveBeenCalledWith(expect.objectContaining({ id: 'a', lastError: 'boom' }));
   });
 
@@ -56,6 +57,32 @@ describe('KvCacheEngineRegistry', () => {
     registry.recordResult('a', { lastError: 'x' });
     await new Promise((resolve) => setImmediate(resolve));
     expect(registry.get('a')).toMatchObject({ lastSeenAt: 5, lastError: 'x' });
+  });
+
+  it('persists a result raised during an update with the updated fields', async () => {
+    const { registry, storage } = setup();
+    await registry.onModuleInit();
+    let finishSave: () => void = () => undefined;
+    storage.saveKvCacheEngine.mockImplementationOnce((e: any) => new Promise((resolve) => (finishSave = () => resolve(e))));
+    const pending = registry.save({ ...engine('a', 'c1', 'lmc-a'), name: 'renamed' });
+    registry.recordResult('a', { lastSeenAt: 7, lastError: null });
+    await new Promise((resolve) => setImmediate(resolve));
+    finishSave();
+    await pending;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.saveKvCacheEngine).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'a', name: 'renamed' }));
+    expect(registry.get('a')?.name).toBe('renamed');
+  });
+
+  it('does not resurrect an engine removed while a result was pending', async () => {
+    const { registry, storage } = setup();
+    await registry.onModuleInit();
+    registry.recordResult('a', { lastSeenAt: 7, lastError: null });
+    await registry.remove('a');
+    registry.recordResult('a', { lastSeenAt: 8, lastError: null });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.saveKvCacheEngine).toHaveBeenCalledTimes(1);
+    expect(registry.get('a')).toBeNull();
   });
 
   it('removes from storage and memory', async () => {
