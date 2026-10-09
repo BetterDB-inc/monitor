@@ -1134,12 +1134,11 @@ export class ProvisioningService {
         if (isDemo) {
           // Same backfill for the demo-only published token.
           await this.ensureMetricsTokenInSecret(namespace, 'PROMETHEUS_METRICS_PUBLIC_TOKEN');
-        } else {
-          // A tenant that has been un-flagged must not keep the published
-          // token around; drop it so the demoted tenant can't be scraped with
-          // the public credential.
-          await this.pruneSecretKey(namespace, 'PROMETHEUS_METRICS_PUBLIC_TOKEN');
         }
+        // For a non-demo tenant the published token is pruned later, after
+        // createDeployment has settled a spec that no longer references it —
+        // dropping the Secret key here would leave the running Deployment's
+        // non-optional secretKeyRef pointing at a missing key.
       } else {
         throw error;
       }
@@ -1444,6 +1443,16 @@ export class ProvisioningService {
       } else {
         throw error;
       }
+    }
+
+    // Prune the published token from the Secret for a non-demo tenant — only
+    // now, once the Deployment spec (created fresh or converged above) no
+    // longer references the key, so we never leave a non-optional secretKeyRef
+    // pointing at a deleted key. Security is already enforced by the guard
+    // (public token honored only when DEMO_HOSTNAME is set) and the env delete;
+    // this just keeps the Secret clean.
+    if (!isDemo) {
+      await this.pruneSecretKey(namespace, 'PROMETHEUS_METRICS_PUBLIC_TOKEN');
     }
   }
 
