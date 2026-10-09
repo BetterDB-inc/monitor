@@ -80,6 +80,8 @@ const DISCORD_COLORS: Record<string, number> = {
   'instance.down': 0xe5484d,
   'instance.up': 0x30a46c,
   'anomaly.detected': 0xf5a524,
+  'writes.rejected': 0xe5484d,
+  'writes.recovered': 0x30a46c,
 };
 
 export function toDiscord(payload: WebhookPayload, appBaseUrl?: string): Record<string, unknown> {

@@ -263,7 +263,7 @@ const CORRELATION_PATTERNS = ['memory_pressure', 'connection_storm', 'slow_queri
 
 const WEBHOOK_EVENTS = [
   'instance.down', 'instance.up', 'memory.critical', 'connection.critical',
-  'anomaly.detected', 'slowlog.threshold', 'latency.spike', 'connection.spike',
+  'writes.rejected', 'writes.recovered', 'anomaly.detected', 'slowlog.threshold', 'latency.spike', 'connection.spike',
   'client.blocked', 'acl.violation', 'acl.modified', 'config.changed',
   'replication.lag', 'cluster.failover', 'audit.policy.violation', 'compliance.alert'
 ];
@@ -1147,6 +1147,24 @@ function generateEventData(eventType: string): Record<string, any> {
         maxConnections: 10000,
         usagePercent: randomFloat(90, 100),
       };
+    case 'writes.rejected':
+      return {
+        causes: ['rdb_bgsave_failed'],
+        severity: 'critical',
+        rejectedSinceLastPoll: { MISCONF: randomInt(10, 500) },
+        rejectingForMs: 0,
+        message: 'Writes are being rejected (rdb_bgsave_failed) and clients are receiving errors',
+      };
+    case 'writes.recovered': {
+      const rejectingForMs = randomInt(5000, 600000);
+      return {
+        causes: [],
+        severity: 'warning',
+        rejectedSinceLastPoll: {},
+        rejectingForMs,
+        message: `Writes accepted again after ${Math.round(rejectingForMs / 1000)}s`,
+      };
+    }
     case 'anomaly.detected':
       return {
         metricType: randomChoice(METRIC_TYPES),
