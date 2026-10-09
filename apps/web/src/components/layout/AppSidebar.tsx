@@ -4,6 +4,8 @@ import { useCanMutate } from '../../hooks/useCanMutate';
 import { useCapabilities } from '../../hooks/useCapabilities';
 import { useCacheProposalsUnread } from '../../hooks/useCacheProposals';
 import { useConnection } from '../../hooks/useConnection';
+import { useKvCacheStatus } from '../../hooks/useKvCacheStatus';
+import { useLicense } from '../../hooks/useLicense';
 import { ConnectionSelector } from '../ConnectionSelector';
 import { CloudUser } from '../../api/workspace';
 import { NavItem } from './NavItem';
@@ -28,6 +30,10 @@ interface SidebarProps {
 export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: SidebarProps) {
   const location = useLocation();
   const { hasVectorSearch } = useCapabilities();
+  const { hasFeature } = useLicense();
+  const kvCacheStatus = useKvCacheStatus();
+  const showKvCache =
+    !hasFeature(Feature.KV_CACHE_MONITORING) || kvCacheStatus.data?.hasLmcache === true;
   const { unreadCount: cacheProposalsUnread } = useCacheProposalsUnread();
   const isDemo = useIsDemo();
   const canMutate = useCanMutate();
@@ -134,6 +140,15 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
           {hasVectorSearch && (
             <NavItem to="/vector-ai" active={location.pathname === '/vector-ai'}>
               Vector / AI
+            </NavItem>
+          )}
+          {showKvCache && (
+            <NavItem
+              to="/kv-cache"
+              active={location.pathname === '/kv-cache'}
+              requiredFeature={Feature.KV_CACHE_MONITORING}
+            >
+              KV Cache
             </NavItem>
           )}
           <NavItem to="/ai-cache-memory" active={location.pathname === '/ai-cache-memory'}>

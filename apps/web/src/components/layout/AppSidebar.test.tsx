@@ -31,6 +31,10 @@ vi.mock('../../hooks/useCapabilities', () => ({
   useCapabilities: () => ({ hasVectorSearch: false }),
 }));
 
+vi.mock('../../hooks/useKvCacheStatus', () => ({
+  useKvCacheStatus: () => ({ data: undefined }),
+}));
+
 vi.mock('../../hooks/useCacheProposals', () => ({
   useCacheProposalsUnread: () => ({ unreadCount: 0 }),
 }));
