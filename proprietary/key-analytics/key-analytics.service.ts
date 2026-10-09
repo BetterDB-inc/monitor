@@ -12,7 +12,6 @@ import {
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { LicenseService } from '@proprietary/licenses/license.service';
 import {
-  ConnectionStatus,
   KeyAnalyticsResult,
   KeySizeDistribution,
   KEY_DETAILS_TOP_N,
@@ -24,6 +23,7 @@ import type { DatabasePort } from '@app/common/interfaces/database-port.interfac
 import { rankCompositeKeys } from './composite-key-ranker';
 import { CollectionPlan, collectionPlan, isScannable } from './key-analytics-plan';
 import { buildPatternSnapshots, mergePatternSnapshots } from './key-pattern-snapshots';
+import { clusterScanNodes, primaryScanNodes } from './scan-nodes';
 import { randomUUID } from 'crypto';
 
 // The collectors prune keyDetails mid-scan to the top KEY_DETAILS_TOP_N keys per
@@ -46,11 +46,6 @@ const COMPOSITE_TOP_N = KEY_DETAILS_TOP_N;
 const LARGEST_KEYS_FETCH_CAP = 10_000;
 
 const NO_KEY_SIZES: KeySizeDistribution = { databases: {}, available: false };
-
-interface ScanNode {
-  name: string;
-  client: DatabasePort;
-}
 
 function dedupeByKeyMaxMemory(entries: HotKeyEntry[]): HotKeyEntry[] {
   const byKey = new Map<string, HotKeyEntry>();
@@ -127,36 +122,12 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     return connection !== undefined && !hasOwnKeyAnalytics(connection.membership);
   }
 
-  private clusterNodes(seed: ScanNode, members: ConnectionStatus[]): ScanNode[] {
-    const nodes = [seed];
-    for (const member of members) {
-      try {
-        nodes.push({ name: member.name, client: this.connectionRegistry.get(member.id) });
-      } catch {
-        this.logger.warn(`Key analytics skipped ${member.name}: the connection is no longer registered`);
-      }
-    }
-    return nodes;
-  }
-
-  private async primaries(nodes: ScanNode[]): Promise<ScanNode[]> {
-    const roles = await Promise.allSettled(nodes.map((node) => node.client.getRole()));
-    return nodes.filter((node, index) => {
-      const role = roles[index];
-      if (role.status === 'rejected') {
-        this.logger.warn(`Key analytics could not read the role of ${node.name}: ${role.reason instanceof Error ? role.reason.message : role.reason}`);
-        return false;
-      }
-      return role.value.role === 'master';
-    });
-  }
-
   private async scan(ctx: ConnectionContext, plan: CollectionPlan, fullScan: boolean): Promise<KeyAnalyticsResult[]> {
     const options = { sampleSize: this.sampleSize, scanBatchSize: this.scanBatchSize, fullScan };
     if (plan.kind !== 'cluster') {
       return [await ctx.client.collectKeyAnalytics(options)];
     }
-    const nodes = await this.primaries(this.clusterNodes({ name: ctx.connectionName, client: ctx.client }, plan.members));
+    const nodes = await primaryScanNodes(clusterScanNodes(this.connectionRegistry, { name: ctx.connectionName, client: ctx.client }, plan.members, this.logger, 'Key analytics'), this.logger, 'Key analytics');
     if (nodes.length === 0) {
       throw new Error(`No reachable primary found for ${ctx.connectionName}`);
     }
@@ -515,7 +486,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
       return this.keySizesOf(client);
     }
 
-    const nodes = await this.primaries(this.clusterNodes({ name: target?.name ?? targetId, client }, plan.members));
+    const nodes = await primaryScanNodes(clusterScanNodes(this.connectionRegistry, { name: target?.name ?? targetId, client }, plan.members, this.logger, 'Key analytics'), this.logger, 'Key analytics');
     return mergeKeySizeDistributions(await Promise.all(nodes.map((node) => this.keySizesOf(node.client))));
   }
 

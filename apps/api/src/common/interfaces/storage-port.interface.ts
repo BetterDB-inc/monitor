@@ -39,6 +39,10 @@ import type {
   ReadinessDimension,
   ReadinessDimensionKey,
   ScalingReadinessSettings,
+  KvCacheEngineSample,
+  KvCacheEngineSource,
+  KvCacheFootprintSnapshot,
+  KvCacheSettings,
 } from '@betterdb/shared';
 export type { MetricForecastSettings, MetricKind } from '@betterdb/shared';
 export type { StoredCveDataset, CveScanResult } from '@betterdb/shared';
@@ -403,6 +407,33 @@ export interface ScalingReadinessScoreQuery {
   limit?: number;
 }
 
+export interface StoredKvCacheEngine {
+  id: string;
+  connectionId: string;
+  name: string;
+  source: KvCacheEngineSource;
+  scrapeUrl: string | null;
+  scrapeAuthHeader: string | null;
+  scrapeAuthEncrypted: boolean;
+  otlpEngineId: string | null;
+  enabled: boolean;
+  createdAt: number;
+  lastSeenAt: number | null;
+  lastError: string | null;
+}
+
+export interface KvCacheRangeQuery {
+  connectionId: string;
+  from?: number;
+  to?: number;
+  limit?: number;
+}
+
+export interface KvCacheSampleQuery extends KvCacheRangeQuery {
+  engineId?: string;
+  modelName?: string;
+}
+
 export interface MemorySnapshotQueryOptions {
   connectionId?: string;
   startTime?: number;
@@ -605,6 +636,19 @@ export interface StoragePort {
   pruneOldScalingReadinessScores(cutoffTimestamp: number, connectionId?: string): Promise<number>;
   getScalingReadinessSettings(connectionId: string): Promise<ScalingReadinessSettings | null>;
   saveScalingReadinessSettings(settings: ScalingReadinessSettings): Promise<ScalingReadinessSettings>;
+  saveKvCacheFootprintSnapshot(snapshot: KvCacheFootprintSnapshot): Promise<void>;
+  getKvCacheFootprintSnapshots(query: KvCacheRangeQuery): Promise<KvCacheFootprintSnapshot[]>;
+  pruneOldKvCacheFootprintSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+  saveKvCacheEngineSamples(samples: KvCacheEngineSample[]): Promise<void>;
+  getKvCacheEngineSamples(query: KvCacheSampleQuery): Promise<KvCacheEngineSample[]>;
+  pruneOldKvCacheEngineSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+  saveKvCacheEngine(engine: StoredKvCacheEngine): Promise<StoredKvCacheEngine>;
+  getKvCacheEngines(connectionId?: string): Promise<StoredKvCacheEngine[]>;
+  getKvCacheEngine(id: string): Promise<StoredKvCacheEngine | null>;
+  deleteKvCacheEngine(id: string): Promise<boolean>;
+  getKvCacheSettings(connectionId: string): Promise<KvCacheSettings | null>;
+  saveKvCacheSettings(settings: KvCacheSettings): Promise<KvCacheSettings>;
+  deleteKvCacheConnectionData(connectionId: string): Promise<void>;
 
   // Command Stats Sample Methods - connectionId required for writes
   saveCommandStatsSamples(
