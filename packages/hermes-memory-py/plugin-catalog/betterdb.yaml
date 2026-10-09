@@ -3,7 +3,7 @@ repo: https://github.com/BetterDB-inc/monitor
 subdir: packages/hermes-memory-py
 sha: <PIN-AT-SUBMISSION>
 version: "0.1.0"
-description: "BetterDB long-term memory provider — semantic recall on Valkey / valkey-search via the betterdb-agent-memory SDK. Completed turns are embedded and stored in a vector index; the next turn recalls the most relevant memories with a composite similarity/recency/importance score. Explicit betterdb_remember / betterdb_recall / betterdb_forget tools. Disclosure — turn text and tool-stored facts are embedded through an OpenAI-compatible embeddings endpoint you configure (embeddings_base_url, default api.openai.com) and written to the Valkey instance you point it at; the SDK registers a discovery marker so BetterDB Monitor can enumerate the tier."
+description: "BetterDB long-term memory provider — semantic recall on Valkey / valkey-search via the betterdb-agent-memory SDK. Completed turns are embedded and stored in a vector index; the next turn recalls the most relevant memories with a composite similarity/recency/importance score. Explicit betterdb_remember / betterdb_recall / betterdb_forget tools. Disclosure — turn text and tool-stored facts are embedded through an OpenAI-compatible embeddings endpoint you configure (embeddings_base_url, default api.openai.com) and written to the Valkey instance you point it at. Opt-in, off by default: a discovery marker (set discovery=true to let BetterDB Monitor enumerate the tier) and SDK usage analytics (set telemetry=true)."
 maintainer: betterdb-inc
 tier: community
 category: memory
@@ -20,5 +20,4 @@ capabilities:
   - sync_turn
   - on_memory_write
   provides_middleware: []
-  requires_env:
-  - BETTERDB_MEMORY_EMBEDDINGS_API_KEY
+  requires_env: []
