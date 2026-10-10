@@ -32,6 +32,14 @@ module "eks" {
   # small requests succeed, then the big data packets are silently dropped until
   # timeout. Clamping only the pod MTU fixes it without touching node-level
   # jumbo traffic (node-to-node, EBS, VPC endpoints).
+  #
+  # NOTE on ordering for a FROM-SCRATCH cluster: EKS bootstraps a self-managed
+  # vpc-cni at MTU 9001 at creation, and this addon only overwrites it
+  # afterward, so early pods can briefly come up at 9001. A clean rebuild should
+  # additionally set `bootstrap_self_managed_addons = false` (cluster-level) and
+  # `before_compute = true` on this addon so the CNI config is in place before
+  # any node exists. We do NOT flip those on the live cluster: it already runs
+  # the CNI (with POD_MTU=1500 set out-of-band), so this addon just adopts it.
   cluster_addons = {
     vpc-cni = {
       addon_version               = "v1.20.4-eksbuild.2" # matches the running CNI image

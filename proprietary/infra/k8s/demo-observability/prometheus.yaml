@@ -1,6 +1,6 @@
 # Prometheus for the public demo. Cluster-internal only (no Ingress); Grafana
 # is the public face. Receives the demo tenant's metrics twice:
-#   - job "betterdb": direct scrape of /api/prometheus/metrics (bearer token)
+#   - job "betterdb-scrape": direct scrape of /api/prometheus/metrics (bearer token)
 #   - OTLP push: the tenant's built-in mirror posts to the native OTLP
 #     receiver (/api/v1/otlp/v1/metrics); series arrive under the job derived
 #     from the pushed service.name resource attribute.

@@ -208,8 +208,8 @@ them on the normal dependency cadence (Grafana CVEs are frequent).
   carries matching demo-only rules: ingress 3001 from this namespace (scrape)
   and egress 9090 to it (OTLP push). The policies in `namespace.yaml` are this
   side of the same pair.
-- OTLP-pushed series land under the job derived from the pushed
-  `service.name` resource attribute; the scraped copy is job `betterdb`. The
-  dashboards' "Scrape job" variable switches between the two paths.
+- OTLP-pushed series land under job `betterdb-monitor` (derived from the pushed
+  `service.name` resource attribute); the scraped copy is job `betterdb-scrape`.
+  The dashboards' "Scrape job" variable switches between the two paths.
 - Rate limiting is NOT active until the WAF ingress annotation from install
   step 6 is applied — which is why publishing the token is step 7.
