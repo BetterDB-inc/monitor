@@ -1,13 +1,13 @@
 {
   "uid": "betterdb-clients",
-  "title": "BetterDB \u00b7 Clients & Pub/Sub",
+  "title": "BetterDB · Clients & Pub/Sub",
   "tags": [
     "betterdb",
     "valkey"
   ],
   "schemaVersion": 39,
   "version": 1,
-  "refresh": "30s",
+  "refresh": "1m",
   "time": {
     "from": "now-6h",
     "to": "now"

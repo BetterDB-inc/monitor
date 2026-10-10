@@ -1,13 +1,13 @@
 {
   "uid": "betterdb-persistence",
-  "title": "BetterDB \u00b7 Persistence",
+  "title": "BetterDB · Persistence",
   "tags": [
     "betterdb",
     "valkey"
   ],
   "schemaVersion": 39,
   "version": 1,
-  "refresh": "30s",
+  "refresh": "1m",
   "time": {
     "from": "now-6h",
     "to": "now"
@@ -139,7 +139,7 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "time() - betterdb_rdb_last_save_timestamp_seconds{job=~\"$job\",connection=~\"$connection\"}",
+          "expr": "(time() - betterdb_rdb_last_save_timestamp_seconds{job=~\"$job\",connection=~\"$connection\"}) * (betterdb_rdb_last_save_timestamp_seconds{job=~\"$job\",connection=~\"$connection\"} > bool 0)",
           "legendFormat": "{{connection}}"
         }
       ],

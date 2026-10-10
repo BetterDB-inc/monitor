@@ -1,13 +1,13 @@
 {
   "uid": "betterdb-keyspace",
-  "title": "BetterDB \u00b7 Keyspace & Eviction",
+  "title": "BetterDB · Keyspace & Eviction",
   "tags": [
     "betterdb",
     "valkey"
   ],
   "schemaVersion": 39,
   "version": 1,
-  "refresh": "30s",
+  "refresh": "1m",
   "time": {
     "from": "now-6h",
     "to": "now"

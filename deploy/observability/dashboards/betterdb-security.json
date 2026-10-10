@@ -1,13 +1,13 @@
 {
   "uid": "betterdb-security",
-  "title": "BetterDB \u00b7 Security & ACL",
+  "title": "BetterDB · Security & ACL",
   "tags": [
     "betterdb",
     "valkey"
   ],
   "schemaVersion": 39,
   "version": 1,
-  "refresh": "30s",
+  "refresh": "1m",
   "time": {
     "from": "now-6h",
     "to": "now"
@@ -81,7 +81,7 @@
     {
       "id": 1,
       "type": "timeseries",
-      "title": "ACL denials/sec",
+      "title": "ACL denied events captured",
       "description": "Commands rejected per second by ACL rules. Any sustained rate means a client is attempting unauthorized operations.",
       "datasource": {
         "type": "prometheus",
@@ -89,7 +89,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "ops",
+          "unit": "short",
           "custom": {
             "fillOpacity": 10
           }
@@ -103,7 +103,7 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "rate(betterdb_acl_denied{job=~\"$job\",connection=~\"$connection\"}[5m])",
+          "expr": "betterdb_acl_denied{job=~\"$job\",connection=~\"$connection\"}",
           "legendFormat": "{{connection}}"
         }
       ],
@@ -117,7 +117,7 @@
     {
       "id": 2,
       "type": "timeseries",
-      "title": "ACL denials by reason",
+      "title": "ACL denied by reason",
       "description": "Denial rate split by cause (command, key, channel, auth).",
       "datasource": {
         "type": "prometheus",
@@ -125,7 +125,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "ops",
+          "unit": "short",
           "custom": {
             "fillOpacity": 10
           }
@@ -139,7 +139,7 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "rate(betterdb_acl_denied_by_reason{job=~\"$job\",connection=~\"$connection\"}[5m])",
+          "expr": "betterdb_acl_denied_by_reason{job=~\"$job\",connection=~\"$connection\"}",
           "legendFormat": "{{reason}}"
         }
       ],
@@ -153,7 +153,7 @@
     {
       "id": 3,
       "type": "timeseries",
-      "title": "ACL denials by user",
+      "title": "ACL denied by user",
       "description": "Denial rate split by ACL user.",
       "datasource": {
         "type": "prometheus",
@@ -161,7 +161,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "ops",
+          "unit": "short",
           "custom": {
             "fillOpacity": 10
           }
@@ -175,7 +175,7 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "rate(betterdb_acl_denied_by_user{job=~\"$job\",connection=~\"$connection\"}[5m])",
+          "expr": "betterdb_acl_denied_by_user{job=~\"$job\",connection=~\"$connection\"}",
           "legendFormat": "{{username}}"
         }
       ],
@@ -211,8 +211,8 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "betterdb_cve_findings{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{connection}}"
+          "expr": "sum(betterdb_cve_findings{job=~\"$job\",connection=~\"$connection\"}) or vector(0)",
+          "legendFormat": "findings"
         }
       ],
       "gridPos": {
@@ -244,8 +244,8 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "betterdb_cve_kev{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{connection}}"
+          "expr": "sum(betterdb_cve_kev{job=~\"$job\",connection=~\"$connection\"}) or vector(0)",
+          "legendFormat": "kev"
         }
       ],
       "gridPos": {
@@ -277,8 +277,8 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "betterdb_cve_dataset_stale{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{connection}}"
+          "expr": "max(betterdb_cve_dataset_stale{job=~\"$job\",connection=~\"$connection\"}) or vector(0)",
+          "legendFormat": "dataset stale"
         }
       ],
       "gridPos": {

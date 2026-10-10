@@ -1,13 +1,13 @@
 {
   "uid": "betterdb-anomalies",
-  "title": "BetterDB \u00b7 Anomalies",
+  "title": "BetterDB · Anomalies",
   "tags": [
     "betterdb",
     "valkey"
   ],
   "schemaVersion": 39,
   "version": 1,
-  "refresh": "30s",
+  "refresh": "1m",
   "time": {
     "from": "now-6h",
     "to": "now"
@@ -471,7 +471,7 @@
     {
       "id": 11,
       "type": "timeseries",
-      "title": "Correlated groups (total)",
+      "title": "Correlated groups (new, 1h)",
       "description": "Active groups of anomalies the correlator has linked together.",
       "datasource": {
         "type": "prometheus",
@@ -493,8 +493,8 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "betterdb_correlated_groups_total{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{connection}}"
+          "expr": "sum by (connection, severity) (increase(betterdb_correlated_groups_total{job=~\"$job\",connection=~\"$connection\"}[1h]))",
+          "legendFormat": "{{connection}} {{severity}}"
         }
       ],
       "gridPos": {

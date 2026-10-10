@@ -1,13 +1,13 @@
 {
   "uid": "betterdb-monitor-internals",
-  "title": "BetterDB \u00b7 Monitor Internals",
+  "title": "BetterDB · Monitor Internals",
   "tags": [
     "betterdb",
     "monitor"
   ],
   "schemaVersion": 39,
   "version": 1,
-  "refresh": "30s",
+  "refresh": "1m",
   "time": {
     "from": "now-6h",
     "to": "now"

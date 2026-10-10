@@ -1,13 +1,13 @@
 {
   "uid": "betterdb-cluster-slots",
-  "title": "BetterDB \u00b7 Cluster Slots",
+  "title": "BetterDB · Cluster Slots",
   "tags": [
     "betterdb",
     "valkey"
   ],
   "schemaVersion": 39,
   "version": 1,
-  "refresh": "30s",
+  "refresh": "1m",
   "time": {
     "from": "now-6h",
     "to": "now"

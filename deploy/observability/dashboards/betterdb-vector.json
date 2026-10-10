@@ -1,13 +1,13 @@
 {
   "uid": "betterdb-vector",
-  "title": "BetterDB \u00b7 Vector Search",
+  "title": "BetterDB · Vector Search",
   "tags": [
     "betterdb",
     "valkey"
   ],
   "schemaVersion": 39,
   "version": 1,
-  "refresh": "30s",
+  "refresh": "1m",
   "time": {
     "from": "now-6h",
     "to": "now"
@@ -164,7 +164,9 @@
           "unit": "percent",
           "custom": {
             "fillOpacity": 10
-          }
+          },
+          "max": 100,
+          "min": 0
         },
         "overrides": []
       },

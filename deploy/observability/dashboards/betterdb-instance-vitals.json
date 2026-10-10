@@ -1,13 +1,13 @@
 {
   "uid": "betterdb-instance-vitals",
-  "title": "BetterDB \u00b7 Instance Vitals",
+  "title": "BetterDB · Instance Vitals",
   "tags": [
     "betterdb",
     "valkey"
   ],
   "schemaVersion": 39,
   "version": 1,
-  "refresh": "30s",
+  "refresh": "1m",
   "time": {
     "from": "now-6h",
     "to": "now"

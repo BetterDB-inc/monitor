@@ -1,13 +1,13 @@
 {
   "uid": "betterdb-query-patterns",
-  "title": "BetterDB \u00b7 Query Patterns",
+  "title": "BetterDB · Query Patterns",
   "tags": [
     "betterdb",
     "valkey"
   ],
   "schemaVersion": 39,
   "version": 1,
-  "refresh": "30s",
+  "refresh": "1m",
   "time": {
     "from": "now-6h",
     "to": "now"
@@ -160,7 +160,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "\u00b5s",
+          "unit": "µs",
           "custom": {
             "fillOpacity": 10
           }
@@ -339,7 +339,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "\u00b5s"
+          "unit": "µs"
         },
         "overrides": []
       },
@@ -384,8 +384,8 @@
     },
     {
       "id": 9,
-      "type": "timeseries",
-      "title": "Command calls by type",
+      "type": "table",
+      "title": "Top command calls/sec",
       "description": "Top command types by call rate.",
       "datasource": {
         "type": "prometheus",
@@ -407,8 +407,10 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "topk(10, rate(betterdb_commandstats_calls_total{job=~\"$job\",connection=~\"$connection\"}[5m]))",
-          "legendFormat": "{{command}}"
+          "expr": "topk(15, sum by (command) (rate(betterdb_commandstats_calls_total{job=~\"$job\",connection=~\"$connection\"}[5m])))",
+          "format": "table",
+          "instant": true,
+          "range": false
         }
       ],
       "gridPos": {
