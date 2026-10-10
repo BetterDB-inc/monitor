@@ -74,6 +74,7 @@ function makeAnalyticsMockClient() {
   return {
     call,
     hset: vi.fn(async () => 1),
+    hget: vi.fn(async () => null),
     hgetall: vi.fn(async () => ({})),
     hincrby: vi.fn(async () => 0),
     expire: vi.fn(async () => 1),
@@ -140,6 +141,54 @@ describe('entryAnalytics', () => {
     expect(topCalls).toHaveLength(1);
     expect(topCalls[0]).toContain('LIMIT');
     expect(topCalls[0][topCalls[0].indexOf('LIMIT') + 2]).toBe('2');
+  });
+
+  it('warns once and falls back to the SCAN path when FT.SEARCH rejects', async () => {
+    const client = makeAnalyticsMockClient();
+    const baseCall = client.call.getMockImplementation()!;
+    client.call.mockImplementation(async (...args: unknown[]) => {
+      if (args[0] === 'FT.SEARCH') throw new Error('Unknown index name');
+      return baseCall(...args);
+    });
+    const keys = ['cache:entry:a', 'cache:entry:b', 'cache:entry:c'];
+    client.scan.mockImplementation(async () => ['0', keys]);
+    client.pipeline.mockImplementation(() => ({
+      hmget: vi.fn().mockReturnThis(),
+      exec: vi.fn(async () => [
+        [null, ['0', '0', '0', '', '']],
+        [null, ['7', String(Date.now()), '0', '', '']],
+        [null, ['0', '0', '0', '', '']],
+      ]),
+      hincrby: vi.fn().mockReturnThis(),
+      hset: vi.fn().mockReturnThis(),
+      call: vi.fn().mockReturnThis(),
+      zadd: vi.fn().mockReturnThis(),
+      zremrangebyscore: vi.fn().mockReturnThis(),
+      zremrangebyrank: vi.fn().mockReturnThis(),
+    }));
+    const logger = { warn: vi.fn() };
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: vi.fn(async () => [0.5, 0.5]),
+      name: 'test_entry_analytics',
+      logger,
+      embeddingCache: { enabled: false },
+      discovery: { enabled: false },
+      configRefresh: { enabled: false },
+    });
+    await cache.initialize();
+
+    const result = await cache.entryAnalytics({ topN: 2, coldAfterDays: 7 });
+
+    // Counts come from the 3 scanned entries, not the FT.SEARCH mock's 15k.
+    expect(result.totalEntries).toBe(3);
+    expect(result.neverHitCount).toBe(2);
+    expect(result.topEntries[0].hitCount).toBe(7);
+    expect(client.scan).toHaveBeenCalled();
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn.mock.calls[0][0]).toContain('falling back');
+    expect(logger.warn.mock.calls[0][0]).toContain('Unknown index name');
   });
 });
 

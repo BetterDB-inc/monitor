@@ -1400,7 +1400,15 @@ export class SemanticCache {
         try {
           ({ totalEntries, neverHitCount, coldEntryCount, topEntries } =
             await this.collectAnalyticsViaSearch(coldCutoff, topN));
-        } catch {
+        } catch (err) {
+          try {
+            this.logger.warn(
+              `@betterdb/semantic-cache '${this.name}': entryAnalytics FT.SEARCH failed, ` +
+                `falling back to sampled SCAN (up to ${ENTRY_ANALYTICS_LIMIT} entries): ${errMsg(err)}`,
+            );
+          } catch {
+            // A throwing custom logger must not fail analytics.
+          }
           ({ totalEntries, neverHitCount, coldEntryCount, topEntries } =
             await this.collectAnalyticsViaScan(coldCutoff, topN));
         }
