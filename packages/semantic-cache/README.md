@@ -360,6 +360,75 @@ Stops the analytics client, cancels the stats snapshot timer, and disposes the d
 
 Graceful shutdown of the discovery layer for in-process caches without destroying data. Stops the discovery heartbeat and deletes the heartbeat key; does not touch the index or entries.
 
+### `cache.entryAnalytics(options?)`
+
+Per-entry usage analytics: how many stored entries have ever been returned as a hit, which entries are hottest, and how many are cold (never hit, or not accessed within `coldAfterDays`). Use this to find dead-weight entries when sizing TTLs and keeping the HNSW index lean.
+
+```typescript
+const a = await cache.entryAnalytics({ topN: 5, coldAfterDays: 14 });
+console.log(`${a.neverHitCount} of ${a.totalEntries} entries have never been hit`);
+console.log('hottest:', a.topEntries.map((e) => `${e.key} (${e.hitCount})`));
+```
+
+Returns `totalEntries`, `neverHitCount`, `hitAtLeastOnceCount`, `coldEntryCount`,
+`topEntries` (sorted by `hitCount` descending, capped at `topN`), and the
+`coldAfterDays` value applied.
+
+When the FT index was created with the `hit_count` / `last_accessed_at` sortable
+fields, counts use server-side `FT.SEARCH` with `LIMIT 0 0` (exact, no
+materialization) and `topEntries` uses `SORTBY hit_count DESC` with `LIMIT 0 topN`.
+
+Older indexes fall back to `SCAN` + pipelined `HMGET` (fetching only the 5
+analytics fields) over a sample of up to 10,000 entries in implementation-defined
+order (`totalEntries` is the sample size). Rebuild the index to enable exact
+counts — see below.
+
+#### Upgrading an index created before 0.14.0
+
+Drop the index **without** `DD` and re-initialize. Valkey Search does not
+delete documents on `FT.DROPINDEX`, so every cached entry and embedding stays
+in place; `initialize()` recreates the index with the new schema and Valkey
+Search backfills it from the existing hashes.
+
+```typescript
+await client.call('FT.DROPINDEX', '<indexName>'); // no DD: keeps entries
+await cache.initialize();                        // recreates index, backfills
+```
+
+- Run this on a `SemanticCache` instance that has **not** been initialized
+  yet — `initialize()` is memoized, so calling it again on an initialized
+  instance does nothing. A one-off script or the start of a deploy works.
+- The embedding-model check reads the discovery marker, not the index, so
+  dropping the index does not make `initialize()` treat existing entries as an
+  embedding-model mismatch.
+- Until the index is recreated, `check()` from other processes fails with
+  "index not found"; until the backfill finishes, lookups can miss entries
+  that are still being indexed.
+- Existing entries have no `hit_count` or `last_accessed_at` field until their
+  first hit after the upgrade (`HINCRBY` then creates the counter). Until then,
+  the two analytics paths count them differently: the `SCAN` fallback counts
+  them as never-hit and cold; the `FT.SEARCH` fast path does not count them in
+  `neverHitCount` or `coldEntryCount`, so `hitAtLeastOnceCount` can be
+  overstated. They are still counted in `totalEntries`.
+
+> **Warning:** `flush()` deletes every cached entry and embedding — only use
+> it if you are fine with a cold cache. `flush()` + `initialize()` also
+> rebuilds the schema, but starts from an empty cache.
+
+#### Performance & tradeoffs
+
+Each genuine cache hit performs a pipelined write to bump `hit_count` and
+`last_accessed_at` (and refresh TTL if configured) — one round trip on
+standalone (one pipeline per matched key on cluster, sent concurrently,
+because entry keys span slots), so latency is flat, but every read becomes a
+write. These writes are best-effort and not atomic: failures are logged once
+per batch via `logger.warn` and never fail the hit. At high QPS on a small hot
+working set, this adds real AOF and replication load on the hottest entries.
+If that becomes an issue, `hit_count` remains the primary signal for
+`entryAnalytics()` accuracy; `last_accessed_at` only powers cold-entry
+detection and could reasonably be sampled (e.g. one write per N hits) in a
+future release. Please open an issue if you hit this in production.
+
 ### `cache.thresholdEffectiveness(options?)`
 
 Analyzes the rolling similarity score window (last 10,000 entries, up to 7 days) and returns:
