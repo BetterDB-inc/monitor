@@ -1,6 +1,6 @@
 {
-  "uid": "betterdb-cluster-slots",
-  "title": "BetterDB · Cluster Slots",
+  "uid": "betterdb-clients",
+  "title": "BetterDB · Clients & Pub/Sub",
   "tags": [
     "betterdb",
     "valkey"
@@ -80,121 +80,9 @@
   "panels": [
     {
       "id": 1,
-      "type": "stat",
-      "title": "Cluster mode",
-      "description": "Whether the connection is running in cluster mode or standalone.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${ds}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": {
-                  "text": "Standalone"
-                },
-                "1": {
-                  "text": "Cluster"
-                }
-              }
-            }
-          ]
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${ds}"
-          },
-          "expr": "betterdb_cluster_enabled{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{connection}}"
-        }
-      ],
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 0,
-        "y": 0
-      }
-    },
-    {
-      "id": 2,
-      "type": "stat",
-      "title": "Slots assigned",
-      "description": "Number of hash slots assigned to the cluster.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${ds}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${ds}"
-          },
-          "expr": "betterdb_cluster_slots_assigned{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{connection}}"
-        }
-      ],
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 4,
-        "y": 0
-      }
-    },
-    {
-      "id": 3,
-      "type": "stat",
-      "title": "Slots OK",
-      "description": "Number of hash slots currently in the OK state.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${ds}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${ds}"
-          },
-          "expr": "betterdb_cluster_slots_ok{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{connection}}"
-        }
-      ],
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 8,
-        "y": 0
-      }
-    },
-    {
-      "id": 4,
-      "type": "stat",
-      "title": "Slots failing",
-      "description": "Slots currently in the FAIL or PFAIL state. Any non-zero value means part of the keyspace is unreachable.",
+      "type": "timeseries",
+      "title": "Connections (current vs peak)",
+      "description": "Current connected clients against the peak seen. A current value pinned near the peak hints at connection-pool exhaustion.",
       "datasource": {
         "type": "prometheus",
         "uid": "${ds}"
@@ -202,18 +90,8 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
+          "custom": {
+            "fillOpacity": 10
           }
         },
         "overrides": []
@@ -225,29 +103,77 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "betterdb_cluster_slots_fail{job=~\"$job\",connection=~\"$connection\"} + betterdb_cluster_slots_pfail{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{connection}}"
+          "expr": "betterdb_client_connections_current{job=~\"$job\",connection=~\"$connection\"}",
+          "legendFormat": "{{connection}} current"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_client_connections_peak{job=~\"$job\",connection=~\"$connection\"}",
+          "legendFormat": "{{connection}} peak"
         }
       ],
       "gridPos": {
-        "h": 4,
-        "w": 4,
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Connections by client name",
+      "description": "Connections grouped by the client-reported name (CLIENT SETNAME).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_client_connections_by_name{job=~\"$job\",connection=~\"$connection\"}",
+          "legendFormat": "{{client_name}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
         "x": 12,
         "y": 0
       }
     },
     {
-      "id": 5,
-      "type": "stat",
-      "title": "Known nodes",
-      "description": "Number of nodes known to the cluster bus.",
+      "id": 3,
+      "type": "timeseries",
+      "title": "Connections by user",
+      "description": "Connections grouped by authenticated ACL user.",
       "datasource": {
         "type": "prometheus",
         "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10
+          }
         },
         "overrides": []
       },
@@ -258,29 +184,104 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "betterdb_cluster_known_nodes{job=~\"$job\",connection=~\"$connection\"}",
+          "expr": "betterdb_client_connections_by_user{job=~\"$job\",connection=~\"$connection\"}",
+          "legendFormat": "{{user}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Tracking clients",
+      "description": "Clients using client-side caching invalidation (CLIENT TRACKING).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_tracking_clients{job=~\"$job\",connection=~\"$connection\"}",
           "legendFormat": "{{connection}}"
         }
       ],
       "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 0
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "New connections/sec",
+      "description": "Connection acceptance rate. A spike can indicate a client that is not pooling.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "rate(betterdb_connections_received_total{job=~\"$job\",connection=~\"$connection\"}[5m])",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
       }
     },
     {
       "id": 6,
-      "type": "stat",
-      "title": "Cluster size",
-      "description": "Number of master nodes serving the keyspace.",
+      "type": "timeseries",
+      "title": "Connected replicas",
+      "description": "Replicas currently attached to this primary.",
       "datasource": {
         "type": "prometheus",
         "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10
+          }
         },
         "overrides": []
       },
@@ -291,38 +292,32 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "betterdb_cluster_size{job=~\"$job\",connection=~\"$connection\"}",
+          "expr": "betterdb_connected_slaves{job=~\"$job\",connection=~\"$connection\"}",
           "legendFormat": "{{connection}}"
         }
       ],
       "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 0
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
       }
     },
     {
       "id": 7,
-      "type": "heatmap",
-      "title": "Key distribution across slots",
-      "description": "Distribution of key counts over hash slots per time bucket, which makes slot skew visible at a glance.",
+      "type": "timeseries",
+      "title": "Pub/Sub channels",
+      "description": "Active publish/subscribe channels.",
       "datasource": {
         "type": "prometheus",
         "uid": "${ds}"
       },
-      "options": {
-        "calculate": true,
-        "calculation": {
-          "xBuckets": {
-            "mode": "size",
-            "value": "1m"
-          }
-        }
-      },
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10
+          }
         },
         "overrides": []
       },
@@ -333,28 +328,32 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "betterdb_cluster_slot_keys{job=~\"$job\",connection=~\"$connection\"}"
+          "expr": "betterdb_pubsub_channels{job=~\"$job\",connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
         }
       ],
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
-        "y": 4
+        "y": 24
       }
     },
     {
       "id": 8,
-      "type": "barchart",
-      "title": "Hottest slots by keys",
-      "description": "The twenty slots holding the most keys right now, answering which slot the heatmap's skew belongs to.",
+      "type": "timeseries",
+      "title": "Pub/Sub patterns",
+      "description": "Active publish/subscribe pattern subscriptions.",
       "datasource": {
         "type": "prometheus",
         "uid": "${ds}"
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10
+          }
         },
         "overrides": []
       },
@@ -365,17 +364,15 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "topk(20, betterdb_cluster_slot_keys{job=~\"$job\",connection=~\"$connection\"})",
-          "legendFormat": "slot {{slot}}",
-          "instant": true,
-          "range": false
+          "expr": "betterdb_pubsub_patterns{job=~\"$job\",connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
         }
       ],
       "gridPos": {
         "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 12
+        "w": 12,
+        "x": 12,
+        "y": 24
       }
     }
   ],
