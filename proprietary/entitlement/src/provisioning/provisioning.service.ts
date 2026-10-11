@@ -41,18 +41,6 @@ const CORE_SECRET_ENV_KEYS = [
   'ENTITLEMENT_API_KEY',
 ] as const;
 
-// Subset of db-credentials keys that are control-plane *config*, not per-tenant
-// generated secrets: a re-provision reconciles these to the current desired
-// value. Everything else (SESSION_SECRET and the *_TOKEN values) is generated
-// once and never rotated out from under a running tenant.
-const RECONCILABLE_SECRET_KEYS: ReadonlySet<string> = new Set([
-  'STORAGE_URL',
-  'CLOUD_MODE',
-  'AUTH_PUBLIC_KEY',
-  'ENTITLEMENT_API_URL',
-  'ENTITLEMENT_API_KEY',
-]);
-
 // The public SNI host is an opaque, stable label derived from the instance id
 // rather than its name: this keeps it globally unique on the shared wildcard
 // endpoint (no cross-tenant collisions) without leaking the friendly name.
@@ -1141,44 +1129,42 @@ export class ProvisioningService {
       if (!this.isAlreadyExistsError(error)) {
         throw error;
       }
-      // Re-provision: the Secret already exists. Reconcile it to the current
-      // schema. An older tenant's Secret can predate current keys (e.g. lack
-      // CLOUD_MODE / AUTH_PUBLIC_KEY / ENTITLEMENT_API_*), and the Deployment
-      // references every key as a non-optional secretKeyRef — a missing one
-      // wedges the new pod in CreateContainerConfigError. Missing/empty keys are
-      // written; control-plane config in RECONCILABLE_SECRET_KEYS is updated to
-      // the current value (so a migrated STORAGE_URL or rotated AUTH_PUBLIC_KEY
-      // is picked up); generated secrets/tokens are never overwritten. (A
+      // Re-provision: the Secret already exists. Backfill any key it is missing
+      // or has blank. An older tenant's Secret can predate current keys (e.g.
+      // lack CLOUD_MODE / AUTH_PUBLIC_KEY / ENTITLEMENT_API_*), and the
+      // Deployment references every key as a non-optional secretKeyRef — a
+      // missing one wedges the new pod in CreateContainerConfigError. Only ADD
+      // absent/empty keys; never overwrite a populated value, so a running
+      // tenant's secrets and tokens are not rotated out from under it (changing
+      // a live value also needs a pod restart, which this path does not do). (A
       // non-demo tenant's stale PROMETHEUS_METRICS_PUBLIC_TOKEN is pruned later
       // in createDeployment, once the spec no longer references it.)
-      this.logger.warn(`Secret db-credentials already exists in ${namespace}, reconciling keys...`);
-      await this.backfillSecretKeys(namespace, stringData, RECONCILABLE_SECRET_KEYS);
+      this.logger.warn(`Secret db-credentials already exists in ${namespace}, backfilling missing keys...`);
+      await this.backfillSecretKeys(namespace, stringData);
     }
   }
 
-  // Reconciles the db-credentials Secret toward `desired` and returns the keys
-  // it wrote. A key that is absent OR empty is always written (brings an older
-  // tenant up to the current key set and repairs a blank value). A key already
-  // present with a value is overwritten only when it is in `reconcileKeys` and
-  // its value changed — so control-plane config (STORAGE_URL, AUTH_PUBLIC_KEY,
-  // ...) is picked up on re-provision, while generated secrets (SESSION_SECRET
-  // and the *_TOKEN values) are never rotated out from under a running tenant.
+  // Writes any db-credentials key that is missing OR empty, and returns the
+  // keys written. Existing non-empty values are left untouched: re-provision
+  // brings an older tenant's key SET up to date (un-wedging a pod that lacks a
+  // required secretKeyRef — the kubelet recovers from CreateContainerConfigError
+  // on its own once the key exists) without rotating live secrets/tokens. It
+  // deliberately does NOT update a populated value: K8s injects Secret env only
+  // at container start, so changing one here wouldn't reach a running pod
+  // without a coordinated restart — that is handled by the dedicated rotation
+  // flow, not re-provision.
   private async backfillSecretKeys(
     namespace: string,
     desired: Record<string, string>,
-    reconcileKeys: ReadonlySet<string> = new Set(),
   ): Promise<string[]> {
     const secret = await this.coreApi.readNamespacedSecret({ name: 'db-credentials', namespace });
     const data = secret.data ?? {};
-    const current = (key: string): string | undefined =>
-      data[key] === undefined ? undefined : Buffer.from(data[key], 'base64').toString('utf8');
+    const hasValue = (key: string): boolean =>
+      data[key] !== undefined && Buffer.from(data[key], 'base64').toString('utf8') !== '';
     const patch: Record<string, string> = {};
     for (const [key, value] of Object.entries(desired)) {
-      const existing = current(key);
-      if (!existing) {
+      if (!hasValue(key)) {
         patch[key] = value; // missing or empty -> write
-      } else if (reconcileKeys.has(key) && existing !== value) {
-        patch[key] = value; // config drifted -> reconcile to desired
       }
     }
     const written = Object.keys(patch);
@@ -1189,7 +1175,7 @@ export class ProvisioningService {
       { name: 'db-credentials', namespace, body: { stringData: patch } },
       k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch),
     );
-    this.logger.log(`Reconciled db-credentials keys in ${namespace}: ${written.join(', ')}`);
+    this.logger.log(`Backfilled missing db-credentials keys in ${namespace}: ${written.join(', ')}`);
     return written;
   }
 
@@ -1399,12 +1385,14 @@ export class ProvisioningService {
       // tenant shouldn't keep (the desired env simply omits them) — except a
       // small allowlist of control-plane-derived vars (COOKIE_DOMAIN) carried
       // forward from the live pod when the desired env omits them, so env drift
-      // in this replica can't strip them. We converge env, resources, replicas
-      // AND the image (so a DEFAULT_IMAGE_TAG bump reaches re-provisioned
-      // tenants); pod-template annotations (e.g. the metrics-token restart
-      // marker) and probes are preserved. Retry only a 409 Conflict (stale
-      // resourceVersion from a concurrent status write), re-reading each attempt
-      // with a short backoff.
+      // in this replica can't strip them. We converge only env, resources and
+      // replicas; the live image is intentionally preserved — fleet image
+      // rollouts go through the version/rollout path, not re-provision, and
+      // flipping it here would race waitForDeploymentReady (an old-image pod can
+      // report ready before the new template rolls). Pod-template annotations
+      // (e.g. the metrics-token restart marker) and probes are preserved too.
+      // Retry only a 409 Conflict (stale resourceVersion from a concurrent
+      // status write), re-reading each attempt with a short backoff.
       this.logger.log(`Deployment already exists in ${namespace}, converging app container`);
       const desired = body.spec!.template!.spec!.containers![0];
       const PRESERVE_ENV = new Set(['COOKIE_DOMAIN']);
@@ -1423,7 +1411,6 @@ export class ProvisioningService {
           );
           c.env = [...desiredEnv, ...carried];
           c.resources = desired.resources;
-          c.image = desired.image;
           existing.spec!.replicas = body.spec!.replicas;
           await this.appsApi.replaceNamespacedDeployment({ name: 'betterdb', namespace, body: existing });
           break;
@@ -1800,9 +1787,9 @@ export class ProvisioningService {
     namespace: string,
     key: 'PROMETHEUS_METRICS_TOKEN' | 'PROMETHEUS_METRICS_PUBLIC_TOKEN' = 'PROMETHEUS_METRICS_TOKEN',
   ): Promise<boolean> {
-    // Add-only (the token key is not in RECONCILABLE_SECRET_KEYS): a missing or
-    // empty value is generated, an existing one is left in place so it is never
-    // rotated. Returns whether a fresh token was written.
+    // backfillSecretKeys is add-only: a missing or empty token is generated, an
+    // existing one is left in place so it is never rotated. Returns whether a
+    // fresh token was written.
     const token = crypto.randomBytes(32).toString('hex');
     const written = await this.backfillSecretKeys(namespace, { [key]: token });
     return written.includes(key);
