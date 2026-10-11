@@ -259,7 +259,7 @@
       "id": 6,
       "type": "stat",
       "title": "CVE dataset stale",
-      "description": "1 when the local CVE dataset is older than the refresh window, so findings may be incomplete.",
+      "description": "1 when the local CVE dataset is older than the refresh window. No data means staleness could not be checked (CVE scanning not reporting) — not that the dataset is fresh.",
       "datasource": {
         "type": "prometheus",
         "uid": "${ds}"
@@ -277,7 +277,7 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "max(betterdb_cve_dataset_stale{job=~\"$job\",connection=~\"$connection\"}) or vector(0)",
+          "expr": "max(betterdb_cve_dataset_stale{job=~\"$job\",connection=~\"$connection\"})",
           "legendFormat": "dataset stale"
         }
       ],
