@@ -20,6 +20,8 @@ Runnable examples for every adapter and major feature.
 | [embedding-cache](./embedding-cache/) | Embedding cache on/off comparison |
 | [batch-check](./batch-check/) | checkBatch() pipelined multi-prompt lookups |
 | [rerank](./rerank/) | Rerank hook for top-k candidate selection |
+| [judge](./judge/) | LLM-as-judge adjudication of borderline hits in the uncertainty band |
+| [monitor-proposals](./monitor-proposals/) | Live cache_propose_threshold_adjust loop — no-restart threshold update |
 
 ## Running an example
 
@@ -42,10 +44,11 @@ These examples run without any API keys using a built-in mock embedder:
 - `batch-check`
 - `rerank`
 - `langgraph`
+- `monitor-proposals`
 
 ## Examples requiring API keys
 
 - `openai`, `openai-responses`, `langchain`, `vercel-ai-sdk`: require `OPENAI_API_KEY`
 - `anthropic`: requires `ANTHROPIC_API_KEY` + `OPENAI_API_KEY` (for embeddings)
-- `llamaindex`: requires `OPENAI_API_KEY`
+- `llamaindex`, `judge`: require `OPENAI_API_KEY`
 - `basic`: requires `VOYAGE_API_KEY` (or use `--mock` flag)
