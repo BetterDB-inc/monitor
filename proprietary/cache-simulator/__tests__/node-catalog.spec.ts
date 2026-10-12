@@ -13,14 +13,35 @@ describe('node catalog', () => {
     }
   });
 
-  it.each(providers)('picks the smallest node that keeps %s under 80%%', (provider) => {
+  it.each(providers)('picks the smallest node that keeps %s under 80%% of usable memory', (provider) => {
     const bytes = 10 * GiB;
     for (const pick of smallestNodeFor(bytes, provider).filter((rec) => rec.shards === 1)) {
       const service = CLOUD_SERVICES.find((candidate) => candidate.service === pick.service)!;
-      expect(pick.memoryBytes * 0.8).toBeGreaterThanOrEqual(bytes);
+      const usable = service.usableRatio * 0.8;
+      expect(pick.memoryBytes * usable).toBeGreaterThanOrEqual(bytes);
       const smaller = service.nodes.filter((node) => node.memoryBytes < pick.memoryBytes);
-      expect(smaller.every((node) => node.memoryBytes * 0.8 < bytes)).toBe(true);
+      expect(smaller.every((node) => node.memoryBytes * usable < bytes)).toBe(true);
     }
+  });
+
+  it('reserves memory the service keeps back from the dataset', () => {
+    const byService = Object.fromEntries(CLOUD_SERVICES.map((service) => [service.service, service.usableRatio]));
+    expect(byService).toEqual({
+      elasticache: 0.75,
+      memorydb: 0.75,
+      'memorystore-valkey': 0.8,
+      'azure-cache-standard': 0.8,
+      'azure-cache-premium': 0.8,
+    });
+    const [standardSmall] = smallestNodeFor(4.5e9, 'gcp');
+    expect(standardSmall.nodeType).toBe('highmem-medium');
+  });
+
+  it('caps GCP shards at one replica per shard and labels Azure as legacy', () => {
+    const gcp = CLOUD_SERVICES.find((service) => service.provider === 'gcp')!;
+    expect(gcp.maxShards).toBe(125);
+    expect(gcp.label).toContain('1 replica per shard');
+    for (const service of CLOUD_SERVICES.filter((candidate) => candidate.provider === 'azure')) expect(service.label).toContain('legacy');
   });
 
   it('falls back to shards of the largest node', () => {
@@ -30,8 +51,8 @@ describe('node catalog', () => {
     const service = CLOUD_SERVICES.find((candidate) => candidate.service === gcp[0].service)!;
     const largest = Math.max(...service.nodes.map((node) => node.memoryBytes));
     expect(gcp[0].memoryBytes).toBe(largest);
-    expect(gcp[0].shards * largest * 0.8).toBeGreaterThanOrEqual(bytes);
-    expect((gcp[0].shards - 1) * largest * 0.8).toBeLessThan(bytes);
+    expect(gcp[0].shards * largest * service.usableRatio * 0.8).toBeGreaterThanOrEqual(bytes);
+    expect((gcp[0].shards - 1) * largest * service.usableRatio * 0.8).toBeLessThan(bytes);
   });
 
   it('omits services whose shard limit cannot hold the data', () => {
