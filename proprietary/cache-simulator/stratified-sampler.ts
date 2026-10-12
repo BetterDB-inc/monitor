@@ -1,6 +1,6 @@
 import { neymanAllocation, splitBudget } from './allocation';
 import type { AllocationInput } from './allocation';
-import { sampleVariance } from './sample-stats';
+import { adjustedSkewness, sampleVariance } from './sample-stats';
 import { estimate } from './size-estimator';
 import type { NodeSample, SamplerClient, Stratum } from './sample-types';
 
@@ -9,6 +9,7 @@ export const SAMPLE_DEADLINE_MS = 60_000;
 export const SAMPLE_HARD_CAP = 50_000;
 export const TARGET_RELATIVE_CI = 0.05;
 export const CENSUS_FACTOR = 10;
+const COCHRAN_FACTOR = 25;
 export const BATCH_SIZE = 100;
 export const PILOT_SHARE = 0.25;
 export const PILOT_MIN = 200;
@@ -104,10 +105,16 @@ async function extend(state: NodeState, cap: number): Promise<void> {
     const hasUnmeasured = sample.strata.some((stratum) => stratum.sizes.length < stratum.estimatedKeys);
     if (measured >= cap || !hasUnmeasured) return;
     const { totalBytes, ci95Bytes } = estimate([sample], 0);
-    if (totalBytes <= 0 || ci95Bytes / totalBytes <= TARGET_RELATIVE_CI) return;
+    if (totalBytes <= 0 || (ci95Bytes / totalBytes <= TARGET_RELATIVE_CI && ciTrusted(sample))) return;
     await grow(state, neymanAllocation(Math.min(measured, cap - measured), allocationInputs(state)));
     if (sampledTotal(state) <= measured) return;
   }
+}
+
+function ciTrusted(sample: NodeSample): boolean {
+  return sample.strata
+    .filter((stratum) => stratum.estimatedKeys > stratum.sizes.length)
+    .every((stratum) => stratum.sizes.length >= COCHRAN_FACTOR * adjustedSkewness(stratum.sizes) ** 2);
 }
 
 async function pilot(state: NodeState, pilotQuota: number, censusLimit: number): Promise<void> {

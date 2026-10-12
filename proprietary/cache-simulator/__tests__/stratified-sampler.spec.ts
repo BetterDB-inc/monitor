@@ -135,6 +135,18 @@ describe('sampleNodes', () => {
       expect(ci95Bytes / totalBytes <= TARGET_RELATIVE_CI || sampledOf(result.strata) === 20_000).toBe(true);
     });
 
+    it('keeps extending to full enumeration when a narrow interval is untrustworthy', async () => {
+      const keys = keyspace(1000, (index) => ({ type: 'string', size: index % 50 === 0 ? 160 : 100 }));
+      const [early] = await sampleNodes([{ name: 'a', client: fakeClient(keys) }], { budget: 100, deadlineMs: 60_000 });
+      const earlyEstimate = estimate([early], 0);
+      expect(earlyEstimate.ci95Bytes / earlyEstimate.totalBytes).toBeLessThanOrEqual(TARGET_RELATIVE_CI);
+      const [result] = await sampleNodes([{ name: 'a', client: fakeClient(keys) }], { budget: 100, hardCap: 1000, deadlineMs: 60_000 });
+      const final = estimate([result], 0);
+      expect(sampledOf(result.strata)).toBe(1000);
+      expect(final.ci95Bytes).toBe(0);
+      expect(final.totalBytes).toBe(980 * 100 + 20 * 160);
+    });
+
     it('never exceeds its share of the hard cap', async () => {
       const [result] = await sampleNodes([{ name: 'a', client: fakeClient(heavyTail()) }], { budget: 400, hardCap: 1000, deadlineMs: 60_000 });
       expect(sampledOf(result.strata)).toBeLessThanOrEqual(1000);
