@@ -74,7 +74,7 @@ export const CLOUD_SERVICES: CloudService[] = [
     service: 'memorydb',
     label: 'Amazon MemoryDB',
     maxShards: 500,
-    usableRatio: 0.75,
+    usableRatio: 1,
     sourceUrl: 'https://aws.amazon.com/memorydb/pricing/',
     asOf: AS_OF,
     nodes: [
