@@ -107,6 +107,25 @@ describe('KvCacheFootprintService', () => {
     expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
   });
 
+  it('discards an in-flight collection and deletes data after it settles when the connection is removed', async () => {
+    const { service, storage, client } = setup();
+    let finishRead: (size: number) => void = () => undefined;
+    client.getDbSize.mockImplementationOnce(() => new Promise((resolve) => (finishRead = resolve)));
+    const listener = jest.fn();
+    service.onSnapshot(listener);
+    const collecting = service.triggerCollection('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    (service as any).onConnectionRemoved('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).not.toHaveBeenCalled();
+    finishRead(6);
+    await expect(collecting).resolves.toBeNull();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
+    expect(listener).not.toHaveBeenCalled();
+    expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
+  });
+
   it('notifies removal listeners with the connection id', () => {
     const { service } = setup();
     const listener = jest.fn();

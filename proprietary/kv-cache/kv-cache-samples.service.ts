@@ -98,16 +98,18 @@ export class KvCacheSamplesService implements OnModuleInit, OnModuleDestroy {
     connectionId: string,
     query: { from: number; to: number; engineId?: string; model?: string },
   ): Promise<KvCacheSamplesResponse> {
-    const rows = await this.storage.getKvCacheEngineSamples({
+    const fetched = await this.storage.getKvCacheEngineSamples({
       connectionId,
       from: Math.max(query.from, query.to - SAMPLES_MAX_RANGE_MS),
       to: query.to,
-      limit: SAMPLES_LIMIT,
+      limit: SAMPLES_LIMIT + 1,
       engineId: query.engineId,
       modelName: query.model,
     });
+    const truncated = fetched.length > SAMPLES_LIMIT;
+    const rows = truncated ? fetched.slice(fetched.length - SAMPLES_LIMIT) : fetched;
     const requested = rows.reduce((sum, row) => sum + row.requestedTokens, 0);
     const hit = rows.reduce((sum, row) => sum + row.hitTokens, 0);
-    return { buckets: mergeBuckets(rows), rangeHitRate: hitRate(requested, hit), truncated: rows.length >= SAMPLES_LIMIT };
+    return { buckets: mergeBuckets(rows), rangeHitRate: hitRate(requested, hit), truncated };
   }
 }

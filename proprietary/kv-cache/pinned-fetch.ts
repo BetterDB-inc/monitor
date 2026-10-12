@@ -11,6 +11,10 @@ type Resolver = (
   callback: (error: NodeJS.ErrnoException | null, addresses: LookupAddress[]) => void,
 ) => void;
 
+const LOOPBACK_ANSWER = /^(127\.|::1$|::ffff:127\.)/i;
+
+const NULL_BODY_STATUSES = new Set([204, 205, 304]);
+
 export class BlockedAddressError extends Error {
   readonly code = 'EBLOCKED';
 }
@@ -20,7 +24,9 @@ export function guardedLookup(allowPrivateNetworks: boolean, resolve: Resolver =
     resolve(hostname, { ...options, all: true }, (error, addresses) => {
       if (error) return callback(error, '');
       const trustedLocalhost = hostname === 'localhost' && process.env.NODE_ENV !== 'production';
-      const blocked = trustedLocalhost ? undefined : addresses.find((entry) => isBlockedIp(entry.address, allowPrivateNetworks));
+      const blocked = addresses.find(
+        (entry) => !(trustedLocalhost && LOOPBACK_ANSWER.test(entry.address)) && isBlockedIp(entry.address, allowPrivateNetworks),
+      );
       if (blocked) return callback(new BlockedAddressError(`blocked address ${blocked.address}`), '');
       if (addresses.length === 0) return callback(Object.assign(new Error(`no address for ${hostname}`), { code: 'ENOTFOUND' }), '');
       if (options.all) return callback(null, addresses);
@@ -52,9 +58,15 @@ export function pinnedFetch(allowPrivateNetworks: boolean, resolve?: Resolver): 
           lookup: lookup as unknown as http.RequestOptions['lookup'],
         },
         (response) => {
-          const status = response.statusCode ?? 502;
-          const body = status === 204 || status === 304 ? null : (Readable.toWeb(response) as unknown as ReadableStream<Uint8Array>);
-          resolveResponse(new Response(body, { status, headers: responseHeaders(response.headers) }));
+          try {
+            const status = response.statusCode ?? 502;
+            const body = NULL_BODY_STATUSES.has(status) ? null : (Readable.toWeb(response) as unknown as ReadableStream<Uint8Array>);
+            if (!body) response.resume();
+            resolveResponse(new Response(body, { status, headers: responseHeaders(response.headers) }));
+          } catch (error) {
+            response.destroy();
+            rejectResponse(error);
+          }
         },
       );
       request.on('error', rejectResponse);

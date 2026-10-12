@@ -40,6 +40,8 @@ describe('guardedLookup', () => {
     process.env.NODE_ENV = 'development';
     expect((await lookupOnce(guardedLookup(true, resolver(answers)), 'localhost')).address).toBe('127.0.0.1');
     expect((await lookupOnce(guardedLookup(true, resolver(answers)), 'evil.example')).error).toBeInstanceOf(BlockedAddressError);
+    const linkLocal = [{ address: '169.254.169.254', family: 4 }];
+    expect((await lookupOnce(guardedLookup(true, resolver(linkLocal)), 'localhost')).error).toBeInstanceOf(BlockedAddressError);
     process.env.NODE_ENV = 'production';
     expect((await lookupOnce(guardedLookup(true, resolver(answers)), 'localhost')).error).toBeInstanceOf(BlockedAddressError);
   });
@@ -51,6 +53,11 @@ describe('pinnedFetch', () => {
 
   beforeAll(async () => {
     server = createServer((request, response) => {
+      if (request.url === '/reset') {
+        response.writeHead(205);
+        response.end('ignored');
+        return;
+      }
       if (request.url === '/redirect') {
         response.writeHead(302, { location: '/metrics' });
         response.end();
@@ -74,6 +81,13 @@ describe('pinnedFetch', () => {
     const redirect = await fetchImpl(`http://localhost:${port}/redirect`);
     expect(redirect.status).toBe(302);
     await redirect.body?.cancel();
+  });
+
+  it('returns a null body for 205', async () => {
+    const fetchImpl = pinnedFetch(true, resolver([{ address: '127.0.0.1', family: 4 }]));
+    const reset = await fetchImpl(`http://localhost:${port}/reset`);
+    expect(reset.status).toBe(205);
+    expect(reset.body).toBeNull();
   });
 
   it('rejects when the host resolves to a blocked address at connect time', async () => {

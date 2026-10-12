@@ -152,7 +152,7 @@ describe('KvCacheSamplesService', () => {
       connectionId: 'c1',
       from: to - SAMPLES_MAX_RANGE_MS,
       to,
-      limit: SAMPLES_LIMIT,
+      limit: SAMPLES_LIMIT + 1,
       engineId: 'e1',
       modelName: 'm',
     });
@@ -160,10 +160,15 @@ describe('KvCacheSamplesService', () => {
     expect(result.rangeHitRate).toBe(0.75);
   });
 
-  it('flags a result that hit the row limit', async () => {
+  it('flags a result only when rows beyond the limit exist', async () => {
     const { service, storage } = setup();
     storage.getKvCacheEngineSamples.mockResolvedValue(Array.from({ length: SAMPLES_LIMIT }, (_, i) => sample({ timestamp: i })));
-    expect((await service.getSamples('c1', { from: 0, to: 1000 })).truncated).toBe(true);
+    expect((await service.getSamples('c1', { from: 0, to: 1000 })).truncated).toBe(false);
+    storage.getKvCacheEngineSamples.mockResolvedValue(Array.from({ length: SAMPLES_LIMIT + 1 }, (_, i) => sample({ timestamp: i })));
+    const result = await service.getSamples('c1', { from: 0, to: 1000 });
+    expect(result.truncated).toBe(true);
+    expect(result.buckets).toHaveLength(SAMPLES_LIMIT);
+    expect(result.buckets[0].timestamp).toBe(1);
   });
 
   it('returns a null range hit rate when nothing was requested', async () => {
