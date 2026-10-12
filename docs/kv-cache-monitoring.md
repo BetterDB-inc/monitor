@@ -182,6 +182,11 @@ addresses as well. Link-local addresses (`169.254.0.0/16`, which
 includes cloud metadata endpoints, and `fe80::/10`) are always refused,
 whatever the setting.
 
+The guard checks every address a hostname resolves to, and the scrape then
+connects only to an address that passed the check. A DNS answer that changes
+between the check and the connection cannot redirect a scrape to a refused
+address.
+
 When you change the metrics URL of a linked engine to a different origin
 (scheme, host or port) and a stored auth header exists, BetterDB refuses the
 update with a `400` unless you also supply an auth header. Send an empty

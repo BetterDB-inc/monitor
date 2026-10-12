@@ -1,4 +1,5 @@
 import { assertSafeOutboundUrl } from '@app/common/utils/outbound-url-guard';
+import { BlockedAddressError, pinnedFetch } from './pinned-fetch';
 
 export const SCRAPE_TIMEOUT_MS = 5_000;
 export const SCRAPE_MAX_BYTES = 5 * 1024 * 1024;
@@ -33,7 +34,11 @@ async function readCapped(response: Response): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-export async function fetchMetricsText(url: string, authHeader: string | null, fetchImpl: typeof fetch = fetch): Promise<string> {
+export async function fetchMetricsText(
+  url: string,
+  authHeader: string | null,
+  fetchImpl: typeof fetch = pinnedFetch(scrapeAllowsPrivateNetworks()),
+): Promise<string> {
   try {
     await assertSafeOutboundUrl(url, { label: 'metrics URL', allowPrivateNetworks: scrapeAllowsPrivateNetworks() });
   } catch {
@@ -47,6 +52,7 @@ export async function fetchMetricsText(url: string, authHeader: string | null, f
       headers: { Accept: 'text/plain', ...(authHeader ? { Authorization: authHeader } : {}) },
     });
   } catch (error) {
+    if (error instanceof BlockedAddressError) throw new ScrapeError('blocked address');
     const name = (error as Error)?.name;
     throw new ScrapeError(name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'connection failed');
   }
