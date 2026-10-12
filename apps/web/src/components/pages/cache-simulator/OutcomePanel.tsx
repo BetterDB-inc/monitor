@@ -21,12 +21,14 @@ const PROVIDERS: Array<{ id: CloudProvider; label: string }> = [
 export function OutcomePanel({ projection, sizingProjection, maxmemory, policy, horizonLabel }: Props) {
   const [provider, setProvider] = useState<CloudProvider>('aws');
   const peak = Math.max(...sizingProjection.points.map((point) => point.high));
-  const grows = projection.points[projection.points.length - 1].bytes > projection.points[0].bytes;
+  const change = projection.points[projection.points.length - 1].bytes - projection.points[0].bytes;
   const headline =
     maxmemory === null
-      ? grows
+      ? change > 0
         ? 'No maxmemory limit is set, so memory grows until the host runs out.'
-        : `No maxmemory limit is set. Memory stays flat over the next ${horizonLabel}.`
+        : change < 0
+          ? `No maxmemory limit is set. Memory shrinks over the next ${horizonLabel}.`
+          : `No maxmemory limit is set. Memory stays flat over the next ${horizonLabel}.`
       : projection.daysToMaxmemory === null
         ? `Stays under maxmemory for the next ${horizonLabel}.`
         : projection.daysToMaxmemory === 0

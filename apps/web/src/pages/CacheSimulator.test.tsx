@@ -179,6 +179,13 @@ describe('CacheSimulator page', () => {
     expect(screen.getByText('No maxmemory limit is set. Memory stays flat over the next 30 days.')).toBeTruthy();
   });
 
+  it('says memory shrinks when no limit is set and the projection declines', () => {
+    useQuery.mockReturnValue({ data: { ...ready, instant: { ...ready.instant, maxmemory: 0 } } });
+    render(<CacheSimulator />);
+    fireEvent.change(screen.getByLabelText('Growth rate (keys/day)'), { target: { value: '-10' } });
+    expect(screen.getByText('No maxmemory limit is set. Memory shrinks over the next 30 days.')).toBeTruthy();
+  });
+
   it('says when no catalog node fits the projection', () => {
     useQuery.mockReturnValue({ data: ready });
     render(<CacheSimulator />);
