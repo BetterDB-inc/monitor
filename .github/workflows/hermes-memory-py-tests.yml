@@ -1,0 +1,45 @@
+# Test betterdb-hermes-memory on every PR / push that touches the package.
+#
+# The suite mocks the SDK client and the event-loop runtime, so it needs neither
+# a live Valkey nor an embeddings endpoint — a plain editable install is enough.
+
+name: Hermes Memory (Python) Tests
+
+on:
+  push:
+    paths:
+      - 'packages/hermes-memory-py/**'
+      - '.github/workflows/hermes-memory-py-tests.yml'
+  pull_request:
+    paths:
+      - 'packages/hermes-memory-py/**'
+      - '.github/workflows/hermes-memory-py-tests.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # The whole declared range (">=3.11,<3.15").
+        python-version: ['3.11', '3.12', '3.13', '3.14']
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package and test deps
+        working-directory: packages/hermes-memory-py
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        working-directory: packages/hermes-memory-py
+        run: pytest tests/ -v
