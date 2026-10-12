@@ -1,5 +1,5 @@
 import type { CacheSimulatorEstimate, CacheSimulatorTypeEstimate } from '@betterdb/shared';
-import { mean, sampleVariance } from './sample-stats';
+import { isHeavyTailed, mean, sampleVariance } from './sample-stats';
 import type { NodeSample } from './sample-types';
 
 const Z95 = 1.96;
@@ -47,6 +47,10 @@ export function estimate(nodes: NodeSample[], sampledAt: number): CacheSimulator
     types.set(cell.type, totals);
   }
 
+  const tailAllowance = cells
+    .filter(isHeavyTailed)
+    .reduce((sum, cell) => sum + cell.estimatedKeys * (3 / cell.sizes.length) * cell.sizes.reduce((largest, size) => Math.max(largest, size), 0), 0);
+
   const byType: CacheSimulatorTypeEstimate[] = [...types].map(([type, totals]) => {
     const avgBytes = totals.weighted / totals.keys;
     return {
@@ -64,7 +68,7 @@ export function estimate(nodes: NodeSample[], sampledAt: number): CacheSimulator
   const avgKeyBytes = keys > 0 ? total / keys : 0;
   return {
     totalBytes: total,
-    ci95Bytes: Z95 * Math.sqrt(variance),
+    ci95Bytes: Z95 * Math.sqrt(variance) + tailAllowance,
     avgKeyBytes,
     stdKeyBytes: keys > 0 ? Math.sqrt(Math.max(0, second / keys - avgKeyBytes * avgKeyBytes)) : 0,
     sampleCount: byType.reduce((sum, entry) => sum + entry.sampled, 0),

@@ -17,3 +17,9 @@ export function sampleVariance(values: number[]): number {
   const average = mean(values);
   return values.reduce((sum, value) => sum + (value - average) ** 2, 0) / (values.length - 1);
 }
+
+export const HEAVY_TAIL_SKEWNESS = 2;
+
+export function isHeavyTailed(stratum: { estimatedKeys: number; sizes: number[] }): boolean {
+  return stratum.estimatedKeys > stratum.sizes.length && adjustedSkewness(stratum.sizes) > HEAVY_TAIL_SKEWNESS;
+}

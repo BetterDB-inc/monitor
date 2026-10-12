@@ -32,7 +32,7 @@ describe('estimate', () => {
       0,
     );
     expect(result.totalBytes).toBe(200_000);
-    expect(result.ci95Bytes).toBeCloseTo(1.96 * Math.sqrt((1000 ** 2 / 2) * 200 * (1 - 2 / 1000)), 6);
+    expect(result.ci95Bytes).toBeCloseTo(1.96 * Math.sqrt((1000 ** 2 / 2) * 200 * (1 - 2 / 1000)) + 165_000, 6);
     expect(result.byType[0]).toMatchObject({ type: 'string', keys: 1000, avgBytes: 100, sampled: 2 });
   });
 
@@ -57,7 +57,7 @@ describe('estimate', () => {
       0,
     );
     expect(result.totalBytes).toBe(3000);
-    expect(result.ci95Bytes).toBeCloseTo(1.96 * Math.sqrt((100 ** 2 / 2) * 200 * (1 - 2 / 100) + 50 ** 2 * 200), 6);
+    expect(result.ci95Bytes).toBeCloseTo(1.96 * Math.sqrt((100 ** 2 / 2) * 200 * (1 - 2 / 100) + 50 ** 2 * 200) + 4500, 6);
   });
 
   it('adds count uncertainty for non-exact strata with different means', () => {
@@ -99,7 +99,22 @@ describe('estimate', () => {
     );
     const pooledVariance = 100;
     const expected = (100 ** 2 / 2) * 200 * (1 - 2 / 100) + 50 ** 2 * pooledVariance * (1 - 1 / 50);
-    expect(result.ci95Bytes).toBeCloseTo(1.96 * Math.sqrt(expected), 6);
+    expect(result.ci95Bytes).toBeCloseTo(1.96 * Math.sqrt(expected) + 4500, 6);
+  });
+
+  it('adds the rule-of-three allowance for a heavy-tailed stratum', () => {
+    const result = estimate([node([{ type: 'string', estimatedKeys: 100, exact: true, observed: 0, sizes: [10, 30] }])], 0);
+    expect(result.ci95Bytes).toBeCloseTo(1.96 * Math.sqrt((100 ** 2 / 2) * 200 * (1 - 2 / 100)) + 100 * (3 / 2) * 30, 6);
+  });
+
+  it('adds no allowance to a non-skewed stratum', () => {
+    const result = estimate([node([{ type: 'string', estimatedKeys: 1000, exact: true, observed: 0, sizes: [90, 100, 110] }])], 0);
+    expect(result.ci95Bytes).toBeCloseTo(1.96 * Math.sqrt((1000 ** 2 / 3) * 100 * (1 - 3 / 1000)), 6);
+  });
+
+  it('adds no allowance when the stratum is fully sampled', () => {
+    const result = estimate([node([{ type: 'string', estimatedKeys: 2, exact: true, observed: 0, sizes: [10, 30] }])], 0);
+    expect(result.ci95Bytes).toBe(0);
   });
 
   it('flags partial results', () => {

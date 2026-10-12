@@ -1,6 +1,6 @@
 import { neymanAllocation, splitBudget } from './allocation';
 import type { AllocationInput } from './allocation';
-import { adjustedSkewness, sampleVariance } from './sample-stats';
+import { adjustedSkewness, isHeavyTailed, sampleVariance } from './sample-stats';
 import { estimate } from './size-estimator';
 import type { NodeSample, SamplerClient, Stratum } from './sample-types';
 
@@ -9,6 +9,7 @@ export const SAMPLE_DEADLINE_MS = 60_000;
 export const SAMPLE_HARD_CAP = 50_000;
 export const TARGET_RELATIVE_CI = 0.05;
 export const CENSUS_FACTOR = 10;
+export const HEAVY_TAIL_MIN_SAMPLES = 20_000;
 const COCHRAN_FACTOR = 25;
 export const BATCH_SIZE = 100;
 export const PILOT_SHARE = 0.25;
@@ -105,8 +106,12 @@ async function extend(state: NodeState, cap: number): Promise<void> {
     const hasUnmeasured = sample.strata.some((stratum) => stratum.sizes.length < stratum.estimatedKeys);
     if (measured >= cap || !hasUnmeasured) return;
     const { totalBytes, ci95Bytes } = estimate([sample], 0);
-    if (totalBytes <= 0 || (ci95Bytes / totalBytes <= TARGET_RELATIVE_CI && ciTrusted(sample))) return;
-    await grow(state, neymanAllocation(Math.min(measured, cap - measured), allocationInputs(state)));
+    const heavyShort = new Set(
+      sample.strata.filter((stratum) => isHeavyTailed(stratum) && stratum.sizes.length < Math.min(stratum.estimatedKeys, HEAVY_TAIL_MIN_SAMPLES)).map((stratum) => stratum.type),
+    );
+    if (totalBytes <= 0 || (ci95Bytes / totalBytes <= TARGET_RELATIVE_CI && ciTrusted(sample) && heavyShort.size === 0)) return;
+    const inputs = allocationInputs(state).filter((input) => heavyShort.size === 0 || heavyShort.has(input.type));
+    await grow(state, neymanAllocation(Math.min(measured, cap - measured), inputs));
     if (sampledTotal(state) <= measured) return;
   }
 }
