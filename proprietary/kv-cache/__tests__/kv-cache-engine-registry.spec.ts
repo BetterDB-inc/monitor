@@ -13,7 +13,7 @@ function setup(initial = [engine('a', 'c1', 'lmc-a'), engine('b', 'c2')]) {
   } as any;
   let removal: (id: string) => void = () => undefined;
   const footprint = { onConnectionRemoval: jest.fn((l) => (removal = l)) } as any;
-  const samples = { forgetEngine: jest.fn() } as any;
+  const samples = { forgetEngine: jest.fn(), settled: jest.fn().mockResolvedValue(undefined) } as any;
   const registry = new KvCacheEngineRegistry(storage, footprint, samples);
   return { registry, storage, samples, removal: (id: string) => removal(id) };
 }
@@ -100,5 +100,6 @@ describe('KvCacheEngineRegistry', () => {
     expect(registry.list().map((e) => e.id)).toEqual(['b']);
     expect(samples.forgetEngine).toHaveBeenCalledTimes(1);
     expect(samples.forgetEngine).toHaveBeenCalledWith('a');
+    expect(samples.settled).toHaveBeenCalled();
   });
 });

@@ -23,6 +23,7 @@ export class KvCacheEngineRegistry implements OnModuleInit {
         this.engines.delete(id);
         this.samples.forgetEngine(id);
       }
+      return this.samples.settled();
     });
   }
 

@@ -1,4 +1,4 @@
-import { buildSnapshot, layoutOf, pickSample, type KeySample, type NodeObservation } from '../footprint-estimate';
+import { buildSnapshot, evictedKeysDelta, layoutOf, pickSample, type KeySample, type NodeObservation } from '../footprint-estimate';
 import { classifyKey } from '../key-classifier';
 
 const M = 'Qwen/Qwen2.5-0.5B-Instruct';
@@ -12,7 +12,7 @@ const sample = (k: string, o: Partial<KeySample> = {}): KeySample => ({
   ...o,
 });
 const memory = { usedMemory: 100_000_000, maxmemory: 0, maxmemoryPolicy: 'noeviction', evictedKeys: 0 };
-const base = { connectionId: 'c', timestamp: 1, memory, previousEvictedKeys: null, otherDbs: [], clientDetected: false };
+const base = { connectionId: 'c', timestamp: 1, memory, evictedKeysDelta: null, otherDbs: [], clientDetected: false };
 
 describe('pickSample', () => {
   it('returns everything under the size and strides above it', () => {
@@ -117,11 +117,13 @@ describe('buildSnapshot', () => {
     ]);
   });
 
-  it('computes the eviction delta and treats a lower counter as a restart', () => {
-    const node: NodeObservation = { scannedKeys: 0, matchedKeys: [], scanComplete: true, dbSize: 0, samples: [] };
-    expect(buildSnapshot({ ...base, nodes: [node] }).evictedKeysDelta).toBeNull();
-    expect(buildSnapshot({ ...base, nodes: [node], memory: { ...memory, evictedKeys: 50 }, previousEvictedKeys: 20 }).evictedKeysDelta).toBe(30);
-    expect(buildSnapshot({ ...base, nodes: [node], memory: { ...memory, evictedKeys: 5 }, previousEvictedKeys: 20 }).evictedKeysDelta).toBe(5);
+  it('computes the eviction delta per node and treats a lower counter as a restart', () => {
+    expect(evictedKeysDelta(undefined, new Map([['a', 5]]))).toBeNull();
+    expect(evictedKeysDelta(new Map([['a', 20]]), new Map([['a', 50]]))).toBe(30);
+    expect(evictedKeysDelta(new Map([['a', 20]]), new Map([['a', 5]]))).toBe(5);
+    expect(evictedKeysDelta(new Map([['a', 20], ['b', 1000]]), new Map([['a', 25]]))).toBe(5);
+    expect(evictedKeysDelta(new Map([['a', 20]]), new Map([['a', 20], ['b', 1000]]))).toBe(0);
+    expect(evictedKeysDelta(new Map([['a', 20]]), new Map([['b', 1000]]))).toBeNull();
   });
 
   it('detects through the GLIDE client even with no keys', () => {

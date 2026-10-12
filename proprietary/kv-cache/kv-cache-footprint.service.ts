@@ -6,11 +6,12 @@ import { ConnectionRegistry } from '@app/connections/connection-registry.service
 import { LicenseService } from '@proprietary/licenses/license.service';
 import { collectionPlan, type CollectionPlan } from '../key-analytics/key-analytics-plan';
 import { clusterScanNodes, primaryScanNodes, type ScanNode } from '../key-analytics/scan-nodes';
-import { buildSnapshot, pickSample, type MemoryStats, type NodeObservation } from './footprint-estimate';
+import { buildSnapshot, evictedKeysDelta, pickSample, type MemoryStats, type NodeObservation } from './footprint-estimate';
 import { hasLmcacheGlideClient, otherNonEmptyDbs, readMemoryStats, sampleLmcacheKeys, scanLmcacheKeys } from './footprint-scanner';
 import { classifyKey, maskKey } from './key-classifier';
 
 export type SnapshotListener = (snapshot: KvCacheFootprintSnapshot) => void | Promise<void>;
+export type RemovalListener = (connectionId: string) => void | Promise<void>;
 
 interface NodeReading {
   observation: NodeObservation;
@@ -42,10 +43,10 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   };
   private readonly sampleSize = resolvePositiveInt(process.env.KV_CACHE_SAMPLE_KEYS, 500, 1);
   private readonly running = new Set<string>();
-  private readonly lastEvicted = new Map<string, number>();
+  private readonly lastEvicted = new Map<string, Map<string, number>>();
   private readonly sampleKeys = new Map<string, string>();
   private readonly listeners: SnapshotListener[] = [];
-  private readonly removalListeners: Array<(connectionId: string) => void> = [];
+  private readonly removalListeners: RemovalListener[] = [];
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -72,19 +73,19 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     this.running.delete(connectionId);
     this.lastEvicted.delete(connectionId);
     this.sampleKeys.delete(connectionId);
-    void this.storage
-      .deleteKvCacheConnectionData(connectionId)
-      .catch((error) => this.logger.warn(`Could not delete KV cache data for ${connectionId}: ${errorMessage(error)}`));
-    for (const listener of this.removalListeners) {
+    const pending = this.removalListeners.map(async (listener) => {
       try {
-        listener(connectionId);
+        await listener(connectionId);
       } catch (error) {
         this.logger.warn(`KV cache removal listener failed: ${errorMessage(error)}`);
       }
-    }
+    });
+    void Promise.all(pending)
+      .then(() => this.storage.deleteKvCacheConnectionData(connectionId))
+      .catch((error) => this.logger.warn(`Could not delete KV cache data for ${connectionId}: ${errorMessage(error)}`));
   }
 
-  onConnectionRemoval(listener: (connectionId: string) => void): void {
+  onConnectionRemoval(listener: RemovalListener): void {
     this.removalListeners.push(listener);
   }
 
@@ -117,17 +118,18 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
       const ownDb = this.connectionRegistry.getConfig(ctx.connectionId)?.dbIndex ?? 0;
       const readings = await Promise.all(nodes.map((node) => this.read(node, ownDb)));
       const memory = this.sumMemory(readings.map((reading) => reading.memory));
+      const evicted = new Map(nodes.map((node, index) => [node.name, readings[index].memory.evictedKeys]));
       const snapshot = buildSnapshot({
         connectionId: ctx.connectionId,
         timestamp: Date.now(),
         nodes: readings.map((reading) => reading.observation),
         memory,
-        previousEvictedKeys: this.lastEvicted.get(ctx.connectionId) ?? null,
+        evictedKeysDelta: evictedKeysDelta(this.lastEvicted.get(ctx.connectionId), evicted),
         otherDbs: readings[0]?.otherDbs ?? [],
         clientDetected: readings.some((reading) => reading.glide),
       });
       await this.storage.saveKvCacheFootprintSnapshot(snapshot);
-      this.lastEvicted.set(ctx.connectionId, memory.evictedKeys);
+      this.lastEvicted.set(ctx.connectionId, new Map([...(this.lastEvicted.get(ctx.connectionId) ?? []), ...evicted]));
       this.rememberSampleKey(ctx.connectionId, readings);
       await this.announce(snapshot);
       return snapshot;

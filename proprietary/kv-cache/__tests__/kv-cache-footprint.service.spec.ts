@@ -82,14 +82,28 @@ describe('KvCacheFootprintService', () => {
     await (service as any).tick();
     registry.list.mockReturnValue([]);
     await (service as any).tick();
+    await new Promise((resolve) => setImmediate(resolve));
     expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
     expect(storage.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
     expect(listener).toHaveBeenCalledWith('c1');
   });
 
-  it('deletes stored data when a connection is removed', () => {
+  it('deletes stored data when a connection is removed', async () => {
     const { service, storage } = setup();
     (service as any).onConnectionRemoved('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
+  });
+
+  it('deletes stored data only after async removal listeners settle', async () => {
+    const { service, storage } = setup();
+    let release: () => void = () => undefined;
+    service.onConnectionRemoval(() => new Promise<void>((resolve) => (release = resolve)));
+    (service as any).onConnectionRemoved('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).not.toHaveBeenCalled();
+    release();
+    await new Promise((resolve) => setImmediate(resolve));
     expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
   });
 
