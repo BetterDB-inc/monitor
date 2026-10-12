@@ -12,6 +12,7 @@ export interface CloudService {
   service: string;
   label: string;
   maxShards: number;
+  usableRatio: number;
   sourceUrl: string;
   asOf: string;
   nodes: CloudNode[];
@@ -57,6 +58,7 @@ export const CLOUD_SERVICES: CloudService[] = [
     service: 'elasticache',
     label: 'Amazon ElastiCache',
     maxShards: 500,
+    usableRatio: 0.75,
     sourceUrl: 'https://aws.amazon.com/elasticache/pricing/',
     asOf: AS_OF,
     nodes: [
@@ -72,6 +74,7 @@ export const CLOUD_SERVICES: CloudService[] = [
     service: 'memorydb',
     label: 'Amazon MemoryDB',
     maxShards: 500,
+    usableRatio: 0.75,
     sourceUrl: 'https://aws.amazon.com/memorydb/pricing/',
     asOf: AS_OF,
     nodes: [
@@ -83,8 +86,9 @@ export const CLOUD_SERVICES: CloudService[] = [
   {
     provider: 'gcp',
     service: 'memorystore-valkey',
-    label: 'Memorystore for Valkey',
-    maxShards: 250,
+    label: 'Memorystore for Valkey (1 replica per shard)',
+    maxShards: 125,
+    usableRatio: 0.8,
     sourceUrl: 'https://cloud.google.com/memorystore/docs/valkey/instance-node-specification',
     asOf: AS_OF,
     nodes: [
@@ -97,8 +101,9 @@ export const CLOUD_SERVICES: CloudService[] = [
   {
     provider: 'azure',
     service: 'azure-cache-standard',
-    label: 'Azure Cache for Redis (Basic/Standard)',
+    label: 'Azure Cache for Redis (Basic/Standard, legacy)',
     maxShards: 1,
+    usableRatio: 0.8,
     sourceUrl: 'https://azure.microsoft.com/pricing/details/cache/',
     asOf: AS_OF,
     nodes: [
@@ -114,8 +119,9 @@ export const CLOUD_SERVICES: CloudService[] = [
   {
     provider: 'azure',
     service: 'azure-cache-premium',
-    label: 'Azure Cache for Redis (Premium)',
+    label: 'Azure Cache for Redis (Premium, legacy)',
     maxShards: 10,
+    usableRatio: 0.8,
     sourceUrl: 'https://azure.microsoft.com/pricing/details/cache/',
     asOf: AS_OF,
     nodes: [node('P1', gb(6)), node('P2', gb(13)), node('P3', gb(26)), node('P4', gb(53)), node('P5', gb(120))],
@@ -126,10 +132,11 @@ export function smallestNodeFor(bytes: number, provider: CloudProvider, headroom
   return CLOUD_SERVICES.filter((service) => service.provider === provider).flatMap((service) => {
     const sorted = [...service.nodes].sort((a, b) => a.memoryBytes - b.memoryBytes);
     const base = { provider, service: service.service, label: service.label };
-    const single = sorted.find((candidate) => candidate.memoryBytes * headroom >= bytes);
+    const capacity = (candidate: CloudNode) => candidate.memoryBytes * service.usableRatio * headroom;
+    const single = sorted.find((candidate) => capacity(candidate) >= bytes);
     if (single) return [{ ...base, nodeType: single.nodeType, memoryBytes: single.memoryBytes, shards: 1 }];
     const largest = sorted[sorted.length - 1];
-    const shards = Math.ceil(bytes / (largest.memoryBytes * headroom));
+    const shards = Math.ceil(bytes / capacity(largest));
     return shards <= service.maxShards ? [{ ...base, nodeType: largest.nodeType, memoryBytes: largest.memoryBytes, shards }] : [];
   });
 }
