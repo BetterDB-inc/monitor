@@ -5,6 +5,8 @@ export type SamplerClient = Pick<DatabasePort, 'call' | 'getClient' | 'getDbSize
 export interface Stratum {
   type: string;
   estimatedKeys: number;
+  exact: boolean;
+  observed: number;
   sizes: number[];
 }
 

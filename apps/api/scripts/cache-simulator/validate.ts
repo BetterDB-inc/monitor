@@ -1,6 +1,6 @@
 import type Valkey from 'iovalkey';
 import { estimate } from '../../../../proprietary/cache-simulator/size-estimator';
-import { sampleNodes, SAMPLE_BUDGET, SAMPLE_DEADLINE_MS } from '../../../../proprietary/cache-simulator/stratified-sampler';
+import { sampleNodes, SAMPLE_BUDGET, SAMPLE_DEADLINE_MS, SAMPLE_HARD_CAP } from '../../../../proprietary/cache-simulator/stratified-sampler';
 import type { SamplerClient } from '../../../../proprietary/cache-simulator/sample-types';
 import { SCENARIOS } from './scenarios';
 import { connect, parseTarget, seed } from './seed';
@@ -37,7 +37,7 @@ async function main(): Promise<void> {
       for (let run = 1; run <= scenario.runs; run++) {
         await seed(client, scenario.generate(run));
         const truth = await groundTruth(client);
-        const result = estimate(await sampleNodes([{ name: 'validate', client: adapter(client) }], { budget: SAMPLE_BUDGET, deadlineMs: SAMPLE_DEADLINE_MS }), Date.now());
+        const result = estimate(await sampleNodes([{ name: 'validate', client: adapter(client) }], { budget: SAMPLE_BUDGET, deadlineMs: SAMPLE_DEADLINE_MS, hardCap: SAMPLE_HARD_CAP }), Date.now());
         const error = Math.abs(result.totalBytes - truth) / truth;
         worst = Math.max(worst, error);
         if (Math.abs(result.totalBytes - truth) <= result.ci95Bytes + 0.001 * truth) covered += 1;

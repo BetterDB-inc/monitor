@@ -11,6 +11,18 @@ interface TypeTotals {
   sampled: number;
 }
 
+function countVariance(strata: NodeSample['strata'], pooledMean: number): number {
+  const open = strata.filter((stratum) => !stratum.exact && stratum.estimatedKeys > 0);
+  const observed = open.reduce((sum, stratum) => sum + stratum.observed, 0);
+  const keys = open.reduce((sum, stratum) => sum + stratum.estimatedKeys, 0);
+  if (open.length < 2 || observed <= 0 || keys <= observed) return 0;
+  const means = open.map((stratum) => (stratum.sizes.length > 0 ? mean(stratum.sizes) : pooledMean));
+  const weights = open.map((stratum) => stratum.observed / observed);
+  const center = weights.reduce((sum, weight, index) => sum + weight * means[index], 0);
+  const spread = weights.reduce((sum, weight, index) => sum + weight * (means[index] - center) ** 2, 0);
+  return ((keys * keys) / observed) * spread * (1 - observed / keys);
+}
+
 export function estimate(nodes: NodeSample[], sampledAt: number): CacheSimulatorEstimate {
   const cells = nodes.flatMap((node) => node.strata.filter((stratum) => stratum.estimatedKeys > 0));
   const pooled = cells.flatMap((cell) => cell.sizes);
@@ -18,13 +30,13 @@ export function estimate(nodes: NodeSample[], sampledAt: number): CacheSimulator
   const pooledVariance = sampleVariance(pooled);
   const types = new Map<string, TypeTotals>();
   let total = 0;
-  let variance = 0;
+  let variance = nodes.reduce((sum, node) => sum + countVariance(node.strata, pooledMean), 0);
 
   for (const cell of cells) {
     const n = cell.sizes.length;
     const N = cell.estimatedKeys;
     const cellMean = n > 0 ? mean(cell.sizes) : pooledMean;
-    const cellVariance = n > 0 ? sampleVariance(cell.sizes) : pooledVariance;
+    const cellVariance = n < 2 && N > n ? pooledVariance : sampleVariance(cell.sizes);
     total += N * cellMean;
     variance += n === 0 ? N * N * pooledVariance : ((N * N) / n) * cellVariance * Math.max(0, 1 - n / N);
     const totals = types.get(cell.type) ?? { keys: 0, weighted: 0, second: 0, sampled: 0 };

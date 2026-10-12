@@ -1,12 +1,18 @@
 import { neymanAllocation, splitBudget } from './allocation';
+import type { AllocationInput } from './allocation';
 import { sampleVariance } from './sample-stats';
+import { estimate } from './size-estimator';
 import type { NodeSample, SamplerClient, Stratum } from './sample-types';
 
 export const SAMPLE_BUDGET = 4000;
 export const SAMPLE_DEADLINE_MS = 60_000;
+export const SAMPLE_HARD_CAP = 50_000;
+export const TARGET_RELATIVE_CI = 0.05;
+export const CENSUS_FACTOR = 10;
 export const BATCH_SIZE = 100;
 export const PILOT_SHARE = 0.25;
 export const PILOT_MIN = 200;
+const CLASSIFY_BATCH = 1000;
 const SCAN_COUNT = '1000';
 const UNSUPPORTED = /unknown command|unknown subcommand|NOPERM|syntax error/i;
 
@@ -20,17 +26,24 @@ export interface SamplerNode {
 export interface SamplerOptions {
   budget: number;
   deadlineMs: number;
+  hardCap?: number;
   onProgress?: (sampled: number) => void;
 }
 
 type Reply = [Error | null, unknown];
 
 interface NodeState {
+  name: string;
+  dbSize: number;
   client: SamplerClient;
   deadline: number;
   seen: Set<string>;
+  classified: Set<string>;
   sizes: Map<string, number[]>;
-  typeCounts: Map<string, number>;
+  census: Map<string, number>;
+  exactCounts: Map<string, number>;
+  unmeasured: number;
+  wrapped: boolean;
   counter: { sampled: number };
   onProgress?: (sampled: number) => void;
   timedOut: boolean;
@@ -40,15 +53,23 @@ export async function sampleNodes(nodes: SamplerNode[], options: SamplerOptions)
   const deadline = Date.now() + options.deadlineMs;
   const dbSizes = await Promise.all(nodes.map((node) => node.client.getDbSize()));
   const quotas = splitBudget(options.budget, dbSizes);
+  const hardCap = options.hardCap ?? options.budget;
+  const caps = hardCap > options.budget ? splitBudget(hardCap, dbSizes) : quotas;
   const counter = { sampled: 0 };
   return Promise.all(
     nodes.map((node, index) =>
-      sampleNode(node, dbSizes[index], quotas[index], {
+      sampleNode(quotas[index], caps[index], {
+        name: node.name,
+        dbSize: dbSizes[index],
         client: node.client,
         deadline,
         seen: new Set(),
+        classified: new Set(),
         sizes: new Map(),
-        typeCounts: new Map(),
+        census: new Map(),
+        exactCounts: new Map(),
+        unmeasured: 0,
+        wrapped: false,
         counter,
         onProgress: options.onProgress,
         timedOut: false,
@@ -57,44 +78,58 @@ export async function sampleNodes(nodes: SamplerNode[], options: SamplerOptions)
   );
 }
 
-async function sampleNode(node: SamplerNode, dbSize: number, quota: number, state: NodeState): Promise<NodeSample> {
-  if (quota === 0) return { node: node.name, dbSize, strata: [], exhausted: dbSize === 0, timedOut: false };
+async function sampleNode(quota: number, cap: number, state: NodeState): Promise<NodeSample> {
+  if (quota === 0) return { node: state.name, dbSize: state.dbSize, strata: [], exhausted: state.dbSize === 0, timedOut: false };
   const pilotQuota = Math.min(quota, Math.max(PILOT_MIN, Math.round(quota * PILOT_SHARE)));
-  if (await pilot(state, pilotQuota)) return result(node.name, dbSize, state, new Map(state.typeCounts), true);
-  const counts = estimateCounts(state, dbSize);
-  const extra = neymanAllocation(
-    quota - sampledTotal(state),
-    [...counts].map(([type, estimatedKeys]) => ({
-      type,
-      estimatedKeys,
-      std: Math.sqrt(sampleVariance(sizesOf(state, type))),
-      sampled: sizesOf(state, type).length,
-    })),
-  );
+  await pilot(state, pilotQuota, quota * CENSUS_FACTOR);
+  if (state.wrapped) state.census.forEach((count, type) => state.exactCounts.set(type, count));
+  if (state.wrapped && state.unmeasured === 0) return nodeResult(state, true);
+  await grow(state, neymanAllocation(quota - sampledTotal(state), allocationInputs(state)));
+  if (cap > quota) await extend(state, cap);
+  return nodeResult(state, false);
+}
+
+async function grow(state: NodeState, extra: Map<string, number>): Promise<void> {
   for (const [type, additional] of extra) {
     if (additional === 0 || state.timedOut) continue;
     const exact = await topUp(state, type, sizesOf(state, type).length + additional);
-    if (exact !== null) counts.set(type, exact);
+    if (exact !== null) state.exactCounts.set(type, exact);
   }
-  return result(node.name, dbSize, state, counts, false);
 }
 
-async function pilot(state: NodeState, quota: number): Promise<boolean> {
+async function extend(state: NodeState, cap: number): Promise<void> {
+  while (!expired(state)) {
+    const measured = sampledTotal(state);
+    const sample = nodeResult(state, false);
+    const hasUnmeasured = sample.strata.some((stratum) => stratum.sizes.length < stratum.estimatedKeys);
+    if (measured >= cap || !hasUnmeasured) return;
+    const { totalBytes, ci95Bytes } = estimate([sample], 0);
+    if (totalBytes <= 0 || ci95Bytes / totalBytes <= TARGET_RELATIVE_CI) return;
+    await grow(state, neymanAllocation(Math.min(measured, cap - measured), allocationInputs(state)));
+    if (sampledTotal(state) <= measured) return;
+  }
+}
+
+async function pilot(state: NodeState, pilotQuota: number, censusLimit: number): Promise<void> {
   let cursor = '0';
+  let dropped = false;
   do {
-    if (expired(state)) return false;
+    if (expired(state)) return;
     const [next, keys] = await scan(state.client, cursor, []);
     cursor = next;
-    const fresh = keys.filter((key) => !state.seen.has(key));
+    const fresh = keys.filter((key) => !state.classified.has(key));
+    const page = fresh.slice(0, Math.max(0, censusLimit - state.classified.size));
+    dropped ||= page.length < fresh.length;
+    page.forEach((key) => state.classified.add(key));
     let index = 0;
-    while (index < fresh.length && sampledTotal(state) < quota) {
-      const take = Math.min(BATCH_SIZE, quota - sampledTotal(state));
-      await measure(state, fresh.slice(index, index + take), null);
+    while (index < page.length && sampledTotal(state) < pilotQuota) {
+      const take = Math.min(BATCH_SIZE, pilotQuota - sampledTotal(state));
+      await measure(state, page.slice(index, index + take), null);
       index += take;
     }
-    if (index < fresh.length) return false;
-  } while (cursor !== '0');
-  return true;
+    for (; index < page.length; index += CLASSIFY_BATCH) await classify(state, page.slice(index, index + CLASSIFY_BATCH));
+  } while (cursor !== '0' && state.classified.size < censusLimit);
+  state.wrapped = cursor === '0' && !dropped;
 }
 
 async function topUp(state: NodeState, type: string, target: number): Promise<number | null> {
@@ -117,6 +152,27 @@ async function topUp(state: NodeState, type: string, target: number): Promise<nu
   return ofType.size;
 }
 
+function raiseOnError(reply: Reply | undefined): void {
+  if (!reply?.[0]) return;
+  if (UNSUPPORTED.test(reply[0].message)) throw new SamplerUnsupportedError(reply[0].message);
+  throw reply[0];
+}
+
+async function classify(state: NodeState, keys: string[]): Promise<void> {
+  if (keys.length === 0) return;
+  const pipeline = state.client.getClient().pipeline();
+  for (const key of keys) pipeline.call('TYPE', key);
+  const executed = await pipeline.exec();
+  if (!executed) throw new Error('Pipeline returned no replies');
+  (executed as Reply[]).forEach((reply) => {
+    raiseOnError(reply);
+    const type = reply ? String(reply[1]) : 'none';
+    if (type === 'none') return;
+    state.census.set(type, (state.census.get(type) ?? 0) + 1);
+    state.unmeasured += 1;
+  });
+}
+
 async function measure(state: NodeState, keys: string[], knownType: string | null): Promise<void> {
   if (keys.length === 0) return;
   const pipeline = state.client.getClient().pipeline();
@@ -132,14 +188,11 @@ async function measure(state: NodeState, keys: string[], knownType: string | nul
     state.seen.add(key);
     const typeReply: Reply = knownType === null ? replies[index * stride] : [null, knownType];
     const memoryReply = replies[index * stride + stride - 1];
-    for (const reply of [typeReply, memoryReply]) {
-      if (!reply?.[0]) continue;
-      if (UNSUPPORTED.test(reply[0].message)) throw new SamplerUnsupportedError(reply[0].message);
-      throw reply[0];
-    }
+    raiseOnError(typeReply);
+    raiseOnError(memoryReply);
     const type = typeReply && !typeReply[0] ? String(typeReply[1]) : 'none';
     if (type === 'none') return;
-    state.typeCounts.set(type, (state.typeCounts.get(type) ?? 0) + 1);
+    if (knownType === null) state.census.set(type, (state.census.get(type) ?? 0) + 1);
     const size = memoryReply && !memoryReply[0] && typeof memoryReply[1] === 'number' ? memoryReply[1] : null;
     if (size === null) return;
     state.sizes.set(type, [...sizesOf(state, type), size]);
@@ -158,14 +211,32 @@ async function scan(client: SamplerClient, cursor: string, extra: string[]): Pro
   }
 }
 
-function estimateCounts(state: NodeState, dbSize: number): Map<string, number> {
-  const typed = [...state.typeCounts.values()].reduce((sum, count) => sum + count, 0);
-  return new Map([...state.typeCounts].map(([type, count]) => [type, typed > 0 ? (count / typed) * dbSize : 0]));
+function buildStrata(state: NodeState): Stratum[] {
+  const exactTotal = [...state.exactCounts.values()].reduce((sum, count) => sum + count, 0);
+  const openObserved = [...state.census]
+    .filter(([type]) => !state.exactCounts.has(type))
+    .reduce((sum, [, count]) => sum + count, 0);
+  const remaining = Math.max(0, state.dbSize - exactTotal);
+  const types = new Set([...state.census.keys(), ...state.exactCounts.keys()]);
+  return [...types].map((type) => {
+    const observed = state.census.get(type) ?? 0;
+    const exactCount = state.exactCounts.get(type);
+    const estimatedKeys = exactCount ?? (openObserved > 0 ? (remaining * observed) / openObserved : 0);
+    return { type, estimatedKeys, exact: exactCount !== undefined, observed, sizes: sizesOf(state, type) };
+  });
 }
 
-function result(node: string, dbSize: number, state: NodeState, counts: Map<string, number>, exhausted: boolean): NodeSample {
-  const strata: Stratum[] = [...counts].map(([type, estimatedKeys]) => ({ type, estimatedKeys, sizes: sizesOf(state, type) }));
-  return { node, dbSize, strata, exhausted, timedOut: state.timedOut };
+function allocationInputs(state: NodeState): AllocationInput[] {
+  return buildStrata(state).map((stratum) => ({
+    type: stratum.type,
+    estimatedKeys: stratum.estimatedKeys,
+    std: Math.sqrt(sampleVariance(stratum.sizes)),
+    sampled: stratum.sizes.length,
+  }));
+}
+
+function nodeResult(state: NodeState, exhausted: boolean): NodeSample {
+  return { node: state.name, dbSize: state.dbSize, strata: buildStrata(state), exhausted, timedOut: state.timedOut };
 }
 
 function sizesOf(state: NodeState, type: string): number[] {
