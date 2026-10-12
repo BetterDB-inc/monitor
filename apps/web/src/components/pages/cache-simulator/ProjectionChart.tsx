@@ -9,6 +9,7 @@ interface Props {
 
 export function ProjectionChart({ projection, maxmemory }: Props) {
   const data = projection.points.map((point) => ({ ...point, band: [point.low, point.high] }));
+  const hasRange = projection.points.some((point) => point.high > point.low);
   return (
     <ResponsiveContainer width="100%" height={320}>
       <ComposedChart data={data}>
@@ -19,7 +20,7 @@ export function ProjectionChart({ projection, maxmemory }: Props) {
           labelStyle={{ color: 'var(--muted-foreground)' }}
           itemStyle={{ color: 'var(--popover-foreground)' }}
           formatter={(value) => (Array.isArray(value) ? value.map((entry) => formatBytes(Number(entry))).join(' – ') : formatBytes(Number(value ?? 0)))} labelFormatter={(day) => `Day ${day}`} />
-        <Area dataKey="band" name="95% range" stroke="none" fill="var(--chart-1)" fillOpacity={0.15} isAnimationActive={false} />
+        {hasRange && <Area dataKey="band" name="95% range" stroke="none" fill="var(--chart-1)" fillOpacity={0.15} isAnimationActive={false} />}
         <Line dataKey="bytes" name="Projected size" stroke="var(--chart-1)" dot={false} isAnimationActive={false} />
         {maxmemory && <ReferenceLine y={maxmemory} stroke="var(--destructive)" label="maxmemory" ifOverflow="extendDomain" />}
         {maxmemory && <ReferenceLine y={maxmemory * HEADROOM} stroke="var(--muted-foreground)" strokeDasharray="4 4" label="80%" ifOverflow="extendDomain" />}

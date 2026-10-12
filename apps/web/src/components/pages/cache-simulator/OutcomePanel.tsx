@@ -21,9 +21,12 @@ const PROVIDERS: Array<{ id: CloudProvider; label: string }> = [
 export function OutcomePanel({ projection, sizingProjection, maxmemory, policy, horizonLabel }: Props) {
   const [provider, setProvider] = useState<CloudProvider>('aws');
   const peak = Math.max(...sizingProjection.points.map((point) => point.high));
+  const grows = projection.points[projection.points.length - 1].bytes > projection.points[0].bytes;
   const headline =
     maxmemory === null
-      ? 'No maxmemory limit is set, so memory grows until the host runs out.'
+      ? grows
+        ? 'No maxmemory limit is set, so memory grows until the host runs out.'
+        : `No maxmemory limit is set. Memory stays flat over the next ${horizonLabel}.`
       : projection.daysToMaxmemory === null
         ? `Stays under maxmemory for the next ${horizonLabel}.`
         : projection.daysToMaxmemory === 0
@@ -51,18 +54,25 @@ export function OutcomePanel({ projection, sizingProjection, maxmemory, policy, 
                 </TabsTrigger>
               ))}
             </TabsList>
-            {PROVIDERS.map((entry) => (
-              <TabsContent key={entry.id} value={entry.id}>
-                <ul className="space-y-1 text-sm">
-                  {smallestNodeFor(peak, entry.id).map((rec) => (
-                    <li key={rec.service}>
-                      {rec.label}: <span className="font-mono">{rec.nodeType}</span> ({formatBytes(rec.memoryBytes)})
-                      {rec.shards > 1 && ` × ${rec.shards} shards`}
-                    </li>
-                  ))}
-                </ul>
-              </TabsContent>
-            ))}
+            {PROVIDERS.map((entry) => {
+              const nodes = smallestNodeFor(peak, entry.id);
+              return (
+                <TabsContent key={entry.id} value={entry.id}>
+                  {nodes.length === 0 ? (
+                    <p className="text-sm">No {entry.label} node in the catalog fits this projection, even at the maximum shard count.</p>
+                  ) : (
+                    <ul className="space-y-1 text-sm">
+                      {nodes.map((rec) => (
+                        <li key={rec.service}>
+                          {rec.label}: <span className="font-mono">{rec.nodeType}</span> ({formatBytes(rec.memoryBytes)})
+                          {rec.shards > 1 && ` × ${rec.shards} shards`}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </TabsContent>
+              );
+            })}
           </Tabs>
         </div>
       </CardContent>

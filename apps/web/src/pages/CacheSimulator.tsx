@@ -37,12 +37,13 @@ export function CacheSimulator() {
     if (isRefreshing) return;
     setIsRefreshing(true);
     setRefreshError(null);
+    const refreshedId = connectionId;
     try {
-      const queryKey = cacheSimulatorKeys.snapshot(connectionId);
+      const queryKey = cacheSimulatorKeys.snapshot(refreshedId);
       await queryClient.cancelQueries({ queryKey });
       const next = await cacheSimulatorApi.getSnapshot(true);
       queryClient.setQueryData(queryKey, next);
-      setOverrides(null);
+      setOverrides((current) => (current?.connectionId === refreshedId ? null : current));
     } catch (error) {
       setRefreshError(error instanceof Error ? error.message : 'Refresh failed');
     } finally {
@@ -67,7 +68,12 @@ export function CacheSimulator() {
 
   if (!data || !inputs || !projection || !sizing) {
     return snapshot.isError ? (
-      <p className="text-sm text-destructive">Could not load the cache size simulator</p>
+      <div className="space-y-2">
+        <p className="text-sm text-destructive">Could not load the cache size simulator: {snapshot.error.message}</p>
+        <Button variant="outline" size="sm" onClick={() => snapshot.refetch()} disabled={snapshot.isFetching}>
+          Retry
+        </Button>
+      </div>
     ) : (
       <div className="space-y-4">
         <Skeleton className="h-8 w-48" />
@@ -86,6 +92,7 @@ export function CacheSimulator() {
         </Button>
       </div>
       {refreshError && <p className="text-sm text-destructive">Could not refresh the sample: {refreshError}</p>}
+      {snapshot.isError && <p className="text-sm text-destructive">Could not update the snapshot, showing the last result: {snapshot.error.message}</p>}
       <CurrentStateCard snapshot={data} />
       <ProjectionInputs inputs={inputs} hasGrowth={data.growth !== null} onChange={(change) =>
           setOverrides((current) => ({ connectionId, values: { ...(current?.connectionId === connectionId ? current.values : {}), ...change } }))
