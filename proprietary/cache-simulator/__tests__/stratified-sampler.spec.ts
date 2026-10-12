@@ -80,4 +80,26 @@ describe('sampleNodes', () => {
     const client = fakeClient(keys, { scanTypeError: 'ERR syntax error' });
     await expect(sampleNodes([{ name: 'a', client }], { budget: 400, deadlineMs: 60_000 })).rejects.toBeInstanceOf(SamplerUnsupportedError);
   });
+
+  it('rethrows other MEMORY USAGE errors without marking them unsupported', async () => {
+    const client = fakeClient(keyspace(10, () => string()), { memoryError: 'LOADING Valkey is loading the dataset in memory' });
+    const failure = await sampleNodes([{ name: 'a', client }], { budget: 4000, deadlineMs: 60_000 }).catch((error) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(SamplerUnsupportedError);
+    expect(failure.message).toBe('LOADING Valkey is loading the dataset in memory');
+  });
+
+  it('throws when the pipeline returns no replies', async () => {
+    const client = fakeClient(keyspace(10, () => string()));
+    (client.getClient as unknown as () => unknown) = () => ({ pipeline: () => ({ call: function () { return this; }, exec: async () => null }) });
+    await expect(sampleNodes([{ name: 'a', client }], { budget: 4000, deadlineMs: 60_000 })).rejects.toThrow('Pipeline returned no replies');
+  });
+
+  it('keeps the estimated count when the TYPE scan stops early', async () => {
+    const keys = keyspace(3000, (index) => ((index < 200 ? index % 10 === 0 : index % 5 === 0) ? hash(index) : string()));
+    const [result] = await sampleNodes([{ name: 'a', client: fakeClient(keys) }], { budget: 400, deadlineMs: 60_000 });
+    const hashes = result.strata.find((stratum) => stratum.type === 'hash')!;
+    expect(hashes.sizes).toHaveLength(220);
+    expect(hashes.estimatedKeys).toBeCloseTo((20 / 200) * 3000, 6);
+  });
 });

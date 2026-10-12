@@ -124,14 +124,18 @@ async function measure(state: NodeState, keys: string[], knownType: string | nul
     if (knownType === null) pipeline.call('TYPE', key);
     pipeline.call('MEMORY', 'USAGE', key, 'SAMPLES', '0');
   }
-  const replies = ((await pipeline.exec()) ?? []) as Reply[];
+  const executed = await pipeline.exec();
+  if (!executed) throw new Error('Pipeline returned no replies');
+  const replies = executed as Reply[];
   const stride = knownType === null ? 2 : 1;
   keys.forEach((key, index) => {
     state.seen.add(key);
     const typeReply: Reply = knownType === null ? replies[index * stride] : [null, knownType];
     const memoryReply = replies[index * stride + stride - 1];
     for (const reply of [typeReply, memoryReply]) {
-      if (reply?.[0] && UNSUPPORTED.test(reply[0].message)) throw new SamplerUnsupportedError(reply[0].message);
+      if (!reply?.[0]) continue;
+      if (UNSUPPORTED.test(reply[0].message)) throw new SamplerUnsupportedError(reply[0].message);
+      throw reply[0];
     }
     const type = typeReply && !typeReply[0] ? String(typeReply[1]) : 'none';
     if (type === 'none') return;
