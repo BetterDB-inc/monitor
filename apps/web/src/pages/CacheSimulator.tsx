@@ -15,7 +15,7 @@ export function CacheSimulator() {
   const connectionId = currentConnection?.id ?? null;
   const queryClient = useQueryClient();
   const [horizon, setHorizon] = useState(HORIZONS[0]);
-  const [overrides, setOverrides] = useState<{ connectionId: string | null; values: SimulatorInputs } | null>(null);
+  const [overrides, setOverrides] = useState<{ connectionId: string | null; values: Partial<SimulatorInputs> } | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
 
@@ -27,7 +27,8 @@ export function CacheSimulator() {
 
   const data = snapshot.data;
   const measured = useMemo(() => (data ? measuredInputs(data) : null), [data]);
-  const inputs = overrides && overrides.connectionId === connectionId ? overrides.values : measured;
+  const overrideValues = overrides && overrides.connectionId === connectionId ? overrides.values : null;
+  const inputs = useMemo(() => (measured ? { ...measured, ...overrideValues } : null), [measured, overrideValues]);
 
   const projection = useMemo(() => (data && inputs ? project(projectionInputs(data, inputs, horizon.days)) : null), [data, inputs, horizon]);
   const sizing = useMemo(() => (data && inputs ? project(projectionInputs(data, inputs, SIX_MONTHS.days)) : null), [data, inputs]);
@@ -86,7 +87,9 @@ export function CacheSimulator() {
       </div>
       {refreshError && <p className="text-sm text-destructive">Could not refresh the sample: {refreshError}</p>}
       <CurrentStateCard snapshot={data} />
-      <ProjectionInputs inputs={inputs} hasGrowth={data.growth !== null} onChange={(values) => setOverrides({ connectionId, values })} onReset={() => setOverrides(null)} />
+      <ProjectionInputs inputs={inputs} hasGrowth={data.growth !== null} onChange={(change) =>
+          setOverrides((current) => ({ connectionId, values: { ...(current?.connectionId === connectionId ? current.values : {}), ...change } }))
+        } onReset={() => setOverrides(null)} />
       <div className="flex gap-2">
         {HORIZONS.map((entry) => (
           <Button key={entry.label} size="sm" variant={entry.label === horizon.label ? 'default' : 'outline'} onClick={() => setHorizon(entry)}>

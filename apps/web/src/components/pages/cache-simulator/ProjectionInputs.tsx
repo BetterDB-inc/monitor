@@ -8,7 +8,7 @@ import type { SimulatorInputs } from './measured-inputs';
 interface Props {
   inputs: SimulatorInputs;
   hasGrowth: boolean;
-  onChange: (inputs: SimulatorInputs) => void;
+  onChange: (change: Partial<SimulatorInputs>) => void;
   onReset: () => void;
 }
 
@@ -36,11 +36,11 @@ export function ProjectionInputs({ inputs, hasGrowth, onChange, onReset }: Props
     const value = raw === '' ? null : Number(raw);
     if (key === 'ttlDays') {
       if (value !== null && !Number.isFinite(value)) return;
-      return onChange({ ...inputs, ttlDays: value !== null && value > 0 ? value : null });
+      return onChange({ ttlDays: value !== null && value > 0 ? value : null });
     }
     if (value === null || !Number.isFinite(value)) return;
     if (value < 0 && key !== 'keysPerDay') return;
-    onChange({ ...inputs, [key]: value });
+    onChange({ [key]: value });
   };
   const display = (key: keyof SimulatorInputs) => {
     const draft = drafts[key];

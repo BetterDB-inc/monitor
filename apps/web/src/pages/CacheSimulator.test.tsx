@@ -70,6 +70,17 @@ describe('CacheSimulator page', () => {
     expect(lastBytes()).toBe(before);
   });
 
+  it('keeps unedited inputs following the measurement after an edit during sampling', () => {
+    useQuery.mockReturnValue({ data: { ...ready, status: 'sampling', estimate: null, progress: { sampled: 100, target: 4000 } } });
+    const { rerender } = render(<CacheSimulator />);
+    fireEvent.change(screen.getByLabelText('Growth rate (keys/day)'), { target: { value: '500' } });
+    useQuery.mockReturnValue({ data: ready });
+    rerender(<CacheSimulator />);
+    expect((screen.getByLabelText('Average key size (bytes)') as HTMLInputElement).value).toBe('500');
+    expect((screen.getByLabelText('Per-key overhead (bytes)') as HTMLInputElement).value).toBe('0');
+    expect((screen.getByLabelText('Growth rate (keys/day)') as HTMLInputElement).value).toBe('500');
+  });
+
   it('explains the eviction consequence and recommends nodes', () => {
     useQuery.mockReturnValue({ data: ready });
     render(<CacheSimulator />);
