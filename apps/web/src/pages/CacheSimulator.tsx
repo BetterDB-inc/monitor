@@ -25,6 +25,8 @@ export function CacheSimulator() {
     refetchInterval: (query: { state: { data?: CacheSimulatorSnapshot } }) => (query.state.data?.status === 'sampling' ? 2000 : false),
   });
 
+  if (overrides && overrides.connectionId !== connectionId) setOverrides(null);
+
   const data = snapshot.data;
   const measured = useMemo(() => (data ? measuredInputs(data) : null), [data]);
   const overrideValues = overrides && overrides.connectionId === connectionId ? overrides.values : null;
@@ -94,7 +96,7 @@ export function CacheSimulator() {
       {refreshError && <p className="text-sm text-destructive">Could not refresh the sample: {refreshError}</p>}
       {snapshot.isError && <p className="text-sm text-destructive">Could not update the snapshot, showing the last result: {snapshot.error.message}</p>}
       <CurrentStateCard snapshot={data} />
-      <ProjectionInputs inputs={inputs} hasGrowth={data.growth !== null} onChange={(change) =>
+      <ProjectionInputs key={connectionId ?? ''} inputs={inputs} hasGrowth={data.growth !== null} onChange={(change) =>
           setOverrides((current) => ({ connectionId, values: { ...(current?.connectionId === connectionId ? current.values : {}), ...change } }))
         } onReset={() => setOverrides(null)} />
       <div className="flex gap-2">

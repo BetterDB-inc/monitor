@@ -14,7 +14,7 @@ Sampling starts at 4,000 keys and keeps going until the 95% range is within ±5%
 
 Heavily skewed key types, where a few keys are far larger than the rest, get at least 20,000 samples and a wider range. The extra width accounts for very large keys that the sample may have missed.
 
-On a cluster the budget is split across primaries in proportion to their key counts. A result that stops at the time limit is marked as partial and has a wider range. Results are cached for 15 minutes; **Refresh sample** starts a new one.
+On a cluster the budget is split across primaries in proportion to their key counts. maxmemory is the sum across primaries, or no limit if any primary has none; if the primaries use different eviction policies, the page says so instead of naming one. A result that stops at the time limit is marked as partial and has a wider range. Results are cached for 15 minutes; **Refresh sample** starts a new one.
 
 BetterDB never uses `KEYS` or `RANDOMKEY`. Every command it sends is read-only.
 

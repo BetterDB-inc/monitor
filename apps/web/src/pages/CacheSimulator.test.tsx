@@ -209,6 +209,23 @@ describe('CacheSimulator page', () => {
     expect(screen.getByTestId('chart')).toBeTruthy();
   });
 
+  it('explains a mixed cluster eviction policy', () => {
+    useQuery.mockReturnValue({ data: { ...ready, instant: { ...ready.instant, maxmemoryPolicy: 'mixed' } } });
+    render(<CacheSimulator />);
+    expect(screen.getByText(/primaries use different eviction policies/)).toBeTruthy();
+  });
+
+  it('drops edits when the connection changes', () => {
+    useQuery.mockReturnValue({ data: ready });
+    const { rerender } = render(<CacheSimulator />);
+    fireEvent.change(screen.getByLabelText('Growth rate (keys/day)'), { target: { value: '500' } });
+    connection.id = 'c2';
+    rerender(<CacheSimulator />);
+    connection.id = 'c1';
+    rerender(<CacheSimulator />);
+    expect((screen.getByLabelText('Growth rate (keys/day)') as HTMLInputElement).value).toBe('25');
+  });
+
   it('keeps edits for another connection when a refresh finishes', async () => {
     useQuery.mockReturnValue({ data: ready });
     let resolve: (value: CacheSimulatorSnapshot) => void = () => {};

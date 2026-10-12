@@ -41,7 +41,10 @@ export function OutcomePanel({ projection, sizingProjection, maxmemory, policy, 
       </CardHeader>
       <CardContent className="space-y-4">
         <p className="font-medium">{headline}</p>
-        {maxmemory !== null && (
+        {maxmemory !== null && policy === 'mixed' && (
+          <p className="text-sm">The cluster primaries use different eviction policies, so what happens at maxmemory differs by shard.</p>
+        )}
+        {maxmemory !== null && policy !== 'mixed' && (
           <p className="text-sm">
             With <span className="font-mono">{policy}</span>: {evictionConsequence(policy)}
           </p>
