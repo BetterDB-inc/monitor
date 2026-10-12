@@ -159,7 +159,7 @@ async function topUp(state: NodeState, type: string, target: number): Promise<nu
       await measure(state, fresh.slice(index, index + take), type);
       index += take;
     }
-    if (sizesOf(state, type).length >= target) return cursor === '0' && index >= fresh.length ? ofType.size : null;
+    if (sizesOf(state, type).length >= target) return cursor === '0' ? ofType.size : null;
   } while (cursor !== '0');
   return ofType.size;
 }
@@ -230,7 +230,7 @@ function buildStrata(state: NodeState): Stratum[] {
   const openObserved = [...state.census]
     .filter(([type]) => !state.exactCounts.has(type))
     .reduce((sum, [, count]) => sum + count, 0);
-  const remaining = Math.max(0, state.dbSize - exactTotal);
+  const remaining = Math.max(openObserved, state.dbSize - exactTotal);
   const types = new Set([...state.census.keys(), ...state.exactCounts.keys()]);
   return [...types].map((type) => {
     const observed = state.census.get(type) ?? 0;
