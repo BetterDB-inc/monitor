@@ -16,5 +16,6 @@ export const EVICTION_POLICIES = Object.keys(COPY);
 export const UNKNOWN_EVICTION_COPY = 'This eviction policy is not recognised, so its behaviour at maxmemory cannot be described.';
 
 export function evictionConsequence(policy: string): string {
-  return COPY[policy.toLowerCase()] ?? UNKNOWN_EVICTION_COPY;
+  const key = policy.toLowerCase();
+  return Object.hasOwn(COPY, key) ? COPY[key] : UNKNOWN_EVICTION_COPY;
 }
