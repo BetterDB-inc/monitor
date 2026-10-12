@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Button } from '../../ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../../ui/card';
 import { Input } from '../../ui/input';
@@ -29,17 +30,33 @@ export function ProjectionInputs({ inputs, hasGrowth, onChange, onReset }: Props
     { key: 'overheadPerKeyBytes', label: 'Per-key overhead (bytes)', hint: 'Dictionary and expiry bookkeeping per key; 88 bytes is typical.' },
     { key: 'maxmemory', label: 'maxmemory (bytes)', hint: 'Read from INFO. 0 means no limit.' },
   ];
+  const [drafts, setDrafts] = useState<Partial<Record<keyof SimulatorInputs, string>>>({});
   const update = (key: keyof SimulatorInputs, raw: string) => {
+    setDrafts((current) => ({ ...current, [key]: raw }));
     const value = raw === '' ? null : Number(raw);
-    if (key === 'ttlDays') return onChange({ ...inputs, ttlDays: value !== null && value > 0 ? value : null });
-    if (value === null || Number.isNaN(value)) return;
-    onChange({ ...inputs, [key]: key === 'keysPerDay' ? value : Math.max(0, value) });
+    if (key === 'ttlDays') {
+      if (value !== null && !Number.isFinite(value)) return;
+      return onChange({ ...inputs, ttlDays: value !== null && value > 0 ? value : null });
+    }
+    if (value === null || !Number.isFinite(value)) return;
+    if (value < 0 && key !== 'keysPerDay') return;
+    onChange({ ...inputs, [key]: value });
   };
+  const display = (key: keyof SimulatorInputs) => {
+    const draft = drafts[key];
+    if (draft !== undefined) return draft;
+    const value = inputs[key];
+    return value === null ? '' : String(Math.round(value * 100) / 100);
+  };
+  const clearDraft = (key: keyof SimulatorInputs) => setDrafts((current) => ({ ...current, [key]: undefined }));
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between pb-2">
         <CardTitle className="text-base">Inputs</CardTitle>
-        <Button variant="outline" size="sm" onClick={onReset}>
+        <Button variant="outline" size="sm" onClick={() => {
+            setDrafts({});
+            onReset();
+          }}>
           Reset to measured
         </Button>
       </CardHeader>
@@ -59,8 +76,9 @@ export function ProjectionInputs({ inputs, hasGrowth, onChange, onReset }: Props
                 <Input
                   id={`sim-${field.key}`}
                   type="number"
-                  value={inputs[field.key] === null ? '' : String(Math.round((inputs[field.key] as number) * 100) / 100)}
+                  value={display(field.key)}
                   onChange={(event) => update(field.key, event.target.value)}
+                  onBlur={() => clearDraft(field.key)}
                 />
                 {field.key === 'keysPerDay' && !hasGrowth && <p className="text-xs text-muted-foreground">Not enough history to fit growth yet.</p>}
               </div>

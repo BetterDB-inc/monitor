@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { CacheSimulatorSnapshot } from '@betterdb/shared';
 
-const { useQuery, getSnapshot, setQueryData } = vi.hoisted(() => ({ useQuery: vi.fn(), getSnapshot: vi.fn(), setQueryData: vi.fn() }));
+const { useQuery, getSnapshot, setQueryData, cancelQueries } = vi.hoisted(() => ({ useQuery: vi.fn(), getSnapshot: vi.fn(), setQueryData: vi.fn(), cancelQueries: vi.fn() }));
 
-vi.mock('@tanstack/react-query', () => ({ useQuery, useQueryClient: () => ({ setQueryData }) }));
+vi.mock('@tanstack/react-query', () => ({ useQuery, useQueryClient: () => ({ setQueryData, cancelQueries }) }));
 vi.mock('../hooks/useConnection', () => ({ useConnection: () => ({ currentConnection: { id: 'c1' } }) }));
 vi.mock('../api/cache-simulator', () => ({
   cacheSimulatorApi: { getSnapshot },
@@ -32,6 +32,9 @@ describe('CacheSimulator page', () => {
   beforeEach(() => {
     useQuery.mockReset();
     getSnapshot.mockReset();
+    setQueryData.mockReset();
+    cancelQueries.mockReset();
+    cancelQueries.mockResolvedValue(undefined);
   });
 
   it('shows INFO figures and progress while sampling', () => {
@@ -92,5 +95,58 @@ describe('CacheSimulator page', () => {
     render(<CacheSimulator />);
     expect(screen.getByText(/ERR unknown command 'MEMORY'/)).toBeTruthy();
     expect(screen.getByLabelText('Average key size (bytes)')).toBeTruthy();
+  });
+
+  it('shows an inline error when refresh rejects', async () => {
+    useQuery.mockReturnValue({ data: ready });
+    getSnapshot.mockRejectedValue(new Error('boom'));
+    render(<CacheSimulator />);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh sample' }));
+    await waitFor(() => expect(screen.getByText(/Could not refresh the sample: boom/)).toBeTruthy());
+    expect((screen.getByRole('button', { name: 'Refresh sample' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('disables refresh while pending and sends one request', async () => {
+    useQuery.mockReturnValue({ data: ready });
+    let resolve: (value: CacheSimulatorSnapshot) => void = () => {};
+    getSnapshot.mockReturnValue(new Promise<CacheSimulatorSnapshot>((r) => (resolve = r)));
+    render(<CacheSimulator />);
+    const button = screen.getByRole('button', { name: 'Refresh sample' }) as HTMLButtonElement;
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await waitFor(() => expect(button.disabled).toBe(true));
+    expect(getSnapshot).toHaveBeenCalledTimes(1);
+    expect(cancelQueries).toHaveBeenCalledWith({ queryKey: ['cache-simulator', 'c1'] });
+    await act(async () => resolve(ready));
+    await waitFor(() => expect(button.disabled).toBe(false));
+    expect(setQueryData).toHaveBeenCalledWith(['cache-simulator', 'c1'], ready);
+  });
+
+  it('keeps edits when sampling finishes', () => {
+    useQuery.mockReturnValue({ data: { ...ready, status: 'sampling', estimate: null, progress: { sampled: 10, target: 4000 } } });
+    const { rerender } = render(<CacheSimulator />);
+    fireEvent.change(screen.getByLabelText('Growth rate (keys/day)'), { target: { value: '500' } });
+    useQuery.mockReturnValue({ data: ready });
+    rerender(<CacheSimulator />);
+    expect((screen.getByLabelText('Growth rate (keys/day)') as HTMLInputElement).value).toBe('500');
+  });
+
+  it('lets a numeric field be cleared and retyped', () => {
+    useQuery.mockReturnValue({ data: ready });
+    render(<CacheSimulator />);
+    const input = screen.getByLabelText('Average key size (bytes)') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '' } });
+    expect(input.value).toBe('');
+    fireEvent.change(input, { target: { value: '700' } });
+    expect(input.value).toBe('700');
+  });
+
+  it('ignores negative and non-finite values', () => {
+    useQuery.mockReturnValue({ data: ready });
+    render(<CacheSimulator />);
+    const before = lastBytes();
+    fireEvent.change(screen.getByLabelText('Average key size (bytes)'), { target: { value: '-5' } });
+    fireEvent.change(screen.getByLabelText('Per-key overhead (bytes)'), { target: { value: '1e999' } });
+    expect(lastBytes()).toBe(before);
   });
 });
