@@ -28,13 +28,15 @@ describe('node catalog', () => {
     const byService = Object.fromEntries(CLOUD_SERVICES.map((service) => [service.service, service.usableRatio]));
     expect(byService).toEqual({
       elasticache: 0.75,
-      memorydb: 0.75,
+      memorydb: 1,
       'memorystore-valkey': 0.8,
       'azure-cache-standard': 0.8,
       'azure-cache-premium': 0.8,
     });
     const [standardSmall] = smallestNodeFor(4.5e9, 'gcp');
     expect(standardSmall.nodeType).toBe('highmem-medium');
+    const memorydb = smallestNodeFor(2.4e9, 'aws').find((rec) => rec.service === 'memorydb');
+    expect(memorydb?.nodeType).toBe('db.t4g.medium');
   });
 
   it('caps GCP shards at one replica per shard and labels Azure as legacy', () => {
