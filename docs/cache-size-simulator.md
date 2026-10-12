@@ -29,7 +29,7 @@ Every input is filled in from measured data and can be changed; the chart redraw
 - **Growth rate** — fitted from the last 30 days of key counts. With less than a day of history it starts at 0.
 - **Key TTL** — with a TTL, new keys expire after that many days, so the key count levels off at rate × TTL.
 - **Average key size** — from the sample.
-- **Per-key overhead** — 88 bytes by default.
+- **Per-key overhead** — memory per key on top of the average key size. Sampled sizes (`MEMORY USAGE`) already include it, so it is 0 once sampling finishes; before that the INFO-based average uses 88 bytes.
 - **maxmemory** — from `INFO`; 0 means no limit.
 
 ## Requirements and limits

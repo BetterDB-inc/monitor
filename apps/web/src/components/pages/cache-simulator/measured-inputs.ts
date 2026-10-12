@@ -25,7 +25,7 @@ export function measuredInputs(snapshot: CacheSimulatorSnapshot): SimulatorInput
     keysPerDay: growth?.keysPerDay ?? 0,
     ttlDays: null,
     avgKeyBytes: Math.max(0, Math.round(estimate?.avgKeyBytes ?? infoAverage)),
-    overheadPerKeyBytes: DEFAULT_OVERHEAD_PER_KEY_BYTES,
+    overheadPerKeyBytes: estimate ? 0 : DEFAULT_OVERHEAD_PER_KEY_BYTES,
     maxmemory: instant.maxmemory,
   };
 }

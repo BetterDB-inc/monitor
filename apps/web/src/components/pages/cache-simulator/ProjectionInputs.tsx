@@ -27,7 +27,7 @@ export function ProjectionInputs({ inputs, hasGrowth, onChange, onReset }: Props
     },
     { key: 'ttlDays', label: 'Key TTL (days)', hint: 'Leave empty for keys that never expire. With a TTL, growth levels off at rate × TTL.' },
     { key: 'avgKeyBytes', label: 'Average key size (bytes)', hint: 'Measured with MEMORY USAGE on a stratified sample of keys.' },
-    { key: 'overheadPerKeyBytes', label: 'Per-key overhead (bytes)', hint: 'Dictionary and expiry bookkeeping per key; 88 bytes is typical.' },
+    { key: 'overheadPerKeyBytes', label: 'Per-key overhead (bytes)', hint: 'Memory per key on top of the average key size. Sampled sizes already include it, so it is 0 once sampling finishes; 88 bytes is typical for INFO averages.' },
     { key: 'maxmemory', label: 'maxmemory (bytes)', hint: 'Read from INFO. 0 means no limit.' },
   ];
   const [drafts, setDrafts] = useState<Partial<Record<keyof SimulatorInputs, string>>>({});
