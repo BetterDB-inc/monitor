@@ -161,4 +161,46 @@ describe('CacheSimulatorService', () => {
     expect(spy.mock.calls[0][0].map((node) => node.name)).toEqual(['seed']);
     expect(result.instant.totalKeys).toBe(5);
   });
+
+  it('starts one job for concurrent first calls', async () => {
+    const spy = jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
+    const { service } = setup();
+    const [a, b] = await Promise.all([service.snapshot('c1'), service.snapshot('c1')]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(a.status).toBe('sampling');
+    expect(b.status).toBe('sampling');
+  });
+
+  it('caches a setup failure for one minute, then retries', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate'] });
+    const spy = jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
+    const connections = { c1: client() };
+    connections.c1.getInfoParsed.mockRejectedValue(new Error('INFO down'));
+    const { service } = setup(connections);
+    const failed = await service.snapshot('c1');
+    expect(failed).toMatchObject({
+      status: 'failed',
+      error: 'INFO down',
+      estimate: null,
+      growth: null,
+      instant: { usedMemory: 0, maxmemory: 0, maxmemoryPolicy: 'unknown', totalKeys: 0 },
+    });
+    await service.snapshot('c1');
+    expect(connections.c1.getInfoParsed).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(FAILURE_TTL_MS + 1);
+    connections.c1.getInfoParsed.mockResolvedValue(info(1000, 10_000));
+    expect((await service.snapshot('c1')).status).toBe('sampling');
+    expect(connections.c1.getInfoParsed).toHaveBeenCalledTimes(2);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns running progress on refresh without starting another job', async () => {
+    const spy = jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
+    const { service } = setup();
+    await service.snapshot('c1');
+    const refreshed = await service.snapshot('c1', true);
+    expect(refreshed.status).toBe('sampling');
+    expect(refreshed.progress).toEqual({ sampled: 0, target: sampler.SAMPLE_BUDGET });
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
 });

@@ -23,6 +23,7 @@ interface Job {
 export class CacheSimulatorService {
   private readonly logger = new Logger(CacheSimulatorService.name);
   private readonly jobs = new Map<string, Job>();
+  private readonly starting = new Map<string, Promise<CacheSimulatorSnapshot>>();
   private readonly results = new Map<string, { snapshot: CacheSimulatorSnapshot; at: number }>();
 
   constructor(
@@ -37,16 +38,43 @@ export class CacheSimulatorService {
     if (running) return this.inProgress(running);
     const cached = this.results.get(connectionId);
     if (cached && !refresh && Date.now() - cached.at < this.ttl(cached.snapshot)) return cached.snapshot;
+    const starting = this.starting.get(connectionId);
+    if (starting) return starting;
     const name = this.registry.getConfig(connectionId)?.name ?? connectionId;
-    const nodes = await this.nodesFor(connectionId, { name, client });
-    const [instant, growth] = await Promise.all([
-      this.instant(nodes),
-      readGrowth(this.storage, connectionId, Date.now()),
-    ]);
-    const job: Job = { instant, growth, progress: { sampled: 0, target: SAMPLE_BUDGET } };
-    this.jobs.set(connectionId, job);
-    void this.run(connectionId, job, nodes);
-    return this.inProgress(job);
+    const promise = this.start(connectionId, { name, client }).finally(() => {
+      this.starting.delete(connectionId);
+    });
+    this.starting.set(connectionId, promise);
+    return promise;
+  }
+
+  private async start(connectionId: string, seed: ScanNode): Promise<CacheSimulatorSnapshot> {
+    try {
+      const nodes = await this.nodesFor(connectionId, seed);
+      const [instant, growth] = await Promise.all([
+        this.instant(nodes),
+        readGrowth(this.storage, connectionId, Date.now()),
+      ]);
+      const job: Job = { instant, growth, progress: { sampled: 0, target: SAMPLE_BUDGET } };
+      this.jobs.set(connectionId, job);
+      void this.run(connectionId, job, nodes);
+      return this.inProgress(job);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`${LABEL} setup failed for ${connectionId}: ${message}`);
+      const snapshot: CacheSimulatorSnapshot = {
+        status: 'failed',
+        progress: null,
+        instant: { usedMemory: 0, maxmemory: 0, maxmemoryPolicy: 'unknown', totalKeys: 0 },
+        estimate: null,
+        growth: null,
+        error: message,
+      };
+      if (this.registry.getConfig(connectionId) !== null) {
+        this.results.set(connectionId, { snapshot, at: Date.now() });
+      }
+      return snapshot;
+    }
   }
 
   private async run(connectionId: string, job: Job, nodes: ScanNode[]): Promise<void> {
