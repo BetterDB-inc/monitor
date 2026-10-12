@@ -41,6 +41,8 @@ that hold keys.
 Page controls:
 
 - A date range picker for the charts, defaulting to the last 6 hours.
+  A range covers at most 31 days and 50,000 stored samples. When a range holds more
+  samples, the page shows only the most recent ones and says so.
 - **Refresh**, which re-collects the footprint now.
 - The alert settings sheet (see [Per-connection switches](#per-connection-switches)).
 - **Rescan now** on the not-detected view, which collects the footprint again.

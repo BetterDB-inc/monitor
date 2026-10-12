@@ -108,6 +108,6 @@ export class KvCacheSamplesService implements OnModuleInit, OnModuleDestroy {
     });
     const requested = rows.reduce((sum, row) => sum + row.requestedTokens, 0);
     const hit = rows.reduce((sum, row) => sum + row.hitTokens, 0);
-    return { buckets: mergeBuckets(rows), rangeHitRate: hitRate(requested, hit) };
+    return { buckets: mergeBuckets(rows), rangeHitRate: hitRate(requested, hit), truncated: rows.length >= SAMPLES_LIMIT };
   }
 }

@@ -160,9 +160,15 @@ describe('KvCacheSamplesService', () => {
     expect(result.rangeHitRate).toBe(0.75);
   });
 
+  it('flags a result that hit the row limit', async () => {
+    const { service, storage } = setup();
+    storage.getKvCacheEngineSamples.mockResolvedValue(Array.from({ length: SAMPLES_LIMIT }, (_, i) => sample({ timestamp: i })));
+    expect((await service.getSamples('c1', { from: 0, to: 1000 })).truncated).toBe(true);
+  });
+
   it('returns a null range hit rate when nothing was requested', async () => {
     const { service } = setup();
-    expect(await service.getSamples('c1', { from: 0, to: 1000 })).toEqual({ buckets: [], rangeHitRate: null });
+    expect(await service.getSamples('c1', { from: 0, to: 1000 })).toEqual({ buckets: [], rangeHitRate: null, truncated: false });
   });
 
   it('flushes the open bucket on module destroy and stops the timer', async () => {

@@ -103,6 +103,12 @@ export function KvCache() {
             recentBuckets={recent.data?.buckets ?? []}
           />
           <KvCacheAdvisories advisories={advisoriesFor(latest)} />
+          {samples.data?.truncated && (
+            <p className="text-sm text-muted-foreground">
+              This range holds more samples than can be shown, so the charts and table cover only its most recent
+              part. Pick a shorter range to see all of it.
+            </p>
+          )}
           <KvCacheCharts buckets={buckets} history={history.data ?? []} engines={engines} />
           <KvCacheModelTable latest={latest} buckets={buckets} />
         </>
