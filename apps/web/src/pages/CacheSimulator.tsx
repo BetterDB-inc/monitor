@@ -5,7 +5,7 @@ import { cacheSimulatorApi, cacheSimulatorKeys } from '../api/cache-simulator';
 import { useConnection } from '../hooks/useConnection';
 import { Button } from '../components/ui/button';
 import { Skeleton } from '../components/ui/skeleton';
-import { CurrentStateCard, HORIZONS, OutcomePanel, ProjectionInputs, isSetupFailure, measuredInputs, projectionInputs, type SimulatorInputs } from '../components/pages/cache-simulator';
+import { CurrentStateCard, HORIZONS, OutcomePanel, ProjectionInputs, isSetupFailure, measuredInputs, projectionInputs, steadyBytes, type SimulatorInputs } from '../components/pages/cache-simulator';
 import { ProjectionChart } from '../components/pages/cache-simulator/ProjectionChart';
 
 const SIX_MONTHS = HORIZONS[HORIZONS.length - 1];
@@ -16,8 +16,10 @@ export function CacheSimulator() {
   const queryClient = useQueryClient();
   const [horizon, setHorizon] = useState(HORIZONS[0]);
   const [overrides, setOverrides] = useState<{ connectionId: string | null; values: Partial<SimulatorInputs> } | null>(null);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [refreshingId, setRefreshingId] = useState<string | null | undefined>(undefined);
+  const [refreshFailure, setRefreshFailure] = useState<{ connectionId: string | null; message: string } | null>(null);
+  const isRefreshing = refreshingId === connectionId;
+  const refreshError = refreshFailure?.connectionId === connectionId ? refreshFailure.message : null;
 
   const snapshot = useQuery({
     queryKey: cacheSimulatorKeys.snapshot(connectionId),
@@ -33,13 +35,14 @@ export function CacheSimulator() {
   const inputs = useMemo(() => (measured ? { ...measured, ...overrideValues } : null), [measured, overrideValues]);
 
   const projection = useMemo(() => (data && inputs ? project(projectionInputs(data, inputs, horizon.days)) : null), [data, inputs, horizon]);
-  const sizing = useMemo(() => (data && inputs ? project(projectionInputs(data, inputs, SIX_MONTHS.days)) : null), [data, inputs]);
+  const sizingInputs = useMemo(() => (data && inputs ? projectionInputs(data, inputs, SIX_MONTHS.days) : null), [data, inputs]);
+  const sizing = useMemo(() => (sizingInputs ? project(sizingInputs) : null), [sizingInputs]);
 
   const refresh = async () => {
     if (isRefreshing) return;
-    setIsRefreshing(true);
-    setRefreshError(null);
     const refreshedId = connectionId;
+    setRefreshingId(refreshedId);
+    setRefreshFailure(null);
     try {
       const queryKey = cacheSimulatorKeys.snapshot(refreshedId);
       await queryClient.cancelQueries({ queryKey });
@@ -47,9 +50,9 @@ export function CacheSimulator() {
       queryClient.setQueryData(queryKey, next);
       setOverrides((current) => (current?.connectionId === refreshedId ? null : current));
     } catch (error) {
-      setRefreshError(error instanceof Error ? error.message : 'Refresh failed');
+      setRefreshFailure({ connectionId: refreshedId, message: error instanceof Error ? error.message : 'Refresh failed' });
     } finally {
-      setIsRefreshing(false);
+      setRefreshingId((current) => (current === refreshedId ? undefined : current));
     }
   };
 
@@ -107,7 +110,7 @@ export function CacheSimulator() {
         ))}
       </div>
       <ProjectionChart projection={projection} maxmemory={maxmemory} />
-      <OutcomePanel projection={projection} sizingProjection={sizing} maxmemory={maxmemory} policy={data.instant.maxmemoryPolicy} horizonLabel={horizon.label === '6m' ? '6 months' : `${horizon.days} days`} />
+      <OutcomePanel projection={projection} sizingProjection={sizing} maxmemory={maxmemory} policy={data.instant.maxmemoryPolicy} plateauBytes={sizingInputs ? steadyBytes(sizingInputs) : null} horizonLabel={horizon.label === '6m' ? '6 months' : `${horizon.days} days`} />
     </div>
   );
 }

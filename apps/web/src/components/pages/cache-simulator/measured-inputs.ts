@@ -45,3 +45,8 @@ export function projectionInputs(snapshot: CacheSimulatorSnapshot, inputs: Simul
     horizonDays,
   };
 }
+
+export function steadyBytes(inputs: ProjectionInputs): number | null {
+  if (inputs.ttlDays === null || inputs.ttlDays <= 0) return null;
+  return Math.max(0, inputs.keysPerDay * inputs.ttlDays) * (inputs.avgKeyBytes + inputs.overheadPerKeyBytes) + inputs.fixedOverheadBytes;
+}

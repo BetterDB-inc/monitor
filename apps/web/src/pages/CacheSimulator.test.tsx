@@ -239,4 +239,28 @@ describe('CacheSimulator page', () => {
     await act(async () => resolve(ready));
     expect((screen.getByLabelText('Growth rate (keys/day)') as HTMLInputElement).value).toBe('500');
   });
+
+  it('says memory levels off when a TTL caps growth and no limit is set', () => {
+    useQuery.mockReturnValue({ data: { ...ready, instant: { ...ready.instant, maxmemory: 0 } } });
+    render(<CacheSimulator />);
+    fireEvent.change(screen.getByLabelText('Key TTL (days)'), { target: { value: '60' } });
+    expect(screen.getByText(/Memory grows, then levels off near .* as keys expire\./)).toBeTruthy();
+    expect(screen.queryByText(/until the host runs out/)).toBeNull();
+  });
+
+  it('clears a refresh error and pending state when the connection changes', async () => {
+    useQuery.mockReturnValue({ data: ready });
+    getSnapshot.mockRejectedValueOnce(new Error('boom')).mockReturnValueOnce(new Promise(() => undefined));
+    const { rerender } = render(<CacheSimulator />);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh sample' }));
+    await waitFor(() => expect(screen.getByText(/Could not refresh the sample: boom/)).toBeTruthy());
+    connection.id = 'c2';
+    rerender(<CacheSimulator />);
+    expect(screen.queryByText(/Could not refresh the sample/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh sample' }));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh sample' }) as HTMLButtonElement).disabled).toBe(true));
+    connection.id = 'c1';
+    rerender(<CacheSimulator />);
+    expect((screen.getByRole('button', { name: 'Refresh sample' }) as HTMLButtonElement).disabled).toBe(false);
+  });
 });

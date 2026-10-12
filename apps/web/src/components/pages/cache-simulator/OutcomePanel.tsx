@@ -9,6 +9,7 @@ interface Props {
   sizingProjection: Projection;
   maxmemory: number | null;
   policy: string;
+  plateauBytes: number | null;
   horizonLabel: string;
 }
 
@@ -18,17 +19,20 @@ const PROVIDERS: Array<{ id: CloudProvider; label: string }> = [
   { id: 'azure', label: 'Azure' },
 ];
 
-export function OutcomePanel({ projection, sizingProjection, maxmemory, policy, horizonLabel }: Props) {
+function unlimitedHeadline(change: number, plateauBytes: number | null, horizonLabel: string): string {
+  if (change > 0 && plateauBytes !== null) return `No maxmemory limit is set. Memory grows, then levels off near ${formatBytes(plateauBytes)} as keys expire.`;
+  if (change > 0) return 'No maxmemory limit is set, so memory grows until the host runs out.';
+  if (change < 0) return `No maxmemory limit is set. Memory shrinks over the next ${horizonLabel}.`;
+  return `No maxmemory limit is set. Memory stays flat over the next ${horizonLabel}.`;
+}
+
+export function OutcomePanel({ projection, sizingProjection, maxmemory, policy, plateauBytes, horizonLabel }: Props) {
   const [provider, setProvider] = useState<CloudProvider>('aws');
   const peak = Math.max(...sizingProjection.points.map((point) => point.high));
   const change = projection.points[projection.points.length - 1].bytes - projection.points[0].bytes;
   const headline =
     maxmemory === null
-      ? change > 0
-        ? 'No maxmemory limit is set, so memory grows until the host runs out.'
-        : change < 0
-          ? `No maxmemory limit is set. Memory shrinks over the next ${horizonLabel}.`
-          : `No maxmemory limit is set. Memory stays flat over the next ${horizonLabel}.`
+      ? unlimitedHeadline(change, plateauBytes, horizonLabel)
       : projection.daysToMaxmemory === null
         ? `Stays under maxmemory for the next ${horizonLabel}.`
         : projection.daysToMaxmemory === 0
