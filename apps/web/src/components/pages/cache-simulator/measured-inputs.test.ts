@@ -21,6 +21,10 @@ describe('measured inputs', () => {
     expect(result.keysPerDay).toBe(0);
   });
 
+  it('rounds the measured key size to whole bytes', () => {
+    expect(measuredInputs({ ...snapshot, estimate: { ...snapshot.estimate!, avgKeyBytes: 1607.56 } }).avgKeyBytes).toBe(1608);
+  });
+
   it('never prefills a negative key size', () => {
     expect(measuredInputs({ ...snapshot, estimate: null, instant: { ...snapshot.instant, usedMemory: 10 } }).avgKeyBytes).toBe(0);
   });

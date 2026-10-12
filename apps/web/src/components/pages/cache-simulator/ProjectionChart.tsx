@@ -15,10 +15,10 @@ export function ProjectionChart({ projection, maxmemory }: Props) {
         <XAxis dataKey="day" tickFormatter={(day: number) => `${day}d`} />
         <YAxis tickFormatter={(bytes: number) => formatBytes(bytes)} width={90} />
         <Tooltip formatter={(value) => (Array.isArray(value) ? value.map((entry) => formatBytes(Number(entry))).join(' – ') : formatBytes(Number(value ?? 0)))} labelFormatter={(day) => `Day ${day}`} />
-        <Area dataKey="band" stroke="none" fill="hsl(var(--primary))" fillOpacity={0.15} isAnimationActive={false} />
-        <Line dataKey="bytes" stroke="hsl(var(--primary))" dot={false} isAnimationActive={false} />
-        {maxmemory && <ReferenceLine y={maxmemory} stroke="hsl(var(--destructive))" label="maxmemory" />}
-        {maxmemory && <ReferenceLine y={maxmemory * HEADROOM} stroke="hsl(var(--muted-foreground))" strokeDasharray="4 4" label="80%" />}
+        <Area dataKey="band" name="95% range" stroke="none" fill="var(--chart-1)" fillOpacity={0.15} isAnimationActive={false} />
+        <Line dataKey="bytes" name="Projected size" stroke="var(--chart-1)" dot={false} isAnimationActive={false} />
+        {maxmemory && <ReferenceLine y={maxmemory} stroke="var(--destructive)" label="maxmemory" />}
+        {maxmemory && <ReferenceLine y={maxmemory * HEADROOM} stroke="var(--muted-foreground)" strokeDasharray="4 4" label="80%" />}
       </ComposedChart>
     </ResponsiveContainer>
   );
