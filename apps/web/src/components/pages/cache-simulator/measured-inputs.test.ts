@@ -1,0 +1,37 @@
+import { describe, it, expect } from 'vitest';
+import type { CacheSimulatorSnapshot } from '@betterdb/shared';
+import { measuredInputs, projectionInputs } from './measured-inputs';
+
+const snapshot: CacheSimulatorSnapshot = {
+  status: 'ready',
+  progress: null,
+  instant: { usedMemory: 1_000_000, maxmemory: 2_000_000, maxmemoryPolicy: 'allkeys-lru', totalKeys: 1000 },
+  estimate: { totalBytes: 500_000, ci95Bytes: 1000, avgKeyBytes: 500, stdKeyBytes: 40, sampleCount: 400, byType: [], sampledAt: 1, partial: false },
+  growth: { keysPerDay: 25, bytesPerDay: 12_000, days: 30 },
+};
+
+describe('measured inputs', () => {
+  it('prefills from the sampled snapshot', () => {
+    expect(measuredInputs(snapshot)).toEqual({ keysPerDay: 25, ttlDays: null, avgKeyBytes: 500, overheadPerKeyBytes: 88, maxmemory: 2_000_000 });
+  });
+
+  it('falls back to INFO averages and zero growth', () => {
+    const result = measuredInputs({ ...snapshot, estimate: null, growth: null });
+    expect(result.avgKeyBytes).toBe(1000 - 88);
+    expect(result.keysPerDay).toBe(0);
+  });
+
+  it('never prefills a negative key size', () => {
+    expect(measuredInputs({ ...snapshot, estimate: null, instant: { ...snapshot.instant, usedMemory: 10 } }).avgKeyBytes).toBe(0);
+  });
+
+  it('builds projection inputs with fixed overhead and band', () => {
+    const result = projectionInputs(snapshot, measuredInputs(snapshot), 30);
+    expect(result).toMatchObject({ currentKeys: 1000, sampleCount: 400, stdKeyBytes: 40, horizonDays: 30, maxmemory: 2_000_000 });
+    expect(result.fixedOverheadBytes).toBe(1_000_000 - 1000 * 588);
+  });
+
+  it('treats maxmemory 0 as no limit', () => {
+    expect(projectionInputs(snapshot, { ...measuredInputs(snapshot), maxmemory: 0 }, 30).maxmemory).toBeNull();
+  });
+});
