@@ -124,6 +124,14 @@ describe('sampleNodes', () => {
     expect(result.strata.reduce((sum, stratum) => sum + stratum.estimatedKeys, 0)).toBeCloseTo(6000, 6);
   });
 
+  it('never estimates fewer keys than the census saw when DBSIZE is stale', async () => {
+    const keys = keyspace(6000, (index) => (index % 3 === 0 ? hash(index) : string()));
+    const client = { ...fakeClient(keys), getDbSize: async () => 1000 };
+    const [result] = await sampleNodes([{ name: 'a', client }], { budget: 200, deadlineMs: 60_000 });
+    for (const stratum of result.strata) expect(stratum.estimatedKeys).toBeGreaterThanOrEqual(stratum.observed);
+    expect(result.strata.every((stratum) => stratum.estimatedKeys > 0)).toBe(true);
+  });
+
   describe('adaptive extension', () => {
     const heavyTail = () => keyspace(20_000, (index) => ({ type: 'string', size: index % 200 === 0 ? 100_000 : 100 }));
     const sampledOf = (strata: { sizes: number[] }[]) => strata.reduce((sum, stratum) => sum + stratum.sizes.length, 0);
