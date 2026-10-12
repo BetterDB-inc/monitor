@@ -27,4 +27,10 @@ describe('eviction copy', () => {
     expect(evictionConsequence('ALLKEYS-LRU')).toBe(evictionConsequence('allkeys-lru'));
     expect(evictionConsequence('something-new')).toBe(UNKNOWN_EVICTION_COPY);
   });
+
+  it('falls back for inherited object keys', () => {
+    expect(evictionConsequence('constructor')).toBe(UNKNOWN_EVICTION_COPY);
+    expect(evictionConsequence('__proto__')).toBe(UNKNOWN_EVICTION_COPY);
+    expect(evictionConsequence('toString')).toBe(UNKNOWN_EVICTION_COPY);
+  });
 });

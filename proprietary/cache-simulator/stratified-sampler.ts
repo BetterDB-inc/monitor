@@ -207,7 +207,9 @@ async function measure(state: NodeState, keys: string[], knownType: string | nul
     if (knownType === null) state.census.set(type, (state.census.get(type) ?? 0) + 1);
     const size = memoryReply && !memoryReply[0] && typeof memoryReply[1] === 'number' ? memoryReply[1] : null;
     if (size === null) return;
-    state.sizes.set(type, [...sizesOf(state, type), size]);
+    const bucket = state.sizes.get(type);
+    if (bucket) bucket.push(size);
+    else state.sizes.set(type, [size]);
     state.counter.sampled += 1;
   });
   state.onProgress?.(state.counter.sampled);
@@ -234,7 +236,7 @@ function buildStrata(state: NodeState): Stratum[] {
     const observed = state.census.get(type) ?? 0;
     const exactCount = state.exactCounts.get(type);
     const estimatedKeys = exactCount ?? (openObserved > 0 ? (remaining * observed) / openObserved : 0);
-    return { type, estimatedKeys, exact: exactCount !== undefined, observed, sizes: sizesOf(state, type) };
+    return { type, estimatedKeys, exact: exactCount !== undefined, observed, sizes: [...sizesOf(state, type)] };
   });
 }
 
