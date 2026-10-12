@@ -17,5 +17,5 @@ export const UNKNOWN_EVICTION_COPY = 'This eviction policy is not recognised, so
 
 export function evictionConsequence(policy: string): string {
   const key = policy.toLowerCase();
-  return Object.hasOwn(COPY, key) ? COPY[key] : UNKNOWN_EVICTION_COPY;
+  return Object.prototype.hasOwnProperty.call(COPY, key) ? COPY[key] : UNKNOWN_EVICTION_COPY;
 }
