@@ -32,6 +32,16 @@ export function fitGrowth(snapshots: GrowthPoint[]): CacheSimulatorGrowth | null
   };
 }
 
+export function sumGrowth(fits: Array<CacheSimulatorGrowth | null>): CacheSimulatorGrowth | null {
+  if (fits.length === 0 || fits.some((fit) => fit === null)) return null;
+  const present = fits as CacheSimulatorGrowth[];
+  return {
+    keysPerDay: present.reduce((sum, fit) => sum + fit.keysPerDay, 0),
+    bytesPerDay: present.reduce((sum, fit) => sum + fit.bytesPerDay, 0),
+    days: Math.min(...present.map((fit) => fit.days)),
+  };
+}
+
 export async function readGrowth(storage: StoragePort, connectionId: string, now: number): Promise<CacheSimulatorGrowth | null> {
   try {
     return fitGrowth(

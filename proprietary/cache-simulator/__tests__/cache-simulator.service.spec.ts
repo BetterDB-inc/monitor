@@ -18,7 +18,7 @@ function setup(connections: Record<string, ReturnType<typeof client>> = { c1: cl
     list: jest.fn(() => (statuses.length ? statuses : Object.keys(connections).map((id) => ({ id, name: id, isConnected: true })))),
   };
   const storage = { getMemorySnapshots: jest.fn().mockResolvedValue([]) };
-  return { service: new CacheSimulatorService(registry as any, storage as any), registry, connections };
+  return { service: new CacheSimulatorService(registry as any, storage as any), registry, connections, storage };
 }
 
 const nodeSample = { node: 'c1', dbSize: 5, strata: [{ type: 'string', estimatedKeys: 5, exact: true, observed: 0, sizes: [10, 10, 10, 10, 10] }], exhausted: true, timedOut: false };
@@ -160,6 +160,33 @@ describe('CacheSimulatorService', () => {
     const result = await service.snapshot('seed');
     expect(spy.mock.calls[0][0].map((node) => node.name)).toEqual(['seed']);
     expect(result.instant.totalKeys).toBe(5);
+  });
+
+  it('sums growth across cluster primaries and needs history for each', async () => {
+    jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
+    const day = 86_400_000;
+    const history = (keysPerDay: number, bytesPerDay: number, days: number) =>
+      Array.from({ length: days * 4 + 1 }, (_, index) => ({ timestamp: Date.now() - (days - index / 4) * day, usedMemory: 1_000_000 + (bytesPerDay * index) / 4, totalKeys: 1000 + (keysPerDay * index) / 4 }));
+    const statuses = [
+      { id: 'seed', name: 'seed', isConnected: true, connectionType: 'direct' },
+      { id: 'm1', name: 'm1', isConnected: true, connectionType: 'direct', membership: { seedId: 'seed', source: 'cluster' } },
+    ];
+    const connections = { seed: client(), m1: client() };
+    const { service, storage } = setup(connections, statuses);
+    storage.getMemorySnapshots.mockImplementation(async ({ connectionId }: { connectionId: string }) =>
+      connectionId === 'seed' ? history(50, 4000, 10) : history(30, 1000, 6),
+    );
+    const result = await service.snapshot('seed');
+    expect(result.growth!.keysPerDay).toBeCloseTo(80, 3);
+    expect(result.growth!.bytesPerDay).toBeCloseTo(5000, 3);
+    expect(result.growth!.days).toBeCloseTo(6, 3);
+    expect(storage.getMemorySnapshots.mock.calls.map(([query]: any[]) => query.connectionId).sort()).toEqual(['m1', 'seed']);
+
+    const second = setup({ seed: client(), m1: client() }, statuses);
+    second.storage.getMemorySnapshots.mockImplementation(async ({ connectionId }: { connectionId: string }) =>
+      connectionId === 'seed' ? history(50, 4000, 10) : [],
+    );
+    expect((await second.service.snapshot('seed')).growth).toBeNull();
   });
 
   it('starts one job for concurrent first calls', async () => {

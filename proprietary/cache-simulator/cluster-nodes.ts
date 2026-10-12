@@ -4,6 +4,7 @@ import type { DatabasePort } from '@app/common/interfaces/database-port.interfac
 import type { ConnectionRegistry } from '@app/connections/connection-registry.service';
 
 export interface ScanNode {
+  id: string;
   name: string;
   client: DatabasePort;
 }
@@ -18,7 +19,7 @@ export function clusterNodes(
   const nodes = [seed];
   for (const member of members) {
     try {
-      nodes.push({ name: member.name, client: registry.get(member.id) });
+      nodes.push({ id: member.id, name: member.name, client: registry.get(member.id) });
     } catch {
       logger.warn(`${label} skipped ${member.name}: the connection is no longer registered`);
     }

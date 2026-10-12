@@ -5,7 +5,7 @@ import { ConnectionRegistry } from '@app/connections/connection-registry.service
 import { collectionPlan } from '../key-analytics/key-analytics-plan';
 import { clusterNodes, primaryNodes, type ScanNode } from './cluster-nodes';
 import { readInstantStats } from './instant-stats';
-import { readGrowth } from './growth-fit';
+import { readGrowth, sumGrowth } from './growth-fit';
 import { estimate } from './size-estimator';
 import { sampleNodes, SAMPLE_BUDGET, SAMPLE_DEADLINE_MS, SAMPLE_HARD_CAP } from './stratified-sampler';
 
@@ -41,7 +41,7 @@ export class CacheSimulatorService {
     const starting = this.starting.get(connectionId);
     if (starting) return starting;
     const name = this.registry.getConfig(connectionId)?.name ?? connectionId;
-    const promise = this.start(connectionId, { name, client }).finally(() => {
+    const promise = this.start(connectionId, { id: connectionId, name, client }).finally(() => {
       this.starting.delete(connectionId);
     });
     this.starting.set(connectionId, promise);
@@ -53,7 +53,7 @@ export class CacheSimulatorService {
       const nodes = await this.nodesFor(connectionId, seed);
       const [instant, growth] = await Promise.all([
         this.instant(nodes),
-        readGrowth(this.storage, connectionId, Date.now()),
+        this.growth(nodes),
       ]);
       const job: Job = { instant, growth, progress: { sampled: 0, target: SAMPLE_BUDGET } };
       this.jobs.set(connectionId, job);
@@ -146,6 +146,11 @@ export class CacheSimulatorService {
       LABEL,
     );
     return nodes.length > 0 ? nodes : [seed];
+  }
+
+  private async growth(nodes: ScanNode[]): Promise<CacheSimulatorGrowth | null> {
+    const now = Date.now();
+    return sumGrowth(await Promise.all(nodes.map((node) => readGrowth(this.storage, node.id, now))));
   }
 
   private async instant(nodes: ScanNode[]): Promise<CacheSimulatorInstant> {
