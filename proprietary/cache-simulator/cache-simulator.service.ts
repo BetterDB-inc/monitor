@@ -36,10 +36,10 @@ export class CacheSimulatorService {
     const client = this.registry.get(connectionId);
     const running = this.jobs.get(connectionId);
     if (running) return this.inProgress(running);
-    const cached = this.results.get(connectionId);
-    if (cached && !refresh && Date.now() - cached.at < this.ttl(cached.snapshot)) return cached.snapshot;
     const starting = this.starting.get(connectionId);
     if (starting) return starting;
+    const cached = this.results.get(connectionId);
+    if (cached && !refresh && Date.now() - cached.at < this.ttl(cached.snapshot)) return cached.snapshot;
     const name = this.registry.getConfig(connectionId)?.name ?? connectionId;
     const promise = this.start(connectionId, { id: connectionId, name, client }).finally(() => {
       this.starting.delete(connectionId);
