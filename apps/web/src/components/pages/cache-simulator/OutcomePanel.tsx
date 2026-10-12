@@ -42,7 +42,7 @@ export function OutcomePanel({ projection, sizingProjection, maxmemory, policy, 
           </p>
         )}
         <div className="space-y-2">
-          <p className="text-sm text-muted-foreground">Smallest nodes that keep the 6-month projection ({formatBytes(peak)}) under 80%:</p>
+          <p className="text-sm text-muted-foreground">Smallest nodes that keep the 6-month projection ({formatBytes(peak)}) under 80% of usable memory:</p>
           <Tabs value={provider} onValueChange={(value) => setProvider(value as CloudProvider)}>
             <TabsList>
               {PROVIDERS.map((entry) => (

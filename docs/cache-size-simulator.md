@@ -36,3 +36,6 @@ Every input is filled in from measured data and can be changed; the chart redraw
 
 - Needs `SCAN … TYPE` (Redis 6.0+ / any Valkey) and `MEMORY USAGE`. If either is missing or blocked by ACLs, the page shows the `INFO` figures and lets you enter values by hand.
 - Cloud node sizes are capacity only (no prices) and were checked against each provider's published specs on the date shown in the catalog.
+- Node picks keep the projection under 80% of usable memory: 75% of node memory on ElastiCache and MemoryDB (default reserved memory), 80% on Memorystore and Azure Cache for Redis.
+- Memorystore picks assume one replica per shard, so a cluster tops out at 125 shards.
+- Azure Cache for Redis tiers are marked legacy: Microsoft no longer offers them to new customers.
