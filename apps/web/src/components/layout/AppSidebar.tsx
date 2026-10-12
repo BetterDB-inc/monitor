@@ -101,6 +101,13 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
             Scaling Readiness
           </NavItem>
           <NavItem
+            to="/cache-simulator"
+            active={location.pathname === '/cache-simulator'}
+            requiredFeature={Feature.CACHE_SIZE_SIMULATOR}
+          >
+            Cache Size Simulator
+          </NavItem>
+          <NavItem
             to="/anomalies"
             active={location.pathname === '/anomalies'}
             requiredFeature={Feature.ANOMALY_DETECTION}
