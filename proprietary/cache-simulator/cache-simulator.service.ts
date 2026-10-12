@@ -160,10 +160,12 @@ export class CacheSimulatorService {
         keys: await node.client.getDbSize(),
       })),
     );
+    const policies = new Set(readings.map((reading) => reading.stats.maxmemoryPolicy));
+    const unlimited = readings.some((reading) => reading.stats.maxmemory === 0);
     return {
       usedMemory: readings.reduce((sum, reading) => sum + reading.stats.usedMemory, 0),
-      maxmemory: readings.reduce((sum, reading) => sum + reading.stats.maxmemory, 0),
-      maxmemoryPolicy: readings[0]?.stats.maxmemoryPolicy ?? 'unknown',
+      maxmemory: unlimited ? 0 : readings.reduce((sum, reading) => sum + reading.stats.maxmemory, 0),
+      maxmemoryPolicy: policies.size === 1 ? [...policies][0] : policies.size > 1 ? 'mixed' : 'unknown',
       totalKeys: readings.reduce((sum, reading) => sum + reading.keys, 0),
     };
   }
