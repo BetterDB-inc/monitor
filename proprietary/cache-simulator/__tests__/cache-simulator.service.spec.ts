@@ -2,7 +2,7 @@ import { NotFoundException } from '@nestjs/common';
 import { CacheSimulatorService, FAILURE_TTL_MS, RESULT_TTL_MS } from '../cache-simulator.service';
 import * as sampler from '../stratified-sampler';
 
-const info = (usedMemory: number, maxmemory: number) => ({ memory: { used_memory: String(usedMemory), maxmemory: String(maxmemory), maxmemory_policy: 'allkeys-lru' }, stats: {} });
+const info = (usedMemory: number, maxmemory: number, policy = 'allkeys-lru') => ({ memory: { used_memory: String(usedMemory), maxmemory: String(maxmemory), maxmemory_policy: policy }, stats: {} });
 
 function client(usedMemory = 1000, maxmemory = 10_000, dbSize = 5) {
   return { getInfoParsed: jest.fn().mockResolvedValue(info(usedMemory, maxmemory)), getDbSize: jest.fn().mockResolvedValue(dbSize), getRole: jest.fn().mockResolvedValue({ role: 'master' }) };
@@ -145,6 +145,19 @@ describe('CacheSimulatorService', () => {
     const result = await service.snapshot('seed');
     expect(result.instant).toMatchObject({ usedMemory: 3000, maxmemory: 20_000, totalKeys: 12 });
     expect(spy.mock.calls[0][0].map((node) => node.name)).toEqual(['seed', 'm1']);
+  });
+
+  it('reports no cluster limit when a primary is unlimited and mixed policies as mixed', async () => {
+    jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
+    const connections = { seed: client(1000, 10_000, 5), m1: client(2000, 0, 7) };
+    connections.m1.getInfoParsed.mockResolvedValue(info(2000, 0, 'noeviction'));
+    const statuses = [
+      { id: 'seed', name: 'seed', isConnected: true, connectionType: 'direct' },
+      { id: 'm1', name: 'm1', isConnected: true, connectionType: 'direct', membership: { seedId: 'seed', source: 'cluster' } },
+    ];
+    const { service } = setup(connections, statuses);
+    const result = await service.snapshot('seed');
+    expect(result.instant).toMatchObject({ maxmemory: 0, maxmemoryPolicy: 'mixed' });
   });
 
   it('falls back to the seed when no primary is reachable', async () => {
