@@ -14,6 +14,10 @@ export const HORIZONS = [
   { label: '6m', days: 182 },
 ];
 
+export function isSetupFailure(snapshot: CacheSimulatorSnapshot): boolean {
+  return snapshot.status === 'failed' && snapshot.estimate === null && snapshot.instant.totalKeys === 0 && snapshot.instant.usedMemory === 0;
+}
+
 export function measuredInputs(snapshot: CacheSimulatorSnapshot): SimulatorInputs {
   const { instant, estimate, growth } = snapshot;
   const infoAverage = instant.totalKeys > 0 ? instant.usedMemory / instant.totalKeys - DEFAULT_OVERHEAD_PER_KEY_BYTES : 0;

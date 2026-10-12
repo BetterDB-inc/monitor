@@ -5,7 +5,7 @@ import { cacheSimulatorApi, cacheSimulatorKeys } from '../api/cache-simulator';
 import { useConnection } from '../hooks/useConnection';
 import { Button } from '../components/ui/button';
 import { Skeleton } from '../components/ui/skeleton';
-import { CurrentStateCard, HORIZONS, OutcomePanel, ProjectionInputs, measuredInputs, projectionInputs, type SimulatorInputs } from '../components/pages/cache-simulator';
+import { CurrentStateCard, HORIZONS, OutcomePanel, ProjectionInputs, isSetupFailure, measuredInputs, projectionInputs, type SimulatorInputs } from '../components/pages/cache-simulator';
 import { ProjectionChart } from '../components/pages/cache-simulator/ProjectionChart';
 
 const SIX_MONTHS = HORIZONS[HORIZONS.length - 1];
@@ -48,6 +48,21 @@ export function CacheSimulator() {
       setIsRefreshing(false);
     }
   };
+
+  if (data && isSetupFailure(data)) {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-semibold">Cache Size Simulator</h1>
+          <Button variant="outline" size="sm" onClick={refresh} disabled={isRefreshing}>
+            Refresh sample
+          </Button>
+        </div>
+        {refreshError && <p className="text-sm text-destructive">Could not refresh the sample: {refreshError}</p>}
+        <p className="text-sm text-destructive">Could not read this instance: {data.error}</p>
+      </div>
+    );
+  }
 
   if (!data || !inputs || !projection || !sizing) {
     return snapshot.isError ? (

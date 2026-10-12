@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { CacheSimulatorSnapshot } from '@betterdb/shared';
-import { measuredInputs, projectionInputs } from './measured-inputs';
+import { isSetupFailure, measuredInputs, projectionInputs } from './measured-inputs';
 
 const snapshot: CacheSimulatorSnapshot = {
   status: 'ready',
@@ -37,5 +37,13 @@ describe('measured inputs', () => {
 
   it('treats maxmemory 0 as no limit', () => {
     expect(projectionInputs(snapshot, { ...measuredInputs(snapshot), maxmemory: 0 }, 30).maxmemory).toBeNull();
+  });
+
+  it('detects a setup failure by the zeroed instant figures', () => {
+    const zeroed = { usedMemory: 0, maxmemory: 0, maxmemoryPolicy: 'unknown', totalKeys: 0 };
+    expect(isSetupFailure({ ...snapshot, status: 'failed', estimate: null, growth: null, instant: zeroed, error: 'down' })).toBe(true);
+    expect(isSetupFailure({ ...snapshot, status: 'failed', estimate: null, error: 'ERR' })).toBe(false);
+    expect(isSetupFailure({ ...snapshot, status: 'failed', instant: zeroed })).toBe(false);
+    expect(isSetupFailure({ ...snapshot, status: 'ready', estimate: null, instant: zeroed })).toBe(false);
   });
 });

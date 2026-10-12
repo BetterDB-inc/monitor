@@ -97,6 +97,17 @@ describe('CacheSimulator page', () => {
     expect(screen.getByLabelText('Average key size (bytes)')).toBeTruthy();
   });
 
+  it('shows only the error and refresh when setup fails', () => {
+    const zeroed = { usedMemory: 0, maxmemory: 0, maxmemoryPolicy: 'unknown', totalKeys: 0 };
+    useQuery.mockReturnValue({ data: { ...ready, status: 'failed', estimate: null, growth: null, instant: zeroed, error: 'connection refused' } });
+    render(<CacheSimulator />);
+    expect(screen.getByText('Could not read this instance: connection refused')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Refresh sample' })).toBeTruthy();
+    expect(screen.queryByTestId('chart')).toBeNull();
+    expect(screen.queryByLabelText('Average key size (bytes)')).toBeNull();
+    expect(screen.queryByText(/The projection below uses INFO figures/)).toBeNull();
+  });
+
   it('shows an inline error when refresh rejects', async () => {
     useQuery.mockReturnValue({ data: ready });
     getSnapshot.mockRejectedValue(new Error('boom'));
