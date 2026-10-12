@@ -156,12 +156,22 @@ function allPanels(dashboard: Dashboard): DashboardPanel[] {
 }
 
 describe('Grafana dashboard pack', () => {
+  // Product dashboards: every panel is scoped to a monitored connection, so
+  // they all carry the ds/job/connection contract. Monitor Internals is the
+  // Monitor's own runtime telemetry (no connection dimension) and is checked
+  // separately below.
   const files = [
     'betterdb-instance-vitals.json',
     'betterdb-query-patterns.json',
     'betterdb-cluster-slots.json',
     'betterdb-anomalies.json',
+    'betterdb-persistence.json',
+    'betterdb-keyspace.json',
+    'betterdb-clients.json',
+    'betterdb-security.json',
+    'betterdb-vector.json',
   ];
+  const internalsFile = 'betterdb-monitor-internals.json';
 
   it.each(files)('%s declares the shared contract', (file) => {
     const dashboard = loadDashboard(file);
@@ -278,7 +288,76 @@ describe('Grafana dashboard pack', () => {
   it('provisions every dashboard file in the directory', () => {
     const onDisk = readdirSync(DASHBOARD_DIR).filter((file) => file.endsWith('.json'));
 
-    expect(onDisk.sort()).toEqual([...files].sort());
+    expect(onDisk.sort()).toEqual([...files, internalsFile].sort());
+  });
+
+  // Monitor Internals charts the Monitor process itself (Node.js runtime, poll
+  // loop, OTLP export). Those series have no `connection` label, so it carries
+  // only the ds/job contract — the connection-scoped rules above do not apply.
+  describe('Monitor Internals dashboard', () => {
+    it('declares the shared contract', () => {
+      const dashboard = loadDashboard(internalsFile);
+
+      expect(dashboard.uid).toBe(internalsFile.replace('.json', ''));
+      expect(dashboard.title.startsWith('BetterDB · ')).toBe(true);
+      expect(dashboard.schemaVersion).toBeGreaterThanOrEqual(39);
+    });
+
+    it('exposes a datasource variable first, then a scrape job variable', () => {
+      const list = loadDashboard(internalsFile).templating.list;
+
+      expect(list[0].name).toBe('ds');
+      expect(list[0].type).toBe('datasource');
+      expect(list.find((item) => item.name === 'job')?.type).toBe('query');
+    });
+
+    it('points every target at the datasource variable and filters by job', () => {
+      const targets = allPanels(loadDashboard(internalsFile)).flatMap(
+        (panel) => panel.targets ?? [],
+      );
+
+      expect(targets.length).toBeGreaterThan(0);
+      for (const target of targets) {
+        expect(target.datasource).toEqual({ type: 'prometheus', uid: '${ds}' });
+        expect(target.expr).toContain('job=~"$job"');
+      }
+    });
+
+    it('leaves no literal datasource uid behind', () => {
+      expect(readFileSync(path.join(DASHBOARD_DIR, internalsFile), 'utf8')).not.toContain(
+        'betterdb-prometheus',
+      );
+    });
+
+    it('only queries metrics the service registers or collects by default', () => {
+      const registered = registeredMetricNames();
+      // Node.js runtime and process metrics come from prom-client's
+      // collectDefaultMetrics (prefixed betterdb_), registered at startup rather
+      // than in the service constructor this registry snapshot is built from.
+      const isDefaultMetric = (name: string) =>
+        name.startsWith('betterdb_nodejs_') || name.startsWith('betterdb_process_');
+      const used = allPanels(loadDashboard(internalsFile))
+        .flatMap((panel) => panel.targets ?? [])
+        .flatMap((target) => metricNamesIn(target.expr));
+
+      expect(used.length).toBeGreaterThan(0);
+      for (const name of used) {
+        const base = name.replace(/_(bucket|sum|count)$/, '');
+        expect(registered.has(name) || registered.has(base) || isDefaultMetric(name)).toBe(true);
+      }
+    });
+
+    it('asks for table frames on every table panel', () => {
+      const tables = allPanels(loadDashboard(internalsFile)).filter(
+        (panel) => panel.type === 'table',
+      );
+
+      for (const panel of tables) {
+        for (const target of panel.targets ?? []) {
+          expect(target.format).toBe('table');
+        }
+      }
+    });
   });
 });
 

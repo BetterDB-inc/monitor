@@ -8,7 +8,9 @@ A hosted instance of this pack runs against the public demo workspace —
 read-only Grafana at `https://demo-grafana.app.betterdb.com` and a published
 scrape credential for `https://demo.app.betterdb.com/api/prometheus/metrics`
 (see [docs/live-demo.md](../../docs/live-demo.md)). The dashboards there are
-these JSON files, unmodified.
+these JSON files, with one demo-only override applied to the deployed copies:
+the `job` template variable's default is pointed at the demo's push/scrape job
+so panels populate on landing. The shipped files here are unchanged.
 
 ## What's here
 
