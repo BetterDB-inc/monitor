@@ -202,6 +202,18 @@ describe('CacheSimulatorService', () => {
     expect((await second.service.snapshot('seed')).growth).toBeNull();
   });
 
+  it('joins a refresh in progress instead of serving the cached result', async () => {
+    const spy = jest.spyOn(sampler, 'sampleNodes').mockResolvedValue([nodeSample]);
+    const { service } = setup();
+    await service.snapshot('c1');
+    await flush();
+    expect((await service.snapshot('c1')).status).toBe('ready');
+    const [refreshed, polled] = await Promise.all([service.snapshot('c1', true), service.snapshot('c1')]);
+    expect(refreshed.status).toBe('sampling');
+    expect(polled.status).toBe('sampling');
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
   it('starts one job for concurrent first calls', async () => {
     const spy = jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
     const { service } = setup();
