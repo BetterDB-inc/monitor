@@ -40,7 +40,9 @@
     "docs:index:valkey": "SOURCE=valkey ts-node -r tsconfig-paths/register scripts/index-docs.ts",
     "docs:index:redis": "SOURCE=redis ts-node -r tsconfig-paths/register scripts/index-docs.ts",
     "docs:clean": "rm -rf data/docs data/chunks data/vector-store",
-    "seed:demo": "ts-node -r tsconfig-paths/register scripts/seed-demo-data.ts"
+    "seed:demo": "ts-node -r tsconfig-paths/register scripts/seed-demo-data.ts",
+    "cache-sim:seed": "ts-node -r tsconfig-paths/register scripts/cache-simulator/seed.ts",
+    "cache-sim:validate": "ts-node -r tsconfig-paths/register scripts/cache-simulator/validate.ts"
   },
   "dependencies": {
     "@betterdb/agent-memory": "workspace:*",
