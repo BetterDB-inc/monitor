@@ -1,7 +1,8 @@
-import { DEFAULT_OVERHEAD_PER_KEY_BYTES, fixedOverhead, type CacheSimulatorSnapshot, type ProjectionInputs } from '@betterdb/shared';
+import { DEFAULT_OVERHEAD_PER_KEY_BYTES, fixedOverhead, inPlaceGrowth, type CacheSimulatorSnapshot, type ProjectionInputs } from '@betterdb/shared';
 
 export interface SimulatorInputs {
   keysPerDay: number;
+  inPlaceBytesPerDay: number;
   ttlDays: number | null;
   avgKeyBytes: number;
   overheadPerKeyBytes: number;
@@ -21,11 +22,14 @@ export function isSetupFailure(snapshot: CacheSimulatorSnapshot): boolean {
 export function measuredInputs(snapshot: CacheSimulatorSnapshot): SimulatorInputs {
   const { instant, estimate, growth } = snapshot;
   const infoAverage = instant.totalKeys > 0 ? instant.usedMemory / instant.totalKeys - DEFAULT_OVERHEAD_PER_KEY_BYTES : 0;
+  const avgKeyBytes = Math.max(0, Math.round(estimate?.avgKeyBytes ?? infoAverage));
+  const overheadPerKeyBytes = estimate ? 0 : DEFAULT_OVERHEAD_PER_KEY_BYTES;
   return {
     keysPerDay: growth?.keysPerDay ?? 0,
+    inPlaceBytesPerDay: growth ? Math.round(inPlaceGrowth(growth, avgKeyBytes + overheadPerKeyBytes)) : 0,
     ttlDays: null,
-    avgKeyBytes: Math.max(0, Math.round(estimate?.avgKeyBytes ?? infoAverage)),
-    overheadPerKeyBytes: estimate ? 0 : DEFAULT_OVERHEAD_PER_KEY_BYTES,
+    avgKeyBytes,
+    overheadPerKeyBytes,
     maxmemory: instant.maxmemory,
   };
 }
@@ -35,10 +39,10 @@ export function projectionInputs(snapshot: CacheSimulatorSnapshot, inputs: Simul
   return {
     currentKeys: keys,
     keysPerDay: inputs.keysPerDay,
+    inPlaceBytesPerDay: inputs.inPlaceBytesPerDay,
     ttlDays: inputs.ttlDays,
     avgKeyBytes: inputs.avgKeyBytes,
-    stdKeyBytes: snapshot.estimate?.stdKeyBytes ?? 0,
-    sampleCount: snapshot.estimate?.sampleCount ?? 0,
+    ci95Bytes: snapshot.estimate?.ci95Bytes ?? 0,
     overheadPerKeyBytes: inputs.overheadPerKeyBytes,
     fixedOverheadBytes: fixedOverhead(snapshot.instant.usedMemory, keys, inputs.avgKeyBytes, inputs.overheadPerKeyBytes),
     maxmemory: inputs.maxmemory > 0 ? inputs.maxmemory : null,
@@ -47,6 +51,6 @@ export function projectionInputs(snapshot: CacheSimulatorSnapshot, inputs: Simul
 }
 
 export function steadyBytes(inputs: ProjectionInputs): number | null {
-  if (inputs.ttlDays === null || inputs.ttlDays <= 0) return null;
+  if (inputs.ttlDays === null || inputs.ttlDays <= 0 || inputs.inPlaceBytesPerDay > 0) return null;
   return Math.max(0, inputs.keysPerDay * inputs.ttlDays) * (inputs.avgKeyBytes + inputs.overheadPerKeyBytes) + inputs.fixedOverheadBytes;
 }

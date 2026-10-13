@@ -33,11 +33,11 @@ export function OutcomePanel({ projection, sizingProjection, maxmemory, policy, 
   const headline =
     maxmemory === null
       ? unlimitedHeadline(change, plateauBytes, horizonLabel)
-      : projection.daysToMaxmemory === null
-        ? `Stays under maxmemory for the next ${horizonLabel}.`
-        : projection.daysToMaxmemory === 0
+      : sizingProjection.daysToMaxmemory === null
+        ? 'Stays under maxmemory for at least 6 months.'
+        : sizingProjection.daysToMaxmemory === 0
           ? 'Already at maxmemory.'
-          : `Reaches maxmemory in ~${projection.daysToMaxmemory} days.`;
+          : `Reaches maxmemory in ~${sizingProjection.daysToMaxmemory} days.`;
   return (
     <Card>
       <CardHeader className="pb-2">

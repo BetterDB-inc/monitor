@@ -12,7 +12,7 @@ const snapshot: CacheSimulatorSnapshot = {
 
 describe('measured inputs', () => {
   it('prefills from the sampled snapshot', () => {
-    expect(measuredInputs(snapshot)).toEqual({ keysPerDay: 25, ttlDays: null, avgKeyBytes: 500, overheadPerKeyBytes: 0, maxmemory: 2_000_000 });
+    expect(measuredInputs(snapshot)).toEqual({ keysPerDay: 25, inPlaceBytesPerDay: 0, ttlDays: null, avgKeyBytes: 500, overheadPerKeyBytes: 0, maxmemory: 2_000_000 });
   });
 
   it('falls back to INFO averages and zero growth', () => {
@@ -20,11 +20,16 @@ describe('measured inputs', () => {
     expect(result.avgKeyBytes).toBe(1000 - 88);
     expect(result.overheadPerKeyBytes).toBe(88);
     expect(result.keysPerDay).toBe(0);
+    expect(result.inPlaceBytesPerDay).toBe(0);
   });
 
   it('starts the projection at used memory when sizes are sampled', () => {
     const result = projectionInputs(snapshot, measuredInputs(snapshot), 30);
     expect(result.currentKeys * (result.avgKeyBytes + result.overheadPerKeyBytes) + result.fixedOverheadBytes).toBe(snapshot.instant.usedMemory);
+  });
+
+  it('prefills in-place growth from the byte trend new keys do not explain', () => {
+    expect(measuredInputs({ ...snapshot, growth: { keysPerDay: 10, bytesPerDay: 8000, days: 30 } }).inPlaceBytesPerDay).toBe(3000);
   });
 
   it('rounds the measured key size to whole bytes', () => {
@@ -37,7 +42,7 @@ describe('measured inputs', () => {
 
   it('builds projection inputs with fixed overhead and band', () => {
     const result = projectionInputs(snapshot, measuredInputs(snapshot), 30);
-    expect(result).toMatchObject({ currentKeys: 1000, sampleCount: 400, stdKeyBytes: 40, horizonDays: 30, maxmemory: 2_000_000 });
+    expect(result).toMatchObject({ currentKeys: 1000, ci95Bytes: 1000, inPlaceBytesPerDay: 0, horizonDays: 30, maxmemory: 2_000_000 });
     expect(result.fixedOverheadBytes).toBe(1_000_000 - 1000 * 500);
   });
 

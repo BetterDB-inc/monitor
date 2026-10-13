@@ -25,6 +25,13 @@ export function ProjectionInputs({ inputs, hasGrowth, onChange, onReset }: Props
       label: 'Growth rate (keys/day)',
       hint: hasGrowth ? 'Fitted from the last 30 days of key counts.' : 'Not enough history to fit growth yet; enter your expected rate.',
     },
+    {
+      key: 'inPlaceBytesPerDay',
+      label: 'In-place growth (bytes/day)',
+      hint: hasGrowth
+        ? 'Memory growth that new keys do not explain, such as values growing in place, fitted from the last 30 days.'
+        : 'Not enough history to fit growth yet; enter how fast existing values grow.',
+    },
     { key: 'ttlDays', label: 'Key TTL (days)', hint: 'Leave empty for keys that never expire. With a TTL, growth levels off at rate × TTL.' },
     { key: 'avgKeyBytes', label: 'Average key size (bytes)', hint: 'Measured with MEMORY USAGE on a stratified sample of keys.' },
     { key: 'overheadPerKeyBytes', label: 'Per-key overhead (bytes)', hint: 'Memory per key on top of the average key size. Sampled sizes already include it, so it is 0 once sampling finishes; 88 bytes is typical for INFO averages.' },
@@ -62,7 +69,7 @@ export function ProjectionInputs({ inputs, hasGrowth, onChange, onReset }: Props
       </CardHeader>
       <CardContent>
         <TooltipProvider>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {fields.map((field) => (
               <div key={field.key} className="space-y-1">
                 <Tooltip>

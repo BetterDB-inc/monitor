@@ -48,6 +48,7 @@ export function CurrentStateCard({ snapshot }: { snapshot: CacheSimulatorSnapsho
           </div>
         )}
         {status === 'failed' && <p className="text-sm text-destructive">Sampling failed: {error}. The projection below uses INFO figures.</p>}
+        {status === 'ready' && error && <p className="text-sm text-destructive">The last refresh failed: {error}. Showing the previous sample.</p>}
         {estimate && (
           <div className="space-y-2">
             <p className="text-sm">

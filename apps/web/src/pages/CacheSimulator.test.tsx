@@ -263,4 +263,36 @@ describe('CacheSimulator page', () => {
     rerender(<CacheSimulator />);
     expect((screen.getByRole('button', { name: 'Refresh sample' }) as HTMLButtonElement).disabled).toBe(false);
   });
+
+  it('projects memory growth that the key count does not explain', () => {
+    useQuery.mockReturnValue({ data: { ...ready, growth: { keysPerDay: 0, bytesPerDay: 50_000, days: 30 } } });
+    render(<CacheSimulator />);
+    expect(lastBytes()).toBe(1_000_000 + 50_000 * 30);
+    expect(screen.getByText('Reaches maxmemory in ~20 days.')).toBeTruthy();
+  });
+
+  it('reports a breach that falls after the selected horizon', () => {
+    useQuery.mockReturnValue({ data: { ...ready, growth: { keysPerDay: 0, bytesPerDay: 22_223, days: 30 } } });
+    render(<CacheSimulator />);
+    expect(screen.getByText('Reaches maxmemory in ~45 days.')).toBeTruthy();
+  });
+
+  it('says how long memory stays under the limit when it never breaches', () => {
+    useQuery.mockReturnValue({ data: { ...ready, growth: null } });
+    render(<CacheSimulator />);
+    expect(screen.getByText('Stays under maxmemory for at least 6 months.')).toBeTruthy();
+  });
+
+  it('lets the in-place growth rate be edited', () => {
+    useQuery.mockReturnValue({ data: { ...ready, growth: null } });
+    render(<CacheSimulator />);
+    fireEvent.change(screen.getByLabelText('In-place growth (bytes/day)'), { target: { value: '10000' } });
+    expect(lastBytes()).toBe(1_000_000 + 10_000 * 30);
+  });
+
+  it('shows a failed refresh beside the kept sample', () => {
+    useQuery.mockReturnValue({ data: { ...ready, error: 'INFO down' } });
+    render(<CacheSimulator />);
+    expect(screen.getByText(/The last refresh failed: INFO down/)).toBeTruthy();
+  });
 });
