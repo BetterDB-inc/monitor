@@ -22,6 +22,13 @@ describe('readInstantStats', () => {
     });
   });
 
+  it('drops a dataset figure that underflowed past used memory', () => {
+    const info: any = {
+      memory: { used_memory: '1024', maxmemory: '0', maxmemory_policy: 'noeviction', used_memory_dataset: '18446744073709551000' },
+    };
+    expect(readInstantStats(info).datasetMemory).toBeNull();
+  });
+
   it('treats non-numeric values as zero', () => {
     const info: any = {
       memory: { used_memory: 'abc', maxmemory: '', maxmemory_policy: '', used_memory_dataset: 'NaN' },

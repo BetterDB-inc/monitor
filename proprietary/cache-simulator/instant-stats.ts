@@ -14,10 +14,12 @@ function toNumber(value: unknown): number {
 
 export function readInstantStats(info: InfoResponse): InstantStats {
   const policy = info.memory?.maxmemory_policy;
+  const usedMemory = toNumber(info.memory?.used_memory);
+  const dataset = info.memory?.used_memory_dataset === undefined ? null : toNumber(info.memory.used_memory_dataset);
   return {
-    usedMemory: toNumber(info.memory?.used_memory),
+    usedMemory,
     maxmemory: toNumber(info.memory?.maxmemory),
     maxmemoryPolicy: policy ? policy : 'unknown',
-    datasetMemory: info.memory?.used_memory_dataset === undefined ? null : toNumber(info.memory.used_memory_dataset),
+    datasetMemory: dataset !== null && dataset > usedMemory ? null : dataset,
   };
 }
