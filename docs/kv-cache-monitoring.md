@@ -44,10 +44,13 @@ Page controls:
 - **Refresh**, which re-collects the footprint now.
 - The alert settings sheet (see [Per-connection switches](#per-connection-switches)).
 - **Rescan now** on the not-detected view, which collects the footprint again.
+- **Link an engine** on the not-detected view, which opens the same dialog as
+  the engines table, so you can link an engine when BetterDB sees no keys.
 - An engines table with an **Enabled** switch, the time each engine was last
-  seen, and its last error. Turning an engine off or on, or changing its
-  scrape URL, restarts its counters from the next reading, so traffic from
-  while it was off is never counted.
+  seen, and its last error. Turning an engine off or on restarts its counters
+  from the next reading, so traffic from while it was off is never counted.
+  The table does not edit an engine's scrape URL; to point an engine at a new
+  endpoint, delete it and link it again.
 - **Delete** on an engine, behind a confirm dialog. It removes the engine and
   deletes all of its stored samples, so it drops out of the charts and hit
   rates at once. It cannot be undone.

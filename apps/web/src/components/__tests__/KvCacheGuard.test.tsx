@@ -4,10 +4,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { Feature } from '@betterdb/shared';
 
-const { license, refreshFootprint, getStatus } = vi.hoisted(() => ({
+const { license, refreshFootprint, getStatus, createEngine } = vi.hoisted(() => ({
   license: { licensed: true },
   refreshFootprint: vi.fn(),
   getStatus: vi.fn(),
+  createEngine: vi.fn(),
 }));
 
 vi.mock('../../hooks/useLicense', () => ({
@@ -20,7 +21,7 @@ vi.mock('../../hooks/useConnection', () => ({
 }));
 vi.mock('../../api/kv-cache', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/kv-cache')>();
-  return { ...actual, kvCacheApi: { getStatus, refreshFootprint } };
+  return { ...actual, kvCacheApi: { getStatus, refreshFootprint, createEngine } };
 });
 
 import { KvCacheGuard } from '../KvCacheGuard';
@@ -66,6 +67,7 @@ describe('KvCacheGuard', () => {
     getStatus.mockReset();
     refreshFootprint.mockReset();
     refreshFootprint.mockResolvedValue(null);
+    createEngine.mockReset();
   });
 
   it('shows the upgrade prompt and no children when unlicensed', () => {
@@ -126,5 +128,27 @@ describe('KvCacheGuard', () => {
     getStatus.mockResolvedValue({ hasLmcache: false, latest, sampleKey: null, engines: [{ id: 'e1' }] });
     renderGuard();
     expect(await screen.findByTestId('children')).toBeInTheDocument();
+  });
+
+  it('opens the link-engine dialog from the not-detected state', async () => {
+    getStatus.mockResolvedValue({ hasLmcache: false, latest, sampleKey: null, engines: [] });
+    renderGuard();
+    fireEvent.click(await screen.findByRole('button', { name: 'Link an engine' }));
+    expect(await screen.findByText('Link LMCache engine')).toBeInTheDocument();
+    expect(screen.getByLabelText('Metrics URL')).toBeInTheDocument();
+  });
+
+  it('keeps the collector snippet open after linking the first engine', async () => {
+    getStatus.mockResolvedValue({ hasLmcache: false, latest, sampleKey: null, engines: [] });
+    renderGuard();
+    fireEvent.click(await screen.findByRole('button', { name: 'Link an engine' }));
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'OTLP' }));
+    const engine = { id: 'e1', name: 'otlp-1', source: 'otlp', otlpEngineId: 'lmc-abc' };
+    createEngine.mockResolvedValue(engine);
+    getStatus.mockResolvedValue({ hasLmcache: false, latest, sampleKey: null, engines: [engine] });
+    fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'otlp-1' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    expect(await screen.findByTestId('children')).toBeInTheDocument();
+    expect(screen.getByTestId('collector-snippet')).toHaveTextContent('lmc-abc');
   });
 });

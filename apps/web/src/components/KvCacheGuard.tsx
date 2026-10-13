@@ -1,7 +1,8 @@
+import { useState } from 'react';
 import { Feature } from '@betterdb/shared';
 import { kvCacheInUse, useKvCacheStatus } from '../hooks/useKvCacheStatus';
 import { useLicense } from '../hooks/useLicense';
-import { KvCacheNotDetected, KvCacheProLocked } from './pages/kv-cache';
+import { KvCacheNotDetected, KvCacheProLocked, LinkEngineDialog } from './pages/kv-cache';
 import { Skeleton } from './ui/skeleton';
 
 interface Props {
@@ -11,6 +12,7 @@ interface Props {
 export function KvCacheGuard({ children }: Props) {
   const { hasFeature } = useLicense();
   const status = useKvCacheStatus();
+  const [linkOpen, setLinkOpen] = useState(false);
 
   if (!hasFeature(Feature.KV_CACHE_MONITORING)) {
     return <KvCacheProLocked />;
@@ -26,8 +28,14 @@ export function KvCacheGuard({ children }: Props) {
       </div>
     );
   }
-  if (!kvCacheInUse(status.data)) {
-    return <KvCacheNotDetected latest={status.data.latest} />;
-  }
-  return <>{children}</>;
+  return (
+    <>
+      {kvCacheInUse(status.data) ? (
+        children
+      ) : (
+        <KvCacheNotDetected latest={status.data.latest} onLinkEngine={() => setLinkOpen(true)} />
+      )}
+      <LinkEngineDialog open={linkOpen} onOpenChange={setLinkOpen} />
+    </>
+  );
 }
