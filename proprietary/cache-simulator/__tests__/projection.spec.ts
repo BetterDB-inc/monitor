@@ -1,9 +1,9 @@
-import { DEFAULT_OVERHEAD_PER_KEY_BYTES, fixedOverhead, inPlaceBytesPerDay, keysAt, project, type ProjectionInputs } from '@betterdb/shared';
+import { DEFAULT_OVERHEAD_PER_KEY_BYTES, fixedOverhead, inPlaceGrowth, keysAt, project, type ProjectionInputs } from '@betterdb/shared';
 
 const base: ProjectionInputs = {
   currentKeys: 1000,
   keysPerDay: 100,
-  bytesPerDay: 0,
+  inPlaceBytesPerDay: 0,
   ttlDays: null,
   avgKeyBytes: 100,
   ci95Bytes: 0,
@@ -75,17 +75,17 @@ describe('projection', () => {
     expect(point.high).toBe(point.bytes);
   });
 
-  it('adds byte growth that the key count does not explain', () => {
-    const inputs = { ...base, keysPerDay: 0, bytesPerDay: 500, maxmemory: 102_000 };
-    expect(inPlaceBytesPerDay(inputs)).toBe(500);
-    const result = project(inputs);
+  it('adds in-place byte growth on top of key growth', () => {
+    const result = project({ ...base, keysPerDay: 0, inPlaceBytesPerDay: 500, maxmemory: 102_000 });
     expect(result.points[10].bytes).toBe(100_000 + 5000);
     expect(result.daysToMaxmemory).toBe(4);
   });
 
-  it('adds no extra growth when new keys explain the byte trend', () => {
-    expect(inPlaceBytesPerDay({ ...base, bytesPerDay: 8000 })).toBe(0);
-    expect(project({ ...base, bytesPerDay: 8000 }).points[10].bytes).toBe(200_000);
+  it('derives in-place growth from the byte trend new keys do not explain', () => {
+    expect(inPlaceGrowth({ keysPerDay: 0, bytesPerDay: 500 }, 100)).toBe(500);
+    expect(inPlaceGrowth({ keysPerDay: 100, bytesPerDay: 8000 }, 100)).toBe(0);
+    expect(inPlaceGrowth({ keysPerDay: 10, bytesPerDay: 3000 }, 100)).toBe(2000);
+    expect(inPlaceGrowth({ keysPerDay: -500, bytesPerDay: 0 }, 100)).toBe(0);
   });
 
   it('stays finite with zero keys', () => {
