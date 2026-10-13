@@ -171,6 +171,18 @@ describe('KvCacheSamplesService', () => {
     expect(result.buckets[0].timestamp).toBe(1);
   });
 
+  it('drops the oldest bucket when the row limit splits it', async () => {
+    const { service, storage } = setup();
+    const boundary = [sample({ timestamp: 0, requestedTokens: 1, hitTokens: 1 }), sample({ timestamp: 0, engineId: 'e2', requestedTokens: 1 })];
+    const newer = Array.from({ length: SAMPLES_LIMIT - 1 }, (_, i) => sample({ timestamp: Math.floor(i / 2) + 1, engineId: i % 2 ? 'e2' : 'e1', requestedTokens: 2, hitTokens: 1 }));
+    storage.getKvCacheEngineSamples.mockResolvedValue([...boundary, ...newer]);
+    const result = await service.getSamples('c1', { from: 0, to: 1_000_000 });
+    expect(result.truncated).toBe(true);
+    expect(result.buckets.some((bucket) => bucket.timestamp === 0)).toBe(false);
+    expect(result.buckets[0]).toMatchObject({ timestamp: 1, requestedTokens: 2 });
+    expect(result.rangeHitRate).toBe(0.5);
+  });
+
   it('returns a null range hit rate when nothing was requested', async () => {
     const { service } = setup();
     expect(await service.getSamples('c1', { from: 0, to: 1000 })).toEqual({ buckets: [], rangeHitRate: null, truncated: false });

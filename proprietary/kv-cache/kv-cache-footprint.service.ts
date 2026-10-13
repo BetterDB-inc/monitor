@@ -73,7 +73,8 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   protected onConnectionRemoved(connectionId: string): void {
     const active = this.running.get(connectionId);
     this.running.delete(connectionId);
-    this.generations.set(connectionId, this.generationOf(connectionId) + 1);
+    const generation = this.generationOf(connectionId) + 1;
+    this.generations.set(connectionId, generation);
     this.lastEvicted.delete(connectionId);
     this.sampleKeys.delete(connectionId);
     const settled = active?.then(
@@ -88,8 +89,18 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
       }
     });
     void Promise.all([...pending, settled])
-      .then(() => this.storage.deleteKvCacheConnectionData(connectionId))
+      .then(() => this.deleteRemovedData(connectionId, generation))
       .catch((error) => this.logger.warn(`Could not delete KV cache data for ${connectionId}: ${errorMessage(error)}`));
+  }
+
+  private async deleteRemovedData(connectionId: string, generation: number): Promise<void> {
+    if (this.generationOf(connectionId) !== generation || this.isRegistered(connectionId)) return;
+    if (!this.running.has(connectionId)) this.generations.delete(connectionId);
+    await this.storage.deleteKvCacheConnectionData(connectionId);
+  }
+
+  private isRegistered(connectionId: string): boolean {
+    return this.connectionRegistry.list().some((connection) => connection.id === connectionId);
   }
 
   onConnectionRemoval(listener: RemovalListener): void {

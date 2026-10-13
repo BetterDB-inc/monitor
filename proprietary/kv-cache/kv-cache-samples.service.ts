@@ -35,6 +35,11 @@ export function mergeBuckets(samples: KvCacheEngineSample[]): KvCacheSampleBucke
     .map((row) => ({ ...row, hitRate: hitRate(row.requestedTokens, row.hitTokens) }));
 }
 
+function dropOldestTimestamp(samples: KvCacheEngineSample[]): KvCacheEngineSample[] {
+  const oldest = samples.reduce((min, row) => Math.min(min, row.timestamp), Infinity);
+  return samples.filter((row) => row.timestamp > oldest);
+}
+
 @Injectable()
 export class KvCacheSamplesService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(KvCacheSamplesService.name);
@@ -107,7 +112,7 @@ export class KvCacheSamplesService implements OnModuleInit, OnModuleDestroy {
       modelName: query.model,
     });
     const truncated = fetched.length > SAMPLES_LIMIT;
-    const rows = truncated ? fetched.slice(fetched.length - SAMPLES_LIMIT) : fetched;
+    const rows = truncated ? dropOldestTimestamp(fetched) : fetched;
     const requested = rows.reduce((sum, row) => sum + row.requestedTokens, 0);
     const hit = rows.reduce((sum, row) => sum + row.hitTokens, 0);
     return { buckets: mergeBuckets(rows), rangeHitRate: hitRate(requested, hit), truncated };

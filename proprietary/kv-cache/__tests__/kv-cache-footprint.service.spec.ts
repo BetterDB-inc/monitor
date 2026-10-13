@@ -89,14 +89,16 @@ describe('KvCacheFootprintService', () => {
   });
 
   it('deletes stored data when a connection is removed', async () => {
-    const { service, storage } = setup();
+    const { service, storage, registry } = setup();
+    registry.list.mockReturnValue([]);
     (service as any).onConnectionRemoved('c1');
     await new Promise((resolve) => setImmediate(resolve));
     expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
   });
 
   it('deletes stored data only after async removal listeners settle', async () => {
-    const { service, storage } = setup();
+    const { service, storage, registry } = setup();
+    registry.list.mockReturnValue([]);
     let release: () => void = () => undefined;
     service.onConnectionRemoval(() => new Promise<void>((resolve) => (release = resolve)));
     (service as any).onConnectionRemoved('c1');
@@ -108,13 +110,14 @@ describe('KvCacheFootprintService', () => {
   });
 
   it('discards an in-flight collection and deletes data after it settles when the connection is removed', async () => {
-    const { service, storage, client } = setup();
+    const { service, storage, client, registry } = setup();
     let finishRead: (size: number) => void = () => undefined;
     client.getDbSize.mockImplementationOnce(() => new Promise((resolve) => (finishRead = resolve)));
     const listener = jest.fn();
     service.onSnapshot(listener);
     const collecting = service.triggerCollection('c1');
     await new Promise((resolve) => setImmediate(resolve));
+    registry.list.mockReturnValue([]);
     (service as any).onConnectionRemoved('c1');
     await new Promise((resolve) => setImmediate(resolve));
     expect(storage.deleteKvCacheConnectionData).not.toHaveBeenCalled();
@@ -124,6 +127,48 @@ describe('KvCacheFootprintService', () => {
     expect(storage.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
     expect(listener).not.toHaveBeenCalled();
     expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
+  });
+
+  it('keeps fresh data when the connection is re-registered before an in-flight run settles', async () => {
+    const { service, storage, client, registry } = setup();
+    const listed = registry.list();
+    let finishRead: (size: number) => void = () => undefined;
+    client.getDbSize.mockImplementationOnce(() => new Promise((resolve) => (finishRead = resolve)));
+    const stale = service.triggerCollection('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    registry.list.mockReturnValue([]);
+    (service as any).onConnectionRemoved('c1');
+    registry.list.mockReturnValue(listed);
+    const fresh = await service.triggerCollection('c1');
+    expect(fresh).not.toBeNull();
+    expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledTimes(1);
+    finishRead(6);
+    await expect(stale).resolves.toBeNull();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledTimes(1);
+    expect(storage.deleteKvCacheConnectionData).not.toHaveBeenCalled();
+    expect(await service.triggerCollection('c1')).not.toBeNull();
+  });
+
+  it('deletes once for the latest removal when a connection is removed again before data is deleted', async () => {
+    const { service, storage, registry } = setup();
+    registry.list.mockReturnValue([]);
+    const releases: Array<() => void> = [];
+    service.onConnectionRemoval(() => new Promise<void>((resolve) => releases.push(resolve)));
+    (service as any).onConnectionRemoved('c1');
+    (service as any).onConnectionRemoved('c1');
+    releases.forEach((release) => release());
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledTimes(1);
+  });
+
+  it('forgets the removal generation once the data is deleted', async () => {
+    const { service, storage, registry } = setup();
+    registry.list.mockReturnValue([]);
+    (service as any).onConnectionRemoved('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
+    expect((service as any).generations.has('c1')).toBe(false);
   });
 
   it('notifies removal listeners with the connection id', () => {
