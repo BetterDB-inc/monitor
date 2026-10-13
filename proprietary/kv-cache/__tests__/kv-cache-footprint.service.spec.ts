@@ -1,3 +1,4 @@
+import { NotFoundException } from '@nestjs/common';
 import { Feature } from '@betterdb/shared';
 import { KvCacheFootprintService, resolvePositiveInt } from '../kv-cache-footprint.service';
 
@@ -84,6 +85,46 @@ describe('KvCacheFootprintService', () => {
     expect(storage.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
   });
 
+  it('backs off full collection after a not-detected result until the recheck window passes', async () => {
+    const { service, storage, client } = setup([]);
+    const now = jest.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    try {
+      await (service as any).tick();
+      expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledTimes(1);
+      expect(storage.saveKvCacheFootprintSnapshot.mock.calls[0][0].detected).toBe(false);
+      now.mockReturnValue(1_000_000 + 1_800_000 - 1);
+      await (service as any).tick();
+      expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledTimes(1);
+      expect(client.getDbSize).toHaveBeenCalledTimes(1);
+      now.mockReturnValue(1_000_000 + 1_800_000);
+      await (service as any).tick();
+      expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledTimes(2);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('collects on a manual trigger during the back-off and resumes polling once detected', async () => {
+    const keys = Array.from({ length: 6 }, (_, i) => KEY(i));
+    const { service, storage, client } = setup([]);
+    await (service as any).tick();
+    await (service as any).tick();
+    expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledTimes(1);
+    client.getDbSize.mockResolvedValue(keys.length);
+    client.call.mockImplementation(async (cmd: string) => (cmd === 'SCAN' ? ['0', keys] : ''));
+    client.getClient().pipeline().exec.mockImplementation(async () => keys.flatMap(() => [[null, 100], [null, -1]]));
+    expect((await service.triggerCollection('c1'))?.detected).toBe(true);
+    await (service as any).tick();
+    expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects a manual trigger for an unknown connection with NotFoundException', async () => {
+    const { service, registry, storage } = setup();
+    registry.getConfig.mockReturnValue(null);
+    await expect(service.triggerCollection('missing')).rejects.toBeInstanceOf(NotFoundException);
+    expect(storage.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
+  });
+
   it('deletes stored data when a connection is removed', () => {
     const { service, storage } = setup();
     (service as any).onConnectionRemoved('c1');
@@ -116,7 +157,7 @@ describe('resolvePositiveInt', () => {
 });
 
 describe('KvCacheFootprintService settings', () => {
-  const keys = ['KV_CACHE_FOOTPRINT_INTERVAL_MS', 'KV_CACHE_SCAN_MAX_KEYS', 'KV_CACHE_MATCH_MAX_KEYS', 'KV_CACHE_SAMPLE_KEYS'];
+  const keys = ['KV_CACHE_FOOTPRINT_INTERVAL_MS', 'KV_CACHE_SCAN_MAX_KEYS', 'KV_CACHE_MATCH_MAX_KEYS', 'KV_CACHE_SAMPLE_KEYS', 'KV_CACHE_UNDETECTED_RECHECK_MS'];
   const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
 
   afterEach(() => {
@@ -131,10 +172,12 @@ describe('KvCacheFootprintService settings', () => {
     process.env.KV_CACHE_SCAN_MAX_KEYS = '0';
     process.env.KV_CACHE_MATCH_MAX_KEYS = 'NaN';
     process.env.KV_CACHE_SAMPLE_KEYS = '-1';
+    process.env.KV_CACHE_UNDETECTED_RECHECK_MS = '1000';
     const { service } = setup();
     expect((service as any).getIntervalMs()).toBe(300000);
     expect((service as any).budgets).toEqual({ maxScanned: 200000, maxMatched: 2000 });
     expect((service as any).sampleSize).toBe(500);
+    expect((service as any).undetectedRecheckMs).toBe(1800000);
   });
 
   it('keeps valid settings', () => {
@@ -142,9 +185,11 @@ describe('KvCacheFootprintService settings', () => {
     process.env.KV_CACHE_SCAN_MAX_KEYS = '1000';
     process.env.KV_CACHE_MATCH_MAX_KEYS = '10';
     process.env.KV_CACHE_SAMPLE_KEYS = '5';
+    process.env.KV_CACHE_UNDETECTED_RECHECK_MS = '600000';
     const { service } = setup();
     expect((service as any).getIntervalMs()).toBe(120000);
     expect((service as any).budgets).toEqual({ maxScanned: 1000, maxMatched: 10 });
     expect((service as any).sampleSize).toBe(5);
+    expect((service as any).undetectedRecheckMs).toBe(600000);
   });
 });

@@ -58,7 +58,7 @@ export async function sampleLmcacheKeys(client: DatabasePort, keys: string[]): P
     let siblingExists: boolean | null = null;
     if (sibling) {
       const [existsErr, exists] = replies[index++] ?? [new Error('missing'), null];
-      siblingExists = !existsErr && Number(exists) === 1;
+      siblingExists = existsErr ? null : Number(exists) === 1;
     }
     return {
       key,
