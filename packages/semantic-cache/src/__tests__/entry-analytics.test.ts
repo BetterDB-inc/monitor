@@ -31,9 +31,13 @@ function makeAnalyticsMockClient() {
       const isCountOnly = limitCount === 0;
 
       if (isCountOnly) {
+        // Counts are complements: the code asks for the positive sets
+        // (hit-at-least-once, warm) and derives never-hit / cold as
+        // `total − matched`, so a hash missing the field counts as never-hit/cold.
         if (filter === '*') return [String(TOTAL_ENTRIES)];
-        if (filter === '@hit_count:[0 0]') return [String(NEVER_HIT_COUNT)];
-        if (filter.startsWith('@last_accessed_at:')) return [String(COLD_ENTRY_COUNT)];
+        if (filter === '@hit_count:[1 +inf]') return [String(TOTAL_ENTRIES - NEVER_HIT_COUNT)];
+        if (filter.startsWith('@last_accessed_at:'))
+          return [String(TOTAL_ENTRIES - COLD_ENTRY_COUNT)];
         return ['0'];
       }
 
@@ -128,12 +132,12 @@ describe('entryAnalytics', () => {
     );
     expect(countCalls.length).toBeGreaterThanOrEqual(3);
     expect(countCalls.some((c) => c[2] === '*')).toBe(true);
-    expect(countCalls.some((c) => c[2] === '@hit_count:[0 0]')).toBe(true);
+    expect(countCalls.some((c) => c[2] === '@hit_count:[1 +inf]')).toBe(true);
     // Asserted here, not inside the mock: a failed expect() in the mock would
     // only surface as a rejected FT.SEARCH, which entryAnalytics() swallows.
     const coldCall = countCalls.find((c) => String(c[2]).startsWith('@last_accessed_at:'));
     expect(coldCall).toBeDefined();
-    expect(coldCall![2]).toMatch(/^@last_accessed_at:\[0 \(\d+\]$/);
+    expect(coldCall![2]).toMatch(/^@last_accessed_at:\[\d+ \+inf\]$/);
 
     const topCalls = client.call.mock.calls.filter(
       (c) => c[0] === 'FT.SEARCH' && c.includes('SORTBY'),
@@ -254,5 +258,101 @@ describe('entryAnalytics (SCAN fallback — cap at 10k)', () => {
     expect(client.pipeline).toHaveBeenCalled();
     const pipelineCallCount = (client.pipeline as ReturnType<typeof vi.fn>).mock.calls.length;
     expect(pipelineCallCount).toBeLessThan(10_000);
+  });
+});
+
+describe('entryAnalytics (complement counts include pre-upgrade entries)', () => {
+  it('counts hashes missing hit_count / last_accessed_at as never-hit and cold', async () => {
+    const TOTAL = 100;
+    const HIT_AT_LEAST_ONCE = 10;
+    const WARM = 5;
+    const client = makeAnalyticsMockClient();
+    // Hashes written before the usage fields existed match neither
+    // `@hit_count:[1 +inf]` nor `@last_accessed_at:[cutoff +inf]`, so the
+    // positive sets are small; `total − matched` must still count them.
+    client.call.mockImplementation(async (...args: unknown[]) => {
+      const cmd = args[0] as string;
+      if (cmd === 'FT.INFO') {
+        return [
+          'attributes',
+          [
+            ['identifier', 'embedding', 'type', 'VECTOR', 'index', ['dimensions', '2']],
+            ['identifier', 'hit_count', 'type', 'NUMERIC'],
+            ['identifier', 'last_accessed_at', 'type', 'NUMERIC'],
+          ],
+        ];
+      }
+      if (cmd === 'FT.SEARCH') {
+        const filter = String(args[2] ?? '*');
+        const limitIdx = args.indexOf('LIMIT');
+        const isCountOnly = limitIdx >= 0 && Number(args[limitIdx + 2]) === 0;
+        if (isCountOnly) {
+          if (filter === '*') return [String(TOTAL)];
+          if (filter === '@hit_count:[1 +inf]') return [String(HIT_AT_LEAST_ONCE)];
+          if (filter.startsWith('@last_accessed_at:')) return [String(WARM)];
+          return ['0'];
+        }
+        return ['0']; // no top entries materialized
+      }
+      return 'OK';
+    });
+
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: vi.fn(async () => [0.5, 0.5]),
+      name: 'test_entry_analytics',
+      embeddingCache: { enabled: false },
+      discovery: { enabled: false },
+      configRefresh: { enabled: false },
+    });
+    await cache.initialize();
+
+    const result = await cache.entryAnalytics({ topN: 2, coldAfterDays: 7 });
+
+    expect(result.totalEntries).toBe(TOTAL);
+    expect(result.neverHitCount).toBe(TOTAL - HIT_AT_LEAST_ONCE); // 90
+    expect(result.coldEntryCount).toBe(TOTAL - WARM); // 95
+    expect(result.hitAtLeastOnceCount).toBe(HIT_AT_LEAST_ONCE); // 10
+  });
+});
+
+describe('entryAnalytics (option validation)', () => {
+  async function initCache() {
+    const client = makeAnalyticsMockClient();
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: vi.fn(async () => [0.5, 0.5]),
+      name: 'test_entry_analytics',
+      embeddingCache: { enabled: false },
+      discovery: { enabled: false },
+      configRefresh: { enabled: false },
+    });
+    await cache.initialize();
+    return { cache, client };
+  }
+
+  it.each([-1, 1.5, NaN, 10_001])('rejects topN=%s with a RangeError', async (topN) => {
+    const { cache } = await initCache();
+    await expect(cache.entryAnalytics({ topN })).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it.each([-1, NaN, Number.POSITIVE_INFINITY])(
+    'rejects coldAfterDays=%s with a RangeError',
+    async (coldAfterDays) => {
+      const { cache } = await initCache();
+      await expect(cache.entryAnalytics({ coldAfterDays })).rejects.toBeInstanceOf(RangeError);
+    },
+  );
+
+  it('topN 0 skips the SORTBY query and returns no top entries', async () => {
+    const { cache, client } = await initCache();
+
+    const result = await cache.entryAnalytics({ topN: 0 });
+
+    expect(result.topEntries).toEqual([]);
+    const sortByCalls = client.call.mock.calls.filter(
+      (c) => c[0] === 'FT.SEARCH' && c.includes('SORTBY'),
+    );
+    expect(sortByCalls).toHaveLength(0);
   });
 });

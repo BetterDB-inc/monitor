@@ -409,11 +409,16 @@ export interface IndexInfo {
 }
 
 export interface EntryAnalyticsOptions {
-  /** Number of hottest entries to return. Default: 10. */
+  /**
+   * Number of hottest entries to return. Must be an integer in [0, 10000];
+   * `0` returns an empty `topEntries` and skips the SORTBY query entirely
+   * (counts only). Anything else throws a `RangeError`. Default: 10.
+   */
   topN?: number;
   /**
    * An entry is "cold" if it has not been accessed within this many days.
-   * A never-hit entry is always counted as cold. Default: 7.
+   * A never-hit entry is always counted as cold. Must be a non-negative finite
+   * number, or a `RangeError` is thrown. Default: 7.
    */
   coldAfterDays?: number;
 }

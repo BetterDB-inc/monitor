@@ -24,9 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional `logger` option (default: `console`) for the operational warnings
   above. Pass `{ warn: () => {} }` to silence them.
 - **Per-entry hit analytics** — every entry now tracks `hit_count` and
-  `last_accessed_at`, updated on each cache hit (batched into the existing
-  TTL-refresh pipeline on standalone). New `entryAnalytics()`
-  method reports total / never-hit / cold entry counts and the hottest entries.
+  `last_accessed_at`, updated on each cache hit by a single-key Lua script
+  guarded by `EXISTS`, so a hit never recreates a deleted or expired entry. New
+  `entryAnalytics()` method reports total / never-hit / cold entry counts and
+  the hottest entries.
   When the index includes usage fields, counts use server-side `FT.SEARCH` with
   `LIMIT 0 0` (exact, no materialization); `topEntries` uses
   `SORTBY hit_count DESC` with `LIMIT 0 topN`. Older indexes fall back to
@@ -51,9 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   untouched.
 - Cache hits now incur one Valkey round trip for usage tracking even when
   `defaultTtl` is not configured (one pipeline per matched key on cluster).
-  Previously a hit was a pure read. These writes are best-effort and
-  non-atomic; failures are logged once per batch via `logger.warn` and never
-  fail the hit.
+  Previously a hit was a pure read. The write is a single-key `EVAL`. Servers
+  or proxies that block scripting will log the usage-tracking warning instead
+  of updating counters. These writes are best-effort and non-atomic; failures
+  are logged once per batch via `logger.warn` and never fail the hit.
 - Cold = `last_accessed_at` strictly older than the cutoff, consistently on
   both the `FT.SEARCH` and `SCAN` paths.
 - The FT index schema gains `hit_count NUMERIC SORTABLE` and
@@ -68,10 +70,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ```
 
   Existing entries have no `hit_count` or `last_accessed_at` until their first
-  hit after the upgrade (`HINCRBY` auto-creates the counter). Until then the
-  `SCAN` fallback counts them as never-hit and cold, but the `FT.SEARCH` fast
-  path does not count them in `neverHitCount` or `coldEntryCount`, so
-  `hitAtLeastOnceCount` can be overstated.
+  hit after the upgrade (the usage script auto-creates them). Until then they
+  count as never-hit and cold on both paths: the `FT.SEARCH` counts are
+  complements (`total − hit-at-least-once`, `total − warm`), so a hash missing
+  the field is counted exactly as the `SCAN` fallback counts it.
   See the README section "Upgrading an index created before 0.14.0".
 
   **Warning:** `flush()` deletes every cached entry and embedding — only use

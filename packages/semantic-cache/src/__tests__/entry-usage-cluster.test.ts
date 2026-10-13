@@ -1,7 +1,9 @@
 /**
- * Per-entry usage tracking (hit_count / last_accessed_at / TTL refresh) must
- * survive Valkey Cluster: entry keys carry no hash tag, so a single pipeline
- * spanning several matched keys is rejected by iovalkey's Cluster client.
+ * Per-entry usage tracking must survive Valkey Cluster. Each hit now runs a
+ * single-key `EVAL` of the usage script (guarded by `EXISTS`, so it never
+ * resurrects a deleted/expired entry); entry keys carry no hash tag, so a
+ * single pipeline spanning several matched keys is rejected by iovalkey's
+ * Cluster client and each key must get its own pipeline.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { Cluster } from 'iovalkey';
@@ -35,12 +37,28 @@ interface MockOptions {
 interface MockState {
   /** Commands from every pipeline whose exec() succeeded. */
   executed: QueuedCommand[];
-  /** Distinct keys of every pipeline that queued an HINCRBY hit_count. */
+  /** Distinct keys of every pipeline that queued a usage-tracking EVAL. */
   usagePipelines: string[][];
 }
 
 function searchReply(key: string): unknown[] {
   return ['1', key, ['__score', '0.01', 'response', `response for ${key}`]];
+}
+
+/** A usage-tracking command is `call('EVAL', script, '1', key, now, ttl)`. */
+function isUsageCommand(q: QueuedCommand): boolean {
+  return q.cmd === 'call' && q.args[0] === 'EVAL';
+}
+
+/**
+ * The hash-slot key of a queued command. For a usage EVAL it's the single key
+ * at args[3]; for an FT.SEARCH call there's no slot key; otherwise it's args[0].
+ */
+function keyOf(q: QueuedCommand): string | null {
+  if (q.cmd === 'call') {
+    return q.args[0] === 'EVAL' ? String(q.args[3]) : null;
+  }
+  return String(q.args[0]);
 }
 
 function makeClient(opts: MockOptions): { client: Valkey; state: MockState } {
@@ -58,10 +76,8 @@ function makeClient(opts: MockOptions): { client: Valkey; state: MockState } {
       });
     }
     stub.exec = vi.fn(async () => {
-      const keys = [
-        ...new Set(queued.filter((q) => q.cmd !== 'call').map((q) => String(q.args[0]))),
-      ];
-      const isUsage = queued.some((q) => q.cmd === 'hincrby' && q.args[1] === 'hit_count');
+      const keys = [...new Set(queued.map(keyOf).filter((k): k is string => k !== null))];
+      const isUsage = queued.some(isUsageCommand);
       if (isUsage) state.usagePipelines.push(keys);
       if (opts.cluster && keys.length > 1) {
         throw new Error(CROSS_SLOT_ERROR);
@@ -70,7 +86,11 @@ function makeClient(opts: MockOptions): { client: Valkey; state: MockState } {
         throw new Error('connection lost');
       }
       state.executed.push(...queued);
-      return queued.map((q) => [null, q.cmd === 'call' ? nextSearchReply() : 1]);
+      return queued.map((q) => {
+        if (q.cmd === 'call' && q.args[0] === 'FT.SEARCH') return [null, nextSearchReply()];
+        if (isUsageCommand(q)) return [null, 1];
+        return [null, 1];
+      });
     });
     return stub;
   });
@@ -129,15 +149,16 @@ async function makeCache(client: Valkey, defaultTtl?: number) {
   return { cache, logger };
 }
 
+/** The usage-tracking EVAL commands recorded for a given entry key. */
 function usageCommandsFor(state: MockState, key: string): QueuedCommand[] {
-  return state.executed.filter((q) => q.cmd !== 'call' && q.args[0] === key);
+  return state.executed.filter((q) => isUsageCommand(q) && q.args[3] === key);
 }
 
 const KEYS = ['t:entry:k1', 't:entry:k2', 't:entry:k3'];
 const PROMPTS = ['first', 'second', 'third'];
 
 describe('entry usage tracking on cluster', () => {
-  it('updates every matched key with one single-key pipeline each', async () => {
+  it('updates every matched key with one single-key EVAL pipeline each', async () => {
     const { client, state } = makeClient({ cluster: true });
     const { cache, logger } = await makeCache(client, TTL);
 
@@ -146,26 +167,39 @@ describe('entry usage tracking on cluster', () => {
     expect(results.map((r) => r.matchedKey)).toEqual(KEYS);
     for (const key of KEYS) {
       const cmds = usageCommandsFor(state, key);
-      expect(cmds).toContainEqual({ cmd: 'hincrby', args: [key, 'hit_count', 1] });
-      expect(cmds).toContainEqual({
-        cmd: 'hset',
-        args: [key, 'last_accessed_at', expect.stringMatching(/^\d+$/)],
-      });
-      expect(cmds).toContainEqual({ cmd: 'expire', args: [key, TTL] });
+      expect(cmds).toHaveLength(1);
+      // call('EVAL', <script>, '1', key, <now>, '300')
+      expect(cmds[0].args).toEqual([
+        'EVAL',
+        expect.any(String),
+        '1',
+        key,
+        expect.stringMatching(/^\d+$/),
+        String(TTL),
+      ]);
     }
     expect(state.usagePipelines).toEqual(KEYS.map((key) => [key]));
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  it('skips EXPIRE when defaultTtl is not set', async () => {
+  it('passes an empty TTL arg to the script when defaultTtl is not set', async () => {
     const { client, state } = makeClient({ cluster: true });
     const { cache, logger } = await makeCache(client);
 
     await cache.checkBatch(PROMPTS);
 
     for (const key of KEYS) {
-      const cmds = usageCommandsFor(state, key).map((q) => q.cmd);
-      expect(cmds).toEqual(['hincrby', 'hset']);
+      const cmds = usageCommandsFor(state, key);
+      expect(cmds).toHaveLength(1);
+      // Empty ttl arg → the script leaves the existing expiry untouched.
+      expect(cmds[0].args).toEqual([
+        'EVAL',
+        expect.any(String),
+        '1',
+        key,
+        expect.stringMatching(/^\d+$/),
+        '',
+      ]);
     }
     expect(logger.warn).not.toHaveBeenCalled();
   });
@@ -180,7 +214,10 @@ describe('entry usage tracking on standalone', () => {
 
     expect(state.usagePipelines).toEqual([KEYS]);
     for (const key of KEYS) {
-      expect(usageCommandsFor(state, key).map((q) => q.cmd)).toEqual(['hincrby', 'hset', 'expire']);
+      const cmds = usageCommandsFor(state, key);
+      expect(cmds).toHaveLength(1);
+      expect(cmds[0].args[0]).toBe('EVAL');
+      expect(cmds[0].args[5]).toBe(String(TTL));
     }
     expect(logger.warn).not.toHaveBeenCalled();
   });
@@ -194,9 +231,9 @@ describe('entry usage tracking failures', () => {
     const results = await cache.checkBatch(PROMPTS);
 
     expect(results.every((r) => r.hit)).toBe(true);
-    expect(usageCommandsFor(state, 't:entry:k1')).toHaveLength(3);
+    expect(usageCommandsFor(state, 't:entry:k1')).toHaveLength(1);
     expect(usageCommandsFor(state, 't:entry:k2')).toHaveLength(0);
-    expect(usageCommandsFor(state, 't:entry:k3')).toHaveLength(3);
+    expect(usageCommandsFor(state, 't:entry:k3')).toHaveLength(1);
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn.mock.calls[0][0]).toContain(
       "@betterdb/semantic-cache 't': failed to record entry usage for 1/3 key(s)",
@@ -204,21 +241,20 @@ describe('entry usage tracking failures', () => {
     expect(logger.warn.mock.calls[0][0]).toContain('connection lost');
   });
 
-  it('counts per-command errors reported in exec() results as failures', async () => {
+  it('counts a WRONGTYPE error reported in exec() results as a failure', async () => {
     const { client } = makeClient({ cluster: false });
     const pipelineFn = client.pipeline as unknown as ReturnType<typeof vi.fn>;
     const realPipeline = pipelineFn.getMockImplementation()!;
     pipelineFn.mockImplementation(() => {
       const stub = realPipeline() as Record<string, unknown> & {
+        call: ReturnType<typeof vi.fn>;
         exec: () => Promise<Array<[Error | null, unknown]>>;
       };
       const realExec = stub.exec;
       stub.exec = async () => {
         const results = await realExec();
-        // Usage pipelines only: WRONGTYPE on the first key's HINCRBY.
-        const isUsage = (stub.hincrby as ReturnType<typeof vi.fn>).mock.calls.some(
-          (c) => c[1] === 'hit_count',
-        );
+        // Usage pipelines only: WRONGTYPE on the first key's EVAL.
+        const isUsage = stub.call.mock.calls.some((c) => c[0] === 'EVAL');
         if (isUsage) results[0] = [new Error('WRONGTYPE Operation against a key'), null];
         return results;
       };
@@ -231,6 +267,36 @@ describe('entry usage tracking failures', () => {
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn.mock.calls[0][0]).toContain('for 1/3 key(s)');
     expect(logger.warn.mock.calls[0][0]).toContain('WRONGTYPE');
+  });
+
+  it('does not count a 0 return (entry already gone) as a failure', async () => {
+    const { client } = makeClient({ cluster: false });
+    const pipelineFn = client.pipeline as unknown as ReturnType<typeof vi.fn>;
+    const realPipeline = pipelineFn.getMockImplementation()!;
+    pipelineFn.mockImplementation(() => {
+      const stub = realPipeline() as Record<string, unknown> & {
+        call: ReturnType<typeof vi.fn>;
+        exec: () => Promise<Array<[Error | null, unknown]>>;
+      };
+      const realExec = stub.exec;
+      stub.exec = async () => {
+        const results = await realExec();
+        // The script returns 0 when the key vanished after FT.SEARCH — a no-op,
+        // never an error. It must not be tallied as a failed key.
+        const isUsage = stub.call.mock.calls.some((c) => c[0] === 'EVAL');
+        if (isUsage) {
+          for (let i = 0; i < results.length; i++) results[i] = [null, 0];
+        }
+        return results;
+      };
+      return stub;
+    });
+    const { cache, logger } = await makeCache(client, TTL);
+
+    const results = await cache.checkBatch(PROMPTS);
+
+    expect(results.every((r) => r.hit)).toBe(true);
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   it('check() still resolves with the hit when usage tracking fails', async () => {

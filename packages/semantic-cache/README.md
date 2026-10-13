@@ -405,11 +405,10 @@ await cache.initialize();                        // recreates index, backfills
   "index not found"; until the backfill finishes, lookups can miss entries
   that are still being indexed.
 - Existing entries have no `hit_count` or `last_accessed_at` field until their
-  first hit after the upgrade (`HINCRBY` then creates the counter). Until then,
-  the two analytics paths count them differently: the `SCAN` fallback counts
-  them as never-hit and cold; the `FT.SEARCH` fast path does not count them in
-  `neverHitCount` or `coldEntryCount`, so `hitAtLeastOnceCount` can be
-  overstated. They are still counted in `totalEntries`.
+  first hit after the upgrade (the usage script then creates them). Until then
+  they count as never-hit and cold on both analytics paths — the `FT.SEARCH`
+  counts are complements (`total − hit-at-least-once`, `total − warm`), so a
+  hash missing the field is counted exactly as the `SCAN` fallback counts it.
 
 > **Warning:** `flush()` deletes every cached entry and embedding — only use
 > it if you are fine with a cold cache. `flush()` + `initialize()` also
@@ -417,11 +416,12 @@ await cache.initialize();                        // recreates index, backfills
 
 #### Performance & tradeoffs
 
-Each genuine cache hit performs a pipelined write to bump `hit_count` and
-`last_accessed_at` (and refresh TTL if configured) — one round trip on
-standalone (one pipeline per matched key on cluster, sent concurrently,
-because entry keys span slots), so latency is flat, but every read becomes a
-write. These writes are best-effort and not atomic: failures are logged once
+Each genuine cache hit runs a small Lua script (`EVAL`) that, only if the entry
+still exists, bumps `hit_count`, sets `last_accessed_at` and refreshes the TTL
+if configured. It's one round trip on standalone, and one single-key script per
+matched key on cluster, sent concurrently. A hit on an entry that was deleted or
+expired in the meantime is a no-op, so tracking never recreates it. These writes
+are best-effort and not atomic: failures are logged once
 per batch via `logger.warn` and never fail the hit. At high QPS on a small hot
 working set, this adds real AOF and replication load on the hottest entries.
 If that becomes an issue, `hit_count` remains the primary signal for

@@ -59,6 +59,25 @@ const INVALIDATE_BATCH_SIZE = 1000;
 const CLUSTER_DELETE_CONCURRENCY = 32;
 const CLUSTER_USAGE_CONCURRENCY = 32;
 const ENTRY_ANALYTICS_LIMIT = 10000;
+const ENTRY_ANALYTICS_TOP_N_MAX = 10000;
+
+/**
+ * Touch an existing entry only. A bare HINCRBY/HSET would otherwise recreate a
+ * deleted or expired key as a TTL-less, untagged hash — resurrecting an entry
+ * the cache no longer owns. Guarded by EXISTS so a hit on a key that vanished
+ * after FT.SEARCH is a no-op. Single-key, so it is cluster-safe and keeps the
+ * per-key routing in {@link SemanticCache.recordEntryUsageBatch}.
+ *
+ * KEYS[1] = entry key. ARGV[1] = last_accessed_at (epoch ms). ARGV[2] = TTL
+ * seconds, or '' to leave the existing expiry untouched. Returns 1 if the
+ * entry was touched, 0 if it was already gone.
+ */
+const RECORD_USAGE_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+redis.call('HINCRBY', KEYS[1], 'hit_count', 1)
+redis.call('HSET', KEYS[1], 'last_accessed_at', ARGV[1])
+if ARGV[2] ~= '' then redis.call('EXPIRE', KEYS[1], ARGV[2]) end
+return 1`;
 
 /**
  * Namespace tag for the embedding cache.
@@ -1376,19 +1395,34 @@ export class SemanticCache {
    * fields (created at or after the version that introduced them), counts use
    * server-side FT.SEARCH with LIMIT 0 0 (no materialization); top entries use
    * SORTBY hit_count DESC with LIMIT 0 topN. For an older index it falls back
-   * to a SCAN + HGETALL sweep — correct but slower. Run flush() +
-   * initialize() to rebuild the index and enable the fast path.
+   * to a SCAN + pipelined HMGET of 5 fields (sampled, max 10,000) — correct but
+   * slower. Rebuild the index non-destructively to enable the fast path (see
+   * "Upgrading an index created before 0.14.0" in the README).
    *
-   * On a legacy index (created before this version), stats reflect a sample of
-   * up to 10,000 entries in implementation-defined scan order — totalEntries is
-   * the sample size, not the absolute entry count. Run flush() + initialize()
-   * to rebuild the index and get exact server-side counts.
+   * On a legacy index, stats reflect a sample of up to 10,000 entries in
+   * implementation-defined scan order — totalEntries is the sample size, not
+   * the absolute entry count. The same non-destructive rebuild gives exact
+   * server-side counts.
+   *
+   * `topN` must be an integer in [0, 10000] (0 skips the SORTBY query and
+   * returns an empty `topEntries`); `coldAfterDays` must be a non-negative
+   * finite number. Anything else throws a `RangeError`.
    */
   async entryAnalytics(options?: EntryAnalyticsOptions): Promise<EntryAnalyticsResult> {
     this.assertInitialized('entryAnalytics');
+    const topN = options?.topN ?? 10;
+    const coldAfterDays = options?.coldAfterDays ?? 7;
+    if (!Number.isInteger(topN) || topN < 0 || topN > ENTRY_ANALYTICS_TOP_N_MAX) {
+      throw new RangeError(
+        `entryAnalytics: topN must be an integer in [0, ${ENTRY_ANALYTICS_TOP_N_MAX}], got ${topN}`,
+      );
+    }
+    if (!Number.isFinite(coldAfterDays) || coldAfterDays < 0) {
+      throw new RangeError(
+        `entryAnalytics: coldAfterDays must be a non-negative number, got ${coldAfterDays}`,
+      );
+    }
     return this.traced('entryAnalytics', async (span) => {
-      const topN = options?.topN ?? 10;
-      const coldAfterDays = options?.coldAfterDays ?? 7;
       const coldCutoff = Date.now() - coldAfterDays * 24 * 60 * 60 * 1000;
 
       let totalEntries: number;
@@ -1903,20 +1937,29 @@ export class SemanticCache {
       return Number(resp?.[0] ?? 0);
     };
 
-    // Deliberate: a numeric range never matches a hash that lacks the field, so
-    // entries written before 0.14.0 (no hit_count / last_accessed_at until
-    // their first hit after an upgrade) are missed by the never-hit and cold
-    // counts below, while the SCAN fallback treats them as 0. Until such
-    // entries are hit, this path understates neverHitCount/coldEntryCount and
-    // overstates hitAtLeastOnceCount. Documented in the README upgrade notes.
-    const [totalEntries, neverHitCount, coldEntryCount] = await Promise.all([
+    // Counts are complements of the positive sets, so a hash that lacks the
+    // field counts toward never-hit/cold rather than being invisible. A
+    // numeric range never matches a missing field, so entries written before
+    // 0.14.0 (no hit_count / last_accessed_at until their first hit after an
+    // upgrade) fall outside `@hit_count:[1 +inf]` and `@last_accessed_at:
+    // [cutoff +inf]`; `total - matched` therefore counts them as never-hit and
+    // cold — the same as the SCAN fallback — until their first hit populates
+    // the fields.
+    const [totalEntries, hitAtLeastOnceCount, warmCount] = await Promise.all([
       countOf('*'),
-      countOf('@hit_count:[0 0]'),
-      // Cold = strictly older than the cutoff. Match the scan path's `< coldCutoff`
-      // exactly by using RediSearch's exclusive upper-bound syntax `[a (b]`.
-      // (Two paths, same semantics: an entry at exactly `coldCutoff` is not cold.)
-      countOf(`@last_accessed_at:[0 (${coldCutoff}]`),
+      countOf('@hit_count:[1 +inf]'),
+      // Warm = accessed at or after the cutoff. Cold is its complement
+      // (strictly older than the cutoff, or missing the field), matching the
+      // scan path's `< coldCutoff`: an entry at exactly `coldCutoff` is warm.
+      countOf(`@last_accessed_at:[${coldCutoff} +inf]`),
     ]);
+    const neverHitCount = Math.max(0, totalEntries - hitAtLeastOnceCount);
+    const coldEntryCount = Math.max(0, totalEntries - warmCount);
+
+    // topN === 0 means the caller wants counts only; skip the SORTBY query.
+    if (topN === 0) {
+      return { totalEntries, neverHitCount, coldEntryCount, topEntries: [] };
+    }
 
     let topResp: unknown;
     try {
@@ -1940,8 +1983,11 @@ export class SemanticCache {
         'DIALECT',
         '2',
       );
-    } catch {
-      throw new Error('search-path-failed');
+    } catch (err) {
+      // Preserve the server's message (and cause) so the fallback warning in
+      // entryAnalytics() shows the real error (e.g. "Unknown index name"),
+      // not an opaque sentinel.
+      throw new Error(`search-path-failed: ${errMsg(err)}`, { cause: err });
     }
     const topEntries = parseFtSearchResponse(topResp).map((row) =>
       this.rowToEntrySummary(row.key, row.fields),
@@ -2019,12 +2065,15 @@ export class SemanticCache {
   /**
    * Best-effort, batched (non-atomic) update of per-entry usage counters
    * (`HINCRBY hit_count` + `HSET last_accessed_at`) and TTL refresh
-   * (`EXPIRE`, when `defaultTtl` is set) for every matched key.
+   * (`EXPIRE`, when `defaultTtl` is set) for every matched key. Each key runs
+   * one single-key `EVAL` of {@link RECORD_USAGE_LUA}, guarded by `EXISTS`, so
+   * a hit on an entry deleted or expired after FT.SEARCH is a silent no-op
+   * rather than resurrecting it.
    *
    * Routing: standalone clients send one pipeline for the whole batch. Entry
    * keys carry no hash tag, so on a cluster they land on different slots and
    * a multi-key pipeline is rejected outright; there each key gets its own
-   * pipeline (all commands share one key, hence one slot), sent in chunks of
+   * pipeline (one single-key script, hence one slot), sent in chunks of
    * {@link CLUSTER_USAGE_CONCURRENCY} with `Promise.allSettled` so one failed
    * key never blocks the others.
    *
@@ -2043,7 +2092,9 @@ export class SemanticCache {
   private async recordEntryUsageBatch(matchedKeys: string[]): Promise<void> {
     if (matchedKeys.length === 0) return;
     const now = Date.now().toString();
-    const commandsPerKey = this.defaultTtl !== undefined ? 3 : 2;
+    // One EVAL per key regardless of TTL — the script folds the HINCRBY/HSET/
+    // EXPIRE into a single command, so each key is one pipeline result tuple.
+    const commandsPerKey = 1;
     let failed = 0;
     let firstError: unknown;
 
@@ -2086,17 +2137,20 @@ export class SemanticCache {
   }
 
   /**
-   * Queues and sends the usage-tracking commands for `keys` in one pipeline.
-   * Async so a synchronous throw while queueing surfaces as a rejection.
+   * Queues and sends the usage-tracking script for `keys` in one pipeline —
+   * one single-key `EVAL` of {@link RECORD_USAGE_LUA} per key, so a hit never
+   * resurrects an entry deleted or expired after FT.SEARCH. Async so a
+   * synchronous throw while queueing surfaces as a rejection.
+   *
+   * A `0` result (key already gone) is a no-op, not a failure; only an actual
+   * command error — e.g. WRONGTYPE, or NOSCRIPT/ERR on a server or proxy that
+   * blocks scripting — counts against the batch.
    */
   private async execEntryUsage(keys: string[], now: string): Promise<PipelineResults> {
     const pipeline = this.client.pipeline();
+    const ttl = this.defaultTtl !== undefined ? String(this.defaultTtl) : '';
     for (const key of keys) {
-      pipeline.hincrby(key, 'hit_count', 1);
-      pipeline.hset(key, 'last_accessed_at', now);
-      if (this.defaultTtl !== undefined) {
-        pipeline.expire(key, this.defaultTtl);
-      }
+      pipeline.call('EVAL', RECORD_USAGE_LUA, '1', key, now, ttl);
     }
     return pipeline.exec();
   }
