@@ -20,6 +20,20 @@ import { DetectorConfigMap, MetricType, resolveDetectorConfig } from '../anomaly
 
 export type DetectorConfigListener = (config: DetectorConfigMap) => void;
 
+const ABSOLUTE_FIELDS = ['warningAbsolute', 'criticalAbsolute'] as const;
+
+// JSON can't carry Infinity, so the API accepts 0 as "no absolute threshold"
+// and stores the Infinity sentinel, which GET omits.
+function disableZeroAbsoluteThresholds(overrides: DetectorConfigMap): void {
+  for (const key of Object.keys(overrides) as MetricType[]) {
+    const override = overrides[key];
+    if (!override) continue;
+    for (const field of ABSOLUTE_FIELDS) {
+      if (override[field] === 0) override[field] = Number.POSITIVE_INFINITY;
+    }
+  }
+}
+
 @Injectable()
 export class SettingsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SettingsService.name);
@@ -39,9 +53,10 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
   // subscribe here rather than being injected into SettingsController: the
   // anomaly module is loaded dynamically and SettingsModule cannot import it.
   private detectorConfigListeners = new Set<DetectorConfigListener>();
-  // Serializes detector-config read-merge-write cycles so concurrent PATCHes
-  // for different metrics can't overwrite each other's changes.
-  private detectorConfigLock: Promise<unknown> = Promise.resolve();
+  // Serializes every settings write. Detector-config PATCHes are
+  // read-merge-write, and the SQL adapters read-merge-write the whole row on
+  // a general update, so any two unserialized writes can lose one's changes.
+  private settingsWriteLock: Promise<unknown> = Promise.resolve();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
@@ -171,7 +186,20 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  /** Public path used by PUT /settings. Detector config is owned by
+   *  PATCH /settings/anomaly/detectors (validated, locked, hot-reloaded). */
   async updateSettings(updates: SettingsUpdateRequest): Promise<SettingsResponse> {
+    if ('anomalyDetectorConfig' in (updates as Record<string, unknown>)) {
+      throw new BadRequestException(
+        'anomalyDetectorConfig cannot be set via PUT /settings; use PATCH /settings/anomaly/detectors',
+      );
+    }
+    return this.withSettingsWriteLock(() => this.writeSettings(updates));
+  }
+
+  /** Internal: callers must already hold the settings write lock and have
+   *  validated any anomalyDetectorConfig they pass. */
+  private async writeSettings(updates: SettingsUpdateRequest): Promise<SettingsResponse> {
     if (updates.localRetentionDays !== undefined && updates.localRetentionDays !== null) {
       if (normalizeRetentionDays(updates.localRetentionDays) === null) {
         throw new BadRequestException(
@@ -210,7 +238,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
   }
 
   updateDetectorConfig(overrides: DetectorConfigMap): Promise<DetectorConfigMap> {
-    return this.withDetectorConfigLock(() => this.applyDetectorConfigUpdate(overrides));
+    return this.withSettingsWriteLock(() => this.applyDetectorConfigUpdate(overrides));
   }
 
   private async applyDetectorConfigUpdate(
@@ -219,6 +247,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     // Read from storage, not the cache: the cache can lag a write made by the
     // previous holder of the lock until commitCacheWrite runs.
     const existing = await this.readStoredDetectorConfig();
+    disableZeroAbsoluteThresholds(overrides);
     const merged: DetectorConfigMap = { ...existing };
 
     for (const key of Object.keys(overrides) as MetricType[]) {
@@ -228,6 +257,21 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
+    return this.validateAndPersistDetectorConfig(merged);
+  }
+
+  /** Clears one metric's override, leaving the others untouched. */
+  clearDetectorOverride(metric: MetricType): Promise<DetectorConfigMap> {
+    return this.withSettingsWriteLock(async () => {
+      const merged: DetectorConfigMap = { ...(await this.readStoredDetectorConfig()) };
+      delete merged[metric];
+      return this.validateAndPersistDetectorConfig(merged);
+    });
+  }
+
+  private async validateAndPersistDetectorConfig(
+    merged: DetectorConfigMap,
+  ): Promise<DetectorConfigMap> {
     for (const key of Object.keys(merged) as MetricType[]) {
       const resolved = resolveDetectorConfig(key as MetricType, merged);
 
@@ -252,15 +296,15 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    const updated = await this.updateSettings({ anomalyDetectorConfig: merged });
+    const updated = await this.writeSettings({ anomalyDetectorConfig: merged });
     const result = (updated.settings.anomalyDetectorConfig ?? {}) as DetectorConfigMap;
     this.notifyDetectorConfigChange(result);
     return result;
   }
 
   resetDetectorConfig(): Promise<void> {
-    return this.withDetectorConfigLock(async () => {
-      await this.updateSettings({ anomalyDetectorConfig: {} });
+    return this.withSettingsWriteLock(async () => {
+      await this.writeSettings({ anomalyDetectorConfig: {} });
       this.notifyDetectorConfigChange({});
     });
   }
@@ -270,10 +314,10 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     return (stored?.anomalyDetectorConfig ?? {}) as DetectorConfigMap;
   }
 
-  private withDetectorConfigLock<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.detectorConfigLock.then(fn, fn);
+  private withSettingsWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.settingsWriteLock.then(fn, fn);
     // A rejected update (e.g. validation failure) must not block later ones.
-    this.detectorConfigLock = run.catch(() => undefined);
+    this.settingsWriteLock = run.catch(() => undefined);
     return run;
   }
 
@@ -299,29 +343,35 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async resetToDefaults(): Promise<SettingsResponse> {
-    // The retention window survives a reset. Re-seeding it from
-    // LOCAL_RETENTION_DAYS would re-arm data deletion for an operator who
-    // explicitly cleared it in the UI and is resetting something unrelated —
-    // the docs promise that clearing the window sticks.
-    const current = await this.storageClient.getSettings();
-    const defaults = this.buildSettingsFromEnv();
-    if (current) {
-      defaults.localRetentionDays = current.localRetentionDays;
-    }
-    await this.storageClient.saveSettings(defaults);
-    const settings = await this.storageClient.getSettings();
+  resetToDefaults(): Promise<SettingsResponse> {
+    return this.withSettingsWriteLock(async () => {
+      // The retention window survives a reset. Re-seeding it from
+      // LOCAL_RETENTION_DAYS would re-arm data deletion for an operator who
+      // explicitly cleared it in the UI and is resetting something unrelated —
+      // the docs promise that clearing the window sticks.
+      const current = await this.storageClient.getSettings();
+      const defaults = this.buildSettingsFromEnv();
+      if (current) {
+        defaults.localRetentionDays = current.localRetentionDays;
+        // Detector overrides survive a general reset too; use
+        // POST /settings/anomaly/detectors/reset to clear them. They are
+        // unchanged, so live detectors need no notification.
+        defaults.anomalyDetectorConfig = current.anomalyDetectorConfig ?? {};
+      }
+      await this.storageClient.saveSettings(defaults);
+      const settings = await this.storageClient.getSettings();
 
-    if (!settings) {
-      throw new Error('Failed to reset settings');
-    }
+      if (!settings) {
+        throw new Error('Failed to reset settings');
+      }
 
-    this.commitCacheWrite(settings);
+      this.commitCacheWrite(settings);
 
-    return {
-      settings,
-      source: 'database',
-      requiresRestart: true,
-    };
+      return {
+        settings,
+        source: 'database',
+        requiresRestart: true,
+      };
+    });
   }
 }

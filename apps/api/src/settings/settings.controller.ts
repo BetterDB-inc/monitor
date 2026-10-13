@@ -4,13 +4,18 @@ import {
   Put,
   Post,
   Patch,
+  Delete,
   Body,
+  Param,
   HttpCode,
+  BadRequestException,
+  UseGuards,
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiOkResponse } from '@nestjs/swagger';
 import { SettingsUpdateRequest, SettingsResponse } from '@betterdb/shared';
+import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import {
   API_METRIC_TYPES,
   DETECTOR_DEFAULTS,
@@ -55,6 +60,8 @@ export class SettingsController {
   }
 
   @Get('anomaly/detectors')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
   @ApiOperation({ summary: 'Get anomaly detector threshold configuration' })
   @ApiOkResponse()
   async getAnomalyDetectors(): Promise<{
@@ -85,6 +92,8 @@ export class SettingsController {
   }
 
   @Patch('anomaly/detectors')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
   @HttpCode(200)
   @ApiOperation({ summary: 'Update per-metric anomaly detector thresholds' })
   @UsePipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true }))
@@ -97,19 +106,43 @@ export class SettingsController {
 
     // Sanitize before returning: strip Infinity sentinels from stored
     // overrides so the JSON response never contains null absolute fields.
-    const sanitizedResult: DetectorConfigMap = {};
-    for (const key of Object.keys(result) as MetricType[]) {
-      sanitizedResult[key] = sanitizeStoredOverride(result[key] ?? {});
+    return { message: 'Detector config updated', config: this.sanitizeMap(result) };
+  }
+
+  @Delete('anomaly/detectors/:metric')
+  @HttpCode(200)
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiOperation({ summary: 'Clear the threshold override for one metric' })
+  async deleteAnomalyDetector(
+    @Param('metric') metric: string,
+  ): Promise<{ message: string; config: DetectorConfigMap }> {
+    if (!(API_METRIC_TYPES as readonly string[]).includes(metric)) {
+      throw new BadRequestException(
+        `Unknown metric "${metric}". Expected one of: ${API_METRIC_TYPES.join(', ')}`,
+      );
     }
-    return { message: 'Detector config updated', config: sanitizedResult };
+    const result = await this.settingsService.clearDetectorOverride(metric as MetricType);
+    this.prometheusService.incrementDetectorConfigUpdates();
+    return { message: `Detector override cleared for ${metric}`, config: this.sanitizeMap(result) };
   }
 
   @Post('anomaly/detectors/reset')
   @HttpCode(200)
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
   @ApiOperation({ summary: 'Reset all anomaly detector thresholds to defaults' })
   async resetAnomalyDetectors(): Promise<{ message: string }> {
     await this.settingsService.resetDetectorConfig();
     return { message: 'Detector config reset to defaults' };
+  }
+
+  private sanitizeMap(map: DetectorConfigMap): DetectorConfigMap {
+    const out: DetectorConfigMap = {};
+    for (const key of Object.keys(map) as MetricType[]) {
+      out[key] = sanitizeStoredOverride(map[key] ?? {});
+    }
+    return out;
   }
 
   private dtoToConfigMap(dto: UpdateAnomalyDetectorsDto): DetectorConfigMap {

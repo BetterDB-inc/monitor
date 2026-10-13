@@ -6,8 +6,10 @@ import {
   DETECTOR_DEFAULTS,
   MetricType,
   resolveDetectorConfig,
+  sanitizeStoredOverride,
   toApiDetectorConfig,
 } from '../anomaly/anomaly.types';
+import { Feature, LicenseGuard } from '@proprietary/licenses';
 import { UpdateAnomalyDetectorsDto } from './dto/update-anomaly-detectors.dto';
 import { PrometheusService } from '../prometheus/prometheus.service';
 import { SettingsController } from './settings.controller';
@@ -19,6 +21,7 @@ describe('Settings anomaly detector thresholds', () => {
     getDetectorConfig: jest.Mock;
     updateDetectorConfig: jest.Mock;
     resetDetectorConfig: jest.Mock;
+    clearDetectorOverride: jest.Mock;
   };
   let prometheusService: { incrementDetectorConfigUpdates: jest.Mock };
 
@@ -27,6 +30,7 @@ describe('Settings anomaly detector thresholds', () => {
       getDetectorConfig: jest.fn().mockResolvedValue({}),
       updateDetectorConfig: jest.fn().mockImplementation(async (map) => map),
       resetDetectorConfig: jest.fn().mockResolvedValue(undefined),
+      clearDetectorOverride: jest.fn().mockResolvedValue({}),
     };
     prometheusService = { incrementDetectorConfigUpdates: jest.fn() };
 
@@ -36,7 +40,10 @@ describe('Settings anomaly detector thresholds', () => {
         { provide: SettingsService, useValue: settingsService },
         { provide: PrometheusService, useValue: prometheusService },
       ],
-    }).compile();
+    })
+      .overrideGuard(LicenseGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
 
     controller = module.get(SettingsController);
   });
@@ -165,6 +172,43 @@ describe('Settings anomaly detector thresholds', () => {
     });
   });
 
+  describe('DELETE /settings/anomaly/detectors/:metric', () => {
+    it('rejects an unknown metric', async () => {
+      await expect(controller.deleteAnomalyDetector('nope')).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(settingsService.clearDetectorOverride).not.toHaveBeenCalled();
+    });
+
+    it('delegates to SettingsService.clearDetectorOverride', async () => {
+      settingsService.clearDetectorOverride.mockResolvedValue({
+        memory_used: { criticalZScore: 4 },
+      });
+      const result = await controller.deleteAnomalyDetector('connections');
+      expect(settingsService.clearDetectorOverride).toHaveBeenCalledWith(MetricType.connections);
+      expect(result.config).toEqual({ memory_used: { criticalZScore: 4 } });
+    });
+  });
+
+  describe('license gating', () => {
+    it.each([
+      'getAnomalyDetectors',
+      'patchAnomalyDetectors',
+      'deleteAnomalyDetector',
+      'resetAnomalyDetectors',
+    ] as const)('%s requires Feature.ANOMALY_DETECTION', (method) => {
+      const handler = SettingsController.prototype[method];
+      expect(Reflect.getMetadata('requiredFeature', handler)).toBe(Feature.ANOMALY_DETECTION);
+      expect(Reflect.getMetadata('__guards__', handler)).toContain(LicenseGuard);
+    });
+
+    it('leaves general settings endpoints ungated', () => {
+      expect(
+        Reflect.getMetadata('requiredFeature', SettingsController.prototype.updateSettings),
+      ).toBeUndefined();
+    });
+  });
+
   describe('SettingsService.updateDetectorConfig', () => {
     const makeService = (stored: Record<string, any>) => {
       let settings = {
@@ -196,7 +240,10 @@ describe('Settings anomaly detector thresholds', () => {
           settings = { ...settings, ...updates };
           return settings;
         }),
-        saveSettings: jest.fn(),
+        saveSettings: jest.fn().mockImplementation(async (next: any) => {
+          settings = { ...next };
+          return settings;
+        }),
       };
       const configService = {
         get: jest.fn((_key: string, defaultValue: string) => defaultValue),
@@ -235,6 +282,74 @@ describe('Settings anomaly detector thresholds', () => {
       await expect(patch).rejects.toThrow(/warningAbsolute \(100\).*criticalAbsolute \(50\)/);
       expect(storageClient.updateSettings).not.toHaveBeenCalled();
       expect(storageClient.saveSettings).not.toHaveBeenCalled();
+    });
+
+    it('PUT /settings rejects anomalyDetectorConfig', async () => {
+      const { svc, storageClient } = makeService({});
+      await expect(
+        svc.updateSettings({
+          anomalyDetectorConfig: { connections: { warningZScore: 9, criticalZScore: 1 } },
+        } as any),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(storageClient.updateSettings).not.toHaveBeenCalled();
+    });
+
+    it('resetToDefaults keeps detector overrides', async () => {
+      const { svc, storageClient } = makeService({ connections: { warningZScore: 2.7 } });
+      const listener = jest.fn();
+      svc.onDetectorConfigChange(listener);
+
+      await svc.resetToDefaults();
+
+      const saved = storageClient.saveSettings.mock.calls.at(-1)?.[0];
+      expect(saved.anomalyDetectorConfig).toEqual({ connections: { warningZScore: 2.7 } });
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('a general PUT does not overwrite a concurrent detector PATCH', async () => {
+      const { svc, storageClient } = makeService({});
+      // Mimic the SQL adapters' whole-row read-merge-write on a general update.
+      storageClient.updateSettings.mockImplementation(async (updates: any) => {
+        const snapshot = await storageClient.getSettings();
+        await new Promise((resolve) => setImmediate(resolve));
+        return storageClient.saveSettings({ ...snapshot, ...updates });
+      });
+
+      await Promise.all([
+        svc.updateDetectorConfig({ connections: { warningZScore: 2.7 } }),
+        svc.updateSettings({ anomalyPollIntervalMs: 2000 } as any),
+      ]);
+
+      const s = await storageClient.getSettings();
+      expect(s.anomalyDetectorConfig).toEqual({ connections: { warningZScore: 2.7 } });
+      expect(s.anomalyPollIntervalMs).toBe(2000);
+    });
+
+    it('0 disables an absolute threshold and GET omits it', async () => {
+      const { svc } = makeService({});
+      const result = await svc.updateDetectorConfig({ acl_denied: { criticalAbsolute: 0 } });
+      expect(result.acl_denied?.criticalAbsolute).toBe(Number.POSITIVE_INFINITY);
+      expect(sanitizeStoredOverride(result.acl_denied!)).toEqual({});
+      expect(resolveDetectorConfig(MetricType.acl_denied, result).criticalAbsolute).toBe(
+        Number.POSITIVE_INFINITY,
+      );
+    });
+
+    it('clearDetectorOverride removes one metric, keeps the rest, and notifies', async () => {
+      const { svc, storageClient } = makeService({
+        connections: { warningZScore: 2.7 },
+        memory_used: { criticalZScore: 4.0 },
+      });
+      const listener = jest.fn();
+      svc.onDetectorConfigChange(listener);
+
+      const result = await svc.clearDetectorOverride(MetricType.connections);
+
+      expect(result).toEqual({ memory_used: { criticalZScore: 4.0 } });
+      expect((await storageClient.getSettings()).anomalyDetectorConfig).toEqual({
+        memory_used: { criticalZScore: 4.0 },
+      });
+      expect(listener).toHaveBeenCalledWith({ memory_used: { criticalZScore: 4.0 } });
     });
 
     it('notifies listeners with the merged map on update and {} on reset', async () => {

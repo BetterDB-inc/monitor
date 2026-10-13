@@ -559,8 +559,8 @@ curl -b cookies.txt -c cookies.txt -X PATCH http://localhost:3001/api/settings/a
 |-------|-------------|
 | `warningZScore` | Z-score threshold for WARNING (0.5–10) |
 | `criticalZScore` | Z-score threshold for CRITICAL (1–15, must be > warning when both set) |
-| `warningAbsolute` | Absolute value threshold for WARNING |
-| `criticalAbsolute` | Absolute value threshold for CRITICAL |
+| `warningAbsolute` | Absolute value threshold for WARNING (`0` disables it) |
+| `criticalAbsolute` | Absolute value threshold for CRITICAL (`0` disables it) |
 | `consecutiveRequired` | Consecutive samples above threshold before alerting (1–20) |
 | `cooldownMs` | Minimum ms between alerts for the same metric (1000–3600000) |
 
@@ -568,11 +568,21 @@ curl -b cookies.txt -c cookies.txt -X PATCH http://localhost:3001/api/settings/a
 
 `replication_role` is detected via state-diff (not z-score) and is not tunable through this API.
 
+Clear the override for one metric (others are kept):
+
+```bash
+curl -b cookies.txt -c cookies.txt -X DELETE http://localhost:3001/api/settings/anomaly/detectors/connections
+```
+
 Reset all overrides:
 
 ```bash
 curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/settings/anomaly/detectors/reset
 ```
+
+Detector thresholds can only be changed through these endpoints; `PUT /api/settings` rejects `anomalyDetectorConfig` with a 400. Resetting general settings (`POST /api/settings/reset`) keeps detector overrides.
+
+These endpoints require a license that includes anomaly detection.
 
 Changes apply to the running anomaly detectors immediately (no restart). In a multi-replica deployment a PATCH updates only the replica that served it; other replicas pick up the stored config on their next restart.
 
@@ -600,6 +610,7 @@ docker run -e ANOMALY_DETECTION_ENABLED=false betterdb/monitor
 ```http
 GET /api/settings/anomaly/detectors
 PATCH /api/settings/anomaly/detectors
+DELETE /api/settings/anomaly/detectors/:metric
 POST /api/settings/anomaly/detectors/reset
 ```
 
