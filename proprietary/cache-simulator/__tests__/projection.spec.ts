@@ -1,12 +1,12 @@
-import { DEFAULT_OVERHEAD_PER_KEY_BYTES, fixedOverhead, keysAt, project, type ProjectionInputs } from '@betterdb/shared';
+import { DEFAULT_OVERHEAD_PER_KEY_BYTES, fixedOverhead, inPlaceBytesPerDay, keysAt, project, type ProjectionInputs } from '@betterdb/shared';
 
 const base: ProjectionInputs = {
   currentKeys: 1000,
   keysPerDay: 100,
+  bytesPerDay: 0,
   ttlDays: null,
   avgKeyBytes: 100,
-  stdKeyBytes: 0,
-  sampleCount: 0,
+  ci95Bytes: 0,
   overheadPerKeyBytes: 0,
   fixedOverheadBytes: 0,
   maxmemory: null,
@@ -62,16 +62,30 @@ describe('projection', () => {
     expect(project({ ...base, maxmemory: 0 }).daysTo80Percent).toBeNull();
   });
 
-  it('widens the band with key size spread', () => {
-    const point = project({ ...base, stdKeyBytes: 50, sampleCount: 100 }).points[0];
-    expect(point.high - point.bytes).toBeCloseTo(1000 * ((1.96 * 50) / 10), 6);
-    expect(point.bytes - point.low).toBeCloseTo(1000 * ((1.96 * 50) / 10), 6);
+  it('anchors the band to the sampled interval and scales it with the key count', () => {
+    const result = project({ ...base, ci95Bytes: 5000 });
+    expect(result.points[0].high - result.points[0].bytes).toBeCloseTo(5000, 6);
+    expect(result.points[0].bytes - result.points[0].low).toBeCloseTo(5000, 6);
+    expect(result.points[10].high - result.points[10].bytes).toBeCloseTo(10_000, 6);
   });
 
-  it('has no band without samples', () => {
-    const point = project({ ...base, stdKeyBytes: 50 }).points[0];
+  it('has no band without an interval', () => {
+    const point = project(base).points[0];
     expect(point.low).toBe(point.bytes);
     expect(point.high).toBe(point.bytes);
+  });
+
+  it('adds byte growth that the key count does not explain', () => {
+    const inputs = { ...base, keysPerDay: 0, bytesPerDay: 500, maxmemory: 102_000 };
+    expect(inPlaceBytesPerDay(inputs)).toBe(500);
+    const result = project(inputs);
+    expect(result.points[10].bytes).toBe(100_000 + 5000);
+    expect(result.daysToMaxmemory).toBe(4);
+  });
+
+  it('adds no extra growth when new keys explain the byte trend', () => {
+    expect(inPlaceBytesPerDay({ ...base, bytesPerDay: 8000 })).toBe(0);
+    expect(project({ ...base, bytesPerDay: 8000 }).points[10].bytes).toBe(200_000);
   });
 
   it('stays finite with zero keys', () => {
