@@ -66,7 +66,7 @@ describe('KvCacheOtlpSinkService', () => {
         engineId: 'e1',
         connectionId: 'c1',
         modelName: 'llama',
-        series: '0|worker',
+        series: '0|worker|[]',
         metric: 'num_hit_tokens',
         value: 10,
         cumulative: true,
@@ -74,8 +74,21 @@ describe('KvCacheOtlpSinkService', () => {
       },
       NOW,
     );
-    expect(samples.observe.mock.calls[1][0]).toMatchObject({ series: '1|worker', value: 20 });
+    expect(samples.observe.mock.calls[1][0]).toMatchObject({ series: '1|worker|[]', value: 20 });
     expect(registry.recordResult).toHaveBeenCalledWith('e1', { lastSeenAt: NOW, lastError: null });
+  });
+
+  it('keeps workers identified only by resource attributes apart', () => {
+    const { service, samples } = setup();
+    const bare = { attributes: [str('model_name', 'llama')], asInt: '5' } as unknown as ReturnType<typeof point>;
+    const metric = () => [sum('lmcache:num_hit_tokens_total', [bare])];
+    service.ingest({ ...attrs, 'service.instance.id': 'b', 'host.name': 'h' }, metric(), NOW);
+    service.ingest({ 'host.name': 'h', 'service.instance.id': 'b', ...attrs }, metric(), NOW);
+    service.ingest({ ...attrs, 'service.instance.id': 'a', 'host.name': 'h' }, metric(), NOW);
+    const [first, same, other] = samples.observe.mock.calls.map(([o]) => o.series);
+    expect(first).toBe(same);
+    expect(first).not.toBe(other);
+    expect(first).toBe('||[["host.name","h"],["service.instance.id","b"]]');
   });
 
   it('skips points flagged as having no recorded value', () => {
@@ -83,7 +96,7 @@ describe('KvCacheOtlpSinkService', () => {
     const metrics = [sum('lmcache:num_hit_tokens_total', [{ ...point('0', 10), flags: 1 } as ReturnType<typeof point>, point('1', 20)])];
     expect(service.ingest(attrs, metrics, NOW)).toEqual({ accepted: 1, dropped: {} });
     expect(samples.observe).toHaveBeenCalledTimes(1);
-    expect(samples.observe.mock.calls[0][0]).toMatchObject({ series: '1|worker', value: 20 });
+    expect(samples.observe.mock.calls[0][0]).toMatchObject({ series: '1|worker|[]', value: 20 });
   });
 
   it('marks delta temporality sums as not cumulative', () => {

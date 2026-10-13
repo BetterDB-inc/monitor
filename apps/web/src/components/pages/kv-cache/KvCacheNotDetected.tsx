@@ -9,9 +9,10 @@ const EXAMPLE_KEY = 'Qwen/Qwen2.5-0.5B-Instruct@1@0@9e3779b97f4a7c15@bfloat16';
 
 interface Props {
   latest: KvCacheFootprintSnapshot | null;
+  onLinkEngine: () => void;
 }
 
-export function KvCacheNotDetected({ latest }: Props) {
+export function KvCacheNotDetected({ latest, onLinkEngine }: Props) {
   const rescan = useRescanKvCache();
   const canMutate = useCanMutate();
 
@@ -58,6 +59,11 @@ export function KvCacheNotDetected({ latest }: Props) {
             {canMutate && (
               <Button onClick={() => rescan.mutate()} disabled={rescan.isPending}>
                 Rescan now
+              </Button>
+            )}
+            {canMutate && (
+              <Button variant="outline" onClick={onLinkEngine}>
+                Link an engine
               </Button>
             )}
             <a

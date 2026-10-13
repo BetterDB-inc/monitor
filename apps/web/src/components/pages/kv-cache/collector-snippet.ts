@@ -25,6 +25,7 @@ export function collectorSnippet(
     'exporters:',
     '  otlphttp:',
     `    metrics_endpoint: ${betterdbUrl}/v1/external/metrics`,
+    '    # Remove this headers block if BetterDB Monitor has no OTEL_INGEST_TOKEN set.',
     '    headers:',
     "      Authorization: 'Bearer ${env:BETTERDB_OTEL_INGEST_TOKEN}'",
     'service:',

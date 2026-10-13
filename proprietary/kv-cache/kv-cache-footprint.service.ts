@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { Feature, type KvCacheFootprintSnapshot } from '@betterdb/shared';
 import { MultiConnectionPoller, type ConnectionContext } from '@app/common/services/multi-connection-poller';
 import type { StoragePort } from '@app/common/interfaces/storage-port.interface';
@@ -42,10 +42,16 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     maxMatched: resolvePositiveInt(process.env.KV_CACHE_MATCH_MAX_KEYS, 2000, 1),
   };
   private readonly sampleSize = resolvePositiveInt(process.env.KV_CACHE_SAMPLE_KEYS, 500, 1);
+  private readonly undetectedRecheckMs = resolvePositiveInt(
+    process.env.KV_CACHE_UNDETECTED_RECHECK_MS,
+    1800000,
+    MIN_FOOTPRINT_INTERVAL_MS,
+  );
   private readonly running = new Map<string, Promise<KvCacheFootprintSnapshot | null>>();
   private readonly generations = new Map<string, number>();
   private readonly lastEvicted = new Map<string, Map<string, number>>();
   private readonly sampleKeys = new Map<string, string>();
+  private readonly undetectedUntil = new Map<string, number>();
   private readonly listeners: SnapshotListener[] = [];
   private readonly removalListeners: RemovalListener[] = [];
 
@@ -67,6 +73,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     if (!this.license.hasFeature(Feature.KV_CACHE_MONITORING)) return;
+    if (Date.now() < (this.undetectedUntil.get(ctx.connectionId) ?? 0)) return;
     await this.collect(ctx);
   }
 
@@ -77,6 +84,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     this.generations.set(connectionId, generation);
     this.lastEvicted.delete(connectionId);
     this.sampleKeys.delete(connectionId);
+    this.undetectedUntil.delete(connectionId);
     const settled = active?.then(
       () => undefined,
       () => undefined,
@@ -116,14 +124,15 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   }
 
   async triggerCollection(connectionId: string): Promise<KvCacheFootprintSnapshot | null> {
-    const client = this.connectionRegistry.get(connectionId);
     const config = this.connectionRegistry.getConfig(connectionId);
+    if (!config) throw new NotFoundException(`Connection '${connectionId}' not found`);
+    const client = this.connectionRegistry.get(connectionId);
     return this.collect({
       connectionId,
-      connectionName: config?.name ?? connectionId,
+      connectionName: config.name,
       client,
-      host: config?.host ?? '',
-      port: config?.port ?? 0,
+      host: config.host,
+      port: config.port,
     });
   }
 
@@ -164,6 +173,8 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     await this.storage.saveKvCacheFootprintSnapshot(snapshot);
     if (!current()) return null;
     this.lastEvicted.set(ctx.connectionId, new Map([...(this.lastEvicted.get(ctx.connectionId) ?? []), ...evicted]));
+    if (snapshot.detected) this.undetectedUntil.delete(ctx.connectionId);
+    else this.undetectedUntil.set(ctx.connectionId, snapshot.timestamp + this.undetectedRecheckMs);
     this.rememberSampleKey(ctx.connectionId, readings);
     await this.announce(snapshot);
     return snapshot;

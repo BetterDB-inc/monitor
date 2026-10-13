@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { kvCacheApi } from './kv-cache';
+import { kvCacheApi, kvCacheKeys } from './kv-cache';
 
 describe('kvCacheApi', () => {
   const fetchMock = vi.fn();
@@ -32,5 +32,16 @@ describe('kvCacheApi', () => {
     await kvCacheApi.getSamples({ from: 1, to: 2, engineId: 'e' });
     expect(fetchMock.mock.calls[0][0]).toContain('/kv-cache/engines/samples?from=1&to=2&engineId=e');
     expect(fetchMock.mock.calls[0][0]).not.toContain('model=');
+  });
+});
+
+describe('kvCacheKeys', () => {
+  it('keeps the live history key apart from the default-range history key', () => {
+    expect(kvCacheKeys.liveHistory('c1')).not.toEqual(kvCacheKeys.history('c1', 0, 0));
+  });
+
+  it('keeps the live history key under the history prefix so rescans refresh it', () => {
+    const prefix = kvCacheKeys.historyAll('c1');
+    expect(kvCacheKeys.liveHistory('c1').slice(0, prefix.length)).toEqual(prefix);
   });
 });

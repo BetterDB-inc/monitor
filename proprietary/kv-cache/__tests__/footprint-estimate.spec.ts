@@ -80,6 +80,35 @@ describe('buildSnapshot', () => {
     expect(s.detected).toBe(false);
   });
 
+  it('measures orphans only over kv_bytes keys whose sibling probe answered', () => {
+    const keys = [key(0, 'kv_bytes'), key(1, 'kv_bytes'), key(2, 'kv_bytes'), key(3, 'kv_bytes')];
+    const node: NodeObservation = {
+      scannedKeys: 4,
+      matchedKeys: keys,
+      scanComplete: true,
+      dbSize: 4,
+      samples: [
+        sample(keys[0], { siblingExists: true }),
+        sample(keys[1], { siblingExists: null }),
+        sample(keys[2], { siblingExists: null }),
+        sample(keys[3], { siblingExists: null }),
+      ],
+    };
+    expect(buildSnapshot({ ...base, nodes: [node] }).orphanRatio).toBe(0);
+  });
+
+  it('reports no orphan ratio when no sibling probe answered', () => {
+    const keys = [key(0, 'kv_bytes'), key(1, 'kv_bytes')];
+    const node: NodeObservation = {
+      scannedKeys: 2,
+      matchedKeys: keys,
+      scanComplete: true,
+      dbSize: 2,
+      samples: keys.map((k) => sample(k, { siblingExists: null })),
+    };
+    expect(buildSnapshot({ ...base, nodes: [node] }).orphanRatio).toBeNull();
+  });
+
   it('ignores vanished keys and measures TTL coverage', () => {
     const keys = [key(0), key(1), key(2)];
     const node: NodeObservation = {

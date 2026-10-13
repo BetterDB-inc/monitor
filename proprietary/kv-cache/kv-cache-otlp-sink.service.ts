@@ -23,6 +23,13 @@ function pointsOf(metric: OtlpMetric): number {
   return points.length;
 }
 
+function resourceSeries(resourceAttributes: Record<string, string>): string {
+  const entries = Object.entries(resourceAttributes)
+    .filter(([key]) => key !== LMCACHE_ENGINE_ATTRIBUTE)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return JSON.stringify(entries);
+}
+
 @Injectable()
 export class KvCacheOtlpSinkService implements KvCacheOtlpSink {
   constructor(
@@ -47,6 +54,7 @@ export class KvCacheOtlpSinkService implements KvCacheOtlpSink {
       if (count > 0) dropped[reason] = (dropped[reason] ?? 0) + count;
     };
     let accepted = 0;
+    const resource = resourceSeries(resourceAttributes);
 
     for (const metric of metrics) {
       const name = (metric.name ?? '').replace(/^lmcache:/, '').replace(/_total$/, '');
@@ -73,7 +81,7 @@ export class KvCacheOtlpSinkService implements KvCacheOtlpSink {
             engineId: engine.id,
             connectionId: engine.connectionId,
             modelName: labels.model_name || 'unknown',
-            series: `${labels.worker_id ?? ''}|${labels.role ?? ''}`,
+            series: `${labels.worker_id ?? ''}|${labels.role ?? ''}|${resource}`,
             metric: name,
             value,
             cumulative,

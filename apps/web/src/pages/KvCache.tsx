@@ -54,7 +54,7 @@ export function KvCache() {
   });
 
   const liveHistory = useQuery({
-    queryKey: kvCacheKeys.history(connectionId, 0, 0),
+    queryKey: kvCacheKeys.liveHistory(connectionId),
     queryFn: ({ signal }) => {
       const end = Date.now();
       return kvCacheApi.getFootprintHistory(end - DEFAULT_RANGE_MS, end, signal);

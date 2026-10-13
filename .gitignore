@@ -96,3 +96,6 @@ packages/retrieval/eval/longmemeval/*_oracle.json
 
 # Terraform-generated Lambda build artifacts
 proprietary/infra/terraform/builds/
+
+# Python bytecode
+__pycache__/

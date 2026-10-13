@@ -26,6 +26,7 @@ describe('collectorSnippet', () => {
         'exporters:',
         '  otlphttp:',
         '    metrics_endpoint: https://betterdb.example.com/v1/external/metrics',
+        '    # Remove this headers block if BetterDB Monitor has no OTEL_INGEST_TOKEN set.',
         '    headers:',
         "      Authorization: 'Bearer ${env:BETTERDB_OTEL_INGEST_TOKEN}'",
         'service:',
@@ -37,6 +38,12 @@ describe('collectorSnippet', () => {
         '',
       ].join('\n'),
     );
+  });
+
+  it('tells the user to drop the headers block when Monitor has no ingest token', () => {
+    const lines = collectorSnippet('lmc-1', 'http://x').split('\n');
+    const headers = lines.indexOf('    headers:');
+    expect(lines[headers - 1]).toMatch(/^\s*# Remove this headers block .*OTEL_INGEST_TOKEN/);
   });
 
   it('honours a custom scrape target', () => {

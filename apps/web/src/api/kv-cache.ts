@@ -71,6 +71,12 @@ export const kvCacheKeys = {
     from,
     to,
   ],
+  liveHistory: (connectionId: string | null | undefined) => [
+    'kv-cache',
+    'history',
+    connectionId ?? null,
+    'live',
+  ],
   samples: (connectionId: string | null | undefined, params: object) => [
     'kv-cache',
     'samples',
