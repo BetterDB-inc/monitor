@@ -1,4 +1,4 @@
-import { estimate } from '../size-estimator';
+import { estimate, keyMemoryCeiling } from '../size-estimator';
 import type { NodeSample } from '../sample-types';
 
 const node = (strata: NodeSample['strata'], timedOut = false): NodeSample => ({
@@ -115,6 +115,27 @@ describe('estimate', () => {
   it('adds no allowance when the stratum is fully sampled', () => {
     const result = estimate([node([{ type: 'string', estimatedKeys: 2, exact: true, observed: 0, sizes: [10, 30] }])], 0);
     expect(result.ci95Bytes).toBe(0);
+  });
+
+  it('widens the interval to the memory the sample cannot explain', () => {
+    const result = estimate([node([{ type: 'string', estimatedKeys: 100, exact: true, observed: 0, sizes: [10, 10] }])], 0, 5000);
+    expect(result.totalBytes).toBe(1000);
+    expect(result.ci95Bytes).toBe(4000);
+  });
+
+  it('ignores the memory ceiling when every key was sampled', () => {
+    const result = estimate([node([{ type: 'string', estimatedKeys: 2, exact: true, observed: 0, sizes: [10, 10] }])], 0, 5000);
+    expect(result.ci95Bytes).toBe(0);
+  });
+
+  it('keeps the statistical interval when it is wider than the unexplained memory', () => {
+    const withoutCeiling = estimate([node([{ type: 'string', estimatedKeys: 1000, exact: true, observed: 0, sizes: [90, 100, 110] }])], 0);
+    const withCeiling = estimate([node([{ type: 'string', estimatedKeys: 1000, exact: true, observed: 0, sizes: [90, 100, 110] }])], 0, 100_001);
+    expect(withCeiling.ci95Bytes).toBe(withoutCeiling.ci95Bytes);
+  });
+
+  it('adds the per-key dict entry to the dataset memory for the ceiling', () => {
+    expect(keyMemoryCeiling(1000, 10)).toBe(1240);
   });
 
   it('flags partial results', () => {

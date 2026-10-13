@@ -3,6 +3,11 @@ import { isHeavyTailed, mean, sampleVariance } from './sample-stats';
 import type { NodeSample } from './sample-types';
 
 const Z95 = 1.96;
+export const DICT_ENTRY_BYTES = 24;
+
+export function keyMemoryCeiling(datasetBytes: number, keys: number): number {
+  return datasetBytes + keys * DICT_ENTRY_BYTES;
+}
 
 interface TypeTotals {
   keys: number;
@@ -23,7 +28,7 @@ function countVariance(strata: NodeSample['strata'], pooledMean: number): number
   return ((keys * keys) / observed) * spread * (1 - observed / keys);
 }
 
-export function estimate(nodes: NodeSample[], sampledAt: number): CacheSimulatorEstimate {
+export function estimate(nodes: NodeSample[], sampledAt: number, memoryCeiling?: number): CacheSimulatorEstimate {
   const cells = nodes.flatMap((node) => node.strata.filter((stratum) => stratum.estimatedKeys > 0));
   const pooled = cells.flatMap((cell) => cell.sizes);
   const pooledMean = mean(pooled);
@@ -63,12 +68,15 @@ export function estimate(nodes: NodeSample[], sampledAt: number): CacheSimulator
   });
   byType.sort((a, b) => b.keys * b.avgBytes - a.keys * a.avgBytes);
 
+  const statistical = Z95 * Math.sqrt(variance) + tailAllowance;
+  const unsampled = cells.some((cell) => cell.sizes.length < cell.estimatedKeys);
+  const unexplained = memoryCeiling !== undefined && unsampled ? Math.max(0, memoryCeiling - total) : 0;
   const keys = byType.reduce((sum, entry) => sum + entry.keys, 0);
   const second = [...types.values()].reduce((sum, entry) => sum + entry.second, 0);
   const avgKeyBytes = keys > 0 ? total / keys : 0;
   return {
     totalBytes: total,
-    ci95Bytes: Z95 * Math.sqrt(variance) + tailAllowance,
+    ci95Bytes: Math.max(statistical, unexplained),
     avgKeyBytes,
     stdKeyBytes: keys > 0 ? Math.sqrt(Math.max(0, second / keys - avgKeyBytes * avgKeyBytes)) : 0,
     sampleCount: byType.reduce((sum, entry) => sum + entry.sampled, 0),
