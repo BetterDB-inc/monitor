@@ -6,7 +6,7 @@ import type {
   CveSeverity,
 } from '@betterdb/shared';
 import { GHSA_REPOS } from '../cve.constants';
-import { branchOf, compareVersions } from '../matcher/version-range';
+import { branchOf } from '../matcher/version-range';
 import {
   fetchLinkedJson,
   type LinkedJson,
@@ -47,25 +47,44 @@ function toSeverity(raw: string): CveSeverity {
 }
 
 const VERSION_PATTERN = /\d+\.\d+\.\d+/g;
-const LOWER_BOUND_PATTERN = /(?:^|,)\s*>=\s*(\d+\.\d+\.\d+)/;
+const VER = String.raw`\d+\.\d+(?:\.\d+)?`;
+// ">= 7.2", ">= 7.2.0", "7.0 or newer", "7.0 and later".
+const LOWER_BOUND_PATTERN = new RegExp(
+  String.raw`(?:>=\s*(${VER}))|(?:(${VER})\s+(?:or|and)\s+(?:newer|later|above))`,
+  'i',
+);
+// Empty, "TBD", "none", "n/a" or "-": the vendor has not published a fix.
+const NO_FIX_PATTERN = /^\s*(tbd|none|n\/a|-)?\s*$/i;
 const AT_OR_BELOW_PATTERN = /(?:^|,)\s*<=\s*(\d+\.\d+\.\d+)/;
 const BELOW_PATTERN = /(?:^|,)\s*<\s*(\d+\.\d+\.\d+)/;
+
+/** Vendor typos seen in real advisories: "=>" for ">=", "=<" for "<=". */
+function normalizeRange(range: string): string {
+  return range.replace(/=>/g, '>=').replace(/=</g, '<=');
+}
+
+/** Pads "7.2" to "7.2.0" so compareVersions/branchOf get three parts. */
+function padVersion(version: string): string {
+  return version.split('.').length === 2 ? `${version}.0` : version;
+}
+
+function lowerBoundOf(range: string): string | null {
+  const match = range.match(LOWER_BOUND_PATTERN);
+  const version = match?.[1] ?? match?.[2];
+  return version ? padVersion(version) : null;
+}
 
 function lowerBoundFor(vulnerableVersionRange: string | undefined, branch: string): string | null {
   if (vulnerableVersionRange === undefined) {
     return null;
   }
 
-  const match = vulnerableVersionRange.match(LOWER_BOUND_PATTERN);
-  if (!match) {
+  const lower = lowerBoundOf(vulnerableVersionRange);
+  if (lower === null || branchOf(lower) !== branch) {
     return null;
   }
 
-  if (branchOf(match[1]) !== branch) {
-    return null;
-  }
-
-  return match[1];
+  return lower;
 }
 
 function exactRangesFromPatchedVersions(
@@ -113,19 +132,19 @@ function unpatchedRangeFrom(vulnerableVersionRange: string): BranchRange | null 
   }
 
   const ceiling = upper.vulnerableAtOrBelow ?? upper.vulnerableBelow ?? '';
-  const lower = vulnerableVersionRange.match(LOWER_BOUND_PATTERN);
+  const lower = lowerBoundOf(vulnerableVersionRange);
 
-  if (!lower) {
+  if (lower === null) {
     return { branch: '*', ...upper };
   }
 
-  const branch = branchOf(lower[1]);
+  const branch = branchOf(lower);
 
   if (branch !== branchOf(ceiling)) {
-    return { branch: '*', ...upper, vulnerableFrom: lower[1] };
+    return { branch: '*', ...upper, vulnerableFrom: lower };
   }
 
-  return { branch, ...upper, vulnerableFrom: lower[1] };
+  return { branch, ...upper, vulnerableFrom: lower };
 }
 
 interface AffectedRanges {
@@ -133,76 +152,73 @@ interface AffectedRanges {
   confidence: CveConfidence;
 }
 
-const ALL_VERSIONS_PATTERN = /^\s*(all|any|\*)\s*$/i;
-const ANY_UPPER_BOUND_PATTERN = /<=?\s*\d+\.\d+\.\d+/g;
+const ALL_VERSIONS_PATTERN = /^\s*(all|any|\*)(\s+versions?)?\s*$/i;
+const ANY_UPPER_BOUND_PATTERN = /<=?\s*\d+\.\d+(?:\.\d+)?/g;
 const AND_BELOW_PATTERN = /\band below\b/i;
-
-function highestVersion(versions: string[]): string | null {
-  return versions.reduce<string | null>((highest, candidate) => {
-    return highest === null || compareVersions(candidate, highest) > 0 ? candidate : highest;
-  }, null);
-}
 
 /**
  * `patched_versions` only names the branches that received a fix. When the
- * vendor's affected range is NOT itself a per-branch enumeration ("All",
- * ">= 6.0.0", "<= 9.0.2"), every other branch below the newest fix is
- * affected with no fix available, typically EOL lines such as Redis 7.0.x.
- * Emit one wildcard range for those branches. matchRanges() never lets a
- * wildcard override a fix published for the version's own branch.
+ * vendor's affected range covers every version ("All", "All versions") or
+ * has a floor but no ceiling (">= 7.0", "7.0 and newer"), every branch it
+ * doesn't list is affected with no fix available, typically EOL lines such
+ * as Redis 7.0.x. Emit one unbounded wildcard for those branches.
+ * matchRanges() never lets a wildcard override a fix published for the
+ * version's own branch.
+ *
+ * Any upper bound ("< 8.0.4", ">= 9.0.0, <= 9.0.2") means the range is
+ * already branch-scoped, so nothing is inferred; unparseable prose never
+ * guesses a range.
  */
-function unlistedBranchFallback(
-  patchedVersions: string,
-  vulnerableVersionRange: string | undefined,
-): BranchRange | null {
-  const highestPatched = highestVersion(patchedVersions.match(VERSION_PATTERN) ?? []);
-  if (highestPatched === null) {
-    return null;
-  }
-
-  const range = vulnerableVersionRange ?? '';
-  const upperBounds = range.match(ANY_UPPER_BOUND_PATTERN) ?? [];
-
-  // "<= 9.1.0, <= 9.0.4, ..." or "7.2.10 and below, 8.0.5 and below": the
-  // vendor enumerated every affected branch, so there is nothing to infer.
-  if (upperBounds.length > 1 || AND_BELOW_PATTERN.test(range)) {
-    return null;
-  }
+function unlistedBranchFallback(rawRange: string | undefined): BranchRange | null {
+  const range = normalizeRange(rawRange ?? '');
 
   // A missing range is unknown, not "all versions": only an explicit marker counts.
-  const allVersions = ALL_VERSIONS_PATTERN.test(range);
-  const lower = range.match(LOWER_BOUND_PATTERN);
-  if (allVersions === false && upperBounds.length === 0 && lower === null) {
-    return null; // unparseable prose: never guess a range
+  if (ALL_VERSIONS_PATTERN.test(range)) {
+    return { branch: '*', vulnerableFrom: '0.0.0' };
   }
 
-  const upper = upperBoundOf(range) ?? { vulnerableBelow: highestPatched };
+  const upperBounds = range.match(ANY_UPPER_BOUND_PATTERN) ?? [];
+  const lower = lowerBoundOf(range);
+  if (lower !== null && upperBounds.length === 0 && !AND_BELOW_PATTERN.test(range)) {
+    return { branch: '*', vulnerableFrom: lower };
+  }
 
-  return { branch: '*', ...upper, ...(lower ? { vulnerableFrom: lower[1] } : {}) };
+  return null;
 }
 
-function toAffectedRanges(vulnerabilities: GhsaVulnerability[]): AffectedRanges {
+function toAffectedRanges(vulnerabilities: GhsaVulnerability[], repo: string): AffectedRanges {
   const exact: BranchRange[] = [];
   const unpatched: BranchRange[] = [];
+  // Valkey advisories enumerate every affected branch, so there is never an
+  // unlisted branch to infer.
+  const allowWildcard = !repo.startsWith('valkey-io/');
 
   for (const vulnerability of vulnerabilities) {
-    const patchedVersions = vulnerability.patched_versions?.trim();
-    const vulnerableVersionRange = vulnerability.vulnerable_version_range?.trim();
+    const patchedRaw = vulnerability.patched_versions?.trim() ?? '';
+    const patchedVersions = NO_FIX_PATTERN.test(patchedRaw) ? '' : patchedRaw;
+    const rawRange = vulnerability.vulnerable_version_range?.trim();
+    const fallback = allowWildcard ? unlistedBranchFallback(rawRange) : null;
 
     if (patchedVersions) {
-      exact.push(...exactRangesFromPatchedVersions(patchedVersions, vulnerableVersionRange));
-      const fallback = unlistedBranchFallback(patchedVersions, vulnerableVersionRange);
+      exact.push(
+        ...exactRangesFromPatchedVersions(patchedVersions, normalizeRange(rawRange ?? '')),
+      );
       if (fallback) {
         exact.push(fallback);
       }
       continue;
     }
 
-    if (vulnerableVersionRange === undefined || vulnerableVersionRange.length === 0) {
+    if (fallback) {
+      unpatched.push(fallback);
       continue;
     }
 
-    const range = unpatchedRangeFrom(vulnerableVersionRange);
+    if (rawRange === undefined || rawRange.length === 0) {
+      continue;
+    }
+
+    const range = unpatchedRangeFrom(normalizeRange(rawRange));
     if (range) {
       unpatched.push(range);
     }
@@ -219,12 +235,12 @@ function toAffectedRanges(vulnerabilities: GhsaVulnerability[]): AffectedRanges 
   return { affected: [], confidence: 'unversioned' };
 }
 
-function toAdvisory(raw: GhsaAdvisory, product: CveProduct): Advisory | null {
+function toAdvisory(raw: GhsaAdvisory, product: CveProduct, repo: string): Advisory | null {
   if (!raw.cve_id) {
     return null;
   }
 
-  const { affected, confidence } = toAffectedRanges(raw.vulnerabilities ?? []);
+  const { affected, confidence } = toAffectedRanges(raw.vulnerabilities ?? [], repo);
 
   return {
     cveId: raw.cve_id,
@@ -288,7 +304,7 @@ export class GhsaSource implements CveSource {
 
       try {
         for (const raw of await this.fetchRepoAdvisories(url)) {
-          const advisory = toAdvisory(raw, repo.product);
+          const advisory = toAdvisory(raw, repo.product, `${repo.owner}/${repo.repo}`);
           if (advisory) {
             advisories.push(advisory);
           }
