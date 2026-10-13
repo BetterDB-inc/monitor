@@ -32,7 +32,13 @@ class CriticalGreaterThanWarningValidator implements ValidatorConstraintInterfac
 class CriticalAbsoluteGreaterThanWarningValidator implements ValidatorConstraintInterface {
   validate(criticalAbsolute: number, args: ValidationArguments): boolean {
     const obj = args.object as DetectorConfigDto;
-    if (obj.warningAbsolute === undefined || criticalAbsolute === undefined) {
+    // 0 means "disabled", so there is no ordering to enforce.
+    if (
+      obj.warningAbsolute === undefined ||
+      criticalAbsolute === undefined ||
+      obj.warningAbsolute === 0 ||
+      criticalAbsolute === 0
+    ) {
       return true;
     }
     return obj.warningAbsolute < criticalAbsolute;
@@ -62,9 +68,9 @@ export class DetectorConfigDto {
   @ApiPropertyOptional({
     minimum: 0,
     description:
-      'Absolute WARNING threshold. Omit the field entirely (do not send `null`) ' +
-      'to indicate "no absolute threshold." GET responses omit this field when ' +
-      'no absolute threshold is configured — never send `null` back on PATCH.',
+      'Absolute WARNING threshold. Send 0 to disable it (no absolute threshold). ' +
+      'Omit to leave unchanged. GET responses omit this field when no absolute ' +
+      'threshold is configured — never send `null` back on PATCH.',
   })
   @IsOptional()
   @IsNumber()
@@ -74,9 +80,9 @@ export class DetectorConfigDto {
   @ApiPropertyOptional({
     minimum: 0,
     description:
-      'Absolute CRITICAL threshold. Omit the field entirely (do not send `null`) ' +
-      'to indicate "no absolute threshold." GET responses omit this field when ' +
-      'no absolute threshold is configured — never send `null` back on PATCH.',
+      'Absolute CRITICAL threshold. Send 0 to disable it (no absolute threshold). ' +
+      'Omit to leave unchanged. GET responses omit this field when no absolute ' +
+      'threshold is configured — never send `null` back on PATCH.',
   })
   @IsOptional()
   @IsNumber()
