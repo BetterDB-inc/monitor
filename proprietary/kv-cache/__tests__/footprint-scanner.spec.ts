@@ -55,6 +55,18 @@ describe('sampleLmcacheKeys', () => {
     ]);
   });
 
+  it('treats a cross-slot sibling probe rejected with MOVED as unknown, not orphaned', async () => {
+    const pipeline = { call: jest.fn().mockReturnThis(), ttl: jest.fn().mockReturnThis(), exists: jest.fn().mockReturnThis(), exec: jest.fn() };
+    pipeline.exec.mockResolvedValue([
+      [null, 3670112], [null, -1], [new Error('MOVED 1234 10.0.0.2:6379'), null],
+      [null, 3670112], [null, -1], [null, 1],
+      [null, 3670112], [null, -1], [null, 0],
+    ]);
+    const client = { getClient: () => ({ pipeline: () => pipeline }) } as any;
+    const samples = await sampleLmcacheKeys(client, [k(0, 'kv_bytes'), k(1, 'kv_bytes'), k(2, 'kv_bytes')]);
+    expect(samples.map((s) => s.siblingExists)).toEqual([null, true, false]);
+  });
+
   it('skips the pipeline for no keys', async () => {
     expect(await sampleLmcacheKeys({ getClient: () => { throw new Error('unused'); } } as any, [])).toEqual([]);
   });

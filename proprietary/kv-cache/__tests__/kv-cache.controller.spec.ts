@@ -1,4 +1,4 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Feature } from '@betterdb/shared';
 import { ENV_DEFAULT_ID } from '@app/connections/connection-registry.service';
@@ -25,6 +25,11 @@ describe('KvCacheController', () => {
   it('refreshes the footprint for the connection', async () => {
     await controller.refreshFootprint('c1');
     expect(footprint.triggerCollection).toHaveBeenCalledWith('c1');
+  });
+
+  it('propagates a not-found connection as a 404', async () => {
+    footprint.triggerCollection.mockRejectedValueOnce(new NotFoundException("Connection 'nope' not found"));
+    await expect(controller.refreshFootprint('nope')).rejects.toBeInstanceOf(NotFoundException);
   });
 
   it('parses and validates the history range', async () => {

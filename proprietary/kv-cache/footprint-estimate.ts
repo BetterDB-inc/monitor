@@ -113,7 +113,7 @@ export function buildSnapshot(input: SnapshotInput): KvCacheFootprintSnapshot {
     allParsed.push(...parsed);
     live.push(...node.samples.filter(isLive));
   }
-  const kvBytes = live.filter((s) => s.parsed.suffix === 'kv_bytes');
+  const probed = live.filter((s) => s.parsed.suffix === 'kv_bytes' && s.siblingExists !== null);
   const { usedMemory, maxmemory, maxmemoryPolicy, evictedKeys } = input.memory;
   const previous = input.previousEvictedKeys;
   return {
@@ -133,9 +133,9 @@ export function buildSnapshot(input: SnapshotInput): KvCacheFootprintSnapshot {
     lmcacheMemoryShare: usedMemory > 0 ? ratio(Math.min(1, bytes / usedMemory)) : 0,
     noTtlRatio: live.length === 0 ? 0 : ratio(live.filter((s) => s.ttl === -1).length / live.length),
     orphanRatio:
-      kvBytes.length === 0
+      probed.length === 0
         ? null
-        : ratio(kvBytes.filter((s) => s.siblingExists === false).length / kvBytes.length),
+        : ratio(probed.filter((s) => s.siblingExists === false).length / probed.length),
     evictedKeysDelta:
       previous === null ? null : evictedKeys >= previous ? evictedKeys - previous : evictedKeys,
     otherDbs: input.otherDbs,
