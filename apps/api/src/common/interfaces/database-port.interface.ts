@@ -125,4 +125,11 @@ export interface DatabasePort {
    * chain or stall).
    */
   dialNodeThroughTunnel?(remoteHost: string, remotePort: number): Promise<{ host: string; port: number }>;
+  /**
+   * Monotonic tunnel generation. Bumped on every tunnel establish, drop and
+   * teardown so cached per-node clients dialling a previous generation's
+   * loopback ports can be detected and rebuilt instead of silently
+   * reading from a reassigned port.
+   */
+  getTunnelEpoch?(): number;
 }

@@ -420,6 +420,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     // Mirror hops[0] onto the legacy top-level fields for older readers.
     if (hops && hops.length > 0) {
       const [first] = hops;
+      if (!first.hostKeyFingerprint && sanitised.hostKeyFingerprint) {
+        first.hostKeyFingerprint = sanitised.hostKeyFingerprint;
+      }
       sanitised.host = first.host;
       sanitised.port = first.port;
       sanitised.username = first.username;
@@ -966,7 +969,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
               authMethod: config.sshTunnel.authMethod,
               keySource: config.sshTunnel.keySource,
               hostKeyPinned: !!config.sshTunnel.hostKeyFingerprint,
-              hopCount: config.sshTunnel.hops?.length ?? 1,
+              hopCount: config.sshTunnel.hops && config.sshTunnel.hops.length > 0 ? config.sshTunnel.hops.length : 1,
               hops: config.sshTunnel.hops?.map((h) => ({
                 host: h.host,
                 port: h.port,

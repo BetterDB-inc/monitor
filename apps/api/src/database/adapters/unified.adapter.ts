@@ -116,6 +116,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   private readonly tunnelKey: string;
   private readonly usesTunnel: boolean;
   private tunnelActive: boolean = false;
+  private tunnelEpoch = 0;
   // SHA256 fingerprint the SSH server presented, captured on first connect when
   // no fingerprint was pinned (trust-on-first-use). The registry reads this back
   // after a successful connect to persist it for subsequent verification.
@@ -242,6 +243,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     this.connectHost = '127.0.0.1';
     this.connectPort = localPort;
     this.tunnelActive = true;
+    this.tunnelEpoch += 1;
   }
 
   async dialNodeThroughTunnel(
@@ -288,6 +290,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     }
     this.logger.warn('SSH tunnel dropped; marking connection down until re-established');
     this.tunnelActive = false;
+    this.tunnelEpoch += 1;
     this.connected = false;
     if (this._client) {
       this._client.disconnect();
@@ -307,6 +310,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     if (this.tunnelActive && this.config.sshTunnelService) {
       await this.config.sshTunnelService.closeTunnel(this.tunnelKey).catch(() => {});
       this.tunnelActive = false;
+      this.tunnelEpoch += 1;
       // The current client's options still point at the now-closed local port,
       // so it must be rebuilt (against a freshly established tunnel) before the
       // next connect(). Discard it and restore the pre-tunnel target.
@@ -328,6 +332,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     return this.observedHostKeyFingerprints.length > 0
       ? [...this.observedHostKeyFingerprints]
       : undefined;
+  }
+
+  getTunnelEpoch(): number {
+    return this.tunnelEpoch;
   }
 
   private connectPromise: Promise<void> | null = null;

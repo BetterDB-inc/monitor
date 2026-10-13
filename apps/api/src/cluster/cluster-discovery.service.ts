@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { ClusterNode } from '../common/types/metrics.types';
@@ -34,6 +34,8 @@ export interface NodeConnection {
   /** Advertised remote endpoint the SSH forward was opened for. */
   remoteHost?: string;
   remotePort?: number;
+  /** Tunnel generation the forward was opened under (for stale-client detection). */
+  tunnelEpoch?: number;
 }
 
 /** Parse an advertised `host:port[@busport]` endpoint. */
@@ -74,7 +76,7 @@ interface DiscoveryCache {
 }
 
 @Injectable()
-export class ClusterDiscoveryService implements OnModuleDestroy {
+export class ClusterDiscoveryService implements OnModuleDestroy, OnModuleInit {
   private readonly logger = new Logger(ClusterDiscoveryService.name);
   private discoveredNodes: Map<string, NodeConnection> = new Map();
   // Per-connection discovery cache to prevent cross-connection cache contamination
@@ -86,12 +88,24 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   private readonly CONNECTION_TIMEOUT = CLUSTER_CONNECTION_TIMEOUT_MS;
   private readonly HEALTH_CHECK_INTERVAL = CLUSTER_HEALTH_CHECK_INTERVAL_MS;
   private readonly MAX_CONNECTIONS = 100;
+  private sweepTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
   ) {}
 
+  async onModuleInit() {
+    this.sweepTimer = setInterval(() => {
+      this.cleanupIdleConnections().catch(() => {});
+    }, CLUSTER_IDLE_TIMEOUT_MS);
+    this.sweepTimer.unref?.();
+  }
+
   async onModuleDestroy() {
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
     await this.disconnectAll();
   }
 
@@ -200,7 +214,12 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   async getNodeConnection(nodeId: string, connectionId?: string): Promise<Valkey> {
-    const existingConnection = this.discoveredNodes.get(nodeId);
+    let existingConnection = this.discoveredNodes.get(nodeId);
+    if (existingConnection && this.isTunnelStale(existingConnection, connectionId)) {
+      await existingConnection.client.quit().catch(() => {/* ignore */});
+      this.discoveredNodes.delete(nodeId);
+      existingConnection = undefined;
+    }
     if (existingConnection) {
       if (existingConnection.client.status === 'ready') {
         // Reuse the live client and refresh its check stamp. A ready connection
@@ -254,6 +273,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       throw new Error(`Node ${nodeId} not found in cluster`);
     }
 
+    await this.pruneDepartedNodes(connectionId, nodes);
+
     // Cluster node addresses include bus port: "host:port@busport"
     // We only need the client port, so split on '@' first
     const parsed = splitHostPort(node.address);
@@ -301,6 +322,9 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       lazyConnect: true,
       connectTimeout: this.CONNECTION_TIMEOUT,
       enableOfflineQueue: false,
+      maxRetriesPerRequest: 0,
+      retryStrategy: () => null,
+      enableReadyCheck: false,
       connectionName: `BetterDB-Monitor-Node-${node.id.substring(0, 8)}`,
     });
 
@@ -337,6 +361,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         connectionId,
         remoteHost: host,
         remotePort: port,
+        tunnelEpoch: dbClient.getTunnelEpoch?.(),
       };
 
       // Quit any stale client we're about to replace so the overwrite never
@@ -345,6 +370,10 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       const replaced = this.discoveredNodes.get(nodeId);
       if (replaced && replaced.client !== client) {
         await replaced.client.quit().catch(() => {});
+        const replacedRemote = this.remoteEndpointOf(replaced);
+        if (replacedRemote && (replacedRemote.host !== host || replacedRemote.port !== port)) {
+          this.releaseNodeForward(replaced);
+        }
       }
 
       this.discoveredNodes.set(nodeId, connection);
@@ -449,11 +478,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   private releaseNodeForward(connection: NodeConnection): void {
-    const remote = connection.remoteHost !== undefined && connection.remotePort !== undefined
-      ? { host: connection.remoteHost, port: connection.remotePort }
-      : connection.node?.address
-        ? parseAdvertisedEndpoint(connection.node.address)
-        : null;
+    const remote = this.remoteEndpointOf(connection);
     if (!remote) return;
     try {
       const dbClient = this.connectionRegistry.get(connection.connectionId);
@@ -461,6 +486,34 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         .releaseNodeThroughTunnel?.(remote.host, remote.port);
     } catch {
       // Registry lookup can throw for a removed connection; eviction is best-effort.
+    }
+  }
+
+  private remoteEndpointOf(connection: NodeConnection): { host: string; port: number } | null {
+    if (connection.remoteHost !== undefined && connection.remotePort !== undefined) {
+      return { host: connection.remoteHost, port: connection.remotePort };
+    }
+    return connection.node?.address ? parseAdvertisedEndpoint(connection.node.address) : null;
+  }
+
+  private isTunnelStale(connection: NodeConnection, connectionId?: string): boolean {
+    if (connection.tunnelEpoch === undefined) return false;
+    try {
+      const epoch = this.connectionRegistry.get(connectionId).getTunnelEpoch?.();
+      return epoch !== undefined && epoch !== connection.tunnelEpoch;
+    } catch {
+      return false;
+    }
+  }
+
+  private async pruneDepartedNodes(connectionId: string | undefined, nodes: DiscoveredNode[]): Promise<void> {
+    if (nodes.length === 0 || this.discoveredNodes.size === 0) return;
+    const liveIds = new Set(nodes.map((n) => n.id));
+    for (const [id, connection] of this.discoveredNodes.entries()) {
+      if (connection.connectionId !== connectionId || liveIds.has(id)) continue;
+      await connection.client.quit().catch(() => {});
+      this.discoveredNodes.delete(id);
+      this.releaseNodeForward(connection);
     }
   }
 

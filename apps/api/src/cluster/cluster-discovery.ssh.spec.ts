@@ -164,4 +164,83 @@ describe('ClusterDiscoveryService — SSH tunnel dial', () => {
     ValkeyMock.mockImplementation(originalImpl as unknown as (...args: unknown[]) => unknown);
     await service.disconnectAll();
   });
+
+  it('releases the old forward when a node moves to a new address', async () => {
+    const release = jest.fn();
+    const { service, mockDbClient } = await buildService(async () => ({ host: '127.0.0.1', port: MOCK_TUNNEL_PORT }));
+    (mockDbClient as unknown as { releaseNodeThroughTunnel: jest.Mock }).releaseNodeThroughTunnel = release;
+    const nodes = await service.discoverNodes('conn-1');
+    await service.getNodeConnection(nodes[0].id, 'conn-1');
+
+    const stored = (service as unknown as { discoveredNodes: Map<string, { client: { status: string; connect: jest.Mock } }> }).discoveredNodes.get(nodes[0].id)!;
+    stored.client.status = 'closed';
+    stored.client.connect = jest.fn(async () => {
+      throw new Error('old endpoint gone');
+    });
+    (service as unknown as { discoveryCacheByConnection: Map<string, unknown> }).discoveryCacheByConnection.clear();
+    (mockDbClient.getClusterNodes as jest.Mock).mockResolvedValue([
+      {
+        id: 'node1-abc',
+        address: `10.0.2.9:${DEFAULT_REDIS_PORT}`,
+        flags: ['master', 'myself'],
+        master: '-',
+        pingSent: 0,
+        pongReceived: 1,
+        configEpoch: 2,
+        linkState: 'connected',
+        slots: [[0, 5460]],
+      },
+    ]);
+
+    await service.getNodeConnection(nodes[0].id, 'conn-1');
+    expect(mockDbClient.dialNodeThroughTunnel).toHaveBeenCalledWith('10.0.2.9', DEFAULT_REDIS_PORT);
+    expect(release).toHaveBeenCalledWith('10.0.1.5', DEFAULT_REDIS_PORT);
+    await service.disconnectAll();
+  });
+
+  it('prunes nodes that left the cluster and releases their forwards', async () => {
+    const release = jest.fn();
+    const { service, mockDbClient } = await buildService(async () => ({ host: '127.0.0.1', port: MOCK_TUNNEL_PORT }));
+    (mockDbClient as unknown as { releaseNodeThroughTunnel: jest.Mock }).releaseNodeThroughTunnel = release;
+    const nodes = await service.discoverNodes('conn-1');
+    await service.getNodeConnection(nodes[0].id, 'conn-1');
+
+    (service as unknown as { discoveryCacheByConnection: Map<string, unknown> }).discoveryCacheByConnection.clear();
+    (mockDbClient.getClusterNodes as jest.Mock).mockResolvedValue([
+      {
+        id: 'node2-def',
+        address: `10.0.1.6:${DEFAULT_REDIS_PORT}`,
+        flags: ['master'],
+        master: '-',
+        pingSent: 0,
+        pongReceived: 1,
+        configEpoch: 2,
+        linkState: 'connected',
+        slots: [[5461, 10922]],
+      },
+    ]);
+
+    await service.getNodeConnection('node2-def', 'conn-1');
+    expect(release).toHaveBeenCalledWith('10.0.1.5', DEFAULT_REDIS_PORT);
+    const stored = (service as unknown as { discoveredNodes: Map<string, unknown> }).discoveredNodes;
+    expect(stored.has('node1-abc')).toBe(false);
+    expect(stored.has('node2-def')).toBe(true);
+    await service.disconnectAll();
+  });
+
+  it('rebuilds ready clients after the tunnel epoch changes', async () => {
+    const { service, mockDbClient } = await buildService(async () => ({ host: '127.0.0.1', port: MOCK_TUNNEL_PORT }));
+    let epoch = 1;
+    (mockDbClient as unknown as { getTunnelEpoch: jest.Mock }).getTunnelEpoch = jest.fn(() => epoch);
+    const nodes = await service.discoverNodes('conn-1');
+    const first = await service.getNodeConnection(nodes[0].id, 'conn-1');
+    expect(mockDbClient.dialNodeThroughTunnel).toHaveBeenCalledTimes(1);
+
+    epoch = 2;
+    const second = await service.getNodeConnection(nodes[0].id, 'conn-1');
+    expect(mockDbClient.dialNodeThroughTunnel).toHaveBeenCalledTimes(2);
+    expect(second).not.toBe(first);
+    expect((first as unknown as { status: string }).status).toBe('end');
+    await service.disconnectAll();
+  });
 });
