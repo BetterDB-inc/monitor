@@ -8,10 +8,25 @@ export interface FakeKey {
 export interface FakeOptions {
   memoryError?: string;
   scanTypeError?: string;
+  seed?: number;
+}
+
+function shuffled(names: string[], seed: number): string[] {
+  let state = seed >>> 0;
+  const next = () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+  const result = [...names];
+  for (let index = result.length - 1; index > 0; index--) {
+    const swap = Math.floor(next() * (index + 1));
+    [result[index], result[swap]] = [result[swap], result[index]];
+  }
+  return result;
 }
 
 export function fakeClient(keys: Map<string, FakeKey>, options: FakeOptions = {}): SamplerClient {
-  const names = [...keys.keys()];
+  const names = shuffled([...keys.keys()], options.seed ?? 1);
   const call = async (command: string, args: string[]): Promise<unknown> => {
     if (command !== 'SCAN') throw new Error(`unexpected ${command}`);
     const [cursor, , count, typeFlag, type] = args;

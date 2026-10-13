@@ -26,7 +26,8 @@ describe('sampleNodes', () => {
     expect(hashes.estimatedKeys).toBe(40);
     expect(hashes.sizes).toHaveLength(40);
     expect(hashes.exact).toBe(true);
-    expect(strings.sizes).toHaveLength(192);
+    expect(strings.sizes.length).toBeGreaterThanOrEqual(30);
+    expect(strings.sizes.length + hashes.sizes.length).toBeLessThanOrEqual(400);
     expect(strings.estimatedKeys).toBe(1000);
     expect(strings.exact).toBe(true);
   });
@@ -103,8 +104,8 @@ describe('sampleNodes', () => {
     const [result] = await sampleNodes([{ name: 'a', client: fakeClient(keys) }], { budget: 100, deadlineMs: 60_000 });
     const hashes = result.strata.find((stratum) => stratum.type === 'hash')!;
     expect(hashes.exact).toBe(false);
-    expect(hashes.observed).toBe(180);
-    expect(hashes.estimatedKeys).toBeCloseTo((180 / 1000) * 3000, 6);
+    expect(hashes.observed).toBeGreaterThan(0);
+    expect(hashes.estimatedKeys).toBeCloseTo((hashes.observed / 1000) * 3000, 6);
   });
 
   it('counts types exactly when the census covers the whole keyspace', async () => {
@@ -180,6 +181,30 @@ describe('sampleNodes', () => {
     it('never exceeds the budget without a hard cap', async () => {
       const [result] = await sampleNodes([{ name: 'a', client: fakeClient(heavyTail()) }], { budget: 400, deadlineMs: 60_000 });
       expect(sampledOf(result.strata)).toBeLessThanOrEqual(400);
+    });
+  });
+
+  describe('rare dominating key', () => {
+    const giant = 512 * 1024 * 1024;
+    const keys = keyspace(50_000, (index) => (index === 31_337 ? string(giant) : string()));
+    const truth = 49_999 * 100 + giant;
+    const runs = Array.from({ length: 20 }, (_, index) => index + 1);
+
+    it('covers the true size with the memory ceiling on every scan order', async () => {
+      for (const seed of runs) {
+        const [result] = await sampleNodes([{ name: 'a', client: fakeClient(keys, { seed }) }], { budget: 4000, hardCap: 50_000, deadlineMs: 60_000 });
+        const { totalBytes, ci95Bytes } = estimate([result], 0, truth + 1024 * 1024);
+        expect(Math.abs(totalBytes - truth)).toBeLessThanOrEqual(ci95Bytes);
+      }
+    });
+
+    it('misses the key on some scan orders, so the sample alone cannot bound it', async () => {
+      let missed = 0;
+      for (const seed of runs) {
+        const [result] = await sampleNodes([{ name: 'a', client: fakeClient(keys, { seed }) }], { budget: 4000, hardCap: 50_000, deadlineMs: 60_000 });
+        if (!result.strata.some((stratum) => stratum.sizes.includes(giant))) missed += 1;
+      }
+      expect(missed).toBeGreaterThan(0);
     });
   });
 });

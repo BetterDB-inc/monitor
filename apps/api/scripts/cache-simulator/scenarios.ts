@@ -7,7 +7,7 @@ export interface SeedCommand {
 
 export interface Scenario {
   name: string;
-  tolerance: number;
+  tolerance: number | null;
   runs: number;
   generate(seed: number): Iterable<SeedCommand>;
 }
@@ -78,6 +78,17 @@ export const SCENARIOS: Scenario[] = [
       const random = mulberry32(seed);
       for (let index = 0; index < 50_000; index++) {
         yield { type: 'string', key: `tt:${seed}:${index}`, value: text(256), ...(random() < 0.5 ? { ttlSeconds: 3600 } : {}) };
+      }
+    },
+  },
+  {
+    name: 'rare-giant',
+    tolerance: null,
+    runs: 10,
+    *generate(seed) {
+      const giant = Math.floor(mulberry32(seed)() * 50_000);
+      for (let index = 0; index < 50_000; index++) {
+        yield { type: 'string', key: `rg:${seed}:${index}`, value: text(index === giant ? 64 * 1024 * 1024 : 100) };
       }
     },
   },

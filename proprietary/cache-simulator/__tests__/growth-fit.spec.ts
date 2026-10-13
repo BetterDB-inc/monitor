@@ -44,11 +44,11 @@ describe('growth fit', () => {
     expect(sumGrowth([])).toBeNull();
   });
 
-  it('reads the last 30 days and survives storage errors', async () => {
+  it('reads the last 30 days and passes storage errors up', async () => {
     const storage = { getMemorySnapshots: jest.fn().mockResolvedValue(series(10, 24)) };
     await readGrowth(storage as any, 'c1', 40 * DAY);
     expect(storage.getMemorySnapshots).toHaveBeenCalledWith({ connectionId: 'c1', startTime: 10 * DAY, endTime: 40 * DAY, limit: 50_000 });
     const failing = { getMemorySnapshots: jest.fn().mockRejectedValue(new Error('down')) };
-    await expect(readGrowth(failing as any, 'c1', 40 * DAY)).resolves.toBeNull();
+    await expect(readGrowth(failing as any, 'c1', 40 * DAY)).rejects.toThrow('down');
   });
 });

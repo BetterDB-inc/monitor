@@ -4,7 +4,7 @@ export interface InstantStats {
   usedMemory: number;
   maxmemory: number;
   maxmemoryPolicy: string;
-  evictedKeys: number;
+  datasetMemory: number | null;
 }
 
 function toNumber(value: unknown): number {
@@ -18,6 +18,6 @@ export function readInstantStats(info: InfoResponse): InstantStats {
     usedMemory: toNumber(info.memory?.used_memory),
     maxmemory: toNumber(info.memory?.maxmemory),
     maxmemoryPolicy: policy ? policy : 'unknown',
-    evictedKeys: toNumber(info.stats?.evicted_keys),
+    datasetMemory: info.memory?.used_memory_dataset === undefined ? null : toNumber(info.memory.used_memory_dataset),
   };
 }
