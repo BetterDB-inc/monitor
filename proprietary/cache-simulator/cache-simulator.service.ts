@@ -4,17 +4,19 @@ import type { StoragePort } from '@app/common/interfaces/storage-port.interface'
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { collectionPlan } from '../key-analytics/key-analytics-plan';
 import { clusterNodes, primaryNodes, type ScanNode } from './cluster-nodes';
-import { readInstantStats } from './instant-stats';
+import { readInstantStats, type InstantStats } from './instant-stats';
 import { readGrowth, sumGrowth } from './growth-fit';
-import { estimate } from './size-estimator';
+import { estimate, keyMemoryCeiling } from './size-estimator';
 import { sampleNodes, SAMPLE_BUDGET, SAMPLE_DEADLINE_MS, SAMPLE_HARD_CAP } from './stratified-sampler';
 
 export const RESULT_TTL_MS = 15 * 60_000;
 export const FAILURE_TTL_MS = 60_000;
+export const SETUP_TIMEOUT_MS = 30_000;
 const LABEL = 'Cache simulator';
 
 interface Job {
   instant: CacheSimulatorInstant;
+  ceiling: number | undefined;
   growth: CacheSimulatorGrowth | null;
   progress: { sampled: number; target: number };
 }
@@ -50,31 +52,45 @@ export class CacheSimulatorService {
 
   private async start(connectionId: string, seed: ScanNode): Promise<CacheSimulatorSnapshot> {
     try {
-      const nodes = await this.nodesFor(connectionId, seed);
-      const [instant, growth] = await Promise.all([
-        this.instant(nodes),
-        this.growth(nodes),
-      ]);
-      const job: Job = { instant, growth, progress: { sampled: 0, target: SAMPLE_BUDGET } };
+      const { job, nodes } = await withTimeout(this.prepare(connectionId, seed), SETUP_TIMEOUT_MS, `Setup timed out after ${SETUP_TIMEOUT_MS / 1000} s`);
       this.jobs.set(connectionId, job);
       void this.run(connectionId, job, nodes);
       return this.inProgress(job);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn(`${LABEL} setup failed for ${connectionId}: ${message}`);
-      const snapshot: CacheSimulatorSnapshot = {
+      return this.settle(connectionId, {
         status: 'failed',
         progress: null,
         instant: { usedMemory: 0, maxmemory: 0, maxmemoryPolicy: 'unknown', totalKeys: 0 },
         estimate: null,
         growth: null,
         error: message,
-      };
-      if (this.registry.getConfig(connectionId) !== null) {
-        this.results.set(connectionId, { snapshot, at: Date.now() });
-      }
-      return snapshot;
+      });
     }
+  }
+
+  private async prepare(connectionId: string, seed: ScanNode): Promise<{ job: Job; nodes: ScanNode[] }> {
+    const nodes = await this.nodesFor(connectionId, seed);
+    const [readings, growth] = await Promise.all([Promise.all(nodes.map((node) => this.read(node))), this.growth(nodes)]);
+    const instant = summarize(readings);
+    const dataset = readings.every((reading) => reading.stats.datasetMemory !== null)
+      ? readings.reduce((sum, reading) => sum + (reading.stats.datasetMemory ?? 0), 0)
+      : null;
+    const ceiling = dataset === null ? undefined : keyMemoryCeiling(dataset, instant.totalKeys);
+    return { job: { instant, ceiling, growth, progress: { sampled: 0, target: SAMPLE_BUDGET } }, nodes };
+  }
+
+  private settle(connectionId: string, snapshot: CacheSimulatorSnapshot): CacheSimulatorSnapshot {
+    if (this.registry.getConfig(connectionId) === null) return snapshot;
+    const cached = this.results.get(connectionId);
+    if (snapshot.status === 'failed' && cached?.snapshot.status === 'ready') {
+      const kept = { ...cached.snapshot, error: snapshot.error };
+      this.results.set(connectionId, { snapshot: kept, at: cached.at });
+      return kept;
+    }
+    this.results.set(connectionId, { snapshot, at: Date.now() });
+    return snapshot;
   }
 
   private async run(connectionId: string, job: Job, nodes: ScanNode[]): Promise<void> {
@@ -92,7 +108,7 @@ export class CacheSimulatorService {
         status: 'ready',
         progress: null,
         instant: job.instant,
-        estimate: estimate(samples, Date.now()),
+        estimate: estimate(samples, Date.now(), job.ceiling),
         growth: job.growth,
       };
     } catch (error) {
@@ -109,8 +125,7 @@ export class CacheSimulatorService {
     }
     if (this.jobs.get(connectionId) !== job) return;
     this.jobs.delete(connectionId);
-    if (this.registry.getConfig(connectionId) === null) return;
-    this.results.set(connectionId, { snapshot, at: Date.now() });
+    this.settle(connectionId, snapshot);
   }
 
   private inProgress(job: Job): CacheSimulatorSnapshot {
@@ -150,23 +165,55 @@ export class CacheSimulatorService {
 
   private async growth(nodes: ScanNode[]): Promise<CacheSimulatorGrowth | null> {
     const now = Date.now();
-    return sumGrowth(await Promise.all(nodes.map((node) => readGrowth(this.storage, node.id, now))));
+    const fits = await Promise.all(
+      nodes.map((node) =>
+        readGrowth(this.storage, node.id, now).catch((error: unknown) => {
+          this.logger.warn(`${LABEL} growth history unavailable for ${node.id}: ${error instanceof Error ? error.message : String(error)}`);
+          return null;
+        }),
+      ),
+    );
+    return sumGrowth(fits);
   }
 
-  private async instant(nodes: ScanNode[]): Promise<CacheSimulatorInstant> {
-    const readings = await Promise.all(
-      nodes.map(async (node) => ({
-        stats: readInstantStats(await node.client.getInfoParsed(['memory', 'stats'])),
-        keys: await node.client.getDbSize(),
-      })),
-    );
-    const policies = new Set(readings.map((reading) => reading.stats.maxmemoryPolicy));
-    const unlimited = readings.some((reading) => reading.stats.maxmemory === 0);
-    return {
-      usedMemory: readings.reduce((sum, reading) => sum + reading.stats.usedMemory, 0),
-      maxmemory: unlimited ? 0 : readings.reduce((sum, reading) => sum + reading.stats.maxmemory, 0),
-      maxmemoryPolicy: policies.size === 1 ? [...policies][0] : policies.size > 1 ? 'mixed' : 'unknown',
-      totalKeys: readings.reduce((sum, reading) => sum + reading.keys, 0),
-    };
+  private async read(node: ScanNode): Promise<Reading> {
+    const attempt = async (): Promise<Reading> => ({
+      stats: readInstantStats(await node.client.getInfoParsed(['memory'])),
+      keys: await node.client.getDbSize(),
+    });
+    try {
+      return await attempt();
+    } catch (error) {
+      this.logger.warn(`${LABEL} retrying INFO for ${node.id}: ${error instanceof Error ? error.message : String(error)}`);
+      return attempt();
+    }
+  }
+}
+
+interface Reading {
+  stats: InstantStats;
+  keys: number;
+}
+
+function summarize(readings: Reading[]): CacheSimulatorInstant {
+  const policies = new Set(readings.map((reading) => reading.stats.maxmemoryPolicy));
+  const unlimited = readings.some((reading) => reading.stats.maxmemory === 0);
+  return {
+    usedMemory: readings.reduce((sum, reading) => sum + reading.stats.usedMemory, 0),
+    maxmemory: unlimited ? 0 : readings.reduce((sum, reading) => sum + reading.stats.maxmemory, 0),
+    maxmemoryPolicy: policies.size === 1 ? [...policies][0] : policies.size > 1 ? 'mixed' : 'unknown',
+    totalKeys: readings.reduce((sum, reading) => sum + reading.keys, 0),
+  };
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
   }
 }

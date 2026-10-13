@@ -1,8 +1,10 @@
 import { NotFoundException } from '@nestjs/common';
-import { CacheSimulatorService, FAILURE_TTL_MS, RESULT_TTL_MS } from '../cache-simulator.service';
+import { CacheSimulatorService, FAILURE_TTL_MS, RESULT_TTL_MS, SETUP_TIMEOUT_MS } from '../cache-simulator.service';
 import * as sampler from '../stratified-sampler';
 
-const info = (usedMemory: number, maxmemory: number, policy = 'allkeys-lru') => ({ memory: { used_memory: String(usedMemory), maxmemory: String(maxmemory), maxmemory_policy: policy }, stats: {} });
+const info = (usedMemory: number, maxmemory: number, policy = 'allkeys-lru', dataset?: number) => ({
+  memory: { used_memory: String(usedMemory), maxmemory: String(maxmemory), maxmemory_policy: policy, ...(dataset === undefined ? {} : { used_memory_dataset: String(dataset) }) },
+});
 
 function client(usedMemory = 1000, maxmemory = 10_000, dbSize = 5) {
   return { getInfoParsed: jest.fn().mockResolvedValue(info(usedMemory, maxmemory)), getDbSize: jest.fn().mockResolvedValue(dbSize), getRole: jest.fn().mockResolvedValue({ role: 'master' }) };
@@ -238,11 +240,11 @@ describe('CacheSimulatorService', () => {
       instant: { usedMemory: 0, maxmemory: 0, maxmemoryPolicy: 'unknown', totalKeys: 0 },
     });
     await service.snapshot('c1');
-    expect(connections.c1.getInfoParsed).toHaveBeenCalledTimes(1);
+    expect(connections.c1.getInfoParsed).toHaveBeenCalledTimes(2);
     jest.advanceTimersByTime(FAILURE_TTL_MS + 1);
     connections.c1.getInfoParsed.mockResolvedValue(info(1000, 10_000));
     expect((await service.snapshot('c1')).status).toBe('sampling');
-    expect(connections.c1.getInfoParsed).toHaveBeenCalledTimes(2);
+    expect(connections.c1.getInfoParsed).toHaveBeenCalledTimes(3);
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
@@ -254,5 +256,72 @@ describe('CacheSimulatorService', () => {
     expect(refreshed.status).toBe('sampling');
     expect(refreshed.progress).toEqual({ sampled: 0, target: sampler.SAMPLE_BUDGET });
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a node read once before failing', async () => {
+    jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
+    const connections = { c1: client() };
+    connections.c1.getInfoParsed.mockRejectedValueOnce(new Error('blip'));
+    const { service } = setup(connections);
+    expect((await service.snapshot('c1')).status).toBe('sampling');
+  });
+
+  it('keeps the last good result when a refresh fails in setup', async () => {
+    jest.spyOn(sampler, 'sampleNodes').mockResolvedValue([nodeSample]);
+    const connections = { c1: client() };
+    const { service } = setup(connections);
+    await service.snapshot('c1');
+    await flush();
+    const good = await service.snapshot('c1');
+    connections.c1.getInfoParsed.mockRejectedValue(new Error('INFO down'));
+    const refreshed = await service.snapshot('c1', true);
+    expect(refreshed).toMatchObject({ status: 'ready', estimate: good.estimate, instant: good.instant, error: 'INFO down' });
+    expect(await service.snapshot('c1')).toEqual(refreshed);
+  });
+
+  it('keeps the last good result when a refresh fails while sampling', async () => {
+    const spy = jest.spyOn(sampler, 'sampleNodes').mockResolvedValueOnce([nodeSample]).mockRejectedValueOnce(new Error('node gone'));
+    const { service } = setup();
+    await service.snapshot('c1');
+    await flush();
+    await service.snapshot('c1', true);
+    await flush();
+    expect(await service.snapshot('c1')).toMatchObject({ status: 'ready', error: 'node gone', estimate: { totalBytes: 50 } });
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it('times out a hung setup instead of wedging the connection', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate'] });
+    jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
+    const connections = { c1: client() };
+    connections.c1.getInfoParsed.mockReturnValue(new Promise(() => undefined));
+    const { service } = setup(connections);
+    const pending = service.snapshot('c1');
+    jest.advanceTimersByTime(SETUP_TIMEOUT_MS + 1);
+    expect(await pending).toMatchObject({ status: 'failed', error: `Setup timed out after ${SETUP_TIMEOUT_MS / 1000} s` });
+    jest.advanceTimersByTime(FAILURE_TTL_MS + 1);
+    connections.c1.getInfoParsed.mockResolvedValue(info(1000, 10_000));
+    expect((await service.snapshot('c1')).status).toBe('sampling');
+  });
+
+  it('bounds the interval by the dataset memory when keys go unsampled', async () => {
+    const partial = { ...nodeSample, strata: [{ ...nodeSample.strata[0], estimatedKeys: 10 }], exhausted: false };
+    jest.spyOn(sampler, 'sampleNodes').mockResolvedValue([partial]);
+    const connections = { c1: client() };
+    connections.c1.getInfoParsed.mockResolvedValue(info(5000, 10_000, 'allkeys-lru', 1000));
+    const { service } = setup(connections);
+    await service.snapshot('c1');
+    await flush();
+    const result = await service.snapshot('c1');
+    expect(result.estimate).toMatchObject({ totalBytes: 100, ci95Bytes: 1000 + 5 * 24 - 100 });
+  });
+
+  it('logs and drops growth when history cannot be read', async () => {
+    jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
+    const { service, storage } = setup();
+    storage.getMemorySnapshots.mockRejectedValue(new Error('storage down'));
+    const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+    expect((await service.snapshot('c1')).growth).toBeNull();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('storage down'));
   });
 });

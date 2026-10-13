@@ -43,16 +43,12 @@ export function sumGrowth(fits: Array<CacheSimulatorGrowth | null>): CacheSimula
 }
 
 export async function readGrowth(storage: StoragePort, connectionId: string, now: number): Promise<CacheSimulatorGrowth | null> {
-  try {
-    return fitGrowth(
-      await storage.getMemorySnapshots({
-        connectionId,
-        startTime: now - GROWTH_WINDOW_MS,
-        endTime: now,
-        limit: SNAPSHOT_LIMIT,
-      }),
-    );
-  } catch {
-    return null;
-  }
+  return fitGrowth(
+    await storage.getMemorySnapshots({
+      connectionId,
+      startTime: now - GROWTH_WINDOW_MS,
+      endTime: now,
+      limit: SNAPSHOT_LIMIT,
+    }),
+  );
 }
