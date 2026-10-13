@@ -28,6 +28,10 @@ export async function connect(target: Target): Promise<Valkey> {
   return client;
 }
 
+async function flush(pipeline: ReturnType<Valkey['pipeline']>): Promise<void> {
+  for (const [error] of (await pipeline.exec()) ?? []) if (error) throw error;
+}
+
 export async function seed(client: Valkey, commands: Iterable<SeedCommand>): Promise<number> {
   let pipeline = client.pipeline();
   let queued = 0;
@@ -42,12 +46,12 @@ export async function seed(client: Valkey, commands: Iterable<SeedCommand>): Pro
     queued += 1;
     total += 1;
     if (queued === 1000) {
-      await pipeline.exec();
+      await flush(pipeline);
       pipeline = client.pipeline();
       queued = 0;
     }
   }
-  if (queued > 0) await pipeline.exec();
+  if (queued > 0) await flush(pipeline);
   return total;
 }
 
