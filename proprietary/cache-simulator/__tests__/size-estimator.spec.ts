@@ -123,6 +123,18 @@ describe('estimate', () => {
     expect(result.ci95Bytes).toBe(4000);
   });
 
+  it('widens the interval when the estimate exceeds the memory ceiling', () => {
+    const result = estimate([node([{ type: 'string', estimatedKeys: 100, exact: true, observed: 0, sizes: [1000, 1000] }])], 0, 5000);
+    expect(result.totalBytes).toBe(100_000);
+    expect(result.ci95Bytes).toBe(95_000);
+  });
+
+  it('treats a nonempty node without measured strata as unsampled', () => {
+    const result = estimate([{ node: 'n', dbSize: 100, strata: [], exhausted: false, timedOut: true }], 0, 5000);
+    expect(result.totalBytes).toBe(0);
+    expect(result.ci95Bytes).toBe(5000);
+  });
+
   it('ignores the memory ceiling when every key was sampled', () => {
     const result = estimate([node([{ type: 'string', estimatedKeys: 2, exact: true, observed: 0, sizes: [10, 10] }])], 0, 5000);
     expect(result.ci95Bytes).toBe(0);
