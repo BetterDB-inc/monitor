@@ -57,6 +57,20 @@ describe('outbound url guard', () => {
     await expect(assertSafeOutboundUrl('http://[fe80::1]/metrics', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toBeInstanceOf(BadRequestException);
   });
 
+  it('always blocks IPv6 unique local addresses', async () => {
+    for (const ip of ['fd00:ec2::254', '[fd00:ec2::254]', 'FD00:EC2::254', 'fd00:0ec2:0000:0000:0000:0000:0000:0254', 'fc00::1', 'fdff:ffff::1']) {
+      expect(isBlockedIp(ip, true)).toBe(true);
+    }
+    expect(isBlockedIp('fe00::1', true)).toBe(false);
+    expect(isBlockedIp('fc0::1', true)).toBe(false);
+    expect(isBlockedIp('2001:db8::1', true)).toBe(false);
+    process.env.NODE_ENV = 'production';
+    await expect(assertSafeOutboundUrl('http://[fd00:ec2::254]/latest/meta-data', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toThrow('Cannot use private IP addresses as metrics URL');
+    await expect(assertSafeOutboundUrl('http://[fd00:ec2:0:0:0:0:0:254]/latest', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toBeInstanceOf(BadRequestException);
+    jest.spyOn(dns, 'lookup').mockResolvedValue([{ address: 'fd00:ec2::254', family: 6 }] as any);
+    await expect(assertSafeOutboundUrl('http://metrics.example.com/x', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toThrow('Metrics URL resolves to blocked IP address: fd00:ec2::254');
+  });
+
   it('unwraps IPv4-mapped IPv6 addresses before classifying them', async () => {
     expect(isBlockedIp('::ffff:169.254.169.254', true)).toBe(true);
     expect(isBlockedIp('[::ffff:a9fe:a9fe]', true)).toBe(true);

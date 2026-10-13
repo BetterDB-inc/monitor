@@ -45,6 +45,35 @@ describe('CounterDeltaTracker', () => {
     expect(t.drain(60_000)[0].hitTokens).toBe(150);
   });
 
+  it('ignores a late point from an older series start', () => {
+    const t = new CounterDeltaTracker();
+    t.observe(obs({ value: 1000, startMs: 1 }), 1_000);
+    t.observe(obs({ value: 50, startMs: 2 }), 2_000);
+    expect(t.drain(200_000, true)[0].hitTokens).toBe(50);
+    t.observe(obs({ value: 1000, startMs: 1 }), 3_000);
+    expect(t.drain(200_000, true)).toEqual([]);
+    t.observe(obs({ value: 70, startMs: 2 }), 4_000);
+    expect(t.drain(200_000, true)[0].hitTokens).toBe(20);
+  });
+
+  it('keeps the newest start when a point arrives without one', () => {
+    const t = new CounterDeltaTracker();
+    t.observe(obs({ value: 100, startMs: 9 }), 1_000);
+    t.observe(obs({ value: 120 }), 2_000);
+    t.observe(obs({ value: 500, startMs: 5 }), 3_000);
+    t.observe(obs({ value: 130, startMs: 9 }), 4_000);
+    expect(t.drain(200_000, true)[0].hitTokens).toBe(30);
+  });
+
+  it('does not flap between interleaved series that share a key', () => {
+    const t = new CounterDeltaTracker();
+    for (let i = 0; i < 4; i += 1) {
+      t.observe(obs({ value: 1000 + i * 10, startMs: 1 }), 1_000 + i);
+      t.observe(obs({ value: 2000 + i * 10, startMs: 2 }), 1_000 + i);
+    }
+    expect(t.drain(200_000, true)[0].hitTokens).toBe(2030);
+  });
+
   it('sums workers into one bucket per engine and model', () => {
     const t = new CounterDeltaTracker();
     for (const series of ['0|worker', '1|worker']) {

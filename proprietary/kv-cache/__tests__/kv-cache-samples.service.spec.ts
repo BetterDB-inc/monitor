@@ -47,6 +47,11 @@ describe('hitRate', () => {
     expect(hitRate(1000, 700)).toBe(0.7);
     expect(hitRate(3, 1)).toBe(0.3333);
   });
+
+  it('clamps the ratio to [0, 1]', () => {
+    expect(hitRate(100, 250)).toBe(1);
+    expect(hitRate(100, -5)).toBe(0);
+  });
 });
 
 describe('mergeBuckets', () => {

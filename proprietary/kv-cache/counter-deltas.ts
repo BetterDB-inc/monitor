@@ -95,18 +95,22 @@ export class CounterDeltaTracker {
   private cumulativeDelta(observation: CounterObservation): number | null {
     const id = `${observation.engineId}|${observation.modelName}|${observation.series}|${observation.metric}`;
     const previous = this.last.get(id);
-    if (
-      previous &&
-      observation.value < previous.value &&
-      observation.startMs !== undefined &&
-      observation.startMs === previous.startMs
-    ) {
+    const startMs = observation.startMs ?? previous?.startMs;
+    if (!previous) {
+      this.last.set(id, { value: observation.value, startMs });
       return null;
     }
-    this.last.set(id, { value: observation.value, startMs: observation.startMs });
-    if (!previous) return null;
-    const restarted =
-      observation.startMs !== undefined && previous.startMs !== undefined && observation.startMs !== previous.startMs;
-    return restarted || observation.value < previous.value ? observation.value : observation.value - previous.value;
+    const order =
+      observation.startMs !== undefined && previous.startMs !== undefined
+        ? Math.sign(observation.startMs - previous.startMs)
+        : null;
+    if (order !== null && order < 0) return null;
+    if (order !== null && order > 0) {
+      this.last.set(id, { value: observation.value, startMs });
+      return observation.value;
+    }
+    if (order === 0 && observation.value < previous.value) return null;
+    this.last.set(id, { value: observation.value, startMs });
+    return observation.value < previous.value ? observation.value : observation.value - previous.value;
   }
 }
