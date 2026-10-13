@@ -1,14 +1,13 @@
 export const DEFAULT_OVERHEAD_PER_KEY_BYTES = 88;
 export const HEADROOM = 0.8;
-const Z95 = 1.96;
 
 export interface ProjectionInputs {
   currentKeys: number;
   keysPerDay: number;
+  bytesPerDay: number;
   ttlDays: number | null;
   avgKeyBytes: number;
-  stdKeyBytes: number;
-  sampleCount: number;
+  ci95Bytes: number;
   overheadPerKeyBytes: number;
   fixedOverheadBytes: number;
   maxmemory: number | null;
@@ -47,13 +46,18 @@ function firstDayAtOrAbove(points: ProjectionPoint[], limit: number | null): num
   return points.find((point) => point.bytes >= limit)?.day ?? null;
 }
 
+export function inPlaceBytesPerDay(inputs: Pick<ProjectionInputs, 'keysPerDay' | 'bytesPerDay' | 'avgKeyBytes' | 'overheadPerKeyBytes'>): number {
+  return Math.max(0, inputs.bytesPerDay - Math.max(0, inputs.keysPerDay) * (inputs.avgKeyBytes + inputs.overheadPerKeyBytes));
+}
+
 export function project(inputs: ProjectionInputs): Projection {
   const perKey = inputs.avgKeyBytes + inputs.overheadPerKeyBytes;
-  const margin = inputs.sampleCount > 0 ? (Z95 * inputs.stdKeyBytes) / Math.sqrt(inputs.sampleCount) : 0;
+  const margin = inputs.currentKeys > 0 ? inputs.ci95Bytes / inputs.currentKeys : 0;
+  const inPlace = inPlaceBytesPerDay(inputs);
   const points: ProjectionPoint[] = [];
   for (let day = 0; day <= inputs.horizonDays; day++) {
     const keys = keysAt(day, inputs);
-    const bytes = keys * perKey + inputs.fixedOverheadBytes;
+    const bytes = keys * perKey + inputs.fixedOverheadBytes + inPlace * day;
     points.push({ day, keys, bytes, low: Math.max(0, bytes - margin * keys), high: bytes + margin * keys });
   }
   const limit = inputs.maxmemory && inputs.maxmemory > 0 ? inputs.maxmemory : null;
