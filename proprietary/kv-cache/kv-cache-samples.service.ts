@@ -8,7 +8,8 @@ export const SAMPLES_MAX_RANGE_MS = 31 * 24 * 60 * 60_000;
 export const SAMPLES_LIMIT = 50_000;
 
 export function hitRate(requested: number, hit: number): number | null {
-  return requested > 0 ? Math.round((hit / requested) * 1e4) / 1e4 : null;
+  if (!(requested > 0)) return null;
+  return Math.round(Math.min(1, Math.max(0, hit / requested)) * 1e4) / 1e4;
 }
 
 export function mergeBuckets(samples: KvCacheEngineSample[]): KvCacheSampleBucket[] {

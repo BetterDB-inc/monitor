@@ -21,7 +21,7 @@ const BLOCKED_IP_PATTERNS = [
   /^f[cd][0-9a-f]{2}:/i,
 ];
 
-const ALWAYS_BLOCKED = [/^169\.254\./, /^fe[89ab][0-9a-f]:/i];
+const ALWAYS_BLOCKED = [/^169\.254\./, /^fe[89ab][0-9a-f]:/i, /^f[cd][0-9a-f]{2}:/i];
 
 const LOOPBACK = [/^127\./, /^0\.0\.0\.0$/, /^::1?$/];
 
