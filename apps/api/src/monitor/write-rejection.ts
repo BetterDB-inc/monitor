@@ -14,7 +14,7 @@ export type WriteRejectionCause =
   | 'maxmemory_reached'
   | 'write_to_replica'
   | 'min_replicas_not_met'
-  /** MISCONF seen but the failing persistence status cleared before the poll. */
+  /** MISCONF seen with no blocking persistence failure visible (status cleared, section absent, or BGSAVE not configured to stop writes). */
   | 'persistence_failed';
 
 const CAUSE_BY_CODE: Record<Exclude<WriteRejectionCode, 'MISCONF'>, WriteRejectionCause> = {

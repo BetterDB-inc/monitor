@@ -275,7 +275,7 @@ Fired when the server starts and stops refusing writes. None of these conditions
 
 `writes.rejected` opens with `severity: "warning"` as soon as persistence fails (`rdb_last_bgsave_status:err`, which makes the server reply `MISCONF` to writes under the default `stop-writes-on-bgsave-error yes`, or `aof_last_write_status:err`), before any client has been refused. When it opens because clients already received errors, `severity` is `"critical"` and `rejectedSinceLastPoll` holds the per-code counts. `OOM`, `READONLY` and `NOREPLICAS` leave no persistent "still broken" flag, so one quiet poll is not proof of recovery. `writes.recovered` fires when:
 
-- 60 seconds pass with no new rejections and, for `maxmemory_reached`, `used_memory` is below `maxmemory`.
+- 60 seconds pass with no new rejections and, for `maxmemory_reached`, `used_memory` minus `mem_not_counted_for_evict` is below `maxmemory` (matching Redis' own check).
 - Only edges with `rdb_bgsave_failed` or `aof_write_failed` also require INFO persistence to report the statuses as `ok`; a missing persistence section keeps those open. The RDB status is ignored when a failed BGSAVE doesn't stop writes (`stop-writes-on-bgsave-error no` or no `save` points).
 - Errorstats-only edges (`maxmemory_reached`, `write_to_replica`, `min_replicas_not_met`, `persistence_failed`) don't depend on persistence, so they also recover on hosts that hide the persistence section.
 
