@@ -13,7 +13,9 @@ export type WriteRejectionCause =
   | 'aof_write_failed'
   | 'maxmemory_reached'
   | 'write_to_replica'
-  | 'min_replicas_not_met';
+  | 'min_replicas_not_met'
+  /** MISCONF seen but the failing persistence status cleared before the poll. */
+  | 'persistence_failed';
 
 const CAUSE_BY_CODE: Record<Exclude<WriteRejectionCode, 'MISCONF'>, WriteRejectionCause> = {
   OOM: 'maxmemory_reached',
@@ -22,6 +24,14 @@ const CAUSE_BY_CODE: Record<Exclude<WriteRejectionCode, 'MISCONF'>, WriteRejecti
 };
 
 export type WriteRejectionSeverity = 'critical' | 'warning';
+
+/**
+ * How long an open edge must see no active cause before it closes. OOM,
+ * READONLY and NOREPLICAS have no persistent "still broken" flag, so one quiet
+ * poll proves nothing. Time-based rather than a poll count because /metrics
+ * scrapes run the same pass at an unpredictable rate.
+ */
+export const RECOVERY_QUIET_MS = 60_000;
 
 export interface WriteRejectionState {
   /** Previous poll's cumulative errorstat counts, keyed by code. */
@@ -33,6 +43,8 @@ export interface WriteRejectionState {
   lastSeverity: WriteRejectionSeverity | null;
   /** Every cause already reported for the open edge; empty while closed. */
   lastCauses: WriteRejectionCause[];
+  /** When the open edge last saw an active cause; recovery waits quietMs after it. */
+  lastActiveAt: number | null;
 }
 
 export function createWriteRejectionState(): WriteRejectionState {
@@ -42,7 +54,25 @@ export function createWriteRejectionState(): WriteRejectionState {
     rejectingSince: null,
     lastSeverity: null,
     lastCauses: [],
+    lastActiveAt: null,
   };
+}
+
+export interface WriteRejectionInput {
+  persistence: Partial<PersistenceInfo> | undefined;
+  errorstats: ErrorStatsInfo | undefined;
+  /** INFO replication role; 'slave'/'replica' means READONLY is expected. */
+  role?: string;
+  /** used_memory and maxmemory from INFO memory (0/undefined = unlimited/unknown). */
+  usedMemory?: number;
+  maxMemory?: number;
+  /**
+   * Whether a failed BGSAVE refuses writes (stop-writes-on-bgsave-error yes
+   * with save points configured). null/undefined = unknown, treated as yes.
+   */
+  rdbStopsWrites?: boolean | null;
+  now: number;
+  quietMs?: number;
 }
 
 export interface WriteRejectionEvaluation {
@@ -51,7 +81,10 @@ export interface WriteRejectionEvaluation {
    * critical or gains a cause, 'recovered' when it closes; null otherwise.
    */
   transition: 'rejected' | 'escalated' | 'recovered' | null;
-  /** 'critical' once clients actually received the error, 'warning' while only at risk. */
+  /**
+   * 'critical' once clients actually received the error, 'warning' while only
+   * at risk. While the edge is open this is the highest severity it reached.
+   */
   severity: WriteRejectionSeverity;
   causes: WriteRejectionCause[];
   /** Errors returned to clients since the previous poll, by code. */
@@ -94,7 +127,13 @@ function persistenceHealthy(persistence: Partial<PersistenceInfo> | undefined): 
  * re-baselines instead of reading as a negative delta. A poll without the
  * errorstats section keeps the previous baseline, so the next poll that has
  * it still sees the whole delta. Recovery needs both signals clean on the
- * same poll, with persistence reported healthy rather than merely absent.
+ * same poll, with persistence reported healthy rather than merely absent,
+ * after quietMs with no active cause, and (for an OOM edge) with used_memory
+ * back below maxmemory.
+ *
+ * READONLY on a node that reports itself a replica is expected (probes,
+ * misrouted clients) and never opens an edge; its counter is still
+ * baselined so a later promotion doesn't fire on old counts.
  *
  * While the edge is open, it escalates once when severity first reaches
  * critical and once per cause not yet reported; staying critical, or causes
@@ -102,14 +141,16 @@ function persistenceHealthy(persistence: Partial<PersistenceInfo> | undefined): 
  */
 export function evaluateWriteRejection(
   state: WriteRejectionState,
-  persistence: Partial<PersistenceInfo> | undefined,
-  errorstats: ErrorStatsInfo | undefined,
-  now: number,
+  input: WriteRejectionInput,
 ): WriteRejectionEvaluation {
+  const { persistence, errorstats, now } = input;
   const causes = new Set<WriteRejectionCause>();
   const rejectedSinceLastPoll: Partial<Record<WriteRejectionCode, number>> = {};
+  const isReplica = input.role === 'slave' || input.role === 'replica';
 
-  if (persistence?.rdb_last_bgsave_status === 'err') causes.add('rdb_bgsave_failed');
+  if (persistence?.rdb_last_bgsave_status === 'err' && input.rdbStopsWrites !== false) {
+    causes.add('rdb_bgsave_failed');
+  }
   if (persistence?.aof_last_write_status === 'err') causes.add('aof_write_failed');
 
   if (errorstats !== undefined) {
@@ -121,9 +162,14 @@ export function evaluateWriteRejection(
       if (previous === undefined || count < previous) continue; // first sight or counter reset
       const delta = count - previous;
       if (delta === 0) continue;
+      // Writes to a by-design replica are normal; the baseline above stays
+      // current, but no outage edge opens.
+      if (code === 'READONLY' && isReplica) continue;
       rejectedSinceLastPoll[code] = delta;
       if (code === 'MISCONF') {
-        if (causes.size === 0) causes.add('rdb_bgsave_failed');
+        if (!causes.has('rdb_bgsave_failed') && !causes.has('aof_write_failed')) {
+          causes.add('persistence_failed');
+        }
       } else {
         causes.add(CAUSE_BY_CODE[code]);
       }
@@ -134,6 +180,7 @@ export function evaluateWriteRejection(
     Object.keys(rejectedSinceLastPoll).length > 0 ? 'critical' : 'warning';
   const active = causes.size > 0;
   let transition: WriteRejectionEvaluation['transition'] = null;
+  if (active) state.lastActiveAt = now;
 
   if (active && state.rejecting === false) {
     state.rejecting = true;
@@ -150,9 +197,26 @@ export function evaluateWriteRejection(
       state.lastCauses = [...state.lastCauses, ...newCauses];
       transition = 'escalated';
     }
-  } else if (active === false && state.rejecting === true && persistenceHealthy(persistence)) {
-    transition = 'recovered';
+  } else if (active === false && state.rejecting === true) {
+    const quietMs = input.quietMs ?? RECOVERY_QUIET_MS;
+    const quietLongEnough = state.lastActiveAt !== null && now - state.lastActiveAt >= quietMs;
+    const memoryClear =
+      !state.lastCauses.includes('maxmemory_reached') ||
+      input.maxMemory === undefined ||
+      input.maxMemory === 0 ||
+      input.usedMemory === undefined ||
+      input.usedMemory < input.maxMemory;
+    if (quietLongEnough && memoryClear && persistenceHealthy(persistence)) {
+      transition = 'recovered';
+    }
   }
+
+  // Report the edge's level, never the poll's: an escalation driven by a new
+  // cause on a quiet poll must not downgrade an edge that already went critical.
+  const reportedSeverity: WriteRejectionSeverity =
+    state.rejecting && (state.lastSeverity === 'critical' || severity === 'critical')
+      ? 'critical'
+      : severity;
 
   const rejectingForMs = state.rejectingSince === null ? null : now - state.rejectingSince;
   if (transition === 'recovered') {
@@ -160,11 +224,12 @@ export function evaluateWriteRejection(
     state.rejectingSince = null;
     state.lastSeverity = null;
     state.lastCauses = [];
+    state.lastActiveAt = null;
   }
 
   return {
     transition,
-    severity,
+    severity: reportedSeverity,
     causes: [...causes],
     rejectedSinceLastPoll,
     rejectingForMs,

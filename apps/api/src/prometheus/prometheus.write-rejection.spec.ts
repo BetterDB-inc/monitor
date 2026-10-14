@@ -10,6 +10,7 @@ import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { OtelEventDispatcherService } from '../otel-telemetry/otel-event-dispatcher.service';
 import type { InfoResponse } from '../common/types/metrics.types';
+import { RECOVERY_QUIET_MS } from '../monitor/write-rejection';
 
 const T0 = 1_700_000_000_000;
 const POLL_INTERVAL_MS = 5000;
@@ -21,8 +22,10 @@ const BGSAVE_FAILED = { rdb_last_bgsave_status: 'err', aof_last_write_status: 'o
 function info(
   persistence: Record<string, string>,
   errorstats: Record<string, number> = {},
+  extra: Partial<InfoResponse> = {},
 ): InfoResponse {
   return {
+    ...extra,
     persistence: persistence as unknown as InfoResponse['persistence'],
     errorstats: Object.fromEntries(
       Object.entries(errorstats).map(([code, count]) => [`errorstat_${code}`, { count }]),
@@ -36,6 +39,7 @@ describe('PrometheusService write-rejection wiring', () => {
   let otelDispatch: jest.Mock;
   let getSlowLogLength: jest.Mock;
   let infoReads: Record<string, jest.Mock>;
+  let getConfigValue: jest.Mock;
 
   beforeEach(() => {
     jest.useFakeTimers({ now: T0 });
@@ -50,10 +54,12 @@ describe('PrometheusService write-rejection wiring', () => {
       'conn-b': jest.fn(),
       'ext-1': jest.fn(),
     };
+    // Unset by default: CONFIG unavailable, so stop-writes is unknown.
+    getConfigValue = jest.fn().mockRejectedValue(new Error('ERR unknown command CONFIG'));
     const registry = {
       getConfig: jest.fn((id: string) => configs[id] ?? null),
       get: jest.fn((id: string) =>
-        infoReads[id] ? { getInfoParsed: infoReads[id], getClusterInfo: jest.fn() } : undefined,
+        infoReads[id] ? { getInfoParsed: infoReads[id], getClusterInfo: jest.fn(), getConfigValue } : undefined,
       ),
       list: jest.fn(() => []),
     } as unknown as ConnectionRegistry;
@@ -105,6 +111,11 @@ describe('PrometheusService write-rejection wiring', () => {
     await service['runUpdateMetricsForConnection'](connectionId);
   }
 
+  /** Lets the open edge sit quiet long enough to be allowed to close. */
+  function waitOutQuietWindow(): void {
+    jest.setSystemTime(Date.now() + RECOVERY_QUIET_MS);
+  }
+
   function writeEvents(connectionId?: string): Array<[string, Record<string, unknown>, string]> {
     return dispatchEvent.mock.calls.filter(
       ([event, , id]) =>
@@ -136,13 +147,16 @@ describe('PrometheusService write-rejection wiring', () => {
     expect(otelDispatch).toHaveBeenCalledTimes(1);
     expect(otelDispatch).toHaveBeenCalledWith(
       WebhookEventType.WRITES_REJECTED,
-      expect.objectContaining({ causes: ['rdb_bgsave_failed'] }),
+      expect.objectContaining({ causes: 'rdb_bgsave_failed' }),
       'conn-a',
     );
   });
 
   it('dispatches writes.recovered once when persistence is healthy again', async () => {
     await poll('conn-a', info(BGSAVE_FAILED));
+    await poll('conn-a', info(HEALTHY));
+    expect(writeEvents('conn-a')).toHaveLength(1); // too soon to call it recovered
+    waitOutQuietWindow();
     await poll('conn-a', info(HEALTHY));
     await poll('conn-a', info(HEALTHY));
 
@@ -151,7 +165,9 @@ describe('PrometheusService write-rejection wiring', () => {
       WebhookEventType.WRITES_REJECTED,
       WebhookEventType.WRITES_RECOVERED,
     ]);
-    expect(events[1][1]).toMatchObject({ rejectingForMs: POLL_INTERVAL_MS });
+    expect(events[1][1]).toMatchObject({
+      rejectingForMs: POLL_INTERVAL_MS * 2 + RECOVERY_QUIET_MS,
+    });
   });
 
   it('dispatches a critical writes.rejected when errorstat_OOM rises on a later poll', async () => {
@@ -180,6 +196,7 @@ describe('PrometheusService write-rejection wiring', () => {
       WebhookEventType.WRITES_REJECTED,
     ]);
 
+    waitOutQuietWindow();
     await poll('conn-a', info(HEALTHY));
     await poll('conn-a', info(HEALTHY));
 
@@ -187,7 +204,9 @@ describe('PrometheusService write-rejection wiring', () => {
       ([event]) => event === WebhookEventType.WRITES_RECOVERED,
     );
     expect(recovered).toHaveLength(1);
-    expect(recovered[0][1]).toMatchObject({ rejectingForMs: POLL_INTERVAL_MS * 2 });
+    expect(recovered[0][1]).toMatchObject({
+      rejectingForMs: POLL_INTERVAL_MS * 2 + RECOVERY_QUIET_MS,
+    });
   });
 
   it('re-sends writes.rejected once, flagged escalated, when clients start receiving MISCONF', async () => {
@@ -232,6 +251,7 @@ describe('PrometheusService write-rejection wiring', () => {
     await poll('conn-b', info(HEALTHY));
     await poll('conn-a', info(BGSAVE_FAILED));
     await poll('conn-b', info(HEALTHY));
+    waitOutQuietWindow();
     await poll('conn-a', info(HEALTHY));
     await poll('conn-b', info(HEALTHY));
 
@@ -253,5 +273,63 @@ describe('PrometheusService write-rejection wiring', () => {
     expect(writeEvents('conn-a')).toHaveLength(1);
     // The slowlog stage runs after INFO metrics; reaching it means the pass completed.
     expect(getSlowLogLength).toHaveBeenCalledWith('conn-a');
+  });
+
+  it('mirrors flat scalar attributes to OTLP while the webhook stays structured', async () => {
+    await poll('conn-a', info(HEALTHY, { OOM: 4 }));
+    await poll('conn-a', info(HEALTHY, { OOM: 90 }));
+
+    const otelAttributes = otelDispatch.mock.calls[0][1] as Record<string, unknown>;
+    expect(otelAttributes).toEqual(
+      expect.objectContaining({
+        causes: 'maxmemory_reached',
+        severity: 'critical',
+        'rejected.OOM': 86,
+      }),
+    );
+    for (const value of Object.values(otelAttributes)) {
+      expect(typeof value === 'object').toBe(false);
+    }
+    expect(writeEvents('conn-a')[0][1]).toMatchObject({
+      causes: ['maxmemory_reached'],
+      rejectedSinceLastPoll: { OOM: 86 },
+    });
+  });
+
+  it('stays quiet when a read replica refuses writes with READONLY', async () => {
+    const replica = { replication: { role: 'slave' } } as unknown as Partial<InfoResponse>;
+    await poll('conn-a', info(HEALTHY, { READONLY: 0 }, replica));
+    await poll('conn-a', info(HEALTHY, { READONLY: 25 }, replica));
+
+    expect(writeEvents()).toHaveLength(0);
+    expect(otelDispatch).not.toHaveBeenCalled();
+  });
+
+  it('ignores a failed BGSAVE when stop-writes-on-bgsave-error is no', async () => {
+    getConfigValue.mockImplementation(async (name: string) =>
+      name === 'stop-writes-on-bgsave-error' ? 'no' : '3600 1',
+    );
+
+    await poll('conn-a', info(HEALTHY));
+    await poll('conn-a', info(BGSAVE_FAILED));
+
+    expect(getConfigValue).toHaveBeenCalledWith('stop-writes-on-bgsave-error');
+    expect(writeEvents()).toHaveLength(0);
+  });
+
+  it('treats a blocked CONFIG GET as unknown and still completes the poll', async () => {
+    await poll('conn-a', info(BGSAVE_FAILED));
+
+    expect(getConfigValue).toHaveBeenCalled();
+    expect(writeEvents('conn-a')).toHaveLength(1);
+    expect(getSlowLogLength).toHaveBeenCalledWith('conn-a');
+  });
+
+  it('caches the stop-writes lookup instead of issuing CONFIG GET every poll', async () => {
+    await poll('conn-a', info(BGSAVE_FAILED));
+    await poll('conn-a', info(BGSAVE_FAILED));
+    await poll('conn-a', info(BGSAVE_FAILED));
+
+    expect(getConfigValue).toHaveBeenCalledTimes(2); // one pair of keys, once
   });
 });

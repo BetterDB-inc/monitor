@@ -129,5 +129,5 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "RDB background save failing on {{ $labels.connection }}"
-          description: "Last BGSAVE failed. With stop-writes-on-bgsave-error yes (the default) the server rejects writes with MISCONF. Check disk space, permissions and fork memory."
+          summary: "BGSAVE failing on {{ $labels.connection }} (writes are refused only if stop-writes-on-bgsave-error=yes)"
+          description: "Last BGSAVE failed. Writes are rejected with MISCONF only when stop-writes-on-bgsave-error is yes (the default) and save points are configured. Check disk space, permissions and fork memory."

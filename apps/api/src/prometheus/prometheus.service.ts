@@ -64,8 +64,11 @@ import { DropReason } from '../external-metrics/otlp-metrics-types';
 import {
   createWriteRejectionState,
   evaluateWriteRejection,
-  WriteRejectionState,
+  type WriteRejectionState,
 } from '../monitor/write-rejection';
+
+/** How long a CONFIG GET of the BGSAVE stop-writes settings stays fresh. */
+const RDB_STOPS_WRITES_TTL_MS = 5 * 60_000;
 
 /**
  * Ceiling on the demoted-node read, clamped down to the poll interval when that
@@ -92,6 +95,8 @@ interface ConnectionMetricState {
   previousTopology: TopologySnapshot | null;
   demotionWatch: DemotionWatch;
   writeRejection: WriteRejectionState;
+  /** Cached stop-writes-on-bgsave-error && save; null = unknown (CONFIG blocked). */
+  rdbStopsWrites: { value: boolean | null; fetchedAt: number } | null;
   currentKeyspaceDbLabels: Set<string>;
   currentClusterSlotLabels: Set<string>;
   // Storage-based metric labels (per-connection)
@@ -445,6 +450,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         previousTopology: null,
         demotionWatch: new Map(),
         writeRejection: createWriteRejectionState(),
+        rdbStopsWrites: null,
         currentKeyspaceDbLabels: new Set(),
         currentClusterSlotLabels: new Set(),
         // Storage-based metric labels
@@ -1271,6 +1277,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
     try {
       const info = await this.readInfo(connectionId, client);
+      if (!external && info.persistence?.rdb_last_bgsave_status === 'err') {
+        await this.refreshRdbStopsWrites(client, state);
+      }
       // A reply is evidence the connection is alive even when this pass no
       // longer owns the metrics, and markFresh only updates a connection the
       // tracker still knows under this same label — so a removed one stays
@@ -1613,12 +1622,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     connectionId: string,
     config: { host: string; port: number } | null,
   ): void {
-    const result = evaluateWriteRejection(
-      state.writeRejection,
-      info.persistence,
-      info.errorstats,
-      Date.now(),
-    );
+    const result = evaluateWriteRejection(state.writeRejection, {
+      persistence: info.persistence,
+      errorstats: info.errorstats,
+      role: info.replication?.role,
+      usedMemory: parseMemoryField(info.memory?.used_memory),
+      maxMemory: parseMemoryField(info.memory?.maxmemory),
+      rdbStopsWrites: state.rdbStopsWrites?.value ?? null,
+      now: Date.now(),
+    });
     if (result.transition === null) return;
 
     // An escalation re-sends writes.rejected, flagged, rather than a new event type.
@@ -1644,8 +1656,19 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.logger.log(`${message} on ${connectionId}`);
     }
 
+    // OTLP attributes must be flat scalars; arrays and objects are dropped.
+    const otelAttributes: Record<string, string | number | boolean> = {
+      causes: result.causes.join(','),
+      severity: result.severity,
+      ...(result.rejectingForMs === null ? {} : { rejectingForMs: result.rejectingForMs }),
+      ...(escalated ? { escalated: true } : {}),
+    };
+    for (const [code, count] of Object.entries(result.rejectedSinceLastPoll)) {
+      otelAttributes[`rejected.${code}`] = count;
+    }
+
     try {
-      this.otelEvents?.dispatch(eventType, attributes, connectionId);
+      this.otelEvents?.dispatch(eventType, otelAttributes, connectionId);
     } catch (err) {
       this.logger.error(`Failed to dispatch ${eventType} OTLP event`, err);
     }
@@ -1663,6 +1686,32 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       .catch((err) => {
         this.logger.error(`Failed to dispatch ${eventType} webhook`, err);
       });
+  }
+
+  /**
+   * A failed BGSAVE refuses writes only with stop-writes-on-bgsave-error yes
+   * and save points configured. Managed services often block CONFIG, so a
+   * failure caches null (unknown) and never fails the poll.
+   */
+  private async refreshRdbStopsWrites(
+    client: DatabasePort,
+    state: ConnectionMetricState,
+  ): Promise<void> {
+    const now = Date.now();
+    if (state.rdbStopsWrites && now - state.rdbStopsWrites.fetchedAt < RDB_STOPS_WRITES_TTL_MS) {
+      return;
+    }
+    let value: boolean | null;
+    try {
+      const [stop, save] = await Promise.all([
+        client.getConfigValue('stop-writes-on-bgsave-error'),
+        client.getConfigValue('save'),
+      ]);
+      value = stop === null ? null : stop === 'yes' && (save ?? '').trim() !== '';
+    } catch {
+      value = null;
+    }
+    state.rdbStopsWrites = { value, fetchedAt: now };
   }
 
   private updatePersistenceMetrics(
@@ -2919,4 +2968,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(2)} KB`;
     return `${bytes} B`;
   }
+}
+
+function parseMemoryField(raw: string | number | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const value = typeof raw === 'number' ? raw : parseInt(raw, 10);
+  return Number.isFinite(value) ? value : undefined;
 }
