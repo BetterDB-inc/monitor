@@ -3889,6 +3889,11 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return chunkedSqliteDelete(this.db, 'kv_cache_engine_samples', 'timestamp < ?', [cutoffTimestamp]);
   }
 
+  async deleteKvCacheEngineSamples(engineId: string): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+    await chunkedSqliteDelete(this.db, 'kv_cache_engine_samples', 'engine_id = ?', [engineId]);
+  }
+
   async saveKvCacheEngine(e: StoredKvCacheEngine): Promise<StoredKvCacheEngine> {
     if (!this.db) throw new Error('Database not initialized');
     this.db

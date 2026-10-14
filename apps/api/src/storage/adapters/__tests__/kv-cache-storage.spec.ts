@@ -134,6 +134,17 @@ describe.each([
     expect(await storage.pruneOldKvCacheEngineSamples(5)).toBe(1);
   });
 
+  it('deletes the samples of one engine only', async () => {
+    await storage.saveKvCacheEngineSamples([
+      sample({ timestamp: 60_000 }),
+      sample({ timestamp: 120_000 }),
+      sample({ engineId: 'eng-2', timestamp: 60_000 }),
+    ]);
+    await storage.deleteKvCacheEngineSamples('eng-1');
+    const rows = await storage.getKvCacheEngineSamples({ connectionId: 'conn-a' });
+    expect(rows.map((r) => r.engineId)).toEqual(['eng-2']);
+  });
+
   it('upserts, lists, reads and deletes engines', async () => {
     await storage.saveKvCacheEngine(engine());
     await storage.saveKvCacheEngine(engine({ id: 'eng-2', source: 'otlp', scrapeUrl: null, otlpEngineId: 'lmc-1', createdAt: 2 }));

@@ -1272,6 +1272,10 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return before - this.kvCacheSamples.length;
   }
 
+  async deleteKvCacheEngineSamples(engineId: string): Promise<void> {
+    this.kvCacheSamples = this.kvCacheSamples.filter((r) => r.engineId !== engineId);
+  }
+
   async saveKvCacheEngine(engine: StoredKvCacheEngine): Promise<StoredKvCacheEngine> {
     this.kvCacheEngines.set(engine.id, { ...engine });
     return engine;

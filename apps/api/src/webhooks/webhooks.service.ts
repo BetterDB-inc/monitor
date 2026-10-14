@@ -1,9 +1,9 @@
 import { Injectable, Inject, Logger, BadRequestException, NotFoundException, ForbiddenException, Optional } from '@nestjs/common';
 import { randomBytes, createHmac } from 'crypto';
-import { promises as dns } from 'dns';
 import type { Webhook, WebhookDelivery, WebhookEventType, DEFAULT_RETRY_POLICY } from '@betterdb/shared';
 import { Tier, validateEventsForTier, getRequiredTierForEvent, getEventsForTier, getLockedEventsForTier } from '@betterdb/shared';
 import { WebhookPayloadFormat } from '@betterdb/shared';
+import { assertSafeOutboundUrl } from '../common/utils/outbound-url-guard';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { CreateWebhookDto, UpdateWebhookDto } from '../common/dto/webhook.dto';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
@@ -12,18 +12,6 @@ import { LicenseService } from '@proprietary/licenses';
 @Injectable()
 export class WebhooksService {
   private readonly logger = new Logger(WebhooksService.name);
-
-  // SSRF Protection: Private IP ranges to block
-  private readonly BLOCKED_IP_PATTERNS = [
-    /^127\./,                    // localhost
-    /^10\./,                     // 10.0.0.0/8
-    /^172\.(1[6-9]|2[0-9]|3[01])\./, // 172.16.0.0/12
-    /^192\.168\./,               // 192.168.0.0/16
-    /^169\.254\./,               // link-local
-    /^::1$/,                     // IPv6 localhost
-    /^fe80:/,                    // IPv6 link-local
-    /^fc00:/,                    // IPv6 unique local
-  ];
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
@@ -37,90 +25,6 @@ export class WebhooksService {
    */
   private resolveConnectionId(connectionId?: string): string | undefined {
     return connectionId || this.connectionRegistry.getDefaultId() || undefined;
-  }
-
-  /**
-   * Check if an IP address is blocked
-   */
-  private isBlockedIp(ip: string): boolean {
-    for (const pattern of this.BLOCKED_IP_PATTERNS) {
-      if (pattern.test(ip)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /**
-   * Validate webhook URL for SSRF protection
-   */
-  private async validateUrl(url: string): Promise<void> {
-    try {
-      const parsed = new URL(url);
-
-      // Only allow http and https
-      if (!['http:', 'https:'].includes(parsed.protocol)) {
-        throw new BadRequestException('Only HTTP and HTTPS protocols are allowed');
-      }
-
-      // Warn if URL contains credentials
-      if (parsed.username || parsed.password) {
-        this.logger.warn(`Webhook URL contains credentials, consider using custom headers instead: ${parsed.hostname}`);
-      }
-
-      // Allow localhost in development/non-production environments
-      const isProduction = process.env.NODE_ENV === 'production';
-      const isLocalhost = parsed.hostname === 'localhost' ||
-        parsed.hostname === '0.0.0.0' ||
-        parsed.hostname === '127.0.0.1' ||
-        parsed.hostname.startsWith('127.');
-
-      if (isLocalhost && !isProduction) {
-        // Allow localhost in development
-        this.logger.debug(`Allowing localhost webhook URL in ${process.env.NODE_ENV || 'development'} mode: ${url}`);
-        return;
-      }
-
-      // Block localhost in production
-      if (parsed.hostname === 'localhost' || parsed.hostname === '0.0.0.0') {
-        throw new BadRequestException('Cannot use localhost or 0.0.0.0 as webhook URL in production');
-      }
-
-      // Check if hostname is already an IP
-      if (this.isBlockedIp(parsed.hostname)) {
-        throw new BadRequestException('Cannot use private IP addresses as webhook URL');
-      }
-
-      // Additional checks for common bypass attempts
-      if (parsed.hostname.includes('127.') || parsed.hostname.includes('localhost')) {
-        throw new BadRequestException('Suspicious hostname detected');
-      }
-
-      // DNS resolution to prevent DNS rebinding attacks
-      if (isProduction) {
-        try {
-          const addresses = await dns.resolve(parsed.hostname);
-          for (const addr of addresses) {
-            if (this.isBlockedIp(addr)) {
-              throw new BadRequestException(`Webhook URL resolves to blocked IP address: ${addr}`);
-            }
-          }
-        } catch (dnsError: any) {
-          // If DNS resolution fails, it might be unreachable but not necessarily malicious
-          if (dnsError instanceof BadRequestException) {
-            throw dnsError;
-          }
-          this.logger.warn(`Failed to resolve DNS for webhook URL: ${parsed.hostname}`);
-          throw new BadRequestException('Failed to resolve webhook URL hostname');
-        }
-      }
-
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        throw error;
-      }
-      throw new BadRequestException('Invalid webhook URL');
-    }
   }
 
   /**
@@ -176,7 +80,7 @@ export class WebhooksService {
    */
   async createWebhook(dto: CreateWebhookDto & { connectionId?: string }): Promise<Webhook> {
     // Validate URL for SSRF
-    await this.validateUrl(dto.url);
+    await assertSafeOutboundUrl(dto.url, { label: 'webhook URL' });
 
     // Validate event tier access
     this.validateEventTiers(dto.events);
@@ -261,7 +165,7 @@ export class WebhooksService {
   async updateWebhook(id: string, dto: UpdateWebhookDto): Promise<Webhook> {
     // Validate URL if provided
     if (dto.url) {
-      await this.validateUrl(dto.url);
+      await assertSafeOutboundUrl(dto.url, { label: 'webhook URL' });
     }
 
     // Validate event tier access if events are being updated

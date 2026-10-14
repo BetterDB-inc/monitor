@@ -9,10 +9,10 @@ const engine = {
 describe('KvCacheStatusService', () => {
   const storage = {
     getKvCacheFootprintSnapshots: jest.fn(),
-    getKvCacheEngines: jest.fn().mockResolvedValue([engine]),
   } as any;
+  const registry = { list: jest.fn().mockReturnValue([engine]) } as any;
   const footprint = { getSampleKey: jest.fn().mockReturnValue('m@1@0@abc…@bfloat16') } as any;
-  const service = new KvCacheStatusService(storage, footprint);
+  const service = new KvCacheStatusService(storage, footprint, registry);
 
   it('never exposes the auth header', () => {
     const pub = toPublicEngine(engine as any);
@@ -25,6 +25,7 @@ describe('KvCacheStatusService', () => {
     storage.getKvCacheFootprintSnapshots.mockResolvedValue([{ detected: true }]);
     const status = await service.getStatus('c1');
     expect(storage.getKvCacheFootprintSnapshots).toHaveBeenCalledWith({ connectionId: 'c1', limit: 1 });
+    expect(registry.list).toHaveBeenCalledWith('c1');
     expect(status).toEqual({ hasLmcache: true, latest: { detected: true }, sampleKey: 'm@1@0@abc…@bfloat16', engines: [toPublicEngine(engine as any)] });
   });
 

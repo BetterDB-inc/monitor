@@ -119,6 +119,9 @@ describe('planSemconvInstruments', () => {
     ['betterdb_cve_findings', 'betterdb.cve.findings', 'gauge', '{finding}'],
     ['betterdb_cve_kev', 'betterdb.cve.kev', 'gauge', '{finding}'],
     ['betterdb_cve_dataset_stale', 'betterdb.cve.dataset_stale', 'gauge', '1'],
+    ['betterdb_kv_cache_hit_rate', 'betterdb.kv_cache.hit_rate', 'gauge', '1'],
+    ['betterdb_kv_cache_chunks', 'betterdb.kv_cache.chunks', 'gauge', '{chunk}'],
+    ['betterdb_kv_cache_bytes', 'betterdb.kv_cache.bytes', 'gauge', 'By'],
   ])('%s → %s (%s, %s)', (prom, name, kind, unit) => {
     expect(planSemconvInstruments([family(prom, [])])).toEqual([
       { name, kind, unit, description: `${prom} help` },

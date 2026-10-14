@@ -112,6 +112,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  getEncryptionService(): EnvelopeEncryptionService | null {
+    return this.encryption;
+  }
+
   async onModuleInit(): Promise<void> {
     await this.loadConnections();
   }
