@@ -361,4 +361,37 @@ describe('PrometheusService write-rejection wiring', () => {
     ]);
     expect(writeEvents('conn-a')[0][1]).toMatchObject({ causes: ['maxmemory_reached'] });
   });
+
+  it('bounds a hung stop-writes CONFIG GET and caches the unknown result', async () => {
+    getConfigValue.mockImplementation(() => new Promise(() => {}));
+    jest.setSystemTime(Date.now() + POLL_INTERVAL_MS);
+    infoReads['conn-a'].mockResolvedValueOnce(info(BGSAVE_FAILED));
+    const pass = service['runUpdateMetricsForConnection']('conn-a');
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+    await pass;
+
+    expect(getSlowLogLength).toHaveBeenCalledWith('conn-a');
+    const events = writeEvents('conn-a');
+    expect(events).toHaveLength(1);
+    expect(events[0][0]).toBe(WebhookEventType.WRITES_REJECTED);
+    expect(events[0][1]).toMatchObject({ causes: ['rdb_bgsave_failed'] });
+
+    const calls = getConfigValue.mock.calls.length;
+    await poll('conn-a', info(BGSAVE_FAILED));
+    expect(getConfigValue).toHaveBeenCalledTimes(calls);
+  });
+
+  it('leaves rdb_last_bgsave_ok unset when the status is absent, 0 when err', async () => {
+    const label = service['getConnectionLabel']('conn-a');
+    const bgsaveOk = async () =>
+      (await service['rdbLastBgsaveOk'].get()).values.find(
+        (v: { labels: Record<string, unknown> }) => v.labels.connection === label,
+      )?.value;
+
+    await poll('conn-a', info({ aof_last_write_status: 'ok' }));
+    expect(await bgsaveOk()).toBeUndefined();
+
+    await poll('conn-a', info(BGSAVE_FAILED));
+    expect(await bgsaveOk()).toBe(0);
+  });
 });

@@ -66,6 +66,8 @@ export interface WriteRejectionInput {
   /** used_memory and maxmemory from INFO memory (0/undefined = unlimited/unknown). */
   usedMemory?: number;
   maxMemory?: number;
+  /** INFO memory mem_not_counted_for_evict (replica output / AOF buffers); Redis excludes it from the maxmemory check. */
+  memNotCountedForEvict?: number;
   /**
    * Whether a failed BGSAVE refuses writes (stop-writes-on-bgsave-error yes
    * with save points configured). null/undefined = unknown, treated as yes.
@@ -221,7 +223,7 @@ export function evaluateWriteRejection(
       input.maxMemory === undefined ||
       input.maxMemory === 0 ||
       input.usedMemory === undefined ||
-      input.usedMemory < input.maxMemory;
+      input.usedMemory - (input.memNotCountedForEvict ?? 0) < input.maxMemory;
     if (
       quietLongEnough &&
       memoryClear &&

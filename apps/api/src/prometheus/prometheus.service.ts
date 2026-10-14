@@ -1628,6 +1628,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       role: info.replication?.role,
       usedMemory: parseMemoryField(info.memory?.used_memory),
       maxMemory: parseMemoryField(info.memory?.maxmemory),
+      memNotCountedForEvict: parseMemoryField(info.memory?.mem_not_counted_for_evict),
       rdbStopsWrites: state.rdbStopsWrites?.value ?? null,
       now: Date.now(),
     });
@@ -1703,10 +1704,16 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
     let value: boolean | null;
     try {
-      const [stop, save] = await Promise.all([
-        client.getConfigValue('stop-writes-on-bgsave-error'),
-        client.getConfigValue('save'),
-      ]);
+      // Bounded so a hung CONFIG reply can't stall the poll pass; a timeout
+      // lands in the catch and is cached as unknown like any other failure.
+      const [stop, save] = await this.readWithTimeout(
+        Promise.all([
+          client.getConfigValue('stop-writes-on-bgsave-error'),
+          client.getConfigValue('save'),
+        ]),
+        Math.min(this.pollIntervalMs, DEMOTED_NODE_READ_TIMEOUT_MS),
+        'stop-writes CONFIG GET',
+      );
       value = stop === null ? null : stop === 'yes' && (save ?? '').trim() !== '';
     } catch {
       value = null;
@@ -1739,7 +1746,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       connLabel,
       persistence.rdb_last_bgsave_status,
       'ok',
-      absentAsZero,
+      // Absent is unknown, not failed: recording 0 would fire BetterDBPersistenceFailing.
+      false,
     );
     this.setInfoFlag(this.aofEnabled, connLabel, persistence.aof_enabled, '1', absentAsZero);
     this.setInfoFlag(

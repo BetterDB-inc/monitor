@@ -294,4 +294,30 @@ describe('evaluateWriteRejection', () => {
     expect(ev(s, undefined, stats({ OOM: 3 }), 20_000).transition).toBeNull();
     expect(ev(s, healthy, stats({ OOM: 3 }), 25_000).transition).toBe('recovered');
   });
+
+  it('OOM edge recovers when only non-evictable buffers keep used_memory above maxmemory', () => {
+    const s = createWriteRejectionState();
+    ev(s, healthy, stats({ OOM: 0 }), 0);
+    ev(s, healthy, stats({ OOM: 5 }), 5_000);
+    expect(
+      ev(s, healthy, stats({ OOM: 5 }), 60_000, {
+        usedMemory: 110,
+        maxMemory: 100,
+        memNotCountedForEvict: 20,
+      }).transition,
+    ).toBe('recovered');
+  });
+
+  it('OOM edge stays open when evictable memory is still at maxmemory', () => {
+    const s = createWriteRejectionState();
+    ev(s, healthy, stats({ OOM: 0 }), 0);
+    ev(s, healthy, stats({ OOM: 5 }), 5_000);
+    expect(
+      ev(s, healthy, stats({ OOM: 5 }), 60_000, {
+        usedMemory: 130,
+        maxMemory: 100,
+        memNotCountedForEvict: 20,
+      }).transition,
+    ).toBeNull();
+  });
 });
