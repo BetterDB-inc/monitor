@@ -88,9 +88,7 @@ function belowUpperBoundOf(version: string, range: BranchRange): boolean {
     return compareVersions(version, range.vulnerableAtOrBelow) <= 0;
   }
 
-  // A floor with no ceiling ("All", ">= 7.0") covers everything above it.
-  // A range with neither bound carries no information and matches nothing.
-  return range.vulnerableFrom !== undefined;
+  return false;
 }
 
 function matchRange(version: string, range: BranchRange): VersionMatch {

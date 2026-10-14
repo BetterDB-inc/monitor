@@ -189,7 +189,7 @@ describe('GhsaSource', () => {
     expect(matchRanges('7.0.13', advisory.affected).vulnerable).toBe(false);
   });
 
-  it('treats an unfixed two-part lower bound as an unbounded wildcard, except on Valkey', async () => {
+  it('infers no wildcard for a lower bound with no published fix', async () => {
     const fixture = [
       ghsaAdvisory({
         cve_id: 'CVE-9999-00003',
@@ -202,8 +202,8 @@ describe('GhsaSource', () => {
     const redis = result.advisories.find((a) => a.product === 'redis');
     const valkey = result.advisories.find((a) => a.product === 'valkey');
 
-    expect(redis?.confidence).toBe('broad');
-    expect(redis?.affected).toEqual([{ branch: '*', vulnerableFrom: '7.2.0' }]);
+    expect(redis?.confidence).toBe('unversioned');
+    expect(redis?.affected).toEqual([]);
     expect(valkey?.confidence).toBe('unversioned');
     expect(valkey?.affected).toEqual([]);
   });

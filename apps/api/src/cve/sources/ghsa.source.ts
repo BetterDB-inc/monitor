@@ -6,7 +6,7 @@ import type {
   CveSeverity,
 } from '@betterdb/shared';
 import { GHSA_REPOS } from '../cve.constants';
-import { branchOf } from '../matcher/version-range';
+import { branchOf, compareVersions } from '../matcher/version-range';
 import {
   fetchLinkedJson,
   type LinkedJson,
@@ -46,7 +46,11 @@ function toSeverity(raw: string): CveSeverity {
   return known ?? 'medium';
 }
 
-const VERSION_PATTERN = /\d+\.\d+\.\d+/g;
+// One patched_versions token: "6.2.17", the two-part "6.2" (= 6.2.0), Redis's
+// "6.2.X" placeholder, optionally with ">=" or "and above" / "or later" / "+".
+const PATCHED_TOKEN_PATTERN =
+  /^(?:>=\s*)?(\d+)\.(\d+)(?:\.(\d+|x))?(?:\s*\+|\s+(?:and|or)\s+(?:above|later|newer))?$/i;
+const THREE_PART_VERSION_PATTERN = /\d+\.\d+\.\d+/g;
 const VER = String.raw`\d+\.\d+(?:\.\d+)?`;
 // ">= 7.2", ">= 7.2.0", "7.0 or newer", "7.0 and later".
 const LOWER_BOUND_PATTERN = new RegExp(
@@ -55,6 +59,7 @@ const LOWER_BOUND_PATTERN = new RegExp(
 );
 // Empty, "TBD", "none", "n/a" or "-": the vendor has not published a fix.
 const NO_FIX_PATTERN = /^\s*(tbd|none|n\/a|-)?\s*$/i;
+const NO_FIX_TOKEN_PATTERN = /^(tbd|none|n\/a|-)$/i;
 const AT_OR_BELOW_PATTERN = /(?:^|,)\s*<=\s*(\d+\.\d+\.\d+)/;
 const BELOW_PATTERN = /(?:^|,)\s*<\s*(\d+\.\d+\.\d+)/;
 
@@ -87,11 +92,49 @@ function lowerBoundFor(vulnerableVersionRange: string | undefined, branch: strin
   return lower;
 }
 
+interface ParsedPatched {
+  /** Concrete fix versions, padded to three parts ("6.2" becomes "6.2.0"). */
+  versions: string[];
+  /**
+   * False when any non-TBD token is not a concrete version ("6.2.X", prose).
+   * The vendor named a fixed branch we can't place, so the unlisted-branch
+   * inference can't be trusted for this advisory.
+   */
+  complete: boolean;
+}
+
+function parsePatchedVersions(patchedVersions: string): ParsedPatched {
+  const versions: string[] = [];
+  let complete = true;
+
+  for (const token of patchedVersions.split(',').map((part) => part.trim())) {
+    if (token.length === 0 || NO_FIX_TOKEN_PATTERN.test(token)) {
+      continue;
+    }
+
+    const match = token.match(PATCHED_TOKEN_PATTERN);
+    if (!match) {
+      // Unrecognized prose: keep any full version it names, but don't trust it.
+      versions.push(...(token.match(THREE_PART_VERSION_PATTERN) ?? []));
+      complete = false;
+      continue;
+    }
+
+    if (match[3] !== undefined && /^x$/i.test(match[3])) {
+      complete = false;
+      continue;
+    }
+
+    versions.push(`${match[1]}.${match[2]}.${match[3] ?? '0'}`);
+  }
+
+  return { versions, complete };
+}
+
 function exactRangesFromPatchedVersions(
-  patchedVersions: string,
+  versions: string[],
   vulnerableVersionRange: string | undefined,
 ): BranchRange[] {
-  const versions = patchedVersions.match(VERSION_PATTERN) ?? [];
   const ranges: BranchRange[] = [];
 
   for (const version of versions) {
@@ -157,30 +200,60 @@ const ANY_UPPER_BOUND_PATTERN = /<=?\s*\d+\.\d+(?:\.\d+)?/g;
 const AND_BELOW_PATTERN = /\band below\b/i;
 
 /**
+ * The first branch after the newest one that received a fix: "8.2.2" gives
+ * "8.3.0". A branch cut after every listed fix carries that fix, so the
+ * unlisted-branch wildcard stops there.
+ */
+function nextBranchFloor(versions: string[]): string {
+  const newest = versions.reduce((highest, candidate) => {
+    return compareVersions(candidate, highest) > 0 ? candidate : highest;
+  });
+  const [major, minor] = branchOf(newest).split('.').map(Number);
+
+  return `${major}.${minor + 1}.0`;
+}
+
+/**
  * `patched_versions` only names the branches that received a fix. When the
  * vendor's affected range covers every version ("All", "All versions") or
- * has a floor but no ceiling (">= 7.0", "7.0 and newer"), every branch it
- * doesn't list is affected with no fix available, typically EOL lines such
- * as Redis 7.0.x. Emit one unbounded wildcard for those branches.
- * matchRanges() never lets a wildcard override a fix published for the
- * version's own branch.
+ * has a floor but no ceiling (">= 7.0", "7.0 and newer"), a branch it
+ * doesn't list that sits below the newest fixed branch is affected with no
+ * fix available, typically EOL lines such as Redis 7.0.x.
  *
- * Any upper bound ("< 8.0.4", ">= 9.0.0, <= 9.0.2") means the range is
- * already branch-scoped, so nothing is inferred; unparseable prose never
- * guesses a range.
+ * The wildcard is capped at the branch after the newest fix: Redis fixes
+ * land upstream before the next branch is cut, so later branches (8.4.0 for
+ * CVE-2025-49844) are not flagged. matchRanges() never lets the wildcard
+ * override a fix published for the version's own branch.
+ *
+ * Nothing is inferred when:
+ * - the range has any upper bound ("< 8.0.4", ">= 9.0.0, <= 9.0.2"): it is
+ *   already branch-scoped;
+ * - the range is missing or unparseable prose;
+ * - there is no published fix ("TBD"): there is no ceiling, so it would flag
+ *   every build forever. GHSA stays rangeless and NVD's range is used;
+ * - a patched token can't be placed ("6.2.X"): the data is too ambiguous to
+ *   trust the inference, so NVD's range is used, as before this fallback.
  */
-function unlistedBranchFallback(rawRange: string | undefined): BranchRange | null {
+function unlistedBranchFallback(
+  rawRange: string | undefined,
+  patched: ParsedPatched,
+): BranchRange | null {
+  if (patched.versions.length === 0 || !patched.complete) {
+    return null;
+  }
+
   const range = normalizeRange(rawRange ?? '');
+  const vulnerableBelow = nextBranchFloor(patched.versions);
 
   // A missing range is unknown, not "all versions": only an explicit marker counts.
   if (ALL_VERSIONS_PATTERN.test(range)) {
-    return { branch: '*', vulnerableFrom: '0.0.0' };
+    return { branch: '*', vulnerableFrom: '0.0.0', vulnerableBelow };
   }
 
   const upperBounds = range.match(ANY_UPPER_BOUND_PATTERN) ?? [];
   const lower = lowerBoundOf(range);
   if (lower !== null && upperBounds.length === 0 && !AND_BELOW_PATTERN.test(range)) {
-    return { branch: '*', vulnerableFrom: lower };
+    return { branch: '*', vulnerableFrom: lower, vulnerableBelow };
   }
 
   return null;
@@ -197,20 +270,22 @@ function toAffectedRanges(vulnerabilities: GhsaVulnerability[], repo: string): A
     const patchedRaw = vulnerability.patched_versions?.trim() ?? '';
     const patchedVersions = NO_FIX_PATTERN.test(patchedRaw) ? '' : patchedRaw;
     const rawRange = vulnerability.vulnerable_version_range?.trim();
-    const fallback = allowWildcard ? unlistedBranchFallback(rawRange) : null;
+    const patched = parsePatchedVersions(patchedVersions);
 
-    if (patchedVersions) {
+    if (patched.versions.length > 0) {
       exact.push(
-        ...exactRangesFromPatchedVersions(patchedVersions, normalizeRange(rawRange ?? '')),
+        ...exactRangesFromPatchedVersions(patched.versions, normalizeRange(rawRange ?? '')),
       );
+      const fallback = allowWildcard ? unlistedBranchFallback(rawRange, patched) : null;
       if (fallback) {
         exact.push(fallback);
       }
       continue;
     }
 
-    if (fallback) {
-      unpatched.push(fallback);
+    if (patchedVersions) {
+      // Patched versions were named but none could be placed ("6.2.X"):
+      // don't guess. NVD's range wins for this advisory.
       continue;
     }
 
