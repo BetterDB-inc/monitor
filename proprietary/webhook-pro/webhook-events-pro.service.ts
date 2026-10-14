@@ -426,7 +426,7 @@ export class WebhookEventsProService implements OnModuleInit {
 
     await this.webhookDispatcher.dispatchThresholdAlert(
       WebhookEventType.LATENCY_SPIKE,
-      'latency_spike',
+      `latency_spike:${data.connectionId ?? 'default'}`,
       data.currentLatency,
       data.threshold,
       true, // isAbove
@@ -461,7 +461,7 @@ export class WebhookEventsProService implements OnModuleInit {
 
     await this.webhookDispatcher.dispatchThresholdAlert(
       WebhookEventType.CONNECTION_SPIKE,
-      'connection_spike',
+      `connection_spike:${data.connectionId ?? 'default'}`,
       data.currentConnections,
       data.threshold,
       true, // isAbove

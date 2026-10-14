@@ -73,13 +73,12 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   // - This prevents oscillation around the threshold boundary
   private readonly DEFAULT_ALERT_HYSTERESIS_FACTOR = DEFAULT_ALERT_CONFIG.hysteresisFactor;
 
-  // Alert state cache configuration
-  // Max 1000 alerts: Sufficient for typical deployments (even 100 instances × 10 metrics = 1000)
-  // Exceeding 1000 means LRU evicts oldest, which is acceptable (they'll re-fire if still breached)
-  private readonly ALERT_STATE_CACHE_MAX_SIZE = 1000;
-
-  // 24 hour TTL: Balances memory usage vs. preventing re-fire after long quiet periods
-  // After 24h, an alert can re-fire even if never recovered (acceptable for persistent issues)
+  // Alert hysteresis state: one entry per alert type × connection × webhook
+  // (plus one OTLP compliance key per connection). Evicting a still-"fired"
+  // entry makes it re-fire on the next poll, so size generously; large fleets
+  // can raise it with WEBHOOK_ALERT_STATE_MAX. The 24h TTL re-arms any
+  // condition that persists longer than a day (intended reminder).
+  private readonly ALERT_STATE_MAX = 10_000;
   private readonly ALERT_STATE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
   // Response body size limits (defaults, can be overridden per-webhook)
@@ -94,10 +93,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   private readonly MAX_TEST_RESPONSE_PREVIEW_BYTES = 1_000;
 
   // Track alert states with LRU cache to prevent memory leak
-  private alertStates = new LRUCache<string, AlertState>({
-    max: this.ALERT_STATE_CACHE_MAX_SIZE,
-    ttl: this.ALERT_STATE_CACHE_TTL_MS,
-  });
+  private alertStates: LRUCache<string, AlertState>;
 
   // Instance context
   private readonly sourceHost: string;
@@ -114,6 +110,10 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       'WEBHOOK_TIMEOUT_MS',
       DEFAULT_DELIVERY_CONFIG.timeoutMs,
     );
+    this.alertStates = new LRUCache<string, AlertState>({
+      max: this.configService.get<number>('WEBHOOK_ALERT_STATE_MAX', this.ALERT_STATE_MAX),
+      ttl: this.ALERT_STATE_CACHE_TTL_MS,
+    });
     this.sourceHost = this.configService.get<string>('database.host', 'localhost');
     this.sourcePort = this.configService.get<number>('database.port', 6379);
     this.appBaseUrl = this.configService.get<string>('FRONTEND_URL');

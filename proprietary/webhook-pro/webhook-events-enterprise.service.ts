@@ -70,6 +70,9 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
     // The OTLP edge is tracked separately from webhook delivery so it still
     // fires (with its own per-connection hysteresis) when no compliance.alert
     // webhook is subscribed.
+    // Intentional: the OTLP event has no subscriber and therefore no per-webhook
+    // threshold, so it uses the fixed 80% default. Webhook delivery follows each
+    // webhook's complianceMemoryPercent, so the two can fire at different levels.
     const otlpEdge = this.webhookDispatcher.shouldFireAlert(
       `compliance_alert_otlp:${data.connectionId ?? 'default'}`,
       data.memoryUsedPercent || 0,

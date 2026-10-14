@@ -833,9 +833,9 @@ To prevent alert fatigue from metrics oscillating around thresholds, BetterDB im
 ### Alert State Tracking
 
 BetterDB maintains alert state in memory using an LRU cache:
-- **Max alerts:** 1000 (sufficient for 100 instances × 10 metrics)
-- **TTL:** 24 hours (prevents indefinite growth)
-- **Eviction:** Oldest alerts evicted if limit exceeded
+- **Max alerts:** 10,000 by default, one entry per alert type × connection × webhook (plus one OTLP compliance entry per connection). Raise it for large fleets with the `WEBHOOK_ALERT_STATE_MAX` environment variable.
+- **TTL:** 24 hours. A condition that is still breached after a day re-fires once as a reminder.
+- **Eviction:** Oldest alerts evicted if limit exceeded; an evicted alert that is still breached re-fires on the next poll
 
 ### Threshold-Based Events
 
