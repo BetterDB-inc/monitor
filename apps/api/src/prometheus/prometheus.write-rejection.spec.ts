@@ -325,6 +325,20 @@ describe('PrometheusService write-rejection wiring', () => {
     expect(getSlowLogLength).toHaveBeenCalledWith('conn-a');
   });
 
+  it('sends writes.recovered with severity warning after a critical edge', async () => {
+    await poll('conn-a', info(HEALTHY, { OOM: 0 }));
+    await poll('conn-a', info(HEALTHY, { OOM: 12 }));
+    waitOutQuietWindow();
+    await poll('conn-a', info(HEALTHY, { OOM: 12 }));
+    const events = writeEvents('conn-a');
+    expect(events.map(([event]) => event)).toEqual([
+      WebhookEventType.WRITES_REJECTED,
+      WebhookEventType.WRITES_RECOVERED,
+    ]);
+    expect(events[0][1]).toMatchObject({ severity: 'critical' });
+    expect(events[1][1]).toMatchObject({ severity: 'warning' });
+  });
+
   it('caches the stop-writes lookup instead of issuing CONFIG GET every poll', async () => {
     await poll('conn-a', info(BGSAVE_FAILED));
     await poll('conn-a', info(BGSAVE_FAILED));

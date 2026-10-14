@@ -245,4 +245,14 @@ describe('evaluateWriteRejection', () => {
     const r = ev(s, bgsaveFailed, stats({ OOM: 3 }), 6_000);
     expect(r).toMatchObject({ transition: 'escalated', severity: 'critical' });
   });
+
+  it('reports warning, not critical, when a critical edge recovers', () => {
+    const s = createWriteRejectionState();
+    ev(s, healthy, stats({ OOM: 0 }), 0);
+    expect(ev(s, healthy, stats({ OOM: 5 }), 5_000).severity).toBe('critical');
+    expect(ev(s, healthy, stats({ OOM: 5 }), 20_000)).toMatchObject({
+      transition: 'recovered',
+      severity: 'warning',
+    });
+  });
 });

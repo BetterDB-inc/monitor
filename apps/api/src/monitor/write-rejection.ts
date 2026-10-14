@@ -213,8 +213,11 @@ export function evaluateWriteRejection(
 
   // Report the edge's level, never the poll's: an escalation driven by a new
   // cause on a quiet poll must not downgrade an edge that already went critical.
+  // A recovery closes the edge, so it reports the poll's own (warning) level.
   const reportedSeverity: WriteRejectionSeverity =
-    state.rejecting && (state.lastSeverity === 'critical' || severity === 'critical')
+    transition !== 'recovered' &&
+    state.rejecting &&
+    (state.lastSeverity === 'critical' || severity === 'critical')
       ? 'critical'
       : severity;
 
