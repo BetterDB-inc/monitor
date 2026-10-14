@@ -25,8 +25,11 @@ export type SshKeySource = 'inline' | 'file';
 /** Maximum bastion hops accepted in a single chained SSH tunnel. */
 export const SSH_MAX_HOPS = 5;
 
-/** Maximum per-node forwarded servers per SSH tunnel (cluster fan-out bound). */
-export const SSH_MAX_NODE_FORWARDS = 32;
+/** Maximum concurrent per-connection node clients (cluster fan-out bound). */
+export const CLUSTER_MAX_NODE_CONNECTIONS = 100;
+
+/** Maximum per-node forwarded servers per SSH tunnel, derived so every node client can hold a forward. */
+export const SSH_MAX_NODE_FORWARDS = CLUSTER_MAX_NODE_CONNECTIONS;
 
 /** Timeout for a single per-node SSH forward (channel open + loopback bind). */
 export const SSH_NODE_FORWARD_TIMEOUT_MS = 5000;

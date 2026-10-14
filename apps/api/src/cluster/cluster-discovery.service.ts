@@ -11,6 +11,7 @@ import {
 } from '../common/constants/cluster.constants';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { tlsIdentityOptions } from '../database/adapters/tls-servername';
+import { CLUSTER_MAX_NODE_CONNECTIONS } from '@betterdb/shared';
 
 export interface DiscoveredNode {
   id: string;
@@ -87,7 +88,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   private readonly DISCOVERY_CACHE_TTL = CLUSTER_DISCOVERY_CACHE_TTL_MS;
   private readonly CONNECTION_TIMEOUT = CLUSTER_CONNECTION_TIMEOUT_MS;
   private readonly HEALTH_CHECK_INTERVAL = CLUSTER_HEALTH_CHECK_INTERVAL_MS;
-  private readonly MAX_CONNECTIONS = 100;
+  private readonly MAX_CONNECTIONS = CLUSTER_MAX_NODE_CONNECTIONS;
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
