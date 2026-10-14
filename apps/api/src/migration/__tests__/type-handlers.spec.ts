@@ -317,6 +317,17 @@ describe('type-handlers / migrateKey', () => {
       expect(target.del).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'));
     });
 
+    it('deletes a directly written stream when its metadata cannot be recreated', async () => {
+      target.call = jest.fn().mockImplementation((cmd: string) =>
+        cmd === 'XGROUP' ? Promise.reject(new Error('OOM command not allowed')) : Promise.resolve('OK'),
+      );
+
+      const result = await migrateKey(source, target, 'user:{}:jobs', 'stream');
+
+      expect(result.ok).toBe(false);
+      expect(target.del).toHaveBeenCalledWith('user:{}:jobs');
+    });
+
     it('fails the key when a pending entry cannot be claimed', async () => {
       target.pipeline.mockReturnValue(claimPipeline(new Error("NOPERM this user has no permissions to run the 'xclaim' command")));
 
