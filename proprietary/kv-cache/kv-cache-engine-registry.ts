@@ -8,6 +8,8 @@ export class KvCacheEngineRegistry implements OnModuleInit {
   private readonly logger = new Logger(KvCacheEngineRegistry.name);
   private readonly engines = new Map<string, StoredKvCacheEngine>();
   private readonly writes = new Map<string, Promise<unknown>>();
+  private readonly statusVersions = new Map<string, number>();
+  private readonly removed = new Set<string>();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -17,12 +19,15 @@ export class KvCacheEngineRegistry implements OnModuleInit {
 
   async onModuleInit(): Promise<void> {
     for (const engine of await this.storage.getKvCacheEngines()) this.engines.set(engine.id, engine);
-    this.footprint.onConnectionRemoval((connectionId) => {
-      for (const [id, engine] of this.engines) {
-        if (engine.connectionId !== connectionId) continue;
+    this.footprint.onConnectionRemoval(async (connectionId) => {
+      const ids = this.list(connectionId).map((engine) => engine.id);
+      for (const id of ids) {
+        this.removed.add(id);
         this.engines.delete(id);
+        this.statusVersions.delete(id);
         this.samples.forgetEngine(id);
       }
+      await Promise.all(ids.map((id) => this.writes.get(id)));
       return this.samples.settled();
     });
   }
@@ -45,9 +50,17 @@ export class KvCacheEngineRegistry implements OnModuleInit {
 
   save(engine: StoredKvCacheEngine): Promise<StoredKvCacheEngine> {
     return this.serialize(engine.id, async () => {
+      if (this.removed.has(engine.id)) return engine;
+      const version = this.statusVersions.get(engine.id);
       const saved = await this.storage.saveKvCacheEngine(engine);
-      this.engines.set(saved.id, saved);
-      return saved;
+      if (this.removed.has(saved.id)) return saved;
+      const latest = this.engines.get(saved.id);
+      const merged =
+        latest && this.statusVersions.get(saved.id) !== version
+          ? { ...saved, lastSeenAt: latest.lastSeenAt, lastError: latest.lastError }
+          : saved;
+      this.engines.set(merged.id, merged);
+      return merged;
     });
   }
 
@@ -68,9 +81,10 @@ export class KvCacheEngineRegistry implements OnModuleInit {
       lastError: result.lastError,
     };
     this.engines.set(id, updated);
+    this.statusVersions.set(id, (this.statusVersions.get(id) ?? 0) + 1);
     void this.serialize(id, async () => {
       const latest = this.engines.get(id);
-      if (latest) await this.storage.saveKvCacheEngine(latest);
+      if (latest && !this.removed.has(id)) await this.storage.saveKvCacheEngine(latest);
     }).catch((error) => this.logger.warn(`Could not persist KV cache engine ${id}: ${error instanceof Error ? error.message : String(error)}`));
   }
 

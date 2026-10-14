@@ -9,7 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../../ui/card';
 import { evictionsPerMinute, formatPercent } from './kv-cache-format';
 
 interface Props {
-  latest: KvCacheFootprintSnapshot;
+  latest: KvCacheFootprintSnapshot | null;
   history: KvCacheFootprintSnapshot[];
   engines: KvCacheEngine[];
   recentHitRate: number | null;
@@ -55,9 +55,9 @@ function hitRateSparkline(buckets: KvCacheSampleBucket[]) {
 export function KvCacheCards({ latest, history, engines, recentHitRate, recentBuckets }: Props) {
   const sparkline = hitRateSparkline(recentBuckets);
   const evictions = evictionsPerMinute(history);
-  const memoryShare = latest.maxmemory > 0 ? latest.bytesEst / latest.maxmemory : null;
+  const memoryShare = latest && latest.maxmemory > 0 ? latest.bytesEst / latest.maxmemory : null;
   const footprintDetails = [
-    latest.lmcacheMemoryShare != null
+    latest?.lmcacheMemoryShare != null
       ? `${formatPercent(latest.lmcacheMemoryShare)} of used memory`
       : null,
     memoryShare !== null ? `${formatPercent(memoryShare)} of maxmemory` : null,
@@ -89,8 +89,12 @@ export function KvCacheCards({ latest, history, engines, recentHitRate, recentBu
       </StatCard>
       <StatCard
         title="Footprint"
-        value={formatBytes(latest.bytesEst)}
-        subtitle={`${latest.chunksEst.toLocaleString()} chunks · ${footprintDetails.join(' · ')}`}
+        value={latest ? formatBytes(latest.bytesEst) : '—'}
+        subtitle={
+          latest
+            ? `${latest.chunksEst.toLocaleString()} chunks · ${footprintDetails.join(' · ')}`
+            : 'No footprint snapshot yet'
+        }
       />
       <StatCard
         title="Evictions/min"
@@ -98,8 +102,8 @@ export function KvCacheCards({ latest, history, engines, recentHitRate, recentBu
       />
       <StatCard
         title="TTL coverage"
-        value={formatPercent(1 - latest.noTtlRatio)}
-        subtitle={latest.maxmemoryPolicy}
+        value={latest && latest.sampledKeys > 0 ? formatPercent(1 - latest.noTtlRatio) : '—'}
+        subtitle={latest?.maxmemoryPolicy}
       />
     </div>
   );

@@ -21,11 +21,18 @@ import { KvCacheFootprintService } from './kv-cache-footprint.service';
 const EVALUATE_INTERVAL_MS = 60_000;
 const EVICTION_REASONS: KvCacheEvictionReason[] = ['unevictable', 'evicting'];
 
+interface CheckedWindow {
+  engineId: string;
+  engineName: string;
+  model: string;
+}
+
 @Injectable()
 export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(KvCacheAlertsService.name);
   private timer: NodeJS.Timeout | null = null;
   private readonly exportedConnections = new Set<string>();
+  private readonly checkedWindows = new Map<string, Map<string, CheckedWindow>>();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -43,6 +50,7 @@ export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
     this.footprint.onSnapshot((snapshot) => this.onSnapshot(snapshot));
     this.footprint.onConnectionRemoval((connectionId) => {
       this.exportedConnections.delete(connectionId);
+      this.checkedWindows.delete(connectionId);
       this.prometheus?.clearKvCache(connectionId);
     });
     this.timer = setInterval(() => void this.evaluateHitRates(), EVALUATE_INTERVAL_MS);
@@ -108,6 +116,7 @@ export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
       const connectionIds = new Set([
         ...this.registry.list().map((engine) => engine.connectionId),
         ...this.exportedConnections,
+        ...this.checkedWindows.keys(),
       ]);
       for (const connectionId of connectionIds) {
         try {
@@ -136,24 +145,44 @@ export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
     if (rates.length > 0) this.exportedConnections.add(connectionId);
     else this.exportedConnections.delete(connectionId);
     if (!this.webhookEventsPro) return;
+    const checked = new Map<string, CheckedWindow>();
     for (const { window, engine } of resolved) {
       if (!engine?.enabled || window.hitRate === null || !shouldCheckHitRate(window, settings)) continue;
-      try {
-        await this.webhookEventsPro.dispatchKvCacheHitRateLow({
-          connectionId,
-          engineId: window.engineId,
-          engineName: engine.name,
-          model: window.model,
-          hitRate: window.hitRate,
-          threshold: settings.hitRateThreshold,
-          requestedTokens: window.requestedTokens,
-          windowMs: KV_CACHE_HIT_RATE_WINDOW_MS,
-          timestamp: now,
-          ...(instance ? { instance } : {}),
-        });
-      } catch (error) {
-        this.logger.warn(`Hit rate alert dispatch failed for ${window.engineId}/${window.model}: ${error instanceof Error ? error.message : error}`);
-      }
+      const target = { engineId: window.engineId, engineName: engine.name, model: window.model };
+      checked.set(JSON.stringify([target.engineId, target.model]), target);
+      await this.dispatchHitRate(connectionId, target, window.hitRate, window.requestedTokens, settings, now, instance);
+    }
+    for (const [key, target] of this.checkedWindows.get(connectionId) ?? []) {
+      if (!checked.has(key)) await this.dispatchHitRate(connectionId, target, 1, 0, settings, now, instance);
+    }
+    if (checked.size > 0) this.checkedWindows.set(connectionId, checked);
+    else this.checkedWindows.delete(connectionId);
+  }
+
+  private async dispatchHitRate(
+    connectionId: string,
+    target: CheckedWindow,
+    hitRate: number,
+    requestedTokens: number,
+    settings: KvCacheSettings,
+    now: number,
+    instance: { host: string; port: number } | undefined,
+  ): Promise<void> {
+    try {
+      await this.webhookEventsPro?.dispatchKvCacheHitRateLow({
+        connectionId,
+        engineId: target.engineId,
+        engineName: target.engineName,
+        model: target.model,
+        hitRate,
+        threshold: settings.hitRateThreshold,
+        requestedTokens,
+        windowMs: KV_CACHE_HIT_RATE_WINDOW_MS,
+        timestamp: now,
+        ...(instance ? { instance } : {}),
+      });
+    } catch (error) {
+      this.logger.warn(`Hit rate alert dispatch failed for ${target.engineId}/${target.model}: ${error instanceof Error ? error.message : error}`);
     }
   }
 

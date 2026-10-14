@@ -221,6 +221,30 @@ describe('KvCacheAlertsService hit rate', () => {
     expect(pro.dispatchKvCacheHitRateLow).toHaveBeenCalledTimes(2);
   });
 
+  it('recovers a checked window once it is no longer checked', async () => {
+    const { service, pro, storage } = setup();
+    await service.evaluateHitRates(1);
+    storage.getKvCacheEngineSamples.mockResolvedValue([row({ requestedTokens: 5000, hitTokens: 100 })]);
+    await service.evaluateHitRates(2);
+    expect(pro.dispatchKvCacheHitRateLow).toHaveBeenCalledTimes(2);
+    expect(pro.dispatchKvCacheHitRateLow).toHaveBeenLastCalledWith(
+      expect.objectContaining({ engineId: 'e1', model: 'm', hitRate: 1, requestedTokens: 0, timestamp: 2 }),
+    );
+    await service.evaluateHitRates(3);
+    expect(pro.dispatchKvCacheHitRateLow).toHaveBeenCalledTimes(2);
+  });
+
+  it('recovers a checked window when its engine is gone and no samples remain', async () => {
+    const { service, pro, storage, registry } = setup();
+    await service.evaluateHitRates(1);
+    registry.list.mockReturnValue([]);
+    registry.get.mockReturnValue(null);
+    storage.getKvCacheEngineSamples.mockResolvedValue([]);
+    await service.evaluateHitRates(2);
+    expect(storage.getKvCacheEngineSamples).toHaveBeenLastCalledWith(expect.objectContaining({ connectionId: 'c1' }));
+    expect(pro.dispatchKvCacheHitRateLow).toHaveBeenLastCalledWith(expect.objectContaining({ engineName: 'vllm', hitRate: 1 }));
+  });
+
   it('never rejects when the registry throws', async () => {
     const { service, registry } = setup();
     registry.list.mockImplementation(() => {

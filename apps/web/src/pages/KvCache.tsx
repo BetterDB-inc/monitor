@@ -93,7 +93,7 @@ export function KvCache() {
           )}
         </div>
       </div>
-      {latest && (
+      {(latest || engines.length > 0) && (
         <>
           <KvCacheCards
             latest={latest}
@@ -102,7 +102,7 @@ export function KvCache() {
             recentHitRate={recent.data?.rangeHitRate ?? null}
             recentBuckets={recent.data?.buckets ?? []}
           />
-          <KvCacheAdvisories advisories={advisoriesFor(latest)} />
+          {latest && <KvCacheAdvisories advisories={advisoriesFor(latest)} />}
           {samples.data?.truncated && (
             <p className="text-sm text-muted-foreground">
               This range holds more samples than can be shown, so the charts and table cover only its most recent
@@ -110,7 +110,7 @@ export function KvCache() {
             </p>
           )}
           <KvCacheCharts buckets={buckets} history={history.data ?? []} engines={engines} />
-          <KvCacheModelTable latest={latest} buckets={buckets} />
+          {latest && <KvCacheModelTable latest={latest} buckets={buckets} />}
         </>
       )}
       <KvCacheEngines engines={engines} />

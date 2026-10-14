@@ -11,7 +11,7 @@ function setup(initial = [engine('a', 'c1', 'lmc-a'), engine('b', 'c2')]) {
     saveKvCacheEngine: jest.fn().mockImplementation(async (e) => e),
     deleteKvCacheEngine: jest.fn().mockResolvedValue(true),
   } as any;
-  let removal: (id: string) => void = () => undefined;
+  let removal: (id: string) => unknown = () => undefined;
   const footprint = { onConnectionRemoval: jest.fn((l) => (removal = l)) } as any;
   const samples = { forgetEngine: jest.fn(), settled: jest.fn().mockResolvedValue(undefined) } as any;
   const registry = new KvCacheEngineRegistry(storage, footprint, samples);
@@ -74,6 +74,43 @@ describe('KvCacheEngineRegistry', () => {
     expect(registry.get('a')?.name).toBe('renamed');
   });
 
+  it('keeps a scrape result that lands during an update', async () => {
+    const { registry, storage } = setup();
+    await registry.onModuleInit();
+    let finishSave: () => void = () => undefined;
+    storage.saveKvCacheEngine.mockImplementationOnce((e: any) => new Promise((resolve) => (finishSave = () => resolve(e))));
+    const pending = registry.save({ ...engine('a', 'c1', 'lmc-a'), name: 'renamed' });
+    await new Promise((resolve) => setImmediate(resolve));
+    registry.recordResult('a', { lastSeenAt: 7, lastError: 'boom' });
+    finishSave();
+    await pending;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(registry.get('a')).toMatchObject({ name: 'renamed', lastSeenAt: 7, lastError: 'boom' });
+    expect(storage.saveKvCacheEngine).toHaveBeenLastCalledWith(expect.objectContaining({ name: 'renamed', lastSeenAt: 7, lastError: 'boom' }));
+  });
+
+  it('waits for in-flight writes on connection removal and never writes the engine again', async () => {
+    const { registry, storage, removal } = setup();
+    await registry.onModuleInit();
+    let finishSave: () => void = () => undefined;
+    storage.saveKvCacheEngine.mockImplementationOnce((e: any) => new Promise((resolve) => (finishSave = () => resolve(e))));
+    const pending = registry.save({ ...engine('a', 'c1', 'lmc-a'), name: 'renamed' });
+    await new Promise((resolve) => setImmediate(resolve));
+    let removed = false;
+    const removing = Promise.resolve(removal('c1')).then(() => (removed = true));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(removed).toBe(false);
+    finishSave();
+    await pending;
+    await removing;
+    expect(registry.get('a')).toBeNull();
+    await registry.save(engine('a', 'c1', 'lmc-a'));
+    registry.recordResult('a', { lastSeenAt: 9, lastError: null });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.saveKvCacheEngine).toHaveBeenCalledTimes(1);
+    expect(registry.get('a')).toBeNull();
+  });
+
   it('does not resurrect an engine removed while a result was pending', async () => {
     const { registry, storage } = setup();
     await registry.onModuleInit();
@@ -96,10 +133,11 @@ describe('KvCacheEngineRegistry', () => {
   it('drops only the removed connection engines on broadcast', async () => {
     const { registry, samples, removal } = setup();
     await registry.onModuleInit();
-    removal('c1');
+    const removing = removal('c1');
     expect(registry.list().map((e) => e.id)).toEqual(['b']);
     expect(samples.forgetEngine).toHaveBeenCalledTimes(1);
     expect(samples.forgetEngine).toHaveBeenCalledWith('a');
+    await removing;
     expect(samples.settled).toHaveBeenCalled();
   });
 });
