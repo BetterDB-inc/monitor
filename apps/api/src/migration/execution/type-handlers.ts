@@ -1,5 +1,7 @@
 import type Valkey from 'iovalkey';
 import { randomBytes } from 'crypto';
+import { execPipeline } from './pipeline-results';
+import { readStreamMeta, writeStreamMeta, type StreamMeta } from './stream-metadata';
 
 // Threshold above which we use cursor-based reads (HSCAN/SSCAN/ZSCAN) instead of bulk reads
 const LARGE_KEY_THRESHOLD = 10_000;
@@ -55,6 +57,7 @@ export async function migrateKey(
 ): Promise<MigratedKey> {
   try {
     let wrote: boolean;
+    let warning: string | undefined;
     switch (type) {
       case 'string':
         // String handles TTL atomically via SET PX
@@ -73,7 +76,7 @@ export async function migrateKey(
         wrote = await migrateZset(source, target, key);
         break;
       case 'stream':
-        wrote = await migrateStream(source, target, key);
+        ({ wrote, warning } = await migrateStream(source, target, key));
         break;
       default:
         return { key, type, ok: false, error: `Unsupported type: ${type}` };
@@ -82,6 +85,7 @@ export async function migrateKey(
     // - String: SET PX
     // - Compound types: Lua RENAME+PEXPIRE via atomicRenameWithTtl
     const result: MigratedKey = { key, type, ok: true };
+    if (warning) result.warning = warning;
 
     // Post-migration list length check: source list may have changed during migration
     if (wrote && type === 'list') {
@@ -258,7 +262,7 @@ async function migrateZset(source: Valkey, target: Valkey, key: string): Promise
         // Score is always ASCII-safe, member stays as Buffer
         pipeline.zadd(writeKey, raw[i + 1].toString(), raw[i]);
       }
-      await pipeline.exec();
+      await execPipeline(pipeline);
     } else {
       // zscanBuffer not available — use callBuffer for ZSCAN to preserve binary members
       let cursor = '0';
@@ -272,7 +276,7 @@ async function migrateZset(source: Valkey, target: Valkey, key: string): Promise
         for (let i = 0; i < entries.length; i += 2) {
           pipeline.zadd(writeKey, entries[i + 1].toString(), entries[i]);
         }
-        await pipeline.exec();
+        await execPipeline(pipeline);
       } while (cursor !== '0');
     }
     const pttl = await source.pttl(key);
@@ -290,7 +294,11 @@ async function migrateZset(source: Valkey, target: Valkey, key: string): Promise
 
 // ── Stream ──
 
-async function migrateStream(source: Valkey, target: Valkey, key: string): Promise<boolean> {
+async function migrateStream(
+  source: Valkey,
+  target: Valkey,
+  key: string,
+): Promise<{ wrote: boolean; warning?: string }> {
   const tmp = tempKey(key);
   const writeKey = tmp ?? key;
   let wrote = false;
@@ -323,19 +331,32 @@ async function migrateStream(source: Valkey, target: Valkey, key: string): Promi
         hasMore = false;
       }
     }
-    if (wrote) {
-      const pttl = await source.pttl(key);
-      if (tmp) {
-        await atomicRenameWithTtl(target, tmp, key, pttl);
-      } else {
-        await applyTtl(target, key, pttl);
-      }
+
+    // XRANGE/XADD copies entries only. Consumer groups, their PELs and the
+    // stream's ID counters live in XINFO and must be recreated explicitly, or
+    // consumers get NOGROUP after cutover. A stream with no entries can still
+    // hold groups (e.g. after XTRIM MAXLEN 0), so it is migrated too.
+    let meta: StreamMeta;
+    try {
+      meta = await readStreamMeta(source, key);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!wrote && /no such key/i.test(msg)) return { wrote: false }; // deleted since SCAN
+      throw err;
     }
+    const warning = await writeStreamMeta(target, writeKey, meta, wrote);
+
+    const pttl = await source.pttl(key);
+    if (tmp) {
+      await atomicRenameWithTtl(target, tmp, key, pttl);
+    } else {
+      await applyTtl(target, key, pttl);
+    }
+    return { wrote: true, warning };
   } catch (err) {
     if (tmp) { try { await target.del(tmp); } catch { /* best-effort cleanup */ } }
     throw err;
   }
-  return wrote;
 }
 
 // ── TTL ──

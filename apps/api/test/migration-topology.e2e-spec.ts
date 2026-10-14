@@ -90,6 +90,16 @@ async function openClient(port: number, isCluster: boolean): Promise<Valkey> {
   return client;
 }
 
+/** FLUSHALL on a Cluster client reaches one random node, so flush every master. */
+async function flushAll(client: Valkey): Promise<void> {
+  const maybeCluster: unknown = client;
+  if (maybeCluster instanceof Cluster) {
+    await Promise.all(maybeCluster.nodes('master').map((node) => node.flushall()));
+    return;
+  }
+  await client.flushall();
+}
+
 // ── Key seed / verify helpers ───────────────────────────────────────
 
 async function seedKeys(client: Valkey, prefix: string): Promise<void> {
@@ -103,6 +113,22 @@ async function seedKeys(client: Valkey, prefix: string): Promise<void> {
   await client.zadd(`${prefix}:zset1`, 1, 'z1', 2, 'z2');
   await client.set(`${prefix}:str4`, 'value4');
   await client.set(`${prefix}:str5`, 'value5');
+
+  // A stream consumed through a group: c1 has read two entries and acked one,
+  // so the group has a last-delivered ID and one pending entry to carry over.
+  const stream = `${prefix}:stream1`;
+  await client.xadd(stream, '1-0', 'job', 'a');
+  await client.xadd(stream, '2-0', 'job', 'b');
+  await client.xadd(stream, '3-0', 'job', 'c');
+  await client.xgroup('CREATE', stream, 'workers', '0');
+  await client.xreadgroup('GROUP', 'workers', 'c1', 'COUNT', 2, 'STREAMS', stream, '>');
+  await client.xack(stream, 'workers', '1-0');
+}
+
+function fieldsToRecord(flat: unknown[]): Record<string, unknown> {
+  const record: Record<string, unknown> = {};
+  for (let i = 0; i + 1 < flat.length; i += 2) record[String(flat[i])] = flat[i + 1];
+  return record;
 }
 
 async function verifyKeys(client: Valkey, prefix: string): Promise<void> {
@@ -127,6 +153,19 @@ async function verifyKeys(client: Valkey, prefix: string): Promise<void> {
   // sorted set (ordered by score)
   const zset = await client.zrange(`${prefix}:zset1`, '0', '-1');
   expect(zset).toEqual(['z1', 'z2']);
+
+  // stream: entries, the consumer group, its pending entry, and a consumer that
+  // resumes after cutover instead of failing with NOGROUP
+  const stream = `${prefix}:stream1`;
+  expect(await client.xlen(stream)).toBe(3);
+  const groups = ((await client.xinfo('GROUPS', stream)) as unknown[][]).map(fieldsToRecord);
+  expect(groups).toEqual([
+    expect.objectContaining({ name: 'workers', 'last-delivered-id': '2-0', pending: 1 }),
+  ]);
+  const pending = (await client.xpending(stream, 'workers', '-', '+', 10)) as unknown[][];
+  expect(pending.map(([id, consumer]) => [id, consumer])).toEqual([['2-0', 'c1']]);
+  const next = (await client.xreadgroup('GROUP', 'workers', 'c1', 'STREAMS', stream, '>')) as unknown[];
+  expect(JSON.stringify(next)).toBe(JSON.stringify([[stream, [['3-0', ['job', 'c']]]]]));
 }
 
 // ── Analysis runner ─────────────────────────────────────────────────
@@ -161,10 +200,16 @@ async function runMigration(
   app: NestFastifyApplication,
   sourceId: string,
   targetId: string,
+  forceReason?: string,
 ): Promise<{ status: string; keysTransferred?: number; error?: string } | 'skipped'> {
   const startRes = await request(app.getHttpServer())
     .post('/migration/execution')
-    .send({ sourceConnectionId: sourceId, targetConnectionId: targetId, mode: 'command' });
+    .send({
+      sourceConnectionId: sourceId,
+      targetConnectionId: targetId,
+      mode: 'command',
+      ...(forceReason ? { force: true, forceReason } : {}),
+    });
 
   if (startRes.status === 402 || startRes.status === 403) return 'skipped';
   expect([200, 201]).toContain(startRes.status);
@@ -213,22 +258,25 @@ async function runMigration(
       { port: TGT_CLUSTER_PORT, isCluster: true },
     ]) {
       const c = await openClient(port, isCluster);
-      await c.flushall();
+      await flushAll(c);
       await c.quit();
     }
 
-    // 5. Seed source standalone (10 keys, prefix "mig:sa")
+    // 5. Seed source standalone (11 keys, prefix "mig:sa")
     const sa = await openClient(SRC_STANDALONE_PORT, false);
     await seedKeys(sa, 'mig:sa');
     await sa.quit();
 
-    // 6. Seed source cluster (10 keys, prefix "mig:cl")
+    // 6. Seed source cluster (11 keys, prefix "mig:cl")
     const cl = await openClient(SRC_CLUSTER_PORT, true);
     await seedKeys(cl, 'mig:cl');
     await cl.quit();
 
-    // 7. Boot NestJS app with Pro license so execution endpoints are unlocked
+    // 7. Boot NestJS app with Pro license so execution endpoints are unlocked.
+    //    The mocked entitlement response is unsigned, which the license service
+    //    only accepts with LICENSE_ALLOW_UNSIGNED.
     process.env.BETTERDB_LICENSE_KEY = 'test-topology-key';
+    process.env.LICENSE_ALLOW_UNSIGNED = 'true';
     jest.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ valid: true, tier: 'pro', expiresAt: null }),
@@ -262,6 +310,7 @@ async function runMigration(
 
     // Restore license env / mocks
     delete process.env.BETTERDB_LICENSE_KEY;
+    delete process.env.LICENSE_ALLOW_UNSIGNED;
     jest.restoreAllMocks();
 
     // Tear down Docker topology
@@ -285,18 +334,26 @@ async function runMigration(
 
     // Flush target before migration
     const flushClient = await openClient(targetPort, targetIsCluster);
-    await flushClient.flushall();
+    await flushAll(flushClient);
     await flushClient.quit();
 
+    // Execution requires a completed analysis for the pair (safety gate).
+    // cluster → standalone is blocking by design; it is exercised here on purpose.
+    const analysis = await runAnalysis(app, srcId, tgtId);
+    expect(analysis.status).toBe('completed');
+    const forceReason = analysis.blockingCount > 0
+      ? 'topology e2e: exercising a blocked topology on purpose'
+      : undefined;
+
     // Run the migration
-    const result = await runMigration(app, srcId, tgtId);
+    const result = await runMigration(app, srcId, tgtId, forceReason);
     expect(result).not.toBe('skipped');
     if (result === 'skipped') return; // type guard
 
     expect(result.status).toBe('completed');
-    expect(result.keysTransferred).toBeGreaterThanOrEqual(10);
+    expect(result.keysTransferred).toBe(11);
 
-    // Verify all 10 keys arrived on the target
+    // Verify all 11 keys arrived on the target
     const target = await openClient(targetPort, targetIsCluster);
     try {
       await verifyKeys(target, sourcePrefix);

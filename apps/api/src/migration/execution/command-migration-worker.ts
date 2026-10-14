@@ -122,6 +122,9 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
               migrateKey(sourceClient, targetClient, key, type).then(result => {
                 if (result.ok) {
                   job.keysTransferred++;
+                  if (result.warning) {
+                    log(job, maxLogLines, `WARN ${key} (${type}): ${result.warning}`);
+                  }
                 } else {
                   keysSkipped++;
                   job.keysSkipped = keysSkipped;

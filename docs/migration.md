@@ -58,7 +58,7 @@ Supported data types:
 | list | `LRANGE` in 1,000-element chunks | `RPUSH` to temp key, then `RENAME` | Lua `RENAME` + `PEXPIRE` |
 | set | `SMEMBERS` or `SSCAN` (>10 K) | `SADD` to temp key, then `RENAME` | Lua `RENAME` + `PEXPIRE` |
 | sorted set | `ZRANGE` or `ZSCAN` (>10 K) | `ZADD` to temp key, then `RENAME` | Lua `RENAME` + `PEXPIRE` |
-| stream | `XRANGE` in 1,000-entry chunks | `XADD` to temp key, then `RENAME` | Lua `RENAME` + `PEXPIRE` |
+| stream | `XRANGE` in 1,000-entry chunks, plus `XINFO` / `XPENDING` for groups | `XADD`, `XSETID`, `XGROUP CREATE`, `XCLAIM … FORCE` to temp key, then `RENAME` | Lua `RENAME` + `PEXPIRE` |
 
 Compound types (everything except string) are written to a temporary key first,
 then atomically renamed to the final key. This avoids partial writes if the
@@ -230,6 +230,23 @@ Valkey 8.1+ supports per-field TTLs within a hash. Analysis detects HFE usage
 via `HEXPIRETIME`, but **command-mode migration does not transfer per-field
 expirations**. Only the overall key-level TTL is preserved. If the target does
 not support HFE, analysis flags this as a blocking incompatibility.
+
+### Streams and consumer groups
+
+Command mode copies a stream's consumer groups along with its entries: each
+group's last-delivered ID and entries-read counter, its consumers, and its
+pending entries (owner, idle time and delivery count, recreated with
+`XCLAIM … FORCE JUSTID`). The stream's last-generated ID, entries-added and
+max-deleted-entry ID are restored with `XSETID`, so new IDs on the target never
+go backwards. Streams that are empty but still hold groups are migrated too.
+
+A pending entry whose message was already trimmed or deleted from the source
+cannot be recreated; the migration log lists a `WARN` line with the count for
+that key. On targets older than 7.0, `XSETID` and `XGROUP CREATE` run without
+the 7.0-only counters.
+
+Validation compares each stream's group names and last-delivered IDs as well as
+its length.
 
 ### Large keys
 
