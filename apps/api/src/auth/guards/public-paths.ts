@@ -14,7 +14,9 @@ const PUBLIC_PREFIXES = [
 
 const READ_ONLY_PUBLIC_PREFIXES = ['/mcp/'];
 
-const ACTOR_OPTIONAL_PREFIX = '/mcp/';
+// Public paths where a caller's session/bearer is still resolved when sent,
+// so the handler can tell a signed-in user from an anonymous probe.
+const ACTOR_OPTIONAL_PREFIXES = ['/mcp/', '/health'];
 
 const PUBLIC_WRITE_PATHS = [
   /^\/mcp\/telemetry$/,
@@ -51,7 +53,7 @@ export function normalizePath(rawPath: string): string {
 }
 
 export function isActorOptionalPath(rawPath: string): boolean {
-  return matchesPrefix(normalizePath(rawPath), ACTOR_OPTIONAL_PREFIX);
+  return matchesAnyPrefix(normalizePath(rawPath), ACTOR_OPTIONAL_PREFIXES);
 }
 
 export function isPublicPath(rawPath: string, method: string): boolean {

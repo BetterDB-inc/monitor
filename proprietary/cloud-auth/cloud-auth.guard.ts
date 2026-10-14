@@ -7,6 +7,10 @@ import { readCloudSession } from './cloud-session';
 
 type CloudRequest = FastifyRequest & { cloudUser?: CloudSessionPayload; actor: Actor | null };
 
+function isHealthPath(path: string): boolean {
+  return ['/health', '/api/health'].some((base) => path === base || path.startsWith(`${base}/`));
+}
+
 @Injectable()
 export class CloudAuthGuardImpl implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
@@ -25,13 +29,23 @@ export class CloudAuthGuardImpl implements CanActivate {
     // /prometheus/metrics is safe to bypass because PrometheusMetricsGuard
     // requires PROMETHEUS_METRICS_TOKEN, and boot validation makes that token
     // mandatory in cloud mode.
+    // Health stays reachable without a session (load balancers, probes), but a
+    // valid session is still attached so the controller serves the full
+    // response to the signed-in app and a redacted one to anonymous callers.
+    if (isHealthPath(path)) {
+      const session = readCloudSession(request.headers.cookie, request.headers.host);
+      if (session !== null) {
+        request.cloudUser = session;
+        request.actor = cloudActor(session);
+      }
+      return true;
+    }
+
     if (
       path.startsWith('/auth/callback') ||
       path.startsWith('/api/auth/callback') ||
       path.startsWith('/auth/logout') ||
       path.startsWith('/api/auth/logout') ||
-      path.startsWith('/api/health') ||
-      path.startsWith('/health') ||
       path.startsWith('/agent/ws') ||
       path.startsWith('/api/agent/ws') ||
       path.startsWith('/mcp/') ||

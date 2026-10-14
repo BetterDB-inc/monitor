@@ -1,15 +1,28 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Inject, Optional, Req, UnauthorizedException } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiHeader } from '@nestjs/swagger';
 import { HealthResponse, DetailedHealthResponse, AllConnectionsHealthResponse } from '@betterdb/shared';
 import { HealthService } from './health.service';
 import { HealthResponseDto } from '../common/dto/health.dto';
 import { AllConnectionsHealthResponseDto } from '../common/dto/connections.dto';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../common/decorators';
+import type { RequestWithActor } from '../auth/guards/actor.guard';
+import { WORKSPACE_CONFIG, type WorkspaceConfig } from '../auth/workspace-config';
+import { isCloudMode } from '../common/utils/cloud-mode';
+import { redactDetailedHealth, redactHealth } from './health-redaction';
 
 @ApiTags('health')
 @Controller('health')
 export class HealthController {
-  constructor(private readonly healthService: HealthService) {}
+  constructor(
+    private readonly healthService: HealthService,
+    @Optional() @Inject(WORKSPACE_CONFIG) private readonly workspaceConfig?: WorkspaceConfig,
+  ) {}
+
+  /** Sign-in is enforced and this request carries no resolved actor. */
+  private isAnonymous(request: RequestWithActor): boolean {
+    const enforced = this.workspaceConfig?.enabled === true || isCloudMode();
+    return enforced && (request.actor === null || request.actor === undefined);
+  }
 
   @Get()
   @ApiOperation({
@@ -19,8 +32,12 @@ export class HealthController {
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to target (returns default connection health if not specified)' })
   @ApiResponse({ status: 200, description: 'Health status retrieved successfully', type: HealthResponseDto })
   @ApiResponse({ status: 500, description: 'Internal server error' })
-  async getHealth(@ConnectionId() connectionId?: string): Promise<HealthResponse> {
-    return this.healthService.getHealth(connectionId);
+  async getHealth(
+    @Req() request: RequestWithActor,
+    @ConnectionId() connectionId?: string,
+  ): Promise<HealthResponse> {
+    const health = await this.healthService.getHealth(connectionId);
+    return this.isAnonymous(request) ? redactHealth(health) : health;
   }
 
   @Get('detailed')
@@ -31,8 +48,12 @@ export class HealthController {
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to target' })
   @ApiResponse({ status: 200, description: 'Detailed health status retrieved successfully' })
   @ApiResponse({ status: 500, description: 'Internal server error' })
-  async getDetailedHealth(@ConnectionId() connectionId?: string): Promise<DetailedHealthResponse> {
-    return this.healthService.getDetailedHealth(connectionId);
+  async getDetailedHealth(
+    @Req() request: RequestWithActor,
+    @ConnectionId() connectionId?: string,
+  ): Promise<DetailedHealthResponse> {
+    const health = await this.healthService.getDetailedHealth(connectionId);
+    return this.isAnonymous(request) ? redactDetailedHealth(health) : health;
   }
 
   @Get('all')
@@ -42,7 +63,12 @@ export class HealthController {
   })
   @ApiResponse({ status: 200, description: 'All connections health status retrieved successfully', type: AllConnectionsHealthResponseDto })
   @ApiResponse({ status: 500, description: 'Internal server error' })
-  async getAllConnectionsHealth(): Promise<AllConnectionsHealthResponse> {
+  async getAllConnectionsHealth(
+    @Req() request: RequestWithActor,
+  ): Promise<AllConnectionsHealthResponse> {
+    if (this.isAnonymous(request)) {
+      throw new UnauthorizedException('Sign in required');
+    }
     return this.healthService.getAllConnectionsHealth();
   }
 }
