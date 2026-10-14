@@ -490,6 +490,14 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     try {
       this.db = await this.openDatabase();
 
+      // Columns first: createSchema's index DDL references connection_id,
+      // which legacy tables (pre multi-connection) only gain through this
+      // migration — CREATE TABLE IF NOT EXISTS will not add it to an existing
+      // table, so running createSchema first throws `no such column` and the
+      // migration that would fix it never gets to run. Same hazard as
+      // documented on addMemoryProposalIntegrityColumns. On a fresh database
+      // the tables don't exist yet and this is a no-op.
+      this.migrateConnectionId();
       // Create schema
       this.createSchema();
       // Run migrations for existing databases
@@ -600,8 +608,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       }
     }
 
-    // Migrate connection_id to all data tables for multi-database support
-    this.migrateConnectionId();
+    // connection_id is migrated in initialize(), before createSchema — see the
+    // ordering note there.
   }
 
   /**
