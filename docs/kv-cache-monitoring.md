@@ -41,6 +41,8 @@ that hold keys.
 Page controls:
 
 - A date range picker for the charts, defaulting to the last 6 hours.
+  A range covers at most 31 days and 50,000 stored samples. When a range holds more
+  samples, the page shows only the most recent ones and says so.
 - **Refresh**, which re-collects the footprint now.
 - The alert settings sheet (see [Per-connection switches](#per-connection-switches)).
 - **Rescan now** on the not-detected view, which collects the footprint again.
@@ -182,6 +184,11 @@ metrics usually live on the cluster network. Set
 addresses as well. Link-local addresses (`169.254.0.0/16`, which
 includes cloud metadata endpoints, and `fe80::/10`) are always refused,
 whatever the setting.
+
+The guard checks every address a hostname resolves to, and the scrape then
+connects only to an address that passed the check. A DNS answer that changes
+between the check and the connection cannot redirect a scrape to a refused
+address.
 
 When you change the metrics URL of a linked engine to a different origin
 (scheme, host or port) and a stored auth header exists, BetterDB refuses the

@@ -36,6 +36,12 @@ export function mergeBuckets(samples: KvCacheEngineSample[]): KvCacheSampleBucke
     .map((row) => ({ ...row, hitRate: hitRate(row.requestedTokens, row.hitTokens) }));
 }
 
+function dropOldestTimestamp(samples: KvCacheEngineSample[]): KvCacheEngineSample[] {
+  const oldest = samples.reduce((min, row) => Math.min(min, row.timestamp), Infinity);
+  const newer = samples.filter((row) => row.timestamp > oldest);
+  return newer.length > 0 ? newer : samples.slice(-SAMPLES_LIMIT);
+}
+
 @Injectable()
 export class KvCacheSamplesService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(KvCacheSamplesService.name);
@@ -68,6 +74,10 @@ export class KvCacheSamplesService implements OnModuleInit, OnModuleDestroy {
     this.tracker.forgetEngine(engineId);
   }
 
+  settled(): Promise<void> {
+    return this.flushing;
+  }
+
   async deleteEngine(engineId: string): Promise<void> {
     this.forgetEngine(engineId);
     await this.flushing;
@@ -95,16 +105,18 @@ export class KvCacheSamplesService implements OnModuleInit, OnModuleDestroy {
     connectionId: string,
     query: { from: number; to: number; engineId?: string; model?: string },
   ): Promise<KvCacheSamplesResponse> {
-    const rows = await this.storage.getKvCacheEngineSamples({
+    const fetched = await this.storage.getKvCacheEngineSamples({
       connectionId,
       from: Math.max(query.from, query.to - SAMPLES_MAX_RANGE_MS),
       to: query.to,
-      limit: SAMPLES_LIMIT,
+      limit: SAMPLES_LIMIT + 1,
       engineId: query.engineId,
       modelName: query.model,
     });
+    const truncated = fetched.length > SAMPLES_LIMIT;
+    const rows = truncated ? dropOldestTimestamp(fetched) : fetched;
     const requested = rows.reduce((sum, row) => sum + row.requestedTokens, 0);
     const hit = rows.reduce((sum, row) => sum + row.hitTokens, 0);
-    return { buckets: mergeBuckets(rows), rangeHitRate: hitRate(requested, hit) };
+    return { buckets: mergeBuckets(rows), rangeHitRate: hitRate(requested, hit), truncated };
   }
 }

@@ -29,12 +29,23 @@ export interface SnapshotInput {
   timestamp: number;
   nodes: NodeObservation[];
   memory: MemoryStats;
-  previousEvictedKeys: number | null;
+  evictedKeysDelta: number | null;
   otherDbs: number[];
   clientDetected: boolean;
 }
 
 export const DETECTION_MIN_MATCHES = 5;
+
+export function evictedKeysDelta(previous: Map<string, number> | undefined, current: Map<string, number>): number | null {
+  if (!previous) return null;
+  let delta: number | null = null;
+  for (const [node, evicted] of current) {
+    const before = previous.get(node);
+    if (before === undefined) continue;
+    delta = (delta ?? 0) + (evicted >= before ? evicted - before : evicted);
+  }
+  return delta;
+}
 
 const ratio = (value: number) => Math.round(value * 1e4) / 1e4;
 
@@ -114,8 +125,7 @@ export function buildSnapshot(input: SnapshotInput): KvCacheFootprintSnapshot {
     live.push(...node.samples.filter(isLive));
   }
   const probed = live.filter((s) => s.parsed.suffix === 'kv_bytes' && s.siblingExists !== null);
-  const { usedMemory, maxmemory, maxmemoryPolicy, evictedKeys } = input.memory;
-  const previous = input.previousEvictedKeys;
+  const { usedMemory, maxmemory, maxmemoryPolicy } = input.memory;
   return {
     connectionId: input.connectionId,
     timestamp: input.timestamp,
@@ -136,8 +146,7 @@ export function buildSnapshot(input: SnapshotInput): KvCacheFootprintSnapshot {
       probed.length === 0
         ? null
         : ratio(probed.filter((s) => s.siblingExists === false).length / probed.length),
-    evictedKeysDelta:
-      previous === null ? null : evictedKeys >= previous ? evictedKeys - previous : evictedKeys,
+    evictedKeysDelta: input.evictedKeysDelta,
     otherDbs: input.otherDbs,
     perModel: splitPerModel(live, chunks, bytes),
   };

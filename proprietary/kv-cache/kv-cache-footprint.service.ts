@@ -6,11 +6,12 @@ import { ConnectionRegistry } from '@app/connections/connection-registry.service
 import { LicenseService } from '@proprietary/licenses/license.service';
 import { collectionPlan, type CollectionPlan } from '../key-analytics/key-analytics-plan';
 import { clusterScanNodes, primaryScanNodes, type ScanNode } from '../key-analytics/scan-nodes';
-import { buildSnapshot, pickSample, type MemoryStats, type NodeObservation } from './footprint-estimate';
+import { buildSnapshot, evictedKeysDelta, pickSample, type MemoryStats, type NodeObservation } from './footprint-estimate';
 import { hasLmcacheGlideClient, otherNonEmptyDbs, readMemoryStats, sampleLmcacheKeys, scanLmcacheKeys } from './footprint-scanner';
 import { classifyKey, maskKey } from './key-classifier';
 
 export type SnapshotListener = (snapshot: KvCacheFootprintSnapshot) => void | Promise<void>;
+export type RemovalListener = (connectionId: string) => void | Promise<void>;
 
 interface NodeReading {
   observation: NodeObservation;
@@ -46,12 +47,15 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     1800000,
     MIN_FOOTPRINT_INTERVAL_MS,
   );
-  private readonly running = new Set<string>();
-  private readonly lastEvicted = new Map<string, number>();
+  private readonly running = new Map<string, Promise<KvCacheFootprintSnapshot | null>>();
+  private readonly generations = new Map<string, number>();
+  private readonly deleting = new Map<string, Promise<void>>();
+  private readonly lastEvicted = new Map<string, Map<string, number>>();
   private readonly sampleKeys = new Map<string, string>();
   private readonly undetectedUntil = new Map<string, number>();
   private readonly listeners: SnapshotListener[] = [];
-  private readonly removalListeners: Array<(connectionId: string) => void> = [];
+  private readonly removalListeners: RemovalListener[] = [];
+  private readonly restoreListeners: RemovalListener[] = [];
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -76,24 +80,66 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   }
 
   protected onConnectionRemoved(connectionId: string): void {
+    const active = this.running.get(connectionId);
     this.running.delete(connectionId);
+    const generation = this.generationOf(connectionId) + 1;
+    this.generations.set(connectionId, generation);
     this.lastEvicted.delete(connectionId);
     this.sampleKeys.delete(connectionId);
     this.undetectedUntil.delete(connectionId);
-    void this.storage
-      .deleteKvCacheConnectionData(connectionId)
-      .catch((error) => this.logger.warn(`Could not delete KV cache data for ${connectionId}: ${errorMessage(error)}`));
-    for (const listener of this.removalListeners) {
+    const settled = active?.then(
+      () => undefined,
+      () => undefined,
+    );
+    const pending = this.removalListeners.map(async (listener) => {
       try {
-        listener(connectionId);
+        await listener(connectionId);
       } catch (error) {
         this.logger.warn(`KV cache removal listener failed: ${errorMessage(error)}`);
+      }
+    });
+    void Promise.all([...pending, settled])
+      .then(() => this.deleteRemovedData(connectionId, generation))
+      .catch((error) => this.logger.warn(`Could not delete KV cache data for ${connectionId}: ${errorMessage(error)}`));
+  }
+
+  private async deleteRemovedData(connectionId: string, generation: number): Promise<void> {
+    if (this.generationOf(connectionId) !== generation) return;
+    if (this.isRegistered(connectionId)) return this.announceRestore(connectionId);
+    if (!this.running.has(connectionId)) this.generations.delete(connectionId);
+    const deletion = this.storage.deleteKvCacheConnectionData(connectionId);
+    const settled = deletion.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.deleting.set(connectionId, settled);
+    try {
+      await deletion;
+    } finally {
+      if (this.deleting.get(connectionId) === settled) this.deleting.delete(connectionId);
+    }
+  }
+
+  private async announceRestore(connectionId: string): Promise<void> {
+    for (const listener of this.restoreListeners) {
+      try {
+        await listener(connectionId);
+      } catch (error) {
+        this.logger.warn(`KV cache restore listener failed: ${errorMessage(error)}`);
       }
     }
   }
 
-  onConnectionRemoval(listener: (connectionId: string) => void): void {
+  private isRegistered(connectionId: string): boolean {
+    return this.connectionRegistry.list().some((connection) => connection.id === connectionId);
+  }
+
+  onConnectionRemoval(listener: RemovalListener): void {
     this.removalListeners.push(listener);
+  }
+
+  onConnectionRestore(listener: RemovalListener): void {
+    this.restoreListeners.push(listener);
   }
 
   onSnapshot(listener: SnapshotListener): void {
@@ -118,33 +164,49 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   }
 
   async collect(ctx: ConnectionContext): Promise<KvCacheFootprintSnapshot | null> {
+    await this.deleting.get(ctx.connectionId);
     const plan = this.planFor(ctx.connectionId);
     if (plan.kind === 'skip' || this.running.has(ctx.connectionId)) return null;
-    this.running.add(ctx.connectionId);
+    const run = this.runCollection(ctx, plan);
+    this.running.set(ctx.connectionId, run);
     try {
-      const nodes = await this.nodesFor(ctx, plan);
-      const ownDb = this.connectionRegistry.getConfig(ctx.connectionId)?.dbIndex ?? 0;
-      const readings = await Promise.all(nodes.map((node) => this.read(node, ownDb)));
-      const memory = this.sumMemory(readings.map((reading) => reading.memory));
-      const snapshot = buildSnapshot({
-        connectionId: ctx.connectionId,
-        timestamp: Date.now(),
-        nodes: readings.map((reading) => reading.observation),
-        memory,
-        previousEvictedKeys: this.lastEvicted.get(ctx.connectionId) ?? null,
-        otherDbs: readings[0]?.otherDbs ?? [],
-        clientDetected: readings.some((reading) => reading.glide),
-      });
-      await this.storage.saveKvCacheFootprintSnapshot(snapshot);
-      this.lastEvicted.set(ctx.connectionId, memory.evictedKeys);
-      if (snapshot.detected) this.undetectedUntil.delete(ctx.connectionId);
-      else this.undetectedUntil.set(ctx.connectionId, snapshot.timestamp + this.undetectedRecheckMs);
-      this.rememberSampleKey(ctx.connectionId, readings);
-      await this.announce(snapshot);
-      return snapshot;
+      return await run;
     } finally {
-      this.running.delete(ctx.connectionId);
+      if (this.running.get(ctx.connectionId) === run) this.running.delete(ctx.connectionId);
     }
+  }
+
+  private generationOf(connectionId: string): number {
+    return this.generations.get(connectionId) ?? 0;
+  }
+
+  private async runCollection(ctx: ConnectionContext, plan: CollectionPlan): Promise<KvCacheFootprintSnapshot | null> {
+    const generation = this.generationOf(ctx.connectionId);
+    const current = () => this.generationOf(ctx.connectionId) === generation;
+    const nodes = await this.nodesFor(ctx, plan);
+    const ownDb = this.connectionRegistry.getConfig(ctx.connectionId)?.dbIndex ?? 0;
+    const readings = await Promise.all(nodes.map((node) => this.read(node, ownDb)));
+    const memory = this.sumMemory(readings.map((reading) => reading.memory));
+    const evicted = new Map(nodes.map((node, index) => [node.name, readings[index].memory.evictedKeys]));
+    const snapshot = buildSnapshot({
+      connectionId: ctx.connectionId,
+      timestamp: Date.now(),
+      nodes: readings.map((reading) => reading.observation),
+      memory,
+      evictedKeysDelta: evictedKeysDelta(this.lastEvicted.get(ctx.connectionId), evicted),
+      otherDbs: readings[0]?.otherDbs ?? [],
+      clientDetected: readings.some((reading) => reading.glide),
+    });
+    await this.deleting.get(ctx.connectionId);
+    if (!current()) return null;
+    await this.storage.saveKvCacheFootprintSnapshot(snapshot);
+    if (!current()) return null;
+    this.lastEvicted.set(ctx.connectionId, new Map([...(this.lastEvicted.get(ctx.connectionId) ?? []), ...evicted]));
+    if (snapshot.detected) this.undetectedUntil.delete(ctx.connectionId);
+    else this.undetectedUntil.set(ctx.connectionId, snapshot.timestamp + this.undetectedRecheckMs);
+    this.rememberSampleKey(ctx.connectionId, readings);
+    await this.announce(snapshot);
+    return snapshot;
   }
 
   private planFor(connectionId: string): CollectionPlan {

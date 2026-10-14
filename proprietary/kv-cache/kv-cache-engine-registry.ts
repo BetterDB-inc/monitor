@@ -10,6 +10,7 @@ export class KvCacheEngineRegistry implements OnModuleInit {
   private readonly writes = new Map<string, Promise<unknown>>();
   private readonly statusVersions = new Map<string, number>();
   private readonly removed = new Set<string>();
+  private readonly removals = new Map<string, number>();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -20,6 +21,7 @@ export class KvCacheEngineRegistry implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     for (const engine of await this.storage.getKvCacheEngines()) this.engines.set(engine.id, engine);
     this.footprint.onConnectionRemoval(async (connectionId) => {
+      this.removals.set(connectionId, (this.removals.get(connectionId) ?? 0) + 1);
       const ids = this.list(connectionId).map((engine) => engine.id);
       for (const id of ids) {
         this.removed.add(id);
@@ -28,7 +30,43 @@ export class KvCacheEngineRegistry implements OnModuleInit {
         this.samples.forgetEngine(id);
       }
       await Promise.all(ids.map((id) => this.writes.get(id)));
+      return this.samples.settled();
     });
+    this.footprint.onConnectionRestore((connectionId) => this.restore(connectionId));
+  }
+
+  private async restore(connectionId: string): Promise<void> {
+    const removals = this.removals.get(connectionId);
+    const stored = (await this.storage.getKvCacheEngines()).filter((engine) => engine.connectionId === connectionId);
+    if (this.removals.get(connectionId) !== removals) return;
+    const superseded: string[] = [];
+    for (const engine of stored) {
+      if (this.engines.has(engine.id)) continue;
+      if (this.clashes(engine)) {
+        superseded.push(engine.id);
+        continue;
+      }
+      this.removed.delete(engine.id);
+      this.engines.set(engine.id, engine);
+    }
+    await Promise.all(
+      superseded.map((id) =>
+        this.serialize(id, async () => {
+          if (this.removals.get(connectionId) !== removals || this.engines.has(id)) return;
+          await this.storage.deleteKvCacheEngine(id);
+        }).catch((error) =>
+          this.logger.warn(`Could not delete superseded KV cache engine ${id}: ${error instanceof Error ? error.message : String(error)}`),
+        ),
+      ),
+    );
+  }
+
+  private clashes(engine: StoredKvCacheEngine): boolean {
+    return [...this.engines.values()].some(
+      (other) =>
+        (other.connectionId === engine.connectionId && other.name === engine.name) ||
+        (engine.otlpEngineId !== null && other.otlpEngineId === engine.otlpEngineId),
+    );
   }
 
   list(connectionId?: string): StoredKvCacheEngine[] {

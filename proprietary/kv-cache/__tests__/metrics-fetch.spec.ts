@@ -1,5 +1,6 @@
 import { assertSafeOutboundUrl } from '@app/common/utils/outbound-url-guard';
 import { fetchMetricsText, ScrapeError } from '../metrics-fetch';
+import { BlockedAddressError } from '../pinned-fetch';
 
 jest.mock('@app/common/utils/outbound-url-guard', () => ({
   assertSafeOutboundUrl: jest.fn().mockResolvedValue(new URL('http://x')),
@@ -40,6 +41,11 @@ describe('fetchMetricsText', () => {
       await expect(fetchMetricsText('http://x', null, jest.fn().mockResolvedValue(response))).rejects.toBeInstanceOf(ScrapeError);
       expect(cancel).toHaveBeenCalled();
     }
+  });
+
+  it('maps a connect-time blocked address to blocked address', async () => {
+    const blocked = jest.fn().mockRejectedValue(new BlockedAddressError('blocked address 169.254.169.254'));
+    await expect(fetchMetricsText('http://x', null, blocked)).rejects.toThrow('blocked address');
   });
 
   it('maps fetch failures to timeout and connection failed', async () => {
