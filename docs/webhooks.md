@@ -62,7 +62,7 @@ All self-hosted BetterDB installations have access to these events:
 | `connection.critical` | Connection limit critical | Connections exceed 90% of maxclients |
 | `client.blocked` | Authentication failure | ACL log entry with reason `auth` |
 | `writes.rejected` | Server is refusing writes | BGSAVE or AOF write failed, or `errorstat_MISCONF` / `OOM` / `READONLY` / `NOREPLICAS` rose since the last poll |
-| `writes.recovered` | Server accepts writes again | Persistence healthy and no new write-rejection errors for 60s |
+| `writes.recovered` | Server accepts writes again | No new write-rejection errors for 60s, memory below maxmemory for OOM, and persistence reported ok for BGSAVE/AOF causes |
 
 ### Pro Tier
 
@@ -286,7 +286,7 @@ Fired when the server starts and stops refusing writes. None of these conditions
 | `maxmemory_reached` | `OOM command not allowed` (e.g. `noeviction` at `maxmemory`) |
 | `write_to_replica` | `READONLY` — clients writing to a replica, typically stale topology after failover |
 | `min_replicas_not_met` | `NOREPLICAS` — `min-replicas-to-write` not satisfied |
-| `persistence_failed` | `MISCONF` seen but the failing persistence status cleared before the poll |
+| `persistence_failed` | `MISCONF` seen with no blocking persistence failure visible (status cleared, persistence section absent, or BGSAVE failure not configured to stop writes) |
 
 `READONLY` from a node that reports `role:slave` is expected (probes, misrouted clients) and never opens an edge; it only alerts on a node that reports `role:master`.
 
@@ -921,13 +921,14 @@ See [Custom Thresholds](#custom-thresholds) for per-webhook configuration.
 These events fire immediately without hysteresis:
 
 - `instance.down` / `instance.up` (state change events)
-- `writes.rejected` / `writes.recovered` (state change events)
 - `client.blocked` (each occurrence)
 - `anomaly.detected` (each detection)
 - `acl.violation` (each violation)
 - `audit.policy.violation` (each violation)
 - `acl.modified` (each change)
 - `config.changed` (each change)
+
+`writes.rejected` fires immediately; `writes.recovered` waits for a 60s quiet window (see [writes.rejected / writes.recovered](#writesrejected--writesrecovered) above).
 
 ## API Reference
 
