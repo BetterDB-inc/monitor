@@ -181,4 +181,36 @@ describe('KvCacheEngineRegistry', () => {
     expect(storage.deleteKvCacheEngine).toHaveBeenCalledWith('a');
     expect(storage.deleteKvCacheEngine).toHaveBeenCalledWith('old');
   });
+
+  it('does not reload engines after a removal that lands while a superseded engine is deleted', async () => {
+    const { registry, storage, removal, restore } = setup([engine('a', 'c1', 'lmc-a'), engine('b', 'c1')]);
+    await registry.onModuleInit();
+    await removal('c1');
+    await registry.save(engine('new', 'c1', 'lmc-a'));
+    let finishDelete: () => void = () => undefined;
+    storage.deleteKvCacheEngine.mockImplementationOnce(() => new Promise((resolve) => (finishDelete = () => resolve(true))));
+    const restoring = restore('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    await removal('c1');
+    finishDelete();
+    await restoring;
+    expect(registry.list('c1')).toEqual([]);
+  });
+
+  it('skips deleting a superseded engine once the connection is removed again', async () => {
+    const { registry, storage, removal, restore } = setup([engine('a', 'c1', 'lmc-a')]);
+    await registry.onModuleInit();
+    await removal('c1');
+    await registry.save(engine('new', 'c1', 'lmc-a'));
+    let finishPending: () => void = () => undefined;
+    storage.deleteKvCacheEngine.mockImplementationOnce(() => new Promise((resolve) => (finishPending = () => resolve(true))));
+    const pending = registry.remove('a');
+    const restoring = restore('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    await removal('c1');
+    finishPending();
+    await pending;
+    await restoring;
+    expect(storage.deleteKvCacheEngine).toHaveBeenCalledTimes(1);
+  });
 });

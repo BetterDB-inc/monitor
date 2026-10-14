@@ -39,17 +39,26 @@ export class KvCacheEngineRegistry implements OnModuleInit {
     const removals = this.removals.get(connectionId);
     const stored = (await this.storage.getKvCacheEngines()).filter((engine) => engine.connectionId === connectionId);
     if (this.removals.get(connectionId) !== removals) return;
+    const superseded: string[] = [];
     for (const engine of stored) {
       if (this.engines.has(engine.id)) continue;
       if (this.clashes(engine)) {
-        await this.serialize(engine.id, () => this.storage.deleteKvCacheEngine(engine.id)).catch((error) =>
-          this.logger.warn(`Could not delete superseded KV cache engine ${engine.id}: ${error instanceof Error ? error.message : String(error)}`),
-        );
+        superseded.push(engine.id);
         continue;
       }
       this.removed.delete(engine.id);
       this.engines.set(engine.id, engine);
     }
+    await Promise.all(
+      superseded.map((id) =>
+        this.serialize(id, async () => {
+          if (this.removals.get(connectionId) !== removals || this.engines.has(id)) return;
+          await this.storage.deleteKvCacheEngine(id);
+        }).catch((error) =>
+          this.logger.warn(`Could not delete superseded KV cache engine ${id}: ${error instanceof Error ? error.message : String(error)}`),
+        ),
+      ),
+    );
   }
 
   private clashes(engine: StoredKvCacheEngine): boolean {
