@@ -56,6 +56,28 @@ describe('anomalyDetectorConfig round-trip', () => {
     });
   });
 
+  describe('disabled absolute threshold (Infinity sentinel)', () => {
+    const disabled = {
+      acl_denied: { criticalAbsolute: Number.POSITIVE_INFINITY },
+    } as AppSettings['anomalyDetectorConfig'];
+
+    it('SqliteAdapter round-trips Infinity, not null', async () => {
+      const storage = new SqliteAdapter({ filepath: ':memory:' });
+      await storage.initialize();
+      await storage.saveSettings(buildSettings({ anomalyDetectorConfig: disabled }));
+      expect(
+        (await storage.getSettings())?.anomalyDetectorConfig?.acl_denied?.criticalAbsolute,
+      ).toBe(Number.POSITIVE_INFINITY);
+
+      // Survives an unrelated whole-row update too.
+      await storage.updateSettings({ anomalyPollIntervalMs: 2_000 });
+      expect(
+        (await storage.getSettings())?.anomalyDetectorConfig?.acl_denied?.criticalAbsolute,
+      ).toBe(Number.POSITIVE_INFINITY);
+      await storage.close();
+    });
+  });
+
   describe('MemoryAdapter', () => {
     it('persists the config through save and partial update', async () => {
       const storage = new MemoryAdapter();

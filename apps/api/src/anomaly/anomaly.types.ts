@@ -25,6 +25,28 @@ export interface DetectorConfig {
 
 export type DetectorConfigMap = Partial<Record<MetricType, DetectorConfig>>;
 
+export const ABSOLUTE_FIELDS = ['warningAbsolute', 'criticalAbsolute'] as const;
+
+/**
+ * SQL adapters persist detector config as JSON, which serializes the Infinity
+ * "disabled" sentinel as null. Map null back to Infinity so a disabled
+ * absolute threshold never becomes `value >= null` (i.e. `>= 0`).
+ * Also tolerates null/non-object input (returns {}).
+ */
+export function normalizeDetectorConfigMap(map: unknown): DetectorConfigMap {
+  if (!map || typeof map !== 'object') return {};
+  const out: DetectorConfigMap = {};
+  for (const [key, raw] of Object.entries(map as Record<string, unknown>)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const cfg = { ...(raw as DetectorConfig) };
+    for (const f of ABSOLUTE_FIELDS) {
+      if ((cfg as Record<string, unknown>)[f] === null) cfg[f] = Number.POSITIVE_INFINITY;
+    }
+    out[key as MetricType] = cfg;
+  }
+  return out;
+}
+
 const NO_ABSOLUTE = Number.POSITIVE_INFINITY;
 
 const zScoreDefaults = {
@@ -83,10 +105,13 @@ export function resolveDetectorConfig(
   metric: MetricType,
   overrides: DetectorConfigMap,
 ): Required<DetectorConfig> {
-  return {
-    ...DETECTOR_DEFAULTS[metric],
-    ...overrides[metric],
-  };
+  const merged = { ...DETECTOR_DEFAULTS[metric], ...overrides[metric] } as Required<DetectorConfig>;
+  // Defensive: a null/undefined absolute (e.g. from a JSON round-trip) means "disabled".
+  for (const f of ABSOLUTE_FIELDS) {
+    const v = merged[f] as number | null | undefined;
+    if (v === null || v === undefined) merged[f] = Number.POSITIVE_INFINITY;
+  }
+  return merged;
 }
 
 /** Strips Infinity sentinels before JSON serialization. Omits absolute fields
@@ -98,8 +123,8 @@ export function toApiDetectorConfig(config: Required<DetectorConfig>): DetectorC
     consecutiveRequired: config.consecutiveRequired,
     cooldownMs: config.cooldownMs,
   };
-  if (isFinite(config.warningAbsolute)) out.warningAbsolute = config.warningAbsolute;
-  if (isFinite(config.criticalAbsolute)) out.criticalAbsolute = config.criticalAbsolute;
+  if (Number.isFinite(config.warningAbsolute)) out.warningAbsolute = config.warningAbsolute;
+  if (Number.isFinite(config.criticalAbsolute)) out.criticalAbsolute = config.criticalAbsolute;
   return out;
 }
 
@@ -112,10 +137,10 @@ export function toApiDetectorConfig(config: Required<DetectorConfig>): DetectorC
  */
 export function sanitizeStoredOverride(override: DetectorConfig): DetectorConfig {
   const out: DetectorConfig = { ...override };
-  if (out.warningAbsolute !== undefined && !isFinite(out.warningAbsolute)) {
+  if (out.warningAbsolute !== undefined && !Number.isFinite(out.warningAbsolute)) {
     delete out.warningAbsolute;
   }
-  if (out.criticalAbsolute !== undefined && !isFinite(out.criticalAbsolute)) {
+  if (out.criticalAbsolute !== undefined && !Number.isFinite(out.criticalAbsolute)) {
     delete out.criticalAbsolute;
   }
   return out;
