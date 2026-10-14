@@ -243,4 +243,58 @@ describe('ClusterDiscoveryService — SSH tunnel dial', () => {
     expect((first as unknown as { status: string }).status).toBe('end');
     await service.disconnectAll();
   });
+
+  it('drops the map entry when revive and fresh connect both fail', async () => {
+    const release = jest.fn();
+    const { service, mockDbClient } = await buildService(async () => ({ host: '127.0.0.1', port: MOCK_TUNNEL_PORT }));
+    (mockDbClient as unknown as { releaseNodeThroughTunnel: jest.Mock }).releaseNodeThroughTunnel = release;
+    const nodes = await service.discoverNodes('conn-1');
+    await service.getNodeConnection(nodes[0].id, 'conn-1');
+
+    const stored = (service as unknown as { discoveredNodes: Map<string, { client: { status: string; connect: jest.Mock } }> }).discoveredNodes.get(nodes[0].id)!;
+    stored.client.status = 'closed';
+    stored.client.connect = jest.fn(async () => {
+      throw new Error('old endpoint gone');
+    });
+    const ValkeyMock = jest.requireMock('iovalkey').default as jest.Mock;
+    const originalImpl = ValkeyMock.getMockImplementation();
+    ValkeyMock.mockImplementation((opts: { host: string; port: number }) => {
+      const instance = (originalImpl as unknown as (opts: { host: string; port: number }) => FakeValkey)(opts);
+      instance.connect = jest.fn(async () => {
+        throw new Error('new endpoint gone');
+      });
+      return instance;
+    });
+
+    await expect(service.getNodeConnection(nodes[0].id, 'conn-1')).rejects.toThrow(/new endpoint gone/);
+    expect(release).toHaveBeenCalledWith('10.0.1.5', DEFAULT_REDIS_PORT);
+    const live = (service as unknown as { discoveredNodes: Map<string, unknown> }).discoveredNodes;
+    expect(live.has(nodes[0].id)).toBe(false);
+    ValkeyMock.mockImplementation(originalImpl as unknown as (...args: unknown[]) => unknown);
+    await service.disconnectAll();
+  });
+
+  it('tags the forward with the pre-dial epoch when the tunnel rebuilds mid-connect', async () => {
+    const { service, mockDbClient } = await buildService(async () => ({ host: '127.0.0.1', port: MOCK_TUNNEL_PORT }));
+    let epoch = 1;
+    (mockDbClient as unknown as { getTunnelEpoch: jest.Mock }).getTunnelEpoch = jest.fn(() => epoch);
+    const ValkeyMock = jest.requireMock('iovalkey').default as jest.Mock;
+    const originalImpl = ValkeyMock.getMockImplementation();
+    ValkeyMock.mockImplementation((opts: { host: string; port: number }) => {
+      const instance = (originalImpl as unknown as (opts: { host: string; port: number }) => FakeValkey)(opts);
+      const innerConnect = instance.connect.bind(instance);
+      instance.connect = jest.fn(async () => {
+        epoch = 2;
+        await innerConnect();
+      });
+      return instance;
+    });
+
+    const nodes = await service.discoverNodes('conn-1');
+    await service.getNodeConnection(nodes[0].id, 'conn-1');
+    ValkeyMock.mockImplementation(originalImpl as unknown as (...args: unknown[]) => unknown);
+    await service.getNodeConnection(nodes[0].id, 'conn-1');
+    expect(mockDbClient.dialNodeThroughTunnel).toHaveBeenCalledTimes(2);
+    await service.disconnectAll();
+  });
 });

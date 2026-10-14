@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { ClusterNode } from '../common/types/metrics.types';
@@ -76,7 +76,7 @@ interface DiscoveryCache {
 }
 
 @Injectable()
-export class ClusterDiscoveryService implements OnModuleDestroy, OnModuleInit {
+export class ClusterDiscoveryService implements OnModuleDestroy {
   private readonly logger = new Logger(ClusterDiscoveryService.name);
   private discoveredNodes: Map<string, NodeConnection> = new Map();
   // Per-connection discovery cache to prevent cross-connection cache contamination
@@ -88,24 +88,12 @@ export class ClusterDiscoveryService implements OnModuleDestroy, OnModuleInit {
   private readonly CONNECTION_TIMEOUT = CLUSTER_CONNECTION_TIMEOUT_MS;
   private readonly HEALTH_CHECK_INTERVAL = CLUSTER_HEALTH_CHECK_INTERVAL_MS;
   private readonly MAX_CONNECTIONS = 100;
-  private sweepTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
   ) {}
 
-  async onModuleInit() {
-    this.sweepTimer = setInterval(() => {
-      this.cleanupIdleConnections().catch(() => {});
-    }, CLUSTER_IDLE_TIMEOUT_MS);
-    this.sweepTimer.unref?.();
-  }
-
   async onModuleDestroy() {
-    if (this.sweepTimer) {
-      clearInterval(this.sweepTimer);
-      this.sweepTimer = null;
-    }
     await this.disconnectAll();
   }
 
@@ -285,6 +273,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy, OnModuleInit {
     const { host, port } = parsed;
 
     const dbClient = this.connectionRegistry.get(connectionId);
+    const dialEpoch = dbClient.getTunnelEpoch?.();
     const primaryClient = dbClient.getClient();
     const username = primaryClient.options.username || '';
     const password = primaryClient.options.password || '';
@@ -361,7 +350,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy, OnModuleInit {
         connectionId,
         remoteHost: host,
         remotePort: port,
-        tunnelEpoch: dbClient.getTunnelEpoch?.(),
+        tunnelEpoch: dialEpoch,
       };
 
       // Quit any stale client we're about to replace so the overwrite never
@@ -396,6 +385,12 @@ export class ClusterDiscoveryService implements OnModuleDestroy, OnModuleInit {
       }
 
       await client.quit().catch(() => {});
+
+      const stale = this.discoveredNodes.get(nodeId);
+      if (stale) {
+        await stale.client.quit().catch(() => {});
+        this.discoveredNodes.delete(nodeId);
+      }
 
       const didDialViaTunnel = dialHost !== host || dialPort !== port;
       if (didDialViaTunnel) {
