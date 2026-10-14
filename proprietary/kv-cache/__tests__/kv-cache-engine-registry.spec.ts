@@ -12,10 +12,14 @@ function setup(initial = [engine('a', 'c1', 'lmc-a'), engine('b', 'c2')]) {
     deleteKvCacheEngine: jest.fn().mockResolvedValue(true),
   } as any;
   let removal: (id: string) => unknown = () => undefined;
-  const footprint = { onConnectionRemoval: jest.fn((l) => (removal = l)) } as any;
+  let restore: (id: string) => unknown = () => undefined;
+  const footprint = {
+    onConnectionRemoval: jest.fn((l) => (removal = l)),
+    onConnectionRestore: jest.fn((l) => (restore = l)),
+  } as any;
   const samples = { forgetEngine: jest.fn(), settled: jest.fn().mockResolvedValue(undefined) } as any;
   const registry = new KvCacheEngineRegistry(storage, footprint, samples);
-  return { registry, storage, samples, removal: (id: string) => removal(id) };
+  return { registry, storage, samples, removal: (id: string) => removal(id), restore: (id: string) => restore(id) };
 }
 
 describe('KvCacheEngineRegistry', () => {
@@ -139,5 +143,30 @@ describe('KvCacheEngineRegistry', () => {
     expect(samples.forgetEngine).toHaveBeenCalledWith('a');
     await removing;
     expect(samples.settled).toHaveBeenCalled();
+  });
+
+  it('reloads the engines of a connection that was registered again before cleanup', async () => {
+    const { registry, storage, removal, restore } = setup();
+    await registry.onModuleInit();
+    await removal('c1');
+    expect(registry.get('a')).toBeNull();
+    await restore('c1');
+    expect(registry.list('c1').map((e) => e.id)).toEqual(['a']);
+    registry.recordResult('a', { lastSeenAt: 9, lastError: null });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.saveKvCacheEngine).toHaveBeenCalledWith(expect.objectContaining({ id: 'a', lastSeenAt: 9 }));
+  });
+
+  it('does not restore engines when the connection is removed again during the reload', async () => {
+    const { registry, storage, removal, restore } = setup();
+    await registry.onModuleInit();
+    await removal('c1');
+    let finishLoad: (engines: unknown) => void = () => undefined;
+    storage.getKvCacheEngines.mockImplementationOnce(() => new Promise((resolve) => (finishLoad = resolve)));
+    const restoring = restore('c1');
+    await removal('c1');
+    finishLoad([engine('a', 'c1', 'lmc-a')]);
+    await restoring;
+    expect(registry.get('a')).toBeNull();
   });
 });

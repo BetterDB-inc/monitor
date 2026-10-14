@@ -191,6 +191,27 @@ describe('KvCacheFootprintService', () => {
     expect(await service.triggerCollection('c1')).not.toBeNull();
   });
 
+  it('announces a restore instead of deleting when the connection is registered again', async () => {
+    const { service, storage } = setup();
+    const restored = jest.fn();
+    service.onConnectionRestore(restored);
+    (service as any).onConnectionRemoved('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).not.toHaveBeenCalled();
+    expect(restored).toHaveBeenCalledWith('c1');
+  });
+
+  it('does not announce a restore when the connection stays removed', async () => {
+    const { service, storage, registry } = setup();
+    const restored = jest.fn();
+    service.onConnectionRestore(restored);
+    registry.list.mockReturnValue([]);
+    (service as any).onConnectionRemoved('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
+    expect(restored).not.toHaveBeenCalled();
+  });
+
   it('waits for an in-flight removal delete before saving for a re-registered connection', async () => {
     const { service, storage, registry } = setup();
     const listed = registry.list();

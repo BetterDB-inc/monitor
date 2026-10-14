@@ -10,6 +10,7 @@ export class KvCacheEngineRegistry implements OnModuleInit {
   private readonly writes = new Map<string, Promise<unknown>>();
   private readonly statusVersions = new Map<string, number>();
   private readonly removed = new Set<string>();
+  private readonly removals = new Map<string, number>();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -20,6 +21,7 @@ export class KvCacheEngineRegistry implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     for (const engine of await this.storage.getKvCacheEngines()) this.engines.set(engine.id, engine);
     this.footprint.onConnectionRemoval(async (connectionId) => {
+      this.removals.set(connectionId, (this.removals.get(connectionId) ?? 0) + 1);
       const ids = this.list(connectionId).map((engine) => engine.id);
       for (const id of ids) {
         this.removed.add(id);
@@ -30,6 +32,17 @@ export class KvCacheEngineRegistry implements OnModuleInit {
       await Promise.all(ids.map((id) => this.writes.get(id)));
       return this.samples.settled();
     });
+    this.footprint.onConnectionRestore((connectionId) => this.restore(connectionId));
+  }
+
+  private async restore(connectionId: string): Promise<void> {
+    const removals = this.removals.get(connectionId);
+    const stored = (await this.storage.getKvCacheEngines()).filter((engine) => engine.connectionId === connectionId);
+    if (this.removals.get(connectionId) !== removals) return;
+    for (const engine of stored) {
+      this.removed.delete(engine.id);
+      if (!this.engines.has(engine.id)) this.engines.set(engine.id, engine);
+    }
   }
 
   list(connectionId?: string): StoredKvCacheEngine[] {

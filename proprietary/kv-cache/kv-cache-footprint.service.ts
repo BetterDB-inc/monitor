@@ -55,6 +55,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   private readonly undetectedUntil = new Map<string, number>();
   private readonly listeners: SnapshotListener[] = [];
   private readonly removalListeners: RemovalListener[] = [];
+  private readonly restoreListeners: RemovalListener[] = [];
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -103,7 +104,8 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   }
 
   private async deleteRemovedData(connectionId: string, generation: number): Promise<void> {
-    if (this.generationOf(connectionId) !== generation || this.isRegistered(connectionId)) return;
+    if (this.generationOf(connectionId) !== generation) return;
+    if (this.isRegistered(connectionId)) return this.announceRestore(connectionId);
     if (!this.running.has(connectionId)) this.generations.delete(connectionId);
     const deletion = this.storage.deleteKvCacheConnectionData(connectionId);
     const settled = deletion.then(
@@ -118,12 +120,26 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     }
   }
 
+  private async announceRestore(connectionId: string): Promise<void> {
+    for (const listener of this.restoreListeners) {
+      try {
+        await listener(connectionId);
+      } catch (error) {
+        this.logger.warn(`KV cache restore listener failed: ${errorMessage(error)}`);
+      }
+    }
+  }
+
   private isRegistered(connectionId: string): boolean {
     return this.connectionRegistry.list().some((connection) => connection.id === connectionId);
   }
 
   onConnectionRemoval(listener: RemovalListener): void {
     this.removalListeners.push(listener);
+  }
+
+  onConnectionRestore(listener: RemovalListener): void {
+    this.restoreListeners.push(listener);
   }
 
   onSnapshot(listener: SnapshotListener): void {
