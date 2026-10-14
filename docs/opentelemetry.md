@@ -170,6 +170,7 @@ A connection is scanned as soon as its version first arrives or changes, and aga
 | `already_polled`          | The resolved host:port is a connection BetterDB already polls directly (not registered as OTLP push).                                                                                                |
 | `unsupported_type`        | The point is a histogram, exponential histogram, or summary.                                                                                                                                         |
 | `unsupported_temporality` | The point is a sum with delta (not cumulative) temporality.                                                                                                                                          |
+| `unknown_engine`          | An LMCache metric whose `betterdb.lmcache.engine` resource attribute matches no linked engine (also: the engine is disabled, or KV cache monitoring isn't licensed). See [KV Cache Monitoring](kv-cache-monitoring). |
 | `unmapped_metric`         | The metric name or its attributes don't match anything in the table above.                                                                                                                           |
 | `invalid_value`           | The point has no value, or its value isn't a finite number.                                                                                                                                          |
 | `cardinality_limit`       | The point would add a new `keyspace` or `commandstats` entry beyond the per-connection cap (256 databases, 1024 commands). Entries whose values have all gone stale free their slot.                 |
@@ -321,6 +322,9 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_cve_findings` | `betterdb.cve.findings` | `{finding}` |
 | `betterdb_cve_kev` | `betterdb.cve.kev` | `{finding}` |
 | `betterdb_cve_dataset_stale` | `betterdb.cve.dataset_stale` | `1` |
+| `betterdb_kv_cache_hit_rate` | `betterdb.kv_cache.hit_rate` | `1` |
+| `betterdb_kv_cache_chunks` | `betterdb.kv_cache.chunks` | `{chunk}` |
+| `betterdb_kv_cache_bytes` | `betterdb.kv_cache.bytes` | `By` |
 | `betterdb_otlp_metric_points_accepted_total` | `betterdb.otlp.metric_points.accepted` | `{point}` |
 | `betterdb_otlp_metric_points_dropped_total` | `betterdb.otlp.metric_points.dropped` | `{point}` |
 
