@@ -111,12 +111,27 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       DEFAULT_DELIVERY_CONFIG.timeoutMs,
     );
     this.alertStates = new LRUCache<string, AlertState>({
-      max: this.configService.get<number>('WEBHOOK_ALERT_STATE_MAX', this.ALERT_STATE_MAX),
+      max: this.resolveAlertStateMax(),
       ttl: this.ALERT_STATE_CACHE_TTL_MS,
     });
     this.sourceHost = this.configService.get<string>('database.host', 'localhost');
     this.sourcePort = this.configService.get<number>('database.port', 6379);
     this.appBaseUrl = this.configService.get<string>('FRONTEND_URL');
+  }
+
+  // ConfigService hands back the raw env string (no validation in ConfigModule),
+  // and lru-cache throws on a non-integer max, so parse it here.
+  private resolveAlertStateMax(): number {
+    const raw = this.configService.get<string | number>('WEBHOOK_ALERT_STATE_MAX');
+    if (raw === undefined || raw === null || raw === '') return this.ALERT_STATE_MAX;
+    const parsed = Number(raw);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      this.logger.warn(
+        `Invalid WEBHOOK_ALERT_STATE_MAX "${raw}", using default ${this.ALERT_STATE_MAX}`,
+      );
+      return this.ALERT_STATE_MAX;
+    }
+    return parsed;
   }
 
   /**
