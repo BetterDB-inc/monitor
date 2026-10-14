@@ -255,6 +255,16 @@ export const envSchema = z
       (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
       z.coerce.number().int().min(0).max(16384).default(100),
     ),
+    // Key-size metric families from key analytics runs. 0 disables the family;
+    // the per-key cap is bounded by what the collector persists (top 50).
+    METRICS_KEY_PATTERNS_TOP_N: z.preprocess(
+      (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+      z.coerce.number().int().min(0).max(10000).default(100),
+    ),
+    METRICS_KEY_DETAILS_TOP_N: z.preprocess(
+      (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+      z.coerce.number().int().min(0).max(50).default(10),
+    ),
 
     // OTel telemetry export (mirror of Prometheus metrics). No-op unless
     // OTEL_EXPORTER_OTLP_ENDPOINT is set.

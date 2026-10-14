@@ -1,7 +1,16 @@
+import { KEY_DETAILS_TOP_N } from '@betterdb/shared';
+
 export type ExportProfile = 'vitals' | 'full';
 
 export const DEFAULT_SLOT_STATS_TOP_N = 100;
 export const MAX_SLOT_STATS_TOP_N = 16384;
+
+export const DEFAULT_KEY_PATTERNS_TOP_N = 100;
+export const MAX_KEY_PATTERNS_TOP_N = 10000;
+export const DEFAULT_KEY_DETAILS_TOP_N = 10;
+// The collector only persists the top KEY_DETAILS_TOP_N largest keys, so a
+// higher cap could not be honored.
+export const MAX_KEY_DETAILS_TOP_N = KEY_DETAILS_TOP_N;
 
 export const VITALS_METRICS: ReadonlySet<string> = new Set([
   'betterdb_uptime_in_seconds',
@@ -55,17 +64,34 @@ export function parseExportProfile(value: unknown): ExportProfile {
 }
 
 export function resolveSlotStatsTopN(value: unknown, profile: ExportProfile): number {
+  return resolveTopN(value, profile, DEFAULT_SLOT_STATS_TOP_N, MAX_SLOT_STATS_TOP_N);
+}
+
+export function resolveKeyPatternsTopN(value: unknown, profile: ExportProfile): number {
+  return resolveTopN(value, profile, DEFAULT_KEY_PATTERNS_TOP_N, MAX_KEY_PATTERNS_TOP_N);
+}
+
+export function resolveKeyDetailsTopN(value: unknown, profile: ExportProfile): number {
+  return resolveTopN(value, profile, DEFAULT_KEY_DETAILS_TOP_N, MAX_KEY_DETAILS_TOP_N);
+}
+
+function resolveTopN(
+  value: unknown,
+  profile: ExportProfile,
+  defaultTopN: number,
+  maxTopN: number,
+): number {
   if (profile === 'vitals') {
     return 0;
   }
   if (value === undefined || value === null || String(value).trim() === '') {
-    return DEFAULT_SLOT_STATS_TOP_N;
+    return defaultTopN;
   }
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) {
-    return DEFAULT_SLOT_STATS_TOP_N;
+    return defaultTopN;
   }
-  return Math.min(MAX_SLOT_STATS_TOP_N, Math.max(0, Math.floor(parsed)));
+  return Math.min(maxTopN, Math.max(0, Math.floor(parsed)));
 }
 
 export function isExportedInProfile(name: string, profile: ExportProfile): boolean {

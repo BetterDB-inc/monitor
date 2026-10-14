@@ -293,6 +293,144 @@
         "x": 12,
         "y": 16
       }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Key memory by pattern",
+      "description": "Total sampled memory per key pattern from the latest key analytics run (Pro). Top patterns by memory, bounded by METRICS_KEY_PATTERNS_TOP_N.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_key_pattern_memory_bytes{job=~\"$job\",connection=~\"$connection\"}",
+          "legendFormat": "{{connection}} {{pattern}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Largest keys",
+      "description": "Largest tracked keys by memory from the latest key analytics run (Pro). Bounded by METRICS_KEY_DETAILS_TOP_N; set it to 0 to disable per-key series.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "sortBy": [
+          {
+            "displayName": "Value",
+            "desc": true
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "topk(10, betterdb_key_memory_bytes{job=~\"$job\",connection=~\"$connection\"})",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      }
+    },
+    {
+      "id": 9,
+      "type": "bargauge",
+      "title": "Keysize distribution",
+      "description": "Keys per size bucket from INFO keysizes (Redis 8.0+; no Valkey version emits it). metric=\"sizes\" buckets string byte length, metric=\"items\" buckets collection element count; absent on servers without the section.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "sum by (metric, bucket) (betterdb_keysize_bucket_keys{job=~\"$job\",connection=~\"$connection\"})",
+          "legendFormat": "{{metric}} {{bucket}}",
+          "instant": true
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      }
     }
   ],
   "links": [

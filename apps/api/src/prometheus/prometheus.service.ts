@@ -14,6 +14,9 @@ import {
   IWebhookEventsEnterpriseService,
   WEBHOOK_EVENTS_PRO_SERVICE,
   WEBHOOK_EVENTS_ENTERPRISE_SERVICE,
+  hasOwnKeyAnalytics,
+  parseKeySizeDistribution,
+  KeySizeDistribution,
 } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
@@ -58,6 +61,8 @@ import {
   ExportProfile,
   isExportedInProfile,
   parseExportProfile,
+  resolveKeyDetailsTopN,
+  resolveKeyPatternsTopN,
   resolveSlotStatsTopN,
 } from './export-profile';
 import { DropReason } from '../external-metrics/otlp-metrics-types';
@@ -88,6 +93,16 @@ interface ConnectionMetricState {
   demotionWatch: DemotionWatch;
   currentKeyspaceDbLabels: Set<string>;
   currentClusterSlotLabels: Set<string>;
+  // Key-size metric labels (per-connection). Per-key and keysize-bucket label
+  // tuples are stored JSON-encoded so a single set tracks the full tuple
+  // (key names may contain any delimiter character).
+  currentKeyPatternLabels: Set<string>;
+  currentKeyDetailLabels: Set<string>;
+  currentKeysizeBucketLabels: Set<string>;
+  lastKeyAnalyticsRefreshAt: number;
+  lastKeyAnalyticsErrorMessage: string | null;
+  lastKeysizesRefreshAt: number;
+  keysizesUnavailableUntil: number;
   // Storage-based metric labels (per-connection)
   currentAclReasonLabels: Set<string>;
   currentAclUserLabels: Set<string>;
@@ -122,6 +137,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private readonly registry: Registry;
   private readonly exportProfile: ExportProfile;
   private readonly slotStatsTopN: number;
+  private readonly keyPatternsTopN: number;
+  private readonly keyDetailsTopN: number;
+  // Analytics older than this are removed from the exposition rather than
+  // served as if current (3x the collector's run interval).
+  private readonly keyAnalyticsStalenessMs: number;
   private readonly exportRegistry: Registry;
   private readonly pollIntervalMs: number;
   // Start time of the last scrape-triggered refresh (stamped before the pass,
@@ -136,6 +156,16 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private perConnectionState = new Map<string, ConnectionMetricState>();
 
   private static readonly CVE_METRICS_REFRESH_MS = 60_000;
+
+  // Key-size data changes once per key-analytics run (minutes), so re-reading
+  // storage / INFO keysizes on every 5s tick would be pure overhead.
+  private static readonly KEY_SIZE_METRICS_REFRESH_MS = 30_000;
+  // Servers without the keysizes section reject the INFO argument; back off
+  // instead of probing an unsupported server every refresh.
+  private static readonly KEYSIZES_UNAVAILABLE_RECHECK_MS = 600_000;
+  // Fetch bound for the latest-run re-rank, mirroring the key-analytics
+  // service's LARGEST_KEYS_FETCH_CAP.
+  private static readonly KEY_ANALYTICS_FETCH_CAP = 10_000;
 
   // Per-connection in-flight INFO-metric updates, so the background poller and a
   // /metrics scrape coalesce instead of racing on shared per-connection state.
@@ -235,6 +265,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private clusterSlotReadsTotal: Gauge;
   private clusterSlotWritesTotal: Gauge;
 
+  // Key Size Metrics (from key analytics runs and INFO keysizes)
+  private keyPatternMemoryBytes: Gauge;
+  private keyPatternAvgMemoryBytes: Gauge;
+  private keyPatternMaxMemoryBytes: Gauge;
+  private keyPatternKeys: Gauge;
+  private keyMemoryBytes: Gauge;
+  private keyCardinality: Gauge;
+  private keysizeBucketKeys: Gauge;
+
   // CPU Metrics
   private cpuSysSecondsTotal: Gauge;
   private cpuUserSecondsTotal: Gauge;
@@ -332,6 +371,16 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.configService.get('METRICS_SLOT_STATS_TOP_N'),
       this.exportProfile,
     );
+    this.keyPatternsTopN = resolveKeyPatternsTopN(
+      this.configService.get('METRICS_KEY_PATTERNS_TOP_N'),
+      this.exportProfile,
+    );
+    this.keyDetailsTopN = resolveKeyDetailsTopN(
+      this.configService.get('METRICS_KEY_DETAILS_TOP_N'),
+      this.exportProfile,
+    );
+    this.keyAnalyticsStalenessMs =
+      3 * Number(this.configService.get<number>('KEY_ANALYTICS_INTERVAL_MS', 300_000));
     this.registry = new Registry();
     this.initializeMetrics();
     this.exportRegistry = this.buildExportRegistry();
@@ -440,6 +489,14 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         demotionWatch: new Map(),
         currentKeyspaceDbLabels: new Set(),
         currentClusterSlotLabels: new Set(),
+        // Key-size metric labels
+        currentKeyPatternLabels: new Set(),
+        currentKeyDetailLabels: new Set(),
+        currentKeysizeBucketLabels: new Set(),
+        lastKeyAnalyticsRefreshAt: 0,
+        lastKeyAnalyticsErrorMessage: null,
+        lastKeysizesRefreshAt: 0,
+        keysizesUnavailableUntil: 0,
         // Storage-based metric labels
         currentAclReasonLabels: new Set(),
         currentAclUserLabels: new Set(),
@@ -728,6 +785,46 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       ['slot'],
     );
 
+    // Key Size Metrics (per connection). Pattern/per-key series come from the
+    // latest persisted key analytics run (Pro feature, default every 5m) and
+    // are removed when no fresh run exists; bucket series come from
+    // INFO keysizes (Redis 8.0+; no Valkey version emits it) and are per node.
+    this.keyPatternMemoryBytes = this.createGauge(
+      'key_pattern_memory_bytes',
+      'Total sampled memory of keys matching pattern, from the latest key analytics run (top patterns by memory, bounded by METRICS_KEY_PATTERNS_TOP_N)',
+      ['pattern'],
+    );
+    this.keyPatternAvgMemoryBytes = this.createGauge(
+      'key_pattern_avg_memory_bytes',
+      'Average per-key memory of keys matching pattern, from the latest key analytics run',
+      ['pattern'],
+    );
+    this.keyPatternMaxMemoryBytes = this.createGauge(
+      'key_pattern_max_memory_bytes',
+      'Largest single-key memory of keys matching pattern, from the latest key analytics run',
+      ['pattern'],
+    );
+    this.keyPatternKeys = this.createGauge(
+      'key_pattern_keys',
+      'Estimated keys matching pattern, from the latest key analytics run',
+      ['pattern'],
+    );
+    this.keyMemoryBytes = this.createGauge(
+      'key_memory_bytes',
+      'Memory of a single tracked key, from the latest key analytics run (top largest keys only, bounded by METRICS_KEY_DETAILS_TOP_N)',
+      ['key', 'type'],
+    );
+    this.keyCardinality = this.createGauge(
+      'key_cardinality',
+      'Elements in a tracked collection key, or byte length for strings (top largest keys only, bounded by METRICS_KEY_DETAILS_TOP_N)',
+      ['key', 'type'],
+    );
+    this.keysizeBucketKeys = this.createGauge(
+      'keysize_bucket_keys',
+      'Keys per INFO keysizes bucket (server-maintained log2 histogram, Redis 8.0+); metric="sizes" buckets byte length, "items" buckets element count',
+      ['db', 'type', 'metric', 'bucket'],
+    );
+
     // CPU Metrics (per connection)
     this.cpuSysSecondsTotal = this.createGauge(
       'cpu_sys_seconds_total',
@@ -981,6 +1078,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       if (this.isSuperseded(connectionId, epoch)) return;
       await this.updateClientMetrics(connectionId, connLabel, state, epoch);
       if (this.isSuperseded(connectionId, epoch)) return;
+      await this.updateKeyAnalyticsMetrics(connectionId, connLabel, state, epoch);
+      if (this.isSuperseded(connectionId, epoch)) return;
     }
     await this.updateSlowlogMetrics(connectionId, connLabel, state);
     if (this.isSuperseded(connectionId, epoch)) return;
@@ -1011,6 +1110,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     for (const user of state.currentClientUserLabels) {
       this.clientConnectionsByUser.remove(connLabel, user);
     }
+    this.removeKeyAnalyticsSeries(connLabel, state);
+    this.removeKeysizeBucketSeries(connLabel, state);
     state.currentAclReasonLabels = new Set();
     state.currentAclUserLabels = new Set();
     state.currentClientNameLabels = new Set();
@@ -1301,6 +1402,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         return;
       }
       await this.updateSlowlogRawMetrics(connLabel, connectionId, config, epoch);
+      if (this.isSuperseded(connectionId, epoch)) {
+        return;
+      }
+      await this.updateKeySizeDistributionMetrics(client, connLabel, connectionId, state, epoch);
     } catch (error) {
       this.logger.error(`Failed to update INFO-based metrics for ${connLabel}`, error);
     }
@@ -2279,6 +2384,237 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     } catch (error) {
       this.logger.error(`Failed to update commandlog metrics for ${connLabel}`, error);
     }
+  }
+
+  /**
+   * Key-size gauges from the latest persisted key analytics run (Pro feature,
+   * default every 5m). Between runs the last run's values are served; a
+   * connection with no fresh run within the staleness bound — feature
+   * disabled, managed service, non-owning topology member, collector stopped —
+   * has its series removed rather than zero-filled.
+   */
+  private async updateKeyAnalyticsMetrics(
+    connectionId: string,
+    connLabel: string,
+    state: ConnectionMetricState,
+    epoch: number,
+  ): Promise<void> {
+    if (this.keyPatternsTopN === 0 && this.keyDetailsTopN === 0) {
+      return;
+    }
+    const now = Date.now();
+    if (now - state.lastKeyAnalyticsRefreshAt < PrometheusService.KEY_SIZE_METRICS_REFRESH_MS) {
+      return;
+    }
+    state.lastKeyAnalyticsRefreshAt = now;
+
+    try {
+      const config = this.connectionRegistry.getConfig(connectionId);
+      if (!config || !hasOwnKeyAnalytics(config.membership)) {
+        this.removeKeyAnalyticsSeries(connLabel, state);
+        return;
+      }
+      const startTime = now - this.keyAnalyticsStalenessMs;
+
+      if (this.keyPatternsTopN > 0) {
+        const snapshots = await this.storage.getKeyPatternSnapshots({
+          connectionId,
+          startTime,
+          limit: PrometheusService.KEY_ANALYTICS_FETCH_CAP,
+        });
+        if (this.isSuperseded(connectionId, epoch)) {
+          return;
+        }
+        // Rows come newest-first; export only the latest run's batch, ranked
+        // by total memory.
+        const latestTimestamp = snapshots[0]?.timestamp;
+        const top = snapshots
+          .filter((snapshot) => snapshot.timestamp === latestTimestamp)
+          .sort((a, b) => b.totalMemoryBytes - a.totalMemoryBytes)
+          .slice(0, this.keyPatternsTopN);
+        const newPatternLabels = new Set<string>();
+        for (const snapshot of top) {
+          newPatternLabels.add(snapshot.pattern);
+          this.keyPatternMemoryBytes
+            .labels(connLabel, snapshot.pattern)
+            .set(snapshot.totalMemoryBytes);
+          this.keyPatternAvgMemoryBytes
+            .labels(connLabel, snapshot.pattern)
+            .set(snapshot.avgMemoryBytes);
+          this.keyPatternMaxMemoryBytes
+            .labels(connLabel, snapshot.pattern)
+            .set(snapshot.maxMemoryBytes);
+          this.keyPatternKeys.labels(connLabel, snapshot.pattern).set(snapshot.keyCount);
+        }
+        for (const stalePattern of state.currentKeyPatternLabels) {
+          if (!newPatternLabels.has(stalePattern)) {
+            this.removeKeyPatternSeries(connLabel, stalePattern);
+          }
+        }
+        state.currentKeyPatternLabels = newPatternLabels;
+      }
+
+      if (this.keyDetailsTopN > 0) {
+        // 'cardinality' entries are the collector's persisted largest-key set;
+        // re-rank by memory the way the largest-keys surface does.
+        const entries = await this.storage.getHotKeys({
+          connectionId,
+          latest: true,
+          startTime,
+          signalTypes: ['cardinality'],
+          limit: PrometheusService.KEY_ANALYTICS_FETCH_CAP,
+        });
+        if (this.isSuperseded(connectionId, epoch)) {
+          return;
+        }
+        // The Postgres adapter surfaces BIGINT columns as strings, so coerce
+        // rather than type-check the numeric fields.
+        const top = [...entries]
+          .sort(
+            (a, b) =>
+              (PrometheusService.toFiniteNumber(b.memoryBytes) ?? 0) -
+              (PrometheusService.toFiniteNumber(a.memoryBytes) ?? 0),
+          )
+          .slice(0, this.keyDetailsTopN);
+        const newKeyLabels = new Set<string>();
+        for (const entry of top) {
+          const keyType = entry.keyType ?? 'unknown';
+          newKeyLabels.add(JSON.stringify([entry.keyName, keyType]));
+          const memoryBytes = PrometheusService.toFiniteNumber(entry.memoryBytes);
+          if (memoryBytes !== null) {
+            this.keyMemoryBytes.labels(connLabel, entry.keyName, keyType).set(memoryBytes);
+          } else {
+            this.keyMemoryBytes.remove(connLabel, entry.keyName, keyType);
+          }
+          const cardinality = PrometheusService.toFiniteNumber(entry.cardinality);
+          if (cardinality !== null) {
+            this.keyCardinality.labels(connLabel, entry.keyName, keyType).set(cardinality);
+          } else {
+            this.keyCardinality.remove(connLabel, entry.keyName, keyType);
+          }
+        }
+        for (const staleKey of state.currentKeyDetailLabels) {
+          if (!newKeyLabels.has(staleKey)) {
+            const [keyName, keyType] = JSON.parse(staleKey) as [string, string];
+            this.keyMemoryBytes.remove(connLabel, keyName, keyType);
+            this.keyCardinality.remove(connLabel, keyName, keyType);
+          }
+        }
+        state.currentKeyDetailLabels = newKeyLabels;
+      }
+      state.lastKeyAnalyticsErrorMessage = null;
+    } catch (error) {
+      // A storage adapter without key-analytics support fails identically on
+      // every refresh; log each distinct failure once, not every 30 seconds.
+      const message = error instanceof Error ? error.message : String(error);
+      if (state.lastKeyAnalyticsErrorMessage !== message) {
+        state.lastKeyAnalyticsErrorMessage = message;
+        this.logger.error(`Failed to update key analytics metrics for ${connLabel}`, error);
+      }
+    }
+  }
+
+  /**
+   * Whole-keyspace size distribution from INFO keysizes (server-maintained,
+   * Redis 8.0+; no Valkey version emits it). Per node: cluster members are polled as their
+   * own connections, so no fan-out or merge happens here.
+   */
+  private async updateKeySizeDistributionMetrics(
+    client: DatabasePort,
+    connLabel: string,
+    connectionId: string,
+    state: ConnectionMetricState,
+    epoch: number,
+  ): Promise<void> {
+    if (this.exportProfile === 'vitals') {
+      return;
+    }
+    const now = Date.now();
+    if (
+      now - state.lastKeysizesRefreshAt < PrometheusService.KEY_SIZE_METRICS_REFRESH_MS ||
+      now < state.keysizesUnavailableUntil
+    ) {
+      return;
+    }
+    state.lastKeysizesRefreshAt = now;
+
+    let distribution: KeySizeDistribution;
+    try {
+      const raw = (await client.call('INFO', ['keysizes'])) as string;
+      distribution = parseKeySizeDistribution(raw ?? '');
+    } catch {
+      // Servers without the section may reject the argument outright rather
+      // than returning an empty string; treat any failure as unavailable.
+      distribution = { databases: {}, available: false };
+    }
+    if (this.isSuperseded(connectionId, epoch)) {
+      return;
+    }
+    if (!distribution.available) {
+      state.keysizesUnavailableUntil = now + PrometheusService.KEYSIZES_UNAVAILABLE_RECHECK_MS;
+      this.removeKeysizeBucketSeries(connLabel, state);
+      return;
+    }
+
+    const newBucketLabels = new Set<string>();
+    for (const [db, types] of Object.entries(distribution.databases)) {
+      for (const [type, typeDistribution] of Object.entries(types)) {
+        for (const { bucket, count } of typeDistribution.buckets) {
+          newBucketLabels.add(JSON.stringify([db, type, typeDistribution.metric, bucket]));
+          this.keysizeBucketKeys
+            .labels(connLabel, db, type, typeDistribution.metric, bucket)
+            .set(count);
+        }
+      }
+    }
+    for (const staleBucket of state.currentKeysizeBucketLabels) {
+      if (!newBucketLabels.has(staleBucket)) {
+        const [db, type, metric, bucket] = JSON.parse(staleBucket) as [
+          string,
+          string,
+          string,
+          string,
+        ];
+        this.keysizeBucketKeys.remove(connLabel, db, type, metric, bucket);
+      }
+    }
+    state.currentKeysizeBucketLabels = newBucketLabels;
+  }
+
+  private static toFiniteNumber(value: unknown): number | null {
+    if (value === null || value === undefined) {
+      return null;
+    }
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  private removeKeyAnalyticsSeries(connLabel: string, state: ConnectionMetricState): void {
+    for (const pattern of state.currentKeyPatternLabels) {
+      this.removeKeyPatternSeries(connLabel, pattern);
+    }
+    for (const staleKey of state.currentKeyDetailLabels) {
+      const [keyName, keyType] = JSON.parse(staleKey) as [string, string];
+      this.keyMemoryBytes.remove(connLabel, keyName, keyType);
+      this.keyCardinality.remove(connLabel, keyName, keyType);
+    }
+    state.currentKeyPatternLabels = new Set();
+    state.currentKeyDetailLabels = new Set();
+  }
+
+  private removeKeyPatternSeries(connLabel: string, pattern: string): void {
+    this.keyPatternMemoryBytes.remove(connLabel, pattern);
+    this.keyPatternAvgMemoryBytes.remove(connLabel, pattern);
+    this.keyPatternMaxMemoryBytes.remove(connLabel, pattern);
+    this.keyPatternKeys.remove(connLabel, pattern);
+  }
+
+  private removeKeysizeBucketSeries(connLabel: string, state: ConnectionMetricState): void {
+    for (const staleBucket of state.currentKeysizeBucketLabels) {
+      const [db, type, metric, bucket] = JSON.parse(staleBucket) as [string, string, string, string];
+      this.keysizeBucketKeys.remove(connLabel, db, type, metric, bucket);
+    }
+    state.currentKeysizeBucketLabels = new Set();
   }
 
   private async updateSlowlogRawMetrics(

@@ -243,6 +243,13 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_db_keys` | `valkey.db.keys` | `{key}` |
 | `betterdb_db_keys_expiring` | `valkey.db.expires` | `{key}` |
 | `betterdb_db_avg_ttl_seconds` | `valkey.db.avg_ttl` | `ms` |
+| `betterdb_key_pattern_memory_bytes` | `valkey.key_pattern.memory` | `By` |
+| `betterdb_key_pattern_avg_memory_bytes` | `valkey.key_pattern.memory.avg` | `By` |
+| `betterdb_key_pattern_max_memory_bytes` | `valkey.key_pattern.memory.max` | `By` |
+| `betterdb_key_pattern_keys` | `valkey.key_pattern.keys` | `{key}` |
+| `betterdb_key_memory_bytes` | `valkey.key.memory` | `By` |
+| `betterdb_key_cardinality` | `valkey.key.cardinality` | `{element}` |
+| `betterdb_keysize_bucket_keys` | `valkey.keysizes.bucket.keys` | `{key}` |
 | `betterdb_commandstats_calls_total` | `valkey.cmd.calls` | `{call}` |
 | `betterdb_connected_slaves` | `valkey.slaves.connected` | `{replica}` |
 | `betterdb_replication_offset` | `valkey.replication.offset` | `By` |
