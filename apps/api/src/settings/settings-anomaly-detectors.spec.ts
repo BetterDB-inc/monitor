@@ -8,7 +8,16 @@ import {
   resolveDetectorConfig,
   sanitizeStoredOverride,
   toApiDetectorConfig,
+  toSpikeDetectorConfig,
+  DetectorConfigMap,
 } from '../anomaly/anomaly.types';
+import { SqliteAdapter } from '../storage/adapters/sqlite.adapter';
+import { SpikeDetector } from '@proprietary/anomaly-detection/spike-detector';
+import { MetricBuffer } from '@proprietary/anomaly-detection/metric-buffer';
+import {
+  AnomalySeverity,
+  MetricType as SpikeMetricType,
+} from '@proprietary/anomaly-detection/types';
 import { Feature, LicenseGuard } from '@proprietary/licenses';
 import { UpdateAnomalyDetectorsDto } from './dto/update-anomaly-detectors.dto';
 import { PrometheusService } from '../prometheus/prometheus.service';
@@ -415,6 +424,85 @@ describe('Settings anomaly detector thresholds', () => {
 
       await expect(bad).rejects.toBeInstanceOf(BadRequestException);
       await expect(good).resolves.toEqual({ memory_used: { criticalZScore: 4.0 } });
+    });
+  });
+
+  describe('disabled absolute threshold on real SQLite storage', () => {
+    let storage: SqliteAdapter;
+    let svc: SettingsService;
+    let realController: SettingsController;
+
+    beforeEach(async () => {
+      storage = new SqliteAdapter({ filepath: ':memory:' });
+      await storage.initialize();
+      const now = Date.now();
+      await storage.saveSettings({
+        id: 1,
+        auditPollIntervalMs: 60000,
+        clientAnalyticsPollIntervalMs: 60000,
+        anomalyPollIntervalMs: 1000,
+        anomalyCacheTtlMs: 3600000,
+        anomalyPrometheusIntervalMs: 30000,
+        metricForecastingEnabled: true,
+        metricForecastingDefaultRollingWindowMs: 21600000,
+        metricForecastingDefaultAlertThresholdMs: 7200000,
+        inferenceSlaConfig: {},
+        anomalyDetectorConfig: {},
+        localRetentionDays: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const configService = {
+        get: jest.fn((_key: string, defaultValue: string) => defaultValue),
+      };
+      svc = new SettingsService(storage as any, configService as any);
+      svc['cachedSettings'] = await storage.getSettings();
+      realController = new SettingsController(svc, prometheusService as any);
+    });
+
+    afterEach(async () => {
+      await storage.close();
+    });
+
+    it('PATCH criticalAbsolute: 0 keeps Infinity end to end (no null)', async () => {
+      let captured: DetectorConfigMap | undefined;
+      svc.onDetectorConfigChange((c) => {
+        captured = c;
+      });
+
+      await svc.updateDetectorConfig({ acl_denied: { criticalAbsolute: 0 } });
+
+      expect(captured?.acl_denied?.criticalAbsolute).toBe(Number.POSITIVE_INFINITY);
+      expect((await svc.getDetectorConfig()).acl_denied?.criticalAbsolute).toBe(
+        Number.POSITIVE_INFINITY,
+      );
+
+      const response = await realController.getAnomalyDetectors();
+      expect(response.resolved.acl_denied).not.toHaveProperty('criticalAbsolute');
+      expect(response.overrides.acl_denied).not.toHaveProperty('criticalAbsolute');
+      expect(JSON.stringify(response)).not.toContain('null');
+
+      // A live detector built from the listener config must not fire CRITICAL
+      // on small values (null would have meant `value >= 0`).
+      const resolved = resolveDetectorConfig(MetricType.acl_denied, captured ?? {});
+      const detector = new SpikeDetector(
+        SpikeMetricType.ACL_DENIED,
+        toSpikeDetectorConfig(resolved),
+      );
+      const buffer = new MetricBuffer(SpikeMetricType.ACL_DENIED, 300, 5);
+      let ts = 1_000_000;
+      for (let i = 0; i < 10; i++) buffer.addSample(1, (ts += 1000));
+      for (let i = 0; i < resolved.consecutiveRequired + 3; i++) {
+        const event = detector.detect(buffer, 1, (ts += 1000));
+        expect(event?.severity).not.toBe(AnomalySeverity.CRITICAL);
+      }
+    });
+
+    it('a follow-up warningAbsolute PATCH succeeds with critical disabled', async () => {
+      await svc.updateDetectorConfig({ acl_denied: { criticalAbsolute: 0 } });
+      const result = await svc.updateDetectorConfig({ acl_denied: { warningAbsolute: 100 } });
+      expect(result.acl_denied?.warningAbsolute).toBe(100);
+      expect(result.acl_denied?.criticalAbsolute).toBe(Number.POSITIVE_INFINITY);
     });
   });
 

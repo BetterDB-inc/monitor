@@ -16,11 +16,15 @@ import {
   parseRetentionDaysToken,
 } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
-import { DetectorConfigMap, MetricType, resolveDetectorConfig } from '../anomaly/anomaly.types';
+import {
+  ABSOLUTE_FIELDS,
+  DetectorConfigMap,
+  MetricType,
+  normalizeDetectorConfigMap,
+  resolveDetectorConfig,
+} from '../anomaly/anomaly.types';
 
 export type DetectorConfigListener = (config: DetectorConfigMap) => void;
-
-const ABSOLUTE_FIELDS = ['warningAbsolute', 'criticalAbsolute'] as const;
 
 // JSON can't carry Infinity, so the API accepts 0 as "no absolute threshold"
 // and stores the Infinity sentinel, which GET omits.
@@ -233,8 +237,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async getDetectorConfig(): Promise<DetectorConfigMap> {
-    const stored = this.getCachedSettings().anomalyDetectorConfig;
-    return stored ?? {};
+    return normalizeDetectorConfigMap(this.getCachedSettings().anomalyDetectorConfig);
   }
 
   updateDetectorConfig(overrides: DetectorConfigMap): Promise<DetectorConfigMap> {
@@ -282,8 +285,8 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
         );
       }
 
-      const hasWarningAbs = resolved.warningAbsolute !== Number.POSITIVE_INFINITY;
-      const hasCriticalAbs = resolved.criticalAbsolute !== Number.POSITIVE_INFINITY;
+      const hasWarningAbs = Number.isFinite(resolved.warningAbsolute);
+      const hasCriticalAbs = Number.isFinite(resolved.criticalAbsolute);
       if (
         hasWarningAbs &&
         hasCriticalAbs &&
@@ -297,7 +300,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     }
 
     const updated = await this.writeSettings({ anomalyDetectorConfig: merged });
-    const result = (updated.settings.anomalyDetectorConfig ?? {}) as DetectorConfigMap;
+    const result = normalizeDetectorConfigMap(updated.settings.anomalyDetectorConfig);
     this.notifyDetectorConfigChange(result);
     return result;
   }
@@ -311,7 +314,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
 
   private async readStoredDetectorConfig(): Promise<DetectorConfigMap> {
     const stored = await this.storageClient.getSettings();
-    return (stored?.anomalyDetectorConfig ?? {}) as DetectorConfigMap;
+    return normalizeDetectorConfigMap(stored?.anomalyDetectorConfig);
   }
 
   private withSettingsWriteLock<T>(fn: () => Promise<T>): Promise<T> {
