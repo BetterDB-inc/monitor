@@ -42,7 +42,7 @@ export function KvCacheSettingsSheet() {
 
   useEffect(() => {
     if (saved) setThreshold(toPercent(saved.hitRateThreshold));
-  }, [saved?.hitRateThreshold]);
+  }, [connectionId, open, saved?.hitRateThreshold]);
 
   const commitThreshold = () => {
     if (!saved) return;
