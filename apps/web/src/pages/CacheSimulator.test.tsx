@@ -2,9 +2,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { CacheSimulatorSnapshot } from '@betterdb/shared';
 
-const { useQuery, getSnapshot, setQueryData, cancelQueries, connection } = vi.hoisted(() => ({ useQuery: vi.fn(), getSnapshot: vi.fn(), setQueryData: vi.fn(), cancelQueries: vi.fn(), connection: { id: 'c1' } }));
+const { useQuery, getSnapshot, setQueryData, getQueryData, cancelQueries, connection } = vi.hoisted(() => ({ useQuery: vi.fn(), getSnapshot: vi.fn(), setQueryData: vi.fn(), getQueryData: vi.fn(), cancelQueries: vi.fn(), connection: { id: 'c1' } }));
 
-vi.mock('@tanstack/react-query', () => ({ useQuery, useQueryClient: () => ({ setQueryData, cancelQueries }) }));
+vi.mock('@tanstack/react-query', () => ({ useQuery, useQueryClient: () => ({ setQueryData, getQueryData, cancelQueries }) }));
 vi.mock('../hooks/useConnection', () => ({ useConnection: () => ({ currentConnection: connection }) }));
 vi.mock('../api/cache-simulator', () => ({
   cacheSimulatorApi: { getSnapshot },
@@ -33,6 +33,7 @@ describe('CacheSimulator page', () => {
     useQuery.mockReset();
     getSnapshot.mockReset();
     setQueryData.mockReset();
+    getQueryData.mockReset();
     cancelQueries.mockReset();
     cancelQueries.mockResolvedValue(undefined);
     connection.id = 'c1';
@@ -118,6 +119,27 @@ describe('CacheSimulator page', () => {
     expect(screen.queryByTestId('chart')).toBeNull();
     expect(screen.queryByLabelText('Average key size (bytes)')).toBeNull();
     expect(screen.queryByText(/The projection below uses INFO figures/)).toBeNull();
+  });
+
+  it('fetches the snapshot for the current connection', async () => {
+    useQuery.mockReturnValue({ data: ready });
+    getSnapshot.mockResolvedValue(ready);
+    render(<CacheSimulator />);
+    const signal = new AbortController().signal;
+    await useQuery.mock.calls[0][0].queryFn({ signal });
+    expect(getSnapshot).toHaveBeenCalledWith('c1', false, signal);
+  });
+
+  it('refreshes the instance it started on and keeps the previous estimate while resampling', async () => {
+    useQuery.mockReturnValue({ data: ready });
+    getQueryData.mockReturnValue(ready);
+    const sampling = { ...ready, status: 'sampling' as const, estimate: null, progress: { sampled: 0, target: 4000 } };
+    getSnapshot.mockResolvedValue(sampling);
+    render(<CacheSimulator />);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh sample' }));
+    await waitFor(() => expect(setQueryData).toHaveBeenCalled());
+    expect(getSnapshot).toHaveBeenCalledWith('c1', true);
+    expect(setQueryData).toHaveBeenCalledWith(['cache-simulator', 'c1'], { ...sampling, estimate: ready.estimate });
   });
 
   it('shows an inline error when refresh rejects', async () => {

@@ -5,7 +5,7 @@ import { cacheSimulatorApi, cacheSimulatorKeys } from '../api/cache-simulator';
 import { useConnection } from '../hooks/useConnection';
 import { Button } from '../components/ui/button';
 import { Skeleton } from '../components/ui/skeleton';
-import { CurrentStateCard, HORIZONS, OutcomePanel, ProjectionInputs, isSetupFailure, measuredInputs, projectionInputs, steadyBytes, type SimulatorInputs } from '../components/pages/cache-simulator';
+import { CurrentStateCard, HORIZONS, OutcomePanel, ProjectionInputs, isSetupFailure, keepPreviousEstimate, measuredInputs, projectionInputs, steadyBytes, type SimulatorInputs } from '../components/pages/cache-simulator';
 import { ProjectionChart } from '../components/pages/cache-simulator/ProjectionChart';
 
 const SIX_MONTHS = HORIZONS[HORIZONS.length - 1];
@@ -21,9 +21,11 @@ export function CacheSimulator() {
   const isRefreshing = refreshingId === connectionId;
   const refreshError = refreshFailure?.connectionId === connectionId ? refreshFailure.message : null;
 
+  const snapshotKey = cacheSimulatorKeys.snapshot(connectionId);
   const snapshot = useQuery({
-    queryKey: cacheSimulatorKeys.snapshot(connectionId),
-    queryFn: ({ signal }) => cacheSimulatorApi.getSnapshot(false, signal),
+    queryKey: snapshotKey,
+    queryFn: async ({ signal }) =>
+      keepPreviousEstimate(queryClient.getQueryData<CacheSimulatorSnapshot>(snapshotKey), await cacheSimulatorApi.getSnapshot(connectionId, false, signal)),
     refetchInterval: (query: { state: { data?: CacheSimulatorSnapshot } }) => (query.state.data?.status === 'sampling' ? 2000 : false),
   });
 
@@ -46,8 +48,8 @@ export function CacheSimulator() {
     try {
       const queryKey = cacheSimulatorKeys.snapshot(refreshedId);
       await queryClient.cancelQueries({ queryKey });
-      const next = await cacheSimulatorApi.getSnapshot(true);
-      queryClient.setQueryData(queryKey, next);
+      const next = await cacheSimulatorApi.getSnapshot(refreshedId, true);
+      queryClient.setQueryData(queryKey, keepPreviousEstimate(queryClient.getQueryData<CacheSimulatorSnapshot>(queryKey), next));
       setOverrides((current) => (current?.connectionId === refreshedId ? null : current));
     } catch (error) {
       setRefreshFailure({ connectionId: refreshedId, message: error instanceof Error ? error.message : 'Refresh failed' });

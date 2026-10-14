@@ -6,9 +6,9 @@ export const cacheSimulatorKeys = {
 };
 
 export const cacheSimulatorApi = {
-  getSnapshot: (refresh: boolean, signal?: AbortSignal) =>
+  getSnapshot: (connectionId: string | null, refresh: boolean, signal?: AbortSignal) =>
     fetchApi<CacheSimulatorSnapshot>(
       `/cache-simulator/snapshot${refresh ? '?refresh=true' : ''}`,
-      { signal },
+      { signal, ...(connectionId ? { headers: { 'x-connection-id': connectionId } } : {}) },
     ),
 };

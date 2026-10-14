@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { CacheSimulatorSnapshot } from '@betterdb/shared';
-import { isSetupFailure, measuredInputs, projectionInputs } from './measured-inputs';
+import { isSetupFailure, keepPreviousEstimate, measuredInputs, projectionInputs } from './measured-inputs';
 
 const snapshot: CacheSimulatorSnapshot = {
   status: 'ready',
@@ -56,5 +56,19 @@ describe('measured inputs', () => {
     expect(isSetupFailure({ ...snapshot, status: 'failed', estimate: null, error: 'ERR' })).toBe(false);
     expect(isSetupFailure({ ...snapshot, status: 'failed', instant: zeroed })).toBe(false);
     expect(isSetupFailure({ ...snapshot, status: 'ready', estimate: null, instant: zeroed })).toBe(false);
+  });
+});
+
+describe('keepPreviousEstimate', () => {
+  const sampling: CacheSimulatorSnapshot = { ...snapshot, status: 'sampling', estimate: null, progress: { sampled: 0, target: 4000 } };
+
+  it('carries the last estimate into a resample that has none yet', () => {
+    expect(keepPreviousEstimate(snapshot, sampling)).toEqual({ ...sampling, estimate: snapshot.estimate });
+  });
+
+  it('leaves a finished or estimate-bearing snapshot alone', () => {
+    const next = { ...snapshot, estimate: { ...snapshot.estimate!, totalBytes: 1 } };
+    expect(keepPreviousEstimate(snapshot, next)).toBe(next);
+    expect(keepPreviousEstimate(undefined, sampling)).toBe(sampling);
   });
 });
