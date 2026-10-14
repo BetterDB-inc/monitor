@@ -346,4 +346,19 @@ describe('PrometheusService write-rejection wiring', () => {
 
     expect(getConfigValue).toHaveBeenCalledTimes(2); // one pair of keys, once
   });
+
+  it('recovers an OOM edge while a non-blocking BGSAVE error is still reported', async () => {
+    getConfigValue.mockImplementation(async (name: string) =>
+      name === 'stop-writes-on-bgsave-error' ? 'no' : '3600 1',
+    );
+    await poll('conn-a', info(HEALTHY, { OOM: 0 }));
+    await poll('conn-a', info(BGSAVE_FAILED, { OOM: 7 }));
+    waitOutQuietWindow();
+    await poll('conn-a', info(BGSAVE_FAILED, { OOM: 7 }));
+    expect(writeEvents('conn-a').map(([event]) => event)).toEqual([
+      WebhookEventType.WRITES_REJECTED,
+      WebhookEventType.WRITES_RECOVERED,
+    ]);
+    expect(writeEvents('conn-a')[0][1]).toMatchObject({ causes: ['maxmemory_reached'] });
+  });
 });

@@ -104,14 +104,30 @@ function countOf(errorstats: ErrorStatsInfo, code: WriteRejectionCode): number |
 }
 
 /**
- * Recovery needs the server to report both statuses as ok. A poll that lacks
- * them proves nothing, so it keeps the edge open rather than closing it.
- * errorstats is not required: servers before Redis 6.2 never report it.
+ * Causes that only clear once the server reports persistence healthy again.
+ * persistence_failed is excluded: it means MISCONF arrived with no failing
+ * status visible (often a host that hides INFO persistence), so the quiet
+ * window is the only evidence recovery can ever get.
  */
-function persistenceHealthy(persistence: Partial<PersistenceInfo> | undefined): boolean {
-  return (
-    persistence?.rdb_last_bgsave_status === 'ok' && persistence?.aof_last_write_status === 'ok'
-  );
+const PERSISTENCE_CAUSES: readonly WriteRejectionCause[] = ['rdb_bgsave_failed', 'aof_write_failed'];
+
+/**
+ * Persistence gate for recovery, applied only to edges that include a
+ * persistence-derived cause. Such an edge needs the server to report the
+ * statuses as ok; a poll that lacks them proves nothing and keeps it open.
+ * The RDB status counts only when a failed BGSAVE refuses writes, mirroring
+ * the opening path (rdbStopsWrites !== false). Errorstats-only edges (OOM,
+ * READONLY, NOREPLICAS, persistence_failed) don't depend on persistence, so a
+ * non-blocking bgsave error or an absent persistence section can't pin them open.
+ */
+function persistenceClear(
+  persistence: Partial<PersistenceInfo> | undefined,
+  edgeCauses: readonly WriteRejectionCause[],
+  rdbStopsWrites: boolean | null | undefined,
+): boolean {
+  if (!edgeCauses.some((cause) => PERSISTENCE_CAUSES.includes(cause))) return true;
+  const rdbOk = rdbStopsWrites === false || persistence?.rdb_last_bgsave_status === 'ok';
+  return rdbOk && persistence?.aof_last_write_status === 'ok';
 }
 
 /**
@@ -126,10 +142,10 @@ function persistenceHealthy(persistence: Partial<PersistenceInfo> | undefined): 
  * Counters are cumulative and reset on restart or CONFIG RESETSTAT, so a drop
  * re-baselines instead of reading as a negative delta. A poll without the
  * errorstats section keeps the previous baseline, so the next poll that has
- * it still sees the whole delta. Recovery needs both signals clean on the
- * same poll, with persistence reported healthy rather than merely absent,
- * after quietMs with no active cause, and (for an OOM edge) with used_memory
- * back below maxmemory.
+ * it still sees the whole delta. Recovery needs no active cause for quietMs,
+ * used_memory back below maxmemory for an OOM edge, and, only for an edge
+ * with a persistence-derived cause, persistence reported healthy (RDB status
+ * ignored when a failed BGSAVE doesn't stop writes) rather than merely absent.
  *
  * READONLY on a node that reports itself a replica is expected (probes,
  * misrouted clients) and never opens an edge; its counter is still
@@ -206,7 +222,11 @@ export function evaluateWriteRejection(
       input.maxMemory === 0 ||
       input.usedMemory === undefined ||
       input.usedMemory < input.maxMemory;
-    if (quietLongEnough && memoryClear && persistenceHealthy(persistence)) {
+    if (
+      quietLongEnough &&
+      memoryClear &&
+      persistenceClear(persistence, state.lastCauses, input.rdbStopsWrites)
+    ) {
       transition = 'recovered';
     }
   }

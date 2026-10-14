@@ -255,4 +255,43 @@ describe('evaluateWriteRejection', () => {
       severity: 'warning',
     });
   });
+
+  it('recovers an errorstats-only edge while a non-blocking BGSAVE error persists', () => {
+    const s = createWriteRejectionState();
+    ev(s, healthy, stats({ OOM: 0 }), 0);
+    expect(ev(s, healthy, stats({ OOM: 5 }), 5_000).transition).toBe('rejected');
+    expect(
+      ev(s, bgsaveFailed, stats({ OOM: 5 }), 20_000, { rdbStopsWrites: false }),
+    ).toMatchObject({ transition: 'recovered', severity: 'warning' });
+  });
+
+  it('recovers an errorstats-only edge when the persistence section is absent (managed hosts)', () => {
+    const s = createWriteRejectionState();
+    ev(s, undefined, stats({ NOREPLICAS: 0 }), 0);
+    expect(ev(s, undefined, stats({ NOREPLICAS: 2 }), 5_000).transition).toBe('rejected');
+    expect(ev(s, undefined, stats({ NOREPLICAS: 2 }), 20_000).transition).toBe('recovered');
+  });
+
+  it('still keeps a persistence edge open without reported persistence', () => {
+    const s = createWriteRejectionState();
+    ev(s, bgsaveFailed, stats({}), 0);
+    expect(ev(s, undefined, stats({}), 20_000).transition).toBeNull();
+  });
+
+  it('recovers an RDB edge once a failed BGSAVE no longer stops writes', () => {
+    const s = createWriteRejectionState();
+    ev(s, bgsaveFailed, stats({}), 0);
+    expect(
+      ev(s, bgsaveFailed, stats({}), 20_000, { rdbStopsWrites: false }).transition,
+    ).toBe('recovered');
+  });
+
+  it('an edge that also had a persistence cause still needs persistence ok', () => {
+    const s = createWriteRejectionState();
+    ev(s, healthy, stats({ OOM: 0 }), 0);
+    ev(s, bgsaveFailed, stats({ OOM: 3 }), 5_000); // opens with rdb + OOM
+    // Quiet long enough, but persistence is unreported: stays open.
+    expect(ev(s, undefined, stats({ OOM: 3 }), 20_000).transition).toBeNull();
+    expect(ev(s, healthy, stats({ OOM: 3 }), 25_000).transition).toBe('recovered');
+  });
 });
