@@ -88,14 +88,22 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
   }
 
   async onModuleInit() {
-    if (!this.license.hasFeature('keyAnalytics')) {
-      this.logger.log('Key Analytics requires Pro license - service disabled');
-      return;
+    // hasFeature() reports the community tier until the background entitlement
+    // validation kicked off by LicenseService resolves, so a boot-time check
+    // without waiting disabled the collector on every start of a licensed
+    // instance. Wait for the verdict the way the license guard does, then
+    // start the poller unconditionally: pollConnection re-checks per tick, so
+    // an entitlement that only lands later (boot-time network failure,
+    // heartbeat re-validation) enables collection without a restart, and a
+    // lapsed one stops it.
+    await this.license.ensureValidated();
+    if (this.license.hasFeature('keyAnalytics')) {
+      this.logger.log(
+        `Key Analytics service initialized (sample: ${this.sampleSize}, interval: ${this.intervalMs}ms)`,
+      );
+    } else {
+      this.logger.log('Key Analytics requires Pro license - collection idle until entitled');
     }
-
-    this.logger.log(
-      `Key Analytics service initialized (sample: ${this.sampleSize}, interval: ${this.intervalMs}ms)`,
-    );
 
     this.start();
     // Retention for key_pattern_snapshots and hot_key_stats is owned by the
@@ -110,6 +118,9 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    if (!this.license.hasFeature('keyAnalytics')) {
+      return;
+    }
     return this.collect(ctx, false);
   }
 
