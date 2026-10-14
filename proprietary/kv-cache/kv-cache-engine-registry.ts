@@ -40,9 +40,24 @@ export class KvCacheEngineRegistry implements OnModuleInit {
     const stored = (await this.storage.getKvCacheEngines()).filter((engine) => engine.connectionId === connectionId);
     if (this.removals.get(connectionId) !== removals) return;
     for (const engine of stored) {
+      if (this.engines.has(engine.id)) continue;
+      if (this.clashes(engine)) {
+        await this.serialize(engine.id, () => this.storage.deleteKvCacheEngine(engine.id)).catch((error) =>
+          this.logger.warn(`Could not delete superseded KV cache engine ${engine.id}: ${error instanceof Error ? error.message : String(error)}`),
+        );
+        continue;
+      }
       this.removed.delete(engine.id);
-      if (!this.engines.has(engine.id)) this.engines.set(engine.id, engine);
+      this.engines.set(engine.id, engine);
     }
+  }
+
+  private clashes(engine: StoredKvCacheEngine): boolean {
+    return [...this.engines.values()].some(
+      (other) =>
+        (other.connectionId === engine.connectionId && other.name === engine.name) ||
+        (engine.otlpEngineId !== null && other.otlpEngineId === engine.otlpEngineId),
+    );
   }
 
   list(connectionId?: string): StoredKvCacheEngine[] {

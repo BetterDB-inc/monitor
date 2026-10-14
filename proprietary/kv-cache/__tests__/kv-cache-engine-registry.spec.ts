@@ -169,4 +169,16 @@ describe('KvCacheEngineRegistry', () => {
     await restoring;
     expect(registry.get('a')).toBeNull();
   });
+
+  it('keeps a link created during cleanup and deletes the stored engine it supersedes', async () => {
+    const { registry, storage, removal, restore } = setup([engine('a', 'c1', 'lmc-a'), engine('old', 'c1')]);
+    await registry.onModuleInit();
+    await removal('c1');
+    await registry.save({ ...engine('new', 'c1', 'lmc-a'), name: 'fresh' });
+    await registry.save({ ...engine('dup', 'c1'), name: 'old' });
+    await restore('c1');
+    expect(registry.list('c1').map((e) => e.id).sort()).toEqual(['dup', 'new']);
+    expect(storage.deleteKvCacheEngine).toHaveBeenCalledWith('a');
+    expect(storage.deleteKvCacheEngine).toHaveBeenCalledWith('old');
+  });
 });
