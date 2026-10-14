@@ -49,6 +49,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   );
   private readonly running = new Map<string, Promise<KvCacheFootprintSnapshot | null>>();
   private readonly generations = new Map<string, number>();
+  private readonly deleting = new Map<string, Promise<void>>();
   private readonly lastEvicted = new Map<string, Map<string, number>>();
   private readonly sampleKeys = new Map<string, string>();
   private readonly undetectedUntil = new Map<string, number>();
@@ -104,7 +105,17 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   private async deleteRemovedData(connectionId: string, generation: number): Promise<void> {
     if (this.generationOf(connectionId) !== generation || this.isRegistered(connectionId)) return;
     if (!this.running.has(connectionId)) this.generations.delete(connectionId);
-    await this.storage.deleteKvCacheConnectionData(connectionId);
+    const deletion = this.storage.deleteKvCacheConnectionData(connectionId);
+    const settled = deletion.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.deleting.set(connectionId, settled);
+    try {
+      await deletion;
+    } finally {
+      if (this.deleting.get(connectionId) === settled) this.deleting.delete(connectionId);
+    }
   }
 
   private isRegistered(connectionId: string): boolean {
@@ -137,6 +148,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   }
 
   async collect(ctx: ConnectionContext): Promise<KvCacheFootprintSnapshot | null> {
+    await this.deleting.get(ctx.connectionId);
     const plan = this.planFor(ctx.connectionId);
     if (plan.kind === 'skip' || this.running.has(ctx.connectionId)) return null;
     const run = this.runCollection(ctx, plan);
@@ -169,6 +181,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
       otherDbs: readings[0]?.otherDbs ?? [],
       clientDetected: readings.some((reading) => reading.glide),
     });
+    await this.deleting.get(ctx.connectionId);
     if (!current()) return null;
     await this.storage.saveKvCacheFootprintSnapshot(snapshot);
     if (!current()) return null;

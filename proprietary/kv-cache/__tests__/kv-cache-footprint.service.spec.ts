@@ -191,6 +191,57 @@ describe('KvCacheFootprintService', () => {
     expect(await service.triggerCollection('c1')).not.toBeNull();
   });
 
+  it('waits for an in-flight removal delete before saving for a re-registered connection', async () => {
+    const { service, storage, registry } = setup();
+    const listed = registry.list();
+    const order: string[] = [];
+    let finishDelete: () => void = () => undefined;
+    storage.deleteKvCacheConnectionData.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (finishDelete = () => { order.push('delete'); resolve(); })),
+    );
+    storage.saveKvCacheFootprintSnapshot.mockImplementation(async () => { order.push('save'); });
+    registry.list.mockReturnValue([]);
+    (service as any).onConnectionRemoved('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
+    registry.list.mockReturnValue(listed);
+    const collecting = service.triggerCollection('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
+    finishDelete();
+    await expect(collecting).resolves.not.toBeNull();
+    expect(order).toEqual(['delete', 'save']);
+  });
+
+  it('holds a save that races an in-flight removal delete until the delete completes', async () => {
+    const { service, storage, client, registry } = setup();
+    const listed = registry.list();
+    const order: string[] = [];
+    let release: () => void = () => undefined;
+    let finishRead: (size: number) => void = () => undefined;
+    let finishDelete: () => void = () => undefined;
+    service.onConnectionRemoval(() => new Promise<void>((resolve) => (release = resolve)));
+    client.getDbSize.mockImplementationOnce(() => new Promise((resolve) => (finishRead = resolve)));
+    storage.deleteKvCacheConnectionData.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (finishDelete = () => { order.push('delete'); resolve(); })),
+    );
+    storage.saveKvCacheFootprintSnapshot.mockImplementation(async () => { order.push('save'); });
+    registry.list.mockReturnValue([]);
+    (service as any).onConnectionRemoved('c1');
+    const collecting = service.collect({ connectionId: 'c1', connectionName: 'one', client, host: 'h', port: 6379 });
+    await new Promise((resolve) => setImmediate(resolve));
+    release();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
+    registry.list.mockReturnValue(listed);
+    finishRead(6);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
+    finishDelete();
+    await expect(collecting).resolves.not.toBeNull();
+    expect(order).toEqual(['delete', 'save']);
+  });
+
   it('deletes once for the latest removal when a connection is removed again before data is deleted', async () => {
     const { service, storage, registry } = setup();
     registry.list.mockReturnValue([]);

@@ -188,6 +188,17 @@ describe('KvCacheSamplesService', () => {
     expect(result.rangeHitRate).toBe(0.5);
   });
 
+  it('keeps the newest rows when every fetched row shares the oldest timestamp', async () => {
+    const { service, storage } = setup();
+    const rows = Array.from({ length: SAMPLES_LIMIT + 1 }, (_, i) => sample({ timestamp: 5, engineId: `e${i}`, requestedTokens: 2, hitTokens: 1 }));
+    storage.getKvCacheEngineSamples.mockResolvedValue(rows);
+    const result = await service.getSamples('c1', { from: 0, to: 1000 });
+    expect(result.truncated).toBe(true);
+    expect(result.buckets).toHaveLength(SAMPLES_LIMIT);
+    expect(result.buckets.some((bucket) => bucket.engineId === 'e0')).toBe(false);
+    expect(result.rangeHitRate).toBe(0.5);
+  });
+
   it('returns a null range hit rate when nothing was requested', async () => {
     const { service } = setup();
     expect(await service.getSamples('c1', { from: 0, to: 1000 })).toEqual({ buckets: [], rangeHitRate: null, truncated: false });

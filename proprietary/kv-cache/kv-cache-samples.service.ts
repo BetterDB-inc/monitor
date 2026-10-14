@@ -38,7 +38,8 @@ export function mergeBuckets(samples: KvCacheEngineSample[]): KvCacheSampleBucke
 
 function dropOldestTimestamp(samples: KvCacheEngineSample[]): KvCacheEngineSample[] {
   const oldest = samples.reduce((min, row) => Math.min(min, row.timestamp), Infinity);
-  return samples.filter((row) => row.timestamp > oldest);
+  const newer = samples.filter((row) => row.timestamp > oldest);
+  return newer.length > 0 ? newer : samples.slice(-SAMPLES_LIMIT);
 }
 
 @Injectable()
