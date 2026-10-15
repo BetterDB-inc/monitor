@@ -1420,6 +1420,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       CREATE INDEX IF NOT EXISTS idx_kps_pattern ON key_pattern_snapshots(pattern, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_kps_pattern_timestamp ON key_pattern_snapshots(pattern, timestamp);
       CREATE INDEX IF NOT EXISTS idx_kps_connection_id ON key_pattern_snapshots(connection_id);
+      CREATE INDEX IF NOT EXISTS idx_kps_connection_db ON key_pattern_snapshots(connection_id, db);
 
       CREATE TABLE IF NOT EXISTS hot_key_stats (
         id UUID PRIMARY KEY,

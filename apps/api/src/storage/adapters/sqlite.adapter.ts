@@ -611,6 +611,11 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!kpsInfo.some((col) => col.name === 'db')) {
       this.db.exec('ALTER TABLE key_pattern_snapshots ADD COLUMN db INTEGER NOT NULL DEFAULT 0');
     }
+    // Backs the 60s-polled SELECT DISTINCT db query used to populate the
+    // database selector; the column must exist before the index can be created.
+    this.db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_kps_connection_db ON key_pattern_snapshots(connection_id, db)',
+    );
 
     // Migrate connection_id to all data tables for multi-database support
     this.migrateConnectionId();
