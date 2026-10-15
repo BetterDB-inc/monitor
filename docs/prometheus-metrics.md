@@ -841,10 +841,13 @@ for: 10m
 > It alerts on `betterdb_key_memory_bytes` (a specific tracked key), not
 > `betterdb_key_pattern_max_memory_bytes`: on a keyspace larger than the sample
 > the pattern max is the largest key *among the sampled keys of one run*, so each
-> run can pick a different key and the value jumps with no real growth. One
-> caveat remains — a key newly entering the tracked top-N starts a baseline-less
-> series, so its first `delta` can fire once as a "new large key" signal; raise
-> `for:` or the threshold if that is noisy.
+> run can pick a different key and the value jumps with no real growth.
+>
+> Because `delta()` is the difference between the first and last samples *within
+> the window*, a key that simply enters the tracked top-N at a steady large size
+> has a delta near zero and does not trip this rule — only actual growth within
+> the window does. To also catch keys that are already large but not growing, use
+> the absolute-size variant above (`BetterDBLargeKey`).
 
 ### Info Alerts
 
