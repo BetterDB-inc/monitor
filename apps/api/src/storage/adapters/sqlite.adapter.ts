@@ -659,6 +659,77 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         });
       }
     }
+
+    this.migrateConnectionIdUniqueConstraints();
+  }
+
+  // Tables whose composite UNIQUE constraint gained connection_id in the
+  // multi-connection change. ALTER TABLE ADD COLUMN cannot alter a UNIQUE
+  // constraint, and createSchema's `CREATE TABLE IF NOT EXISTS` is a no-op on an
+  // existing table, so a legacy database keeps its old connection_id-less
+  // constraint. saveAclEntries' `ON CONFLICT(... connection_id)` then has no
+  // matching constraint and every ACL write throws; the slow/command log
+  // `INSERT OR IGNORE` paths silently dedup across connections on the wrong key.
+  private static readonly CONNECTION_ID_UNIQUE_CONSTRAINTS: Record<string, string[]> = {
+    acl_audit: [
+      'timestamp_created',
+      'username',
+      'object',
+      'reason',
+      'source_host',
+      'source_port',
+      'connection_id',
+    ],
+    slow_log_entries: ['slowlog_id', 'source_host', 'source_port', 'connection_id'],
+    command_log_entries: ['commandlog_id', 'log_type', 'source_host', 'source_port', 'connection_id'],
+  };
+
+  /**
+   * Backfill the connection_id-inclusive UNIQUE constraint on legacy tables as a
+   * standalone unique index — the conflict target SQLite's UPSERT/`INSERT OR
+   * IGNORE` paths require. Idempotent: brand-new databases have none of these
+   * tables yet (this runs before createSchema, which builds them with the
+   * constraint inline), so the index is only ever created for a pre-existing
+   * table that lacks it. Widening the key (adding connection_id) can never make
+   * rows that were unique under the old key non-unique, so the index build is
+   * safe on existing data.
+   */
+  private migrateConnectionIdUniqueConstraints(): void {
+    if (!this.db) return;
+
+    for (const [table, columns] of Object.entries(
+      SqliteAdapter.CONNECTION_ID_UNIQUE_CONSTRAINTS,
+    )) {
+      try {
+        const indexes = this.db.prepare(`PRAGMA index_list(${table})`).all() as {
+          name: string;
+          unique: number;
+        }[];
+        const alreadyCovered = indexes.some((index) => {
+          if (!index.unique) return false;
+          const indexColumns = (
+            this.db!.prepare(`PRAGMA index_info(${index.name})`).all() as { name: string }[]
+          ).map((c) => c.name);
+          return indexColumns.includes('connection_id');
+        });
+        if (alreadyCovered) continue;
+
+        const indexName = `idx_${table}_conn_unique`;
+        this.db.exec(
+          `CREATE UNIQUE INDEX IF NOT EXISTS ${indexName} ON ${table}(${columns.join(', ')})`,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Fresh database: createSchema has not built the table yet and will add
+        // the inline constraint itself. Any other failure must surface.
+        if (/no such table/i.test(message)) {
+          continue;
+        }
+        throw new Error(`connection_id unique-constraint migration failed for ${table}: ${message}`, {
+          cause: error,
+        });
+      }
+    }
   }
 
   async close(): Promise<void> {

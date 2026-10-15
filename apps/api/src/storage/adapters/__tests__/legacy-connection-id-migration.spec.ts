@@ -26,7 +26,9 @@ describe('SqliteAdapter legacy connection_id migration', () => {
 
   function createLegacyAclAudit(): void {
     const db = new Database(dbPath);
-    // The pre-multi-connection shape: no connection_id column.
+    // The pre-multi-connection shape: no connection_id column, and the UNIQUE
+    // constraint predates connection_id (six columns, as shipped before the
+    // multi-connection change).
     db.exec(`
       CREATE TABLE acl_audit (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,7 +44,8 @@ describe('SqliteAdapter legacy connection_id migration', () => {
         captured_at INTEGER NOT NULL,
         source_host TEXT NOT NULL,
         source_port INTEGER NOT NULL,
-        created_at INTEGER
+        created_at INTEGER,
+        UNIQUE(timestamp_created, username, object, reason, source_host, source_port)
       );
     `);
     db.close();
@@ -59,6 +62,42 @@ describe('SqliteAdapter legacy connection_id migration', () => {
     const columns = db.prepare('PRAGMA table_info(acl_audit)').all() as { name: string }[];
     db.close();
     expect(columns.some((c) => c.name === 'connection_id')).toBe(true);
+  });
+
+  it('accepts ACL upserts against a migrated legacy acl_audit', async () => {
+    createLegacyAclAudit();
+
+    const adapter = new SqliteAdapter({ filepath: dbPath });
+    await adapter.initialize();
+
+    const entry = {
+      id: 0,
+      count: 1,
+      reason: 'auth',
+      context: 'toplevel',
+      object: 'cmd',
+      username: 'default',
+      ageSeconds: 5,
+      clientInfo: 'addr=127.0.0.1:6379',
+      timestampCreated: 1_700_000_000,
+      timestampLastUpdated: 1_700_000_000,
+      capturedAt: 1_700_000_100,
+      sourceHost: '127.0.0.1',
+      sourcePort: 6379,
+    };
+
+    // The pre-fix migration added connection_id but left the six-column UNIQUE
+    // in place, so this upsert's ON CONFLICT(... connection_id) had no matching
+    // constraint and threw. It must now succeed, and a repeat must upsert (not
+    // duplicate) on the connection_id-inclusive key.
+    await expect(adapter.saveAclEntries([entry], 'env-default')).resolves.toBe(1);
+    await adapter.saveAclEntries([{ ...entry, count: 2 }], 'env-default');
+
+    const stored = await adapter.getAclEntries({ connectionId: 'env-default' });
+    await adapter.close();
+
+    expect(stored).toHaveLength(1);
+    expect(stored[0].count).toBe(2);
   });
 
   it('still initializes a brand-new database', async () => {

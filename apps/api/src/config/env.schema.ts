@@ -32,14 +32,19 @@ const optionalTrimmedString = z
     return trimmed;
   });
 
-// Top-N caps are clamped at runtime by the export-profile resolvers (the
-// documented behavior); schema bounds reference the same constants and
-// .catch() keeps an out-of-range or malformed value from aborting boot
-// where the resolver would simply clamp it.
+// Top-N caps mirror the export-profile resolvers' documented behavior: an
+// out-of-range value is clamped to 0..max (above the cap yields max, a negative
+// yields 0), matching the runtime resolver rather than silently reverting to
+// the default. Only a malformed/non-finite value falls back to def, and .catch
+// keeps any residual parse failure from aborting boot.
 const topNEnv = (max: number, def: number) =>
   z.preprocess(
     (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
-    z.coerce.number().int().min(0).max(max).default(def).catch(def),
+    z.coerce
+      .number()
+      .transform((n) => (Number.isFinite(n) ? Math.min(max, Math.max(0, Math.floor(n))) : def))
+      .default(def)
+      .catch(def),
   );
 
 /**

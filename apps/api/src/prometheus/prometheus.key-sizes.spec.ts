@@ -430,11 +430,17 @@ describe('PrometheusService key size metrics', () => {
     resetThrottles(service);
     await update(service);
 
-    // Only the limit-1 probe runs; the unchanged run skips the batch re-fetch,
-    // getHotKeys, and every gauge rewrite.
+    // Only the limit-1 probes run (one for patterns, one confirming the hot-key
+    // capture is unchanged); the unchanged run skips the batch re-fetch and
+    // every gauge rewrite.
     expect(storage.getKeyPatternSnapshots).toHaveBeenCalledTimes(1);
     expect(storage.getKeyPatternSnapshots.mock.calls[0][0]).toMatchObject({ limit: 1 });
-    expect(storage.getHotKeys).not.toHaveBeenCalled();
+    expect(storage.getHotKeys).toHaveBeenCalledTimes(1);
+    expect(storage.getHotKeys.mock.calls[0][0]).toMatchObject({
+      limit: 1,
+      latest: true,
+      signalTypes: ['cardinality'],
+    });
     // The already-exported series are still served.
     expect(await service.getMetrics()).toContain('betterdb_key_pattern_memory_bytes{');
   });
@@ -457,6 +463,32 @@ describe('PrometheusService key size metrics', () => {
     expect(await service.getMetrics()).toContain(
       `betterdb_key_pattern_memory_bytes{connection="${LABEL}",pattern="user:*"} 3000000`,
     );
+  });
+
+  it('re-exports per-key gauges when a newer hot-key capture lands under an unchanged pattern run', async () => {
+    const { service, storage } = buildService();
+    await update(service);
+    expect(await service.getMetrics()).toContain(
+      `betterdb_key_memory_bytes{connection="${LABEL}",key="user:1:profile",type="hash"} 50000`,
+    );
+
+    // The pattern run is unchanged (same timestamp), but hot keys are persisted
+    // in a second write that can lag the pattern write, so a newer capture lands
+    // under the same run. Probe-skip must not freeze the per-key gauges on the
+    // previous capture: it keys off the hot-key captured_at, not just the
+    // pattern timestamp.
+    storage.getHotKeys.mockResolvedValue([
+      hotKey({ keyName: 'bigblob:1', keyType: 'string', memoryBytes: 999_999, capturedAt: NOW + 1000 }),
+    ]);
+    resetThrottles(service);
+    await update(service);
+
+    const text = await service.getMetrics();
+    expect(text).toContain(
+      `betterdb_key_memory_bytes{connection="${LABEL}",key="bigblob:1",type="string"} 999999`,
+    );
+    // The previous capture's key is gone, not frozen alongside the new one.
+    expect(text).not.toContain('key="user:1:profile"');
   });
 
   it('keeps and updates pattern series while getHotKeys persistently fails', async () => {

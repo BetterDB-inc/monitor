@@ -421,7 +421,7 @@
             "uid": "${ds}"
           },
           "expr": "sum by (type, metric, bucket) (betterdb_keysize_bucket_keys{job=~\"$job\",connection=~\"$connection\"})",
-          "legendFormat": "{{type}} {{bucket}}",
+          "legendFormat": "{{type}} {{metric}} {{bucket}}",
           "instant": true
         }
       ],

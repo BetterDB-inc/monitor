@@ -97,28 +97,33 @@ describe('Metric export profile env', () => {
     );
   });
 
-  it('falls back to the default for a slot top-N out of range or fractional instead of failing boot', () => {
-    // The runtime resolvers (export-profile.ts) clamp these values — the
-    // documented behavior — so schema validation must not abort startup for
-    // inputs the resolver would simply clamp.
-    expect(envSchema.parse({ METRICS_SLOT_STATS_TOP_N: '-1' }).METRICS_SLOT_STATS_TOP_N).toBe(100);
+  it('clamps a slot top-N out of range to the bound and floors a fractional value instead of failing boot', () => {
+    // The schema mirrors the runtime resolvers (export-profile.ts): an
+    // out-of-range value is clamped to 0..max rather than aborting boot or
+    // silently reverting to the default.
+    expect(envSchema.parse({ METRICS_SLOT_STATS_TOP_N: '-1' }).METRICS_SLOT_STATS_TOP_N).toBe(0);
     expect(envSchema.parse({ METRICS_SLOT_STATS_TOP_N: '16385' }).METRICS_SLOT_STATS_TOP_N).toBe(
-      100,
+      16384,
     );
-    expect(envSchema.parse({ METRICS_SLOT_STATS_TOP_N: '2.5' }).METRICS_SLOT_STATS_TOP_N).toBe(
-      100,
-    );
+    expect(envSchema.parse({ METRICS_SLOT_STATS_TOP_N: '2.5' }).METRICS_SLOT_STATS_TOP_N).toBe(2);
   });
 
-  it('falls back to defaults for out-of-range key-size top-N values instead of failing boot', () => {
+  it('clamps out-of-range key-size top-N values to their bounds instead of failing boot', () => {
     expect(envSchema.parse({ METRICS_KEY_DETAILS_TOP_N: '500' }).METRICS_KEY_DETAILS_TOP_N).toBe(
-      10,
+      50,
     );
     expect(
       envSchema.parse({ METRICS_KEY_PATTERNS_TOP_N: '99999' }).METRICS_KEY_PATTERNS_TOP_N,
-    ).toBe(100);
+    ).toBe(10000);
     expect(envSchema.parse({ METRICS_KEY_DETAILS_TOP_N: '25' }).METRICS_KEY_DETAILS_TOP_N).toBe(
       25,
+    );
+  });
+
+  it('falls back to the default for a malformed (non-numeric) top-N instead of failing boot', () => {
+    expect(envSchema.parse({ METRICS_SLOT_STATS_TOP_N: 'abc' }).METRICS_SLOT_STATS_TOP_N).toBe(100);
+    expect(envSchema.parse({ METRICS_KEY_DETAILS_TOP_N: 'xyz' }).METRICS_KEY_DETAILS_TOP_N).toBe(
+      10,
     );
   });
 

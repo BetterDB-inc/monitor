@@ -115,6 +115,12 @@ interface ConnectionMetricState {
   // probe that returns the same timestamp with both families still fresh skips
   // the batch re-fetch, getHotKeys, and gauge rewrites (the run is unchanged).
   lastExportedRunTimestamp: number | null;
+  // captured_at of the hot-key capture backing the per-key gauges last exported.
+  // Hot keys are persisted in a second write with their own timestamp, which can
+  // lag the pattern write within a single run, so the pattern run timestamp
+  // alone is not proof the per-key gauges are current — the probe-skip confirms
+  // this stamp too before skipping the per-key re-fetch.
+  lastExportedKeyDetailsCapturedAt: number | null;
   lastKeysizesRefreshAt: number;
   lastKeysizesErrorMessage: string | null;
   keysizesUnavailableUntil: number;
@@ -540,6 +546,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         lastKeysizesSuccessAt: now,
         lastKeyAnalyticsErrorMessage: null,
         lastExportedRunTimestamp: null,
+        lastExportedKeyDetailsCapturedAt: null,
         lastKeysizesRefreshAt: 0,
         lastKeysizesErrorMessage: null,
         keysizesUnavailableUntil: 0,
@@ -2489,6 +2496,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (!config || !hasOwnKeyAnalytics(config.membership)) {
       this.removeKeyAnalyticsSeries(connLabel, state);
       state.lastExportedRunTimestamp = null;
+      state.lastExportedKeyDetailsCapturedAt = null;
       // An ownership flip (e.g. a sentinel primary moving to another node)
       // must not leave a stale error message behind: it would suppress the
       // next distinct-failure log from the new owner's first real failure.
@@ -2537,13 +2545,39 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           patternsFresh &&
           detailsFresh
         ) {
-          state.lastPatternsSuccessAt = now;
+          // The pattern run is unchanged, but hot keys are persisted in a
+          // separate write with their own captured_at that can lag the pattern
+          // write within one run. Confirm the latest hot-key capture is also the
+          // one already exported before skipping — otherwise a refresh that
+          // landed in that inter-write gap (exporting the previous run's hot
+          // keys while stamping this run's pattern timestamp) would freeze the
+          // per-key gauges until the next analytics cycle. A single-row probe,
+          // matching the pattern probe's cost, only runs once the cheap pattern
+          // checks already indicate a skip.
+          let keyDetailsCurrent = true;
           if (detailsEnabled) {
-            state.lastKeyDetailsSuccessAt = now;
+            const newestKeyDetail = await this.storage.getHotKeys({
+              connectionId,
+              latest: true,
+              startTime,
+              signalTypes: ['cardinality'],
+              limit: 1,
+            });
+            if (this.isSuperseded(connectionId, epoch)) {
+              return;
+            }
+            keyDetailsCurrent =
+              (newestKeyDetail[0]?.capturedAt ?? null) === state.lastExportedKeyDetailsCapturedAt;
           }
-          state.lastKeyAnalyticsErrorMessage = null;
-          state.lastKeyAnalyticsRefreshAt = now;
-          return;
+          if (keyDetailsCurrent) {
+            state.lastPatternsSuccessAt = now;
+            if (detailsEnabled) {
+              state.lastKeyDetailsSuccessAt = now;
+            }
+            state.lastKeyAnalyticsErrorMessage = null;
+            state.lastKeyAnalyticsRefreshAt = now;
+            return;
+          }
         }
 
         const snapshots =
@@ -2651,7 +2685,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           }
         }
         state.currentKeyDetailLabels = newKeyLabels;
-        // Per-key gauges now reflect the latest capture (even if empty).
+        // Per-key gauges now reflect the latest capture (even if empty). Record
+        // that capture's captured_at so the probe-skip can tell a later refresh
+        // apart from the one that would surface a newer capture of the same run.
+        // All rows of a latest:true read share one captured_at; an empty capture
+        // yields null, which the probe compares symmetrically.
+        state.lastExportedKeyDetailsCapturedAt = entries[0]?.capturedAt ?? null;
         state.lastKeyDetailsSuccessAt = now;
         keyDetailsExported = true;
       }
