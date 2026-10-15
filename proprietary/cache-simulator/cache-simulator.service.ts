@@ -158,20 +158,21 @@ export class CacheSimulatorService {
       LABEL,
     );
     const expected = await this.primaryCount(seed);
-    if (expected !== null && nodes.length < expected) {
+    if (nodes.length < expected) {
       throw new Error(`Only ${nodes.length} of ${expected} cluster primaries are reachable, so the totals would be understated`);
     }
-    return nodes.length > 0 ? nodes : [seed];
+    return nodes;
   }
 
-  private async primaryCount(seed: ScanNode): Promise<number | null> {
-    try {
-      const size = Number((await seed.client.getClusterInfo()).cluster_size);
-      return Number.isInteger(size) && size > 0 ? size : null;
-    } catch (error) {
-      this.logger.warn(`${LABEL} could not read the cluster size from ${seed.name}: ${error instanceof Error ? error.message : String(error)}`);
-      return null;
-    }
+  private async primaryCount(seed: ScanNode): Promise<number> {
+    const size = await seed.client.getClusterInfo().then(
+      (info) => Number(info.cluster_size),
+      (error: unknown) => {
+        throw new Error(`Could not read the cluster size from ${seed.name}: ${error instanceof Error ? error.message : String(error)}`);
+      },
+    );
+    if (!Number.isInteger(size) || size < 1) throw new Error(`${seed.name} reported no cluster size, so the totals cannot be checked`);
+    return size;
   }
 
   private async growth(nodes: ScanNode[]): Promise<CacheSimulatorGrowth | null> {
