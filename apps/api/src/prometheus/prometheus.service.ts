@@ -2814,8 +2814,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const newBucketLabels = new Set<string>();
     for (const [db, types] of Object.entries(distribution.databases)) {
       for (const [type, typeDistribution] of Object.entries(types)) {
-        // Emit the singular TYPE-style name so `type` joins with the per-key and
-        // per-pattern families (INFO keysizes reports it in the plural).
+        // Emit the singular TYPE-style name so `type` joins with the per-key
+        // families (INFO keysizes reports it in the plural); the per-pattern
+        // families carry only a `pattern` label.
         const labelType = canonicalKeySizeType(type);
         for (const { bucket, count } of typeDistribution.buckets) {
           newBucketLabels.add(JSON.stringify([db, labelType, typeDistribution.metric, bucket]));

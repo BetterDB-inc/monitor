@@ -98,10 +98,11 @@ export function parseKeySizeDistribution(raw: string): KeySizeDistribution {
 }
 
 // INFO keysizes names its sections in the plural (`strings`, `hashes`, …),
-// while the TYPE command — the source of the `type` label on the per-key and
-// per-pattern families — is singular (`string`, `hash`, …). Map keysize type
-// names onto the singular form so a PromQL join on `type` across the families
-// matches instead of silently dropping every row.
+// while the TYPE command — the source of the `type` label on the per-key
+// families (betterdb_key_memory_bytes / betterdb_key_cardinality) — is singular
+// (`string`, `hash`, …). Map keysize type names onto the singular form so a
+// PromQL join on `type` with those families matches instead of silently
+// dropping every row.
 const KEY_SIZE_TYPE_SINGULAR: Record<string, string> = {
   strings: 'string',
   lists: 'list',

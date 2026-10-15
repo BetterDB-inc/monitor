@@ -438,7 +438,7 @@ Key memory per pattern, per tracked key, and the whole-keyspace size distributio
 | `betterdb_key_pattern_keys`             | gauge | `pattern`                       | Estimated keys matching pattern (extrapolated from the sample)                    | `1000`    |
 | `betterdb_key_memory_bytes`             | gauge | `key`, `type`                   | Memory of a single tracked key (the collector's tracked keys ranked by memory; a huge-by-memory key the collector did not track may be absent) | `65536`   |
 | `betterdb_key_cardinality`              | gauge | `key`, `type`                   | Elements in a tracked collection key, or byte length for strings                   | `4000`    |
-| `betterdb_keysize_bucket_keys`          | gauge | `db`, `type`, `metric`, `bucket` | Keys per `INFO keysizes` bucket; `metric="sizes"` is byte length, `"items"` is element count. Per node, so with several connections (or auto-registered replicas) selected the counts sum across nodes — select a single connection for a true per-server distribution. `type` is normalized to the singular form (`string`, `hash`, …) so it joins with the per-key/per-pattern families | `655`     |
+| `betterdb_keysize_bucket_keys`          | gauge | `db`, `type`, `metric`, `bucket` | Keys per `INFO keysizes` bucket; `metric="sizes"` is byte length, `"items"` is element count. Per node, so with several connections (or auto-registered replicas) selected the counts sum across nodes — select a single connection for a true per-server distribution. `type` is normalized to the singular form (`string`, `hash`, …) so it joins with the per-key families (`betterdb_key_memory_bytes` / `betterdb_key_cardinality`); the per-pattern families carry only a `pattern` label | `655`     |
 
 **Cardinality bounds**: pattern series are capped at the top `METRICS_KEY_PATTERNS_TOP_N` patterns by total memory (default 100, `0` disables them). Per-key series are capped at the top `METRICS_KEY_DETAILS_TOP_N` keys by memory (default 10, maximum 50, `0` disables only the per-key family). Per-key series put raw key names in the `key` label — keep the cap conservative, or disable the family, if key names embed user identifiers. Bucket series are bounded by the server: one per populated database × data type × log2 bucket.
 
@@ -824,22 +824,27 @@ betterdb_anomaly_by_severity{severity!="info"} > 10
 for: 30m
 ```
 
-**BetterDBKeyMemoryGrowth** - A tracked key ballooning in size (requires Pro key analytics; 104857600 = 100 MiB — tune to your workload)
+**BetterDBKeyMemoryGrowth** - A tracked key ballooning in size (requires Pro key analytics; 104857600 = 100 MiB growth over an hour — tune to your workload)
 
 ```promql
-max_over_time(betterdb_key_memory_bytes[15m]) > 104857600
+delta(max_over_time(betterdb_key_memory_bytes[15m])[1h:5m]) > 104857600
 for: 10m
 ```
 
-> Alert on `betterdb_key_memory_bytes` (a specific tracked key) rather than
-> `betterdb_key_pattern_max_memory_bytes`. On a keyspace larger than the sample,
+> This is a growth rule, matching the name: the inner `max_over_time[15m]`
+> smooths a single key's series, and the outer `delta(...[1h:5m])` measures how
+> much it grew over the last hour — so it fires on a key that *balloons*, not on
+> one that is merely large. (For a static "this key is too big" alert instead,
+> drop the `delta` and compare `max_over_time(betterdb_key_memory_bytes[15m])`
+> to an absolute threshold, and rename it, e.g. `BetterDBLargeKey`.)
+>
+> It alerts on `betterdb_key_memory_bytes` (a specific tracked key), not
+> `betterdb_key_pattern_max_memory_bytes`: on a keyspace larger than the sample
 > the pattern max is the largest key *among the sampled keys of one run*, so each
-> run can pick a different key and the value jumps with no real growth; a pattern
-> newly entering the top-N also starts a fresh series with no baseline, which a
-> `delta`/`increase` rule misreads as a spike. `max_over_time` on the per-key
-> series rides over the per-run resampling. If you must alert per pattern, use
-> `betterdb_key_pattern_memory_bytes` (the estimated total) with a long window
-> and expect sampling noise.
+> run can pick a different key and the value jumps with no real growth. One
+> caveat remains — a key newly entering the tracked top-N starts a baseline-less
+> series, so its first `delta` can fire once as a "new large key" signal; raise
+> `for:` or the threshold if that is noisy.
 
 ### Info Alerts
 
