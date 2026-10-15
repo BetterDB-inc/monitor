@@ -2862,7 +2862,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         SUM(hot_key_count) as hot_key_count,
         SUM(cold_key_count) as cold_key_count,
         SUM(sampled_key_count) as sampled_key_count,
-        SUM(avg_memory_bytes * sampled_key_count) as weighted_avg_memory
+        SUM(avg_memory_bytes::bigint * sampled_key_count) as weighted_avg_memory
       FROM key_pattern_snapshots
       WHERE ${patternWhere}
       GROUP BY pattern
