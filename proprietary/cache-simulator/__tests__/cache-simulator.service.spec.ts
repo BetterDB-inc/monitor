@@ -7,7 +7,7 @@ const info = (usedMemory: number, maxmemory: number, policy = 'allkeys-lru', dat
 });
 
 function client(usedMemory = 1000, maxmemory = 10_000, dbSize = 5) {
-  return { getInfoParsed: jest.fn().mockResolvedValue(info(usedMemory, maxmemory)), getDbSize: jest.fn().mockResolvedValue(dbSize), getRole: jest.fn().mockResolvedValue({ role: 'master' }) };
+  return { getInfoParsed: jest.fn().mockResolvedValue(info(usedMemory, maxmemory)), getDbSize: jest.fn().mockResolvedValue(dbSize), getRole: jest.fn().mockResolvedValue({ role: 'master' }), getClusterInfo: jest.fn().mockResolvedValue({ cluster_size: '2' }) };
 }
 
 function setup(connections: Record<string, ReturnType<typeof client>> = { c1: client() }, statuses: any[] = []) {
@@ -162,7 +162,7 @@ describe('CacheSimulatorService', () => {
     expect(result.instant).toMatchObject({ maxmemory: 0, maxmemoryPolicy: 'mixed' });
   });
 
-  it('falls back to the seed when no primary is reachable', async () => {
+  it('fails setup when no primary is reachable', async () => {
     const spy = jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
     const connections = { seed: client(1000, 10_000, 5), m1: client(2000, 10_000, 7) };
     connections.seed.getRole.mockRejectedValue(new Error('down'));
@@ -172,9 +172,34 @@ describe('CacheSimulatorService', () => {
       { id: 'm1', name: 'm1', isConnected: true, connectionType: 'direct', membership: { seedId: 'seed', source: 'cluster' } },
     ];
     const { service } = setup(connections, statuses);
-    const result = await service.snapshot('seed');
-    expect(spy.mock.calls[0][0].map((node) => node.name)).toEqual(['seed']);
-    expect(result.instant.totalKeys).toBe(5);
+    expect(await service.snapshot('seed')).toMatchObject({ status: 'failed', error: 'Only 0 of 2 cluster primaries are reachable, so the totals would be understated' });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('fails setup when the cluster size cannot be read', async () => {
+    const spy = jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
+    const connections = { seed: client(1000, 10_000, 5), m1: client(2000, 10_000, 7) };
+    connections.seed.getClusterInfo.mockRejectedValue(new Error('NOPERM'));
+    const statuses = [
+      { id: 'seed', name: 'seed', isConnected: true, connectionType: 'direct' },
+      { id: 'm1', name: 'm1', isConnected: true, connectionType: 'direct', membership: { seedId: 'seed', source: 'cluster' } },
+    ];
+    const { service } = setup(connections, statuses);
+    expect(await service.snapshot('seed')).toMatchObject({ status: 'failed', error: 'Could not read the cluster size from seed: NOPERM' });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('fails setup when the cluster reports no size', async () => {
+    const spy = jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
+    const connections = { seed: client(1000, 10_000, 5), m1: client(2000, 10_000, 7) };
+    connections.seed.getClusterInfo.mockResolvedValue({});
+    const statuses = [
+      { id: 'seed', name: 'seed', isConnected: true, connectionType: 'direct' },
+      { id: 'm1', name: 'm1', isConnected: true, connectionType: 'direct', membership: { seedId: 'seed', source: 'cluster' } },
+    ];
+    const { service } = setup(connections, statuses);
+    expect(await service.snapshot('seed')).toMatchObject({ status: 'failed', error: 'seed reported no cluster size, so the totals cannot be checked' });
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it('fails setup when fewer primaries are reachable than the cluster reports', async () => {
