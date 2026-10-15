@@ -1,5 +1,13 @@
 import { z } from 'zod';
 import { MAX_RETENTION_DAYS, parseRetentionDaysToken } from '@betterdb/shared';
+import {
+  DEFAULT_KEY_DETAILS_TOP_N,
+  DEFAULT_KEY_PATTERNS_TOP_N,
+  DEFAULT_SLOT_STATS_TOP_N,
+  MAX_KEY_DETAILS_TOP_N,
+  MAX_KEY_PATTERNS_TOP_N,
+  MAX_SLOT_STATS_TOP_N,
+} from '../prometheus/export-profile';
 import { parseActivityRetentionDays } from '../activity/activity-config';
 import { isCloudModeValue } from '../common/utils/cloud-mode';
 import { isNegativeEnvValue } from '../common/utils/env-bool';
@@ -251,19 +259,41 @@ export const envSchema = z
         .transform((v) => v.trim().toLowerCase())
         .pipe(z.enum(['vitals', 'full'])),
     ),
+    // Top-N caps are clamped at runtime by the export-profile resolvers (the
+    // documented behavior); schema bounds reference the same constants and
+    // .catch() keeps an out-of-range or malformed value from aborting boot
+    // where the resolver would simply clamp it.
     METRICS_SLOT_STATS_TOP_N: z.preprocess(
       (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
-      z.coerce.number().int().min(0).max(16384).default(100),
+      z.coerce
+        .number()
+        .int()
+        .min(0)
+        .max(MAX_SLOT_STATS_TOP_N)
+        .default(DEFAULT_SLOT_STATS_TOP_N)
+        .catch(DEFAULT_SLOT_STATS_TOP_N),
     ),
     // Key-size metric families from key analytics runs. 0 disables the family;
-    // the per-key cap is bounded by what the collector persists (top 50).
+    // the per-key cap is bounded by what the collector persists.
     METRICS_KEY_PATTERNS_TOP_N: z.preprocess(
       (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
-      z.coerce.number().int().min(0).max(10000).default(100),
+      z.coerce
+        .number()
+        .int()
+        .min(0)
+        .max(MAX_KEY_PATTERNS_TOP_N)
+        .default(DEFAULT_KEY_PATTERNS_TOP_N)
+        .catch(DEFAULT_KEY_PATTERNS_TOP_N),
     ),
     METRICS_KEY_DETAILS_TOP_N: z.preprocess(
       (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
-      z.coerce.number().int().min(0).max(50).default(10),
+      z.coerce
+        .number()
+        .int()
+        .min(0)
+        .max(MAX_KEY_DETAILS_TOP_N)
+        .default(DEFAULT_KEY_DETAILS_TOP_N)
+        .catch(DEFAULT_KEY_DETAILS_TOP_N),
     ),
 
     // OTel telemetry export (mirror of Prometheus metrics). No-op unless

@@ -157,13 +157,19 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
   betterdb_db_keys: gauge('valkey.db.keys', '{key}', perDb(1)),
   betterdb_db_keys_expiring: gauge('valkey.db.expires', '{key}', perDb(1)),
   betterdb_db_avg_ttl_seconds: gauge('valkey.db.avg_ttl', 'ms', perDb(1000)),
-  betterdb_key_pattern_memory_bytes: gauge('valkey.key_pattern.memory', 'By'),
-  betterdb_key_pattern_avg_memory_bytes: gauge('valkey.key_pattern.memory.avg', 'By'),
-  betterdb_key_pattern_max_memory_bytes: gauge('valkey.key_pattern.memory.max', 'By'),
-  betterdb_key_pattern_keys: gauge('valkey.key_pattern.keys', '{key}'),
-  betterdb_key_memory_bytes: gauge('valkey.key.memory', 'By'),
-  betterdb_key_cardinality: gauge('valkey.key.cardinality', '{element}'),
-  betterdb_keysize_bucket_keys: gauge('valkey.keysizes.bucket.keys', '{key}'),
+  // Monitor-computed key analytics (Pro collector output, not INFO-native) —
+  // betterdb.* namespace like every other derived family; valkey.* is reserved
+  // for the redisreceiver catalogue. The keysizes histogram is server-native
+  // but absent from the receiver catalogue, so it lands here too.
+  betterdb_key_pattern_memory_bytes: gauge('betterdb.key_pattern.memory', 'By'),
+  betterdb_key_pattern_avg_memory_bytes: gauge('betterdb.key_pattern.memory.avg', 'By'),
+  betterdb_key_pattern_max_memory_bytes: gauge('betterdb.key_pattern.memory.max', 'By'),
+  betterdb_key_pattern_keys: gauge('betterdb.key_pattern.keys', '{key}'),
+  betterdb_key_memory_bytes: gauge('betterdb.key.memory', 'By'),
+  betterdb_key_cardinality: gauge('betterdb.key.cardinality', '{element}'),
+  // perDb(1) normalizes the db attribute ('db0' -> '0') to match the other
+  // db-labelled instruments in this export.
+  betterdb_keysize_bucket_keys: gauge('betterdb.keysizes.bucket.keys', '{key}', perDb(1)),
   betterdb_commandstats_calls_total: counter('valkey.cmd.calls', '{call}'),
   betterdb_connected_slaves: updown('valkey.slaves.connected', '{replica}'),
   betterdb_replication_offset: gauge('valkey.replication.offset', 'By'),

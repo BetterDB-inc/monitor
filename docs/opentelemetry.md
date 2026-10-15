@@ -243,13 +243,6 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_db_keys` | `valkey.db.keys` | `{key}` |
 | `betterdb_db_keys_expiring` | `valkey.db.expires` | `{key}` |
 | `betterdb_db_avg_ttl_seconds` | `valkey.db.avg_ttl` | `ms` |
-| `betterdb_key_pattern_memory_bytes` | `valkey.key_pattern.memory` | `By` |
-| `betterdb_key_pattern_avg_memory_bytes` | `valkey.key_pattern.memory.avg` | `By` |
-| `betterdb_key_pattern_max_memory_bytes` | `valkey.key_pattern.memory.max` | `By` |
-| `betterdb_key_pattern_keys` | `valkey.key_pattern.keys` | `{key}` |
-| `betterdb_key_memory_bytes` | `valkey.key.memory` | `By` |
-| `betterdb_key_cardinality` | `valkey.key.cardinality` | `{element}` |
-| `betterdb_keysize_bucket_keys` | `valkey.keysizes.bucket.keys` | `{key}` |
 | `betterdb_commandstats_calls_total` | `valkey.cmd.calls` | `{call}` |
 | `betterdb_connected_slaves` | `valkey.slaves.connected` | `{replica}` |
 | `betterdb_replication_offset` | `valkey.replication.offset` | `By` |
@@ -273,6 +266,13 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_instantaneous_output_kbps` | `betterdb.net.output_rate` | `KiBy/s` |
 | `betterdb_pubsub_channels` | `betterdb.pubsub.channels` | `{channel}` |
 | `betterdb_pubsub_patterns` | `betterdb.pubsub.patterns` | `{pattern}` |
+| `betterdb_key_pattern_memory_bytes` | `betterdb.key_pattern.memory` | `By` |
+| `betterdb_key_pattern_avg_memory_bytes` | `betterdb.key_pattern.memory.avg` | `By` |
+| `betterdb_key_pattern_max_memory_bytes` | `betterdb.key_pattern.memory.max` | `By` |
+| `betterdb_key_pattern_keys` | `betterdb.key_pattern.keys` | `{key}` |
+| `betterdb_key_memory_bytes` | `betterdb.key.memory` | `By` |
+| `betterdb_key_cardinality` | `betterdb.key.cardinality` | `{element}` |
+| `betterdb_keysize_bucket_keys` | `betterdb.keysizes.bucket.keys` | `{key}` |
 | `betterdb_repl_output_buffer_ratio` | `betterdb.replication.output_buffer_ratio` | `1` |
 | `betterdb_master_link_up` | `betterdb.replication.master_link_up` | `1` |
 | `betterdb_master_last_io_seconds_ago` | `betterdb.replication.master_last_io_age` | `s` |

@@ -79,7 +79,7 @@ export interface KeySizeTypeDistribution {
 
 /**
  * Parsed `INFO keysizes` output: whole-keyspace size distribution maintained by the
- * server (Valkey >= 8.1 / Redis >= 7.4), with zero key scanning.
+ * server (Redis >= 8.0; no Valkey version emits the section), with zero key scanning.
  */
 export interface KeySizeDistribution {
   /** db -> data type (strings|lists|sets|zsets|hashes|streams) -> distribution. */

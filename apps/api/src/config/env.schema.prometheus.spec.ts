@@ -97,10 +97,29 @@ describe('Metric export profile env', () => {
     );
   });
 
-  it('rejects a slot top-N out of range or fractional', () => {
-    expect(envSchema.safeParse({ METRICS_SLOT_STATS_TOP_N: '-1' }).success).toBe(false);
-    expect(envSchema.safeParse({ METRICS_SLOT_STATS_TOP_N: '16385' }).success).toBe(false);
-    expect(envSchema.safeParse({ METRICS_SLOT_STATS_TOP_N: '2.5' }).success).toBe(false);
+  it('falls back to the default for a slot top-N out of range or fractional instead of failing boot', () => {
+    // The runtime resolvers (export-profile.ts) clamp these values — the
+    // documented behavior — so schema validation must not abort startup for
+    // inputs the resolver would simply clamp.
+    expect(envSchema.parse({ METRICS_SLOT_STATS_TOP_N: '-1' }).METRICS_SLOT_STATS_TOP_N).toBe(100);
+    expect(envSchema.parse({ METRICS_SLOT_STATS_TOP_N: '16385' }).METRICS_SLOT_STATS_TOP_N).toBe(
+      100,
+    );
+    expect(envSchema.parse({ METRICS_SLOT_STATS_TOP_N: '2.5' }).METRICS_SLOT_STATS_TOP_N).toBe(
+      100,
+    );
+  });
+
+  it('falls back to defaults for out-of-range key-size top-N values instead of failing boot', () => {
+    expect(envSchema.parse({ METRICS_KEY_DETAILS_TOP_N: '500' }).METRICS_KEY_DETAILS_TOP_N).toBe(
+      10,
+    );
+    expect(
+      envSchema.parse({ METRICS_KEY_PATTERNS_TOP_N: '99999' }).METRICS_KEY_PATTERNS_TOP_N,
+    ).toBe(100);
+    expect(envSchema.parse({ METRICS_KEY_DETAILS_TOP_N: '25' }).METRICS_KEY_DETAILS_TOP_N).toBe(
+      25,
+    );
   });
 
   it('treats a blank profile as unset and defaults to full', () => {

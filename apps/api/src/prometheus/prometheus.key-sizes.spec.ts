@@ -258,6 +258,71 @@ describe('PrometheusService key size metrics', () => {
     resetThrottles(service);
     await update(service);
     expect(await service.getMetrics()).not.toContain('betterdb_keysize_bucket_keys{');
+    // No section header at all means "unsupported": the long backoff is armed.
+    expect(service['perConnectionState'].get(CONN)!.keysizesUnavailableUntil).toBeGreaterThan(0);
+  });
+
+  it('treats a header-only reply as an empty keyspace, not an unsupported server', async () => {
+    const { service, client } = buildService();
+    await update(service);
+    expect(await service.getMetrics()).toContain('betterdb_keysize_bucket_keys{');
+
+    // Redis 8 with an empty keyspace (e.g. right after FLUSHALL) replies with
+    // the section header and no distribution lines.
+    client.call.mockResolvedValue('# Keysizes\r\n');
+    resetThrottles(service);
+    await update(service);
+    expect(await service.getMetrics()).not.toContain('betterdb_keysize_bucket_keys{');
+    expect(service['perConnectionState'].get(CONN)!.keysizesUnavailableUntil).toBe(0);
+
+    // Keys written back show up on the next refresh, not after a 10m backoff.
+    client.call.mockResolvedValue(KEYSIZES_RAW);
+    resetThrottles(service);
+    await update(service);
+    expect(await service.getMetrics()).toContain('betterdb_keysize_bucket_keys{');
+  });
+
+  it('keeps keysize series through a transient INFO failure', async () => {
+    const { service, client } = buildService();
+    await update(service);
+    expect(await service.getMetrics()).toContain('betterdb_keysize_bucket_keys{');
+
+    client.call.mockRejectedValue(new Error('Command timed out'));
+    resetThrottles(service);
+    await update(service);
+    // A transport error on a healthy server must not blank the histogram or
+    // arm the unsupported backoff.
+    expect(await service.getMetrics()).toContain('betterdb_keysize_bucket_keys{');
+    expect(service['perConnectionState'].get(CONN)!.keysizesUnavailableUntil).toBe(0);
+  });
+
+  it('removes analytics series when storage keeps failing past the staleness bound', async () => {
+    const { service, storage } = buildService();
+    await update(service);
+    expect(await service.getMetrics()).toContain('betterdb_key_pattern_memory_bytes{');
+
+    storage.getKeyPatternSnapshots.mockRejectedValue(new Error('db down'));
+    storage.getHotKeys.mockRejectedValue(new Error('db down'));
+    const state = service['perConnectionState'].get(CONN)!;
+    state.lastKeyAnalyticsSuccessAt = Date.now() - 901_000;
+    resetThrottles(service);
+    await update(service);
+
+    const text = await service.getMetrics();
+    expect(text).not.toContain('betterdb_key_pattern_memory_bytes{');
+    expect(text).not.toContain('betterdb_key_memory_bytes{');
+  });
+
+  it('parses KEY_ANALYTICS_INTERVAL_MS like the collector (empty/invalid falls back)', () => {
+    expect(buildService({ KEY_ANALYTICS_INTERVAL_MS: '' }).service['keyAnalyticsStalenessMs']).toBe(
+      900_000,
+    );
+    expect(
+      buildService({ KEY_ANALYTICS_INTERVAL_MS: 'abc' }).service['keyAnalyticsStalenessMs'],
+    ).toBe(900_000);
+    expect(
+      buildService({ KEY_ANALYTICS_INTERVAL_MS: '60000' }).service['keyAnalyticsStalenessMs'],
+    ).toBe(180_000);
   });
 
   it('removes pattern and key series when analytics data disappears', async () => {
@@ -303,9 +368,10 @@ describe('PrometheusService key size metrics', () => {
       }),
     );
     const { startTime } = storage.getHotKeys.mock.calls[0][0];
-    // 3x the default 5-minute analytics interval
-    expect(Date.now() - startTime).toBeGreaterThanOrEqual(899_000);
-    expect(Date.now() - startTime).toBeLessThanOrEqual(901_000);
+    // 3x the default 5-minute analytics interval; generous upper tolerance so
+    // a slow CI runner between the stamp and this assertion cannot flake it.
+    expect(Date.now() - startTime).toBeGreaterThanOrEqual(900_000);
+    expect(Date.now() - startTime).toBeLessThanOrEqual(960_000);
   });
 });
 

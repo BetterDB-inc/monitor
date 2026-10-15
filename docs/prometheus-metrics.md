@@ -185,6 +185,7 @@ Patterns are fingerprinted before they become label values. Each key segment is 
 - **Full slot coverage.** With `METRICS_SLOT_STATS_TOP_N=16384`, one cluster connection exports 65,536 slot series. At the default of 100 it exports at most 400.
 - **Pattern churn.** Fingerprinting does not catch short, non-hex dynamic segments such as `session:ab12x` or `user:alice`. Each distinct key then becomes its own pattern. A workload like this can add up to 128 new slowlog patterns per poll. On servers with COMMANDLOG (Valkey 8.1+) it can also add up to 128 new large-request and 128 new large-reply patterns per poll. Because the pattern families are zeroed rather than removed, over the process lifetime they are bounded only by the number of distinct patterns each source has produced since BetterDB started. The client-name and ACL-username families behave the same way when names are generated per session.
 - **Many databases.** A standalone server that uses all 16 databases adds 48 per-db series.
+- **Keysize buckets.** `betterdb_keysize_bucket_keys` has no top-N knob: it is bounded only by the server (populated databases × data types × log2 buckets, up to D × T × B ≈ 6,144 series for a 16-database Redis 8 connection using every type and bucket; a single-db instance typically emits a few dozen). The only mitigations are `METRICS_EXPORT_PROFILE=vitals` or `metric_relabel_configs`.
 
 If a worst case applies, use one of these:
 
@@ -225,6 +226,8 @@ This example uses `full` with 5 standalone primaries and 2 cluster primaries, as
 The total with `full` is 55 + 5 × 263 + 2 × 667 = **2,704 series**. Add up to 181 more while anomaly detection runs.
 
 The same fleet under `vitals` exports 55 + 5 × 33 + 2 × 39 = **298 series**, and that number does not change with key count, database count, pattern churn or cluster size.
+
+On Pro deployments with key analytics running, add the [Key Size Metrics](#key-size-metrics) families per owning connection: up to 4 × `METRICS_KEY_PATTERNS_TOP_N` + 2 × `METRICS_KEY_DETAILS_TOP_N` series (420 at the defaults — more than the example's entire standalone per-connection budget), plus the keysize bucket series on Redis 8.0+ (see Worst cases above). Both key-analytics families are dropped under `vitals`.
 
 The OTLP export in `semconv` mode (see [OpenTelemetry export modes](opentelemetry.md#export-modes)) carries the same series under different names, split into one resource per node, minus `betterdb_keyspace_keys`, `betterdb_keyspace_keys_expiring` and `betterdb_poll_duration_seconds`. The counts above are therefore upper bounds for it too.
 
@@ -425,7 +428,7 @@ Per-database key statistics.
 Key memory per pattern, per tracked key, and the whole-keyspace size distribution. Two data sources with different cadences:
 
 - The **pattern and per-key gauges** come from the latest key analytics run (a Pro feature; the collector runs every `KEY_ANALYTICS_INTERVAL_MS`, default 5 minutes). Values hold between runs. When no run newer than 3× the collector interval exists for a connection — feature disabled, managed service, non-owning topology member, collector stopped — the series are removed, never zero-filled. The exporter re-reads the stored run every 30 seconds.
-- **`betterdb_keysize_bucket_keys`** reads `INFO keysizes` directly (server-maintained; Redis 8.0+ — no Valkey version emits the section yet), refreshed every 30 seconds. Servers without the section export no series. Cluster members are monitored as their own connections, so these series are per node; the pattern and per-key gauges live under the seed connection's label.
+- **`betterdb_keysize_bucket_keys`** reads `INFO keysizes` directly (server-maintained; Redis 8.0+ — no Valkey version emits the section yet), refreshed every 30 seconds. Servers without the section export no series. Cluster members are monitored as their own connections, so these series are per node; the pattern and per-key gauges live under the label of the connection that owns key analytics — a standalone connection, a cluster seed, or the **current sentinel primary** (after a failover the series move to the new primary's `connection` label).
 
 | Metric                                  | Type  | Labels                          | Description                                                                        | Example   |
 | --------------------------------------- | ----- | ------------------------------- | ---------------------------------------------------------------------------------- | --------- |

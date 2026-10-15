@@ -3050,7 +3050,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       signalType: row.signal_type,
       freqScore: row.freq_score ?? undefined,
       idleSeconds: row.idle_seconds ?? undefined,
-      memoryBytes: row.memory_bytes ?? undefined,
+      // BIGINT: the pg driver returns int8 as a string, which violates the
+      // HotKeyEntry number contract and made relational comparisons on
+      // memoryBytes lexicographic downstream.
+      memoryBytes: row.memory_bytes != null ? parseInt(row.memory_bytes) : undefined,
       cardinality: row.cardinality != null ? parseInt(row.cardinality) : undefined,
       keyType: row.key_type ?? undefined,
       ttl: row.ttl ?? undefined,

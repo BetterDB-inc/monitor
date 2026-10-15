@@ -636,15 +636,27 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         // Check if column exists
         const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
         if (!columns.some((c) => c.name === 'connection_id')) {
-          // Add connection_id column with default value
+          // Add connection_id column with default value. The matching index is
+          // NOT created here: createSchema runs right after this migration and
+          // creates the canonical per-table index (the names here used to
+          // differ from the schema's, leaving legacy databases with duplicate
+          // indexes on the same column).
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN connection_id TEXT DEFAULT 'env-default'`);
-          // Create index
-          this.db.exec(
-            `CREATE INDEX IF NOT EXISTS idx_${table}_connection_id ON ${table}(connection_id)`,
-          );
         }
       } catch (error) {
-        // Table might not exist yet - that's fine, createSchema will handle it
+        // This migration runs BEFORE createSchema, so a missing table is the
+        // expected fresh-database case — but only that. Swallowing a real
+        // ALTER failure (busy/locked database, disk full) here would let
+        // createSchema's index DDL rethrow the misleading
+        // `no such column: connection_id` with the root cause erased.
+        // Same pattern as addMemoryProposalIntegrityColumns.
+        const message = error instanceof Error ? error.message : String(error);
+        if (/no such table/i.test(message)) {
+          continue;
+        }
+        throw new Error(`connection_id migration failed for ${table}: ${message}`, {
+          cause: error,
+        });
       }
     }
   }

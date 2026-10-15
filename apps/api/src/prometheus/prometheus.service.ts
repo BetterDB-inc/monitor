@@ -17,6 +17,7 @@ import {
   hasOwnKeyAnalytics,
   parseKeySizeDistribution,
   KeySizeDistribution,
+  KEY_DETAILS_TOP_N,
 } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
@@ -56,6 +57,7 @@ import {
   resolveStalenessMs,
   selectSeriesToRemove,
   SeriesSnapshot,
+  STALENESS_POLL_MULTIPLIER,
 } from './staleness';
 import {
   ExportProfile,
@@ -100,6 +102,7 @@ interface ConnectionMetricState {
   currentKeyDetailLabels: Set<string>;
   currentKeysizeBucketLabels: Set<string>;
   lastKeyAnalyticsRefreshAt: number;
+  lastKeyAnalyticsSuccessAt: number;
   lastKeyAnalyticsErrorMessage: string | null;
   lastKeysizesRefreshAt: number;
   keysizesUnavailableUntil: number;
@@ -379,8 +382,21 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.configService.get('METRICS_KEY_DETAILS_TOP_N'),
       this.exportProfile,
     );
+    // Parse exactly like the collector (parseInt with a falsy-'' fallback):
+    // Number() would turn a set-but-empty env var into 0 (staleness window of
+    // zero — every series removed while the collector keeps writing) and a
+    // non-numeric value into NaN (falsy startTime — adapters drop the time
+    // filter and stale runs export as current). Guard non-positive/NaN to the
+    // collector's default rather than trusting the raw value.
+    const keyAnalyticsIntervalMs = parseInt(
+      String(this.configService.get('KEY_ANALYTICS_INTERVAL_MS') ?? '') || '300000',
+      10,
+    );
     this.keyAnalyticsStalenessMs =
-      3 * Number(this.configService.get<number>('KEY_ANALYTICS_INTERVAL_MS', 300_000));
+      STALENESS_POLL_MULTIPLIER *
+      (Number.isFinite(keyAnalyticsIntervalMs) && keyAnalyticsIntervalMs > 0
+        ? keyAnalyticsIntervalMs
+        : 300_000);
     this.registry = new Registry();
     this.initializeMetrics();
     this.exportRegistry = this.buildExportRegistry();
@@ -494,6 +510,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         currentKeyDetailLabels: new Set(),
         currentKeysizeBucketLabels: new Set(),
         lastKeyAnalyticsRefreshAt: 0,
+        lastKeyAnalyticsSuccessAt: 0,
         lastKeyAnalyticsErrorMessage: null,
         lastKeysizesRefreshAt: 0,
         keysizesUnavailableUntil: 0,
@@ -2417,34 +2434,67 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       const startTime = now - this.keyAnalyticsStalenessMs;
 
       if (this.keyPatternsTopN > 0) {
-        const snapshots = await this.storage.getKeyPatternSnapshots({
+        // Two-step read: resolve the latest run's timestamp first (rows come
+        // newest-first), then fetch only that run's rows. A single windowed
+        // fetch would pull every run in the staleness window — thousands of
+        // wide rows per refresh on pattern-heavy keyspaces — and discard all
+        // but the newest batch.
+        const newest = await this.storage.getKeyPatternSnapshots({
           connectionId,
           startTime,
-          limit: PrometheusService.KEY_ANALYTICS_FETCH_CAP,
+          limit: 1,
         });
         if (this.isSuperseded(connectionId, epoch)) {
+          // Nothing was written this pass; hand the 30s refresh slot back so
+          // the superseding pass (or the next tick) refreshes instead of
+          // skipping on a throttle stamp that bought nothing.
+          state.lastKeyAnalyticsRefreshAt = 0;
           return;
         }
-        // Rows come newest-first; export only the latest run's batch, ranked
-        // by total memory.
-        const latestTimestamp = snapshots[0]?.timestamp;
+        const latestTimestamp = newest[0]?.timestamp;
+        const snapshots =
+          latestTimestamp === undefined
+            ? []
+            : await this.storage.getKeyPatternSnapshots({
+                connectionId,
+                startTime: latestTimestamp,
+                endTime: latestTimestamp,
+                limit: PrometheusService.KEY_ANALYTICS_FETCH_CAP,
+              });
+        if (this.isSuperseded(connectionId, epoch)) {
+          // Nothing was written this pass; hand the 30s refresh slot back so
+          // the superseding pass (or the next tick) refreshes instead of
+          // skipping on a throttle stamp that bought nothing.
+          state.lastKeyAnalyticsRefreshAt = 0;
+          return;
+        }
         const top = snapshots
           .filter((snapshot) => snapshot.timestamp === latestTimestamp)
-          .sort((a, b) => b.totalMemoryBytes - a.totalMemoryBytes)
+          .sort(
+            (a, b) =>
+              (PrometheusService.toFiniteNumber(b.totalMemoryBytes) ?? 0) -
+              (PrometheusService.toFiniteNumber(a.totalMemoryBytes) ?? 0),
+          )
           .slice(0, this.keyPatternsTopN);
         const newPatternLabels = new Set<string>();
         for (const snapshot of top) {
           newPatternLabels.add(snapshot.pattern);
+          // Coerced like the per-key fields below: Gauge.set() throws on
+          // non-numbers, and one bad row mid-loop would otherwise leave the
+          // already-written series untracked (the Set is assigned after the
+          // loop) and unremovable.
           this.keyPatternMemoryBytes
             .labels(connLabel, snapshot.pattern)
-            .set(snapshot.totalMemoryBytes);
+            .set(PrometheusService.toFiniteNumber(snapshot.totalMemoryBytes) ?? 0);
           this.keyPatternAvgMemoryBytes
             .labels(connLabel, snapshot.pattern)
-            .set(snapshot.avgMemoryBytes);
+            .set(PrometheusService.toFiniteNumber(snapshot.avgMemoryBytes) ?? 0);
           this.keyPatternMaxMemoryBytes
             .labels(connLabel, snapshot.pattern)
-            .set(snapshot.maxMemoryBytes);
-          this.keyPatternKeys.labels(connLabel, snapshot.pattern).set(snapshot.keyCount);
+            .set(PrometheusService.toFiniteNumber(snapshot.maxMemoryBytes) ?? 0);
+          this.keyPatternKeys
+            .labels(connLabel, snapshot.pattern)
+            .set(PrometheusService.toFiniteNumber(snapshot.keyCount) ?? 0);
         }
         for (const stalePattern of state.currentKeyPatternLabels) {
           if (!newPatternLabels.has(stalePattern)) {
@@ -2457,14 +2507,21 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       if (this.keyDetailsTopN > 0) {
         // 'cardinality' entries are the collector's persisted largest-key set;
         // re-rank by memory the way the largest-keys surface does.
+        // latest:true pins a single capture, and the collector persists at
+        // most KEY_DETAILS_TOP_N cardinality rows per capture — a larger
+        // limit could never bind.
         const entries = await this.storage.getHotKeys({
           connectionId,
           latest: true,
           startTime,
           signalTypes: ['cardinality'],
-          limit: PrometheusService.KEY_ANALYTICS_FETCH_CAP,
+          limit: KEY_DETAILS_TOP_N,
         });
         if (this.isSuperseded(connectionId, epoch)) {
+          // Nothing was written this pass; hand the 30s refresh slot back so
+          // the superseding pass (or the next tick) refreshes instead of
+          // skipping on a throttle stamp that bought nothing.
+          state.lastKeyAnalyticsRefreshAt = 0;
           return;
         }
         // The Postgres adapter surfaces BIGINT columns as strings, so coerce
@@ -2503,6 +2560,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         state.currentKeyDetailLabels = newKeyLabels;
       }
       state.lastKeyAnalyticsErrorMessage = null;
+      state.lastKeyAnalyticsSuccessAt = now;
     } catch (error) {
       // A storage adapter without key-analytics support fails identically on
       // every refresh; log each distinct failure once, not every 30 seconds.
@@ -2510,6 +2568,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       if (state.lastKeyAnalyticsErrorMessage !== message) {
         state.lastKeyAnalyticsErrorMessage = message;
         this.logger.error(`Failed to update key analytics metrics for ${connLabel}`, error);
+      }
+      // The staleness bound is normally enforced through the query window,
+      // which only runs on success. Without this, a dead storage backend
+      // would freeze the last exported values and serve them as current
+      // indefinitely — exactly what the contract above rules out.
+      if (now - state.lastKeyAnalyticsSuccessAt > this.keyAnalyticsStalenessMs) {
+        this.removeKeyAnalyticsSeries(connLabel, state);
       }
     }
   }
@@ -2538,20 +2603,40 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
     state.lastKeysizesRefreshAt = now;
 
-    let distribution: KeySizeDistribution;
+    let raw: string;
     try {
-      const raw = (await client.call('INFO', ['keysizes'])) as string;
-      distribution = parseKeySizeDistribution(raw ?? '');
-    } catch {
-      // Servers without the section may reject the argument outright rather
-      // than returning an empty string; treat any failure as unavailable.
-      distribution = { databases: {}, available: false };
+      raw = (await client.call('INFO', ['keysizes'])) as string;
+    } catch (error) {
+      if (this.isSuperseded(connectionId, epoch)) {
+        return;
+      }
+      // Only a definitive server reply (an ERR error string — servers without
+      // the section reject the argument outright) means "unsupported" and
+      // earns the long backoff. A transport failure (timeout, disconnect,
+      // LOADING) on a healthy server must not blank the histogram for 10
+      // minutes: keep the current series and retry on the next refresh.
+      const message = error instanceof Error ? error.message : String(error);
+      if (/^ERR\b/i.test(message.trim())) {
+        state.keysizesUnavailableUntil = now + PrometheusService.KEYSIZES_UNAVAILABLE_RECHECK_MS;
+        this.removeKeysizeBucketSeries(connLabel, state);
+      }
+      return;
     }
     if (this.isSuperseded(connectionId, epoch)) {
       return;
     }
+    const distribution = parseKeySizeDistribution(raw ?? '');
     if (!distribution.available) {
-      state.keysizesUnavailableUntil = now + PrometheusService.KEYSIZES_UNAVAILABLE_RECHECK_MS;
+      // A supported server with an EMPTY keyspace replies with the section
+      // header and no distribution lines — indistinguishable from
+      // "unsupported" at the parse level. Only back off when even the header
+      // is missing; an empty keyspace just drops the series and re-probes on
+      // the normal cadence so data appearing after a FLUSHALL shows up within
+      // one refresh, not ten minutes.
+      const sectionPresent = typeof raw === 'string' && /#\s*Keysizes/i.test(raw);
+      if (!sectionPresent) {
+        state.keysizesUnavailableUntil = now + PrometheusService.KEYSIZES_UNAVAILABLE_RECHECK_MS;
+      }
       this.removeKeysizeBucketSeries(connLabel, state);
       return;
     }
