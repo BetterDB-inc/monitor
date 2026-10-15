@@ -354,9 +354,13 @@ as synthesized Responses events and the underlying model is not called.
 
 Streamed requests share cache entries with their non-streamed twins — a
 `Runner.run_streamed(...)` call hits what a `Runner.run(...)` call stored, and
-vice-versa. Tool-call streams are not stored (mirrors the
-`@betterdb/agent-cache` `wrapStream` convention); non-streaming `get_response()`
-continues to cache tool calls.
+vice-versa.
+
+Only fully completed responses are stored — truncated (`response.incomplete`),
+failed, cancelled, or early-stopped streams are not, and neither are streams
+containing tool or agent steps (mirrors the `@betterdb/agent-cache`
+`wrapStream` convention). Non-streaming `get_response()` continues to cache
+tool calls, and a streamed request can hit those entries.
 
 ### Anthropic
 

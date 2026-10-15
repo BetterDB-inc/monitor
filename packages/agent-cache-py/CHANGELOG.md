@@ -1,4 +1,4 @@
-## [0.12.0] - 2026-07-13
+## [Unreleased]
 
 ### Added
 
@@ -17,13 +17,16 @@
 
 ### Behavior
 
-- **Tool-call streams are not stored** — mirrors the
-  `@betterdb/agent-cache` v0.11.0 `wrapStream` convention of not caching
-  half-executed agent steps. Non-streaming `get_response()` continues to cache
-  tool calls; the streaming/non-streaming asymmetry is intentional for this
-  release and can be revisited in a follow-up.
-- Upstream stream errors propagate unchanged; partial streams are not stored.
-- Store happens after stream completion; store failures log a warning and
+- Only fully completed streams are stored: `response.incomplete` /
+  `response.failed`, upstream errors, cancelled streams, and streams the
+  consumer stops early are never cached.
+- Streams whose output contains any tool or agent step (`function_call`,
+  `file_search_call`, `web_search_call`, `computer_call`, `mcp_call`, …) are
+  not stored — mirrors the `@betterdb/agent-cache` `wrapStream` convention of
+  not caching half-executed agent steps. Non-streaming `get_response()`
+  continues to cache tool calls (#149); a stream request can still *hit* such
+  an entry and replays it intact.
+- Store runs after the stream is fully delivered; failures log a warning and
   never surface to the caller.
 
 ## [0.11.0] - 2026-07-10
