@@ -32,3 +32,5 @@ export * from './types/otel-traces';
 export * from './types/cve';
 export * from './utils/cve-modules';
 export * from './types/workspace';
+export * from './types/cache-simulator.types';
+export * from './utils/cache-simulator';
