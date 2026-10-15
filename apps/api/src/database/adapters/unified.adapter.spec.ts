@@ -434,4 +434,34 @@ describe('UnifiedDatabaseAdapter — configured dbIndex', () => {
     const client = adapter.getClient() as unknown as { options: { db?: number } };
     expect(client.options.db).toBe(0);
   });
+
+  it('surfaces a SELECT failure on an invalid dbIndex and disconnects the leaked client', async () => {
+    const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+    const client = {
+      options: { host: 'localhost', port: 6379 },
+      connect: jest.fn().mockResolvedValue(undefined),
+      select: jest.fn().mockRejectedValue(new Error('ERR DB index is out of range')),
+      disconnect: jest.fn(),
+    };
+    (adapter as unknown as { _client: unknown })._client = client;
+    (adapter as unknown as { config: unknown }).config = { dbIndex: 5 };
+    (adapter as unknown as { usesTunnel: boolean }).usesTunnel = false;
+    (adapter as unknown as { tunnelActive: boolean }).tunnelActive = false;
+    (adapter as unknown as { logger: unknown }).logger = {
+      debug: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      log: jest.fn(),
+    };
+
+    await expect(
+      (adapter as unknown as { doConnect(): Promise<void> }).doConnect(),
+    ).rejects.toThrow('ERR DB index is out of range');
+
+    // The socket connected and authenticated before SELECT failed; without an
+    // explicit disconnect here it would stay open, leaking one live session
+    // per failed attempt (e.g. each failed Test Connection with a bad dbIndex).
+    expect(client.disconnect).toHaveBeenCalled();
+    expect((adapter as unknown as { _client: unknown })._client).toBeNull();
+  });
 });

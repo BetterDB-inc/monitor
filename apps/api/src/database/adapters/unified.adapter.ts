@@ -312,6 +312,16 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     } catch (error) {
       this.connected = false;
       await this.teardownTunnel();
+      // A later setup step (the dbIndex SELECT, detectCapabilities) can fail
+      // after the socket already connected and authenticated. teardownTunnel
+      // only discards the client for a tunneled connection, so a direct
+      // connection's client would otherwise stay open — leaking a live
+      // session per failed attempt (e.g. each failed Test Connection call
+      // with a bad dbIndex builds its own throwaway adapter).
+      if (this._client) {
+        this._client.disconnect();
+        this._client = null;
+      }
       this.logger.error(`Connection failed: ${error instanceof Error ? error.message : error}`);
       throw error;
     }
