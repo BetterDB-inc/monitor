@@ -1,6 +1,8 @@
 """Tests for the OpenAI Agents SDK adapter."""
 from __future__ import annotations
 
+import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -310,26 +312,6 @@ async def test_cached_model_propagates_errors():
 
 
 @pytest.mark.asyncio
-async def test_stream_response_delegates_directly():
-    """stream_response is not cached — it must delegate without interception."""
-    base = _FakeModel(_make_text_response("ok"))
-    wrapped = CachedModel(base, _make_cache())
-    with pytest.raises(NotImplementedError, match="stream not mocked"):
-        wrapped.stream_response(
-            None,
-            "hello",
-            None,
-            [],
-            None,
-            [],
-            None,
-            previous_response_id=None,
-            conversation_id=None,
-            prompt=None,
-        )
-
-
-@pytest.mark.asyncio
 async def test_cached_provider_wraps_models():
     cache = _make_cache()
     base_model = _FakeModel(_make_text_response("provided"))
@@ -339,3 +321,452 @@ async def test_cached_provider_wraps_models():
     out = await wrapped.get_response(None, "test", None, **_DEFAULT_KWARGS)
     assert base_model.calls == 1
     assert out is base_model.response
+
+
+# ---------------------------------------------------------------------------
+# Streaming
+# ---------------------------------------------------------------------------
+
+
+def _text_delta_event(text: str) -> SimpleNamespace:
+    """Fake ``response.output_text.delta`` event."""
+    return SimpleNamespace(
+        type="response.output_text.delta",
+        delta=text,
+        output_index=0,
+        content_index=0,
+    )
+
+
+def _completed_event(response: SimpleNamespace) -> SimpleNamespace:
+    """Fake terminal ``response.completed`` event carrying a full Response."""
+    if not hasattr(response, "status"):
+        response.status = "completed"
+    return SimpleNamespace(type="response.completed", response=response)
+
+
+class _StreamingFakeModel:
+    """Minimal streaming mock — scripted event list + optional mid-iteration raise."""
+
+    model = "fake-model"
+
+    def __init__(
+        self,
+        events: list[object],
+        *,
+        raise_after: int | None = None,
+    ) -> None:
+        self.events = events
+        self.raise_after = raise_after
+        self.stream_calls = 0
+        self.get_response_calls = 0
+
+    async def get_response(
+        self,
+        system_instructions,
+        input,
+        model_settings,
+        tools,
+        output_schema,
+        handoffs,
+        tracing,
+        *,
+        previous_response_id=None,
+        **kwargs,
+    ):
+        self.get_response_calls += 1
+        return _make_text_response("nonstream-result")
+
+    async def stream_response(
+        self,
+        system_instructions,
+        input,
+        model_settings,
+        tools,
+        output_schema,
+        handoffs,
+        tracing,
+        *,
+        previous_response_id=None,
+        **kwargs,
+    ):
+        self.stream_calls += 1
+        for i, event in enumerate(self.events):
+            if self.raise_after is not None and i == self.raise_after:
+                raise RuntimeError("upstream stream failed")
+            yield event
+
+    async def close(self):
+        pass
+
+
+async def _drain(agen):
+    return [event async for event in agen]
+
+
+@pytest.mark.asyncio
+async def test_stream_miss_passes_through_and_stores():
+    cache = _make_cache()
+    text_response = _make_text_response("streamed result")
+    events = [
+        _text_delta_event("streamed "),
+        _text_delta_event("result"),
+        _completed_event(text_response),
+    ]
+    base = _StreamingFakeModel(events)
+    wrapped = CachedModel(base, cache)
+
+    received = await _drain(
+        wrapped.stream_response(None, "prompt", None, **_DEFAULT_KWARGS),
+    )
+
+    assert received == events
+    assert base.stream_calls == 1
+
+    params = await prepare_params(None, "prompt", "fake-model")
+    cached = await cache.llm.check(params)
+    assert cached.hit is True
+    assert cached.content_blocks[0]["type"] == "text"
+    assert cached.content_blocks[0]["text"] == "streamed result"
+
+
+@pytest.mark.asyncio
+async def test_stream_hit_replays_without_calling_model():
+    cache = _make_cache()
+    params = await prepare_params(None, "cached prompt", "fake-model")
+    await cache.llm.store_multipart(
+        params,
+        [{"type": "text", "text": "from cache"}],
+    )
+
+    base = _StreamingFakeModel(events=[])
+    wrapped = CachedModel(base, cache)
+
+    received = await _drain(
+        wrapped.stream_response(None, "cached prompt", None, **_DEFAULT_KWARGS),
+    )
+
+    assert base.stream_calls == 0
+    assert received[-1].type == "response.completed"
+    output = received[-1].response.output
+    texts = [
+        getattr(p, "text", None)
+        for item in output
+        for p in (getattr(item, "content", []) or [])
+    ]
+    assert "from cache" in texts
+
+
+@pytest.mark.asyncio
+async def test_stream_hit_after_nonstream_store():
+    """Cache-key parity between stream and non-stream paths."""
+    cache = _make_cache()
+
+    text_base = _FakeModel(_make_text_response("shared answer"))
+    non_stream_wrapped = CachedModel(text_base, cache)
+    await non_stream_wrapped.get_response(
+        "sys", "shared prompt", None, **_DEFAULT_KWARGS,
+    )
+    assert text_base.calls == 1
+
+    stream_base = _StreamingFakeModel(events=[])
+    stream_wrapped = CachedModel(stream_base, cache)
+    received = await _drain(
+        stream_wrapped.stream_response(
+            "sys", "shared prompt", None, **_DEFAULT_KWARGS,
+        ),
+    )
+    assert stream_base.stream_calls == 0
+    assert received[-1].type == "response.completed"
+
+
+@pytest.mark.asyncio
+async def test_stream_tool_calls_are_not_stored():
+    """Mirrors @betterdb/agent-cache v0.11.0 wrapStream — no half-executed agent steps in cache."""
+    cache = _make_cache()
+    tool_response = _make_tool_response("call_1", "get_weather", '{"city":"Sofia"}')
+    events = [_completed_event(tool_response)]
+    base = _StreamingFakeModel(events)
+    wrapped = CachedModel(base, cache)
+
+    await _drain(
+        wrapped.stream_response(None, "weather?", None, **_DEFAULT_KWARGS),
+    )
+    assert base.stream_calls == 1
+
+    params = await prepare_params(None, "weather?", "fake-model")
+    cached = await cache.llm.check(params)
+    assert cached.hit is False
+
+
+@pytest.mark.asyncio
+async def test_stream_error_does_not_store():
+    cache = _make_cache()
+    text_response = _make_text_response("never finishes")
+    events = [
+        _text_delta_event("partial"),
+        _completed_event(text_response),
+    ]
+    base = _StreamingFakeModel(events, raise_after=1)
+    wrapped = CachedModel(base, cache)
+
+    received: list[object] = []
+    with pytest.raises(RuntimeError, match="upstream stream failed"):
+        async for event in wrapped.stream_response(
+            None, "prompt", None, **_DEFAULT_KWARGS,
+        ):
+            received.append(event)
+
+    assert received == [events[0]]
+    params = await prepare_params(None, "prompt", "fake-model")
+    cached = await cache.llm.check(params)
+    assert cached.hit is False
+
+
+@pytest.mark.asyncio
+async def test_stream_store_failure_is_fail_open():
+    """A Valkey store failure must not surface to the caller mid- or post-stream."""
+    cache = _make_cache()
+
+    async def _boom(*_a, **_k):
+        raise ValkeyCommandError("SET", RuntimeError("valkey down"))
+
+    cache.llm.store_multipart = _boom  # type: ignore[assignment]
+
+    text_response = _make_text_response("delivered fully")
+    events = [
+        _text_delta_event("delivered "),
+        _text_delta_event("fully"),
+        _completed_event(text_response),
+    ]
+    base = _StreamingFakeModel(events)
+    wrapped = CachedModel(base, cache)
+
+    received = await _drain(
+        wrapped.stream_response(None, "prompt", None, **_DEFAULT_KWARGS),
+    )
+    assert received == events
+
+
+class _RecordingStreamModel(_StreamingFakeModel):
+    """Records the args the real Runner passes, then fails (it must not be reached on a hit)."""
+
+    def __init__(self) -> None:
+        super().__init__(events=[])
+        self.recorded: tuple | None = None
+
+    def get_retry_advice(self, request):
+        # Same default as agents.models.interface.Model; the Runner calls it.
+        return None
+
+    async def stream_response(self, system_instructions, input, model_settings, *args, **kwargs):
+        self.stream_calls += 1
+        self.recorded = (system_instructions, input, model_settings)
+        raise RuntimeError("underlying model must not be called on a hit")
+        yield  # pragma: no cover - makes this an async generator
+
+
+@pytest.mark.asyncio
+async def test_stream_hit_drives_real_runner():
+    """The synthesized replay must satisfy the real ``Runner.run_streamed``, not just fakes."""
+    from agents import Agent, RunConfig, Runner
+    from openai.types.responses import ResponseCompletedEvent
+    from openai.types.responses.response_usage import ResponseUsage
+
+    cache = _make_cache()
+
+    def run_config(model):
+        # The recommended integration: CachedModelProvider via RunConfig.
+        provider = CachedModelProvider(_FakeProvider(model), cache)
+        return RunConfig(model_provider=provider, tracing_disabled=True)
+
+    # 1. Capture the exact args the Runner passes to the model for this prompt.
+    probe = _RecordingStreamModel()
+    probe_run = Runner.run_streamed(
+        Agent(name="A", model="fake-model"), "cached prompt", run_config=run_config(probe),
+    )
+    with pytest.raises(RuntimeError, match="must not be called"):
+        async for _ in probe_run.stream_events():
+            pass
+    assert probe.recorded is not None
+    system_instructions, runner_input, model_settings = probe.recorded
+
+    # 2. Store an answer under the params those args produce.
+    params = await prepare_params(system_instructions, runner_input, "fake-model", model_settings)
+    await cache.llm.store_multipart(params, [{"type": "text", "text": "from cache"}])
+
+    # 3. A fresh run is a hit: the Runner accepts the replay and the model is never called.
+    base = _RecordingStreamModel()
+    result = Runner.run_streamed(
+        Agent(name="A", model="fake-model"), "cached prompt", run_config=run_config(base),
+    )
+    raw = [e.data async for e in result.stream_events() if getattr(e, "type", None) == "raw_response_event"]
+
+    assert result.final_output == "from cache"
+    assert base.stream_calls == 0
+    completed = [e for e in raw if isinstance(e, ResponseCompletedEvent)]
+    assert len(completed) == 1
+    # Validated path, not the construct() fallback: only the validated path builds
+    # a Responses ``ResponseUsage`` (the fallback carries an ``agents.Usage``).
+    assert isinstance(completed[0].response.usage, ResponseUsage)
+    assert completed[0].response.model == "fake-model"
+
+
+@pytest.mark.asyncio
+async def test_stream_incomplete_is_not_stored():
+    cache = _make_cache()
+    truncated = _make_text_response("truncated answ")
+    truncated.status = "incomplete"
+    events = [
+        _text_delta_event("truncated answ"),
+        SimpleNamespace(type="response.incomplete", response=truncated),
+    ]
+    base = _StreamingFakeModel(events)
+    wrapped = CachedModel(base, cache)
+
+    received = await _drain(wrapped.stream_response(None, "prompt", None, **_DEFAULT_KWARGS))
+
+    assert received == events
+    params = await prepare_params(None, "prompt", "fake-model")
+    assert (await cache.llm.check(params)).hit is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "item_type", ["file_search_call", "web_search_call", "computer_call", "mcp_call"],
+)
+async def test_stream_non_function_tool_items_are_not_stored(item_type):
+    cache = _make_cache()
+    response = SimpleNamespace(
+        output=[SimpleNamespace(type=item_type, id="item_1")],
+        usage=SimpleNamespace(input_tokens=3, output_tokens=4),
+    )
+    base = _StreamingFakeModel([_completed_event(response)])
+    wrapped = CachedModel(base, cache)
+
+    await _drain(wrapped.stream_response(None, "prompt", None, **_DEFAULT_KWARGS))
+
+    params = await prepare_params(None, "prompt", "fake-model")
+    assert (await cache.llm.check(params)).hit is False
+
+
+@pytest.mark.asyncio
+async def test_stream_consumer_break_does_not_store():
+    cache = _make_cache()
+    events = [_text_delta_event("full answer"), _completed_event(_make_text_response("full answer"))]
+    base = _StreamingFakeModel(events)
+    wrapped = CachedModel(base, cache)
+
+    agen = wrapped.stream_response(None, "prompt", None, **_DEFAULT_KWARGS)
+    async for event in agen:
+        if event.type == "response.completed":
+            break
+    await agen.aclose()
+
+    params = await prepare_params(None, "prompt", "fake-model")
+    assert (await cache.llm.check(params)).hit is False
+
+
+class _SlowStreamingFakeModel(_StreamingFakeModel):
+    """Sleeps between events so the consuming task can be cancelled mid-stream."""
+
+    async def stream_response(self, *args, **kwargs):
+        self.stream_calls += 1
+        for event in self.events:
+            yield event
+            await asyncio.sleep(10)
+
+
+@pytest.mark.asyncio
+async def test_stream_cancelled_does_not_store():
+    cache = _make_cache()
+    events = [_text_delta_event("partial"), _completed_event(_make_text_response("partial"))]
+    base = _SlowStreamingFakeModel(events)
+    wrapped = CachedModel(base, cache)
+    first_event = asyncio.Event()
+
+    async def consume():
+        async for _ in wrapped.stream_response(None, "prompt", None, **_DEFAULT_KWARGS):
+            first_event.set()
+
+    task = asyncio.create_task(consume())
+    await first_event.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    params = await prepare_params(None, "prompt", "fake-model")
+    assert (await cache.llm.check(params)).hit is False
+
+
+@pytest.mark.asyncio
+async def test_stream_hit_replays_nonstream_tool_call():
+    """get_response() may store tool calls (#149); a stream hit must replay them intact."""
+    cache = _make_cache()
+    nonstream = _FakeModel(_make_tool_response("call_9", "get_weather", '{"city":"Berlin"}'))
+    await CachedModel(nonstream, cache).get_response(None, "weather?", None, **_DEFAULT_KWARGS)
+    assert nonstream.calls == 1
+
+    base = _StreamingFakeModel(events=[])
+    received = await _drain(
+        CachedModel(base, cache).stream_response(None, "weather?", None, **_DEFAULT_KWARGS),
+    )
+
+    assert base.stream_calls == 0
+    assert received[-1].type == "response.completed"
+    calls = [i for i in received[-1].response.output if getattr(i, "type", None) == "function_call"]
+    assert len(calls) == 1
+    assert calls[0].call_id == "call_9"
+    assert calls[0].name == "get_weather"
+    assert json.loads(calls[0].arguments) == {"city": "Berlin"}
+
+
+def test_direct_wrapping_is_accepted_by_agent():
+    """The README's ``Agent(model=CachedModel(...))`` example must not raise."""
+    from agents import Agent
+    from agents.models.interface import Model
+
+    cache = _make_cache()
+    base = _StreamingFakeModel(events=[])
+
+    Agent(name="A", model=CachedModel(base, cache))
+    assert isinstance(CachedModel(base, cache), Model)
+
+
+@pytest.mark.asyncio
+async def test_stream_hit_drives_real_runner_direct_wrapping():
+    """Same as the real-Runner hit test, but with ``Agent(model=CachedModel(...))``."""
+    from agents import Agent, RunConfig, Runner
+    from openai.types.responses import ResponseCompletedEvent
+    from openai.types.responses.response_usage import ResponseUsage
+
+    cache = _make_cache()
+    run_config = RunConfig(tracing_disabled=True)
+
+    # 1. Capture the exact args the Runner passes to the model for this prompt.
+    probe = _RecordingStreamModel()
+    probe_run = Runner.run_streamed(
+        Agent(name="A", model=CachedModel(probe, cache)), "cached prompt", run_config=run_config,
+    )
+    with pytest.raises(RuntimeError, match="must not be called"):
+        async for _ in probe_run.stream_events():
+            pass
+    assert probe.recorded is not None
+    system_instructions, runner_input, model_settings = probe.recorded
+
+    # 2. Store an answer under the params those args produce.
+    params = await prepare_params(system_instructions, runner_input, "fake-model", model_settings)
+    await cache.llm.store_multipart(params, [{"type": "text", "text": "from cache"}])
+
+    # 3. A fresh run is a hit: the Runner accepts the replay and the model is never called.
+    base = _RecordingStreamModel()
+    result = Runner.run_streamed(
+        Agent(name="A", model=CachedModel(base, cache)), "cached prompt", run_config=run_config,
+    )
+    raw = [e.data async for e in result.stream_events() if getattr(e, "type", None) == "raw_response_event"]
+
+    assert result.final_output == "from cache"
+    assert base.stream_calls == 0
+    completed = [e for e in raw if isinstance(e, ResponseCompletedEvent)]
+    assert len(completed) == 1
+    assert isinstance(completed[0].response.usage, ResponseUsage)
