@@ -6,6 +6,7 @@ import { useCanMutate } from '../hooks/useCanMutate';
 import { useTelemetry } from '../hooks/useTelemetry';
 import { fetchApi } from '../api/client';
 import { parseConnectionUrl, ParsedConnection } from '../utils/connectionUrl';
+import { openAddConnection } from '../lib/addConnectionIntent';
 
 interface PageEmptyState {
   headline: string;
@@ -228,18 +229,6 @@ function ProviderGuidesInfo() {
   );
 }
 
-interface OpenAddConnectionOptions {
-  prefill?: Partial<ParsedConnection>;
-  tab?: 'direct' | 'agent' | 'valkey';
-  valkeyMaxmemory?: string;
-}
-
-function openAddConnectionDialog(options?: OpenAddConnectionOptions) {
-  window.dispatchEvent(
-    new CustomEvent('betterdb:open-add-connection', options ? { detail: options } : undefined),
-  );
-}
-
 function isLocalhostHost(host: string): boolean {
   const h = host.trim().toLowerCase();
   return h === 'localhost' || h === '::1' || h === '0.0.0.0' || /^127\./.test(h);
@@ -341,7 +330,7 @@ function QuickConnect({ isCloudDomain, onConnected, capture }: QuickConnectProps
           {parsed && (
             <button
               type="button"
-              onClick={() => openAddConnectionDialog({ prefill: parsed })}
+              onClick={() => openAddConnection({ prefill: parsed })}
               className="mt-1 font-medium underline underline-offset-2 hover:no-underline cursor-pointer"
             >
               Review details in the full form →
@@ -519,7 +508,7 @@ function DockerQuickStart({
           A database is configured from your environment. Add it with its credentials using{' '}
           <button
             type="button"
-            onClick={() => openAddConnectionDialog()}
+            onClick={() => openAddConnection()}
             className="font-medium underline underline-offset-2 hover:no-underline cursor-pointer"
           >
             Add connection manually
@@ -561,7 +550,7 @@ function CloudProvisionCard({
         type="button"
         onClick={() => {
           capture('provision_instance_clicked', { source: 'empty_state' });
-          openAddConnectionDialog({ tab: 'valkey', valkeyMaxmemory: '1gb' });
+          openAddConnection({ tab: 'valkey', valkeyMaxmemory: '1gb' });
         }}
         className="w-full h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 active:scale-[0.98] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 cursor-pointer"
       >
@@ -746,7 +735,7 @@ export function NoConnectionsGuard({ children }: NoConnectionsGuardProps): React
 
             <div className="p-5 sm:px-8 flex flex-wrap items-center justify-center gap-x-4 gap-y-2">
               <button
-                onClick={() => openAddConnectionDialog()}
+                onClick={() => openAddConnection()}
                 className="inline-flex items-center gap-2 h-10 px-5 rounded-lg border border-border text-sm font-semibold text-foreground hover:border-primary/50 hover:bg-primary/5 active:scale-[0.98] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 cursor-pointer"
               >
                 <span className="text-[1.05rem] leading-none text-primary">+</span>

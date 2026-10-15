@@ -35,3 +35,42 @@ describe('webhook-payload-formatter', () => {
     expect(discord.embeds[0].url).toBe('https://betterdb.example.com/anomalies');
   });
 });
+
+describe('webhook-payload-formatter: untrusted text', () => {
+  // ACL LOG records the username an unauthenticated client *tried*, so
+  // `AUTH <!channel> x` / `AUTH @everyone x` reaches client.blocked verbatim.
+  const hostile: WebhookPayload = {
+    ...base,
+    event: WebhookEventType.CLIENT_BLOCKED,
+    data: {
+      username: '<!channel>',
+      message:
+        'Client blocked: authentication failure by <!channel> <https://evil.example|Reset your password> @everyone [Reset](https://evil.example)@10.0.0.9:51234 (count: 1)',
+    },
+  };
+
+  it('neutralises Slack mentions and masked links', () => {
+    const body = formatWebhookBody({ payloadFormat: WebhookPayloadFormat.SLACK }, hostile);
+    expect(body).not.toContain('<!channel>');
+    expect(body).not.toContain('<https://evil.example|');
+    expect(body).toContain('&lt;!channel&gt;');
+  });
+
+  it('disables Discord pings and masked links', () => {
+    const discord = JSON.parse(
+      formatWebhookBody({ payloadFormat: WebhookPayloadFormat.DISCORD }, hostile),
+    ) as {
+      content: string;
+      allowed_mentions: { parse: string[] };
+      embeds: Array<{ title: string }>;
+    };
+    expect(discord.allowed_mentions).toEqual({ parse: [] });
+    expect(discord.content).not.toMatch(/(^|[^\\])\[Reset\]\(https/);
+    expect(discord.content).not.toContain('@everyone');
+    expect(discord.embeds[0].title).toBe(discord.content);
+  });
+
+  it('leaves the generic JSON payload untouched', () => {
+    expect(JSON.parse(formatWebhookBody({}, hostile))).toEqual(JSON.parse(JSON.stringify(hostile)));
+  });
+});

@@ -78,6 +78,10 @@ spec:
           env:
             - name: GF_SERVER_ROOT_URL
               value: https://demo-grafana.app.betterdb.com
+            # Land visitors directly on the Instance Vitals dashboard instead of
+            # the empty Grafana home (one of the provisioned dashboard files).
+            - name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH
+              value: /var/lib/grafana/dashboards/betterdb-instance-vitals.json
             # Public read-only access.
             - name: GF_AUTH_ANONYMOUS_ENABLED
               value: "true"
@@ -152,9 +156,9 @@ spec:
         - name: dashboard-provider
           configMap:
             name: grafana-dashboard-provider
-        # Created from the shipped dashboard pack:
-        #   kubectl create configmap grafana-dashboards -n demo-observability \
-        #     --from-file=deploy/observability/dashboards/
+        # Built from the shipped dashboard pack by build-dashboards-configmap.sh
+        # (defaults the `job` variable to the OTLP push path so the landing
+        # dashboard is populated). See that script and the README.
         - name: dashboards
           configMap:
             name: grafana-dashboards

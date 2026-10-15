@@ -169,9 +169,10 @@ resource "aws_wafv2_web_acl" "tenant_alb" {
         aggregate_key_type = "IP"
 
         scope_down_statement {
-          byte_match_statement {
-            search_string         = "demo-grafana.app.betterdb.com"
-            positional_constraint = "EXACTLY"
+          # Optional :port so a Host like demo-grafana.app.betterdb.com:443
+          # can't bypass an exact match (same guard as the metrics rule above).
+          regex_match_statement {
+            regex_string = "^demo-grafana\\.app\\.betterdb\\.com(:[0-9]+)?$"
             field_to_match {
               single_header {
                 name = "host"

@@ -89,11 +89,13 @@ kubectl create secret generic grafana-admin -n demo-observability \
 
 ### 4. Dashboards
 
-The shipped pack is provisioned as-is — no fork of the JSON:
+The shipped pack is provisioned with one demo-only override — the `job`
+template variable defaults to `betterdb-monitor` (the OTLP push path) so
+visitors land on a populated dashboard. The shipped JSON is not edited; the
+override is applied to copies. See the script header for details:
 
 ```bash
-kubectl create configmap grafana-dashboards -n demo-observability \
-  --from-file=../../../../deploy/observability/dashboards/
+./build-dashboards-configmap.sh
 ```
 
 ### 5. Prometheus + Grafana
@@ -185,9 +187,7 @@ kubectl rollout restart deployment/prometheus -n demo-observability
 ### Update dashboards after a pack release
 
 ```bash
-kubectl create configmap grafana-dashboards -n demo-observability \
-  --from-file=../../../../deploy/observability/dashboards/ \
-  --dry-run=client -o yaml | kubectl apply -f -
+./build-dashboards-configmap.sh
 kubectl rollout restart deployment/grafana -n demo-observability
 ```
 
@@ -208,8 +208,8 @@ them on the normal dependency cadence (Grafana CVEs are frequent).
   carries matching demo-only rules: ingress 3001 from this namespace (scrape)
   and egress 9090 to it (OTLP push). The policies in `namespace.yaml` are this
   side of the same pair.
-- OTLP-pushed series land under the job derived from the pushed
-  `service.name` resource attribute; the scraped copy is job `betterdb`. The
-  dashboards' "Scrape job" variable switches between the two paths.
+- OTLP-pushed series land under job `betterdb-monitor` (derived from the pushed
+  `service.name` resource attribute); the scraped copy is job `betterdb-scrape`.
+  The dashboards' "Scrape job" variable switches between the two paths.
 - Rate limiting is NOT active until the WAF ingress annotation from install
   step 6 is applied — which is why publishing the token is step 7.

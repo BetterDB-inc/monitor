@@ -1,0 +1,4 @@
+name: betterdb
+version: "0.1.0"
+description: "BetterDB long-term memory provider — semantic recall on Valkey / valkey-search via the betterdb-agent-memory SDK. Completed turns are embedded and stored in a vector index; the next turn recalls the most relevant memories ranked by a composite similarity/recency/importance score. Tools: betterdb_remember / betterdb_recall / betterdb_forget."
+requires_env: []

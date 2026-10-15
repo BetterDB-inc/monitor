@@ -70,7 +70,7 @@ asyncio.run(main())
 | `use_default_cost_table` | `bool` | `True` | Merge bundled LiteLLM price table |
 | `embedding_cache.enabled` | `bool` | `True` | Cache computed embeddings in Valkey |
 | `embedding_cache.ttl` | `int` | `86400` | Embedding cache TTL in seconds |
-| `telemetry.tracer_name` | `str` | `'betterdb-semantic-cache'` | OTel tracer name |
+| `telemetry.tracer_name` | `str` | `'@betterdb/semantic-cache'` | OTel tracer name |
 | `telemetry.metrics_prefix` | `str` | `'semantic_cache'` | Prometheus metric name prefix |
 | `config_refresh.enabled` | `bool` | `True` | Periodically re-read threshold config from Valkey |
 | `config_refresh.interval_ms` | `int` | `30000` | Refresh interval in milliseconds (min: 1000) |

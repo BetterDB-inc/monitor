@@ -5,6 +5,11 @@ import { useCanMutate } from '../hooks/useCanMutate';
 import { useConnection } from '../hooks/useConnection';
 import { fetchApi } from '../api/client';
 import { parseConnectionUrl, looksLikeConnectionUrl } from '../utils/connectionUrl';
+import {
+  consumePendingAddConnection,
+  OPEN_ADD_CONNECTION_EVENT,
+  type OpenAddConnectionOptions,
+} from '../lib/addConnectionIntent';
 import { agentTokensApi, GeneratedToken, TokenListItem } from '../api/agent-tokens';
 import { databasesApi, Database, DatabaseStatus, DatabaseCredentials } from '../api/databases';
 import { workspaceApi, CloudUser } from '../api/workspace';
@@ -151,21 +156,15 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   }, [showAddDialog]);
 
   useEffect(() => {
-    const handler = (e: Event) => {
+    const applyOptions = (detail?: OpenAddConnectionOptions) => {
       if (locked === true) {
         return;
       }
-      const detail = (
-        e as CustomEvent<
-          | { prefill?: Partial<ConnectionFormData>; tab?: AddTab; valkeyMaxmemory?: string }
-          | undefined
-        >
-      ).detail;
       if (detail?.prefill) {
         setFormData({
           ...defaultFormData,
           ...(isCloudMode ? { host: '' } : {}),
-          ...detail.prefill,
+          ...(detail.prefill as Partial<ConnectionFormData>),
         });
         setTestResult(null);
         setAddTab('direct');
@@ -183,8 +182,19 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       }
       setShowAddDialog(true);
     };
-    window.addEventListener('betterdb:open-add-connection', handler);
-    return () => window.removeEventListener('betterdb:open-add-connection', handler);
+    // Live request while we are already mounted (desktop, or an open sidebar).
+    const handler = (e: Event) => {
+      consumePendingAddConnection();
+      applyOptions((e as CustomEvent<OpenAddConnectionOptions | undefined>).detail);
+    };
+    window.addEventListener(OPEN_ADD_CONNECTION_EVENT, handler);
+    // A request made while we were unmounted (on mobile the sidebar Sheet mounts
+    // us only after it is revealed) waits in the stash — apply it on mount.
+    const stashed = consumePendingAddConnection();
+    if (stashed !== null) {
+      applyOptions(stashed);
+    }
+    return () => window.removeEventListener(OPEN_ADD_CONNECTION_EVENT, handler);
   }, [isCloudMode, showAgentTab, locked]);
   const [showManageDialog, setShowManageDialog] = useState(false);
   const [formData, setFormData] = useState<ConnectionFormData>(emptyFormData);
