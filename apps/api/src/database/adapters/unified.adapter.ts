@@ -297,6 +297,14 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       }
       this.logger.log(`Connecting to ${this.client.options.host}:${this.client.options.port}...`);
       await this.client.connect();
+      // iovalkey silently swallows a failed handshake SELECT (silentEmit), so an
+      // invalid dbIndex (out of range, or SELECT rejected in cluster mode) would
+      // otherwise leave the client connected and quietly running on db0. Select
+      // explicitly so that failure surfaces here as a connection error.
+      const dbIndex = this.config.dbIndex ?? 0;
+      if (dbIndex > 0) {
+        await this.client.select(dbIndex);
+      }
       this.connected = true;
       this.logger.log('Connected successfully');
       await this.detectCapabilities();
@@ -862,15 +870,39 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     // than today's single-db scan.
     for (const db of databases) {
       if (db === ownDb) {
-        results.push(await this.scanDatabase(this.client, db, options));
+        try {
+          results.push(await this.scanDatabase(this.client, db, options));
+        } catch (error) {
+          failures.push(error);
+          this.logger.warn(
+            `Key analytics scan failed on db${db}: ${error instanceof Error ? error.message : error}`,
+          );
+        }
+        continue;
+      }
+      // After a tunnel drop, connectHost/connectPort point at the real (possibly
+      // bastion-only) endpoint; a scratch client built now would dial it directly
+      // and bypass the tunnel. Treat the database as failed instead, mirroring
+      // getCliClient's guard.
+      if (this.usesTunnel && !this.tunnelActive) {
+        failures.push(new Error('SSH tunnel is not established'));
+        this.logger.warn(`Key analytics scan skipped on db${db}: SSH tunnel is not established`);
         continue;
       }
       const scratch = this.createValkeyClient(
         `${this.config.connectionName ?? 'BetterDB-Monitor'}-keyscan-db${db}`,
         db,
       );
+      scratch.on('error', (err) => {
+        this.logger.debug(`Scratch client error on db${db}: ${err.message}`);
+      });
       try {
         await scratch.connect();
+        // iovalkey silently swallows a failed handshake SELECT (silentEmit), so
+        // a client that cannot SELECT this db (e.g. a restricted ACL) would
+        // otherwise keep scanning db0 while results are tagged with `db`. Select
+        // explicitly so that failure surfaces here as a caught per-db failure.
+        await scratch.select(db);
         results.push(await this.scanDatabase(scratch, db, options));
       } catch (error) {
         failures.push(error);
