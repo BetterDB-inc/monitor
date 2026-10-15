@@ -51,6 +51,21 @@ export class WorkspaceController {
     }
   }
 
+  /**
+   * The workspace tenant an id-addressed mutation must be scoped to. Fails
+   * closed on an empty tenant: the entitlement server's tenant guard is
+   * truthiness-based, so sending `?tenantId=` would make it skip the check
+   * and run the mutation unscoped (GHSA-2rwf-9ffp-8pf2). A pod with neither
+   * TENANT_ID nor a session tenant has no business mutating by id.
+   */
+  private requireTenantId(cloudUser: any): string {
+    const tenantId = this.tenantId || cloudUser.tenantId;
+    if (!tenantId) {
+      throw new ForbiddenException('No workspace tenant for this request');
+    }
+    return tenantId;
+  }
+
   @Get('me')
   getMe(@Req() req: FastifyRequest) {
     const cloudUser = this.getCloudUser(req);
@@ -125,7 +140,10 @@ export class WorkspaceController {
   ) {
     const cloudUser = this.getCloudUser(req);
     this.requireAdminOrOwner(cloudUser);
-    return this.entitlementClient.revokeInvitation(id);
+    // Scope to the caller's workspace so an owner can't revoke another
+    // tenant's invitation by id (same pattern as the database handlers).
+    const tenantId = this.requireTenantId(cloudUser);
+    return this.entitlementClient.revokeInvitation(id, tenantId);
   }
 
   @Delete('members/:userId')
@@ -140,7 +158,10 @@ export class WorkspaceController {
       throw new BadRequestException('Cannot remove yourself');
     }
 
-    return this.entitlementClient.deleteUser(userId);
+    // Scope to the caller's workspace so an owner can't delete another
+    // tenant's user by id (same pattern as the database handlers).
+    const tenantId = this.requireTenantId(cloudUser);
+    return this.entitlementClient.deleteUser(userId, tenantId);
   }
 
   @Get('databases')
