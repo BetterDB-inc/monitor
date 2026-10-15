@@ -12,31 +12,38 @@ import {
 import { format } from 'date-fns';
 import { formatTime } from '../metric-forecasting/formatters';
 
-const MULTI_DAY_MS = 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DATE_ONLY_MS = 3 * DAY_MS;
 
-export function isMultiDaySpan(points: { timestamp: number }[]): boolean {
-  if (points.length < 2) return false;
+export type ReadinessSpan = 'time' | 'dateTime' | 'date';
+
+export function readinessSpan(points: { timestamp: number }[]): ReadinessSpan {
+  if (points.length < 2) return 'time';
   const first = points[0].timestamp;
   const last = points[points.length - 1].timestamp;
-  return (
-    last - first > MULTI_DAY_MS || new Date(first).toDateString() !== new Date(last).toDateString()
-  );
+  if (last - first > DATE_ONLY_MS) return 'date';
+  if (last - first > DAY_MS || new Date(first).toDateString() !== new Date(last).toDateString()) {
+    return 'dateTime';
+  }
+  return 'time';
 }
 
-export function formatReadinessAxisLabel(timestamp: number, multiDay: boolean): string {
-  return multiDay ? format(timestamp, 'MMM d') : formatTime(timestamp);
+export function formatReadinessAxisLabel(timestamp: number, span: ReadinessSpan): string {
+  if (span === 'date') return format(timestamp, 'MMM d');
+  if (span === 'dateTime') return format(timestamp, 'MMM d HH:mm');
+  return formatTime(timestamp);
 }
 
-export function formatReadinessTooltipLabel(timestamp: number, multiDay: boolean): string {
-  return multiDay ? format(timestamp, 'MMM d, HH:mm') : formatTime(timestamp);
+export function formatReadinessTooltipLabel(timestamp: number, span: ReadinessSpan): string {
+  return span === 'time' ? formatTime(timestamp) : format(timestamp, 'MMM d, HH:mm');
 }
 
 export function ReadinessHistoryChart({ points }: { points: ScalingReadinessHistoryPoint[] }) {
   if (points.length === 0) {
     return <p className="text-sm text-muted-foreground">No score history in this range yet.</p>;
   }
-  const multiDay = isMultiDaySpan(points);
-  const data = points.map((p) => ({ ...p, label: formatReadinessTooltipLabel(p.timestamp, multiDay) }));
+  const span = readinessSpan(points);
+  const data = points.map((p) => ({ ...p, label: formatReadinessTooltipLabel(p.timestamp, span) }));
   return (
     <ResponsiveContainer width="100%" height={260}>
       <AreaChart data={data}>
@@ -46,7 +53,7 @@ export function ReadinessHistoryChart({ points }: { points: ScalingReadinessHist
           type="number"
           scale="time"
           domain={['dataMin', 'dataMax']}
-          tickFormatter={(value: number) => formatReadinessAxisLabel(value, multiDay)}
+          tickFormatter={(value: number) => formatReadinessAxisLabel(value, span)}
           minTickGap={40}
         />
         <YAxis domain={[0, 100]} />
