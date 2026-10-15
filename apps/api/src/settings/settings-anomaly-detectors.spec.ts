@@ -100,8 +100,8 @@ describe('Settings anomaly detector thresholds', () => {
 
       const result = await controller.getAnomalyDetectors();
 
-      expect(result.overrides.connections).toEqual({ warningZScore: 2.5 });
-      expect('warningAbsolute' in (result.overrides.connections ?? {})).toBe(false);
+      expect(result.overrides.connections).toEqual({ warningZScore: 2.5, warningAbsolute: 0 });
+      expect(result.overrides.connections?.warningAbsolute).toBe(0);
       expect(JSON.stringify(result)).not.toContain(':null');
     });
   });
@@ -178,6 +178,12 @@ describe('Settings anomaly detector thresholds', () => {
 
       expect(result).toEqual({ message: 'Detector config reset to defaults' });
       expect(settingsService.resetDetectorConfig).toHaveBeenCalledTimes(1);
+    });
+
+    it('counts a reset as a detector config update', async () => {
+      await controller.resetAnomalyDetectors();
+
+      expect(prometheusService.incrementDetectorConfigUpdates).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -338,7 +344,7 @@ describe('Settings anomaly detector thresholds', () => {
       const { svc } = makeService({});
       const result = await svc.updateDetectorConfig({ acl_denied: { criticalAbsolute: 0 } });
       expect(result.acl_denied?.criticalAbsolute).toBe(Number.POSITIVE_INFINITY);
-      expect(sanitizeStoredOverride(result.acl_denied!)).toEqual({});
+      expect(sanitizeStoredOverride(result.acl_denied!)).toEqual({ criticalAbsolute: 0 });
       expect(resolveDetectorConfig(MetricType.acl_denied, result).criticalAbsolute).toBe(
         Number.POSITIVE_INFINITY,
       );
@@ -479,7 +485,7 @@ describe('Settings anomaly detector thresholds', () => {
 
       const response = await realController.getAnomalyDetectors();
       expect(response.resolved.acl_denied).not.toHaveProperty('criticalAbsolute');
-      expect(response.overrides.acl_denied).not.toHaveProperty('criticalAbsolute');
+      expect(response.overrides.acl_denied?.criticalAbsolute).toBe(0);
       expect(JSON.stringify(response)).not.toContain('null');
 
       // A live detector built from the listener config must not fire CRITICAL
@@ -503,6 +509,22 @@ describe('Settings anomaly detector thresholds', () => {
       const result = await svc.updateDetectorConfig({ acl_denied: { warningAbsolute: 100 } });
       expect(result.acl_denied?.warningAbsolute).toBe(100);
       expect(result.acl_denied?.criticalAbsolute).toBe(Number.POSITIVE_INFINITY);
+    });
+
+    it('a disabled override round-trips through GET → PATCH unchanged', async () => {
+      await realController.patchAnomalyDetectors({ acl_denied: { criticalAbsolute: 0 } });
+
+      const first = await realController.getAnomalyDetectors();
+      expect(first.overrides.acl_denied?.criticalAbsolute).toBe(0);
+      expect(first.resolved.acl_denied).not.toHaveProperty('criticalAbsolute');
+      expect(first.defaults.acl_denied.criticalAbsolute).toBe(50);
+      expect(JSON.stringify(first)).not.toContain('null');
+
+      // Send GET's overrides back as-is: accepted, and GET is unchanged.
+      await expect(realController.patchAnomalyDetectors(first.overrides)).resolves.toMatchObject({
+        message: 'Detector config updated',
+      });
+      expect(await realController.getAnomalyDetectors()).toEqual(first);
     });
   });
 

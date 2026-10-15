@@ -129,19 +129,23 @@ export function toApiDetectorConfig(config: Required<DetectorConfig>): DetectorC
 }
 
 /**
- * Strip Infinity sentinels from a stored partial override before returning it
- * over the API. Unlike toApiDetectorConfig (which operates on the fully-resolved
- * Required<DetectorConfig>), this preserves the partial shape — fields that
- * were not overridden stay absent — and only removes the specific Infinity
- * poison that JSON.stringify would otherwise emit as null.
+ * Prepare a stored partial override for the API. Preserves the partial shape
+ * (fields that were not overridden stay absent). A disabled absolute threshold
+ * (stored as the Infinity sentinel, or null after a SQL JSON round-trip) is
+ * emitted as 0, the same value PATCH accepts to disable it, so an override
+ * that disables a default absolute threshold is distinguishable from no
+ * override and round-trips through GET → PATCH unchanged. Never emits null.
  */
 export function sanitizeStoredOverride(override: DetectorConfig): DetectorConfig {
   const out: DetectorConfig = { ...override };
-  if (out.warningAbsolute !== undefined && !Number.isFinite(out.warningAbsolute)) {
-    delete out.warningAbsolute;
-  }
-  if (out.criticalAbsolute !== undefined && !Number.isFinite(out.criticalAbsolute)) {
-    delete out.criticalAbsolute;
+  for (const f of ABSOLUTE_FIELDS) {
+    if (!(f in out)) continue;
+    const v = (out as Record<string, unknown>)[f];
+    if (v === undefined) {
+      delete out[f];
+    } else if (v === null || (typeof v === 'number' && !Number.isFinite(v))) {
+      out[f] = 0;
+    }
   }
   return out;
 }

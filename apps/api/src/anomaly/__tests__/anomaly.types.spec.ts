@@ -27,10 +27,14 @@ describe('disabled absolute threshold normalization', () => {
     expect(resolved.criticalAbsolute).toBe(Number.POSITIVE_INFINITY);
   });
 
-  it('sanitizers strip null and Infinity', () => {
+  it('sanitizers never emit null; overrides map disabled to 0', () => {
+    expect(sanitizeStoredOverride({ criticalAbsolute: null as unknown as number })).toEqual({
+      criticalAbsolute: 0,
+    });
     expect(
-      sanitizeStoredOverride({ criticalAbsolute: null as unknown as number }),
-    ).not.toHaveProperty('criticalAbsolute');
+      sanitizeStoredOverride({ criticalAbsolute: Number.POSITIVE_INFINITY, warningZScore: 2.5 }),
+    ).toEqual({ criticalAbsolute: 0, warningZScore: 2.5 });
+    expect(sanitizeStoredOverride({ warningZScore: 2.5 })).toEqual({ warningZScore: 2.5 });
     const api = toApiDetectorConfig(
       resolveDetectorConfig(MetricType.acl_denied, {
         acl_denied: { criticalAbsolute: Number.POSITIVE_INFINITY },

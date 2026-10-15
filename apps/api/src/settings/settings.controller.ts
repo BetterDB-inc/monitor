@@ -134,6 +134,7 @@ export class SettingsController {
   @ApiOperation({ summary: 'Reset all anomaly detector thresholds to defaults' })
   async resetAnomalyDetectors(): Promise<{ message: string }> {
     await this.settingsService.resetDetectorConfig();
+    this.prometheusService.incrementDetectorConfigUpdates();
     return { message: 'Detector config reset to defaults' };
   }
 
