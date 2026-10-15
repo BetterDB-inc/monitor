@@ -1,10 +1,13 @@
 {
   "uid": "betterdb-query-patterns",
   "title": "BetterDB · Query Patterns",
-  "tags": ["betterdb", "valkey"],
+  "tags": [
+    "betterdb",
+    "valkey"
+  ],
   "schemaVersion": 39,
   "version": 1,
-  "refresh": "30s",
+  "refresh": "1m",
   "time": {
     "from": "now-6h",
     "to": "now"
@@ -378,6 +381,164 @@
         "x": 0,
         "y": 32
       }
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Top command calls/sec",
+      "description": "Top command types by call rate.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "topk(15, sum by (command) (rate(betterdb_commandstats_calls_total{job=~\"$job\",connection=~\"$connection\"}[5m])))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Large requests logged",
+      "description": "Count of oversized request payloads recorded in the command log.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_commandlog_large_request{job=~\"$job\",connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Large replies logged",
+      "description": "Count of oversized reply payloads recorded in the command log.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_commandlog_large_reply{job=~\"$job\",connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      }
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Slowlog last ID",
+      "description": "Most recent slowlog entry ID; a jump means new slow commands were recorded.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_slowlog_last_id{job=~\"$job\",connection=~\"$connection\"}",
+          "legendFormat": "{{connection}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      }
+    }
+  ],
+  "links": [
+    {
+      "title": "BetterDB dashboards",
+      "type": "dashboards",
+      "tags": [
+        "betterdb"
+      ],
+      "asDropdown": true,
+      "targetBlank": false,
+      "includeVars": true,
+      "keepTime": true,
+      "icon": "external link",
+      "keepTags": false
     }
   ]
 }

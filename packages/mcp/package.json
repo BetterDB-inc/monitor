@@ -34,7 +34,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

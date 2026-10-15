@@ -11,9 +11,13 @@ data before wiring up your own instance.
 
 It renders the shipped dashboard pack
 ([`deploy/observability/dashboards/`](../deploy/observability/dashboards/))
-against the demo workspace: Instance Vitals, Query Patterns, Cluster Slots,
-and Anomalies. These are the exact JSON files you can import into your own
-Grafana — nothing demo-specific.
+against the demo workspace — ten dashboards: Instance Vitals, Query Patterns,
+Cluster Slots, Anomalies, Persistence, Keyspace & Eviction, Clients & Pub/Sub,
+Security & ACL, Vector Search, and Monitor Internals. These are the exact JSON
+files you can import into your own Grafana. The only demo-specific tweak is the
+`job` variable's default (pointed at the demo's push/scrape job so panels
+populate on landing), applied to the deployed copies — the shipped files
+themselves are unchanged.
 
 ## Scrape the demo yourself
 

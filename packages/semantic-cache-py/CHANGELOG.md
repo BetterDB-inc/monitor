@@ -8,6 +8,12 @@
   `text-embedding-004` stopped resolving on 2026-01-14 and `embedding-001` on
   2025-10-30, so the provider failed at call time against its own defaults. The
   default is now `gemini-embedding-2`.
+- **Cache spans were missing from BetterDB Monitor's AI Traces.** The default
+  `TelemetryOptions.tracer_name` was `"betterdb-semantic-cache"`, but Monitor's
+  OTLP ingest keeps only spans from `@betterdb/*` instrumentation scopes, so every
+  cache span recorded inside an application trace was dropped. The default is now
+  `"@betterdb/semantic-cache"`, matching the TypeScript package. Pass
+  `tracer_name=` explicitly to keep the old scope name.
 
 ### Changed
 

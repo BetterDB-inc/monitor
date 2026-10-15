@@ -1,4 +1,4 @@
-import { ReactElement, useMemo, useState } from 'react';
+import { ReactElement, useEffect, useMemo, useState } from 'react';
 import { Navigate, Routes, Route } from 'react-router-dom';
 import { DemoBanner } from '../DemoBanner';
 import { useIdleTracker } from '../../hooks/useIdleTracker';
@@ -7,6 +7,7 @@ import { useCliPanel } from '../../hooks/useCliPanel';
 import { useValkeyAutoLink } from '../../hooks/useValkeyAutoLink';
 import { UpdateBanner } from '../UpdateBanner';
 import { NoConnectionsGuard } from '../NoConnectionsGuard';
+import { OPEN_ADD_CONNECTION_EVENT } from '../../lib/addConnectionIntent';
 import { LiveConnectionGuard } from '../LiveConnectionGuard';
 import { VectorSearchGuard } from '../VectorSearchGuard';
 import { CliPanel } from '../CliPanel';
@@ -95,6 +96,22 @@ function AppLayoutInner(): ReactElement {
   );
   useIdleTracker();
   useNavigationTracker();
+  // The Add Connection dialog lives inside the sidebar, which on mobile is a
+  // Sheet whose contents are unmounted while closed — so a request from the
+  // empty-state buttons would reach no listener. Reveal the sidebar first (the
+  // same thing the connection switcher does above), which mounts the dialog;
+  // it then consumes the stashed request.
+  useEffect(() => {
+    const reveal = () => {
+      if (isMobile) {
+        setOpenMobile(true);
+      } else {
+        setOpen(true);
+      }
+    };
+    window.addEventListener(OPEN_ADD_CONNECTION_EVENT, reveal);
+    return () => window.removeEventListener(OPEN_ADD_CONNECTION_EVENT, reveal);
+  }, [isMobile, setOpen, setOpenMobile]);
   // Mirror ready managed Valkey instances into the connection list app-wide, so
   // linking doesn't depend on the Add Connection dialog staying open.
   useValkeyAutoLink(cloudUser);
