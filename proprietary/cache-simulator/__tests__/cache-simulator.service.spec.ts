@@ -177,6 +177,34 @@ describe('CacheSimulatorService', () => {
     expect(result.instant.totalKeys).toBe(5);
   });
 
+  it('fails setup when fewer primaries are reachable than the cluster reports', async () => {
+    const spy = jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
+    const connections: any = { seed: client(1000, 10_000, 5), m1: client(2000, 10_000, 7) };
+    connections.seed.getClusterInfo = jest.fn().mockResolvedValue({ cluster_size: '3' });
+    const statuses = [
+      { id: 'seed', name: 'seed', isConnected: true, connectionType: 'direct' },
+      { id: 'm1', name: 'm1', isConnected: true, connectionType: 'direct', membership: { seedId: 'seed', source: 'cluster' } },
+      { id: 'm2', name: 'm2', isConnected: false, connectionType: 'direct', membership: { seedId: 'seed', source: 'cluster' } },
+    ];
+    const { service } = setup(connections, statuses);
+    const result = await service.snapshot('seed');
+    expect(result).toMatchObject({ status: 'failed', error: 'Only 2 of 3 cluster primaries are reachable, so the totals would be understated' });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('samples when every primary the cluster reports is reachable', async () => {
+    const spy = jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
+    const connections: any = { seed: client(1000, 10_000, 5), m1: client(2000, 10_000, 7) };
+    connections.seed.getClusterInfo = jest.fn().mockResolvedValue({ cluster_size: '2' });
+    const statuses = [
+      { id: 'seed', name: 'seed', isConnected: true, connectionType: 'direct' },
+      { id: 'm1', name: 'm1', isConnected: true, connectionType: 'direct', membership: { seedId: 'seed', source: 'cluster' } },
+    ];
+    const { service } = setup(connections, statuses);
+    expect(await service.snapshot('seed')).toMatchObject({ status: 'sampling' });
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
   it('sums growth across cluster primaries and needs history for each', async () => {
     jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
     const day = 86_400_000;
@@ -288,6 +316,23 @@ describe('CacheSimulatorService', () => {
     await flush();
     expect(await service.snapshot('c1')).toMatchObject({ status: 'ready', error: 'node gone', estimate: { totalBytes: 50 } });
     expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it('backs off after a failed resample of an expired result', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate'] });
+    const spy = jest.spyOn(sampler, 'sampleNodes').mockResolvedValueOnce([nodeSample]).mockRejectedValue(new Error('node gone'));
+    const { service } = setup();
+    await service.snapshot('c1');
+    await flush();
+    jest.advanceTimersByTime(RESULT_TTL_MS + 1);
+    await service.snapshot('c1');
+    await flush();
+    expect(await service.snapshot('c1')).toMatchObject({ status: 'ready', error: 'node gone' });
+    expect(spy).toHaveBeenCalledTimes(2);
+    jest.advanceTimersByTime(FAILURE_TTL_MS + 1);
+    await service.snapshot('c1');
+    await flush();
+    expect(spy).toHaveBeenCalledTimes(3);
   });
 
   it('times out a hung setup instead of wedging the connection', async () => {
