@@ -124,10 +124,20 @@ export function KeyAnalytics() {
   >('patterns');
   const [sortField, setSortField] = useState<SortField>('keyCount');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
-  const [selectedPattern, setSelectedPattern] = useState<string | null>(null);
+  const [selectedPattern, setSelectedPattern] = useState<{ db: number; pattern: string } | null>(
+    null,
+  );
   // Logical database filter: 'all' aggregates across every scanned database.
   const [rawSelectedDb, setSelectedDb] = useState<number | 'all'>('all');
   const detailRef = useRef<HTMLDivElement>(null);
+
+  // Reset the db filter when the connection changes, so (a) the first fetches
+  // for a new connection don't go out with the old numeric filter while
+  // availableDbs is still loading for it, and (b) the filter doesn't silently
+  // snap back from 'all' if the remembered db happens to also exist there.
+  useEffect(() => {
+    setSelectedDb('all');
+  }, [currentConnection?.id]);
 
   // Databases that have analytics data for this connection. The filter is only
   // shown when there is more than one (or the single one is not db0).
@@ -206,6 +216,7 @@ export function KeyAnalytics() {
     connectionId: currentConnection?.id,
     startTime: hotKeyStartTime,
     endTime: hotKeyEndTime,
+    db: dbFilter,
     enabled: activeTab === 'hot-keys' && isHotKeyTimeFiltered,
   });
 
@@ -594,11 +605,12 @@ export function KeyAnalytics() {
                           <tr
                             key={pattern.id}
                             className={`border-b hover:bg-muted cursor-pointer transition-colors ${
-                              selectedPattern === pattern.pattern
+                              selectedPattern?.db === (pattern.db ?? 0) &&
+                              selectedPattern?.pattern === pattern.pattern
                                 ? 'bg-primary/10 border-l-4 border-l-primary'
                                 : ''
                             }`}
-                            onClick={() => setSelectedPattern(pattern.pattern)}
+                            onClick={() => setSelectedPattern({ db: pattern.db ?? 0, pattern: pattern.pattern })}
                           >
                             <td className="p-2 font-mono text-xs">
                               {pattern.pattern}
@@ -643,7 +655,13 @@ export function KeyAnalytics() {
                   <div className="flex justify-between items-center">
                     <CardTitle className="flex items-center gap-2">
                       <BarChart3 className="h-5 w-5 text-primary" />
-                      Pattern Detail: <span className="font-mono text-sm">{selectedPattern}</span>
+                      Pattern Detail:{' '}
+                      <span className="font-mono text-sm">{selectedPattern.pattern}</span>
+                      {(availableDbs?.length ?? 0) > 1 && (
+                        <Badge variant="outline" className="font-sans">
+                          db{selectedPattern.db}
+                        </Badge>
+                      )}
                     </CardTitle>
                     <button
                       onClick={() => setSelectedPattern(null)}
@@ -655,7 +673,9 @@ export function KeyAnalytics() {
                 </CardHeader>
                 <CardContent>
                   {(() => {
-                    const pattern = sortedPatterns.find((p) => p.pattern === selectedPattern);
+                    const pattern = sortedPatterns.find(
+                      (p) => (p.db ?? 0) === selectedPattern.db && p.pattern === selectedPattern.pattern,
+                    );
                     if (!pattern) return null;
 
                     return (
