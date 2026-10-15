@@ -191,7 +191,8 @@ interface FakeClient {
 function fakeClient(role: 'master' | 'slave' | 'sentinel', result: KeyAnalyticsResult | Error, keySizes = ''): FakeClient {
   return {
     getRole: jest.fn().mockResolvedValue({ role }),
-    collectKeyAnalytics: result instanceof Error ? jest.fn().mockRejectedValue(result) : jest.fn().mockResolvedValue(result),
+    // The port returns one result per scanned logical database.
+    collectKeyAnalytics: result instanceof Error ? jest.fn().mockRejectedValue(result) : jest.fn().mockResolvedValue([result]),
     call: jest.fn().mockResolvedValue(keySizes),
     getCapabilities: () => ({ isSentinel: role === 'sentinel' }),
   };
@@ -344,6 +345,46 @@ describe('KeyAnalyticsService with topology members', () => {
     expect(connectionId).toBe('standalone');
     expect(snapshots).toHaveLength(1);
     expect(snapshots[0]).toMatchObject({ pattern: 'user:*', keyCount: 50 });
+  });
+
+  it('keeps the per-database results of one instance separate and db-tags the hot keys', async () => {
+    const { poll, clients, storage } = cluster();
+    // The standalone instance holds keys in db0 and db1 — one result each.
+    clients.standalone.collectKeyAnalytics.mockResolvedValue([
+      { ...scanOf(50), db: 0 },
+      { ...scanOf(70, 'job:*'), db: 1 },
+    ]);
+
+    await poll('standalone');
+
+    const [snapshots] = storage.saveKeyPatternSnapshots.mock.calls[0] as [KeyPatternSnapshot[]];
+    expect(snapshots.map((s) => [s.pattern, s.db, s.keyCount]).sort()).toEqual([
+      ['job:*', 1, 70],
+      ['user:*', 0, 50],
+    ]);
+
+    const [hotKeys] = storage.saveHotKeys.mock.calls[0] as [Array<{ keyName: string; signalType: string; db?: number }>];
+    const cardinality = hotKeys.filter((row) => row.signalType === 'cardinality');
+    expect(cardinality.map((row) => [row.keyName, row.db])).toEqual([
+      ['job:*:70', 1],
+      ['user:*:50', 0],
+    ]);
+  });
+
+  it('keeps the same pattern apart across logical databases instead of merging it', async () => {
+    const { poll, clients, storage } = cluster();
+    clients.standalone.collectKeyAnalytics.mockResolvedValue([
+      { ...scanOf(50), db: 0 },
+      { ...scanOf(70), db: 1 },
+    ]);
+
+    await poll('standalone');
+
+    const [snapshots] = storage.saveKeyPatternSnapshots.mock.calls[0] as [KeyPatternSnapshot[]];
+    expect(snapshots.map((s) => [s.pattern, s.db, s.keyCount]).sort()).toEqual([
+      ['user:*', 0, 50],
+      ['user:*', 1, 70],
+    ]);
   });
 
   it('scans a sentinel primary but not its replicas or a retired node', async () => {

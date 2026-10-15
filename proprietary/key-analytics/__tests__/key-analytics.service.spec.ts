@@ -94,7 +94,8 @@ describe('KeyAnalyticsService.collect composite persistence', () => {
     client: { collectKeyAnalytics: jest.Mock };
   } {
     const client = {
-      collectKeyAnalytics: jest.fn().mockResolvedValue({
+      // One result per scanned logical database.
+      collectKeyAnalytics: jest.fn().mockResolvedValue([{
         dbSize: 3,
         scanned: 3,
         patterns: [],
@@ -106,7 +107,7 @@ describe('KeyAnalyticsService.collect composite persistence', () => {
           // Big but LFU-cold (freq 0 is dropped) -> cardinality dimension only.
           { keyName: 'onlybig', keyType: 'hash', freqScore: 0, idleSeconds: null, memoryBytes: 900, cardinality: 4000, ttl: null },
         ],
-      }),
+      }]),
     };
     const storage = {
       saveHotKeys,

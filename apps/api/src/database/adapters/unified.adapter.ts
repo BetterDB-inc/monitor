@@ -60,6 +60,8 @@ export interface UnifiedDatabaseAdapterConfig {
   username: string;
   password: string;
   connectionName?: string;
+  /** Logical database index the clients SELECT on connect (defaults to 0). */
+  dbIndex?: number;
   tls?: boolean;
   /** Hostname the TLS certificate is verified against when `host` is a bare IP. */
   tlsServername?: string;
@@ -124,12 +126,16 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   private connectHost: string;
   private connectPort: number;
 
-  private createValkeyClient(connectionName: string): Valkey {
+  private createValkeyClient(connectionName: string, db?: number): Valkey {
     return new Valkey({
       host: this.connectHost,
       port: this.connectPort,
       username: this.config.username,
       password: this.config.password,
+      // Logical database the client SELECTs on connect. Defaults to the
+      // connection's configured dbIndex; key-analytics scans override it to
+      // visit sibling databases discovered via INFO keyspace.
+      db: db ?? this.config.dbIndex ?? 0,
       lazyConnect: true,
       enableOfflineQueue: false,
       connectionName,
@@ -805,10 +811,90 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     return await this.client.lastsave();
   }
 
-  async collectKeyAnalytics(options: KeyAnalyticsOptions): Promise<KeyAnalyticsResult> {
-    const dbSize = await this.client.dbsize();
+  /**
+   * Logical databases that currently hold keys, from `INFO keyspace`
+   * (`db<N>:keys=...` lines — the section only lists non-empty databases).
+   * Returns [] when the section is empty or unavailable (e.g. cluster mode
+   * proxies that hide it), in which case the caller falls back to scanning
+   * the connection's own database.
+   */
+  private async listKeyspaceDatabases(): Promise<number[]> {
+    try {
+      const raw = await this.client.info('keyspace');
+      const dbs: number[] = [];
+      for (const line of raw.split('\n')) {
+        const match = /^db(\d+):keys=(\d+)/.exec(line.trim());
+        if (match && parseInt(match[2], 10) > 0) {
+          dbs.push(parseInt(match[1], 10));
+        }
+      }
+      return dbs.sort((a, b) => a - b);
+    } catch (error) {
+      this.logger.debug(
+        `Could not list keyspace databases: ${error instanceof Error ? error.message : error}`,
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Scan every non-empty logical database of this instance, one result per
+   * database. The databases are discovered via `INFO keyspace` rather than
+   * `DBSIZE` on the connected database alone, so an instance whose keys live
+   * outside the configured dbIndex (e.g. everything in db1, nothing in db0)
+   * is still analyzed. Databases other than the connection's own are visited
+   * through a short-lived client SELECTed onto that database — the shared
+   * client never switches databases, so concurrent monitoring is unaffected.
+   */
+  async collectKeyAnalytics(options: KeyAnalyticsOptions): Promise<KeyAnalyticsResult[]> {
+    const ownDb = this.config.dbIndex ?? 0;
+    const databases = await this.listKeyspaceDatabases();
+    if (databases.length === 0) {
+      // Empty instance or no keyspace section: preserve the single-db
+      // behaviour (the dbSize === 0 early-return keeps this cheap).
+      return [await this.scanDatabase(this.client, ownDb, options)];
+    }
+
+    const results: KeyAnalyticsResult[] = [];
+    const failures: unknown[] = [];
+    // Sequential on purpose: SCAN + per-key pipelines are heavy, and running
+    // the databases one after another keeps the load on the server no higher
+    // than today's single-db scan.
+    for (const db of databases) {
+      if (db === ownDb) {
+        results.push(await this.scanDatabase(this.client, db, options));
+        continue;
+      }
+      const scratch = this.createValkeyClient(
+        `${this.config.connectionName ?? 'BetterDB-Monitor'}-keyscan-db${db}`,
+        db,
+      );
+      try {
+        await scratch.connect();
+        results.push(await this.scanDatabase(scratch, db, options));
+      } catch (error) {
+        failures.push(error);
+        this.logger.warn(
+          `Key analytics scan failed on db${db}: ${error instanceof Error ? error.message : error}`,
+        );
+      } finally {
+        await closeClient(scratch);
+      }
+    }
+    if (results.length === 0 && failures.length > 0) {
+      throw failures[0];
+    }
+    return results;
+  }
+
+  private async scanDatabase(
+    client: Valkey,
+    db: number,
+    options: KeyAnalyticsOptions,
+  ): Promise<KeyAnalyticsResult> {
+    const dbSize = await client.dbsize();
     if (dbSize === 0) {
-      return { dbSize: 0, scanned: 0, patterns: [] };
+      return { dbSize: 0, scanned: 0, patterns: [], db };
     }
 
     const patternsMap = new Map<string, KeyPatternData>();
@@ -817,7 +903,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     let scanned = 0;
 
     do {
-      const [newCursor, keys] = await this.client.scan(cursor, 'COUNT', options.scanBatchSize);
+      const [newCursor, keys] = await client.scan(cursor, 'COUNT', options.scanBatchSize);
       cursor = newCursor;
 
       for (const key of keys) {
@@ -841,7 +927,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
         };
 
         try {
-          const pipeline = this.client.pipeline();
+          const pipeline = client.pipeline();
           pipeline.memory('USAGE', key);
           pipeline.object('IDLETIME', key);
           pipeline.object('FREQ', key);
@@ -968,6 +1054,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       scanned,
       patterns: Array.from(patternsMap.values()),
       keyDetails: pruneKeyDetails(keyDetails),
+      db,
     };
   }
 

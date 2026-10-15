@@ -356,6 +356,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       port: config.port,
       username: config.username || 'default',
       password: config.password || '',
+      dbIndex: config.dbIndex,
       connectionName,
       tls: config.tls,
       tlsServername: config.membership?.origin === 'auto' ? config.membership.hostname : undefined,

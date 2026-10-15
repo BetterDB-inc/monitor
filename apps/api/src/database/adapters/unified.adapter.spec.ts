@@ -179,8 +179,10 @@ describe('UnifiedDatabaseAdapter.collectKeyAnalytics — stale keys', () => {
     (adapter as unknown as { _client: unknown })._client = {
       dbsize: jest.fn().mockResolvedValue(keys.length),
       scan: jest.fn().mockResolvedValue(['0', keys]),
+      info: jest.fn().mockResolvedValue(`db0:keys=${keys.length},expires=0,avg_ttl=0`),
       pipeline,
     };
+    (adapter as unknown as { config: unknown }).config = {};
     return adapter;
   }
 
@@ -193,10 +195,184 @@ describe('UnifiedDatabaseAdapter.collectKeyAnalytics — stale keys', () => {
       'session:5': DAY,
     });
 
-    const result = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
 
     const [sessions] = result.patterns;
     expect(sessions.totalIdleTime / sessions.count).toBeGreaterThan(DAY);
     expect(sessions.staleCount).toBe(1);
+  });
+});
+
+describe('UnifiedDatabaseAdapter.collectKeyAnalytics — multiple logical databases', () => {
+  function scanChain() {
+    const chain = {
+      memory: () => chain,
+      object: () => chain,
+      ttl: () => chain,
+      type: () => chain,
+      strlen: () => chain,
+      llen: () => chain,
+      hlen: () => chain,
+      scard: () => chain,
+      zcard: () => chain,
+      xlen: () => chain,
+      exec: async () => [
+        [null, 100],
+        [null, 10],
+        [null, null],
+        [null, -1],
+        [null, 'string'],
+        [null, 5],
+      ],
+    };
+    return chain;
+  }
+
+  function fakeScanClient(keys: string[]) {
+    return {
+      dbsize: jest.fn().mockResolvedValue(keys.length),
+      scan: jest.fn().mockResolvedValue(['0', keys]),
+      pipeline: scanChain,
+      connect: jest.fn().mockResolvedValue(undefined),
+      quit: jest.fn().mockResolvedValue('OK'),
+      disconnect: jest.fn(),
+    };
+  }
+
+  function makeMultiDbAdapter(options: {
+    dbIndex?: number;
+    keyspaceInfo: string;
+    ownKeys: string[];
+    scratchKeysByDb?: Record<number, string[]>;
+  }) {
+    const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+    const ownClient = {
+      ...fakeScanClient(options.ownKeys),
+      info: jest.fn().mockResolvedValue(options.keyspaceInfo),
+    };
+    (adapter as unknown as { _client: unknown })._client = ownClient;
+    (adapter as unknown as { config: unknown }).config = { dbIndex: options.dbIndex };
+    // Object.create bypasses the constructor, so the logger field is unset.
+    (adapter as unknown as { logger: unknown }).logger = {
+      debug: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      log: jest.fn(),
+    };
+    const scratchClients: Record<number, ReturnType<typeof fakeScanClient>> = {};
+    const createValkeyClient = jest.fn((_name: string, db?: number) => {
+      const client = fakeScanClient(options.scratchKeysByDb?.[db ?? 0] ?? []);
+      scratchClients[db ?? 0] = client;
+      return client;
+    });
+    (adapter as unknown as { createValkeyClient: unknown }).createValkeyClient =
+      createValkeyClient;
+    return { adapter, ownClient, scratchClients, createValkeyClient };
+  }
+
+  it('scans every non-empty database from INFO keyspace, visiting siblings with a scratch client', async () => {
+    const { adapter, ownClient, scratchClients, createValkeyClient } = makeMultiDbAdapter({
+      dbIndex: 0,
+      keyspaceInfo:
+        'db0:keys=2,expires=0,avg_ttl=0\r\ndb2:keys=3,expires=1,avg_ttl=0\r\n',
+      ownKeys: ['a:1', 'a:2'],
+      scratchKeysByDb: { 2: ['b:1', 'b:2', 'b:3'] },
+    });
+
+    const results = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    expect(results.map((r) => r.db)).toEqual([0, 2]);
+    expect(results.map((r) => r.dbSize)).toEqual([2, 3]);
+    // db0 is the connection's own database: scanned on the shared client.
+    expect(ownClient.scan).toHaveBeenCalled();
+    // db2 is visited through a short-lived client SELECTed onto db 2…
+    expect(createValkeyClient).toHaveBeenCalledTimes(1);
+    expect(createValkeyClient.mock.calls[0][1]).toBe(2);
+    expect(scratchClients[2].connect).toHaveBeenCalled();
+    // …which is closed afterwards.
+    expect(scratchClients[2].quit).toHaveBeenCalled();
+  });
+
+  it('finds keys outside the configured database even when that database is empty (BetterDB feedback)', async () => {
+    const { adapter, ownClient } = makeMultiDbAdapter({
+      dbIndex: 0,
+      // db0 holds nothing, so INFO keyspace does not list it at all.
+      keyspaceInfo: 'db1:keys=3,expires=0,avg_ttl=0\r\n',
+      ownKeys: [],
+      scratchKeysByDb: { 1: ['user:1', 'user:2', 'user:3'] },
+    });
+
+    const results = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    // The old implementation DBSIZE'd db0, got 0 and gave up. Now db1 is found.
+    expect(results.map((r) => r.db)).toEqual([1]);
+    expect(results[0].dbSize).toBe(3);
+    expect(results[0].scanned).toBe(3);
+    expect(ownClient.scan).not.toHaveBeenCalled();
+  });
+
+  it('falls back to scanning the connected database when INFO keyspace is unavailable', async () => {
+    const { adapter, ownClient, createValkeyClient } = makeMultiDbAdapter({
+      dbIndex: 4,
+      keyspaceInfo: '',
+      ownKeys: ['k:1'],
+    });
+    ownClient.info.mockRejectedValue(new Error('NOPERM'));
+
+    const results = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    expect(results).toHaveLength(1);
+    expect(results[0].db).toBe(4);
+    expect(ownClient.scan).toHaveBeenCalled();
+    expect(createValkeyClient).not.toHaveBeenCalled();
+  });
+
+  it('keeps scanning the remaining databases when one database scan fails', async () => {
+    const { adapter, scratchClients } = makeMultiDbAdapter({
+      dbIndex: 0,
+      keyspaceInfo:
+        'db0:keys=1,expires=0,avg_ttl=0\r\ndb1:keys=1,expires=0,avg_ttl=0\r\ndb2:keys=1,expires=0,avg_ttl=0\r\n',
+      ownKeys: ['a:1'],
+      scratchKeysByDb: { 1: ['b:1'], 2: ['c:1'] },
+    });
+    // db1's scratch connect blows up; db0 and db2 must still come back.
+    const original = (adapter as unknown as { createValkeyClient: jest.Mock })
+      .createValkeyClient;
+    original.mockImplementationOnce((_name: string, _db?: number) => {
+      const broken = fakeScanClient([]);
+      broken.connect.mockRejectedValue(new Error('connection refused'));
+      return broken;
+    });
+
+    const results = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    expect(results.map((r) => r.db)).toEqual([0, 2]);
+    expect(scratchClients[2].quit).toHaveBeenCalled();
+  });
+});
+
+describe('UnifiedDatabaseAdapter — configured dbIndex', () => {
+  it('passes dbIndex through to the Valkey client options (BetterDB feedback)', () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'localhost',
+      port: 6379,
+      username: 'default',
+      password: '',
+      dbIndex: 3,
+    });
+    // lazyConnect: no socket is opened; only the options are inspected.
+    const client = adapter.getClient() as unknown as { options: { db?: number } };
+    expect(client.options.db).toBe(3);
+  });
+
+  it('defaults to db0 when no dbIndex is configured', () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'localhost',
+      port: 6379,
+      username: 'default',
+      password: '',
+    });
+    const client = adapter.getClient() as unknown as { options: { db?: number } };
+    expect(client.options.db).toBe(0);
   });
 });

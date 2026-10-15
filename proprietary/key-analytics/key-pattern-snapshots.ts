@@ -49,6 +49,7 @@ export function buildPatternSnapshots(result: KeyAnalyticsResult, timestamp: num
       id: randomUUID(),
       timestamp,
       pattern: stats.pattern,
+      db: result.db ?? 0,
       keyCount: Math.round(stats.count / samplingRatio),
       sampledKeyCount: stats.count,
       keysWithTtl: Math.round(stats.withTtl / samplingRatio),
@@ -72,9 +73,13 @@ export function mergePatternSnapshots(perNode: KeyPatternSnapshot[][]): KeyPatte
   if (perNode.length === 1) {
     return perNode[0];
   }
+  // Merge the same pattern observed on several cluster primaries, but never
+  // across logical databases — per-database rows are the stored dimension the
+  // UI filters on, so the group identity is (db, pattern).
   const byPattern = new Map<string, KeyPatternSnapshot[]>();
   for (const snapshot of perNode.flat()) {
-    byPattern.set(snapshot.pattern, [...(byPattern.get(snapshot.pattern) ?? []), snapshot]);
+    const identity = `${snapshot.db ?? 0} ${snapshot.pattern}`;
+    byPattern.set(identity, [...(byPattern.get(identity) ?? []), snapshot]);
   }
   return Array.from(byPattern.values()).map((group) => (group.length === 1 ? group[0] : mergeGroup(group)));
 }
@@ -103,6 +108,7 @@ function mergeGroup(group: KeyPatternSnapshot[]): KeyPatternSnapshot {
     id: randomUUID(),
     timestamp: group[0].timestamp,
     pattern: group[0].pattern,
+    db: group[0].db,
     keyCount: sum(keyCount),
     sampledKeyCount: sum((snapshot) => snapshot.sampledKeyCount),
     keysWithTtl: sum((snapshot) => snapshot.keysWithTtl),

@@ -1411,8 +1411,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         min_ttl_seconds INTEGER,
         max_ttl_seconds INTEGER,
         connection_id TEXT NOT NULL DEFAULT 'env-default',
+        db INTEGER NOT NULL DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
+      ALTER TABLE key_pattern_snapshots ADD COLUMN IF NOT EXISTS db INTEGER NOT NULL DEFAULT 0;
 
       CREATE INDEX IF NOT EXISTS idx_kps_timestamp ON key_pattern_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_kps_pattern ON key_pattern_snapshots(pattern, timestamp DESC);
@@ -1431,10 +1433,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         cardinality BIGINT,
         key_type TEXT,
         ttl INTEGER,
-        rank INTEGER NOT NULL
+        rank INTEGER NOT NULL,
+        db INTEGER NOT NULL DEFAULT 0
       );
       ALTER TABLE hot_key_stats ADD COLUMN IF NOT EXISTS cardinality BIGINT;
       ALTER TABLE hot_key_stats ADD COLUMN IF NOT EXISTS key_type TEXT;
+      ALTER TABLE hot_key_stats ADD COLUMN IF NOT EXISTS db INTEGER NOT NULL DEFAULT 0;
       CREATE INDEX IF NOT EXISTS idx_hot_key_captured_at_global
         ON hot_key_stats(captured_at);
 
@@ -2680,7 +2684,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     for (const snapshot of snapshots) {
       values.push(
-        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
+        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
       );
       params.push(
         snapshot.id,
@@ -2702,6 +2706,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         snapshot.minTtlSeconds ?? null,
         snapshot.maxTtlSeconds ?? null,
         connectionId,
+        snapshot.db ?? 0,
       );
     }
 
@@ -2712,7 +2717,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         keys_with_ttl, keys_expiring_soon, total_memory_bytes,
         avg_memory_bytes, max_memory_bytes, avg_access_frequency,
         hot_key_count, cold_key_count, avg_idle_time_seconds,
-        stale_key_count, avg_ttl_seconds, min_ttl_seconds, max_ttl_seconds, connection_id
+        stale_key_count, avg_ttl_seconds, min_ttl_seconds, max_ttl_seconds, connection_id, db
       ) VALUES ${values.join(', ')}
     `,
       params,
@@ -2746,6 +2751,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`pattern = $${paramIndex++}`);
       params.push(options.pattern);
     }
+    if (options.db !== undefined) {
+      conditions.push(`db = $${paramIndex++}`);
+      params.push(options.db);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 100;
@@ -2768,6 +2777,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     startTime?: number,
     endTime?: number,
     connectionId?: string,
+    db?: number,
   ): Promise<KeyAnalyticsSummary | null> {
     if (!this.pool) throw new Error('Database not initialized');
 
@@ -2787,6 +2797,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`timestamp <= $${paramIndex++}`);
       params.push(endTime);
     }
+    if (db !== undefined) {
+      conditions.push(`db = $${paramIndex++}`);
+      params.push(db);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
@@ -2802,9 +2816,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     if (latestSnapshotsResult.rows.length === 0) return null;
 
-    const patternConditions = latestSnapshotsResult.rows
-      .map(() => '(pattern = ? AND timestamp = ?)')
-      .join(' OR ');
+    // A (pattern, timestamp) pair can match several rows — one per logical
+    // database — so the db filter must be re-applied here, and the unfiltered
+    // per-pattern breakdown below aggregates across the per-database rows.
     const patternParams: any[] = [];
     for (const row of latestSnapshotsResult.rows) {
       patternParams.push(row.pattern, row.latest_timestamp);
@@ -2814,6 +2828,11 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const patternPlaceholders = latestSnapshotsResult.rows
       .map(() => `(pattern = $${pIdx++} AND timestamp = $${pIdx++})`)
       .join(' OR ');
+    const patternWhere =
+      db !== undefined ? `(${patternPlaceholders}) AND db = $${pIdx++}` : patternPlaceholders;
+    if (db !== undefined) {
+      patternParams.push(db);
+    }
 
     const summaryResult = await this.pool.query(
       `
@@ -2826,7 +2845,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         SUM(cold_key_count) as cold_key_count,
         SUM(keys_expiring_soon) as keys_expiring_soon
       FROM key_pattern_snapshots
-      WHERE ${patternPlaceholders}
+      WHERE ${patternWhere}
     `,
       patternParams,
     );
@@ -2835,22 +2854,33 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     const patternRowsResult = await this.pool.query(
       `
-      SELECT pattern, key_count, total_memory_bytes, avg_memory_bytes, stale_key_count, hot_key_count, cold_key_count
+      SELECT
+        pattern,
+        SUM(key_count) as key_count,
+        SUM(total_memory_bytes) as total_memory_bytes,
+        SUM(stale_key_count) as stale_key_count,
+        SUM(hot_key_count) as hot_key_count,
+        SUM(cold_key_count) as cold_key_count,
+        SUM(sampled_key_count) as sampled_key_count,
+        SUM(avg_memory_bytes * sampled_key_count) as weighted_avg_memory
       FROM key_pattern_snapshots
-      WHERE ${patternPlaceholders}
+      WHERE ${patternWhere}
+      GROUP BY pattern
     `,
       patternParams,
     );
 
     const byPattern: Record<string, any> = {};
     for (const row of patternRowsResult.rows) {
+      const sampledKeyCount = parseInt(row.sampled_key_count) || 0;
       byPattern[row.pattern] = {
-        keyCount: row.key_count,
-        memoryBytes: parseInt(row.total_memory_bytes),
-        avgMemoryBytes: row.avg_memory_bytes,
-        staleCount: row.stale_key_count ?? null,
-        hotCount: row.hot_key_count ?? 0,
-        coldCount: row.cold_key_count ?? 0,
+        keyCount: parseInt(row.key_count) || 0,
+        memoryBytes: parseInt(row.total_memory_bytes) || 0,
+        avgMemoryBytes:
+          sampledKeyCount > 0 ? Math.round(parseInt(row.weighted_avg_memory) / sampledKeyCount) : 0,
+        staleCount: row.stale_key_count == null ? null : parseInt(row.stale_key_count),
+        hotCount: row.hot_key_count == null ? 0 : parseInt(row.hot_key_count),
+        coldCount: row.cold_key_count == null ? 0 : parseInt(row.cold_key_count),
       };
     }
 
@@ -2888,6 +2918,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     startTime: number,
     endTime: number,
     connectionId?: string,
+    db?: number,
   ): Promise<
     Array<{
       timestamp: number;
@@ -2902,15 +2933,26 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const params: any[] = [pattern, startTime, endTime];
 
     if (connectionId) {
-      conditions.push('connection_id = $4');
       params.push(connectionId);
+      conditions.push(`connection_id = $${params.length}`);
+    }
+    if (db !== undefined) {
+      params.push(db);
+      conditions.push(`db = $${params.length}`);
     }
 
+    // One collection writes one row per logical database; aggregate them per
+    // timestamp so an unfiltered trend stays a single series.
     const result = await this.pool.query(
       `
-      SELECT timestamp, key_count, total_memory_bytes, stale_key_count
+      SELECT
+        timestamp,
+        SUM(key_count) as key_count,
+        SUM(total_memory_bytes) as total_memory_bytes,
+        SUM(stale_key_count) as stale_key_count
       FROM key_pattern_snapshots
       WHERE ${conditions.join(' AND ')}
+      GROUP BY timestamp
       ORDER BY timestamp ASC
     `,
       params,
@@ -2918,9 +2960,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     return result.rows.map((row) => ({
       timestamp: parseInt(row.timestamp),
-      keyCount: row.key_count,
-      memoryBytes: parseInt(row.total_memory_bytes),
-      staleCount: row.stale_key_count ?? 0,
+      keyCount: parseInt(row.key_count) || 0,
+      memoryBytes: parseInt(row.total_memory_bytes) || 0,
+      staleCount: row.stale_key_count == null ? 0 : parseInt(row.stale_key_count),
     }));
   }
 
@@ -2949,7 +2991,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     for (const entry of entries) {
       values.push(
-        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
+        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
       );
       params.push(
         entry.id,
@@ -2964,6 +3006,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         entry.keyType ?? null,
         entry.ttl ?? null,
         entry.rank,
+        entry.db ?? 0,
       );
     }
 
@@ -2971,7 +3014,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `
       INSERT INTO hot_key_stats (
         id, key_name, connection_id, captured_at, signal_type,
-        freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank
+        freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank, db
       ) VALUES ${values.join(', ')}
     `,
       params,
@@ -3005,6 +3048,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`captured_at <= $${paramIndex++}`);
       params.push(options.endTime);
     }
+    if (options.db !== undefined) {
+      conditions.push(`db = $${paramIndex++}`);
+      params.push(options.db);
+    }
     if (options.latest || options.oldest) {
       const agg = options.latest ? 'MAX' : 'MIN';
       const subSignalPlaceholders = signalTypes.map(() => `$${paramIndex++}`).join(', ');
@@ -3022,6 +3069,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         subConditions.push(`captured_at <= $${paramIndex++}`);
         params.push(options.endTime);
       }
+      if (options.db !== undefined) {
+        subConditions.push(`db = $${paramIndex++}`);
+        params.push(options.db);
+      }
       const subWhere = subConditions.length > 0 ? `WHERE ${subConditions.join(' AND ')}` : '';
       conditions.push(`captured_at = (SELECT ${agg}(captured_at) FROM hot_key_stats ${subWhere})`);
     }
@@ -3033,7 +3084,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const result = await this.pool.query(
       `
       SELECT id, key_name, connection_id, captured_at, signal_type,
-             freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank
+             freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank, db
       FROM hot_key_stats
       ${whereClause}
       ORDER BY captured_at DESC, rank ASC
@@ -3055,7 +3106,20 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       keyType: row.key_type ?? undefined,
       ttl: row.ttl ?? undefined,
       rank: row.rank,
+      db: row.db ?? 0,
     }));
+  }
+
+  async getKeyAnalyticsDatabases(connectionId?: string): Promise<number[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const where = connectionId ? 'WHERE connection_id = $1' : '';
+    const params = connectionId ? [connectionId] : [];
+    const result = await this.pool.query(
+      `SELECT DISTINCT db FROM key_pattern_snapshots ${where} ORDER BY db ASC`,
+      params,
+    );
+    return result.rows.map((row: { db: number | null }) => row.db ?? 0);
   }
 
   async pruneOldHotKeys(cutoffTimestamp: number, connectionId?: string): Promise<number> {
