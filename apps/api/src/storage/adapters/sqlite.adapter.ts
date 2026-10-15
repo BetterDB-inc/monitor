@@ -2665,7 +2665,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const query = `
       SELECT * FROM key_pattern_snapshots
       ${whereClause}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, db ASC, pattern ASC
       LIMIT ? OFFSET ?
     `;
 
@@ -2842,7 +2842,10 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
 
     // One collection writes one row per logical database; aggregate them per
-    // timestamp so an unfiltered trend stays a single series.
+    // timestamp so an unfiltered trend stays a single series. When no
+    // connectionId is given, also group by connection_id so trends from
+    // different connections aren't merged into one series.
+    const groupBy = connectionId ? 'timestamp' : 'timestamp, connection_id';
     const query = `
       SELECT
         timestamp,
@@ -2851,7 +2854,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         SUM(stale_key_count) as stale_key_count
       FROM key_pattern_snapshots
       WHERE ${conditions.join(' AND ')}
-      GROUP BY timestamp
+      GROUP BY ${groupBy}
       ORDER BY timestamp ASC
     `;
 
