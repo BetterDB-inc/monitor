@@ -103,6 +103,7 @@ export function llmCacheHash(params: {
   responseFormat?: unknown;
   reasoningEffort?: string;
   promptCacheKey?: string;
+  providerParams?: Record<string, unknown>;
 }): string {
   const tools = params.tools
     ? [...params.tools].sort((a, b) => a.function.name.localeCompare(b.function.name))
@@ -121,6 +122,7 @@ export function llmCacheHash(params: {
     responseFormat: params.responseFormat,
     reasoningEffort: params.reasoningEffort,
     promptCacheKey: params.promptCacheKey,
+    providerParams: params.providerParams,
   });
 
   return sha256(canonical);
