@@ -276,11 +276,13 @@ describe('PrometheusService key size metrics', () => {
     const text = await service.getMetrics();
 
     expect(client.call).toHaveBeenCalledWith('INFO', ['keysizes']);
+    // type is normalized to the singular TYPE-style name (INFO reports plural),
+    // so it joins with the per-key/per-pattern families.
     expect(text).toContain(
-      `betterdb_keysize_bucket_keys{connection="${LABEL}",db="db0",type="strings",metric="sizes",bucket="2"} 655`,
+      `betterdb_keysize_bucket_keys{connection="${LABEL}",db="db0",type="string",metric="sizes",bucket="2"} 655`,
     );
     expect(text).toContain(
-      `betterdb_keysize_bucket_keys{connection="${LABEL}",db="db0",type="lists",metric="items",bucket="32"} 2`,
+      `betterdb_keysize_bucket_keys{connection="${LABEL}",db="db0",type="list",metric="items",bucket="32"} 2`,
     );
   });
 

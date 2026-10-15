@@ -298,7 +298,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "Key memory by pattern",
-      "description": "Total sampled memory per key pattern from the latest key analytics run (Pro). Top patterns by memory, bounded by METRICS_KEY_PATTERNS_TOP_N.",
+      "description": "Estimated total memory per key pattern, extrapolated from the sampled keys of the latest key analytics run (Pro) — an estimate, not an exact total, on keyspaces larger than the sample. Top patterns by memory, bounded by METRICS_KEY_PATTERNS_TOP_N.",
       "datasource": {
         "type": "prometheus",
         "uid": "${ds}"
@@ -389,7 +389,7 @@
       "id": 9,
       "type": "bargauge",
       "title": "Keysize distribution",
-      "description": "Keys per size bucket from INFO keysizes (Redis 8.0+; no Valkey version emits it), split by data type. metric=\"sizes\" buckets string byte length, metric=\"items\" buckets element count per collection type; summed across databases and selected connections. Buckets are log2 sizes; bar order follows label sort, not bucket magnitude. Absent on servers without the section.",
+      "description": "Keys per size bucket from INFO keysizes (Redis 8.0+; no Valkey version emits it), split by data type. metric=\"sizes\" buckets string byte length, metric=\"items\" buckets element count per collection type; summed across databases and selected connections. These series are per node, and topology auto-registration adds replicas as their own connections, so selecting \"All\" sums primaries and replicas and roughly doubles the counts on a replicated deployment — select a single connection for a true per-server distribution. Buckets are log2 sizes; bar order follows label sort, not bucket magnitude. Absent on servers without the section.",
       "datasource": {
         "type": "prometheus",
         "uid": "${ds}"

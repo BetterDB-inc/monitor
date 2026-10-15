@@ -266,7 +266,7 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_instantaneous_output_kbps` | `betterdb.net.output_rate` | `KiBy/s` |
 | `betterdb_pubsub_channels` | `betterdb.pubsub.channels` | `{channel}` |
 | `betterdb_pubsub_patterns` | `betterdb.pubsub.patterns` | `{pattern}` |
-| `betterdb_key_pattern_memory_bytes` | `betterdb.key_pattern.memory` | `By` |
+| `betterdb_key_pattern_memory_bytes` | `betterdb.key_pattern.memory.total` | `By` |
 | `betterdb_key_pattern_avg_memory_bytes` | `betterdb.key_pattern.memory.avg` | `By` |
 | `betterdb_key_pattern_max_memory_bytes` | `betterdb.key_pattern.memory.max` | `By` |
 | `betterdb_key_pattern_keys` | `betterdb.key_pattern.keys` | `{key}` |

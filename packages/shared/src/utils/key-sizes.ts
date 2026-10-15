@@ -97,6 +97,25 @@ export function parseKeySizeDistribution(raw: string): KeySizeDistribution {
   return { databases, available: hasHeader || Object.keys(databases).length > 0 };
 }
 
+// INFO keysizes names its sections in the plural (`strings`, `hashes`, …),
+// while the TYPE command — the source of the `type` label on the per-key and
+// per-pattern families — is singular (`string`, `hash`, …). Map keysize type
+// names onto the singular form so a PromQL join on `type` across the families
+// matches instead of silently dropping every row.
+const KEY_SIZE_TYPE_SINGULAR: Record<string, string> = {
+  strings: 'string',
+  lists: 'list',
+  sets: 'set',
+  zsets: 'zset',
+  hashes: 'hash',
+  streams: 'stream',
+};
+
+/** Normalize an INFO keysizes section name to the singular TYPE-style name. */
+export function canonicalKeySizeType(type: string): string {
+  return KEY_SIZE_TYPE_SINGULAR[type] ?? type;
+}
+
 const BUCKET_UNITS = ['', 'K', 'M', 'G', 'T', 'P', 'E'];
 
 function bucketValue(bucket: string): number {

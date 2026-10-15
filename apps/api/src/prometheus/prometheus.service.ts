@@ -16,6 +16,7 @@ import {
   WEBHOOK_EVENTS_ENTERPRISE_SERVICE,
   hasOwnKeyAnalytics,
   parseKeySizeDistribution,
+  canonicalKeySizeType,
   KeySizeDistribution,
   KEY_DETAILS_TOP_N,
 } from '@betterdb/shared';
@@ -844,7 +845,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // INFO keysizes (Redis 8.0+; no Valkey version emits it) and are per node.
     this.keyPatternMemoryBytes = this.createGauge(
       'key_pattern_memory_bytes',
-      'Total sampled memory of keys matching pattern, from the latest key analytics run (top patterns by memory, bounded by METRICS_KEY_PATTERNS_TOP_N)',
+      'Estimated total memory of keys matching pattern, extrapolated from the sampled keys of the latest key analytics run (top patterns by memory, bounded by METRICS_KEY_PATTERNS_TOP_N)',
       ['pattern'],
     );
     this.keyPatternAvgMemoryBytes = this.createGauge(
@@ -864,12 +865,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     );
     this.keyMemoryBytes = this.createGauge(
       'key_memory_bytes',
-      'Memory of a single tracked key, from the latest key analytics run (top largest keys only, bounded by METRICS_KEY_DETAILS_TOP_N)',
+      "Memory of a single tracked key, from the latest key analytics run (the collector's tracked keys ranked by memory, bounded by METRICS_KEY_DETAILS_TOP_N; a huge-by-memory key the collector did not track may be absent)",
       ['key', 'type'],
     );
     this.keyCardinality = this.createGauge(
       'key_cardinality',
-      'Elements in a tracked collection key, or byte length for strings (top largest keys only, bounded by METRICS_KEY_DETAILS_TOP_N)',
+      "Elements in a tracked collection key, or byte length for strings (the collector's tracked keys ranked by memory, bounded by METRICS_KEY_DETAILS_TOP_N)",
       ['key', 'type'],
     );
     this.keysizeBucketKeys = this.createGauge(
@@ -2813,10 +2814,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const newBucketLabels = new Set<string>();
     for (const [db, types] of Object.entries(distribution.databases)) {
       for (const [type, typeDistribution] of Object.entries(types)) {
+        // Emit the singular TYPE-style name so `type` joins with the per-key and
+        // per-pattern families (INFO keysizes reports it in the plural).
+        const labelType = canonicalKeySizeType(type);
         for (const { bucket, count } of typeDistribution.buckets) {
-          newBucketLabels.add(JSON.stringify([db, type, typeDistribution.metric, bucket]));
+          newBucketLabels.add(JSON.stringify([db, labelType, typeDistribution.metric, bucket]));
           this.keysizeBucketKeys
-            .labels(connLabel, db, type, typeDistribution.metric, bucket)
+            .labels(connLabel, db, labelType, typeDistribution.metric, bucket)
             .set(count);
         }
       }

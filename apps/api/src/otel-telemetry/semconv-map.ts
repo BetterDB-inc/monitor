@@ -161,7 +161,7 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
   // betterdb.* namespace like every other derived family; valkey.* is reserved
   // for the redisreceiver catalogue. The keysizes histogram is server-native
   // but absent from the receiver catalogue, so it lands here too.
-  betterdb_key_pattern_memory_bytes: gauge('betterdb.key_pattern.memory', 'By'),
+  betterdb_key_pattern_memory_bytes: gauge('betterdb.key_pattern.memory.total', 'By'),
   betterdb_key_pattern_avg_memory_bytes: gauge('betterdb.key_pattern.memory.avg', 'By'),
   betterdb_key_pattern_max_memory_bytes: gauge('betterdb.key_pattern.memory.max', 'By'),
   betterdb_key_pattern_keys: gauge('betterdb.key_pattern.keys', '{key}'),

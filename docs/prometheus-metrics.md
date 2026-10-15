@@ -432,15 +432,17 @@ Key memory per pattern, per tracked key, and the whole-keyspace size distributio
 
 | Metric                                  | Type  | Labels                          | Description                                                                        | Example   |
 | --------------------------------------- | ----- | ------------------------------- | ---------------------------------------------------------------------------------- | --------- |
-| `betterdb_key_pattern_memory_bytes`     | gauge | `pattern`                       | Total sampled memory of keys matching pattern, from the latest key analytics run   | `1048576` |
-| `betterdb_key_pattern_avg_memory_bytes` | gauge | `pattern`                       | Average per-key memory of keys matching pattern                                    | `1024`    |
-| `betterdb_key_pattern_max_memory_bytes` | gauge | `pattern`                       | Largest single-key memory of keys matching pattern                                 | `65536`   |
-| `betterdb_key_pattern_keys`             | gauge | `pattern`                       | Estimated keys matching pattern                                                    | `1000`    |
-| `betterdb_key_memory_bytes`             | gauge | `key`, `type`                   | Memory of a single tracked key (top largest keys only)                             | `65536`   |
+| `betterdb_key_pattern_memory_bytes`     | gauge | `pattern`                       | Estimated total memory of keys matching pattern, extrapolated from the sampled keys of the latest run (not the raw sampled sum) | `1048576` |
+| `betterdb_key_pattern_avg_memory_bytes` | gauge | `pattern`                       | Average per-key memory across the sampled keys matching pattern                   | `1024`    |
+| `betterdb_key_pattern_max_memory_bytes` | gauge | `pattern`                       | Largest single-key memory among the sampled keys matching pattern                 | `65536`   |
+| `betterdb_key_pattern_keys`             | gauge | `pattern`                       | Estimated keys matching pattern (extrapolated from the sample)                    | `1000`    |
+| `betterdb_key_memory_bytes`             | gauge | `key`, `type`                   | Memory of a single tracked key (the collector's tracked keys ranked by memory; a huge-by-memory key the collector did not track may be absent) | `65536`   |
 | `betterdb_key_cardinality`              | gauge | `key`, `type`                   | Elements in a tracked collection key, or byte length for strings                   | `4000`    |
-| `betterdb_keysize_bucket_keys`          | gauge | `db`, `type`, `metric`, `bucket` | Keys per `INFO keysizes` bucket; `metric="sizes"` is byte length, `"items"` is element count | `655`     |
+| `betterdb_keysize_bucket_keys`          | gauge | `db`, `type`, `metric`, `bucket` | Keys per `INFO keysizes` bucket; `metric="sizes"` is byte length, `"items"` is element count. Per node, so with several connections (or auto-registered replicas) selected the counts sum across nodes — select a single connection for a true per-server distribution. `type` is normalized to the singular form (`string`, `hash`, …) so it joins with the per-key/per-pattern families | `655`     |
 
 **Cardinality bounds**: pattern series are capped at the top `METRICS_KEY_PATTERNS_TOP_N` patterns by total memory (default 100, `0` disables them). Per-key series are capped at the top `METRICS_KEY_DETAILS_TOP_N` keys by memory (default 10, maximum 50, `0` disables only the per-key family). Per-key series put raw key names in the `key` label — keep the cap conservative, or disable the family, if key names embed user identifiers. Bucket series are bounded by the server: one per populated database × data type × log2 bucket.
+
+**Sampling note**: pattern memory and key counts are extrapolated from a sample (`sampled value / sampling ratio`), so on a keyspace larger than the sample they are estimates, not exact totals. `*_avg_memory_bytes` and `*_max_memory_bytes` describe only the sampled keys.
 
 **Label Example**: `pattern="user:*"`, `key="user:1:profile"`, `type="hash"`, `db="db0"`, `metric="sizes"`, `bucket="16K"`
 
@@ -822,12 +824,22 @@ betterdb_anomaly_by_severity{severity!="info"} > 10
 for: 30m
 ```
 
-**BetterDBKeyMemoryGrowth** - Largest key in a pattern ballooning in size (requires Pro key analytics; 104857600 = 100 MiB — tune to your workload)
+**BetterDBKeyMemoryGrowth** - A tracked key ballooning in size (requires Pro key analytics; 104857600 = 100 MiB — tune to your workload)
 
 ```promql
-delta(betterdb_key_pattern_max_memory_bytes[1h]) > 104857600
+max_over_time(betterdb_key_memory_bytes[15m]) > 104857600
 for: 10m
 ```
+
+> Alert on `betterdb_key_memory_bytes` (a specific tracked key) rather than
+> `betterdb_key_pattern_max_memory_bytes`. On a keyspace larger than the sample,
+> the pattern max is the largest key *among the sampled keys of one run*, so each
+> run can pick a different key and the value jumps with no real growth; a pattern
+> newly entering the top-N also starts a fresh series with no baseline, which a
+> `delta`/`increase` rule misreads as a spike. `max_over_time` on the per-key
+> series rides over the per-run resampling. If you must alert per pattern, use
+> `betterdb_key_pattern_memory_bytes` (the estimated total) with a long window
+> and expect sampling noise.
 
 ### Info Alerts
 
