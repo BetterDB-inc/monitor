@@ -354,10 +354,10 @@ async function migrateStream(
     }
     return { wrote: true, warning };
   } catch (err) {
-    // Direct-write path (no same-slot temp key): the target key was deleted and
-    // partially rewritten, so remove it rather than leave a partial stream without TTL.
-    const partial = tmp ?? (wrote ? key : null);
-    if (partial) { try { await target.del(partial); } catch { /* best-effort cleanup */ } }
+    // Direct-write path (no same-slot temp key): the target key was deleted up front
+    // and may have been partly rewritten (entries, or an empty stream created for its
+    // groups), so remove it rather than leave a partial stream without its TTL.
+    try { await target.del(tmp ?? key); } catch { /* best-effort cleanup */ }
     throw err;
   }
 }

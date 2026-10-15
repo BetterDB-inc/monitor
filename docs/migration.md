@@ -240,9 +240,11 @@ pending entries (owner, idle time and delivery count, recreated with
 max-deleted-entry ID are restored with `XSETID`, so new IDs on the target never
 go backwards. Streams that are empty but still hold groups are migrated too.
 
-A pending entry whose message was already trimmed or deleted from the source
-cannot be recreated; the migration log lists a `WARN` line with the count for
-that key. On targets older than 7.0, `XSETID` and `XGROUP CREATE` run without
+A pending entry whose message is not in the copy cannot be recreated: the
+message was trimmed or deleted on the source, or was added and delivered after
+the entries were copied (group state is read after the entries, so on a live
+source this can happen). The migration log lists a `WARN` line with the count
+for that key. On targets older than 7.0, `XSETID` and `XGROUP CREATE` run without
 the 7.0-only counters.
 
 Validation compares each stream's group names and last-delivered IDs as well as

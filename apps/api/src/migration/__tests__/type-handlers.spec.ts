@@ -286,7 +286,7 @@ describe('type-handlers / migrateKey', () => {
       const result = await migrateKey(source, target, 'jobs', 'stream');
 
       expect(result.ok).toBe(true);
-      expect(result.warning).toBe('1 pending entry not restored (message already deleted from the stream)');
+      expect(result.warning).toBe('1 pending entry not restored (message deleted from the source, or added after the copy)');
     });
 
     it('falls back to plain XSETID and XGROUP CREATE on targets older than 7.0', async () => {
@@ -326,6 +326,19 @@ describe('type-handlers / migrateKey', () => {
 
       expect(result.ok).toBe(false);
       expect(target.del).toHaveBeenCalledWith('user:{}:jobs');
+    });
+
+    it('deletes a directly written empty stream when its metadata cannot be recreated', async () => {
+      source.callBuffer.mockImplementation(() => Promise.resolve([]));
+      target.call = jest.fn().mockImplementation((cmd: string) =>
+        cmd === 'XSETID' ? Promise.reject(new Error('OOM command not allowed')) : Promise.resolve('OK'),
+      );
+
+      const result = await migrateKey(source, target, 'user:{}:jobs', 'stream');
+
+      expect(result.ok).toBe(false);
+      expect(target.call).toHaveBeenCalledWith('XGROUP', 'CREATE', 'user:{}:jobs', '__betterdb_mig_placeholder', '0', 'MKSTREAM');
+      expect(target.del).toHaveBeenLastCalledWith('user:{}:jobs');
     });
 
     it('fails the key when a pending entry cannot be claimed', async () => {

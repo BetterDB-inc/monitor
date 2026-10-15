@@ -150,8 +150,9 @@ function isSyntaxError(err: unknown): boolean {
  * Falls back to the pre-7.0 forms of XSETID / XGROUP CREATE when the target
  * rejects ENTRIESADDED / MAXDELETEDID / ENTRIESREAD.
  *
- * Returns a warning when some pending entries could not be restored (their
- * message was already deleted from the source stream, so XCLAIM ignores them).
+ * Returns a warning when some pending entries could not be restored: their
+ * message was deleted from the source, or was added and delivered after the
+ * entries were copied, so it is not in the copy and XCLAIM ignores it.
  */
 export async function writeStreamMeta(
   target: Valkey,
@@ -227,14 +228,14 @@ export async function writeStreamMeta(
         );
       }
       for (const claimed of await execPipeline(pipeline)) {
-        // XCLAIM skips IDs whose message is no longer in the stream.
+        // XCLAIM skips IDs whose message is not in the copy.
         if (!Array.isArray(claimed) || claimed.length === 0) lostPending++;
       }
     }
   }
 
   return lostPending > 0
-    ? `${lostPending} pending entr${lostPending === 1 ? 'y' : 'ies'} not restored (message already deleted from the stream)`
+    ? `${lostPending} pending entr${lostPending === 1 ? 'y' : 'ies'} not restored (message deleted from the source, or added after the copy)`
     : undefined;
 }
 
