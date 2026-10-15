@@ -6,7 +6,8 @@ import type {
   CveSeverity,
 } from '@betterdb/shared';
 import { GHSA_REPOS } from '../cve.constants';
-import { branchOf, compareVersions } from '../matcher/version-range';
+import { branchOf } from '../matcher/version-range';
+import { unlistedBranchCeiling } from './branch-releases';
 import {
   fetchLinkedJson,
   type LinkedJson,
@@ -28,6 +29,7 @@ interface GhsaAdvisory {
   cvss?: { score?: number | null } | null;
   cwe_ids?: string[] | null;
   html_url: string;
+  published_at?: string | null;
   vulnerabilities?: GhsaVulnerability[] | null;
 }
 
@@ -200,50 +202,32 @@ const ANY_UPPER_BOUND_PATTERN = /<=?\s*\d+\.\d+(?:\.\d+)?/g;
 const AND_BELOW_PATTERN = /\band below\b/i;
 
 /**
- * The first branch after the newest one that received a fix: "8.2.2" gives
- * "8.3.0". A branch cut after every listed fix carries that fix, so the
- * unlisted-branch wildcard stops there.
- */
-function nextBranchFloor(versions: string[]): string {
-  const newest = versions.reduce((highest, candidate) => {
-    return compareVersions(candidate, highest) > 0 ? candidate : highest;
-  });
-  const [major, minor] = branchOf(newest).split('.').map(Number);
-
-  return `${major}.${minor + 1}.0`;
-}
-
-/**
- * `patched_versions` only names the branches that received a fix. When the
- * vendor's affected range covers every version ("All", "All versions") or
- * has a floor but no ceiling (">= 7.0", "7.0 and newer"), a branch it
- * doesn't list that sits below the newest fixed branch is affected with no
- * fix available, typically EOL lines such as Redis 7.0.x.
+ * `patched_versions` only names branches that received a fix. When the
+ * affected range is all-versions ("All") or has a floor and no ceiling
+ * (">= 7.0", "7.0 and newer"), a branch it does not list is affected unless
+ * it was cut after the advisory was published. The wildcard is therefore
+ * capped at the first branch released on or after `published_at`
+ * (branch-releases.ts), never at the newest listed fix: a branch above the
+ * newest fix but released before disclosure (e.g. 7.4/8.0 when only 6.2 and
+ * 7.2 are patched) stays flagged. With no date, or no newer known branch,
+ * there is no ceiling (fail safe). matchRanges() still never lets the
+ * wildcard override a fix published on the version's own branch.
  *
- * The wildcard is capped at the branch after the newest fix: Redis fixes
- * land upstream before the next branch is cut, so later branches (8.4.0 for
- * CVE-2025-49844) are not flagged. matchRanges() never lets the wildcard
- * override a fix published for the version's own branch.
- *
- * Nothing is inferred when:
- * - the range has any upper bound ("< 8.0.4", ">= 9.0.0, <= 9.0.2"): it is
- *   already branch-scoped;
- * - the range is missing or unparseable prose;
- * - there is no published fix ("TBD"): there is no ceiling, so it would flag
- *   every build forever. GHSA stays rangeless and NVD's range is used;
- * - a patched token can't be placed ("6.2.X"): the data is too ambiguous to
- *   trust the inference, so NVD's range is used, as before this fallback.
+ * Nothing is inferred when: the range has any upper bound (already
+ * branch-scoped); the range is missing/unparseable; there is no published
+ * fix ("TBD", NVD wins); or a patched token cannot be placed ("6.2.X").
  */
 function unlistedBranchFallback(
   rawRange: string | undefined,
   patched: ParsedPatched,
+  publishedAt: string | null | undefined,
 ): BranchRange | null {
   if (patched.versions.length === 0 || !patched.complete) {
     return null;
   }
 
   const range = normalizeRange(rawRange ?? '');
-  const vulnerableBelow = nextBranchFloor(patched.versions);
+  const vulnerableBelow = unlistedBranchCeiling(publishedAt);
 
   // A missing range is unknown, not "all versions": only an explicit marker counts.
   if (ALL_VERSIONS_PATTERN.test(range)) {
@@ -259,7 +243,11 @@ function unlistedBranchFallback(
   return null;
 }
 
-function toAffectedRanges(vulnerabilities: GhsaVulnerability[], repo: string): AffectedRanges {
+function toAffectedRanges(
+  vulnerabilities: GhsaVulnerability[],
+  repo: string,
+  publishedAt: string | null | undefined,
+): AffectedRanges {
   const exact: BranchRange[] = [];
   const unpatched: BranchRange[] = [];
   // Valkey advisories enumerate every affected branch, so there is never an
@@ -276,7 +264,7 @@ function toAffectedRanges(vulnerabilities: GhsaVulnerability[], repo: string): A
       exact.push(
         ...exactRangesFromPatchedVersions(patched.versions, normalizeRange(rawRange ?? '')),
       );
-      const fallback = allowWildcard ? unlistedBranchFallback(rawRange, patched) : null;
+      const fallback = allowWildcard ? unlistedBranchFallback(rawRange, patched, publishedAt) : null;
       if (fallback) {
         exact.push(fallback);
       }
@@ -315,7 +303,11 @@ function toAdvisory(raw: GhsaAdvisory, product: CveProduct, repo: string): Advis
     return null;
   }
 
-  const { affected, confidence } = toAffectedRanges(raw.vulnerabilities ?? [], repo);
+  const { affected, confidence } = toAffectedRanges(
+    raw.vulnerabilities ?? [],
+    repo,
+    raw.published_at,
+  );
 
   return {
     cveId: raw.cve_id,

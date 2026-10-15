@@ -108,13 +108,21 @@ describe('GHSA unlisted-branch fallback with no vulnerable_version_range', () =>
   });
 });
 
-const adv = (range: string | null, patched: string, repo = 'redis/redis', id = 'GHSA-x') => ({
+// Default publish date falls after 8.2.0 and before 8.4.0 (see branch-releases.ts).
+const adv = (
+  range: string | null,
+  patched: string,
+  repo = 'redis/redis',
+  id = 'GHSA-x',
+  publishedAt: string | null = '2025-10-03T00:00:00Z',
+) => ({
   ghsa_id: id,
   cve_id: 'CVE-2099-0002',
   severity: 'critical',
   cvss: { score: 9 },
   cwe_ids: [],
   summary: 's',
+  published_at: publishedAt,
   html_url: `https://github.com/${repo}/security/advisories/${id}`,
   vulnerabilities: [
     {
@@ -178,15 +186,30 @@ describe('GHSA unlisted-branch wildcard rules', () => {
     expect(isVulnerable(ds, '7.2.10')).toBe(true);
   });
 
-  it('(b) "All" flags unlisted branches up to the newest fixed branch, not past it', async () => {
+  it('(b) "All" with only 6.2/7.2 patched still flags unpatched 7.4/8.0 released before disclosure', async () => {
     const ds = await datasetFor([adv('All', '6.2.20, 7.2.11')]);
-    for (const v of ['5.0.14', '6.0.20', '7.0.15', '6.2.19', '7.2.10']) {
+    for (const v of ['5.0.14', '6.0.20', '7.0.15', '6.2.19', '7.2.10', '7.4.0', '7.4.5', '8.0.0', '8.2.0']) {
       expect(isVulnerable(ds, v)).toBe(true);
     }
-    // A branch cut after the newest fix carries it.
-    for (const v of ['6.2.20', '7.2.11', '7.4.0', '8.0.0']) {
-      expect(isVulnerable(ds, v)).toBe(false);
+    for (const v of ['6.2.20', '7.2.11']) {
+      expect(isVulnerable(ds, v)).toBe(false); // patched on own branch
     }
+    expect(isVulnerable(ds, '8.4.0')).toBe(false); // cut after disclosure
+  });
+
+  it('with no published_at, never clears an unlisted newer branch (fail safe)', async () => {
+    const ds = await datasetFor([adv('All', '6.2.20, 7.2.11', 'redis/redis', 'GHSA-x', null)]);
+    for (const v of ['7.4.0', '8.0.0', '8.4.0']) {
+      expect(isVulnerable(ds, v)).toBe(true);
+    }
+  });
+
+  it('advisory published after every known branch clears nothing unlisted (no evidence)', async () => {
+    const ds = await datasetFor([
+      adv('All', '6.2.20', 'redis/redis', 'GHSA-x', '2099-01-01T00:00:00Z'),
+    ]);
+    expect(isVulnerable(ds, '8.4.0')).toBe(true);
+    expect(isVulnerable(ds, '6.2.20')).toBe(false);
   });
 
   it.each(['All versions', 'all', '>= 2.8', '2.8 or newer', '7.0 and newer', '=> 7.0'])(
@@ -267,8 +290,11 @@ describe('GHSA unlisted-branch wildcard rules', () => {
     }
   });
 
+  // published_at per NVD (Feb 27, 2021); any date before Redis 7.0.0 (2022-04-27) behaves the same.
   it('parses a two-part patched version as the .0 release (CVE-2021-21309 shape)', async () => {
-    const ds = await datasetFor([adv('All', '6.0.11, 5.0.11, 6.2')]);
+    const ds = await datasetFor([
+      adv('All', '6.0.11, 5.0.11, 6.2', 'redis/redis', 'GHSA-x', '2021-02-27T00:00:00Z'),
+    ]);
     for (const v of ['6.2.0', '6.2.5', '6.2.20', '6.0.11', '5.0.11', '7.0.15']) {
       expect(isVulnerable(ds, v)).toBe(false);
     }
@@ -278,13 +304,13 @@ describe('GHSA unlisted-branch wildcard rules', () => {
   });
 
   it.each([
-    ['CVE-2021-32626', '2.6 or newer', '5.0.14, 6.0.16, 6.2.6', '8.2.3', '6.0.15'],
-    ['CVE-2024-31449', '>= 2.8.18', '6.2.16, 7.2.6, 7.4.1', '8.0.4', '7.0.15'],
-    ['CVE-2025-62507', '>= 8.2.0', '8.2.3', '8.4.0', '8.2.2'],
+    ['CVE-2021-32626', '2.6 or newer', '5.0.14, 6.0.16, 6.2.6', '8.2.3', '6.0.15', '2021-10-04T11:30:20Z'],
+    ['CVE-2024-31449', '>= 2.8.18', '6.2.16, 7.2.6, 7.4.1', '8.0.4', '7.0.15', '2024-10-06T18:16:07Z'],
+    ['CVE-2025-62507', '>= 8.2.0', '8.2.3', '8.4.0', '8.2.2', '2025-11-02T13:49:19Z'],
   ])(
-    '%s: no finding on a branch cut after the newest fix',
-    async (_cve, range, patched, clean, vulnerable) => {
-      const ds = await datasetFor([adv(range, patched)]);
+    '%s: no finding on a branch cut after the advisory',
+    async (_cve, range, patched, clean, vulnerable, publishedAt) => {
+      const ds = await datasetFor([adv(range, patched, 'redis/redis', 'GHSA-x', publishedAt)]);
       expect(isVulnerable(ds, clean)).toBe(false);
       expect(isVulnerable(ds, vulnerable)).toBe(true);
     },

@@ -5,6 +5,7 @@
     "severity": "critical",
     "cvss": { "score": 10 },
     "cwe_ids": ["CWE-416"],
+    "published_at": "2025-10-03T07:22:30Z",
     "summary": "Lua use-after-free may lead to remote code execution",
     "html_url": "https://github.com/redis/redis/security/advisories/GHSA-4789-qfc9-5f9q",
     "vulnerabilities": [
