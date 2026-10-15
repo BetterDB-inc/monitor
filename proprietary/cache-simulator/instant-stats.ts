@@ -7,15 +7,20 @@ export interface InstantStats {
   datasetMemory: number | null;
 }
 
-function toNumber(value: unknown): number {
+function toFinite(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function toNumber(value: unknown): number {
+  return toFinite(value) ?? 0;
 }
 
 export function readInstantStats(info: InfoResponse): InstantStats {
   const policy = info.memory?.maxmemory_policy;
   const usedMemory = toNumber(info.memory?.used_memory);
-  const dataset = info.memory?.used_memory_dataset === undefined ? null : toNumber(info.memory.used_memory_dataset);
+  const dataset = toFinite(info.memory?.used_memory_dataset);
   return {
     usedMemory,
     maxmemory: toNumber(info.memory?.maxmemory),

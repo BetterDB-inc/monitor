@@ -26,7 +26,7 @@ export class CacheSimulatorService {
   private readonly logger = new Logger(CacheSimulatorService.name);
   private readonly jobs = new Map<string, Job>();
   private readonly starting = new Map<string, Promise<CacheSimulatorSnapshot>>();
-  private readonly results = new Map<string, { snapshot: CacheSimulatorSnapshot; at: number }>();
+  private readonly results = new Map<string, { snapshot: CacheSimulatorSnapshot; expiresAt: number }>();
 
   constructor(
     private readonly registry: ConnectionRegistry,
@@ -41,7 +41,7 @@ export class CacheSimulatorService {
     const starting = this.starting.get(connectionId);
     if (starting) return starting;
     const cached = this.results.get(connectionId);
-    if (cached && !refresh && Date.now() - cached.at < this.ttl(cached.snapshot)) return cached.snapshot;
+    if (cached && !refresh && Date.now() < cached.expiresAt) return cached.snapshot;
     const name = this.registry.getConfig(connectionId)?.name ?? connectionId;
     const promise = this.start(connectionId, { id: connectionId, name, client }).finally(() => {
       this.starting.delete(connectionId);
@@ -86,10 +86,11 @@ export class CacheSimulatorService {
     const cached = this.results.get(connectionId);
     if (snapshot.status === 'failed' && cached?.snapshot.status === 'ready') {
       const kept = { ...cached.snapshot, error: snapshot.error };
-      this.results.set(connectionId, { snapshot: kept, at: cached.at });
+      this.results.set(connectionId, { snapshot: kept, expiresAt: Math.max(cached.expiresAt, Date.now() + FAILURE_TTL_MS) });
       return kept;
     }
-    this.results.set(connectionId, { snapshot, at: Date.now() });
+    const ttl = snapshot.status === 'failed' ? FAILURE_TTL_MS : RESULT_TTL_MS;
+    this.results.set(connectionId, { snapshot, expiresAt: Date.now() + ttl });
     return snapshot;
   }
 
@@ -138,10 +139,6 @@ export class CacheSimulatorService {
     };
   }
 
-  private ttl(snapshot: CacheSimulatorSnapshot): number {
-    return snapshot.status === 'failed' ? FAILURE_TTL_MS : RESULT_TTL_MS;
-  }
-
   private prune(): void {
     for (const id of new Set([...this.jobs.keys(), ...this.results.keys()])) {
       if (this.registry.getConfig(id) !== null) continue;
@@ -160,7 +157,21 @@ export class CacheSimulatorService {
       this.logger,
       LABEL,
     );
+    const expected = await this.primaryCount(seed);
+    if (expected !== null && nodes.length < expected) {
+      throw new Error(`Only ${nodes.length} of ${expected} cluster primaries are reachable, so the totals would be understated`);
+    }
     return nodes.length > 0 ? nodes : [seed];
+  }
+
+  private async primaryCount(seed: ScanNode): Promise<number | null> {
+    try {
+      const size = Number((await seed.client.getClusterInfo()).cluster_size);
+      return Number.isInteger(size) && size > 0 ? size : null;
+    } catch (error) {
+      this.logger.warn(`${LABEL} could not read the cluster size from ${seed.name}: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
   }
 
   private async growth(nodes: ScanNode[]): Promise<CacheSimulatorGrowth | null> {

@@ -29,7 +29,7 @@ describe('readInstantStats', () => {
     expect(readInstantStats(info).datasetMemory).toBeNull();
   });
 
-  it('treats non-numeric values as zero', () => {
+  it('treats non-numeric values as zero and an unparseable dataset as unknown', () => {
     const info: any = {
       memory: { used_memory: 'abc', maxmemory: '', maxmemory_policy: '', used_memory_dataset: 'NaN' },
     };
@@ -37,7 +37,14 @@ describe('readInstantStats', () => {
       usedMemory: 0,
       maxmemory: 0,
       maxmemoryPolicy: 'unknown',
-      datasetMemory: 0,
+      datasetMemory: null,
     });
+  });
+
+  it('treats an empty or null dataset figure as unknown', () => {
+    const empty: any = { memory: { used_memory: '100', used_memory_dataset: '' } };
+    const missing: any = { memory: { used_memory: '100', used_memory_dataset: null } };
+    expect(readInstantStats(empty).datasetMemory).toBeNull();
+    expect(readInstantStats(missing).datasetMemory).toBeNull();
   });
 });
