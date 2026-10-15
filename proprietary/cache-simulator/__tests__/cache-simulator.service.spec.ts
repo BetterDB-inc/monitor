@@ -7,7 +7,7 @@ const info = (usedMemory: number, maxmemory: number, policy = 'allkeys-lru', dat
 });
 
 function client(usedMemory = 1000, maxmemory = 10_000, dbSize = 5) {
-  return { getInfoParsed: jest.fn().mockResolvedValue(info(usedMemory, maxmemory)), getDbSize: jest.fn().mockResolvedValue(dbSize), getRole: jest.fn().mockResolvedValue({ role: 'master' }), getClusterInfo: jest.fn().mockResolvedValue({ cluster_size: '2' }) };
+  return { getInfoParsed: jest.fn().mockResolvedValue(info(usedMemory, maxmemory)), getDbSize: jest.fn().mockResolvedValue(dbSize), getClusterNodes: jest.fn().mockResolvedValue([{ flags: ['myself', 'master'], slots: [[0, 100]] }]), getClusterInfo: jest.fn().mockResolvedValue({ cluster_size: '2' }) };
 }
 
 function setup(connections: Record<string, ReturnType<typeof client>> = { c1: client() }, statuses: any[] = []) {
@@ -165,8 +165,8 @@ describe('CacheSimulatorService', () => {
   it('fails setup when no primary is reachable', async () => {
     const spy = jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
     const connections = { seed: client(1000, 10_000, 5), m1: client(2000, 10_000, 7) };
-    connections.seed.getRole.mockRejectedValue(new Error('down'));
-    connections.m1.getRole.mockResolvedValue({ role: 'slave' });
+    connections.seed.getClusterNodes.mockRejectedValue(new Error('down'));
+    connections.m1.getClusterNodes.mockResolvedValue([{ flags: ['myself', 'slave'], slots: [] }]);
     const statuses = [
       { id: 'seed', name: 'seed', isConnected: true, connectionType: 'direct' },
       { id: 'm1', name: 'm1', isConnected: true, connectionType: 'direct', membership: { seedId: 'seed', source: 'cluster' } },
@@ -214,6 +214,19 @@ describe('CacheSimulatorService', () => {
     const { service } = setup(connections, statuses);
     const result = await service.snapshot('seed');
     expect(result).toMatchObject({ status: 'failed', error: 'Only 2 of 3 cluster primaries are reachable, so the totals would be understated' });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('does not let a slotless master stand in for a missing primary', async () => {
+    const spy = jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
+    const connections = { seed: client(1000, 10_000, 5), m1: client(2000, 10_000, 7) };
+    connections.m1.getClusterNodes.mockResolvedValue([{ flags: ['myself', 'master'], slots: [] }]);
+    const statuses = [
+      { id: 'seed', name: 'seed', isConnected: true, connectionType: 'direct' },
+      { id: 'm1', name: 'm1', isConnected: true, connectionType: 'direct', membership: { seedId: 'seed', source: 'cluster' } },
+    ];
+    const { service } = setup(connections, statuses);
+    expect(await service.snapshot('seed')).toMatchObject({ status: 'failed', error: 'Only 1 of 2 cluster primaries are reachable, so the totals would be understated' });
     expect(spy).not.toHaveBeenCalled();
   });
 

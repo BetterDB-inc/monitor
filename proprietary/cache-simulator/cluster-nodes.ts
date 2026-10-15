@@ -32,15 +32,16 @@ export async function primaryNodes(
   logger: Pick<Logger, 'warn'>,
   label: string,
 ): Promise<ScanNode[]> {
-  const roles = await Promise.allSettled(nodes.map((node) => node.client.getRole()));
+  const views = await Promise.allSettled(nodes.map((node) => node.client.getClusterNodes()));
   return nodes.filter((node, index) => {
-    const role = roles[index];
-    if (role.status === 'rejected') {
+    const view = views[index];
+    if (view.status === 'rejected') {
       logger.warn(
-        `${label} could not read the role of ${node.name}: ${role.reason instanceof Error ? role.reason.message : role.reason}`,
+        `${label} could not read the cluster role of ${node.name}: ${view.reason instanceof Error ? view.reason.message : view.reason}`,
       );
       return false;
     }
-    return role.value.role === 'master';
+    const self = view.value.find((entry) => entry.flags.includes('myself'));
+    return self !== undefined && self.flags.includes('master') && self.slots.length > 0;
   });
 }
