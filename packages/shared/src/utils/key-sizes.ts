@@ -52,16 +52,25 @@ export function pruneKeyDetails(details: KeyDetail[], topN = KEY_DETAILS_TOP_N):
 // Matches lines like: db0_distrib_strings_sizes:1=19,2=655,4=3918,16K=3
 const LINE_RE = /^db(\d+)_distrib_([a-z]+)_(sizes|items):(.+)$/;
 
+// Section header emitted by a server that supports the section, e.g. "# Keysizes".
+const HEADER_RE = /^#\s*keysizes\b/i;
+
 /**
  * Parse the raw `INFO keysizes` reply into a structured distribution.
- * Unknown / unrelated lines are ignored. `available` is false when no
- * keysizes lines are present (older server or section disabled).
+ * Unknown / unrelated lines are ignored. `available` means "the server exposes
+ * the keysizes section": it is true when the reply carries the `# Keysizes`
+ * header OR at least one dbN_distrib line (so a supported server with an empty
+ * keyspace reports available:true with no databases), and false only for an
+ * empty reply / missing header (pre-8 Redis, every Valkey, section disabled).
  */
 export function parseKeySizeDistribution(raw: string): KeySizeDistribution {
   const databases: KeySizeDistribution['databases'] = {};
+  let hasHeader = false;
 
   for (const rawLine of raw.split(/\r?\n/)) {
-    const match = LINE_RE.exec(rawLine.trim());
+    const line = rawLine.trim();
+    if (HEADER_RE.test(line)) hasHeader = true;
+    const match = LINE_RE.exec(line);
     if (!match) continue;
 
     const [, db, type, metric, rest] = match;
@@ -85,7 +94,7 @@ export function parseKeySizeDistribution(raw: string): KeySizeDistribution {
     };
   }
 
-  return { databases, available: Object.keys(databases).length > 0 };
+  return { databases, available: hasHeader || Object.keys(databases).length > 0 };
 }
 
 const BUCKET_UNITS = ['', 'K', 'M', 'G', 'T', 'P', 'E'];

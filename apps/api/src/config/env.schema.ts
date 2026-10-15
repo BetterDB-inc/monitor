@@ -32,6 +32,16 @@ const optionalTrimmedString = z
     return trimmed;
   });
 
+// Top-N caps are clamped at runtime by the export-profile resolvers (the
+// documented behavior); schema bounds reference the same constants and
+// .catch() keeps an out-of-range or malformed value from aborting boot
+// where the resolver would simply clamp it.
+const topNEnv = (max: number, def: number) =>
+  z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    z.coerce.number().int().min(0).max(max).default(def).catch(def),
+  );
+
 /**
  * Environment variable validation schema
  * Validates all environment variables at application startup
@@ -259,42 +269,11 @@ export const envSchema = z
         .transform((v) => v.trim().toLowerCase())
         .pipe(z.enum(['vitals', 'full'])),
     ),
-    // Top-N caps are clamped at runtime by the export-profile resolvers (the
-    // documented behavior); schema bounds reference the same constants and
-    // .catch() keeps an out-of-range or malformed value from aborting boot
-    // where the resolver would simply clamp it.
-    METRICS_SLOT_STATS_TOP_N: z.preprocess(
-      (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
-      z.coerce
-        .number()
-        .int()
-        .min(0)
-        .max(MAX_SLOT_STATS_TOP_N)
-        .default(DEFAULT_SLOT_STATS_TOP_N)
-        .catch(DEFAULT_SLOT_STATS_TOP_N),
-    ),
+    METRICS_SLOT_STATS_TOP_N: topNEnv(MAX_SLOT_STATS_TOP_N, DEFAULT_SLOT_STATS_TOP_N),
     // Key-size metric families from key analytics runs. 0 disables the family;
     // the per-key cap is bounded by what the collector persists.
-    METRICS_KEY_PATTERNS_TOP_N: z.preprocess(
-      (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
-      z.coerce
-        .number()
-        .int()
-        .min(0)
-        .max(MAX_KEY_PATTERNS_TOP_N)
-        .default(DEFAULT_KEY_PATTERNS_TOP_N)
-        .catch(DEFAULT_KEY_PATTERNS_TOP_N),
-    ),
-    METRICS_KEY_DETAILS_TOP_N: z.preprocess(
-      (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
-      z.coerce
-        .number()
-        .int()
-        .min(0)
-        .max(MAX_KEY_DETAILS_TOP_N)
-        .default(DEFAULT_KEY_DETAILS_TOP_N)
-        .catch(DEFAULT_KEY_DETAILS_TOP_N),
-    ),
+    METRICS_KEY_PATTERNS_TOP_N: topNEnv(MAX_KEY_PATTERNS_TOP_N, DEFAULT_KEY_PATTERNS_TOP_N),
+    METRICS_KEY_DETAILS_TOP_N: topNEnv(MAX_KEY_DETAILS_TOP_N, DEFAULT_KEY_DETAILS_TOP_N),
 
     // OTel telemetry export (mirror of Prometheus metrics). No-op unless
     // OTEL_EXPORTER_OTLP_ENDPOINT is set.

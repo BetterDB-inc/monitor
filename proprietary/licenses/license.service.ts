@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'crypto';
 import { compare, valid as validSemver } from 'semver';
 import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
-import { Tier, Feature, TIER_FEATURES, EntitlementResponse, EntitlementRequest } from './types';
+import { Tier, Feature, TIER_FEATURES, EntitlementResponse, EntitlementRequest, parseTier } from './types';
 import type { LicenseSource, LicenseTokenClaims } from './types';
 import type { InstallMethod, VersionInfo } from '@betterdb/shared';
 import { TelemetryPort } from '@app/common/interfaces/telemetry-port.interface';
@@ -706,7 +706,13 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
         this.setLatestVersion(data.latestVersion, data.releaseUrl);
       }
 
-      return data;
+      // Choke point for unverified tiers: the token-less body is not signature-
+      // checked, so a version-skewed server could report a tier this build
+      // doesn't know. Every cache write downstream of checkOnline (both
+      // validateLicense branches, activateLicenseKey) flows through here —
+      // pin the tier to a known value so a cached EntitlementResponse can never
+      // key TIER_FEATURES with an undefined tier and crash the read path.
+      return { ...data, tier: parseTier(data.tier, Tier.community) };
     } finally {
       clearTimeout(timeout);
     }
@@ -1001,8 +1007,12 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
   hasFeature(feature: Feature | string): boolean {
     this.enforceOfflineExpiry();
     const entitlement = this.cache?.response || this.getCommunityEntitlement();
-    // Derive features from tier using TIER_FEATURES mapping
-    const tierFeatures = TIER_FEATURES[entitlement.tier];
+    // Derive features from tier using TIER_FEATURES mapping. Fall back to
+    // community for an unknown tier: a cache persisted by an older build (before
+    // checkOnline normalized the tier) may predate normalization, and a wrong
+    // tier must degrade — never throw on TIER_FEATURES[undefined].includes,
+    // which main.ts's unhandledRejection handler would turn into a process exit.
+    const tierFeatures = TIER_FEATURES[entitlement.tier] ?? TIER_FEATURES[Tier.community];
     return tierFeatures.includes(feature as Feature);
   }
 

@@ -84,7 +84,11 @@ export interface KeySizeTypeDistribution {
 export interface KeySizeDistribution {
   /** db -> data type (strings|lists|sets|zsets|hashes|streams) -> distribution. */
   databases: Record<string, Record<string, KeySizeTypeDistribution>>;
-  /** False when the server does not expose the keysizes section. */
+  /**
+   * True when the server exposes the keysizes section. A supported server with
+   * an empty keyspace reports available:true with empty `databases`; false means
+   * the server does not expose the section at all (pre-8 Redis / every Valkey).
+   */
   available: boolean;
 }
 

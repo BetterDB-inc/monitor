@@ -110,7 +110,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
       }
 
       this.start();
-    });
+    }).catch((error) => this.logger.error('Key Analytics deferred start failed', error));
     // Retention for key_pattern_snapshots and hot_key_stats is owned by the
     // shared sweeps (cloud DataRetentionService / self-hosted
     // LocalRetentionService via runRetentionSweep) — no service-local pruner.
@@ -540,9 +540,11 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
       const raw = (await client.call('INFO', ['keysizes'])) as string;
       return parseKeySizeDistribution(raw ?? '');
     } catch {
-      // Servers without the keysizes section may reject the argument outright
-      // (e.g. an ERR reply) rather than returning an empty string. Treat any
-      // failure as "section unavailable" so the tab shows its empty state.
+      // Some managed servers reject the argument outright (NOPERM / "command is
+      // not available") rather than returning an empty string. Treat any failure
+      // as "section unavailable". A supported server with an empty keyspace is
+      // handled by the parser instead (header present -> available:true), so this
+      // path no longer conflates empty keyspaces with unsupported servers.
       return NO_KEY_SIZES;
     }
   }

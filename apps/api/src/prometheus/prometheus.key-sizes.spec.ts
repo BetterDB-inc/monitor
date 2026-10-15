@@ -18,6 +18,39 @@ const KEYSIZES_RAW = [
   'db0_distrib_lists_items:1=5,32=2',
 ].join('\r\n');
 
+// Mirror of PrometheusService.KEYSIZES_STALENESS_MS (10 * 30s refresh = 5 min):
+// the freeze cap for a frozen bucket histogram under persistent transient
+// transport failures (the keysizes read has no query window of its own).
+const KEYSIZES_STALENESS_MS = 300_000;
+
+interface SnapshotQuery {
+  startTime?: number;
+  endTime?: number;
+  limit?: number;
+}
+
+/**
+ * A getKeyPatternSnapshots mock that honors the query options the way both
+ * real adapters do: filter the fixture rows by [startTime, endTime], return
+ * them newest-first, and apply the row limit. The production two-step read
+ * (limit-1 probe, then a startTime=endTime=latestTimestamp batch) only selects
+ * a single run because the adapter enforces the window — so the mock must too.
+ */
+function patternSnapshotsHonoring(rows: KeyPatternSnapshot[]): jest.Mock {
+  return jest.fn(async (query: SnapshotQuery = {}) => {
+    let result = rows.filter(
+      (row) =>
+        (query.startTime === undefined || row.timestamp >= query.startTime) &&
+        (query.endTime === undefined || row.timestamp <= query.endTime),
+    );
+    result = [...result].sort((a, b) => b.timestamp - a.timestamp);
+    if (query.limit !== undefined) {
+      result = result.slice(0, query.limit);
+    }
+    return result;
+  });
+}
+
 function patternSnapshot(overrides: Partial<KeyPatternSnapshot> = {}): KeyPatternSnapshot {
   return {
     id: 'snap-1',
@@ -55,6 +88,7 @@ interface Harness {
   client: { getInfoParsed: jest.Mock; call: jest.Mock };
   storage: { getKeyPatternSnapshots: jest.Mock; getHotKeys: jest.Mock };
   registry: { getConfig: jest.Mock };
+  tracker: { isAvailable: jest.Mock; recordFailure: jest.Mock };
 }
 
 function buildService(env: Record<string, unknown> = {}): Harness {
@@ -73,12 +107,17 @@ function buildService(env: Record<string, unknown> = {}): Harness {
     getName: jest.fn().mockReturnValue('primary'),
   };
   const storage = {
-    getKeyPatternSnapshots: jest
-      .fn()
-      .mockResolvedValue([
-        patternSnapshot(),
-        patternSnapshot({ id: 'snap-2', pattern: 'session:*', totalMemoryBytes: 200_000, avgMemoryBytes: 400, maxMemoryBytes: 9_000, keyCount: 500 }),
-      ]),
+    getKeyPatternSnapshots: patternSnapshotsHonoring([
+      patternSnapshot(),
+      patternSnapshot({
+        id: 'snap-2',
+        pattern: 'session:*',
+        totalMemoryBytes: 200_000,
+        avgMemoryBytes: 400,
+        maxMemoryBytes: 9_000,
+        keyCount: 500,
+      }),
+    ]),
     getHotKeys: jest
       .fn()
       .mockResolvedValue([
@@ -92,7 +131,7 @@ function buildService(env: Record<string, unknown> = {}): Harness {
   } as unknown as ConfigService;
   const tracker = {
     isAvailable: jest.fn().mockReturnValue(true),
-    recordFailure: jest.fn(),
+    recordFailure: jest.fn().mockReturnValue(false),
   };
 
   const service = new PrometheusService(
@@ -106,7 +145,7 @@ function buildService(env: Record<string, unknown> = {}): Harness {
   );
   jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
   jest.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
-  return { service, client, storage, registry };
+  return { service, client, storage, registry, tracker };
 }
 
 async function update(service: PrometheusService): Promise<void> {
@@ -156,10 +195,15 @@ describe('PrometheusService key size metrics', () => {
 
   it('exports only the latest run when older snapshots are present', async () => {
     const { service, storage } = buildService();
-    storage.getKeyPatternSnapshots.mockResolvedValue([
-      patternSnapshot(),
-      patternSnapshot({ id: 'snap-old', pattern: 'stale:*', timestamp: NOW - 600_000 }),
-    ]);
+    // Honor the query window: the probe resolves the newest run's timestamp and
+    // the batch fetches startTime=endTime=that timestamp, so the stale run is
+    // filtered out by the adapter contract — not a post-fetch .filter().
+    storage.getKeyPatternSnapshots.mockImplementation(
+      patternSnapshotsHonoring([
+        patternSnapshot(),
+        patternSnapshot({ id: 'snap-old', pattern: 'stale:*', timestamp: NOW - 600_000 }),
+      ]),
+    );
     await update(service);
     const text = await service.getMetrics();
 
@@ -304,7 +348,10 @@ describe('PrometheusService key size metrics', () => {
     storage.getKeyPatternSnapshots.mockRejectedValue(new Error('db down'));
     storage.getHotKeys.mockRejectedValue(new Error('db down'));
     const state = service['perConnectionState'].get(CONN)!;
-    state.lastKeyAnalyticsSuccessAt = Date.now() - 901_000;
+    // Both families stale past the bound: the synchronous prefix removes each
+    // before the (now-failing) fetch runs.
+    state.lastPatternsSuccessAt = Date.now() - 901_000;
+    state.lastKeyDetailsSuccessAt = Date.now() - 901_000;
     resetThrottles(service);
     await update(service);
 
@@ -372,6 +419,145 @@ describe('PrometheusService key size metrics', () => {
     // a slow CI runner between the stamp and this assertion cannot flake it.
     expect(Date.now() - startTime).toBeGreaterThanOrEqual(900_000);
     expect(Date.now() - startTime).toBeLessThanOrEqual(960_000);
+  });
+
+  it('skips the batch fetch and getHotKeys when the latest run is unchanged', async () => {
+    const { service, storage } = buildService();
+    await update(service);
+
+    storage.getKeyPatternSnapshots.mockClear();
+    storage.getHotKeys.mockClear();
+    resetThrottles(service);
+    await update(service);
+
+    // Only the limit-1 probe runs; the unchanged run skips the batch re-fetch,
+    // getHotKeys, and every gauge rewrite.
+    expect(storage.getKeyPatternSnapshots).toHaveBeenCalledTimes(1);
+    expect(storage.getKeyPatternSnapshots.mock.calls[0][0]).toMatchObject({ limit: 1 });
+    expect(storage.getHotKeys).not.toHaveBeenCalled();
+    // The already-exported series are still served.
+    expect(await service.getMetrics()).toContain('betterdb_key_pattern_memory_bytes{');
+  });
+
+  it('re-exports the run once its timestamp advances', async () => {
+    const { service, storage } = buildService();
+    await update(service);
+
+    storage.getKeyPatternSnapshots.mockImplementation(
+      patternSnapshotsHonoring([
+        patternSnapshot({ timestamp: NOW + 1000, totalMemoryBytes: 3_000_000 }),
+      ]),
+    );
+    storage.getHotKeys.mockClear();
+    resetThrottles(service);
+    await update(service);
+
+    // A newer run defeats the probe-skip: the batch re-fetches and getHotKeys runs.
+    expect(storage.getHotKeys).toHaveBeenCalled();
+    expect(await service.getMetrics()).toContain(
+      `betterdb_key_pattern_memory_bytes{connection="${LABEL}",pattern="user:*"} 3000000`,
+    );
+  });
+
+  it('keeps and updates pattern series while getHotKeys persistently fails', async () => {
+    const { service, storage } = buildService();
+    await update(service);
+    expect(await service.getMetrics()).toContain('betterdb_key_pattern_memory_bytes{');
+    expect(await service.getMetrics()).toContain('betterdb_key_memory_bytes{');
+
+    // getHotKeys (per-key family) fails; its last success is pushed past the
+    // bound so the sync prefix expires only that family. Patterns stay healthy.
+    storage.getHotKeys.mockRejectedValue(new Error('hot keys unavailable'));
+    const state = service['perConnectionState'].get(CONN)!;
+    state.lastKeyDetailsSuccessAt = Date.now() - 901_000;
+    storage.getKeyPatternSnapshots.mockImplementation(
+      patternSnapshotsHonoring([patternSnapshot({ totalMemoryBytes: 4_000_000 })]),
+    );
+    resetThrottles(service);
+    await update(service);
+
+    const text = await service.getMetrics();
+    // Pattern family survives AND reflects the newest run.
+    expect(text).toContain(
+      `betterdb_key_pattern_memory_bytes{connection="${LABEL}",pattern="user:*"} 4000000`,
+    );
+    // Per-key family removed after its own staleness bound.
+    expect(text).not.toContain('betterdb_key_memory_bytes{');
+    // A failing getHotKeys must still let the pattern family stamp success.
+    expect(state.lastPatternsSuccessAt).toBeGreaterThan(state.lastKeyDetailsSuccessAt);
+  });
+
+  it('records a blocked-command keysizes failure and drops the buckets', async () => {
+    const { service, client, tracker } = buildService();
+    await update(service);
+    expect(await service.getMetrics()).toContain('betterdb_keysize_bucket_keys{');
+
+    client.call.mockRejectedValue(
+      new Error("NOPERM this user has no permissions to run the 'info|keysizes' command"),
+    );
+    tracker.recordFailure.mockReturnValue(true);
+    resetThrottles(service);
+    await update(service);
+
+    expect(tracker.recordFailure).toHaveBeenCalledWith(CONN, 'canKeysizes', expect.any(Error));
+    expect(await service.getMetrics()).not.toContain('betterdb_keysize_bucket_keys{');
+    // A blocked command is not a "section absent" signal, so no 10m backoff is
+    // armed — the capability gate (not the backoff) suppresses re-probes.
+    expect(service['perConnectionState'].get(CONN)!.keysizesUnavailableUntil).toBe(0);
+  });
+
+  it('drops keysize buckets and skips the probe when the capability is unavailable', async () => {
+    const { service, client, tracker } = buildService();
+    await update(service);
+    expect(await service.getMetrics()).toContain('betterdb_keysize_bucket_keys{');
+
+    tracker.isAvailable.mockImplementation((_id: string, key: string) => key !== 'canKeysizes');
+    client.call.mockClear();
+    resetThrottles(service);
+    await update(service);
+
+    expect(client.call).not.toHaveBeenCalled();
+    expect(await service.getMetrics()).not.toContain('betterdb_keysize_bucket_keys{');
+  });
+
+  it('logs a transient keysizes failure once across repeated refreshes', async () => {
+    const { service, client } = buildService();
+    const logged = jest
+      .spyOn(service['logger'], 'error')
+      .mockImplementation(() => undefined);
+    await update(service);
+
+    client.call.mockRejectedValue(new Error('Command timed out'));
+    const keysizesLogsBefore = logged.mock.calls.filter((call) =>
+      String(call[0]).includes('keysizes'),
+    ).length;
+    resetThrottles(service);
+    await update(service);
+    resetThrottles(service);
+    await update(service);
+    const keysizesLogsAfter = logged.mock.calls.filter((call) =>
+      String(call[0]).includes('keysizes'),
+    ).length;
+
+    // Same message twice logs exactly once (dedup latch), series kept.
+    expect(keysizesLogsAfter - keysizesLogsBefore).toBe(1);
+    expect(await service.getMetrics()).toContain('betterdb_keysize_bucket_keys{');
+  });
+
+  it('removes keysize buckets once a transient failure persists past the bound', async () => {
+    const { service, client } = buildService();
+    await update(service);
+    expect(await service.getMetrics()).toContain('betterdb_keysize_bucket_keys{');
+
+    client.call.mockRejectedValue(new Error('Command timed out'));
+    const state = service['perConnectionState'].get(CONN)!;
+    state.lastKeysizesSuccessAt = Date.now() - (KEYSIZES_STALENESS_MS + 1000);
+    resetThrottles(service);
+    await update(service);
+
+    // The sync-prefix freeze cap drops the histogram; still no unsupported backoff.
+    expect(await service.getMetrics()).not.toContain('betterdb_keysize_bucket_keys{');
+    expect(state.keysizesUnavailableUntil).toBe(0);
   });
 });
 
