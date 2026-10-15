@@ -29,6 +29,14 @@
 - Store runs after the stream is fully delivered; failures log a warning and
   never surface to the caller.
 
+### Fixed
+
+- `CachedModel` now subclasses the Agents SDK `Model` (when `openai-agents` is
+  installed), so `Agent(model=CachedModel(...))` is accepted by current
+  Agents SDK versions instead of raising `TypeError`. It also forwards
+  `close()` and `_cleanup_on_run_end()` to the wrapped model.
+  `CachedModelProvider` was unaffected.
+
 ## [0.11.0] - 2026-07-10
 
 ### Added
