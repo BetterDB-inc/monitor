@@ -2,7 +2,11 @@ import { clusterNodes, primaryNodes } from '../cluster-nodes';
 
 const logger = () => ({ warn: jest.fn() });
 const member = (id: string) => ({ id, name: id }) as any;
-const node = (name: string, role: () => Promise<unknown>) => ({ id: name, name, client: { getRole: jest.fn(role) } as any });
+const self = (flags: string[], slots: number[][] = [[0, 100]]) => async () => [
+  { flags: ['master'], slots: [[101, 200]] },
+  { flags: ['myself', ...flags], slots },
+];
+const node = (name: string, view: () => Promise<unknown>) => ({ id: name, name, client: { getClusterNodes: jest.fn(view) } as any });
 
 describe('clusterNodes', () => {
   it('skips a missing member with a warning', () => {
@@ -22,17 +26,23 @@ describe('clusterNodes', () => {
 });
 
 describe('primaryNodes', () => {
-  it('keeps only masters', async () => {
-    const nodes = [node('a', async () => ({ role: 'master' })), node('b', async () => ({ role: 'slave' }))];
+  it('keeps only masters that serve slots', async () => {
+    const nodes = [node('a', self(['master'])), node('b', self(['slave'], [])), node('c', self(['master'], []))];
     const result = await primaryNodes(nodes, logger(), 'Cache simulator');
     expect(result.map((n) => n.name)).toEqual(['a']);
   });
 
-  it('drops a node whose role read rejects', async () => {
+  it('drops a node that does not report itself', async () => {
+    const nodes = [node('a', self(['master'])), node('b', async () => [{ flags: ['master'], slots: [[0, 100]] }])];
+    const result = await primaryNodes(nodes, logger(), 'Cache simulator');
+    expect(result.map((n) => n.name)).toEqual(['a']);
+  });
+
+  it('drops a node whose cluster view read rejects', async () => {
     const log = logger();
-    const nodes = [node('a', async () => ({ role: 'master' })), node('b', () => Promise.reject(new Error('boom')))];
+    const nodes = [node('a', self(['master'])), node('b', () => Promise.reject(new Error('boom')))];
     const result = await primaryNodes(nodes, log, 'Cache simulator');
     expect(result.map((n) => n.name)).toEqual(['a']);
-    expect(log.warn).toHaveBeenCalledWith('Cache simulator could not read the role of b: boom');
+    expect(log.warn).toHaveBeenCalledWith('Cache simulator could not read the cluster role of b: boom');
   });
 });
