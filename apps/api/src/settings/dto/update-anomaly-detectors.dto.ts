@@ -69,8 +69,8 @@ export class DetectorConfigDto {
     minimum: 0,
     description:
       'Absolute WARNING threshold. Send 0 to disable it (no absolute threshold). ' +
-      'Omit to leave unchanged. GET responses omit this field when no absolute ' +
-      'threshold is configured — never send `null` back on PATCH.',
+      'Omit to leave unchanged. GET returns 0 in overrides for a disabled threshold ' +
+      'and omits it from resolved — never send `null` back on PATCH.',
   })
   @IsOptional()
   @IsNumber()
@@ -81,8 +81,8 @@ export class DetectorConfigDto {
     minimum: 0,
     description:
       'Absolute CRITICAL threshold. Send 0 to disable it (no absolute threshold). ' +
-      'Omit to leave unchanged. GET responses omit this field when no absolute ' +
-      'threshold is configured — never send `null` back on PATCH.',
+      'Omit to leave unchanged. GET returns 0 in overrides for a disabled threshold ' +
+      'and omits it from resolved — never send `null` back on PATCH.',
   })
   @IsOptional()
   @IsNumber()
