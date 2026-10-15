@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entries. New `entry_analytics` capability on the discovery marker.
   `EntryAnalyticsOptions`, `EntryAnalyticsResult`, and `EntrySummary`
   exported from the package root.
+- `usageTracking: { enabled?: boolean }` option (default `true`). Set
+  `enabled: false` to make cache hits pure reads again: no usage `EVAL` is
+  sent, and the sliding TTL is refreshed with a plain `EXPIRE` only when
+  `defaultTtl` is set (the pre-0.14.0 behaviour). Use it when serving hits from
+  read replicas (where `EVAL` fails with `READONLY`), when scripting is
+  blocked, or to avoid per-hit write load. `UsageTrackingOptions` is exported
+  from the package root and the `@betterdb/ai` facade.
 
 ### Changed
 
@@ -55,7 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Previously a hit was a pure read. The write is a single-key `EVAL`. Servers
   or proxies that block scripting will log the usage-tracking warning instead
   of updating counters. These writes are best-effort and non-atomic; failures
-  are logged once per batch via `logger.warn` and never fail the hit.
+  are logged once per batch via `logger.warn` and never fail the hit. Set
+  `usageTracking: { enabled: false }` to restore pure-read hits. Usage-tracking
+  failures caused by `READONLY` (replica reads) or blocked scripting now include
+  that hint in the warning.
+- The `entryAnalytics()` SCAN fallback now stops scanning once it has sampled
+  10,000 entries, instead of iterating the remaining keyspace into a no-op.
 - Cold = `last_accessed_at` strictly older than the cutoff, consistently on
   both the `FT.SEARCH` and `SCAN` paths.
 - The FT index schema gains `hit_count NUMERIC SORTABLE` and

@@ -172,6 +172,7 @@ export class SemanticCache {
   private readonly embeddingModel: string | undefined;
   private readonly onEmbeddingModelChange: EmbeddingModelChangeAction;
   private readonly logger: SemanticCacheLogger;
+  private readonly usageTrackingEnabled: boolean;
   private embeddingModelWarned = false;
   private configRefreshTimer: ReturnType<typeof setInterval> | undefined;
   private discovery: DiscoveryManager | null = null;
@@ -209,6 +210,11 @@ export class SemanticCache {
         : embedderFingerprint(this.embedderDescriptor);
     this.onEmbeddingModelChange = options.onEmbeddingModelChange ?? 'throw';
     this.logger = options.logger ?? console;
+    const usageEnabled = options.usageTracking?.enabled ?? true;
+    if (typeof usageEnabled !== 'boolean') {
+      throw new TypeError('usageTracking.enabled must be a boolean');
+    }
+    this.usageTrackingEnabled = usageEnabled;
 
     this.name = options.name ?? 'betterdb_scache';
     this.indexName = `${this.name}:idx`;
@@ -2016,7 +2022,7 @@ export class SemanticCache {
     const pattern = `${this.entryPrefix}*`;
     let limitReached = false;
     await clusterScan(this.client, pattern, async (keys, nodeClient) => {
-      if (limitReached) return;
+      if (limitReached) return false;
 
       // Clamp batch to the remaining capacity so we never pipeline more than needed
       const remaining = ENTRY_ANALYTICS_LIMIT - summaries.length;
@@ -2040,6 +2046,11 @@ export class SemanticCache {
           if (values[j] != null) fields[f] = values[j]!;
         });
         summaries.push(this.rowToEntrySummary(batch[i], fields));
+      }
+      // Stop scanning as soon as the sample is full, not after one more batch.
+      if (limitReached || summaries.length >= ENTRY_ANALYTICS_LIMIT) {
+        limitReached = true;
+        return false;
       }
     });
 
@@ -2088,9 +2099,21 @@ export class SemanticCache {
    * Never throws: usage tracking and TTL refresh are non-critical on a hit
    * path. A failed key may miss an increment and its TTL may not refresh —
    * the entry still expires on its previously-set schedule.
+   *
+   * Skipped entirely when usageTracking.enabled is false (only the TTL EXPIRE runs, as before 0.14.0).
    */
   private async recordEntryUsageBatch(matchedKeys: string[]): Promise<void> {
     if (matchedKeys.length === 0) return;
+    if (!this.usageTrackingEnabled) {
+      // Pre-0.14.0 behaviour: hits are pure reads; only the sliding TTL is refreshed,
+      // one awaited single-key EXPIRE per hit, errors propagating as on master.
+      if (this.defaultTtl === undefined) return;
+      const ttl = this.defaultTtl;
+      for (const key of matchedKeys) {
+        await this.client.expire(key, ttl);
+      }
+      return;
+    }
     const now = Date.now().toString();
     // One EVAL per key regardless of TTL — the script folds the HINCRBY/HSET/
     // EXPIRE into a single command, so each key is one pipeline result tuple.
@@ -2124,11 +2147,15 @@ export class SemanticCache {
 
     // One warn per batch, not per key, so a broken cluster cannot flood logs.
     if (failed > 0) {
+      const firstMsg = errMsg(firstError);
+      const hint = /READONLY|NOSCRIPT|unknown command|not allowed|NOPERM/i.test(firstMsg)
+        ? ' — hits may be served from a read replica or scripting is blocked; set `usageTracking: { enabled: false }` to stop usage writes'
+        : '';
       try {
         this.logger.warn(
           `@betterdb/semantic-cache '${this.name}': failed to record entry usage for ` +
             `${failed}/${matchedKeys.length} key(s); hit_count/last_accessed_at and TTL ` +
-            `refresh were skipped: ${errMsg(firstError)}`,
+            `refresh were skipped: ${firstMsg}${hint}`,
         );
       } catch {
         // A throwing custom logger must not fail the hit.

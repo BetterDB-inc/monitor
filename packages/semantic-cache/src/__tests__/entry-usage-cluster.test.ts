@@ -267,6 +267,38 @@ describe('entry usage tracking failures', () => {
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn.mock.calls[0][0]).toContain('for 1/3 key(s)');
     expect(logger.warn.mock.calls[0][0]).toContain('WRONGTYPE');
+    expect(logger.warn.mock.calls[0][0]).not.toContain('usageTracking');
+  });
+
+  it('adds an opt-out hint when usage tracking fails with READONLY (replica reads)', async () => {
+    const { client } = makeClient({ cluster: false });
+    const pipelineFn = client.pipeline as unknown as ReturnType<typeof vi.fn>;
+    const realPipeline = pipelineFn.getMockImplementation()!;
+    pipelineFn.mockImplementation(() => {
+      const stub = realPipeline() as Record<string, unknown> & {
+        call: ReturnType<typeof vi.fn>;
+        exec: () => Promise<Array<[Error | null, unknown]>>;
+      };
+      const realExec = stub.exec;
+      stub.exec = async () => {
+        const results = await realExec();
+        const isUsage = stub.call.mock.calls.some((c) => c[0] === 'EVAL');
+        if (isUsage) {
+          results[0] = [new Error("READONLY You can't write against a read only replica."), null];
+        }
+        return results;
+      };
+      return stub;
+    });
+    const { cache, logger } = await makeCache(client, TTL);
+
+    await cache.checkBatch(PROMPTS);
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    const msg = logger.warn.mock.calls[0][0] as string;
+    expect(msg).toContain('for 1/3 key(s)');
+    expect(msg).toContain('READONLY');
+    expect(msg).toContain('usageTracking: { enabled: false }');
   });
 
   it('does not count a 0 return (entry already gone) as a failure', async () => {

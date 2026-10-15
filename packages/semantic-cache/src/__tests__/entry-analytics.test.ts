@@ -2,7 +2,9 @@
  * entryAnalytics() — server-side count queries must not sample via SORTBY LIMIT.
  */
 import { describe, it, expect, vi } from 'vitest';
+import { Cluster } from 'iovalkey';
 import { SemanticCache } from '../SemanticCache';
+import { clusterScan } from '../cluster';
 import type { Valkey } from '../types';
 
 const TOTAL_ENTRIES = 15_000;
@@ -258,6 +260,117 @@ describe('entryAnalytics (SCAN fallback — cap at 10k)', () => {
     expect(client.pipeline).toHaveBeenCalled();
     const pipelineCallCount = (client.pipeline as ReturnType<typeof vi.fn>).mock.calls.length;
     expect(pipelineCallCount).toBeLessThan(10_000);
+  });
+
+  it('stops issuing SCANs once the 10k sample is full', async () => {
+    const PAGE = 6_000;
+    // Calls 1–5 return cursors '1'…'5', the 6th returns '0': a 36k keyspace.
+    let scanCalls = 0;
+    const scan = vi.fn(async () => {
+      scanCalls++;
+      const page = Array.from({ length: PAGE }, (_, i) => `scan_test:entry:${scanCalls}-${i}`);
+      return [scanCalls < 6 ? String(scanCalls) : '0', page] as [string, string[]];
+    });
+    let hmgetCount = 0;
+    const client = {
+      call: vi.fn(async (...args: unknown[]) => {
+        const cmd = args[0] as string;
+        if (cmd === 'FT.INFO') {
+          return [
+            'attributes',
+            [['identifier', 'embedding', 'type', 'VECTOR', 'index', ['dimensions', '2']]],
+          ];
+        }
+        if (cmd === 'FT.CREATE') return 'OK';
+        return null;
+      }),
+      hgetall: vi.fn(async () => ({})),
+      hset: vi.fn(async () => 1),
+      hincrby: vi.fn(async () => 0),
+      expire: vi.fn(async () => 1),
+      del: vi.fn(async () => 1),
+      scan,
+      get: vi.fn(async () => null),
+      getBuffer: vi.fn(async () => null),
+      set: vi.fn(async () => 'OK'),
+      pipeline: vi.fn(() => {
+        let queued = 0;
+        const stub = {
+          hmget: vi.fn(() => {
+            queued++;
+            hmgetCount++;
+            return stub;
+          }),
+          exec: vi.fn(async () =>
+            Array.from({ length: queued }, () => [null, ['0', '0', '0', '', '']]),
+          ),
+          hincrby: vi.fn().mockReturnThis(),
+          hset: vi.fn().mockReturnThis(),
+        };
+        return stub;
+      }),
+      zadd: vi.fn(async () => 1),
+      zrange: vi.fn(async () => []),
+      nodes: vi.fn(() => null),
+    };
+
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: vi.fn(async () => [0.1, 0.2]),
+      name: 'scan_test',
+      embeddingCache: { enabled: false },
+      discovery: { enabled: false },
+      configRefresh: { enabled: false },
+    });
+    await cache.initialize();
+
+    const result = await cache.entryAnalytics({ topN: 5 });
+
+    expect(result.totalEntries).toBe(10_000);
+    expect(hmgetCount).toBe(10_000);
+    // 6k + 6k ≥ 10k: the callback returns false after batch 2.
+    expect(scan).toHaveBeenCalledTimes(2);
+    expect(client.hgetall).not.toHaveBeenCalled();
+  });
+});
+
+describe('clusterScan (early termination)', () => {
+  function scanNode(pages: number) {
+    let call = 0;
+    return {
+      scan: vi.fn(async () => {
+        call++;
+        return [call < pages ? String(call) : '0', [`k${call}`]] as [string, string[]];
+      }),
+    };
+  }
+
+  function fakeCluster(nodes: ReturnType<typeof scanNode>[]): Valkey {
+    return Object.assign(Object.create(Cluster.prototype) as Cluster, {
+      nodes: vi.fn(() => nodes),
+    }) as unknown as Valkey;
+  }
+
+  it('scans every cursor on every node when the callback returns undefined', async () => {
+    const nodes = [scanNode(3), scanNode(2)];
+    const onKeys = vi.fn(async () => undefined);
+
+    await clusterScan(fakeCluster(nodes), 'p:*', onKeys);
+
+    expect(nodes[0].scan).toHaveBeenCalledTimes(3);
+    expect(nodes[1].scan).toHaveBeenCalledTimes(2);
+    expect(onKeys).toHaveBeenCalledTimes(5);
+  });
+
+  it('stops after one SCAN and skips the remaining nodes when the callback returns false', async () => {
+    const nodes = [scanNode(3), scanNode(2)];
+    const onKeys = vi.fn(async () => false);
+
+    await clusterScan(fakeCluster(nodes), 'p:*', onKeys);
+
+    expect(nodes[0].scan).toHaveBeenCalledTimes(1);
+    expect(nodes[1].scan).not.toHaveBeenCalled();
+    expect(onKeys).toHaveBeenCalledTimes(1);
   });
 });
 

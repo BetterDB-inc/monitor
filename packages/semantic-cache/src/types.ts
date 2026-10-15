@@ -12,6 +12,25 @@ export interface ConfigRefreshOptions {
   intervalMs?: number;
 }
 
+export interface UsageTrackingOptions {
+  /**
+   * Record per-entry `hit_count` / `last_accessed_at` on every genuine cache hit
+   * (one single-key `EVAL` per matched key). Default: `true`.
+   *
+   * Set to `false` to make hits pure reads again (pre-0.14.0 behaviour):
+   * - no `EVAL` is sent on a hit;
+   * - if `defaultTtl` is set, the sliding TTL is still refreshed with a plain
+   *   per-key `EXPIRE`, exactly as before 0.14.0;
+   * - if `defaultTtl` is not set, a hit performs no write at all.
+   *
+   * Disable this when hits are served from read replicas (`EVAL` fails with
+   * `READONLY` there), when scripting is blocked, or when the write load on a
+   * hot working set is unacceptable. `entryAnalytics()` keeps working, but
+   * counters stop advancing, so new hits are not reflected.
+   */
+  enabled?: boolean;
+}
+
 export type EmbedFn = (text: string) => Promise<number[]>;
 
 /**
@@ -171,6 +190,8 @@ export interface SemanticCacheOptions {
    * Pass `{ warn: () => {} }` to silence them.
    */
   logger?: SemanticCacheLogger;
+  /** Per-entry hit tracking on the hit path. See {@link UsageTrackingOptions}. */
+  usageTracking?: UsageTrackingOptions;
 }
 
 export type EmbeddingModelChangeAction = 'throw' | 'warn' | 'flush';

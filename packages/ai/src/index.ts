@@ -57,6 +57,7 @@ export type {
   SemanticCacheLogger,
   SemanticCacheOptions,
   ThresholdEffectivenessResult,
+  UsageTrackingOptions,
 } from '@betterdb/semantic-cache';
 
 export {

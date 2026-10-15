@@ -22,6 +22,7 @@ export type {
   EntryAnalyticsOptions,
   EntryAnalyticsResult,
   EntrySummary,
+  UsageTrackingOptions,
 } from './types';
 export { describeEmbedder, embedderFingerprint, getEmbedderDescriptor } from './embedder-identity';
 export { createKeywordOverlapRerank } from './rerank';

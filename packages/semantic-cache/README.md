@@ -179,6 +179,7 @@ const result = await cache.check(userPrompt, {
 | `normalizer` | `BinaryNormalizer` | `defaultNormalizer` | Binary content normalizer |
 | `embeddingCache.enabled` | `boolean` | `true` | Cache computed embeddings in Valkey |
 | `embeddingCache.ttl` | `number` | `86400` | Embedding cache TTL (seconds) |
+| `usageTracking.enabled` | `boolean` | `true` | Record per-entry hit counters on each hit. Set `false` for pure-read hits (replicas, blocked scripting, write-sensitive deployments) |
 | `telemetry.tracerName` | `string` | `'@betterdb/semantic-cache'` | OTel tracer name |
 | `telemetry.metricsPrefix` | `string` | `'semantic_cache'` | Prometheus prefix |
 | `telemetry.registry` | `Registry` | default | prom-client Registry |
@@ -428,6 +429,33 @@ If that becomes an issue, `hit_count` remains the primary signal for
 `entryAnalytics()` accuracy; `last_accessed_at` only powers cold-entry
 detection and could reasonably be sampled (e.g. one write per N hits) in a
 future release. Please open an issue if you hit this in production.
+
+#### Disabling usage tracking
+
+Usage tracking is on by default. Turn it off to make cache hits pure reads again:
+
+```typescript
+const cache = new SemanticCache({
+  client,
+  embedFn,
+  name: 'my_cache',
+  usageTracking: { enabled: false },
+});
+```
+
+With tracking disabled, a hit sends no `EVAL`. If `defaultTtl` is set, the
+sliding TTL is still refreshed with a plain `EXPIRE` (the pre-0.14.0
+behaviour). Otherwise a hit performs no write at all. `entryAnalytics()` still
+works, but counters stop advancing.
+
+Disable it when:
+
+- **You read from replicas.** `EVAL` is a write and fails with `READONLY` on a
+  replica. The hit is still returned, but every batch logs a warning and no
+  counters are recorded. (Note that `EXPIRE` with `defaultTtl` is also a write
+  and fails on a replica the same way it did before 0.14.0.)
+- **Scripting is blocked** by your server, proxy, or ACL.
+- **The write load** on a small, hot working set at high QPS is unacceptable.
 
 ### `cache.thresholdEffectiveness(options?)`
 
