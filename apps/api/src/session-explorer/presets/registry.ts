@@ -1,0 +1,37 @@
+import type { CustomSchema, PresetId } from '@betterdb/shared';
+import type { PresetDefinition } from './types';
+import { agentCachePreset } from './agent-cache';
+import { langchainCommunityPreset } from './langchain-community';
+import { llamaindexPreset } from './llamaindex';
+import { failedView } from './text';
+
+const langchainJsPreset: PresetDefinition = {
+  ...langchainCommunityPreset,
+  id: 'langchain-js',
+  defaultPattern: (prefix) => `${prefix}*`,
+};
+
+const rawPreset: PresetDefinition = {
+  id: 'raw',
+  defaultPattern: (prefix) => `${prefix}*`,
+  sessionIdOf: (key) => key,
+  parseKey: (k) => failedView(k, 'No schema configured'),
+  mergeSession: () => [],
+};
+
+export function getPreset(id: PresetId, _custom?: CustomSchema | null): PresetDefinition {
+  switch (id) {
+    case 'langchain-community':
+      return langchainCommunityPreset;
+    case 'langchain-js':
+      return langchainJsPreset;
+    case 'llamaindex':
+      return llamaindexPreset;
+    case 'agent-cache':
+      return agentCachePreset;
+    case 'raw':
+      return rawPreset;
+    case 'custom':
+      throw new Error('Custom preset is not implemented');
+  }
+}
