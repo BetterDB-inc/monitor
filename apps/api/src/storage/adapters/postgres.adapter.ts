@@ -1420,7 +1420,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       CREATE INDEX IF NOT EXISTS idx_kps_pattern ON key_pattern_snapshots(pattern, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_kps_pattern_timestamp ON key_pattern_snapshots(pattern, timestamp);
       CREATE INDEX IF NOT EXISTS idx_kps_connection_id ON key_pattern_snapshots(connection_id);
-      CREATE INDEX IF NOT EXISTS idx_kps_connection_db ON key_pattern_snapshots(connection_id, db);
+      DROP INDEX IF EXISTS idx_kps_connection_db;
+      CREATE INDEX IF NOT EXISTS idx_kps_connection_db_ts ON key_pattern_snapshots(connection_id, db, timestamp DESC, pattern ASC);
 
       CREATE TABLE IF NOT EXISTS hot_key_stats (
         id UUID PRIMARY KEY,
@@ -2761,35 +2762,43 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const limit = options.limit ?? 100;
     const offset = options.offset ?? 0;
 
-    // Without a db filter the limit applies PER logical database (via the
-    // window below), not globally: rows sort db0-first within a collection,
-    // so a global limit would let a pattern-heavy db0 fill the page and hide
-    // later databases entirely from the all-databases view. The result stays
-    // bounded at limit x populated databases. With a db filter there is one
-    // database and the plain global limit is the same thing, cheaper.
-    const query =
-      options.db !== undefined
-        ? `
-      SELECT * FROM key_pattern_snapshots
-      ${whereClause}
-      ORDER BY timestamp DESC, db ASC, pattern ASC
-      LIMIT $${paramIndex++} OFFSET $${paramIndex++}
-    `
-        : `
-      SELECT * FROM (
-        SELECT *, ROW_NUMBER() OVER (
-          PARTITION BY db
-          ORDER BY timestamp DESC, pattern ASC
-        ) AS db_row
-        FROM key_pattern_snapshots
+    if (options.db !== undefined) {
+      const result = await this.pool.query(
+        `
+        SELECT * FROM key_pattern_snapshots
         ${whereClause}
-      ) ranked
-      WHERE db_row <= $${paramIndex++}
-      ORDER BY timestamp DESC, db ASC, pattern ASC
-      OFFSET $${paramIndex++}
-    `;
+        ORDER BY timestamp DESC, db ASC, pattern ASC
+        LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+      `,
+        [...params, limit, offset],
+      );
+      return result.rows.map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
+    }
 
-    const result = await this.pool.query(query, [...params, limit, offset]);
+    // Without a db filter the limit applies PER logical database, not
+    // globally: rows sort db0-first within a collection, so a global limit
+    // would let a pattern-heavy db0 fill the page and hide later databases
+    // from the all-databases view. A LATERAL join runs one LIMITed,
+    // early-terminating scan of the (connection_id, db, timestamp) index per
+    // populated database rather than a ROW_NUMBER() window, which would have
+    // to number and sort the connection's full snapshot history on every
+    // request — including the web's 60s patterns poll.
+    const result = await this.pool.query(
+      `
+      SELECT s.* FROM (
+        SELECT DISTINCT db FROM key_pattern_snapshots ${whereClause}
+      ) dbs
+      CROSS JOIN LATERAL (
+        SELECT * FROM key_pattern_snapshots
+        ${whereClause ? `${whereClause} AND` : 'WHERE'} db = dbs.db
+        ORDER BY timestamp DESC, pattern ASC
+        LIMIT $${paramIndex++}
+      ) s
+      ORDER BY s.timestamp DESC, s.db ASC, s.pattern ASC
+      OFFSET $${paramIndex++}
+    `,
+      [...params, limit, offset],
+    );
 
     return result.rows.map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
   }

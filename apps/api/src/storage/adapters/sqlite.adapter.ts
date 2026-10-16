@@ -713,10 +713,15 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!kpsInfo.some((col) => col.name === 'db')) {
       this.db.exec('ALTER TABLE key_pattern_snapshots ADD COLUMN db INTEGER NOT NULL DEFAULT 0');
     }
-    // Backs the 60s-polled SELECT DISTINCT db query used to populate the
-    // database selector; the column must exist before the index can be created.
+    // Backs the 60s-polled SELECT DISTINCT db query (prefix) AND the per-db
+    // newest-rows scans of the patterns view (full key: each per-db query
+    // walks timestamps backwards and stops at its LIMIT instead of sorting
+    // the connection's whole history). The column must exist before the
+    // index can be created; the trailing timestamp supersedes the earlier
+    // two-column shape from this branch.
+    this.db.exec('DROP INDEX IF EXISTS idx_kps_connection_db');
     this.db.exec(
-      'CREATE INDEX IF NOT EXISTS idx_kps_connection_db ON key_pattern_snapshots(connection_id, db)',
+      'CREATE INDEX IF NOT EXISTS idx_kps_connection_db_ts ON key_pattern_snapshots(connection_id, db, timestamp DESC, pattern ASC)',
     );
 
     // connection_id is migrated in initialize(), before createSchema — see the
@@ -2808,39 +2813,47 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const limit = options.limit ?? 100;
     const offset = options.offset ?? 0;
 
-    // Without a db filter the limit applies PER logical database (via the
-    // window below), not globally: rows sort db0-first within a collection,
-    // so a global limit would let a pattern-heavy db0 fill the page and hide
-    // later databases entirely from the all-databases view. The result stays
-    // bounded at limit x populated databases. With a db filter there is one
-    // database and the plain global limit is the same thing, cheaper.
-    const query =
-      options.db !== undefined
-        ? `
-      SELECT * FROM key_pattern_snapshots
-      ${whereClause}
-      ORDER BY timestamp DESC, db ASC, pattern ASC
-      LIMIT ? OFFSET ?
-    `
-        : `
-      SELECT * FROM (
-        SELECT *, ROW_NUMBER() OVER (
-          PARTITION BY db
-          ORDER BY timestamp DESC, pattern ASC
-        ) AS db_row
-        FROM key_pattern_snapshots
+    if (options.db !== undefined) {
+      const query = `
+        SELECT * FROM key_pattern_snapshots
         ${whereClause}
-      )
-      WHERE db_row <= ?
-      ORDER BY timestamp DESC, db ASC, pattern ASC
-      LIMIT -1 OFFSET ?
+        ORDER BY timestamp DESC, db ASC, pattern ASC
+        LIMIT ? OFFSET ?
+      `;
+      const rows = this.db.prepare(query).all(...params, limit, offset) as any[];
+      return rows.map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
+    }
+
+    // Without a db filter the limit applies PER logical database, not
+    // globally: rows sort db0-first within a collection, so a global limit
+    // would let a pattern-heavy db0 fill the page and hide later databases
+    // from the all-databases view. One small LIMITed query per populated
+    // database (each an early-terminating scan of the (connection_id, db,
+    // timestamp) index) rather than a ROW_NUMBER() window, which would have
+    // to number and sort the connection's full snapshot history on every
+    // request — including the web's 60s patterns poll.
+    const dbRows = this.db
+      .prepare(`SELECT DISTINCT db FROM key_pattern_snapshots ${whereClause} ORDER BY db ASC`)
+      .all(...params) as Array<{ db: number | null }>;
+
+    const perDbQuery = `
+      SELECT * FROM key_pattern_snapshots
+      ${whereClause ? `${whereClause} AND` : 'WHERE'} db = ?
+      ORDER BY timestamp DESC, pattern ASC
+      LIMIT ?
     `;
+    const rows: any[] = [];
+    for (const { db: dbValue } of dbRows) {
+      rows.push(...(this.db.prepare(perDbQuery).all(...params, dbValue ?? 0, limit) as any[]));
+    }
+    rows.sort(
+      (a, b) =>
+        b.timestamp - a.timestamp || a.db - b.db || String(a.pattern).localeCompare(String(b.pattern)),
+    );
 
-    params.push(limit, offset);
-
-    const rows = this.db.prepare(query).all(...params) as any[];
-
-    return rows.map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
+    return rows
+      .slice(offset, offset + limit * Math.max(1, dbRows.length))
+      .map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
   }
 
   async getKeyAnalyticsSummary(
