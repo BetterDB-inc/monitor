@@ -397,6 +397,10 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     return false;
   }
 
+  clearThresholdAlert(alertKey: string): void {
+    this.alertStates.delete(alertKey);
+  }
+
   /**
    * Dispatch threshold-based alert (e.g., memory.critical, connection.critical)
    * Uses global threshold - consider using dispatchThresholdAlertPerWebhook for per-webhook thresholds

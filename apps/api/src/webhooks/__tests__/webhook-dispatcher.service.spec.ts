@@ -221,6 +221,19 @@ describe('WebhookDispatcherService', () => {
     });
   });
 
+  describe('Clearing a threshold alert', () => {
+    it('lets a latched alert fire again without a recovery sample', async () => {
+      webhooksService.getWebhooksByEvent.mockResolvedValue([]);
+      const fire = () =>
+        service.dispatchThresholdAlert(WebhookEventType.REPLICATION_LAG, 'lag_test', 30, 10, true, {});
+
+      expect(await fire()).toBe(true);
+      expect(await fire()).toBe(false);
+      service.clearThresholdAlert('lag_test');
+      expect(await fire()).toBe(true);
+    });
+  });
+
   describe('Signature Generation', () => {
     it('should generate signature with timestamp', () => {
       webhooksService.generateSignature.mockReturnValue('test-signature');
