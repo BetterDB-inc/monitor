@@ -17,6 +17,7 @@ import {
   CommandLogType,
 } from '../../common/interfaces/storage-port.interface';
 import { WebhookPayloadFormat } from '@betterdb/shared';
+import { normalizeDetectorConfigMap } from '../../anomaly/anomaly.types';
 
 /**
  * SQL dialect abstraction for database-specific operations.
@@ -271,6 +272,9 @@ export class RowMappers {
       metricForecastingDefaultRollingWindowMs: row.throughput_forecasting_default_rolling_window_ms,
       metricForecastingDefaultAlertThresholdMs: row.throughput_forecasting_default_alert_threshold_ms,
       inferenceSlaConfig: this.dialect.fromJson(row.inference_sla_config) ?? {},
+      anomalyDetectorConfig: normalizeDetectorConfigMap(
+        this.dialect.fromJson(row.anomaly_detector_config),
+      ),
       localRetentionDays: row.local_retention_days ?? null,
       updatedAt: typeof row.updated_at === 'string' ? parseInt(row.updated_at, 10) : row.updated_at,
       createdAt: typeof row.created_at === 'string' ? parseInt(row.created_at, 10) : row.created_at,

@@ -16,6 +16,27 @@ import {
   parseRetentionDaysToken,
 } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
+import {
+  ABSOLUTE_FIELDS,
+  DetectorConfigMap,
+  MetricType,
+  normalizeDetectorConfigMap,
+  resolveDetectorConfig,
+} from '../anomaly/anomaly.types';
+
+export type DetectorConfigListener = (config: DetectorConfigMap) => void;
+
+// JSON can't carry Infinity, so the API accepts 0 as "no absolute threshold"
+// and stores the Infinity sentinel, which GET omits.
+function disableZeroAbsoluteThresholds(overrides: DetectorConfigMap): void {
+  for (const key of Object.keys(overrides) as MetricType[]) {
+    const override = overrides[key];
+    if (!override) continue;
+    for (const field of ABSOLUTE_FIELDS) {
+      if (override[field] === 0) override[field] = Number.POSITIVE_INFINITY;
+    }
+  }
+}
 
 @Injectable()
 export class SettingsService implements OnModuleInit, OnModuleDestroy {
@@ -32,6 +53,14 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
   // bury the one actionable line. Warn once per missing episode, reset when
   // the row comes back.
   private warnedSettingsRowMissing = false;
+  // Live consumers of detector thresholds (the proprietary AnomalyService)
+  // subscribe here rather than being injected into SettingsController: the
+  // anomaly module is loaded dynamically and SettingsModule cannot import it.
+  private detectorConfigListeners = new Set<DetectorConfigListener>();
+  // Serializes every settings write. Detector-config PATCHes are
+  // read-merge-write, and the SQL adapters read-merge-write the whole row on
+  // a general update, so any two unserialized writes can lose one's changes.
+  private settingsWriteLock: Promise<unknown> = Promise.resolve();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
@@ -132,6 +161,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
         10,
       ),
       inferenceSlaConfig: {},
+      anomalyDetectorConfig: {},
       localRetentionDays: parseRetentionDaysToken(this.configService.get('LOCAL_RETENTION_DAYS')),
       createdAt: now,
       updatedAt: now,
@@ -160,7 +190,20 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  /** Public path used by PUT /settings. Detector config is owned by
+   *  PATCH /settings/anomaly/detectors (validated, locked, hot-reloaded). */
   async updateSettings(updates: SettingsUpdateRequest): Promise<SettingsResponse> {
+    if ('anomalyDetectorConfig' in (updates as Record<string, unknown>)) {
+      throw new BadRequestException(
+        'anomalyDetectorConfig cannot be set via PUT /settings; use PATCH /settings/anomaly/detectors',
+      );
+    }
+    return this.withSettingsWriteLock(() => this.writeSettings(updates));
+  }
+
+  /** Internal: callers must already hold the settings write lock and have
+   *  validated any anomalyDetectorConfig they pass. */
+  private async writeSettings(updates: SettingsUpdateRequest): Promise<SettingsResponse> {
     if (updates.localRetentionDays !== undefined && updates.localRetentionDays !== null) {
       if (normalizeRetentionDays(updates.localRetentionDays) === null) {
         throw new BadRequestException(
@@ -193,29 +236,145 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async resetToDefaults(): Promise<SettingsResponse> {
-    // The retention window survives a reset. Re-seeding it from
-    // LOCAL_RETENTION_DAYS would re-arm data deletion for an operator who
-    // explicitly cleared it in the UI and is resetting something unrelated —
-    // the docs promise that clearing the window sticks.
-    const current = await this.storageClient.getSettings();
-    const defaults = this.buildSettingsFromEnv();
-    if (current) {
-      defaults.localRetentionDays = current.localRetentionDays;
+  async getDetectorConfig(): Promise<DetectorConfigMap> {
+    return normalizeDetectorConfigMap(this.getCachedSettings().anomalyDetectorConfig);
+  }
+
+  updateDetectorConfig(overrides: DetectorConfigMap): Promise<DetectorConfigMap> {
+    return this.withSettingsWriteLock(() => this.applyDetectorConfigUpdate(overrides));
+  }
+
+  private async applyDetectorConfigUpdate(
+    overrides: DetectorConfigMap,
+  ): Promise<DetectorConfigMap> {
+    // Read from storage, not the cache: the cache can lag a write made by the
+    // previous holder of the lock until commitCacheWrite runs.
+    const existing = await this.readStoredDetectorConfig();
+    disableZeroAbsoluteThresholds(overrides);
+    const merged: DetectorConfigMap = { ...existing };
+
+    for (const key of Object.keys(overrides) as MetricType[]) {
+      merged[key] = {
+        ...existing[key],
+        ...overrides[key],
+      };
     }
-    await this.storageClient.saveSettings(defaults);
-    const settings = await this.storageClient.getSettings();
 
-    if (!settings) {
-      throw new Error('Failed to reset settings');
+    return this.validateAndPersistDetectorConfig(merged);
+  }
+
+  /** Clears one metric's override, leaving the others untouched. */
+  clearDetectorOverride(metric: MetricType): Promise<DetectorConfigMap> {
+    return this.withSettingsWriteLock(async () => {
+      const merged: DetectorConfigMap = { ...(await this.readStoredDetectorConfig()) };
+      delete merged[metric];
+      return this.validateAndPersistDetectorConfig(merged);
+    });
+  }
+
+  private async validateAndPersistDetectorConfig(
+    merged: DetectorConfigMap,
+  ): Promise<DetectorConfigMap> {
+    for (const key of Object.keys(merged) as MetricType[]) {
+      const resolved = resolveDetectorConfig(key as MetricType, merged);
+
+      if (resolved.warningZScore >= resolved.criticalZScore) {
+        throw new BadRequestException(
+          `${key}: warningZScore (${resolved.warningZScore}) must be less than ` +
+            `criticalZScore (${resolved.criticalZScore}) after merging with stored config`,
+        );
+      }
+
+      const hasWarningAbs = Number.isFinite(resolved.warningAbsolute);
+      const hasCriticalAbs = Number.isFinite(resolved.criticalAbsolute);
+      if (
+        hasWarningAbs &&
+        hasCriticalAbs &&
+        resolved.warningAbsolute >= resolved.criticalAbsolute
+      ) {
+        throw new BadRequestException(
+          `${key}: warningAbsolute (${resolved.warningAbsolute}) must be less than ` +
+            `criticalAbsolute (${resolved.criticalAbsolute}) after merging with stored config`,
+        );
+      }
     }
 
-    this.commitCacheWrite(settings);
+    const updated = await this.writeSettings({ anomalyDetectorConfig: merged });
+    const result = normalizeDetectorConfigMap(updated.settings.anomalyDetectorConfig);
+    this.notifyDetectorConfigChange(result);
+    return result;
+  }
 
-    return {
-      settings,
-      source: 'database',
-      requiresRestart: true,
+  resetDetectorConfig(): Promise<void> {
+    return this.withSettingsWriteLock(async () => {
+      await this.writeSettings({ anomalyDetectorConfig: {} });
+      this.notifyDetectorConfigChange({});
+    });
+  }
+
+  private async readStoredDetectorConfig(): Promise<DetectorConfigMap> {
+    const stored = await this.storageClient.getSettings();
+    return normalizeDetectorConfigMap(stored?.anomalyDetectorConfig);
+  }
+
+  private withSettingsWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.settingsWriteLock.then(fn, fn);
+    // A rejected update (e.g. validation failure) must not block later ones.
+    this.settingsWriteLock = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Subscribe to detector config changes. Returns an unsubscribe function. */
+  onDetectorConfigChange(listener: DetectorConfigListener): () => void {
+    this.detectorConfigListeners.add(listener);
+    return () => {
+      this.detectorConfigListeners.delete(listener);
     };
+  }
+
+  // The config is already persisted by the time listeners run, so a failing
+  // listener must not turn a successful write into an error for the caller.
+  private notifyDetectorConfigChange(config: DetectorConfigMap): void {
+    for (const listener of this.detectorConfigListeners) {
+      try {
+        listener(config);
+      } catch (err) {
+        this.logger.error(
+          `Detector config listener failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+
+  resetToDefaults(): Promise<SettingsResponse> {
+    return this.withSettingsWriteLock(async () => {
+      // The retention window survives a reset. Re-seeding it from
+      // LOCAL_RETENTION_DAYS would re-arm data deletion for an operator who
+      // explicitly cleared it in the UI and is resetting something unrelated —
+      // the docs promise that clearing the window sticks.
+      const current = await this.storageClient.getSettings();
+      const defaults = this.buildSettingsFromEnv();
+      if (current) {
+        defaults.localRetentionDays = current.localRetentionDays;
+        // Detector overrides survive a general reset too; use
+        // POST /settings/anomaly/detectors/reset to clear them. They are
+        // unchanged, so live detectors need no notification.
+        defaults.anomalyDetectorConfig = current.anomalyDetectorConfig ?? {};
+      }
+      await this.storageClient.saveSettings(defaults);
+      const settings = await this.storageClient.getSettings();
+
+      if (!settings) {
+        throw new Error('Failed to reset settings');
+      }
+
+      this.commitCacheWrite(settings);
+
+      return {
+        settings,
+        source: 'database',
+        requiresRestart: true,
+      };
+    });
   }
 }
