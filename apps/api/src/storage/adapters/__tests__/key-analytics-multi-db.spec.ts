@@ -96,6 +96,27 @@ describe('SqliteAdapter key analytics per logical database', () => {
     expect(db1?.byPattern['user:*'].keyCount).toBe(30);
   });
 
+  it('keeps a sibling database in the summary after a partial collection moved the pattern timestamp', async () => {
+    // T1: full collection wrote user:* rows for db0 and db1. T2: db1's scan
+    // failed, so the partial collection wrote only db0's row. The summary must
+    // combine db0@T2 with db1@T1 instead of dropping db1 entirely.
+    await storage.saveKeyPatternSnapshots(
+      [
+        snapshot({ id: 't1-db0', db: 0, timestamp: 1_000, keyCount: 10, totalMemoryBytes: 100 }),
+        snapshot({ id: 't1-db1', db: 1, timestamp: 1_000, keyCount: 30, totalMemoryBytes: 300 }),
+        snapshot({ id: 't2-db0', db: 0, timestamp: 2_000, keyCount: 12, totalMemoryBytes: 120 }),
+      ],
+      CONN,
+    );
+
+    const all = await storage.getKeyAnalyticsSummary(undefined, undefined, CONN);
+    expect(all?.totalKeys).toBe(42); // 12 (db0 @ T2) + 30 (db1 @ T1)
+    expect(all?.byPattern['user:*'].keyCount).toBe(42);
+
+    const db1 = await storage.getKeyAnalyticsSummary(undefined, undefined, CONN, 1);
+    expect(db1?.totalKeys).toBe(30);
+  });
+
   it('aggregates trends per timestamp across databases and respects the db filter', async () => {
     await storage.saveKeyPatternSnapshots(
       [

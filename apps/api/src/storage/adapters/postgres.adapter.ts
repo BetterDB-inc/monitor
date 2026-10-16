@@ -2805,42 +2805,43 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
+    // Latest snapshot per (pattern, logical database): grouping by pattern
+    // alone pins one MAX(timestamp) per pattern, and a partial collection
+    // (one db scanned, a sibling's scan failed) moves that timestamp forward
+    // for only some databases — silently dropping the sibling's last row and
+    // undercounting the headline totals.
     const latestSnapshotsResult = await this.pool.query(
       `
-      SELECT pattern, MAX(timestamp) as latest_timestamp
+      SELECT pattern, db, MAX(timestamp) as latest_timestamp
       FROM key_pattern_snapshots
       ${whereClause}
-      GROUP BY pattern
+      GROUP BY pattern, db
     `,
       params,
     );
 
     if (latestSnapshotsResult.rows.length === 0) return null;
 
-    // A (pattern, timestamp) pair can match several rows — one per logical
-    // database — so the db filter must be re-applied here, and the unfiltered
+    // Each (pattern, db, timestamp) triple pins exactly one logical database's
+    // freshest row, so no separate db re-filter is needed; the unfiltered
     // per-pattern breakdown below aggregates across the per-database rows.
     const patternParams: any[] = [];
     for (const row of latestSnapshotsResult.rows) {
-      patternParams.push(row.pattern, row.latest_timestamp);
+      patternParams.push(row.pattern, row.db, row.latest_timestamp);
     }
 
     let pIdx = 1;
     const patternPlaceholders = latestSnapshotsResult.rows
-      .map(() => `(pattern = $${pIdx++} AND timestamp = $${pIdx++})`)
+      .map(() => `(pattern = $${pIdx++} AND db = $${pIdx++} AND timestamp = $${pIdx++})`)
       .join(' OR ');
-    // Re-apply the connection and db scoping here too: a (pattern, timestamp)
-    // pair is not unique across connections or logical databases, so without
-    // these predicates another connection's snapshot sharing the same pattern
-    // and collection timestamp would be summed into this connection's totals.
+    // Re-apply the connection scoping: a (pattern, db, timestamp) triple is
+    // not unique across connections, so without this predicate another
+    // connection's snapshot sharing the same pattern, db and collection
+    // timestamp would be summed into this connection's totals.
     let patternWhere = `(${patternPlaceholders})`;
     if (connectionId) {
       patternWhere += ` AND connection_id = $${pIdx++}`;
       patternParams.push(connectionId);
-    }
-    if (db !== undefined) {
-      patternWhere += ` AND db = $${pIdx++}`;
-      patternParams.push(db);
     }
 
     const summaryResult = await this.pool.query(

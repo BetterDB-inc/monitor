@@ -2852,18 +2852,25 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    // Get the latest snapshot for each pattern within the time range
+    // Get the latest snapshot for each (pattern, logical database) within the
+    // time range. Grouping by pattern alone would pin one MAX(timestamp) per
+    // pattern — but a partial collection (one database scanned, a sibling's
+    // scan failed) legitimately moves that timestamp forward for only some
+    // databases, which would silently drop the sibling's last row from the
+    // summary and undercount the headline totals.
     const latestSnapshotsQuery = `
       SELECT
         pattern,
+        db,
         MAX(timestamp) as latest_timestamp
       FROM key_pattern_snapshots
       ${whereClause}
-      GROUP BY pattern
+      GROUP BY pattern, db
     `;
 
     const latestSnapshots = this.db.prepare(latestSnapshotsQuery).all(...params) as Array<{
       pattern: string;
+      db: number;
       latest_timestamp: number;
     }>;
 
@@ -2871,28 +2878,24 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       return null;
     }
 
-    // Build aggregation query for latest snapshots only. A (pattern, timestamp)
-    // pair can match several rows — one per logical database — so the db filter
-    // must be re-applied here, and the unfiltered per-pattern breakdown must
-    // aggregate across the per-database rows rather than let the last row win.
+    // Build aggregation query for the latest snapshot rows only. Each
+    // (pattern, db, timestamp) triple pins exactly one logical database's
+    // freshest row, so no separate db re-filter is needed; the unfiltered
+    // per-pattern breakdown then aggregates across the per-database rows.
     const patternConditions = latestSnapshots
-      .map(() => '(pattern = ? AND timestamp = ?)')
+      .map(() => '(pattern = ? AND db = ? AND timestamp = ?)')
       .join(' OR ');
     const patternParams: any[] = [];
     for (const snapshot of latestSnapshots) {
-      patternParams.push(snapshot.pattern, snapshot.latest_timestamp);
+      patternParams.push(snapshot.pattern, snapshot.db, snapshot.latest_timestamp);
     }
-    // Re-apply connection and db scoping: a (pattern, timestamp) pair is not
-    // unique across connections or logical databases, so without these another
-    // connection's snapshot at the same pattern+timestamp would be summed in.
+    // Re-apply connection scoping: a (pattern, db, timestamp) triple is not
+    // unique across connections, so without this another connection's snapshot
+    // at the same pattern+db+timestamp would be summed in.
     let patternWhere = `(${patternConditions})`;
     if (connectionId) {
       patternWhere += ' AND connection_id = ?';
       patternParams.push(connectionId);
-    }
-    if (db !== undefined) {
-      patternWhere += ' AND db = ?';
-      patternParams.push(db);
     }
 
     const summaryQuery = `
