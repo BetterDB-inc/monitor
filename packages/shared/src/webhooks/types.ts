@@ -375,6 +375,8 @@ export interface IWebhookEventsProService {
     connectionId?: string;
   }): Promise<void>;
 
+  clearReplicationLag(connectionId?: string): void;
+
   dispatchClusterFailover(data: {
     clusterState: string;
     previousState?: string;

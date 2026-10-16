@@ -1962,6 +1962,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
 
     if (role === 'master') {
+      this.webhookEventsProService?.clearReplicationLag(connectionId);
       this.masterLinkUp.remove(connLabel);
       this.masterLastIoSecondsAgo.remove(connLabel);
       this.setInfoGauge(
@@ -2013,6 +2014,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           .catch((err) => {
             this.logger.error('Failed to dispatch replication.lag webhook', err);
           });
+      } else {
+        this.webhookEventsProService?.clearReplicationLag(connectionId);
       }
     }
   }
