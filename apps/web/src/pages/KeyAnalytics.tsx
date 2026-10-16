@@ -180,20 +180,17 @@ export function KeyAnalytics() {
     refetchKey: `${currentConnection?.id}-${selectedDb}`,
   });
 
-  // One collection stores one row per (db, pattern), so the "All databases"
-  // view needs headroom proportional to the database count — with a flat 100,
-  // db0's rows would fill the page and later databases would never appear.
-  const patternsLimit =
-    selectedDb === 'all' ? Math.min(100 * Math.max(1, availableDbs?.length ?? 1), 400) : 100;
-
   const {
     data: rawPatterns,
     loading: patternsLoading,
     refresh: refetchPatterns,
   } = usePolling({
-    fetcher: () => keyAnalyticsApi.getPatterns({ limit: patternsLimit, db: dbFilter }),
+    // Without a db filter the storage layer applies the limit per logical
+    // database, so every populated database gets up to 100 rows here and none
+    // can crowd a sibling out of the "All databases" view.
+    fetcher: () => keyAnalyticsApi.getPatterns({ limit: 100, db: dbFilter }),
     interval: 60000,
-    refetchKey: `${currentConnection?.id}-${selectedDb}-${patternsLimit}`,
+    refetchKey: `${currentConnection?.id}-${selectedDb}`,
   });
 
   const [hotKeyDateRange, setHotKeyDateRange] = useState<DateRange | undefined>(undefined);

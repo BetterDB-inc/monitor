@@ -2808,11 +2808,32 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const limit = options.limit ?? 100;
     const offset = options.offset ?? 0;
 
-    const query = `
+    // Without a db filter the limit applies PER logical database (via the
+    // window below), not globally: rows sort db0-first within a collection,
+    // so a global limit would let a pattern-heavy db0 fill the page and hide
+    // later databases entirely from the all-databases view. The result stays
+    // bounded at limit x populated databases. With a db filter there is one
+    // database and the plain global limit is the same thing, cheaper.
+    const query =
+      options.db !== undefined
+        ? `
       SELECT * FROM key_pattern_snapshots
       ${whereClause}
       ORDER BY timestamp DESC, db ASC, pattern ASC
       LIMIT ? OFFSET ?
+    `
+        : `
+      SELECT * FROM (
+        SELECT *, ROW_NUMBER() OVER (
+          PARTITION BY db
+          ORDER BY timestamp DESC, pattern ASC
+        ) AS db_row
+        FROM key_pattern_snapshots
+        ${whereClause}
+      )
+      WHERE db_row <= ?
+      ORDER BY timestamp DESC, db ASC, pattern ASC
+      LIMIT -1 OFFSET ?
     `;
 
     params.push(limit, offset);

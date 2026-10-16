@@ -26,6 +26,11 @@ export interface KeyPatternQueryOptions {
   startTime?: number;
   endTime?: number;
   pattern?: string;
+  /**
+   * With a `db` filter: the usual global row limit. Without one: the limit
+   * applies PER logical database, so a pattern-heavy db0 cannot fill the page
+   * and hide later databases (the result is bounded at limit x databases).
+   */
   limit?: number;
   offset?: number;
   connectionId?: string;

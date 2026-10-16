@@ -117,6 +117,32 @@ describe('SqliteAdapter key analytics per logical database', () => {
     expect(db1?.totalKeys).toBe(30);
   });
 
+  it('applies the row limit per database, so a pattern-heavy db0 cannot hide its siblings', async () => {
+    // Five db0 patterns and two db1 patterns, all in one collection. A global
+    // limit of 3 with db0-first ordering would return only db0 rows; the
+    // per-database limit returns 3 of db0's AND both of db1's.
+    const rows: KeyPatternSnapshot[] = [];
+    for (let i = 0; i < 5; i++) {
+      rows.push(snapshot({ id: `db0-${i}`, db: 0, pattern: `a${i}:*` }));
+    }
+    rows.push(snapshot({ id: 'db1-0', db: 1, pattern: 'z0:*' }));
+    rows.push(snapshot({ id: 'db1-1', db: 1, pattern: 'z1:*' }));
+    await storage.saveKeyPatternSnapshots(rows, CONN);
+
+    const result = await storage.getKeyPatternSnapshots({ connectionId: CONN, limit: 3 });
+
+    const byDb = new Map<number, number>();
+    for (const row of result) {
+      byDb.set(row.db ?? 0, (byDb.get(row.db ?? 0) ?? 0) + 1);
+    }
+    expect(byDb.get(0)).toBe(3);
+    expect(byDb.get(1)).toBe(2);
+
+    // With a db filter the limit stays a plain global limit.
+    const db0Only = await storage.getKeyPatternSnapshots({ connectionId: CONN, db: 0, limit: 3 });
+    expect(db0Only).toHaveLength(3);
+  });
+
   it('summarizes a keyspace with more patterns than the bind-parameter limit allows', async () => {
     // The old implementation expanded one (pattern = ? AND db = ? AND
     // timestamp = ?) OR-term per kept pair — 11k patterns means 33k bind
@@ -150,11 +176,11 @@ describe('SqliteAdapter key analytics per logical database', () => {
     expect(db1).toEqual([{ timestamp: 1_000, keyCount: 30, memoryBytes: 100, staleCount: 0 }]);
   });
 
-  it('orders tied timestamps deterministically by db then pattern instead of truncating an arbitrary subset', async () => {
+  it('orders tied timestamps deterministically and limits per database, never truncating a db away', async () => {
     // One collection across 2 dbs x 2 patterns writes 4 rows at the same
-    // timestamp. A LIMIT smaller than that must keep a stable, deterministic
-    // prefix (db ASC, pattern ASC) rather than whatever order SQLite happens
-    // to return ties in.
+    // timestamp. The limit applies per database (so db1 cannot be truncated
+    // away by db0's rows) and ties keep a stable (db ASC, pattern ASC) order
+    // rather than whatever order SQLite happens to return them in.
     await storage.saveKeyPatternSnapshots(
       [
         snapshot({ id: 's-0-b', db: 0, pattern: 'b:*' }),
@@ -165,11 +191,11 @@ describe('SqliteAdapter key analytics per logical database', () => {
       CONN,
     );
 
-    const page = await storage.getKeyPatternSnapshots({ connectionId: CONN, limit: 2 });
+    const page = await storage.getKeyPatternSnapshots({ connectionId: CONN, limit: 1 });
 
     expect(page.map((row) => [row.db, row.pattern])).toEqual([
       [0, 'a:*'],
-      [0, 'b:*'],
+      [1, 'a:*'],
     ]);
   });
 
