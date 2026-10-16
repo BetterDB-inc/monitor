@@ -2741,8 +2741,16 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     for (const snapshot of latestSnapshots) {
       patternParams.push(snapshot.pattern, snapshot.latest_timestamp);
     }
-    const patternWhere = db !== undefined ? `(${patternConditions}) AND db = ?` : patternConditions;
+    // Re-apply connection and db scoping: a (pattern, timestamp) pair is not
+    // unique across connections or logical databases, so without these another
+    // connection's snapshot at the same pattern+timestamp would be summed in.
+    let patternWhere = `(${patternConditions})`;
+    if (connectionId) {
+      patternWhere += ' AND connection_id = ?';
+      patternParams.push(connectionId);
+    }
     if (db !== undefined) {
+      patternWhere += ' AND db = ?';
       patternParams.push(db);
     }
 

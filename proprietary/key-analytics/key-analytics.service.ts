@@ -14,8 +14,10 @@ import { LicenseService } from '@proprietary/licenses/license.service';
 import {
   ConnectionStatus,
   KeyAnalyticsResult,
+  KeyDetail,
   KeySizeDistribution,
   KEY_DETAILS_TOP_N,
+  dbScopedIdentity,
   hasOwnKeyAnalytics,
   mergeKeySizeDistributions,
   parseKeySizeDistribution,
@@ -57,7 +59,7 @@ function dedupeByKeyMaxMemory(entries: HotKeyEntry[]): HotKeyEntry[] {
   for (const entry of entries) {
     // The same key name can exist in several logical databases — those are
     // distinct keys, so the identity includes the database index.
-    const identity = `${entry.db ?? 0} ${entry.keyName}`;
+    const identity = dbScopedIdentity(entry.db, entry.keyName);
     const existing = byKey.get(identity);
     if (existing === undefined || (entry.memoryBytes ?? 0) > (existing.memoryBytes ?? 0)) {
       byKey.set(identity, entry);
@@ -210,119 +212,43 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
       const scanned = results.reduce((total, result) => total + result.scanned, 0);
       const timestamp = Date.now();
       const snapshots = mergePatternSnapshots(results.map((result) => buildPatternSnapshots(result, timestamp)));
-      // Tag each per-key record with the logical database its result came
-      // from, so the hot/largest/composite entries stay distinguishable when
-      // one instance holds keys in several databases.
-      const keyDetails = results.flatMap((result) =>
-        (result.keyDetails ?? []).map((kd) => ({ ...kd, db: result.db ?? 0 })),
-      );
-
       await this.storage.saveKeyPatternSnapshots(snapshots, ctx.connectionId);
 
-      // Collect hot keys from per-key pipeline data
-      if (keyDetails.length > 0) {
-        const capturedAt = Date.now();
-        const lfuKeys: typeof keyDetails = [];
-        const idletimeKeys: typeof keyDetails = [];
-
-        for (const kd of keyDetails) {
-          if (kd.freqScore !== null) {
-            lfuKeys.push(kd);
-          } else if (kd.idleSeconds !== null) {
-            idletimeKeys.push(kd);
-          }
+      // Rank hot/largest/composite keys PER logical database rather than as a
+      // single global top-N across the whole instance: a database whose keys
+      // are crowded out by a busier sibling still gets its own ranked lists,
+      // and each db's ranks stay contiguous (1..N) for the per-db UI views. One
+      // capturedAt is shared across all dbs so the composite freshness guard
+      // (getCompositeKeys) still sees a single atomic collection. Results from
+      // several cluster primaries share db 0, so they are merged into one group
+      // and ranked together — only distinct logical databases rank separately.
+      const capturedAt = Date.now();
+      const keyDetailsByDb = new Map<number, KeyDetail[]>();
+      for (const result of results) {
+        const db = result.db ?? 0;
+        const group = keyDetailsByDb.get(db);
+        if (group) {
+          group.push(...(result.keyDetails ?? []));
+        } else {
+          keyDetailsByDb.set(db, [...(result.keyDetails ?? [])]);
         }
+      }
+      const hotKeyRows: HotKeyEntry[] = [];
+      for (const [db, kds] of keyDetailsByDb) {
+        if (kds.length === 0) continue;
+        hotKeyRows.push(...this.buildHotKeyRows(kds, db, capturedAt, ctx.connectionId));
+      }
 
-        // LFU: descending by freqScore
-        lfuKeys.sort((a, b) => (b.freqScore ?? 0) - (a.freqScore ?? 0));
-        // IDLETIME: ascending by idleSeconds (lower = more recently accessed)
-        idletimeKeys.sort((a, b) => (a.idleSeconds ?? 0) - (b.idleSeconds ?? 0));
-
-        // LFU keys rank above all IDLETIME keys
-        const ranked = [...lfuKeys, ...idletimeKeys].slice(0, HOT_KEYS_TOP_N);
-
-        const hotKeys: HotKeyEntry[] = ranked.map((kd, idx) => {
-          const isLfu = kd.freqScore !== null;
-          return {
-            id: randomUUID(),
-            keyName: kd.keyName,
-            connectionId: ctx.connectionId,
-            capturedAt,
-            signalType: isLfu ? ('lfu' as const) : ('idletime' as const),
-            freqScore: isLfu ? (kd.freqScore ?? undefined) : undefined,
-            idleSeconds: !isLfu ? (kd.idleSeconds ?? undefined) : undefined,
-            memoryBytes: kd.memoryBytes ?? undefined,
-            ttl: kd.ttl ?? undefined,
-            rank: idx + 1,
-            db: kd.db,
-          };
-        });
-
-        // Largest keys (valkey #1827): rank by cardinality (element count / byte length).
-        const largestKeys: HotKeyEntry[] = keyDetails
-          .filter((kd) => kd.cardinality !== null)
-          .sort((a, b) => (b.cardinality ?? 0) - (a.cardinality ?? 0))
-          .slice(0, LARGEST_KEYS_TOP_N)
-          .map((kd, idx) => ({
-            id: randomUUID(),
-            keyName: kd.keyName,
-            connectionId: ctx.connectionId,
-            capturedAt,
-            signalType: 'cardinality' as const,
-            cardinality: kd.cardinality ?? undefined,
-            keyType: kd.keyType ?? undefined,
-            memoryBytes: kd.memoryBytes ?? undefined,
-            ttl: kd.ttl ?? undefined,
-            rank: idx + 1,
-            db: kd.db,
-          }));
-
-        // Composite / multi-dimensional keys (valkey #4189): keys that are extreme
-        // on more than one dimension at once — the "hot big key" that the single
-        // signal lists above each miss. Derived from the same per-key data, so no
-        // extra scanning; only keys placing in >= 2 dimensions are emitted.
-        const compositeKeys: HotKeyEntry[] = rankCompositeKeys(
-          keyDetails.map((kd) => ({
-            keyName: kd.keyName,
-            keyType: kd.keyType,
-            db: kd.db,
-            freqScore: kd.freqScore,
-            idleSeconds: kd.idleSeconds,
-            memoryBytes: kd.memoryBytes,
-            cardinality: kd.cardinality,
-            ttl: kd.ttl,
-          })),
-          COMPOSITE_TOP_N,
-        )
-          .slice(0, COMPOSITE_TOP_N)
-          .map((ck, idx) => ({
-            id: randomUUID(),
-            keyName: ck.keyName,
-            connectionId: ctx.connectionId,
-            capturedAt,
-            signalType: 'composite' as const,
-            freqScore: ck.freqScore ?? undefined,
-            idleSeconds: ck.idleSeconds ?? undefined,
-            memoryBytes: ck.memoryBytes ?? undefined,
-            cardinality: ck.cardinality ?? undefined,
-            keyType: ck.keyType ?? undefined,
-            ttl: ck.ttl ?? undefined,
-            rank: idx + 1,
-            db: ck.db,
-          }));
-
-        // Persist all three signal groups in ONE atomic saveHotKeys call so a
-        // reader never sees a half-written collection. If hot/largest rows landed
-        // first under this capturedAt while composites were still pending, the
-        // composite freshness guard (getCompositeKeys) would read the newer
-        // non-composite rows, conclude the scan produced no composites, and
-        // return empty even though composites were about to be written. Writing
-        // them together (saveHotKeys wraps the batch in a transaction) means a
-        // capturedAt is either fully visible with its composites or not at all.
-        const hotKeyRows = [...hotKeys, ...largestKeys, ...compositeKeys];
-        if (hotKeyRows.length > 0) {
-          await this.storage.saveHotKeys(hotKeyRows, ctx.connectionId);
-        }
+      // Persist all signal groups in ONE atomic saveHotKeys call so a reader
+      // never sees a half-written collection. If hot/largest rows landed first
+      // under this capturedAt while composites were still pending, the composite
+      // freshness guard (getCompositeKeys) would read the newer non-composite
+      // rows, conclude the scan produced no composites, and return empty even
+      // though composites were about to be written. Writing them together
+      // (saveHotKeys wraps the batch in a transaction) means a capturedAt is
+      // either fully visible with its composites or not at all.
+      if (hotKeyRows.length > 0) {
+        await this.storage.saveHotKeys(hotKeyRows, ctx.connectionId);
       }
 
       const duration = Date.now() - startTime;
@@ -341,6 +267,108 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     } finally {
       this.isRunning.set(ctx.connectionId, false);
     }
+  }
+
+  /**
+   * Build the hot / largest / composite hot-key rows for ONE logical database's
+   * per-key sample. Ranked and capped per database so a quiet db is not crowded
+   * out of the instance-wide top-N by a busier sibling, with ranks contiguous
+   * within the db.
+   */
+  private buildHotKeyRows(
+    keyDetails: KeyDetail[],
+    db: number,
+    capturedAt: number,
+    connectionId: string,
+  ): HotKeyEntry[] {
+    const lfuKeys: KeyDetail[] = [];
+    const idletimeKeys: KeyDetail[] = [];
+    for (const kd of keyDetails) {
+      if (kd.freqScore !== null) {
+        lfuKeys.push(kd);
+      } else if (kd.idleSeconds !== null) {
+        idletimeKeys.push(kd);
+      }
+    }
+
+    // LFU: descending by freqScore
+    lfuKeys.sort((a, b) => (b.freqScore ?? 0) - (a.freqScore ?? 0));
+    // IDLETIME: ascending by idleSeconds (lower = more recently accessed)
+    idletimeKeys.sort((a, b) => (a.idleSeconds ?? 0) - (b.idleSeconds ?? 0));
+
+    // LFU keys rank above all IDLETIME keys
+    const ranked = [...lfuKeys, ...idletimeKeys].slice(0, HOT_KEYS_TOP_N);
+    const hotKeys: HotKeyEntry[] = ranked.map((kd, idx) => {
+      const isLfu = kd.freqScore !== null;
+      return {
+        id: randomUUID(),
+        keyName: kd.keyName,
+        connectionId,
+        capturedAt,
+        signalType: isLfu ? ('lfu' as const) : ('idletime' as const),
+        freqScore: isLfu ? (kd.freqScore ?? undefined) : undefined,
+        idleSeconds: !isLfu ? (kd.idleSeconds ?? undefined) : undefined,
+        memoryBytes: kd.memoryBytes ?? undefined,
+        ttl: kd.ttl ?? undefined,
+        rank: idx + 1,
+        db,
+      };
+    });
+
+    // Largest keys (valkey #1827): rank by cardinality (element count / byte length).
+    const largestKeys: HotKeyEntry[] = keyDetails
+      .filter((kd) => kd.cardinality !== null)
+      .sort((a, b) => (b.cardinality ?? 0) - (a.cardinality ?? 0))
+      .slice(0, LARGEST_KEYS_TOP_N)
+      .map((kd, idx) => ({
+        id: randomUUID(),
+        keyName: kd.keyName,
+        connectionId,
+        capturedAt,
+        signalType: 'cardinality' as const,
+        cardinality: kd.cardinality ?? undefined,
+        keyType: kd.keyType ?? undefined,
+        memoryBytes: kd.memoryBytes ?? undefined,
+        ttl: kd.ttl ?? undefined,
+        rank: idx + 1,
+        db,
+      }));
+
+    // Composite / multi-dimensional keys (valkey #4189): keys that are extreme
+    // on more than one dimension at once — the "hot big key" that the single
+    // signal lists above each miss. Derived from the same per-key data, so no
+    // extra scanning; only keys placing in >= 2 dimensions are emitted.
+    const compositeKeys: HotKeyEntry[] = rankCompositeKeys(
+      keyDetails.map((kd) => ({
+        keyName: kd.keyName,
+        keyType: kd.keyType,
+        db,
+        freqScore: kd.freqScore,
+        idleSeconds: kd.idleSeconds,
+        memoryBytes: kd.memoryBytes,
+        cardinality: kd.cardinality,
+        ttl: kd.ttl,
+      })),
+      COMPOSITE_TOP_N,
+    )
+      .slice(0, COMPOSITE_TOP_N)
+      .map((ck, idx) => ({
+        id: randomUUID(),
+        keyName: ck.keyName,
+        connectionId,
+        capturedAt,
+        signalType: 'composite' as const,
+        freqScore: ck.freqScore ?? undefined,
+        idleSeconds: ck.idleSeconds ?? undefined,
+        memoryBytes: ck.memoryBytes ?? undefined,
+        cardinality: ck.cardinality ?? undefined,
+        keyType: ck.keyType ?? undefined,
+        ttl: ck.ttl ?? undefined,
+        rank: idx + 1,
+        db,
+      }));
+
+    return [...hotKeys, ...largestKeys, ...compositeKeys];
   }
 
   async getSummary(startTime?: number, endTime?: number, connectionId?: string, db?: number) {

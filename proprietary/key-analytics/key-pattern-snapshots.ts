@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import type { KeyAnalyticsResult, KeyPatternSnapshot } from '@betterdb/shared';
+import { dbScopedIdentity } from '@betterdb/shared';
 
 type Pick = (snapshot: KeyPatternSnapshot) => number | undefined;
 
@@ -78,7 +79,7 @@ export function mergePatternSnapshots(perNode: KeyPatternSnapshot[][]): KeyPatte
   // UI filters on, so the group identity is (db, pattern).
   const byPattern = new Map<string, KeyPatternSnapshot[]>();
   for (const snapshot of perNode.flat()) {
-    const identity = `${snapshot.db ?? 0} ${snapshot.pattern}`;
+    const identity = dbScopedIdentity(snapshot.db, snapshot.pattern);
     byPattern.set(identity, [...(byPattern.get(identity) ?? []), snapshot]);
   }
   return Array.from(byPattern.values()).map((group) => (group.length === 1 ? group[0] : mergeGroup(group)));

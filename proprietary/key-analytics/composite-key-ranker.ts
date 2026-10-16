@@ -34,6 +34,8 @@
  * SDK-free and side-effect-free so it can be unit-tested directly.
  */
 
+import { dbScopedIdentity } from '@betterdb/shared';
+
 export type CompositeDimension = 'hotness' | 'cardinality';
 
 export interface CompositeCandidate {
@@ -138,7 +140,7 @@ export function rankCompositeKeys(
   // The same key name in two logical databases is two distinct keys, so the
   // identity used for membership / dedupe includes the database index.
   const identityOf = (candidate: CompositeCandidate): string =>
-    `${candidate.db ?? 0} ${candidate.keyName}`;
+    dbScopedIdentity(candidate.db, candidate.keyName);
 
   // key identity -> (dimension -> ranking value) for the dimensions where the key made top-N.
   const membership = new Map<string, Map<CompositeDimension, number>>();

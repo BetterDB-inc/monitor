@@ -365,7 +365,9 @@ describe('KeyAnalyticsService with topology members', () => {
 
     const [hotKeys] = storage.saveHotKeys.mock.calls[0] as [Array<{ keyName: string; signalType: string; db?: number }>];
     const cardinality = hotKeys.filter((row) => row.signalType === 'cardinality');
-    expect(cardinality.map((row) => [row.keyName, row.db])).toEqual([
+    // Ranked per logical database, so order within the combined save array is
+    // by db group; sort to assert membership independent of group order.
+    expect(cardinality.map((row) => [row.keyName, row.db]).sort()).toEqual([
       ['job:*:70', 1],
       ['user:*:50', 0],
     ]);

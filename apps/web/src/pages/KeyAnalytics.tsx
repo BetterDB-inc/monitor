@@ -2,7 +2,7 @@ import { useState, useMemo, useRef, useEffect } from 'react';
 import { keyAnalyticsApi } from '../api/keyAnalytics';
 import type { HotKeyEntry } from '../api/keyAnalytics';
 import { useBaselineHotKeys } from '../hooks/useBaselineHotKeys';
-import { extractPattern } from '@betterdb/shared';
+import { extractPattern, dbScopedIdentity } from '@betterdb/shared';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
@@ -131,13 +131,17 @@ export function KeyAnalytics() {
   const [rawSelectedDb, setSelectedDb] = useState<number | 'all'>('all');
   const detailRef = useRef<HTMLDivElement>(null);
 
-  // Reset the db filter when the connection changes, so (a) the first fetches
-  // for a new connection don't go out with the old numeric filter while
-  // availableDbs is still loading for it, and (b) the filter doesn't silently
-  // snap back from 'all' if the remembered db happens to also exist there.
-  useEffect(() => {
+  // Reset the db filter synchronously when the connection changes, so the first
+  // fetches for the new connection are never scoped to the previous
+  // connection's (stale) numeric db while availableDbs is still loading. Doing
+  // this in render rather than a post-commit effect means React re-renders with
+  // the reset value before the fetchers below read dbFilter, avoiding a
+  // throwaway fetch at the old filter.
+  const [dbFilterConnId, setDbFilterConnId] = useState(currentConnection?.id);
+  if (currentConnection?.id !== dbFilterConnId) {
+    setDbFilterConnId(currentConnection?.id);
     setSelectedDb('all');
-  }, [currentConnection?.id]);
+  }
 
   // Databases that have analytics data for this connection. The filter is only
   // shown when there is more than one (or the single one is not db0).
@@ -227,7 +231,7 @@ export function KeyAnalytics() {
     if (!rawPatterns) return null;
     const seen = new Set<string>();
     return rawPatterns.filter((p) => {
-      const identity = `${p.db ?? 0}:${p.pattern}`;
+      const identity = dbScopedIdentity(p.db, p.pattern);
       if (seen.has(identity)) return false;
       seen.add(identity);
       return true;
@@ -317,24 +321,35 @@ export function KeyAnalytics() {
     return [...patterns]
       .sort((a, b) => b.keyCount - a.keyCount)
       .slice(0, 10)
-      .map((p) => ({
-        name: p.pattern.length > 20 ? p.pattern.substring(0, 20) + '...' : p.pattern,
-        fullName: p.pattern,
-        value: p.keyCount,
-      }));
-  }, [patterns]);
+      .map((p) => {
+        // In the aggregated 'all databases' view the same pattern can appear
+        // once per db; suffix the db so the chart doesn't render duplicate,
+        // indistinguishable entries.
+        const suffix = showDbBadges ? ` (db${p.db ?? 0})` : '';
+        const truncated = p.pattern.length > 20 ? p.pattern.substring(0, 20) + '...' : p.pattern;
+        return {
+          name: truncated + suffix,
+          fullName: p.pattern + suffix,
+          value: p.keyCount,
+        };
+      });
+  }, [patterns, showDbBadges]);
 
   const topPatternsByMemory = useMemo(() => {
     if (!patterns) return [];
     return [...patterns]
       .sort((a, b) => b.totalMemoryBytes - a.totalMemoryBytes)
       .slice(0, 10)
-      .map((p) => ({
-        name: p.pattern.length > 20 ? p.pattern.substring(0, 20) + '...' : p.pattern,
-        fullName: p.pattern,
-        value: p.totalMemoryBytes,
-      }));
-  }, [patterns]);
+      .map((p) => {
+        const suffix = showDbBadges ? ` (db${p.db ?? 0})` : '';
+        const truncated = p.pattern.length > 20 ? p.pattern.substring(0, 20) + '...' : p.pattern;
+        return {
+          name: truncated + suffix,
+          fullName: p.pattern + suffix,
+          value: p.totalMemoryBytes,
+        };
+      });
+  }, [patterns, showDbBadges]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {

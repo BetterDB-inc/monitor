@@ -838,11 +838,16 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
    */
   private async listKeyspaceDatabases(): Promise<number[]> {
     try {
-      const raw = await this.client.info('keyspace');
+      // Reuse the centralized INFO keyspace parser (MetricsParser via
+      // getInfoParsed) rather than a second regex: it is the single definition
+      // of a db entry and already drops malformed `db<N>:` lines as raw strings.
+      const { keyspace } = await this.getInfoParsed(['keyspace']);
       const dbs: number[] = [];
-      for (const line of raw.split('\n')) {
-        const match = /^db(\d+):keys=(\d+)/.exec(line.trim());
-        if (match && parseInt(match[2], 10) > 0) {
+      for (const [key, info] of Object.entries(keyspace ?? {})) {
+        const match = /^db(\d+)$/.exec(key);
+        // A raw-string value is a malformed line the parser kept verbatim; only
+        // typed entries with a positive key count are non-empty databases.
+        if (match && typeof info === 'object' && info.keys > 0) {
           dbs.push(parseInt(match[1], 10));
         }
       }
@@ -877,53 +882,72 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     const failures: unknown[] = [];
     // Sequential on purpose: SCAN + per-key pipelines are heavy, and running
     // the databases one after another keeps the load on the server no higher
-    // than today's single-db scan.
-    for (const db of databases) {
-      if (db === ownDb) {
+    // than today's single-db scan. Sibling databases share ONE scratch client
+    // that SELECTs between them, so an N-database instance opens one extra
+    // connection per scan rather than one per database.
+    let scratch: Valkey | null = null;
+    try {
+      for (const db of databases) {
+        if (db === ownDb) {
+          try {
+            results.push(await this.scanDatabase(this.client, db, options));
+          } catch (error) {
+            failures.push(error);
+            this.logger.warn(
+              `Key analytics scan failed on db${db}: ${error instanceof Error ? error.message : error}`,
+            );
+          }
+          continue;
+        }
+        // After a tunnel drop, connectHost/connectPort point at the real (possibly
+        // bastion-only) endpoint; a scratch client built now would dial it directly
+        // and bypass the tunnel. Treat the database as failed instead, mirroring
+        // getCliClient's guard.
+        if (this.usesTunnel && !this.tunnelActive) {
+          failures.push(new Error('SSH tunnel is not established'));
+          this.logger.warn(`Key analytics scan skipped on db${db}: SSH tunnel is not established`);
+          continue;
+        }
         try {
-          results.push(await this.scanDatabase(this.client, db, options));
+          if (!scratch) {
+            scratch = this.createValkeyClient(
+              `${this.config.connectionName ?? 'BetterDB-Monitor'}-keyscan`,
+              db,
+            );
+            scratch.on('error', (err) => {
+              this.logger.debug(`Scratch client error: ${err.message}`);
+            });
+            await scratch.connect();
+          }
+          // iovalkey silently swallows a failed handshake SELECT (silentEmit), so
+          // a client that cannot SELECT this db (e.g. a restricted ACL) would
+          // otherwise keep scanning the previous db while results are tagged with
+          // `db`. Select explicitly so that failure surfaces as a per-db failure.
+          await scratch.select(db);
+          results.push(await this.scanDatabase(scratch, db, options));
         } catch (error) {
           failures.push(error);
           this.logger.warn(
             `Key analytics scan failed on db${db}: ${error instanceof Error ? error.message : error}`,
           );
+          // Drop a broken connection so the next database rebuilds rather than
+          // reusing a dead client; a client that is still ready (e.g. a per-db
+          // SELECT/scan error) is kept and reused for the remaining databases.
+          if (scratch && scratch.status !== 'ready') {
+            await closeClient(scratch);
+            scratch = null;
+          }
         }
-        continue;
       }
-      // After a tunnel drop, connectHost/connectPort point at the real (possibly
-      // bastion-only) endpoint; a scratch client built now would dial it directly
-      // and bypass the tunnel. Treat the database as failed instead, mirroring
-      // getCliClient's guard.
-      if (this.usesTunnel && !this.tunnelActive) {
-        failures.push(new Error('SSH tunnel is not established'));
-        this.logger.warn(`Key analytics scan skipped on db${db}: SSH tunnel is not established`);
-        continue;
-      }
-      const scratch = this.createValkeyClient(
-        `${this.config.connectionName ?? 'BetterDB-Monitor'}-keyscan-db${db}`,
-        db,
-      );
-      scratch.on('error', (err) => {
-        this.logger.debug(`Scratch client error on db${db}: ${err.message}`);
-      });
-      try {
-        await scratch.connect();
-        // iovalkey silently swallows a failed handshake SELECT (silentEmit), so
-        // a client that cannot SELECT this db (e.g. a restricted ACL) would
-        // otherwise keep scanning db0 while results are tagged with `db`. Select
-        // explicitly so that failure surfaces here as a caught per-db failure.
-        await scratch.select(db);
-        results.push(await this.scanDatabase(scratch, db, options));
-      } catch (error) {
-        failures.push(error);
-        this.logger.warn(
-          `Key analytics scan failed on db${db}: ${error instanceof Error ? error.message : error}`,
-        );
-      } finally {
+    } finally {
+      if (scratch) {
         await closeClient(scratch);
       }
     }
-    if (results.length === 0 && failures.length > 0) {
+    // An empty-database result (dbSize 0) is not a real scan of any data, so it
+    // must not mask the failures of data-bearing databases: only suppress the
+    // rethrow when at least one database was actually scanned with data.
+    if (results.every((r) => r.dbSize === 0) && failures.length > 0) {
       throw failures[0];
     }
     return results;

@@ -179,7 +179,7 @@ describe('UnifiedDatabaseAdapter.collectKeyAnalytics — stale keys', () => {
     (adapter as unknown as { _client: unknown })._client = {
       dbsize: jest.fn().mockResolvedValue(keys.length),
       scan: jest.fn().mockResolvedValue(['0', keys]),
-      info: jest.fn().mockResolvedValue(`db0:keys=${keys.length},expires=0,avg_ttl=0`),
+      info: jest.fn().mockResolvedValue(`# Keyspace\r\ndb0:keys=${keys.length},expires=0,avg_ttl=0`),
       pipeline,
     };
     (adapter as unknown as { config: unknown }).config = {};
@@ -250,7 +250,7 @@ describe('UnifiedDatabaseAdapter.collectKeyAnalytics — multiple logical databa
     const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
     const ownClient = {
       ...fakeScanClient(options.ownKeys),
-      info: jest.fn().mockResolvedValue(options.keyspaceInfo),
+      info: jest.fn().mockResolvedValue(`# Keyspace\r\n${options.keyspaceInfo}`),
     };
     (adapter as unknown as { _client: unknown })._client = ownClient;
     (adapter as unknown as { config: unknown }).config = { dbIndex: options.dbIndex };

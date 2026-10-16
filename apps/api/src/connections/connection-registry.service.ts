@@ -1163,6 +1163,20 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       if (config && (config.dbIndex ?? 0) !== 0) {
         await this.storage.updateConnection(id, { dbIndex: 0 });
         this.configs.set(id, { ...config, dbIndex: 0 });
+        // The live adapter was built with the old non-zero dbIndex; rebuild it
+        // from the corrected config so it stops running on (or failing to
+        // SELECT in cluster mode) a non-zero db, rather than waiting for the
+        // next incidental reconnect. The stored config is already fixed, so a
+        // reconnect failure here self-heals on the next reconnect.
+        if (this.connections.has(id)) {
+          try {
+            await this.reconnect(id);
+          } catch (err) {
+            this.logger.warn(
+              `Could not reconnect ${config.name} after forcing db0 on cluster adoption: ${err instanceof Error ? err.message : err}`,
+            );
+          }
+        }
       }
     }
   }

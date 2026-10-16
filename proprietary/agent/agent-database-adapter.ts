@@ -479,8 +479,9 @@ export class AgentDatabaseAdapter implements DatabasePort {
 
   async collectKeyAnalytics(options: KeyAnalyticsOptions): Promise<KeyAnalyticsResult[]> {
     const response = await this.sendCommand('COLLECT_KEY_ANALYTICS', [JSON.stringify(options)]);
-    // The agent scans its connected database only; normalize to the
-    // one-result-per-database shape of the port.
+    // The agent scans its single connected database and tags the result with
+    // that logical db index; normalize to the one-result-per-database shape of
+    // the port. (Older agents omit db, so it defaults to 0 downstream.)
     return [JSON.parse(response as string)];
   }
 

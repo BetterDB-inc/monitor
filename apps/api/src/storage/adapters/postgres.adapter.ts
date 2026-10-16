@@ -2829,9 +2829,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const patternPlaceholders = latestSnapshotsResult.rows
       .map(() => `(pattern = $${pIdx++} AND timestamp = $${pIdx++})`)
       .join(' OR ');
-    const patternWhere =
-      db !== undefined ? `(${patternPlaceholders}) AND db = $${pIdx++}` : patternPlaceholders;
+    // Re-apply the connection and db scoping here too: a (pattern, timestamp)
+    // pair is not unique across connections or logical databases, so without
+    // these predicates another connection's snapshot sharing the same pattern
+    // and collection timestamp would be summed into this connection's totals.
+    let patternWhere = `(${patternPlaceholders})`;
+    if (connectionId) {
+      patternWhere += ` AND connection_id = $${pIdx++}`;
+      patternParams.push(connectionId);
+    }
     if (db !== undefined) {
+      patternWhere += ` AND db = $${pIdx++}`;
       patternParams.push(db);
     }
 
