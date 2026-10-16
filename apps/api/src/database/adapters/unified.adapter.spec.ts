@@ -496,7 +496,24 @@ describe('UnifiedDatabaseAdapter — configured dbIndex', () => {
 
     expect(adapter.getActiveDbIndex()).toBe(0);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('falling back to db0'));
+    // The client's recorded SELECT target is pinned back to db0 so an
+    // auto-reconnect cannot silently retry the rejected index.
+    expect(client.select).toHaveBeenCalledWith(0);
     expect(client.disconnect).not.toHaveBeenCalled();
+  });
+
+  it('fails the connect on a transport error during SELECT instead of mislabeling the db', async () => {
+    // iovalkey records the SELECT target when the command is SENT and
+    // re-selects it on auto-reconnect — a dropped connection mid-SELECT must
+    // therefore fail the connect, not fall back: the client would come back
+    // on dbN while activeDbIndex claimed db0, mislabeling every scan.
+    const { adapter, client } = makeConnectAdapter(new Error('Connection is closed.'));
+
+    await expect(
+      (adapter as unknown as { doConnect(): Promise<void> }).doConnect(),
+    ).rejects.toThrow('Connection is closed.');
+
+    expect(client.disconnect).toHaveBeenCalled();
   });
 
   it('reports the configured dbIndex as active when its SELECT succeeds', async () => {

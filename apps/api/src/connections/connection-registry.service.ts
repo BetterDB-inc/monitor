@@ -646,6 +646,21 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       throw new Error(`Connection failed: ${errorMsg}`);
     }
 
+    // Validation parity with testConnection: a live connection tolerates a
+    // rejected SELECT by falling back to db0 (so stored configs survive an
+    // upgrade), but Save must not silently persist a connection that monitors
+    // a different database than the user asked for.
+    if (
+      adapter instanceof UnifiedDatabaseAdapter &&
+      (config.dbIndex ?? 0) > 0 &&
+      adapter.getActiveDbIndex() !== config.dbIndex
+    ) {
+      await adapter.disconnect().catch(() => {});
+      throw new Error(
+        `Connection failed: could not SELECT database ${config.dbIndex} — the server rejected it (index out of range, cluster mode, or ACL without +select)`,
+      );
+    }
+
     // Connection succeeded - now persist state
     // If storage fails, disconnect the adapter to prevent leaks
     try {

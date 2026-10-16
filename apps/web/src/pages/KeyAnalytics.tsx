@@ -370,6 +370,25 @@ export function KeyAnalytics() {
 
   const hotKeySignalType = hotKeys && hotKeys.length > 0 ? hotKeys[0].signalType : null;
 
+  // Ranks are stored per logical database, so the unfiltered list comes back
+  // interleaved (rank 1 of every db, then rank 2, ...). For "All databases",
+  // re-rank the merged list by the underlying hotness signal — LFU frequency
+  // first (descending), then idle recency (ascending), mirroring the
+  // collector's own ranking policy — and number rows by display position so
+  // the # column doesn't repeat (1,1,2,2,...). A db-filtered view keeps the
+  // stored per-db ranks untouched.
+  const displayHotKeys = useMemo(() => {
+    if (!hotKeys) return null;
+    if (!showDbBadges) return hotKeys;
+    return [...hotKeys].sort((a, b) => {
+      const aLfu = a.freqScore !== undefined;
+      const bLfu = b.freqScore !== undefined;
+      if (aLfu !== bLfu) return aLfu ? -1 : 1;
+      if (aLfu && bLfu) return (b.freqScore ?? 0) - (a.freqScore ?? 0);
+      return (a.idleSeconds ?? 0) - (b.idleSeconds ?? 0);
+    });
+  }, [hotKeys, showDbBadges]);
+
   // Pattern summary chips: group hot keys by pattern
   const patternSummary = useMemo(() => {
     if (!hotKeys || hotKeys.length === 0) return [];
@@ -896,21 +915,25 @@ export function KeyAnalytics() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {hotKeys?.map((entry: HotKeyEntry) => {
+                      {displayHotKeys?.map((entry: HotKeyEntry, index: number) => {
                         const delta = getRankDelta(
                           entry.rank,
                           entry.keyName,
                           baselineHotKeys ?? null,
                           entry.db,
                         );
-                        const isTop10 = entry.rank <= 10;
+                        // Across all databases, rank by display position in
+                        // the re-ranked merged list; a db-filtered view shows
+                        // the stored per-db rank.
+                        const displayRank = showDbBadges ? index + 1 : entry.rank;
+                        const isTop10 = displayRank <= 10;
                         return (
                           <TableRow
                             key={entry.id}
                             className={isTop10 ? 'border-l-2 border-l-primary' : ''}
                           >
                             <TableCell className="text-muted-foreground font-medium">
-                              {entry.rank}
+                              {displayRank}
                             </TableCell>
                             <TableCell className={`text-xs ${delta.className}`}>
                               {delta.label}

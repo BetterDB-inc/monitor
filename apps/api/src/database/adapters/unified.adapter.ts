@@ -321,9 +321,24 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
         try {
           await this.client.select(dbIndex);
         } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          // Only a server-side rejection means the index is unusable. A
+          // transport error mid-SELECT must fail the connect instead: iovalkey
+          // records the target db when SELECT is SENT and re-selects it on
+          // auto-reconnect, so treating a dropped connection as "db0" would
+          // leave activeDbIndex disagreeing with the client's real database
+          // and mislabel every subsequent scan.
+          if (!/^(ERR|NOPERM|WRONGPASS|NOAUTH)\b/i.test(message)) {
+            throw error;
+          }
           this.activeDbIndex = 0;
+          // Pin the client's recorded target back to db0 (SELECT 0 is legal
+          // everywhere, including cluster mode), so an auto-reconnect cannot
+          // silently retry the rejected index and drift away from
+          // activeDbIndex if the server's config changed in the meantime.
+          await this.client.select(0).catch(() => undefined);
           this.logger.warn(
-            `SELECT ${dbIndex} failed (${error instanceof Error ? error.message : error}); ` +
+            `SELECT ${dbIndex} failed (${message}); ` +
               'falling back to db0 — check the connection\'s configured database index',
           );
         }
