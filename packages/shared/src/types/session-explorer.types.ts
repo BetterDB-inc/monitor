@@ -1,0 +1,103 @@
+export type PresetId =
+  | 'langchain-community'
+  | 'langchain-js'
+  | 'llamaindex'
+  | 'agent-cache'
+  | 'custom'
+  | 'raw';
+
+export type ValkeyValue =
+  | string
+  | string[]
+  | Record<string, string>
+  | Array<[string, number]>
+  | { base64: string }
+  | unknown;
+
+export interface CapturedKey {
+  key: string;
+  type: string;
+  pttl: number;
+  value: ValkeyValue;
+  truncated?: boolean;
+  bytes?: number;
+}
+
+export interface CustomSchema {
+  sessionRegex?: string;
+  valueType: 'list' | 'string' | 'hash' | 'json';
+  messages:
+    | { from: 'items' }
+    | { from: 'path'; path: string }
+    | { from: 'key' };
+  fields: {
+    role: string;
+    content: string;
+    timestamp?: string;
+    toolName?: string;
+    toolArgs?: string;
+    toolResult?: string;
+  };
+}
+
+export interface SessionNamespace {
+  id: string;
+  connectionId: string;
+  name: string;
+  pattern: string;
+  preset: PresetId;
+  customSchema: CustomSchema | null;
+  oversizeThresholdBytes: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type SessionNamespaceInput = Pick<
+  SessionNamespace,
+  'name' | 'pattern' | 'preset' | 'customSchema' | 'oversizeThresholdBytes'
+>;
+
+export interface SessionSummary {
+  sessionId: string;
+  keyCount: number;
+  memoryBytes: number;
+  idleSeconds: number | null;
+  ttlMs: number | null;
+}
+
+export interface SessionListResponse {
+  sessions: SessionSummary[];
+  scannedKeys: number;
+  truncated: boolean;
+  partial: boolean;
+  failedNodes: number;
+}
+
+export interface ParsedMessage {
+  role: string;
+  content: string;
+  timestamp?: string;
+  toolCalls?: Array<{ name: string; args: unknown; id?: string }>;
+  toolResult?: { name?: string; content: unknown; callId?: string };
+}
+
+export type KeyView = {
+  key: string;
+  type: string;
+  ttlMs: number | null;
+  raw: ValkeyValue;
+  truncated: boolean;
+} & (
+  | { parsed: true; messages: ParsedMessage[] }
+  | { parsed: false; reason: string }
+);
+
+export interface SessionDetail {
+  sessionId: string;
+  preset: PresetId;
+  keys: KeyView[];
+  messages: ParsedMessage[];
+  estimatedTokens: number;
+  ttlMs: number | null;
+  memoryBytes: number;
+}
