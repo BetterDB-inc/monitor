@@ -112,6 +112,7 @@ describe('RuntimeCapabilityTracker', () => {
         'canClusterInfo',
         'canClusterSlotStats',
         'canMemory',
+        'canKeysizes',
       ];
       expect(Object.keys(CAPABILITY_TEST_COMMAND).sort()).toEqual(expected.sort());
     });

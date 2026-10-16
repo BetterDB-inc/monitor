@@ -26,6 +26,7 @@ Complete reference for all metrics exposed by BetterDB Monitor at the `/api/prom
   - [CPU Metrics](#cpu-metrics)
   - [Replication Metrics](#replication-metrics)
   - [Keyspace Metrics](#keyspace-metrics)
+  - [Key Size Metrics](#key-size-metrics)
   - [Persistence Metrics](#persistence-metrics)
   - [Cluster Metrics](#cluster-metrics)
   - [Anomaly Detection Metrics](#anomaly-detection-metrics)
@@ -166,6 +167,9 @@ A family marked **removed** tracks only its current label values: a value that d
 | `betterdb_inference_bucket_p50_us`, `_p95_us`, `_p99_us`, `betterdb_inference_unhealthy`     | 4 × (2 + I′) | One `read` bucket, one `write` bucket, and one `FT.SEARCH:<index>` bucket for each of the I′ indexes that appear in the slowlog or COMMANDLOG window.                         | removed      |
 | `betterdb_inference_sla_breach`                                                              | ≤ I          | One per index with an SLA configured.                                                                                                                                         | removed      |
 | `betterdb_metric_forecast_time_to_limit_seconds`                                             | ≤ 4          | The four forecast metric kinds.                                                                                                                                               | removed      |
+| `betterdb_key_pattern_memory_bytes`, `_avg_memory_bytes`, `_max_memory_bytes`, `betterdb_key_pattern_keys` | 4 × P        | P is `METRICS_KEY_PATTERNS_TOP_N` (default 100, `0` disables): the top patterns by total memory from the latest key analytics run. Pro connections only.                       | removed      |
+| `betterdb_key_memory_bytes`, `betterdb_key_cardinality`                                      | 2 × K        | K is `METRICS_KEY_DETAILS_TOP_N` (default 10, maximum 50, `0` disables): the top tracked keys by memory. Key names become label values. Pro connections only.                  | removed      |
+| `betterdb_keysize_bucket_keys`                                                               | D × T × B    | One series per populated database (D) × data type (T, ≤ 6) × log2 bucket (B, ≤ 64) from `INFO keysizes`. Only on Redis 8.0+ (no Valkey version emits it).                      | removed      |
 | `betterdb_acl_denied_by_reason`                                                              | ≤ 4          | The ACL LOG reasons: `auth`, `command`, `key`, `channel`.                                                                                                                     | zeroed       |
 | `betterdb_acl_denied_by_user`                                                                | U            | Distinct usernames seen in ACL audit data since BetterDB started.                                                                                                             | zeroed       |
 | `betterdb_client_connections_by_name`, `betterdb_client_connections_by_user`                 | K + L        | Distinct client names (K) and users (L) seen in client snapshots since BetterDB started.                                                                                      | zeroed       |
@@ -181,11 +185,13 @@ Patterns are fingerprinted before they become label values. Each key segment is 
 - **Full slot coverage.** With `METRICS_SLOT_STATS_TOP_N=16384`, one cluster connection exports 65,536 slot series. At the default of 100 it exports at most 400.
 - **Pattern churn.** Fingerprinting does not catch short, non-hex dynamic segments such as `session:ab12x` or `user:alice`. Each distinct key then becomes its own pattern. A workload like this can add up to 128 new slowlog patterns per poll. On servers with COMMANDLOG (Valkey 8.1+) it can also add up to 128 new large-request and 128 new large-reply patterns per poll. Because the pattern families are zeroed rather than removed, over the process lifetime they are bounded only by the number of distinct patterns each source has produced since BetterDB started. The client-name and ACL-username families behave the same way when names are generated per session.
 - **Many databases.** A standalone server that uses all 16 databases adds 48 per-db series.
+- **Keysize buckets.** `betterdb_keysize_bucket_keys` has no top-N knob: it is bounded only by the server (populated databases × data types × log2 buckets, up to D × T × B ≈ 6,144 series for a 16-database Redis 8 connection using every type and bucket; a single-db instance typically emits a few dozen). The only mitigations are `METRICS_EXPORT_PROFILE=vitals` or `metric_relabel_configs`.
 
 If a worst case applies, use one of these:
 
 - Switch to `METRICS_EXPORT_PROFILE=vitals`, which drops every variable family.
 - Lower `METRICS_SLOT_STATS_TOP_N`.
+- Lower `METRICS_KEY_PATTERNS_TOP_N` or `METRICS_KEY_DETAILS_TOP_N` (either can be `0` to drop its family; per-key is the riskier one since key names become label values).
 - Drop the pattern families with `metric_relabel_configs`.
 
 ### Worked example
@@ -220,6 +226,8 @@ This example uses `full` with 5 standalone primaries and 2 cluster primaries, as
 The total with `full` is 55 + 5 × 263 + 2 × 667 = **2,704 series**. Add up to 181 more while anomaly detection runs.
 
 The same fleet under `vitals` exports 55 + 5 × 33 + 2 × 39 = **298 series**, and that number does not change with key count, database count, pattern churn or cluster size.
+
+On Pro deployments with key analytics running, add the [Key Size Metrics](#key-size-metrics) families per owning connection: up to 4 × `METRICS_KEY_PATTERNS_TOP_N` + 2 × `METRICS_KEY_DETAILS_TOP_N` series (420 at the defaults — more than the example's entire standalone per-connection budget), plus the keysize bucket series on Redis 8.0+ (see Worst cases above). All three families are dropped under `vitals`.
 
 The OTLP export in `semconv` mode (see [OpenTelemetry export modes](opentelemetry.md#export-modes)) carries the same series under different names, split into one resource per node, minus `betterdb_keyspace_keys`, `betterdb_keyspace_keys_expiring` and `betterdb_poll_duration_seconds`. The counts above are therefore upper bounds for it too.
 
@@ -414,6 +422,29 @@ Per-database key statistics.
 **Label Example**: `db="db0"`, `db="db1"`
 
 **Externally monitored (OTLP-push) connections**: `betterdb_db_keys_expiring` is exported for databases whose expiry count was pushed, and `betterdb_db_avg_ttl_seconds` for databases whose average TTL was pushed. Each is omitted, never reported as 0, when its value was not pushed. `betterdb_keyspace_keys_expiring` is omitted when no database pushed an expiry count.
+
+### Key Size Metrics
+
+Key memory per pattern, per tracked key, and the whole-keyspace size distribution. Two data sources with different cadences:
+
+- The **pattern and per-key gauges** come from the latest key analytics run (a Pro feature; the collector runs every `KEY_ANALYTICS_INTERVAL_MS`, default 5 minutes). Values hold between runs. When no run newer than 3× the collector interval exists for a connection — feature disabled, managed service, non-owning topology member, collector stopped — the series are removed, never zero-filled. The exporter re-reads the stored run every 30 seconds.
+- **`betterdb_keysize_bucket_keys`** reads `INFO keysizes` directly (server-maintained; Redis 8.0+ — no Valkey version emits the section yet), refreshed every 30 seconds. Servers without the section export no series. Cluster members are monitored as their own connections, so these series are per node; the pattern and per-key gauges live under the label of the connection that owns key analytics — a standalone connection, a cluster seed, or the **current sentinel primary** (after a failover the series move to the new primary's `connection` label).
+
+| Metric                                  | Type  | Labels                          | Description                                                                        | Example   |
+| --------------------------------------- | ----- | ------------------------------- | ---------------------------------------------------------------------------------- | --------- |
+| `betterdb_key_pattern_memory_bytes`     | gauge | `pattern`                       | Estimated total memory of keys matching pattern, extrapolated from the sampled keys of the latest run (not the raw sampled sum) | `1048576` |
+| `betterdb_key_pattern_avg_memory_bytes` | gauge | `pattern`                       | Average per-key memory across the sampled keys matching pattern                   | `1024`    |
+| `betterdb_key_pattern_max_memory_bytes` | gauge | `pattern`                       | Largest single-key memory among the sampled keys matching pattern                 | `65536`   |
+| `betterdb_key_pattern_keys`             | gauge | `pattern`                       | Estimated keys matching pattern (extrapolated from the sample)                    | `1000`    |
+| `betterdb_key_memory_bytes`             | gauge | `key`, `type`                   | Memory of a single tracked key (the collector's tracked keys ranked by memory; a huge-by-memory key the collector did not track may be absent) | `65536`   |
+| `betterdb_key_cardinality`              | gauge | `key`, `type`                   | Elements in a tracked collection key, or byte length for strings                   | `4000`    |
+| `betterdb_keysize_bucket_keys`          | gauge | `db`, `type`, `metric`, `bucket` | Keys per `INFO keysizes` bucket; `metric="sizes"` is byte length, `"items"` is element count. Per node, so with several connections (or auto-registered replicas) selected the counts sum across nodes — select a single connection for a true per-server distribution. `type` is normalized to the singular form (`string`, `hash`, …) so it joins with the per-key families (`betterdb_key_memory_bytes` / `betterdb_key_cardinality`); the per-pattern families carry only a `pattern` label | `655`     |
+
+**Cardinality bounds**: pattern series are capped at the top `METRICS_KEY_PATTERNS_TOP_N` patterns by total memory (default 100, `0` disables them). Per-key series are capped at the top `METRICS_KEY_DETAILS_TOP_N` keys by memory (default 10, maximum 50, `0` disables only the per-key family). Per-key series put raw key names in the `key` label — keep the cap conservative, or disable the family, if key names embed user identifiers. Bucket series are bounded by the server: one per populated database × data type × log2 bucket.
+
+**Sampling note**: pattern memory and key counts are extrapolated from a sample (`sampled value / sampling ratio`), so on a keyspace larger than the sample they are estimates, not exact totals. `*_avg_memory_bytes` and `*_max_memory_bytes` describe only the sampled keys.
+
+**Label Example**: `pattern="user:*"`, `key="user:1:profile"`, `type="hash"`, `db="db0"`, `metric="sizes"`, `bucket="16K"`
 
 ### Persistence Metrics
 
@@ -792,6 +823,31 @@ for: 10m
 betterdb_anomaly_by_severity{severity!="info"} > 10
 for: 30m
 ```
+
+**BetterDBKeyMemoryGrowth** - A tracked key ballooning in size (requires Pro key analytics; 104857600 = 100 MiB growth over an hour — tune to your workload)
+
+```promql
+delta(max_over_time(betterdb_key_memory_bytes[15m])[1h:5m]) > 104857600
+for: 10m
+```
+
+> This is a growth rule, matching the name: the inner `max_over_time[15m]`
+> smooths a single key's series, and the outer `delta(...[1h:5m])` measures how
+> much it grew over the last hour — so it fires on a key that *balloons*, not on
+> one that is merely large. (For a static "this key is too big" alert instead,
+> drop the `delta` and compare `max_over_time(betterdb_key_memory_bytes[15m])`
+> to an absolute threshold, and rename it, e.g. `BetterDBLargeKey`.)
+>
+> It alerts on `betterdb_key_memory_bytes` (a specific tracked key), not
+> `betterdb_key_pattern_max_memory_bytes`: on a keyspace larger than the sample
+> the pattern max is the largest key *among the sampled keys of one run*, so each
+> run can pick a different key and the value jumps with no real growth.
+>
+> Because `delta()` is the difference between the first and last samples *within
+> the window*, a key that simply enters the tracked top-N at a steady large size
+> has a delta near zero and does not trip this rule — only actual growth within
+> the window does. To also catch keys that are already large but not growing, use
+> the absolute-size variant above (`BetterDBLargeKey`).
 
 ### Info Alerts
 

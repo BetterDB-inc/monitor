@@ -44,6 +44,14 @@ class TestPoller extends MultiConnectionPoller {
   tickNow(): Promise<void> {
     return (this as unknown as { tick(): Promise<void> }).tick();
   }
+
+  startNow(): void {
+    (this as unknown as { start(): void }).start();
+  }
+
+  active(): boolean {
+    return (this as unknown as { isPollingActive(): boolean }).isPollingActive();
+  }
 }
 
 function status(id: string, connectionType: ConnectionStatus['connectionType']): ConnectionStatus {
@@ -129,6 +137,24 @@ describe('MultiConnectionPoller external handling', () => {
     setStatuses([status('d', 'direct'), status('e', 'external')]);
     await poller.tickNow();
     expect(polledIds().filter((id) => id === 'e')).toHaveLength(2);
+  });
+});
+
+describe('MultiConnectionPoller teardown', () => {
+  it('ignores a start() that races after onModuleDestroy', async () => {
+    jest.useFakeTimers();
+    try {
+      const { poller, polledIds } = setup();
+      // Teardown latches the poller shut.
+      await poller.onModuleDestroy();
+      // A deferred start() arriving after close() must not re-arm the timer.
+      poller.startNow();
+      jest.advanceTimersByTime(5000); // well past the 1000ms interval
+      expect(polledIds()).toEqual([]);
+      expect(poller.active()).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

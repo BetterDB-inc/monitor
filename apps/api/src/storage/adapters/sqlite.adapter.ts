@@ -341,6 +341,100 @@ const COMMAND_STATS_SAMPLES_NULLABLE = [
   'usec_delta',
 ] as const;
 
+// Tables whose composite UNIQUE constraint gained connection_id in the
+// multi-connection change. These DDL constants are the single source of truth,
+// shared by createSchema and the legacy-constraint rebuild in
+// migrateConnectionIdUniqueConstraints, so the rebuilt table matches the schema
+// a fresh database gets exactly (same columns, same connection_id-inclusive
+// UNIQUE). The matching ON CONFLICT / INSERT OR IGNORE targets live in
+// saveAclEntries and the slow/command log repositories.
+const ACL_AUDIT_COLUMNS = `
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  count INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  context TEXT NOT NULL,
+  object TEXT NOT NULL,
+  username TEXT NOT NULL,
+  age_seconds INTEGER NOT NULL,
+  client_info TEXT NOT NULL,
+  timestamp_created INTEGER NOT NULL,
+  timestamp_last_updated INTEGER NOT NULL,
+  captured_at INTEGER NOT NULL,
+  source_host TEXT NOT NULL,
+  source_port INTEGER NOT NULL,
+  connection_id TEXT NOT NULL DEFAULT 'env-default',
+  created_at INTEGER DEFAULT (strftime('%s', 'now')),
+  UNIQUE(timestamp_created, username, object, reason, source_host, source_port, connection_id)
+`;
+
+const ACL_AUDIT_INDEXES = `
+  CREATE INDEX IF NOT EXISTS idx_acl_username ON acl_audit(username);
+  CREATE INDEX IF NOT EXISTS idx_acl_reason ON acl_audit(reason);
+  CREATE INDEX IF NOT EXISTS idx_acl_captured_at ON acl_audit(captured_at);
+  CREATE INDEX IF NOT EXISTS idx_acl_timestamp_created ON acl_audit(timestamp_created);
+  CREATE INDEX IF NOT EXISTS idx_acl_connection_id ON acl_audit(connection_id);
+`;
+
+const SLOW_LOG_ENTRIES_COLUMNS = `
+  pk INTEGER PRIMARY KEY AUTOINCREMENT,
+  slowlog_id INTEGER NOT NULL,
+  timestamp INTEGER NOT NULL,
+  duration INTEGER NOT NULL,
+  command TEXT NOT NULL DEFAULT '[]',
+  client_address TEXT,
+  client_name TEXT,
+  captured_at INTEGER NOT NULL,
+  source_host TEXT NOT NULL,
+  source_port INTEGER NOT NULL,
+  connection_id TEXT NOT NULL DEFAULT 'env-default',
+  UNIQUE(slowlog_id, source_host, source_port, connection_id)
+`;
+
+const SLOW_LOG_ENTRIES_INDEXES = `
+  CREATE INDEX IF NOT EXISTS idx_slowlog_timestamp ON slow_log_entries(timestamp DESC);
+  CREATE INDEX IF NOT EXISTS idx_slowlog_command ON slow_log_entries(command);
+  CREATE INDEX IF NOT EXISTS idx_slowlog_duration ON slow_log_entries(duration DESC);
+  CREATE INDEX IF NOT EXISTS idx_slowlog_client_name ON slow_log_entries(client_name);
+  CREATE INDEX IF NOT EXISTS idx_slowlog_captured_at ON slow_log_entries(captured_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_slowlog_connection_id ON slow_log_entries(connection_id);
+`;
+
+const COMMAND_LOG_ENTRIES_COLUMNS = `
+  pk INTEGER PRIMARY KEY AUTOINCREMENT,
+  commandlog_id INTEGER NOT NULL,
+  timestamp INTEGER NOT NULL,
+  duration INTEGER NOT NULL,
+  command TEXT NOT NULL DEFAULT '[]',
+  client_address TEXT,
+  client_name TEXT,
+  log_type TEXT NOT NULL,
+  captured_at INTEGER NOT NULL,
+  source_host TEXT NOT NULL,
+  source_port INTEGER NOT NULL,
+  connection_id TEXT NOT NULL DEFAULT 'env-default',
+  UNIQUE(commandlog_id, log_type, source_host, source_port, connection_id)
+`;
+
+const COMMAND_LOG_ENTRIES_INDEXES = `
+  CREATE INDEX IF NOT EXISTS idx_commandlog_timestamp ON command_log_entries(timestamp DESC);
+  CREATE INDEX IF NOT EXISTS idx_commandlog_type ON command_log_entries(log_type);
+  CREATE INDEX IF NOT EXISTS idx_commandlog_duration ON command_log_entries(duration DESC);
+  CREATE INDEX IF NOT EXISTS idx_commandlog_client_name ON command_log_entries(client_name);
+  CREATE INDEX IF NOT EXISTS idx_commandlog_captured_at ON command_log_entries(captured_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_commandlog_connection_id ON command_log_entries(connection_id);
+`;
+
+// Rebuild spec per table, consumed by migrateConnectionIdUniqueConstraints.
+const CONNECTION_ID_UNIQUE_REBUILDS = [
+  { table: 'acl_audit', columns: ACL_AUDIT_COLUMNS, indexes: ACL_AUDIT_INDEXES },
+  { table: 'slow_log_entries', columns: SLOW_LOG_ENTRIES_COLUMNS, indexes: SLOW_LOG_ENTRIES_INDEXES },
+  {
+    table: 'command_log_entries',
+    columns: COMMAND_LOG_ENTRIES_COLUMNS,
+    indexes: COMMAND_LOG_ENTRIES_INDEXES,
+  },
+] as const;
+
 function rebuildWithNullableColumns(
   db: Database.Database,
   table: string,
@@ -490,6 +584,14 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     try {
       this.db = await this.openDatabase();
 
+      // Columns first: createSchema's index DDL references connection_id,
+      // which legacy tables (pre multi-connection) only gain through this
+      // migration — CREATE TABLE IF NOT EXISTS will not add it to an existing
+      // table, so running createSchema first throws `no such column` and the
+      // migration that would fix it never gets to run. Same hazard as
+      // documented on addMemoryProposalIntegrityColumns. On a fresh database
+      // the tables don't exist yet and this is a no-op.
+      this.migrateConnectionId();
       // Create schema
       this.createSchema();
       // Run migrations for existing databases
@@ -600,8 +702,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       }
     }
 
-    // Migrate connection_id to all data tables for multi-database support
-    this.migrateConnectionId();
+    // connection_id is migrated in initialize(), before createSchema — see the
+    // ordering note there.
   }
 
   /**
@@ -628,15 +730,115 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         // Check if column exists
         const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
         if (!columns.some((c) => c.name === 'connection_id')) {
-          // Add connection_id column with default value
+          // Add connection_id column with default value. The matching index is
+          // NOT created here: createSchema runs right after this migration and
+          // creates the canonical per-table index (the names here used to
+          // differ from the schema's, leaving legacy databases with duplicate
+          // indexes on the same column).
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN connection_id TEXT DEFAULT 'env-default'`);
-          // Create index
-          this.db.exec(
-            `CREATE INDEX IF NOT EXISTS idx_${table}_connection_id ON ${table}(connection_id)`,
-          );
         }
       } catch (error) {
-        // Table might not exist yet - that's fine, createSchema will handle it
+        // This migration runs BEFORE createSchema, so a missing table is the
+        // expected fresh-database case — but only that. Swallowing a real
+        // ALTER failure (busy/locked database, disk full) here would let
+        // createSchema's index DDL rethrow the misleading
+        // `no such column: connection_id` with the root cause erased.
+        // Same pattern as addMemoryProposalIntegrityColumns.
+        const message = error instanceof Error ? error.message : String(error);
+        if (/no such table/i.test(message)) {
+          continue;
+        }
+        throw new Error(`connection_id migration failed for ${table}: ${message}`, {
+          cause: error,
+        });
+      }
+    }
+
+    this.migrateConnectionIdUniqueConstraints();
+  }
+
+  /**
+   * Replace the pre-multi-connection UNIQUE constraint on legacy tables with the
+   * connection_id-inclusive one the current schema (and the upsert paths)
+   * require. `ALTER TABLE ADD COLUMN` cannot alter a UNIQUE constraint and a
+   * standalone unique index only *adds* a second rule — the old connection_id-
+   * less constraint stays and SQLite keeps enforcing it, so `saveAclEntries`
+   * (`ON CONFLICT(... connection_id)`) still aborts when two connections share
+   * source_host/source_port, and the slow/command log `INSERT OR IGNORE` paths
+   * still dedup on the wrong (connection_id-less) key. SQLite can only drop an
+   * inline constraint via a table rebuild, so rebuild the table to the canonical
+   * schema (same create/copy/drop/rename pattern as rebuildWithNullableColumns).
+   *
+   * Idempotent and safe:
+   * - Runs before createSchema, so a brand-new database has none of these tables
+   *   yet (`no such table` → skip); the rebuild only ever touches a pre-existing
+   *   legacy table.
+   * - Rebuilds only when the table is NOT already canonical — i.e. it lacks a
+   *   connection_id-inclusive unique index or still carries a connection_id-less
+   *   one (the partially-migrated case left by the earlier index-only fix).
+   * - Copies rows with INSERT OR IGNORE: widening the key cannot turn previously
+   *   unique rows into duplicates, but a legacy table with a weaker/no unique
+   *   constraint could hold genuine duplicates, and dropping those is exactly
+   *   what the canonical constraint enforces going forward.
+   */
+  private migrateConnectionIdUniqueConstraints(): void {
+    if (!this.db) return;
+    const db = this.db;
+
+    for (const { table, columns, indexes: indexesDdl } of CONNECTION_ID_UNIQUE_REBUILDS) {
+      try {
+        // PRAGMA statements return an empty result (not an error) for a missing
+        // table, so check existence explicitly: a brand-new database has none of
+        // these tables yet and createSchema will build them canonically.
+        const exists = db
+          .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`)
+          .get(table);
+        if (!exists) continue;
+
+        const uniqueColumnSets = (
+          db.prepare(`PRAGMA index_list(${table})`).all() as { name: string; unique: number }[]
+        )
+          .filter((index) => index.unique)
+          .map((index) =>
+            (db.prepare(`PRAGMA index_info(${index.name})`).all() as { name: string }[]).map(
+              (c) => c.name,
+            ),
+          );
+        const hasCanonicalUnique = uniqueColumnSets.some((cols) => cols.includes('connection_id'));
+        const hasStaleUnique = uniqueColumnSets.some((cols) => !cols.includes('connection_id'));
+        // Canonical already: exactly the connection_id-inclusive constraint and
+        // no leftover narrow one. Nothing to do.
+        if (hasCanonicalUnique && !hasStaleUnique) continue;
+
+        const existingColumns = (
+          db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+        ).map((c) => c.name);
+
+        const rebuilt = `${table}_rebuild`;
+        db.transaction(() => {
+          db.exec(`DROP TABLE IF EXISTS ${rebuilt}`);
+          db.exec(`CREATE TABLE ${rebuilt} (${columns})`);
+          const target = new Set(
+            (db.prepare(`PRAGMA table_info(${rebuilt})`).all() as { name: string }[]).map(
+              (c) => c.name,
+            ),
+          );
+          const shared = existingColumns.filter((name) => target.has(name)).join(', ');
+          db.exec(`INSERT OR IGNORE INTO ${rebuilt} (${shared}) SELECT ${shared} FROM ${table}`);
+          db.exec(`DROP TABLE ${table}`);
+          db.exec(`ALTER TABLE ${rebuilt} RENAME TO ${table}`);
+          db.exec(indexesDdl);
+        })();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Fresh database: createSchema has not built the table yet and will add
+        // the canonical constraint itself. Any other failure must surface.
+        if (/no such table/i.test(message)) {
+          continue;
+        }
+        throw new Error(`connection_id unique-constraint migration failed for ${table}: ${message}`, {
+          cause: error,
+        });
       }
     }
   }
@@ -1366,30 +1568,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     this.migrateCveAdvisoriesTable();
 
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS acl_audit (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        count INTEGER NOT NULL,
-        reason TEXT NOT NULL,
-        context TEXT NOT NULL,
-        object TEXT NOT NULL,
-        username TEXT NOT NULL,
-        age_seconds INTEGER NOT NULL,
-        client_info TEXT NOT NULL,
-        timestamp_created INTEGER NOT NULL,
-        timestamp_last_updated INTEGER NOT NULL,
-        captured_at INTEGER NOT NULL,
-        source_host TEXT NOT NULL,
-        source_port INTEGER NOT NULL,
-        connection_id TEXT NOT NULL DEFAULT 'env-default',
-        created_at INTEGER DEFAULT (strftime('%s', 'now')),
-        UNIQUE(timestamp_created, username, object, reason, source_host, source_port, connection_id)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_acl_username ON acl_audit(username);
-      CREATE INDEX IF NOT EXISTS idx_acl_reason ON acl_audit(reason);
-      CREATE INDEX IF NOT EXISTS idx_acl_captured_at ON acl_audit(captured_at);
-      CREATE INDEX IF NOT EXISTS idx_acl_timestamp_created ON acl_audit(timestamp_created);
-      CREATE INDEX IF NOT EXISTS idx_acl_connection_id ON acl_audit(connection_id);
+      CREATE TABLE IF NOT EXISTS acl_audit (${ACL_AUDIT_COLUMNS});
+      ${ACL_AUDIT_INDEXES}
 
       CREATE TABLE IF NOT EXISTS client_snapshots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1640,51 +1820,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_connection_id ON webhook_deliveries(connection_id);
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_created_at ON webhook_deliveries(created_at);
 
-      CREATE TABLE IF NOT EXISTS slow_log_entries (
-        pk INTEGER PRIMARY KEY AUTOINCREMENT,
-        slowlog_id INTEGER NOT NULL,
-        timestamp INTEGER NOT NULL,
-        duration INTEGER NOT NULL,
-        command TEXT NOT NULL DEFAULT '[]',
-        client_address TEXT,
-        client_name TEXT,
-        captured_at INTEGER NOT NULL,
-        source_host TEXT NOT NULL,
-        source_port INTEGER NOT NULL,
-        connection_id TEXT NOT NULL DEFAULT 'env-default',
-        UNIQUE(slowlog_id, source_host, source_port, connection_id)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_slowlog_timestamp ON slow_log_entries(timestamp DESC);
-      CREATE INDEX IF NOT EXISTS idx_slowlog_command ON slow_log_entries(command);
-      CREATE INDEX IF NOT EXISTS idx_slowlog_duration ON slow_log_entries(duration DESC);
-      CREATE INDEX IF NOT EXISTS idx_slowlog_client_name ON slow_log_entries(client_name);
-      CREATE INDEX IF NOT EXISTS idx_slowlog_captured_at ON slow_log_entries(captured_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_slowlog_connection_id ON slow_log_entries(connection_id);
+      CREATE TABLE IF NOT EXISTS slow_log_entries (${SLOW_LOG_ENTRIES_COLUMNS});
+      ${SLOW_LOG_ENTRIES_INDEXES}
 
       -- Command Log Entries Table (Valkey-specific)
-      CREATE TABLE IF NOT EXISTS command_log_entries (
-        pk INTEGER PRIMARY KEY AUTOINCREMENT,
-        commandlog_id INTEGER NOT NULL,
-        timestamp INTEGER NOT NULL,
-        duration INTEGER NOT NULL,
-        command TEXT NOT NULL DEFAULT '[]',
-        client_address TEXT,
-        client_name TEXT,
-        log_type TEXT NOT NULL,
-        captured_at INTEGER NOT NULL,
-        source_host TEXT NOT NULL,
-        source_port INTEGER NOT NULL,
-        connection_id TEXT NOT NULL DEFAULT 'env-default',
-        UNIQUE(commandlog_id, log_type, source_host, source_port, connection_id)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_commandlog_timestamp ON command_log_entries(timestamp DESC);
-      CREATE INDEX IF NOT EXISTS idx_commandlog_type ON command_log_entries(log_type);
-      CREATE INDEX IF NOT EXISTS idx_commandlog_duration ON command_log_entries(duration DESC);
-      CREATE INDEX IF NOT EXISTS idx_commandlog_client_name ON command_log_entries(client_name);
-      CREATE INDEX IF NOT EXISTS idx_commandlog_captured_at ON command_log_entries(captured_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_commandlog_connection_id ON command_log_entries(connection_id);
+      CREATE TABLE IF NOT EXISTS command_log_entries (${COMMAND_LOG_ENTRIES_COLUMNS});
+      ${COMMAND_LOG_ENTRIES_INDEXES}
 
       CREATE TABLE IF NOT EXISTS latency_snapshots (
         id TEXT PRIMARY KEY,

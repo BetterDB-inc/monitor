@@ -87,17 +87,30 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     return this.intervalMs;
   }
 
-  async onModuleInit() {
-    if (!this.license.hasFeature('keyAnalytics')) {
-      this.logger.log('Key Analytics requires Pro license - service disabled');
-      return;
-    }
+  onModuleInit() {
+    // hasFeature() reports the community tier until the background entitlement
+    // validation kicked off by LicenseService resolves, so a boot-time check
+    // without waiting disabled the collector on every start of a licensed
+    // instance. Wait for the verdict the way the license guard does — but off
+    // the module-init path: NestJS awaits init hooks sequentially before
+    // app.listen, so awaiting here stalled every boot (including keyless
+    // community instances) by up to the 5s validation timeout. Deferring
+    // start() until the verdict keeps the immediate first tick accurate;
+    // pollConnection re-checks per tick, so an entitlement that only lands
+    // later (boot-time network failure, heartbeat re-validation) enables
+    // collection without a restart, and a lapsed one stops it.
+    // ensureValidated never rejects (it resolves community on timeout).
+    void this.license.ensureValidated().finally(() => {
+      if (this.license.hasFeature('keyAnalytics')) {
+        this.logger.log(
+          `Key Analytics service initialized (sample: ${this.sampleSize}, interval: ${this.intervalMs}ms)`,
+        );
+      } else {
+        this.logger.log('Key Analytics requires Pro license - collection idle until entitled');
+      }
 
-    this.logger.log(
-      `Key Analytics service initialized (sample: ${this.sampleSize}, interval: ${this.intervalMs}ms)`,
-    );
-
-    this.start();
+      this.start();
+    }).catch((error) => this.logger.error('Key Analytics deferred start failed', error));
     // Retention for key_pattern_snapshots and hot_key_stats is owned by the
     // shared sweeps (cloud DataRetentionService / self-hosted
     // LocalRetentionService via runRetentionSweep) — no service-local pruner.
@@ -110,6 +123,9 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    if (!this.license.hasFeature('keyAnalytics')) {
+      return;
+    }
     return this.collect(ctx, false);
   }
 
@@ -524,9 +540,11 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
       const raw = (await client.call('INFO', ['keysizes'])) as string;
       return parseKeySizeDistribution(raw ?? '');
     } catch {
-      // Servers without the keysizes section may reject the argument outright
-      // (e.g. an ERR reply) rather than returning an empty string. Treat any
-      // failure as "section unavailable" so the tab shows its empty state.
+      // Some managed servers reject the argument outright (NOPERM / "command is
+      // not available") rather than returning an empty string. Treat any failure
+      // as "section unavailable". A supported server with an empty keyspace is
+      // handled by the parser instead (header present -> available:true), so this
+      // path no longer conflates empty keyspaces with unsupported servers.
       return NO_KEY_SIZES;
     }
   }
