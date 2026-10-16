@@ -16,10 +16,10 @@ function hotKey(over: Partial<HotKeyEntry>): HotKeyEntry {
   };
 }
 
-function makeService(getHotKeys: jest.Mock, getKeyAnalyticsDatabases?: jest.Mock): KeyAnalyticsService {
+function makeService(getHotKeys: jest.Mock, getHotKeyDatabases?: jest.Mock): KeyAnalyticsService {
   const storage = {
     getHotKeys,
-    getKeyAnalyticsDatabases: getKeyAnalyticsDatabases ?? jest.fn(async () => [0]),
+    getHotKeyDatabases: getHotKeyDatabases ?? jest.fn(async () => [0]),
   } as unknown as StoragePort;
   const registry = { list: () => [] } as unknown as ConnectionRegistry;
   const license = {

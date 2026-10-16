@@ -3192,6 +3192,21 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rows.map((row: { db: number | null }) => row.db ?? 0);
   }
 
+  async getHotKeyDatabases(connectionId?: string): Promise<number[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    // Distinct logical databases present in hot_key_stats (where composite/
+    // hot-key rows live, unlike key_pattern_snapshots which can diverge). Plain
+    // DISTINCT: backs only the infrequent composite endpoint.
+    const where = connectionId ? 'WHERE connection_id = $1' : '';
+    const params = connectionId ? [connectionId] : [];
+    const result = await this.pool.query(
+      `SELECT DISTINCT db FROM hot_key_stats ${where} ORDER BY db ASC`,
+      params,
+    );
+    return result.rows.map((row: { db: number | null }) => row.db ?? 0);
+  }
+
   async pruneOldHotKeys(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
 

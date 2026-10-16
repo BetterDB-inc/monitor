@@ -813,6 +813,11 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     throw new Error('Hot key stats not supported in memory adapter');
   }
 
+  async getHotKeyDatabases(_connectionId?: string): Promise<number[]> {
+    // Nothing is ever stored here, so no databases have hot-key data.
+    return [];
+  }
+
   async pruneOldHotKeys(_cutoffTimestamp: number, _connectionId?: string): Promise<number> {
     // Nothing is ever stored here, so there is nothing to prune. Returning 0
     // (instead of throwing like the read/write paths) keeps the retention

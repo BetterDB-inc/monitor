@@ -3224,6 +3224,22 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return rows.map((row) => row.db ?? 0);
   }
 
+  async getHotKeyDatabases(connectionId?: string): Promise<number[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    // Distinct logical databases present in hot_key_stats. Composite/hot-key
+    // rows live here, not in key_pattern_snapshots (which can diverge — e.g.
+    // pattern-only retention pruning), so the composite read enumerates from
+    // this table. A plain DISTINCT: hot_key_stats has no db index, and this
+    // backs only the (infrequent) composite endpoint.
+    const where = connectionId ? 'WHERE connection_id = ?' : '';
+    const params = connectionId ? [connectionId] : [];
+    const rows = this.db
+      .prepare(`SELECT DISTINCT db FROM hot_key_stats ${where} ORDER BY db ASC`)
+      .all(...params) as Array<{ db: number | null }>;
+    return rows.map((row) => row.db ?? 0);
+  }
+
   async pruneOldHotKeys(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
 

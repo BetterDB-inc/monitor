@@ -506,10 +506,14 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
 
     let rows: HotKeyEntry[];
     if (perDbPinned) {
+      // Enumerate from hot_key_stats (where composites live), NOT
+      // key_pattern_snapshots: the two can diverge (e.g. pattern-only retention
+      // pruning), which would otherwise skip a database that still has stored
+      // composites but no pattern rows.
       const dbs =
         rest.db !== undefined
           ? [rest.db]
-          : await this.storage.getKeyAnalyticsDatabases(connectionId);
+          : await this.storage.getHotKeyDatabases(connectionId);
       const perDb = await Promise.all(
         dbs.map(async (db) => {
           const composites = await this.storage.getHotKeys({

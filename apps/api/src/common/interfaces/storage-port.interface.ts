@@ -530,6 +530,12 @@ export interface StoragePort {
   // Hot Key Stats Methods - connectionId required for writes, optional filter for reads
   saveHotKeys(entries: HotKeyEntry[], connectionId: string): Promise<number>;
   getHotKeys(options?: HotKeyQueryOptions): Promise<HotKeyEntry[]>;
+  /**
+   * Distinct logical database indexes present in stored hot-key stats. Separate
+   * from getKeyAnalyticsDatabases because hot-key / composite rows live in
+   * hot_key_stats, which can diverge from key_pattern_snapshots.
+   */
+  getHotKeyDatabases(connectionId?: string): Promise<number[]>;
   pruneOldHotKeys(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Settings Methods (global, not connection-scoped)
