@@ -68,9 +68,10 @@ describe('SqliteAdapter key analytics summary stale count', () => {
 describe('PostgresAdapter key analytics summary stale count', () => {
   function adapterReturning(summaryRow: Record<string, unknown>, patternRows: Record<string, unknown>[]) {
     const adapter = new PostgresAdapter({ connectionString: 'postgres://unused' });
+    // The summary runs three queries: aggregate totals (over the grouped-join
+    // of latest rows), per-pattern breakdown, and the time range.
     const query = jest
       .fn()
-      .mockResolvedValueOnce({ rows: patternRows.map((row) => ({ pattern: row.pattern, latest_timestamp: '1000' })) })
       .mockResolvedValueOnce({ rows: [summaryRow] })
       .mockResolvedValueOnce({ rows: patternRows })
       .mockResolvedValueOnce({ rows: [{ earliest: '1000', latest: '1000' }] });

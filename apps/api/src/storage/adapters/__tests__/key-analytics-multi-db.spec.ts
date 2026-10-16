@@ -117,6 +117,23 @@ describe('SqliteAdapter key analytics per logical database', () => {
     expect(db1?.totalKeys).toBe(30);
   });
 
+  it('summarizes a keyspace with more patterns than the bind-parameter limit allows', async () => {
+    // The old implementation expanded one (pattern = ? AND db = ? AND
+    // timestamp = ?) OR-term per kept pair — 11k patterns means 33k bind
+    // parameters, past SQLite's 32766 limit. The grouped-join keeps the
+    // parameter count constant regardless of pattern count.
+    const many: KeyPatternSnapshot[] = [];
+    for (let i = 0; i < 11_000; i++) {
+      many.push(snapshot({ id: `many-${i}`, pattern: `p${i}:*`, keyCount: 1, totalMemoryBytes: 1 }));
+    }
+    await storage.saveKeyPatternSnapshots(many, CONN);
+
+    const summary = await storage.getKeyAnalyticsSummary(undefined, undefined, CONN);
+
+    expect(summary?.totalPatterns).toBe(11_000);
+    expect(summary?.totalKeys).toBe(11_000);
+  });
+
   it('aggregates trends per timestamp across databases and respects the db filter', async () => {
     await storage.saveKeyPatternSnapshots(
       [

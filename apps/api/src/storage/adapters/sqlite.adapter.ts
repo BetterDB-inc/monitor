@@ -2852,85 +2852,70 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    // Get the latest snapshot for each (pattern, logical database) within the
-    // time range. Grouping by pattern alone would pin one MAX(timestamp) per
-    // pattern — but a partial collection (one database scanned, a sibling's
-    // scan failed) legitimately moves that timestamp forward for only some
-    // databases, which would silently drop the sibling's last row from the
-    // summary and undercount the headline totals.
-    const latestSnapshotsQuery = `
-      SELECT
-        pattern,
-        db,
-        MAX(timestamp) as latest_timestamp
-      FROM key_pattern_snapshots
-      ${whereClause}
-      GROUP BY pattern, db
+    // Aggregate over the latest snapshot per (pattern, logical database)
+    // within the time range. Per db, not per pattern: a partial collection
+    // (one database scanned, a sibling's scan failed) legitimately moves the
+    // pattern's newest timestamp forward for only some databases, and pinning
+    // one MAX(timestamp) per pattern would silently drop the sibling's last
+    // row and undercount the headline totals. The latest rows are selected by
+    // JOINing a grouped subquery rather than expanding each (pattern, db,
+    // timestamp) triple into an OR term with three bind parameters — that
+    // expansion scales with patterns x databases and can exceed the engine's
+    // bind-parameter limit (32766 for SQLite).
+    //
+    // connection scoping is re-applied on the outer rows: a (pattern, db,
+    // timestamp) triple is not unique across connections, so without it
+    // another connection's snapshot at the same triple would be summed in.
+    const latestJoin = `
+      FROM key_pattern_snapshots s
+      JOIN (
+        SELECT pattern, db, MAX(timestamp) as latest_timestamp
+        FROM key_pattern_snapshots
+        ${whereClause}
+        GROUP BY pattern, db
+      ) latest
+        ON s.pattern = latest.pattern
+        AND s.db = latest.db
+        AND s.timestamp = latest.latest_timestamp
+      ${connectionId ? 'WHERE s.connection_id = ?' : ''}
     `;
-
-    const latestSnapshots = this.db.prepare(latestSnapshotsQuery).all(...params) as Array<{
-      pattern: string;
-      db: number;
-      latest_timestamp: number;
-    }>;
-
-    if (latestSnapshots.length === 0) {
-      return null;
-    }
-
-    // Build aggregation query for the latest snapshot rows only. Each
-    // (pattern, db, timestamp) triple pins exactly one logical database's
-    // freshest row, so no separate db re-filter is needed; the unfiltered
-    // per-pattern breakdown then aggregates across the per-database rows.
-    const patternConditions = latestSnapshots
-      .map(() => '(pattern = ? AND db = ? AND timestamp = ?)')
-      .join(' OR ');
-    const patternParams: any[] = [];
-    for (const snapshot of latestSnapshots) {
-      patternParams.push(snapshot.pattern, snapshot.db, snapshot.latest_timestamp);
-    }
-    // Re-apply connection scoping: a (pattern, db, timestamp) triple is not
-    // unique across connections, so without this another connection's snapshot
-    // at the same pattern+db+timestamp would be summed in.
-    let patternWhere = `(${patternConditions})`;
-    if (connectionId) {
-      patternWhere += ' AND connection_id = ?';
-      patternParams.push(connectionId);
-    }
+    const latestParams = connectionId ? [...params, connectionId] : params;
 
     const summaryQuery = `
       SELECT
-        COUNT(DISTINCT pattern) as total_patterns,
-        SUM(key_count) as total_keys,
-        SUM(total_memory_bytes) as total_memory_bytes,
-        SUM(stale_key_count) as stale_key_count,
-        SUM(hot_key_count) as hot_key_count,
-        SUM(cold_key_count) as cold_key_count,
-        SUM(keys_expiring_soon) as keys_expiring_soon
-      FROM key_pattern_snapshots
-      WHERE ${patternWhere}
+        COUNT(DISTINCT s.pattern) as total_patterns,
+        SUM(s.key_count) as total_keys,
+        SUM(s.total_memory_bytes) as total_memory_bytes,
+        SUM(s.stale_key_count) as stale_key_count,
+        SUM(s.hot_key_count) as hot_key_count,
+        SUM(s.cold_key_count) as cold_key_count,
+        SUM(s.keys_expiring_soon) as keys_expiring_soon
+      ${latestJoin}
     `;
 
-    const summary = this.db.prepare(summaryQuery).get(...patternParams) as any;
+    const summary = this.db.prepare(summaryQuery).get(...latestParams) as any;
+
+    if (!summary || !summary.total_patterns) {
+      return null;
+    }
 
     // Get per-pattern breakdown, aggregated across the per-database rows of
     // each pattern (avg weighted by key count via the summed totals).
     const byPatternQuery = `
       SELECT
-        pattern,
-        SUM(key_count) as key_count,
-        SUM(total_memory_bytes) as total_memory_bytes,
-        SUM(stale_key_count) as stale_key_count,
-        SUM(hot_key_count) as hot_key_count,
-        SUM(cold_key_count) as cold_key_count,
-        SUM(sampled_key_count) as sampled_key_count,
-        SUM(avg_memory_bytes * sampled_key_count) as weighted_avg_memory
-      FROM key_pattern_snapshots
-      WHERE ${patternWhere}
-      GROUP BY pattern
+        s.pattern,
+        SUM(s.key_count) as key_count,
+        SUM(s.total_memory_bytes) as total_memory_bytes,
+        SUM(s.stale_key_count) as stale_key_count,
+        SUM(s.hot_key_count) as hot_key_count,
+        SUM(s.cold_key_count) as cold_key_count,
+        SUM(s.sampled_key_count) as sampled_key_count,
+        SUM(s.avg_memory_bytes * s.sampled_key_count) as weighted_avg_memory
+      ${latestJoin}
+      GROUP BY s.pattern
     `;
 
-    const patternRows = this.db.prepare(byPatternQuery).all(...patternParams) as any[];
+    const patternRows = this.db.prepare(byPatternQuery).all(...latestParams) as any[];
 
     const byPattern: Record<string, any> = {};
     for (const row of patternRows) {

@@ -2805,79 +2805,68 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    // Latest snapshot per (pattern, logical database): grouping by pattern
-    // alone pins one MAX(timestamp) per pattern, and a partial collection
-    // (one db scanned, a sibling's scan failed) moves that timestamp forward
-    // for only some databases — silently dropping the sibling's last row and
-    // undercounting the headline totals.
-    const latestSnapshotsResult = await this.pool.query(
-      `
-      SELECT pattern, db, MAX(timestamp) as latest_timestamp
-      FROM key_pattern_snapshots
-      ${whereClause}
-      GROUP BY pattern, db
-    `,
-      params,
-    );
-
-    if (latestSnapshotsResult.rows.length === 0) return null;
-
-    // Each (pattern, db, timestamp) triple pins exactly one logical database's
-    // freshest row, so no separate db re-filter is needed; the unfiltered
-    // per-pattern breakdown below aggregates across the per-database rows.
-    const patternParams: any[] = [];
-    for (const row of latestSnapshotsResult.rows) {
-      patternParams.push(row.pattern, row.db, row.latest_timestamp);
-    }
-
-    let pIdx = 1;
-    const patternPlaceholders = latestSnapshotsResult.rows
-      .map(() => `(pattern = $${pIdx++} AND db = $${pIdx++} AND timestamp = $${pIdx++})`)
-      .join(' OR ');
-    // Re-apply the connection scoping: a (pattern, db, timestamp) triple is
-    // not unique across connections, so without this predicate another
-    // connection's snapshot sharing the same pattern, db and collection
-    // timestamp would be summed into this connection's totals.
-    let patternWhere = `(${patternPlaceholders})`;
-    if (connectionId) {
-      patternWhere += ` AND connection_id = $${pIdx++}`;
-      patternParams.push(connectionId);
-    }
+    // Aggregate over the latest snapshot per (pattern, logical database): per
+    // db, not per pattern, because a partial collection (one db scanned, a
+    // sibling's scan failed) moves the pattern's newest timestamp forward for
+    // only some databases — pinning one MAX(timestamp) per pattern would
+    // silently drop the sibling's last row and undercount headline totals.
+    // The latest rows are selected by JOINing a grouped subquery rather than
+    // expanding each (pattern, db, timestamp) triple into an OR term with
+    // three bind parameters — that expansion scales with patterns x databases
+    // and can exceed the engine's bind-parameter limit (65535 for Postgres).
+    //
+    // connection scoping is re-applied on the outer rows: a (pattern, db,
+    // timestamp) triple is not unique across connections, so without it
+    // another connection's snapshot at the same triple would be summed in.
+    const latestJoin = `
+      FROM key_pattern_snapshots s
+      JOIN (
+        SELECT pattern, db, MAX(timestamp) as latest_timestamp
+        FROM key_pattern_snapshots
+        ${whereClause}
+        GROUP BY pattern, db
+      ) latest
+        ON s.pattern = latest.pattern
+        AND s.db = latest.db
+        AND s.timestamp = latest.latest_timestamp
+      ${connectionId ? `WHERE s.connection_id = $${paramIndex++}` : ''}
+    `;
+    const latestParams = connectionId ? [...params, connectionId] : params;
 
     const summaryResult = await this.pool.query(
       `
       SELECT
-        COUNT(DISTINCT pattern) as total_patterns,
-        SUM(key_count) as total_keys,
-        SUM(total_memory_bytes) as total_memory_bytes,
-        SUM(stale_key_count) as stale_key_count,
-        SUM(hot_key_count) as hot_key_count,
-        SUM(cold_key_count) as cold_key_count,
-        SUM(keys_expiring_soon) as keys_expiring_soon
-      FROM key_pattern_snapshots
-      WHERE ${patternWhere}
+        COUNT(DISTINCT s.pattern) as total_patterns,
+        SUM(s.key_count) as total_keys,
+        SUM(s.total_memory_bytes) as total_memory_bytes,
+        SUM(s.stale_key_count) as stale_key_count,
+        SUM(s.hot_key_count) as hot_key_count,
+        SUM(s.cold_key_count) as cold_key_count,
+        SUM(s.keys_expiring_soon) as keys_expiring_soon
+      ${latestJoin}
     `,
-      patternParams,
+      latestParams,
     );
 
     const summary = summaryResult.rows[0];
 
+    if (!summary || !parseInt(summary.total_patterns)) return null;
+
     const patternRowsResult = await this.pool.query(
       `
       SELECT
-        pattern,
-        SUM(key_count) as key_count,
-        SUM(total_memory_bytes) as total_memory_bytes,
-        SUM(stale_key_count) as stale_key_count,
-        SUM(hot_key_count) as hot_key_count,
-        SUM(cold_key_count) as cold_key_count,
-        SUM(sampled_key_count) as sampled_key_count,
-        SUM(avg_memory_bytes::bigint * sampled_key_count) as weighted_avg_memory
-      FROM key_pattern_snapshots
-      WHERE ${patternWhere}
-      GROUP BY pattern
+        s.pattern,
+        SUM(s.key_count) as key_count,
+        SUM(s.total_memory_bytes) as total_memory_bytes,
+        SUM(s.stale_key_count) as stale_key_count,
+        SUM(s.hot_key_count) as hot_key_count,
+        SUM(s.cold_key_count) as cold_key_count,
+        SUM(s.sampled_key_count) as sampled_key_count,
+        SUM(s.avg_memory_bytes::bigint * s.sampled_key_count) as weighted_avg_memory
+      ${latestJoin}
+      GROUP BY s.pattern
     `,
-      patternParams,
+      latestParams,
     );
 
     const byPattern: Record<string, any> = {};
