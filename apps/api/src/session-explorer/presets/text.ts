@@ -15,8 +15,9 @@ const tryDecode = (buf: Buffer): string | null => {
 export function decodeValue(
   buf: Buffer,
   cap: number,
+  more = false,
 ): { value: string | { base64: string }; truncated: boolean } {
-  const truncated = buf.length > cap;
+  const truncated = more || buf.length > cap;
   const slice = truncated ? buf.subarray(0, cap) : buf;
   const full = tryDecode(slice);
   if (full !== null) {

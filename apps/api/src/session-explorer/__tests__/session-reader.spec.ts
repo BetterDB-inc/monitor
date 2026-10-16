@@ -1,4 +1,5 @@
 import Valkey from 'iovalkey';
+import calculateSlot from 'cluster-key-slot';
 import { readSessionKeys } from '../session-reader';
 import { FakeEntry, FakeValkey, fakeDb, masterNode } from './fake-valkey';
 
@@ -9,45 +10,76 @@ const MB = 1024 * 1024;
 
 const storeOf = (entries: Record<string, FakeEntry>) => new Map(Object.entries(entries));
 
+const readOne = async (client: FakeValkey, key: string, opts = {}) =>
+  (await readSessionKeys(fakeDb(client), [key], opts)).keys[0];
+
+function clusterOf(nodes: Record<number, FakeValkey>, slotsByPort: Record<number, number[][]>) {
+  ValkeyMock.mockImplementation((opts: { port: number }) => nodes[opts.port]);
+  return fakeDb(new FakeValkey(), {
+    nodes: Object.keys(nodes).map((port) =>
+      masterNode(port, `10.0.0.1:${port}`, [], slotsByPort[Number(port)]),
+    ),
+  });
+}
+
 describe('readSessionKeys', () => {
   beforeEach(() => ValkeyMock.mockReset());
 
   it('reads a small string whole', async () => {
     const client = new FakeValkey(storeOf({ k: { type: 'string', value: 'hello', pttl: 500 } }));
-    const [key] = await readSessionKeys(fakeDb(client), ['k']);
+    const key = await readOne(client, 'k');
     expect(key).toMatchObject({ key: 'k', type: 'string', pttl: 500, value: 'hello' });
     expect(key.truncated).toBeFalsy();
-    expect(client.callsOf('getBuffer')).toHaveLength(1);
   });
 
   it('truncates a 3 MB string at a 2 MB cap without reading it whole', async () => {
     const big = 'x'.repeat(3 * MB);
     const client = new FakeValkey(storeOf({ k: { type: 'string', value: big, memory: 3 * MB } }));
 
-    const [key] = await readSessionKeys(fakeDb(client), ['k'], { byteCap: 2 * MB });
+    const key = await readOne(client, 'k', { byteCap: 2 * MB });
 
     expect(key.truncated).toBe(true);
-    expect((key.value as string).length).toBe(2 * MB);
-    expect(client.callsOf('getBuffer')).toHaveLength(0);
-    expect(client.callsOf('getrangeBuffer')[0].args).toEqual(['k', 0, 2 * MB]);
+    expect((key.value as string).length).toBeGreaterThanOrEqual(2 * MB - 4);
+    expect((key.value as string).length).toBeLessThanOrEqual(2 * MB);
+    expect(client.callsOf('pipeline.getBuffer')).toHaveLength(0);
+    expect(client.callsOf('pipeline.getrangeBuffer')[0].args).toEqual(['k', 0, 2 * MB - 1]);
+  });
+
+  it('keeps a multibyte character split by the cap out of the truncated string', async () => {
+    const client = new FakeValkey(storeOf({ k: { type: 'string', value: 'ab€€€' } }));
+    const key = await readOne(client, 'k', { byteCap: 6 });
+    expect(key).toMatchObject({ value: 'ab€', truncated: true });
   });
 
   it('falls back to base64 for a binary string', async () => {
     const client = new FakeValkey(
       storeOf({ k: { type: 'string', value: Buffer.from([0x80, 0x81, 0xff]) } }),
     );
-    const [key] = await readSessionKeys(fakeDb(client), ['k']);
+    const key = await readOne(client, 'k');
     expect(key.value).toEqual({ base64: Buffer.from([0x80, 0x81, 0xff]).toString('base64') });
+  });
+
+  it('pipelines a session of small string keys in batches', async () => {
+    const entries: Record<string, FakeEntry> = {};
+    const keys = Array.from({ length: 2500 }, (_, i) => `s:${i}`);
+    for (const key of keys) entries[key] = { type: 'string', value: 'v', memory: 50 };
+    const client = new FakeValkey(storeOf(entries));
+
+    const result = await readSessionKeys(fakeDb(client), keys, { batch: 1000 });
+
+    expect(result.keys).toHaveLength(2500);
+    expect(client.pipelineExecs).toBe(6);
+    expect(client.directReads).toHaveLength(0);
   });
 
   it('reads a list over 500 items in windows', async () => {
     const items = Array.from({ length: 1200 }, (_, i) => `m${i}`);
     const client = new FakeValkey(storeOf({ l: { type: 'list', value: items } }));
 
-    const [key] = await readSessionKeys(fakeDb(client), ['l']);
+    const key = await readOne(client, 'l');
 
+    expect(client.callsOf('pipeline.lrangeBuffer').map((c) => c.args.slice(1))).toEqual([[0, 499]]);
     expect(client.callsOf('lrangeBuffer').map((c) => c.args.slice(1))).toEqual([
-      [0, 499],
       [500, 999],
       [1000, 1499],
     ]);
@@ -59,28 +91,28 @@ describe('readSessionKeys', () => {
     const items = Array.from({ length: 50 }, () => 'y'.repeat(100));
     const client = new FakeValkey(storeOf({ l: { type: 'list', value: items } }));
 
-    const [key] = await readSessionKeys(fakeDb(client), ['l'], { byteCap: 1000, listWindow: 20 });
+    const key = await readOne(client, 'l', { byteCap: 1000, listWindow: 20 });
 
     expect(key.truncated).toBe(true);
     expect((key.value as string[]).length).toBe(10);
-    expect(client.callsOf('lrangeBuffer')).toHaveLength(1);
+    expect(client.callsOf('lrangeBuffer')).toHaveLength(0);
   });
 
   it('reads a hash as a record of strings', async () => {
     const client = new FakeValkey(
       storeOf({ h: { type: 'hash', value: { a: '1', b: '2' }, memory: 50 } }),
     );
-    const [key] = await readSessionKeys(fakeDb(client), ['h']);
+    const key = await readOne(client, 'h');
     expect(key.value).toEqual({ a: '1', b: '2' });
-    expect(client.callsOf('hgetallBuffer')).toHaveLength(1);
+    expect(client.callsOf('pipeline.hgetallBuffer')).toHaveLength(1);
   });
 
   it('reads a hash larger than the cap with a bounded HSCAN', async () => {
     const client = new FakeValkey(
       storeOf({ h: { type: 'hash', value: { a: 'x'.repeat(60), b: 'y'.repeat(60) }, memory: 5000 } }),
     );
-    const [key] = await readSessionKeys(fakeDb(client), ['h'], { byteCap: 100 });
-    expect(client.callsOf('hgetallBuffer')).toHaveLength(0);
+    const key = await readOne(client, 'h', { byteCap: 100 });
+    expect(client.callsOf('pipeline.hgetallBuffer')).toHaveLength(0);
     expect(client.callsOf('hscanBuffer')).toHaveLength(1);
     expect(key.truncated).toBe(true);
     expect(Object.keys(key.value as object)).toEqual(['a']);
@@ -88,7 +120,7 @@ describe('readSessionKeys', () => {
 
   it('reads a sorted set as member and score pairs', async () => {
     const client = new FakeValkey(storeOf({ z: { type: 'zset', value: ['m1', '1', 'm2', '2.5'] } }));
-    const [key] = await readSessionKeys(fakeDb(client), ['z']);
+    const key = await readOne(client, 'z');
     expect(key.value).toEqual([
       ['m1', 1],
       ['m2', 2.5],
@@ -97,15 +129,15 @@ describe('readSessionKeys', () => {
 
   it('returns ReJSON-RL values as the raw JSON.GET string', async () => {
     const client = new FakeValkey(storeOf({ j: { type: 'ReJSON-RL', value: '{"a":[1,2]}' } }));
-    const [key] = await readSessionKeys(fakeDb(client), ['j']);
+    const key = await readOne(client, 'j');
     expect(key.value).toBe('{"a":[1,2]}');
-    expect(client.callsOf('call:JSON.GET')[0].args).toEqual(['j']);
+    expect(client.callsOf('pipeline.callBuffer')[0].args).toEqual(['JSON.GET', 'j']);
   });
 
   it('applies the byte cap to JSON values', async () => {
     const doc = JSON.stringify({ text: 'z'.repeat(500) });
     const client = new FakeValkey(storeOf({ j: { type: 'ReJSON-RL', value: doc, memory: 300 } }));
-    const [key] = await readSessionKeys(fakeDb(client), ['j'], { byteCap: 100 });
+    const key = await readOne(client, 'j', { byteCap: 100 });
     expect(key.truncated).toBe(true);
     expect((key.value as string).length).toBe(100);
   });
@@ -114,66 +146,136 @@ describe('readSessionKeys', () => {
     const client = new FakeValkey(
       storeOf({ j: { type: 'ReJSON-RL', value: '{}', memory: 100 * MB } }),
     );
-    const [key] = await readSessionKeys(fakeDb(client), ['j'], { byteCap: MB });
-    expect(key.truncated).toBe(true);
-    expect(client.callsOf('call:JSON.GET')).toHaveLength(0);
+    const key = await readOne(client, 'j', { byteCap: MB });
+    expect(key).toMatchObject({ value: '', truncated: true });
+    expect(client.callsOf('pipeline.callBuffer')).toHaveLength(0);
+    expect(client.callsOf('callBuffer')).toHaveLength(0);
+  });
+
+  it('sizes JSON with JSON.DEBUG MEMORY when MEMORY USAGE is unavailable', async () => {
+    const client = new FakeValkey(
+      storeOf({ j: { type: 'ReJSON-RL', value: '{"a":1}', memory: null, jsonMemory: 40 } }),
+    );
+    const key = await readOne(client, 'j');
+    expect(client.callsOf('pipeline.call')[0].args).toEqual(['JSON.DEBUG', 'MEMORY', 'j']);
+    expect(key).toMatchObject({ value: '{"a":1}' });
+    expect(key.truncated).toBeFalsy();
+  });
+
+  it('does not read JSON when no size is available', async () => {
+    const client = new FakeValkey(
+      storeOf({ j: { type: 'ReJSON-RL', value: '{"a":1}', memory: null, jsonMemory: null } }),
+    );
+    const key = await readOne(client, 'j');
+    expect(key).toMatchObject({ value: '', truncated: true });
+    expect(client.calls.some((c) => c.args[0] === 'JSON.GET')).toBe(false);
   });
 
   it('omits a missing key', async () => {
     const client = new FakeValkey(storeOf({ k: { type: 'string', value: 'v' } }));
-    const keys = await readSessionKeys(fakeDb(client), ['gone', 'k']);
-    expect(keys.map((k) => k.key)).toEqual(['k']);
+    const result = await readSessionKeys(fakeDb(client), ['gone', 'k']);
+    expect(result.keys.map((k) => k.key)).toEqual(['k']);
+    expect(result.missingKeys).toBe(0);
+  });
+
+  it('omits a key whose read fails without failing the request', async () => {
+    const client = new FakeValkey(
+      storeOf({ k1: { type: 'string', value: 'a' }, k2: { type: 'string', value: 'b' } }),
+    );
+    client.failKeys.set('k1', 'WRONGTYPE Operation against a key holding the wrong kind of value');
+
+    const result = await readSessionKeys(fakeDb(client), ['k1', 'k2']);
+
+    expect(result.keys.map((k) => k.key)).toEqual(['k2']);
+    expect(result.missingKeys).toBe(1);
   });
 
   it('records memory usage as bytes', async () => {
     const client = new FakeValkey(storeOf({ k: { type: 'string', value: 'v', memory: 72 } }));
-    const [key] = await readSessionKeys(fakeDb(client), ['k']);
+    const key = await readOne(client, 'k');
     expect(key.bytes).toBe(72);
   });
 
-  it('reads each key from the primary that owns it', async () => {
-    const parent = new FakeValkey();
+  it('stops at the total byte budget and flags truncation', async () => {
+    const entries: Record<string, FakeEntry> = {};
+    const keys = Array.from({ length: 10 }, (_, i) => `k${i}`);
+    for (const key of keys) entries[key] = { type: 'string', value: 'x'.repeat(100), memory: 100 };
+    const client = new FakeValkey(storeOf(entries));
+
+    const result = await readSessionKeys(fakeDb(client), keys, { totalByteCap: 350 });
+
+    expect(result.truncated).toBe(true);
+    expect(result.keys.map((k) => k.key)).toEqual(['k0', 'k1', 'k2', 'k3']);
+    expect(result.keys[2].truncated).toBeFalsy();
+    expect(result.keys[3]).toMatchObject({ value: 'x'.repeat(50), truncated: true });
+  });
+
+  it('reads a key larger than the remaining budget up to the budget', async () => {
+    const client = new FakeValkey(
+      storeOf({
+        big: { type: 'string', value: 'b'.repeat(500), memory: 500 },
+        small: { type: 'string', value: 's', memory: 1 },
+      }),
+    );
+
+    const result = await readSessionKeys(fakeDb(client), ['big', 'small'], { totalByteCap: 200 });
+
+    expect(result.truncated).toBe(true);
+    expect(result.keys).toEqual([
+      expect.objectContaining({ key: 'big', value: 'b'.repeat(200), truncated: true }),
+    ]);
+  });
+
+  it('is not truncated when everything fits the budget', async () => {
+    const client = new FakeValkey(storeOf({ k: { type: 'string', value: 'v' } }));
+    const result = await readSessionKeys(fakeDb(client), ['k']);
+    expect(result).toMatchObject({ truncated: false, failedNodes: 0, missingKeys: 0 });
+  });
+
+  it('routes each key to the primary that owns its slot', async () => {
     const nodeA = new FakeValkey(storeOf({ a: { type: 'string', value: 'from-a' } }));
     const nodeB = new FakeValkey(storeOf({ b: { type: 'string', value: 'from-b' } }));
-    const moved = (owner: FakeValkey, other: FakeValkey) => {
-      const original = owner.pipeline.bind(owner);
-      owner.pipeline = () => {
-        const chain = original() as Record<string, (...a: unknown[]) => unknown>;
-        const exec = chain.exec as () => Promise<Array<[Error | null, unknown]>>;
-        const keysSeen: string[] = [];
-        const type = chain.type;
-        chain.type = (k: unknown) => {
-          keysSeen.push(k as string);
-          return type(k);
-        };
-        chain.exec = async () => {
-          const results = await exec();
-          const perKey = results.length / keysSeen.length;
-          return results.map((r, i) =>
-            other.store.has(keysSeen[Math.floor(i / perKey)])
-              ? ([new Error('MOVED 1 x:1'), null] as [Error, null])
-              : r,
-          );
-        };
-        return chain;
-      };
-    };
-    moved(nodeA, nodeB);
-    moved(nodeB, nodeA);
-    const byPort: Record<number, FakeValkey> = { 7001: nodeA, 7002: nodeB };
-    ValkeyMock.mockImplementation((opts: { port: number }) => byPort[opts.port]);
-    const db = fakeDb(parent, {
-      nodes: [masterNode('a', '10.0.0.1:7001'), masterNode('b', '10.0.0.2:7002')],
-    });
+    const db = clusterOf(
+      { 7001: nodeA, 7002: nodeB },
+      { 7001: [[calculateSlot('a'), calculateSlot('a')]], 7002: [[calculateSlot('b'), calculateSlot('b')]] },
+    );
 
-    const keys = await readSessionKeys(db, ['a', 'b']);
+    const result = await readSessionKeys(db, ['a', 'b']);
 
-    expect(keys.map((k) => [k.key, k.value])).toEqual([
+    expect(result.keys.map((k) => [k.key, k.value])).toEqual([
       ['a', 'from-a'],
       ['b', 'from-b'],
     ]);
-    expect(nodeA.callsOf('getBuffer').map((c) => c.args[0])).toEqual(['a']);
-    expect(nodeB.callsOf('getBuffer').map((c) => c.args[0])).toEqual(['b']);
+    expect(nodeA.callsOf('pipeline.type').map((c) => c.args[0])).toEqual(['a']);
+    expect(nodeB.callsOf('pipeline.type').map((c) => c.args[0])).toEqual(['b']);
     expect(nodeA.disconnected && nodeB.disconnected).toBe(true);
+  });
+
+  it('omits a key answered with MOVED during slot migration', async () => {
+    const nodeA = new FakeValkey(
+      storeOf({ a: { type: 'string', value: '1' }, b: { type: 'string', value: '2' } }),
+    );
+    nodeA.movedKeys.add('a');
+    const db = clusterOf({ 7001: nodeA }, { 7001: [[0, 16383]] });
+
+    const result = await readSessionKeys(db, ['a', 'b']);
+
+    expect(result.keys.map((k) => k.key)).toEqual(['b']);
+    expect(result.missingKeys).toBe(1);
+  });
+
+  it('reports keys owned by an unreachable primary', async () => {
+    const nodeA = new FakeValkey(storeOf({ a: { type: 'string', value: '1' } }));
+    const nodeB = new FakeValkey(storeOf({ b: { type: 'string', value: '2' } }));
+    nodeB.connectError = new Error('ECONNREFUSED');
+    const db = clusterOf(
+      { 7001: nodeA, 7002: nodeB },
+      { 7001: [[calculateSlot('a'), calculateSlot('a')]], 7002: [[calculateSlot('b'), calculateSlot('b')]] },
+    );
+
+    const result = await readSessionKeys(db, ['a', 'b']);
+
+    expect(result.keys.map((k) => k.key)).toEqual(['a']);
+    expect(result).toMatchObject({ failedNodes: 1, missingKeys: 1 });
   });
 });

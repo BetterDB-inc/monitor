@@ -41,6 +41,31 @@ describe('scanSessions', () => {
     expect(result.sessions).toEqual([expect.objectContaining({ sessionId: 'a', keyCount: 10000 })]);
   });
 
+  it('applies the key cap as a total across primaries', async () => {
+    const nodes = [7001, 7002, 7003].map((port, n) => {
+      const node = new FakeValkey();
+      node.scanPages = [keyRange(n * 5000, 5000)];
+      for (const key of node.scanPages[0]) node.store.set(key, { type: 'string' });
+      return node;
+    });
+    const byPort: Record<number, FakeValkey> = { 7001: nodes[0], 7002: nodes[1], 7003: nodes[2] };
+    ValkeyMock.mockImplementation((opts: { port: number }) => byPort[opts.port]);
+    const db = fakeDb(new FakeValkey(), {
+      nodes: [
+        masterNode('a', '10.0.0.1:7001'),
+        masterNode('b', '10.0.0.2:7002'),
+        masterNode('c', '10.0.0.3:7003'),
+      ],
+    });
+
+    const result = await scanSessions(db, 's:*', preset, { keyCap: 10000 });
+
+    expect(result.scannedKeys).toBe(10000);
+    expect(result.truncated).toBe(true);
+    expect(nodes[2].callsOf('scan')).toHaveLength(0);
+    expect(nodes.every((n) => n.disconnected)).toBe(true);
+  });
+
   it('is not truncated when the scan completes under the cap', async () => {
     const client = new FakeValkey(storeOf({ 's:a:1': { type: 'string' } }));
     const result = await scanSessions(fakeDb(client), 's:*', preset);
@@ -247,17 +272,42 @@ describe('keysForSession', () => {
       nodes: [masterNode('a', '10.0.0.1:7001'), masterNode('b', '10.0.0.2:7002')],
     });
 
-    const keys = await keysForSession(db, 's:*', preset, 'x');
+    const result = await keysForSession(db, 's:*', preset, 'x');
 
-    expect(keys.sort()).toEqual(['s:x:1', 's:x:2']);
+    expect(result.keys.sort()).toEqual(['s:x:1', 's:x:2']);
+    expect(result).toMatchObject({ truncated: false, failedNodes: 0 });
     expect(nodeA.disconnected && nodeB.disconnected).toBe(true);
   });
 
   it('respects the key cap', async () => {
     const client = new FakeValkey();
     client.scanPages = [keyRange(0, 5000, 'x'), keyRange(5000, 5000, 'x')];
-    const keys = await keysForSession(fakeDb(client), 's:*', preset, 'x', 3000);
-    expect(keys).toHaveLength(3000);
+    const result = await keysForSession(fakeDb(client), 's:*', preset, 'x', 3000);
+    expect(result.keys).toHaveLength(3000);
+    expect(result.truncated).toBe(true);
     expect(client.callsOf('scan')).toHaveLength(1);
+  });
+
+  it('reports primaries that could not be reached or scanned', async () => {
+    const nodeA = new FakeValkey(storeOf({ 's:x:1': { type: 'string' } }));
+    const nodeB = new FakeValkey();
+    nodeB.connectError = new Error('ECONNREFUSED');
+    const nodeC = new FakeValkey();
+    nodeC.scan = async () => {
+      throw new Error('LOADING');
+    };
+    const byPort: Record<number, FakeValkey> = { 7001: nodeA, 7002: nodeB, 7003: nodeC };
+    ValkeyMock.mockImplementation((opts: { port: number }) => byPort[opts.port]);
+    const db = fakeDb(new FakeValkey(), {
+      nodes: [
+        masterNode('a', '10.0.0.1:7001'),
+        masterNode('b', '10.0.0.2:7002'),
+        masterNode('c', '10.0.0.3:7003'),
+      ],
+    });
+
+    const result = await keysForSession(db, 's:*', preset, 'x');
+
+    expect(result).toEqual({ keys: ['s:x:1'], truncated: false, failedNodes: 2 });
   });
 });

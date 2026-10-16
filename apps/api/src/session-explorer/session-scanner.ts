@@ -21,6 +21,24 @@ interface ScanOutcome {
   exhausted: boolean;
 }
 
+interface NodeKeys {
+  client: Valkey;
+  keys: string[];
+}
+
+interface ScanAllOutcome {
+  nodes: NodeKeys[];
+  scannedKeys: number;
+  truncated: boolean;
+  failed: number;
+}
+
+export interface SessionKeysResult {
+  keys: string[];
+  truncated: boolean;
+  failedNodes: number;
+}
+
 async function scanNode(client: Valkey, pattern: string, limit: number): Promise<ScanOutcome> {
   const seen = new Set<string>();
   let cursor = '0';
@@ -33,6 +51,33 @@ async function scanNode(client: Valkey, pattern: string, limit: number): Promise
     }
   } while (cursor !== '0' && seen.size < limit);
   return { keys: [...seen], exhausted: cursor === '0' };
+}
+
+async function scanAll(clients: Valkey[], pattern: string, keyCap: number): Promise<ScanAllOutcome> {
+  const nodes: NodeKeys[] = [];
+  let scannedKeys = 0;
+  let truncated = false;
+  let failed = 0;
+  let lastError: unknown;
+
+  for (const [index, client] of clients.entries()) {
+    if (scannedKeys >= keyCap) {
+      truncated = true;
+      break;
+    }
+    try {
+      const { keys, exhausted } = await scanNode(client, pattern, keyCap - scannedKeys);
+      scannedKeys += keys.length;
+      if (!exhausted || (scannedKeys >= keyCap && index < clients.length - 1)) truncated = true;
+      nodes.push({ client, keys });
+    } catch (err) {
+      failed++;
+      lastError = err;
+    }
+  }
+
+  if (nodes.length === 0 && lastError !== undefined) throw lastError;
+  return { nodes, scannedKeys, truncated, failed };
 }
 
 const numberOf = (r: PipelineResult): number | null =>
@@ -90,22 +135,14 @@ export async function scanSessions(
   const batch = opts.batch ?? DEFAULT_BATCH;
 
   return withPrimaries(db, async ({ clients, failed: unreachable }) => {
+    const scan = await scanAll(clients, pattern, keyCap);
     const grouped = new Map<string, KeyMeta[]>();
-    let scannedKeys = 0;
-    let truncated = false;
-    let failed = unreachable;
+    let failed = unreachable + scan.failed;
     let lastError: unknown;
     let succeeded = 0;
 
-    for (const [index, client] of clients.entries()) {
-      if (scannedKeys >= keyCap) {
-        truncated = true;
-        break;
-      }
+    for (const { client, keys } of scan.nodes) {
       try {
-        const { keys, exhausted } = await scanNode(client, pattern, keyCap - scannedKeys);
-        scannedKeys += keys.length;
-        if (!exhausted || (scannedKeys >= keyCap && index < clients.length - 1)) truncated = true;
         const sessionKeys = keys.filter((key) => preset.sessionIdOf(key) !== null);
         const meta = await fetchMeta(client, sessionKeys, batch);
         for (const [key, m] of meta) {
@@ -125,8 +162,8 @@ export async function scanSessions(
 
     return {
       sessions: [...grouped].map(([id, keys]) => summarise(id, keys)),
-      scannedKeys,
-      truncated,
+      scannedKeys: scan.scannedKeys,
+      truncated: scan.truncated,
       partial: failed > 0,
       failedNodes: failed,
     };
@@ -139,24 +176,15 @@ export async function keysForSession(
   preset: PresetDefinition,
   sessionId: string,
   keyCap: number = DEFAULT_KEY_CAP,
-): Promise<string[]> {
-  return withPrimaries(db, async ({ clients }) => {
-    const matches: string[] = [];
-    let scanned = 0;
-    let lastError: unknown;
-    let succeeded = 0;
-    for (const client of clients) {
-      if (scanned >= keyCap) break;
-      try {
-        const { keys } = await scanNode(client, pattern, keyCap - scanned);
-        scanned += keys.length;
-        matches.push(...keys.filter((key) => preset.sessionIdOf(key) === sessionId));
-        succeeded++;
-      } catch (err) {
-        lastError = err;
-      }
-    }
-    if (succeeded === 0 && lastError !== undefined) throw lastError;
-    return matches;
+): Promise<SessionKeysResult> {
+  return withPrimaries(db, async ({ clients, failed }) => {
+    const scan = await scanAll(clients, pattern, keyCap);
+    return {
+      keys: scan.nodes.flatMap(({ keys }) =>
+        keys.filter((key) => preset.sessionIdOf(key) === sessionId),
+      ),
+      truncated: scan.truncated,
+      failedNodes: failed + scan.failed,
+    };
   });
 }

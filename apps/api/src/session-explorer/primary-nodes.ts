@@ -6,9 +6,15 @@ import { parseNodeAddress } from '../topology/membership-diff';
 
 const NODE_TIMEOUT_MS = 5000;
 
+export interface PrimaryRoute {
+  client: Valkey;
+  slots: number[][];
+}
+
 export interface PrimaryClients {
   clients: Valkey[];
   failed: number;
+  routes: PrimaryRoute[] | null;
   release: () => Promise<void>;
 }
 
@@ -59,12 +65,13 @@ async function connectNode(parent: Valkey, node: ClusterNode): Promise<Valkey | 
 export async function primaryClients(db: DatabasePort): Promise<PrimaryClients> {
   const parent = db.getClient();
   if (!db.getCapabilities().clusterEnabled) {
-    return { clients: [parent], failed: 0, release: async () => undefined };
+    return { clients: [parent], failed: 0, routes: null, release: async () => undefined };
   }
 
   const primaries = (await db.getClusterNodes()).filter(isServingPrimary);
   const owned: Valkey[] = [];
   const clients: Valkey[] = [];
+  const routes: PrimaryRoute[] = [];
   let failed = 0;
 
   const connected = await Promise.all(
@@ -72,18 +79,20 @@ export async function primaryClients(db: DatabasePort): Promise<PrimaryClients> 
       node.flags.includes('myself') ? Promise.resolve(parent) : connectNode(parent, node),
     ),
   );
-  for (const client of connected) {
+  connected.forEach((client, i) => {
     if (!client) {
       failed++;
-      continue;
+      return;
     }
     clients.push(client);
+    routes.push({ client, slots: primaries[i].slots });
     if (client !== parent) owned.push(client);
-  }
+  });
 
   return {
     clients,
     failed,
+    routes,
     release: async () => {
       for (const client of owned) client.disconnect();
     },

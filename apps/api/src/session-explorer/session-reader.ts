@@ -1,17 +1,42 @@
 import type Valkey from 'iovalkey';
+import type { ChainableCommander } from 'iovalkey';
+import calculateSlot from 'cluster-key-slot';
 import type { CapturedKey, ValkeyValue } from '@betterdb/shared';
 import type { DatabasePort } from '../common/interfaces/database-port.interface';
 import { decodeValue } from './presets/text';
-import { withPrimaries } from './primary-nodes';
+import { PrimaryClients, withPrimaries } from './primary-nodes';
 
 export const DEFAULT_BYTE_CAP = 2 * 1024 * 1024;
+export const DEFAULT_TOTAL_BYTE_CAP = 32 * 1024 * 1024;
 export const DEFAULT_LIST_WINDOW = 500;
+export const DEFAULT_READ_BATCH = 1000;
 const JSON_MEMORY_HEADROOM = 4;
 
 type PipelineResult = [Error | null, unknown] | undefined;
 
+export interface SessionKeysRead {
+  keys: CapturedKey[];
+  truncated: boolean;
+  failedNodes: number;
+  missingKeys: number;
+}
+
+export interface ReadOptions {
+  byteCap?: number;
+  totalByteCap?: number;
+  listWindow?: number;
+  batch?: number;
+}
+
+interface ReadOpts {
+  byteCap: number;
+  totalByteCap: number;
+  listWindow: number;
+  batch: number;
+}
+
 interface Located {
-  client: Valkey;
+  key: string;
   type: string;
   pttl: number;
   memory: number | null;
@@ -20,195 +45,386 @@ interface Located {
 interface ReadResult {
   value: ValkeyValue;
   truncated: boolean;
+  bytes: number;
 }
 
-interface ReadOpts {
-  byteCap: number;
-  listWindow: number;
-}
+class KeyReadError extends Error {}
+
+const resultOf = (r: PipelineResult): unknown => {
+  if (!r || r[0]) throw new KeyReadError();
+  return r[1];
+};
+
+const numberOf = (r: PipelineResult): number | null =>
+  r && !r[0] && typeof r[1] === 'number' ? r[1] : null;
 
 const decoded = (buf: Buffer, cap: number) => decodeValue(buf, cap).value;
 
-async function locate(clients: Valkey[], keys: string[]): Promise<Map<string, Located>> {
-  const located = new Map<string, Located>();
-  for (const client of clients) {
-    const pending = keys.filter((key) => !located.has(key));
-    if (pending.length === 0) break;
+function decodeCut(buf: Buffer, cap: number, cut: boolean): ReadResult {
+  return { ...decodeValue(buf, cap, cut), bytes: Math.min(buf.length, cap) };
+}
+
+class Accumulator<T> {
+  items: T[] = [];
+  bytes = 0;
+  full = false;
+
+  constructor(private readonly cap: number) {}
+
+  add(size: number, item: () => T): boolean {
+    if (this.bytes + size > this.cap) {
+      this.full = true;
+      return false;
+    }
+    this.bytes += size;
+    this.items.push(item());
+    return true;
+  }
+}
+
+function routeKeys(
+  primaries: PrimaryClients,
+  keys: string[],
+): { groups: Map<Valkey, string[]>; unrouted: number } {
+  const groups = new Map<Valkey, string[]>();
+  let unrouted = 0;
+  const add = (client: Valkey, key: string) => {
+    const list = groups.get(client) ?? [];
+    list.push(key);
+    groups.set(client, list);
+  };
+  for (const key of keys) {
+    if (!primaries.routes) {
+      add(primaries.clients[0], key);
+      continue;
+    }
+    const slot = calculateSlot(key);
+    const route = primaries.routes.find((r) =>
+      r.slots.some(([start, end]) => slot >= start && slot <= end),
+    );
+    if (route) add(route.client, key);
+    else unrouted++;
+  }
+  return { groups, unrouted };
+}
+
+async function locate(
+  client: Valkey,
+  keys: string[],
+  batch: number,
+): Promise<{ located: Located[]; missing: number }> {
+  const located: Located[] = [];
+  let missing = 0;
+  for (let start = 0; start < keys.length; start += batch) {
+    const slice = keys.slice(start, start + batch);
     const pipeline = client.pipeline();
-    for (const key of pending) {
+    for (const key of slice) {
       pipeline.type(key);
       pipeline.pttl(key);
       pipeline.memory('USAGE', key);
     }
     const results = (await pipeline.exec()) ?? [];
-    pending.forEach((key, i) => {
+    slice.forEach((key, i) => {
       const [type, pttl, memory] = results.slice(i * 3, i * 3 + 3) as PipelineResult[];
-      if (!type || type[0] || typeof type[1] !== 'string') return;
-      located.set(key, {
-        client,
-        type: type[1],
-        pttl: pttl && !pttl[0] && typeof pttl[1] === 'number' ? pttl[1] : -1,
-        memory: memory && !memory[0] && typeof memory[1] === 'number' ? memory[1] : null,
-      });
+      if (!type || type[0] || typeof type[1] !== 'string') {
+        missing++;
+        return;
+      }
+      if (type[1] === 'none') return;
+      located.push({ key, type: type[1], pttl: numberOf(pttl) ?? -1, memory: numberOf(memory) });
     });
   }
-  return located;
+  return { located, missing };
 }
 
-async function readString(
-  client: Valkey,
-  key: string,
-  { byteCap }: ReadOpts,
-): Promise<ReadResult | null> {
-  const length = await client.strlen(key);
-  const buf =
-    length > byteCap ? await client.getrangeBuffer(key, 0, byteCap) : await client.getBuffer(key);
-  return buf === null ? null : decodeValue(buf, byteCap);
-}
-
-async function readList(client: Valkey, key: string, opts: ReadOpts): Promise<ReadResult> {
-  const length = await client.llen(key);
-  const items: ValkeyValue[] = [];
-  let bytes = 0;
-  for (let start = 0; start < length; start += opts.listWindow) {
-    const window = await client.lrangeBuffer(key, start, start + opts.listWindow - 1);
-    for (const item of window) {
-      if (bytes + item.length > opts.byteCap) return { value: items, truncated: true };
-      bytes += item.length;
-      items.push(decoded(item, opts.byteCap));
-    }
-    if (window.length < opts.listWindow) break;
+function queueFirstRead(pipeline: ChainableCommander, at: Located, opts: ReadOpts): number {
+  const { key, memory } = at;
+  switch (at.type) {
+    case 'string':
+      pipeline.strlen(key);
+      pipeline.getrangeBuffer(key, 0, opts.byteCap - 1);
+      return 2;
+    case 'list':
+      pipeline.llen(key);
+      pipeline.lrangeBuffer(key, 0, opts.listWindow - 1);
+      return 2;
+    case 'hash':
+      if (memory === null || memory > opts.byteCap) return 0;
+      pipeline.hgetallBuffer(key);
+      return 1;
+    case 'zset':
+      pipeline.zcard(key);
+      pipeline.zrangeBuffer(key, 0, String(opts.listWindow - 1), 'WITHSCORES');
+      return 2;
+    case 'ReJSON-RL':
+      if (memory === null) {
+        pipeline.call('JSON.DEBUG', 'MEMORY', key);
+        return 1;
+      }
+      if (memory > opts.byteCap * JSON_MEMORY_HEADROOM) return 0;
+      pipeline.callBuffer('JSON.GET', key);
+      return 1;
+    case 'stream':
+      pipeline.xrangeBuffer(key, '-', '+', 'COUNT', opts.listWindow + 1);
+      return 1;
+    default:
+      return 0;
   }
-  return { value: items, truncated: false };
+}
+
+function readString(results: PipelineResult[], cap: number): ReadResult {
+  const length = resultOf(results[0]) as number;
+  const buf = resultOf(results[1]) as Buffer;
+  return decodeCut(buf, cap, length > buf.length);
+}
+
+async function readList(
+  client: Valkey,
+  at: Located,
+  results: PipelineResult[],
+  cap: number,
+  opts: ReadOpts,
+): Promise<ReadResult> {
+  const length = resultOf(results[0]) as number;
+  let window = resultOf(results[1]) as Buffer[];
+  const acc = new Accumulator<ValkeyValue>(cap);
+  for (let start = 0; ; ) {
+    for (const item of window) {
+      if (!acc.add(item.length, () => decoded(item, cap))) break;
+    }
+    start += opts.listWindow;
+    if (acc.full || window.length < opts.listWindow || start >= length) break;
+    window = await client.lrangeBuffer(at.key, start, start + opts.listWindow - 1);
+  }
+  return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
 }
 
 async function readHash(
   client: Valkey,
-  key: string,
-  memory: number | null,
+  at: Located,
+  results: PipelineResult[],
+  cap: number,
   opts: ReadOpts,
 ): Promise<ReadResult> {
-  if (memory !== null && memory <= opts.byteCap) {
-    const all = await client.hgetallBuffer(key);
-    return {
-      value: Object.fromEntries(
-        Object.entries(all).map(([field, v]) => [field, decoded(v, opts.byteCap)]),
-      ),
-      truncated: false,
-    };
-  }
-  const fields: Record<string, ValkeyValue> = {};
-  let bytes = 0;
-  let cursor = '0';
-  do {
-    const [next, flat] = await client.hscanBuffer(key, cursor, 'COUNT', opts.listWindow);
-    cursor = next.toString();
-    for (let i = 0; i + 1 < flat.length; i += 2) {
-      const size = flat[i].length + flat[i + 1].length;
-      if (bytes + size > opts.byteCap) return { value: fields, truncated: true };
-      bytes += size;
-      fields[flat[i].toString()] = decoded(flat[i + 1], opts.byteCap);
+  const acc = new Accumulator<[string, ValkeyValue]>(cap);
+  if (results.length > 0) {
+    const all = resultOf(results[0]) as Record<string, Buffer>;
+    for (const [field, v] of Object.entries(all)) {
+      if (!acc.add(Buffer.byteLength(field) + v.length, () => [field, decoded(v, cap)])) break;
     }
-  } while (cursor !== '0');
-  return { value: fields, truncated: false };
+  } else {
+    let cursor = '0';
+    do {
+      const [next, flat] = await client.hscanBuffer(at.key, cursor, 'COUNT', opts.listWindow);
+      cursor = next.toString();
+      for (let i = 0; i + 1 < flat.length; i += 2) {
+        const [field, v] = [flat[i], flat[i + 1]];
+        if (!acc.add(field.length + v.length, () => [field.toString(), decoded(v, cap)])) break;
+      }
+    } while (cursor !== '0' && !acc.full);
+  }
+  return { value: Object.fromEntries(acc.items), truncated: acc.full, bytes: acc.bytes };
 }
 
-async function readZset(client: Valkey, key: string, opts: ReadOpts): Promise<ReadResult> {
-  const pairs: Array<[ValkeyValue, number]> = [];
-  let bytes = 0;
-  for (let start = 0; ; start += opts.listWindow) {
-    const flat = await client.zrangeBuffer(
-      key,
+async function readZset(
+  client: Valkey,
+  at: Located,
+  results: PipelineResult[],
+  cap: number,
+  opts: ReadOpts,
+): Promise<ReadResult> {
+  const length = resultOf(results[0]) as number;
+  let flat = resultOf(results[1]) as Buffer[];
+  const acc = new Accumulator<[ValkeyValue, number]>(cap);
+  for (let start = 0; ; ) {
+    for (let i = 0; i + 1 < flat.length; i += 2) {
+      const [member, score] = [flat[i], flat[i + 1]];
+      if (!acc.add(member.length, () => [decoded(member, cap), Number(score.toString())])) break;
+    }
+    start += opts.listWindow;
+    if (acc.full || flat.length < opts.listWindow * 2 || start >= length) break;
+    flat = await client.zrangeBuffer(
+      at.key,
       start,
       String(start + opts.listWindow - 1),
       'WITHSCORES',
     );
-    for (let i = 0; i + 1 < flat.length; i += 2) {
-      if (bytes + flat[i].length > opts.byteCap) return { value: pairs, truncated: true };
-      bytes += flat[i].length;
-      pairs.push([decoded(flat[i], opts.byteCap), Number(flat[i + 1].toString())]);
-    }
-    if (flat.length < opts.listWindow * 2) break;
   }
-  return { value: pairs, truncated: false };
+  return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
 }
+
+const UNREAD_JSON: ReadResult = { value: '', truncated: true, bytes: 0 };
 
 async function readJson(
   client: Valkey,
-  key: string,
-  memory: number | null,
-  { byteCap }: ReadOpts,
+  at: Located,
+  results: PipelineResult[],
+  cap: number,
+  opts: ReadOpts,
 ): Promise<ReadResult | null> {
-  if (memory !== null && memory > byteCap * JSON_MEMORY_HEADROOM) {
-    return { value: '', truncated: true };
+  const limit = opts.byteCap * JSON_MEMORY_HEADROOM;
+  let buf: Buffer | null;
+  if (at.memory === null) {
+    const size = numberOf(results[0]);
+    if (size === null || size > limit) return UNREAD_JSON;
+    buf = (await client.callBuffer('JSON.GET', at.key)) as Buffer | null;
+  } else if (at.memory > limit) {
+    return UNREAD_JSON;
+  } else {
+    buf = resultOf(results[0]) as Buffer | null;
   }
-  const buf = (await client.callBuffer('JSON.GET', key)) as Buffer | null;
-  return buf === null ? null : decodeValue(buf, byteCap);
+  if (buf === null) return null;
+  return { ...decodeValue(buf, cap), bytes: Math.min(buf.length, cap) };
 }
 
-async function readStream(client: Valkey, key: string, opts: ReadOpts): Promise<ReadResult> {
-  const entries = await client.xrangeBuffer(key, '-', '+', 'COUNT', opts.listWindow + 1);
-  const value: Array<[string, Record<string, ValkeyValue>]> = [];
-  let bytes = 0;
+function readStream(results: PipelineResult[], cap: number, opts: ReadOpts): ReadResult {
+  const entries = resultOf(results[0]) as Array<[Buffer, Buffer[]]>;
+  const acc = new Accumulator<[string, Record<string, ValkeyValue>]>(cap);
   for (const [id, flat] of entries.slice(0, opts.listWindow)) {
     const fields: Record<string, ValkeyValue> = {};
+    let size = 0;
     for (let i = 0; i + 1 < flat.length; i += 2) {
-      const size = flat[i].length + flat[i + 1].length;
-      if (bytes + size > opts.byteCap) return { value, truncated: true };
-      bytes += size;
-      fields[flat[i].toString()] = decoded(flat[i + 1], opts.byteCap);
+      size += flat[i].length + flat[i + 1].length;
+      fields[flat[i].toString()] = decoded(flat[i + 1], cap);
     }
-    value.push([id.toString(), fields]);
+    if (!acc.add(size, () => [id.toString(), fields])) break;
   }
-  return { value, truncated: entries.length > opts.listWindow };
+  return {
+    value: acc.items,
+    truncated: acc.full || entries.length > opts.listWindow,
+    bytes: acc.bytes,
+  };
 }
 
-function readValue(key: string, at: Located, opts: ReadOpts): Promise<ReadResult | null> {
+function finishRead(
+  client: Valkey,
+  at: Located,
+  results: PipelineResult[],
+  cap: number,
+  opts: ReadOpts,
+): Promise<ReadResult | null> | ReadResult | null {
   switch (at.type) {
     case 'string':
-      return readString(at.client, key, opts);
+      return readString(results, cap);
     case 'list':
-      return readList(at.client, key, opts);
+      return readList(client, at, results, cap, opts);
     case 'hash':
-      return readHash(at.client, key, at.memory, opts);
+      return readHash(client, at, results, cap, opts);
     case 'zset':
-      return readZset(at.client, key, opts);
+      return readZset(client, at, results, cap, opts);
     case 'ReJSON-RL':
-      return readJson(at.client, key, at.memory, opts);
+      return readJson(client, at, results, cap, opts);
     case 'stream':
-      return readStream(at.client, key, opts);
+      return readStream(results, cap, opts);
     default:
-      return Promise.resolve({ value: null, truncated: false });
+      return { value: null, truncated: false, bytes: 0 };
+  }
+}
+
+const estimate = (at: Located, opts: ReadOpts) =>
+  Math.max(1, Math.min(at.memory ?? opts.byteCap, opts.byteCap));
+
+interface ReadState {
+  remaining: number;
+  exhausted: boolean;
+  missing: number;
+  captured: Map<string, CapturedKey>;
+}
+
+async function readNode(
+  client: Valkey,
+  located: Located[],
+  opts: ReadOpts,
+  state: ReadState,
+): Promise<void> {
+  let next = 0;
+  while (next < located.length) {
+    if (state.remaining <= 0) {
+      state.exhausted = true;
+      return;
+    }
+    const batch: Located[] = [];
+    let reserved = 0;
+    while (next < located.length && batch.length < opts.batch) {
+      const cost = estimate(located[next], opts);
+      if (batch.length > 0 && reserved + cost > state.remaining) break;
+      reserved += cost;
+      batch.push(located[next++]);
+    }
+
+    const pipeline = client.pipeline();
+    const counts = batch.map((at) => queueFirstRead(pipeline, at, opts));
+    const results = counts.some((n) => n > 0) ? ((await pipeline.exec()) ?? []) : [];
+
+    let offset = 0;
+    for (const [i, at] of batch.entries()) {
+      const own = results.slice(offset, offset + counts[i]) as PipelineResult[];
+      offset += counts[i];
+      try {
+        const read = await finishRead(client, at, own, Math.min(opts.byteCap, state.remaining), opts);
+        if (!read) continue;
+        state.remaining -= read.bytes;
+        state.captured.set(at.key, {
+          key: at.key,
+          type: at.type,
+          pttl: at.pttl,
+          value: read.value,
+          ...(read.truncated ? { truncated: true } : {}),
+          ...(at.memory !== null ? { bytes: at.memory } : {}),
+        });
+      } catch {
+        state.missing++;
+      }
+    }
   }
 }
 
 export async function readSessionKeys(
   db: DatabasePort,
   keys: string[],
-  opts: { byteCap?: number; listWindow?: number } = {},
-): Promise<CapturedKey[]> {
-  const readOpts: ReadOpts = {
-    byteCap: opts.byteCap ?? DEFAULT_BYTE_CAP,
-    listWindow: opts.listWindow ?? DEFAULT_LIST_WINDOW,
+  options: ReadOptions = {},
+): Promise<SessionKeysRead> {
+  const opts: ReadOpts = {
+    byteCap: options.byteCap ?? DEFAULT_BYTE_CAP,
+    totalByteCap: options.totalByteCap ?? DEFAULT_TOTAL_BYTE_CAP,
+    listWindow: options.listWindow ?? DEFAULT_LIST_WINDOW,
+    batch: options.batch ?? DEFAULT_READ_BATCH,
   };
-  return withPrimaries(db, async ({ clients }) => {
-    const located = await locate(clients, keys);
-    const captured: CapturedKey[] = [];
-    for (const key of keys) {
-      const at = located.get(key);
-      if (!at || at.type === 'none') continue;
-      const read = await readValue(key, at, readOpts);
-      if (!read) continue;
-      const { value, truncated } = read;
-      captured.push({
-        key,
-        type: at.type,
-        pttl: at.pttl,
-        value,
-        ...(truncated ? { truncated: true } : {}),
-        ...(at.memory !== null ? { bytes: at.memory } : {}),
-      });
+  return withPrimaries(db, async (primaries) => {
+    const { groups, unrouted } = routeKeys(primaries, keys);
+    const state: ReadState = {
+      remaining: opts.totalByteCap,
+      exhausted: false,
+      missing: unrouted,
+      captured: new Map(),
+    };
+    let failedNodes = primaries.failed;
+    let lastError: unknown;
+    let succeeded = 0;
+
+    for (const [client, nodeKeys] of groups) {
+      if (state.exhausted) break;
+      try {
+        const { located, missing } = await locate(client, nodeKeys, opts.batch);
+        state.missing += missing;
+        await readNode(client, located, opts, state);
+        succeeded++;
+      } catch (err) {
+        failedNodes++;
+        lastError = err;
+      }
     }
-    return captured;
+
+    if (succeeded === 0 && lastError !== undefined) throw lastError;
+
+    return {
+      keys: keys.flatMap((key) => {
+        const captured = state.captured.get(key);
+        return captured ? [captured] : [];
+      }),
+      truncated: state.exhausted,
+      failedNodes,
+      missingKeys: state.missing,
+    };
   });
 }
