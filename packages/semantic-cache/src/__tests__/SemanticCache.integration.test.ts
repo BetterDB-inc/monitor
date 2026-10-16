@@ -364,4 +364,74 @@ describe('SemanticCache integration', () => {
       }
     });
   });
+
+  describe('entry usage tracking: real Valkey', () => {
+    it('recordEntryUsage on an expired key does not resurrect it', async () => {
+      if (skip) return;
+
+      const name = `betterdb_resurrect_${Date.now()}`;
+      const c = new SemanticCache({
+        name,
+        client,
+        embedFn: fakeEmbed,
+        defaultThreshold: 0.5,
+        telemetry: { registry: new Registry() },
+      });
+
+      try {
+        await c.initialize();
+        const key = await c.store('ephemeral prompt', 'answer', { ttl: 1 });
+        // Let the per-entry TTL expire the key out from under us.
+        await new Promise((r) => setTimeout(r, 1500));
+        expect(await client.exists(key)).toBe(0);
+
+        // Exercise the usage script directly against the now-gone key: the
+        // EXISTS guard must make it a no-op rather than recreating the hash.
+        await (c as unknown as { recordEntryUsage(k: string): Promise<void> }).recordEntryUsage(
+          key,
+        );
+
+        expect(await client.exists(key)).toBe(0);
+      } finally {
+        await c.flush();
+      }
+    });
+
+    it('entryAnalytics counts an entry with HDEL-ed usage fields as never-hit', async () => {
+      if (skip) return;
+
+      const name = `betterdb_analytics_int_${Date.now()}`;
+      const c = new SemanticCache({
+        name,
+        client,
+        embedFn: fakeEmbed,
+        defaultThreshold: 0.5,
+        telemetry: { registry: new Registry() },
+      });
+
+      try {
+        await c.initialize();
+        const kA = await c.store('alpha analytics prompt', 'a');
+        await c.store('beta analytics prompt', 'b');
+        await c.store('gamma analytics prompt', 'c');
+
+        // Simulate a pre-upgrade entry: strip its usage fields. The complement
+        // counts must still treat it as never-hit / cold.
+        await client.hdel(kA, 'hit_count', 'last_accessed_at');
+        await new Promise((r) => setTimeout(r, 800)); // indexing
+
+        // Hit one entry so exactly one has hit_count >= 1.
+        const hit = await c.check('beta analytics prompt');
+        expect(hit.hit).toBe(true);
+        await new Promise((r) => setTimeout(r, 800)); // index the usage write
+
+        const analytics = await c.entryAnalytics();
+        expect(analytics.totalEntries).toBe(3);
+        // Both the HDEL-ed entry and the untouched one count as never-hit.
+        expect(analytics.neverHitCount).toBe(2);
+      } finally {
+        await c.flush();
+      }
+    });
+  });
 });
