@@ -3,6 +3,7 @@ import type { PresetDefinition } from './types';
 import { agentCachePreset } from './agent-cache';
 import { langchainCommunityPreset } from './langchain-community';
 import { llamaindexPreset } from './llamaindex';
+import { createCustomPreset } from './custom';
 import { failedView } from './text';
 
 const langchainJsPreset: PresetDefinition = {
@@ -19,7 +20,7 @@ const rawPreset: PresetDefinition = {
   mergeSession: () => [],
 };
 
-export function getPreset(id: PresetId, _custom?: CustomSchema | null): PresetDefinition {
+export function getPreset(id: PresetId, custom?: CustomSchema | null): PresetDefinition {
   switch (id) {
     case 'langchain-community':
       return langchainCommunityPreset;
@@ -32,6 +33,7 @@ export function getPreset(id: PresetId, _custom?: CustomSchema | null): PresetDe
     case 'raw':
       return rawPreset;
     case 'custom':
-      throw new Error('Custom preset is not implemented');
+      if (!custom) throw new Error('Custom preset requires a schema');
+      return createCustomPreset(custom);
   }
 }
