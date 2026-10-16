@@ -75,6 +75,11 @@ export interface UnifiedDatabaseAdapterConfig {
 
 export const QUIT_TIMEOUT_MS = 2_000;
 
+// Minimum per-database share of the key-analytics sample budget (capped at the
+// database's own key count), so a small database next to a huge sibling still
+// gets a representative sample. See collectKeyAnalytics.
+export const MIN_DB_SAMPLE_SIZE = 100;
+
 async function closeClient(client: Valkey): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   const quit = client.quit().then(
@@ -125,6 +130,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   // once an SSH tunnel is established.
   private connectHost: string;
   private connectPort: number;
+  // Logical database the shared client actually sits on after connect: the
+  // configured dbIndex, or 0 when its SELECT was rejected and the connection
+  // fell back (see doConnect). Null until a connect has run.
+  private activeDbIndex: number | null = null;
 
   private createValkeyClient(connectionName: string, db?: number): Valkey {
     return new Valkey({
@@ -300,10 +309,24 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // iovalkey silently swallows a failed handshake SELECT (silentEmit), so an
       // invalid dbIndex (out of range, or SELECT rejected in cluster mode) would
       // otherwise leave the client connected and quietly running on db0. Select
-      // explicitly so that failure surfaces here as a connection error.
+      // explicitly so the failure is observable — but do NOT fail the whole
+      // connection on it: dbIndex was stored-but-ignored before it was honored,
+      // so stray values exist in saved configs, and a monitoring connection on
+      // db0 beats a dead one (SELECT is also version-dependent on clusters —
+      // illegal before Valkey 9, legal after). Fall back to db0 with a loud
+      // warning; testConnection checks getActiveDbIndex() and stays strict.
       const dbIndex = this.config.dbIndex ?? 0;
+      this.activeDbIndex = dbIndex;
       if (dbIndex > 0) {
-        await this.client.select(dbIndex);
+        try {
+          await this.client.select(dbIndex);
+        } catch (error) {
+          this.activeDbIndex = 0;
+          this.logger.warn(
+            `SELECT ${dbIndex} failed (${error instanceof Error ? error.message : error}); ` +
+              'falling back to db0 — check the connection\'s configured database index',
+          );
+        }
       }
       this.connected = true;
       this.logger.log('Connected successfully');
@@ -341,6 +364,16 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
   isConnected(): boolean {
     return this.connected && this._client?.status === 'ready';
+  }
+
+  /**
+   * Logical database the shared client is actually on: the configured dbIndex,
+   * or 0 when the connect-time SELECT was rejected and the connection fell
+   * back. testConnection compares this against the requested index so a bad
+   * dbIndex fails validation even though a live connection tolerates it.
+   */
+  getActiveDbIndex(): number {
+    return this.activeDbIndex ?? this.config.dbIndex ?? 0;
   }
 
   async ping(): Promise<boolean> {
@@ -836,22 +869,22 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
    * proxies that hide it), in which case the caller falls back to scanning
    * the connection's own database.
    */
-  private async listKeyspaceDatabases(): Promise<number[]> {
+  private async listKeyspaceDatabases(): Promise<Array<{ db: number; keys: number }>> {
     try {
       // Reuse the centralized INFO keyspace parser (MetricsParser via
       // getInfoParsed) rather than a second regex: it is the single definition
       // of a db entry and already drops malformed `db<N>:` lines as raw strings.
       const { keyspace } = await this.getInfoParsed(['keyspace']);
-      const dbs: number[] = [];
+      const dbs: Array<{ db: number; keys: number }> = [];
       for (const [key, info] of Object.entries(keyspace ?? {})) {
         const match = /^db(\d+)$/.exec(key);
         // A raw-string value is a malformed line the parser kept verbatim; only
         // typed entries with a positive key count are non-empty databases.
         if (match && typeof info === 'object' && info.keys > 0) {
-          dbs.push(parseInt(match[1], 10));
+          dbs.push({ db: parseInt(match[1], 10), keys: info.keys });
         }
       }
-      return dbs.sort((a, b) => a - b);
+      return dbs.sort((a, b) => a.db - b.db);
     } catch (error) {
       this.logger.debug(
         `Could not list keyspace databases: ${error instanceof Error ? error.message : error}`,
@@ -870,13 +903,28 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
    * client never switches databases, so concurrent monitoring is unaffected.
    */
   async collectKeyAnalytics(options: KeyAnalyticsOptions): Promise<KeyAnalyticsResult[]> {
-    const ownDb = this.config.dbIndex ?? 0;
+    // The shared client's ACTUAL database, which differs from config.dbIndex
+    // when the connect-time SELECT fell back to db0.
+    const ownDb = this.activeDbIndex ?? this.config.dbIndex ?? 0;
     const databases = await this.listKeyspaceDatabases();
     if (databases.length === 0) {
       // Empty instance or no keyspace section: preserve the single-db
       // behaviour (the dbSize === 0 early-return keeps this cheap).
       return [await this.scanDatabase(this.client, ownDb, options)];
     }
+
+    // Sampled scans share ONE sampleSize budget across the databases instead
+    // of granting each one the full budget (16 populated databases would mean
+    // 16x the SCAN + per-key pipeline work per collection). The budget is
+    // split proportionally to each database's key count, with a floor so a
+    // small database next to a huge sibling is still represented. Deep scans
+    // (fullScan) visit everything by definition and ignore sampleSize.
+    const totalKeys = databases.reduce((sum, entry) => sum + entry.keys, 0);
+    const sampleBudget = (keys: number): number =>
+      Math.max(
+        Math.min(keys, MIN_DB_SAMPLE_SIZE),
+        Math.round((options.sampleSize * keys) / Math.max(1, totalKeys)),
+      );
 
     const results: KeyAnalyticsResult[] = [];
     const failures: unknown[] = [];
@@ -887,10 +935,11 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     // connection per scan rather than one per database.
     let scratch: Valkey | null = null;
     try {
-      for (const db of databases) {
+      for (const { db, keys } of databases) {
+        const dbOptions = { ...options, sampleSize: sampleBudget(keys) };
         if (db === ownDb) {
           try {
-            results.push(await this.scanDatabase(this.client, db, options));
+            results.push(await this.scanDatabase(this.client, db, dbOptions));
           } catch (error) {
             failures.push(error);
             this.logger.warn(
@@ -924,7 +973,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
           // otherwise keep scanning the previous db while results are tagged with
           // `db`. Select explicitly so that failure surfaces as a per-db failure.
           await scratch.select(db);
-          results.push(await this.scanDatabase(scratch, db, options));
+          results.push(await this.scanDatabase(scratch, db, dbOptions));
         } catch (error) {
           failures.push(error);
           this.logger.warn(

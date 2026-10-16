@@ -393,6 +393,33 @@ describe('UnifiedDatabaseAdapter.collectKeyAnalytics — multiple logical databa
     expect(scratchClients[1]).toBeUndefined();
   });
 
+  it('splits the sample budget across databases proportionally to their key counts', async () => {
+    const { adapter } = makeMultiDbAdapter({
+      dbIndex: 0,
+      keyspaceInfo:
+        'db0:keys=30000,expires=0,avg_ttl=0\r\ndb1:keys=10000,expires=0,avg_ttl=0\r\n',
+      ownKeys: ['a:1'],
+      scratchKeysByDb: { 1: ['b:1'] },
+    });
+    const scanDatabase = jest
+      .spyOn(
+        adapter as unknown as {
+          scanDatabase: (c: unknown, db: number, o: { sampleSize: number }) => Promise<unknown>;
+        },
+        'scanDatabase',
+      )
+      .mockImplementation(async (_c, db) => ({ dbSize: 1, scanned: 1, patterns: [], db }));
+
+    await adapter.collectKeyAnalytics({ sampleSize: 1000, scanBatchSize: 100 });
+
+    // 16 populated databases must not mean 16x the scan work: one budget,
+    // split by key count (30k:10k -> 750:250), not sampleSize per database.
+    expect(scanDatabase.mock.calls.map(([, db, opts]) => [db, opts.sampleSize])).toEqual([
+      [0, 750],
+      [1, 250],
+    ]);
+  });
+
   it('skips a sibling database instead of dialing the raw host when the SSH tunnel is down', async () => {
     const { adapter, createValkeyClient } = makeMultiDbAdapter({
       dbIndex: 0,
@@ -435,32 +462,65 @@ describe('UnifiedDatabaseAdapter — configured dbIndex', () => {
     expect(client.options.db).toBe(0);
   });
 
-  it('surfaces a SELECT failure on an invalid dbIndex and disconnects the leaked client', async () => {
+  function makeConnectAdapter(selectError?: Error) {
     const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
     const client = {
       options: { host: 'localhost', port: 6379 },
       connect: jest.fn().mockResolvedValue(undefined),
-      select: jest.fn().mockRejectedValue(new Error('ERR DB index is out of range')),
+      select: selectError
+        ? jest.fn().mockRejectedValue(selectError)
+        : jest.fn().mockResolvedValue('OK'),
       disconnect: jest.fn(),
     };
     (adapter as unknown as { _client: unknown })._client = client;
     (adapter as unknown as { config: unknown }).config = { dbIndex: 5 };
     (adapter as unknown as { usesTunnel: boolean }).usesTunnel = false;
     (adapter as unknown as { tunnelActive: boolean }).tunnelActive = false;
-    (adapter as unknown as { logger: unknown }).logger = {
-      debug: jest.fn(),
-      warn: jest.fn(),
-      error: jest.fn(),
-      log: jest.fn(),
-    };
+    (adapter as unknown as { detectCapabilities: unknown }).detectCapabilities = jest
+      .fn()
+      .mockResolvedValue(undefined);
+    const logger = { debug: jest.fn(), warn: jest.fn(), error: jest.fn(), log: jest.fn() };
+    (adapter as unknown as { logger: unknown }).logger = logger;
+    return { adapter, client, logger };
+  }
+
+  it('falls back to db0 with a warning when SELECT on the configured dbIndex is rejected', async () => {
+    // Availability over strictness: dbIndex was stored-but-ignored before it
+    // was honored, so stray values must not take whole connections down on
+    // upgrade (out-of-range index, ACL without +select, pre-Valkey-9 cluster).
+    const { adapter, client, logger } = makeConnectAdapter(
+      new Error('ERR DB index is out of range'),
+    );
+
+    await (adapter as unknown as { doConnect(): Promise<void> }).doConnect();
+
+    expect(adapter.getActiveDbIndex()).toBe(0);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('falling back to db0'));
+    expect(client.disconnect).not.toHaveBeenCalled();
+  });
+
+  it('reports the configured dbIndex as active when its SELECT succeeds', async () => {
+    const { adapter, client } = makeConnectAdapter();
+
+    await (adapter as unknown as { doConnect(): Promise<void> }).doConnect();
+
+    expect(client.select).toHaveBeenCalledWith(5);
+    expect(adapter.getActiveDbIndex()).toBe(5);
+  });
+
+  it('disconnects the leaked client when a post-connect step fails', async () => {
+    const { adapter, client } = makeConnectAdapter();
+    (adapter as unknown as { detectCapabilities: jest.Mock }).detectCapabilities = jest
+      .fn()
+      .mockRejectedValue(new Error('NOPERM'));
 
     await expect(
       (adapter as unknown as { doConnect(): Promise<void> }).doConnect(),
-    ).rejects.toThrow('ERR DB index is out of range');
+    ).rejects.toThrow('NOPERM');
 
-    // The socket connected and authenticated before SELECT failed; without an
-    // explicit disconnect here it would stay open, leaking one live session
-    // per failed attempt (e.g. each failed Test Connection with a bad dbIndex).
+    // The socket connected and authenticated before the failure; without an
+    // explicit disconnect it would stay open, leaking one live session per
+    // failed attempt.
     expect(client.disconnect).toHaveBeenCalled();
     expect((adapter as unknown as { _client: unknown })._client).toBeNull();
   });

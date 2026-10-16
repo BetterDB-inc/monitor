@@ -812,6 +812,16 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
     try {
       await adapter.connect();
+      // A live connection tolerates a rejected SELECT by falling back to db0
+      // (availability), but a TEST is validation: surface the bad index here
+      // so the user fixes it before saving instead of silently monitoring db0.
+      if ((request.dbIndex ?? 0) > 0 && adapter.getActiveDbIndex() !== request.dbIndex) {
+        await adapter.disconnect();
+        return {
+          success: false,
+          error: `Could not SELECT database ${request.dbIndex} — the server rejected it (index out of range, cluster mode, or ACL without +select)`,
+        };
+      }
       const capabilities = adapter.getCapabilities();
       await adapter.disconnect();
 
@@ -1154,31 +1164,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async adoptChild(id: string, seedId: string, node: DesiredNode): Promise<void> {
     await this.setMembership(id, { seedId, origin: 'adopted', ...membershipFields(node) });
-    if (node.source === 'cluster') {
-      // SELECT on a non-zero db is illegal in cluster mode; force db0 like
-      // addManagedChild does for auto-registered cluster members, since an
-      // adopted connection may have been configured with a non-zero dbIndex
-      // before joining the cluster.
-      const config = this.configs.get(id);
-      if (config && (config.dbIndex ?? 0) !== 0) {
-        await this.storage.updateConnection(id, { dbIndex: 0 });
-        this.configs.set(id, { ...config, dbIndex: 0 });
-        // The live adapter was built with the old non-zero dbIndex; rebuild it
-        // from the corrected config so it stops running on (or failing to
-        // SELECT in cluster mode) a non-zero db, rather than waiting for the
-        // next incidental reconnect. The stored config is already fixed, so a
-        // reconnect failure here self-heals on the next reconnect.
-        if (this.connections.has(id)) {
-          try {
-            await this.reconnect(id);
-          } catch (err) {
-            this.logger.warn(
-              `Could not reconnect ${config.name} after forcing db0 on cluster adoption: ${err instanceof Error ? err.message : err}`,
-            );
-          }
-        }
-      }
-    }
+    // The adopted connection keeps its configured dbIndex: whether SELECT on a
+    // non-zero db is legal on a cluster node depends on the server (illegal
+    // before Valkey 9, legal on Valkey 9 multi-db clusters), so the connect
+    // path decides at runtime — a rejected SELECT falls back to db0 with a
+    // warning instead of this registry guessing and clobbering the config.
   }
 
   async refreshChild(id: string, node: DesiredNode): Promise<void> {
