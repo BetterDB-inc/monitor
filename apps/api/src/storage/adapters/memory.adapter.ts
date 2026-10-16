@@ -117,6 +117,7 @@ import type {
   KvCacheEngineSample,
   KvCacheFootprintSnapshot,
   KvCacheSettings,
+  SessionNamespace,
 } from '@betterdb/shared';
 
 const NULL_SUB_DISCRIMINATOR = '__betterdb_null__';
@@ -1374,6 +1375,36 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       if (engine.connectionId === connectionId) this.kvCacheEngines.delete(id);
     }
     this.kvCacheSettings.delete(connectionId);
+  }
+
+  private sessionNamespaces = new Map<string, SessionNamespace>();
+
+  async listSessionNamespaces(connectionId: string): Promise<SessionNamespace[]> {
+    return [...this.sessionNamespaces.values()]
+      .filter((n) => n.connectionId === connectionId)
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((n) => ({ ...n }));
+  }
+
+  async getSessionNamespace(connectionId: string, id: string): Promise<SessionNamespace | null> {
+    const ns = this.sessionNamespaces.get(id);
+    return ns && ns.connectionId === connectionId ? { ...ns } : null;
+  }
+
+  async saveSessionNamespace(ns: SessionNamespace): Promise<SessionNamespace> {
+    const existing = this.sessionNamespaces.get(ns.id);
+    if (existing && existing.connectionId !== ns.connectionId) {
+      throw new Error('Session namespace id belongs to another connection');
+    }
+    const stored = { ...ns, createdAt: existing ? existing.createdAt : ns.createdAt };
+    this.sessionNamespaces.set(ns.id, stored);
+    return { ...stored };
+  }
+
+  async deleteSessionNamespace(connectionId: string, id: string): Promise<boolean> {
+    const ns = this.sessionNamespaces.get(id);
+    if (!ns || ns.connectionId !== connectionId) return false;
+    return this.sessionNamespaces.delete(id);
   }
 
   // Command Stats Sample Methods
