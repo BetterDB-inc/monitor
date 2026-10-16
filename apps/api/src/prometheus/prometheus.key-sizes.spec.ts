@@ -331,11 +331,13 @@ describe('PrometheusService key size metrics', () => {
     expect(client.call).toHaveBeenCalledWith('INFO', ['keysizes']);
     // type is normalized to the singular TYPE-style name (INFO reports plural),
     // so it joins with the per-key/per-pattern families.
+    // db label is the bare index ("0"), matching the per-pattern / per-key
+    // families so a PromQL join on `db` works (INFO keysizes names it "db0").
     expect(text).toContain(
-      `betterdb_keysize_bucket_keys{connection="${LABEL}",db="db0",type="string",metric="sizes",bucket="2"} 655`,
+      `betterdb_keysize_bucket_keys{connection="${LABEL}",db="0",type="string",metric="sizes",bucket="2"} 655`,
     );
     expect(text).toContain(
-      `betterdb_keysize_bucket_keys{connection="${LABEL}",db="db0",type="list",metric="items",bucket="32"} 2`,
+      `betterdb_keysize_bucket_keys{connection="${LABEL}",db="0",type="list",metric="items",bucket="32"} 2`,
     );
   });
 

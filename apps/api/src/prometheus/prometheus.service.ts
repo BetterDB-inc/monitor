@@ -2818,7 +2818,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
 
     const newBucketLabels = new Set<string>();
-    for (const [db, types] of Object.entries(distribution.databases)) {
+    for (const [dbKey, types] of Object.entries(distribution.databases)) {
+      // INFO keysizes names databases "db0", "db1", ...; emit the bare index
+      // ("0", "1") so the `db` label matches the per-pattern and per-key
+      // families (and the OTLP mirror), letting a PromQL join on `db` across
+      // them actually match.
+      const db = dbKey.replace(/^db/, '');
       for (const [type, typeDistribution] of Object.entries(types)) {
         // Emit the singular TYPE-style name so `type` joins with the per-key
         // families (INFO keysizes reports it in the plural); the per-pattern

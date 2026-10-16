@@ -69,7 +69,11 @@ function withAttributes(extra: Attributes): Convert {
 
 function perDb(scale: number): Convert {
   return (value, labels) => {
-    const match = /^db(\d+)$/.exec(String(labels.db ?? ''));
+    // Accept both the raw INFO form ("db0") and the already-bare index ("0"):
+    // the keyspace metrics still carry "db0", while the keysize-bucket family
+    // now emits the bare index in Prometheus so its `db` label joins the
+    // per-pattern/per-key families. Normalize both to the bare index here.
+    const match = /^(?:db)?(\d+)$/.exec(String(labels.db ?? ''));
     if (!match) {
       return null;
     }
@@ -167,8 +171,9 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
   betterdb_key_pattern_keys: gauge('betterdb.key_pattern.keys', '{key}'),
   betterdb_key_memory_bytes: gauge('betterdb.key.memory', 'By'),
   betterdb_key_cardinality: gauge('betterdb.key.cardinality', '{element}'),
-  // perDb(1) normalizes the db attribute ('db0' -> '0') to match the other
-  // db-labelled instruments in this export.
+  // perDb(1) normalizes the db attribute to the bare index to match the other
+  // db-labelled instruments. The Prometheus label is already bare ("0") so this
+  // is a pass-through; perDb also tolerates the raw "db0" form for safety.
   betterdb_keysize_bucket_keys: gauge('betterdb.keysizes.bucket.keys', '{key}', perDb(1)),
   betterdb_commandstats_calls_total: counter('valkey.cmd.calls', '{call}'),
   betterdb_connected_slaves: updown('valkey.slaves.connected', '{replica}'),
