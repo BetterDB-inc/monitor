@@ -75,8 +75,8 @@ const checkpointId = (key: string) =>
   key.slice(key.indexOf(CHECKPOINT_MARKER) + CHECKPOINT_MARKER.length);
 
 function newestCheckpoint(keys: KeyView[]): KeyView | undefined {
-  const latest = keys.find((v) => v.parsed && v.key.endsWith(LATEST_SUFFIX));
-  if (latest) return latest;
+  const latest = keys.find((v) => v.key.endsWith(LATEST_SUFFIX));
+  if (latest) return latest.parsed ? latest : undefined;
   return keys
     .filter((v) => v.parsed && v.key.includes(CHECKPOINT_MARKER))
     .sort((a, b) => (checkpointId(a.key) < checkpointId(b.key) ? -1 : 1))

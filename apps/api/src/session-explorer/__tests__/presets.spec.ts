@@ -113,6 +113,21 @@ describe('session presets against captured fixtures', () => {
     expect(preset.mergeSession(withoutLatest)).toHaveLength(7);
   });
 
+  it('agent-cache does not fall back to a stale checkpoint when latest is unparsed', () => {
+    const fixture = fixtures.find((f) => f.preset === 'agent-cache')!;
+    const { preset, groups } = loadSessions(fixture);
+    const views = groups.get('multi-turn')!;
+    const broken = views.map((v) =>
+      v.key.endsWith('__checkpoint_latest')
+        ? ({ ...v, parsed: false, reason: 'Value is not valid JSON' } as KeyView)
+        : v,
+    );
+    expect(broken.some((v) => !v.parsed)).toBe(true);
+    expect(preset.mergeSession(broken)).toEqual([]);
+    const withoutLatest = views.filter((v) => !v.key.endsWith('__checkpoint_latest'));
+    expect(preset.mergeSession(withoutLatest)).toHaveLength(7);
+  });
+
   it('agent-cache writes keys parse as empty messages', () => {
     const fixture = fixtures.find((f) => f.preset === 'agent-cache')!;
     const preset = getPreset('agent-cache');
