@@ -2783,14 +2783,29 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     // populated database rather than a ROW_NUMBER() window, which would have
     // to number and sort the connection's full snapshot history on every
     // request — including the web's 60s patterns poll.
+    //
+    // The database list itself is enumerated with a loose index scan (one
+    // MIN(db) seek per populated database via the recursive CTE): Postgres
+    // has no skip scan, so a plain SELECT DISTINCT db would still walk every
+    // index entry for the connection — O(history) on every request.
     const result = await this.pool.query(
       `
+      WITH RECURSIVE dbs(db) AS (
+        SELECT MIN(db) FROM key_pattern_snapshots ${whereClause}
+        UNION ALL
+        SELECT (
+          SELECT MIN(db) FROM key_pattern_snapshots
+          ${whereClause ? `${whereClause} AND` : 'WHERE'} db > dbs.db
+        )
+        FROM dbs
+        WHERE dbs.db IS NOT NULL
+      )
       SELECT s.* FROM (
-        SELECT DISTINCT db FROM key_pattern_snapshots ${whereClause}
-      ) dbs
+        SELECT db FROM dbs WHERE db IS NOT NULL
+      ) d
       CROSS JOIN LATERAL (
         SELECT * FROM key_pattern_snapshots
-        ${whereClause ? `${whereClause} AND` : 'WHERE'} db = dbs.db
+        ${whereClause ? `${whereClause} AND` : 'WHERE'} db = d.db
         ORDER BY timestamp DESC, pattern ASC
         LIMIT $${paramIndex++}
       ) s
@@ -3147,10 +3162,26 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   async getKeyAnalyticsDatabases(connectionId?: string): Promise<number[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
+    // Loose index scan (one MIN(db) seek per populated database): this is
+    // polled every 60s per open Key Analytics tab, and a plain DISTINCT would
+    // walk every index entry for the connection on each poll (Postgres has no
+    // skip scan for DISTINCT over an index prefix).
     const where = connectionId ? 'WHERE connection_id = $1' : '';
     const params = connectionId ? [connectionId] : [];
     const result = await this.pool.query(
-      `SELECT DISTINCT db FROM key_pattern_snapshots ${where} ORDER BY db ASC`,
+      `
+      WITH RECURSIVE dbs(db) AS (
+        SELECT MIN(db) FROM key_pattern_snapshots ${where}
+        UNION ALL
+        SELECT (
+          SELECT MIN(db) FROM key_pattern_snapshots
+          ${where ? `${where} AND` : 'WHERE'} db > dbs.db
+        )
+        FROM dbs
+        WHERE dbs.db IS NOT NULL
+      )
+      SELECT db FROM dbs WHERE db IS NOT NULL ORDER BY db ASC
+    `,
       params,
     );
     return result.rows.map((row: { db: number | null }) => row.db ?? 0);

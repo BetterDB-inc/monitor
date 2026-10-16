@@ -2832,9 +2832,29 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     // timestamp) index) rather than a ROW_NUMBER() window, which would have
     // to number and sort the connection's full snapshot history on every
     // request — including the web's 60s patterns poll.
+    //
+    // The database list itself is enumerated with a loose index scan (one
+    // MIN(db) index seek per populated database via the recursive CTE):
+    // neither SQLite nor Postgres skip-scans DISTINCT over an index prefix,
+    // so a plain SELECT DISTINCT db would still walk every index entry for
+    // the connection — O(history) on every request.
     const dbRows = this.db
-      .prepare(`SELECT DISTINCT db FROM key_pattern_snapshots ${whereClause} ORDER BY db ASC`)
-      .all(...params) as Array<{ db: number | null }>;
+      .prepare(
+        `
+      WITH RECURSIVE dbs(db) AS (
+        SELECT MIN(db) FROM key_pattern_snapshots ${whereClause}
+        UNION ALL
+        SELECT (
+          SELECT MIN(db) FROM key_pattern_snapshots
+          ${whereClause ? `${whereClause} AND` : 'WHERE'} db > dbs.db
+        )
+        FROM dbs
+        WHERE dbs.db IS NOT NULL
+      )
+      SELECT db FROM dbs WHERE db IS NOT NULL ORDER BY db ASC
+    `,
+      )
+      .all(...params, ...params) as Array<{ db: number | null }>;
 
     const perDbQuery = `
       SELECT * FROM key_pattern_snapshots
@@ -3185,11 +3205,28 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   async getKeyAnalyticsDatabases(connectionId?: string): Promise<number[]> {
     if (!this.db) throw new Error('Database not initialized');
 
+    // Loose index scan (one MIN(db) seek per populated database): this is
+    // polled every 60s per open Key Analytics tab, and a plain DISTINCT would
+    // walk every index entry for the connection on each poll.
     const where = connectionId ? 'WHERE connection_id = ?' : '';
     const params = connectionId ? [connectionId] : [];
     const rows = this.db
-      .prepare(`SELECT DISTINCT db FROM key_pattern_snapshots ${where} ORDER BY db ASC`)
-      .all(...params) as Array<{ db: number | null }>;
+      .prepare(
+        `
+      WITH RECURSIVE dbs(db) AS (
+        SELECT MIN(db) FROM key_pattern_snapshots ${where}
+        UNION ALL
+        SELECT (
+          SELECT MIN(db) FROM key_pattern_snapshots
+          ${where ? `${where} AND` : 'WHERE'} db > dbs.db
+        )
+        FROM dbs
+        WHERE dbs.db IS NOT NULL
+      )
+      SELECT db FROM dbs WHERE db IS NOT NULL ORDER BY db ASC
+    `,
+      )
+      .all(...params, ...params) as Array<{ db: number | null }>;
     return rows.map((row) => row.db ?? 0);
   }
 
