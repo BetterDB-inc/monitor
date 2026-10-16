@@ -460,7 +460,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     const ranked = [...candidates].sort((a, b) => {
       return (b.memoryBytes ?? 0) - (a.memoryBytes ?? 0);
     });
-    const limited = limit === undefined ? ranked : ranked.slice(0, limit);
+    const limited = limit === undefined ? ranked : ranked.slice(0, Math.max(0, limit));
     return limited.map((entry, index) => {
       return { ...entry, rank: index + 1 };
     });
@@ -483,91 +483,129 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     if (this.hidesAnalytics(options?.connectionId)) {
       return [];
     }
-    // Fetch the whole capture (not the caller's limit): composite ranks are
-    // stored PER logical database, so an unfiltered multi-db read is interleaved
-    // and a storage-level limit would truncate by per-db rank — dropping a
-    // database's top composites. The global renumber + slice happens below.
     const { limit, ...rest } = options ?? {};
-    const composite = await this.storage.getHotKeys({
-      ...rest,
-      signalTypes: ['composite'],
-      limit: KEY_ANALYTICS_FETCH_CAP,
-    });
+    const connectionId = rest.connectionId;
 
-    // Unlike the other lists, a scan can legitimately find zero composite keys
-    // (nothing hot AND big) even on a full database. When that happens no
-    // 'composite' row is written, so a `latest` query — MAX(captured_at) over
-    // composite rows — would pin the previous non-empty batch and keep serving
-    // keys that are no longer composite. Every signal in one collection shares a
-    // capturedAt, so if the connection's newest row (any signal) is newer than
-    // the newest composite row, the latest scan produced no composites.
-    //
-    // This comparison is only sound *per connection*: a shared capturedAt holds
-    // within one connection, not across connections. For an unscoped query
-    // (connectionId omitted), a later empty scan on connection A would otherwise
-    // wrongly suppress connection B's still-valid composites — so the guard is
-    // limited to connection-scoped latest views (and never to explicit ranges).
-    let fresh = composite;
-    if (
-      options?.connectionId &&
-      options.latest &&
-      !options.startTime &&
-      !options.endTime &&
-      composite.length > 0
-    ) {
-      const connectionId = options.connectionId;
-      const newestAnyForDb = async (db: number | undefined): Promise<number | undefined> => {
-        const newestAny = await this.storage.getHotKeys({
-          connectionId,
-          db,
-          signalTypes: ['lfu', 'idletime', 'cardinality', 'composite'],
-          latest: true,
-          limit: 1,
-        });
-        return newestAny[0]?.capturedAt;
-      };
+    // Gather the composite rows to rank. For a connection-scoped latest/oldest
+    // read with no explicit db, fetch EACH database's own latest/oldest composite
+    // capture: storage `latest` pins ONE global MAX(captured_at) across all
+    // databases, which silently drops a database whose latest composite capture
+    // is older than a sibling's (e.g. a partial scan where only the sibling was
+    // rescanned). Pull recent composites without the storage latch and reduce to
+    // each database's own latest/oldest capture in memory.
+    const perDbExtreme =
+      connectionId !== undefined &&
+      rest.db === undefined &&
+      (rest.latest === true || rest.oldest === true) &&
+      !rest.startTime &&
+      !rest.endTime;
 
-      if (options.db !== undefined) {
-        // Single database: one newest-any capture for that db decides freshness.
-        const latestCollectionAt = await newestAnyForDb(options.db);
-        if (latestCollectionAt !== undefined && composite[0].capturedAt < latestCollectionAt) {
-          fresh = [];
+    let rows: HotKeyEntry[];
+    if (perDbExtreme) {
+      const all = await this.storage.getHotKeys({
+        ...rest,
+        latest: false,
+        oldest: false,
+        signalTypes: ['composite'],
+        limit: KEY_ANALYTICS_FETCH_CAP,
+      });
+      const targetByDb = new Map<number, number>();
+      for (const row of all) {
+        const db = row.db ?? 0;
+        const current = targetByDb.get(db);
+        if (
+          current === undefined ||
+          (rest.oldest ? row.capturedAt < current : row.capturedAt > current)
+        ) {
+          targetByDb.set(db, row.capturedAt);
         }
-      } else {
-        // All databases: apply the guard PER logical database. A shared
-        // capturedAt holds within one database's collection, not across
-        // databases, so one database's newer scan (e.g. a sibling rescanned
-        // while this database's scan failed) must not suppress another
-        // database's still-valid composites. One pass builds each db's newest
-        // composite capturedAt; the per-db newest-any lookups run in parallel.
-        const latestCompositeByDb = new Map<number, number>();
-        for (const entry of composite) {
-          const db = entry.db ?? 0;
-          latestCompositeByDb.set(db, Math.max(latestCompositeByDb.get(db) ?? 0, entry.capturedAt));
-        }
-        const dbs = [...latestCompositeByDb.keys()];
-        const newestAny = await Promise.all(dbs.map((db) => newestAnyForDb(db)));
+      }
+      rows = all.filter((row) => targetByDb.get(row.db ?? 0) === row.capturedAt);
+
+      // Freshness guard (latest only): a scan can legitimately find zero
+      // composites (nothing hot AND big), writing no 'composite' row, so drop a
+      // database whose newest ANY-signal capture is newer than its newest
+      // composite — that scan produced no composites. Applied PER database (a
+      // shared capturedAt holds within one database's collection, not across
+      // databases), with the per-db newest-any lookups run in parallel.
+      if (rest.latest) {
+        const dbs = [...targetByDb.keys()];
+        const newestAny = await Promise.all(
+          dbs.map((db) =>
+            this.storage
+              .getHotKeys({
+                connectionId,
+                db,
+                signalTypes: ['lfu', 'idletime', 'cardinality', 'composite'],
+                latest: true,
+                limit: 1,
+              })
+              .then((newest) => newest[0]?.capturedAt),
+          ),
+        );
         const freshDbs = new Set<number>();
         dbs.forEach((db, index) => {
           const latestCollectionAt = newestAny[index];
-          if (
-            latestCollectionAt === undefined ||
-            (latestCompositeByDb.get(db) ?? 0) >= latestCollectionAt
-          ) {
+          if (latestCollectionAt === undefined || (targetByDb.get(db) ?? 0) >= latestCollectionAt) {
             freshDbs.add(db);
           }
         });
-        fresh = composite.filter((entry) => freshDbs.has(entry.db ?? 0));
+        rows = rows.filter((row) => freshDbs.has(row.db ?? 0));
       }
+    } else {
+      rows = await this.storage.getHotKeys({
+        ...rest,
+        signalTypes: ['composite'],
+        limit: KEY_ANALYTICS_FETCH_CAP,
+      });
     }
 
-    // Global renumber + limit: stored ranks are per logical database, so the
-    // merged list would otherwise repeat ranks (1,1,2,2,...). Composite scores
-    // are normalized per database, so a cross-db score sort is not meaningful;
-    // the storage order (per-db rank ascending, interleaved across databases) is
-    // the fair global order. Renumber by position and slice to the caller's
-    // limit (guarded against a negative limit).
-    const limited = limit === undefined ? fresh : fresh.slice(0, Math.max(0, limit));
+    // Collapse a (db, key) that recurs across snapshots to its most recent
+    // observation (storage returns captured_at DESC, so the first seen wins), so
+    // a multi-snapshot range read does not spend the limit on duplicate rows.
+    const seen = new Set<string>();
+    const deduped: HotKeyEntry[] = [];
+    for (const row of rows) {
+      const identity = dbScopedIdentity(row.db, row.keyName);
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      deduped.push(row);
+    }
+
+    // Ordering. A single database's stored rank IS its composite order, so keep
+    // it. Across databases the stored per-db rank is not comparable (composite
+    // scores are normalized per database), so re-rank the merged set through the
+    // composite scorer with one global dimension-max — the full size as the
+    // per-dimension cutoff, so a genuine composite is never re-filtered out —
+    // yielding a cross-db comparable order instead of an arbitrary interleave.
+    let ordered = deduped;
+    if (rest.db === undefined && deduped.length > 1) {
+      const positionByKey = new Map<string, number>();
+      rankCompositeKeys(
+        deduped.map((row) => ({
+          keyName: row.keyName,
+          keyType: row.keyType ?? null,
+          db: row.db,
+          freqScore: row.freqScore ?? null,
+          idleSeconds: row.idleSeconds ?? null,
+          memoryBytes: row.memoryBytes ?? null,
+          cardinality: row.cardinality ?? null,
+          ttl: row.ttl ?? null,
+        })),
+        deduped.length,
+      ).forEach((ranked, index) => {
+        positionByKey.set(dbScopedIdentity(ranked.db, ranked.keyName), index);
+      });
+      ordered = deduped
+        .filter((row) => positionByKey.has(dbScopedIdentity(row.db, row.keyName)))
+        .sort(
+          (a, b) =>
+            (positionByKey.get(dbScopedIdentity(a.db, a.keyName)) ?? 0) -
+            (positionByKey.get(dbScopedIdentity(b.db, b.keyName)) ?? 0),
+        );
+    }
+
+    const limited = limit === undefined ? ordered : ordered.slice(0, Math.max(0, limit));
     return limited.map((entry, index) => ({ ...entry, rank: index + 1 }));
   }
 

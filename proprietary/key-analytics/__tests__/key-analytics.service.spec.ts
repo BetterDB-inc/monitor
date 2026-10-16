@@ -105,15 +105,14 @@ describe('KeyAnalyticsService.getCompositeKeys freshness guard', () => {
     expect(res.map((r) => r.keyName)).toEqual(['db0-composite']);
   });
 
-  it('renumbers composites globally across databases and fetches the whole capture (no per-db-rank truncation)', async () => {
-    // Composites stored per-db (ranks 1,2 in each of db0/db1), returned
-    // interleaved by rank. The result must be renumbered 1..4 (not 1,1,2,2) and
-    // keep every database's rows (fetch the cap, not the caller's small limit).
+  it('merges every database\'s composites and re-ranks globally by composite score (not per-db-rank interleave)', async () => {
+    // db1's composite has per-db rank 1 but is weakly composite; db0's has a far
+    // higher composite score. Stored per-db ranks would interleave db1 first; the
+    // read must re-rank by a cross-db-comparable composite score (db0 first), keep
+    // both databases, and renumber 1..N.
     const rows = [
-      hotKey({ capturedAt: 1000, keyName: 'd0r1', db: 0, rank: 1 }),
-      hotKey({ capturedAt: 1000, keyName: 'd1r1', db: 1, rank: 1 }),
-      hotKey({ capturedAt: 1000, keyName: 'd0r2', db: 0, rank: 2 }),
-      hotKey({ capturedAt: 1000, keyName: 'd1r2', db: 1, rank: 2 }),
+      hotKey({ keyName: 'd1-weak', db: 1, rank: 1, capturedAt: 1000, freqScore: 10, cardinality: 10 }),
+      hotKey({ keyName: 'd0-strong', db: 0, rank: 1, capturedAt: 1000, freqScore: 100, cardinality: 100 }),
     ];
     const getHotKeys = jest.fn(async (opts: HotKeyQueryOptions) =>
       isCompositeOnly(opts) ? rows : [hotKey({ capturedAt: 1000, signalType: 'lfu' })],
@@ -121,10 +120,28 @@ describe('KeyAnalyticsService.getCompositeKeys freshness guard', () => {
 
     const res = await makeService(getHotKeys).getCompositeKeys({ connectionId: 'c1', latest: true });
 
-    expect(res.map((r) => r.keyName)).toEqual(['d0r1', 'd1r1', 'd0r2', 'd1r2']);
-    expect(res.map((r) => r.rank)).toEqual([1, 2, 3, 4]);
-    const compositeCall = getHotKeys.mock.calls.find((call) => isCompositeOnly(call[0]));
-    expect(compositeCall?.[0].limit ?? 0).toBeGreaterThan(4);
+    expect(res.map((r) => r.keyName)).toEqual(['d0-strong', 'd1-weak']);
+    expect(res.map((r) => r.rank)).toEqual([1, 2]);
+  });
+
+  it('keeps a database\'s latest composites when a sibling has a newer composite capture (per-db latest)', async () => {
+    // Partial scan: db0's latest composite capture is t=1000, db1's is t=2000.
+    // storage `latest` would pin the global MAX (2000) and drop db0 entirely; the
+    // per-db-latest read must keep db0's t=1000 composite alongside db1's.
+    const composites = [
+      hotKey({ keyName: 'd1-key', db: 1, capturedAt: 2000, freqScore: 50, cardinality: 50 }),
+      hotKey({ keyName: 'd0-key', db: 0, capturedAt: 1000, freqScore: 90, cardinality: 90 }),
+    ];
+    const getHotKeys = jest.fn(async (opts: HotKeyQueryOptions) => {
+      if (isCompositeOnly(opts)) return composites;
+      // newest-any per db: neither db was rescanned past its composite capture.
+      if (opts.db === 0) return [hotKey({ capturedAt: 1000, signalType: 'lfu', db: 0 })];
+      return [hotKey({ capturedAt: 2000, signalType: 'lfu', db: 1 })];
+    });
+
+    const res = await makeService(getHotKeys).getCompositeKeys({ connectionId: 'c1', latest: true });
+
+    expect(res.map((r) => r.keyName).sort()).toEqual(['d0-key', 'd1-key']);
   });
 });
 

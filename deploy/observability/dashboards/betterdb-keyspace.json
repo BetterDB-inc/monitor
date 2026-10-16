@@ -176,7 +176,7 @@
             "uid": "${ds}"
           },
           "expr": "betterdb_db_keys_expiring{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{connection}} {{db}}"
+          "legendFormat": "{{connection}} db{{db}}"
         }
       ],
       "gridPos": {
@@ -212,7 +212,7 @@
             "uid": "${ds}"
           },
           "expr": "betterdb_db_avg_ttl_seconds{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{connection}} {{db}}"
+          "legendFormat": "{{connection}} db{{db}}"
         }
       ],
       "gridPos": {
