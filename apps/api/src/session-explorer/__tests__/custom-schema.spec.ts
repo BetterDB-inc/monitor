@@ -45,6 +45,7 @@ describe('getPath', () => {
 
   it('does not read inherited properties', () => {
     expect(getPath({}, 'constructor')).toBeUndefined();
+    expect(getPath({}, '__proto__')).toBeUndefined();
   });
 });
 
@@ -78,6 +79,69 @@ describe('validateCustomSchema', () => {
   it('rejects messages.from path without a path', () => {
     const result = validateCustomSchema({ ...baseSchema, messages: { from: 'path' } });
     expect(result.ok).toBe(false);
+  });
+
+  it('rejects regexes that could backtrack catastrophically', () => {
+    for (const sessionRegex of ['^(a+)+$', '(\\w+)*:(?<session>x)', '(?<session>(a*)*)']) {
+      const result = validateCustomSchema({ ...baseSchema, sessionRegex });
+      expect(result).toMatchObject({ ok: false });
+      if (!result.ok) {
+        expect(result.errors).toContain(
+          'Session regex has nested repetition that could hang the server',
+        );
+      }
+    }
+  });
+
+  it('rejects an over-long regex', () => {
+    const result = validateCustomSchema({
+      ...baseSchema,
+      sessionRegex: `(?<session>${'a'.repeat(200)})`,
+    });
+    expect(result).toEqual({
+      ok: false,
+      errors: ['Session regex must be at most 200 characters'],
+    });
+  });
+
+  it('accepts a normal regex', () => {
+    const result = validateCustomSchema({
+      ...baseSchema,
+      sessionRegex: '^app:(?<session>[^:]+):',
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('requires a real session group', () => {
+    expect(validateCustomSchema({ ...baseSchema, sessionRegex: '\\(?<session>x' }).ok).toBe(false);
+    expect(validateCustomSchema({ ...baseSchema, sessionRegex: '[(?<session>]' }).ok).toBe(false);
+  });
+
+  it('rejects malformed paths and names the field', () => {
+    const badContent = validateCustomSchema({
+      ...baseSchema,
+      fields: { role: 'type', content: 'a..b' },
+    });
+    expect(badContent).toEqual({ ok: false, errors: ['fields.content is not a valid path'] });
+    const badPath = validateCustomSchema({
+      ...baseSchema,
+      messages: { from: 'path', path: 'a[' },
+    });
+    expect(badPath).toEqual({ ok: false, errors: ['messages.path is not a valid path'] });
+    const badOptional = validateCustomSchema({
+      ...baseSchema,
+      fields: { role: 'type', content: 'c', toolName: 'x[' },
+    });
+    expect(badOptional.ok).toBe(false);
+  });
+
+  it('drops unknown properties', () => {
+    const result = validateCustomSchema({
+      ...baseSchema,
+      extra: 1,
+      fields: { ...baseSchema.fields, junk: 'x' },
+    });
+    expect(result).toEqual({ ok: true, schema: baseSchema });
   });
 
   it('rejects unknown valueType and non-object input', () => {
@@ -120,6 +184,12 @@ describe('custom preset', () => {
     const preset = createCustomPreset({ ...baseSchema, sessionRegex: '^chat:(?<session>\\w+)$' });
     expect(preset.sessionIdOf('chat:abc')).toBe('abc');
     expect(preset.sessionIdOf('other:abc')).toBeNull();
+  });
+
+  it('returns null for oversized keys without running the regex', () => {
+    const preset = createCustomPreset({ ...baseSchema, sessionRegex: '^(?<session>a+)$' });
+    expect(preset.sessionIdOf('a'.repeat(2000))).toBeNull();
+    expect(preset.sessionIdOf('aaa')).toBe('aaa');
   });
 
   it('reads messages from a path inside a JSON string', () => {

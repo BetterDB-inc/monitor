@@ -5,7 +5,9 @@ import { fail, failedView, guardedParse, isRecord, parseJson, textContent } from
 const VALUE_TYPES = ['list', 'string', 'hash', 'json'] as const;
 const MESSAGE_SOURCES = ['items', 'path', 'key'] as const;
 const OPTIONAL_FIELDS = ['timestamp', 'toolName', 'toolArgs', 'toolResult'] as const;
-const SESSION_GROUP = /\(\?<session>/;
+const MAX_REGEX_LENGTH = 200;
+const MAX_KEY_LENGTH = 1024;
+const OPEN_BOUND = /^\{\d+,\}/;
 const SEGMENT = /^([^.[\]]*)((?:\[\d+\])*)$/;
 const INDEX = /\[(\d+)\]/g;
 
@@ -31,6 +33,42 @@ export function getPath(obj: unknown, path: string): unknown {
   return current;
 }
 
+const isValidPath = (path: string): boolean =>
+  path.split('.').every((segment) => {
+    const match = SEGMENT.exec(segment);
+    return match !== null && !(match[1] === '' && match[2] === '');
+  });
+
+const startsUnboundedRepeat = (src: string, i: number): boolean =>
+  src[i] === '+' || src[i] === '*' || (src[i] === '{' && OPEN_BOUND.test(src.slice(i)));
+
+function hasNestedRepetition(src: string): boolean {
+  const stack: boolean[] = [];
+  let inClass = false;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (c === '\\') {
+      i++;
+    } else if (inClass) {
+      if (c === ']') inClass = false;
+    } else if (c === '[') {
+      inClass = true;
+    } else if (c === '(') {
+      stack.push(false);
+    } else if (c === ')') {
+      const innerRepeats = stack.pop() ?? false;
+      if (innerRepeats && startsUnboundedRepeat(src, i + 1)) return true;
+      if (innerRepeats && stack.length > 0) stack[stack.length - 1] = true;
+    } else if (startsUnboundedRepeat(src, i) && stack.length > 0) {
+      stack[stack.length - 1] = true;
+    }
+  }
+  return false;
+}
+
+const hasSessionGroup = (src: string): boolean =>
+  'session' in (new RegExp(`(?:${src})|`).exec('')?.groups ?? {});
+
 const isNonEmptyString = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
 
 export function validateCustomSchema(
@@ -43,13 +81,21 @@ export function validateCustomSchema(
     if (typeof s.sessionRegex !== 'string') {
       errors.push('sessionRegex must be a string');
     } else {
-      try {
-        new RegExp(s.sessionRegex);
-        if (!SESSION_GROUP.test(s.sessionRegex)) {
-          errors.push('sessionRegex must contain a named group "session"');
+      const src = s.sessionRegex;
+      if (src.length > MAX_REGEX_LENGTH) {
+        errors.push(`Session regex must be at most ${MAX_REGEX_LENGTH} characters`);
+      } else {
+        try {
+          new RegExp(src);
+          if (!hasSessionGroup(src)) {
+            errors.push('sessionRegex must contain a named group "session"');
+          }
+          if (hasNestedRepetition(src)) {
+            errors.push('Session regex has nested repetition that could hang the server');
+          }
+        } catch {
+          errors.push('sessionRegex is not a valid regular expression');
         }
-      } catch {
-        errors.push('sessionRegex is not a valid regular expression');
       }
     }
   }
@@ -64,25 +110,51 @@ export function validateCustomSchema(
     !MESSAGE_SOURCES.includes(messages.from as (typeof MESSAGE_SOURCES)[number])
   ) {
     errors.push('messages.from must be one of items, path, key');
-  } else if (messages.from === 'path' && !isNonEmptyString(messages.path)) {
-    errors.push('messages.path is required when messages.from is "path"');
+  } else if (messages.from === 'path') {
+    if (!isNonEmptyString(messages.path)) {
+      errors.push('messages.path is required when messages.from is "path"');
+    } else if (!isValidPath(messages.path)) {
+      errors.push('messages.path is not a valid path');
+    }
   }
 
   const fields = s.fields;
   if (!isRecord(fields)) {
     errors.push('fields is required');
   } else {
-    if (!isNonEmptyString(fields.role)) errors.push('fields.role is required');
-    if (!isNonEmptyString(fields.content)) errors.push('fields.content is required');
+    for (const name of ['role', 'content'] as const) {
+      if (!isNonEmptyString(fields[name])) errors.push(`fields.${name} is required`);
+      else if (!isValidPath(fields[name])) errors.push(`fields.${name} is not a valid path`);
+    }
     for (const name of OPTIONAL_FIELDS) {
-      if (fields[name] !== undefined && !isNonEmptyString(fields[name])) {
-        errors.push(`fields.${name} must be a non-empty string`);
-      }
+      const value = fields[name];
+      if (value === undefined) continue;
+      if (!isNonEmptyString(value)) errors.push(`fields.${name} must be a non-empty string`);
+      else if (!isValidPath(value)) errors.push(`fields.${name} is not a valid path`);
     }
   }
 
   if (errors.length > 0) return { ok: false, errors };
-  return { ok: true, schema: s as unknown as CustomSchema };
+  const input = s as unknown as CustomSchema;
+  const schema: CustomSchema = {
+    ...(input.sessionRegex !== undefined ? { sessionRegex: input.sessionRegex } : {}),
+    valueType: input.valueType,
+    messages:
+      input.messages.from === 'path'
+        ? { from: 'path', path: input.messages.path }
+        : { from: input.messages.from },
+    fields: {
+      role: input.fields.role,
+      content: input.fields.content,
+      ...Object.fromEntries(
+        OPTIONAL_FIELDS.filter((name) => input.fields[name] !== undefined).map((name) => [
+          name,
+          input.fields[name],
+        ]),
+      ),
+    },
+  };
+  return { ok: true, schema };
 }
 
 const TYPE_MATCHES: Record<CustomSchema['valueType'], string[]> = {
@@ -174,6 +246,7 @@ export function createCustomPreset(schema: CustomSchema): PresetDefinition {
     defaultPattern: (prefix) => `${prefix}*`,
     sessionIdOf: (key) => {
       if (!sessionRegex) return key;
+      if (key.length > MAX_KEY_LENGTH) return null;
       return sessionRegex.exec(key)?.groups?.session || null;
     },
     parseKey: (k) => {
