@@ -30,15 +30,16 @@ export function validateNamespaceInput(
   const name = typeof input.name === 'string' ? input.name.trim() : '';
   if (name === '') errors.push('Name is required');
 
-  const pattern = typeof input.pattern === 'string' ? input.pattern : '';
+  const pattern = typeof input.pattern === 'string' ? input.pattern.trim() : '';
   if (!hasLiteralPrefix(pattern)) errors.push('Pattern must include a literal prefix');
+  if (/\s/.test(pattern)) errors.push('Pattern must not contain whitespace');
 
   const preset = PRESET_IDS.find((id) => id === input.preset);
   if (!preset) errors.push('Unknown preset');
 
   const threshold = input.oversizeThresholdBytes ?? DEFAULT_OVERSIZE_THRESHOLD_BYTES;
   const thresholdValid =
-    typeof threshold === 'number' && Number.isInteger(threshold) && threshold > 0;
+    typeof threshold === 'number' && Number.isSafeInteger(threshold) && threshold > 0;
   if (!thresholdValid) errors.push('Oversize threshold must be a positive integer');
 
   let customSchema: SessionNamespaceInput['customSchema'] = null;

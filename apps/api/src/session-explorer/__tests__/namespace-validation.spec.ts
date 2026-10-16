@@ -33,11 +33,21 @@ describe('validateNamespaceInput', () => {
     expect(errorsOf({ ...valid, pattern })).toEqual([]);
   });
 
+  it('accepts an escaped star as a literal prefix', () => {
+    expect(errorsOf({ ...valid, pattern: '\\*abc' })).toEqual([]);
+  });
+
+  it('trims the pattern and rejects inner whitespace', () => {
+    const result = validateNamespaceInput({ ...valid, pattern: '  app:*  ' });
+    expect(result.ok && result.value.pattern).toBe('app:*');
+    expect(errorsOf({ ...valid, pattern: 'app: *' })).toContain('Pattern must not contain whitespace');
+  });
+
   it('rejects an empty name', () => {
     expect(errorsOf({ ...valid, name: '   ' })).toContain('Name is required');
   });
 
-  it.each([0, -1, 1.5, '10'])('rejects threshold %p', (oversizeThresholdBytes) => {
+  it.each([0, -1, 1.5, '10', 1e300])('rejects threshold %p', (oversizeThresholdBytes) => {
     expect(errorsOf({ ...valid, oversizeThresholdBytes })).toContain(
       'Oversize threshold must be a positive integer',
     );
