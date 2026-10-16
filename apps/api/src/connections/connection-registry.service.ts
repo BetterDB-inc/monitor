@@ -803,6 +803,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       username: request.username || 'default',
       password: request.password || '',
       tls: request.tls,
+      dbIndex: request.dbIndex,
       // Unique id so a test tunnel never collides with a live connection's tunnel.
       connectionId: `test:${randomUUID()}`,
       sshTunnel: this.sanitizeSshTunnelInput(request.sshTunnel),
@@ -1153,6 +1154,17 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async adoptChild(id: string, seedId: string, node: DesiredNode): Promise<void> {
     await this.setMembership(id, { seedId, origin: 'adopted', ...membershipFields(node) });
+    if (node.source === 'cluster') {
+      // SELECT on a non-zero db is illegal in cluster mode; force db0 like
+      // addManagedChild does for auto-registered cluster members, since an
+      // adopted connection may have been configured with a non-zero dbIndex
+      // before joining the cluster.
+      const config = this.configs.get(id);
+      if (config && (config.dbIndex ?? 0) !== 0) {
+        await this.storage.updateConnection(id, { dbIndex: 0 });
+        this.configs.set(id, { ...config, dbIndex: 0 });
+      }
+    }
   }
 
   async refreshChild(id: string, node: DesiredNode): Promise<void> {

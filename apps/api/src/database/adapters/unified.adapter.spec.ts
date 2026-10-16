@@ -234,6 +234,8 @@ describe('UnifiedDatabaseAdapter.collectKeyAnalytics — multiple logical databa
       scan: jest.fn().mockResolvedValue(['0', keys]),
       pipeline: scanChain,
       connect: jest.fn().mockResolvedValue(undefined),
+      select: jest.fn().mockResolvedValue('OK'),
+      on: jest.fn(),
       quit: jest.fn().mockResolvedValue('OK'),
       disconnect: jest.fn(),
     };
@@ -349,6 +351,63 @@ describe('UnifiedDatabaseAdapter.collectKeyAnalytics — multiple logical databa
     expect(results.map((r) => r.db)).toEqual([0, 2]);
     expect(scratchClients[2].quit).toHaveBeenCalled();
   });
+
+  it('keeps scanning sibling databases when the own-db scan fails', async () => {
+    const { adapter, ownClient, scratchClients } = makeMultiDbAdapter({
+      dbIndex: 0,
+      keyspaceInfo: 'db0:keys=1,expires=0,avg_ttl=0\r\ndb1:keys=1,expires=0,avg_ttl=0\r\n',
+      ownKeys: ['a:1'],
+      scratchKeysByDb: { 1: ['b:1'] },
+    });
+    ownClient.scan.mockRejectedValue(new Error('own-db scan failed'));
+
+    const results = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    // The old implementation let an own-db failure propagate out of the loop
+    // and discard sibling results. Now db1 still comes back.
+    expect(results.map((r) => r.db)).toEqual([1]);
+    expect(scratchClients[1].quit).toHaveBeenCalled();
+  });
+
+  it('treats a scratch client that cannot SELECT the target db as a failed scan', async () => {
+    const { adapter, scratchClients } = makeMultiDbAdapter({
+      dbIndex: 0,
+      keyspaceInfo: 'db0:keys=1,expires=0,avg_ttl=0\r\ndb1:keys=1,expires=0,avg_ttl=0\r\n',
+      ownKeys: ['a:1'],
+      scratchKeysByDb: { 1: ['b:1'] },
+    });
+    // iovalkey silently swallows a failed handshake SELECT; the explicit
+    // post-connect select() is what must surface this as a failure.
+    const original = (adapter as unknown as { createValkeyClient: jest.Mock })
+      .createValkeyClient;
+    original.mockImplementationOnce((_name: string, _db?: number) => {
+      const restricted = fakeScanClient(['b:1']);
+      restricted.select.mockRejectedValue(new Error('NOPERM this user has no permissions'));
+      return restricted;
+    });
+
+    const results = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    // db1 must not appear tagged with data actually scanned from db0.
+    expect(results.map((r) => r.db)).toEqual([0]);
+    expect(scratchClients[1]).toBeUndefined();
+  });
+
+  it('skips a sibling database instead of dialing the raw host when the SSH tunnel is down', async () => {
+    const { adapter, createValkeyClient } = makeMultiDbAdapter({
+      dbIndex: 0,
+      keyspaceInfo: 'db0:keys=1,expires=0,avg_ttl=0\r\ndb1:keys=1,expires=0,avg_ttl=0\r\n',
+      ownKeys: ['a:1'],
+      scratchKeysByDb: { 1: ['b:1'] },
+    });
+    (adapter as unknown as { usesTunnel: boolean }).usesTunnel = true;
+    (adapter as unknown as { tunnelActive: boolean }).tunnelActive = false;
+
+    const results = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    expect(results.map((r) => r.db)).toEqual([0]);
+    expect(createValkeyClient).not.toHaveBeenCalled();
+  });
 });
 
 describe('UnifiedDatabaseAdapter — configured dbIndex', () => {
@@ -374,5 +433,35 @@ describe('UnifiedDatabaseAdapter — configured dbIndex', () => {
     });
     const client = adapter.getClient() as unknown as { options: { db?: number } };
     expect(client.options.db).toBe(0);
+  });
+
+  it('surfaces a SELECT failure on an invalid dbIndex and disconnects the leaked client', async () => {
+    const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+    const client = {
+      options: { host: 'localhost', port: 6379 },
+      connect: jest.fn().mockResolvedValue(undefined),
+      select: jest.fn().mockRejectedValue(new Error('ERR DB index is out of range')),
+      disconnect: jest.fn(),
+    };
+    (adapter as unknown as { _client: unknown })._client = client;
+    (adapter as unknown as { config: unknown }).config = { dbIndex: 5 };
+    (adapter as unknown as { usesTunnel: boolean }).usesTunnel = false;
+    (adapter as unknown as { tunnelActive: boolean }).tunnelActive = false;
+    (adapter as unknown as { logger: unknown }).logger = {
+      debug: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      log: jest.fn(),
+    };
+
+    await expect(
+      (adapter as unknown as { doConnect(): Promise<void> }).doConnect(),
+    ).rejects.toThrow('ERR DB index is out of range');
+
+    // The socket connected and authenticated before SELECT failed; without an
+    // explicit disconnect here it would stay open, leaking one live session
+    // per failed attempt (e.g. each failed Test Connection with a bad dbIndex).
+    expect(client.disconnect).toHaveBeenCalled();
+    expect((adapter as unknown as { _client: unknown })._client).toBeNull();
   });
 });

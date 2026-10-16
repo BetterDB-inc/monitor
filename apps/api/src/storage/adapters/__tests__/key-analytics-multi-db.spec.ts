@@ -112,6 +112,38 @@ describe('SqliteAdapter key analytics per logical database', () => {
     expect(db1).toEqual([{ timestamp: 1_000, keyCount: 30, memoryBytes: 100, staleCount: 0 }]);
   });
 
+  it('orders tied timestamps deterministically by db then pattern instead of truncating an arbitrary subset', async () => {
+    // One collection across 2 dbs x 2 patterns writes 4 rows at the same
+    // timestamp. A LIMIT smaller than that must keep a stable, deterministic
+    // prefix (db ASC, pattern ASC) rather than whatever order SQLite happens
+    // to return ties in.
+    await storage.saveKeyPatternSnapshots(
+      [
+        snapshot({ id: 's-0-b', db: 0, pattern: 'b:*' }),
+        snapshot({ id: 's-1-a', db: 1, pattern: 'a:*' }),
+        snapshot({ id: 's-0-a', db: 0, pattern: 'a:*' }),
+        snapshot({ id: 's-1-b', db: 1, pattern: 'b:*' }),
+      ],
+      CONN,
+    );
+
+    const page = await storage.getKeyPatternSnapshots({ connectionId: CONN, limit: 2 });
+
+    expect(page.map((row) => [row.db, row.pattern])).toEqual([
+      [0, 'a:*'],
+      [0, 'b:*'],
+    ]);
+  });
+
+  it('keeps trends from different connections as separate series when connectionId is not provided', async () => {
+    await storage.saveKeyPatternSnapshots([snapshot({ id: 's0', keyCount: 10 })], CONN);
+    await storage.saveKeyPatternSnapshots([snapshot({ id: 's1', keyCount: 30 })], 'conn-b');
+
+    const unscoped = await storage.getKeyPatternTrends('user:*', 0, 2_000);
+
+    expect(unscoped.map((row) => row.keyCount).sort((a, b) => a - b)).toEqual([10, 30]);
+  });
+
   it('lists the distinct databases that have analytics data', async () => {
     await storage.saveKeyPatternSnapshots(
       [snapshot({ id: 's0', db: 0 }), snapshot({ id: 's1', db: 2 }), snapshot({ id: 's2', db: 2, pattern: 'job:*' })],

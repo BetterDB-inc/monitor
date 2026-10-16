@@ -1420,6 +1420,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       CREATE INDEX IF NOT EXISTS idx_kps_pattern ON key_pattern_snapshots(pattern, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_kps_pattern_timestamp ON key_pattern_snapshots(pattern, timestamp);
       CREATE INDEX IF NOT EXISTS idx_kps_connection_id ON key_pattern_snapshots(connection_id);
+      CREATE INDEX IF NOT EXISTS idx_kps_connection_db ON key_pattern_snapshots(connection_id, db);
 
       CREATE TABLE IF NOT EXISTS hot_key_stats (
         id UUID PRIMARY KEY,
@@ -2764,7 +2765,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `
       SELECT * FROM key_pattern_snapshots
       ${whereClause}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, db ASC, pattern ASC
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}
     `,
       [...params, limit, offset],
@@ -2862,7 +2863,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         SUM(hot_key_count) as hot_key_count,
         SUM(cold_key_count) as cold_key_count,
         SUM(sampled_key_count) as sampled_key_count,
-        SUM(avg_memory_bytes * sampled_key_count) as weighted_avg_memory
+        SUM(avg_memory_bytes::bigint * sampled_key_count) as weighted_avg_memory
       FROM key_pattern_snapshots
       WHERE ${patternWhere}
       GROUP BY pattern
@@ -2942,7 +2943,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
 
     // One collection writes one row per logical database; aggregate them per
-    // timestamp so an unfiltered trend stays a single series.
+    // timestamp so an unfiltered trend stays a single series. When no
+    // connectionId is given, also group by connection_id so trends from
+    // different connections aren't merged into one series.
+    const groupBy = connectionId ? 'timestamp' : 'timestamp, connection_id';
     const result = await this.pool.query(
       `
       SELECT
@@ -2952,7 +2956,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         SUM(stale_key_count) as stale_key_count
       FROM key_pattern_snapshots
       WHERE ${conditions.join(' AND ')}
-      GROUP BY timestamp
+      GROUP BY ${groupBy}
       ORDER BY timestamp ASC
     `,
       params,
