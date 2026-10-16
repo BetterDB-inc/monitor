@@ -1,6 +1,6 @@
 {
   "name": "@betterdb/agent",
-  "version": "1.6.2",
+  "version": "1.7.0",
   "license": "MIT",
   "description": "BetterDB remote monitoring agent for Valkey/Redis",
   "main": "dist/index.js",
