@@ -18,6 +18,7 @@ import {
   parseKeySizeDistribution,
   canonicalKeySizeType,
   KeySizeDistribution,
+  KEY_ANALYTICS_FETCH_CAP,
 } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
@@ -191,9 +192,6 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   // Servers without the keysizes section reject the INFO argument; back off
   // instead of probing an unsupported server every refresh.
   private static readonly KEYSIZES_UNAVAILABLE_RECHECK_MS = 600_000;
-  // Fetch bound for the latest-run re-rank, mirroring the key-analytics
-  // service's LARGEST_KEYS_FETCH_CAP.
-  private static readonly KEY_ANALYTICS_FETCH_CAP = 10_000;
 
   // Per-connection in-flight INFO-metric updates, so the background poller and a
   // /metrics scrape coalesce instead of racing on shared per-connection state.
@@ -1913,20 +1911,25 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       // parseInfoToTyped emits typed objects for db* entries; anything still
       // a string is a non-db or unparseable line.
       if (!dbInfo || typeof dbInfo !== 'object') continue;
-      newDbLabels.add(dbKey);
+      // Emit the bare logical-database index ("0", "1", ...) rather than the raw
+      // INFO keyspace key ("db0"), so the `db` label matches the key-analytics
+      // and keysize-bucket families and a PromQL join on `db` across all of them
+      // matches.
+      const db = dbKey.replace(/^db/, '');
+      newDbLabels.add(db);
 
       const parsedInfo = dbInfo as { keys: number; expires?: number; avg_ttl?: number };
-      this.dbKeys.labels(connLabel, dbKey).set(parsedInfo.keys || 0);
+      this.dbKeys.labels(connLabel, db).set(parsedInfo.keys || 0);
       if (absentAsZero || parsedInfo.expires !== undefined) {
-        this.dbKeysExpiring.labels(connLabel, dbKey).set(parsedInfo.expires || 0);
+        this.dbKeysExpiring.labels(connLabel, db).set(parsedInfo.expires || 0);
         sawExpires = true;
       } else {
-        this.dbKeysExpiring.remove(connLabel, dbKey);
+        this.dbKeysExpiring.remove(connLabel, db);
       }
       if (absentAsZero || parsedInfo.avg_ttl !== undefined) {
-        this.dbAvgTtlSeconds.labels(connLabel, dbKey).set((parsedInfo.avg_ttl || 0) / 1000);
+        this.dbAvgTtlSeconds.labels(connLabel, db).set((parsedInfo.avg_ttl || 0) / 1000);
       } else {
-        this.dbAvgTtlSeconds.remove(connLabel, dbKey);
+        this.dbAvgTtlSeconds.remove(connLabel, db);
       }
       totalKeys += parsedInfo.keys || 0;
       totalExpiring += parsedInfo.expires || 0;
@@ -2590,7 +2593,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
                 connectionId,
                 startTime: latestTimestamp,
                 endTime: latestTimestamp,
-                limit: PrometheusService.KEY_ANALYTICS_FETCH_CAP,
+                limit: KEY_ANALYTICS_FETCH_CAP,
               });
         if (this.isSuperseded(connectionId, epoch)) {
           return;
@@ -2654,7 +2657,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           latest: true,
           startTime,
           signalTypes: ['cardinality'],
-          limit: PrometheusService.KEY_ANALYTICS_FETCH_CAP,
+          limit: KEY_ANALYTICS_FETCH_CAP,
         });
         if (this.isSuperseded(connectionId, epoch)) {
           return;

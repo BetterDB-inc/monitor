@@ -20,7 +20,7 @@ import { ClientAnalyticsAnalysisService } from '../client-analytics/client-analy
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
 import { ClusterMetricsService } from '../cluster/cluster-metrics.service';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
-import { HOT_KEYS_FETCH_CAP, rankHotKeys } from '@betterdb/shared';
+import { KEY_ANALYTICS_FETCH_CAP, rankHotKeys } from '@betterdb/shared';
 import { ConfigHazardService } from '../monitor/config-hazard.service';
 import { ConfigHazardFinding } from '../monitor/config-hazard';
 import {
@@ -421,7 +421,7 @@ export class McpController {
         connectionId: id,
         startTime: safeParseInt(startTime),
         endTime: safeParseInt(endTime),
-        limit: HOT_KEYS_FETCH_CAP,
+        limit: KEY_ANALYTICS_FETCH_CAP,
         latest: true,
       });
       return rankHotKeys(entries, { limit: parsedLimit, singleSnapshot: true });

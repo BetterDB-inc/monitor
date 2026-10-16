@@ -69,10 +69,10 @@ function withAttributes(extra: Attributes): Convert {
 
 function perDb(scale: number): Convert {
   return (value, labels) => {
-    // Accept both the raw INFO form ("db0") and the already-bare index ("0"):
-    // the keyspace metrics still carry "db0", while the keysize-bucket family
-    // now emits the bare index in Prometheus so its `db` label joins the
-    // per-pattern/per-key families. Normalize both to the bare index here.
+    // Every db-labelled Prometheus family now emits the bare logical-database
+    // index ("0", "1", ...), so this is effectively a pass-through. The optional
+    // "db" prefix is tolerated defensively (e.g. a caller passing a raw INFO
+    // key) rather than silently dropping the series. Normalize to the bare index.
     const match = /^(?:db)?(\d+)$/.exec(String(labels.db ?? ''));
     if (!match) {
       return null;

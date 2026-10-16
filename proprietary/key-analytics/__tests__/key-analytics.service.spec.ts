@@ -104,6 +104,28 @@ describe('KeyAnalyticsService.getCompositeKeys freshness guard', () => {
 
     expect(res.map((r) => r.keyName)).toEqual(['db0-composite']);
   });
+
+  it('renumbers composites globally across databases and fetches the whole capture (no per-db-rank truncation)', async () => {
+    // Composites stored per-db (ranks 1,2 in each of db0/db1), returned
+    // interleaved by rank. The result must be renumbered 1..4 (not 1,1,2,2) and
+    // keep every database's rows (fetch the cap, not the caller's small limit).
+    const rows = [
+      hotKey({ capturedAt: 1000, keyName: 'd0r1', db: 0, rank: 1 }),
+      hotKey({ capturedAt: 1000, keyName: 'd1r1', db: 1, rank: 1 }),
+      hotKey({ capturedAt: 1000, keyName: 'd0r2', db: 0, rank: 2 }),
+      hotKey({ capturedAt: 1000, keyName: 'd1r2', db: 1, rank: 2 }),
+    ];
+    const getHotKeys = jest.fn(async (opts: HotKeyQueryOptions) =>
+      isCompositeOnly(opts) ? rows : [hotKey({ capturedAt: 1000, signalType: 'lfu' })],
+    );
+
+    const res = await makeService(getHotKeys).getCompositeKeys({ connectionId: 'c1', latest: true });
+
+    expect(res.map((r) => r.keyName)).toEqual(['d0r1', 'd1r1', 'd0r2', 'd1r2']);
+    expect(res.map((r) => r.rank)).toEqual([1, 2, 3, 4]);
+    const compositeCall = getHotKeys.mock.calls.find((call) => isCompositeOnly(call[0]));
+    expect(compositeCall?.[0].limit ?? 0).toBeGreaterThan(4);
+  });
 });
 
 describe('KeyAnalyticsService.getHotKeys global re-rank', () => {
@@ -132,6 +154,27 @@ describe('KeyAnalyticsService.getHotKeys global re-rank', () => {
     // Fetched the full capture (a cap), not the caller's small limit.
     const passedLimit = getHotKeys.mock.calls[0]?.[0]?.limit;
     expect(passedLimit ?? 0).toBeGreaterThan(2);
+  });
+
+  it('on a multi-snapshot range read dedupes each key to its hottest observation, not its largest-memory one', async () => {
+    // Same key in two snapshots: hotter one (freq 500) has small memory, the
+    // cooler one (freq 10) has huge memory. A memory-based dedupe would keep the
+    // freq-10 row; this surface ranks by hotness, so it must keep freq 500.
+    const stored = [
+      hotKey({ keyName: 'k', db: 0, signalType: 'lfu', freqScore: 500, memoryBytes: 10, capturedAt: 1 }),
+      hotKey({ keyName: 'k', db: 0, signalType: 'lfu', freqScore: 10, memoryBytes: 9999, capturedAt: 2 }),
+    ];
+    const getHotKeys = jest.fn(async (_opts: HotKeyQueryOptions) => stored);
+
+    // No latest/oldest -> multi-snapshot path (singleSnapshot = false).
+    const res = await makeService(getHotKeys).getHotKeys({
+      connectionId: 'c1',
+      startTime: 1,
+      endTime: 9,
+    });
+
+    expect(res).toHaveLength(1);
+    expect(res[0].freqScore).toBe(500);
   });
 });
 

@@ -320,7 +320,7 @@
             "uid": "${ds}"
           },
           "expr": "betterdb_key_pattern_memory_bytes{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{connection}} {{pattern}}"
+          "legendFormat": "{{connection}} {{pattern}} db{{db}}"
         }
       ],
       "gridPos": {

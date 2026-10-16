@@ -419,7 +419,7 @@ Per-database key statistics.
 | `betterdb_keyspace_keys`          | gauge | -      | Total keys across all databases              | `125000` |
 | `betterdb_keyspace_keys_expiring` | gauge | -      | Keys with an expiration across all databases | `45000`  |
 
-**Label Example**: `db="db0"`, `db="db1"`
+**Label Example**: `db="0"`, `db="1"` — the bare logical-database index (not `db0`), consistent with the key-analytics and keysize families so a PromQL join on `db` across all of them matches.
 
 **Externally monitored (OTLP-push) connections**: `betterdb_db_keys_expiring` is exported for databases whose expiry count was pushed, and `betterdb_db_avg_ttl_seconds` for databases whose average TTL was pushed. Each is omitted, never reported as 0, when its value was not pushed. `betterdb_keyspace_keys_expiring` is omitted when no database pushed an expiry count.
 
@@ -444,7 +444,7 @@ Key memory per pattern, per tracked key, and the whole-keyspace size distributio
 
 **Sampling note**: pattern memory and key counts are extrapolated from a sample (`sampled value / sampling ratio`), so on a keyspace larger than the sample they are estimates, not exact totals. `*_avg_memory_bytes` and `*_max_memory_bytes` describe only the sampled keys.
 
-**Label Example**: `pattern="user:*"`, `key="user:1:profile"`, `type="hash"`, `db="db0"`, `metric="sizes"`, `bucket="16K"`
+**Label Example**: `pattern="user:*"`, `key="user:1:profile"`, `type="hash"`, `db="0"`, `metric="sizes"`, `bucket="16K"`
 
 ### Persistence Metrics
 
