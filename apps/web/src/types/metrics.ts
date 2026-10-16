@@ -20,6 +20,7 @@ export interface RuntimeCapabilities {
   canCommandLog: boolean;
   canLatency: boolean;
   canMemory: boolean;
+  canKeysizes: boolean;
 }
 
 export interface RuntimeCapabilityDisabledInfo {

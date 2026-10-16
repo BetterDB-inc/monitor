@@ -1,5 +1,13 @@
 import { z } from 'zod';
 import { MAX_RETENTION_DAYS, parseRetentionDaysToken } from '@betterdb/shared';
+import {
+  DEFAULT_KEY_DETAILS_TOP_N,
+  DEFAULT_KEY_PATTERNS_TOP_N,
+  DEFAULT_SLOT_STATS_TOP_N,
+  MAX_KEY_DETAILS_TOP_N,
+  MAX_KEY_PATTERNS_TOP_N,
+  MAX_SLOT_STATS_TOP_N,
+} from '../prometheus/export-profile';
 import { parseActivityRetentionDays } from '../activity/activity-config';
 import { isCloudModeValue } from '../common/utils/cloud-mode';
 import { isNegativeEnvValue } from '../common/utils/env-bool';
@@ -23,6 +31,21 @@ const optionalTrimmedString = z
 
     return trimmed;
   });
+
+// Top-N caps mirror the export-profile resolvers' documented behavior: an
+// out-of-range value is clamped to 0..max (above the cap yields max, a negative
+// yields 0), matching the runtime resolver rather than silently reverting to
+// the default. Only a malformed/non-finite value falls back to def, and .catch
+// keeps any residual parse failure from aborting boot.
+const topNEnv = (max: number, def: number) =>
+  z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    z.coerce
+      .number()
+      .transform((n) => (Number.isFinite(n) ? Math.min(max, Math.max(0, Math.floor(n))) : def))
+      .default(def)
+      .catch(def),
+  );
 
 /**
  * Environment variable validation schema
@@ -177,6 +200,8 @@ export const envSchema = z
     // Webhook configuration
     WEBHOOK_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).optional(),
     WEBHOOK_MAX_RESPONSE_BODY_BYTES: z.coerce.number().int().min(0).optional(),
+    // Max in-memory alert hysteresis entries (alert type × connection × webhook).
+    WEBHOOK_ALERT_STATE_MAX: z.coerce.number().int().min(1).optional(),
     // Public base URL of the web UI (e.g. https://monitor.example.com).
     // Used to build "View in BetterDB" links in Slack/Discord payloads.
     // Unset = chat messages render without the link button.
@@ -251,10 +276,11 @@ export const envSchema = z
         .transform((v) => v.trim().toLowerCase())
         .pipe(z.enum(['vitals', 'full'])),
     ),
-    METRICS_SLOT_STATS_TOP_N: z.preprocess(
-      (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
-      z.coerce.number().int().min(0).max(16384).default(100),
-    ),
+    METRICS_SLOT_STATS_TOP_N: topNEnv(MAX_SLOT_STATS_TOP_N, DEFAULT_SLOT_STATS_TOP_N),
+    // Key-size metric families from key analytics runs. 0 disables the family;
+    // the per-key cap is bounded by what the collector persists.
+    METRICS_KEY_PATTERNS_TOP_N: topNEnv(MAX_KEY_PATTERNS_TOP_N, DEFAULT_KEY_PATTERNS_TOP_N),
+    METRICS_KEY_DETAILS_TOP_N: topNEnv(MAX_KEY_DETAILS_TOP_N, DEFAULT_KEY_DETAILS_TOP_N),
 
     // OTel telemetry export (mirror of Prometheus metrics). No-op unless
     // OTEL_EXPORTER_OTLP_ENDPOINT is set.

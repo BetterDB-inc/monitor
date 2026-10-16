@@ -20,6 +20,7 @@ export interface RuntimeCapabilities {
   canCommandLog: boolean;
   canLatency: boolean;
   canMemory: boolean;
+  canKeysizes: boolean;
 }
 
 /** Reason a runtime capability is disabled and when it was disabled (ms epoch). */
