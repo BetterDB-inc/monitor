@@ -86,6 +86,53 @@ describe('KeyAnalyticsService.getCompositeKeys freshness guard', () => {
     // No second lookup for the latest-collection timestamp.
     expect(getHotKeys).toHaveBeenCalledTimes(1);
   });
+
+  it('applies the guard per database so a sibling\'s newer scan does not suppress valid composites', async () => {
+    // All-databases view (no db filter): db0 last produced composites at t=1000
+    // and was not rescanned since; db1 was rescanned later at t=2000 with no
+    // composites. A single global newest-any (t=2000) would wrongly blank db0's
+    // still-valid composites — the guard must compare per database.
+    const getHotKeys = jest.fn(async (opts: HotKeyQueryOptions) => {
+      if (isCompositeOnly(opts)) {
+        return [hotKey({ capturedAt: 1000, keyName: 'db0-composite', db: 0 })];
+      }
+      if (opts.db === 0) return [hotKey({ capturedAt: 1000, signalType: 'lfu', db: 0 })];
+      return [hotKey({ capturedAt: 2000, signalType: 'lfu', db: 1 })];
+    });
+
+    const res = await makeService(getHotKeys).getCompositeKeys({ connectionId: 'c1', latest: true });
+
+    expect(res.map((r) => r.keyName)).toEqual(['db0-composite']);
+  });
+});
+
+describe('KeyAnalyticsService.getHotKeys global re-rank', () => {
+  it('re-ranks merged per-db rows by hotness and renumbers, instead of truncating by per-db rank', async () => {
+    // db0 holds the two hottest keys (freq 200, 190 at per-db ranks 1, 2); db1
+    // holds cooler keys (freq 50, 40 at per-db ranks 1, 2). Stored rows are
+    // interleaved by per-db rank, so a naive storage limit:2 would return
+    // db0#1 + db1#1 and drop db0#2. The service must fetch the whole capture,
+    // re-rank by freqScore, and renumber 1..N.
+    const stored = [
+      hotKey({ keyName: 'd0a', signalType: 'lfu', freqScore: 200, rank: 1, db: 0 }),
+      hotKey({ keyName: 'd1a', signalType: 'lfu', freqScore: 50, rank: 1, db: 1 }),
+      hotKey({ keyName: 'd0b', signalType: 'lfu', freqScore: 190, rank: 2, db: 0 }),
+      hotKey({ keyName: 'd1b', signalType: 'lfu', freqScore: 40, rank: 2, db: 1 }),
+    ];
+    const getHotKeys = jest.fn(async (_opts: HotKeyQueryOptions) => stored);
+
+    const res = await makeService(getHotKeys).getHotKeys({
+      connectionId: 'c1',
+      latest: true,
+      limit: 2,
+    });
+
+    expect(res.map((r) => r.keyName)).toEqual(['d0a', 'd0b']);
+    expect(res.map((r) => r.rank)).toEqual([1, 2]);
+    // Fetched the full capture (a cap), not the caller's small limit.
+    const passedLimit = getHotKeys.mock.calls[0]?.[0]?.limit;
+    expect(passedLimit ?? 0).toBeGreaterThan(2);
+  });
 });
 
 describe('KeyAnalyticsService.collect composite persistence', () => {

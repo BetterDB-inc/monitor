@@ -75,6 +75,16 @@ export function resolveKeyDetailsTopN(value: unknown, profile: ExportProfile): n
   return resolveTopN(value, profile, DEFAULT_KEY_DETAILS_TOP_N, MAX_KEY_DETAILS_TOP_N);
 }
 
+/**
+ * Clamp a finite top-N value to the inclusive range [0, maxTopN], flooring
+ * fractional values. Single source of truth for the top-N bound policy, shared
+ * by the runtime resolvers here and the boot-time env validation
+ * (env.schema's topNEnv) so the two never diverge.
+ */
+export function clampTopN(value: number, maxTopN: number): number {
+  return Math.min(maxTopN, Math.max(0, Math.floor(value)));
+}
+
 function resolveTopN(
   value: unknown,
   profile: ExportProfile,
@@ -91,7 +101,7 @@ function resolveTopN(
   if (!Number.isFinite(parsed)) {
     return defaultTopN;
   }
-  return Math.min(maxTopN, Math.max(0, Math.floor(parsed)));
+  return clampTopN(parsed, maxTopN);
 }
 
 export function isExportedInProfile(name: string, profile: ExportProfile): boolean {

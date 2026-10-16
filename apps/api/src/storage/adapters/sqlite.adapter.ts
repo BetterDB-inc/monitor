@@ -435,6 +435,28 @@ const CONNECTION_ID_UNIQUE_REBUILDS = [
   },
 ] as const;
 
+// Loose index scan that enumerates the populated logical databases: one MIN(db)
+// index seek per database via a recursive CTE, since neither SQLite nor Postgres
+// skip-scans DISTINCT over an index prefix (a plain SELECT DISTINCT db would walk
+// every index entry — O(history)). The `where` fragment is spliced twice (the
+// anchor and the recursive step), so callers must bind its params twice. Single
+// definition shared by getKeyPatternSnapshots and getKeyAnalyticsDatabases.
+function populatedDbsCte(where: string): string {
+  return `
+    WITH RECURSIVE dbs(db) AS (
+      SELECT MIN(db) FROM key_pattern_snapshots ${where}
+      UNION ALL
+      SELECT (
+        SELECT MIN(db) FROM key_pattern_snapshots
+        ${where ? `${where} AND` : 'WHERE'} db > dbs.db
+      )
+      FROM dbs
+      WHERE dbs.db IS NOT NULL
+    )
+    SELECT db FROM dbs WHERE db IS NOT NULL ORDER BY db ASC
+  `;
+}
+
 function rebuildWithNullableColumns(
   db: Database.Database,
   table: string,
@@ -2839,21 +2861,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     // so a plain SELECT DISTINCT db would still walk every index entry for
     // the connection — O(history) on every request.
     const dbRows = this.db
-      .prepare(
-        `
-      WITH RECURSIVE dbs(db) AS (
-        SELECT MIN(db) FROM key_pattern_snapshots ${whereClause}
-        UNION ALL
-        SELECT (
-          SELECT MIN(db) FROM key_pattern_snapshots
-          ${whereClause ? `${whereClause} AND` : 'WHERE'} db > dbs.db
-        )
-        FROM dbs
-        WHERE dbs.db IS NOT NULL
-      )
-      SELECT db FROM dbs WHERE db IS NOT NULL ORDER BY db ASC
-    `,
-      )
+      .prepare(populatedDbsCte(whereClause))
       .all(...params, ...params) as Array<{ db: number | null }>;
 
     const perDbQuery = `
@@ -3211,21 +3219,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const where = connectionId ? 'WHERE connection_id = ?' : '';
     const params = connectionId ? [connectionId] : [];
     const rows = this.db
-      .prepare(
-        `
-      WITH RECURSIVE dbs(db) AS (
-        SELECT MIN(db) FROM key_pattern_snapshots ${where}
-        UNION ALL
-        SELECT (
-          SELECT MIN(db) FROM key_pattern_snapshots
-          ${where ? `${where} AND` : 'WHERE'} db > dbs.db
-        )
-        FROM dbs
-        WHERE dbs.db IS NOT NULL
-      )
-      SELECT db FROM dbs WHERE db IS NOT NULL ORDER BY db ASC
-    `,
-      )
+      .prepare(populatedDbsCte(where))
       .all(...params, ...params) as Array<{ db: number | null }>;
     return rows.map((row) => row.db ?? 0);
   }

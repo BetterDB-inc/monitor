@@ -214,6 +214,29 @@ function toAgentToken(row: AgentTokenPgRow): AgentToken {
   };
 }
 
+// The `WITH RECURSIVE dbs(db) AS (...)` loose index scan that enumerates the
+// populated logical databases: one MIN(db) seek per database, since Postgres
+// has no skip scan for DISTINCT over an index prefix (a plain SELECT DISTINCT db
+// would walk every index entry — O(history)). Returns just the CTE definition
+// (callers append their own SELECT). The `where` fragment is spliced twice (the
+// anchor and the recursive step); its $n placeholders are positional so reuse
+// binds the same values. Shared by getKeyPatternSnapshots and
+// getKeyAnalyticsDatabases.
+function populatedDbsCte(where: string): string {
+  return `
+      WITH RECURSIVE dbs(db) AS (
+        SELECT MIN(db) FROM key_pattern_snapshots ${where}
+        UNION ALL
+        SELECT (
+          SELECT MIN(db) FROM key_pattern_snapshots
+          ${where ? `${where} AND` : 'WHERE'} db > dbs.db
+        )
+        FROM dbs
+        WHERE dbs.db IS NOT NULL
+      )
+  `;
+}
+
 export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   private pool: Pool | null = null;
   private ready: boolean = false;
@@ -2790,16 +2813,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     // index entry for the connection — O(history) on every request.
     const result = await this.pool.query(
       `
-      WITH RECURSIVE dbs(db) AS (
-        SELECT MIN(db) FROM key_pattern_snapshots ${whereClause}
-        UNION ALL
-        SELECT (
-          SELECT MIN(db) FROM key_pattern_snapshots
-          ${whereClause ? `${whereClause} AND` : 'WHERE'} db > dbs.db
-        )
-        FROM dbs
-        WHERE dbs.db IS NOT NULL
-      )
+      ${populatedDbsCte(whereClause)}
       SELECT s.* FROM (
         SELECT db FROM dbs WHERE db IS NOT NULL
       ) d
@@ -3170,16 +3184,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const params = connectionId ? [connectionId] : [];
     const result = await this.pool.query(
       `
-      WITH RECURSIVE dbs(db) AS (
-        SELECT MIN(db) FROM key_pattern_snapshots ${where}
-        UNION ALL
-        SELECT (
-          SELECT MIN(db) FROM key_pattern_snapshots
-          ${where ? `${where} AND` : 'WHERE'} db > dbs.db
-        )
-        FROM dbs
-        WHERE dbs.db IS NOT NULL
-      )
+      ${populatedDbsCte(where)}
       SELECT db FROM dbs WHERE db IS NOT NULL ORDER BY db ASC
     `,
       params,

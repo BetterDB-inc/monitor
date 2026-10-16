@@ -1,6 +1,6 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { keyAnalyticsApi } from '../api/keyAnalytics';
-import type { HotKeyEntry } from '../api/keyAnalytics';
+import type { HotKeyEntry, KeyPatternSnapshot } from '../api/keyAnalytics';
 import { useBaselineHotKeys } from '../hooks/useBaselineHotKeys';
 import { extractPattern, dbScopedIdentity } from '@betterdb/shared';
 import { usePolling } from '../hooks/usePolling';
@@ -51,6 +51,18 @@ function getRankDelta(
   if (delta > 0) return { label: `\u2191${delta}`, className: 'text-emerald-600' };
   if (delta < 0) return { label: `\u2193${Math.abs(delta)}`, className: 'text-destructive' };
   return { label: '\u2014', className: 'text-muted-foreground' };
+}
+
+// Inline "dbN" badge shown next to a key/pattern name in the aggregated
+// all-databases view (hidden when a single database fills the view). One
+// definition so the styling/visibility rule never diverges across the tables.
+function DbBadge({ db, show }: { db: number | undefined; show: boolean }) {
+  if (!show) return null;
+  return (
+    <Badge variant="outline" className="ml-2 font-sans">
+      db{db ?? 0}
+    </Badge>
+  );
 }
 
 type SortField = 'pattern' | 'keyCount' | 'memoryBytes' | 'staleKeyCount';
@@ -319,40 +331,32 @@ export function KeyAnalytics() {
     return sorted;
   }, [patterns, sortField, sortDirection]);
 
-  const topPatternsByKeys = useMemo(() => {
+  // Top-10 patterns by a chosen numeric field, shaped for the bar charts. In
+  // the aggregated 'all databases' view the same pattern can appear once per
+  // db, so suffix the db to keep the chart entries distinct.
+  const topPatternsBy = (select: (p: KeyPatternSnapshot) => number) => {
     if (!patterns) return [];
     return [...patterns]
-      .sort((a, b) => b.keyCount - a.keyCount)
+      .sort((a, b) => select(b) - select(a))
       .slice(0, 10)
       .map((p) => {
-        // In the aggregated 'all databases' view the same pattern can appear
-        // once per db; suffix the db so the chart doesn't render duplicate,
-        // indistinguishable entries.
         const suffix = showDbBadges ? ` (db${p.db ?? 0})` : '';
         const truncated = p.pattern.length > 20 ? p.pattern.substring(0, 20) + '...' : p.pattern;
-        return {
-          name: truncated + suffix,
-          fullName: p.pattern + suffix,
-          value: p.keyCount,
-        };
+        return { name: truncated + suffix, fullName: p.pattern + suffix, value: select(p) };
       });
-  }, [patterns, showDbBadges]);
+  };
 
-  const topPatternsByMemory = useMemo(() => {
-    if (!patterns) return [];
-    return [...patterns]
-      .sort((a, b) => b.totalMemoryBytes - a.totalMemoryBytes)
-      .slice(0, 10)
-      .map((p) => {
-        const suffix = showDbBadges ? ` (db${p.db ?? 0})` : '';
-        const truncated = p.pattern.length > 20 ? p.pattern.substring(0, 20) + '...' : p.pattern;
-        return {
-          name: truncated + suffix,
-          fullName: p.pattern + suffix,
-          value: p.totalMemoryBytes,
-        };
-      });
-  }, [patterns, showDbBadges]);
+  const topPatternsByKeys = useMemo(
+    () => topPatternsBy((p) => p.keyCount),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [patterns, showDbBadges],
+  );
+
+  const topPatternsByMemory = useMemo(
+    () => topPatternsBy((p) => p.totalMemoryBytes),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [patterns, showDbBadges],
+  );
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -370,24 +374,9 @@ export function KeyAnalytics() {
 
   const hotKeySignalType = hotKeys && hotKeys.length > 0 ? hotKeys[0].signalType : null;
 
-  // Ranks are stored per logical database, so the unfiltered list comes back
-  // interleaved (rank 1 of every db, then rank 2, ...). For "All databases",
-  // re-rank the merged list by the underlying hotness signal — LFU frequency
-  // first (descending), then idle recency (ascending), mirroring the
-  // collector's own ranking policy — and number rows by display position so
-  // the # column doesn't repeat (1,1,2,2,...). A db-filtered view keeps the
-  // stored per-db ranks untouched.
-  const displayHotKeys = useMemo(() => {
-    if (!hotKeys) return null;
-    if (!showDbBadges) return hotKeys;
-    return [...hotKeys].sort((a, b) => {
-      const aLfu = a.freqScore !== undefined;
-      const bLfu = b.freqScore !== undefined;
-      if (aLfu !== bLfu) return aLfu ? -1 : 1;
-      if (aLfu && bLfu) return (b.freqScore ?? 0) - (a.freqScore ?? 0);
-      return (a.idleSeconds ?? 0) - (b.idleSeconds ?? 0);
-    });
-  }, [hotKeys, showDbBadges]);
+  // Hot keys arrive already globally ranked and contiguously numbered from the
+  // API (getHotKeys re-ranks the merged per-db rows), so the row's stored
+  // `rank` is the display rank in every view — no client-side re-rank needed.
 
   // Pattern summary chips: group hot keys by pattern
   const patternSummary = useMemo(() => {
@@ -651,11 +640,7 @@ export function KeyAnalytics() {
                           >
                             <td className="p-2 font-mono text-xs">
                               {pattern.pattern}
-                              {showDbBadges && (
-                                <Badge variant="outline" className="ml-2 font-sans">
-                                  db{pattern.db ?? 0}
-                                </Badge>
-                              )}
+                              <DbBadge db={pattern.db} show={showDbBadges} />
                             </td>
                             <td className="p-2 font-bold">{formatNumber(pattern.keyCount)}</td>
                             <td className="p-2 text-muted-foreground">
@@ -915,36 +900,28 @@ export function KeyAnalytics() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {displayHotKeys?.map((entry: HotKeyEntry, index: number) => {
+                      {hotKeys?.map((entry: HotKeyEntry) => {
                         const delta = getRankDelta(
                           entry.rank,
                           entry.keyName,
                           baselineHotKeys ?? null,
                           entry.db,
                         );
-                        // Across all databases, rank by display position in
-                        // the re-ranked merged list; a db-filtered view shows
-                        // the stored per-db rank.
-                        const displayRank = showDbBadges ? index + 1 : entry.rank;
-                        const isTop10 = displayRank <= 10;
+                        const isTop10 = entry.rank <= 10;
                         return (
                           <TableRow
                             key={entry.id}
                             className={isTop10 ? 'border-l-2 border-l-primary' : ''}
                           >
                             <TableCell className="text-muted-foreground font-medium">
-                              {displayRank}
+                              {entry.rank}
                             </TableCell>
                             <TableCell className={`text-xs ${delta.className}`}>
                               {delta.label}
                             </TableCell>
                             <TableCell className="font-mono text-sm">
                               {entry.keyName}
-                              {showDbBadges && (
-                                <Badge variant="outline" className="ml-2 font-sans">
-                                  db{entry.db ?? 0}
-                                </Badge>
-                              )}
+                              <DbBadge db={entry.db} show={showDbBadges} />
                             </TableCell>
                             <TableCell>
                               {entry.signalType === 'lfu' ? (
@@ -1108,11 +1085,7 @@ export function KeyAnalytics() {
                           </TableCell>
                           <TableCell className="font-mono text-sm">
                             {entry.keyName}
-                            {showDbBadges && (
-                              <Badge variant="outline" className="ml-2 font-sans">
-                                db{entry.db ?? 0}
-                              </Badge>
-                            )}
+                            <DbBadge db={entry.db} show={showDbBadges} />
                           </TableCell>
                           <TableCell>
                             {entry.keyType ? (

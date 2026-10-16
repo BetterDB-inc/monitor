@@ -954,7 +954,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
         const dbOptions = { ...options, sampleSize: sampleBudget(keys) };
         if (db === ownDb) {
           try {
-            results.push(await this.scanDatabase(this.client, db, dbOptions));
+            results.push(await this.scanDatabase(this.client, db, dbOptions, keys));
           } catch (error) {
             failures.push(error);
             this.logger.warn(
@@ -988,7 +988,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
           // otherwise keep scanning the previous db while results are tagged with
           // `db`. Select explicitly so that failure surfaces as a per-db failure.
           await scratch.select(db);
-          results.push(await this.scanDatabase(scratch, db, dbOptions));
+          results.push(await this.scanDatabase(scratch, db, dbOptions, keys));
         } catch (error) {
           failures.push(error);
           this.logger.warn(
@@ -1021,8 +1021,12 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     client: Valkey,
     db: number,
     options: KeyAnalyticsOptions,
+    // Key count already known from the INFO keyspace discovery (db<N>:keys=...),
+    // so the sibling-database scans skip a redundant DBSIZE round-trip. Only the
+    // single-db fallback, which has no INFO count, pays for DBSIZE.
+    knownKeyCount?: number,
   ): Promise<KeyAnalyticsResult> {
-    const dbSize = await client.dbsize();
+    const dbSize = knownKeyCount ?? (await client.dbsize());
     if (dbSize === 0) {
       return { dbSize: 0, scanned: 0, patterns: [], db };
     }

@@ -433,7 +433,32 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     if (this.hidesAnalytics(options?.connectionId)) {
       return [];
     }
-    return this.storage.getHotKeys(options);
+    const { limit, ...rest } = options ?? {};
+    // Hot-key ranks are stored PER logical database (buildHotKeyRows numbers
+    // 1..N within each db), so an unfiltered multi-db read comes back
+    // interleaved (rank 1 of every db, then rank 2, ...) and a storage-level
+    // limit would truncate by per-db rank — dropping a database's genuinely
+    // hotter keys in favor of another's low-ranked ones. Fetch the whole
+    // capture (bounded by the fetch cap), re-rank the merged set by the same
+    // hotness policy the collector uses (LFU frequency desc, then idle recency
+    // asc), slice to the requested limit, and renumber by position so the
+    // global top-N is correct and ranks are contiguous. Mirrors getLargestKeys;
+    // a db-filtered read trivially re-ranks that one db's already-correct rows.
+    const entries = await this.storage.getHotKeys({
+      ...rest,
+      limit: LARGEST_KEYS_FETCH_CAP,
+    });
+    const singleSnapshot = rest.latest === true || rest.oldest === true;
+    const candidates = singleSnapshot ? entries : dedupeByKeyMaxMemory(entries);
+    const ranked = [...candidates].sort((a, b) => {
+      const aLfu = a.freqScore !== undefined && a.freqScore !== null;
+      const bLfu = b.freqScore !== undefined && b.freqScore !== null;
+      if (aLfu !== bLfu) return aLfu ? -1 : 1;
+      if (aLfu && bLfu) return (b.freqScore ?? 0) - (a.freqScore ?? 0);
+      return (a.idleSeconds ?? 0) - (b.idleSeconds ?? 0);
+    });
+    const limited = limit === undefined ? ranked : ranked.slice(0, limit);
+    return limited.map((entry, index) => ({ ...entry, rank: index + 1 }));
   }
 
   /** Top-N largest keys ranked by memory usage among tracked (cardinality-signal) entries. */
@@ -501,17 +526,44 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
       !options.endTime &&
       composite.length > 0
     ) {
-      const newestAny = await this.storage.getHotKeys({
-        connectionId: options.connectionId,
-        db: options.db,
-        signalTypes: ['lfu', 'idletime', 'cardinality', 'composite'],
-        latest: true,
-        limit: 1,
-      });
-      const latestCollectionAt = newestAny[0]?.capturedAt;
-      if (latestCollectionAt !== undefined && composite[0].capturedAt < latestCollectionAt) {
-        return [];
+      const connectionId = options.connectionId;
+      const newestAnyForDb = async (db: number | undefined): Promise<number | undefined> => {
+        const newestAny = await this.storage.getHotKeys({
+          connectionId,
+          db,
+          signalTypes: ['lfu', 'idletime', 'cardinality', 'composite'],
+          latest: true,
+          limit: 1,
+        });
+        return newestAny[0]?.capturedAt;
+      };
+
+      if (options.db !== undefined) {
+        // Single database: one newest-any capture for that db decides freshness.
+        const latestCollectionAt = await newestAnyForDb(options.db);
+        if (latestCollectionAt !== undefined && composite[0].capturedAt < latestCollectionAt) {
+          return [];
+        }
+        return composite;
       }
+
+      // All databases: apply the guard PER logical database. A shared capturedAt
+      // holds within one database's collection, not across databases, so one
+      // database's newer scan (e.g. a sibling rescanned while this database's
+      // scan failed) must not suppress another database's still-valid
+      // composites. Keep a database's composites only when it has not produced a
+      // newer non-composite capture than its newest composite row.
+      const freshDbs = new Set<number>();
+      for (const db of new Set(composite.map((entry) => entry.db ?? 0))) {
+        const latestCollectionAt = await newestAnyForDb(db);
+        const latestCompositeForDb = Math.max(
+          ...composite.filter((entry) => (entry.db ?? 0) === db).map((entry) => entry.capturedAt),
+        );
+        if (latestCollectionAt === undefined || latestCompositeForDb >= latestCollectionAt) {
+          freshDbs.add(db);
+        }
+      }
+      return composite.filter((entry) => freshDbs.has(entry.db ?? 0));
     }
 
     return composite;

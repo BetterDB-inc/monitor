@@ -180,16 +180,69 @@ describe('PrometheusService key size metrics', () => {
     const text = await service.getMetrics();
 
     expect(text).toContain(
-      `betterdb_key_pattern_memory_bytes{connection="${LABEL}",pattern="user:*"} 1000000`,
+      `betterdb_key_pattern_memory_bytes{connection="${LABEL}",pattern="user:*",db="0"} 1000000`,
     );
     expect(text).toContain(
-      `betterdb_key_pattern_avg_memory_bytes{connection="${LABEL}",pattern="user:*"} 1000`,
+      `betterdb_key_pattern_avg_memory_bytes{connection="${LABEL}",pattern="user:*",db="0"} 1000`,
     );
     expect(text).toContain(
-      `betterdb_key_pattern_max_memory_bytes{connection="${LABEL}",pattern="user:*"} 50000`,
+      `betterdb_key_pattern_max_memory_bytes{connection="${LABEL}",pattern="user:*",db="0"} 50000`,
     );
     expect(text).toContain(
-      `betterdb_key_pattern_keys{connection="${LABEL}",pattern="session:*"} 500`,
+      `betterdb_key_pattern_keys{connection="${LABEL}",pattern="session:*",db="0"} 500`,
+    );
+  });
+
+  it('keeps the same pattern in different logical databases as distinct series (no collision)', async () => {
+    const { service, storage } = buildService();
+    storage.getKeyPatternSnapshots = patternSnapshotsHonoring([
+      patternSnapshot({ db: 0, totalMemoryBytes: 1_000_000, keyCount: 1000 }),
+      patternSnapshot({
+        id: 'snap-db1',
+        db: 1,
+        totalMemoryBytes: 40_000,
+        keyCount: 40,
+      }),
+    ]);
+    await update(service);
+    const text = await service.getMetrics();
+
+    // Each logical database exports under its own db label; the larger db0 value
+    // is not overwritten by the smaller db1 one (the pre-fix last-write-wins bug).
+    expect(text).toContain(
+      `betterdb_key_pattern_memory_bytes{connection="${LABEL}",pattern="user:*",db="0"} 1000000`,
+    );
+    expect(text).toContain(
+      `betterdb_key_pattern_memory_bytes{connection="${LABEL}",pattern="user:*",db="1"} 40000`,
+    );
+  });
+
+  it('keeps the same key name in different logical databases as distinct series (no collision)', async () => {
+    const { service, storage } = buildService();
+    storage.getHotKeys = jest.fn().mockResolvedValue([
+      hotKey({ db: 0, memoryBytes: 50_000 }),
+      hotKey({ id: 'hot-db1', db: 1, memoryBytes: 2_000 }),
+    ]);
+    await update(service);
+    const text = await service.getMetrics();
+
+    expect(text).toContain(
+      `betterdb_key_memory_bytes{connection="${LABEL}",key="user:1:profile",type="hash",db="0"} 50000`,
+    );
+    expect(text).toContain(
+      `betterdb_key_memory_bytes{connection="${LABEL}",key="user:1:profile",type="hash",db="1"} 2000`,
+    );
+  });
+
+  it('fetches the whole latest capture for per-key export so multi-db largest keys are not truncated', async () => {
+    const { service, storage } = buildService();
+    await update(service);
+
+    // Must fetch the full capture (fetch cap), then re-rank by memory and slice
+    // to the exported top-N — a KEY_DETAILS_TOP_N limit here would truncate by
+    // the interleaved per-db rank on a multi-db instance.
+    expect(storage.getHotKeys).toHaveBeenCalledWith(
+      expect.objectContaining({ signalTypes: ['cardinality'], limit: 10_000 }),
     );
   });
 
@@ -217,10 +270,10 @@ describe('PrometheusService key size metrics', () => {
     const text = await service.getMetrics();
 
     expect(text).toContain(
-      `betterdb_key_memory_bytes{connection="${LABEL}",key="user:1:profile",type="hash"} 50000`,
+      `betterdb_key_memory_bytes{connection="${LABEL}",key="user:1:profile",type="hash",db="0"} 50000`,
     );
     expect(text).toContain(
-      `betterdb_key_cardinality{connection="${LABEL}",key="queue:jobs",type="list"} 4000`,
+      `betterdb_key_cardinality{connection="${LABEL}",key="queue:jobs",type="list",db="0"} 4000`,
     );
   });
 
@@ -233,10 +286,10 @@ describe('PrometheusService key size metrics', () => {
     const text = await service.getMetrics();
 
     expect(text).toContain(
-      `betterdb_key_memory_bytes{connection="${LABEL}",key="user:1:profile",type="hash"} 70000`,
+      `betterdb_key_memory_bytes{connection="${LABEL}",key="user:1:profile",type="hash",db="0"} 70000`,
     );
     expect(text).toContain(
-      `betterdb_key_cardinality{connection="${LABEL}",key="user:1:profile",type="hash"} 123`,
+      `betterdb_key_cardinality{connection="${LABEL}",key="user:1:profile",type="hash",db="0"} 123`,
     );
   });
 
@@ -463,7 +516,7 @@ describe('PrometheusService key size metrics', () => {
     // A newer run defeats the probe-skip: the batch re-fetches and getHotKeys runs.
     expect(storage.getHotKeys).toHaveBeenCalled();
     expect(await service.getMetrics()).toContain(
-      `betterdb_key_pattern_memory_bytes{connection="${LABEL}",pattern="user:*"} 3000000`,
+      `betterdb_key_pattern_memory_bytes{connection="${LABEL}",pattern="user:*",db="0"} 3000000`,
     );
   });
 
@@ -471,7 +524,7 @@ describe('PrometheusService key size metrics', () => {
     const { service, storage } = buildService();
     await update(service);
     expect(await service.getMetrics()).toContain(
-      `betterdb_key_memory_bytes{connection="${LABEL}",key="user:1:profile",type="hash"} 50000`,
+      `betterdb_key_memory_bytes{connection="${LABEL}",key="user:1:profile",type="hash",db="0"} 50000`,
     );
 
     // The pattern run is unchanged (same timestamp), but hot keys are persisted
@@ -487,7 +540,7 @@ describe('PrometheusService key size metrics', () => {
 
     const text = await service.getMetrics();
     expect(text).toContain(
-      `betterdb_key_memory_bytes{connection="${LABEL}",key="bigblob:1",type="string"} 999999`,
+      `betterdb_key_memory_bytes{connection="${LABEL}",key="bigblob:1",type="string",db="0"} 999999`,
     );
     // The previous capture's key is gone, not frozen alongside the new one.
     expect(text).not.toContain('key="user:1:profile"');
@@ -513,7 +566,7 @@ describe('PrometheusService key size metrics', () => {
     const text = await service.getMetrics();
     // Pattern family survives AND reflects the newest run.
     expect(text).toContain(
-      `betterdb_key_pattern_memory_bytes{connection="${LABEL}",pattern="user:*"} 4000000`,
+      `betterdb_key_pattern_memory_bytes{connection="${LABEL}",pattern="user:*",db="0"} 4000000`,
     );
     // Per-key family removed after its own staleness bound.
     expect(text).not.toContain('betterdb_key_memory_bytes{');
