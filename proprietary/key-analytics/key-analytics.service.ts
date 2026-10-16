@@ -438,7 +438,9 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
       limit: KEY_ANALYTICS_FETCH_CAP,
     });
     const singleSnapshot = rest.latest === true || rest.oldest === true;
-    return rankHotKeys(entries, { limit, singleSnapshot });
+    // Default to the collector's per-db top-N (50) when a direct service caller
+    // omits a limit, rather than returning the whole fetch cap.
+    return rankHotKeys(entries, { limit: limit ?? HOT_KEYS_TOP_N, singleSnapshot });
   }
 
   /** Top-N largest keys ranked by memory usage among tracked (cardinality-signal) entries. */
@@ -460,7 +462,9 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     const ranked = [...candidates].sort((a, b) => {
       return (b.memoryBytes ?? 0) - (a.memoryBytes ?? 0);
     });
-    const limited = limit === undefined ? ranked : ranked.slice(0, Math.max(0, limit));
+    // Default to the collector's per-db top-N (50) when a direct service caller
+    // omits a limit, rather than returning the whole fetch cap.
+    const limited = ranked.slice(0, Math.max(0, limit ?? LARGEST_KEYS_TOP_N));
     return limited.map((entry, index) => {
       return { ...entry, rank: index + 1 };
     });
@@ -486,72 +490,61 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     const { limit, ...rest } = options ?? {};
     const connectionId = rest.connectionId;
 
-    // Gather the composite rows to rank. For a connection-scoped latest/oldest
-    // read with no explicit db, fetch EACH database's own latest/oldest composite
-    // capture: storage `latest` pins ONE global MAX(captured_at) across all
-    // databases, which silently drops a database whose latest composite capture
-    // is older than a sibling's (e.g. a partial scan where only the sibling was
-    // rescanned). Pull recent composites without the storage latch and reduce to
-    // each database's own latest/oldest capture in memory.
-    const perDbExtreme =
+    // Connection-scoped latest/oldest reads: issue one db-pinned query per
+    // database so storage scopes MAX/MIN(captured_at) to that database. A single
+    // global `latest`/`oldest` pin would (latest) drop a database whose latest
+    // composite capture is older than a sibling's (e.g. a partial scan where
+    // only the sibling was rescanned), and (oldest) select the minimum within
+    // the newest CAP-truncated window rather than each database's true oldest
+    // capture. A db-filtered read is a single pinned query (and keeps its
+    // freshness guard); range reads fall through to one windowed fetch.
+    const perDbPinned =
       connectionId !== undefined &&
-      rest.db === undefined &&
       (rest.latest === true || rest.oldest === true) &&
       !rest.startTime &&
       !rest.endTime;
 
     let rows: HotKeyEntry[];
-    if (perDbExtreme) {
-      const all = await this.storage.getHotKeys({
-        ...rest,
-        latest: false,
-        oldest: false,
-        signalTypes: ['composite'],
-        limit: KEY_ANALYTICS_FETCH_CAP,
-      });
-      const targetByDb = new Map<number, number>();
-      for (const row of all) {
-        const db = row.db ?? 0;
-        const current = targetByDb.get(db);
-        if (
-          current === undefined ||
-          (rest.oldest ? row.capturedAt < current : row.capturedAt > current)
-        ) {
-          targetByDb.set(db, row.capturedAt);
-        }
-      }
-      rows = all.filter((row) => targetByDb.get(row.db ?? 0) === row.capturedAt);
-
-      // Freshness guard (latest only): a scan can legitimately find zero
-      // composites (nothing hot AND big), writing no 'composite' row, so drop a
-      // database whose newest ANY-signal capture is newer than its newest
-      // composite — that scan produced no composites. Applied PER database (a
-      // shared capturedAt holds within one database's collection, not across
-      // databases), with the per-db newest-any lookups run in parallel.
-      if (rest.latest) {
-        const dbs = [...targetByDb.keys()];
-        const newestAny = await Promise.all(
-          dbs.map((db) =>
-            this.storage
-              .getHotKeys({
-                connectionId,
-                db,
-                signalTypes: ['lfu', 'idletime', 'cardinality', 'composite'],
-                latest: true,
-                limit: 1,
-              })
-              .then((newest) => newest[0]?.capturedAt),
-          ),
-        );
-        const freshDbs = new Set<number>();
-        dbs.forEach((db, index) => {
-          const latestCollectionAt = newestAny[index];
-          if (latestCollectionAt === undefined || (targetByDb.get(db) ?? 0) >= latestCollectionAt) {
-            freshDbs.add(db);
+    if (perDbPinned) {
+      const dbs =
+        rest.db !== undefined
+          ? [rest.db]
+          : await this.storage.getKeyAnalyticsDatabases(connectionId);
+      const perDb = await Promise.all(
+        dbs.map(async (db) => {
+          const composites = await this.storage.getHotKeys({
+            ...rest,
+            db,
+            signalTypes: ['composite'],
+            limit: KEY_ANALYTICS_FETCH_CAP,
+          });
+          if (composites.length === 0) {
+            return [];
           }
-        });
-        rows = rows.filter((row) => freshDbs.has(row.db ?? 0));
-      }
+          // Freshness guard (latest only): a scan can legitimately find zero
+          // composites (nothing hot AND big), writing no 'composite' row, so
+          // drop this database's composites when its newest ANY-signal capture
+          // is newer than its newest composite — that scan produced none.
+          if (rest.latest) {
+            const newestAny = await this.storage.getHotKeys({
+              connectionId,
+              db,
+              signalTypes: ['lfu', 'idletime', 'cardinality', 'composite'],
+              latest: true,
+              limit: 1,
+            });
+            const latestCollectionAt = newestAny[0]?.capturedAt;
+            if (
+              latestCollectionAt !== undefined &&
+              composites[0].capturedAt < latestCollectionAt
+            ) {
+              return [];
+            }
+          }
+          return composites;
+        }),
+      );
+      rows = perDb.flat();
     } else {
       rows = await this.storage.getHotKeys({
         ...rest,
@@ -605,7 +598,9 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
         );
     }
 
-    const limited = limit === undefined ? ordered : ordered.slice(0, Math.max(0, limit));
+    // Default to the collector's per-db top-N (50) when a direct service caller
+    // omits a limit, rather than returning the whole fetch cap.
+    const limited = ordered.slice(0, Math.max(0, limit ?? COMPOSITE_TOP_N));
     return limited.map((entry, index) => ({ ...entry, rank: index + 1 }));
   }
 
