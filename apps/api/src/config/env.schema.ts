@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { MAX_RETENTION_DAYS, parseRetentionDaysToken } from '@betterdb/shared';
 import {
+  clampTopN,
   DEFAULT_KEY_DETAILS_TOP_N,
   DEFAULT_KEY_PATTERNS_TOP_N,
   DEFAULT_SLOT_STATS_TOP_N,
@@ -42,7 +43,7 @@ const topNEnv = (max: number, def: number) =>
     (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
     z.coerce
       .number()
-      .transform((n) => (Number.isFinite(n) ? Math.min(max, Math.max(0, Math.floor(n))) : def))
+      .transform((n) => (Number.isFinite(n) ? clampTopN(n, max) : def))
       .default(def)
       .catch(def),
   );

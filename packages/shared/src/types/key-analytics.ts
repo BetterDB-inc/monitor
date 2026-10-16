@@ -18,15 +18,24 @@ export interface KeyPatternSnapshot {
   minTtlSeconds?: number;
   maxTtlSeconds?: number;
   connectionId?: string;
+  /** Logical database index the snapshot was collected from (defaults to 0). */
+  db?: number;
 }
 
 export interface KeyPatternQueryOptions {
   startTime?: number;
   endTime?: number;
   pattern?: string;
+  /**
+   * With a `db` filter: the usual global row limit. Without one: the limit
+   * applies PER logical database, so a pattern-heavy db0 cannot fill the page
+   * and hide later databases (the result is bounded at limit x databases).
+   */
   limit?: number;
   offset?: number;
   connectionId?: string;
+  /** Restrict to one logical database index. */
+  db?: number;
 }
 
 export interface KeyAnalyticsSummary {
@@ -110,6 +119,8 @@ export interface KeyPatternData {
 export interface KeyDetail {
   keyName: string;
   keyType: string | null;
+  /** Logical database index the key lives in (defaults to 0). */
+  db?: number;
   /** #elements for collections, byte length for strings (valkey #1827 "bigkey" metric) */
   cardinality: number | null;
   freqScore: number | null;
@@ -123,6 +134,8 @@ export interface KeyAnalyticsResult {
   scanned: number;
   patterns: KeyPatternData[];
   keyDetails?: KeyDetail[];
+  /** Logical database index the result was collected from (defaults to 0). */
+  db?: number;
 }
 
 /**
@@ -149,6 +162,8 @@ export interface HotKeyEntry {
   keyType?: string;
   ttl?: number;
   rank: number;
+  /** Logical database index the key lives in (defaults to 0). */
+  db?: number;
 }
 
 export interface HotKeyQueryOptions {
@@ -161,4 +176,6 @@ export interface HotKeyQueryOptions {
   oldest?: boolean;
   /** Restrict to these signal types. Defaults to access signals (`lfu`, `idletime`). */
   signalTypes?: Array<HotKeyEntry['signalType']>;
+  /** Restrict to one logical database index. */
+  db?: number;
 }

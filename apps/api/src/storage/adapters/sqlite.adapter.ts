@@ -435,6 +435,28 @@ const CONNECTION_ID_UNIQUE_REBUILDS = [
   },
 ] as const;
 
+// Loose index scan that enumerates the populated logical databases: one MIN(db)
+// index seek per database via a recursive CTE, since neither SQLite nor Postgres
+// skip-scans DISTINCT over an index prefix (a plain SELECT DISTINCT db would walk
+// every index entry — O(history)). The `where` fragment is spliced twice (the
+// anchor and the recursive step), so callers must bind its params twice. Single
+// definition shared by getKeyPatternSnapshots and getKeyAnalyticsDatabases.
+function populatedDbsCte(where: string): string {
+  return `
+    WITH RECURSIVE dbs(db) AS (
+      SELECT MIN(db) FROM key_pattern_snapshots ${where}
+      UNION ALL
+      SELECT (
+        SELECT MIN(db) FROM key_pattern_snapshots
+        ${where ? `${where} AND` : 'WHERE'} db > dbs.db
+      )
+      FROM dbs
+      WHERE dbs.db IS NOT NULL
+    )
+    SELECT db FROM dbs WHERE db IS NOT NULL ORDER BY db ASC
+  `;
+}
+
 function rebuildWithNullableColumns(
   db: Database.Database,
   table: string,
@@ -687,7 +709,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       }
     }
 
-    // Lazy ALTERs for hot_key_stats columns added to support largest-key ranking.
+    // Lazy ALTERs for hot_key_stats columns added to support largest-key ranking
+    // and the per-logical-database dimension.
     const hotKeyInfo = this.db.prepare('PRAGMA table_info(hot_key_stats)').all() as {
       name: string;
     }[];
@@ -695,12 +718,33 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const hotKeyMigrations = [
       { name: 'cardinality', type: 'INTEGER' },
       { name: 'key_type', type: 'TEXT' },
+      { name: 'db', type: 'INTEGER NOT NULL DEFAULT 0' },
     ];
     for (const col of hotKeyMigrations) {
       if (!hotKeyColumns.has(col.name)) {
         this.db.exec(`ALTER TABLE hot_key_stats ADD COLUMN ${col.name} ${col.type}`);
       }
     }
+
+    // Lazy ALTER for the key_pattern_snapshots logical-database dimension.
+    // Pre-existing rows were all collected from the connected database, which
+    // was db0 before dbIndex support — the DEFAULT 0 backfill is accurate.
+    const kpsInfo = this.db.prepare('PRAGMA table_info(key_pattern_snapshots)').all() as {
+      name: string;
+    }[];
+    if (!kpsInfo.some((col) => col.name === 'db')) {
+      this.db.exec('ALTER TABLE key_pattern_snapshots ADD COLUMN db INTEGER NOT NULL DEFAULT 0');
+    }
+    // Backs the 60s-polled SELECT DISTINCT db query (prefix) AND the per-db
+    // newest-rows scans of the patterns view (full key: each per-db query
+    // walks timestamps backwards and stops at its LIMIT instead of sorting
+    // the connection's whole history). The column must exist before the
+    // index can be created; the trailing timestamp supersedes the earlier
+    // two-column shape from this branch.
+    this.db.exec('DROP INDEX IF EXISTS idx_kps_connection_db');
+    this.db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_kps_connection_db_ts ON key_pattern_snapshots(connection_id, db, timestamp DESC, pattern ASC)',
+    );
 
     // connection_id is migrated in initialize(), before createSchema — see the
     // ordering note there.
@@ -1703,6 +1747,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         min_ttl_seconds INTEGER,
         max_ttl_seconds INTEGER,
         connection_id TEXT NOT NULL DEFAULT 'env-default',
+        db INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
       );
 
@@ -1723,7 +1768,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         cardinality INTEGER,
         key_type TEXT,
         ttl INTEGER,
-        rank INTEGER NOT NULL
+        rank INTEGER NOT NULL,
+        db INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE INDEX IF NOT EXISTS idx_hks_connection_captured
@@ -2721,8 +2767,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         keys_with_ttl, keys_expiring_soon, total_memory_bytes,
         avg_memory_bytes, max_memory_bytes, avg_access_frequency,
         hot_key_count, cold_key_count, avg_idle_time_seconds,
-        stale_key_count, avg_ttl_seconds, min_ttl_seconds, max_ttl_seconds, connection_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        stale_key_count, avg_ttl_seconds, min_ttl_seconds, max_ttl_seconds, connection_id, db
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const insertMany = this.db.transaction((snapshots: KeyPatternSnapshot[], connId: string) => {
@@ -2747,6 +2793,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           snapshot.minTtlSeconds ?? null,
           snapshot.maxTtlSeconds ?? null,
           connId,
+          snapshot.db ?? 0,
         );
       }
     });
@@ -2779,29 +2826,69 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push('pattern = ?');
       params.push(options.pattern);
     }
+    if (options.db !== undefined) {
+      conditions.push('db = ?');
+      params.push(options.db);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 100;
     const offset = options.offset ?? 0;
 
-    const query = `
+    if (options.db !== undefined) {
+      const query = `
+        SELECT * FROM key_pattern_snapshots
+        ${whereClause}
+        ORDER BY timestamp DESC, db ASC, pattern ASC
+        LIMIT ? OFFSET ?
+      `;
+      const rows = this.db.prepare(query).all(...params, limit, offset) as any[];
+      return rows.map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
+    }
+
+    // Without a db filter the limit applies PER logical database, not
+    // globally: rows sort db0-first within a collection, so a global limit
+    // would let a pattern-heavy db0 fill the page and hide later databases
+    // from the all-databases view. One small LIMITed query per populated
+    // database (each an early-terminating scan of the (connection_id, db,
+    // timestamp) index) rather than a ROW_NUMBER() window, which would have
+    // to number and sort the connection's full snapshot history on every
+    // request — including the web's 60s patterns poll.
+    //
+    // The database list itself is enumerated with a loose index scan (one
+    // MIN(db) index seek per populated database via the recursive CTE):
+    // neither SQLite nor Postgres skip-scans DISTINCT over an index prefix,
+    // so a plain SELECT DISTINCT db would still walk every index entry for
+    // the connection — O(history) on every request.
+    const dbRows = this.db
+      .prepare(populatedDbsCte(whereClause))
+      .all(...params, ...params) as Array<{ db: number | null }>;
+
+    const perDbQuery = `
       SELECT * FROM key_pattern_snapshots
-      ${whereClause}
-      ORDER BY timestamp DESC
-      LIMIT ? OFFSET ?
+      ${whereClause ? `${whereClause} AND` : 'WHERE'} db = ?
+      ORDER BY timestamp DESC, pattern ASC
+      LIMIT ?
     `;
+    const rows: any[] = [];
+    for (const { db: dbValue } of dbRows) {
+      rows.push(...(this.db.prepare(perDbQuery).all(...params, dbValue ?? 0, limit) as any[]));
+    }
+    rows.sort(
+      (a, b) =>
+        b.timestamp - a.timestamp || a.db - b.db || String(a.pattern).localeCompare(String(b.pattern)),
+    );
 
-    params.push(limit, offset);
-
-    const rows = this.db.prepare(query).all(...params) as any[];
-
-    return rows.map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
+    return rows
+      .slice(offset, offset + limit * Math.max(1, dbRows.length))
+      .map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
   }
 
   async getKeyAnalyticsSummary(
     startTime?: number,
     endTime?: number,
     connectionId?: string,
+    db?: number,
   ): Promise<KeyAnalyticsSummary | null> {
     if (!this.db) throw new Error('Database not initialized');
 
@@ -2820,74 +2907,85 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push('timestamp <= ?');
       params.push(endTime);
     }
+    if (db !== undefined) {
+      conditions.push('db = ?');
+      params.push(db);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    // Get the latest snapshot for each pattern within the time range
-    const latestSnapshotsQuery = `
-      SELECT
-        pattern,
-        MAX(timestamp) as latest_timestamp
-      FROM key_pattern_snapshots
-      ${whereClause}
-      GROUP BY pattern
+    // Aggregate over the latest snapshot per (pattern, logical database)
+    // within the time range. Per db, not per pattern: a partial collection
+    // (one database scanned, a sibling's scan failed) legitimately moves the
+    // pattern's newest timestamp forward for only some databases, and pinning
+    // one MAX(timestamp) per pattern would silently drop the sibling's last
+    // row and undercount the headline totals. The latest rows are selected by
+    // JOINing a grouped subquery rather than expanding each (pattern, db,
+    // timestamp) triple into an OR term with three bind parameters — that
+    // expansion scales with patterns x databases and can exceed the engine's
+    // bind-parameter limit (32766 for SQLite).
+    //
+    // connection scoping is re-applied on the outer rows: a (pattern, db,
+    // timestamp) triple is not unique across connections, so without it
+    // another connection's snapshot at the same triple would be summed in.
+    const latestJoin = `
+      FROM key_pattern_snapshots s
+      JOIN (
+        SELECT pattern, db, MAX(timestamp) as latest_timestamp
+        FROM key_pattern_snapshots
+        ${whereClause}
+        GROUP BY pattern, db
+      ) latest
+        ON s.pattern = latest.pattern
+        AND s.db = latest.db
+        AND s.timestamp = latest.latest_timestamp
+      ${connectionId ? 'WHERE s.connection_id = ?' : ''}
     `;
-
-    const latestSnapshots = this.db.prepare(latestSnapshotsQuery).all(...params) as Array<{
-      pattern: string;
-      latest_timestamp: number;
-    }>;
-
-    if (latestSnapshots.length === 0) {
-      return null;
-    }
-
-    // Build aggregation query for latest snapshots only
-    const patternConditions = latestSnapshots
-      .map(() => '(pattern = ? AND timestamp = ?)')
-      .join(' OR ');
-    const patternParams: any[] = [];
-    for (const snapshot of latestSnapshots) {
-      patternParams.push(snapshot.pattern, snapshot.latest_timestamp);
-    }
+    const latestParams = connectionId ? [...params, connectionId] : params;
 
     const summaryQuery = `
       SELECT
-        COUNT(DISTINCT pattern) as total_patterns,
-        SUM(key_count) as total_keys,
-        SUM(total_memory_bytes) as total_memory_bytes,
-        SUM(stale_key_count) as stale_key_count,
-        SUM(hot_key_count) as hot_key_count,
-        SUM(cold_key_count) as cold_key_count,
-        SUM(keys_expiring_soon) as keys_expiring_soon
-      FROM key_pattern_snapshots
-      WHERE ${patternConditions}
+        COUNT(DISTINCT s.pattern) as total_patterns,
+        SUM(s.key_count) as total_keys,
+        SUM(s.total_memory_bytes) as total_memory_bytes,
+        SUM(s.stale_key_count) as stale_key_count,
+        SUM(s.hot_key_count) as hot_key_count,
+        SUM(s.cold_key_count) as cold_key_count,
+        SUM(s.keys_expiring_soon) as keys_expiring_soon
+      ${latestJoin}
     `;
 
-    const summary = this.db.prepare(summaryQuery).get(...patternParams) as any;
+    const summary = this.db.prepare(summaryQuery).get(...latestParams) as any;
 
-    // Get per-pattern breakdown
+    if (!summary || !summary.total_patterns) {
+      return null;
+    }
+
+    // Get per-pattern breakdown, aggregated across the per-database rows of
+    // each pattern (avg weighted by key count via the summed totals).
     const byPatternQuery = `
       SELECT
-        pattern,
-        key_count,
-        total_memory_bytes,
-        avg_memory_bytes,
-        stale_key_count,
-        hot_key_count,
-        cold_key_count
-      FROM key_pattern_snapshots
-      WHERE ${patternConditions}
+        s.pattern,
+        SUM(s.key_count) as key_count,
+        SUM(s.total_memory_bytes) as total_memory_bytes,
+        SUM(s.stale_key_count) as stale_key_count,
+        SUM(s.hot_key_count) as hot_key_count,
+        SUM(s.cold_key_count) as cold_key_count,
+        SUM(s.sampled_key_count) as sampled_key_count,
+        SUM(s.avg_memory_bytes * s.sampled_key_count) as weighted_avg_memory
+      ${latestJoin}
+      GROUP BY s.pattern
     `;
 
-    const patternRows = this.db.prepare(byPatternQuery).all(...patternParams) as any[];
+    const patternRows = this.db.prepare(byPatternQuery).all(...latestParams) as any[];
 
     const byPattern: Record<string, any> = {};
     for (const row of patternRows) {
       byPattern[row.pattern] = {
         keyCount: row.key_count,
         memoryBytes: row.total_memory_bytes,
-        avgMemoryBytes: row.avg_memory_bytes,
+        avgMemoryBytes:
+          row.sampled_key_count > 0 ? Math.round(row.weighted_avg_memory / row.sampled_key_count) : 0,
         staleCount: row.stale_key_count ?? null,
         hotCount: row.hot_key_count ?? 0,
         coldCount: row.cold_key_count ?? 0,
@@ -2924,6 +3022,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     startTime: number,
     endTime: number,
     connectionId?: string,
+    db?: number,
   ): Promise<
     Array<{
       timestamp: number;
@@ -2941,15 +3040,25 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push('connection_id = ?');
       params.push(connectionId);
     }
+    if (db !== undefined) {
+      conditions.push('db = ?');
+      params.push(db);
+    }
 
+    // One collection writes one row per logical database; aggregate them per
+    // timestamp so an unfiltered trend stays a single series. When no
+    // connectionId is given, also group by connection_id so trends from
+    // different connections aren't merged into one series.
+    const groupBy = connectionId ? 'timestamp' : 'timestamp, connection_id';
     const query = `
       SELECT
         timestamp,
-        key_count,
-        total_memory_bytes,
-        stale_key_count
+        SUM(key_count) as key_count,
+        SUM(total_memory_bytes) as total_memory_bytes,
+        SUM(stale_key_count) as stale_key_count
       FROM key_pattern_snapshots
       WHERE ${conditions.join(' AND ')}
+      GROUP BY ${groupBy}
       ORDER BY timestamp ASC
     `;
 
@@ -2985,8 +3094,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const stmt = this.db.prepare(`
       INSERT INTO hot_key_stats (
         id, key_name, connection_id, captured_at, signal_type,
-        freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank, db
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const insertMany = this.db.transaction((entries: HotKeyEntry[], connId: string) => {
@@ -3004,6 +3113,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           entry.keyType ?? null,
           entry.ttl ?? null,
           entry.rank,
+          entry.db ?? 0,
         );
       }
     });
@@ -3036,6 +3146,10 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push('captured_at <= ?');
       params.push(options.endTime);
     }
+    if (options.db !== undefined) {
+      conditions.push('db = ?');
+      params.push(options.db);
+    }
     if (options.latest || options.oldest) {
       const agg = options.latest ? 'MAX' : 'MIN';
       const subConditions: string[] = [`signal_type IN (${signalPlaceholders})`];
@@ -3052,6 +3166,10 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         subConditions.push('captured_at <= ?');
         subParams.push(options.endTime);
       }
+      if (options.db !== undefined) {
+        subConditions.push('db = ?');
+        subParams.push(options.db);
+      }
       const subWhere = subConditions.length > 0 ? `WHERE ${subConditions.join(' AND ')}` : '';
       conditions.push(`captured_at = (SELECT ${agg}(captured_at) FROM hot_key_stats ${subWhere})`);
       params.push(...subParams);
@@ -3066,7 +3184,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       .prepare(
         `
       SELECT id, key_name, connection_id, captured_at, signal_type,
-             freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank
+             freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank, db
       FROM hot_key_stats
       ${whereClause}
       ORDER BY captured_at DESC, rank ASC
@@ -3088,7 +3206,38 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       keyType: row.key_type ?? undefined,
       ttl: row.ttl ?? undefined,
       rank: row.rank,
+      db: row.db ?? 0,
     }));
+  }
+
+  async getKeyAnalyticsDatabases(connectionId?: string): Promise<number[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    // Loose index scan (one MIN(db) seek per populated database): this is
+    // polled every 60s per open Key Analytics tab, and a plain DISTINCT would
+    // walk every index entry for the connection on each poll.
+    const where = connectionId ? 'WHERE connection_id = ?' : '';
+    const params = connectionId ? [connectionId] : [];
+    const rows = this.db
+      .prepare(populatedDbsCte(where))
+      .all(...params, ...params) as Array<{ db: number | null }>;
+    return rows.map((row) => row.db ?? 0);
+  }
+
+  async getHotKeyDatabases(connectionId?: string): Promise<number[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    // Distinct logical databases present in hot_key_stats. Composite/hot-key
+    // rows live here, not in key_pattern_snapshots (which can diverge — e.g.
+    // pattern-only retention pruning), so the composite read enumerates from
+    // this table. A plain DISTINCT: hot_key_stats has no db index, and this
+    // backs only the (infrequent) composite endpoint.
+    const where = connectionId ? 'WHERE connection_id = ?' : '';
+    const params = connectionId ? [connectionId] : [];
+    const rows = this.db
+      .prepare(`SELECT DISTINCT db FROM hot_key_stats ${where} ORDER BY db ASC`)
+      .all(...params) as Array<{ db: number | null }>;
+    return rows.map((row) => row.db ?? 0);
   }
 
   async pruneOldHotKeys(cutoffTimestamp: number, connectionId?: string): Promise<number> {

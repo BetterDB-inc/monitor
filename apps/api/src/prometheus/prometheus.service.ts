@@ -18,7 +18,7 @@ import {
   parseKeySizeDistribution,
   canonicalKeySizeType,
   KeySizeDistribution,
-  KEY_DETAILS_TOP_N,
+  KEY_ANALYTICS_FETCH_CAP,
 } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
@@ -203,9 +203,6 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   // Servers without the keysizes section reject the INFO argument; back off
   // instead of probing an unsupported server every refresh.
   private static readonly KEYSIZES_UNAVAILABLE_RECHECK_MS = 600_000;
-  // Fetch bound for the latest-run re-rank, mirroring the key-analytics
-  // service's LARGEST_KEYS_FETCH_CAP.
-  private static readonly KEY_ANALYTICS_FETCH_CAP = 10_000;
 
   // Per-connection in-flight INFO-metric updates, so the background poller and a
   // /metrics scrape coalesce instead of racing on shared per-connection state.
@@ -856,35 +853,40 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // latest persisted key analytics run (Pro feature, default every 5m) and
     // are removed when no fresh run exists; bucket series come from
     // INFO keysizes (Redis 8.0+; no Valkey version emits it) and are per node.
+    // Every pattern/per-key family carries a `db` label: the collector stores
+    // and ranks per logical database, so the same pattern or key name can occur
+    // in more than one database. Without the label those rows would collide on
+    // one series and overwrite each other (last write wins). Matches the `db`
+    // dimension already carried by keysize_bucket_keys below.
     this.keyPatternMemoryBytes = this.createGauge(
       'key_pattern_memory_bytes',
-      'Estimated total memory of keys matching pattern, extrapolated from the sampled keys of the latest key analytics run (top patterns by memory, bounded by METRICS_KEY_PATTERNS_TOP_N)',
-      ['pattern'],
+      'Estimated total memory of keys matching pattern in a logical database, extrapolated from the sampled keys of the latest key analytics run (top (pattern, db) series by memory, bounded by METRICS_KEY_PATTERNS_TOP_N)',
+      ['pattern', 'db'],
     );
     this.keyPatternAvgMemoryBytes = this.createGauge(
       'key_pattern_avg_memory_bytes',
-      'Average per-key memory of keys matching pattern, from the latest key analytics run',
-      ['pattern'],
+      'Average per-key memory of keys matching pattern in a logical database, from the latest key analytics run',
+      ['pattern', 'db'],
     );
     this.keyPatternMaxMemoryBytes = this.createGauge(
       'key_pattern_max_memory_bytes',
-      'Largest single-key memory of keys matching pattern, from the latest key analytics run',
-      ['pattern'],
+      'Largest single-key memory of keys matching pattern in a logical database, from the latest key analytics run',
+      ['pattern', 'db'],
     );
     this.keyPatternKeys = this.createGauge(
       'key_pattern_keys',
-      'Estimated keys matching pattern, from the latest key analytics run',
-      ['pattern'],
+      'Estimated keys matching pattern in a logical database, from the latest key analytics run',
+      ['pattern', 'db'],
     );
     this.keyMemoryBytes = this.createGauge(
       'key_memory_bytes',
       "Memory of a single tracked key, from the latest key analytics run (the collector's tracked keys ranked by memory, bounded by METRICS_KEY_DETAILS_TOP_N; a huge-by-memory key the collector did not track may be absent)",
-      ['key', 'type'],
+      ['key', 'type', 'db'],
     );
     this.keyCardinality = this.createGauge(
       'key_cardinality',
       "Elements in a tracked collection key, or byte length for strings (the collector's tracked keys ranked by memory, bounded by METRICS_KEY_DETAILS_TOP_N)",
-      ['key', 'type'],
+      ['key', 'type', 'db'],
     );
     this.keysizeBucketKeys = this.createGauge(
       'keysize_bucket_keys',
@@ -2039,20 +2041,25 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       // parseInfoToTyped emits typed objects for db* entries; anything still
       // a string is a non-db or unparseable line.
       if (!dbInfo || typeof dbInfo !== 'object') continue;
-      newDbLabels.add(dbKey);
+      // Emit the bare logical-database index ("0", "1", ...) rather than the raw
+      // INFO keyspace key ("db0"), so the `db` label matches the key-analytics
+      // and keysize-bucket families and a PromQL join on `db` across all of them
+      // matches.
+      const db = dbKey.replace(/^db/, '');
+      newDbLabels.add(db);
 
       const parsedInfo = dbInfo as { keys: number; expires?: number; avg_ttl?: number };
-      this.dbKeys.labels(connLabel, dbKey).set(parsedInfo.keys || 0);
+      this.dbKeys.labels(connLabel, db).set(parsedInfo.keys || 0);
       if (absentAsZero || parsedInfo.expires !== undefined) {
-        this.dbKeysExpiring.labels(connLabel, dbKey).set(parsedInfo.expires || 0);
+        this.dbKeysExpiring.labels(connLabel, db).set(parsedInfo.expires || 0);
         sawExpires = true;
       } else {
-        this.dbKeysExpiring.remove(connLabel, dbKey);
+        this.dbKeysExpiring.remove(connLabel, db);
       }
       if (absentAsZero || parsedInfo.avg_ttl !== undefined) {
-        this.dbAvgTtlSeconds.labels(connLabel, dbKey).set((parsedInfo.avg_ttl || 0) / 1000);
+        this.dbAvgTtlSeconds.labels(connLabel, db).set((parsedInfo.avg_ttl || 0) / 1000);
       } else {
-        this.dbAvgTtlSeconds.remove(connLabel, dbKey);
+        this.dbAvgTtlSeconds.remove(connLabel, db);
       }
       totalKeys += parsedInfo.keys || 0;
       totalExpiring += parsedInfo.expires || 0;
@@ -2716,7 +2723,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
                 connectionId,
                 startTime: latestTimestamp,
                 endTime: latestTimestamp,
-                limit: PrometheusService.KEY_ANALYTICS_FETCH_CAP,
+                limit: KEY_ANALYTICS_FETCH_CAP,
               });
         if (this.isSuperseded(connectionId, epoch)) {
           return;
@@ -2734,29 +2741,30 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           .map((decorated) => decorated.snapshot);
         const newPatternLabels = new Set<string>();
         for (const snapshot of top) {
-          newPatternLabels.add(snapshot.pattern);
+          const db = String(snapshot.db ?? 0);
+          // Label identity is (pattern, db): the same pattern in two logical
+          // databases is two distinct series and must not collide.
+          newPatternLabels.add(JSON.stringify([snapshot.pattern, db]));
           // Coerced like the per-key fields below: Gauge.set() throws on
           // non-numbers, and one bad row mid-loop would otherwise leave the
           // already-written series untracked (the Set is assigned after the
           // loop) and unremovable.
           this.keyPatternMemoryBytes
-            .labels(connLabel, snapshot.pattern)
+            .labels(connLabel, snapshot.pattern, db)
             .set(PrometheusService.toFiniteNumber(snapshot.totalMemoryBytes) ?? 0);
           this.keyPatternAvgMemoryBytes
-            .labels(connLabel, snapshot.pattern)
+            .labels(connLabel, snapshot.pattern, db)
             .set(PrometheusService.toFiniteNumber(snapshot.avgMemoryBytes) ?? 0);
           this.keyPatternMaxMemoryBytes
-            .labels(connLabel, snapshot.pattern)
+            .labels(connLabel, snapshot.pattern, db)
             .set(PrometheusService.toFiniteNumber(snapshot.maxMemoryBytes) ?? 0);
           this.keyPatternKeys
-            .labels(connLabel, snapshot.pattern)
+            .labels(connLabel, snapshot.pattern, db)
             .set(PrometheusService.toFiniteNumber(snapshot.keyCount) ?? 0);
         }
-        for (const stalePattern of state.currentKeyPatternLabels) {
-          if (!newPatternLabels.has(stalePattern)) {
-            this.removeKeyPatternSeries(connLabel, stalePattern);
-          }
-        }
+        this.sweepRemovedLabels(state.currentKeyPatternLabels, newPatternLabels, (label) =>
+          this.removeKeyPatternSeries(connLabel, label),
+        );
         state.currentKeyPatternLabels = newPatternLabels;
         // Gauges now reflect the latest run (or its absence — an empty run is
         // still current data), so the pattern family is fresh.
@@ -2766,16 +2774,20 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
       if (detailsEnabled) {
         // 'cardinality' entries are the collector's persisted largest-key set;
-        // re-rank by memory the way the largest-keys surface does.
-        // latest:true pins a single capture, and the collector persists at
-        // most KEY_DETAILS_TOP_N cardinality rows per capture — a larger
-        // limit could never bind.
+        // re-rank by memory the way the largest-keys surface does. latest:true
+        // pins a single capture, but the collector persists up to
+        // KEY_DETAILS_TOP_N cardinality rows PER logical database, so a capture
+        // on a multi-db instance holds KEY_DETAILS_TOP_N x databases rows. Fetch
+        // the whole capture (bounded by the fetch cap) so the memory re-rank
+        // below sees every database's largest keys before slicing to the
+        // exported top-N; a KEY_DETAILS_TOP_N limit here would truncate by the
+        // interleaved per-db rank and drop a database's genuinely largest keys.
         const entries = await this.storage.getHotKeys({
           connectionId,
           latest: true,
           startTime,
           signalTypes: ['cardinality'],
-          limit: KEY_DETAILS_TOP_N,
+          limit: KEY_ANALYTICS_FETCH_CAP,
         });
         if (this.isSuperseded(connectionId, epoch)) {
           return;
@@ -2792,27 +2804,26 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         const newKeyLabels = new Set<string>();
         for (const entry of top) {
           const keyType = entry.keyType ?? 'unknown';
-          newKeyLabels.add(JSON.stringify([entry.keyName, keyType]));
+          const db = String(entry.db ?? 0);
+          // Label identity is (key, type, db): the same key name in two logical
+          // databases is two distinct keys and must not collide.
+          newKeyLabels.add(JSON.stringify([entry.keyName, keyType, db]));
           const memoryBytes = PrometheusService.toFiniteNumber(entry.memoryBytes);
           if (memoryBytes !== null) {
-            this.keyMemoryBytes.labels(connLabel, entry.keyName, keyType).set(memoryBytes);
+            this.keyMemoryBytes.labels(connLabel, entry.keyName, keyType, db).set(memoryBytes);
           } else {
-            this.keyMemoryBytes.remove(connLabel, entry.keyName, keyType);
+            this.keyMemoryBytes.remove(connLabel, entry.keyName, keyType, db);
           }
           const cardinality = PrometheusService.toFiniteNumber(entry.cardinality);
           if (cardinality !== null) {
-            this.keyCardinality.labels(connLabel, entry.keyName, keyType).set(cardinality);
+            this.keyCardinality.labels(connLabel, entry.keyName, keyType, db).set(cardinality);
           } else {
-            this.keyCardinality.remove(connLabel, entry.keyName, keyType);
+            this.keyCardinality.remove(connLabel, entry.keyName, keyType, db);
           }
         }
-        for (const staleKey of state.currentKeyDetailLabels) {
-          if (!newKeyLabels.has(staleKey)) {
-            const [keyName, keyType] = JSON.parse(staleKey) as [string, string];
-            this.keyMemoryBytes.remove(connLabel, keyName, keyType);
-            this.keyCardinality.remove(connLabel, keyName, keyType);
-          }
-        }
+        this.sweepRemovedLabels(state.currentKeyDetailLabels, newKeyLabels, (label) =>
+          this.removeKeyDetailSeries(connLabel, label),
+        );
         state.currentKeyDetailLabels = newKeyLabels;
         // Per-key gauges now reflect the latest capture (even if empty). Record
         // that capture's captured_at so the probe-skip can tell a later refresh
@@ -2940,11 +2951,17 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
 
     const newBucketLabels = new Set<string>();
-    for (const [db, types] of Object.entries(distribution.databases)) {
+    for (const [dbKey, types] of Object.entries(distribution.databases)) {
+      // INFO keysizes names databases "db0", "db1", ...; emit the bare index
+      // ("0", "1") so the `db` label matches the per-pattern and per-key
+      // families (and the OTLP mirror), letting a PromQL join on `db` across
+      // them actually match.
+      const db = dbKey.replace(/^db/, '');
       for (const [type, typeDistribution] of Object.entries(types)) {
         // Emit the singular TYPE-style name so `type` joins with the per-key
         // families (INFO keysizes reports it in the plural); the per-pattern
-        // families carry only a `pattern` label.
+        // families carry a `pattern` label (plus `db`), the per-key families a
+        // (`key`, `type`, `db`) tuple.
         const labelType = canonicalKeySizeType(type);
         for (const { bucket, count } of typeDistribution.buckets) {
           newBucketLabels.add(JSON.stringify([db, labelType, typeDistribution.metric, bucket]));
@@ -2954,17 +2971,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         }
       }
     }
-    for (const staleBucket of state.currentKeysizeBucketLabels) {
-      if (!newBucketLabels.has(staleBucket)) {
-        const [db, type, metric, bucket] = JSON.parse(staleBucket) as [
-          string,
-          string,
-          string,
-          string,
-        ];
-        this.keysizeBucketKeys.remove(connLabel, db, type, metric, bucket);
-      }
-    }
+    this.sweepRemovedLabels(state.currentKeysizeBucketLabels, newBucketLabels, (label) =>
+      this.removeKeysizeBucketSeriesLabel(connLabel, label),
+    );
     state.currentKeysizeBucketLabels = newBucketLabels;
     // available:true — buckets written, or an empty keyspace (header only, zero
     // buckets) whose series were removed by the stale sweep above. Either way
@@ -2982,38 +2991,63 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     return Number.isFinite(parsed) ? parsed : null;
   }
 
+  // Remove every label tuple present in `previous` but absent from `next`
+  // (the set-difference sweep every per-connection metric family runs after
+  // writing its current series). `remove` decodes the JSON label tuple for its
+  // own family.
+  private sweepRemovedLabels(
+    previous: ReadonlySet<string>,
+    next: ReadonlySet<string>,
+    remove: (label: string) => void,
+  ): void {
+    for (const label of previous) {
+      if (!next.has(label)) {
+        remove(label);
+      }
+    }
+  }
+
   private removeKeyAnalyticsSeries(connLabel: string, state: ConnectionMetricState): void {
     this.removeAllKeyPatternSeries(connLabel, state);
     this.removeAllKeyDetailSeries(connLabel, state);
   }
 
   private removeAllKeyPatternSeries(connLabel: string, state: ConnectionMetricState): void {
-    for (const pattern of state.currentKeyPatternLabels) {
-      this.removeKeyPatternSeries(connLabel, pattern);
+    for (const label of state.currentKeyPatternLabels) {
+      this.removeKeyPatternSeries(connLabel, label);
     }
     state.currentKeyPatternLabels = new Set();
   }
 
   private removeAllKeyDetailSeries(connLabel: string, state: ConnectionMetricState): void {
-    for (const staleKey of state.currentKeyDetailLabels) {
-      const [keyName, keyType] = JSON.parse(staleKey) as [string, string];
-      this.keyMemoryBytes.remove(connLabel, keyName, keyType);
-      this.keyCardinality.remove(connLabel, keyName, keyType);
+    for (const label of state.currentKeyDetailLabels) {
+      this.removeKeyDetailSeries(connLabel, label);
     }
     state.currentKeyDetailLabels = new Set();
   }
 
-  private removeKeyPatternSeries(connLabel: string, pattern: string): void {
-    this.keyPatternMemoryBytes.remove(connLabel, pattern);
-    this.keyPatternAvgMemoryBytes.remove(connLabel, pattern);
-    this.keyPatternMaxMemoryBytes.remove(connLabel, pattern);
-    this.keyPatternKeys.remove(connLabel, pattern);
+  private removeKeyPatternSeries(connLabel: string, label: string): void {
+    const [pattern, db] = JSON.parse(label) as [string, string];
+    this.keyPatternMemoryBytes.remove(connLabel, pattern, db);
+    this.keyPatternAvgMemoryBytes.remove(connLabel, pattern, db);
+    this.keyPatternMaxMemoryBytes.remove(connLabel, pattern, db);
+    this.keyPatternKeys.remove(connLabel, pattern, db);
+  }
+
+  private removeKeyDetailSeries(connLabel: string, label: string): void {
+    const [keyName, keyType, db] = JSON.parse(label) as [string, string, string];
+    this.keyMemoryBytes.remove(connLabel, keyName, keyType, db);
+    this.keyCardinality.remove(connLabel, keyName, keyType, db);
+  }
+
+  private removeKeysizeBucketSeriesLabel(connLabel: string, label: string): void {
+    const [db, type, metric, bucket] = JSON.parse(label) as [string, string, string, string];
+    this.keysizeBucketKeys.remove(connLabel, db, type, metric, bucket);
   }
 
   private removeKeysizeBucketSeries(connLabel: string, state: ConnectionMetricState): void {
-    for (const staleBucket of state.currentKeysizeBucketLabels) {
-      const [db, type, metric, bucket] = JSON.parse(staleBucket) as [string, string, string, string];
-      this.keysizeBucketKeys.remove(connLabel, db, type, metric, bucket);
+    for (const label of state.currentKeysizeBucketLabels) {
+      this.removeKeysizeBucketSeriesLabel(connLabel, label);
     }
     state.currentKeysizeBucketLabels = new Set();
   }

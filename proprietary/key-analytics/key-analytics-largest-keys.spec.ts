@@ -84,4 +84,15 @@ describe('KeyAnalyticsService.getLargestKeys', () => {
       limit: 10_000,
     });
   });
+
+  it('returns empty for a negative limit rather than slicing from the tail', async () => {
+    storage.getHotKeys.mockResolvedValue([
+      { keyName: 'a', memoryBytes: 1 },
+      { keyName: 'b', memoryBytes: 3 },
+      { keyName: 'c', memoryBytes: 2 },
+    ]);
+    const service = makeService();
+    const res = await service.getLargestKeys({ connectionId: 'c1', limit: -1, latest: true });
+    expect(res).toEqual([]);
+  });
 });

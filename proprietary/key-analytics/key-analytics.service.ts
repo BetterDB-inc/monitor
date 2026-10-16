@@ -14,11 +14,16 @@ import { LicenseService } from '@proprietary/licenses/license.service';
 import {
   ConnectionStatus,
   KeyAnalyticsResult,
+  KeyDetail,
   KeySizeDistribution,
   KEY_DETAILS_TOP_N,
+  KEY_ANALYTICS_FETCH_CAP,
+  compareHotness,
+  dbScopedIdentity,
   hasOwnKeyAnalytics,
   mergeKeySizeDistributions,
   parseKeySizeDistribution,
+  rankHotKeys,
 } from '@betterdb/shared';
 import type { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { rankCompositeKeys } from './composite-key-ranker';
@@ -41,9 +46,6 @@ const LARGEST_KEYS_TOP_N = KEY_DETAILS_TOP_N;
 // that same top-N bound. (Memory is NOT globally retained and so is reported as
 // context only, never as a ranking dimension — see composite-key-ranker.)
 const COMPOSITE_TOP_N = KEY_DETAILS_TOP_N;
-// Explicit storage fetch cap for ranked reads: adapters default a missing limit
-// to 50, which would truncate multi-snapshot sets BEFORE the memory re-rank.
-const LARGEST_KEYS_FETCH_CAP = 10_000;
 
 const NO_KEY_SIZES: KeySizeDistribution = { databases: {}, available: false };
 
@@ -55,9 +57,12 @@ interface ScanNode {
 function dedupeByKeyMaxMemory(entries: HotKeyEntry[]): HotKeyEntry[] {
   const byKey = new Map<string, HotKeyEntry>();
   for (const entry of entries) {
-    const existing = byKey.get(entry.keyName);
+    // The same key name can exist in several logical databases — those are
+    // distinct keys, so the identity includes the database index.
+    const identity = dbScopedIdentity(entry.db, entry.keyName);
+    const existing = byKey.get(identity);
     if (existing === undefined || (entry.memoryBytes ?? 0) > (existing.memoryBytes ?? 0)) {
-      byKey.set(entry.keyName, entry);
+      byKey.set(identity, entry);
     }
   }
   return Array.from(byKey.values());
@@ -170,7 +175,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
   private async scan(ctx: ConnectionContext, plan: CollectionPlan, fullScan: boolean): Promise<KeyAnalyticsResult[]> {
     const options = { sampleSize: this.sampleSize, scanBatchSize: this.scanBatchSize, fullScan };
     if (plan.kind !== 'cluster') {
-      return [await ctx.client.collectKeyAnalytics(options)];
+      return await ctx.client.collectKeyAnalytics(options);
     }
     const nodes = await this.primaries(this.clusterNodes({ name: ctx.connectionName, client: ctx.client }, plan.members));
     if (nodes.length === 0) {
@@ -181,7 +186,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     const failures: unknown[] = [];
     scans.forEach((scanResult, index) => {
       if (scanResult.status === 'fulfilled') {
-        results.push(scanResult.value);
+        results.push(...scanResult.value);
         return;
       }
       failures.push(scanResult.reason);
@@ -215,7 +220,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
       const results = (await this.scan(ctx, plan, fullScan)).filter((result) => result.dbSize > 0);
 
       if (results.length === 0) {
-        this.logger.log('No keys found in database, skipping analytics');
+        this.logger.log('No keys found in any logical database, skipping analytics');
         return;
       }
 
@@ -223,116 +228,54 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
       const scanned = results.reduce((total, result) => total + result.scanned, 0);
       const timestamp = Date.now();
       const snapshots = mergePatternSnapshots(results.map((result) => buildPatternSnapshots(result, timestamp)));
-      const keyDetails = results.flatMap((result) => result.keyDetails ?? []);
-
       await this.storage.saveKeyPatternSnapshots(snapshots, ctx.connectionId);
 
-      // Collect hot keys from per-key pipeline data
-      if (keyDetails.length > 0) {
-        const capturedAt = Date.now();
-        const lfuKeys: typeof keyDetails = [];
-        const idletimeKeys: typeof keyDetails = [];
-
-        for (const kd of keyDetails) {
-          if (kd.freqScore !== null) {
-            lfuKeys.push(kd);
-          } else if (kd.idleSeconds !== null) {
-            idletimeKeys.push(kd);
-          }
+      // Rank hot/largest/composite keys PER logical database rather than as a
+      // single global top-N across the whole instance: a database whose keys
+      // are crowded out by a busier sibling still gets its own ranked lists,
+      // and each db's ranks stay contiguous (1..N) for the per-db UI views. One
+      // capturedAt is shared across all dbs so the composite freshness guard
+      // (getCompositeKeys) still sees a single atomic collection. Results from
+      // several cluster primaries share db 0, so they are merged into one group
+      // and ranked together — only distinct logical databases rank separately.
+      const capturedAt = Date.now();
+      const keyDetailsByDb = new Map<number, KeyDetail[]>();
+      for (const result of results) {
+        const db = result.db ?? 0;
+        const group = keyDetailsByDb.get(db);
+        if (group) {
+          group.push(...(result.keyDetails ?? []));
+        } else {
+          keyDetailsByDb.set(db, [...(result.keyDetails ?? [])]);
         }
+      }
+      const hotKeyRows: HotKeyEntry[] = [];
+      for (const [db, kds] of keyDetailsByDb) {
+        if (kds.length === 0) continue;
+        hotKeyRows.push(...this.buildHotKeyRows(kds, db, capturedAt, ctx.connectionId));
+      }
 
-        // LFU: descending by freqScore
-        lfuKeys.sort((a, b) => (b.freqScore ?? 0) - (a.freqScore ?? 0));
-        // IDLETIME: ascending by idleSeconds (lower = more recently accessed)
-        idletimeKeys.sort((a, b) => (a.idleSeconds ?? 0) - (b.idleSeconds ?? 0));
-
-        // LFU keys rank above all IDLETIME keys
-        const ranked = [...lfuKeys, ...idletimeKeys].slice(0, HOT_KEYS_TOP_N);
-
-        const hotKeys: HotKeyEntry[] = ranked.map((kd, idx) => {
-          const isLfu = kd.freqScore !== null;
-          return {
-            id: randomUUID(),
-            keyName: kd.keyName,
-            connectionId: ctx.connectionId,
-            capturedAt,
-            signalType: isLfu ? ('lfu' as const) : ('idletime' as const),
-            freqScore: isLfu ? (kd.freqScore ?? undefined) : undefined,
-            idleSeconds: !isLfu ? (kd.idleSeconds ?? undefined) : undefined,
-            memoryBytes: kd.memoryBytes ?? undefined,
-            ttl: kd.ttl ?? undefined,
-            rank: idx + 1,
-          };
-        });
-
-        // Largest keys (valkey #1827): rank by cardinality (element count / byte length).
-        const largestKeys: HotKeyEntry[] = keyDetails
-          .filter((kd) => kd.cardinality !== null)
-          .sort((a, b) => (b.cardinality ?? 0) - (a.cardinality ?? 0))
-          .slice(0, LARGEST_KEYS_TOP_N)
-          .map((kd, idx) => ({
-            id: randomUUID(),
-            keyName: kd.keyName,
-            connectionId: ctx.connectionId,
-            capturedAt,
-            signalType: 'cardinality' as const,
-            cardinality: kd.cardinality ?? undefined,
-            keyType: kd.keyType ?? undefined,
-            memoryBytes: kd.memoryBytes ?? undefined,
-            ttl: kd.ttl ?? undefined,
-            rank: idx + 1,
-          }));
-
-        // Composite / multi-dimensional keys (valkey #4189): keys that are extreme
-        // on more than one dimension at once — the "hot big key" that the single
-        // signal lists above each miss. Derived from the same per-key data, so no
-        // extra scanning; only keys placing in >= 2 dimensions are emitted.
-        const compositeKeys: HotKeyEntry[] = rankCompositeKeys(
-          keyDetails.map((kd) => ({
-            keyName: kd.keyName,
-            keyType: kd.keyType,
-            freqScore: kd.freqScore,
-            idleSeconds: kd.idleSeconds,
-            memoryBytes: kd.memoryBytes,
-            cardinality: kd.cardinality,
-            ttl: kd.ttl,
-          })),
-          COMPOSITE_TOP_N,
-        )
-          .slice(0, COMPOSITE_TOP_N)
-          .map((ck, idx) => ({
-            id: randomUUID(),
-            keyName: ck.keyName,
-            connectionId: ctx.connectionId,
-            capturedAt,
-            signalType: 'composite' as const,
-            freqScore: ck.freqScore ?? undefined,
-            idleSeconds: ck.idleSeconds ?? undefined,
-            memoryBytes: ck.memoryBytes ?? undefined,
-            cardinality: ck.cardinality ?? undefined,
-            keyType: ck.keyType ?? undefined,
-            ttl: ck.ttl ?? undefined,
-            rank: idx + 1,
-          }));
-
-        // Persist all three signal groups in ONE atomic saveHotKeys call so a
-        // reader never sees a half-written collection. If hot/largest rows landed
-        // first under this capturedAt while composites were still pending, the
-        // composite freshness guard (getCompositeKeys) would read the newer
-        // non-composite rows, conclude the scan produced no composites, and
-        // return empty even though composites were about to be written. Writing
-        // them together (saveHotKeys wraps the batch in a transaction) means a
-        // capturedAt is either fully visible with its composites or not at all.
-        const hotKeyRows = [...hotKeys, ...largestKeys, ...compositeKeys];
-        if (hotKeyRows.length > 0) {
-          await this.storage.saveHotKeys(hotKeyRows, ctx.connectionId);
-        }
+      // Persist all signal groups in ONE atomic saveHotKeys call so a reader
+      // never sees a half-written collection. If hot/largest rows landed first
+      // under this capturedAt while composites were still pending, the composite
+      // freshness guard (getCompositeKeys) would read the newer non-composite
+      // rows, conclude the scan produced no composites, and return empty even
+      // though composites were about to be written. Writing them together
+      // (saveHotKeys wraps the batch in a transaction) means a capturedAt is
+      // either fully visible with its composites or not at all.
+      if (hotKeyRows.length > 0) {
+        await this.storage.saveHotKeys(hotKeyRows, ctx.connectionId);
       }
 
       const duration = Date.now() - startTime;
+      const scannedDbs = new Set(results.map((result) => result.db ?? 0));
+      const spread =
+        results.length > 1
+          ? ` across ${results.length} ${scannedDbs.size > 1 ? `logical database scans (db ${[...scannedDbs].sort((a, b) => a - b).join(', db ')})` : 'primaries'}`
+          : '';
       this.logger.log(
         `Key Analytics (${ctx.connectionName}): ${fullScan ? 'deep-scanned' : 'sampled'} ${scanned}/${dbSize} keys (${(Math.min(1, scanned / dbSize) * 100).toFixed(1)}%)` +
-          `${results.length > 1 ? ` across ${results.length} primaries` : ''}, found ${snapshots.length} patterns in ${duration}ms`,
+          `${spread}, found ${snapshots.length} patterns in ${duration}ms`,
       );
     } catch (error) {
       this.logger.error(`Error collecting key analytics for ${ctx.connectionName}:`, error);
@@ -342,11 +285,104 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     }
   }
 
-  async getSummary(startTime?: number, endTime?: number, connectionId?: string) {
+  /**
+   * Build the hot / largest / composite hot-key rows for ONE logical database's
+   * per-key sample. Ranked and capped per database so a quiet db is not crowded
+   * out of the instance-wide top-N by a busier sibling, with ranks contiguous
+   * within the db.
+   */
+  private buildHotKeyRows(
+    keyDetails: KeyDetail[],
+    db: number,
+    capturedAt: number,
+    connectionId: string,
+  ): HotKeyEntry[] {
+    // Access-signal keys (LFU frequency or idle time present), ranked by the
+    // shared hotness policy — LFU above idletime, then freqScore desc / idle
+    // asc. compareHotness is the single definition of this policy, reused by the
+    // read-time global re-rank (rankHotKeys) so collection and read never drift.
+    const ranked = keyDetails
+      .filter((kd) => kd.freqScore !== null || kd.idleSeconds !== null)
+      .sort(compareHotness)
+      .slice(0, HOT_KEYS_TOP_N);
+    const hotKeys: HotKeyEntry[] = ranked.map((kd, idx) => {
+      const isLfu = kd.freqScore !== null;
+      return {
+        id: randomUUID(),
+        keyName: kd.keyName,
+        connectionId,
+        capturedAt,
+        signalType: isLfu ? ('lfu' as const) : ('idletime' as const),
+        freqScore: isLfu ? (kd.freqScore ?? undefined) : undefined,
+        idleSeconds: !isLfu ? (kd.idleSeconds ?? undefined) : undefined,
+        memoryBytes: kd.memoryBytes ?? undefined,
+        ttl: kd.ttl ?? undefined,
+        rank: idx + 1,
+        db,
+      };
+    });
+
+    // Largest keys (valkey #1827): rank by cardinality (element count / byte length).
+    const largestKeys: HotKeyEntry[] = keyDetails
+      .filter((kd) => kd.cardinality !== null)
+      .sort((a, b) => (b.cardinality ?? 0) - (a.cardinality ?? 0))
+      .slice(0, LARGEST_KEYS_TOP_N)
+      .map((kd, idx) => ({
+        id: randomUUID(),
+        keyName: kd.keyName,
+        connectionId,
+        capturedAt,
+        signalType: 'cardinality' as const,
+        cardinality: kd.cardinality ?? undefined,
+        keyType: kd.keyType ?? undefined,
+        memoryBytes: kd.memoryBytes ?? undefined,
+        ttl: kd.ttl ?? undefined,
+        rank: idx + 1,
+        db,
+      }));
+
+    // Composite / multi-dimensional keys (valkey #4189): keys that are extreme
+    // on more than one dimension at once — the "hot big key" that the single
+    // signal lists above each miss. Derived from the same per-key data, so no
+    // extra scanning; only keys placing in >= 2 dimensions are emitted.
+    const compositeKeys: HotKeyEntry[] = rankCompositeKeys(
+      keyDetails.map((kd) => ({
+        keyName: kd.keyName,
+        keyType: kd.keyType,
+        db,
+        freqScore: kd.freqScore,
+        idleSeconds: kd.idleSeconds,
+        memoryBytes: kd.memoryBytes,
+        cardinality: kd.cardinality,
+        ttl: kd.ttl,
+      })),
+      COMPOSITE_TOP_N,
+    )
+      .slice(0, COMPOSITE_TOP_N)
+      .map((ck, idx) => ({
+        id: randomUUID(),
+        keyName: ck.keyName,
+        connectionId,
+        capturedAt,
+        signalType: 'composite' as const,
+        freqScore: ck.freqScore ?? undefined,
+        idleSeconds: ck.idleSeconds ?? undefined,
+        memoryBytes: ck.memoryBytes ?? undefined,
+        cardinality: ck.cardinality ?? undefined,
+        keyType: ck.keyType ?? undefined,
+        ttl: ck.ttl ?? undefined,
+        rank: idx + 1,
+        db,
+      }));
+
+    return [...hotKeys, ...largestKeys, ...compositeKeys];
+  }
+
+  async getSummary(startTime?: number, endTime?: number, connectionId?: string, db?: number) {
     if (this.hidesAnalytics(connectionId)) {
       return null;
     }
-    return this.storage.getKeyAnalyticsSummary(startTime, endTime, connectionId);
+    return this.storage.getKeyAnalyticsSummary(startTime, endTime, connectionId, db);
   }
 
   async getPatternSnapshots(options?: {
@@ -355,6 +391,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     endTime?: number;
     limit?: number;
     connectionId?: string;
+    db?: number;
   }) {
     if (this.hidesAnalytics(options?.connectionId)) {
       return [];
@@ -367,18 +404,43 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     startTime: number,
     endTime: number,
     connectionId?: string,
+    db?: number,
   ) {
     if (this.hidesAnalytics(connectionId)) {
       return [];
     }
-    return this.storage.getKeyPatternTrends(pattern, startTime, endTime, connectionId);
+    return this.storage.getKeyPatternTrends(pattern, startTime, endTime, connectionId, db);
+  }
+
+  /** Distinct logical database indexes with stored analytics for the connection. */
+  async getDatabases(connectionId?: string): Promise<number[]> {
+    if (this.hidesAnalytics(connectionId)) {
+      return [];
+    }
+    return this.storage.getKeyAnalyticsDatabases(connectionId);
   }
 
   async getHotKeys(options?: HotKeyQueryOptions): Promise<HotKeyEntry[]> {
     if (this.hidesAnalytics(options?.connectionId)) {
       return [];
     }
-    return this.storage.getHotKeys(options);
+    const { limit, ...rest } = options ?? {};
+    // Hot-key ranks are stored PER logical database (buildHotKeyRows numbers
+    // 1..N within each db), so an unfiltered multi-db read comes back
+    // interleaved (rank 1 of every db, then rank 2, ...) and a storage-level
+    // limit would truncate by per-db rank — dropping a database's genuinely
+    // hotter keys in favor of another's low-ranked ones. Fetch the whole
+    // capture (bounded by the fetch cap), then re-rank globally and renumber
+    // via the shared helper — the same ranking the MCP hot-keys tool applies —
+    // before slicing to the caller's limit. Mirrors getLargestKeys.
+    const entries = await this.storage.getHotKeys({
+      ...rest,
+      limit: KEY_ANALYTICS_FETCH_CAP,
+    });
+    const singleSnapshot = rest.latest === true || rest.oldest === true;
+    // Default to the collector's per-db top-N (50) when a direct service caller
+    // omits a limit, rather than returning the whole fetch cap.
+    return rankHotKeys(entries, { limit: limit ?? HOT_KEYS_TOP_N, singleSnapshot });
   }
 
   /** Top-N largest keys ranked by memory usage among tracked (cardinality-signal) entries. */
@@ -390,7 +452,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     const entries = await this.storage.getHotKeys({
       ...rest,
       signalTypes: ['cardinality'],
-      limit: LARGEST_KEYS_FETCH_CAP,
+      limit: KEY_ANALYTICS_FETCH_CAP,
     });
     // latest/oldest pin a single snapshot; anything else can span snapshots,
     // where the same key appears once per snapshot and would dominate the
@@ -400,7 +462,9 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     const ranked = [...candidates].sort((a, b) => {
       return (b.memoryBytes ?? 0) - (a.memoryBytes ?? 0);
     });
-    const limited = limit === undefined ? ranked : ranked.slice(0, limit);
+    // Default to the collector's per-db top-N (50) when a direct service caller
+    // omits a limit, rather than returning the whole fetch cap.
+    const limited = ranked.slice(0, Math.max(0, limit ?? LARGEST_KEYS_TOP_N));
     return limited.map((entry, index) => {
       return { ...entry, rank: index + 1 };
     });
@@ -423,42 +487,125 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     if (this.hidesAnalytics(options?.connectionId)) {
       return [];
     }
-    const composite = await this.storage.getHotKeys({ ...options, signalTypes: ['composite'] });
+    const { limit, ...rest } = options ?? {};
+    const connectionId = rest.connectionId;
 
-    // Unlike the other lists, a scan can legitimately find zero composite keys
-    // (nothing hot AND big) even on a full database. When that happens no
-    // 'composite' row is written, so a `latest` query — MAX(captured_at) over
-    // composite rows — would pin the previous non-empty batch and keep serving
-    // keys that are no longer composite. Every signal in one collection shares a
-    // capturedAt, so if the connection's newest row (any signal) is newer than
-    // the newest composite row, the latest scan produced no composites: return
-    // empty.
-    //
-    // This comparison is only sound *per connection*: a shared capturedAt holds
-    // within one connection, not across connections. For an unscoped query
-    // (connectionId omitted), a later empty scan on connection A would otherwise
-    // wrongly suppress connection B's still-valid composites — so the guard is
-    // limited to connection-scoped latest views (and never to explicit ranges).
-    if (
-      options?.connectionId &&
-      options.latest &&
-      !options.startTime &&
-      !options.endTime &&
-      composite.length > 0
-    ) {
-      const newestAny = await this.storage.getHotKeys({
-        connectionId: options.connectionId,
-        signalTypes: ['lfu', 'idletime', 'cardinality', 'composite'],
-        latest: true,
-        limit: 1,
+    // Connection-scoped latest/oldest reads: issue one db-pinned query per
+    // database so storage scopes MAX/MIN(captured_at) to that database. A single
+    // global `latest`/`oldest` pin would (latest) drop a database whose latest
+    // composite capture is older than a sibling's (e.g. a partial scan where
+    // only the sibling was rescanned), and (oldest) select the minimum within
+    // the newest CAP-truncated window rather than each database's true oldest
+    // capture. A db-filtered read is a single pinned query (and keeps its
+    // freshness guard); range reads fall through to one windowed fetch.
+    const perDbPinned =
+      connectionId !== undefined &&
+      (rest.latest === true || rest.oldest === true) &&
+      !rest.startTime &&
+      !rest.endTime;
+
+    let rows: HotKeyEntry[];
+    if (perDbPinned) {
+      // Enumerate from hot_key_stats (where composites live), NOT
+      // key_pattern_snapshots: the two can diverge (e.g. pattern-only retention
+      // pruning), which would otherwise skip a database that still has stored
+      // composites but no pattern rows.
+      const dbs =
+        rest.db !== undefined
+          ? [rest.db]
+          : await this.storage.getHotKeyDatabases(connectionId);
+      const perDb = await Promise.all(
+        dbs.map(async (db) => {
+          const composites = await this.storage.getHotKeys({
+            ...rest,
+            db,
+            signalTypes: ['composite'],
+            limit: KEY_ANALYTICS_FETCH_CAP,
+          });
+          if (composites.length === 0) {
+            return [];
+          }
+          // Freshness guard (latest only): a scan can legitimately find zero
+          // composites (nothing hot AND big), writing no 'composite' row, so
+          // drop this database's composites when its newest ANY-signal capture
+          // is newer than its newest composite — that scan produced none.
+          if (rest.latest) {
+            const newestAny = await this.storage.getHotKeys({
+              connectionId,
+              db,
+              signalTypes: ['lfu', 'idletime', 'cardinality', 'composite'],
+              latest: true,
+              limit: 1,
+            });
+            const latestCollectionAt = newestAny[0]?.capturedAt;
+            if (
+              latestCollectionAt !== undefined &&
+              composites[0].capturedAt < latestCollectionAt
+            ) {
+              return [];
+            }
+          }
+          return composites;
+        }),
+      );
+      rows = perDb.flat();
+    } else {
+      rows = await this.storage.getHotKeys({
+        ...rest,
+        signalTypes: ['composite'],
+        limit: KEY_ANALYTICS_FETCH_CAP,
       });
-      const latestCollectionAt = newestAny[0]?.capturedAt;
-      if (latestCollectionAt !== undefined && composite[0].capturedAt < latestCollectionAt) {
-        return [];
-      }
     }
 
-    return composite;
+    // Collapse a (db, key) that recurs across snapshots to its most recent
+    // observation (storage returns captured_at DESC, so the first seen wins), so
+    // a multi-snapshot range read does not spend the limit on duplicate rows.
+    const seen = new Set<string>();
+    const deduped: HotKeyEntry[] = [];
+    for (const row of rows) {
+      const identity = dbScopedIdentity(row.db, row.keyName);
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      deduped.push(row);
+    }
+
+    // Ordering. A single database's stored rank IS its composite order, so keep
+    // it. Across databases the stored per-db rank is not comparable (composite
+    // scores are normalized per database), so re-rank the merged set through the
+    // composite scorer with one global dimension-max — the full size as the
+    // per-dimension cutoff, so a genuine composite is never re-filtered out —
+    // yielding a cross-db comparable order instead of an arbitrary interleave.
+    let ordered = deduped;
+    if (rest.db === undefined && deduped.length > 1) {
+      const positionByKey = new Map<string, number>();
+      rankCompositeKeys(
+        deduped.map((row) => ({
+          keyName: row.keyName,
+          keyType: row.keyType ?? null,
+          db: row.db,
+          freqScore: row.freqScore ?? null,
+          idleSeconds: row.idleSeconds ?? null,
+          memoryBytes: row.memoryBytes ?? null,
+          cardinality: row.cardinality ?? null,
+          ttl: row.ttl ?? null,
+        })),
+        deduped.length,
+      ).forEach((ranked, index) => {
+        positionByKey.set(dbScopedIdentity(ranked.db, ranked.keyName), index);
+      });
+      ordered = deduped
+        .filter((row) => positionByKey.has(dbScopedIdentity(row.db, row.keyName)))
+        .sort(
+          (a, b) =>
+            (positionByKey.get(dbScopedIdentity(a.db, a.keyName)) ?? 0) -
+            (positionByKey.get(dbScopedIdentity(b.db, b.keyName)) ?? 0),
+        );
+    }
+
+    // Default to the collector's per-db top-N (50) when a direct service caller
+    // omits a limit, rather than returning the whole fetch cap.
+    const limited = ordered.slice(0, Math.max(0, limit ?? COMPOSITE_TOP_N));
+    return limited.map((entry, index) => ({ ...entry, rank: index + 1 }));
   }
 
   async pruneOldSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {

@@ -253,6 +253,7 @@ export class RowMappers {
       minTtlSeconds: row.min_ttl_seconds,
       maxTtlSeconds: row.max_ttl_seconds,
       connectionId: row.connection_id,
+      db: row.db ?? 0,
     };
   }
 

@@ -96,7 +96,12 @@ export interface DatabasePort {
   getConfigValues(pattern: string): Promise<ConfigGetResponse>;
   getDbSize(): Promise<number>;
   getLastSaveTime(): Promise<number>;
-  collectKeyAnalytics(options: KeyAnalyticsOptions): Promise<KeyAnalyticsResult>;
+  /**
+   * One result per scanned logical database. Adapters that can discover
+   * sibling databases (via `INFO keyspace`) scan every non-empty one; others
+   * return a single result for the connected database.
+   */
+  collectKeyAnalytics(options: KeyAnalyticsOptions): Promise<KeyAnalyticsResult[]>;
   getVectorIndexList(): Promise<string[]>;
   getVectorIndexInfo(indexName: string): Promise<VectorIndexInfo>;
   getHashFieldBuffer(key: string, field: string): Promise<Buffer | null>;
