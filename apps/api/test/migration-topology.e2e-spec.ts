@@ -3,6 +3,7 @@ import request from 'supertest';
 import Valkey, { Cluster } from 'iovalkey';
 import { execSync } from 'child_process';
 import { join } from 'path';
+import type { MigrationValidationResult } from '@betterdb/shared';
 import { createTestApp } from './test-utils';
 
 /**
@@ -227,6 +228,33 @@ async function runMigration(
   return result;
 }
 
+// ── Validation runner ───────────────────────────────────────────────
+
+async function runValidation(
+  app: NestFastifyApplication,
+  sourceId: string,
+  targetId: string,
+): Promise<MigrationValidationResult> {
+  const startRes = await request(app.getHttpServer())
+    .post('/migration/validation')
+    .send({ sourceConnectionId: sourceId, targetConnectionId: targetId });
+
+  expect([200, 201]).toContain(startRes.status);
+
+  const validationId = startRes.body.id;
+
+  let result: MigrationValidationResult | undefined;
+  for (let i = 0; i < 60; i++) {
+    const poll = await request(app.getHttpServer()).get(`/migration/validation/${validationId}`);
+    expect(poll.status).toBe(200);
+    result = poll.body as MigrationValidationResult;
+    if (result.status === 'completed' || result.status === 'failed') break;
+    await sleep(500);
+  }
+  if (!result) throw new Error(`Validation ${validationId} returned no result`);
+  return result;
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 (RUN ? describe : describe.skip)('Migration Topology E2E', () => {
@@ -352,6 +380,14 @@ async function runMigration(
 
     expect(result.status).toBe('completed');
     expect(result.keysTransferred).toBe(11);
+
+    // Validation must see the whole dataset on both sides — every master of a
+    // cluster, not one node — and pass a complete migration. Runs before
+    // verifyKeys, which reads from the stream's group on the target.
+    const validation = await runValidation(app, srcId, tgtId);
+    expect(validation.status).toBe('completed');
+    expect(validation.keyCount).toMatchObject({ sourceKeys: 11, targetKeys: 11, discrepancy: 0 });
+    expect(validation.passed).toBe(true);
 
     // Verify all 11 keys arrived on the target
     const target = await openClient(targetPort, targetIsCluster);

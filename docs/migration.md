@@ -273,11 +273,12 @@ reported. If the source has custom ACL users missing from the target, analysis
 issues a warning. If the source uses modules not loaded on the target, analysis
 flags a blocking incompatibility.
 
-### DBSIZE accuracy in cluster mode
+### Key counts in cluster mode
 
-`DBSIZE` on a cluster client is sent to a single random node, returning a
-partial count. This means the key count comparison in validation may be
-inaccurate for cluster targets. This is a known limitation.
+Validation sums `DBSIZE` over every master of a cluster source or target, so
+the key count comparison covers the whole dataset. The sample spot-check still
+reads keys from the source connection's node; on a cluster source that is one
+shard's keys.
 
 ### Concurrent writes on the source
 
