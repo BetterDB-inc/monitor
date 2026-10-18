@@ -9,7 +9,9 @@
  * (5.0 and 6.0 have no GitHub release; their dates are the tag's date).
  * MAINTENANCE: append a row when Redis cuts a new branch. A branch missing
  * here is never cleared (see unlistedBranchCeiling), so a stale table errs
- * toward flagging, not toward a false all-clear.
+ * toward flagging, not toward a false all-clear. Adding the row is part of
+ * tracking a new Redis GA. `branch-releases.spec.ts` checks ordering, and the
+ * `last known branch` test there must be updated in the same PR.
  */
 export const REDIS_BRANCH_FIRST_RELEASE: ReadonlyArray<{ branch: string; releasedAt: string }> = [
   { branch: '5.0', releasedAt: '2018-10-17T15:32:28Z' },
@@ -21,24 +23,25 @@ export const REDIS_BRANCH_FIRST_RELEASE: ReadonlyArray<{ branch: string; release
   { branch: '8.0', releasedAt: '2025-05-02T11:20:31Z' },
   { branch: '8.2', releasedAt: '2025-08-04T11:14:00Z' },
   { branch: '8.4', releasedAt: '2025-11-18T15:06:37Z' },
+  { branch: '8.6', releasedAt: '2026-02-10T14:15:04Z' },
+  { branch: '8.8', releasedAt: '2026-05-25T09:29:25Z' },
+  { branch: '8.10', releasedAt: '2026-07-29T17:20:06Z' },
 ];
-
-/** Effectively "no ceiling": matchRanges needs an upper bound to match. */
-export const NO_CEILING = '999.0.0';
 
 /**
  * Exclusive upper bound for the unlisted-branch wildcard: the floor of the
- * first branch released on or after `publishedAt`. Returns NO_CEILING when the
- * date is missing/unparseable or every known branch predates the advisory,
- * because then we have no evidence that any newer branch carries the fix.
+ * first branch released on or after `publishedAt`. Returns undefined (no
+ * ceiling) when the date is missing/unparseable or every known branch predates
+ * the advisory, because then we have no evidence that any newer branch carries
+ * the fix.
  */
-export function unlistedBranchCeiling(publishedAt: string | null | undefined): string {
+export function unlistedBranchCeiling(publishedAt: string | null | undefined): string | undefined {
   const published = publishedAt ? Date.parse(publishedAt) : Number.NaN;
   if (Number.isNaN(published)) {
-    return NO_CEILING;
+    return undefined;
   }
   const carried = REDIS_BRANCH_FIRST_RELEASE.find((entry) => {
     return Date.parse(entry.releasedAt) >= published;
   });
-  return carried ? `${carried.branch}.0` : NO_CEILING;
+  return carried ? `${carried.branch}.0` : undefined;
 }

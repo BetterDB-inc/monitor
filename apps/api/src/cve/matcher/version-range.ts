@@ -5,6 +5,8 @@ import { MODULE_VERSION_ENCODINGS } from '../cve.constants';
 export interface VersionMatch {
   vulnerable: boolean;
   fixedIn?: string;
+  /** Set when the vulnerable match came from an inferred (date-derived) range. */
+  inferred?: true;
 }
 
 const WILDCARD_BRANCH = '*';
@@ -80,6 +82,19 @@ export function branchOf(version: string): string {
 }
 
 function belowUpperBoundOf(version: string, range: BranchRange): boolean {
+  // An inferred unlisted-branch wildcard with no known ceiling (no branch in
+  // branch-releases.ts was cut after disclosure) is open-ended: it matches
+  // everything at or above vulnerableFrom. Any other range without an upper
+  // bound still matches nothing.
+  const openEnded =
+    range.inferred === true &&
+    range.vulnerableBelow === undefined &&
+    range.vulnerableAtOrBelow === undefined &&
+    range.vulnerableFrom !== undefined;
+  if (openEnded) {
+    return true;
+  }
+
   if (range.vulnerableBelow !== undefined) {
     return compareVersions(version, range.vulnerableBelow) < 0;
   }
@@ -95,9 +110,12 @@ function matchRange(version: string, range: BranchRange): VersionMatch {
   const aboveLowerBound =
     range.vulnerableFrom === undefined || compareVersions(version, range.vulnerableFrom) >= 0;
 
+  const vulnerable = aboveLowerBound && belowUpperBoundOf(version, range);
+
   return {
-    vulnerable: aboveLowerBound && belowUpperBoundOf(version, range),
+    vulnerable,
     ...(range.patchedAt ? { fixedIn: range.patchedAt } : {}),
+    ...(vulnerable && range.inferred === true ? { inferred: true as const } : {}),
   };
 }
 

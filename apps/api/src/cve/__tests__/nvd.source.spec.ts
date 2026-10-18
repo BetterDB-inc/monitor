@@ -42,16 +42,19 @@ describe('NvdSource', () => {
       branch: '8.0',
       vulnerableBelow: '8.0.7',
       vulnerableFrom: '8.0.0',
+      patchedAt: '8.0.7',
     });
     expect(advisory?.affected).toContainEqual({
       branch: '8.1',
       vulnerableBelow: '8.1.6',
       vulnerableFrom: '8.1.0',
+      patchedAt: '8.1.6',
     });
     expect(advisory?.affected).toContainEqual({
       branch: '9.0',
       vulnerableBelow: '9.0.2',
       vulnerableFrom: '9.0.0',
+      patchedAt: '9.0.2',
     });
     expect(advisory?.affected).toHaveLength(4);
   });
@@ -108,6 +111,7 @@ describe('NvdSource', () => {
       branch: '7.4',
       vulnerableBelow: '7.4.3',
       vulnerableFrom: '7.4.0',
+      patchedAt: '7.4.3',
     });
   });
 
@@ -122,6 +126,51 @@ describe('NvdSource', () => {
       vulnerableFrom: '2.6.0',
     });
     expect(matchRanges('6.5.0', advisory?.affected ?? []).vulnerable).toBe(true);
+  });
+
+  it('records patchedAt only for an exclusive end on a concrete branch', () => {
+    const cve = (match: Record<string, string>) => ({
+      totalResults: 1,
+      vulnerabilities: [
+        {
+          cve: {
+            id: 'CVE-2099-7000',
+            configurations: [
+              {
+                nodes: [
+                  {
+                    cpeMatch: [
+                      {
+                        criteria: 'cpe:2.3:a:redis:redis:*:*:*:*:*:*:*:*',
+                        vulnerable: true,
+                        ...match,
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    });
+    const rangesFor = async (match: Record<string, string>) => {
+      const result = await new NvdSource(fetchStub(cve(match))).fetchAdvisories();
+      return result.advisories.find((a) => a.product === 'redis')?.affected ?? [];
+    };
+
+    return Promise.all([
+      rangesFor({ versionStartIncluding: '7.0.0', versionEndExcluding: '7.0.15' }),
+      rangesFor({ versionStartIncluding: '7.0.0', versionEndIncluding: '7.0.14' }),
+      rangesFor({ versionEndExcluding: '7.0.15' }),
+    ]).then(([excluding, including, wildcard]) => {
+      expect(excluding).toEqual([
+        { branch: '7.0', vulnerableBelow: '7.0.15', vulnerableFrom: '7.0.0', patchedAt: '7.0.15' },
+      ]);
+      expect(including[0]).not.toHaveProperty('patchedAt');
+      expect(wildcard[0]).toMatchObject({ branch: '*' });
+      expect(wildcard[0]).not.toHaveProperty('patchedAt');
+    });
   });
 
   it('keeps a .0 exclusive upper bound exclusive, so the first patched release is not a finding', async () => {

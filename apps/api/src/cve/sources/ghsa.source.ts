@@ -39,6 +39,13 @@ const GHSA_PAGE_SIZE = 100;
 
 const GHSA_MAX_PAGES = 10;
 
+// The unlisted-branch inference relies on REDIS_BRANCH_FIRST_RELEASE, which
+// only describes the redis/redis engine version line. Module repos
+// (RediSearch, …) use unrelated version numbers, and Valkey advisories list
+// every affected branch. Opt-in only, so a repo added to GHSA_REPOS later
+// cannot silently inherit it.
+const WILDCARD_REPOS: ReadonlySet<string> = new Set(['redis/redis']);
+
 function toSeverity(raw: string): CveSeverity {
   const lowered = raw.toLowerCase();
   const known = SEVERITIES.find((severity) => {
@@ -49,9 +56,10 @@ function toSeverity(raw: string): CveSeverity {
 }
 
 // One patched_versions token: "6.2.17", the two-part "6.2" (= 6.2.0), Redis's
-// "6.2.X" placeholder, optionally with ">=" or "and above" / "or later" / "+".
+// "6.2.X" placeholder, optionally open-ended with ">=" / "+" / "and above" /
+// "or later" / "or newer".
 const PATCHED_TOKEN_PATTERN =
-  /^(?:>=\s*)?(\d+)\.(\d+)(?:\.(\d+|x))?(?:\s*\+|\s+(?:and|or)\s+(?:above|later|newer))?$/i;
+  /^(?<gte>>=\s*)?(?<major>\d+)\.(?<minor>\d+)(?:\.(?<patch>\d+|x))?(?<tail>\s*\+|\s+(?:and|or)\s+(?:above|later|newer))?$/i;
 const THREE_PART_VERSION_PATTERN = /\d+\.\d+\.\d+/g;
 const VER = String.raw`\d+\.\d+(?:\.\d+)?`;
 // ">= 7.2", ">= 7.2.0", "7.0 or newer", "7.0 and later".
@@ -98,9 +106,10 @@ interface ParsedPatched {
   /** Concrete fix versions, padded to three parts ("6.2" becomes "6.2.0"). */
   versions: string[];
   /**
-   * False when any non-TBD token is not a concrete version ("6.2.X", prose).
-   * The vendor named a fixed branch we can't place, so the unlisted-branch
-   * inference can't be trusted for this advisory.
+   * False when any non-TBD token is not a concrete version ("6.2.X", prose) or
+   * is open-ended (">= 8.0.4", "8.0.4+", "8.0.4 and above"). The vendor named a
+   * fix we can't place, or one that may also claim newer branches, so the
+   * unlisted-branch inference can't be trusted for this advisory.
    */
   complete: boolean;
 }
@@ -115,19 +124,26 @@ function parsePatchedVersions(patchedVersions: string): ParsedPatched {
     }
 
     const match = token.match(PATCHED_TOKEN_PATTERN);
-    if (!match) {
+    if (!match?.groups) {
       // Unrecognized prose: keep any full version it names, but don't trust it.
       versions.push(...(token.match(THREE_PART_VERSION_PATTERN) ?? []));
       complete = false;
       continue;
     }
 
-    if (match[3] !== undefined && /^x$/i.test(match[3])) {
+    const { gte, major, minor, patch, tail } = match.groups;
+    if (patch !== undefined && /^x$/i.test(patch)) {
       complete = false;
       continue;
     }
 
-    versions.push(`${match[1]}.${match[2]}.${match[3] ?? '0'}`);
+    versions.push(`${major}.${minor}.${patch ?? '0'}`);
+    if (gte !== undefined || tail !== undefined) {
+      // "8.0.4 and above" is a fix for its own branch (kept above), but whether it
+      // also claims every newer branch is ambiguous, and the wildcard would
+      // contradict the vendor. Don't infer unlisted branches; NVD wins.
+      complete = false;
+    }
   }
 
   return { versions, complete };
@@ -210,7 +226,7 @@ const AND_BELOW_PATTERN = /\band below\b/i;
  * (branch-releases.ts), never at the newest listed fix: a branch above the
  * newest fix but released before disclosure (e.g. 7.4/8.0 when only 6.2 and
  * 7.2 are patched) stays flagged. With no date, or no newer known branch,
- * there is no ceiling (fail safe). matchRanges() still never lets the
+ * the wildcard has no upper bound (fail safe). matchRanges() still never lets the
  * wildcard override a fix published on the version's own branch.
  *
  * Nothing is inferred when: the range has any upper bound (already
@@ -227,17 +243,19 @@ function unlistedBranchFallback(
   }
 
   const range = normalizeRange(rawRange ?? '');
-  const vulnerableBelow = unlistedBranchCeiling(publishedAt);
+  const ceiling = unlistedBranchCeiling(publishedAt);
+  // Absent, not undefined, so toEqual, JSON and computeDatasetVersion never see a key.
+  const bound = ceiling === undefined ? {} : { vulnerableBelow: ceiling };
 
   // A missing range is unknown, not "all versions": only an explicit marker counts.
   if (ALL_VERSIONS_PATTERN.test(range)) {
-    return { branch: '*', vulnerableFrom: '0.0.0', vulnerableBelow };
+    return { branch: '*', vulnerableFrom: '0.0.0', ...bound, inferred: true };
   }
 
   const upperBounds = range.match(ANY_UPPER_BOUND_PATTERN) ?? [];
   const lower = lowerBoundOf(range);
   if (lower !== null && upperBounds.length === 0 && !AND_BELOW_PATTERN.test(range)) {
-    return { branch: '*', vulnerableFrom: lower, vulnerableBelow };
+    return { branch: '*', vulnerableFrom: lower, ...bound, inferred: true };
   }
 
   return null;
@@ -250,9 +268,7 @@ function toAffectedRanges(
 ): AffectedRanges {
   const exact: BranchRange[] = [];
   const unpatched: BranchRange[] = [];
-  // Valkey advisories enumerate every affected branch, so there is never an
-  // unlisted branch to infer.
-  const allowWildcard = !repo.startsWith('valkey-io/');
+  const allowWildcard = WILDCARD_REPOS.has(repo);
 
   for (const vulnerability of vulnerabilities) {
     const patchedRaw = vulnerability.patched_versions?.trim() ?? '';

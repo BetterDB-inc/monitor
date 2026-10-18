@@ -18,6 +18,12 @@ export interface BranchRange {
   vulnerableBelow?: string;
   vulnerableFrom?: string;
   patchedAt?: string;
+  /**
+   * True when this range was inferred (GHSA unlisted-branch fallback from the
+   * advisory publish date) rather than stated by a vendor or NVD. Findings
+   * matched only through an inferred range report confidence 'broad'.
+   */
+  inferred?: true;
 }
 
 export interface SourceProvenance {
@@ -53,6 +59,8 @@ export interface CveFinding {
   matchedVersion: string;
   moduleName?: string;
   fixedIn?: string;
+  /** 'broad' when matched only through an inferred range; else the advisory's confidence. */
+  confidence?: CveConfidence;
 }
 
 export interface ScannedNode {

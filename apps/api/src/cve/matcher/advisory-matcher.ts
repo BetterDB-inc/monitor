@@ -84,6 +84,7 @@ export function matchAdvisories(input: MatchInput, advisories: Advisory[]): Matc
       matchedVersion: version,
       ...(loadedModule ? { moduleName: loadedModule.name } : {}),
       ...(match.fixedIn ? { fixedIn: match.fixedIn } : {}),
+      confidence: match.inferred ? 'broad' : advisory.confidence,
     });
     severityCounts[advisory.severity] += 1;
   }

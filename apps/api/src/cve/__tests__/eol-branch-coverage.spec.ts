@@ -316,6 +316,70 @@ describe('GHSA unlisted-branch wildcard rules', () => {
     },
   );
 
+  it('an NVD on-branch fix suppresses the wildcard (KIvanow #1)', async () => {
+    const ds = await datasetWithNvd([adv('All', '6.2.20, 7.2.11')], {
+      branch: '7.0',
+      vulnerableBelow: '7.0.15',
+      patchedAt: '7.0.15',
+    });
+    expect(isVulnerable(ds, '7.0.20')).toBe(false); // NVD says fixed on 7.0
+    expect(isVulnerable(ds, '7.0.15')).toBe(false);
+    expect(isVulnerable(ds, '7.0.14')).toBe(true);
+    expect(isVulnerable(ds, '6.0.20')).toBe(true); // other unlisted EOL still flagged
+  });
+
+  it('never infers a wildcard for RediSearch (module version line)', async () => {
+    const repo = 'RediSearch/RediSearch';
+    const fetch = jest.fn().mockImplementation(async (url: string) => ({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: async () =>
+        url.includes(`/repos/${repo}/`) ? [adv('>= 2.0.0', '2.6.20, 2.8.10', repo)] : [],
+    }));
+    const ghsa = await new GhsaSource(fetch).fetchAdvisories();
+    const affected = ghsa.advisories.flatMap((a) => a.affected);
+    expect(affected.length).toBeGreaterThan(0);
+    expect(affected.some((r) => r.branch === '*')).toBe(false);
+  });
+
+  it.each(['8.0.4 and above', '>= 8.0.4', '8.0.4+', '8.0.4 or later'])(
+    'open-ended patched token "%s" infers no wildcard (KIvanow #3)',
+    async (token) => {
+      const ds = await datasetFor([adv('All', `7.2.11, ${token}`)]);
+      expect(ds.flatMap((a) => a.affected).some((r) => r.branch === '*')).toBe(false);
+      expect(isVulnerable(ds, '8.2.1')).toBe(false); // vendor says fixed
+      expect(isVulnerable(ds, '8.0.3')).toBe(true); // below fix on own branch
+      expect(isVulnerable(ds, '7.2.10')).toBe(true);
+    },
+  );
+
+  it('stores no sentinel ceiling when there is no evidence (KIvanow #4)', async () => {
+    const ds = await datasetFor([adv('All', '6.2.20, 7.2.11', 'redis/redis', 'GHSA-x', null)]);
+    const wildcard = ds.flatMap((a) => a.affected).find((r) => r.branch === '*');
+    expect(wildcard).toBeDefined();
+    expect(wildcard).not.toHaveProperty('vulnerableBelow');
+    expect(JSON.stringify(ds)).not.toContain('999');
+    for (const v of ['7.4.0', '8.0.0', '8.4.0', '8.10.0']) expect(isVulnerable(ds, v)).toBe(true);
+  });
+
+  it('labels date-inferred matches broad and vendor ranges exact (KIvanow #5)', async () => {
+    const ds = await redisDataset();
+    const finding = (v: string) =>
+      matchAdvisories({ product: 'redis', engineVersion: v, modules: [] }, ds).findings[0];
+    expect(finding('7.0.15').confidence).toBe('broad'); // EOL, wildcard only
+    expect(finding('7.2.10').confidence).toBe('exact'); // below vendor fix on own branch
+  });
+
+  it('an advisory published between 8.8 and 8.10 GA clears 8.10.0 but flags 8.8.x', async () => {
+    const ds = await datasetFor([
+      adv('All', '7.2.11', 'redis/redis', 'GHSA-x', '2026-06-15T00:00:00Z'),
+    ]);
+    expect(isVulnerable(ds, '8.10.0')).toBe(false);
+    expect(isVulnerable(ds, '8.8.0')).toBe(true);
+    expect(isVulnerable(ds, '8.6.3')).toBe(true);
+  });
+
   it('lower-bounded range does not flag versions below the floor', async () => {
     const ds = await datasetFor([adv('>= 7.0.0', '7.2.11')]);
     expect(isVulnerable(ds, '6.2.20')).toBe(false);
