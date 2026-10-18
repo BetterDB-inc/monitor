@@ -17,3 +17,11 @@
  * @see https://redis.io/docs/latest/operate/oss_and_stack/reference/cluster-spec/
  */
 export const CLUSTER_TOTAL_SLOTS = 16384;
+
+import { SSH_NODE_FORWARD_TIMEOUT_MS } from '@betterdb/shared';
+
+export const CLUSTER_DISCOVERY_CACHE_TTL_MS = 30000;
+export const CLUSTER_CONNECTION_TIMEOUT_MS = SSH_NODE_FORWARD_TIMEOUT_MS;
+export const CLUSTER_HEALTH_CHECK_INTERVAL_MS = CLUSTER_DISCOVERY_CACHE_TTL_MS;
+export const CLUSTER_IDLE_TIMEOUT_MS = 60000;
+export const CLUSTER_HEALTH_CHECK_TIMEOUT_MS = 2000;
