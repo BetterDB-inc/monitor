@@ -437,6 +437,57 @@ async function runValidation(
     expect(result.blockingCount).toBeGreaterThanOrEqual(1);
   }, 60_000);
 
+  it('analysis: a target without room for the source should report a blocking capacity issue', async () => {
+    const srcId = connIds['srcSA'];
+    const tgtId = connIds['tgtSA'];
+    if (!srcId || !tgtId) throw new Error('Connections not registered');
+
+    const target = await openClient(TGT_STANDALONE_PORT, false);
+    try {
+      await flushAll(target);
+      // A limit below what the target already uses leaves no room at all.
+      const used = Number(/used_memory:(\d+)/.exec(await target.info('memory'))?.[1]);
+      await target.config('SET', 'maxmemory-policy', 'noeviction');
+      await target.config('SET', 'maxmemory', String(Math.floor(used / 2)));
+
+      const result = await runAnalysis(app, srcId, tgtId);
+
+      expect(result.status).toBe('completed');
+      expect(result.incompatibilities).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ severity: 'blocking', category: 'capacity' }),
+        ]),
+      );
+    } finally {
+      await target.config('SET', 'maxmemory', '0');
+      await target.quit();
+    }
+  }, 60_000);
+
+  it('analysis: source keys that already exist on the target should be reported', async () => {
+    const srcId = connIds['srcSA'];
+    const tgtId = connIds['tgtSA'];
+    if (!srcId || !tgtId) throw new Error('Connections not registered');
+
+    const target = await openClient(TGT_STANDALONE_PORT, false);
+    try {
+      await flushAll(target);
+      await target.set('mig:sa:str1', 'already here');
+
+      const result = await runAnalysis(app, srcId, tgtId);
+
+      expect(result.status).toBe('completed');
+      expect(result.incompatibilities).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ severity: 'warning', category: 'key_overlap' }),
+        ]),
+      );
+    } finally {
+      await flushAll(target);
+      await target.quit();
+    }
+  }, 60_000);
+
   it('analysis: standalone → cluster should report a warning incompatibility', async () => {
     const srcId = connIds['srcSA'];
     const tgtId = connIds['tgtCL'];

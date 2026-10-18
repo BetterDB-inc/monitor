@@ -9,6 +9,7 @@ import { sampleTtls } from './analysis/ttl-sampler';
 import { detectHfe } from './analysis/hfe-detector';
 import { analyzeCommands } from './analysis/commandlog-analyzer';
 import { buildInstanceMeta, checkCompatibility } from './analysis/compatibility-checker';
+import { probeTargetCapacity } from './analysis/capacity-checker';
 import {
   loadAnalysisVerdict,
   resolveVerdictDir,
@@ -508,6 +509,22 @@ export class MigrationService {
       } catch { /* ignore */ }
 
       const incompatibilities = checkCompatibility(sourceMeta, targetMeta, job.result.hfeDetected ?? false, sourceHasFunctions);
+
+      // Capacity + key-overlap preflight. Best-effort: a target that cannot be
+      // probed (ACL, unreachable master) adds no issues and never fails analysis.
+      if (targetConfig) {
+        try {
+          incompatibilities.push(...await probeTargetCapacity({
+            targetConfig,
+            targetIsCluster: job.result.targetIsCluster === true,
+            sourceBytes: job.result.estimatedTotalMemoryBytes || job.result.totalMemoryBytes || 0,
+            sampledKeys: sampledKeys.map(k => k.key),
+          }));
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          this.logger.warn(`Analysis ${job.id}: capacity preflight skipped: ${message}`);
+        }
+      }
       job.result.incompatibilities = incompatibilities;
       job.result.blockingCount = incompatibilities.filter(i => i.severity === 'blocking').length;
       job.result.warningCount = incompatibilities.filter(i => i.severity === 'warning').length;

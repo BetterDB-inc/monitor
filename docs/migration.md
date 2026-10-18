@@ -166,10 +166,19 @@ Analysis detects the following incompatibilities:
 | `maxmemory_policy` | warning | Eviction policy differs between source and target |
 | `acl` | warning | Source has custom ACL users that do not exist on target |
 | `persistence` | info | Persistence configuration differs |
+| `capacity` | blocking | The source dataset does not fit in the target's free memory and the target uses `noeviction` (or its masters use different policies) — writes would fail with OOM part-way through |
+| `capacity` | warning | The source dataset does not fit and the target uses an `allkeys-*` / `volatile-*` policy (it would evict while being filled), or it fits with under 10% headroom |
+| `key_overlap` | warning | Sampled source keys already exist on the target (command mode overwrites them; RedisShake modes stop with `BUSYKEY` unless the target is flushed first) |
+| `key_overlap` | info | The target already holds keys, but none of the sampled source keys |
 
-Blocking incompatibilities are advisory — the execution endpoint does not
-currently enforce them. A future release will reject execution when blocking
-incompatibilities exist.
+The capacity check compares the estimated source dataset (sampled `MEMORY USAGE`
+scaled to the key count, or `used_memory` when sampling is unavailable) with
+`maxmemory - used_memory` summed over every target master. A target with no
+`maxmemory` on any master is not checked. The total can fit while one shard
+does not, so leave headroom on clusters with uneven slot sizes.
+
+Execution is refused while the latest analysis for the pair has blocking
+incompatibilities, unless the request sets `force: true` with a `forceReason`.
 
 ## Limitations
 
