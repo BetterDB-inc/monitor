@@ -162,6 +162,31 @@ describe('MigrationValidationService', () => {
       expect(clusterRegistry.mockAdapter.getInfo).toHaveBeenCalledWith(['cluster']);
     });
 
+    it('counts a cluster source through a cluster client, not the seed node alone', async () => {
+      const { compareKeyCounts } = jest.requireMock('../validation/key-count-comparator');
+      const { Cluster } = jest.requireMock('iovalkey');
+      compareKeyCounts.mockClear();
+      Cluster.mockClear();
+
+      const sourceAdapter = {
+        ...registry.mockAdapter,
+        getInfo: jest.fn().mockResolvedValue({ cluster: { cluster_enabled: '1' } }),
+      };
+      registry.get.mockImplementation((id: string) => (id === 'conn-1' ? sourceAdapter : registry.mockAdapter));
+
+      const { id } = await service.startValidation({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+      });
+      await new Promise(r => setTimeout(r, 100));
+
+      expect(service.getValidation(id)!.status).toBe('completed');
+      expect(Cluster).toHaveBeenCalledTimes(1);
+      const sourceCountClient = Cluster.mock.results[0].value;
+      expect(compareKeyCounts).toHaveBeenCalledWith(sourceCountClient, expect.anything(), undefined);
+      expect(sourceCountClient.quit).toHaveBeenCalled();
+    });
+
     it('should use Phase 1 analysis result when analysisId provided', async () => {
       migrationService.getJob.mockReturnValue({
         status: 'completed',
