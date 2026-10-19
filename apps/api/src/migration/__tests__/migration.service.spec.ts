@@ -218,13 +218,25 @@ describe('MigrationService capacity preflight', () => {
     expect(job.warningCount).toBeGreaterThanOrEqual(1);
   });
 
-  it('completes the analysis without capacity issues when the target cannot be probed', async () => {
+  it('reports that the preflight did not run when the target cannot be probed', async () => {
     probe.mockRejectedValue(new Error('NOPERM this user has no permissions to run the info command'));
 
     const job = await analyze();
 
     expect(job.status).toBe('completed');
-    expect(job.incompatibilities?.some((i) => i.category === 'capacity')).toBe(false);
+    expect(job.blockingCount).toBe(0);
+    expect(job.incompatibilities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          severity: 'info',
+          category: 'capacity',
+          title: 'Capacity and key-overlap checks did not run',
+        }),
+      ]),
+    );
+    expect(
+      job.incompatibilities?.find((i) => i.title === 'Capacity and key-overlap checks did not run')?.detail,
+    ).toContain('NOPERM');
   });
 });
 

@@ -166,17 +166,21 @@ Analysis detects the following incompatibilities:
 | `maxmemory_policy` | warning | Eviction policy differs between source and target |
 | `acl` | warning | Source has custom ACL users that do not exist on target |
 | `persistence` | info | Persistence configuration differs |
-| `capacity` | blocking | A target master cannot hold its share of the source dataset and cannot evict: its policy is `noeviction`, or a `volatile-*` policy with no TTL keys on that master or in the source — writes would fail with OOM part-way through |
-| `capacity` | warning | A target master cannot hold its share but its policy evicts (`allkeys-*`, or `volatile-*` with TTL keys available), or it fits with under 10% headroom |
-| `key_overlap` | warning | Sampled source keys already exist on the target (command mode overwrites them; RedisShake modes stop with `BUSYKEY` unless the target is flushed first) |
-| `key_overlap` | info | The target already holds keys, but none of the sampled source keys |
+| `capacity` | blocking | A target master cannot evict (`noeviction`, or `volatile-*` with no TTL keys on that master or in the source) and its share of the source exceeds its `maxmemory` by more than 10%, so even an emptied target would hit OOM part-way through |
+| `capacity` | warning | A master's share does not fit next to its current data but fits within `maxmemory` (empty the target first, e.g. `emptyDbBeforeSync`); or the master evicts (`allkeys-*`, `volatile-*` with TTL keys); or it fits with under 10% headroom |
+| `capacity` | info | The capacity and key-overlap checks could not run (for example NOPERM on `INFO`, or an unreachable master) |
+| `key_overlap` | warning | Sampled source keys (up to 200, spread across source nodes) already exist in the target's db0 (command mode overwrites them; RedisShake modes stop with `BUSYKEY` unless the target is flushed first) |
+| `key_overlap` | info | The target's db0 already holds keys, but none of the sampled source keys |
 
 The capacity check runs per target master. Each master's share of the estimated
 source dataset (sampled `MEMORY USAGE` scaled to the key count, or `used_memory`
 when sampling is unavailable) is weighted by the hash slots it owns, or split
 equally when the slot map is unavailable. That share is compared with the
 master's `maxmemory - (used_memory - mem_not_counted_for_evict)`, the same figure
-Valkey uses to decide when to evict or reject writes. Each master is judged by
+Valkey uses to decide when to evict or reject writes. Because `emptyDbBeforeSync` or a manual flush frees the target's current data,
+and the source size is a sampled estimate, a master that cannot evict only
+blocks when its share exceeds `maxmemory` by more than 10%; a share that fits
+`maxmemory` but not next to the existing data is a warning. Each master is judged by
 its own `maxmemory-policy`; masters without `maxmemory` are skipped, while capped
 masters in the same cluster are still checked. The analysis reports the master
 with the least room and how many masters were flagged. Slot weighting assumes

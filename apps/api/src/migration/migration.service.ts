@@ -9,7 +9,7 @@ import { sampleTtls } from './analysis/ttl-sampler';
 import { detectHfe } from './analysis/hfe-detector';
 import { analyzeCommands } from './analysis/commandlog-analyzer';
 import { buildInstanceMeta, checkCompatibility } from './analysis/compatibility-checker';
-import { probeTargetCapacity, sourceExpiringKeysFrom } from './analysis/capacity-checker';
+import { pickOverlapSample, probeTargetCapacity, sourceExpiringKeysFrom, type TtlSample } from './analysis/capacity-checker';
 import {
   loadAnalysisVerdict,
   resolveVerdictDir,
@@ -511,7 +511,7 @@ export class MigrationService {
       const incompatibilities = checkCompatibility(sourceMeta, targetMeta, job.result.hfeDetected ?? false, sourceHasFunctions);
 
       // Capacity + key-overlap preflight. Best-effort: a target that cannot be
-      // probed (ACL, unreachable master) adds no issues and never fails analysis.
+      // probed (ACL, unreachable master) adds an info item and never fails analysis.
       if (targetConfig) {
         // TTL keys on the source, from the INFO keyspace already read in step 2.
         // That INFO came from one node, so a zero on a cluster source is unknown.
@@ -521,19 +521,37 @@ export class MigrationService {
             .filter(([key, val]) => key.startsWith('db') && typeof val === 'string')
             .map(([key, val]) => `${key}:${val}`)
             .join('\n');
-          sourceExpiringKeys = sourceExpiringKeysFrom(keyspaceText, !isCluster);
+          const ttl = job.result.ttlDistribution;
+          const ttlSample: TtlSample | null = ttl
+            ? {
+                sampled:
+                  ttl.noExpiry +
+                  ttl.expiresWithin1h +
+                  ttl.expiresWithin24h +
+                  ttl.expiresWithin7d +
+                  ttl.expiresAfter7d,
+                noExpiry: ttl.noExpiry,
+              }
+            : null;
+          sourceExpiringKeys = sourceExpiringKeysFrom(keyspaceText, !isCluster, ttlSample);
         } catch { /* unknown TTL count: the capacity check treats null as "not none" */ }
         try {
           incompatibilities.push(...await probeTargetCapacity({
             targetConfig,
             targetIsCluster: job.result.targetIsCluster === true,
             sourceBytes: job.result.estimatedTotalMemoryBytes || job.result.totalMemoryBytes || 0,
-            sampledKeys: sampledKeys.map(k => k.key),
+            sampledKeys: pickOverlapSample(sampledKeys),
             sourceExpiringKeys,
           }));
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           this.logger.warn(`Analysis ${job.id}: capacity preflight skipped: ${message}`);
+          incompatibilities.push({
+            severity: 'info',
+            category: 'capacity',
+            title: 'Capacity and key-overlap checks did not run',
+            detail: `The target's memory and keys could not be read (${message}), so this analysis did not check whether the source fits or whether its keys already exist there. Allow INFO and EXISTS for the target user, or check target capacity manually before migrating.`,
+          });
         }
       }
       job.result.incompatibilities = incompatibilities;

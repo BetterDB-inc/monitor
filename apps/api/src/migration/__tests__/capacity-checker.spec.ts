@@ -3,6 +3,7 @@ import {
   checkKeyOverlap,
   checkTargetCapacity,
   keyspaceTotals,
+  pickOverlapSample,
   readTargetMemory,
   sampleKeyOverlap,
   sourceExpiringKeysFrom,
@@ -19,6 +20,7 @@ function master(overrides: Partial<MasterMemory> = {}): MasterMemory {
     usedMemory: 2 * GiB,
     policy: 'noeviction',
     keys: 0,
+    db0Keys: 0,
     expires: 0,
     slotShare: 1,
     ...overrides,
@@ -32,7 +34,7 @@ function shard(name: string, overrides: Partial<MasterMemory> = {}): MasterMemor
 
 function target(...masters: MasterMemory[]): TargetMemory {
   const list = masters.length > 0 ? masters : [master()];
-  return { masters: list, keys: list.reduce((s, m) => s + m.keys, 0) };
+  return { masters: list, db0Keys: list.reduce((s, m) => s + m.db0Keys, 0) };
 }
 
 interface NodeSpec {
@@ -70,8 +72,8 @@ function cluster(nodes: ReturnType<typeof node>[], slots?: string[][]): Cluster 
 }
 
 describe('capacity-checker / checkTargetCapacity (standalone)', () => {
-  it('blocks when the dataset does not fit and the target cannot evict', () => {
-    const [issue] = checkTargetCapacity(9 * GiB, target());
+  it('blocks when the source does not fit even in an empty target', () => {
+    const [issue] = checkTargetCapacity(12 * GiB, target());
     expect(issue).toMatchObject({
       severity: 'blocking',
       category: 'capacity',
@@ -114,8 +116,29 @@ describe('capacity-checker / checkTargetCapacity (standalone)', () => {
   });
 
   it('blocks under a volatile policy when neither side has TTL keys to evict', () => {
-    const [issue] = checkTargetCapacity(9 * GiB, target(master({ policy: 'volatile-lru' })), 0);
+    const [issue] = checkTargetCapacity(12 * GiB, target(master({ policy: 'volatile-lru' })), 0);
     expect(issue).toMatchObject({ severity: 'blocking', category: 'capacity' });
+    expect(issue.detail).toContain('only evicts keys with a TTL');
+  });
+
+  it('warns instead of blocking when the source only fits once the target is emptied', () => {
+    const [issue] = checkTargetCapacity(9 * GiB, target());
+    expect(issue).toMatchObject({
+      severity: 'warning',
+      category: 'capacity',
+      title: 'Target only has room if it is emptied first',
+    });
+    expect(issue.detail).toContain('emptyDbBeforeSync');
+  });
+
+  it('keeps a 10% margin over maxmemory before blocking', () => {
+    expect(checkTargetCapacity(10.5 * GiB, target())[0].severity).toBe('warning');
+    expect(checkTargetCapacity(11.5 * GiB, target())[0].severity).toBe('blocking');
+  });
+
+  it('warns to empty first under a volatile policy with no TTL keys when the source fits maxmemory', () => {
+    const [issue] = checkTargetCapacity(9 * GiB, target(master({ policy: 'volatile-lru' })), 0);
+    expect(issue.title).toBe('Target only has room if it is emptied first');
     expect(issue.detail).toContain('only evicts keys with a TTL');
   });
 
@@ -138,7 +161,7 @@ describe('capacity-checker / checkTargetCapacity (standalone)', () => {
 describe('capacity-checker / checkTargetCapacity (cluster)', () => {
   it('still checks a capped master when another master has no limit', () => {
     const issues = checkTargetCapacity(
-      2 * GiB,
+      10 * GiB,
       target(shard('10.0.0.1:6379', { maxmemory: 0 }), shard('10.0.0.2:6379', { usedMemory: 4 * GiB })),
     );
     expect(issues).toHaveLength(1);
@@ -162,7 +185,7 @@ describe('capacity-checker / checkTargetCapacity (cluster)', () => {
 
   it('blocks when any master cannot evict, and says how many masters are flagged', () => {
     const issues = checkTargetCapacity(
-      8 * GiB,
+      10 * GiB,
       target(
         shard('10.0.0.1:6379', { policy: 'noeviction' }),
         shard('10.0.0.2:6379', { policy: 'allkeys-lru' }),
@@ -175,9 +198,9 @@ describe('capacity-checker / checkTargetCapacity (cluster)', () => {
   });
 
   it('catches a shard that overflows even though the cluster total fits', () => {
-    // 5 GiB source, 6 GiB free in total; the 80% shard needs 4 GiB but has 3 GiB.
+    // 5.8 GiB source, 6 GiB free in total; the 80% shard needs 4.6 GiB, more than its 4 GiB maxmemory.
     const [issue] = checkTargetCapacity(
-      5 * GiB,
+      5.8 * GiB,
       target(
         shard('10.0.0.1:6379', { slotShare: 0.8 }),
         shard('10.0.0.2:6379', { slotShare: 0.2 }),
@@ -190,7 +213,7 @@ describe('capacity-checker / checkTargetCapacity (cluster)', () => {
 
   it('judges each volatile master by its own TTL keys', () => {
     const [issue] = checkTargetCapacity(
-      8 * GiB,
+      10 * GiB,
       target(
         shard('10.0.0.1:6379', { policy: 'volatile-lru', expires: 0 }),
         shard('10.0.0.2:6379', { policy: 'volatile-lru', expires: 100 }),
@@ -198,6 +221,20 @@ describe('capacity-checker / checkTargetCapacity (cluster)', () => {
       0,
     );
     expect(issue.severity).toBe('blocking');
+    expect(issue.detail).toContain('10.0.0.1:6379');
+  });
+
+  it('names the full shard when summed free memory would have hidden it (3x10 GB, 9/5/4 used, 9 GB source)', () => {
+    const third = 1 / 3;
+    const [issue] = checkTargetCapacity(
+      9 * GiB,
+      target(
+        master({ name: '10.0.0.1:6379', usedMemory: 9 * GiB, slotShare: third }),
+        master({ name: '10.0.0.2:6379', usedMemory: 5 * GiB, slotShare: third }),
+        master({ name: '10.0.0.3:6379', usedMemory: 4 * GiB, slotShare: third }),
+      ),
+    );
+    expect(issue).toMatchObject({ severity: 'warning', title: 'Target only has room if it is emptied first' });
     expect(issue.detail).toContain('10.0.0.1:6379');
   });
 
@@ -220,6 +257,10 @@ describe('capacity-checker / checkKeyOverlap', () => {
     const [issue] = checkKeyOverlap(5000, { sampled: 200, existing: 50 });
     expect(issue).toMatchObject({ severity: 'warning', category: 'key_overlap' });
     expect(issue.detail).toContain('50 of 200 sampled source keys (25%)');
+  });
+
+  it('talks about db0 keys', () => {
+    expect(checkKeyOverlap(5000, { sampled: 200, existing: 0 })[0].detail).toContain('keys in db0');
   });
 
   it('only notes a non-empty target when no sampled key collides', () => {
@@ -245,11 +286,12 @@ describe('capacity-checker / readTargetMemory', () => {
           usedMemory: 2 * GiB,
           policy: 'allkeys-lru',
           keys: 42,
+          db0Keys: 42,
           expires: 7,
           slotShare: 1,
         },
       ],
-      keys: 42,
+      db0Keys: 42,
     });
   });
 
@@ -278,7 +320,7 @@ describe('capacity-checker / readTargetMemory', () => {
     );
     const memory = await readTargetMemory(c as unknown as Valkey);
     expect(c.nodes).toHaveBeenCalledWith('master');
-    expect(memory.keys).toBe(30);
+    expect(memory.db0Keys).toBe(30);
     expect(memory.masters).toEqual([
       expect.objectContaining({ name: '10.0.0.1:6379', slotShare: 0.75, policy: 'noeviction', maxmemory: 4 * GiB }),
       expect.objectContaining({ name: '10.0.0.2:6379', slotShare: 0.25, policy: 'allkeys-lru', maxmemory: 0 }),
@@ -306,14 +348,20 @@ describe('capacity-checker / keyspaceTotals and sourceExpiringKeysFrom', () => {
   const noTtl = '# Keyspace\r\ndb0:keys=5,expires=0,avg_ttl=0\r\n';
 
   it('sums keys and expires over every db', () => {
-    expect(keyspaceTotals(info)).toEqual({ keys: 15, expires: 2 });
+    expect(keyspaceTotals(info)).toEqual({ keys: 15, expires: 2, db0Keys: 5 });
   });
 
-  it('returns the TTL key count, or null when it cannot be trusted', () => {
+  it('returns the TTL key count, or null when nothing can vouch for "none"', () => {
     expect(sourceExpiringKeysFrom(info, false)).toBe(2);
     expect(sourceExpiringKeysFrom(noTtl, true)).toBe(0);
     expect(sourceExpiringKeysFrom(noTtl, false)).toBeNull();
     expect(sourceExpiringKeysFrom(undefined, true)).toBeNull();
+  });
+
+  it('uses the key sample when INFO shows no TTL keys', () => {
+    expect(sourceExpiringKeysFrom(noTtl, false, { sampled: 200, noExpiry: 150 })).toBe(50);
+    expect(sourceExpiringKeysFrom(noTtl, false, { sampled: 200, noExpiry: 200 })).toBe(0);
+    expect(sourceExpiringKeysFrom(undefined, false, { sampled: 0, noExpiry: 0 })).toBeNull();
   });
 });
 
@@ -326,5 +374,29 @@ describe('capacity-checker / sampleKeyOverlap', () => {
     const overlap = await sampleKeyOverlap({ exists } as unknown as Valkey, keys);
     expect(exists).toHaveBeenCalledTimes(200);
     expect(overlap).toEqual({ sampled: 200, existing: 20 });
+  });
+});
+
+describe('capacity-checker / pickOverlapSample', () => {
+  it('takes keys round-robin across source nodes', () => {
+    const keys = [
+      ...Array.from({ length: 300 }, (_, i) => ({ key: `a:${i}`, clientIndex: 0 })),
+      ...Array.from({ length: 300 }, (_, i) => ({ key: `b:${i}`, clientIndex: 1 })),
+      ...Array.from({ length: 300 }, (_, i) => ({ key: `c:${i}`, clientIndex: 2 })),
+    ];
+    const picked = pickOverlapSample(keys);
+    expect(picked).toHaveLength(200);
+    expect(picked.slice(0, 3)).toEqual(['a:0', 'b:0', 'c:0']);
+    for (const prefix of ['a:', 'b:', 'c:']) {
+      expect(picked.filter((k) => k.startsWith(prefix)).length).toBeGreaterThanOrEqual(66);
+    }
+  });
+
+  it('fills from larger nodes when a node has few keys, and handles a missing clientIndex', () => {
+    const picked = pickOverlapSample(
+      [{ key: 'x' }, ...Array.from({ length: 10 }, (_, i) => ({ key: `y:${i}`, clientIndex: 1 }))],
+      5,
+    );
+    expect(picked).toEqual(['x', 'y:0', 'y:1', 'y:2', 'y:3']);
   });
 });

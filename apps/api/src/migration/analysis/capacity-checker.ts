@@ -2,6 +2,7 @@ import Valkey, { Cluster } from 'iovalkey';
 import type { DatabaseConnectionConfig, Incompatibility } from '@betterdb/shared';
 import { formatBytes } from '../../scaling-readiness/dimension-inputs';
 import { createTargetClient } from '../execution/client-factory';
+import { masterNodes } from '../validation/key-count-comparator';
 
 /** Memory picture of one target master (the whole instance for a standalone target). */
 export interface MasterMemory {
@@ -18,6 +19,8 @@ export interface MasterMemory {
   /** This master's own maxmemory-policy. */
   policy: string;
   keys: number;
+  /** Keys in db0 only. */
+  db0Keys: number;
   /** Keys with a TTL on this master (`expires=` summed over every db). */
   expires: number;
   /** Share of the hash slots this master owns, 0..1 (1 for a standalone target). */
@@ -27,8 +30,8 @@ export interface MasterMemory {
 /** Memory picture of the whole target, one entry per master. */
 export interface TargetMemory {
   masters: MasterMemory[];
-  /** Keys summed over every master. */
-  keys: number;
+  /** db0 keys summed over every master: what overlap checks compare against. */
+  db0Keys: number;
 }
 
 /** Result of checking a sample of source keys against the target. */
@@ -39,6 +42,11 @@ export interface KeyOverlap {
 
 /** Above this share of a master's free memory the fit is called tight. */
 export const TIGHT_FIT_RATIO = 0.9;
+/**
+ * The source estimate is sampled MEMORY USAGE scaled by key count, so a hard
+ * block needs it to exceed maxmemory by this factor; below that it warns.
+ */
+export const BLOCK_MARGIN = 1.1;
 const OVERLAP_SAMPLE_LIMIT = 200;
 const OVERLAP_BATCH = 50;
 
@@ -50,30 +58,45 @@ function infoNumber(info: string, field: string): number {
   return Number(infoField(info, field) ?? 0) || 0;
 }
 
-/** Sum `keys=` and `expires=` over every db line of an INFO keyspace reply. */
-export function keyspaceTotals(info: string): { keys: number; expires: number } {
+/**
+ * Totals from an INFO keyspace reply. `keys` and `expires` cover every db
+ * (eviction sees all of them); `db0Keys` is db0 only, the db that EXISTS and
+ * the source sample see.
+ */
+export function keyspaceTotals(info: string): { keys: number; expires: number; db0Keys: number } {
   let keys = 0;
   let expires = 0;
-  for (const match of info.matchAll(/^db\d+:keys=(\d+),expires=(\d+)/gm)) {
-    keys += Number(match[1]);
-    expires += Number(match[2]);
+  let db0Keys = 0;
+  for (const match of info.matchAll(/^db(\d+):keys=(\d+),expires=(\d+)/gm)) {
+    keys += Number(match[2]);
+    expires += Number(match[3]);
+    if (match[1] === '0') db0Keys = Number(match[2]);
   }
-  return { keys, expires };
+  return { keys, expires, db0Keys };
+}
+
+/** TTL counts from analysis's key sample (`ttlDistribution`). */
+export interface TtlSample {
+  sampled: number;
+  noExpiry: number;
 }
 
 /**
- * Source keys with a TTL, from the source's INFO keyspace. Returns null when
- * the count cannot be trusted: no INFO at all, or a zero read from only part of
- * a clustered source (other masters may hold TTL keys).
+ * Source keys with a TTL. Uses INFO keyspace when it shows any, then the key
+ * sample (which spans every source master). Returns null when neither can
+ * vouch for "none": no data, or a zero INFO read from one node of a cluster
+ * with no usable sample.
  */
 export function sourceExpiringKeysFrom(
   keyspaceInfo: string | null | undefined,
   coversWholeSource: boolean,
+  ttlSample: TtlSample | null = null,
 ): number | null {
-  if (!keyspaceInfo) return null;
-  const { expires } = keyspaceTotals(keyspaceInfo);
-  if (expires > 0) return expires;
-  return coversWholeSource ? 0 : null;
+  const fromInfo = keyspaceInfo ? keyspaceTotals(keyspaceInfo).expires : null;
+  if (fromInfo !== null && fromInfo > 0) return fromInfo;
+  if (ttlSample && ttlSample.sampled > 0) return Math.max(0, ttlSample.sampled - ttlSample.noExpiry);
+  if (fromInfo === 0 && coversWholeSource) return 0;
+  return null;
 }
 
 function nodeName(node: Valkey): string {
@@ -103,14 +126,14 @@ function slotShares(cluster: Cluster, masters: Valkey[]): number[] {
 export async function readTargetMemory(client: Valkey): Promise<TargetMemory> {
   const maybeCluster: unknown = client;
   const cluster = maybeCluster instanceof Cluster ? maybeCluster : null;
-  const nodes: Valkey[] = cluster ? cluster.nodes('master') : [client];
+  const nodes = masterNodes(client);
   if (nodes.length === 0) throw new Error('No target masters available');
   const shares = cluster ? slotShares(cluster, nodes) : [1];
 
   const masters = await Promise.all(
     nodes.map(async (node, i): Promise<MasterMemory> => {
       const [memory, keyspace] = await Promise.all([node.info('memory'), node.info('keyspace')]);
-      const { keys, expires } = keyspaceTotals(keyspace);
+      const { keys, expires, db0Keys } = keyspaceTotals(keyspace);
       return {
         name: cluster ? nodeName(node) : 'target',
         maxmemory: infoNumber(memory, 'maxmemory'),
@@ -120,12 +143,13 @@ export async function readTargetMemory(client: Valkey): Promise<TargetMemory> {
         ),
         policy: infoField(memory, 'maxmemory_policy') ?? 'noeviction',
         keys,
+        db0Keys,
         expires,
         slotShare: shares[i],
       };
     }),
   );
-  return { masters, keys: masters.reduce((s, m) => s + m.keys, 0) };
+  return { masters, db0Keys: masters.reduce((s, m) => s + m.db0Keys, 0) };
 }
 
 /** EXISTS a sample of source keys on the target, one key per call so cluster routing works. */
@@ -140,8 +164,39 @@ export async function sampleKeyOverlap(target: Valkey, keys: string[]): Promise<
   return { sampled: sample.length, existing };
 }
 
-type CapacityKind = 'tight' | 'evict' | 'oom';
-const KIND_RANK: Record<CapacityKind, number> = { tight: 1, evict: 2, oom: 3 };
+/**
+ * Pick up to `limit` source keys round-robin across the source nodes they
+ * were sampled from, so a sample filled node by node does not come only
+ * from the first master.
+ */
+export function pickOverlapSample(
+  keys: { key: string; clientIndex?: number }[],
+  limit = OVERLAP_SAMPLE_LIMIT,
+): string[] {
+  const groups = new Map<number, string[]>();
+  for (const k of keys) {
+    const group = k.clientIndex ?? 0;
+    const list = groups.get(group);
+    if (list) list.push(k.key);
+    else groups.set(group, [k.key]);
+  }
+  const queues = [...groups.values()];
+  const picked: string[] = [];
+  for (let i = 0; picked.length < limit; i++) {
+    let added = false;
+    for (const queue of queues) {
+      if (i < queue.length && picked.length < limit) {
+        picked.push(queue[i]);
+        added = true;
+      }
+    }
+    if (!added) break;
+  }
+  return picked;
+}
+
+type CapacityKind = 'tight' | 'flush' | 'evict' | 'oom';
+const KIND_RANK: Record<CapacityKind, number> = { tight: 1, flush: 2, evict: 3, oom: 4 };
 
 interface MasterFinding {
   master: MasterMemory;
@@ -165,21 +220,24 @@ function assessMaster(
   const free = Math.max(0, master.maxmemory - master.usedMemory);
   const base = { master, need, free, noEvictionCandidates: false };
 
-  if (need > free) {
-    if (master.policy.startsWith('allkeys-')) return { ...base, kind: 'evict' };
-    if (master.policy.startsWith('volatile-')) {
-      // volatile-* only evicts keys with a TTL. With none on this master and none
-      // arriving from the source, Valkey behaves like noeviction. An unknown
-      // source count (null) is not treated as "none".
-      const noCandidates = master.expires === 0 && sourceExpiringKeys === 0;
-      return noCandidates
-        ? { ...base, kind: 'oom', noEvictionCandidates: true }
-        : { ...base, kind: 'evict' };
-    }
-    return { ...base, kind: 'oom' };
+  if (need <= free) {
+    return need > free * TIGHT_FIT_RATIO ? { ...base, kind: 'tight' } : null;
   }
-  if (need > free * TIGHT_FIT_RATIO) return { ...base, kind: 'tight' };
-  return null;
+
+  // volatile-* only evicts keys with a TTL. With none on this master and none
+  // arriving from the source, Valkey behaves like noeviction. An unknown
+  // source count (null) is not treated as "none".
+  const volatile = master.policy.startsWith('volatile-');
+  const noEvictionCandidates = volatile && master.expires === 0 && sourceExpiringKeys === 0;
+  const canEvict = master.policy.startsWith('allkeys-') || (volatile && !noEvictionCandidates);
+  if (canEvict) return { ...base, kind: 'evict' };
+
+  // Cannot evict. emptyDbBeforeSync (or a manual flush) frees the current
+  // data, so only block when the source would not fit even in an empty master.
+  if (need > master.maxmemory * BLOCK_MARGIN) {
+    return { ...base, kind: 'oom', noEvictionCandidates };
+  }
+  return { ...base, kind: 'flush', noEvictionCandidates };
 }
 
 function overflowRatio(f: MasterFinding): number {
@@ -207,10 +265,13 @@ function describeFit(f: MasterFinding, sourceBytes: number, clustered: boolean):
  * Will each target master hold its share of the source dataset?
  * Every master is judged on its own memory and policy; masters without a
  * maxmemory limit are skipped. The worst master is reported:
- * - cannot evict (noeviction, or volatile-* with no TTL keys on the master or
- *   in the source) and does not fit -> blocking: writes fail with OOM part-way.
- * - evicts (allkeys-*, volatile-* with TTL keys) and does not fit -> warning.
- * - fits, but uses more than TIGHT_FIT_RATIO of free memory -> warning.
+ * Per master, with need = source x slot share and free = maxmemory - used:
+ * - fits but uses more than TIGHT_FIT_RATIO of free -> warning (tight).
+ * - does not fit, master can evict (allkeys-*, volatile-* with TTL keys) -> warning (evict).
+ * - does not fit, cannot evict, need <= maxmemory x BLOCK_MARGIN -> warning (only
+ *   fits if the target is emptied first, e.g. emptyDbBeforeSync).
+ * - does not fit, cannot evict, need > maxmemory x BLOCK_MARGIN -> blocking (OOM
+ *   even on an empty target).
  * `sourceExpiringKeys` is null when the source's TTL key count is unknown.
  */
 export function checkTargetCapacity(
@@ -235,14 +296,28 @@ export function checkTargetCapacity(
 
   if (worst.kind === 'oom') {
     const why = worst.noEvictionCandidates
-      ? `A '${policy}' policy only evicts keys with a TTL, and there are none on this target or in the source, so writes will fail with OOM part-way through the migration.`
-      : 'Writes will fail with OOM part-way through the migration.';
+      ? ` A '${policy}' policy only evicts keys with a TTL, and there are none on this target or in the source.`
+      : '';
     return [
       {
         severity: 'blocking',
         category: 'capacity',
         title: 'Target does not have enough memory',
-        detail: `${fit} (policy '${policy}'). ${why} Raise maxmemory, add shards, or free memory on the target first.${spread}`,
+        detail: `${fit} (policy '${policy}'). The source does not fit within maxmemory even on an empty target, so writes will fail with OOM part-way through the migration.${why} Raise maxmemory or add shards first.${spread}`,
+      },
+    ];
+  }
+
+  if (worst.kind === 'flush') {
+    const why = worst.noEvictionCandidates
+      ? ` A '${policy}' policy only evicts keys with a TTL, and there are none on this target or in the source.`
+      : '';
+    return [
+      {
+        severity: 'warning',
+        category: 'capacity',
+        title: 'Target only has room if it is emptied first',
+        detail: `${fit} (policy '${policy}'). The source fits within maxmemory but not next to the data already on the target, so writes will fail with OOM part-way through unless the target is emptied first.${why} Use a RedisShake mode with emptyDbBeforeSync, flush the target, or raise maxmemory before migrating.${spread}`,
       },
     ];
   }
@@ -281,7 +356,7 @@ export function checkKeyOverlap(targetKeys: number, overlap: KeyOverlap | null):
         severity: 'warning',
         category: 'key_overlap',
         title: 'Source keys already exist on the target',
-        detail: `${overlap.existing} of ${overlap.sampled} sampled source keys (${pct}%) already exist on the target, which holds ${targetKeys.toLocaleString()} keys. Command mode overwrites them; RedisShake modes stop with BUSYKEY unless the target is emptied first (emptyDbBeforeSync).`,
+        detail: `${overlap.existing} of ${overlap.sampled} sampled source keys (${pct}%) already exist on the target, which holds ${targetKeys.toLocaleString()} keys in db0. Command mode overwrites them; RedisShake modes stop with BUSYKEY unless the target is emptied first (emptyDbBeforeSync).`,
       },
     ];
   }
@@ -290,7 +365,7 @@ export function checkKeyOverlap(targetKeys: number, overlap: KeyOverlap | null):
       severity: 'info',
       category: 'key_overlap',
       title: 'Target is not empty',
-      detail: `The target already holds ${targetKeys.toLocaleString()} keys. None of the sampled source keys exist there, so they are not expected to collide, but the target's key count will not match the source after migration.`,
+      detail: `The target already holds ${targetKeys.toLocaleString()} keys in db0. None of the sampled source keys exist there, so they are not expected to collide, but the target's key count will not match the source after migration.`,
     },
   ];
 }
@@ -322,10 +397,10 @@ export async function probeTargetCapacity(input: CapacityProbeInput): Promise<In
   try {
     await client.connect();
     const target = await readTargetMemory(client);
-    const overlap = target.keys > 0 ? await sampleKeyOverlap(client, input.sampledKeys) : null;
+    const overlap = target.db0Keys > 0 ? await sampleKeyOverlap(client, input.sampledKeys) : null;
     return [
       ...checkTargetCapacity(input.sourceBytes, target, input.sourceExpiringKeys ?? null),
-      ...checkKeyOverlap(target.keys, overlap),
+      ...checkKeyOverlap(target.db0Keys, overlap),
     ];
   } finally {
     await client.quit().catch(() => undefined);

@@ -437,7 +437,7 @@ async function runValidation(
     expect(result.blockingCount).toBeGreaterThanOrEqual(1);
   }, 60_000);
 
-  it('analysis: a target without room for the source should report a blocking capacity issue', async () => {
+  it('analysis: a target whose data leaves no room for the source should warn to empty it first', async () => {
     const srcId = connIds['srcSA'];
     const tgtId = connIds['tgtSA'];
     if (!srcId || !tgtId) throw new Error('Connections not registered');
@@ -455,7 +455,11 @@ async function runValidation(
       expect(result.status).toBe('completed');
       expect(result.incompatibilities).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ severity: 'blocking', category: 'capacity' }),
+          expect.objectContaining({
+            severity: 'warning',
+            category: 'capacity',
+            title: 'Target only has room if it is emptied first',
+          }),
         ]),
       );
     } finally {
