@@ -22,6 +22,7 @@ jest.mock('../analysis/hfe-detector', () => ({
   }),
 }));
 jest.mock('../analysis/capacity-checker', () => ({
+  ...jest.requireActual('../analysis/capacity-checker'),
   probeTargetCapacity: jest.fn().mockResolvedValue([]),
 }));
 jest.mock('../analysis/commandlog-analyzer', () => ({
@@ -203,7 +204,12 @@ describe('MigrationService capacity preflight', () => {
 
     expect(job.status).toBe('completed');
     expect(probe).toHaveBeenCalledWith(
-      expect.objectContaining({ targetIsCluster: false, sourceBytes: 1000000, sampledKeys: [] }),
+      expect.objectContaining({
+        targetIsCluster: false,
+        sourceBytes: 1000000,
+        sampledKeys: [],
+        sourceExpiringKeys: 0,
+      }),
     );
     expect(job.incompatibilities).toEqual(
       expect.arrayContaining([expect.objectContaining({ category: 'capacity', severity: 'blocking' })]),

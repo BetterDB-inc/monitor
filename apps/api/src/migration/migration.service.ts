@@ -9,7 +9,7 @@ import { sampleTtls } from './analysis/ttl-sampler';
 import { detectHfe } from './analysis/hfe-detector';
 import { analyzeCommands } from './analysis/commandlog-analyzer';
 import { buildInstanceMeta, checkCompatibility } from './analysis/compatibility-checker';
-import { probeTargetCapacity } from './analysis/capacity-checker';
+import { probeTargetCapacity, sourceExpiringKeysFrom } from './analysis/capacity-checker';
 import {
   loadAnalysisVerdict,
   resolveVerdictDir,
@@ -513,12 +513,23 @@ export class MigrationService {
       // Capacity + key-overlap preflight. Best-effort: a target that cannot be
       // probed (ACL, unreachable master) adds no issues and never fails analysis.
       if (targetConfig) {
+        // TTL keys on the source, from the INFO keyspace already read in step 2.
+        // That INFO came from one node, so a zero on a cluster source is unknown.
+        let sourceExpiringKeys: number | null = null;
+        try {
+          const keyspaceText = Object.entries(keyspaceSection)
+            .filter(([key, val]) => key.startsWith('db') && typeof val === 'string')
+            .map(([key, val]) => `${key}:${val}`)
+            .join('\n');
+          sourceExpiringKeys = sourceExpiringKeysFrom(keyspaceText, !isCluster);
+        } catch { /* unknown TTL count: the capacity check treats null as "not none" */ }
         try {
           incompatibilities.push(...await probeTargetCapacity({
             targetConfig,
             targetIsCluster: job.result.targetIsCluster === true,
             sourceBytes: job.result.estimatedTotalMemoryBytes || job.result.totalMemoryBytes || 0,
             sampledKeys: sampledKeys.map(k => k.key),
+            sourceExpiringKeys,
           }));
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
