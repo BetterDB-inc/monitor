@@ -67,7 +67,9 @@ export interface AppSettings {
   createdAt: number;
 }
 
-export type SettingsUpdateRequest = Partial<Omit<AppSettings, 'id' | 'createdAt' | 'updatedAt'>>;
+export type SettingsUpdateRequest = Partial<
+  Omit<AppSettings, 'id' | 'createdAt' | 'updatedAt' | 'anomalyDetectorConfig'>
+>;
 
 export interface SettingsResponse {
   settings: AppSettings;

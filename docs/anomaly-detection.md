@@ -561,12 +561,12 @@ In `overrides`, a disabled absolute threshold is shown as `0` (the same value PA
 |-------|-------------|
 | `warningZScore` | Z-score threshold for WARNING (0.5–10) |
 | `criticalZScore` | Z-score threshold for CRITICAL (1–15, must be > warning when both set) |
-| `warningAbsolute` | Absolute value threshold for WARNING (`0` disables it) |
-| `criticalAbsolute` | Absolute value threshold for CRITICAL (`0` disables it) |
+| `warningAbsolute` | Absolute value threshold for WARNING, must be > 0. `0` is reserved: it disables the check. |
+| `criticalAbsolute` | Absolute value threshold for CRITICAL, must be > 0. `0` is reserved: it disables the check. |
 | `consecutiveRequired` | Consecutive samples above threshold before alerting (1–20) |
 | `cooldownMs` | Minimum ms between alerts for the same metric (1000–3600000) |
 
-To disable an absolute threshold, send `0`. Do not send `null`.
+To disable an absolute threshold, send `0`. `null` is rejected with 400 for every field; omit a field to leave it unchanged.
 
 **Metrics**: `connections`, `ops_per_sec`, `memory_used`, `input_kbps`, `output_kbps`, `slowlog_last_id`, `acl_denied`, `evicted_keys`, `blocked_clients`, `keyspace_misses`, `fragmentation_ratio`.
 
@@ -588,7 +588,7 @@ Detector thresholds can only be changed through these endpoints; `PUT /api/setti
 
 These endpoints require a license that includes anomaly detection. Without it they return the license guard's error.
 
-Changes apply to the running anomaly detectors immediately (no restart). In a multi-replica deployment a PATCH updates only the replica that served it; other replicas pick up the stored config on their next restart.
+Changes apply to the running anomaly detectors immediately (no restart). In a multi-replica deployment the replica that served the request applies the change immediately; other replicas apply it to their running detectors on their next settings refresh (every 30 s), with no restart.
 
 Overrides persist in postgres/sqlite settings storage and survive restarts. The memory storage backend resets overrides on restart (same as other settings).
 

@@ -32,7 +32,6 @@ import {
   KeyPatternSnapshot,
   LatencySnapshotQueryOptions,
   MemorySnapshotQueryOptions,
-  SettingsUpdateRequest,
   SlowLogQueryOptions,
   StoragePort,
   StoredAclEntry,
@@ -3283,7 +3282,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return saved;
   }
 
-  async updateSettings(updates: SettingsUpdateRequest): Promise<AppSettings> {
+  async updateSettings(updates: Partial<AppSettings>): Promise<AppSettings> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const current = await this.getSettings();

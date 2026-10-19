@@ -541,7 +541,7 @@ export interface StoragePort {
   // Settings Methods (global, not connection-scoped)
   getSettings(): Promise<AppSettings | null>;
   saveSettings(settings: AppSettings): Promise<AppSettings>;
-  updateSettings(updates: SettingsUpdateRequest): Promise<AppSettings>;
+  updateSettings(updates: Partial<AppSettings>): Promise<AppSettings>;
 
   // Webhook Methods - connectionId optional filter for scoping webhooks to connections
   createWebhook(webhook: Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>): Promise<Webhook>;

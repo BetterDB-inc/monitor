@@ -34,7 +34,6 @@ import {
   KeyPatternQueryOptions,
   KeyAnalyticsSummary,
   AppSettings,
-  SettingsUpdateRequest,
   Webhook,
   WebhookDelivery,
   WebhookEventType,
@@ -3317,7 +3316,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return saved;
   }
 
-  async updateSettings(updates: SettingsUpdateRequest): Promise<AppSettings> {
+  async updateSettings(updates: Partial<AppSettings>): Promise<AppSettings> {
     if (!this.db) throw new Error('Database not initialized');
 
     const current = await this.getSettings();

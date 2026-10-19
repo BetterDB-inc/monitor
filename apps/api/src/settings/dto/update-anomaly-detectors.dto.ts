@@ -3,21 +3,29 @@ import { Type } from 'class-transformer';
 import {
   IsInt,
   IsNumber,
-  IsOptional,
+  IsObject,
   Max,
   Min,
   Validate,
+  ValidateIf,
   ValidateNested,
   ValidationArguments,
   ValidatorConstraint,
   ValidatorConstraintInterface,
 } from 'class-validator';
 
+/**
+ * Like @IsOptional, but only `undefined` (field omitted) skips validation.
+ * An explicit `null` is validated and rejected with 400, because null cannot
+ * mean "unchanged" (omit the field) or "disabled" (send 0 for absolutes).
+ */
+const IsOptionalNotNull = () => ValidateIf((_obj: unknown, value: unknown) => value !== undefined);
+
 @ValidatorConstraint({ name: 'criticalGreaterThanWarning', async: false })
 class CriticalGreaterThanWarningValidator implements ValidatorConstraintInterface {
   validate(criticalZScore: number, args: ValidationArguments): boolean {
     const obj = args.object as DetectorConfigDto;
-    if (obj.warningZScore === undefined || criticalZScore === undefined) {
+    if (obj.warningZScore == null || criticalZScore == null) {
       return true;
     }
     return obj.warningZScore < criticalZScore;
@@ -34,8 +42,8 @@ class CriticalAbsoluteGreaterThanWarningValidator implements ValidatorConstraint
     const obj = args.object as DetectorConfigDto;
     // 0 means "disabled", so there is no ordering to enforce.
     if (
-      obj.warningAbsolute === undefined ||
-      criticalAbsolute === undefined ||
+      obj.warningAbsolute == null ||
+      criticalAbsolute == null ||
       obj.warningAbsolute === 0 ||
       criticalAbsolute === 0
     ) {
@@ -51,14 +59,14 @@ class CriticalAbsoluteGreaterThanWarningValidator implements ValidatorConstraint
 
 export class DetectorConfigDto {
   @ApiPropertyOptional({ minimum: 0.5, maximum: 10 })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsNumber()
   @Min(0.5)
   @Max(10)
   warningZScore?: number;
 
   @ApiPropertyOptional({ minimum: 1, maximum: 15 })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsNumber()
   @Min(1)
   @Max(15)
@@ -68,11 +76,12 @@ export class DetectorConfigDto {
   @ApiPropertyOptional({
     minimum: 0,
     description:
-      'Absolute WARNING threshold. Send 0 to disable it (no absolute threshold). ' +
-      'Omit to leave unchanged. GET returns 0 in overrides for a disabled threshold ' +
-      'and omits it from resolved — never send `null` back on PATCH.',
+      'Absolute WARNING threshold; must be > 0 to be active. 0 is a reserved value, not a threshold: ' +
+      'it DISABLES the absolute WARNING check. Omit the field to leave it unchanged. ' +
+      'null is rejected (400). In GET, overrides show a disabled threshold as 0; resolved omits it.',
+    example: 10,
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsNumber()
   @Min(0)
   warningAbsolute?: number;
@@ -80,25 +89,26 @@ export class DetectorConfigDto {
   @ApiPropertyOptional({
     minimum: 0,
     description:
-      'Absolute CRITICAL threshold. Send 0 to disable it (no absolute threshold). ' +
-      'Omit to leave unchanged. GET returns 0 in overrides for a disabled threshold ' +
-      'and omits it from resolved — never send `null` back on PATCH.',
+      'Absolute CRITICAL threshold; must be > 0 to be active. 0 is a reserved value, not a threshold: ' +
+      'it DISABLES the absolute CRITICAL check. Omit the field to leave it unchanged. ' +
+      'null is rejected (400). In GET, overrides show a disabled threshold as 0; resolved omits it.',
+    example: 10,
   })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsNumber()
   @Min(0)
   @Validate(CriticalAbsoluteGreaterThanWarningValidator)
   criticalAbsolute?: number;
 
   @ApiPropertyOptional({ minimum: 1, maximum: 20 })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsInt()
   @Min(1)
   @Max(20)
   consecutiveRequired?: number;
 
   @ApiPropertyOptional({ minimum: 1000, maximum: 3600000 })
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsInt()
   @Min(1000)
   @Max(3600000)
@@ -107,67 +117,78 @@ export class DetectorConfigDto {
 
 export class UpdateAnomalyDetectorsDto {
   @ApiPropertyOptional({ type: DetectorConfigDto })
-  @IsOptional()
+  @IsOptionalNotNull()
+  @IsObject()
   @ValidateNested()
   @Type(() => DetectorConfigDto)
   connections?: DetectorConfigDto;
 
   @ApiPropertyOptional({ type: DetectorConfigDto })
-  @IsOptional()
+  @IsOptionalNotNull()
+  @IsObject()
   @ValidateNested()
   @Type(() => DetectorConfigDto)
   ops_per_sec?: DetectorConfigDto;
 
   @ApiPropertyOptional({ type: DetectorConfigDto })
-  @IsOptional()
+  @IsOptionalNotNull()
+  @IsObject()
   @ValidateNested()
   @Type(() => DetectorConfigDto)
   memory_used?: DetectorConfigDto;
 
   @ApiPropertyOptional({ type: DetectorConfigDto })
-  @IsOptional()
+  @IsOptionalNotNull()
+  @IsObject()
   @ValidateNested()
   @Type(() => DetectorConfigDto)
   input_kbps?: DetectorConfigDto;
 
   @ApiPropertyOptional({ type: DetectorConfigDto })
-  @IsOptional()
+  @IsOptionalNotNull()
+  @IsObject()
   @ValidateNested()
   @Type(() => DetectorConfigDto)
   output_kbps?: DetectorConfigDto;
 
   @ApiPropertyOptional({ type: DetectorConfigDto })
-  @IsOptional()
+  @IsOptionalNotNull()
+  @IsObject()
   @ValidateNested()
   @Type(() => DetectorConfigDto)
   slowlog_last_id?: DetectorConfigDto;
 
   @ApiPropertyOptional({ type: DetectorConfigDto })
-  @IsOptional()
+  @IsOptionalNotNull()
+  @IsObject()
   @ValidateNested()
   @Type(() => DetectorConfigDto)
   acl_denied?: DetectorConfigDto;
 
   @ApiPropertyOptional({ type: DetectorConfigDto })
-  @IsOptional()
+  @IsOptionalNotNull()
+  @IsObject()
   @ValidateNested()
   @Type(() => DetectorConfigDto)
   evicted_keys?: DetectorConfigDto;
 
   @ApiPropertyOptional({ type: DetectorConfigDto })
-  @IsOptional()
+  @IsOptionalNotNull()
+  @IsObject()
   @ValidateNested()
   @Type(() => DetectorConfigDto)
   blocked_clients?: DetectorConfigDto;
 
   @ApiPropertyOptional({ type: DetectorConfigDto })
-  @IsOptional()
+  @IsOptionalNotNull()
+  @IsObject()
   @ValidateNested()
   @Type(() => DetectorConfigDto)
   keyspace_misses?: DetectorConfigDto;
 
   @ApiPropertyOptional({ type: DetectorConfigDto })
-  @IsOptional()
+  @IsOptionalNotNull()
+  @IsObject()
   @ValidateNested()
   @Type(() => DetectorConfigDto)
   fragmentation_ratio?: DetectorConfigDto;

@@ -37,9 +37,11 @@ describe('Settings anomaly detector thresholds', () => {
   beforeEach(async () => {
     settingsService = {
       getDetectorConfig: jest.fn().mockResolvedValue({}),
-      updateDetectorConfig: jest.fn().mockImplementation(async (map) => map),
-      resetDetectorConfig: jest.fn().mockResolvedValue(undefined),
-      clearDetectorOverride: jest.fn().mockResolvedValue({}),
+      updateDetectorConfig: jest
+        .fn()
+        .mockImplementation(async (map) => ({ config: map, changed: true })),
+      resetDetectorConfig: jest.fn().mockResolvedValue({ changed: true }),
+      clearDetectorOverride: jest.fn().mockResolvedValue({ config: {}, changed: true }),
     };
     prometheusService = { incrementDetectorConfigUpdates: jest.fn() };
 
@@ -111,7 +113,7 @@ describe('Settings anomaly detector thresholds', () => {
 
     it('persists partial updates via SettingsService', async () => {
       const merged = { [MetricType.connections]: { warningZScore: 2.5, consecutiveRequired: 5 } };
-      settingsService.updateDetectorConfig.mockResolvedValue(merged);
+      settingsService.updateDetectorConfig.mockResolvedValue({ config: merged, changed: true });
 
       const result = await controller.patchAnomalyDetectors({
         connections: { warningZScore: 2.5, consecutiveRequired: 5 },
@@ -197,7 +199,8 @@ describe('Settings anomaly detector thresholds', () => {
 
     it('delegates to SettingsService.clearDetectorOverride', async () => {
       settingsService.clearDetectorOverride.mockResolvedValue({
-        memory_used: { criticalZScore: 4 },
+        config: { memory_used: { criticalZScore: 4 } },
+        changed: true,
       });
       const result = await controller.deleteAnomalyDetector('connections');
       expect(settingsService.clearDetectorOverride).toHaveBeenCalledWith(MetricType.connections);
@@ -274,7 +277,7 @@ describe('Settings anomaly detector thresholds', () => {
         connections: { warningZScore: 2.5, consecutiveRequired: 5 },
       });
 
-      const result = await svc.updateDetectorConfig({
+      const { config: result } = await svc.updateDetectorConfig({
         connections: { warningZScore: 2.8 },
       });
 
@@ -342,7 +345,9 @@ describe('Settings anomaly detector thresholds', () => {
 
     it('0 disables an absolute threshold and GET omits it', async () => {
       const { svc } = makeService({});
-      const result = await svc.updateDetectorConfig({ acl_denied: { criticalAbsolute: 0 } });
+      const { config: result } = await svc.updateDetectorConfig({
+        acl_denied: { criticalAbsolute: 0 },
+      });
       expect(result.acl_denied?.criticalAbsolute).toBe(Number.POSITIVE_INFINITY);
       expect(sanitizeStoredOverride(result.acl_denied!)).toEqual({ criticalAbsolute: 0 });
       expect(resolveDetectorConfig(MetricType.acl_denied, result).criticalAbsolute).toBe(
@@ -360,7 +365,7 @@ describe('Settings anomaly detector thresholds', () => {
 
       const result = await svc.clearDetectorOverride(MetricType.connections);
 
-      expect(result).toEqual({ memory_used: { criticalZScore: 4.0 } });
+      expect(result).toEqual({ config: { memory_used: { criticalZScore: 4.0 } }, changed: true });
       expect((await storageClient.getSettings()).anomalyDetectorConfig).toEqual({
         memory_used: { criticalZScore: 4.0 },
       });
@@ -403,7 +408,7 @@ describe('Settings anomaly detector thresholds', () => {
 
       await expect(
         svc.updateDetectorConfig({ connections: { warningZScore: 2.7 } }),
-      ).resolves.toEqual({ connections: { warningZScore: 2.7 } });
+      ).resolves.toEqual({ config: { connections: { warningZScore: 2.7 } }, changed: true });
       expect(after).toHaveBeenCalledWith({ connections: { warningZScore: 2.7 } });
     });
 
@@ -429,7 +434,10 @@ describe('Settings anomaly detector thresholds', () => {
       const good = svc.updateDetectorConfig({ memory_used: { criticalZScore: 4.0 } });
 
       await expect(bad).rejects.toBeInstanceOf(BadRequestException);
-      await expect(good).resolves.toEqual({ memory_used: { criticalZScore: 4.0 } });
+      await expect(good).resolves.toEqual({
+        config: { memory_used: { criticalZScore: 4.0 } },
+        changed: true,
+      });
     });
   });
 
@@ -506,7 +514,9 @@ describe('Settings anomaly detector thresholds', () => {
 
     it('a follow-up warningAbsolute PATCH succeeds with critical disabled', async () => {
       await svc.updateDetectorConfig({ acl_denied: { criticalAbsolute: 0 } });
-      const result = await svc.updateDetectorConfig({ acl_denied: { warningAbsolute: 100 } });
+      const { config: result } = await svc.updateDetectorConfig({
+        acl_denied: { warningAbsolute: 100 },
+      });
       expect(result.acl_denied?.warningAbsolute).toBe(100);
       expect(result.acl_denied?.criticalAbsolute).toBe(Number.POSITIVE_INFINITY);
     });
@@ -520,9 +530,9 @@ describe('Settings anomaly detector thresholds', () => {
       expect(first.defaults.acl_denied.criticalAbsolute).toBe(50);
       expect(JSON.stringify(first)).not.toContain('null');
 
-      // Send GET's overrides back as-is: accepted, and GET is unchanged.
+      // Send GET's overrides back as-is: accepted as a no-op, and GET is unchanged.
       await expect(realController.patchAnomalyDetectors(first.overrides)).resolves.toMatchObject({
-        message: 'Detector config updated',
+        message: 'No changes',
       });
       expect(await realController.getAnomalyDetectors()).toEqual(first);
     });
@@ -536,6 +546,198 @@ describe('Settings anomaly detector thresholds', () => {
       };
       expect(resolveDetectorConfig(MetricType.connections, merged).warningZScore).toBe(2.8);
       expect(resolveDetectorConfig(MetricType.connections, merged).consecutiveRequired).toBe(5);
+    });
+  });
+
+  describe('null handling', () => {
+    const pipe = new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true });
+    const validate = (body: unknown) =>
+      pipe.transform(body, { type: 'body', metatype: UpdateAnomalyDetectorsDto });
+
+    it.each([
+      ['warningZScore'],
+      ['criticalZScore'],
+      ['warningAbsolute'],
+      ['criticalAbsolute'],
+      ['consecutiveRequired'],
+      ['cooldownMs'],
+    ])('rejects explicit null for field %s with 400', async (field) => {
+      await expect(validate({ connections: { [field]: null } })).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+    });
+
+    it('rejects the reviewer payload (multiple null fields) with 400', async () => {
+      await expect(
+        validate({
+          connections: { warningZScore: null, cooldownMs: null, consecutiveRequired: null },
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('rejects a null metric object with 400 (not 500)', async () => {
+      await expect(validate({ connections: null })).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('still accepts omitted fields and 0-to-disable', async () => {
+      await expect(validate({ connections: { warningZScore: 2.5 } })).resolves.toBeDefined();
+      await expect(validate({ acl_denied: { criticalAbsolute: 0 } })).resolves.toBeDefined();
+    });
+  });
+
+  describe('no-op updates', () => {
+    const makeService = (stored: Record<string, any>) => {
+      let settings: any = {
+        id: 1,
+        auditPollIntervalMs: 60000,
+        clientAnalyticsPollIntervalMs: 60000,
+        anomalyPollIntervalMs: 1000,
+        anomalyCacheTtlMs: 3600000,
+        anomalyPrometheusIntervalMs: 30000,
+        metricForecastingEnabled: true,
+        metricForecastingDefaultRollingWindowMs: 21600000,
+        metricForecastingDefaultAlertThresholdMs: 7200000,
+        inferenceSlaConfig: {},
+        anomalyDetectorConfig: stored,
+        localRetentionDays: null,
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      const storageClient = {
+        getSettings: jest.fn().mockImplementation(async () => settings),
+        updateSettings: jest.fn().mockImplementation(async (updates: any) => {
+          settings = { ...settings, ...updates };
+          return settings;
+        }),
+        saveSettings: jest.fn().mockImplementation(async (next: any) => {
+          settings = { ...next };
+          return settings;
+        }),
+      };
+      const configService = {
+        get: jest.fn((_key: string, defaultValue: string) => defaultValue),
+      };
+      const svc = new SettingsService(storageClient as any, configService as any);
+      svc['cachedSettings'] = settings;
+      const counter = { incrementDetectorConfigUpdates: jest.fn() };
+      const ctrl = new SettingsController(svc, counter as any);
+      const listener = jest.fn();
+      svc.onDetectorConfigChange(listener);
+      return { svc, ctrl, storageClient, counter, listener };
+    };
+
+    const expectNothingHappened = (t: ReturnType<typeof makeService>) => {
+      expect(t.storageClient.updateSettings).not.toHaveBeenCalled();
+      expect(t.storageClient.saveSettings).not.toHaveBeenCalled();
+      expect(t.listener).not.toHaveBeenCalled();
+      expect(t.counter.incrementDetectorConfigUpdates).not.toHaveBeenCalled();
+    };
+
+    it('PATCH {} is a no-op', async () => {
+      const t = makeService({ memory_used: { criticalZScore: 4 } });
+      const res = await t.ctrl.patchAnomalyDetectors({});
+      expect(res.message).toBe('No changes');
+      expectNothingHappened(t);
+    });
+
+    it('PATCH {"connections":{}} is a no-op and stores no connections key', async () => {
+      const t = makeService({});
+      const res = await t.ctrl.patchAnomalyDetectors({ connections: {} });
+      expect(res.message).toBe('No changes');
+      expect(res.config).not.toHaveProperty('connections');
+      expect(t.storageClient.getSettings).toBeDefined();
+      expect((await t.storageClient.getSettings()).anomalyDetectorConfig).not.toHaveProperty(
+        'connections',
+      );
+      expectNothingHappened(t);
+    });
+
+    it('PATCH with the value already stored is a no-op', async () => {
+      const t = makeService({ connections: { warningZScore: 2.7 } });
+      const res = await t.ctrl.patchAnomalyDetectors({ connections: { warningZScore: 2.7 } });
+      expect(res.message).toBe('No changes');
+      expectNothingHappened(t);
+    });
+
+    it('DELETE on a metric with no override is a no-op', async () => {
+      const t = makeService({ memory_used: { criticalZScore: 4 } });
+      const res = await t.ctrl.deleteAnomalyDetector('connections');
+      expect(res.message).toBe('No override to clear for connections');
+      expectNothingHappened(t);
+    });
+
+    it('reset with no overrides is a no-op', async () => {
+      const t = makeService({});
+      const res = await t.ctrl.resetAnomalyDetectors();
+      expect(res.message).toBe('Detector config already at defaults');
+      expectNothingHappened(t);
+    });
+
+    it('a real change still writes, notifies once and counts once', async () => {
+      const t = makeService({});
+      const res = await t.ctrl.patchAnomalyDetectors({ connections: { warningZScore: 2.7 } });
+      expect(res.message).toBe('Detector config updated');
+      expect(t.storageClient.updateSettings).toHaveBeenCalledTimes(1);
+      expect(t.listener).toHaveBeenCalledTimes(1);
+      expect(t.counter.incrementDetectorConfigUpdates).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('multi-replica refresh', () => {
+    it('propagates a change to another replica once, without double-notifying the writer', async () => {
+      let settings: any = {
+        id: 1,
+        auditPollIntervalMs: 60000,
+        clientAnalyticsPollIntervalMs: 60000,
+        anomalyPollIntervalMs: 1000,
+        anomalyCacheTtlMs: 3600000,
+        anomalyPrometheusIntervalMs: 30000,
+        metricForecastingEnabled: true,
+        metricForecastingDefaultRollingWindowMs: 21600000,
+        metricForecastingDefaultAlertThresholdMs: 7200000,
+        inferenceSlaConfig: {},
+        anomalyDetectorConfig: {},
+        localRetentionDays: null,
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      // One fake storage shared by both replicas.
+      const storageClient = {
+        getSettings: jest.fn().mockImplementation(async () => settings),
+        updateSettings: jest.fn().mockImplementation(async (updates: any) => {
+          settings = { ...settings, ...updates };
+          return settings;
+        }),
+        saveSettings: jest.fn().mockImplementation(async (next: any) => {
+          settings = { ...next };
+          return settings;
+        }),
+      };
+      const configService = {
+        get: jest.fn((_key: string, defaultValue: string) => defaultValue),
+      };
+      const a = new SettingsService(storageClient as any, configService as any);
+      const b = new SettingsService(storageClient as any, configService as any);
+      a['cachedSettings'] = settings;
+      b['cachedSettings'] = settings;
+      const listenerA = jest.fn();
+      const listenerB = jest.fn();
+      a.onDetectorConfigChange(listenerA);
+      b.onDetectorConfigChange(listenerB);
+
+      await a.updateDetectorConfig({ connections: { warningZScore: 2.7 } });
+      expect(listenerA).toHaveBeenCalledTimes(1);
+      expect(listenerB).not.toHaveBeenCalled();
+
+      await b['refreshCache']();
+      expect(listenerB).toHaveBeenCalledTimes(1);
+      expect(listenerB.mock.calls[0][0].connections.warningZScore).toBe(2.7);
+
+      await b['refreshCache']();
+      expect(listenerB).toHaveBeenCalledTimes(1);
+
+      await a['refreshCache']();
+      expect(listenerA).toHaveBeenCalledTimes(1);
     });
   });
 });

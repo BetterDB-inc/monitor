@@ -14,7 +14,12 @@ import {
   ValidationPipe,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiOkResponse } from '@nestjs/swagger';
-import { SettingsUpdateRequest, SettingsResponse } from '@betterdb/shared';
+import {
+  SettingsUpdateRequest,
+  SettingsResponse,
+  AnomalyDetectorSettingsResponse,
+  AnomalyDetectorUpdateResponse,
+} from '@betterdb/shared';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import {
   API_METRIC_TYPES,
@@ -64,11 +69,7 @@ export class SettingsController {
   @RequiresFeature(Feature.ANOMALY_DETECTION)
   @ApiOperation({ summary: 'Get anomaly detector threshold configuration' })
   @ApiOkResponse()
-  async getAnomalyDetectors(): Promise<{
-    defaults: Record<MetricType, DetectorConfig>;
-    overrides: DetectorConfigMap;
-    resolved: Record<MetricType, DetectorConfig>;
-  }> {
+  async getAnomalyDetectors(): Promise<AnomalyDetectorSettingsResponse> {
     const overrides = await this.settingsService.getDetectorConfig();
 
     const sanitize = (cfg: Required<DetectorConfig>) => toApiDetectorConfig(cfg);
@@ -99,14 +100,17 @@ export class SettingsController {
   @UsePipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true }))
   async patchAnomalyDetectors(
     @Body() dto: UpdateAnomalyDetectorsDto,
-  ): Promise<{ message: string; config: DetectorConfigMap }> {
+  ): Promise<AnomalyDetectorUpdateResponse> {
     const configMap = this.dtoToConfigMap(dto);
-    const result = await this.settingsService.updateDetectorConfig(configMap);
-    this.prometheusService.incrementDetectorConfigUpdates();
+    const { config, changed } = await this.settingsService.updateDetectorConfig(configMap);
+    if (changed) this.prometheusService.incrementDetectorConfigUpdates();
 
     // Sanitize before returning: strip Infinity sentinels from stored
     // overrides so the JSON response never contains null absolute fields.
-    return { message: 'Detector config updated', config: this.sanitizeMap(result) };
+    return {
+      message: changed ? 'Detector config updated' : 'No changes',
+      config: this.sanitizeMap(config),
+    };
   }
 
   @Delete('anomaly/detectors/:metric')
@@ -116,15 +120,22 @@ export class SettingsController {
   @ApiOperation({ summary: 'Clear the threshold override for one metric' })
   async deleteAnomalyDetector(
     @Param('metric') metric: string,
-  ): Promise<{ message: string; config: DetectorConfigMap }> {
+  ): Promise<AnomalyDetectorUpdateResponse> {
     if (!(API_METRIC_TYPES as readonly string[]).includes(metric)) {
       throw new BadRequestException(
         `Unknown metric "${metric}". Expected one of: ${API_METRIC_TYPES.join(', ')}`,
       );
     }
-    const result = await this.settingsService.clearDetectorOverride(metric as MetricType);
-    this.prometheusService.incrementDetectorConfigUpdates();
-    return { message: `Detector override cleared for ${metric}`, config: this.sanitizeMap(result) };
+    const { config, changed } = await this.settingsService.clearDetectorOverride(
+      metric as MetricType,
+    );
+    if (changed) this.prometheusService.incrementDetectorConfigUpdates();
+    return {
+      message: changed
+        ? `Detector override cleared for ${metric}`
+        : `No override to clear for ${metric}`,
+      config: this.sanitizeMap(config),
+    };
   }
 
   @Post('anomaly/detectors/reset')
@@ -133,9 +144,13 @@ export class SettingsController {
   @RequiresFeature(Feature.ANOMALY_DETECTION)
   @ApiOperation({ summary: 'Reset all anomaly detector thresholds to defaults' })
   async resetAnomalyDetectors(): Promise<{ message: string }> {
-    await this.settingsService.resetDetectorConfig();
-    this.prometheusService.incrementDetectorConfigUpdates();
-    return { message: 'Detector config reset to defaults' };
+    const { changed } = await this.settingsService.resetDetectorConfig();
+    if (changed) this.prometheusService.incrementDetectorConfigUpdates();
+    return {
+      message: changed
+        ? 'Detector config reset to defaults'
+        : 'Detector config already at defaults',
+    };
   }
 
   private sanitizeMap(map: DetectorConfigMap): DetectorConfigMap {
@@ -150,21 +165,21 @@ export class SettingsController {
     const map: DetectorConfigMap = {};
     for (const metric of API_METRIC_TYPES) {
       const entry = dto[metric];
-      if (entry !== undefined) {
-        map[metric] = this.stripUndefined(entry);
-      }
+      if (entry == null || typeof entry !== 'object') continue;
+      const stripped = this.stripUndefined(entry);
+      if (Object.keys(stripped).length > 0) map[metric] = stripped;
     }
     return map;
   }
 
-  private stripUndefined(dto: DetectorConfigDto): DetectorConfigMap[MetricType] {
-    const out: DetectorConfigMap[MetricType] = {};
-    if (dto.warningZScore !== undefined) out.warningZScore = dto.warningZScore;
-    if (dto.criticalZScore !== undefined) out.criticalZScore = dto.criticalZScore;
-    if (dto.warningAbsolute !== undefined) out.warningAbsolute = dto.warningAbsolute;
-    if (dto.criticalAbsolute !== undefined) out.criticalAbsolute = dto.criticalAbsolute;
-    if (dto.consecutiveRequired !== undefined) out.consecutiveRequired = dto.consecutiveRequired;
-    if (dto.cooldownMs !== undefined) out.cooldownMs = dto.cooldownMs;
+  private stripUndefined(dto: DetectorConfigDto): DetectorConfig {
+    const out: DetectorConfig = {};
+    if (dto.warningZScore != null) out.warningZScore = dto.warningZScore;
+    if (dto.criticalZScore != null) out.criticalZScore = dto.criticalZScore;
+    if (dto.warningAbsolute != null) out.warningAbsolute = dto.warningAbsolute;
+    if (dto.criticalAbsolute != null) out.criticalAbsolute = dto.criticalAbsolute;
+    if (dto.consecutiveRequired != null) out.consecutiveRequired = dto.consecutiveRequired;
+    if (dto.cooldownMs != null) out.cooldownMs = dto.cooldownMs;
     return out;
   }
 }

@@ -1,4 +1,5 @@
 import type { SpikeDetectorConfig } from '@proprietary/anomaly-detection/types';
+import { ANOMALY_DETECTOR_METRICS, AnomalyDetectorMetric } from '@betterdb/shared';
 
 export enum MetricType {
   connections = 'connections',
@@ -25,7 +26,24 @@ export interface DetectorConfig {
 
 export type DetectorConfigMap = Partial<Record<MetricType, DetectorConfig>>;
 
+// Fails to compile if MetricType and the shared list diverge.
+const _metricsInSync: [AnomalyDetectorMetric] extends [`${MetricType}`]
+  ? [`${MetricType}`] extends [AnomalyDetectorMetric]
+    ? true
+    : never
+  : never = true;
+void _metricsInSync;
+
 export const ABSOLUTE_FIELDS = ['warningAbsolute', 'criticalAbsolute'] as const;
+
+/** Non-absolute fields: must always be finite numbers. A null/non-finite value
+ *  (e.g. persisted before null was rejected) falls back to the default. */
+export const FINITE_FIELDS = [
+  'warningZScore',
+  'criticalZScore',
+  'consecutiveRequired',
+  'cooldownMs',
+] as const;
 
 /**
  * SQL adapters persist detector config as JSON, which serializes the Infinity
@@ -42,9 +60,36 @@ export function normalizeDetectorConfigMap(map: unknown): DetectorConfigMap {
     for (const f of ABSOLUTE_FIELDS) {
       if ((cfg as Record<string, unknown>)[f] === null) cfg[f] = Number.POSITIVE_INFINITY;
     }
+    for (const f of FINITE_FIELDS) {
+      const v = (cfg as Record<string, unknown>)[f];
+      if (v !== undefined && !(typeof v === 'number' && Number.isFinite(v))) delete cfg[f];
+    }
+    if (Object.keys(cfg).length === 0) continue;
     out[key as MetricType] = cfg;
   }
   return out;
+}
+
+/** Stable comparison of two override maps. Treats Infinity/null absolutes as the
+ *  same "disabled" value, ignores key order, and ignores empty overrides. */
+export function detectorConfigEquals(a: DetectorConfigMap, b: DetectorConfigMap): boolean {
+  const canon = (m: DetectorConfigMap) => {
+    const n = normalizeDetectorConfigMap(m);
+    return JSON.stringify(
+      Object.keys(n)
+        .sort()
+        .map((k) => {
+          const cfg = n[k as MetricType] as Record<string, number>;
+          return [
+            k,
+            Object.keys(cfg)
+              .sort()
+              .map((f) => [f, Number.isFinite(cfg[f]) ? cfg[f] : 'Infinity']),
+          ];
+        }),
+    );
+  };
+  return canon(a) === canon(b);
 }
 
 const NO_ABSOLUTE = Number.POSITIVE_INFINITY;
@@ -110,6 +155,10 @@ export function resolveDetectorConfig(
   for (const f of ABSOLUTE_FIELDS) {
     const v = merged[f] as number | null | undefined;
     if (v === null || v === undefined) merged[f] = Number.POSITIVE_INFINITY;
+  }
+  for (const f of FINITE_FIELDS) {
+    const v = merged[f] as unknown;
+    if (!(typeof v === 'number' && Number.isFinite(v))) merged[f] = DETECTOR_DEFAULTS[metric][f];
   }
   return merged;
 }

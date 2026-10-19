@@ -175,13 +175,10 @@ export class SpikeDetector {
    * `toSpikeDetectorConfig(resolveDetectorConfig(...))`), so this method
    * requires the `Required<>` variant — that keeps `DETECTOR_DEFAULTS` in
    * `apps/api/src/anomaly/anomaly.types.ts` as the single source of truth for
-   * defaults. `detectDrops` is preserved from the current config because the
-   * API surface does not expose it.
+   * defaults. `detectDrops` is fixed at construction and is never changed by a
+   * hot reload: the API does not expose it, so the incoming value is ignored.
    */
   updateConfig(config: Required<SpikeDetectorConfig>): void {
-    this.config = {
-      ...config,
-      detectDrops: config.detectDrops ?? this.config.detectDrops,
-    };
+    this.config = { ...config, detectDrops: this.config.detectDrops };
   }
 }

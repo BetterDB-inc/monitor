@@ -1,4 +1,7 @@
+import { ANOMALY_DETECTOR_METRICS } from '@betterdb/shared';
 import {
+  API_METRIC_TYPES,
+  DETECTOR_DEFAULTS,
   MetricType,
   normalizeDetectorConfigMap,
   resolveDetectorConfig,
@@ -42,5 +45,32 @@ describe('disabled absolute threshold normalization', () => {
     );
     expect(api).not.toHaveProperty('criticalAbsolute');
     expect(JSON.stringify(api)).not.toContain('null');
+  });
+});
+
+describe('non-finite non-absolute fields', () => {
+  it('resolveDetectorConfig falls back to defaults for null z-score/count/cooldown', () => {
+    const r = resolveDetectorConfig(MetricType.connections, {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      connections: { warningZScore: null, consecutiveRequired: null, cooldownMs: null } as any,
+    });
+    expect(r.warningZScore).toBe(DETECTOR_DEFAULTS.connections.warningZScore);
+    expect(r.consecutiveRequired).toBe(DETECTOR_DEFAULTS.connections.consecutiveRequired);
+    expect(r.cooldownMs).toBe(DETECTOR_DEFAULTS.connections.cooldownMs);
+  });
+
+  it('normalizeDetectorConfigMap drops persisted nulls and empty overrides', () => {
+    const out = normalizeDetectorConfigMap({
+      connections: { warningZScore: null, cooldownMs: 5000 },
+      ops_per_sec: { criticalZScore: null },
+    });
+    expect(out.connections).toEqual({ cooldownMs: 5000 });
+    expect(out).not.toHaveProperty('ops_per_sec');
+  });
+});
+
+describe('metric list sync', () => {
+  it('shared metric list matches MetricType', () => {
+    expect([...ANOMALY_DETECTOR_METRICS].sort()).toEqual([...API_METRIC_TYPES].sort());
   });
 });

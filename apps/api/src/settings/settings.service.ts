@@ -20,11 +20,23 @@ import {
   ABSOLUTE_FIELDS,
   DetectorConfigMap,
   MetricType,
+  detectorConfigEquals,
   normalizeDetectorConfigMap,
   resolveDetectorConfig,
 } from '../anomaly/anomaly.types';
 
 export type DetectorConfigListener = (config: DetectorConfigMap) => void;
+
+export interface DetectorConfigUpdateResult {
+  config: DetectorConfigMap;
+  changed: boolean;
+}
+
+/** Internal write shape. Only the detector-config methods (under the lock,
+ *  after validation) may set anomalyDetectorConfig. */
+type InternalSettingsUpdate = SettingsUpdateRequest & {
+  anomalyDetectorConfig?: AppSettings['anomalyDetectorConfig'];
+};
 
 // JSON can't carry Infinity, so the API accepts 0 as "no absolute threshold"
 // and stores the Infinity sentinel, which GET omits.
@@ -75,7 +87,9 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     await this.refreshCache();
 
     this.cacheRefreshInterval = setInterval(() => {
-      this.refreshCache().catch((err) =>
+      // Under the write lock so a refresh that started before a local PATCH
+      // can't commit a stale row and notify old thresholds after it.
+      this.withSettingsWriteLock(() => this.refreshCache()).catch((err) =>
         this.logger.error('Failed to refresh settings cache:', err),
       );
     }, this.CACHE_REFRESH_MS);
@@ -108,8 +122,16 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     // out values that were never saved — and an unsaved LOCAL_RETENTION_DAYS
     // must not be able to trigger deletion.
     if (dbSettings) {
+      const hadCache = this.cachedSettings !== null;
+      const prev = normalizeDetectorConfigMap(this.cachedSettings?.anomalyDetectorConfig);
       this.cachedSettings = dbSettings;
       this.warnedSettingsRowMissing = false; // episode over — warn again next time
+      // Another replica may have changed the detector config. Not on first
+      // load: AnomalyService.onModuleInit already reads the config.
+      const next = normalizeDetectorConfigMap(dbSettings.anomalyDetectorConfig);
+      if (hadCache && !detectorConfigEquals(prev, next)) {
+        this.notifyDetectorConfigChange(next);
+      }
     } else if (this.cachedSettings && !this.warnedSettingsRowMissing) {
       this.warnedSettingsRowMissing = true;
       this.logger.warn(
@@ -203,7 +225,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
 
   /** Internal: callers must already hold the settings write lock and have
    *  validated any anomalyDetectorConfig they pass. */
-  private async writeSettings(updates: SettingsUpdateRequest): Promise<SettingsResponse> {
+  private async writeSettings(updates: InternalSettingsUpdate): Promise<SettingsResponse> {
     if (updates.localRetentionDays !== undefined && updates.localRetentionDays !== null) {
       if (normalizeRetentionDays(updates.localRetentionDays) === null) {
         throw new BadRequestException(
@@ -240,35 +262,45 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     return normalizeDetectorConfigMap(this.getCachedSettings().anomalyDetectorConfig);
   }
 
-  updateDetectorConfig(overrides: DetectorConfigMap): Promise<DetectorConfigMap> {
+  updateDetectorConfig(overrides: DetectorConfigMap): Promise<DetectorConfigUpdateResult> {
     return this.withSettingsWriteLock(() => this.applyDetectorConfigUpdate(overrides));
   }
 
   private async applyDetectorConfigUpdate(
     overrides: DetectorConfigMap,
-  ): Promise<DetectorConfigMap> {
+  ): Promise<DetectorConfigUpdateResult> {
     // Read from storage, not the cache: the cache can lag a write made by the
     // previous holder of the lock until commitCacheWrite runs.
     const existing = await this.readStoredDetectorConfig();
+    if (Object.keys(overrides).length === 0) {
+      return { config: existing, changed: false };
+    }
     disableZeroAbsoluteThresholds(overrides);
     const merged: DetectorConfigMap = { ...existing };
 
     for (const key of Object.keys(overrides) as MetricType[]) {
-      merged[key] = {
-        ...existing[key],
-        ...overrides[key],
-      };
+      const next = { ...existing[key], ...overrides[key] };
+      if (Object.keys(next).length === 0) {
+        delete merged[key];
+      } else {
+        merged[key] = next;
+      }
     }
 
-    return this.validateAndPersistDetectorConfig(merged);
+    if (detectorConfigEquals(existing, merged)) {
+      return { config: existing, changed: false };
+    }
+    return { config: await this.validateAndPersistDetectorConfig(merged), changed: true };
   }
 
   /** Clears one metric's override, leaving the others untouched. */
-  clearDetectorOverride(metric: MetricType): Promise<DetectorConfigMap> {
+  clearDetectorOverride(metric: MetricType): Promise<DetectorConfigUpdateResult> {
     return this.withSettingsWriteLock(async () => {
-      const merged: DetectorConfigMap = { ...(await this.readStoredDetectorConfig()) };
+      const existing = await this.readStoredDetectorConfig();
+      if (!(metric in existing)) return { config: existing, changed: false };
+      const merged: DetectorConfigMap = { ...existing };
       delete merged[metric];
-      return this.validateAndPersistDetectorConfig(merged);
+      return { config: await this.validateAndPersistDetectorConfig(merged), changed: true };
     });
   }
 
@@ -305,10 +337,13 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     return result;
   }
 
-  resetDetectorConfig(): Promise<void> {
+  resetDetectorConfig(): Promise<{ changed: boolean }> {
     return this.withSettingsWriteLock(async () => {
+      const existing = await this.readStoredDetectorConfig();
+      if (Object.keys(existing).length === 0) return { changed: false };
       await this.writeSettings({ anomalyDetectorConfig: {} });
       this.notifyDetectorConfigChange({});
+      return { changed: true };
     });
   }
 
