@@ -6,8 +6,10 @@ const VALUE_TYPES = ['list', 'string', 'hash', 'json'] as const;
 const MESSAGE_SOURCES = ['items', 'path', 'key'] as const;
 const OPTIONAL_FIELDS = ['timestamp', 'toolName', 'toolArgs', 'toolResult'] as const;
 const MAX_REGEX_LENGTH = 200;
-const MAX_KEY_LENGTH = 1024;
-const OPEN_BOUND = /^\{\d+,\}/;
+const MAX_KEY_LENGTH = 512;
+const BOUND = /^\{(\d+)(,(\d*))?\}/;
+const MAX_SMALL_BOUND = 16;
+const MAX_LARGE_REPEATS = 3;
 const SEGMENT = /^([^.[\]]*)((?:\[\d+\])*)$/;
 const INDEX = /\[(\d+)\]/g;
 
@@ -39,12 +41,45 @@ const isValidPath = (path: string): boolean =>
     return match !== null && !(match[1] === '' && match[2] === '');
   });
 
-const startsUnboundedRepeat = (src: string, i: number): boolean =>
-  src[i] === '+' || src[i] === '*' || (src[i] === '{' && OPEN_BOUND.test(src.slice(i)));
+interface Quantifier {
+  length: number;
+  large: boolean;
+}
 
-function hasNestedRepetition(src: string): boolean {
-  const stack: boolean[] = [];
+interface GroupFrame {
+  repeats: boolean;
+  alternates: boolean;
+}
+
+function quantifierAt(src: string, i: number): Quantifier | null {
+  let q: Quantifier | null = null;
+  if (src[i] === '*' || src[i] === '+') {
+    q = { length: 1, large: true };
+  } else if (src[i] === '?') {
+    q = { length: 1, large: false };
+  } else if (src[i] === '{') {
+    const bound = BOUND.exec(src.slice(i));
+    if (!bound) return null;
+    const max =
+      bound[2] === undefined ? Number(bound[1]) : bound[3] === '' ? Infinity : Number(bound[3]);
+    q = { length: bound[0].length, large: max > MAX_SMALL_BOUND };
+  }
+  if (q && src[i + q.length] === '?') q.length++;
+  return q;
+}
+
+function groupSyntaxLength(src: string, i: number): number {
+  if (src[i + 1] !== '?') return 0;
+  if (src.startsWith('<=', i + 2) || src.startsWith('<!', i + 2)) return 3;
+  if (src[i + 2] === '<') return src.indexOf('>', i) - i;
+  return 2;
+}
+
+function repetitionRisk(src: string): { nested: boolean; largeRepeats: number } {
+  const stack: GroupFrame[] = [];
   let inClass = false;
+  let nested = false;
+  let largeRepeats = 0;
   for (let i = 0; i < src.length; i++) {
     const c = src[i];
     if (c === '\\') {
@@ -54,16 +89,28 @@ function hasNestedRepetition(src: string): boolean {
     } else if (c === '[') {
       inClass = true;
     } else if (c === '(') {
-      stack.push(false);
+      stack.push({ repeats: false, alternates: false });
+      i += groupSyntaxLength(src, i);
+    } else if (c === '|') {
+      if (stack.length > 0) stack[stack.length - 1].alternates = true;
     } else if (c === ')') {
-      const innerRepeats = stack.pop() ?? false;
-      if (innerRepeats && startsUnboundedRepeat(src, i + 1)) return true;
-      if (innerRepeats && stack.length > 0) stack[stack.length - 1] = true;
-    } else if (startsUnboundedRepeat(src, i) && stack.length > 0) {
-      stack[stack.length - 1] = true;
+      const frame = stack.pop() ?? { repeats: false, alternates: false };
+      if (quantifierAt(src, i + 1)?.large && (frame.repeats || frame.alternates)) nested = true;
+      const parent = stack[stack.length - 1];
+      if (parent) {
+        parent.repeats ||= frame.repeats;
+        parent.alternates ||= frame.alternates;
+      }
+    } else {
+      const q = quantifierAt(src, i);
+      if (q) {
+        if (q.large) largeRepeats++;
+        if (stack.length > 0) stack[stack.length - 1].repeats = true;
+        i += q.length - 1;
+      }
     }
   }
-  return false;
+  return { nested, largeRepeats };
 }
 
 const hasSessionGroup = (src: string): boolean =>
@@ -90,8 +137,14 @@ export function validateCustomSchema(
           if (!hasSessionGroup(src)) {
             errors.push('sessionRegex must contain a named group "session"');
           }
-          if (hasNestedRepetition(src)) {
+          const risk = repetitionRisk(src);
+          if (risk.nested) {
             errors.push('Session regex has nested repetition that could hang the server');
+          }
+          if (risk.largeRepeats > MAX_LARGE_REPEATS) {
+            errors.push(
+              `Session regex may use at most ${MAX_LARGE_REPEATS} unbounded repeats (*, +, {n,})`,
+            );
           }
         } catch {
           errors.push('sessionRegex is not a valid regular expression');

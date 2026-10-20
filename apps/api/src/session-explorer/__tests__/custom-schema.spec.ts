@@ -93,6 +93,57 @@ describe('validateCustomSchema', () => {
     }
   });
 
+  it('rejects repeated alternation and optional repeats that backtrack exponentially', () => {
+    for (const sessionRegex of [
+      '^(?<session>(a|a)*)!$',
+      '(?<session>(a|ab)+)',
+      '(?<session>(a|a){1,100})',
+      '(?<session>(a?){30}a{30})',
+    ]) {
+      const result = validateCustomSchema({ ...baseSchema, sessionRegex });
+      expect(result).toMatchObject({ ok: false });
+      if (!result.ok) {
+        expect(result.errors).toContain(
+          'Session regex has nested repetition that could hang the server',
+        );
+      }
+    }
+  });
+
+  it('rejects more than three unbounded repeats', () => {
+    for (const sessionRegex of ['(?<session>a*a*a*a*)!', '(?<session>.*):.*:.*:.*$']) {
+      const result = validateCustomSchema({ ...baseSchema, sessionRegex });
+      expect(result).toMatchObject({ ok: false });
+      if (!result.ok) {
+        expect(result.errors).toContain(
+          'Session regex may use at most 3 unbounded repeats (*, +, {n,})',
+        );
+      }
+    }
+  });
+
+  it('accepts common session regexes', () => {
+    for (const sessionRegex of [
+      '^chat:(?<session>[^:]+):msg:\\d+$',
+      '^(?<session>.+)$',
+      '^(?:a|b):(?<session>\\w{1,8})-\\d{1,3}$',
+      '^app:(?<session>[^:]+)(?::.*)?$',
+    ]) {
+      expect(validateCustomSchema({ ...baseSchema, sessionRegex })).toMatchObject({ ok: true });
+    }
+  });
+
+  it('matches accepted worst-case regexes against long keys quickly', () => {
+    const preset = createCustomPreset({
+      ...baseSchema,
+      sessionRegex: '^(?<session>.*):.*:.*!$',
+    } as CustomSchema);
+    const started = Date.now();
+    expect(preset.sessionIdOf(':'.repeat(5000))).toBeNull();
+    expect(preset.sessionIdOf(':'.repeat(500))).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
   it('rejects an over-long regex', () => {
     const result = validateCustomSchema({
       ...baseSchema,
