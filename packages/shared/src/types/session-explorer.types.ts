@@ -120,6 +120,7 @@ export interface SessionOversizeResponse {
 export interface SessionPreview {
   sampleKey: string | null;
   view: KeyView | null;
+  exhausted: boolean;
 }
 
 export interface SessionExport {

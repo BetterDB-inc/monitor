@@ -35,7 +35,7 @@ describe('NamespaceSetup', () => {
   });
 
   it('previews against a sampled key and renders the returned view', async () => {
-    api.preview.mockResolvedValue({ sampleKey: 'chat:1', view: parsedKey() });
+    api.preview.mockResolvedValue({ sampleKey: 'chat:1', view: parsedKey(), exhausted: true });
     render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);
     fill();
     fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
@@ -47,7 +47,7 @@ describe('NamespaceSetup', () => {
   });
 
   it('sends the custom schema with the preview', async () => {
-    api.preview.mockResolvedValue({ sampleKey: null, view: null });
+    api.preview.mockResolvedValue({ sampleKey: null, view: null, exhausted: true });
     render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);
     fill();
     fireEvent.change(screen.getByLabelText('Preset'), { target: { value: 'custom' } });
@@ -60,6 +60,19 @@ describe('NamespaceSetup', () => {
       messages: { from: 'items' },
       fields: { role: 'who', content: 'text' },
     });
+  });
+
+  it('says the preview search was partial when the scan budget ran out', async () => {
+    api.preview.mockResolvedValue({ sampleKey: null, view: null, exhausted: false });
+    render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);
+    fill();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    await waitFor(() =>
+      expect(
+        screen.getByText('No matching key in the first 10,000 keys scanned on each node.'),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText('No key matched this pattern.')).not.toBeInTheDocument();
   });
 
   it('shows server validation errors inline', async () => {

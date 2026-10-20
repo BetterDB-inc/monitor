@@ -277,7 +277,11 @@ export function NamespaceSetup({ initial, onSaved, onCancel }: Props) {
               <KeyPanel key={preview.sampleKey} view={preview.view} />
             </div>
           ) : (
-            <p className="text-sm text-muted-foreground">No key matched this pattern.</p>
+            <p className="text-sm text-muted-foreground">
+              {preview.exhausted
+                ? 'No key matched this pattern.'
+                : 'No matching key in the first 10,000 keys scanned on each node.'}
+            </p>
           ))}
       </CardContent>
     </Card>
