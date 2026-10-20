@@ -9,6 +9,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useDemoState } from '../contexts/DemoContext';
 import { useCanMutate } from '../hooks/useCanMutate';
 import { McpTokensPanel } from '../components/pages/settings/McpTokensPanel';
+import { DetectorThresholds } from '../components/pages/settings/anomaly-detectors/DetectorThresholds';
 import { Members } from './Members';
 import {
   AppSettings,
@@ -652,6 +653,8 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                     className="w-full px-3 py-2 border rounded-md"
                   />
                 </div>
+
+                <DetectorThresholds />
               </div>
             )}
 

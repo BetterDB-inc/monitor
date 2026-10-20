@@ -19,6 +19,10 @@ const { tokensApi, workspaceApi, settingsApi, authState } = vi.hoisted(() => {
       getSettings: vi.fn(),
       updateSettings: vi.fn(),
       resetSettings: vi.fn(),
+      getAnomalyDetectors: vi.fn(),
+      updateAnomalyDetectors: vi.fn(),
+      resetAnomalyDetector: vi.fn(),
+      resetAllAnomalyDetectors: vi.fn(),
     },
     authState: {
       user: null as null | { userId: string; email: string; role: string; isOwner: boolean },
@@ -36,7 +40,7 @@ vi.mock('../api/workspace', () => ({ workspaceApi }));
 vi.mock('../api/settings', () => ({ settingsApi }));
 vi.mock('../api/license', () => ({ licenseApi: {} }));
 vi.mock('../hooks/useLicense', () => ({
-  useLicense: () => ({ tier: 'community', license: null }),
+  useLicense: () => ({ tier: 'community', license: null, hasFeature: () => false }),
 }));
 vi.mock('../hooks/useConnection', () => ({
   useConnection: () => ({ currentConnection: null }),
