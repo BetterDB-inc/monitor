@@ -3,14 +3,7 @@ import { ArrowDown, ArrowUp } from 'lucide-react';
 import type { SessionListResponse, SessionSummary } from '@betterdb/shared';
 import { Badge } from '../../ui/badge';
 import { Alert, AlertDescription } from '../../ui/alert';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '../../ui/table';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../ui/table';
 import { cn, formatBytes } from '../../../lib/utils';
 import { formatIdle, formatTtl } from './format';
 
@@ -100,50 +93,54 @@ export function SessionList({ data, oversizeIds, selectedId, onSelect }: Props) 
           </AlertDescription>
         </Alert>
       )}
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Session</TableHead>
-            <TableHead>Keys</TableHead>
-            <SortHeader label="Last access" column="access" sort={sort} onSort={onSort} />
-            <SortHeader label="Size" column="size" sort={sort} onSort={onSort} />
-            <SortHeader label="TTL" column="ttl" sort={sort} onSort={onSort} />
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {sessions.map((s) => (
-            <TableRow
-              key={s.sessionId}
-              onClick={() => onSelect(s.sessionId)}
-              data-state={s.sessionId === selectedId ? 'selected' : undefined}
-              className="cursor-pointer"
-            >
-              <TableCell className="max-w-xs">
-                <span className="break-all font-mono text-xs">{s.sessionId}</span>
-                {oversizeIds?.has(s.sessionId) && (
-                  <Badge variant="warning" className="ms-2">
-                    Oversize
-                  </Badge>
-                )}
-              </TableCell>
-              <TableCell>{s.keyCount}</TableCell>
-              <TableCell>{formatIdle(s.idleSeconds)}</TableCell>
-              <TableCell>
-                {s.unmeasuredKeys > 0 ? (
-                  <span
-                    title={`${s.unmeasuredKeys} ${s.unmeasuredKeys === 1 ? 'key' : 'keys'} could not be measured`}
-                  >
-                    ≥ {formatBytes(s.memoryBytes)}
-                  </span>
-                ) : (
-                  formatBytes(s.memoryBytes)
-                )}
-              </TableCell>
-              <TableCell>{formatTtl(s.ttlMs)}</TableCell>
+      {sessions.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No sessions match this pattern.</p>
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Session</TableHead>
+              <TableHead>Keys</TableHead>
+              <SortHeader label="Last access" column="access" sort={sort} onSort={onSort} />
+              <SortHeader label="Size" column="size" sort={sort} onSort={onSort} />
+              <SortHeader label="TTL" column="ttl" sort={sort} onSort={onSort} />
             </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+          </TableHeader>
+          <TableBody>
+            {sessions.map((s) => (
+              <TableRow
+                key={s.sessionId}
+                onClick={() => onSelect(s.sessionId)}
+                data-state={s.sessionId === selectedId ? 'selected' : undefined}
+                className="cursor-pointer"
+              >
+                <TableCell className="max-w-xs">
+                  <span className="break-all font-mono text-xs">{s.sessionId}</span>
+                  {oversizeIds?.has(s.sessionId) && (
+                    <Badge variant="warning" className="ms-2">
+                      Oversize
+                    </Badge>
+                  )}
+                </TableCell>
+                <TableCell>{s.keyCount}</TableCell>
+                <TableCell>{formatIdle(s.idleSeconds)}</TableCell>
+                <TableCell>
+                  {s.unmeasuredKeys > 0 ? (
+                    <span
+                      title={`${s.unmeasuredKeys} ${s.unmeasuredKeys === 1 ? 'key' : 'keys'} could not be measured`}
+                    >
+                      ≥ {formatBytes(s.memoryBytes)}
+                    </span>
+                  ) : (
+                    formatBytes(s.memoryBytes)
+                  )}
+                </TableCell>
+                <TableCell>{formatTtl(s.ttlMs)}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
     </div>
   );
 }

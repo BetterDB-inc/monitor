@@ -70,7 +70,9 @@ export function SessionExplorer() {
       await sessionExplorerApi.deleteNamespace(namespace.id);
       setSelectedNs(null);
       setSessionId(null);
-      await queryClient.invalidateQueries({ queryKey: sessionExplorerKeys.namespaces(connectionId) });
+      await queryClient.invalidateQueries({
+        queryKey: sessionExplorerKeys.namespaces(connectionId),
+      });
     } catch (err) {
       setActionError(errorText(err));
     }
@@ -201,17 +203,14 @@ export function SessionExplorer() {
                 <AlertDescription>{errorText(sessions.error)}</AlertDescription>
               </Alert>
             )}
-            {sessions.data &&
-              (sessions.data.sessions.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No sessions match this pattern.</p>
-              ) : (
-                <SessionList
-                  data={sessions.data}
-                  oversizeIds={oversizeIds}
-                  selectedId={sessionId}
-                  onSelect={setSessionId}
-                />
-              ))}
+            {sessions.data && (
+              <SessionList
+                data={sessions.data}
+                oversizeIds={oversizeIds}
+                selectedId={sessionId}
+                onSelect={setSessionId}
+              />
+            )}
           </CardContent>
         </Card>
 

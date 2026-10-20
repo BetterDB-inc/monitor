@@ -147,6 +147,35 @@ describe('validateCustomSchema', () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
+  it('rejects or quickly matches every regex that passes validation', () => {
+    const patterns = [
+      `^(?<session>${'(?:a|a)?'.repeat(20)})$`,
+      `^(?<session>${'.{0,16}'.repeat(7)})x`,
+      `^(?<session>${'\\w{1,16}'.repeat(6)})x`,
+      '(?<session>.*.*.*)x',
+    ];
+    for (const sessionRegex of patterns) {
+      const schema = { ...baseSchema, sessionRegex };
+      if (!validateCustomSchema(schema).ok) continue;
+      const preset = createCustomPreset(schema as CustomSchema);
+      const started = Date.now();
+      preset.sessionIdOf('a'.repeat(511) + 'b');
+      expect(Date.now() - started).toBeLessThan(100);
+    }
+  });
+
+  it('rejects lookarounds and backreferences, which cannot run in linear time', () => {
+    for (const sessionRegex of ['^(?<session>\\w+)(?=:)', '^(?<session>a)\\k<session>']) {
+      const result = validateCustomSchema({ ...baseSchema, sessionRegex });
+      expect(result).toMatchObject({ ok: false });
+      if (!result.ok) {
+        expect(result.errors).toContain(
+          'Session regex cannot use lookarounds, backreferences or large nested repeats',
+        );
+      }
+    }
+  });
+
   it('rejects an over-long regex', () => {
     const result = validateCustomSchema({
       ...baseSchema,

@@ -59,6 +59,14 @@ describe('SessionList', () => {
     expect(screen.getByText(/Showing the first 10,000 keys/)).toBeInTheDocument();
   });
 
+  it('keeps scan warnings visible when no session matched', () => {
+    renderList({ data: listResponse({ sessions: [], truncated: true, partial: true, failedNodes: 1 }) });
+    expect(screen.getByText(/No sessions match this pattern/)).toBeInTheDocument();
+    expect(screen.getByText(/first 10,000 keys/)).toBeInTheDocument();
+    expect(screen.getByText(/1 node did not respond/)).toBeInTheDocument();
+    expect(screen.queryByRole('table')).toBeNull();
+  });
+
   it('warns about partial results naming the failed node count', () => {
     renderList({ data: listResponse({ partial: true, failedNodes: 2 }) });
     expect(screen.getByText(/2 nodes did not respond/)).toBeInTheDocument();

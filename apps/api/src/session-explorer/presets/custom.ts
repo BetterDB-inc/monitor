@@ -1,3 +1,4 @@
+import { setFlagsFromString } from 'node:v8';
 import type { CapturedKey, CustomSchema, ParsedMessage } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
 import { fail, failedView, guardedParse, isRecord, parseJson, textContent } from './text';
@@ -114,6 +115,19 @@ function repetitionRisk(src: string): { nested: boolean; largeRepeats: number } 
   return { nested, largeRepeats };
 }
 
+setFlagsFromString('--enable-experimental-regexp-engine');
+
+export const linearRegex = (src: string): RegExp => new RegExp(src, 'l');
+
+function runsInLinearTime(src: string): boolean {
+  try {
+    linearRegex(src);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const hasSessionGroup = (src: string): boolean =>
   'session' in (new RegExp(`(?:${src})|`).exec('')?.groups ?? {});
 
@@ -135,6 +149,9 @@ export function validateCustomSchema(
       } else {
         try {
           new RegExp(src);
+          if (!runsInLinearTime(src)) {
+            errors.push('Session regex cannot use lookarounds, backreferences or large nested repeats');
+          }
           if (!hasSessionGroup(src)) {
             errors.push('sessionRegex must contain a named group "session"');
           }
@@ -294,7 +311,7 @@ function toMessage(entry: unknown, fields: CustomSchema['fields']): ParsedMessag
 }
 
 export function createCustomPreset(schema: CustomSchema): PresetDefinition {
-  const sessionRegex = schema.sessionRegex ? new RegExp(schema.sessionRegex) : null;
+  const sessionRegex = schema.sessionRegex ? linearRegex(schema.sessionRegex) : null;
   const expectedTypes = TYPE_MATCHES[schema.valueType];
   return {
     id: 'custom',

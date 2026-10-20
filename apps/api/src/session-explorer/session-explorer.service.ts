@@ -87,9 +87,9 @@ export class SessionExplorerService {
     const input = this.validate(body);
     const preset = this.presetOf(input);
     const db = this.registry.get(connectionId);
-    const { sampleKey, exhausted } = await withPrimaries(db, async ({ clients }) => {
+    const { sampleKey, exhausted } = await withPrimaries(db, async ({ clients, failed }) => {
       let fallback: string | null = null;
-      let searchedAll = true;
+      let searchedAll = failed === 0;
       let lastError: unknown;
       let succeeded = 0;
       for (const client of clients) {

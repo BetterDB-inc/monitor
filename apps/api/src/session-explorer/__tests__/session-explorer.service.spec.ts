@@ -4,6 +4,7 @@ import Valkey from 'iovalkey';
 import { SessionExplorerService } from '../session-explorer.service';
 import { keysForSession, scanSessions } from '../session-scanner';
 import { readSessionKeys } from '../session-reader';
+import { withPrimaries } from '../primary-nodes';
 import { FakeValkey, fakeDb, masterNode } from './fake-valkey';
 
 jest.mock('iovalkey', () => ({ __esModule: true, default: jest.fn() }));
@@ -13,6 +14,10 @@ jest.mock('../session-scanner', () => ({
   keysForSession: jest.fn(),
   scanSessions: jest.fn(),
 }));
+jest.mock('../primary-nodes', () => {
+  const actual = jest.requireActual('../primary-nodes');
+  return { ...actual, withPrimaries: jest.fn(actual.withPrimaries) };
+});
 jest.mock('../session-reader', () => ({
   ...jest.requireActual('../session-reader'),
   readSessionKeys: jest.fn(),
@@ -211,5 +216,25 @@ describe('SessionExplorerService.preview', () => {
     const service = serviceOver({ 7001: failing('LOADING'), 7002: failing('LOADING') });
 
     await expect(service.preview('conn-1', input)).rejects.toThrow('LOADING');
+  });
+
+  it('does not report an exhaustive search when a primary scan fails', async () => {
+    const service = serviceOver({ 7001: failing('LOADING'), 7002: new FakeValkey() });
+
+    expect(await service.preview('conn-1', input)).toEqual({
+      sampleKey: null,
+      view: null,
+      exhausted: false,
+    });
+  });
+
+  it('does not report an exhaustive search when a primary could not be reached', async () => {
+    const client = { scan: jest.fn(async () => ['0', []]) };
+    jest.mocked(withPrimaries).mockImplementationOnce(async (_db, fn) =>
+      fn({ clients: [client as never], failed: 1, routes: null, release: async () => undefined }),
+    );
+    const service = new SessionExplorerService({ get: jest.fn(() => ({})) } as never, {} as never);
+    const result = await service.preview('conn-1', { name: 'n', pattern: 'lc:*', preset: 'langchain-community' });
+    expect(result).toEqual({ sampleKey: null, view: null, exhausted: false });
   });
 });
