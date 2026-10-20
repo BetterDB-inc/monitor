@@ -1,5 +1,10 @@
 import type Database from 'better-sqlite3';
 import { chunkedSqliteDelete } from './sqlite-chunked-delete';
+import {
+  otelSpanCap,
+  otelSpanCapCheckInterval,
+  otelSpanLowWaterMark,
+} from '../otel-span-cap';
 import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
@@ -1967,6 +1972,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
       CREATE INDEX IF NOT EXISTS idx_otel_trace ON otel_spans(trace_id);
       CREATE INDEX IF NOT EXISTS idx_otel_start ON otel_spans(start_time_ms);
+      CREATE INDEX IF NOT EXISTS idx_otel_ingested ON otel_spans(ingested_at);
 
       CREATE TABLE IF NOT EXISTS vector_index_snapshots (
         id TEXT PRIMARY KEY,
@@ -4300,7 +4306,22 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       }
     });
     transaction();
+    await this.maybeEnforceOtelSpanCapOnSave(spans.length);
     return count;
+  }
+
+  // Inserts since the cap was last checked on save. The time-based retention
+  // sweep is the primary bound, but between sweeps the public ingest route can
+  // still grow the table; checking on save every `check interval` inserts keeps
+  // the disk bound at ~cap regardless of the sweep interval, without paying a
+  // COUNT per request.
+  private otelSpansSinceCapCheck = 0;
+
+  private async maybeEnforceOtelSpanCapOnSave(inserted: number): Promise<void> {
+    this.otelSpansSinceCapCheck += inserted;
+    if (this.otelSpansSinceCapCheck < otelSpanCapCheckInterval()) return;
+    this.otelSpansSinceCapCheck = 0;
+    await this.enforceOtelSpanCap();
   }
 
   async getOtelTraces(options: OtelTraceQueryOptions): Promise<OtelTraceSummary[]> {
@@ -4393,9 +4414,11 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async pruneOldOtelSpans(cutoffTimestamp: number): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
-    // Prune whole traces (by trace-level start), not individual spans, so a long
-    // trace never loses its root/early spans while later ones survive.
-    // "MIN(start_time_ms) < c" is equivalent to "any span < c", so the
+    // Prune whole traces (never split one) by the server-stamped ingest time,
+    // NOT the sender-supplied start time: start_time_ms comes from the OTLP
+    // payload, so keying retention on it let a far-future value make spans
+    // permanently un-prunable (unbounded growth via the public ingest route).
+    // "MIN(ingested_at) < c" is equivalent to "any span < c", so the
     // index-driven DISTINCT probe replaces the full GROUP BY aggregate scan.
     //
     // Batched per TRACE, not per row: a generic rowid-chunked delete would
@@ -4408,12 +4431,62 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const TRACE_BATCH = 1_000;
     const deleteBatch = this.db.prepare(
       `DELETE FROM otel_spans WHERE trace_id IN (
-         SELECT DISTINCT trace_id FROM otel_spans WHERE start_time_ms < ? LIMIT ?
+         SELECT DISTINCT trace_id FROM otel_spans WHERE ingested_at < ? LIMIT ?
        )`,
     );
     let total = 0;
     for (;;) {
       const { changes } = deleteBatch.run(cutoffTimestamp, TRACE_BATCH);
+      if (changes === 0) break;
+      total += changes;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    total += await this.enforceOtelSpanCap();
+    return total;
+  }
+
+  /**
+   * Hard backstop for the public ingest route: time-based retention cannot
+   * bound the store within the window, so after the time prune, evict whole
+   * traces oldest-ingested-first until the span count is back under the cap.
+   * The GROUP BY probe only runs while the store is over the cap.
+   */
+  private async enforceOtelSpanCap(): Promise<number> {
+    if (!this.db) return 0;
+    const cap = otelSpanCap();
+    const lowWater = otelSpanLowWaterMark(cap);
+    const countStmt = this.db.prepare('SELECT COUNT(*) AS c FROM otel_spans');
+    // Find the ingested_at boundary that leaves ~lowWater newest spans, then
+    // evict whole traces that have any span at or below it. Both the boundary
+    // probe (an OFFSET walk) and the delete's inner filter ride
+    // idx_otel_ingested / idx_otel_trace, so a pass costs O(spans removed), not
+    // a full-table `GROUP BY trace_id ORDER BY MIN(ingested_at)` per batch — the
+    // old approach ran that aggregate scan ~once per 500 traces, which at a
+    // large OTEL_MAX_RETAINED_SPANS meant minutes of synchronous event-loop
+    // blocking. Draining to the low-water mark (not just back to the cap) keeps
+    // the amortized cost down under a sustained flood on the public route.
+    const boundaryStmt = this.db.prepare(
+      'SELECT ingested_at FROM otel_spans ORDER BY ingested_at ASC LIMIT 1 OFFSET ?',
+    );
+    const evictBatch = this.db.prepare(
+      `DELETE FROM otel_spans WHERE trace_id IN (
+         SELECT DISTINCT trace_id FROM otel_spans WHERE ingested_at <= ?
+       )`,
+    );
+    let total = 0;
+    for (;;) {
+      const count = (countStmt.get() as { c: number }).c;
+      if (count <= cap) break;
+      // Position of the first span to KEEP in ascending ingest order; `<=` on
+      // its ingest time removes the older ones plus any ties on the boundary
+      // value, so a flood that stamps many spans the same millisecond still
+      // makes progress (whole-trace eviction may overshoot the low-water mark —
+      // the price of never splitting a trace).
+      const boundary = boundaryStmt.get(count - lowWater) as
+        | { ingested_at: number }
+        | undefined;
+      if (boundary === undefined) break;
+      const { changes } = evictBatch.run(boundary.ingested_at);
       if (changes === 0) break;
       total += changes;
       await new Promise<void>((resolve) => setImmediate(resolve));

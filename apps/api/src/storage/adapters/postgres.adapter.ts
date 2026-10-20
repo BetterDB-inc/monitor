@@ -1,6 +1,11 @@
-import { Pool, PoolConfig } from 'pg';
+import { Pool, PoolClient, PoolConfig } from 'pg';
 import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
+import {
+  otelSpanCap,
+  otelSpanCapCheckInterval,
+  otelSpanLowWaterMark,
+} from '../otel-span-cap';
 import { randomUUID } from 'crypto';
 import { parseSshTunnel, parseMembership } from '@betterdb/shared';
 import type {
@@ -426,6 +431,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       // This must happen before createSchema() which creates indexes on connection_id.
       await this.migrateConnectionId();
       await this.createSchema();
+      await this.ensureOtelIngestedIndex();
       await this.backfillMemoryProposalDiscriminators();
 
       this.ready = true;
@@ -1827,6 +1833,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
       CREATE INDEX IF NOT EXISTS idx_otel_trace ON otel_spans(trace_id);
       CREATE INDEX IF NOT EXISTS idx_otel_start ON otel_spans(start_time_ms);
+      -- idx_otel_ingested is built separately, CONCURRENTLY, after this
+      -- transactional batch — see ensureOtelIngestedIndex(). A plain CREATE
+      -- INDEX here would hold a write lock while it builds, and on a database
+      -- already flooded via the public ingest route that is a startup stall.
 
       CREATE TABLE IF NOT EXISTS vector_index_snapshots (
         id TEXT PRIMARY KEY,
@@ -4314,7 +4324,22 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         ingested_at = EXCLUDED.ingested_at
     `;
     const result = await this.pool.query(query, values);
+    await this.maybeEnforceOtelSpanCapOnSave(spans.length);
     return result.rowCount ?? 0;
+  }
+
+  // Inserts since the cap was last checked on save. The time-based retention
+  // sweep is the primary bound, but between sweeps the public ingest route can
+  // still grow the table; checking on save every `check interval` inserts keeps
+  // the disk bound at ~cap regardless of the sweep interval, without paying a
+  // COUNT per request.
+  private otelSpansSinceCapCheck = 0;
+
+  private async maybeEnforceOtelSpanCapOnSave(inserted: number): Promise<void> {
+    this.otelSpansSinceCapCheck += inserted;
+    if (this.otelSpansSinceCapCheck < otelSpanCapCheckInterval()) return;
+    this.otelSpansSinceCapCheck = 0;
+    await this.enforceOtelSpanCap();
   }
 
   async getOtelTraces(options: OtelTraceQueryOptions): Promise<OtelTraceSummary[]> {
@@ -4406,8 +4431,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async pruneOldOtelSpans(cutoffTimestamp: number): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
-    // Prune whole traces (by trace-level start), not individual spans, so a
-    // long trace never loses its root/early spans while later ones survive.
+    // Prune whole traces (never split one) by the server-stamped ingest time,
+    // NOT the sender-supplied start time: start_time_ms comes from the OTLP
+    // payload, so keying retention on it let a far-future value make spans
+    // permanently un-prunable (unbounded growth via the public ingest route).
     // One statement per batch: the uncorrelated LIMIT subquery is evaluated
     // once under the statement's snapshot and the outer DELETE removes ALL
     // spans of the selected traces, so no trace is ever split and each
@@ -4418,9 +4445,137 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     for (;;) {
       const result = await this.pool.query(
         `DELETE FROM otel_spans WHERE trace_id IN (
-           SELECT DISTINCT trace_id FROM otel_spans WHERE start_time_ms < $1 LIMIT $2
+           SELECT DISTINCT trace_id FROM otel_spans WHERE ingested_at < $1 LIMIT $2
          )`,
         [cutoffTimestamp, TRACE_BATCH],
+      );
+      const changes = result.rowCount ?? 0;
+      if (changes === 0) break;
+      total += changes;
+    }
+    total += await this.enforceOtelSpanCap();
+    return total;
+  }
+
+  /**
+   * Build idx_otel_ingested (the index retention and the span cap both scan)
+   * CONCURRENTLY, outside createSchema's transactional batch. CONCURRENTLY
+   * cannot run inside a transaction block, so it lives here as its own
+   * autocommit statement; in exchange it does not hold a write lock while it
+   * builds, which on an already-flooded otel_spans table would otherwise stall
+   * ingestion at startup. Best-effort: if the concurrent build fails, fall
+   * back to a plain blocking build so the index is guaranteed present;
+   * retention correctness outweighs the one-time lock.
+   *
+   * A concurrent build that fails partway (or whose process dies mid-build)
+   * leaves an INVALID index under the name, and IF NOT EXISTS would then skip
+   * it on this and every later boot, leaving the cap probe and the retention
+   * delete on full scans. So an invalid index is dropped before each build.
+   * An index that is still being built concurrently also reads as invalid,
+   * so only one replica per schema builds at a time (session advisory lock);
+   * a replica that finds the lock held skips, since the holder is building
+   * the index.
+   */
+  private async ensureOtelIngestedIndex(): Promise<void> {
+    if (!this.pool) return;
+    const client = await this.pool.connect();
+    try {
+      // Keyed on this schema's otel_spans table, not a constant: advisory locks
+      // are database-wide, so with per-tenant schemas in one database a shared
+      // key would let tenant A's build make tenant B skip its own.
+      const lock = await client.query(
+        `SELECT key, pg_try_advisory_lock(key) AS locked FROM (
+           SELECT hashtext('betterdb.idx_otel_ingested:' || 'otel_spans'::regclass::oid) AS key
+         ) k`,
+      );
+      if (!lock.rows[0]?.locked) return;
+      const lockKey: number = lock.rows[0].key;
+      try {
+        try {
+          await this.dropInvalidOtelIngestedIndex(client, true);
+          await client.query(
+            'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_otel_ingested ON otel_spans(ingested_at)',
+          );
+        } catch (error) {
+          console.warn(
+            `CONCURRENT build of idx_otel_ingested failed, falling back to a blocking build: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          // The failed concurrent build may have left its own invalid index.
+          await this.dropInvalidOtelIngestedIndex(client, false);
+          await client.query(
+            'CREATE INDEX IF NOT EXISTS idx_otel_ingested ON otel_spans(ingested_at)',
+          );
+        }
+      } finally {
+        await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
+      }
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Drop idx_otel_ingested if it exists but is INVALID (see ensureOtelIngestedIndex). */
+  private async dropInvalidOtelIngestedIndex(
+    client: PoolClient,
+    concurrently: boolean,
+  ): Promise<void> {
+    // Resolve the index through otel_spans itself, so with a per-tenant schema
+    // this never looks at (or drops) another schema's index of the same name.
+    const result = await client.query(
+      `SELECT quote_ident(n.nspname) AS schema_name, i.indisvalid AS valid
+         FROM pg_index i
+         JOIN pg_class c ON c.oid = i.indexrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE i.indrelid = 'otel_spans'::regclass AND c.relname = 'idx_otel_ingested'`,
+    );
+    const row = result.rows[0];
+    if (!row || row.valid) return;
+    console.warn('idx_otel_ingested is INVALID (an earlier build was interrupted); rebuilding it');
+    await client.query(
+      `DROP INDEX ${concurrently ? 'CONCURRENTLY ' : ''}IF EXISTS ${row.schema_name}.idx_otel_ingested`,
+    );
+  }
+
+  /**
+   * Hard backstop for the public ingest route: time-based retention cannot
+   * bound the store within the window, so after the time prune, evict whole
+   * traces oldest-ingested-first until the span count is back under the cap.
+   */
+  private async enforceOtelSpanCap(): Promise<number> {
+    if (!this.pool) return 0;
+    const cap = otelSpanCap();
+    const lowWater = otelSpanLowWaterMark(cap);
+    let total = 0;
+    for (;;) {
+      const countResult = await this.pool.query('SELECT COUNT(*)::int AS c FROM otel_spans');
+      const count = countResult.rows[0]?.c ?? 0;
+      if (count <= cap) break;
+      // Find the ingested_at boundary that leaves ~lowWater newest spans, then
+      // evict whole traces with any span at or below it. The boundary probe and
+      // the delete's inner filter both ride idx_otel_ingested / idx_otel_trace,
+      // so a pass costs O(spans removed) rather than the full-table
+      // `GROUP BY trace_id ORDER BY MIN(ingested_at)` the old per-500-trace loop
+      // ran every pass — minutes of blocking at a large OTEL_MAX_RETAINED_SPANS.
+      // Draining to the low-water mark keeps the amortized cost down under a
+      // sustained flood. (Concurrent saves on separate replicas can each run a
+      // pass; the deletes are idempotent and both target the oldest spans, so
+      // they converge near the low-water mark rather than far below it.)
+      const boundaryResult = await this.pool.query(
+        'SELECT ingested_at FROM otel_spans ORDER BY ingested_at ASC LIMIT 1 OFFSET $1',
+        [count - lowWater],
+      );
+      const boundary = boundaryResult.rows[0]?.ingested_at;
+      if (boundary === undefined || boundary === null) break;
+      // `<=` so a flood stamping many spans the same millisecond still makes
+      // progress (whole-trace eviction may overshoot the low-water mark — the
+      // price of never splitting a trace).
+      const result = await this.pool.query(
+        `DELETE FROM otel_spans WHERE trace_id IN (
+           SELECT DISTINCT trace_id FROM otel_spans WHERE ingested_at <= $1
+         )`,
+        [boundary],
       );
       const changes = result.rowCount ?? 0;
       if (changes === 0) break;
