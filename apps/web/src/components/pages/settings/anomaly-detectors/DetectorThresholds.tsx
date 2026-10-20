@@ -11,7 +11,8 @@ import { useLicense } from '../../../../hooks/useLicense';
 import { Alert, AlertDescription, AlertTitle } from '../../../ui/alert';
 import { Badge } from '../../../ui/badge';
 import { Button } from '../../../ui/button';
-import { ANOMALY_DETECTORS_QUERY_KEY, DetectorPanel } from './DetectorPanel';
+import { DetectorPanel } from './DetectorPanel';
+import { ANOMALY_DETECTORS_QUERY_KEY } from './detector-form';
 
 function isDetectorMetric(value: string | null): value is AnomalyDetectorMetric {
   return value !== null && (ANOMALY_DETECTOR_METRICS as readonly string[]).includes(value);

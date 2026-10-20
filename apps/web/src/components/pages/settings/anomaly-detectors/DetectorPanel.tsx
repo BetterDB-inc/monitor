@@ -11,6 +11,7 @@ import { Input } from '../../../ui/input';
 import { Switch } from '../../../ui/switch';
 import { cn } from '../../../../lib/utils';
 import {
+  ANOMALY_DETECTORS_QUERY_KEY,
   LIFETIME_COUNTER_METRICS,
   METRIC_UNITS,
   buildSave,
@@ -23,8 +24,6 @@ import {
   type DetectorFormState,
   type DetectorSave,
 } from './detector-form';
-
-export const ANOMALY_DETECTORS_QUERY_KEY = ['anomaly-detectors'] as const;
 
 interface DetectorPanelProps {
   metric: AnomalyDetectorMetric;

@@ -1,5 +1,7 @@
 import type { AnomalyDetectorConfigEntry, AnomalyDetectorMetric } from '@betterdb/shared';
 
+export const ANOMALY_DETECTORS_QUERY_KEY = ['anomaly-detectors'] as const;
+
 export const METRIC_UNITS: Record<AnomalyDetectorMetric, string> = {
   connections: 'connected clients',
   ops_per_sec: 'ops/s',
