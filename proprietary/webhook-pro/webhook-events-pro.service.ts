@@ -11,10 +11,6 @@ import {
 } from '@betterdb/shared';
 import { LicenseService } from '@proprietary/licenses';
 
-function replicationLagKey(connectionId: string): string {
-  return `replication_lag:${connectionId}`;
-}
-
 /**
  * Webhook Events Pro Service - Generates PRO tier webhook events
  *
@@ -109,7 +105,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
 
     await this.webhookDispatcher.dispatchThresholdAlertPerWebhook(
       WebhookEventType.REPLICATION_LAG,
-      replicationLagKey(data.connectionId),
+      'replication_lag',
       data.lagSeconds,
       'replicationLagSeconds',
       true, // isAbove
@@ -126,7 +122,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
   }
 
   clearReplicationLag(connectionId: string): void {
-    this.webhookDispatcher.clearThresholdAlert(replicationLagKey(connectionId));
+    this.webhookDispatcher.clearThresholdAlertPerWebhook('replication_lag', connectionId);
   }
 
   /**

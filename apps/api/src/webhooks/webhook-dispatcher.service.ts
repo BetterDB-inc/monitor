@@ -412,8 +412,12 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     return false;
   }
 
-  clearThresholdAlert(alertKey: string): void {
-    this.alertStates.delete(alertKey);
+  clearThresholdAlertPerWebhook(alertKeyPrefix: string, connectionId: string): void {
+    const connectionPrefix = `${alertKeyPrefix}:${connectionId}:`;
+    const keys = [...this.alertStates.keys()].filter((key) => key.startsWith(connectionPrefix));
+    for (const key of keys) {
+      this.alertStates.delete(key);
+    }
   }
 
   /**

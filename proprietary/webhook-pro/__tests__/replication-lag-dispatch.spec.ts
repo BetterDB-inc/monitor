@@ -6,7 +6,10 @@ import { LicenseService } from '@proprietary/licenses';
 
 describe('WebhookEventsProService - replication lag', () => {
   let service: WebhookEventsProService;
-  let webhookDispatcher: { dispatchThresholdAlert: jest.Mock; clearThresholdAlert: jest.Mock };
+  let webhookDispatcher: {
+    dispatchThresholdAlertPerWebhook: jest.Mock;
+    clearThresholdAlertPerWebhook: jest.Mock;
+  };
 
   const data = {
     lagSeconds: 30,
@@ -19,8 +22,8 @@ describe('WebhookEventsProService - replication lag', () => {
 
   beforeEach(async () => {
     webhookDispatcher = {
-      dispatchThresholdAlert: jest.fn().mockResolvedValue(true),
-      clearThresholdAlert: jest.fn(),
+      dispatchThresholdAlertPerWebhook: jest.fn().mockResolvedValue(true),
+      clearThresholdAlertPerWebhook: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -34,21 +37,22 @@ describe('WebhookEventsProService - replication lag', () => {
     service = module.get(WebhookEventsProService);
   });
 
-  it('keys the lag alert per connection', async () => {
+  it('dispatches and clears under the same prefix and connection', async () => {
     await service.dispatchReplicationLag(data);
-    expect(webhookDispatcher.dispatchThresholdAlert).toHaveBeenCalledWith(
+    service.clearReplicationLag('conn-1');
+
+    expect(webhookDispatcher.dispatchThresholdAlertPerWebhook).toHaveBeenCalledWith(
       WebhookEventType.REPLICATION_LAG,
-      'replication_lag:conn-1',
+      'replication_lag',
       30,
-      10,
+      'replicationLagSeconds',
       true,
-      expect.objectContaining({ lagSeconds: 30, masterLinkStatus: 'up' }),
+      expect.any(Function),
       'conn-1',
     );
-  });
-
-  it('clears the same per-connection alert state', () => {
-    service.clearReplicationLag('conn-1');
-    expect(webhookDispatcher.clearThresholdAlert).toHaveBeenCalledWith('replication_lag:conn-1');
+    expect(webhookDispatcher.clearThresholdAlertPerWebhook).toHaveBeenCalledWith(
+      'replication_lag',
+      'conn-1',
+    );
   });
 });

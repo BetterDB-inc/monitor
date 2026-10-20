@@ -222,15 +222,20 @@ describe('WebhookDispatcherService', () => {
   });
 
   describe('Clearing a threshold alert', () => {
-    it('lets a latched alert fire again without a recovery sample', async () => {
-      webhooksService.getWebhooksByEvent.mockResolvedValue([]);
-      const fire = () =>
-        service.dispatchThresholdAlert(WebhookEventType.REPLICATION_LAG, 'lag_test', 30, 10, true, {});
+    it('re-arms every webhook of one connection without touching others', () => {
+      const fire = (key: string) => service.shouldFireAlert(key, 30, 10, true);
+      const keys = [
+        'replication_lag:conn-1:wh-1',
+        'replication_lag:conn-1:wh-2',
+        'replication_lag:conn-10:wh-1',
+        'replication_lag:conn-2:wh-1',
+        'slowlog_threshold:conn-1:wh-1',
+      ];
 
-      expect(await fire()).toBe(true);
-      expect(await fire()).toBe(false);
-      service.clearThresholdAlert('lag_test');
-      expect(await fire()).toBe(true);
+      keys.forEach((key) => expect(fire(key)).toBe(true));
+      service.clearThresholdAlertPerWebhook('replication_lag', 'conn-1');
+
+      expect(keys.map(fire)).toEqual([true, true, false, false, false]);
     });
   });
 
