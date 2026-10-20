@@ -366,10 +366,10 @@ export interface IWebhookEventsProService {
     masterLinkStatus: string;
     timestamp: number;
     instance: WebhookInstanceInfo;
-    connectionId?: string;
+    connectionId: string;
   }): Promise<void>;
 
-  clearReplicationLag(connectionId?: string): void;
+  clearReplicationLag(connectionId: string): void;
 
   dispatchClusterFailover(data: {
     clusterState: string;

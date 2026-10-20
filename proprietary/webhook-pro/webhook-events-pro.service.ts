@@ -3,6 +3,7 @@ import { WebhookDispatcherService } from '@app/webhooks/webhook-dispatcher.servi
 import {
   WebhookEventType,
   type CveCriticalDetectedData,
+  type IWebhookEventsProService,
   type LatencyRegressionDetectedData,
   type MetricKind,
   type ScalingReadinessLowData,
@@ -10,8 +11,8 @@ import {
 } from '@betterdb/shared';
 import { LicenseService } from '@proprietary/licenses';
 
-function replicationLagKey(connectionId?: string): string {
-  return connectionId ? `replication_lag:${connectionId}` : 'replication_lag';
+function replicationLagKey(connectionId: string): string {
+  return `replication_lag:${connectionId}`;
 }
 
 /**
@@ -30,7 +31,7 @@ function replicationLagKey(connectionId?: string): string {
  * - connection.spike - Connection spike detected
  */
 @Injectable()
-export class WebhookEventsProService implements OnModuleInit {
+export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProService {
   private readonly logger = new Logger(WebhookEventsProService.name);
 
   constructor(
@@ -99,7 +100,7 @@ export class WebhookEventsProService implements OnModuleInit {
     masterLinkStatus: string;
     timestamp: number;
     instance: { host: string; port: number };
-    connectionId?: string;
+    connectionId: string;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('Replication lag event skipped - requires PRO license');
@@ -124,7 +125,7 @@ export class WebhookEventsProService implements OnModuleInit {
     );
   }
 
-  clearReplicationLag(connectionId?: string): void {
+  clearReplicationLag(connectionId: string): void {
     this.webhookDispatcher.clearThresholdAlert(replicationLagKey(connectionId));
   }
 
