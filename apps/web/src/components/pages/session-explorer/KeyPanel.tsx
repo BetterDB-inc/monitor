@@ -8,8 +8,13 @@ import { formatTtl } from './format';
 const isBase64 = (v: unknown): v is { base64: string } =>
   typeof v === 'object' && v !== null && 'base64' in v && typeof v.base64 === 'string';
 
-function rawText(raw: unknown): string {
-  if (isBase64(raw)) return raw.base64;
+const binaryOf = (view: KeyView): string | null =>
+  view.type !== 'hash' && isBase64(view.raw) ? view.raw.base64 : null;
+
+function rawText(view: KeyView): string {
+  const binary = binaryOf(view);
+  if (binary !== null) return binary;
+  const raw = view.raw;
   if (typeof raw === 'string') {
     try {
       const parsed: unknown = JSON.parse(raw);
@@ -59,7 +64,7 @@ export function KeyPanel({ view }: { view: KeyView }) {
       )}
       {showRaw ? (
         <>
-          {isBase64(view.raw) && (
+          {binaryOf(view) !== null && (
             <p className="mb-1 text-xs text-muted-foreground">
               This value is not valid UTF-8, shown as base64.
             </p>
@@ -68,7 +73,7 @@ export function KeyPanel({ view }: { view: KeyView }) {
             data-testid="raw-value"
             className="max-h-96 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/40 p-2 text-xs"
           >
-            {rawText(view.raw)}
+            {rawText(view)}
           </pre>
         </>
       ) : (

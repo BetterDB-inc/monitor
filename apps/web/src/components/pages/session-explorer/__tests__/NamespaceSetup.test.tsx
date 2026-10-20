@@ -92,6 +92,39 @@ describe('NamespaceSetup', () => {
     expect(onSaved).not.toHaveBeenCalled();
   });
 
+  it('suggests a session regex with the required named group', () => {
+    render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('Preset'), { target: { value: 'custom' } });
+    expect(screen.getByLabelText('Session id regex')).toHaveAttribute(
+      'placeholder',
+      '^chat:(?<session>.+)$',
+    );
+  });
+
+  it('clears an earlier preview when the inputs change', async () => {
+    api.preview.mockResolvedValue({ sampleKey: 'chat:1', view: parsedKey(), exhausted: true });
+    render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);
+    fill();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    await waitFor(() => expect(screen.getByText('Where should I stay?')).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText('Key pattern'), { target: { value: 'other:*' } });
+    expect(screen.queryByText('Where should I stay?')).not.toBeInTheDocument();
+  });
+
+  it('clears an earlier preview when a later preview fails', async () => {
+    api.preview.mockResolvedValueOnce({ sampleKey: 'chat:1', view: parsedKey(), exhausted: true });
+    api.preview.mockRejectedValueOnce(
+      new ApiError('Invalid namespace', 400, { message: 'Invalid namespace', errors: ['Bad regex'] }),
+    );
+    render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);
+    fill();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    await waitFor(() => expect(screen.getByText('Where should I stay?')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    await waitFor(() => expect(screen.getByText('Bad regex')).toBeInTheDocument());
+    expect(screen.queryByText('Where should I stay?')).not.toBeInTheDocument();
+  });
+
   it('saves a new namespace and reports it', async () => {
     const saved = { id: 'ns-1' };
     api.createNamespace.mockResolvedValue(saved as never);

@@ -109,7 +109,9 @@ export function NamespaceSetup({ initial, onSaved, onCancel }: Props) {
   );
   const [schema, setSchema] = useState<SchemaDraft>(() => emptySchema(initial?.customSchema));
   const [errors, setErrors] = useState<string[]>([]);
-  const [preview, setPreview] = useState<SessionPreview | null>(null);
+  const [previewed, setPreviewed] = useState<{ input: string; result: SessionPreview } | null>(
+    null,
+  );
   const [busy, setBusy] = useState<'preview' | 'save' | null>(null);
 
   const setField = (field: keyof SchemaDraft) => (value: string) =>
@@ -123,12 +125,18 @@ export function NamespaceSetup({ initial, onSaved, onCancel }: Props) {
     oversizeThresholdBytes: Number(threshold),
   });
 
+  const preview =
+    previewed && previewed.input === JSON.stringify(input()) ? previewed.result : null;
+
   const run = async (kind: 'preview' | 'save') => {
     setBusy(kind);
     setErrors([]);
     try {
       if (kind === 'preview') {
-        setPreview(await sessionExplorerApi.preview(input()));
+        setPreviewed(null);
+        const body = input();
+        const result = await sessionExplorerApi.preview(body);
+        setPreviewed({ input: JSON.stringify(body), result });
       } else {
         const saved = initial
           ? await sessionExplorerApi.updateNamespace(initial.id, input())
@@ -236,7 +244,7 @@ export function NamespaceSetup({ initial, onSaved, onCancel }: Props) {
               )}
             </Field>
             {schema.from === 'path' && text('Messages path', 'path', 'messages')}
-            {text('Session id regex', 'sessionRegex', '^chat:(.+)$')}
+            {text('Session id regex', 'sessionRegex', '^chat:(?<session>.+)$')}
             {text('Role field', 'role', 'role')}
             {text('Content field', 'content', 'content')}
             {text('Timestamp field', 'timestamp')}

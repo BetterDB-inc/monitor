@@ -44,6 +44,7 @@ const isValidPath = (path: string): boolean =>
 interface Quantifier {
   length: number;
   large: boolean;
+  repeats: boolean;
 }
 
 interface GroupFrame {
@@ -54,15 +55,15 @@ interface GroupFrame {
 function quantifierAt(src: string, i: number): Quantifier | null {
   let q: Quantifier | null = null;
   if (src[i] === '*' || src[i] === '+') {
-    q = { length: 1, large: true };
+    q = { length: 1, large: true, repeats: true };
   } else if (src[i] === '?') {
-    q = { length: 1, large: false };
+    q = { length: 1, large: false, repeats: false };
   } else if (src[i] === '{') {
     const bound = BOUND.exec(src.slice(i));
     if (!bound) return null;
     const max =
       bound[2] === undefined ? Number(bound[1]) : bound[3] === '' ? Infinity : Number(bound[3]);
-    q = { length: bound[0].length, large: max > MAX_SMALL_BOUND };
+    q = { length: bound[0].length, large: max > MAX_SMALL_BOUND, repeats: max > 1 };
   }
   if (q && src[i + q.length] === '?') q.length++;
   return q;
@@ -95,7 +96,7 @@ function repetitionRisk(src: string): { nested: boolean; largeRepeats: number } 
       if (stack.length > 0) stack[stack.length - 1].alternates = true;
     } else if (c === ')') {
       const frame = stack.pop() ?? { repeats: false, alternates: false };
-      if (quantifierAt(src, i + 1)?.large && (frame.repeats || frame.alternates)) nested = true;
+      if (quantifierAt(src, i + 1)?.repeats && (frame.repeats || frame.alternates)) nested = true;
       const parent = stack[stack.length - 1];
       if (parent) {
         parent.repeats ||= frame.repeats;

@@ -33,6 +33,14 @@ describe('KeyPanel', () => {
     expect(screen.getByTestId('raw-value').textContent).toBe('AAEC');
   });
 
+  it('shows a whole hash that has a field named base64', () => {
+    render(
+      <KeyPanel view={failedKey({ type: 'hash', raw: { base64: 'aGk=', role: 'user' } })} />,
+    );
+    expect(screen.queryByText(/not valid UTF-8/)).not.toBeInTheDocument();
+    expect(screen.getByTestId('raw-value').textContent).toContain('"role": "user"');
+  });
+
   it('shows the reason and defaults to raw for an unparsed key', () => {
     render(<KeyPanel view={failedKey()} />);
     expect(screen.getByText(/Element is not a \{type, data\} message envelope/)).toBeInTheDocument();

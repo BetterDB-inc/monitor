@@ -99,6 +99,9 @@ describe('validateCustomSchema', () => {
       '(?<session>(a|ab)+)',
       '(?<session>(a|a){1,100})',
       '(?<session>(a?){30}a{30})',
+      '^(?<session>(\\w+){16})x',
+      '(?<session>(\\w+){2,16})',
+      '(?<session>(?:a|ab){16})',
     ]) {
       const result = validateCustomSchema({ ...baseSchema, sessionRegex });
       expect(result).toMatchObject({ ok: false });
@@ -161,6 +164,12 @@ describe('validateCustomSchema', () => {
       sessionRegex: '^app:(?<session>[^:]+):',
     });
     expect(result.ok).toBe(true);
+  });
+
+  it('accepts an optional or single group around a repeat', () => {
+    for (const sessionRegex of ['^app:(?<session>[^:]+)(:\\d+)?$', '^(?<session>(\\w+){1}):']) {
+      expect(validateCustomSchema({ ...baseSchema, sessionRegex }).ok).toBe(true);
+    }
   });
 
   it('requires a real session group', () => {
