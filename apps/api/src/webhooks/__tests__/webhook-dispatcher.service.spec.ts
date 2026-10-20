@@ -259,6 +259,23 @@ describe('WebhookDispatcherService', () => {
       expect(dispatched).not.toHaveBeenCalled();
       expect(service.shouldFireAlert('replication_lag:conn-1:wh-1', 30, 10, true)).toBe(true);
     });
+
+    it('keeps no generation state once lookups settle, however many connections are cleared', async () => {
+      webhooksService.getWebhooksByEvent.mockResolvedValue([]);
+      for (let i = 0; i < 50; i++) {
+        service.clearThresholdAlertPerWebhook('replication_lag', `conn-${i}`);
+        await service.dispatchThresholdAlertPerWebhook(
+          WebhookEventType.REPLICATION_LAG,
+          'replication_lag',
+          30,
+          'replicationLagSeconds',
+          true,
+          { message: 'lag' },
+          `conn-${i}`,
+        );
+      }
+      expect((service as any).pendingLookups.size).toBe(0);
+    });
   });
 
   describe('Signature Generation', () => {
