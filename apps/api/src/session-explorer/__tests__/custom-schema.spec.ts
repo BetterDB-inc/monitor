@@ -125,6 +125,31 @@ describe('validateCustomSchema', () => {
     }
   });
 
+  it('rejects regexes whose bounded repeats expand past the budget', () => {
+    for (const sessionRegex of [
+      `(?<session>${'.{0,16}'.repeat(20)})x`,
+      '^(?<session>(?:\\w{1,16}){5})$',
+      '^(?<session>a{65})$',
+      '^(?<session>a{70,})$',
+    ]) {
+      const result = validateCustomSchema({ ...baseSchema, sessionRegex });
+      expect(result).toMatchObject({ ok: false });
+      if (!result.ok) {
+        expect(result.errors).toContain('Session regex repeats may expand to at most 64 characters');
+      }
+    }
+  });
+
+  it('accepts bounded repeats within the budget', () => {
+    for (const sessionRegex of [
+      `^(?<session>${'.{0,16}'.repeat(4)})x`,
+      '^tenant:\\d{1,8}:(?<session>[0-9a-f]{8}-[0-9a-f]{4}):msg:\\d{1,10}$',
+      `^${'prefix'.repeat(20)}:(?<session>\\w+)$`,
+    ]) {
+      expect(validateCustomSchema({ ...baseSchema, sessionRegex })).toMatchObject({ ok: true });
+    }
+  });
+
   it('accepts common session regexes', () => {
     for (const sessionRegex of [
       '^chat:(?<session>[^:]+):msg:\\d+$',

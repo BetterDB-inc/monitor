@@ -11,6 +11,7 @@ const MAX_KEY_LENGTH = 512;
 const BOUND = /^\{(\d+)(,(\d*))?\}/;
 const MAX_SMALL_BOUND = 16;
 const MAX_LARGE_REPEATS = 3;
+const MAX_REPEAT_COST = 64;
 const SEGMENT = /^([^.[\]]*)((?:\[\d+\])*)$/;
 const INDEX = /\[(\d+)\]/g;
 
@@ -44,6 +45,7 @@ const isValidPath = (path: string): boolean =>
 
 interface Quantifier {
   length: number;
+  weight: number;
   large: boolean;
   repeats: boolean;
 }
@@ -53,18 +55,28 @@ interface GroupFrame {
   alternates: boolean;
 }
 
+interface Expansion {
+  size: number;
+  cost: number;
+}
+
 function quantifierAt(src: string, i: number): Quantifier | null {
   let q: Quantifier | null = null;
   if (src[i] === '*' || src[i] === '+') {
-    q = { length: 1, large: true, repeats: true };
+    q = { length: 1, weight: 1, large: true, repeats: true };
   } else if (src[i] === '?') {
-    q = { length: 1, large: false, repeats: false };
+    q = { length: 1, weight: 1, large: false, repeats: false };
   } else if (src[i] === '{') {
     const bound = BOUND.exec(src.slice(i));
     if (!bound) return null;
-    const max =
-      bound[2] === undefined ? Number(bound[1]) : bound[3] === '' ? Infinity : Number(bound[3]);
-    q = { length: bound[0].length, large: max > MAX_SMALL_BOUND, repeats: max > 1 };
+    const min = Number(bound[1]);
+    const max = bound[2] === undefined ? min : bound[3] === '' ? Infinity : Number(bound[3]);
+    q = {
+      length: bound[0].length,
+      weight: max === Infinity ? min + 1 : max,
+      large: max > MAX_SMALL_BOUND,
+      repeats: max > 1,
+    };
   }
   if (q && src[i + q.length] === '?') q.length++;
   return q;
@@ -115,6 +127,50 @@ function repetitionRisk(src: string): { nested: boolean; largeRepeats: number } 
   return { nested, largeRepeats };
 }
 
+function repeatCost(src: string): number {
+  const stack: Expansion[] = [{ size: 0, cost: 0 }];
+  let last: Expansion = { size: 0, cost: 0 };
+  let inClass = false;
+  const add = (term: Expansion) => {
+    const frame = stack[stack.length - 1];
+    frame.size += term.size;
+    frame.cost += term.cost;
+    last = term;
+  };
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (inClass) {
+      if (c === '\\') i++;
+      else if (c === ']') {
+        inClass = false;
+        add({ size: 1, cost: 0 });
+      }
+    } else if (c === '\\') {
+      i++;
+      add({ size: 1, cost: 0 });
+    } else if (c === '[') {
+      inClass = true;
+    } else if (c === '(') {
+      stack.push({ size: 0, cost: 0 });
+      i += groupSyntaxLength(src, i);
+    } else if (c === ')') {
+      if (stack.length > 1) add(stack.pop() as Expansion);
+    } else if (c !== '|') {
+      const q = quantifierAt(src, i);
+      if (q) {
+        const frame = stack[stack.length - 1];
+        frame.size += last.size * (q.weight - 1);
+        frame.cost += last.size * q.weight - last.cost;
+        last = { size: last.size * q.weight, cost: last.size * q.weight };
+        i += q.length - 1;
+      } else {
+        add({ size: 1, cost: 0 });
+      }
+    }
+  }
+  return stack[0].cost;
+}
+
 setFlagsFromString('--enable-experimental-regexp-engine');
 
 export const linearRegex = (src: string): RegExp => new RegExp(src, 'l');
@@ -163,6 +219,9 @@ export function validateCustomSchema(
             errors.push(
               `Session regex may use at most ${MAX_LARGE_REPEATS} unbounded repeats (*, +, {n,})`,
             );
+          }
+          if (repeatCost(src) > MAX_REPEAT_COST) {
+            errors.push(`Session regex repeats may expand to at most ${MAX_REPEAT_COST} characters`);
           }
         } catch {
           errors.push('sessionRegex is not a valid regular expression');
