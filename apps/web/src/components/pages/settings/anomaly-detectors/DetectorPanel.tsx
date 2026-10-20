@@ -164,7 +164,7 @@ export function DetectorPanel({
           onChange={(e) => setAbsolute(key, { value: e.target.value })}
           className="mt-1"
         />
-        <FieldHints differsFrom={differs ? defaultLabel : undefined} range="≥ 0" error={errors[key]} />
+        <FieldHints differsFrom={differs ? defaultLabel : undefined} range="> 0" error={errors[key]} />
       </div>
     );
   };

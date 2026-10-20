@@ -122,7 +122,7 @@ export function validateForm(
     const field = filled[key];
     if (!field.enabled) continue;
     if (field.value.trim() === '') errors[key] = 'Enter a value or turn this threshold off';
-    else if (!(parse(field.value) >= 0)) errors[key] = 'Must be 0 or more';
+    else if (!(parse(field.value) > 0)) errors[key] = 'Must be greater than 0, or turn this threshold off';
   }
   if (
     filled.warningAbsolute.enabled &&

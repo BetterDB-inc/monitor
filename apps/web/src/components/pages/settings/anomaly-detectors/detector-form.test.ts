@@ -148,7 +148,16 @@ describe('validateForm', () => {
 
   it('rejects a negative absolute threshold', () => {
     const form = { ...emptyForm(), warningAbsolute: { enabled: true, value: '-1' } };
-    expect(validateForm(form, connections).warningAbsolute).toBe('Must be 0 or more');
+    expect(validateForm(form, connections).warningAbsolute).toBe(
+      'Must be greater than 0, or turn this threshold off',
+    );
+  });
+
+  it('rejects 0 for an enabled absolute threshold because 0 means off', () => {
+    const form = { ...emptyForm(), criticalAbsolute: { enabled: true, value: '0' } };
+    expect(validateForm(form, connections).criticalAbsolute).toBe(
+      'Must be greater than 0, or turn this threshold off',
+    );
   });
 
   it('rejects a fractional consecutive count', () => {
