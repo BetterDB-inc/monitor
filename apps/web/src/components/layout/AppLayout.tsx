@@ -37,6 +37,7 @@ import { VectorAi } from '../../pages/VectorAi';
 import { InferenceLatency } from '../../pages/InferenceLatency';
 import { MetricForecasting } from '../../pages/MetricForecasting';
 import { ScalingReadiness } from '../../pages/ScalingReadiness';
+import { SessionExplorer } from '../../pages/SessionExplorer';
 import { CacheSimulator } from '../../pages/CacheSimulator';
 import { CacheSimulatorGuard } from '../CacheSimulatorGuard';
 import { CacheProposals } from '../../pages/CacheProposals';
@@ -326,6 +327,14 @@ function AppLayoutInner(): ReactElement {
                         <KvCache />
                       </KvCacheGuard>
                     </LiveConnectionGuard>
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/session-explorer"
+                element={
+                  <NoConnectionsGuard>
+                    <SessionExplorer />
                   </NoConnectionsGuard>
                 }
               />

@@ -101,6 +101,9 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
           <NavItem to="/scaling-readiness" active={location.pathname === '/scaling-readiness'}>
             Scaling Readiness
           </NavItem>
+          <NavItem to="/session-explorer" active={location.pathname === '/session-explorer'}>
+            Session Explorer
+          </NavItem>
           <NavItem
             to="/cache-simulator"
             active={location.pathname === '/cache-simulator'}

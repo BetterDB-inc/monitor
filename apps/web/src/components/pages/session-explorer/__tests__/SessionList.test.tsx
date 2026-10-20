@@ -1,0 +1,114 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
+import { SessionList } from '../SessionList';
+import { listResponse } from './fixtures';
+import { renderHookWithQuery } from '../../../../test/test-utils';
+import { useOversizeSessions } from '../../../../hooks/useSessionExplorer';
+import { sessionExplorerApi } from '../../../../api/session-explorer';
+
+vi.mock('../../../../api/session-explorer', () => ({
+  sessionExplorerApi: { oversize: vi.fn() },
+}));
+
+const order = () =>
+  screen
+    .getAllByRole('row')
+    .slice(1)
+    .map((row) => within(row).getAllByRole('cell')[0].textContent?.replace('Oversize', '').trim());
+
+const renderList = (props: Partial<Parameters<typeof SessionList>[0]> = {}) =>
+  render(
+    <SessionList
+      data={listResponse()}
+      oversizeIds={null}
+      selectedId={null}
+      onSelect={vi.fn()}
+      {...props}
+    />,
+  );
+
+describe('SessionList', () => {
+  it('sorts by last access by default, most recent first', () => {
+    renderList();
+    expect(order()).toEqual(['bravo', 'alpha', 'charlie']);
+  });
+
+  it('sorts by size when the size header is clicked, toggling direction', () => {
+    renderList();
+    fireEvent.click(screen.getByRole('button', { name: /Size/ }));
+    expect(order()).toEqual(['bravo', 'alpha', 'charlie']);
+    fireEvent.click(screen.getByRole('button', { name: /Size/ }));
+    expect(order()).toEqual(['charlie', 'alpha', 'bravo']);
+  });
+
+  it('sorts by TTL with persistent sessions last', () => {
+    renderList();
+    fireEvent.click(screen.getByRole('button', { name: /TTL/ }));
+    expect(order()).toEqual(['charlie', 'alpha', 'bravo']);
+  });
+
+  it('returns to last access ordering', () => {
+    renderList();
+    fireEvent.click(screen.getByRole('button', { name: /TTL/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Last access/ }));
+    expect(order()).toEqual(['bravo', 'alpha', 'charlie']);
+  });
+
+  it('notices a capped scan', () => {
+    renderList({ data: listResponse({ truncated: true }) });
+    expect(screen.getByText(/Showing the first 10,000 keys/)).toBeInTheDocument();
+  });
+
+  it('warns about partial results naming the failed node count', () => {
+    renderList({ data: listResponse({ partial: true, failedNodes: 2 }) });
+    expect(screen.getByText(/2 nodes did not respond/)).toBeInTheDocument();
+  });
+
+  it('shows no notices for a complete scan', () => {
+    renderList();
+    expect(screen.queryByText(/Showing the first/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/did not respond/)).not.toBeInTheDocument();
+  });
+
+  it('badges only sessions in the oversize list', () => {
+    renderList({ oversizeIds: new Set(['alpha']) });
+    const rows = screen.getAllByRole('row').slice(1);
+    const badged = rows.filter((row) => within(row).queryByText('Oversize'));
+    expect(badged).toHaveLength(1);
+    expect(badged[0].textContent).toContain('alpha');
+  });
+
+  it('shows no badge when not entitled', () => {
+    renderList({ oversizeIds: null });
+    expect(screen.queryByText('Oversize')).not.toBeInTheDocument();
+  });
+
+  it('selects a session on click', () => {
+    const onSelect = vi.fn();
+    renderList({ onSelect });
+    fireEvent.click(screen.getByText('charlie'));
+    expect(onSelect).toHaveBeenCalledWith('charlie');
+  });
+});
+
+describe('useOversizeSessions', () => {
+  const oversize = vi.mocked(sessionExplorerApi.oversize);
+
+  beforeEach(() => {
+    oversize.mockReset();
+    oversize.mockResolvedValue({ thresholdBytes: 1, sessionIds: ['alpha'], truncated: false });
+  });
+
+  it('does not call the oversize endpoint when not entitled', async () => {
+    const { result } = renderHookWithQuery(() => useOversizeSessions('conn-1', 'ns-1', false));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(oversize).not.toHaveBeenCalled();
+    expect(result.current).toBeNull();
+  });
+
+  it('returns the oversize ids when entitled', async () => {
+    const { result } = renderHookWithQuery(() => useOversizeSessions('conn-1', 'ns-1', true));
+    await waitFor(() => expect(result.current).toEqual(new Set(['alpha'])));
+    expect(oversize).toHaveBeenCalledWith('ns-1', expect.anything());
+  });
+});
