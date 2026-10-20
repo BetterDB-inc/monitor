@@ -86,11 +86,11 @@ export function DetectorPanel({
   const summary = summarize(resolved, defaults);
 
   const mutation = useMutation({
-    mutationFn: (save: DetectorSave) =>
+    mutationFn: ({ save }: { save: DetectorSave; submitted: DetectorFormState }) =>
       save.kind === 'reset'
         ? settingsApi.resetAnomalyDetector(metric)
         : settingsApi.updateAnomalyDetectors({ [metric]: save.entry }),
-    onSuccess: (_data, save) => {
+    onSuccess: (_data, { save, submitted }) => {
       setError(null);
       const next = expectedResolved(save, defaults);
       queryClient.setQueryData<AnomalyDetectorSettingsResponse>(ANOMALY_DETECTORS_QUERY_KEY, (prev) => {
@@ -100,7 +100,7 @@ export function DetectorPanel({
         else overrides[metric] = save.entry;
         return { ...prev, overrides, resolved: { ...prev.resolved, [metric]: next } };
       });
-      setForm(toFormState(next, defaults));
+      setForm((current) => (isDirty(current, submitted) ? current : toFormState(next, defaults)));
       queryClient.invalidateQueries({ queryKey: ANOMALY_DETECTORS_QUERY_KEY });
     },
     onError: (err) => setError(err instanceof Error ? err.message : 'Failed to save'),
@@ -247,7 +247,7 @@ export function DetectorPanel({
           <Button
             size="sm"
             disabled={!dirty || hasErrors || mutation.isPending}
-            onClick={() => mutation.mutate(buildSave(form, defaults))}
+            onClick={() => mutation.mutate({ save: buildSave(form, defaults), submitted: form })}
           >
             Save
           </Button>
@@ -255,7 +255,7 @@ export function DetectorPanel({
             size="sm"
             variant="outline"
             disabled={!hasOverride || mutation.isPending}
-            onClick={() => mutation.mutate({ kind: 'reset' })}
+            onClick={() => mutation.mutate({ save: { kind: 'reset' }, submitted: form })}
           >
             Reset to defaults
           </Button>

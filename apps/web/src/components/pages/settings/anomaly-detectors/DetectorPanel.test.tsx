@@ -140,6 +140,19 @@ describe('DetectorPanel', () => {
     expect(screen.queryByText('save failed')).not.toBeInTheDocument();
   });
 
+  it('keeps an edit made while the save is pending', async () => {
+    let finish: (value: unknown) => void = () => {};
+    api.updateAnomalyDetectors.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    renderPanel();
+    fireEvent.change(warningZ(), { target: { value: '2.5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.change(warningZ(), { target: { value: '2.7' } });
+    finish({ message: 'ok', config: {} });
+    await waitFor(() => expect(api.updateAnomalyDetectors).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).not.toBeDisabled());
+    expect(warningZ().value).toBe('2.7');
+  });
+
   it('warns about lifetime counters only on those metrics', () => {
     const { unmount } = renderPanel({ metric: 'acl_denied', defaults: aclDenied, resolved: aclDenied });
     expect(screen.getByText(/lifetime total since the server's last restart/)).toBeInTheDocument();
