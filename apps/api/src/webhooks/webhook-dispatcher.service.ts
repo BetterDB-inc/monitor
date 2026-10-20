@@ -94,6 +94,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
 
   // Track alert states with LRU cache to prevent memory leak
   private alertStates: LRUCache<string, AlertState>;
+  private readonly alertGenerations = new Map<string, number>();
 
   // Instance context
   private readonly sourceHost: string;
@@ -413,7 +414,9 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   }
 
   clearThresholdAlertPerWebhook(alertKeyPrefix: string, connectionId: string): void {
-    const connectionPrefix = `${alertKeyPrefix}:${connectionId}:`;
+    const generationKey = `${alertKeyPrefix}:${connectionId}`;
+    this.alertGenerations.set(generationKey, (this.alertGenerations.get(generationKey) ?? 0) + 1);
+    const connectionPrefix = `${generationKey}:`;
     const keys = [...this.alertStates.keys()].filter((key) => key.startsWith(connectionPrefix));
     for (const key of keys) {
       this.alertStates.delete(key);
@@ -466,9 +469,15 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     connectionId?: string,
   ): Promise<boolean> {
     let firedAny = false;
+    const generationKey = connectionId ? `${alertKeyPrefix}:${connectionId}` : null;
+    const generation = generationKey ? (this.alertGenerations.get(generationKey) ?? 0) : 0;
     try {
       // Get webhooks subscribed to this event, filtered by connectionId
       const webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
+
+      if (generationKey && (this.alertGenerations.get(generationKey) ?? 0) !== generation) {
+        return false;
+      }
 
       if (webhooks.length === 0) {
         this.logger.debug(

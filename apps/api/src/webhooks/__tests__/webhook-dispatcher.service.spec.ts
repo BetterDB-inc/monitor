@@ -237,6 +237,28 @@ describe('WebhookDispatcherService', () => {
 
       expect(keys.map(fire)).toEqual([true, true, false, false, false]);
     });
+
+    it('drops a dispatch whose webhook lookup was still pending when the alert was cleared', async () => {
+      let resolveLookup: (webhooks: any[]) => void = () => undefined;
+      webhooksService.getWebhooksByEvent.mockReturnValue(new Promise((resolve) => (resolveLookup = resolve)));
+      const dispatched = jest.spyOn(service as any, 'dispatchPendingEvent').mockResolvedValue(undefined);
+
+      const pending = service.dispatchThresholdAlertPerWebhook(
+        WebhookEventType.REPLICATION_LAG,
+        'replication_lag',
+        30,
+        'replicationLagSeconds',
+        true,
+        { message: 'lag' },
+        'conn-1',
+      );
+      service.clearThresholdAlertPerWebhook('replication_lag', 'conn-1');
+      resolveLookup([{ id: 'wh-1', thresholds: {} }]);
+
+      await expect(pending).resolves.toBe(false);
+      expect(dispatched).not.toHaveBeenCalled();
+      expect(service.shouldFireAlert('replication_lag:conn-1:wh-1', 30, 10, true)).toBe(true);
+    });
   });
 
   describe('Signature Generation', () => {
