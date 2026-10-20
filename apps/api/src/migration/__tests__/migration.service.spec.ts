@@ -184,8 +184,15 @@ describe('MigrationService capacity preflight', () => {
     else process.env.MIGRATION_VERDICT_DIR = OLD_VERDICT_DIR;
   });
 
-  async function analyze() {
-    const registry = createMockRegistry() as unknown as ConstructorParameters<typeof MigrationService>[0];
+  async function analyze(usedMemory?: string) {
+    const mock = createMockRegistry();
+    if (usedMemory) {
+      mock.mockAdapter.getInfo.mockResolvedValue({
+        ...(await mock.mockAdapter.getInfo()),
+        memory: { used_memory: usedMemory },
+      });
+    }
+    const registry = mock as unknown as ConstructorParameters<typeof MigrationService>[0];
     const service = new MigrationService(registry);
     const { id } = await service.startAnalysis({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2' });
     for (let i = 0; i < 100 && service.getJob(id)?.status !== 'completed'; i++) {
@@ -207,6 +214,7 @@ describe('MigrationService capacity preflight', () => {
       expect.objectContaining({
         targetIsCluster: false,
         sourceBytes: 1000000,
+        roughSourceSize: true,
         sampledKeys: [],
         sourceExpiringKeys: 0,
       }),
@@ -216,6 +224,17 @@ describe('MigrationService capacity preflight', () => {
     );
     expect(job.blockingCount).toBe(1);
     expect(job.warningCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it('sizes the source by its used_memory and flags it rough when sampling gave no estimate', async () => {
+    probe.mockResolvedValue([]);
+
+    const job = await analyze('5000000');
+
+    expect(job.totalMemoryBytes).toBe(5000000);
+    expect(probe).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceBytes: 5000000, roughSourceSize: true }),
+    );
   });
 
   it('reports that the preflight did not run when the target cannot be probed', async () => {

@@ -9,7 +9,14 @@ import { sampleTtls } from './analysis/ttl-sampler';
 import { detectHfe } from './analysis/hfe-detector';
 import { analyzeCommands } from './analysis/commandlog-analyzer';
 import { buildInstanceMeta, checkCompatibility } from './analysis/compatibility-checker';
-import { pickOverlapSample, probeTargetCapacity, sourceExpiringKeysFrom, type TtlSample } from './analysis/capacity-checker';
+import {
+  capacitySourceSize,
+  pickOverlapSample,
+  probeTargetCapacity,
+  sourceDb0Share,
+  sourceExpiringKeysFrom,
+  type TtlSample,
+} from './analysis/capacity-checker';
 import {
   loadAnalysisVerdict,
   resolveVerdictDir,
@@ -513,14 +520,24 @@ export class MigrationService {
       // Capacity + key-overlap preflight. Best-effort: a target that cannot be
       // probed (ACL, unreachable master) adds an info item and never fails analysis.
       if (targetConfig) {
-        // TTL keys on the source, from the INFO keyspace already read in step 2.
-        // That INFO came from one node, so a zero on a cluster source is unknown.
-        let sourceExpiringKeys: number | null = null;
+        // INFO keyspace already read in step 2, as text.
+        let keyspaceText = '';
         try {
-          const keyspaceText = Object.entries(keyspaceSection)
+          keyspaceText = Object.entries(keyspaceSection)
             .filter(([key, val]) => key.startsWith('db') && typeof val === 'string')
             .map(([key, val]) => `${key}:${val}`)
             .join('\n');
+        } catch { /* no keyspace text: db0 share 1, TTL count from the sample */ }
+        // Command mode copies db0, so size the source by db0's share of its keys.
+        const sourceSize = capacitySourceSize({
+          estimatedBytes: job.result.estimatedTotalMemoryBytes ?? 0,
+          db0Share: sourceDb0Share(keyspaceText, isCluster),
+          usedMemory: job.result.totalMemoryBytes ?? 0,
+        });
+        // TTL keys on the source. That INFO came from one node, so a zero on a
+        // cluster source is unknown.
+        let sourceExpiringKeys: number | null = null;
+        try {
           const ttl = job.result.ttlDistribution;
           const ttlSample: TtlSample | null = ttl
             ? {
@@ -539,7 +556,8 @@ export class MigrationService {
           incompatibilities.push(...await probeTargetCapacity({
             targetConfig,
             targetIsCluster: job.result.targetIsCluster === true,
-            sourceBytes: job.result.estimatedTotalMemoryBytes || job.result.totalMemoryBytes || 0,
+            sourceBytes: sourceSize.bytes,
+            roughSourceSize: sourceSize.rough,
             sampledKeys: pickOverlapSample(sampledKeys),
             sourceExpiringKeys,
           }));

@@ -16,8 +16,11 @@ export interface MasterMemory {
    * are excluded).
    */
   usedMemory: number;
+  /** `used_memory_dataset`: memory held by keys, which a flush can free (the rest is baseline). */
+  datasetMemory: number;
   /** This master's own maxmemory-policy. */
   policy: string;
+  /** Keys in every db; with db0Keys, gives db0's share of datasetMemory. */
   keys: number;
   /** Keys in db0 only. */
   db0Keys: number;
@@ -44,7 +47,7 @@ export interface KeyOverlap {
 export const TIGHT_FIT_RATIO = 0.9;
 /**
  * The source estimate is sampled MEMORY USAGE scaled by key count, so a hard
- * block needs it to exceed maxmemory by this factor; below that it warns.
+ * block needs it to exceed what the master can hold by this factor.
  */
 export const BLOCK_MARGIN = 1.1;
 const OVERLAP_SAMPLE_LIMIT = 200;
@@ -58,10 +61,14 @@ function infoNumber(info: string, field: string): number {
   return Number(infoField(info, field) ?? 0) || 0;
 }
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /**
  * Totals from an INFO keyspace reply. `keys` and `expires` cover every db
- * (eviction sees all of them); `db0Keys` is db0 only, the db that EXISTS and
- * the source sample see.
+ * (eviction sees all of them); `db0Keys` is db0 only, the db that EXISTS,
+ * the source sample and command mode see.
  */
 export function keyspaceTotals(info: string): { keys: number; expires: number; db0Keys: number } {
   let keys = 0;
@@ -99,6 +106,37 @@ export function sourceExpiringKeysFrom(
   return null;
 }
 
+/**
+ * db0's share of the source's keys. Command mode copies db0 only, while the
+ * analysis estimate scales by keys in every db. A cluster source only has db0.
+ * Returns 1 when INFO keyspace is missing or empty.
+ */
+export function sourceDb0Share(
+  keyspaceInfo: string | null | undefined,
+  isClusterSource: boolean,
+): number {
+  if (isClusterSource || !keyspaceInfo) return 1;
+  const { keys, db0Keys } = keyspaceTotals(keyspaceInfo);
+  return keys > 0 ? db0Keys / keys : 1;
+}
+
+/**
+ * Source size the capacity check compares against the target. The sampled
+ * estimate is scaled to db0. When sampling produced no estimate, the source's
+ * used_memory is used instead and flagged `rough`: it includes replication and
+ * client buffers and allocator overhead, so it must not hard-block.
+ */
+export function capacitySourceSize(input: {
+  estimatedBytes: number;
+  db0Share: number;
+  usedMemory: number;
+}): { bytes: number; rough: boolean } {
+  if (input.estimatedBytes > 0) {
+    return { bytes: input.estimatedBytes * Math.min(1, Math.max(0, input.db0Share)), rough: false };
+  }
+  return { bytes: Math.max(0, input.usedMemory), rough: true };
+}
+
 function nodeName(node: Valkey): string {
   const { host, port } = node.options ?? {};
   return `${host ?? 'unknown'}:${port ?? 'unknown'}`;
@@ -122,7 +160,7 @@ function slotShares(cluster: Cluster, masters: Valkey[]): number[] {
   return counts.map((c) => c / matched);
 }
 
-/** Read maxmemory, evictable used memory, policy, keys and TTL keys from every master of the target. */
+/** Read memory, dataset size, policy, keys and TTL keys from every master of the target. */
 export async function readTargetMemory(client: Valkey): Promise<TargetMemory> {
   const maybeCluster: unknown = client;
   const cluster = maybeCluster instanceof Cluster ? maybeCluster : null;
@@ -141,6 +179,7 @@ export async function readTargetMemory(client: Valkey): Promise<TargetMemory> {
           0,
           infoNumber(memory, 'used_memory') - infoNumber(memory, 'mem_not_counted_for_evict'),
         ),
+        datasetMemory: infoNumber(memory, 'used_memory_dataset'),
         policy: infoField(memory, 'maxmemory_policy') ?? 'noeviction',
         keys,
         db0Keys,
@@ -195,18 +234,26 @@ export function pickOverlapSample(
   return picked;
 }
 
-type CapacityKind = 'tight' | 'flush' | 'evict' | 'oom';
-const KIND_RANK: Record<CapacityKind, number> = { tight: 1, flush: 2, evict: 3, oom: 4 };
+type CapacityKind = 'tight' | 'flush' | 'marginal' | 'evict' | 'oom';
+const KIND_RANK: Record<CapacityKind, number> = { tight: 1, flush: 2, marginal: 3, evict: 4, oom: 5 };
 
 interface MasterFinding {
   master: MasterMemory;
   kind: CapacityKind;
   /** Bytes of the source this master is expected to receive. */
   need: number;
-  /** Bytes this master can take before it reaches maxmemory. */
+  /** Bytes this master can take now, before it reaches maxmemory. */
   free: number;
-  /** volatile-* policy with no TTL keys on the master or in the source. */
-  noEvictionCandidates: boolean;
+  /** Bytes this master could take after db0 is flushed. */
+  roomAfterFlush: number;
+  /** volatile-* policy and the source has no TTL keys, so its keys can't be evicted. */
+  volatileNoSourceTtl: boolean;
+}
+
+/** Memory a FLUSHDB of db0 would free: db0's share of the dataset. 0 when db0 is empty. */
+function flushableBytes(master: MasterMemory): number {
+  if (master.db0Keys <= 0 || master.keys <= 0) return 0;
+  return master.datasetMemory * Math.min(1, master.db0Keys / master.keys);
 }
 
 function assessMaster(
@@ -218,26 +265,32 @@ function assessMaster(
   const need = sourceBytes * master.slotShare;
   if (need <= 0) return null;
   const free = Math.max(0, master.maxmemory - master.usedMemory);
-  const base = { master, need, free, noEvictionCandidates: false };
+  const roomAfterFlush = Math.max(
+    0,
+    master.maxmemory - Math.max(0, master.usedMemory - flushableBytes(master)),
+  );
+  const volatile = master.policy.startsWith('volatile-');
+  const volatileNoSourceTtl = volatile && sourceExpiringKeys === 0;
+  const base = { master, need, free, roomAfterFlush, volatileNoSourceTtl };
 
   if (need <= free) {
     return need > free * TIGHT_FIT_RATIO ? { ...base, kind: 'tight' } : null;
   }
 
-  // volatile-* only evicts keys with a TTL. With none on this master and none
-  // arriving from the source, Valkey behaves like noeviction. An unknown
-  // source count (null) is not treated as "none".
-  const volatile = master.policy.startsWith('volatile-');
-  const noEvictionCandidates = volatile && master.expires === 0 && sourceExpiringKeys === 0;
-  const canEvict = master.policy.startsWith('allkeys-') || (volatile && !noEvictionCandidates);
+  // volatile-* only evicts keys with a TTL. It cannot evict when neither this
+  // master nor the source has any, and when the source has none, evicting the
+  // target's own TTL keys cannot make room for a source that alone exceeds
+  // maxmemory. An unknown source count (null) is never treated as "none".
+  const volatileCannotEvict =
+    volatileNoSourceTtl && (master.expires === 0 || need > master.maxmemory * BLOCK_MARGIN);
+  const canEvict = master.policy.startsWith('allkeys-') || (volatile && !volatileCannotEvict);
   if (canEvict) return { ...base, kind: 'evict' };
 
-  // Cannot evict. emptyDbBeforeSync (or a manual flush) frees the current
-  // data, so only block when the source would not fit even in an empty master.
-  if (need > master.maxmemory * BLOCK_MARGIN) {
-    return { ...base, kind: 'oom', noEvictionCandidates };
-  }
-  return { ...base, kind: 'flush', noEvictionCandidates };
+  // Cannot evict. A flush (emptyDbBeforeSync) frees db0's dataset, never the
+  // baseline, so judge against the room a flush would leave.
+  if (need > roomAfterFlush * BLOCK_MARGIN) return { ...base, kind: 'oom' };
+  if (need <= roomAfterFlush) return { ...base, kind: 'flush' };
+  return { ...base, kind: 'marginal' };
 }
 
 function overflowRatio(f: MasterFinding): number {
@@ -261,23 +314,39 @@ function describeFit(f: MasterFinding, sourceBytes: number, clustered: boolean):
   return `The source dataset is about ${formatBytes(sourceBytes)}. Target master ${f.master.name} owns about ${pct}% of the hash slots, so it receives about ${formatBytes(f.need)}; it has ${have}`;
 }
 
+function volatileNote(f: MasterFinding): string {
+  if (!f.volatileNoSourceTtl) return '';
+  return f.master.expires === 0
+    ? ` A '${f.master.policy}' policy only evicts keys with a TTL, and there are none on this target or in the source.`
+    : ` A '${f.master.policy}' policy only evicts keys with a TTL, and the source has none, so evicting the target's own keys cannot make room for it.`;
+}
+
+/** Options for {@link checkTargetCapacity}. */
+export interface CapacityCheckOptions {
+  /**
+   * The source size is the source's used_memory (MEMORY USAGE sampling was
+   * unavailable), not a dataset estimate: report at most a warning.
+   */
+  roughSourceSize?: boolean;
+}
+
 /**
- * Will each target master hold its share of the source dataset?
- * Every master is judged on its own memory and policy; masters without a
- * maxmemory limit are skipped. The worst master is reported:
- * Per master, with need = source x slot share and free = maxmemory - used:
- * - fits but uses more than TIGHT_FIT_RATIO of free -> warning (tight).
- * - does not fit, master can evict (allkeys-*, volatile-* with TTL keys) -> warning (evict).
- * - does not fit, cannot evict, need <= maxmemory x BLOCK_MARGIN -> warning (only
- *   fits if the target is emptied first, e.g. emptyDbBeforeSync).
- * - does not fit, cannot evict, need > maxmemory x BLOCK_MARGIN -> blocking (OOM
- *   even on an empty target).
+ * Will each target master hold its share of the source dataset? Every capped
+ * master is judged on its own memory and policy; the worst one is reported.
+ * Per master, with need = source x slot share:
+ * - fits, but uses more than TIGHT_FIT_RATIO of free memory -> warning (tight).
+ * - does not fit and the master can evict -> warning (evict).
+ * - cannot evict, fits once db0 is flushed -> warning (empty it first).
+ * - cannot evict, within BLOCK_MARGIN of the room after a flush -> warning (marginal).
+ * - cannot evict, beyond BLOCK_MARGIN of the room after a flush -> blocking,
+ *   unless the source size is rough, which caps it at a warning.
  * `sourceExpiringKeys` is null when the source's TTL key count is unknown.
  */
 export function checkTargetCapacity(
   sourceBytes: number,
   target: TargetMemory,
   sourceExpiringKeys: number | null = null,
+  options: CapacityCheckOptions = {},
 ): Incompatibility[] {
   if (sourceBytes <= 0) return [];
   const findings = target.masters
@@ -293,31 +362,47 @@ export function checkTargetCapacity(
       ? ` ${findings.length} of ${target.masters.length} target masters are flagged; this one has the least room.`
       : '';
   const policy = worst.master.policy;
+  const afterFlush = formatBytes(worst.roomAfterFlush);
 
   if (worst.kind === 'oom') {
-    const why = worst.noEvictionCandidates
-      ? ` A '${policy}' policy only evicts keys with a TTL, and there are none on this target or in the source.`
-      : '';
+    if (options.roughSourceSize) {
+      return [
+        {
+          severity: 'warning',
+          category: 'capacity',
+          title: 'Target may not have enough memory',
+          detail: `${fit} (policy '${policy}'); about ${afterFlush} would be available after emptying it.${volatileNote(worst)} The source size here is its used_memory, because MEMORY USAGE sampling was unavailable, and that includes replication and client buffers, so this is not treated as a hard block. Check the source's dataset size before migrating.${spread}`,
+        },
+      ];
+    }
     return [
       {
         severity: 'blocking',
         category: 'capacity',
         title: 'Target does not have enough memory',
-        detail: `${fit} (policy '${policy}'). The source does not fit within maxmemory even on an empty target, so writes will fail with OOM part-way through the migration.${why} Raise maxmemory or add shards first.${spread}`,
+        detail: `${fit} (policy '${policy}'). Even after emptying the target, only about ${afterFlush} would be available, so writes will fail with OOM part-way through the migration.${volatileNote(worst)} Raise maxmemory or add shards first.${spread}`,
       },
     ];
   }
 
   if (worst.kind === 'flush') {
-    const why = worst.noEvictionCandidates
-      ? ` A '${policy}' policy only evicts keys with a TTL, and there are none on this target or in the source.`
-      : '';
     return [
       {
         severity: 'warning',
         category: 'capacity',
         title: 'Target only has room if it is emptied first',
-        detail: `${fit} (policy '${policy}'). The source fits within maxmemory but not next to the data already on the target, so writes will fail with OOM part-way through unless the target is emptied first.${why} Use a RedisShake mode with emptyDbBeforeSync, flush the target, or raise maxmemory before migrating.${spread}`,
+        detail: `${fit} (policy '${policy}'). The source does not fit next to the data already on the target, but about ${afterFlush} would be available after emptying it, which is enough. Use a RedisShake mode with emptyDbBeforeSync or flush the target before migrating; otherwise writes fail with OOM part-way through.${volatileNote(worst)}${spread}`,
+      },
+    ];
+  }
+
+  if (worst.kind === 'marginal') {
+    return [
+      {
+        severity: 'warning',
+        category: 'capacity',
+        title: 'Target memory may not hold the source',
+        detail: `${fit} (policy '${policy}'). Even after emptying the target only about ${afterFlush} would be available, and the source estimate is within 10% of that, too close to call from a sampled estimate. Writes may fail with OOM part-way through; raise maxmemory or add shards before migrating.${volatileNote(worst)}${spread}`,
       },
     ];
   }
@@ -346,10 +431,20 @@ export function checkTargetCapacity(
   ];
 }
 
-/** Does the target already hold data, and do source keys collide with it? */
+/** Does the target's db0 already hold data, and do source keys collide with it? */
 export function checkKeyOverlap(targetKeys: number, overlap: KeyOverlap | null): Incompatibility[] {
   if (targetKeys <= 0) return [];
-  if (overlap && overlap.existing > 0 && overlap.sampled > 0) {
+  if (!overlap || overlap.sampled === 0) {
+    return [
+      {
+        severity: 'info',
+        category: 'key_overlap',
+        title: 'Key overlap was not checked',
+        detail: `The target already holds ${targetKeys.toLocaleString()} keys in db0, but analysis sampled no source keys, so collisions with the target were not checked.`,
+      },
+    ];
+  }
+  if (overlap.existing > 0) {
     const pct = Math.round((overlap.existing / overlap.sampled) * 100);
     return [
       {
@@ -374,9 +469,11 @@ export function checkKeyOverlap(targetKeys: number, overlap: KeyOverlap | null):
 export interface CapacityProbeInput {
   targetConfig: DatabaseConnectionConfig;
   targetIsCluster: boolean;
-  /** Estimated source dataset size in bytes (0 when unknown). */
+  /** Source size for the capacity check, in bytes (0 when unknown). See capacitySourceSize. */
   sourceBytes: number;
-  /** Source key names already sampled by analysis. */
+  /** true when sourceBytes is the source's used_memory rather than a dataset estimate. */
+  roughSourceSize?: boolean;
+  /** Source key names to check on the target (see pickOverlapSample). */
   sampledKeys: string[];
   /** Source keys with a TTL; null or omitted when unknown. */
   sourceExpiringKeys?: number | null;
@@ -385,8 +482,10 @@ export interface CapacityProbeInput {
 /**
  * Connect to the target with its own client (the adapter's INFO comes from a
  * single node), read memory and key counts from every master, and return the
- * `capacity` and `key_overlap` issues. Throws when the target cannot be probed;
- * the caller treats that as "nothing to report".
+ * `capacity` and `key_overlap` issues. Throws when the target's memory cannot
+ * be read; the caller reports that the checks did not run. A failing overlap
+ * step (e.g. EXISTS denied) only replaces the overlap result, so a capacity
+ * finding is never lost.
  */
 export async function probeTargetCapacity(input: CapacityProbeInput): Promise<Incompatibility[]> {
   const client = createTargetClient(
@@ -397,11 +496,28 @@ export async function probeTargetCapacity(input: CapacityProbeInput): Promise<In
   try {
     await client.connect();
     const target = await readTargetMemory(client);
-    const overlap = target.db0Keys > 0 ? await sampleKeyOverlap(client, input.sampledKeys) : null;
-    return [
-      ...checkTargetCapacity(input.sourceBytes, target, input.sourceExpiringKeys ?? null),
-      ...checkKeyOverlap(target.db0Keys, overlap),
-    ];
+    const capacity = checkTargetCapacity(
+      input.sourceBytes,
+      target,
+      input.sourceExpiringKeys ?? null,
+      { roughSourceSize: input.roughSourceSize === true },
+    );
+    let overlap: Incompatibility[];
+    try {
+      const sampled =
+        target.db0Keys > 0 ? await sampleKeyOverlap(client, input.sampledKeys) : null;
+      overlap = checkKeyOverlap(target.db0Keys, sampled);
+    } catch (err: unknown) {
+      overlap = [
+        {
+          severity: 'info',
+          category: 'key_overlap',
+          title: 'Key-overlap check did not run',
+          detail: `Source keys could not be checked on the target (${errorMessage(err)}). Allow EXISTS for the target user, or check for colliding keys manually before migrating.`,
+        },
+      ];
+    }
+    return [...capacity, ...overlap];
   } finally {
     await client.quit().catch(() => undefined);
   }
