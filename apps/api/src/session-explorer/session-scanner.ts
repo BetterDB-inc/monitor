@@ -39,7 +39,16 @@ export interface SessionKeysResult {
   failedNodes: number;
 }
 
-async function scanNode(client: Valkey, pattern: string, limit: number): Promise<ScanOutcome> {
+type KeyFilter = (key: string) => boolean;
+
+const acceptAll: KeyFilter = () => true;
+
+async function scanNode(
+  client: Valkey,
+  pattern: string,
+  limit: number,
+  accept: KeyFilter,
+): Promise<ScanOutcome> {
   const seen = new Set<string>();
   let cursor = '0';
   do {
@@ -47,13 +56,18 @@ async function scanNode(client: Valkey, pattern: string, limit: number): Promise
     cursor = next;
     for (const key of page) {
       if (seen.size >= limit) break;
-      seen.add(key);
+      if (accept(key)) seen.add(key);
     }
   } while (cursor !== '0' && seen.size < limit);
   return { keys: [...seen], exhausted: cursor === '0' };
 }
 
-async function scanAll(clients: Valkey[], pattern: string, keyCap: number): Promise<ScanAllOutcome> {
+async function scanAll(
+  clients: Valkey[],
+  pattern: string,
+  keyCap: number,
+  accept: KeyFilter = acceptAll,
+): Promise<ScanAllOutcome> {
   const nodes: NodeKeys[] = [];
   let scannedKeys = 0;
   let truncated = false;
@@ -66,7 +80,7 @@ async function scanAll(clients: Valkey[], pattern: string, keyCap: number): Prom
       break;
     }
     try {
-      const { keys, exhausted } = await scanNode(client, pattern, keyCap - scannedKeys);
+      const { keys, exhausted } = await scanNode(client, pattern, keyCap - scannedKeys, accept);
       scannedKeys += keys.length;
       if (!exhausted || (scannedKeys >= keyCap && index < clients.length - 1)) truncated = true;
       nodes.push({ client, keys });
@@ -186,11 +200,14 @@ export async function keysForSession(
   keyCap: number = DEFAULT_KEY_CAP,
 ): Promise<SessionKeysResult> {
   return withPrimaries(db, async ({ clients, failed }) => {
-    const scan = await scanAll(clients, pattern, keyCap);
+    const scan = await scanAll(
+      clients,
+      pattern,
+      keyCap,
+      (key) => preset.sessionIdOf(key) === sessionId,
+    );
     return {
-      keys: scan.nodes.flatMap(({ keys }) =>
-        keys.filter((key) => preset.sessionIdOf(key) === sessionId),
-      ),
+      keys: scan.nodes.flatMap(({ keys }) => keys),
       truncated: scan.truncated,
       failedNodes: failed + scan.failed,
     };

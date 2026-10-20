@@ -299,6 +299,13 @@ describe('keysForSession', () => {
     expect(client.callsOf('scan')).toHaveLength(1);
   });
 
+  it('finds session keys past the cap of non-matching keys', async () => {
+    const client = new FakeValkey();
+    client.scanPages = [keyRange(0, 5000, 'y'), keyRange(5000, 5000, 'y'), ['s:x:1']];
+    const result = await keysForSession(fakeDb(client), 's:*', preset, 'x', 3000);
+    expect(result).toMatchObject({ keys: ['s:x:1'], truncated: false });
+  });
+
   it('reports primaries that could not be reached or scanned', async () => {
     const nodeA = new FakeValkey(storeOf({ 's:x:1': { type: 'string' } }));
     const nodeB = new FakeValkey();
