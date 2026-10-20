@@ -78,6 +78,18 @@ describe('SessionList', () => {
     expect(badged[0].textContent).toContain('alpha');
   });
 
+  it('marks sizes that leave out keys whose memory could not be measured', () => {
+    const base = listResponse();
+    renderList({
+      data: listResponse({
+        sessions: [{ ...base.sessions[0], unmeasuredKeys: 2 }, base.sessions[1]],
+      }),
+    });
+    const marked = screen.getByTitle('2 keys could not be measured');
+    expect(marked.textContent).toBe('≥ 300.00 B');
+    expect(screen.getAllByTitle(/could not be measured/)).toHaveLength(1);
+  });
+
   it('shows no badge when not entitled', () => {
     renderList({ oversizeIds: null });
     expect(screen.queryByText('Oversize')).not.toBeInTheDocument();

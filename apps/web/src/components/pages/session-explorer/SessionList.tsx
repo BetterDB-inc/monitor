@@ -128,7 +128,17 @@ export function SessionList({ data, oversizeIds, selectedId, onSelect }: Props) 
               </TableCell>
               <TableCell>{s.keyCount}</TableCell>
               <TableCell>{formatIdle(s.idleSeconds)}</TableCell>
-              <TableCell>{formatBytes(s.memoryBytes)}</TableCell>
+              <TableCell>
+                {s.unmeasuredKeys > 0 ? (
+                  <span
+                    title={`${s.unmeasuredKeys} ${s.unmeasuredKeys === 1 ? 'key' : 'keys'} could not be measured`}
+                  >
+                    ≥ {formatBytes(s.memoryBytes)}
+                  </span>
+                ) : (
+                  formatBytes(s.memoryBytes)
+                )}
+              </TableCell>
               <TableCell>{formatTtl(s.ttlMs)}</TableCell>
             </TableRow>
           ))}

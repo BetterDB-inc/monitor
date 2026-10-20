@@ -2,9 +2,9 @@ import type { KeyView, SessionDetail, SessionListResponse } from '@betterdb/shar
 
 export const listResponse = (overrides: Partial<SessionListResponse> = {}): SessionListResponse => ({
   sessions: [
-    { sessionId: 'alpha', keyCount: 1, memoryBytes: 300, idleSeconds: 50, ttlMs: 9000 },
-    { sessionId: 'bravo', keyCount: 2, memoryBytes: 900, idleSeconds: 5, ttlMs: null },
-    { sessionId: 'charlie', keyCount: 1, memoryBytes: 100, idleSeconds: 500, ttlMs: 1000 },
+    { sessionId: 'alpha', keyCount: 1, memoryBytes: 300, unmeasuredKeys: 0, idleSeconds: 50, ttlMs: 9000 },
+    { sessionId: 'bravo', keyCount: 2, memoryBytes: 900, unmeasuredKeys: 0, idleSeconds: 5, ttlMs: null },
+    { sessionId: 'charlie', keyCount: 1, memoryBytes: 100, unmeasuredKeys: 0, idleSeconds: 500, ttlMs: 1000 },
   ],
   scannedKeys: 4,
   truncated: false,
