@@ -100,4 +100,22 @@ export interface SessionDetail {
   estimatedTokens: number;
   ttlMs: number | null;
   memoryBytes: number;
+  complete: boolean;
+  unparsedKeys: number;
+  truncated: boolean;
+  failedNodes: number;
+  missingKeys: number;
+}
+
+export interface SessionPreview {
+  sampleKey: string | null;
+  view: KeyView | null;
+}
+
+export interface SessionExport {
+  exportedAt: string;
+  namespace: Pick<SessionNamespace, 'name' | 'pattern' | 'preset'>;
+  sessionId: string;
+  keys: CapturedKey[];
+  parsed: SessionDetail;
 }
