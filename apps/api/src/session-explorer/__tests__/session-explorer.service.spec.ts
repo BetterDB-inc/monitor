@@ -1,12 +1,13 @@
 import { NotFoundException } from '@nestjs/common';
 import type { CapturedKey, SessionNamespace } from '@betterdb/shared';
 import { SessionExplorerService } from '../session-explorer.service';
-import { keysForSession } from '../session-scanner';
+import { keysForSession, scanSessions } from '../session-scanner';
 import { readSessionKeys } from '../session-reader';
 
 jest.mock('../session-scanner', () => ({
   ...jest.requireActual('../session-scanner'),
   keysForSession: jest.fn(),
+  scanSessions: jest.fn(),
 }));
 jest.mock('../session-reader', () => ({
   ...jest.requireActual('../session-reader'),
@@ -113,5 +114,39 @@ describe('SessionExplorerService.getSession', () => {
     await expect(service.getSession('conn-1', 'missing', 'lc:1')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+});
+
+describe('SessionExplorerService.oversizeSessions', () => {
+  const scan = scanSessions as jest.MockedFunction<typeof scanSessions>;
+  const storage = {
+    getSessionNamespace: jest.fn(async () => ({ ...ns, oversizeThresholdBytes: 100 })),
+  };
+  const service = new SessionExplorerService({ get: jest.fn(() => ({})) } as never, storage as never);
+  const summary = (sessionId: string, memoryBytes: number, unmeasuredKeys = 0) => ({
+    sessionId,
+    keyCount: 1,
+    memoryBytes,
+    unmeasuredKeys,
+    idleSeconds: null,
+    ttlMs: null,
+  });
+
+  it('carries partial scans and unmeasured sessions into the response', async () => {
+    scan.mockResolvedValue({
+      sessions: [summary('big', 500), summary('unknown', 10, 1), summary('small', 10)],
+      scannedKeys: 3,
+      truncated: false,
+      partial: true,
+      failedNodes: 1,
+    });
+    expect(await service.oversizeSessions('conn-1', 'ns-1')).toEqual({
+      thresholdBytes: 100,
+      sessionIds: ['big'],
+      unmeasuredSessionIds: ['unknown'],
+      truncated: false,
+      partial: true,
+      failedNodes: 1,
+    });
   });
 });

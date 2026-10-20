@@ -102,12 +102,16 @@ export class SessionExplorerService {
       this.presetOf(namespace),
     );
     const thresholdBytes = namespace.oversizeThresholdBytes;
+    const oversize = list.sessions.filter((s) => s.memoryBytes > thresholdBytes);
     return {
       thresholdBytes,
-      sessionIds: list.sessions
-        .filter((s) => s.memoryBytes > thresholdBytes)
+      sessionIds: oversize.map((s) => s.sessionId),
+      unmeasuredSessionIds: list.sessions
+        .filter((s) => s.unmeasuredKeys > 0 && !oversize.includes(s))
         .map((s) => s.sessionId),
       truncated: list.truncated,
+      partial: list.partial,
+      failedNodes: list.failedNodes,
     };
   }
 

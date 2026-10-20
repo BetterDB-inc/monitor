@@ -61,6 +61,7 @@ export interface SessionSummary {
   sessionId: string;
   keyCount: number;
   memoryBytes: number;
+  unmeasuredKeys: number;
   idleSeconds: number | null;
   ttlMs: number | null;
 }
@@ -110,7 +111,10 @@ export interface SessionDetail {
 export interface SessionOversizeResponse {
   thresholdBytes: number;
   sessionIds: string[];
+  unmeasuredSessionIds: string[];
   truncated: boolean;
+  partial: boolean;
+  failedNodes: number;
 }
 
 export interface SessionPreview {

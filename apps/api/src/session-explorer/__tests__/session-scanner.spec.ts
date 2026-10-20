@@ -141,6 +141,17 @@ describe('scanSessions', () => {
     expect(session).toMatchObject({ memoryBytes: 400, idleSeconds: 7 });
   });
 
+  it('counts keys whose MEMORY USAGE failed instead of sizing them as zero', async () => {
+    const client = new FakeValkey(
+      storeOf({
+        's:a:1': { type: 'string', memory: 100 },
+        's:a:2': { type: 'string', memory: null },
+      }),
+    );
+    const [session] = (await scanSessions(fakeDb(client), 's:*', preset)).sessions;
+    expect(session).toMatchObject({ memoryBytes: 100, unmeasuredKeys: 1 });
+  });
+
   it('ttl is null when no key expires', async () => {
     const client = new FakeValkey(
       storeOf({ 's:a:1': { type: 'string', pttl: -1 }, 's:a:2': { type: 'string', pttl: -1 } }),

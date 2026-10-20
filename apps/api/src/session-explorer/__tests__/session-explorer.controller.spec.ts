@@ -413,7 +413,14 @@ describe('SessionExplorerController', () => {
         headers,
       });
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ thresholdBytes: 120, sessionIds: ['chat:2'], truncated: false });
+      expect(res.json()).toEqual({
+        thresholdBytes: 120,
+        sessionIds: ['chat:2'],
+        unmeasuredSessionIds: [],
+        truncated: false,
+        partial: false,
+        failedNodes: 0,
+      });
     });
 
     it('flags the captured oversize session at the default threshold', async () => {
@@ -441,7 +448,10 @@ describe('SessionExplorerController', () => {
       expect(res.json()).toEqual({
         thresholdBytes: 1048576,
         sessionIds: ['sxfix:lcc:oversize'],
+        unmeasuredSessionIds: [],
         truncated: false,
+        partial: false,
+        failedNodes: 0,
       });
     });
   });

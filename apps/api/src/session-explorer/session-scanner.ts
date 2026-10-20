@@ -11,7 +11,7 @@ const SCAN_COUNT = 1000;
 type PipelineResult = [Error | null, unknown] | undefined;
 
 interface KeyMeta {
-  memory: number;
+  memory: number | null;
   idle: number | null;
   pttl: number;
 }
@@ -104,7 +104,7 @@ async function fetchMeta(
       if (!type || type[0] || type[1] === 'none') return;
       const ttl = numberOf(pttl);
       if (ttl === -2) return;
-      meta.set(key, { memory: numberOf(memory) ?? 0, idle: numberOf(idle), pttl: ttl ?? -1 });
+      meta.set(key, { memory: numberOf(memory), idle: numberOf(idle), pttl: ttl ?? -1 });
     });
   }
   return meta;
@@ -117,11 +117,19 @@ function summarise(sessionId: string, keys: KeyMeta[]): SessionSummary {
   return keys.reduce<SessionSummary>(
     (acc, k) => ({
       ...acc,
-      memoryBytes: acc.memoryBytes + k.memory,
+      memoryBytes: acc.memoryBytes + (k.memory ?? 0),
+      unmeasuredKeys: acc.unmeasuredKeys + (k.memory === null ? 1 : 0),
       idleSeconds: minOrNull(acc.idleSeconds, k.idle),
       ttlMs: k.pttl > 0 ? minOrNull(acc.ttlMs, k.pttl) : acc.ttlMs,
     }),
-    { sessionId, keyCount: keys.length, memoryBytes: 0, idleSeconds: null, ttlMs: null },
+    {
+      sessionId,
+      keyCount: keys.length,
+      memoryBytes: 0,
+      unmeasuredKeys: 0,
+      idleSeconds: null,
+      ttlMs: null,
+    },
   );
 }
 
