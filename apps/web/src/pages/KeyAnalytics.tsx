@@ -1,8 +1,8 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { keyAnalyticsApi } from '../api/keyAnalytics';
-import type { HotKeyEntry } from '../api/keyAnalytics';
+import type { HotKeyEntry, KeyPatternSnapshot } from '../api/keyAnalytics';
 import { useBaselineHotKeys } from '../hooks/useBaselineHotKeys';
-import { extractPattern } from '@betterdb/shared';
+import { extractPattern, dbScopedIdentity } from '@betterdb/shared';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
@@ -40,14 +40,29 @@ function getRankDelta(
   currentRank: number,
   keyName: string,
   prevKeys: HotKeyEntry[] | null,
+  db?: number,
 ): { label: string; className: string } {
   if (!prevKeys || prevKeys.length === 0) return { label: '', className: '' };
-  const prev = prevKeys.find((k) => k.keyName === keyName);
+  // Key identity includes the logical database: the same name in two
+  // databases is two distinct keys.
+  const prev = prevKeys.find((k) => k.keyName === keyName && (k.db ?? 0) === (db ?? 0));
   if (!prev) return { label: 'NEW', className: 'text-emerald-600 font-semibold' };
   const delta = prev.rank - currentRank;
   if (delta > 0) return { label: `\u2191${delta}`, className: 'text-emerald-600' };
   if (delta < 0) return { label: `\u2193${Math.abs(delta)}`, className: 'text-destructive' };
   return { label: '\u2014', className: 'text-muted-foreground' };
+}
+
+// Inline "dbN" badge shown next to a key/pattern name in the aggregated
+// all-databases view (hidden when a single database fills the view). One
+// definition so the styling/visibility rule never diverges across the tables.
+function DbBadge({ db, show }: { db: number | undefined; show: boolean }) {
+  if (!show) return null;
+  return (
+    <Badge variant="outline" className="ml-2 font-sans">
+      db{db ?? 0}
+    </Badge>
+  );
 }
 
 type SortField = 'pattern' | 'keyCount' | 'memoryBytes' | 'staleKeyCount';
@@ -121,8 +136,42 @@ export function KeyAnalytics() {
   >('patterns');
   const [sortField, setSortField] = useState<SortField>('keyCount');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
-  const [selectedPattern, setSelectedPattern] = useState<string | null>(null);
+  const [selectedPattern, setSelectedPattern] = useState<{ db: number; pattern: string } | null>(
+    null,
+  );
+  // Logical database filter: 'all' aggregates across every scanned database.
+  const [rawSelectedDb, setSelectedDb] = useState<number | 'all'>('all');
   const detailRef = useRef<HTMLDivElement>(null);
+
+  // Reset the db filter synchronously when the connection changes, so the first
+  // fetches for the new connection are never scoped to the previous
+  // connection's (stale) numeric db while availableDbs is still loading. Doing
+  // this in render rather than a post-commit effect means React re-renders with
+  // the reset value before the fetchers below read dbFilter, avoiding a
+  // throwaway fetch at the old filter.
+  const [dbFilterConnId, setDbFilterConnId] = useState(currentConnection?.id);
+  if (currentConnection?.id !== dbFilterConnId) {
+    setDbFilterConnId(currentConnection?.id);
+    setSelectedDb('all');
+  }
+
+  // Databases that have analytics data for this connection. The filter is only
+  // shown when there is more than one (or the single one is not db0).
+  const { data: availableDbs } = usePolling({
+    fetcher: () => keyAnalyticsApi.getDatabases(),
+    interval: 60000,
+    refetchKey: currentConnection?.id,
+  });
+  // A db no longer present (e.g. after switching connections) must not keep
+  // filtering everything down to an empty view — fall back to 'all'.
+  const selectedDb =
+    rawSelectedDb !== 'all' && availableDbs && !availableDbs.includes(rawSelectedDb)
+      ? 'all'
+      : rawSelectedDb;
+  const dbFilter = selectedDb === 'all' ? undefined : selectedDb;
+  const showDbFilter =
+    (availableDbs?.length ?? 0) > 1 || (availableDbs?.length === 1 && availableDbs[0] !== 0);
+  const showDbBadges = (availableDbs?.length ?? 0) > 1 && selectedDb === 'all';
 
   // Scroll to detail panel when a pattern is selected
   useEffect(() => {
@@ -138,9 +187,9 @@ export function KeyAnalytics() {
     loading: _summaryLoading,
     refresh: refetchSummary,
   } = usePolling({
-    fetcher: () => keyAnalyticsApi.getSummary(),
+    fetcher: () => keyAnalyticsApi.getSummary(undefined, undefined, dbFilter),
     interval: 60000, // 1 minute
-    refetchKey: currentConnection?.id,
+    refetchKey: `${currentConnection?.id}-${selectedDb}`,
   });
 
   const {
@@ -148,9 +197,12 @@ export function KeyAnalytics() {
     loading: patternsLoading,
     refresh: refetchPatterns,
   } = usePolling({
-    fetcher: () => keyAnalyticsApi.getPatterns({ limit: 100 }),
+    // Without a db filter the storage layer applies the limit per logical
+    // database, so every populated database gets up to 100 rows here and none
+    // can crowd a sibling out of the "All databases" view.
+    fetcher: () => keyAnalyticsApi.getPatterns({ limit: 100, db: dbFilter }),
     interval: 60000,
-    refetchKey: currentConnection?.id,
+    refetchKey: `${currentConnection?.id}-${selectedDb}`,
   });
 
   const [hotKeyDateRange, setHotKeyDateRange] = useState<DateRange | undefined>(undefined);
@@ -171,9 +223,10 @@ export function KeyAnalytics() {
         latest: true,
         startTime: hotKeyStartTime,
         endTime: hotKeyEndTime,
+        db: dbFilter,
       }),
     interval: 60000,
-    refetchKey: `${currentConnection?.id}-${hotKeyStartTime}-${hotKeyEndTime}`,
+    refetchKey: `${currentConnection?.id}-${hotKeyStartTime}-${hotKeyEndTime}-${selectedDb}`,
     enabled: activeTab === 'hot-keys',
   });
 
@@ -182,16 +235,20 @@ export function KeyAnalytics() {
     connectionId: currentConnection?.id,
     startTime: hotKeyStartTime,
     endTime: hotKeyEndTime,
+    db: dbFilter,
     enabled: activeTab === 'hot-keys' && isHotKeyTimeFiltered,
   });
 
-  // Deduplicate: keep only the latest snapshot per pattern (results are ordered by timestamp DESC)
+  // Deduplicate: keep only the latest snapshot per (db, pattern) — results are
+  // ordered by timestamp DESC, and the same pattern can legitimately exist in
+  // several logical databases at once.
   const patterns = useMemo(() => {
     if (!rawPatterns) return null;
     const seen = new Set<string>();
     return rawPatterns.filter((p) => {
-      if (seen.has(p.pattern)) return false;
-      seen.add(p.pattern);
+      const identity = dbScopedIdentity(p.db, p.pattern);
+      if (seen.has(identity)) return false;
+      seen.add(identity);
       return true;
     });
   }, [rawPatterns]);
@@ -212,9 +269,9 @@ export function KeyAnalytics() {
     loading: largestKeysLoading,
     refresh: refetchLargestKeys,
   } = usePolling({
-    fetcher: () => keyAnalyticsApi.getLargestKeys({ limit: 50, latest: true }),
+    fetcher: () => keyAnalyticsApi.getLargestKeys({ limit: 50, latest: true, db: dbFilter }),
     interval: 60000,
-    refetchKey: currentConnection?.id,
+    refetchKey: `${currentConnection?.id}-${selectedDb}`,
     enabled: activeTab === 'largest-keys',
   });
 
@@ -274,29 +331,32 @@ export function KeyAnalytics() {
     return sorted;
   }, [patterns, sortField, sortDirection]);
 
-  const topPatternsByKeys = useMemo(() => {
+  // Top-10 patterns by a chosen numeric field, shaped for the bar charts. In
+  // the aggregated 'all databases' view the same pattern can appear once per
+  // db, so suffix the db to keep the chart entries distinct.
+  const topPatternsBy = (select: (p: KeyPatternSnapshot) => number) => {
     if (!patterns) return [];
     return [...patterns]
-      .sort((a, b) => b.keyCount - a.keyCount)
+      .sort((a, b) => select(b) - select(a))
       .slice(0, 10)
-      .map((p) => ({
-        name: p.pattern.length > 20 ? p.pattern.substring(0, 20) + '...' : p.pattern,
-        fullName: p.pattern,
-        value: p.keyCount,
-      }));
-  }, [patterns]);
+      .map((p) => {
+        const suffix = showDbBadges ? ` (db${p.db ?? 0})` : '';
+        const truncated = p.pattern.length > 20 ? p.pattern.substring(0, 20) + '...' : p.pattern;
+        return { name: truncated + suffix, fullName: p.pattern + suffix, value: select(p) };
+      });
+  };
 
-  const topPatternsByMemory = useMemo(() => {
-    if (!patterns) return [];
-    return [...patterns]
-      .sort((a, b) => b.totalMemoryBytes - a.totalMemoryBytes)
-      .slice(0, 10)
-      .map((p) => ({
-        name: p.pattern.length > 20 ? p.pattern.substring(0, 20) + '...' : p.pattern,
-        fullName: p.pattern,
-        value: p.totalMemoryBytes,
-      }));
-  }, [patterns]);
+  const topPatternsByKeys = useMemo(
+    () => topPatternsBy((p) => p.keyCount),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [patterns, showDbBadges],
+  );
+
+  const topPatternsByMemory = useMemo(
+    () => topPatternsBy((p) => p.totalMemoryBytes),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [patterns, showDbBadges],
+  );
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -313,6 +373,10 @@ export function KeyAnalytics() {
   };
 
   const hotKeySignalType = hotKeys && hotKeys.length > 0 ? hotKeys[0].signalType : null;
+
+  // Hot keys arrive already globally ranked and contiguously numbered from the
+  // API (getHotKeys re-ranks the merged per-db rows), so the row's stored
+  // `rank` is the display rank in every view — no client-side re-rank needed.
 
   // Pattern summary chips: group hot keys by pattern
   const patternSummary = useMemo(() => {
@@ -344,6 +408,23 @@ export function KeyAnalytics() {
             </p>
           </div>
           <div className="flex items-center gap-3">
+            {showDbFilter && (
+              <select
+                value={selectedDb === 'all' ? 'all' : String(selectedDb)}
+                onChange={(e) =>
+                  setSelectedDb(e.target.value === 'all' ? 'all' : parseInt(e.target.value, 10))
+                }
+                title="Filter analytics by logical database"
+                className="px-3 py-2 border border-border rounded bg-background text-sm hover:bg-muted"
+              >
+                <option value="all">All databases</option>
+                {(availableDbs ?? []).map((db) => (
+                  <option key={db} value={String(db)}>
+                    db{db}
+                  </option>
+                ))}
+              </select>
+            )}
             <TabsList>
               <TabsTrigger value="patterns">Patterns</TabsTrigger>
               <TabsTrigger value="hot-keys">Hot Keys</TabsTrigger>
@@ -550,13 +631,17 @@ export function KeyAnalytics() {
                           <tr
                             key={pattern.id}
                             className={`border-b hover:bg-muted cursor-pointer transition-colors ${
-                              selectedPattern === pattern.pattern
+                              selectedPattern?.db === (pattern.db ?? 0) &&
+                              selectedPattern?.pattern === pattern.pattern
                                 ? 'bg-primary/10 border-l-4 border-l-primary'
                                 : ''
                             }`}
-                            onClick={() => setSelectedPattern(pattern.pattern)}
+                            onClick={() => setSelectedPattern({ db: pattern.db ?? 0, pattern: pattern.pattern })}
                           >
-                            <td className="p-2 font-mono text-xs">{pattern.pattern}</td>
+                            <td className="p-2 font-mono text-xs">
+                              {pattern.pattern}
+                              <DbBadge db={pattern.db} show={showDbBadges} />
+                            </td>
                             <td className="p-2 font-bold">{formatNumber(pattern.keyCount)}</td>
                             <td className="p-2 text-muted-foreground">
                               {formatNumber(pattern.sampledKeyCount)}
@@ -592,7 +677,13 @@ export function KeyAnalytics() {
                   <div className="flex justify-between items-center">
                     <CardTitle className="flex items-center gap-2">
                       <BarChart3 className="h-5 w-5 text-primary" />
-                      Pattern Detail: <span className="font-mono text-sm">{selectedPattern}</span>
+                      Pattern Detail:{' '}
+                      <span className="font-mono text-sm">{selectedPattern.pattern}</span>
+                      {(availableDbs?.length ?? 0) > 1 && (
+                        <Badge variant="outline" className="font-sans">
+                          db{selectedPattern.db}
+                        </Badge>
+                      )}
                     </CardTitle>
                     <button
                       onClick={() => setSelectedPattern(null)}
@@ -604,7 +695,9 @@ export function KeyAnalytics() {
                 </CardHeader>
                 <CardContent>
                   {(() => {
-                    const pattern = sortedPatterns.find((p) => p.pattern === selectedPattern);
+                    const pattern = sortedPatterns.find(
+                      (p) => (p.db ?? 0) === selectedPattern.db && p.pattern === selectedPattern.pattern,
+                    );
                     if (!pattern) return null;
 
                     return (
@@ -812,6 +905,7 @@ export function KeyAnalytics() {
                           entry.rank,
                           entry.keyName,
                           baselineHotKeys ?? null,
+                          entry.db,
                         );
                         const isTop10 = entry.rank <= 10;
                         return (
@@ -825,7 +919,10 @@ export function KeyAnalytics() {
                             <TableCell className={`text-xs ${delta.className}`}>
                               {delta.label}
                             </TableCell>
-                            <TableCell className="font-mono text-sm">{entry.keyName}</TableCell>
+                            <TableCell className="font-mono text-sm">
+                              {entry.keyName}
+                              <DbBadge db={entry.db} show={showDbBadges} />
+                            </TableCell>
                             <TableCell>
                               {entry.signalType === 'lfu' ? (
                                 <div className="flex items-center gap-2">
@@ -986,7 +1083,10 @@ export function KeyAnalytics() {
                           <TableCell className="text-muted-foreground font-medium">
                             {entry.rank}
                           </TableCell>
-                          <TableCell className="font-mono text-sm">{entry.keyName}</TableCell>
+                          <TableCell className="font-mono text-sm">
+                            {entry.keyName}
+                            <DbBadge db={entry.db} show={showDbBadges} />
+                          </TableCell>
                           <TableCell>
                             {entry.keyType ? (
                               <Badge variant="secondary">{entry.keyType}</Badge>

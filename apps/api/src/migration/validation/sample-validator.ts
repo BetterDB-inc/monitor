@@ -1,5 +1,6 @@
 import type Valkey from 'iovalkey';
 import type { SampleValidationResult, SampleKeyResult, SampleKeyStatus } from '@betterdb/shared';
+import { describeStreamGroups } from '../execution/stream-metadata';
 
 const TYPE_BATCH_SIZE = 100;
 const MAX_ISSUES = 50;
@@ -376,6 +377,16 @@ async function compareStream(source: Valkey, target: Valkey, key: string): Promi
 
   if (sourceLen !== targetLen) {
     return `stream length differs (source: ${sourceLen}, target: ${targetLen})`;
+  }
+
+  // Equal length is not enough: a stream migrated without its consumer groups
+  // looks identical to XLEN but breaks every XREADGROUP after cutover.
+  const [sourceGroups, targetGroups] = await Promise.all([
+    describeStreamGroups(source, key),
+    describeStreamGroups(target, key),
+  ]);
+  if (sourceGroups !== targetGroups) {
+    return `consumer groups differ (source: ${sourceGroups || 'none'}, target: ${targetGroups || 'none'})`;
   }
 
   return null;

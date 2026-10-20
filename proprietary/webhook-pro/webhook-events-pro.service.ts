@@ -73,19 +73,19 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
       return;
     }
 
-    await this.webhookDispatcher.dispatchThresholdAlert(
+    await this.webhookDispatcher.dispatchThresholdAlertPerWebhook(
       WebhookEventType.SLOWLOG_THRESHOLD,
       'slowlog_threshold',
       data.slowlogCount,
-      data.threshold,
+      'slowlogCount',
       true, // isAbove
-      {
+      (threshold) => ({
         slowlogCount: data.slowlogCount,
-        threshold: data.threshold,
-        message: `Slowlog count (${data.slowlogCount}) exceeds threshold (${data.threshold})`,
+        threshold,
+        message: `Slowlog count (${data.slowlogCount}) exceeds threshold (${threshold})`,
         timestamp: data.timestamp,
         instance: data.instance,
-      },
+      }),
       data.connectionId,
     );
   }
@@ -107,20 +107,20 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
       return;
     }
 
-    await this.webhookDispatcher.dispatchThresholdAlert(
+    await this.webhookDispatcher.dispatchThresholdAlertPerWebhook(
       WebhookEventType.REPLICATION_LAG,
       replicationLagKey(data.connectionId),
       data.lagSeconds,
-      data.threshold,
+      'replicationLagSeconds',
       true, // isAbove
-      {
+      (threshold) => ({
         lagSeconds: data.lagSeconds,
-        threshold: data.threshold,
+        threshold,
         masterLinkStatus: data.masterLinkStatus,
-        message: `Replication lag (${data.lagSeconds}s) exceeds threshold (${data.threshold}s)`,
+        message: `Replication lag (${data.lagSeconds}s) exceeds threshold (${threshold}s)`,
         timestamp: data.timestamp,
         instance: data.instance,
-      },
+      }),
       data.connectionId,
     );
   }
@@ -435,7 +435,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
 
     await this.webhookDispatcher.dispatchThresholdAlert(
       WebhookEventType.LATENCY_SPIKE,
-      'latency_spike',
+      `latency_spike:${data.connectionId ?? 'default'}`,
       data.currentLatency,
       data.threshold,
       true, // isAbove
@@ -470,7 +470,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
 
     await this.webhookDispatcher.dispatchThresholdAlert(
       WebhookEventType.CONNECTION_SPIKE,
-      'connection_spike',
+      `connection_spike:${data.connectionId ?? 'default'}`,
       data.currentConnections,
       data.threshold,
       true, // isAbove

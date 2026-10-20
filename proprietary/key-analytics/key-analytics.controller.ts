@@ -26,10 +26,11 @@ export class KeyAnalyticsController {
     @ConnectionId() connectionId?: string,
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
+    @Query('db') db?: string,
   ) {
     const start = startTime ? parseInt(startTime, 10) : undefined;
     const end = endTime ? parseInt(endTime, 10) : undefined;
-    return this.keyAnalytics.getSummary(start, end, connectionId);
+    return this.keyAnalytics.getSummary(start, end, connectionId, safeInt(db));
   }
 
   @Get('patterns')
@@ -42,6 +43,7 @@ export class KeyAnalyticsController {
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
     @Query('limit') limit?: string,
+    @Query('db') db?: string,
   ) {
     return this.keyAnalytics.getPatternSnapshots({
       pattern,
@@ -49,6 +51,7 @@ export class KeyAnalyticsController {
       endTime: endTime ? parseInt(endTime, 10) : undefined,
       limit: limit ? parseInt(limit, 10) : undefined,
       connectionId,
+      db: safeInt(db),
     });
   }
 
@@ -63,6 +66,7 @@ export class KeyAnalyticsController {
     @Query('endTime') endTime?: string,
     @Query('latest') latest?: string,
     @Query('oldest') oldest?: string,
+    @Query('db') db?: string,
   ) {
     return this.keyAnalytics.getHotKeys({
       connectionId,
@@ -71,6 +75,7 @@ export class KeyAnalyticsController {
       endTime: safeInt(endTime),
       latest: latest === 'true',
       oldest: oldest === 'true',
+      db: safeInt(db),
     });
   }
 
@@ -85,6 +90,7 @@ export class KeyAnalyticsController {
     @Query('endTime') endTime?: string,
     @Query('latest') latest?: string,
     @Query('oldest') oldest?: string,
+    @Query('db') db?: string,
   ) {
     const wantOldest = oldest === 'true';
     return this.keyAnalytics.getLargestKeys({
@@ -95,6 +101,7 @@ export class KeyAnalyticsController {
       // Default to the latest snapshot unless an explicit time range or oldest is requested.
       latest: wantOldest ? false : latest !== 'false',
       oldest: wantOldest,
+      db: safeInt(db),
     });
   }
 
@@ -109,6 +116,7 @@ export class KeyAnalyticsController {
     @Query('endTime') endTime?: string,
     @Query('latest') latest?: string,
     @Query('oldest') oldest?: string,
+    @Query('db') db?: string,
   ) {
     const wantOldest = oldest === 'true';
     return this.keyAnalytics.getCompositeKeys({
@@ -119,6 +127,7 @@ export class KeyAnalyticsController {
       // Default to the latest snapshot unless an explicit time range or oldest is requested.
       latest: wantOldest ? false : latest !== 'false',
       oldest: wantOldest,
+      db: safeInt(db),
     });
   }
 
@@ -131,11 +140,12 @@ export class KeyAnalyticsController {
     @Query('pattern') pattern?: string,
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
+    @Query('db') db?: string,
   ) {
     if (!pattern || !startTime || !endTime) {
       throw new Error('pattern, startTime, and endTime are required');
     }
-    return this.keyAnalytics.getPatternTrends(pattern, parseInt(startTime, 10), parseInt(endTime, 10), connectionId);
+    return this.keyAnalytics.getPatternTrends(pattern, parseInt(startTime, 10), parseInt(endTime, 10), connectionId, safeInt(db));
   }
 
   @Post('collect')
@@ -149,6 +159,14 @@ export class KeyAnalyticsController {
       message: `Key analytics ${fullScan ? 'deep-scan ' : ''}collection triggered`,
       status: 'processing',
     };
+  }
+
+  @Get('databases')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature('keyAnalytics')
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
+  async getDatabases(@ConnectionId() connectionId?: string) {
+    return this.keyAnalytics.getDatabases(connectionId);
   }
 
   @Get('key-sizes')

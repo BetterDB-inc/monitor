@@ -800,12 +800,22 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return 0;
   }
 
+  async getKeyAnalyticsDatabases(_connectionId?: string): Promise<number[]> {
+    // Nothing is ever stored here, so no databases have analytics data.
+    return [];
+  }
+
   async saveHotKeys(_entries: HotKeyEntry[], _connectionId: string): Promise<number> {
     throw new Error('Hot key stats not supported in memory adapter');
   }
 
   async getHotKeys(_options?: HotKeyQueryOptions): Promise<HotKeyEntry[]> {
     throw new Error('Hot key stats not supported in memory adapter');
+  }
+
+  async getHotKeyDatabases(_connectionId?: string): Promise<number[]> {
+    // Nothing is ever stored here, so no databases have hot-key data.
+    return [];
   }
 
   async pruneOldHotKeys(_cutoffTimestamp: number, _connectionId?: string): Promise<number> {

@@ -214,6 +214,29 @@ function toAgentToken(row: AgentTokenPgRow): AgentToken {
   };
 }
 
+// The `WITH RECURSIVE dbs(db) AS (...)` loose index scan that enumerates the
+// populated logical databases: one MIN(db) seek per database, since Postgres
+// has no skip scan for DISTINCT over an index prefix (a plain SELECT DISTINCT db
+// would walk every index entry — O(history)). Returns just the CTE definition
+// (callers append their own SELECT). The `where` fragment is spliced twice (the
+// anchor and the recursive step); its $n placeholders are positional so reuse
+// binds the same values. Shared by getKeyPatternSnapshots and
+// getKeyAnalyticsDatabases.
+function populatedDbsCte(where: string): string {
+  return `
+      WITH RECURSIVE dbs(db) AS (
+        SELECT MIN(db) FROM key_pattern_snapshots ${where}
+        UNION ALL
+        SELECT (
+          SELECT MIN(db) FROM key_pattern_snapshots
+          ${where ? `${where} AND` : 'WHERE'} db > dbs.db
+        )
+        FROM dbs
+        WHERE dbs.db IS NOT NULL
+      )
+  `;
+}
+
 export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   private pool: Pool | null = null;
   private ready: boolean = false;
@@ -1411,13 +1434,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         min_ttl_seconds INTEGER,
         max_ttl_seconds INTEGER,
         connection_id TEXT NOT NULL DEFAULT 'env-default',
+        db INTEGER NOT NULL DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
+      ALTER TABLE key_pattern_snapshots ADD COLUMN IF NOT EXISTS db INTEGER NOT NULL DEFAULT 0;
 
       CREATE INDEX IF NOT EXISTS idx_kps_timestamp ON key_pattern_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_kps_pattern ON key_pattern_snapshots(pattern, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_kps_pattern_timestamp ON key_pattern_snapshots(pattern, timestamp);
       CREATE INDEX IF NOT EXISTS idx_kps_connection_id ON key_pattern_snapshots(connection_id);
+      DROP INDEX IF EXISTS idx_kps_connection_db;
+      CREATE INDEX IF NOT EXISTS idx_kps_connection_db_ts ON key_pattern_snapshots(connection_id, db, timestamp DESC, pattern ASC);
 
       CREATE TABLE IF NOT EXISTS hot_key_stats (
         id UUID PRIMARY KEY,
@@ -1431,10 +1458,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         cardinality BIGINT,
         key_type TEXT,
         ttl INTEGER,
-        rank INTEGER NOT NULL
+        rank INTEGER NOT NULL,
+        db INTEGER NOT NULL DEFAULT 0
       );
       ALTER TABLE hot_key_stats ADD COLUMN IF NOT EXISTS cardinality BIGINT;
       ALTER TABLE hot_key_stats ADD COLUMN IF NOT EXISTS key_type TEXT;
+      ALTER TABLE hot_key_stats ADD COLUMN IF NOT EXISTS db INTEGER NOT NULL DEFAULT 0;
       CREATE INDEX IF NOT EXISTS idx_hot_key_captured_at_global
         ON hot_key_stats(captured_at);
 
@@ -2680,7 +2709,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     for (const snapshot of snapshots) {
       values.push(
-        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
+        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
       );
       params.push(
         snapshot.id,
@@ -2702,6 +2731,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         snapshot.minTtlSeconds ?? null,
         snapshot.maxTtlSeconds ?? null,
         connectionId,
+        snapshot.db ?? 0,
       );
     }
 
@@ -2712,7 +2742,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         keys_with_ttl, keys_expiring_soon, total_memory_bytes,
         avg_memory_bytes, max_memory_bytes, avg_access_frequency,
         hot_key_count, cold_key_count, avg_idle_time_seconds,
-        stale_key_count, avg_ttl_seconds, min_ttl_seconds, max_ttl_seconds, connection_id
+        stale_key_count, avg_ttl_seconds, min_ttl_seconds, max_ttl_seconds, connection_id, db
       ) VALUES ${values.join(', ')}
     `,
       params,
@@ -2746,17 +2776,55 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`pattern = $${paramIndex++}`);
       params.push(options.pattern);
     }
+    if (options.db !== undefined) {
+      conditions.push(`db = $${paramIndex++}`);
+      params.push(options.db);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 100;
     const offset = options.offset ?? 0;
 
+    if (options.db !== undefined) {
+      const result = await this.pool.query(
+        `
+        SELECT * FROM key_pattern_snapshots
+        ${whereClause}
+        ORDER BY timestamp DESC, db ASC, pattern ASC
+        LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+      `,
+        [...params, limit, offset],
+      );
+      return result.rows.map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
+    }
+
+    // Without a db filter the limit applies PER logical database, not
+    // globally: rows sort db0-first within a collection, so a global limit
+    // would let a pattern-heavy db0 fill the page and hide later databases
+    // from the all-databases view. A LATERAL join runs one LIMITed,
+    // early-terminating scan of the (connection_id, db, timestamp) index per
+    // populated database rather than a ROW_NUMBER() window, which would have
+    // to number and sort the connection's full snapshot history on every
+    // request — including the web's 60s patterns poll.
+    //
+    // The database list itself is enumerated with a loose index scan (one
+    // MIN(db) seek per populated database via the recursive CTE): Postgres
+    // has no skip scan, so a plain SELECT DISTINCT db would still walk every
+    // index entry for the connection — O(history) on every request.
     const result = await this.pool.query(
       `
-      SELECT * FROM key_pattern_snapshots
-      ${whereClause}
-      ORDER BY timestamp DESC
-      LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+      ${populatedDbsCte(whereClause)}
+      SELECT s.* FROM (
+        SELECT db FROM dbs WHERE db IS NOT NULL
+      ) d
+      CROSS JOIN LATERAL (
+        SELECT * FROM key_pattern_snapshots
+        ${whereClause ? `${whereClause} AND` : 'WHERE'} db = d.db
+        ORDER BY timestamp DESC, pattern ASC
+        LIMIT $${paramIndex++}
+      ) s
+      ORDER BY s.timestamp DESC, s.db ASC, s.pattern ASC
+      OFFSET $${paramIndex++}
     `,
       [...params, limit, offset],
     );
@@ -2768,6 +2836,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     startTime?: number,
     endTime?: number,
     connectionId?: string,
+    db?: number,
   ): Promise<KeyAnalyticsSummary | null> {
     if (!this.pool) throw new Error('Database not initialized');
 
@@ -2787,70 +2856,88 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`timestamp <= $${paramIndex++}`);
       params.push(endTime);
     }
+    if (db !== undefined) {
+      conditions.push(`db = $${paramIndex++}`);
+      params.push(db);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const latestSnapshotsResult = await this.pool.query(
-      `
-      SELECT pattern, MAX(timestamp) as latest_timestamp
-      FROM key_pattern_snapshots
-      ${whereClause}
-      GROUP BY pattern
-    `,
-      params,
-    );
-
-    if (latestSnapshotsResult.rows.length === 0) return null;
-
-    const patternConditions = latestSnapshotsResult.rows
-      .map(() => '(pattern = ? AND timestamp = ?)')
-      .join(' OR ');
-    const patternParams: any[] = [];
-    for (const row of latestSnapshotsResult.rows) {
-      patternParams.push(row.pattern, row.latest_timestamp);
-    }
-
-    let pIdx = 1;
-    const patternPlaceholders = latestSnapshotsResult.rows
-      .map(() => `(pattern = $${pIdx++} AND timestamp = $${pIdx++})`)
-      .join(' OR ');
+    // Aggregate over the latest snapshot per (pattern, logical database): per
+    // db, not per pattern, because a partial collection (one db scanned, a
+    // sibling's scan failed) moves the pattern's newest timestamp forward for
+    // only some databases — pinning one MAX(timestamp) per pattern would
+    // silently drop the sibling's last row and undercount headline totals.
+    // The latest rows are selected by JOINing a grouped subquery rather than
+    // expanding each (pattern, db, timestamp) triple into an OR term with
+    // three bind parameters — that expansion scales with patterns x databases
+    // and can exceed the engine's bind-parameter limit (65535 for Postgres).
+    //
+    // connection scoping is re-applied on the outer rows: a (pattern, db,
+    // timestamp) triple is not unique across connections, so without it
+    // another connection's snapshot at the same triple would be summed in.
+    const latestJoin = `
+      FROM key_pattern_snapshots s
+      JOIN (
+        SELECT pattern, db, MAX(timestamp) as latest_timestamp
+        FROM key_pattern_snapshots
+        ${whereClause}
+        GROUP BY pattern, db
+      ) latest
+        ON s.pattern = latest.pattern
+        AND s.db = latest.db
+        AND s.timestamp = latest.latest_timestamp
+      ${connectionId ? `WHERE s.connection_id = $${paramIndex++}` : ''}
+    `;
+    const latestParams = connectionId ? [...params, connectionId] : params;
 
     const summaryResult = await this.pool.query(
       `
       SELECT
-        COUNT(DISTINCT pattern) as total_patterns,
-        SUM(key_count) as total_keys,
-        SUM(total_memory_bytes) as total_memory_bytes,
-        SUM(stale_key_count) as stale_key_count,
-        SUM(hot_key_count) as hot_key_count,
-        SUM(cold_key_count) as cold_key_count,
-        SUM(keys_expiring_soon) as keys_expiring_soon
-      FROM key_pattern_snapshots
-      WHERE ${patternPlaceholders}
+        COUNT(DISTINCT s.pattern) as total_patterns,
+        SUM(s.key_count) as total_keys,
+        SUM(s.total_memory_bytes) as total_memory_bytes,
+        SUM(s.stale_key_count) as stale_key_count,
+        SUM(s.hot_key_count) as hot_key_count,
+        SUM(s.cold_key_count) as cold_key_count,
+        SUM(s.keys_expiring_soon) as keys_expiring_soon
+      ${latestJoin}
     `,
-      patternParams,
+      latestParams,
     );
 
     const summary = summaryResult.rows[0];
 
+    if (!summary || !parseInt(summary.total_patterns)) return null;
+
     const patternRowsResult = await this.pool.query(
       `
-      SELECT pattern, key_count, total_memory_bytes, avg_memory_bytes, stale_key_count, hot_key_count, cold_key_count
-      FROM key_pattern_snapshots
-      WHERE ${patternPlaceholders}
+      SELECT
+        s.pattern,
+        SUM(s.key_count) as key_count,
+        SUM(s.total_memory_bytes) as total_memory_bytes,
+        SUM(s.stale_key_count) as stale_key_count,
+        SUM(s.hot_key_count) as hot_key_count,
+        SUM(s.cold_key_count) as cold_key_count,
+        SUM(s.sampled_key_count) as sampled_key_count,
+        SUM(s.avg_memory_bytes::bigint * s.sampled_key_count) as weighted_avg_memory
+      ${latestJoin}
+      GROUP BY s.pattern
     `,
-      patternParams,
+      latestParams,
     );
 
     const byPattern: Record<string, any> = {};
     for (const row of patternRowsResult.rows) {
+      const sampledKeyCount = parseInt(row.sampled_key_count) || 0;
       byPattern[row.pattern] = {
-        keyCount: row.key_count,
-        memoryBytes: parseInt(row.total_memory_bytes),
-        avgMemoryBytes: row.avg_memory_bytes,
-        staleCount: row.stale_key_count ?? null,
-        hotCount: row.hot_key_count ?? 0,
-        coldCount: row.cold_key_count ?? 0,
+        keyCount: parseInt(row.key_count) || 0,
+        memoryBytes: parseInt(row.total_memory_bytes) || 0,
+        avgMemoryBytes:
+          sampledKeyCount > 0 ? Math.round(parseInt(row.weighted_avg_memory) / sampledKeyCount) : 0,
+        staleCount: row.stale_key_count == null ? null : parseInt(row.stale_key_count),
+        hotCount: row.hot_key_count == null ? 0 : parseInt(row.hot_key_count),
+        coldCount: row.cold_key_count == null ? 0 : parseInt(row.cold_key_count),
       };
     }
 
@@ -2888,6 +2975,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     startTime: number,
     endTime: number,
     connectionId?: string,
+    db?: number,
   ): Promise<
     Array<{
       timestamp: number;
@@ -2902,15 +2990,29 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const params: any[] = [pattern, startTime, endTime];
 
     if (connectionId) {
-      conditions.push('connection_id = $4');
       params.push(connectionId);
+      conditions.push(`connection_id = $${params.length}`);
+    }
+    if (db !== undefined) {
+      params.push(db);
+      conditions.push(`db = $${params.length}`);
     }
 
+    // One collection writes one row per logical database; aggregate them per
+    // timestamp so an unfiltered trend stays a single series. When no
+    // connectionId is given, also group by connection_id so trends from
+    // different connections aren't merged into one series.
+    const groupBy = connectionId ? 'timestamp' : 'timestamp, connection_id';
     const result = await this.pool.query(
       `
-      SELECT timestamp, key_count, total_memory_bytes, stale_key_count
+      SELECT
+        timestamp,
+        SUM(key_count) as key_count,
+        SUM(total_memory_bytes) as total_memory_bytes,
+        SUM(stale_key_count) as stale_key_count
       FROM key_pattern_snapshots
       WHERE ${conditions.join(' AND ')}
+      GROUP BY ${groupBy}
       ORDER BY timestamp ASC
     `,
       params,
@@ -2918,9 +3020,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     return result.rows.map((row) => ({
       timestamp: parseInt(row.timestamp),
-      keyCount: row.key_count,
-      memoryBytes: parseInt(row.total_memory_bytes),
-      staleCount: row.stale_key_count ?? 0,
+      keyCount: parseInt(row.key_count) || 0,
+      memoryBytes: parseInt(row.total_memory_bytes) || 0,
+      staleCount: row.stale_key_count == null ? 0 : parseInt(row.stale_key_count),
     }));
   }
 
@@ -2949,7 +3051,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     for (const entry of entries) {
       values.push(
-        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
+        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
       );
       params.push(
         entry.id,
@@ -2964,6 +3066,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         entry.keyType ?? null,
         entry.ttl ?? null,
         entry.rank,
+        entry.db ?? 0,
       );
     }
 
@@ -2971,7 +3074,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `
       INSERT INTO hot_key_stats (
         id, key_name, connection_id, captured_at, signal_type,
-        freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank
+        freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank, db
       ) VALUES ${values.join(', ')}
     `,
       params,
@@ -3005,6 +3108,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`captured_at <= $${paramIndex++}`);
       params.push(options.endTime);
     }
+    if (options.db !== undefined) {
+      conditions.push(`db = $${paramIndex++}`);
+      params.push(options.db);
+    }
     if (options.latest || options.oldest) {
       const agg = options.latest ? 'MAX' : 'MIN';
       const subSignalPlaceholders = signalTypes.map(() => `$${paramIndex++}`).join(', ');
@@ -3022,6 +3129,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         subConditions.push(`captured_at <= $${paramIndex++}`);
         params.push(options.endTime);
       }
+      if (options.db !== undefined) {
+        subConditions.push(`db = $${paramIndex++}`);
+        params.push(options.db);
+      }
       const subWhere = subConditions.length > 0 ? `WHERE ${subConditions.join(' AND ')}` : '';
       conditions.push(`captured_at = (SELECT ${agg}(captured_at) FROM hot_key_stats ${subWhere})`);
     }
@@ -3033,7 +3144,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const result = await this.pool.query(
       `
       SELECT id, key_name, connection_id, captured_at, signal_type,
-             freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank
+             freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank, db
       FROM hot_key_stats
       ${whereClause}
       ORDER BY captured_at DESC, rank ASC
@@ -3058,7 +3169,42 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       keyType: row.key_type ?? undefined,
       ttl: row.ttl ?? undefined,
       rank: row.rank,
+      db: row.db ?? 0,
     }));
+  }
+
+  async getKeyAnalyticsDatabases(connectionId?: string): Promise<number[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    // Loose index scan (one MIN(db) seek per populated database): this is
+    // polled every 60s per open Key Analytics tab, and a plain DISTINCT would
+    // walk every index entry for the connection on each poll (Postgres has no
+    // skip scan for DISTINCT over an index prefix).
+    const where = connectionId ? 'WHERE connection_id = $1' : '';
+    const params = connectionId ? [connectionId] : [];
+    const result = await this.pool.query(
+      `
+      ${populatedDbsCte(where)}
+      SELECT db FROM dbs WHERE db IS NOT NULL ORDER BY db ASC
+    `,
+      params,
+    );
+    return result.rows.map((row: { db: number | null }) => row.db ?? 0);
+  }
+
+  async getHotKeyDatabases(connectionId?: string): Promise<number[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    // Distinct logical databases present in hot_key_stats (where composite/
+    // hot-key rows live, unlike key_pattern_snapshots which can diverge). Plain
+    // DISTINCT: backs only the infrequent composite endpoint.
+    const where = connectionId ? 'WHERE connection_id = $1' : '';
+    const params = connectionId ? [connectionId] : [];
+    const result = await this.pool.query(
+      `SELECT DISTINCT db FROM hot_key_stats ${where} ORDER BY db ASC`,
+      params,
+    );
+    return result.rows.map((row: { db: number | null }) => row.db ?? 0);
   }
 
   async pruneOldHotKeys(cutoffTimestamp: number, connectionId?: string): Promise<number> {

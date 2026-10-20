@@ -83,8 +83,9 @@ export class MigrationValidationService {
     this.jobs.set(id, job);
 
     // 6. Fire and forget
+    const sourceAdapter = this.connectionRegistry.get(req.sourceConnectionId);
     const targetAdapter = this.connectionRegistry.get(req.targetConnectionId);
-    this.runValidation(job, sourceConfig, targetConfig, targetAdapter, req.migrationStartedAt, analysisResult).catch(err => {
+    this.runValidation(job, sourceConfig, targetConfig, sourceAdapter, targetAdapter, req.migrationStartedAt, analysisResult).catch(err => {
       this.logger.error(`Validation ${id} failed: ${err.message}`);
     });
 
@@ -95,20 +96,25 @@ export class MigrationValidationService {
     job: ValidationJob,
     sourceConfig: DatabaseConnectionConfig,
     targetConfig: DatabaseConnectionConfig,
+    sourceAdapter: import('../common/interfaces/database-port.interface').DatabasePort,
     targetAdapter: import('../common/interfaces/database-port.interface').DatabasePort,
     migrationStartedAt?: number,
     analysisResult?: MigrationAnalysisResult,
   ): Promise<void> {
     let sourceClient: Valkey | null = null;
+    let sourceCountClient: Valkey | null = null;
     let targetClient: Valkey | null = null;
 
     try {
       job.status = 'running';
 
-      // Detect if target is a cluster
-      const targetInfo = await targetAdapter.getInfo(['cluster']);
-      const targetClusterSection = (targetInfo as Record<string, Record<string, string>>).cluster ?? {};
-      const targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
+      // Detect if source / target are clusters
+      const isClusterEnabled = (info: unknown): boolean => {
+        const section = (info as Record<string, Record<string, string>>).cluster ?? {};
+        return String(section['cluster_enabled'] ?? '0') === '1';
+      };
+      const sourceIsCluster = isClusterEnabled(await sourceAdapter.getInfo(['cluster']));
+      const targetIsCluster = isClusterEnabled(await targetAdapter.getInfo(['cluster']));
 
       // Create temporary iovalkey clients — same pattern as command-migration-worker.ts
       sourceClient = createClient(sourceConfig, 'BetterDB-Validation-Source');
@@ -149,7 +155,13 @@ export class MigrationValidationService {
       if (job.cancelled) return;
 
       // Step 2: Key count comparison (20%)
-      const keyCount = await compareKeyCounts(sourceClient, targetClient, analysisResult);
+      // The standalone source client only sees the seed node of a cluster, so
+      // count a cluster source through a Cluster client that reaches every master.
+      if (sourceIsCluster) {
+        sourceCountClient = createTargetClient(sourceConfig, 'BetterDB-Validation-Source-Count', true);
+        await sourceCountClient.connect();
+      }
+      const keyCount = await compareKeyCounts(sourceCountClient ?? sourceClient, targetClient, analysisResult);
       job.result.keyCount = keyCount;
       job.progress = 20;
 
@@ -215,7 +227,7 @@ export class MigrationValidationService {
       }
       job.completedAt = Date.now();
       // Graceful cleanup — never Promise.all, never disconnect()
-      const clients = [sourceClient, targetClient].filter((c): c is Valkey => c !== null);
+      const clients = [sourceClient, sourceCountClient, targetClient].filter((c): c is Valkey => c !== null);
       await Promise.allSettled(clients.map(c => c.quit()));
     }
   }

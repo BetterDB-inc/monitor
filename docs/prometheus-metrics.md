@@ -167,8 +167,8 @@ A family marked **removed** tracks only its current label values: a value that d
 | `betterdb_inference_bucket_p50_us`, `_p95_us`, `_p99_us`, `betterdb_inference_unhealthy`     | 4 × (2 + I′) | One `read` bucket, one `write` bucket, and one `FT.SEARCH:<index>` bucket for each of the I′ indexes that appear in the slowlog or COMMANDLOG window.                         | removed      |
 | `betterdb_inference_sla_breach`                                                              | ≤ I          | One per index with an SLA configured.                                                                                                                                         | removed      |
 | `betterdb_metric_forecast_time_to_limit_seconds`                                             | ≤ 4          | The four forecast metric kinds.                                                                                                                                               | removed      |
-| `betterdb_key_pattern_memory_bytes`, `_avg_memory_bytes`, `_max_memory_bytes`, `betterdb_key_pattern_keys` | 4 × P        | P is `METRICS_KEY_PATTERNS_TOP_N` (default 100, `0` disables): the top patterns by total memory from the latest key analytics run. Pro connections only.                       | removed      |
-| `betterdb_key_memory_bytes`, `betterdb_key_cardinality`                                      | 2 × K        | K is `METRICS_KEY_DETAILS_TOP_N` (default 10, maximum 50, `0` disables): the top tracked keys by memory. Key names become label values. Pro connections only.                  | removed      |
+| `betterdb_key_pattern_memory_bytes`, `_avg_memory_bytes`, `_max_memory_bytes`, `betterdb_key_pattern_keys` | 4 × P        | P is `METRICS_KEY_PATTERNS_TOP_N` (default 100, `0` disables): the top `(pattern, db)` series by total memory from the latest key analytics run (a pattern in several logical databases is several series, each carrying a `db` label). Pro connections only.                       | removed      |
+| `betterdb_key_memory_bytes`, `betterdb_key_cardinality`                                      | 2 × K        | K is `METRICS_KEY_DETAILS_TOP_N` (default 10, maximum 50, `0` disables): the top tracked keys by memory, each a `(key, type, db)` series. Key names become label values. Pro connections only.                  | removed      |
 | `betterdb_keysize_bucket_keys`                                                               | D × T × B    | One series per populated database (D) × data type (T, ≤ 6) × log2 bucket (B, ≤ 64) from `INFO keysizes`. Only on Redis 8.0+ (no Valkey version emits it).                      | removed      |
 | `betterdb_acl_denied_by_reason`                                                              | ≤ 4          | The ACL LOG reasons: `auth`, `command`, `key`, `channel`.                                                                                                                     | zeroed       |
 | `betterdb_acl_denied_by_user`                                                                | U            | Distinct usernames seen in ACL audit data since BetterDB started.                                                                                                             | zeroed       |
@@ -419,7 +419,7 @@ Per-database key statistics.
 | `betterdb_keyspace_keys`          | gauge | -      | Total keys across all databases              | `125000` |
 | `betterdb_keyspace_keys_expiring` | gauge | -      | Keys with an expiration across all databases | `45000`  |
 
-**Label Example**: `db="db0"`, `db="db1"`
+**Label Example**: `db="0"`, `db="1"` — the bare logical-database index (not `db0`), consistent with the key-analytics and keysize families so a PromQL join on `db` across all of them matches.
 
 **Externally monitored (OTLP-push) connections**: `betterdb_db_keys_expiring` is exported for databases whose expiry count was pushed, and `betterdb_db_avg_ttl_seconds` for databases whose average TTL was pushed. Each is omitted, never reported as 0, when its value was not pushed. `betterdb_keyspace_keys_expiring` is omitted when no database pushed an expiry count.
 
@@ -432,19 +432,19 @@ Key memory per pattern, per tracked key, and the whole-keyspace size distributio
 
 | Metric                                  | Type  | Labels                          | Description                                                                        | Example   |
 | --------------------------------------- | ----- | ------------------------------- | ---------------------------------------------------------------------------------- | --------- |
-| `betterdb_key_pattern_memory_bytes`     | gauge | `pattern`                       | Estimated total memory of keys matching pattern, extrapolated from the sampled keys of the latest run (not the raw sampled sum) | `1048576` |
-| `betterdb_key_pattern_avg_memory_bytes` | gauge | `pattern`                       | Average per-key memory across the sampled keys matching pattern                   | `1024`    |
-| `betterdb_key_pattern_max_memory_bytes` | gauge | `pattern`                       | Largest single-key memory among the sampled keys matching pattern                 | `65536`   |
-| `betterdb_key_pattern_keys`             | gauge | `pattern`                       | Estimated keys matching pattern (extrapolated from the sample)                    | `1000`    |
-| `betterdb_key_memory_bytes`             | gauge | `key`, `type`                   | Memory of a single tracked key (the collector's tracked keys ranked by memory; a huge-by-memory key the collector did not track may be absent) | `65536`   |
-| `betterdb_key_cardinality`              | gauge | `key`, `type`                   | Elements in a tracked collection key, or byte length for strings                   | `4000`    |
-| `betterdb_keysize_bucket_keys`          | gauge | `db`, `type`, `metric`, `bucket` | Keys per `INFO keysizes` bucket; `metric="sizes"` is byte length, `"items"` is element count. Per node, so with several connections (or auto-registered replicas) selected the counts sum across nodes — select a single connection for a true per-server distribution. `type` is normalized to the singular form (`string`, `hash`, …) so it joins with the per-key families (`betterdb_key_memory_bytes` / `betterdb_key_cardinality`); the per-pattern families carry only a `pattern` label | `655`     |
+| `betterdb_key_pattern_memory_bytes`     | gauge | `pattern`, `db`                 | Estimated total memory of keys matching pattern in a logical database, extrapolated from the sampled keys of the latest run (not the raw sampled sum) | `1048576` |
+| `betterdb_key_pattern_avg_memory_bytes` | gauge | `pattern`, `db`                 | Average per-key memory across the sampled keys matching pattern in a logical database                   | `1024`    |
+| `betterdb_key_pattern_max_memory_bytes` | gauge | `pattern`, `db`                 | Largest single-key memory among the sampled keys matching pattern in a logical database                 | `65536`   |
+| `betterdb_key_pattern_keys`             | gauge | `pattern`, `db`                 | Estimated keys matching pattern in a logical database (extrapolated from the sample)                    | `1000`    |
+| `betterdb_key_memory_bytes`             | gauge | `key`, `type`, `db`             | Memory of a single tracked key (the collector's tracked keys ranked by memory; a huge-by-memory key the collector did not track may be absent) | `65536`   |
+| `betterdb_key_cardinality`              | gauge | `key`, `type`, `db`             | Elements in a tracked collection key, or byte length for strings                   | `4000`    |
+| `betterdb_keysize_bucket_keys`          | gauge | `db`, `type`, `metric`, `bucket` | Keys per `INFO keysizes` bucket; `metric="sizes"` is byte length, `"items"` is element count. Per node, so with several connections (or auto-registered replicas) selected the counts sum across nodes — select a single connection for a true per-server distribution. `type` is normalized to the singular form (`string`, `hash`, …) and `db` to the bare logical-database index (`0`, `1`, … — not `db0`), so both join with the per-pattern (`pattern`, `db`) and per-key (`key`, `type`, `db`) families | `655`     |
 
 **Cardinality bounds**: pattern series are capped at the top `METRICS_KEY_PATTERNS_TOP_N` patterns by total memory (default 100, `0` disables them). Per-key series are capped at the top `METRICS_KEY_DETAILS_TOP_N` keys by memory (default 10, maximum 50, `0` disables only the per-key family). Per-key series put raw key names in the `key` label — keep the cap conservative, or disable the family, if key names embed user identifiers. Bucket series are bounded by the server: one per populated database × data type × log2 bucket.
 
 **Sampling note**: pattern memory and key counts are extrapolated from a sample (`sampled value / sampling ratio`), so on a keyspace larger than the sample they are estimates, not exact totals. `*_avg_memory_bytes` and `*_max_memory_bytes` describe only the sampled keys.
 
-**Label Example**: `pattern="user:*"`, `key="user:1:profile"`, `type="hash"`, `db="db0"`, `metric="sizes"`, `bucket="16K"`
+**Label Example**: `pattern="user:*"`, `key="user:1:profile"`, `type="hash"`, `db="0"`, `metric="sizes"`, `bucket="16K"`
 
 ### Persistence Metrics
 

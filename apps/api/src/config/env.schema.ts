@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { MAX_RETENTION_DAYS, parseRetentionDaysToken } from '@betterdb/shared';
 import {
+  clampTopN,
   DEFAULT_KEY_DETAILS_TOP_N,
   DEFAULT_KEY_PATTERNS_TOP_N,
   DEFAULT_SLOT_STATS_TOP_N,
@@ -42,7 +43,7 @@ const topNEnv = (max: number, def: number) =>
     (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
     z.coerce
       .number()
-      .transform((n) => (Number.isFinite(n) ? Math.min(max, Math.max(0, Math.floor(n))) : def))
+      .transform((n) => (Number.isFinite(n) ? clampTopN(n, max) : def))
       .default(def)
       .catch(def),
   );
@@ -200,6 +201,8 @@ export const envSchema = z
     // Webhook configuration
     WEBHOOK_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).optional(),
     WEBHOOK_MAX_RESPONSE_BODY_BYTES: z.coerce.number().int().min(0).optional(),
+    // Max in-memory alert hysteresis entries (alert type × connection × webhook).
+    WEBHOOK_ALERT_STATE_MAX: z.coerce.number().int().min(1).optional(),
     // Public base URL of the web UI (e.g. https://monitor.example.com).
     // Used to build "View in BetterDB" links in Slack/Discord payloads.
     // Unset = chat messages render without the link button.
