@@ -18,6 +18,10 @@ function isDetectorMetric(value: string | null): value is AnomalyDetectorMetric 
   return value !== null && (ANOMALY_DETECTOR_METRICS as readonly string[]).includes(value);
 }
 
+function loadErrorMessage(error: unknown): string {
+  return `Failed to load detector thresholds: ${error instanceof Error ? error.message : 'unknown error'}`;
+}
+
 export function DetectorThresholds() {
   const { hasFeature, tier } = useLicense();
   const licensed = hasFeature(Feature.ANOMALY_DETECTION);
@@ -31,7 +35,7 @@ export function DetectorThresholds() {
   );
   const [resetError, setResetError] = useState<string | null>(null);
 
-  const { data, error, isLoading } = useQuery({
+  const { data, error } = useQuery({
     queryKey: ANOMALY_DETECTORS_QUERY_KEY,
     queryFn: () => settingsApi.getAnomalyDetectors(),
     enabled: licensed,
@@ -98,14 +102,15 @@ export function DetectorThresholds() {
           </AlertTitle>
           <AlertDescription>Per-metric detector thresholds require a Pro license.</AlertDescription>
         </Alert>
-      ) : error ? (
-        <p className="text-sm text-destructive">
-          Failed to load detector thresholds: {error instanceof Error ? error.message : 'unknown error'}
-        </p>
-      ) : isLoading || !data ? (
-        <p className="text-sm text-muted-foreground">Loading detector thresholds…</p>
+      ) : !data ? (
+        error ? (
+          <p className="text-sm text-destructive">{loadErrorMessage(error)}</p>
+        ) : (
+          <p className="text-sm text-muted-foreground">Loading detector thresholds…</p>
+        )
       ) : (
         <div className="rounded-lg border border-border">
+          {error && <p className="px-4 py-2 text-sm text-destructive">{loadErrorMessage(error)}</p>}
           {ANOMALY_DETECTOR_METRICS.map((metric) => (
             <DetectorPanel
               key={metric}

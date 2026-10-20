@@ -94,9 +94,14 @@ export function DetectorPanel({
     onError: (err) => setError(err instanceof Error ? err.message : 'Failed to save'),
   });
 
-  const setText = (key: TextField, value: string) => setForm((f) => ({ ...f, [key]: value }));
-  const setAbsolute = (key: AbsoluteKey, patch: Partial<AbsoluteField>) =>
+  const setText = (key: TextField, value: string) => {
+    setError(null);
+    setForm((f) => ({ ...f, [key]: value }));
+  };
+  const setAbsolute = (key: AbsoluteKey, patch: Partial<AbsoluteField>) => {
+    setError(null);
     setForm((f) => ({ ...f, [key]: { ...f[key], ...patch } }));
+  };
 
   const defaultText = (key: TextField): string => {
     if (key === 'cooldownSeconds') {

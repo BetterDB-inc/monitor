@@ -120,6 +120,26 @@ describe('DetectorPanel', () => {
     expect(warningZ().value).toBe('2.5');
   });
 
+  it('clears the save error once the user edits a field', async () => {
+    api.updateAnomalyDetectors.mockRejectedValue(new Error('save failed'));
+    renderPanel();
+    fireEvent.change(warningZ(), { target: { value: '2.5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText('save failed')).toBeInTheDocument();
+    fireEvent.change(warningZ(), { target: { value: '2.4' } });
+    expect(screen.queryByText('save failed')).not.toBeInTheDocument();
+  });
+
+  it('clears the save error once the user toggles an absolute threshold', async () => {
+    api.updateAnomalyDetectors.mockRejectedValue(new Error('save failed'));
+    renderPanel();
+    fireEvent.change(warningZ(), { target: { value: '2.5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText('save failed')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('switch', { name: 'Warning above enabled' }));
+    expect(screen.queryByText('save failed')).not.toBeInTheDocument();
+  });
+
   it('warns about lifetime counters only on those metrics', () => {
     const { unmount } = renderPanel({ metric: 'acl_denied', defaults: aclDenied, resolved: aclDenied });
     expect(screen.getByText(/lifetime total since the server's last restart/)).toBeInTheDocument();

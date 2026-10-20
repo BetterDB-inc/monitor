@@ -130,4 +130,14 @@ describe('DetectorThresholds', () => {
     renderAt('/settings?section=anomaly');
     expect(await screen.findByText(/boom/)).toBeInTheDocument();
   });
+
+  it('keeps the panels and their unsaved edits when a refetch fails', async () => {
+    const { queryClient } = renderAt('/settings?section=anomaly&metric=connections');
+    const input = (await screen.findByLabelText('Warning z-score')) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '2.5' } });
+    api.getAnomalyDetectors.mockRejectedValue(new Error('refetch failed'));
+    await queryClient.refetchQueries({ queryKey: ['anomaly-detectors'] });
+    expect(await screen.findByText(/refetch failed/)).toBeInTheDocument();
+    expect((screen.getByLabelText('Warning z-score') as HTMLInputElement).value).toBe('2.5');
+  });
 });
