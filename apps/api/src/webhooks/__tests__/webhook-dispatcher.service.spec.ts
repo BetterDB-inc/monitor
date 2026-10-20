@@ -260,6 +260,25 @@ describe('WebhookDispatcherService', () => {
       expect(service.shouldFireAlert('replication_lag:conn-1:wh-1', 30, 10, true)).toBe(true);
     });
 
+    it('does not restore a latch cleared in the microtask right after the lookup resolves', async () => {
+      webhooksService.getWebhooksByEvent.mockResolvedValue([{ id: 'wh-1', thresholds: {} }] as any);
+      jest.spyOn(service as any, 'dispatchPendingEvent').mockResolvedValue(undefined);
+
+      const pending = service.dispatchThresholdAlertPerWebhook(
+        WebhookEventType.REPLICATION_LAG,
+        'replication_lag',
+        30,
+        'replicationLagSeconds',
+        true,
+        { message: 'lag' },
+        'conn-1',
+      );
+      const cleared = Promise.resolve().then(() => service.clearThresholdAlertPerWebhook('replication_lag', 'conn-1'));
+      await Promise.all([pending, cleared]);
+
+      expect(service.shouldFireAlert('replication_lag:conn-1:wh-1', 30, 10, true)).toBe(true);
+    });
+
     it('keeps no generation state once lookups settle, however many connections are cleared', async () => {
       webhooksService.getWebhooksByEvent.mockResolvedValue([]);
       for (let i = 0; i < 50; i++) {

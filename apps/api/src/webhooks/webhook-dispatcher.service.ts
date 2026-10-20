@@ -460,26 +460,22 @@ export class WebhookDispatcherService implements OnModuleDestroy {
    * @param data Event data payload
    * @param connectionId Optional connection ID to filter webhooks and include in payload
    */
-  private async lookupUnlessCleared(
-    eventType: WebhookEventType,
-    alertKeyPrefix: string,
-    connectionId?: string,
-  ): Promise<{ current: boolean; webhooks: Webhook[] }> {
-    if (!connectionId) {
-      return { current: true, webhooks: await this.webhooksService.getWebhooksByEvent(eventType, connectionId) };
-    }
+  private trackLookup(alertKeyPrefix: string, connectionId?: string): () => boolean {
+    if (!connectionId) return () => true;
     const key = `${alertKeyPrefix}:${connectionId}`;
     const pending = this.pendingLookups.get(key) ?? { count: 0, generation: 0 };
     pending.count += 1;
     this.pendingLookups.set(key, pending);
     const generation = pending.generation;
-    try {
-      const webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
-      return { current: pending.generation === generation, webhooks };
-    } finally {
-      pending.count -= 1;
-      if (pending.count === 0) this.pendingLookups.delete(key);
-    }
+    let settled = false;
+    return () => {
+      if (!settled) {
+        settled = true;
+        pending.count -= 1;
+        if (pending.count === 0) this.pendingLookups.delete(key);
+      }
+      return pending.generation === generation;
+    };
   }
 
   async dispatchThresholdAlertPerWebhook(
@@ -492,13 +488,13 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     connectionId?: string,
   ): Promise<boolean> {
     let firedAny = false;
+    const settleLookup = this.trackLookup(alertKeyPrefix, connectionId);
     try {
       // Get webhooks subscribed to this event, filtered by connectionId
-      const lookup = await this.lookupUnlessCleared(eventType, alertKeyPrefix, connectionId);
-      if (!lookup.current) {
+      const webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
+      if (!settleLookup()) {
         return false;
       }
-      const webhooks = lookup.webhooks;
 
       if (webhooks.length === 0) {
         this.logger.debug(
@@ -552,6 +548,8 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       );
     } catch (error) {
       this.logger.error(`Failed to dispatch per-webhook threshold alert ${eventType}:`, error);
+    } finally {
+      settleLookup();
     }
     return firedAny;
   }
