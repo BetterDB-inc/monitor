@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Valkey from 'iovalkey';
 import { SemanticCache } from '../SemanticCache';
 import { SemanticCacheUsageError } from '../errors';
@@ -385,11 +385,12 @@ describe('SemanticCache integration', () => {
         await new Promise((r) => setTimeout(r, 1500));
         expect(await client.exists(key)).toBe(0);
 
-        // Exercise the usage script directly against the now-gone key: the
-        // EXISTS guard must make it a no-op rather than recreating the hash.
-        await (c as unknown as { recordEntryUsage(k: string): Promise<void> }).recordEntryUsage(
+        // Exercise the usage script directly (and awaited — the hit path is
+        // fire-and-forget) against the now-gone key: the EXISTS guard must
+        // make it a no-op rather than recreating the hash.
+        await (c as unknown as { trackEntryUsage(k: string[]): Promise<void> }).trackEntryUsage([
           key,
-        );
+        ]);
 
         expect(await client.exists(key)).toBe(0);
       } finally {
@@ -423,6 +424,7 @@ describe('SemanticCache integration', () => {
         // Hit one entry so exactly one has hit_count >= 1.
         const hit = await c.check('beta analytics prompt');
         expect(hit.hit).toBe(true);
+        await c._drainUsageWrites();
         await new Promise((r) => setTimeout(r, 800)); // index the usage write
 
         const analytics = await c.entryAnalytics();
@@ -430,6 +432,55 @@ describe('SemanticCache integration', () => {
         // Both the HDEL-ed entry and the untouched one count as never-hit.
         expect(analytics.neverHitCount).toBe(2);
       } finally {
+        await c.flush();
+      }
+    });
+
+    it('entryAnalytics takes the FT.SEARCH fast path on a fresh index (no SCAN fallback)', async () => {
+      if (skip) return;
+      const name = `betterdb_fastpath_${Date.now()}`;
+      const logger = { warn: vi.fn() };
+      const c = new SemanticCache({
+        name,
+        client,
+        embedFn: fakeEmbed,
+        defaultThreshold: 0.5,
+        logger,
+        telemetry: { registry: new Registry() },
+      });
+      const scanSpy = vi.spyOn(client, 'scan');
+      try {
+        await c.initialize();
+        const hot = await c.store('fast path hot prompt', 'h');
+        await c.store('fast path warm prompt', 'w');
+        await c.store('fast path cold prompt', 'c');
+        await new Promise((r) => setTimeout(r, 800)); // indexing
+
+        expect((await c.check('fast path hot prompt')).hit).toBe(true);
+        expect((await c.check('fast path hot prompt')).hit).toBe(true);
+        await c._drainUsageWrites();
+        await new Promise((r) => setTimeout(r, 800)); // index the usage writes
+
+        scanSpy.mockClear();
+        const a = await c.entryAnalytics({ topN: 5 });
+
+        // The regression this guards: Valkey Search rejects a bare `*` query,
+        // which silently sent every call to the sampled SCAN fallback.
+        const fallbackWarnings = logger.warn.mock.calls.filter(([msg]) =>
+          String(msg).includes('falling back'),
+        );
+        expect(fallbackWarnings).toEqual([]);
+        expect(scanSpy).not.toHaveBeenCalled();
+        expect(a.sampled).toBe(false);
+
+        expect(a.totalEntries).toBe(3);
+        expect(a.hitAtLeastOnceCount).toBe(1);
+        expect(a.neverHitCount).toBe(2);
+        expect(a.coldEntryCount).toBe(2);
+        expect(a.topEntries.map((e) => e.key)).toEqual([hot]);
+        expect(a.topEntries[0].hitCount).toBe(2);
+      } finally {
+        scanSpy.mockRestore();
         await c.flush();
       }
     });

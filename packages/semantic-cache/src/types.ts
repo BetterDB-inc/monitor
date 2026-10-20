@@ -15,16 +15,22 @@ export interface ConfigRefreshOptions {
 export interface UsageTrackingOptions {
   /**
    * Record per-entry `hit_count` / `last_accessed_at` on every genuine cache hit
-   * (one single-key `EVAL` per matched key). Default: `true`.
+   * (one single-key script call per matched key, sent without blocking the
+   * hit). Default: `true`.
+   *
+   * Each tracked hit is a write to an indexed hash, which Valkey Search
+   * re-indexes (~1–2.5 ms of server time per write on valkey-bundle 9.1). With
+   * `defaultTtl` set that matches the cost of the sliding-TTL `EXPIRE` hits
+   * already paid; without `defaultTtl` it turns a pure-read hit into a write.
    *
    * Set to `false` to make hits pure reads again (pre-0.14.0 behaviour):
-   * - no `EVAL` is sent on a hit;
+   * - no usage script is sent on a hit;
    * - if `defaultTtl` is set, the sliding TTL is still refreshed with a plain
    *   per-key `EXPIRE`, exactly as before 0.14.0;
    * - if `defaultTtl` is not set, a hit performs no write at all.
    *
-   * Disable this when hits are served from read replicas (`EVAL` fails with
-   * `READONLY` there), when scripting is blocked, or when the write load on a
+   * Disable this when hits are served from read replicas (the script fails
+   * with `READONLY` there), when scripting is blocked, or when the write load on a
    * hot working set is unacceptable. `entryAnalytics()` keeps working, but
    * counters stop advancing, so new hits are not reflected.
    */
@@ -463,8 +469,8 @@ export interface EntrySummary {
 export interface EntryAnalyticsResult {
   /**
    * Number of entries examined. Exact on the FT.SEARCH path; on the SCAN
-   * fallback (indexes created before 0.14.0) this is capped at
-   * `ENTRY_ANALYTICS_LIMIT` (10,000) and is a sample.
+   * fallback (indexes created before 0.14.0) this is capped at 10,000 — check
+   * `sampled` to tell the two apart.
    */
   totalEntries: number;
   /** Entries with hitCount === 0. */
@@ -476,8 +482,20 @@ export interface EntryAnalyticsResult {
    * coldAfterDays. Includes neverHitCount.
    */
   coldEntryCount: number;
-  /** The topN hottest entries, descending by hitCount. */
+  /**
+   * Up to topN entries that have been hit at least once, descending by
+   * hitCount. Never-hit entries are not included, so this can be shorter than
+   * topN.
+   */
   topEntries: EntrySummary[];
   /** The coldAfterDays cutoff that was applied. */
   coldAfterDays: number;
+  /**
+   * `true` when the counts come from the SCAN fallback and it stopped at the
+   * 10,000-entry cap, so they describe a sample in scan order (the first
+   * master on a cluster, the first slots on standalone) rather than the whole
+   * cache. `false` when the counts are exact: the FT.SEARCH path, or a SCAN
+   * that covered every entry.
+   */
+  sampled: boolean;
 }

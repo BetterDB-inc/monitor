@@ -27,19 +27,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `last_accessed_at`, updated on each cache hit by a single-key Lua script
   guarded by `EXISTS`, so a hit never recreates a deleted or expired entry. New
   `entryAnalytics()` method reports total / never-hit / cold entry counts and
-  the hottest entries.
-  When the index includes usage fields, counts use server-side `FT.SEARCH` with
-  `LIMIT 0 0` (exact, no materialization); `topEntries` uses
-  `SORTBY hit_count DESC` with `LIMIT 0 topN`. Older indexes fall back to
-  `SCAN` + pipelined `HMGET` (5 fields only) over a sample of up to 10,000
-  entries. New `entry_analytics` capability on the discovery marker.
+  the hottest entries (entries hit at least once).
+  When the index includes usage fields, counts use server-side `FT.SEARCH`
+  range queries with `LIMIT 0 0` (exact, no materialization; the total is
+  `@inserted_at:[-inf +inf]` because Valkey Search rejects a bare `*`);
+  `topEntries` uses `@hit_count:[1 +inf] SORTBY hit_count DESC LIMIT 0 topN`.
+  Older indexes fall back to `SCAN` + pipelined `HMGET` (5 fields only),
+  stopping at 10,000 entries; `sampled: true` on the result marks a capped
+  sample. New `entry_analytics` capability on the discovery marker.
   `EntryAnalyticsOptions`, `EntryAnalyticsResult`, and `EntrySummary`
   exported from the package root.
 - `usageTracking: { enabled?: boolean }` option (default `true`). Set
-  `enabled: false` to make cache hits pure reads again: no usage `EVAL` is
+  `enabled: false` to make cache hits pure reads again: no usage script is
   sent, and the sliding TTL is refreshed with a plain `EXPIRE` only when
   `defaultTtl` is set (the pre-0.14.0 behaviour). Use it when serving hits from
-  read replicas (where `EVAL` fails with `READONLY`), when scripting is
+  read replicas (where the script fails with `READONLY`), when scripting is
   blocked, or to avoid per-hit write load. `UsageTrackingOptions` is exported
   from the package root and the `@betterdb/ai` facade.
 
@@ -57,15 +59,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`{name}:embed:{tag}:{hash}`). Existing embedding-cache entries are not
   read after upgrade and expire on their own TTL; cached *responses* are
   untouched.
-- Cache hits now incur one Valkey round trip for usage tracking even when
-  `defaultTtl` is not configured (one pipeline per matched key on cluster).
-  Previously a hit was a pure read. The write is a single-key `EVAL`. Servers
-  or proxies that block scripting will log the usage-tracking warning instead
-  of updating counters. These writes are best-effort and non-atomic; failures
-  are logged once per batch via `logger.warn` and never fail the hit. Set
+- Cache hits now send a usage-tracking write even when `defaultTtl` is not
+  configured (one pipeline per matched key on cluster). Previously such a hit
+  was a pure read. The write is a single-key script sent as `EVALSHA` (retried
+  once as `EVAL` on `NOSCRIPT`) and is not awaited by `check()` /
+  `checkBatch()`, so it adds no client round trip; `shutdown()` drains
+  in-flight writes. On the server it costs a Valkey Search re-index of the
+  entry (~1–2.5 ms on valkey-bundle 9.1) — the same cost the sliding-TTL
+  `EXPIRE` already had when `defaultTtl` is set. Servers or proxies that block
+  scripting will log the usage-tracking warning instead of updating counters.
+  These writes are best-effort and non-atomic; failures are logged once per
+  batch via `logger.warn` and never fail the hit. Set
   `usageTracking: { enabled: false }` to restore pure-read hits. Usage-tracking
   failures caused by `READONLY` (replica reads) or blocked scripting now include
   that hint in the warning.
+- With usage tracking on and `defaultTtl` set, a failed sliding-TTL refresh on
+  a hit (from `check()` or `checkBatch()`) is now logged via `logger.warn`
+  instead of being thrown, because the `EXPIRE` runs inside the usage script.
+  The entry keeps its previous expiry. With `usageTracking: { enabled: false }`
+  the TTL is refreshed with an awaited `EXPIRE` whose errors propagate, as
+  before.
 - The `entryAnalytics()` SCAN fallback now stops scanning once it has sampled
   10,000 entries, instead of iterating the remaining keyspace into a no-op.
 - Cold = `last_accessed_at` strictly older than the cutoff, consistently on

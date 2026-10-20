@@ -372,17 +372,26 @@ console.log('hottest:', a.topEntries.map((e) => `${e.key} (${e.hitCount})`));
 ```
 
 Returns `totalEntries`, `neverHitCount`, `hitAtLeastOnceCount`, `coldEntryCount`,
-`topEntries` (sorted by `hitCount` descending, capped at `topN`), and the
-`coldAfterDays` value applied.
+`topEntries` (entries hit at least once, sorted by `hitCount` descending, capped
+at `topN`), the `coldAfterDays` value applied, and `sampled`.
 
 When the FT index was created with the `hit_count` / `last_accessed_at` sortable
-fields, counts use server-side `FT.SEARCH` with `LIMIT 0 0` (exact, no
-materialization) and `topEntries` uses `SORTBY hit_count DESC` with `LIMIT 0 topN`.
+fields, counts use server-side `FT.SEARCH` range queries with `LIMIT 0 0` (exact,
+no materialization) and `topEntries` uses `@hit_count:[1 +inf]` with
+`SORTBY hit_count DESC LIMIT 0 topN`. Valkey Search rejects a bare `*` query, so
+the total is counted as `@inserted_at:[-inf +inf]` — every writer sets
+`inserted_at`. `sampled` is `false`.
 
 Older indexes fall back to `SCAN` + pipelined `HMGET` (fetching only the 5
-analytics fields) over a sample of up to 10,000 entries in implementation-defined
-order (`totalEntries` is the sample size). Rebuild the index to enable exact
-counts — see below.
+analytics fields). The scan stops at 10,000 entries; when it does, `sampled` is
+`true` and the counts describe the entries scanned first (the first master on a
+cluster), not the whole cache. Rebuild the index to enable exact counts — see
+below.
+
+Entries written or hit only through the Python SDK (`betterdb-semantic-cache`)
+do not record `hit_count` / `last_accessed_at` yet, so they count as never-hit
+and cold. Parity is tracked in
+[#541](https://github.com/BetterDB-inc/monitor/issues/541).
 
 #### Upgrading an index created before 0.14.0
 
@@ -417,18 +426,29 @@ await cache.initialize();                        // recreates index, backfills
 
 #### Performance & tradeoffs
 
-Each genuine cache hit runs a small Lua script (`EVAL`) that, only if the entry
-still exists, bumps `hit_count`, sets `last_accessed_at` and refreshes the TTL
-if configured. It's one round trip on standalone, and one single-key script per
-matched key on cluster, sent concurrently. A hit on an entry that was deleted or
-expired in the meantime is a no-op, so tracking never recreates it. These writes
-are best-effort and not atomic: failures are logged once
-per batch via `logger.warn` and never fail the hit. At high QPS on a small hot
-working set, this adds real AOF and replication load on the hottest entries.
-If that becomes an issue, `hit_count` remains the primary signal for
-`entryAnalytics()` accuracy; `last_accessed_at` only powers cold-entry
-detection and could reasonably be sampled (e.g. one write per N hits) in a
-future release. Please open an issue if you hit this in production.
+Each genuine cache hit runs a small Lua script (sent as `EVALSHA`, falling back
+to `EVAL` once if the server has not cached it) that, only if the entry still
+exists, bumps `hit_count`, sets `last_accessed_at` and refreshes the TTL if
+configured. `check()` and `checkBatch()` do not wait for it: the write is sent
+in the background and adds no round trip to the hit. `shutdown()` waits for
+in-flight writes. A hit on an entry that was deleted or expired in the meantime
+is a no-op, so tracking never recreates it. These writes are best-effort and not
+atomic: failures are logged once per batch via `logger.warn` and never fail the
+hit.
+
+The cost is on the server. Every write to an indexed hash makes Valkey Search
+re-index the document, including its TEXT fields (`prompt`, `response`). On
+valkey-bundle 9.1 one usage write costs roughly 1–2.5 ms of server time,
+versus ~70 µs on an unindexed hash, and a burst of tracked hits delays other
+commands on the same server while it runs.
+
+- **With `defaultTtl` set** this is cost-neutral: before 0.14.0 every hit
+  already sent an `EXPIRE`, which Valkey Search re-indexes the same way. The
+  usage script replaces that `EXPIRE`.
+- **Without `defaultTtl`** a hit used to be a pure read and is now a server-side
+  write. At high hit QPS that is real main-thread time, plus AOF and
+  replication traffic. If that matters for your deployment, set
+  `usageTracking: { enabled: false }` (below).
 
 #### Disabling usage tracking
 
@@ -443,19 +463,20 @@ const cache = new SemanticCache({
 });
 ```
 
-With tracking disabled, a hit sends no `EVAL`. If `defaultTtl` is set, the
+With tracking disabled, a hit sends no usage script. If `defaultTtl` is set, the
 sliding TTL is still refreshed with a plain `EXPIRE` (the pre-0.14.0
 behaviour). Otherwise a hit performs no write at all. `entryAnalytics()` still
 works, but counters stop advancing.
 
 Disable it when:
 
-- **You read from replicas.** `EVAL` is a write and fails with `READONLY` on a
-  replica. The hit is still returned, but every batch logs a warning and no
+- **You read from replicas.** The usage script is a write and fails with
+  `READONLY` on a replica. The hit is still returned, but every batch logs a warning and no
   counters are recorded. (Note that `EXPIRE` with `defaultTtl` is also a write
   and fails on a replica the same way it did before 0.14.0.)
 - **Scripting is blocked** by your server, proxy, or ACL.
-- **The write load** on a small, hot working set at high QPS is unacceptable.
+- **You have no `defaultTtl` and high hit QPS**, and the per-hit re-index cost
+  described above is unacceptable.
 
 ### `cache.thresholdEffectiveness(options?)`
 

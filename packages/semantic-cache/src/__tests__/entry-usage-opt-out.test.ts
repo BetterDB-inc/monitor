@@ -41,14 +41,19 @@ function searchReply(key: string): unknown[] {
   return ['1', key, ['__score', '0.01', 'response', `response for ${key}`]];
 }
 
-/** A usage-tracking command is `call('EVAL', script, '1', key, now, ttl)`. */
+/** True for the usage script, sent as EVALSHA (or EVAL on a NOSCRIPT retry). */
+function isScriptCall(args: unknown[]): boolean {
+  return args[0] === 'EVALSHA' || args[0] === 'EVAL';
+}
+
+/** A usage-tracking command is `call('EVALSHA', sha, '1', key, now, ttl)`. */
 function isUsageCommand(q: QueuedCommand): boolean {
-  return q.cmd === 'call' && q.args[0] === 'EVAL';
+  return q.cmd === 'call' && isScriptCall(q.args);
 }
 
 function keyOf(q: QueuedCommand): string | null {
   if (q.cmd === 'call') {
-    return q.args[0] === 'EVAL' ? String(q.args[3]) : null;
+    return isScriptCall(q.args) ? String(q.args[3]) : null;
   }
   return String(q.args[0]);
 }
@@ -141,10 +146,10 @@ async function makeCache(
   return { cache, logger };
 }
 
-/** Every usage EVAL, whether queued in a pipeline or sent via client.call. */
+/** Every usage script call (EVALSHA/EVAL), whether queued in a pipeline or sent via client.call. */
 function usageEvals(client: Valkey, state: MockState): number {
   const call = client.call as unknown as ReturnType<typeof vi.fn>;
-  const direct = call.mock.calls.filter((c) => c[0] === 'EVAL').length;
+  const direct = call.mock.calls.filter((c) => isScriptCall(c)).length;
   return direct + state.executed.filter(isUsageCommand).length;
 }
 

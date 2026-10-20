@@ -40,7 +40,9 @@ function makeClient(existing: Set<string>) {
       zremrangebyrank: vi.fn(() => stub),
       exec: vi.fn(async () =>
         queued.map((a) =>
-          a[0] === 'EVAL' ? [null, evalUsage(String(a[3]), String(a[4]), String(a[5]))] : [null, 1],
+          a[0] === 'EVALSHA' || a[0] === 'EVAL'
+            ? [null, evalUsage(String(a[3]), String(a[4]), String(a[5]))]
+            : [null, 1],
         ),
       ),
     };
@@ -61,7 +63,8 @@ function makeClient(existing: Set<string>) {
       }
       if (args[0] === 'FT.SEARCH')
         return ['1', 't:entry:gone', ['__score', '0.01', 'response', 'r']];
-      if (args[0] === 'EVAL') return evalUsage(String(args[3]), String(args[4]), String(args[5]));
+      if (args[0] === 'EVALSHA' || args[0] === 'EVAL')
+        return evalUsage(String(args[3]), String(args[4]), String(args[5]));
       return 'OK';
     }),
     pipeline,

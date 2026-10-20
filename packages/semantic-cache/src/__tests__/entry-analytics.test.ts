@@ -10,6 +10,9 @@ import type { Valkey } from '../types';
 const TOTAL_ENTRIES = 15_000;
 const NEVER_HIT_COUNT = 12_000;
 const COLD_ENTRY_COUNT = 13_000;
+// Valkey Search rejects a bare `*` query, so "every entry" is a range on inserted_at.
+const ALL_ENTRIES = '@inserted_at:[-inf +inf]';
+const HIT_AT_LEAST_ONCE = '@hit_count:[1 +inf]';
 
 function makeAnalyticsMockClient() {
   const ftInfo = [
@@ -36,7 +39,7 @@ function makeAnalyticsMockClient() {
         // Counts are complements: the code asks for the positive sets
         // (hit-at-least-once, warm) and derives never-hit / cold as
         // `total − matched`, so a hash missing the field counts as never-hit/cold.
-        if (filter === '*') return [String(TOTAL_ENTRIES)];
+        if (filter === ALL_ENTRIES) return [String(TOTAL_ENTRIES)];
         if (filter === '@hit_count:[1 +inf]') return [String(TOTAL_ENTRIES - NEVER_HIT_COUNT)];
         if (filter.startsWith('@last_accessed_at:'))
           return [String(TOTAL_ENTRIES - COLD_ENTRY_COUNT)];
@@ -133,8 +136,8 @@ describe('entryAnalytics', () => {
       (c) => c[0] === 'FT.SEARCH' && c[c.indexOf('LIMIT') + 2] === '0',
     );
     expect(countCalls.length).toBeGreaterThanOrEqual(3);
-    expect(countCalls.some((c) => c[2] === '*')).toBe(true);
-    expect(countCalls.some((c) => c[2] === '@hit_count:[1 +inf]')).toBe(true);
+    expect(countCalls.some((c) => c[2] === ALL_ENTRIES)).toBe(true);
+    expect(countCalls.some((c) => c[2] === HIT_AT_LEAST_ONCE)).toBe(true);
     // Asserted here, not inside the mock: a failed expect() in the mock would
     // only surface as a rejected FT.SEARCH, which entryAnalytics() swallows.
     const coldCall = countCalls.find((c) => String(c[2]).startsWith('@last_accessed_at:'));
@@ -145,8 +148,36 @@ describe('entryAnalytics', () => {
       (c) => c[0] === 'FT.SEARCH' && c.includes('SORTBY'),
     );
     expect(topCalls).toHaveLength(1);
+    // Only entries hit at least once can be "hottest".
+    expect(topCalls[0][2]).toBe(HIT_AT_LEAST_ONCE);
     expect(topCalls[0]).toContain('LIMIT');
     expect(topCalls[0][topCalls[0].indexOf('LIMIT') + 2]).toBe('2');
+    expect(result.sampled).toBe(false);
+  });
+
+  it('never sends a bare `*` query (Valkey Search rejects it without KNN)', async () => {
+    const client = makeAnalyticsMockClient();
+    const logger = { warn: vi.fn() };
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: vi.fn(async () => [0.5, 0.5]),
+      name: 'test_entry_analytics',
+      logger,
+      embeddingCache: { enabled: false },
+      discovery: { enabled: false },
+      configRefresh: { enabled: false },
+    });
+    await cache.initialize();
+
+    await cache.entryAnalytics({ topN: 5 });
+
+    const searches = client.call.mock.calls.filter((c) => c[0] === 'FT.SEARCH');
+    expect(searches).toHaveLength(4); // 3 counts + 1 top-N
+    for (const c of searches) {
+      // Every analytics query is a field filter, never a match-all wildcard.
+      expect(String(c[2])).toMatch(/^@\w+:\[/);
+    }
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   it('warns once and falls back to the SCAN path when FT.SEARCH rejects', async () => {
@@ -190,6 +221,10 @@ describe('entryAnalytics', () => {
     expect(result.totalEntries).toBe(3);
     expect(result.neverHitCount).toBe(2);
     expect(result.topEntries[0].hitCount).toBe(7);
+    // Never-hit entries are not "hot": only the one hit entry is returned.
+    expect(result.topEntries).toHaveLength(1);
+    // The scan covered the whole (3-entry) keyspace, so the counts are exact.
+    expect(result.sampled).toBe(false);
     expect(client.scan).toHaveBeenCalled();
 
     expect(logger.warn).toHaveBeenCalledTimes(1);
@@ -252,6 +287,7 @@ describe('entryAnalytics (SCAN fallback — cap at 10k)', () => {
 
     const result = await cache.entryAnalytics({ topN: 5 });
     expect(result.totalEntries).toBe(10_000);
+    expect(result.sampled).toBe(true);
 
     // hgetall must never be called — we use pipelined hmget for only the 5 needed fields
     expect(client.hgetall).not.toHaveBeenCalled();
@@ -327,6 +363,7 @@ describe('entryAnalytics (SCAN fallback — cap at 10k)', () => {
     const result = await cache.entryAnalytics({ topN: 5 });
 
     expect(result.totalEntries).toBe(10_000);
+    expect(result.sampled).toBe(true);
     expect(hmgetCount).toBe(10_000);
     // 6k + 6k ≥ 10k: the callback returns false after batch 2.
     expect(scan).toHaveBeenCalledTimes(2);
@@ -400,7 +437,7 @@ describe('entryAnalytics (complement counts include pre-upgrade entries)', () =>
         const limitIdx = args.indexOf('LIMIT');
         const isCountOnly = limitIdx >= 0 && Number(args[limitIdx + 2]) === 0;
         if (isCountOnly) {
-          if (filter === '*') return [String(TOTAL)];
+          if (filter === ALL_ENTRIES) return [String(TOTAL)];
           if (filter === '@hit_count:[1 +inf]') return [String(HIT_AT_LEAST_ONCE)];
           if (filter.startsWith('@last_accessed_at:')) return [String(WARM)];
           return ['0'];

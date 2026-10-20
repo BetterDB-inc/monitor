@@ -45,9 +45,16 @@ function searchReply(key: string): unknown[] {
   return ['1', key, ['__score', '0.01', 'response', `response for ${key}`]];
 }
 
-/** A usage-tracking command is `call('EVAL', script, '1', key, now, ttl)`. */
+const SHA1_HEX = /^[0-9a-f]{40}$/;
+
+/** True for the usage script, sent as EVALSHA (or EVAL on a NOSCRIPT retry). */
+function isScriptCall(args: unknown[]): boolean {
+  return args[0] === 'EVALSHA' || args[0] === 'EVAL';
+}
+
+/** A usage-tracking command is `call('EVALSHA', sha, '1', key, now, ttl)`. */
 function isUsageCommand(q: QueuedCommand): boolean {
-  return q.cmd === 'call' && q.args[0] === 'EVAL';
+  return q.cmd === 'call' && isScriptCall(q.args);
 }
 
 /**
@@ -56,7 +63,7 @@ function isUsageCommand(q: QueuedCommand): boolean {
  */
 function keyOf(q: QueuedCommand): string | null {
   if (q.cmd === 'call') {
-    return q.args[0] === 'EVAL' ? String(q.args[3]) : null;
+    return isScriptCall(q.args) ? String(q.args[3]) : null;
   }
   return String(q.args[0]);
 }
@@ -163,15 +170,16 @@ describe('entry usage tracking on cluster', () => {
     const { cache, logger } = await makeCache(client, TTL);
 
     const results = await cache.checkBatch(PROMPTS);
+    await cache._drainUsageWrites();
 
     expect(results.map((r) => r.matchedKey)).toEqual(KEYS);
     for (const key of KEYS) {
       const cmds = usageCommandsFor(state, key);
       expect(cmds).toHaveLength(1);
-      // call('EVAL', <script>, '1', key, <now>, '300')
+      // call('EVALSHA', <sha1>, '1', key, <now>, '300')
       expect(cmds[0].args).toEqual([
-        'EVAL',
-        expect.any(String),
+        'EVALSHA',
+        expect.stringMatching(SHA1_HEX),
         '1',
         key,
         expect.stringMatching(/^\d+$/),
@@ -187,14 +195,15 @@ describe('entry usage tracking on cluster', () => {
     const { cache, logger } = await makeCache(client);
 
     await cache.checkBatch(PROMPTS);
+    await cache._drainUsageWrites();
 
     for (const key of KEYS) {
       const cmds = usageCommandsFor(state, key);
       expect(cmds).toHaveLength(1);
       // Empty ttl arg → the script leaves the existing expiry untouched.
       expect(cmds[0].args).toEqual([
-        'EVAL',
-        expect.any(String),
+        'EVALSHA',
+        expect.stringMatching(SHA1_HEX),
         '1',
         key,
         expect.stringMatching(/^\d+$/),
@@ -211,12 +220,13 @@ describe('entry usage tracking on standalone', () => {
     const { cache, logger } = await makeCache(client, TTL);
 
     await cache.checkBatch(PROMPTS);
+    await cache._drainUsageWrites();
 
     expect(state.usagePipelines).toEqual([KEYS]);
     for (const key of KEYS) {
       const cmds = usageCommandsFor(state, key);
       expect(cmds).toHaveLength(1);
-      expect(cmds[0].args[0]).toBe('EVAL');
+      expect(cmds[0].args[0]).toBe('EVALSHA');
       expect(cmds[0].args[5]).toBe(String(TTL));
     }
     expect(logger.warn).not.toHaveBeenCalled();
@@ -229,6 +239,7 @@ describe('entry usage tracking failures', () => {
     const { cache, logger } = await makeCache(client, TTL);
 
     const results = await cache.checkBatch(PROMPTS);
+    await cache._drainUsageWrites();
 
     expect(results.every((r) => r.hit)).toBe(true);
     expect(usageCommandsFor(state, 't:entry:k1')).toHaveLength(1);
@@ -254,7 +265,7 @@ describe('entry usage tracking failures', () => {
       stub.exec = async () => {
         const results = await realExec();
         // Usage pipelines only: WRONGTYPE on the first key's EVAL.
-        const isUsage = stub.call.mock.calls.some((c) => c[0] === 'EVAL');
+        const isUsage = stub.call.mock.calls.some((c) => isScriptCall(c));
         if (isUsage) results[0] = [new Error('WRONGTYPE Operation against a key'), null];
         return results;
       };
@@ -263,6 +274,7 @@ describe('entry usage tracking failures', () => {
     const { cache, logger } = await makeCache(client, TTL);
 
     await cache.checkBatch(PROMPTS);
+    await cache._drainUsageWrites();
 
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn.mock.calls[0][0]).toContain('for 1/3 key(s)');
@@ -282,7 +294,7 @@ describe('entry usage tracking failures', () => {
       const realExec = stub.exec;
       stub.exec = async () => {
         const results = await realExec();
-        const isUsage = stub.call.mock.calls.some((c) => c[0] === 'EVAL');
+        const isUsage = stub.call.mock.calls.some((c) => isScriptCall(c));
         if (isUsage) {
           results[0] = [new Error("READONLY You can't write against a read only replica."), null];
         }
@@ -293,6 +305,7 @@ describe('entry usage tracking failures', () => {
     const { cache, logger } = await makeCache(client, TTL);
 
     await cache.checkBatch(PROMPTS);
+    await cache._drainUsageWrites();
 
     expect(logger.warn).toHaveBeenCalledTimes(1);
     const msg = logger.warn.mock.calls[0][0] as string;
@@ -315,7 +328,7 @@ describe('entry usage tracking failures', () => {
         const results = await realExec();
         // The script returns 0 when the key vanished after FT.SEARCH — a no-op,
         // never an error. It must not be tallied as a failed key.
-        const isUsage = stub.call.mock.calls.some((c) => c[0] === 'EVAL');
+        const isUsage = stub.call.mock.calls.some((c) => isScriptCall(c));
         if (isUsage) {
           for (let i = 0; i < results.length; i++) results[i] = [null, 0];
         }
@@ -326,6 +339,7 @@ describe('entry usage tracking failures', () => {
     const { cache, logger } = await makeCache(client, TTL);
 
     const results = await cache.checkBatch(PROMPTS);
+    await cache._drainUsageWrites();
 
     expect(results.every((r) => r.hit)).toBe(true);
     expect(logger.warn).not.toHaveBeenCalled();
@@ -336,10 +350,88 @@ describe('entry usage tracking failures', () => {
     const { cache, logger } = await makeCache(client, TTL);
 
     const result = await cache.check('first');
+    await cache._drainUsageWrites();
 
     expect(result.hit).toBe(true);
     expect(result.matchedKey).toBe('t:entry:k1');
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn.mock.calls[0][0]).toContain('for 1/1 key(s)');
+  });
+});
+
+describe('entry usage tracking: EVALSHA + NOSCRIPT fallback', () => {
+  it('retries NOSCRIPT keys once with EVAL and does not warn', async () => {
+    const { client } = makeClient({ cluster: false });
+    const pipelineFn = client.pipeline as unknown as ReturnType<typeof vi.fn>;
+    const realPipeline = pipelineFn.getMockImplementation()!;
+    const scriptCalls: unknown[][] = [];
+    pipelineFn.mockImplementation(() => {
+      const stub = realPipeline() as Record<string, unknown> & {
+        call: ReturnType<typeof vi.fn>;
+        exec: () => Promise<Array<[Error | null, unknown]>>;
+      };
+      const realExec = stub.exec;
+      stub.exec = async () => {
+        const results = await realExec();
+        stub.call.mock.calls.forEach((c, i) => {
+          if (!isScriptCall(c)) return;
+          scriptCalls.push(c);
+          // Empty script cache: every EVALSHA answers NOSCRIPT, EVAL succeeds.
+          if (c[0] === 'EVALSHA') {
+            results[i] = [new Error('NOSCRIPT No matching script. Please use EVAL.'), null];
+          }
+        });
+        return results;
+      };
+      return stub;
+    });
+    const { cache, logger } = await makeCache(client, TTL);
+
+    const results = await cache.checkBatch(PROMPTS);
+    await cache._drainUsageWrites();
+
+    expect(results.every((r) => r.hit)).toBe(true);
+    const evalsha = scriptCalls.filter((c) => c[0] === 'EVALSHA');
+    const evals = scriptCalls.filter((c) => c[0] === 'EVAL');
+    expect(evalsha.map((c) => c[3])).toEqual(KEYS);
+    // Retried once per key, with the full script body and the same args.
+    expect(evals.map((c) => c[3])).toEqual(KEYS);
+    for (const c of evals) {
+      expect(String(c[1])).toContain("redis.call('EXISTS', KEYS[1])");
+      expect(c[5]).toBe(String(TTL));
+    }
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('entry usage tracking: hit latency', () => {
+  it('check() and checkBatch() resolve without waiting for the usage write', async () => {
+    const { client } = makeClient({ cluster: false });
+    const pipelineFn = client.pipeline as unknown as ReturnType<typeof vi.fn>;
+    const realPipeline = pipelineFn.getMockImplementation()!;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    pipelineFn.mockImplementation(() => {
+      const stub = realPipeline() as Record<string, unknown> & {
+        call: ReturnType<typeof vi.fn>;
+        exec: () => Promise<Array<[Error | null, unknown]>>;
+      };
+      const realExec = stub.exec;
+      stub.exec = async () => {
+        // Hold every usage pipeline open until the test releases it.
+        if (stub.call.mock.calls.some((c) => isScriptCall(c))) await gate;
+        return realExec();
+      };
+      return stub;
+    });
+    const { cache, logger } = await makeCache(client, TTL);
+
+    // Both resolve while every usage write is still blocked on the gate.
+    expect((await cache.check('first')).hit).toBe(true);
+    expect((await cache.checkBatch(PROMPTS)).every((r) => r.hit)).toBe(true);
+
+    release();
+    await cache._drainUsageWrites();
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 });
