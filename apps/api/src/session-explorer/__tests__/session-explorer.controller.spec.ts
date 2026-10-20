@@ -1,7 +1,12 @@
 import { Logger } from '@nestjs/common';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
-import type { SessionNamespace } from '@betterdb/shared';
+import * as fs from 'fs';
+import * as path from 'path';
+import { Feature } from '@betterdb/shared';
+import type { CapturedKey, SessionNamespace } from '@betterdb/shared';
+import { LicenseGuard } from '@proprietary/licenses';
+import { LiveConnectionGuard } from '../../external-metrics/live-connection.guard';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { SessionExplorerController } from '../session-explorer.controller';
 import { SessionExplorerService } from '../session-explorer.service';
@@ -94,7 +99,10 @@ describe('SessionExplorerController', () => {
         { provide: ConnectionRegistry, useValue: registry },
         { provide: 'STORAGE_CLIENT', useValue: storage },
       ],
-    }).compile();
+    })
+      .overrideGuard(LicenseGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
@@ -381,6 +389,60 @@ describe('SessionExplorerController', () => {
         headers,
       });
       expect(new Set(storage.calls)).toEqual(new Set(['getSessionNamespace']));
+    });
+  });
+
+  describe('oversize flags', () => {
+    const handler = SessionExplorerController.prototype.oversizeSessions;
+
+    it('is gated by the license guard on the session oversize feature', () => {
+      expect(Reflect.getMetadata('requiredFeature', handler)).toBe(Feature.SESSION_OVERSIZE_FLAGS);
+      expect(Feature.SESSION_OVERSIZE_FLAGS).toBe('sessionOversizeFlags');
+      expect(Reflect.getMetadata('__guards__', handler)).toEqual(
+        expect.arrayContaining([LiveConnectionGuard, LicenseGuard]),
+      );
+    });
+
+    it('flags only sessions strictly above the threshold', async () => {
+      storage.rows.set('ns-raw', namespace({ oversizeThresholdBytes: 120 }));
+      valkey.scanPages = [['chat:1', 'chat:2']];
+      valkey.store.set('chat:2', { type: 'string', pttl: -1, memory: 121, value: 'x' });
+      const res = await app.inject({
+        method: 'GET',
+        url: '/session-explorer/namespaces/ns-raw/oversize',
+        headers,
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ thresholdBytes: 120, sessionIds: ['chat:2'], truncated: false });
+    });
+
+    it('flags the captured oversize session at the default threshold', async () => {
+      const fixture = JSON.parse(
+        fs.readFileSync(
+          path.join(__dirname, '../../../test/fixtures/session-explorer/langchain-community@0.4.2.json'),
+          'utf8',
+        ),
+      ) as { keys: CapturedKey[] };
+      for (const k of fixture.keys) {
+        valkey.store.set(k.key, {
+          type: k.type,
+          pttl: k.pttl,
+          memory: Buffer.byteLength(JSON.stringify(k.value)),
+          value: k.value as string[],
+        });
+      }
+      valkey.scanPages = [fixture.keys.map((k) => k.key)];
+      storage.rows.set('ns-lc', namespace({ id: 'ns-lc', pattern: 'sxfix:lcc:*', preset: 'langchain-community' }));
+      const res = await app.inject({
+        method: 'GET',
+        url: '/session-explorer/namespaces/ns-lc/oversize',
+        headers,
+      });
+      expect(res.json()).toEqual({
+        thresholdBytes: 1048576,
+        sessionIds: ['sxfix:lcc:oversize'],
+        truncated: false,
+      });
     });
   });
 });

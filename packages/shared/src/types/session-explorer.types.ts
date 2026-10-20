@@ -107,6 +107,12 @@ export interface SessionDetail {
   missingKeys: number;
 }
 
+export interface SessionOversizeResponse {
+  thresholdBytes: number;
+  sessionIds: string[];
+  truncated: boolean;
+}
+
 export interface SessionPreview {
   sampleKey: string | null;
   view: KeyView | null;

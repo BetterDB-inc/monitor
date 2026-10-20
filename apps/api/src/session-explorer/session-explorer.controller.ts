@@ -13,12 +13,16 @@ import {
 } from '@nestjs/common';
 import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { FastifyReply } from 'fastify';
+import { Feature } from '@betterdb/shared';
 import type {
   SessionDetail,
   SessionListResponse,
   SessionNamespace,
+  SessionOversizeResponse,
   SessionPreview,
 } from '@betterdb/shared';
+import { LicenseGuard } from '@proprietary/licenses';
+import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
 import { ConnectionId } from '../common/decorators/connection-id.decorator';
 import { ENV_DEFAULT_ID } from '../connections/connection-registry.service';
 import {
@@ -100,6 +104,17 @@ export class SessionExplorerController {
     @ConnectionId() connectionId?: string,
   ): Promise<SessionListResponse> {
     return this.service.listSessions(connectionId || ENV_DEFAULT_ID, id);
+  }
+
+  @Get('namespaces/:id/oversize')
+  @UseGuards(LiveConnectionGuard, LicenseGuard)
+  @RequiresFeature(Feature.SESSION_OVERSIZE_FLAGS)
+  @ApiOperation({ summary: 'Sessions whose memory exceeds the namespace threshold' })
+  oversizeSessions(
+    @Param('id') id: string,
+    @ConnectionId() connectionId?: string,
+  ): Promise<SessionOversizeResponse> {
+    return this.service.oversizeSessions(connectionId || ENV_DEFAULT_ID, id);
   }
 
   @Get('namespaces/:id/sessions/:sessionId')

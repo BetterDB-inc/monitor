@@ -6,6 +6,7 @@ import type {
   SessionListResponse,
   SessionNamespace,
   SessionNamespaceInput,
+  SessionOversizeResponse,
   SessionPreview,
 } from '@betterdb/shared';
 import type { StoragePort } from '../common/interfaces/storage-port.interface';
@@ -91,6 +92,23 @@ export class SessionExplorerService {
   async listSessions(connectionId: string, id: string): Promise<SessionListResponse> {
     const namespace = await this.namespace(connectionId, id);
     return scanSessions(this.registry.get(connectionId), namespace.pattern, this.presetOf(namespace));
+  }
+
+  async oversizeSessions(connectionId: string, id: string): Promise<SessionOversizeResponse> {
+    const namespace = await this.namespace(connectionId, id);
+    const list = await scanSessions(
+      this.registry.get(connectionId),
+      namespace.pattern,
+      this.presetOf(namespace),
+    );
+    const thresholdBytes = namespace.oversizeThresholdBytes;
+    return {
+      thresholdBytes,
+      sessionIds: list.sessions
+        .filter((s) => s.memoryBytes > thresholdBytes)
+        .map((s) => s.sessionId),
+      truncated: list.truncated,
+    };
   }
 
   async getSession(connectionId: string, id: string, sessionId: string): Promise<SessionDetail> {
