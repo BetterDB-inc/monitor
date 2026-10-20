@@ -171,9 +171,20 @@ describe('readSessionKeys', () => {
     );
     const key = await readOne(client, 'h', { byteCap: 100 });
     expect(client.callsOf('pipeline.hgetallBuffer')).toHaveLength(0);
-    expect(client.callsOf('hscanBuffer')).toHaveLength(1);
+    expect(client.callsOf('hscanBuffer')).toHaveLength(2);
     expect(key.truncated).toBe(true);
     expect(Object.keys(key.value as object)).toEqual(['a']);
+  });
+
+  it('starts HSCAN at one field and sizes later pages from the field average', async () => {
+    const value = Object.fromEntries(
+      Array.from({ length: 10 }, (_, i) => [String(i), 'v'.repeat(9)]),
+    );
+    const client = new FakeValkey(storeOf({ h: { type: 'hash', value, memory: 5000 } }));
+    const key = await readOne(client, 'h', { byteCap: 1000, listWindow: 500 });
+    expect(client.callsOf('hscanBuffer').map((c) => c.args[3])).toEqual([1, 100]);
+    expect(Object.keys(key.value as object)).toHaveLength(10);
+    expect(key.truncated).toBeFalsy();
   });
 
   it('reads a sorted set as member and score pairs', async () => {

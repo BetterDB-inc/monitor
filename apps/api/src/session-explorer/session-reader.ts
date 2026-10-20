@@ -225,13 +225,15 @@ async function readHash(
     }
   } else {
     let cursor = '0';
+    let count = firstWindow(at, opts);
     do {
-      const [next, flat] = await client.hscanBuffer(at.key, cursor, 'COUNT', opts.listWindow);
+      const [next, flat] = await client.hscanBuffer(at.key, cursor, 'COUNT', count);
       cursor = next.toString();
       for (let i = 0; i + 1 < flat.length; i += 2) {
         const [field, v] = [flat[i], flat[i + 1]];
         if (!acc.add(field.length + v.length, () => [field.toString(), decoded(v, cap)])) break;
       }
+      if (acc.items.length > 0) count = nextWindow(acc, opts);
     } while (cursor !== '0' && !acc.full);
   }
   return { value: Object.fromEntries(acc.items), truncated: acc.full, bytes: acc.bytes };

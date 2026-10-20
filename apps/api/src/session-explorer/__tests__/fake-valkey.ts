@@ -176,14 +176,16 @@ export class FakeValkey {
         return Object.fromEntries(
           Object.entries((raw as Record<string, string>) ?? {}).map(([k, v]) => [k, Buffer.from(v)]),
         );
-      case 'hscanBuffer':
+      case 'hscanBuffer': {
+        const [, cursor, , count] = args as [string, string, string, number];
+        const fields = Object.entries((raw as Record<string, string>) ?? {});
+        const start = Number(cursor);
+        const end = start + count;
         return [
-          Buffer.from('0'),
-          Object.entries((raw as Record<string, string>) ?? {}).flatMap(([k, v]) => [
-            Buffer.from(k),
-            Buffer.from(v),
-          ]),
+          Buffer.from(end >= fields.length ? '0' : String(end)),
+          fields.slice(start, end).flatMap(([k, v]) => [Buffer.from(k), Buffer.from(v)]),
         ];
+      }
       case 'zrangeBuffer': {
         const [, start, stop] = args as [string, number, string];
         return ((raw as string[]) ?? [])
