@@ -9,34 +9,63 @@ const ROLE_MAP: Record<string, string> = {
   tool: 'tool',
 };
 
+type ToolCall = NonNullable<ParsedMessage['toolCalls']>[number];
+
 function blocksText(blocks: unknown): string {
   if (!Array.isArray(blocks)) return fail('blocks is not a list');
   return blocks
     .map((block) => {
-      if (!isRecord(block) || block.block_type !== 'text' || typeof block.text !== 'string') {
+      if (!isRecord(block) || typeof block.block_type !== 'string') {
         return fail('Unsupported content block');
       }
-      return block.text;
+      if (block.block_type === 'text' && typeof block.text === 'string') return block.text;
+      if (block.block_type === 'tool_call') return '';
+      return `[${block.block_type}]`;
     })
     .join('');
+}
+
+const withId = (id: unknown) => (typeof id === 'string' ? { id } : {});
+
+function argsOf(text: string): unknown {
+  try {
+    return parseJson(text);
+  } catch {
+    return text;
+  }
+}
+
+function parseToolCall(call: unknown): ToolCall {
+  if (!isRecord(call)) return fail('Malformed tool call');
+  if (isRecord(call.function) && typeof call.function.name === 'string') {
+    const argText = call.function.arguments;
+    if (typeof argText !== 'string') return fail('Tool call arguments are not a string');
+    return { name: call.function.name, args: argsOf(argText), ...withId(call.id) };
+  }
+  if (typeof call.name === 'string') {
+    return { name: call.name, args: call.input, ...withId(call.id) };
+  }
+  return fail('Malformed tool call');
 }
 
 function parseToolCalls(raw: unknown): ParsedMessage['toolCalls'] {
   if (raw === undefined || raw === null) return undefined;
   if (!Array.isArray(raw)) return fail('tool_calls is not a list');
   if (raw.length === 0) return undefined;
-  return raw.map((call) => {
-    if (!isRecord(call) || !isRecord(call.function) || typeof call.function.name !== 'string') {
-      return fail('Malformed tool call');
-    }
-    const argText = call.function.arguments;
-    if (typeof argText !== 'string') return fail('Tool call arguments are not a string');
-    return {
-      name: call.function.name,
-      args: parseJson(argText),
-      ...(typeof call.id === 'string' ? { id: call.id } : {}),
-    };
-  });
+  return raw.map(parseToolCall);
+}
+
+function blockToolCalls(blocks: unknown[]): ParsedMessage['toolCalls'] {
+  const calls = blocks.filter(
+    (block): block is Record<string, unknown> =>
+      isRecord(block) && block.block_type === 'tool_call' && typeof block.tool_name === 'string',
+  );
+  if (calls.length === 0) return undefined;
+  return calls.map((block) => ({
+    name: block.tool_name as string,
+    args: block.tool_kwargs,
+    ...withId(block.tool_call_id),
+  }));
 }
 
 function parseElement(element: unknown): ParsedMessage {
@@ -51,7 +80,8 @@ function parseElement(element: unknown): ParsedMessage {
   if (kwargs !== undefined && !isRecord(kwargs)) return fail('additional_kwargs is not an object');
   const extras = kwargs ?? {};
   const message: ParsedMessage = { role, content: blocksText(msg.blocks) };
-  const toolCalls = parseToolCalls(extras.tool_calls);
+  const toolCalls =
+    parseToolCalls(extras.tool_calls) ?? blockToolCalls(msg.blocks as unknown[]);
   if (toolCalls) message.toolCalls = toolCalls;
   if (role === 'tool') {
     message.toolResult = {

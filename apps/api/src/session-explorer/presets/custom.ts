@@ -188,6 +188,7 @@ function readRoot(k: CapturedKey, valueType: CustomSchema['valueType']): unknown
         ]),
       );
     default:
+      if (k.type === 'ReJSON-RL' && typeof k.value !== 'string') return k.value;
       if (typeof k.value !== 'string') return fail('Expected a string value');
       return parseJson(k.value);
   }
@@ -215,7 +216,7 @@ function toMessage(entry: unknown, fields: CustomSchema['fields']): ParsedMessag
   if (typeof role !== 'string' || role === '') return fail(`Missing role at "${fields.role}"`);
   const rawContent = getPath(entry, fields.content);
   if (rawContent === undefined) return fail(`Missing content at "${fields.content}"`);
-  const message: ParsedMessage = { role, content: textContent(rawContent) };
+  const message: ParsedMessage = { role, content: textContent(rawContent ?? '') };
 
   if (fields.timestamp) {
     const ts = getPath(entry, fields.timestamp);

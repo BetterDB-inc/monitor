@@ -71,7 +71,7 @@ export const fail = (reason: string): never => {
 
 export const readableValue = (k: CapturedKey): string | null => {
   if (k.truncated === true) return 'Value truncated at the byte cap';
-  if (isRecord(k.value) && typeof k.value.base64 === 'string') {
+  if (k.type !== 'hash' && isRecord(k.value) && typeof k.value.base64 === 'string') {
     return 'Value is not valid UTF-8';
   }
   return null;
@@ -99,12 +99,28 @@ export function textContent(content: unknown): string {
     return content
       .map((part) => {
         if (typeof part === 'string') return part;
-        if (isRecord(part) && part.type === 'text' && typeof part.text === 'string') {
-          return part.text;
+        if (!isRecord(part) || typeof part.type !== 'string') {
+          return fail('Unsupported content block');
         }
-        return fail('Unsupported content block');
+        if (part.type === 'text' && typeof part.text === 'string') return part.text;
+        if (part.type === 'tool_use') return '';
+        return `[${part.type}]`;
       })
       .join('');
   }
   return fail('Message content is not text');
+}
+
+export function toolUseCalls(content: unknown): ParsedMessage['toolCalls'] {
+  if (!Array.isArray(content)) return undefined;
+  const calls = content.filter(
+    (part): part is Record<string, unknown> =>
+      isRecord(part) && part.type === 'tool_use' && typeof part.name === 'string',
+  );
+  if (calls.length === 0) return undefined;
+  return calls.map((part) => ({
+    name: part.name as string,
+    args: part.input,
+    ...(typeof part.id === 'string' ? { id: part.id } : {}),
+  }));
 }

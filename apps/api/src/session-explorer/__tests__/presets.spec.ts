@@ -224,6 +224,142 @@ describe('decodeValue', () => {
   });
 });
 
+describe('presets with content blocks beyond text', () => {
+  const listKey = (elements: unknown[]): CapturedKey => ({
+    key: 'k',
+    type: 'list',
+    pttl: -1,
+    value: elements.map((e) => JSON.stringify(e)),
+  });
+  const parsedMessages = (view: KeyView): ParsedMessage[] => {
+    expect(view.parsed).toBe(true);
+    return view.parsed ? view.messages : [];
+  };
+
+  it('langchain keeps text, maps Anthropic tool_use blocks to tool calls and marks other blocks', () => {
+    const view = getPreset('langchain-community').parseKey(
+      listKey([
+        {
+          type: 'ai',
+          data: {
+            content: [
+              { type: 'text', text: 'Let me check' },
+              { type: 'tool_use', id: 'toolu_1', name: 'get_weather', input: { city: 'Sofia' } },
+            ],
+          },
+        },
+        {
+          type: 'human',
+          data: {
+            content: [
+              { type: 'text', text: 'What is this?' },
+              { type: 'image_url', image_url: { url: 'data:' } },
+            ],
+          },
+        },
+      ]),
+    );
+    const [human, ai] = parsedMessages(view);
+    expect(human.content).toBe('What is this?[image_url]');
+    expect(ai).toEqual({
+      role: 'ai',
+      content: 'Let me check',
+      toolCalls: [{ name: 'get_weather', args: { city: 'Sofia' }, id: 'toolu_1' }],
+    });
+  });
+
+  it('langchain prefers tool_calls over tool_use blocks when both are present', () => {
+    const view = getPreset('langchain-community').parseKey(
+      listKey([
+        {
+          type: 'ai',
+          data: {
+            content: [{ type: 'tool_use', id: 'toolu_1', name: 'from_block', input: {} }],
+            tool_calls: [{ name: 'from_calls', args: {}, id: 'toolu_1' }],
+          },
+        },
+      ]),
+    );
+    expect(parsedMessages(view)[0].toolCalls).toEqual([
+      { name: 'from_calls', args: {}, id: 'toolu_1' },
+    ]);
+  });
+
+  it('agent-cache reads streamed chunk message classes', () => {
+    const lc = (name: string, kwargs: Record<string, unknown>) => ({
+      lc: 1,
+      type: 'constructor',
+      id: ['langchain_core', 'messages', name],
+      kwargs,
+    });
+    const value = JSON.stringify({
+      checkpoint: {
+        channel_values: {
+          messages: [
+            lc('HumanMessage', { content: 'hi' }),
+            lc('AIMessageChunk', { content: 'hello' }),
+          ],
+        },
+      },
+    });
+    const view = getPreset('agent-cache').parseKey({
+      key: 'p:session:t1:__checkpoint_latest',
+      type: 'string',
+      pttl: -1,
+      value,
+    });
+    expect(parsedMessages(view).map((m) => m.role)).toEqual(['human', 'ai']);
+  });
+
+  it('llamaindex keeps a malformed tool-call argument string as raw text', () => {
+    const view = getPreset('llamaindex').parseKey(
+      listKey([
+        {
+          role: 'assistant',
+          blocks: [],
+          additional_kwargs: {
+            tool_calls: [{ id: 'c1', function: { name: 'lookup', arguments: '{"q": ' } }],
+          },
+        },
+      ]),
+    );
+    expect(parsedMessages(view)[0].toolCalls).toEqual([{ name: 'lookup', args: '{"q": ', id: 'c1' }]);
+  });
+
+  it('llamaindex reads tool_call blocks, Anthropic tool_use dicts and marks other blocks', () => {
+    const view = getPreset('llamaindex').parseKey(
+      listKey([
+        {
+          role: 'assistant',
+          blocks: [
+            { block_type: 'thinking', content: 'hmm' },
+            { block_type: 'text', text: 'Checking' },
+            { block_type: 'tool_call', tool_call_id: 'c1', tool_name: 'lookup', tool_kwargs: { q: 1 } },
+          ],
+        },
+        {
+          role: 'assistant',
+          blocks: [{ block_type: 'image', url: 'x' }],
+          additional_kwargs: {
+            tool_calls: [{ id: 'toolu_1', name: 'get_weather', input: { city: 'Sofia' }, type: 'tool_use' }],
+          },
+        },
+      ]),
+    );
+    const [first, second] = parsedMessages(view);
+    expect(first).toEqual({
+      role: 'ai',
+      content: '[thinking]Checking',
+      toolCalls: [{ name: 'lookup', args: { q: 1 }, id: 'c1' }],
+    });
+    expect(second).toEqual({
+      role: 'ai',
+      content: '[image]',
+      toolCalls: [{ name: 'get_weather', args: { city: 'Sofia' }, id: 'toolu_1' }],
+    });
+  });
+});
+
 describe('estimateTokens', () => {
   it('is ceil of content chars over 4', () => {
     const messages: ParsedMessage[] = [

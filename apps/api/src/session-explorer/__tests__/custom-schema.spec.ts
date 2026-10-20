@@ -236,6 +236,44 @@ describe('custom preset', () => {
     expect(view).toMatchObject({ parsed: false, reason: 'Value is not valid JSON' });
   });
 
+  it('reads a ReJSON document that was captured already parsed', () => {
+    const preset = createCustomPreset({
+      valueType: 'json',
+      messages: { from: 'path', path: 'turns' },
+      fields: { role: 'who', content: 'text' },
+    });
+    const view = preset.parseKey(
+      key({ type: 'ReJSON-RL', value: { turns: [{ who: 'user', text: 'hi' }] } }),
+    );
+    expect(view).toMatchObject({ parsed: true, messages: [{ role: 'user', content: 'hi' }] });
+  });
+
+  it('reads null content next to a tool call as empty text', () => {
+    const preset = createCustomPreset({
+      valueType: 'list',
+      messages: { from: 'items' },
+      fields: { role: 'role', content: 'content', toolName: 'tool_calls[0].function.name' },
+    });
+    const entry = { role: 'assistant', content: null, tool_calls: [{ function: { name: 'lookup' } }] };
+    const view = preset.parseKey(key({ type: 'list', value: [JSON.stringify(entry)] }));
+    expect(view).toMatchObject({
+      parsed: true,
+      messages: [{ role: 'assistant', content: '', toolCalls: [{ name: 'lookup' }] }],
+    });
+  });
+
+  it('parses a hash with a field named base64', () => {
+    const preset = createCustomPreset({
+      valueType: 'hash',
+      messages: { from: 'key' },
+      fields: { role: 'role', content: 'body' },
+    });
+    const view = preset.parseKey(
+      key({ type: 'hash', value: { role: 'user', body: 'hello', base64: 'aGk=' } }),
+    );
+    expect(view).toMatchObject({ parsed: true, messages: [{ role: 'user', content: 'hello' }] });
+  });
+
   it('registry requires a schema for custom', () => {
     expect(() => getPreset('custom', null)).toThrow();
     expect(getPreset('custom', baseSchema).id).toBe('custom');

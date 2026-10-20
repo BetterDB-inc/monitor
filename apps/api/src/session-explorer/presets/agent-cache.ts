@@ -1,6 +1,6 @@
 import type { KeyView, ParsedMessage } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
-import { fail, guardedParse, isRecord, parseJson, textContent } from './text';
+import { fail, guardedParse, isRecord, parseJson, textContent, toolUseCalls } from './text';
 
 const SESSION_KEY = /:session:(.+?):(?:__checkpoint_latest$|checkpoint:|writes:)/;
 const CHECKPOINT_MARKER = ':checkpoint:';
@@ -12,6 +12,10 @@ const ROLE_BY_CONSTRUCTOR: Record<string, string> = {
   AIMessage: 'ai',
   SystemMessage: 'system',
   ToolMessage: 'tool',
+  HumanMessageChunk: 'human',
+  AIMessageChunk: 'ai',
+  SystemMessageChunk: 'system',
+  ToolMessageChunk: 'tool',
 };
 
 function parseToolCalls(raw: unknown): ParsedMessage['toolCalls'] {
@@ -45,7 +49,7 @@ function parseMessage(entry: unknown): ParsedMessage {
   if (!role) return fail('Unknown message constructor');
   const kwargs = entry.kwargs;
   const message: ParsedMessage = { role, content: textContent(kwargs.content) };
-  const toolCalls = parseToolCalls(kwargs.tool_calls);
+  const toolCalls = parseToolCalls(kwargs.tool_calls) ?? toolUseCalls(kwargs.content);
   if (toolCalls) message.toolCalls = toolCalls;
   if (role === 'tool') {
     message.toolResult = {

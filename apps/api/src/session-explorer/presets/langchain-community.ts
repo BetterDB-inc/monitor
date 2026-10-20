@@ -1,6 +1,6 @@
 import type { ParsedMessage } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
-import { fail, guardedParse, isRecord, parseJson, textContent } from './text';
+import { fail, guardedParse, isRecord, parseJson, textContent, toolUseCalls } from './text';
 
 const ROLES = new Set(['human', 'ai', 'system', 'tool']);
 
@@ -30,7 +30,7 @@ function parseElement(element: unknown): ParsedMessage {
   if (!ROLES.has(role)) return fail(`Unknown message type "${role}"`);
   const data = envelope.data;
   const message: ParsedMessage = { role, content: textContent(data.content) };
-  const toolCalls = parseToolCalls(data.tool_calls);
+  const toolCalls = parseToolCalls(data.tool_calls) ?? toolUseCalls(data.content);
   if (toolCalls) message.toolCalls = toolCalls;
   if (role === 'tool') {
     message.toolResult = {
