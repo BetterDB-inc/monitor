@@ -98,6 +98,64 @@ describe('readSessionKeys', () => {
     expect(client.callsOf('lrangeBuffer')).toHaveLength(0);
   });
 
+  const fetchedItems = (client: FakeValkey, command: string) =>
+    [...client.callsOf(`pipeline.${command}`), ...client.callsOf(command)].reduce((sum, c) => {
+      const [, start, stop] = c.args as [string, number, number | string];
+      return sum + Number(stop) - start + 1;
+    }, 0);
+
+  it('fetches only a few elements past the cap from a list of large items', async () => {
+    const items = Array.from({ length: 50 }, () => 'y'.repeat(100_000));
+    const client = new FakeValkey(storeOf({ l: { type: 'list', value: items, memory: 5 * MB } }));
+
+    const key = await readOne(client, 'l', { byteCap: 250_000 });
+
+    expect(key.truncated).toBe(true);
+    expect((key.value as string[]).length).toBe(2);
+    expect(fetchedItems(client, 'lrangeBuffer')).toBeLessThanOrEqual(4);
+  });
+
+  it('fetches only a few members past the cap from a sorted set of large members', async () => {
+    const value = Array.from({ length: 50 }, (_, i) => ['z'.repeat(100_000) + i, String(i)]).flat();
+    const client = new FakeValkey(storeOf({ z: { type: 'zset', value, memory: 5 * MB } }));
+
+    const key = await readOne(client, 'z', { byteCap: 250_000 });
+
+    expect(key.truncated).toBe(true);
+    expect((key.value as unknown[]).length).toBe(2);
+    expect(fetchedItems(client, 'zrangeBuffer')).toBeLessThanOrEqual(4);
+  });
+
+  it('pages a stream of large entries and stops at the cap', async () => {
+    const value = Array.from(
+      { length: 50 },
+      (_, i) => [`${i + 1}-0`, { m: 's'.repeat(100_000) }] as [string, Record<string, string>],
+    );
+    const client = new FakeValkey(storeOf({ s: { type: 'stream', value, memory: 5 * MB } }));
+
+    const key = await readOne(client, 's', { byteCap: 250_000 });
+
+    expect(key.truncated).toBe(true);
+    expect((key.value as unknown[]).length).toBe(2);
+    const counts = [...client.callsOf('pipeline.xrangeBuffer'), ...client.callsOf('xrangeBuffer')]
+      .map((c) => Number(c.args[4]));
+    expect(counts.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(4);
+  });
+
+  it('reads a whole stream of small entries across pages', async () => {
+    const value = Array.from(
+      { length: 1200 },
+      (_, i) => [`${i + 1}-0`, { m: `e${i}` }] as [string, Record<string, string>],
+    );
+    const client = new FakeValkey(storeOf({ s: { type: 'stream', value } }));
+
+    const key = await readOne(client, 's');
+
+    expect(key.truncated).toBeFalsy();
+    expect((key.value as unknown[]).length).toBe(1200);
+    expect((key.value as Array<[string, unknown]>)[1199]).toEqual(['1200-0', { m: 'e1199' }]);
+  });
+
   it('reads a hash as a record of strings', async () => {
     const client = new FakeValkey(
       storeOf({ h: { type: 'hash', value: { a: '1', b: '2' }, memory: 50 } }),

@@ -69,7 +69,7 @@ class Accumulator<T> {
   bytes = 0;
   full = false;
 
-  constructor(private readonly cap: number) {}
+  constructor(readonly cap: number) {}
 
   add(size: number, item: () => T): boolean {
     if (this.bytes + size > this.cap) {
@@ -80,6 +80,15 @@ class Accumulator<T> {
     this.items.push(item());
     return true;
   }
+}
+
+const firstWindow = (at: Located, opts: ReadOpts): number =>
+  at.memory !== null && at.memory <= opts.byteCap ? opts.listWindow : 1;
+
+function nextWindow(acc: Accumulator<unknown>, opts: ReadOpts): number {
+  const average = Math.max(1, acc.bytes / Math.max(1, acc.items.length));
+  const fits = Math.floor((acc.cap - acc.bytes) / average) + 1;
+  return Math.max(1, Math.min(opts.listWindow, fits));
 }
 
 function routeKeys(
@@ -146,7 +155,7 @@ function queueFirstRead(pipeline: ChainableCommander, at: Located, opts: ReadOpt
       return 2;
     case 'list':
       pipeline.llen(key);
-      pipeline.lrangeBuffer(key, 0, opts.listWindow - 1);
+      pipeline.lrangeBuffer(key, 0, firstWindow(at, opts) - 1);
       return 2;
     case 'hash':
       if (memory === null || memory > opts.byteCap) return 0;
@@ -154,7 +163,7 @@ function queueFirstRead(pipeline: ChainableCommander, at: Located, opts: ReadOpt
       return 1;
     case 'zset':
       pipeline.zcard(key);
-      pipeline.zrangeBuffer(key, 0, String(opts.listWindow - 1), 'WITHSCORES');
+      pipeline.zrangeBuffer(key, 0, String(firstWindow(at, opts) - 1), 'WITHSCORES');
       return 2;
     case 'ReJSON-RL':
       if (memory === null) {
@@ -165,7 +174,7 @@ function queueFirstRead(pipeline: ChainableCommander, at: Located, opts: ReadOpt
       pipeline.callBuffer('JSON.GET', key);
       return 1;
     case 'stream':
-      pipeline.xrangeBuffer(key, '-', '+', 'COUNT', opts.listWindow + 1);
+      pipeline.xrangeBuffer(key, '-', '+', 'COUNT', firstWindow(at, opts));
       return 1;
     default:
       return 0;
@@ -188,13 +197,15 @@ async function readList(
   const length = resultOf(results[0]) as number;
   let window = resultOf(results[1]) as Buffer[];
   const acc = new Accumulator<ValkeyValue>(cap);
+  let size = firstWindow(at, opts);
   for (let start = 0; ; ) {
     for (const item of window) {
       if (!acc.add(item.length, () => decoded(item, cap))) break;
     }
-    start += opts.listWindow;
-    if (acc.full || window.length < opts.listWindow || start >= length) break;
-    window = await client.lrangeBuffer(at.key, start, start + opts.listWindow - 1);
+    start += window.length;
+    if (acc.full || window.length < size || start >= length) break;
+    size = nextWindow(acc, opts);
+    window = await client.lrangeBuffer(at.key, start, start + size - 1);
   }
   return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
 }
@@ -236,19 +247,16 @@ async function readZset(
   const length = resultOf(results[0]) as number;
   let flat = resultOf(results[1]) as Buffer[];
   const acc = new Accumulator<[ValkeyValue, number]>(cap);
+  let size = firstWindow(at, opts);
   for (let start = 0; ; ) {
     for (let i = 0; i + 1 < flat.length; i += 2) {
       const [member, score] = [flat[i], flat[i + 1]];
       if (!acc.add(member.length, () => [decoded(member, cap), Number(score.toString())])) break;
     }
-    start += opts.listWindow;
-    if (acc.full || flat.length < opts.listWindow * 2 || start >= length) break;
-    flat = await client.zrangeBuffer(
-      at.key,
-      start,
-      String(start + opts.listWindow - 1),
-      'WITHSCORES',
-    );
+    start += flat.length / 2;
+    if (acc.full || flat.length < size * 2 || start >= length) break;
+    size = nextWindow(acc, opts);
+    flat = await client.zrangeBuffer(at.key, start, String(start + size - 1), 'WITHSCORES');
   }
   return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
 }
@@ -277,23 +285,37 @@ async function readJson(
   return { ...decodeValue(buf, cap), bytes: Math.min(buf.length, cap) };
 }
 
-function readStream(results: PipelineResult[], cap: number, opts: ReadOpts): ReadResult {
-  const entries = resultOf(results[0]) as Array<[Buffer, Buffer[]]>;
+async function readStream(
+  client: Valkey,
+  at: Located,
+  results: PipelineResult[],
+  cap: number,
+  opts: ReadOpts,
+): Promise<ReadResult> {
+  let entries = resultOf(results[0]) as Array<[Buffer, Buffer[]]>;
   const acc = new Accumulator<[string, Record<string, ValkeyValue>]>(cap);
-  for (const [id, flat] of entries.slice(0, opts.listWindow)) {
-    const fields: Record<string, ValkeyValue> = {};
-    let size = 0;
-    for (let i = 0; i + 1 < flat.length; i += 2) {
-      size += flat[i].length + flat[i + 1].length;
-      fields[flat[i].toString()] = decoded(flat[i + 1], cap);
+  let size = firstWindow(at, opts);
+  for (;;) {
+    for (const [id, flat] of entries) {
+      let entryBytes = 0;
+      for (let i = 0; i + 1 < flat.length; i += 2) entryBytes += flat[i].length + flat[i + 1].length;
+      const fields = () => {
+        const out: Record<string, ValkeyValue> = {};
+        for (let i = 0; i + 1 < flat.length; i += 2) {
+          out[flat[i].toString()] = decoded(flat[i + 1], cap);
+        }
+        return out;
+      };
+      if (!acc.add(entryBytes, () => [id.toString(), fields()])) break;
     }
-    if (!acc.add(size, () => [id.toString(), fields])) break;
+    if (acc.full || entries.length < size) break;
+    const lastId = entries[entries.length - 1][0].toString();
+    size = nextWindow(acc, opts);
+    entries = (await client.xrangeBuffer(at.key, `(${lastId}`, '+', 'COUNT', size)) as Array<
+      [Buffer, Buffer[]]
+    >;
   }
-  return {
-    value: acc.items,
-    truncated: acc.full || entries.length > opts.listWindow,
-    bytes: acc.bytes,
-  };
+  return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
 }
 
 function finishRead(
@@ -315,7 +337,7 @@ function finishRead(
     case 'ReJSON-RL':
       return readJson(client, at, results, cap, opts);
     case 'stream':
-      return readStream(results, cap, opts);
+      return readStream(client, at, results, cap, opts);
     default:
       return { value: null, truncated: false, bytes: 0 };
   }
