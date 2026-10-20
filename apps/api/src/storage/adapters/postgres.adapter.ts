@@ -1,6 +1,11 @@
-import { Pool, PoolConfig } from 'pg';
+import { Pool, PoolClient, PoolConfig } from 'pg';
 import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
+import {
+  otelSpanCap,
+  otelSpanCapCheckInterval,
+  otelSpanLowWaterMark,
+} from '../otel-span-cap';
 import { randomUUID } from 'crypto';
 import { parseSshTunnel, parseMembership } from '@betterdb/shared';
 import type {
@@ -32,7 +37,6 @@ import {
   KeyPatternSnapshot,
   LatencySnapshotQueryOptions,
   MemorySnapshotQueryOptions,
-  SettingsUpdateRequest,
   SlowLogQueryOptions,
   StoragePort,
   StoredAclEntry,
@@ -212,6 +216,29 @@ function toAgentToken(row: AgentTokenPgRow): AgentToken {
     lastUsedAt: row.last_used_at === null ? null : Number(row.last_used_at),
     userId: row.user_id,
   };
+}
+
+// The `WITH RECURSIVE dbs(db) AS (...)` loose index scan that enumerates the
+// populated logical databases: one MIN(db) seek per database, since Postgres
+// has no skip scan for DISTINCT over an index prefix (a plain SELECT DISTINCT db
+// would walk every index entry — O(history)). Returns just the CTE definition
+// (callers append their own SELECT). The `where` fragment is spliced twice (the
+// anchor and the recursive step); its $n placeholders are positional so reuse
+// binds the same values. Shared by getKeyPatternSnapshots and
+// getKeyAnalyticsDatabases.
+function populatedDbsCte(where: string): string {
+  return `
+      WITH RECURSIVE dbs(db) AS (
+        SELECT MIN(db) FROM key_pattern_snapshots ${where}
+        UNION ALL
+        SELECT (
+          SELECT MIN(db) FROM key_pattern_snapshots
+          ${where ? `${where} AND` : 'WHERE'} db > dbs.db
+        )
+        FROM dbs
+        WHERE dbs.db IS NOT NULL
+      )
+  `;
 }
 
 export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
@@ -404,6 +431,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       // This must happen before createSchema() which creates indexes on connection_id.
       await this.migrateConnectionId();
       await this.createSchema();
+      await this.ensureOtelIngestedIndex();
       await this.backfillMemoryProposalDiscriminators();
 
       this.ready = true;
@@ -1411,13 +1439,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         min_ttl_seconds INTEGER,
         max_ttl_seconds INTEGER,
         connection_id TEXT NOT NULL DEFAULT 'env-default',
+        db INTEGER NOT NULL DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
+      ALTER TABLE key_pattern_snapshots ADD COLUMN IF NOT EXISTS db INTEGER NOT NULL DEFAULT 0;
 
       CREATE INDEX IF NOT EXISTS idx_kps_timestamp ON key_pattern_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_kps_pattern ON key_pattern_snapshots(pattern, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_kps_pattern_timestamp ON key_pattern_snapshots(pattern, timestamp);
       CREATE INDEX IF NOT EXISTS idx_kps_connection_id ON key_pattern_snapshots(connection_id);
+      DROP INDEX IF EXISTS idx_kps_connection_db;
+      CREATE INDEX IF NOT EXISTS idx_kps_connection_db_ts ON key_pattern_snapshots(connection_id, db, timestamp DESC, pattern ASC);
 
       CREATE TABLE IF NOT EXISTS hot_key_stats (
         id UUID PRIMARY KEY,
@@ -1431,10 +1463,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         cardinality BIGINT,
         key_type TEXT,
         ttl INTEGER,
-        rank INTEGER NOT NULL
+        rank INTEGER NOT NULL,
+        db INTEGER NOT NULL DEFAULT 0
       );
       ALTER TABLE hot_key_stats ADD COLUMN IF NOT EXISTS cardinality BIGINT;
       ALTER TABLE hot_key_stats ADD COLUMN IF NOT EXISTS key_type TEXT;
+      ALTER TABLE hot_key_stats ADD COLUMN IF NOT EXISTS db INTEGER NOT NULL DEFAULT 0;
       CREATE INDEX IF NOT EXISTS idx_hot_key_captured_at_global
         ON hot_key_stats(captured_at);
 
@@ -1452,6 +1486,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
         throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
         inference_sla_config JSONB NOT NULL DEFAULT '{}'::JSONB,
+        anomaly_detector_config JSONB NOT NULL DEFAULT '{}'::JSONB,
         local_retention_days INTEGER,
         updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
         created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
@@ -1462,6 +1497,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000;
       ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000;
       ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS inference_sla_config JSONB NOT NULL DEFAULT '{}'::JSONB;
+      ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS anomaly_detector_config JSONB NOT NULL DEFAULT '{}'::JSONB;
       ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS local_retention_days INTEGER;
 
       CREATE TABLE IF NOT EXISTS metric_forecast_settings (
@@ -1797,6 +1833,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
       CREATE INDEX IF NOT EXISTS idx_otel_trace ON otel_spans(trace_id);
       CREATE INDEX IF NOT EXISTS idx_otel_start ON otel_spans(start_time_ms);
+      -- idx_otel_ingested is built separately, CONCURRENTLY, after this
+      -- transactional batch — see ensureOtelIngestedIndex(). A plain CREATE
+      -- INDEX here would hold a write lock while it builds, and on a database
+      -- already flooded via the public ingest route that is a startup stall.
 
       CREATE TABLE IF NOT EXISTS vector_index_snapshots (
         id TEXT PRIMARY KEY,
@@ -2680,7 +2720,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     for (const snapshot of snapshots) {
       values.push(
-        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
+        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
       );
       params.push(
         snapshot.id,
@@ -2702,6 +2742,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         snapshot.minTtlSeconds ?? null,
         snapshot.maxTtlSeconds ?? null,
         connectionId,
+        snapshot.db ?? 0,
       );
     }
 
@@ -2712,7 +2753,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         keys_with_ttl, keys_expiring_soon, total_memory_bytes,
         avg_memory_bytes, max_memory_bytes, avg_access_frequency,
         hot_key_count, cold_key_count, avg_idle_time_seconds,
-        stale_key_count, avg_ttl_seconds, min_ttl_seconds, max_ttl_seconds, connection_id
+        stale_key_count, avg_ttl_seconds, min_ttl_seconds, max_ttl_seconds, connection_id, db
       ) VALUES ${values.join(', ')}
     `,
       params,
@@ -2746,17 +2787,55 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`pattern = $${paramIndex++}`);
       params.push(options.pattern);
     }
+    if (options.db !== undefined) {
+      conditions.push(`db = $${paramIndex++}`);
+      params.push(options.db);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 100;
     const offset = options.offset ?? 0;
 
+    if (options.db !== undefined) {
+      const result = await this.pool.query(
+        `
+        SELECT * FROM key_pattern_snapshots
+        ${whereClause}
+        ORDER BY timestamp DESC, db ASC, pattern ASC
+        LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+      `,
+        [...params, limit, offset],
+      );
+      return result.rows.map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
+    }
+
+    // Without a db filter the limit applies PER logical database, not
+    // globally: rows sort db0-first within a collection, so a global limit
+    // would let a pattern-heavy db0 fill the page and hide later databases
+    // from the all-databases view. A LATERAL join runs one LIMITed,
+    // early-terminating scan of the (connection_id, db, timestamp) index per
+    // populated database rather than a ROW_NUMBER() window, which would have
+    // to number and sort the connection's full snapshot history on every
+    // request — including the web's 60s patterns poll.
+    //
+    // The database list itself is enumerated with a loose index scan (one
+    // MIN(db) seek per populated database via the recursive CTE): Postgres
+    // has no skip scan, so a plain SELECT DISTINCT db would still walk every
+    // index entry for the connection — O(history) on every request.
     const result = await this.pool.query(
       `
-      SELECT * FROM key_pattern_snapshots
-      ${whereClause}
-      ORDER BY timestamp DESC
-      LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+      ${populatedDbsCte(whereClause)}
+      SELECT s.* FROM (
+        SELECT db FROM dbs WHERE db IS NOT NULL
+      ) d
+      CROSS JOIN LATERAL (
+        SELECT * FROM key_pattern_snapshots
+        ${whereClause ? `${whereClause} AND` : 'WHERE'} db = d.db
+        ORDER BY timestamp DESC, pattern ASC
+        LIMIT $${paramIndex++}
+      ) s
+      ORDER BY s.timestamp DESC, s.db ASC, s.pattern ASC
+      OFFSET $${paramIndex++}
     `,
       [...params, limit, offset],
     );
@@ -2768,6 +2847,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     startTime?: number,
     endTime?: number,
     connectionId?: string,
+    db?: number,
   ): Promise<KeyAnalyticsSummary | null> {
     if (!this.pool) throw new Error('Database not initialized');
 
@@ -2787,70 +2867,88 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`timestamp <= $${paramIndex++}`);
       params.push(endTime);
     }
+    if (db !== undefined) {
+      conditions.push(`db = $${paramIndex++}`);
+      params.push(db);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const latestSnapshotsResult = await this.pool.query(
-      `
-      SELECT pattern, MAX(timestamp) as latest_timestamp
-      FROM key_pattern_snapshots
-      ${whereClause}
-      GROUP BY pattern
-    `,
-      params,
-    );
-
-    if (latestSnapshotsResult.rows.length === 0) return null;
-
-    const patternConditions = latestSnapshotsResult.rows
-      .map(() => '(pattern = ? AND timestamp = ?)')
-      .join(' OR ');
-    const patternParams: any[] = [];
-    for (const row of latestSnapshotsResult.rows) {
-      patternParams.push(row.pattern, row.latest_timestamp);
-    }
-
-    let pIdx = 1;
-    const patternPlaceholders = latestSnapshotsResult.rows
-      .map(() => `(pattern = $${pIdx++} AND timestamp = $${pIdx++})`)
-      .join(' OR ');
+    // Aggregate over the latest snapshot per (pattern, logical database): per
+    // db, not per pattern, because a partial collection (one db scanned, a
+    // sibling's scan failed) moves the pattern's newest timestamp forward for
+    // only some databases — pinning one MAX(timestamp) per pattern would
+    // silently drop the sibling's last row and undercount headline totals.
+    // The latest rows are selected by JOINing a grouped subquery rather than
+    // expanding each (pattern, db, timestamp) triple into an OR term with
+    // three bind parameters — that expansion scales with patterns x databases
+    // and can exceed the engine's bind-parameter limit (65535 for Postgres).
+    //
+    // connection scoping is re-applied on the outer rows: a (pattern, db,
+    // timestamp) triple is not unique across connections, so without it
+    // another connection's snapshot at the same triple would be summed in.
+    const latestJoin = `
+      FROM key_pattern_snapshots s
+      JOIN (
+        SELECT pattern, db, MAX(timestamp) as latest_timestamp
+        FROM key_pattern_snapshots
+        ${whereClause}
+        GROUP BY pattern, db
+      ) latest
+        ON s.pattern = latest.pattern
+        AND s.db = latest.db
+        AND s.timestamp = latest.latest_timestamp
+      ${connectionId ? `WHERE s.connection_id = $${paramIndex++}` : ''}
+    `;
+    const latestParams = connectionId ? [...params, connectionId] : params;
 
     const summaryResult = await this.pool.query(
       `
       SELECT
-        COUNT(DISTINCT pattern) as total_patterns,
-        SUM(key_count) as total_keys,
-        SUM(total_memory_bytes) as total_memory_bytes,
-        SUM(stale_key_count) as stale_key_count,
-        SUM(hot_key_count) as hot_key_count,
-        SUM(cold_key_count) as cold_key_count,
-        SUM(keys_expiring_soon) as keys_expiring_soon
-      FROM key_pattern_snapshots
-      WHERE ${patternPlaceholders}
+        COUNT(DISTINCT s.pattern) as total_patterns,
+        SUM(s.key_count) as total_keys,
+        SUM(s.total_memory_bytes) as total_memory_bytes,
+        SUM(s.stale_key_count) as stale_key_count,
+        SUM(s.hot_key_count) as hot_key_count,
+        SUM(s.cold_key_count) as cold_key_count,
+        SUM(s.keys_expiring_soon) as keys_expiring_soon
+      ${latestJoin}
     `,
-      patternParams,
+      latestParams,
     );
 
     const summary = summaryResult.rows[0];
 
+    if (!summary || !parseInt(summary.total_patterns)) return null;
+
     const patternRowsResult = await this.pool.query(
       `
-      SELECT pattern, key_count, total_memory_bytes, avg_memory_bytes, stale_key_count, hot_key_count, cold_key_count
-      FROM key_pattern_snapshots
-      WHERE ${patternPlaceholders}
+      SELECT
+        s.pattern,
+        SUM(s.key_count) as key_count,
+        SUM(s.total_memory_bytes) as total_memory_bytes,
+        SUM(s.stale_key_count) as stale_key_count,
+        SUM(s.hot_key_count) as hot_key_count,
+        SUM(s.cold_key_count) as cold_key_count,
+        SUM(s.sampled_key_count) as sampled_key_count,
+        SUM(s.avg_memory_bytes::bigint * s.sampled_key_count) as weighted_avg_memory
+      ${latestJoin}
+      GROUP BY s.pattern
     `,
-      patternParams,
+      latestParams,
     );
 
     const byPattern: Record<string, any> = {};
     for (const row of patternRowsResult.rows) {
+      const sampledKeyCount = parseInt(row.sampled_key_count) || 0;
       byPattern[row.pattern] = {
-        keyCount: row.key_count,
-        memoryBytes: parseInt(row.total_memory_bytes),
-        avgMemoryBytes: row.avg_memory_bytes,
-        staleCount: row.stale_key_count ?? null,
-        hotCount: row.hot_key_count ?? 0,
-        coldCount: row.cold_key_count ?? 0,
+        keyCount: parseInt(row.key_count) || 0,
+        memoryBytes: parseInt(row.total_memory_bytes) || 0,
+        avgMemoryBytes:
+          sampledKeyCount > 0 ? Math.round(parseInt(row.weighted_avg_memory) / sampledKeyCount) : 0,
+        staleCount: row.stale_key_count == null ? null : parseInt(row.stale_key_count),
+        hotCount: row.hot_key_count == null ? 0 : parseInt(row.hot_key_count),
+        coldCount: row.cold_key_count == null ? 0 : parseInt(row.cold_key_count),
       };
     }
 
@@ -2888,6 +2986,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     startTime: number,
     endTime: number,
     connectionId?: string,
+    db?: number,
   ): Promise<
     Array<{
       timestamp: number;
@@ -2902,15 +3001,29 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const params: any[] = [pattern, startTime, endTime];
 
     if (connectionId) {
-      conditions.push('connection_id = $4');
       params.push(connectionId);
+      conditions.push(`connection_id = $${params.length}`);
+    }
+    if (db !== undefined) {
+      params.push(db);
+      conditions.push(`db = $${params.length}`);
     }
 
+    // One collection writes one row per logical database; aggregate them per
+    // timestamp so an unfiltered trend stays a single series. When no
+    // connectionId is given, also group by connection_id so trends from
+    // different connections aren't merged into one series.
+    const groupBy = connectionId ? 'timestamp' : 'timestamp, connection_id';
     const result = await this.pool.query(
       `
-      SELECT timestamp, key_count, total_memory_bytes, stale_key_count
+      SELECT
+        timestamp,
+        SUM(key_count) as key_count,
+        SUM(total_memory_bytes) as total_memory_bytes,
+        SUM(stale_key_count) as stale_key_count
       FROM key_pattern_snapshots
       WHERE ${conditions.join(' AND ')}
+      GROUP BY ${groupBy}
       ORDER BY timestamp ASC
     `,
       params,
@@ -2918,9 +3031,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     return result.rows.map((row) => ({
       timestamp: parseInt(row.timestamp),
-      keyCount: row.key_count,
-      memoryBytes: parseInt(row.total_memory_bytes),
-      staleCount: row.stale_key_count ?? 0,
+      keyCount: parseInt(row.key_count) || 0,
+      memoryBytes: parseInt(row.total_memory_bytes) || 0,
+      staleCount: row.stale_key_count == null ? 0 : parseInt(row.stale_key_count),
     }));
   }
 
@@ -2949,7 +3062,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     for (const entry of entries) {
       values.push(
-        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
+        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
       );
       params.push(
         entry.id,
@@ -2964,6 +3077,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         entry.keyType ?? null,
         entry.ttl ?? null,
         entry.rank,
+        entry.db ?? 0,
       );
     }
 
@@ -2971,7 +3085,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `
       INSERT INTO hot_key_stats (
         id, key_name, connection_id, captured_at, signal_type,
-        freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank
+        freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank, db
       ) VALUES ${values.join(', ')}
     `,
       params,
@@ -3005,6 +3119,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`captured_at <= $${paramIndex++}`);
       params.push(options.endTime);
     }
+    if (options.db !== undefined) {
+      conditions.push(`db = $${paramIndex++}`);
+      params.push(options.db);
+    }
     if (options.latest || options.oldest) {
       const agg = options.latest ? 'MAX' : 'MIN';
       const subSignalPlaceholders = signalTypes.map(() => `$${paramIndex++}`).join(', ');
@@ -3022,6 +3140,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         subConditions.push(`captured_at <= $${paramIndex++}`);
         params.push(options.endTime);
       }
+      if (options.db !== undefined) {
+        subConditions.push(`db = $${paramIndex++}`);
+        params.push(options.db);
+      }
       const subWhere = subConditions.length > 0 ? `WHERE ${subConditions.join(' AND ')}` : '';
       conditions.push(`captured_at = (SELECT ${agg}(captured_at) FROM hot_key_stats ${subWhere})`);
     }
@@ -3033,7 +3155,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const result = await this.pool.query(
       `
       SELECT id, key_name, connection_id, captured_at, signal_type,
-             freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank
+             freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank, db
       FROM hot_key_stats
       ${whereClause}
       ORDER BY captured_at DESC, rank ASC
@@ -3050,12 +3172,50 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       signalType: row.signal_type,
       freqScore: row.freq_score ?? undefined,
       idleSeconds: row.idle_seconds ?? undefined,
-      memoryBytes: row.memory_bytes ?? undefined,
+      // BIGINT: the pg driver returns int8 as a string, which violates the
+      // HotKeyEntry number contract and made relational comparisons on
+      // memoryBytes lexicographic downstream.
+      memoryBytes: row.memory_bytes != null ? parseInt(row.memory_bytes) : undefined,
       cardinality: row.cardinality != null ? parseInt(row.cardinality) : undefined,
       keyType: row.key_type ?? undefined,
       ttl: row.ttl ?? undefined,
       rank: row.rank,
+      db: row.db ?? 0,
     }));
+  }
+
+  async getKeyAnalyticsDatabases(connectionId?: string): Promise<number[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    // Loose index scan (one MIN(db) seek per populated database): this is
+    // polled every 60s per open Key Analytics tab, and a plain DISTINCT would
+    // walk every index entry for the connection on each poll (Postgres has no
+    // skip scan for DISTINCT over an index prefix).
+    const where = connectionId ? 'WHERE connection_id = $1' : '';
+    const params = connectionId ? [connectionId] : [];
+    const result = await this.pool.query(
+      `
+      ${populatedDbsCte(where)}
+      SELECT db FROM dbs WHERE db IS NOT NULL ORDER BY db ASC
+    `,
+      params,
+    );
+    return result.rows.map((row: { db: number | null }) => row.db ?? 0);
+  }
+
+  async getHotKeyDatabases(connectionId?: string): Promise<number[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    // Distinct logical databases present in hot_key_stats (where composite/
+    // hot-key rows live, unlike key_pattern_snapshots which can diverge). Plain
+    // DISTINCT: backs only the infrequent composite endpoint.
+    const where = connectionId ? 'WHERE connection_id = $1' : '';
+    const params = connectionId ? [connectionId] : [];
+    const result = await this.pool.query(
+      `SELECT DISTINCT db FROM hot_key_stats ${where} ORDER BY db ASC`,
+      params,
+    );
+    return result.rows.map((row: { db: number | null }) => row.db ?? 0);
   }
 
   async pruneOldHotKeys(cutoffTimestamp: number, connectionId?: string): Promise<number> {
@@ -3092,9 +3252,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         id, audit_poll_interval_ms, client_analytics_poll_interval_ms,
         anomaly_poll_interval_ms, anomaly_cache_ttl_ms, anomaly_prometheus_interval_ms,
         throughput_forecasting_enabled, throughput_forecasting_default_rolling_window_ms, throughput_forecasting_default_alert_threshold_ms,
-        inference_sla_config, local_retention_days,
+        inference_sla_config, anomaly_detector_config, local_retention_days,
         updated_at, created_at
-      ) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      ) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       ON CONFLICT(id) DO UPDATE SET
         audit_poll_interval_ms = EXCLUDED.audit_poll_interval_ms,
         client_analytics_poll_interval_ms = EXCLUDED.client_analytics_poll_interval_ms,
@@ -3105,6 +3265,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         throughput_forecasting_default_rolling_window_ms = EXCLUDED.throughput_forecasting_default_rolling_window_ms,
         throughput_forecasting_default_alert_threshold_ms = EXCLUDED.throughput_forecasting_default_alert_threshold_ms,
         inference_sla_config = EXCLUDED.inference_sla_config,
+        anomaly_detector_config = EXCLUDED.anomaly_detector_config,
         local_retention_days = EXCLUDED.local_retention_days,
         updated_at = EXCLUDED.updated_at`,
       [
@@ -3117,6 +3278,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         settings.metricForecastingDefaultRollingWindowMs,
         settings.metricForecastingDefaultAlertThresholdMs,
         JSON.stringify(settings.inferenceSlaConfig ?? {}),
+        JSON.stringify(settings.anomalyDetectorConfig ?? {}),
         settings.localRetentionDays ?? null,
         now,
         settings.createdAt || now,
@@ -3130,7 +3292,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return saved;
   }
 
-  async updateSettings(updates: SettingsUpdateRequest): Promise<AppSettings> {
+  async updateSettings(updates: Partial<AppSettings>): Promise<AppSettings> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const current = await this.getSettings();
@@ -4162,7 +4324,22 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         ingested_at = EXCLUDED.ingested_at
     `;
     const result = await this.pool.query(query, values);
+    await this.maybeEnforceOtelSpanCapOnSave(spans.length);
     return result.rowCount ?? 0;
+  }
+
+  // Inserts since the cap was last checked on save. The time-based retention
+  // sweep is the primary bound, but between sweeps the public ingest route can
+  // still grow the table; checking on save every `check interval` inserts keeps
+  // the disk bound at ~cap regardless of the sweep interval, without paying a
+  // COUNT per request.
+  private otelSpansSinceCapCheck = 0;
+
+  private async maybeEnforceOtelSpanCapOnSave(inserted: number): Promise<void> {
+    this.otelSpansSinceCapCheck += inserted;
+    if (this.otelSpansSinceCapCheck < otelSpanCapCheckInterval()) return;
+    this.otelSpansSinceCapCheck = 0;
+    await this.enforceOtelSpanCap();
   }
 
   async getOtelTraces(options: OtelTraceQueryOptions): Promise<OtelTraceSummary[]> {
@@ -4254,8 +4431,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async pruneOldOtelSpans(cutoffTimestamp: number): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
-    // Prune whole traces (by trace-level start), not individual spans, so a
-    // long trace never loses its root/early spans while later ones survive.
+    // Prune whole traces (never split one) by the server-stamped ingest time,
+    // NOT the sender-supplied start time: start_time_ms comes from the OTLP
+    // payload, so keying retention on it let a far-future value make spans
+    // permanently un-prunable (unbounded growth via the public ingest route).
     // One statement per batch: the uncorrelated LIMIT subquery is evaluated
     // once under the statement's snapshot and the outer DELETE removes ALL
     // spans of the selected traces, so no trace is ever split and each
@@ -4266,9 +4445,137 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     for (;;) {
       const result = await this.pool.query(
         `DELETE FROM otel_spans WHERE trace_id IN (
-           SELECT DISTINCT trace_id FROM otel_spans WHERE start_time_ms < $1 LIMIT $2
+           SELECT DISTINCT trace_id FROM otel_spans WHERE ingested_at < $1 LIMIT $2
          )`,
         [cutoffTimestamp, TRACE_BATCH],
+      );
+      const changes = result.rowCount ?? 0;
+      if (changes === 0) break;
+      total += changes;
+    }
+    total += await this.enforceOtelSpanCap();
+    return total;
+  }
+
+  /**
+   * Build idx_otel_ingested (the index retention and the span cap both scan)
+   * CONCURRENTLY, outside createSchema's transactional batch. CONCURRENTLY
+   * cannot run inside a transaction block, so it lives here as its own
+   * autocommit statement; in exchange it does not hold a write lock while it
+   * builds, which on an already-flooded otel_spans table would otherwise stall
+   * ingestion at startup. Best-effort: if the concurrent build fails, fall
+   * back to a plain blocking build so the index is guaranteed present;
+   * retention correctness outweighs the one-time lock.
+   *
+   * A concurrent build that fails partway (or whose process dies mid-build)
+   * leaves an INVALID index under the name, and IF NOT EXISTS would then skip
+   * it on this and every later boot, leaving the cap probe and the retention
+   * delete on full scans. So an invalid index is dropped before each build.
+   * An index that is still being built concurrently also reads as invalid,
+   * so only one replica per schema builds at a time (session advisory lock);
+   * a replica that finds the lock held skips, since the holder is building
+   * the index.
+   */
+  private async ensureOtelIngestedIndex(): Promise<void> {
+    if (!this.pool) return;
+    const client = await this.pool.connect();
+    try {
+      // Keyed on this schema's otel_spans table, not a constant: advisory locks
+      // are database-wide, so with per-tenant schemas in one database a shared
+      // key would let tenant A's build make tenant B skip its own.
+      const lock = await client.query(
+        `SELECT key, pg_try_advisory_lock(key) AS locked FROM (
+           SELECT hashtext('betterdb.idx_otel_ingested:' || 'otel_spans'::regclass::oid) AS key
+         ) k`,
+      );
+      if (!lock.rows[0]?.locked) return;
+      const lockKey: number = lock.rows[0].key;
+      try {
+        try {
+          await this.dropInvalidOtelIngestedIndex(client, true);
+          await client.query(
+            'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_otel_ingested ON otel_spans(ingested_at)',
+          );
+        } catch (error) {
+          console.warn(
+            `CONCURRENT build of idx_otel_ingested failed, falling back to a blocking build: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          // The failed concurrent build may have left its own invalid index.
+          await this.dropInvalidOtelIngestedIndex(client, false);
+          await client.query(
+            'CREATE INDEX IF NOT EXISTS idx_otel_ingested ON otel_spans(ingested_at)',
+          );
+        }
+      } finally {
+        await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
+      }
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Drop idx_otel_ingested if it exists but is INVALID (see ensureOtelIngestedIndex). */
+  private async dropInvalidOtelIngestedIndex(
+    client: PoolClient,
+    concurrently: boolean,
+  ): Promise<void> {
+    // Resolve the index through otel_spans itself, so with a per-tenant schema
+    // this never looks at (or drops) another schema's index of the same name.
+    const result = await client.query(
+      `SELECT quote_ident(n.nspname) AS schema_name, i.indisvalid AS valid
+         FROM pg_index i
+         JOIN pg_class c ON c.oid = i.indexrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE i.indrelid = 'otel_spans'::regclass AND c.relname = 'idx_otel_ingested'`,
+    );
+    const row = result.rows[0];
+    if (!row || row.valid) return;
+    console.warn('idx_otel_ingested is INVALID (an earlier build was interrupted); rebuilding it');
+    await client.query(
+      `DROP INDEX ${concurrently ? 'CONCURRENTLY ' : ''}IF EXISTS ${row.schema_name}.idx_otel_ingested`,
+    );
+  }
+
+  /**
+   * Hard backstop for the public ingest route: time-based retention cannot
+   * bound the store within the window, so after the time prune, evict whole
+   * traces oldest-ingested-first until the span count is back under the cap.
+   */
+  private async enforceOtelSpanCap(): Promise<number> {
+    if (!this.pool) return 0;
+    const cap = otelSpanCap();
+    const lowWater = otelSpanLowWaterMark(cap);
+    let total = 0;
+    for (;;) {
+      const countResult = await this.pool.query('SELECT COUNT(*)::int AS c FROM otel_spans');
+      const count = countResult.rows[0]?.c ?? 0;
+      if (count <= cap) break;
+      // Find the ingested_at boundary that leaves ~lowWater newest spans, then
+      // evict whole traces with any span at or below it. The boundary probe and
+      // the delete's inner filter both ride idx_otel_ingested / idx_otel_trace,
+      // so a pass costs O(spans removed) rather than the full-table
+      // `GROUP BY trace_id ORDER BY MIN(ingested_at)` the old per-500-trace loop
+      // ran every pass — minutes of blocking at a large OTEL_MAX_RETAINED_SPANS.
+      // Draining to the low-water mark keeps the amortized cost down under a
+      // sustained flood. (Concurrent saves on separate replicas can each run a
+      // pass; the deletes are idempotent and both target the oldest spans, so
+      // they converge near the low-water mark rather than far below it.)
+      const boundaryResult = await this.pool.query(
+        'SELECT ingested_at FROM otel_spans ORDER BY ingested_at ASC LIMIT 1 OFFSET $1',
+        [count - lowWater],
+      );
+      const boundary = boundaryResult.rows[0]?.ingested_at;
+      if (boundary === undefined || boundary === null) break;
+      // `<=` so a flood stamping many spans the same millisecond still makes
+      // progress (whole-trace eviction may overshoot the low-water mark — the
+      // price of never splitting a trace).
+      const result = await this.pool.query(
+        `DELETE FROM otel_spans WHERE trace_id IN (
+           SELECT DISTINCT trace_id FROM otel_spans WHERE ingested_at <= $1
+         )`,
+        [boundary],
       );
       const changes = result.rowCount ?? 0;
       if (changes === 0) break;

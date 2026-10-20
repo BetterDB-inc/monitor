@@ -1,5 +1,5 @@
 import type { KeyPatternData } from '@betterdb/shared';
-import { buildPatternSnapshots } from '../key-pattern-snapshots';
+import { buildPatternSnapshots, mergePatternSnapshots } from '../key-pattern-snapshots';
 
 const DAY = 86400;
 
@@ -74,5 +74,35 @@ describe('buildPatternSnapshots stale key count', () => {
 
     expect(snapshot.hotKeyCount).toBe(2);
     expect(snapshot.coldKeyCount).toBe(2);
+  });
+});
+
+describe('pattern snapshots across logical databases', () => {
+  it('tags each snapshot with the logical database of its scan result', () => {
+    const [snapshot] = buildPatternSnapshots(
+      { dbSize: 4, scanned: 4, patterns: [pattern()], db: 2 },
+      1,
+    );
+    expect(snapshot.db).toBe(2);
+  });
+
+  it('defaults the snapshot db to 0 for results without one (older agents)', () => {
+    const [snapshot] = buildPatternSnapshots({ dbSize: 4, scanned: 4, patterns: [pattern()] }, 1);
+    expect(snapshot.db).toBe(0);
+  });
+
+  it('merges a pattern across cluster nodes but never across logical databases', () => {
+    const nodeA = buildPatternSnapshots({ dbSize: 4, scanned: 4, patterns: [pattern()], db: 0 }, 1);
+    const nodeB = buildPatternSnapshots({ dbSize: 8, scanned: 8, patterns: [pattern({ count: 8, totalMemory: 800 })], db: 0 }, 1);
+    const otherDb = buildPatternSnapshots({ dbSize: 2, scanned: 2, patterns: [pattern({ count: 2, totalMemory: 200 })], db: 1 }, 1);
+
+    const merged = mergePatternSnapshots([nodeA, nodeB, otherDb]);
+
+    // session:* in db0 (merged across the two nodes) and session:* in db1.
+    expect(merged).toHaveLength(2);
+    const db0 = merged.find((s) => s.db === 0);
+    const db1 = merged.find((s) => s.db === 1);
+    expect(db0?.keyCount).toBe(12);
+    expect(db1?.keyCount).toBe(2);
   });
 });

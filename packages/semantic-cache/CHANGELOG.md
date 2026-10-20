@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   omitted when the embedder is undescribed.
 - Optional `logger` option (default: `console`) for the operational warnings
   above. Pass `{ warn: () => {} }` to silence them.
+- **Judge cancellation via AbortSignal** — the `judgeFn` input now includes a
+  `signal: AbortSignal`. The cache creates an `AbortController` per judge
+  invocation and aborts it when `timeoutMs` elapses. Forward `signal` to your
+  LLM client (`fetch`, OpenAI/Anthropic SDKs) to cancel the in-flight request on
+  timeout instead of letting it run to completion and consume API quota. A
+  `judgeFn` that ignores `signal` behaves exactly as before.
 - **Per-entry hit analytics** — every entry now tracks `hit_count` and
   `last_accessed_at`, updated on each cache hit by a single-key Lua script
   guarded by `EXISTS`, so a hit never recreates a deleted or expired entry. New
@@ -59,6 +65,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`{name}:embed:{tag}:{hash}`). Existing embedding-cache entries are not
   read after upgrade and expire on their own TTL; cached *responses* are
   untouched.
+- `JudgeOptions.timeoutMs` JSDoc updated to describe the abort behavior.
+- Additive, not breaking for judges that ignore `signal`. Code that calls
+  `judgeFn` directly (e.g. custom tests) must now supply `signal`, since the
+  type field is required.
 - Cache hits now send a usage-tracking write even when `defaultTtl` is not
   configured (one pipeline per matched key on cluster). Previously such a hit
   was a pure read. The write is a single-key script sent as `EVALSHA` (retried

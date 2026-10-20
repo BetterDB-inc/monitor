@@ -3,6 +3,8 @@ export {
   Feature,
   TIER_FEATURES,
   LICENSE_JWT_ISSUER,
+  parseTier,
+  isValidTier,
 } from '@betterdb/shared';
 
 export type {

@@ -10,7 +10,7 @@ import {
 import { ApiTags, ApiOperation, ApiOkResponse } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { LicenseService } from './license.service';
-import { Feature, TIER_FEATURES } from './types';
+import { Feature, TIER_FEATURES, Tier } from './types';
 import type { VersionInfo } from '@betterdb/shared';
 
 @Controller()
@@ -30,7 +30,9 @@ export class LicenseController {
   @ApiOperation({ summary: 'Get license status and tier' })
   getStatus() {
     const info = this.license.getLicenseInfo();
-    const features = TIER_FEATURES[info.tier];
+    // Fall back to community for an unknown tier: a cache predating tier
+    // normalization must degrade, not crash on TIER_FEATURES[undefined].
+    const features = TIER_FEATURES[info.tier] ?? TIER_FEATURES[Tier.community];
     const claims = this.license.getVerifiedClaims();
     return {
       tier: info.tier,
@@ -53,7 +55,8 @@ export class LicenseController {
   getFeatures() {
     const info = this.license.getLicenseInfo();
     const allFeatures = Object.values(Feature);
-    const tierFeatures = TIER_FEATURES[info.tier];
+    // Unknown tier degrades to community rather than throwing (see getStatus).
+    const tierFeatures = TIER_FEATURES[info.tier] ?? TIER_FEATURES[Tier.community];
     return {
       tier: info.tier,
       features: allFeatures.map(f => ({
@@ -88,7 +91,8 @@ export class LicenseController {
     }
 
     const info = await this.license.activateLicenseKey(body.key.trim());
-    const features = TIER_FEATURES[info.tier];
+    // Unknown tier degrades to community rather than throwing (see getStatus).
+    const features = TIER_FEATURES[info.tier] ?? TIER_FEATURES[Tier.community];
 
     if (!info.valid) {
       const error = info.error || 'License activation failed';
@@ -131,7 +135,8 @@ export class LicenseController {
     }
 
     const { entitlement, fallbackOnly } = await this.license.activateOfflineLicense(token);
-    const features = TIER_FEATURES[entitlement.tier];
+    // Unknown tier degrades to community rather than throwing (see getStatus).
+    const features = TIER_FEATURES[entitlement.tier] ?? TIER_FEATURES[Tier.community];
 
     if (!entitlement.valid && !fallbackOnly) {
       throw new BadRequestException({

@@ -5,6 +5,7 @@ interface UseBaselineHotKeysOptions {
   connectionId?: string;
   startTime?: number;
   endTime?: number;
+  db?: number;
   enabled?: boolean;
 }
 
@@ -12,16 +13,18 @@ export function useBaselineHotKeys({
   connectionId,
   startTime,
   endTime,
+  db,
   enabled = true,
 }: UseBaselineHotKeysOptions) {
   return useQuery({
-    queryKey: ['hot-keys-baseline', connectionId, startTime, endTime],
+    queryKey: ['hot-keys-baseline', connectionId, startTime, endTime, db],
     queryFn: async () => {
       const entries = await keyAnalyticsApi.getHotKeys({
         limit: 50,
         startTime,
         endTime,
         oldest: true,
+        db,
       });
       return entries.length > 0 ? entries : null;
     },

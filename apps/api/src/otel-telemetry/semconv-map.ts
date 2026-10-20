@@ -69,7 +69,11 @@ function withAttributes(extra: Attributes): Convert {
 
 function perDb(scale: number): Convert {
   return (value, labels) => {
-    const match = /^db(\d+)$/.exec(String(labels.db ?? ''));
+    // Every db-labelled Prometheus family now emits the bare logical-database
+    // index ("0", "1", ...), so this is effectively a pass-through. The optional
+    // "db" prefix is tolerated defensively (e.g. a caller passing a raw INFO
+    // key) rather than silently dropping the series. Normalize to the bare index.
+    const match = /^(?:db)?(\d+)$/.exec(String(labels.db ?? ''));
     if (!match) {
       return null;
     }
@@ -157,6 +161,20 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
   betterdb_db_keys: gauge('valkey.db.keys', '{key}', perDb(1)),
   betterdb_db_keys_expiring: gauge('valkey.db.expires', '{key}', perDb(1)),
   betterdb_db_avg_ttl_seconds: gauge('valkey.db.avg_ttl', 'ms', perDb(1000)),
+  // Monitor-computed key analytics (Pro collector output, not INFO-native) —
+  // betterdb.* namespace like every other derived family; valkey.* is reserved
+  // for the redisreceiver catalogue. The keysizes histogram is server-native
+  // but absent from the receiver catalogue, so it lands here too.
+  betterdb_key_pattern_memory_bytes: gauge('betterdb.key_pattern.memory.total', 'By'),
+  betterdb_key_pattern_avg_memory_bytes: gauge('betterdb.key_pattern.memory.avg', 'By'),
+  betterdb_key_pattern_max_memory_bytes: gauge('betterdb.key_pattern.memory.max', 'By'),
+  betterdb_key_pattern_keys: gauge('betterdb.key_pattern.keys', '{key}'),
+  betterdb_key_memory_bytes: gauge('betterdb.key.memory', 'By'),
+  betterdb_key_cardinality: gauge('betterdb.key.cardinality', '{element}'),
+  // perDb(1) normalizes the db attribute to the bare index to match the other
+  // db-labelled instruments. The Prometheus label is already bare ("0") so this
+  // is a pass-through; perDb also tolerates the raw "db0" form for safety.
+  betterdb_keysize_bucket_keys: gauge('betterdb.keysizes.bucket.keys', '{key}', perDb(1)),
   betterdb_commandstats_calls_total: counter('valkey.cmd.calls', '{call}'),
   betterdb_connected_slaves: updown('valkey.slaves.connected', '{replica}'),
   betterdb_replication_offset: gauge('valkey.replication.offset', 'By'),
@@ -242,6 +260,10 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
   betterdb_anomaly_by_severity: gauge('betterdb.anomaly.by_severity', '{event}'),
   betterdb_anomaly_by_metric: gauge('betterdb.anomaly.by_metric', '{event}'),
   betterdb_correlated_groups_total: counter('betterdb.anomaly.correlated_groups', '{group}'),
+  betterdb_detector_config_updates_total: counter(
+    'betterdb.anomaly.detector_config_updates',
+    '{update}',
+  ),
   betterdb_correlated_groups_by_severity: gauge(
     'betterdb.anomaly.correlated_groups_by_severity',
     '{group}',

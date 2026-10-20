@@ -507,12 +507,14 @@ export interface StoragePort {
     startTime?: number,
     endTime?: number,
     connectionId?: string,
+    db?: number,
   ): Promise<KeyAnalyticsSummary | null>;
   getKeyPatternTrends(
     pattern: string,
     startTime: number,
     endTime: number,
     connectionId?: string,
+    db?: number,
   ): Promise<
     Array<{
       timestamp: number;
@@ -522,16 +524,24 @@ export interface StoragePort {
     }>
   >;
   pruneOldKeyPatternSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+  /** Distinct logical database indexes present in stored key-pattern snapshots. */
+  getKeyAnalyticsDatabases(connectionId?: string): Promise<number[]>;
 
   // Hot Key Stats Methods - connectionId required for writes, optional filter for reads
   saveHotKeys(entries: HotKeyEntry[], connectionId: string): Promise<number>;
   getHotKeys(options?: HotKeyQueryOptions): Promise<HotKeyEntry[]>;
+  /**
+   * Distinct logical database indexes present in stored hot-key stats. Separate
+   * from getKeyAnalyticsDatabases because hot-key / composite rows live in
+   * hot_key_stats, which can diverge from key_pattern_snapshots.
+   */
+  getHotKeyDatabases(connectionId?: string): Promise<number[]>;
   pruneOldHotKeys(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Settings Methods (global, not connection-scoped)
   getSettings(): Promise<AppSettings | null>;
   saveSettings(settings: AppSettings): Promise<AppSettings>;
-  updateSettings(updates: SettingsUpdateRequest): Promise<AppSettings>;
+  updateSettings(updates: Partial<AppSettings>): Promise<AppSettings>;
 
   // Webhook Methods - connectionId optional filter for scoping webhooks to connections
   createWebhook(webhook: Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>): Promise<Webhook>;

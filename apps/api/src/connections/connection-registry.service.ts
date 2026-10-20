@@ -356,6 +356,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       port: config.port,
       username: config.username || 'default',
       password: config.password || '',
+      dbIndex: config.dbIndex,
       connectionName,
       tls: config.tls,
       tlsServername: config.membership?.origin === 'auto' ? config.membership.hostname : undefined,
@@ -645,6 +646,21 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       throw new Error(`Connection failed: ${errorMsg}`);
     }
 
+    // Validation parity with testConnection: a live connection tolerates a
+    // rejected SELECT by falling back to db0 (so stored configs survive an
+    // upgrade), but Save must not silently persist a connection that monitors
+    // a different database than the user asked for.
+    if (
+      adapter instanceof UnifiedDatabaseAdapter &&
+      (config.dbIndex ?? 0) > 0 &&
+      adapter.getActiveDbIndex() !== config.dbIndex
+    ) {
+      await adapter.disconnect().catch(() => {});
+      throw new Error(
+        `Connection failed: could not SELECT database ${config.dbIndex} — the server rejected it (index out of range, cluster mode, or ACL without +select)`,
+      );
+    }
+
     // Connection succeeded - now persist state
     // If storage fails, disconnect the adapter to prevent leaks
     try {
@@ -802,6 +818,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       username: request.username || 'default',
       password: request.password || '',
       tls: request.tls,
+      dbIndex: request.dbIndex,
       // Unique id so a test tunnel never collides with a live connection's tunnel.
       connectionId: `test:${randomUUID()}`,
       sshTunnel: this.sanitizeSshTunnelInput(request.sshTunnel),
@@ -810,6 +827,16 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
     try {
       await adapter.connect();
+      // A live connection tolerates a rejected SELECT by falling back to db0
+      // (availability), but a TEST is validation: surface the bad index here
+      // so the user fixes it before saving instead of silently monitoring db0.
+      if ((request.dbIndex ?? 0) > 0 && adapter.getActiveDbIndex() !== request.dbIndex) {
+        await adapter.disconnect();
+        return {
+          success: false,
+          error: `Could not SELECT database ${request.dbIndex} — the server rejected it (index out of range, cluster mode, or ACL without +select)`,
+        };
+      }
       const capabilities = adapter.getCapabilities();
       await adapter.disconnect();
 
@@ -1152,6 +1179,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async adoptChild(id: string, seedId: string, node: DesiredNode): Promise<void> {
     await this.setMembership(id, { seedId, origin: 'adopted', ...membershipFields(node) });
+    // The adopted connection keeps its configured dbIndex: whether SELECT on a
+    // non-zero db is legal on a cluster node depends on the server (illegal
+    // before Valkey 9, legal on Valkey 9 multi-db clusters), so the connect
+    // path decides at runtime — a rejected SELECT falls back to db0 with a
+    // warning instead of this registry guessing and clobbering the config.
   }
 
   async refreshChild(id: string, node: DesiredNode): Promise<void> {

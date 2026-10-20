@@ -417,7 +417,136 @@ describe('judgeFn receives correct inputs', () => {
       category: 'trivia',
       // Reserved for consumer judge functions; falls back to '' when the stored entry has no prompt field.
       cachedPrompt: '',
+      signal: expect.any(AbortSignal),
     });
+  });
+});
+
+// --- AbortSignal on judgeFn ---
+
+describe('judgeFn AbortSignal', () => {
+  it('supplies an AbortSignal to judgeFn', async () => {
+    const registry = new Registry();
+    const client = makeMockClient(BORDERLINE_SCORE);
+    const cache = await makeCache(client, registry, 'test_judge_signal_supplied');
+    let receivedSignal: AbortSignal | undefined;
+    const judgeFn = vi.fn(async (input: { signal: AbortSignal }) => {
+      receivedSignal = input.signal;
+      return true;
+    });
+
+    await cache.check('hello', { judge: { judgeFn } });
+
+    expect(receivedSignal).toBeDefined();
+    expect(receivedSignal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('aborts the judgeFn signal when the judge times out', async () => {
+    const registry = new Registry();
+    const client = makeMockClient(BORDERLINE_SCORE);
+    const cache = await makeCache(client, registry, 'test_judge_signal_timeout');
+    let observedAbort = false;
+    const judgeFn = vi.fn((input: { signal: AbortSignal }) => {
+      return new Promise<boolean>(() => {
+        input.signal.addEventListener('abort', () => {
+          observedAbort = true;
+          // Stay pending so raceWithTimeout's timeout branch wins (real clients
+          // would reject here; resolving would promote to confidence: 'high').
+        });
+      });
+    });
+
+    const result = await cache.check('hello', {
+      judge: { judgeFn, onError: 'accept', timeoutMs: 20 },
+    });
+
+    expect(observedAbort).toBe(true);
+    expect(result.hit).toBe(true);
+    expect(result.confidence).toBe('uncertain');
+  });
+
+  it('does not abort the signal when judgeFn resolves in time', async () => {
+    const registry = new Registry();
+    const client = makeMockClient(BORDERLINE_SCORE);
+    const cache = await makeCache(client, registry, 'test_judge_signal_no_abort');
+    let receivedSignal: AbortSignal | undefined;
+    const judgeFn = vi.fn(async (input: { signal: AbortSignal }) => {
+      receivedSignal = input.signal;
+      return true;
+    });
+
+    const result = await cache.check('hello', {
+      judge: { judgeFn, timeoutMs: 5000 },
+    });
+
+    expect(receivedSignal?.aborted).toBe(false); // still clean after the judge settled
+    expect(result.hit).toBe(true);
+    expect(result.confidence).toBe('high');
+  });
+
+  it('still works when judgeFn ignores the signal (backward compatible)', async () => {
+    const registry = new Registry();
+    const client = makeMockClient(BORDERLINE_SCORE);
+    const cache = await makeCache(client, registry, 'test_judge_signal_ignored');
+    const judgeFn = vi.fn(async () => true); // legacy judge: no signal usage
+
+    const result = await cache.check('hello', { judge: { judgeFn } });
+
+    expect(result.hit).toBe(true);
+    expect(result.confidence).toBe('high');
+  });
+
+  it('handles a judgeFn that rejects on abort without unhandled rejections', async () => {
+    const registry = new Registry();
+    const client = makeMockClient(BORDERLINE_SCORE);
+    const cache = await makeCache(client, registry, 'test_judge_signal_reject_on_abort');
+    const judgeFn = vi.fn((input: { signal: AbortSignal }) => {
+      return new Promise<boolean>((_, reject) => {
+        input.signal.addEventListener(
+          'abort',
+          () => reject(new DOMException('Aborted', 'AbortError')),
+          { once: true },
+        );
+      });
+    });
+
+    const result = await cache.check('hello', {
+      judge: { judgeFn, onError: 'accept', timeoutMs: 20 },
+    });
+
+    // The timeout wins the race (not the late AbortError), so it is counted as a timeout.
+    expect(result.hit).toBe(true);
+    expect(result.confidence).toBe('uncertain');
+    const count = await getCounterValue(
+      registry,
+      'semantic_cache_judge_decisions_total',
+      'timeout_accept',
+    );
+    expect(count).toBe(1);
+  });
+
+  it('aborts the signal on timeout with onError=reject', async () => {
+    const registry = new Registry();
+    const client = makeMockClient(BORDERLINE_SCORE);
+    const cache = await makeCache(client, registry, 'test_judge_signal_timeout_reject');
+    let signal: AbortSignal | undefined;
+    const judgeFn = vi.fn((input: { signal: AbortSignal }) => {
+      signal = input.signal;
+      return new Promise<boolean>(() => {});
+    });
+
+    const result = await cache.check('hello', {
+      judge: { judgeFn, onError: 'reject', timeoutMs: 20 },
+    });
+
+    expect(signal?.aborted).toBe(true);
+    expect(result.hit).toBe(false);
+    const count = await getCounterValue(
+      registry,
+      'semantic_cache_judge_decisions_total',
+      'timeout_reject',
+    );
+    expect(count).toBe(1);
   });
 });
 

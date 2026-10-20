@@ -26,6 +26,10 @@ export const CAPABILITY_TEST_COMMAND: Record<keyof RuntimeCapabilities, [string,
   // server that accepts the polled call also accepts the probe.
   canClusterSlotStats: ['CLUSTER', 'SLOT-STATS', 'ORDERBY', 'key-count', 'LIMIT', '1'],
   canMemory: ['MEMORY', 'STATS'],
+  // INFO keysizes is Redis 8.0+ only; a supported server replies with the
+  // '# Keysizes' section, unsupported ones with an empty string, and some
+  // managed servers reject it with a NOPERM-style error.
+  canKeysizes: ['INFO', 'keysizes'],
 };
 
 const BLOCKED_COMMAND_PATTERNS = [
@@ -57,6 +61,7 @@ function defaultCapabilities(): RuntimeCapabilities {
     canCommandLog: true,
     canLatency: true,
     canMemory: true,
+    canKeysizes: true,
   };
 }
 

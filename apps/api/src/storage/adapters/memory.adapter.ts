@@ -1,6 +1,13 @@
 import { randomUUID } from 'crypto';
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
+  approxOtelSpanBytes,
+  otelSpanByteCap,
+  otelSpanCap,
+  otelSpanLowWaterMark,
+  OTEL_SPAN_CAP_LOW_WATER_RATIO,
+} from '../otel-span-cap';
+import {
   StoragePort,
   StoredAclEntry,
   AuditQueryOptions,
@@ -19,7 +26,6 @@ import {
   KeyPatternQueryOptions,
   KeyAnalyticsSummary,
   AppSettings,
-  SettingsUpdateRequest,
   Webhook,
   WebhookDelivery,
   WebhookEventType,
@@ -800,12 +806,22 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return 0;
   }
 
+  async getKeyAnalyticsDatabases(_connectionId?: string): Promise<number[]> {
+    // Nothing is ever stored here, so no databases have analytics data.
+    return [];
+  }
+
   async saveHotKeys(_entries: HotKeyEntry[], _connectionId: string): Promise<number> {
     throw new Error('Hot key stats not supported in memory adapter');
   }
 
   async getHotKeys(_options?: HotKeyQueryOptions): Promise<HotKeyEntry[]> {
     throw new Error('Hot key stats not supported in memory adapter');
+  }
+
+  async getHotKeyDatabases(_connectionId?: string): Promise<number[]> {
+    // Nothing is ever stored here, so no databases have hot-key data.
+    return [];
   }
 
   async pruneOldHotKeys(_cutoffTimestamp: number, _connectionId?: string): Promise<number> {
@@ -830,7 +846,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return { ...this.settings };
   }
 
-  async updateSettings(updates: SettingsUpdateRequest): Promise<AppSettings> {
+  async updateSettings(updates: Partial<AppSettings>): Promise<AppSettings> {
     if (!this.settings) {
       throw new Error('Settings not found. Initialize settings first.');
     }
@@ -865,6 +881,9 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
     if (updates.inferenceSlaConfig !== undefined) {
       validUpdates.inferenceSlaConfig = updates.inferenceSlaConfig;
+    }
+    if (updates.anomalyDetectorConfig !== undefined) {
+      validUpdates.anomalyDetectorConfig = updates.anomalyDetectorConfig;
     }
     if (updates.localRetentionDays !== undefined) {
       validUpdates.localRetentionDays = updates.localRetentionDays;
@@ -1385,17 +1404,75 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   // OTLP Trace Methods
-  private otelSpans: StoredOtelSpan[] = [];
+  // Keyed by `${traceId}:${spanId}` so a save is an O(1) upsert. The previous
+  // array + findIndex per span was O(n) per insert, which let an anonymous
+  // flood on the public ingest route degrade the event loop as the store grew.
+  private otelSpans = new Map<string, StoredOtelSpan>();
+  // Running approxOtelSpanBytes total of the store, for the byte budget. Kept
+  // in step by setOtelSpan / deleteOtelSpan — every mutation goes through them.
+  private otelSpanBytes = 0;
+
+  private setOtelSpan(s: StoredOtelSpan): void {
+    const key = `${s.traceId}:${s.spanId}`;
+    const prev = this.otelSpans.get(key);
+    if (prev) this.otelSpanBytes -= approxOtelSpanBytes(prev);
+    this.otelSpans.set(key, s);
+    this.otelSpanBytes += approxOtelSpanBytes(s);
+  }
+
+  private deleteOtelSpan(key: string, s: StoredOtelSpan): void {
+    if (this.otelSpans.delete(key)) this.otelSpanBytes -= approxOtelSpanBytes(s);
+  }
 
   async saveOtelSpans(spans: StoredOtelSpan[]): Promise<number> {
     for (const s of spans) {
-      const idx = this.otelSpans.findIndex(
-        (e) => e.traceId === s.traceId && e.spanId === s.spanId,
-      );
-      if (idx >= 0) this.otelSpans[idx] = s;
-      else this.otelSpans.push(s);
+      this.setOtelSpan(s);
     }
+    this.enforceOtelSpanCap();
     return spans.length;
+  }
+
+  /**
+   * Hard backstop for the public ingest route: when the store exceeds the
+   * cap, evict whole traces oldest-ingested-first down to the low-water mark.
+   * Whole traces, never individual spans, so the cap keeps the same no-split
+   * invariant as pruneOldOtelSpans. Draining to the low-water mark (not just
+   * back to the cap) is what keeps this O(n log n) pass off the event loop on
+   * every save once the store sits at the cap under a sustained flood.
+   *
+   * The same pass enforces the byte budget (otelSpanByteCap): the store holds
+   * everything on the heap, so a flood of max-size spans must not OOM the
+   * process before the count cap is reached. Eviction drains until both the
+   * count and the bytes are at their low-water marks.
+   */
+  private enforceOtelSpanCap(): void {
+    const cap = otelSpanCap();
+    const byteCap = otelSpanByteCap();
+    if (this.otelSpans.size <= cap && this.otelSpanBytes <= byteCap) return;
+    const lowWater = otelSpanLowWaterMark(cap);
+    const byteLowWater = Math.floor(byteCap * OTEL_SPAN_CAP_LOW_WATER_RATIO);
+    const minIngestByTrace = new Map<string, number>();
+    const spanCountByTrace = new Map<string, number>();
+    const bytesByTrace = new Map<string, number>();
+    for (const s of this.otelSpans.values()) {
+      const cur = minIngestByTrace.get(s.traceId);
+      if (cur === undefined || s.ingestedAt < cur) minIngestByTrace.set(s.traceId, s.ingestedAt);
+      spanCountByTrace.set(s.traceId, (spanCountByTrace.get(s.traceId) ?? 0) + 1);
+      bytesByTrace.set(s.traceId, (bytesByTrace.get(s.traceId) ?? 0) + approxOtelSpanBytes(s));
+    }
+    const oldestFirst = [...minIngestByTrace.entries()].sort((a, b) => a[1] - b[1]);
+    const evict = new Set<string>();
+    let remaining = this.otelSpans.size;
+    let remainingBytes = this.otelSpanBytes;
+    for (const [traceId] of oldestFirst) {
+      if (remaining <= lowWater && remainingBytes <= byteLowWater) break;
+      evict.add(traceId);
+      remaining -= spanCountByTrace.get(traceId) ?? 0;
+      remainingBytes -= bytesByTrace.get(traceId) ?? 0;
+    }
+    for (const [key, s] of this.otelSpans) {
+      if (evict.has(s.traceId)) this.deleteOtelSpan(key, s);
+    }
   }
 
   async getOtelTraces(options: OtelTraceQueryOptions): Promise<OtelTraceSummary[]> {
@@ -1403,8 +1480,13 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     // trace-level start / service — so a boundary trace still gets a complete
     // summary (span count, root, duration) rather than a partial one.
     const byTrace = new Map<string, StoredOtelSpan[]>();
-    for (const s of this.otelSpans) {
-      byTrace.set(s.traceId, [...(byTrace.get(s.traceId) ?? []), s]);
+    for (const s of this.otelSpans.values()) {
+      // Push into the existing array; spreading it per span is O(n^2) in the
+      // trace's span count, so a single large trace (within the cap) froze the
+      // UI on every listing.
+      const spans = byTrace.get(s.traceId);
+      if (spans) spans.push(s);
+      else byTrace.set(s.traceId, [s]);
     }
     const summaries: OtelTraceSummary[] = [];
     for (const [traceId, spans] of byTrace) {
@@ -1434,7 +1516,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   async getOtelTraceSpans(traceId: string): Promise<StoredOtelSpan[]> {
-    return this.otelSpans
+    return [...this.otelSpans.values()]
       .filter((s) => s.traceId === traceId)
       .sort(
         (a, b) =>
@@ -1444,18 +1526,24 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   async pruneOldOtelSpans(cutoffTimestamp: number): Promise<number> {
-    // Prune whole traces (by trace-level start), not individual spans, so a long
-    // trace never loses its root/early spans while later ones survive.
-    const minStartByTrace = new Map<string, number>();
-    for (const s of this.otelSpans) {
-      const cur = minStartByTrace.get(s.traceId);
-      if (cur === undefined || s.startTimeMs < cur) minStartByTrace.set(s.traceId, s.startTimeMs);
+    // Prune whole traces (never split one) by the server-stamped ingest time,
+    // NOT the sender-supplied start time: startTimeMs comes from the OTLP
+    // payload, so keying retention on it let a far-future value make spans
+    // permanently un-prunable (unbounded growth via the public ingest route).
+    // A trace ages out a fixed window after its first span was received;
+    // later spans cannot extend it.
+    const minIngestByTrace = new Map<string, number>();
+    for (const s of this.otelSpans.values()) {
+      const cur = minIngestByTrace.get(s.traceId);
+      if (cur === undefined || s.ingestedAt < cur) minIngestByTrace.set(s.traceId, s.ingestedAt);
     }
-    const before = this.otelSpans.length;
-    this.otelSpans = this.otelSpans.filter(
-      (s) => (minStartByTrace.get(s.traceId) ?? s.startTimeMs) >= cutoffTimestamp,
-    );
-    return before - this.otelSpans.length;
+    const before = this.otelSpans.size;
+    for (const [key, s] of this.otelSpans) {
+      if ((minIngestByTrace.get(s.traceId) ?? s.ingestedAt) < cutoffTimestamp) {
+        this.deleteOtelSpan(key, s);
+      }
+    }
+    return before - this.otelSpans.size;
   }
 
   // Vector Index Snapshot Methods

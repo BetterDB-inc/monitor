@@ -9,6 +9,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
+import { Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation, ApiExcludeEndpoint } from '@nestjs/swagger';
 import { OtelIngestService, OtlpTraceRequest } from './otel-ingest.service';
 import { decodeOtlpTraceProtobuf } from './otlp-protobuf';
@@ -28,12 +29,22 @@ import { assertOtlpTraceShape } from './otlp-json-shape';
  * than accepting anonymous spans into a tenant's store.
  * Gate: `OTEL_INGEST_ENABLED` set to `false`, `0`, `no` or `off` disables the endpoint.
  */
+/**
+ * Tighter per-route limit than the deliberately loose global throttle
+ * (10,000/min): the route is public on default self-hosted installs, so this
+ * bounds how fast an anonymous sender can grow the span store between
+ * retention sweeps. 600/min (10 rps avg per IP) is far above what batching
+ * OTel exporters send, which flush on multi-second intervals.
+ */
+const OTLP_ROUTE_THROTTLE = { default: { limit: 600, ttl: 60_000 } };
+
 @ApiTags('ai-observability')
 @Controller('v1')
 export class OtelIngestController {
   constructor(private readonly ingest: OtelIngestService) {}
 
   @Post('traces')
+  @Throttle(OTLP_ROUTE_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'OTLP/HTTP trace ingestion endpoint (JSON or protobuf)' })
   @ApiExcludeEndpoint()

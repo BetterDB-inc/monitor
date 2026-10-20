@@ -176,7 +176,7 @@
             "uid": "${ds}"
           },
           "expr": "betterdb_db_keys_expiring{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{connection}} {{db}}"
+          "legendFormat": "{{connection}} db{{db}}"
         }
       ],
       "gridPos": {
@@ -212,7 +212,7 @@
             "uid": "${ds}"
           },
           "expr": "betterdb_db_avg_ttl_seconds{job=~\"$job\",connection=~\"$connection\"}",
-          "legendFormat": "{{connection}} {{db}}"
+          "legendFormat": "{{connection}} db{{db}}"
         }
       ],
       "gridPos": {
@@ -292,6 +292,144 @@
         "w": 12,
         "x": 12,
         "y": 16
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Key memory by pattern",
+      "description": "Estimated total memory per key pattern, extrapolated from the sampled keys of the latest key analytics run (Pro) — an estimate, not an exact total, on keyspaces larger than the sample. Top patterns by memory, bounded by METRICS_KEY_PATTERNS_TOP_N.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "betterdb_key_pattern_memory_bytes{job=~\"$job\",connection=~\"$connection\"}",
+          "legendFormat": "{{connection}} {{pattern}} db{{db}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Largest keys",
+      "description": "Largest tracked keys by memory from the latest key analytics run (Pro). Bounded by METRICS_KEY_DETAILS_TOP_N; set it to 0 to disable per-key series.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "sortBy": [
+          {
+            "displayName": "Value",
+            "desc": true
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "topk(10, betterdb_key_memory_bytes{job=~\"$job\",connection=~\"$connection\"})",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      }
+    },
+    {
+      "id": 9,
+      "type": "bargauge",
+      "title": "Keysize distribution",
+      "description": "Keys per size bucket from INFO keysizes (Redis 8.0+; no Valkey version emits it), split by data type. metric=\"sizes\" buckets string byte length, metric=\"items\" buckets element count per collection type; summed across databases and selected connections. These series are per node, and topology auto-registration adds replicas as their own connections, so selecting \"All\" sums primaries and replicas and roughly doubles the counts on a replicated deployment — select a single connection for a true per-server distribution. Buckets are log2 sizes; bar order follows label sort, not bucket magnitude. Absent on servers without the section.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "sum by (type, metric, bucket) (betterdb_keysize_bucket_keys{job=~\"$job\",connection=~\"$connection\"})",
+          "legendFormat": "{{type}} {{metric}} {{bucket}}",
+          "instant": true
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 32
       }
     }
   ],

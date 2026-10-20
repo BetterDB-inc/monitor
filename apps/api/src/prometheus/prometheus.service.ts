@@ -14,6 +14,11 @@ import {
   IWebhookEventsEnterpriseService,
   WEBHOOK_EVENTS_PRO_SERVICE,
   WEBHOOK_EVENTS_ENTERPRISE_SERVICE,
+  hasOwnKeyAnalytics,
+  parseKeySizeDistribution,
+  canonicalKeySizeType,
+  KeySizeDistribution,
+  KEY_ANALYTICS_FETCH_CAP,
 } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
@@ -53,14 +58,25 @@ import {
   resolveStalenessMs,
   selectSeriesToRemove,
   SeriesSnapshot,
+  STALENESS_POLL_MULTIPLIER,
 } from './staleness';
 import {
   ExportProfile,
   isExportedInProfile,
   parseExportProfile,
+  resolveKeyDetailsTopN,
+  resolveKeyPatternsTopN,
   resolveSlotStatsTopN,
 } from './export-profile';
 import { DropReason } from '../external-metrics/otlp-metrics-types';
+import {
+  createWriteRejectionState,
+  evaluateWriteRejection,
+  type WriteRejectionState,
+} from '../monitor/write-rejection';
+
+/** How long a CONFIG GET of the BGSAVE stop-writes settings stays fresh. */
+const RDB_STOPS_WRITES_TTL_MS = 5 * 60_000;
 
 /**
  * Ceiling on the demoted-node read, clamped down to the poll interval when that
@@ -86,8 +102,40 @@ interface ConnectionMetricState {
   previousCrcMismatch: number | null;
   previousTopology: TopologySnapshot | null;
   demotionWatch: DemotionWatch;
+  writeRejection: WriteRejectionState;
+  /** Cached stop-writes-on-bgsave-error && save; null = unknown (CONFIG blocked). */
+  rdbStopsWrites: { value: boolean | null; fetchedAt: number } | null;
   currentKeyspaceDbLabels: Set<string>;
   currentClusterSlotLabels: Set<string>;
+  // Key-size metric labels (per-connection). Per-key and keysize-bucket label
+  // tuples are stored JSON-encoded so a single set tracks the full tuple
+  // (key names may contain any delimiter character).
+  currentKeyPatternLabels: Set<string>;
+  currentKeyDetailLabels: Set<string>;
+  currentKeysizeBucketLabels: Set<string>;
+  lastKeyAnalyticsRefreshAt: number;
+  // Per-family success stamps. The pattern and per-key families fail
+  // independently (distinct storage calls), so one family failing must not
+  // expire the other's healthy series: each stamp advances only when THAT
+  // family's gauges are current, and the staleness bound is enforced per
+  // family in the synchronous prefix of the updater.
+  lastPatternsSuccessAt: number;
+  lastKeyDetailsSuccessAt: number;
+  lastKeysizesSuccessAt: number;
+  lastKeyAnalyticsErrorMessage: string | null;
+  // Timestamp of the latest key-analytics run already exported in full. A
+  // probe that returns the same timestamp with both families still fresh skips
+  // the batch re-fetch, getHotKeys, and gauge rewrites (the run is unchanged).
+  lastExportedRunTimestamp: number | null;
+  // captured_at of the hot-key capture backing the per-key gauges last exported.
+  // Hot keys are persisted in a second write with their own timestamp, which can
+  // lag the pattern write within a single run, so the pattern run timestamp
+  // alone is not proof the per-key gauges are current — the probe-skip confirms
+  // this stamp too before skipping the per-key re-fetch.
+  lastExportedKeyDetailsCapturedAt: number | null;
+  lastKeysizesRefreshAt: number;
+  lastKeysizesErrorMessage: string | null;
+  keysizesUnavailableUntil: number;
   // Storage-based metric labels (per-connection)
   currentAclReasonLabels: Set<string>;
   currentAclUserLabels: Set<string>;
@@ -122,6 +170,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private readonly registry: Registry;
   private readonly exportProfile: ExportProfile;
   private readonly slotStatsTopN: number;
+  private readonly keyPatternsTopN: number;
+  private readonly keyDetailsTopN: number;
+  // Analytics older than this are removed from the exposition rather than
+  // served as if current (3x the collector's run interval).
+  private readonly keyAnalyticsStalenessMs: number;
   private readonly exportRegistry: Registry;
   private readonly pollIntervalMs: number;
   // Start time of the last scrape-triggered refresh (stamped before the pass,
@@ -136,6 +189,20 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private perConnectionState = new Map<string, ConnectionMetricState>();
 
   private static readonly CVE_METRICS_REFRESH_MS = 60_000;
+
+  // Key-size data changes once per key-analytics run (minutes), so re-reading
+  // storage / INFO keysizes on every 5s tick would be pure overhead.
+  private static readonly KEY_SIZE_METRICS_REFRESH_MS = 30_000;
+  // Upper bound on how long bucket series survive while INFO keysizes keeps
+  // failing transiently (timeout, disconnect, LOADING). Ten refresh intervals
+  // (5 min) — generous against the 30s cadence, so a brief hiccup never blanks
+  // the histogram, but a persistently unreachable transport cannot freeze a
+  // stale distribution forever. The keysizes read has no query-window bound of
+  // its own (unlike the analytics storage reads), so this is its only freeze cap.
+  private static readonly KEYSIZES_STALENESS_MS = 10 * PrometheusService.KEY_SIZE_METRICS_REFRESH_MS;
+  // Servers without the keysizes section reject the INFO argument; back off
+  // instead of probing an unsupported server every refresh.
+  private static readonly KEYSIZES_UNAVAILABLE_RECHECK_MS = 600_000;
 
   // Per-connection in-flight INFO-metric updates, so the background poller and a
   // /metrics scrape coalesce instead of racing on shared per-connection state.
@@ -235,6 +302,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private clusterSlotReadsTotal: Gauge;
   private clusterSlotWritesTotal: Gauge;
 
+  // Key Size Metrics (from key analytics runs and INFO keysizes)
+  private keyPatternMemoryBytes: Gauge;
+  private keyPatternAvgMemoryBytes: Gauge;
+  private keyPatternMaxMemoryBytes: Gauge;
+  private keyPatternKeys: Gauge;
+  private keyMemoryBytes: Gauge;
+  private keyCardinality: Gauge;
+  private keysizeBucketKeys: Gauge;
+
   // CPU Metrics
   private cpuSysSecondsTotal: Gauge;
   private cpuUserSecondsTotal: Gauge;
@@ -272,6 +348,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private anomalyBySeverity: Gauge;
   private anomalyByMetric: Gauge;
   private correlatedGroupsTotal: Counter;
+  private detectorConfigUpdatesTotal: Counter;
   private correlatedGroupsBySeverity: Gauge;
   private correlatedGroupsByPattern: Gauge;
   private anomalyDetectionBufferReady: Gauge;
@@ -332,6 +409,29 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.configService.get('METRICS_SLOT_STATS_TOP_N'),
       this.exportProfile,
     );
+    this.keyPatternsTopN = resolveKeyPatternsTopN(
+      this.configService.get('METRICS_KEY_PATTERNS_TOP_N'),
+      this.exportProfile,
+    );
+    this.keyDetailsTopN = resolveKeyDetailsTopN(
+      this.configService.get('METRICS_KEY_DETAILS_TOP_N'),
+      this.exportProfile,
+    );
+    // Parse exactly like the collector (parseInt with a falsy-'' fallback):
+    // Number() would turn a set-but-empty env var into 0 (staleness window of
+    // zero — every series removed while the collector keeps writing) and a
+    // non-numeric value into NaN (falsy startTime — adapters drop the time
+    // filter and stale runs export as current). Guard non-positive/NaN to the
+    // collector's default rather than trusting the raw value.
+    const keyAnalyticsIntervalMs = parseInt(
+      String(this.configService.get('KEY_ANALYTICS_INTERVAL_MS') ?? '') || '300000',
+      10,
+    );
+    this.keyAnalyticsStalenessMs =
+      STALENESS_POLL_MULTIPLIER *
+      (Number.isFinite(keyAnalyticsIntervalMs) && keyAnalyticsIntervalMs > 0
+        ? keyAnalyticsIntervalMs
+        : 300_000);
     this.registry = new Registry();
     this.initializeMetrics();
     this.exportRegistry = this.buildExportRegistry();
@@ -355,10 +455,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // would push healthy connections past their own staleness bound.
     const deadline = Date.now() + this.pollIntervalMs;
     try {
-      const epoch = await this.updateMetricsForConnection(ctx.connectionId);
-
-      // Update storage-based metrics for this connection
-      await this.updateStorageBasedMetricsForConnection(ctx.connectionId, epoch);
+      // The shared in-flight entry covers both the INFO phase and the
+      // storage phase, so a concurrent scrape joins the whole pass rather
+      // than racing the storage reads after the INFO phase settles.
+      await this.updateMetricsForConnection(ctx.connectionId);
 
       // Trigger health check on successful metrics update - may fire instance.up webhook if recovered
       await this.pingHealth(ctx.connectionId, deadline);
@@ -432,14 +532,36 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
    */
   private getConnectionState(connectionId: string): ConnectionMetricState {
     if (!this.perConnectionState.has(connectionId)) {
+      // A brand-new connection has never had data, so stamp the success marks
+      // to now rather than 0: at 0 the staleness prefix would treat every
+      // family as already expired on the first pass and run a (harmless, empty)
+      // removal before the first fetch. Stamping now defers expiry to a real
+      // staleness window measured from the connection's birth.
+      const now = Date.now();
       this.perConnectionState.set(connectionId, {
         previousClusterState: null,
         previousSlotsFail: 0,
         previousCrcMismatch: null,
         previousTopology: null,
         demotionWatch: new Map(),
+        writeRejection: createWriteRejectionState(),
+        rdbStopsWrites: null,
         currentKeyspaceDbLabels: new Set(),
         currentClusterSlotLabels: new Set(),
+        // Key-size metric labels
+        currentKeyPatternLabels: new Set(),
+        currentKeyDetailLabels: new Set(),
+        currentKeysizeBucketLabels: new Set(),
+        lastKeyAnalyticsRefreshAt: 0,
+        lastPatternsSuccessAt: now,
+        lastKeyDetailsSuccessAt: now,
+        lastKeysizesSuccessAt: now,
+        lastKeyAnalyticsErrorMessage: null,
+        lastExportedRunTimestamp: null,
+        lastExportedKeyDetailsCapturedAt: null,
+        lastKeysizesRefreshAt: 0,
+        lastKeysizesErrorMessage: null,
+        keysizesUnavailableUntil: 0,
         // Storage-based metric labels
         currentAclReasonLabels: new Set(),
         currentAclUserLabels: new Set(),
@@ -728,6 +850,51 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       ['slot'],
     );
 
+    // Key Size Metrics (per connection). Pattern/per-key series come from the
+    // latest persisted key analytics run (Pro feature, default every 5m) and
+    // are removed when no fresh run exists; bucket series come from
+    // INFO keysizes (Redis 8.0+; no Valkey version emits it) and are per node.
+    // Every pattern/per-key family carries a `db` label: the collector stores
+    // and ranks per logical database, so the same pattern or key name can occur
+    // in more than one database. Without the label those rows would collide on
+    // one series and overwrite each other (last write wins). Matches the `db`
+    // dimension already carried by keysize_bucket_keys below.
+    this.keyPatternMemoryBytes = this.createGauge(
+      'key_pattern_memory_bytes',
+      'Estimated total memory of keys matching pattern in a logical database, extrapolated from the sampled keys of the latest key analytics run (top (pattern, db) series by memory, bounded by METRICS_KEY_PATTERNS_TOP_N)',
+      ['pattern', 'db'],
+    );
+    this.keyPatternAvgMemoryBytes = this.createGauge(
+      'key_pattern_avg_memory_bytes',
+      'Average per-key memory of keys matching pattern in a logical database, from the latest key analytics run',
+      ['pattern', 'db'],
+    );
+    this.keyPatternMaxMemoryBytes = this.createGauge(
+      'key_pattern_max_memory_bytes',
+      'Largest single-key memory of keys matching pattern in a logical database, from the latest key analytics run',
+      ['pattern', 'db'],
+    );
+    this.keyPatternKeys = this.createGauge(
+      'key_pattern_keys',
+      'Estimated keys matching pattern in a logical database, from the latest key analytics run',
+      ['pattern', 'db'],
+    );
+    this.keyMemoryBytes = this.createGauge(
+      'key_memory_bytes',
+      "Memory of a single tracked key, from the latest key analytics run (the collector's tracked keys ranked by memory, bounded by METRICS_KEY_DETAILS_TOP_N; a huge-by-memory key the collector did not track may be absent)",
+      ['key', 'type', 'db'],
+    );
+    this.keyCardinality = this.createGauge(
+      'key_cardinality',
+      "Elements in a tracked collection key, or byte length for strings (the collector's tracked keys ranked by memory, bounded by METRICS_KEY_DETAILS_TOP_N)",
+      ['key', 'type', 'db'],
+    );
+    this.keysizeBucketKeys = this.createGauge(
+      'keysize_bucket_keys',
+      'Keys per INFO keysizes bucket (server-maintained log2 histogram, Redis 8.0+); metric="sizes" buckets byte length, "items" buckets element count',
+      ['db', 'type', 'metric', 'bucket'],
+    );
+
     // CPU Metrics (per connection)
     this.cpuSysSecondsTotal = this.createGauge(
       'cpu_sys_seconds_total',
@@ -837,6 +1004,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       labelNames: ['connection', 'pattern', 'severity'],
       registers: [this.registry],
     });
+    this.detectorConfigUpdatesTotal = new Counter({
+      name: 'betterdb_detector_config_updates_total',
+      help: 'Successful anomaly detector threshold config updates',
+      registers: [this.registry],
+    });
     this.anomalyEventsCurrent = this.createGauge('anomaly_events_current', 'Unresolved anomalies', [
       'severity',
     ]);
@@ -943,8 +1115,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     await Promise.allSettled(
       connectedConnections.map(async (conn) => {
         try {
-          const epoch = await this.updateMetricsForConnection(conn.id);
-          await this.updateStorageBasedMetricsForConnection(conn.id, epoch);
+          // One coalesced entry covers INFO + storage; a poll already in
+          // flight for this connection is joined rather than duplicated.
+          await this.updateMetricsForConnection(conn.id);
         } catch (error) {
           this.logger.warn(
             `Failed to update metrics for connection ${conn.name}: ${error instanceof Error ? error.message : 'Unknown'}`,
@@ -981,6 +1154,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       if (this.isSuperseded(connectionId, epoch)) return;
       await this.updateClientMetrics(connectionId, connLabel, state, epoch);
       if (this.isSuperseded(connectionId, epoch)) return;
+      await this.updateKeyAnalyticsMetrics(connectionId, connLabel, state, epoch);
+      if (this.isSuperseded(connectionId, epoch)) return;
     }
     await this.updateSlowlogMetrics(connectionId, connLabel, state);
     if (this.isSuperseded(connectionId, epoch)) return;
@@ -1011,6 +1186,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     for (const user of state.currentClientUserLabels) {
       this.clientConnectionsByUser.remove(connLabel, user);
     }
+    this.removeKeyAnalyticsSeries(connLabel, state);
+    this.removeKeysizeBucketSeries(connLabel, state);
     state.currentAclReasonLabels = new Set();
     state.currentAclUserLabels = new Set();
     state.currentClientNameLabels = new Set();
@@ -1168,45 +1345,55 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   /**
-   * Update all INFO-based metrics for a specific connection
-   */
-  /**
-   * Coalesces concurrent INFO-based metric updates for the SAME connection onto
-   * one in-flight pass. Two independent entry points reach here — the background
-   * poller (pollConnection) and the /metrics scrape (updateMetrics) — so without
-   * this a poll and a scrape could run getClusterInfo() concurrently for one
-   * connection; an older response completing last would move
-   * state.previousCrcMismatch backward and re-emit the same cluster.bus.corruption
-   * delta on the next poll. Serializing per connection (the granularity of the
-   * shared state) closes that race for both paths.
+   * Run — and coalesce — a full metrics pass for ONE connection: the INFO
+   * phase followed by the storage phase, under a single in-flight entry.
+   *
+   * Two independent entry points reach here — the background poller
+   * (pollConnection) and the /metrics scrape (updateMetrics). Coalescing both
+   * phases onto one promise closes two distinct races:
+   *   - Concurrent INFO: a poll and a scrape running getClusterInfo() at once,
+   *     where an older response completing last would move
+   *     state.previousCrcMismatch backward and re-emit the same
+   *     cluster.bus.corruption delta on the next poll.
+   *   - Mid-storage retirement: when callers ran the storage phase themselves
+   *     (outside the tracked promise), a scraper at a cadence <= pollIntervalMs
+   *     whose storage reads outran the gap would start a new pass that retires
+   *     the running pass's epoch mid-storage, and the two would supersede each
+   *     other forever. Folding storage inside the entry keeps retireEpoch
+   *     unreachable while any phase of the pass is still running.
    */
   private updateMetricsForConnection(connectionId: string): Promise<number> {
     const existing = this.updateMetricsInFlight.get(connectionId);
     if (existing !== undefined) {
       return existing;
     }
-    // The read is bounded here rather than at the call sites so that a hung
-    // INFO releases its in-flight entry when the bound expires; otherwise the
-    // entry would outlive every later pass and no connection would ever be
-    // re-read. Starting a pass retires the previous epoch, so a reply that
-    // arrives after the bound cannot write metrics behind a newer pass.
+    // Starting a pass retires the previous epoch, so a reply that arrives after
+    // this pass is abandoned cannot write metrics behind a newer pass.
     this.retireEpoch(connectionId);
     const epoch = this.currentEpoch(connectionId);
-    const run: Promise<number> = this.readWithTimeout(
-      this.runUpdateMetricsForConnection(connectionId, epoch),
-      this.pollIntervalMs,
-      `INFO update for ${connectionId}`,
-    )
-      .then(() => epoch)
-      .finally(() => {
-        // Compare-and-delete: only clear the entry if it is still ours. If the
-        // connection was removed (cleanupConnectionMetrics) or re-added with a
-        // fresh in-flight update while this one ran, we must not evict that newer
-        // entry when this stale promise settles.
-        if (this.updateMetricsInFlight.get(connectionId) === run) {
-          this.updateMetricsInFlight.delete(connectionId);
-        }
-      });
+    const run: Promise<number> = (async () => {
+      // The timeout bounds the INFO phase ONLY: a hung INFO releases the
+      // in-flight entry when the bound expires (otherwise the entry would
+      // outlive every later pass and no connection would ever be re-read). The
+      // storage phase is deliberately left unbounded by this race — the base
+      // poller already waits for every connection before the next tick, and
+      // each storage read carries its own supersede/freshness guards.
+      await this.readWithTimeout(
+        this.runUpdateMetricsForConnection(connectionId, epoch),
+        this.pollIntervalMs,
+        `INFO update for ${connectionId}`,
+      );
+      await this.updateStorageBasedMetricsForConnection(connectionId, epoch);
+      return epoch;
+    })().finally(() => {
+      // Compare-and-delete: only clear the entry once the FULL pass settles and
+      // only if it is still ours. If the connection was removed
+      // (cleanupConnectionMetrics) or re-added with a fresh in-flight update
+      // while this one ran, we must not evict that newer entry.
+      if (this.updateMetricsInFlight.get(connectionId) === run) {
+        this.updateMetricsInFlight.delete(connectionId);
+      }
+    });
     this.updateMetricsInFlight.set(connectionId, run);
     return run;
   }
@@ -1264,6 +1451,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
     try {
       const info = await this.readInfo(connectionId, client);
+      if (!external && info.persistence?.rdb_last_bgsave_status === 'err') {
+        await this.refreshRdbStopsWrites(client, state);
+      }
       // A reply is evidence the connection is alive even when this pass no
       // longer owns the metrics, and markFresh only updates a connection the
       // tracker still knows under this same label — so a removed one stays
@@ -1283,6 +1473,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.updateStatsMetrics(info, connLabel, absentAsZero);
       this.updateCpuMetrics(info, connLabel, absentAsZero);
       this.updatePersistenceMetrics(info, connLabel, absentAsZero);
+      if (!external) {
+        this.dispatchWriteRejection(info, state, connectionId, config);
+      }
       this.updateReplicationMetrics(info, connLabel, connectionId, config, absentAsZero);
       this.updateKeyspaceMetricsFromInfo(info, connLabel, state, absentAsZero);
       if (external) {
@@ -1301,6 +1494,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         return;
       }
       await this.updateSlowlogRawMetrics(connLabel, connectionId, config, epoch);
+      if (this.isSuperseded(connectionId, epoch)) {
+        return;
+      }
+      await this.updateKeySizeDistributionMetrics(client, connLabel, connectionId, state, epoch);
     } catch (error) {
       this.logger.error(`Failed to update INFO-based metrics for ${connLabel}`, error);
     }
@@ -1521,11 +1718,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       // Compliance alert for enterprise tier. OTLP mirrors the webhook's edge
       // semantics: dispatchComplianceAlert resolves true only when the alert
       // edge fired (hysteresis) and the license tier allows it.
-      if (
-        usedPercent > 80 &&
-        maxmemoryPolicy === 'noeviction' &&
-        this.webhookEventsEnterpriseService
-      ) {
+      // Evaluated on every poll (not only above 80%) so each webhook's
+      // complianceMemoryPercent decides, and recovery re-arms the alert.
+      if (maxmemoryPolicy === 'noeviction' && this.webhookEventsEnterpriseService) {
         this.webhookEventsEnterpriseService
           .dispatchComplianceAlert({
             complianceType: 'data_retention',
@@ -1592,6 +1787,116 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     );
   }
 
+  /**
+   * writes.rejected / writes.recovered: the server refusing writes (MISCONF,
+   * OOM, READONLY, NOREPLICAS) moves no memory, CPU or latency signal, so it is
+   * read from the persistence status and errorstats deltas already in INFO.
+   */
+  private dispatchWriteRejection(
+    info: InfoResponse,
+    state: ConnectionMetricState,
+    connectionId: string,
+    config: { host: string; port: number } | null,
+  ): void {
+    const result = evaluateWriteRejection(state.writeRejection, {
+      persistence: info.persistence,
+      errorstats: info.errorstats,
+      role: info.replication?.role,
+      usedMemory: parseMemoryField(info.memory?.used_memory),
+      maxMemory: parseMemoryField(info.memory?.maxmemory),
+      memNotCountedForEvict: parseMemoryField(info.memory?.mem_not_counted_for_evict),
+      rdbStopsWrites: state.rdbStopsWrites?.value ?? null,
+      now: Date.now(),
+    });
+    if (result.transition === null) return;
+
+    // An escalation re-sends writes.rejected, flagged, rather than a new event type.
+    const escalated = result.transition === 'escalated';
+    const rejected = result.transition === 'rejected' || escalated;
+    const eventType = rejected
+      ? WebhookEventType.WRITES_REJECTED
+      : WebhookEventType.WRITES_RECOVERED;
+    const attributes = {
+      causes: result.causes,
+      severity: result.severity,
+      rejectedSinceLastPoll: result.rejectedSinceLastPoll,
+      ...(result.rejectingForMs === null ? {} : { rejectingForMs: result.rejectingForMs }),
+      ...(escalated ? { escalated: true } : {}),
+    };
+    const message = rejected
+      ? `Writes are being rejected (${result.causes.join(', ')})${result.severity === 'critical' ? ' and clients are receiving errors' : ''}`
+      : `Writes accepted again after ${Math.round((result.rejectingForMs ?? 0) / 1000)}s`;
+
+    if (rejected) {
+      this.logger.error(`${message} on ${connectionId}`);
+    } else {
+      this.logger.log(`${message} on ${connectionId}`);
+    }
+
+    // OTLP attributes must be flat scalars; arrays and objects are dropped.
+    const otelAttributes: Record<string, string | number | boolean> = {
+      causes: result.causes.join(','),
+      severity: result.severity,
+      ...(result.rejectingForMs === null ? {} : { rejectingForMs: result.rejectingForMs }),
+      ...(escalated ? { escalated: true } : {}),
+    };
+    for (const [code, count] of Object.entries(result.rejectedSinceLastPoll)) {
+      otelAttributes[`rejected.${code}`] = count;
+    }
+
+    try {
+      this.otelEvents?.dispatch(eventType, otelAttributes, connectionId);
+    } catch (err) {
+      this.logger.error(`Failed to dispatch ${eventType} OTLP event`, err);
+    }
+    this.webhookDispatcher
+      ?.dispatchEvent(
+        eventType,
+        {
+          ...attributes,
+          message,
+          timestamp: Date.now(),
+          instance: { host: config?.host || 'localhost', port: config?.port || 6379 },
+        },
+        connectionId,
+      )
+      .catch((err) => {
+        this.logger.error(`Failed to dispatch ${eventType} webhook`, err);
+      });
+  }
+
+  /**
+   * A failed BGSAVE refuses writes only with stop-writes-on-bgsave-error yes
+   * and save points configured. Managed services often block CONFIG, so a
+   * failure caches null (unknown) and never fails the poll.
+   */
+  private async refreshRdbStopsWrites(
+    client: DatabasePort,
+    state: ConnectionMetricState,
+  ): Promise<void> {
+    const now = Date.now();
+    if (state.rdbStopsWrites && now - state.rdbStopsWrites.fetchedAt < RDB_STOPS_WRITES_TTL_MS) {
+      return;
+    }
+    let value: boolean | null;
+    try {
+      // Bounded so a hung CONFIG reply can't stall the poll pass; a timeout
+      // lands in the catch and is cached as unknown like any other failure.
+      const [stop, save] = await this.readWithTimeout(
+        Promise.all([
+          client.getConfigValue('stop-writes-on-bgsave-error'),
+          client.getConfigValue('save'),
+        ]),
+        Math.min(this.pollIntervalMs, DEMOTED_NODE_READ_TIMEOUT_MS),
+        'stop-writes CONFIG GET',
+      );
+      value = stop === null ? null : stop === 'yes' && (save ?? '').trim() !== '';
+    } catch {
+      value = null;
+    }
+    state.rdbStopsWrites = { value, fetchedAt: now };
+  }
+
   private updatePersistenceMetrics(
     info: InfoResponse,
     connLabel: string,
@@ -1617,7 +1922,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       connLabel,
       persistence.rdb_last_bgsave_status,
       'ok',
-      absentAsZero,
+      // Absent is unknown, not failed: recording 0 would fire BetterDBPersistenceFailing.
+      false,
     );
     this.setInfoFlag(this.aofEnabled, connLabel, persistence.aof_enabled, '1', absentAsZero);
     this.setInfoFlag(
@@ -1741,20 +2047,25 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       // parseInfoToTyped emits typed objects for db* entries; anything still
       // a string is a non-db or unparseable line.
       if (!dbInfo || typeof dbInfo !== 'object') continue;
-      newDbLabels.add(dbKey);
+      // Emit the bare logical-database index ("0", "1", ...) rather than the raw
+      // INFO keyspace key ("db0"), so the `db` label matches the key-analytics
+      // and keysize-bucket families and a PromQL join on `db` across all of them
+      // matches.
+      const db = dbKey.replace(/^db/, '');
+      newDbLabels.add(db);
 
       const parsedInfo = dbInfo as { keys: number; expires?: number; avg_ttl?: number };
-      this.dbKeys.labels(connLabel, dbKey).set(parsedInfo.keys || 0);
+      this.dbKeys.labels(connLabel, db).set(parsedInfo.keys || 0);
       if (absentAsZero || parsedInfo.expires !== undefined) {
-        this.dbKeysExpiring.labels(connLabel, dbKey).set(parsedInfo.expires || 0);
+        this.dbKeysExpiring.labels(connLabel, db).set(parsedInfo.expires || 0);
         sawExpires = true;
       } else {
-        this.dbKeysExpiring.remove(connLabel, dbKey);
+        this.dbKeysExpiring.remove(connLabel, db);
       }
       if (absentAsZero || parsedInfo.avg_ttl !== undefined) {
-        this.dbAvgTtlSeconds.labels(connLabel, dbKey).set((parsedInfo.avg_ttl || 0) / 1000);
+        this.dbAvgTtlSeconds.labels(connLabel, db).set((parsedInfo.avg_ttl || 0) / 1000);
       } else {
-        this.dbAvgTtlSeconds.remove(connLabel, dbKey);
+        this.dbAvgTtlSeconds.remove(connLabel, db);
       }
       totalKeys += parsedInfo.keys || 0;
       totalExpiring += parsedInfo.expires || 0;
@@ -2281,6 +2592,472 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
   }
 
+  /**
+   * Key-size gauges from the latest persisted key analytics run (Pro feature,
+   * default every 5m). Between runs the last run's values are served; a
+   * connection with no fresh run within the staleness bound — feature
+   * disabled, managed service, non-owning topology member, collector stopped —
+   * has its series removed rather than zero-filled.
+   */
+  private async updateKeyAnalyticsMetrics(
+    connectionId: string,
+    connLabel: string,
+    state: ConnectionMetricState,
+    epoch: number,
+  ): Promise<void> {
+    if (this.keyPatternsTopN === 0 && this.keyDetailsTopN === 0) {
+      return;
+    }
+    const now = Date.now();
+    if (now - state.lastKeyAnalyticsRefreshAt < PrometheusService.KEY_SIZE_METRICS_REFRESH_MS) {
+      return;
+    }
+
+    // Per-family staleness is enforced here, in the synchronous prefix before
+    // any await, so it is epoch-safe: a stale pass's late rejection can no
+    // longer race this removal (that was the old unguarded catch-path bug).
+    // Each family is bounded independently — a persistent getHotKeys-only
+    // failure must not wipe freshly-written healthy pattern series, and vice
+    // versa. Only remove a family that actually has tracked series.
+    if (
+      this.keyPatternsTopN > 0 &&
+      state.currentKeyPatternLabels.size > 0 &&
+      now - state.lastPatternsSuccessAt > this.keyAnalyticsStalenessMs
+    ) {
+      this.removeAllKeyPatternSeries(connLabel, state);
+    }
+    if (
+      this.keyDetailsTopN > 0 &&
+      state.currentKeyDetailLabels.size > 0 &&
+      now - state.lastKeyDetailsSuccessAt > this.keyAnalyticsStalenessMs
+    ) {
+      this.removeAllKeyDetailSeries(connLabel, state);
+    }
+
+    const config = this.connectionRegistry.getConfig(connectionId);
+    if (!config || !hasOwnKeyAnalytics(config.membership)) {
+      this.removeKeyAnalyticsSeries(connLabel, state);
+      state.lastExportedRunTimestamp = null;
+      state.lastExportedKeyDetailsCapturedAt = null;
+      // An ownership flip (e.g. a sentinel primary moving to another node)
+      // must not leave a stale error message behind: it would suppress the
+      // next distinct-failure log from the new owner's first real failure.
+      state.lastKeyAnalyticsErrorMessage = null;
+      state.lastKeyAnalyticsRefreshAt = now;
+      return;
+    }
+    const startTime = now - this.keyAnalyticsStalenessMs;
+    const patternsEnabled = this.keyPatternsTopN > 0;
+    const detailsEnabled = this.keyDetailsTopN > 0;
+    let latestTimestamp: number | undefined;
+    let patternsExported = false;
+    let keyDetailsExported = false;
+
+    try {
+      if (patternsEnabled) {
+        // Two-step read: resolve the latest run's timestamp first (rows come
+        // newest-first), then fetch only that run's rows. A single windowed
+        // fetch would pull every run in the staleness window — thousands of
+        // wide rows per refresh on pattern-heavy keyspaces — and discard all
+        // but the newest batch.
+        const newest = await this.storage.getKeyPatternSnapshots({
+          connectionId,
+          startTime,
+          limit: 1,
+        });
+        if (this.isSuperseded(connectionId, epoch)) {
+          // Superseded: nothing written. Leave the refresh throttle unstamped
+          // so the superseding pass (or next tick) refreshes immediately.
+          return;
+        }
+        latestTimestamp = newest[0]?.timestamp;
+
+        // Probe-skip: the latest run is the one already exported in full and
+        // both enabled families are still within the staleness bound, so the
+        // persisted run is byte-for-byte what the gauges already hold. Skip the
+        // batch re-fetch, getHotKeys, and gauge rewrites — only re-stamp
+        // freshness so the staleness prefix does not later expire current data.
+        const patternsFresh =
+          now - state.lastPatternsSuccessAt <= this.keyAnalyticsStalenessMs;
+        const detailsFresh =
+          !detailsEnabled || now - state.lastKeyDetailsSuccessAt <= this.keyAnalyticsStalenessMs;
+        if (
+          latestTimestamp !== undefined &&
+          latestTimestamp === state.lastExportedRunTimestamp &&
+          patternsFresh &&
+          detailsFresh
+        ) {
+          // The pattern run is unchanged, but hot keys are persisted in a
+          // separate write with their own captured_at that can lag the pattern
+          // write within one run. Confirm the latest hot-key capture is also the
+          // one already exported before skipping — otherwise a refresh that
+          // landed in that inter-write gap (exporting the previous run's hot
+          // keys while stamping this run's pattern timestamp) would freeze the
+          // per-key gauges until the next analytics cycle. A single-row probe,
+          // matching the pattern probe's cost, only runs once the cheap pattern
+          // checks already indicate a skip.
+          let keyDetailsCurrent = true;
+          if (detailsEnabled) {
+            const newestKeyDetail = await this.storage.getHotKeys({
+              connectionId,
+              latest: true,
+              startTime,
+              signalTypes: ['cardinality'],
+              limit: 1,
+            });
+            if (this.isSuperseded(connectionId, epoch)) {
+              return;
+            }
+            keyDetailsCurrent =
+              (newestKeyDetail[0]?.capturedAt ?? null) === state.lastExportedKeyDetailsCapturedAt;
+          }
+          if (keyDetailsCurrent) {
+            state.lastPatternsSuccessAt = now;
+            if (detailsEnabled) {
+              state.lastKeyDetailsSuccessAt = now;
+            }
+            state.lastKeyAnalyticsErrorMessage = null;
+            state.lastKeyAnalyticsRefreshAt = now;
+            return;
+          }
+        }
+
+        const snapshots =
+          latestTimestamp === undefined
+            ? []
+            : await this.storage.getKeyPatternSnapshots({
+                connectionId,
+                startTime: latestTimestamp,
+                endTime: latestTimestamp,
+                limit: KEY_ANALYTICS_FETCH_CAP,
+              });
+        if (this.isSuperseded(connectionId, epoch)) {
+          return;
+        }
+        // Decorate-sort-undecorate: coerce totalMemoryBytes once per row rather
+        // than on every comparison (the Postgres adapter surfaces BIGINT as a
+        // string, so a bare subtraction would compare lexically).
+        const top = snapshots
+          .map((snapshot) => ({
+            snapshot,
+            memory: PrometheusService.toFiniteNumber(snapshot.totalMemoryBytes) ?? 0,
+          }))
+          .sort((a, b) => b.memory - a.memory)
+          .slice(0, this.keyPatternsTopN)
+          .map((decorated) => decorated.snapshot);
+        const newPatternLabels = new Set<string>();
+        for (const snapshot of top) {
+          const db = String(snapshot.db ?? 0);
+          // Label identity is (pattern, db): the same pattern in two logical
+          // databases is two distinct series and must not collide.
+          newPatternLabels.add(JSON.stringify([snapshot.pattern, db]));
+          // Coerced like the per-key fields below: Gauge.set() throws on
+          // non-numbers, and one bad row mid-loop would otherwise leave the
+          // already-written series untracked (the Set is assigned after the
+          // loop) and unremovable.
+          this.keyPatternMemoryBytes
+            .labels(connLabel, snapshot.pattern, db)
+            .set(PrometheusService.toFiniteNumber(snapshot.totalMemoryBytes) ?? 0);
+          this.keyPatternAvgMemoryBytes
+            .labels(connLabel, snapshot.pattern, db)
+            .set(PrometheusService.toFiniteNumber(snapshot.avgMemoryBytes) ?? 0);
+          this.keyPatternMaxMemoryBytes
+            .labels(connLabel, snapshot.pattern, db)
+            .set(PrometheusService.toFiniteNumber(snapshot.maxMemoryBytes) ?? 0);
+          this.keyPatternKeys
+            .labels(connLabel, snapshot.pattern, db)
+            .set(PrometheusService.toFiniteNumber(snapshot.keyCount) ?? 0);
+        }
+        this.sweepRemovedLabels(state.currentKeyPatternLabels, newPatternLabels, (label) =>
+          this.removeKeyPatternSeries(connLabel, label),
+        );
+        state.currentKeyPatternLabels = newPatternLabels;
+        // Gauges now reflect the latest run (or its absence — an empty run is
+        // still current data), so the pattern family is fresh.
+        state.lastPatternsSuccessAt = now;
+        patternsExported = true;
+      }
+
+      if (detailsEnabled) {
+        // 'cardinality' entries are the collector's persisted largest-key set;
+        // re-rank by memory the way the largest-keys surface does. latest:true
+        // pins a single capture, but the collector persists up to
+        // KEY_DETAILS_TOP_N cardinality rows PER logical database, so a capture
+        // on a multi-db instance holds KEY_DETAILS_TOP_N x databases rows. Fetch
+        // the whole capture (bounded by the fetch cap) so the memory re-rank
+        // below sees every database's largest keys before slicing to the
+        // exported top-N; a KEY_DETAILS_TOP_N limit here would truncate by the
+        // interleaved per-db rank and drop a database's genuinely largest keys.
+        const entries = await this.storage.getHotKeys({
+          connectionId,
+          latest: true,
+          startTime,
+          signalTypes: ['cardinality'],
+          limit: KEY_ANALYTICS_FETCH_CAP,
+        });
+        if (this.isSuperseded(connectionId, epoch)) {
+          return;
+        }
+        // The Postgres adapter surfaces BIGINT columns as strings, so coerce
+        // rather than type-check the numeric fields.
+        const top = [...entries]
+          .sort(
+            (a, b) =>
+              (PrometheusService.toFiniteNumber(b.memoryBytes) ?? 0) -
+              (PrometheusService.toFiniteNumber(a.memoryBytes) ?? 0),
+          )
+          .slice(0, this.keyDetailsTopN);
+        const newKeyLabels = new Set<string>();
+        for (const entry of top) {
+          const keyType = entry.keyType ?? 'unknown';
+          const db = String(entry.db ?? 0);
+          // Label identity is (key, type, db): the same key name in two logical
+          // databases is two distinct keys and must not collide.
+          newKeyLabels.add(JSON.stringify([entry.keyName, keyType, db]));
+          const memoryBytes = PrometheusService.toFiniteNumber(entry.memoryBytes);
+          if (memoryBytes !== null) {
+            this.keyMemoryBytes.labels(connLabel, entry.keyName, keyType, db).set(memoryBytes);
+          } else {
+            this.keyMemoryBytes.remove(connLabel, entry.keyName, keyType, db);
+          }
+          const cardinality = PrometheusService.toFiniteNumber(entry.cardinality);
+          if (cardinality !== null) {
+            this.keyCardinality.labels(connLabel, entry.keyName, keyType, db).set(cardinality);
+          } else {
+            this.keyCardinality.remove(connLabel, entry.keyName, keyType, db);
+          }
+        }
+        this.sweepRemovedLabels(state.currentKeyDetailLabels, newKeyLabels, (label) =>
+          this.removeKeyDetailSeries(connLabel, label),
+        );
+        state.currentKeyDetailLabels = newKeyLabels;
+        // Per-key gauges now reflect the latest capture (even if empty). Record
+        // that capture's captured_at so the probe-skip can tell a later refresh
+        // apart from the one that would surface a newer capture of the same run.
+        // All rows of a latest:true read share one captured_at; an empty capture
+        // yields null, which the probe compares symmetrically.
+        state.lastExportedKeyDetailsCapturedAt = entries[0]?.capturedAt ?? null;
+        state.lastKeyDetailsSuccessAt = now;
+        keyDetailsExported = true;
+      }
+
+      // Only arm the probe-skip when every enabled family exported this pass
+      // against a known run; a partial pass must re-fetch next time.
+      if (
+        latestTimestamp !== undefined &&
+        (!patternsEnabled || patternsExported) &&
+        (!detailsEnabled || keyDetailsExported)
+      ) {
+        state.lastExportedRunTimestamp = latestTimestamp;
+      }
+      state.lastKeyAnalyticsErrorMessage = null;
+      // Stamp on a successful completion so the next refresh waits the 30s
+      // cadence. (Superseded returns above leave this unstamped on purpose.)
+      state.lastKeyAnalyticsRefreshAt = now;
+    } catch (error) {
+      // A storage adapter without key-analytics support fails identically on
+      // every refresh; log each distinct failure once, not every 30 seconds.
+      const message = error instanceof Error ? error.message : String(error);
+      if (state.lastKeyAnalyticsErrorMessage !== message) {
+        state.lastKeyAnalyticsErrorMessage = message;
+        this.logger.error(`Failed to update key analytics metrics for ${connLabel}`, error);
+      }
+      // Stamp on a handled failure too, so a persistently dead storage backend
+      // keeps the 30s backoff instead of hammering every tick. The staleness
+      // prefix above (not this catch) is what eventually removes the frozen
+      // series, epoch-safe and per family.
+      state.lastKeyAnalyticsRefreshAt = now;
+    }
+  }
+
+  /**
+   * Whole-keyspace size distribution from INFO keysizes (server-maintained,
+   * Redis 8.0+; no Valkey version emits it). Per node: cluster members are polled as their
+   * own connections, so no fan-out or merge happens here.
+   */
+  private async updateKeySizeDistributionMetrics(
+    client: DatabasePort,
+    connLabel: string,
+    connectionId: string,
+    state: ConnectionMetricState,
+    epoch: number,
+  ): Promise<void> {
+    if (this.exportProfile === 'vitals') {
+      return;
+    }
+    const now = Date.now();
+    if (
+      now - state.lastKeysizesRefreshAt < PrometheusService.KEY_SIZE_METRICS_REFRESH_MS ||
+      now < state.keysizesUnavailableUntil
+    ) {
+      return;
+    }
+
+    // A blocked-command error on a prior pass disabled the capability (managed
+    // servers that reject INFO keysizes with NOPERM et al.); stop probing and
+    // drop any series, mirroring how clearSlotSeries handles a disabled
+    // slot-stats capability.
+    if (!this.runtimeCapabilityTracker.isAvailable(connectionId, 'canKeysizes')) {
+      this.removeKeysizeBucketSeries(connLabel, state);
+      state.lastKeysizesRefreshAt = now;
+      return;
+    }
+
+    // Sync-prefix staleness bound (before any await, so epoch-safe). This read
+    // has no query window of its own, so this is the only cap on how long a
+    // frozen histogram survives persistent transient transport failures.
+    if (
+      state.currentKeysizeBucketLabels.size > 0 &&
+      now - state.lastKeysizesSuccessAt > PrometheusService.KEYSIZES_STALENESS_MS
+    ) {
+      this.removeKeysizeBucketSeries(connLabel, state);
+    }
+
+    let raw: string;
+    try {
+      raw = (await client.call('INFO', ['keysizes'])) as string;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      // Classify via the capability tracker, not a local regex: a blocked
+      // command (NOPERM, unknown subcommand, "command is not available") trips
+      // recordFailure and disables the capability for good; everything else
+      // (timeout, disconnect, LOADING, "max number of clients reached") is
+      // transient and must not blank the histogram or arm a backoff.
+      const disabled = this.runtimeCapabilityTracker.recordFailure(connectionId, 'canKeysizes', err);
+      if (this.isSuperseded(connectionId, epoch)) {
+        return;
+      }
+      if (disabled) {
+        this.removeKeysizeBucketSeries(connLabel, state);
+      } else if (state.lastKeysizesErrorMessage !== err.message) {
+        // Dedup transient-failure logging the way the analytics updater does;
+        // keep the current series (the sync-prefix bound caps the freeze).
+        state.lastKeysizesErrorMessage = err.message;
+        this.logger.error(`Failed to update keysizes metrics for ${connLabel}`, error);
+      }
+      state.lastKeysizesRefreshAt = now;
+      return;
+    }
+    if (this.isSuperseded(connectionId, epoch)) {
+      return;
+    }
+    const distribution = parseKeySizeDistribution(raw ?? '');
+    if (!distribution.available) {
+      // available:false means a genuinely unsupported server: an empty-string
+      // reply with no section header (pre-8 Redis, every Valkey, section
+      // disabled). Arm the long backoff and drop the series. A header-only
+      // reply from an empty keyspace is available:true and takes the normal
+      // path below, so data appearing after a FLUSHALL shows up within one
+      // refresh rather than after a 10-minute backoff.
+      state.keysizesUnavailableUntil = now + PrometheusService.KEYSIZES_UNAVAILABLE_RECHECK_MS;
+      this.removeKeysizeBucketSeries(connLabel, state);
+      state.lastKeysizesErrorMessage = null;
+      state.lastKeysizesRefreshAt = now;
+      return;
+    }
+
+    const newBucketLabels = new Set<string>();
+    for (const [dbKey, types] of Object.entries(distribution.databases)) {
+      // INFO keysizes names databases "db0", "db1", ...; emit the bare index
+      // ("0", "1") so the `db` label matches the per-pattern and per-key
+      // families (and the OTLP mirror), letting a PromQL join on `db` across
+      // them actually match.
+      const db = dbKey.replace(/^db/, '');
+      for (const [type, typeDistribution] of Object.entries(types)) {
+        // Emit the singular TYPE-style name so `type` joins with the per-key
+        // families (INFO keysizes reports it in the plural); the per-pattern
+        // families carry a `pattern` label (plus `db`), the per-key families a
+        // (`key`, `type`, `db`) tuple.
+        const labelType = canonicalKeySizeType(type);
+        for (const { bucket, count } of typeDistribution.buckets) {
+          newBucketLabels.add(JSON.stringify([db, labelType, typeDistribution.metric, bucket]));
+          this.keysizeBucketKeys
+            .labels(connLabel, db, labelType, typeDistribution.metric, bucket)
+            .set(count);
+        }
+      }
+    }
+    this.sweepRemovedLabels(state.currentKeysizeBucketLabels, newBucketLabels, (label) =>
+      this.removeKeysizeBucketSeriesLabel(connLabel, label),
+    );
+    state.currentKeysizeBucketLabels = newBucketLabels;
+    // available:true — buckets written, or an empty keyspace (header only, zero
+    // buckets) whose series were removed by the stale sweep above. Either way
+    // the exported data is current: stamp freshness and clear the dedup latch.
+    state.lastKeysizesSuccessAt = now;
+    state.lastKeysizesErrorMessage = null;
+    state.lastKeysizesRefreshAt = now;
+  }
+
+  private static toFiniteNumber(value: unknown): number | null {
+    if (value === null || value === undefined) {
+      return null;
+    }
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  // Remove every label tuple present in `previous` but absent from `next`
+  // (the set-difference sweep every per-connection metric family runs after
+  // writing its current series). `remove` decodes the JSON label tuple for its
+  // own family.
+  private sweepRemovedLabels(
+    previous: ReadonlySet<string>,
+    next: ReadonlySet<string>,
+    remove: (label: string) => void,
+  ): void {
+    for (const label of previous) {
+      if (!next.has(label)) {
+        remove(label);
+      }
+    }
+  }
+
+  private removeKeyAnalyticsSeries(connLabel: string, state: ConnectionMetricState): void {
+    this.removeAllKeyPatternSeries(connLabel, state);
+    this.removeAllKeyDetailSeries(connLabel, state);
+  }
+
+  private removeAllKeyPatternSeries(connLabel: string, state: ConnectionMetricState): void {
+    for (const label of state.currentKeyPatternLabels) {
+      this.removeKeyPatternSeries(connLabel, label);
+    }
+    state.currentKeyPatternLabels = new Set();
+  }
+
+  private removeAllKeyDetailSeries(connLabel: string, state: ConnectionMetricState): void {
+    for (const label of state.currentKeyDetailLabels) {
+      this.removeKeyDetailSeries(connLabel, label);
+    }
+    state.currentKeyDetailLabels = new Set();
+  }
+
+  private removeKeyPatternSeries(connLabel: string, label: string): void {
+    const [pattern, db] = JSON.parse(label) as [string, string];
+    this.keyPatternMemoryBytes.remove(connLabel, pattern, db);
+    this.keyPatternAvgMemoryBytes.remove(connLabel, pattern, db);
+    this.keyPatternMaxMemoryBytes.remove(connLabel, pattern, db);
+    this.keyPatternKeys.remove(connLabel, pattern, db);
+  }
+
+  private removeKeyDetailSeries(connLabel: string, label: string): void {
+    const [keyName, keyType, db] = JSON.parse(label) as [string, string, string];
+    this.keyMemoryBytes.remove(connLabel, keyName, keyType, db);
+    this.keyCardinality.remove(connLabel, keyName, keyType, db);
+  }
+
+  private removeKeysizeBucketSeriesLabel(connLabel: string, label: string): void {
+    const [db, type, metric, bucket] = JSON.parse(label) as [string, string, string, string];
+    this.keysizeBucketKeys.remove(connLabel, db, type, metric, bucket);
+  }
+
+  private removeKeysizeBucketSeries(connLabel: string, state: ConnectionMetricState): void {
+    for (const label of state.currentKeysizeBucketLabels) {
+      this.removeKeysizeBucketSeriesLabel(connLabel, label);
+    }
+    state.currentKeysizeBucketLabels = new Set();
+  }
+
   private async updateSlowlogRawMetrics(
     connLabel: string,
     connectionId: string,
@@ -2529,6 +3306,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       return;
     }
     this.pollsTotal.labels(connLabel).inc();
+  }
+
+  incrementDetectorConfigUpdates(): void {
+    this.detectorConfigUpdatesTotal.inc();
   }
 
   updateVectorIndexMetrics(
@@ -2846,4 +3627,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(2)} KB`;
     return `${bytes} B`;
   }
+}
+
+function parseMemoryField(raw: string | number | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const value = typeof raw === 'number' ? raw : parseInt(raw, 10);
+  return Number.isFinite(value) ? value : undefined;
 }

@@ -73,13 +73,12 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   // - This prevents oscillation around the threshold boundary
   private readonly DEFAULT_ALERT_HYSTERESIS_FACTOR = DEFAULT_ALERT_CONFIG.hysteresisFactor;
 
-  // Alert state cache configuration
-  // Max 1000 alerts: Sufficient for typical deployments (even 100 instances × 10 metrics = 1000)
-  // Exceeding 1000 means LRU evicts oldest, which is acceptable (they'll re-fire if still breached)
-  private readonly ALERT_STATE_CACHE_MAX_SIZE = 1000;
-
-  // 24 hour TTL: Balances memory usage vs. preventing re-fire after long quiet periods
-  // After 24h, an alert can re-fire even if never recovered (acceptable for persistent issues)
+  // Alert hysteresis state: one entry per alert type × connection × webhook
+  // (plus one OTLP compliance key per connection). Evicting a still-"fired"
+  // entry makes it re-fire on the next poll, so size generously; large fleets
+  // can raise it with WEBHOOK_ALERT_STATE_MAX. The 24h TTL re-arms any
+  // condition that persists longer than a day (intended reminder).
+  private readonly ALERT_STATE_MAX = 10_000;
   private readonly ALERT_STATE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
   // Response body size limits (defaults, can be overridden per-webhook)
@@ -94,10 +93,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   private readonly MAX_TEST_RESPONSE_PREVIEW_BYTES = 1_000;
 
   // Track alert states with LRU cache to prevent memory leak
-  private alertStates = new LRUCache<string, AlertState>({
-    max: this.ALERT_STATE_CACHE_MAX_SIZE,
-    ttl: this.ALERT_STATE_CACHE_TTL_MS,
-  });
+  private alertStates: LRUCache<string, AlertState>;
 
   // Instance context
   private readonly sourceHost: string;
@@ -114,9 +110,28 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       'WEBHOOK_TIMEOUT_MS',
       DEFAULT_DELIVERY_CONFIG.timeoutMs,
     );
+    this.alertStates = new LRUCache<string, AlertState>({
+      max: this.resolveAlertStateMax(),
+      ttl: this.ALERT_STATE_CACHE_TTL_MS,
+    });
     this.sourceHost = this.configService.get<string>('database.host', 'localhost');
     this.sourcePort = this.configService.get<number>('database.port', 6379);
     this.appBaseUrl = this.configService.get<string>('FRONTEND_URL');
+  }
+
+  // ConfigService hands back the raw env string (no validation in ConfigModule),
+  // and lru-cache throws on a non-integer max, so parse it here.
+  private resolveAlertStateMax(): number {
+    const raw = this.configService.get<string | number>('WEBHOOK_ALERT_STATE_MAX');
+    if (raw === undefined || raw === null || raw === '') return this.ALERT_STATE_MAX;
+    const parsed = Number(raw);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      this.logger.warn(
+        `Invalid WEBHOOK_ALERT_STATE_MAX "${raw}", using default ${this.ALERT_STATE_MAX}`,
+      );
+      return this.ALERT_STATE_MAX;
+    }
+    return parsed;
   }
 
   /**
@@ -360,7 +375,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   /**
    * Check if alert should fire (with hysteresis to prevent flapping)
    */
-  private shouldFireAlert(
+  shouldFireAlert(
     alertKey: string,
     currentValue: number,
     threshold: number,
@@ -439,9 +454,10 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     currentValue: number,
     thresholdKey: keyof WebhookThresholds,
     isAbove: boolean,
-    data: Record<string, unknown>,
+    data: Record<string, unknown> | ((threshold: number) => Record<string, unknown>),
     connectionId?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    let firedAny = false;
     try {
       // Get webhooks subscribed to this event, filtered by connectionId
       const webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
@@ -450,7 +466,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
         this.logger.debug(
           `No webhooks subscribed to event: ${eventType}${connectionId ? ` for connection ${connectionId}` : ''}`,
         );
-        return;
+        return false;
       }
 
       // Dispatch to each webhook with its own threshold
@@ -479,9 +495,11 @@ export class WebhookDispatcherService implements OnModuleDestroy {
               `Threshold alert triggered for webhook ${webhook.id}: ${eventType} (${currentValue} ${isAbove ? '>=' : '<='} ${threshold})`,
             );
 
+            firedAny = true;
             // Add threshold info to data
+            const base = typeof data === 'function' ? data(threshold) : data;
             const enrichedData = {
-              ...data,
+              ...base,
               threshold,
               thresholdKey,
               ...(connectionId && { connectionId }),
@@ -497,6 +515,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     } catch (error) {
       this.logger.error(`Failed to dispatch per-webhook threshold alert ${eventType}:`, error);
     }
+    return firedAny;
   }
 
   /**
