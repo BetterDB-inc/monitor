@@ -19,7 +19,6 @@ import {
   KeyPatternQueryOptions,
   KeyAnalyticsSummary,
   AppSettings,
-  SettingsUpdateRequest,
   Webhook,
   WebhookDelivery,
   WebhookEventType,
@@ -840,7 +839,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return { ...this.settings };
   }
 
-  async updateSettings(updates: SettingsUpdateRequest): Promise<AppSettings> {
+  async updateSettings(updates: Partial<AppSettings>): Promise<AppSettings> {
     if (!this.settings) {
       throw new Error('Settings not found. Initialize settings first.');
     }
@@ -875,6 +874,9 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
     if (updates.inferenceSlaConfig !== undefined) {
       validUpdates.inferenceSlaConfig = updates.inferenceSlaConfig;
+    }
+    if (updates.anomalyDetectorConfig !== undefined) {
+      validUpdates.anomalyDetectorConfig = updates.anomalyDetectorConfig;
     }
     if (updates.localRetentionDays !== undefined) {
       validUpdates.localRetentionDays = updates.localRetentionDays;

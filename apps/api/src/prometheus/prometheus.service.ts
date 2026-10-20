@@ -348,6 +348,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private anomalyBySeverity: Gauge;
   private anomalyByMetric: Gauge;
   private correlatedGroupsTotal: Counter;
+  private detectorConfigUpdatesTotal: Counter;
   private correlatedGroupsBySeverity: Gauge;
   private correlatedGroupsByPattern: Gauge;
   private anomalyDetectionBufferReady: Gauge;
@@ -1001,6 +1002,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       name: 'betterdb_correlated_groups_total',
       help: 'Total correlated anomaly groups',
       labelNames: ['connection', 'pattern', 'severity'],
+      registers: [this.registry],
+    });
+    this.detectorConfigUpdatesTotal = new Counter({
+      name: 'betterdb_detector_config_updates_total',
+      help: 'Successful anomaly detector threshold config updates',
       registers: [this.registry],
     });
     this.anomalyEventsCurrent = this.createGauge('anomaly_events_current', 'Unresolved anomalies', [
@@ -3300,6 +3306,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       return;
     }
     this.pollsTotal.labels(connLabel).inc();
+  }
+
+  incrementDetectorConfigUpdates(): void {
+    this.detectorConfigUpdatesTotal.inc();
   }
 
   updateVectorIndexMetrics(
