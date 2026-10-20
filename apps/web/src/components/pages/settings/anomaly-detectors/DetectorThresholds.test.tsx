@@ -131,6 +131,20 @@ describe('DetectorThresholds', () => {
     expect(await screen.findByText(/boom/)).toBeInTheDocument();
   });
 
+  it('shows a saved panel as saved before the refetch returns', async () => {
+    api.updateAnomalyDetectors.mockResolvedValue({ message: 'ok', config: {} });
+    renderAt('/settings?section=anomaly&metric=connections');
+    const input = (await screen.findByLabelText('Warning z-score')) as HTMLInputElement;
+    api.getAnomalyDetectors.mockReturnValue(new Promise(() => {}));
+    fireEvent.change(input, { target: { value: '2.5' } });
+    expect(screen.getByText('Unsaved')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.updateAnomalyDetectors).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByText('Unsaved')).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    expect(screen.getByText('z 2.5 / 3')).toBeInTheDocument();
+  });
+
   it('keeps the panels and their unsaved edits when a refetch fails', async () => {
     const { queryClient } = renderAt('/settings?section=anomaly&metric=connections');
     const input = (await screen.findByLabelText('Warning z-score')) as HTMLInputElement;

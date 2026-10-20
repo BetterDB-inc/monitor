@@ -1,7 +1,11 @@
 import { useId, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { ChevronDown } from 'lucide-react';
-import type { AnomalyDetectorConfigEntry, AnomalyDetectorMetric } from '@betterdb/shared';
+import type {
+  AnomalyDetectorConfigEntry,
+  AnomalyDetectorMetric,
+  AnomalyDetectorSettingsResponse,
+} from '@betterdb/shared';
 import { settingsApi } from '../../../../api/settings';
 import { Alert, AlertDescription } from '../../../ui/alert';
 import { Badge } from '../../../ui/badge';
@@ -88,7 +92,15 @@ export function DetectorPanel({
         : settingsApi.updateAnomalyDetectors({ [metric]: save.entry }),
     onSuccess: (_data, save) => {
       setError(null);
-      setForm(toFormState(expectedResolved(save, defaults), defaults));
+      const next = expectedResolved(save, defaults);
+      queryClient.setQueryData<AnomalyDetectorSettingsResponse>(ANOMALY_DETECTORS_QUERY_KEY, (prev) => {
+        if (!prev) return prev;
+        const overrides = { ...prev.overrides };
+        if (save.kind === 'reset') delete overrides[metric];
+        else overrides[metric] = save.entry;
+        return { ...prev, overrides, resolved: { ...prev.resolved, [metric]: next } };
+      });
+      setForm(toFormState(next, defaults));
       queryClient.invalidateQueries({ queryKey: ANOMALY_DETECTORS_QUERY_KEY });
     },
     onError: (err) => setError(err instanceof Error ? err.message : 'Failed to save'),
