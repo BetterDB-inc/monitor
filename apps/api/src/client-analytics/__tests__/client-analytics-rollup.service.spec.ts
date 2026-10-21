@@ -530,6 +530,21 @@ describe('ClientAnalyticsRollupService', () => {
       expect(service.getLatestStats('conn-a')?.peakConnections).toBe(3);
       expect(service.getLatestStats('conn-a')?.peakTimestamp).toBe(now - HOUR);
     });
+
+    it('resolves an equal peak inside and outside the window to the earliest capture', async () => {
+      // A batch of 3 at 30h back ties the in-window peak of 3 at 1h back; the
+      // retention read wins the tie because it is earlier.
+      const tied = [...history, ...rowsAt(now - 30 * HOUR, 'api', 3)];
+      jest.useFakeTimers({ now });
+      const fake = createFakeStorage(tied, { indexReady: false });
+      await fake.storage.upsertClientAnalyticsRollups(
+        foldGroupsIntoRollups('conn-a', groupsFromRaw(tied, 'conn-a'), new Map(), now),
+      );
+      const { service, poll } = createService(fake.storage, { CLIENT_ANALYTICS_ROLLUP_RETENTION_DAYS: 2 });
+      await poll();
+      expect(service.getLatestStats('conn-a')?.peakConnections).toBe(3);
+      expect(service.getLatestStats('conn-a')?.peakTimestamp).toBe(now - 30 * HOUR);
+    });
   });
 
   it('serves range queries from rollups and clears state on removal', async () => {

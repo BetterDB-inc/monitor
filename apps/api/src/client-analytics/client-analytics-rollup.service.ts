@@ -203,7 +203,14 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
       );
       if (this.states.get(id) !== state) return;
       const latest = mergeRollupsIntoStats(rows);
-      if (retentionPeak && retentionPeak.peak > latest.peakConnections) {
+      // Same tie rule as the merge and the adapters: an equal peak goes to
+      // the earliest capture, which the retention read may hold.
+      if (
+        retentionPeak &&
+        (retentionPeak.peak > latest.peakConnections ||
+          (retentionPeak.peak === latest.peakConnections &&
+            retentionPeak.capturedAt < latest.peakTimestamp))
+      ) {
         latest.peakConnections = retentionPeak.peak;
         latest.peakTimestamp = retentionPeak.capturedAt;
       }

@@ -51,7 +51,7 @@ All custom metrics are prefixed with `betterdb_`. Standard Node.js process metri
 Sentinel connections are not polled for INFO series (the keyspace and INFO pollers skip them), so a Sentinel seed has no `betterdb_*` series of its own in the scrape. The data nodes it auto-registers are exported like any other connection. See [Sentinel auto-registration](sentinel-auto-registration.md).
 
 **Scrape Interval**: Recommended 15s
-**Metrics Update**: Metrics are computed on-demand during each scrape
+**Metrics Update**: `INFO`-based metrics are refreshed by a background poller every `PROMETHEUS_POLL_INTERVAL_MS` (a scrape older than that triggers one bounded refresh); ACL audit and client analytics gauges are served from in-memory values maintained by their own collectors, never computed during a scrape
 
 ## Export Profiles
 

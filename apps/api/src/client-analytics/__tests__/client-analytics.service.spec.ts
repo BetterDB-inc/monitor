@@ -71,6 +71,12 @@ describe('ClientAnalyticsService', () => {
       expect(rollup.getStatsForRange).toHaveBeenCalledWith(NOW - RAW_MAX - 1, NOW, 'c1');
     });
 
+    it('serves a short span without a connection from rollups, never the raw cross-connection fold', async () => {
+      await expect(service.getStats(NOW - HOUR, NOW, undefined)).resolves.toBe(ranged);
+      expect(rollup.getStatsForRange).toHaveBeenLastCalledWith(NOW - HOUR, NOW, undefined);
+      expect(storage.getClientAnalyticsStats).not.toHaveBeenCalled();
+    });
+
     it('fills a missing bound from now and the window', async () => {
       await service.getStats(NOW - HOUR, undefined, 'c1');
       expect(storage.getClientAnalyticsStats).toHaveBeenLastCalledWith(NOW - HOUR, NOW, 'c1');
