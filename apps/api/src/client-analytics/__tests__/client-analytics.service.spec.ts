@@ -23,6 +23,7 @@ describe('ClientAnalyticsService', () => {
     let rollup: {
       getLatestStats: jest.Mock;
       getStatsForRange: jest.Mock;
+      getWindowStatsWithRetentionPeak: jest.Mock;
       getLatestStatsAllConnections: jest.Mock;
       getWindowMs: jest.Mock;
     };
@@ -31,6 +32,7 @@ describe('ClientAnalyticsService', () => {
     const ranged = { currentConnections: 2 } as never;
     const raw = { currentConnections: 3 } as never;
     const allLatest = { currentConnections: 4 } as never;
+    const windowed = { currentConnections: 5 } as never;
 
     beforeEach(() => {
       jest.useFakeTimers({ now: NOW });
@@ -41,6 +43,7 @@ describe('ClientAnalyticsService', () => {
       rollup = {
         getLatestStats: jest.fn().mockReturnValue(latest),
         getStatsForRange: jest.fn().mockResolvedValue(ranged),
+        getWindowStatsWithRetentionPeak: jest.fn().mockResolvedValue(windowed),
         getLatestStatsAllConnections: jest.fn().mockResolvedValue(allLatest),
         getWindowMs: jest.fn().mockReturnValue(WINDOW),
       };
@@ -62,10 +65,11 @@ describe('ClientAnalyticsService', () => {
       expect(storage.getClientAnalyticsStats).not.toHaveBeenCalled();
     });
 
-    it('falls back to a rollup range when no latest exists for the connection', async () => {
+    it('falls back to the window with the retention peak when no latest exists for the connection', async () => {
       rollup.getLatestStats.mockReturnValue(null);
-      await expect(service.getStats(undefined, undefined, 'c1')).resolves.toBe(ranged);
-      expect(rollup.getStatsForRange).toHaveBeenLastCalledWith(NOW - WINDOW, NOW, 'c1');
+      await expect(service.getStats(undefined, undefined, 'c1')).resolves.toBe(windowed);
+      expect(rollup.getWindowStatsWithRetentionPeak).toHaveBeenCalledWith('c1');
+      expect(rollup.getStatsForRange).not.toHaveBeenCalled();
       expect(rollup.getLatestStatsAllConnections).not.toHaveBeenCalled();
       expect(storage.getClientAnalyticsStats).not.toHaveBeenCalled();
     });

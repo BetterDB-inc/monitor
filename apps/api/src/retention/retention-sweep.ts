@@ -1,4 +1,5 @@
 import { Logger } from '@nestjs/common';
+import { clientRollupBucketStart } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 
 /**
@@ -26,8 +27,15 @@ export async function runRetentionSweep(
     // The rollup poller also trims rollups hourly to
     // CLIENT_ANALYTICS_ROLLUP_RETENTION_DAYS, but only for registered
     // connections; this reclaims rollups of removed connections and applies
-    // the general window when it is the shorter one. Compared to bucket_start.
-    { name: 'client_analytics_rollups', fn: () => storage.pruneOldClientAnalyticsRollups(cutoff) },
+    // the general window when it is the shorter one. Compared to bucket_start,
+    // so the cutoff is aligned down to its bucket: only buckets wholly before
+    // the cutoff go. Deleting the bucket that straddles it would drop the
+    // rollup while the raw snapshots captured after the cutoff survive (raw
+    // rows compare captured_at), and those are never re-folded.
+    {
+      name: 'client_analytics_rollups',
+      fn: () => storage.pruneOldClientAnalyticsRollups(clientRollupBucketStart(cutoff)),
+    },
     { name: 'anomaly_events', fn: () => storage.pruneOldAnomalyEvents(cutoff) },
     { name: 'correlated_groups', fn: () => storage.pruneOldCorrelatedGroups(cutoff) },
     { name: 'key_patterns', fn: () => storage.pruneOldKeyPatternSnapshots(cutoff) },

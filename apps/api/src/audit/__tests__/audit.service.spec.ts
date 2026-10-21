@@ -148,23 +148,60 @@ describe('AuditService', () => {
           client: { getCapabilities: () => ({ hasAclLog }), getAclLog: aclLog } as never,
         });
 
-      it.each([
+      const disablers: Array<[string, () => void]> = [
         ['the runtime tracker marks ACL LOG unavailable', () => isAvailable.mockReturnValue(false)],
         ['the server has no ACL LOG', () => (hasAclLog = false)],
-      ])('fills the cache once but skips due refreshes when %s', async (_label, disable) => {
-        disable();
-        await gatedPoll();
-        expect(cache.get('c1')).toEqual(stats);
-        expect(storage.getAuditStats).toHaveBeenCalledTimes(1);
-        expect(aclLog).not.toHaveBeenCalled();
+      ];
+      const empty = { totalEntries: 0, entriesByReason: {}, entriesByUser: {} };
 
-        for (let i = 1; i <= 3; i++) {
-          clock.mockReturnValue(now + i * AUDIT_STATS_PERIODIC_REFRESH_MS);
+      it.each(disablers)(
+        'fills the cache once but skips due refreshes with no stored rows when %s',
+        async (_label, disable) => {
+          disable();
+          storage.getAuditStats.mockResolvedValue(empty);
           await gatedPoll();
-        }
-        expect(storage.getAuditStats).toHaveBeenCalledTimes(1);
-        expect(cache.get('c1')).toEqual(stats);
-      });
+          expect(cache.get('c1')).toEqual(empty);
+          expect(storage.getAuditStats).toHaveBeenCalledTimes(1);
+          expect(aclLog).not.toHaveBeenCalled();
+
+          for (let i = 1; i <= 3; i++) {
+            clock.mockReturnValue(now + i * AUDIT_STATS_PERIODIC_REFRESH_MS);
+            await gatedPoll();
+          }
+          expect(storage.getAuditStats).toHaveBeenCalledTimes(1);
+          expect(cache.get('c1')).toEqual(empty);
+        },
+      );
+
+      it.each(disablers)(
+        'keeps refreshing when due while stored rows remain, even though %s',
+        async (_label, disable) => {
+          disable();
+          await gatedPoll();
+          expect(cache.get('c1')).toEqual(stats);
+          expect(storage.getAuditStats).toHaveBeenCalledTimes(1);
+
+          // Not yet due: no refresh.
+          clock.mockReturnValue(now + AUDIT_STATS_PERIODIC_REFRESH_MS - 1);
+          await gatedPoll();
+          expect(storage.getAuditStats).toHaveBeenCalledTimes(1);
+
+          // Due with rows cached: refresh, picking up the retention sweep's prune.
+          clock.mockReturnValue(now + AUDIT_STATS_PERIODIC_REFRESH_MS);
+          storage.getAuditStats.mockResolvedValue(empty);
+          await gatedPoll();
+          expect(storage.getAuditStats).toHaveBeenCalledTimes(2);
+          expect(cache.get('c1')).toEqual(empty);
+
+          // Every row pruned: no further refreshes.
+          for (let i = 2; i <= 4; i++) {
+            clock.mockReturnValue(now + i * AUDIT_STATS_PERIODIC_REFRESH_MS);
+            await gatedPoll();
+          }
+          expect(storage.getAuditStats).toHaveBeenCalledTimes(2);
+          expect(aclLog).not.toHaveBeenCalled();
+        },
+      );
 
       it('refreshes when due while ACL LOG is available', async () => {
         await gatedPoll();

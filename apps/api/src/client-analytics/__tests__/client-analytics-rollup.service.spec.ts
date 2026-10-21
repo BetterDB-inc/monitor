@@ -838,6 +838,146 @@ describe('ClientAnalyticsRollupService', () => {
       expect(service.getLatestStats('conn-a')?.peakConnections).toBe(3);
       expect(service.getLatestStats('conn-a')?.peakTimestamp).toBe(now - 30 * HOUR);
     });
+
+    describe('kept in state instead of re-queried', () => {
+      async function setup(env: Record<string, unknown> = {}) {
+        jest.useFakeTimers({ now });
+        const rawRows = [...history];
+        const fake = createFakeStorage(rawRows, { indexReady: false });
+        await fake.storage.upsertClientAnalyticsRollups(
+          foldGroupsIntoRollups('conn-a', groupsFromRaw(rawRows, 'conn-a'), new Map(), now),
+        );
+        const { service, poll } = createService(fake.storage, env);
+        const peakReads = () => fake.storage.getClientAnalyticsRollupPeak.mock.calls.length;
+        // The storage read the in-state peak must agree with (called after the counts are checked).
+        const oracle = (at: number) =>
+          fake.storage.getClientAnalyticsRollupPeak('conn-a', clientRollupBucketStart(at - service.config.rollupRetentionMs));
+        return { fake, service, poll, rawRows, peakReads, oracle };
+      }
+
+      it('reads the peak on init and after the first prune, then not on ordinary runs', async () => {
+        const { service, poll, peakReads, oracle } = await setup();
+        await poll();
+        // Init, then the run's (first) rollup prune.
+        expect(peakReads()).toBe(2);
+        expect(service['states'].get('conn-a')?.retentionPeak).toEqual({ peak: 12, capturedAt: oldAt });
+
+        for (let i = 1; i <= 3; i++) {
+          jest.setSystemTime(now + i * 15_000);
+          await poll();
+        }
+        expect(peakReads()).toBe(2);
+        const latest = service.getLatestStats('conn-a');
+        const expected = await oracle(now + 45_000);
+        expect([latest?.peakConnections, latest?.peakTimestamp]).toEqual([expected?.peak, expected?.capturedAt]);
+      });
+
+      it('raises the in-state peak from folded rows without querying it', async () => {
+        const { service, poll, rawRows, peakReads, oracle } = await setup();
+        await poll();
+        const reads = peakReads();
+
+        const burstAt = now + 10_000;
+        rawRows.push(...rowsAt(burstAt, 'api', 20));
+        jest.setSystemTime(now + 15_000);
+        await poll();
+        expect(peakReads()).toBe(reads);
+        expect(service['states'].get('conn-a')?.retentionPeak).toEqual({ peak: 20, capturedAt: burstAt });
+        const latest = service.getLatestStats('conn-a');
+        expect(latest?.peakConnections).toBe(20);
+        expect(latest?.peakTimestamp).toBe(burstAt);
+        expect(await oracle(now + 15_000)).toEqual({ peak: 20, capturedAt: burstAt });
+      });
+
+      it('re-reads the peak when the horizon passes its bucket and after the next hourly prune', async () => {
+        // Retention of 3 days + 30 minutes: the 12-client bucket survives the
+        // first prune, leaves the horizon ~33 minutes later and is removed by
+        // the prune an hour later.
+        const retentionDays = (3 * DAY + 30 * 60_000) / DAY;
+        const { service, poll, fake, peakReads, oracle } = await setup({
+          CLIENT_ANALYTICS_ROLLUP_RETENTION_DAYS: retentionDays,
+        });
+        await poll();
+        expect(service.getLatestStats('conn-a')?.peakConnections).toBe(12);
+        const reads = peakReads();
+
+        // The horizon passes the peak's bucket about 33 minutes in: re-read then (no prune yet).
+        jest.setSystemTime(now + 40 * 60_000);
+        await poll();
+        expect(fake.storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledTimes(1);
+        expect(peakReads()).toBe(reads + 1);
+        const afterHorizon = service.getLatestStats('conn-a');
+        const expectedAfterHorizon = await oracle(now + 40 * 60_000);
+        expect(expectedAfterHorizon).toEqual({ peak: 3, capturedAt: now - HOUR });
+        expect([afterHorizon?.peakConnections, afterHorizon?.peakTimestamp]).toEqual([3, now - HOUR]);
+
+        // The next hourly prune re-reads it again.
+        const beforePrune = peakReads();
+        jest.setSystemTime(now + HOUR);
+        await poll();
+        expect(fake.storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledTimes(2);
+        expect(peakReads()).toBe(beforePrune + 1);
+        const afterPrune = service.getLatestStats('conn-a');
+        const expectedAfterPrune = await oracle(now + HOUR);
+        expect([afterPrune?.peakConnections, afterPrune?.peakTimestamp]).toEqual([
+          expectedAfterPrune?.peak,
+          expectedAfterPrune?.capturedAt,
+        ]);
+      });
+
+      it('re-reads the peak when the horizon passes its bucket between prunes', async () => {
+        // A 3-day retention puts the 12-client bucket exactly at the horizon now.
+        const { service, poll, peakReads, oracle } = await setup({ CLIENT_ANALYTICS_ROLLUP_RETENTION_DAYS: 3 });
+        await poll();
+        expect(service.getLatestStats('conn-a')?.peakConnections).toBe(12);
+        const reads = peakReads();
+
+        jest.setSystemTime(now + BUCKET);
+        await poll();
+        expect(peakReads()).toBe(reads + 1);
+        const latest = service.getLatestStats('conn-a');
+        const expected = await oracle(now + BUCKET);
+        expect(expected).toEqual({ peak: 3, capturedAt: now - HOUR });
+        expect([latest?.peakConnections, latest?.peakTimestamp]).toEqual([3, now - HOUR]);
+      });
+    });
+
+    describe('getWindowStatsWithRetentionPeak', () => {
+      async function unpolled() {
+        jest.useFakeTimers({ now });
+        const fake = createFakeStorage(history, { indexReady: false });
+        await fake.storage.upsertClientAnalyticsRollups(
+          foldGroupsIntoRollups('conn-a', groupsFromRaw(history, 'conn-a'), new Map(), now),
+        );
+        return { fake, ...createService(fake.storage) };
+      }
+
+      it('applies the retention peak before the first run, matching what that run then reports', async () => {
+        const { service, poll, fake } = await unpolled();
+        const before = await service.getWindowStatsWithRetentionPeak('conn-a');
+        expect(service.getLatestStats('conn-a')).toBeNull();
+        expect(before.peakConnections).toBe(12);
+        expect(before.peakTimestamp).toBe(oldAt);
+        expect(fake.storage.getClientAnalyticsRollupPeak).toHaveBeenCalledWith(
+          'conn-a',
+          clientRollupBucketStart(now - 90 * DAY),
+        );
+        // The range read alone would report the window-scoped peak.
+        expect((await service.getStatsForRange(now - 24 * HOUR, now, 'conn-a')).peakConnections).toBe(3);
+
+        await poll();
+        expect(service.getLatestStats('conn-a')).toEqual(before);
+      });
+
+      it('uses the in-state peak once the state holds one', async () => {
+        const { service, poll, fake } = await unpolled();
+        await poll();
+        const reads = fake.storage.getClientAnalyticsRollupPeak.mock.calls.length;
+        const stats = await service.getWindowStatsWithRetentionPeak('conn-a');
+        expect(fake.storage.getClientAnalyticsRollupPeak.mock.calls.length).toBe(reads);
+        expect([stats.peakConnections, stats.peakTimestamp]).toEqual([12, oldAt]);
+      });
+    });
   });
 
   it('serves range queries from rollups and clears state on removal', async () => {

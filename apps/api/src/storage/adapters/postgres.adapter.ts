@@ -137,7 +137,16 @@ const PG_CLIENT_IP_EXPR = "regexp_replace(addr, ':[0-9]+$', '')";
 export interface PostgresAdapterConfig {
   connectionString: string;
   schema?: string; // PostgreSQL schema for tenant isolation
+  /**
+   * How long the background analytics index build waits before re-checking
+   * when another session holds its advisory lock. Defaults to
+   * ANALYTICS_INDEX_LOCK_RETRY_MS; tests shorten it.
+   */
+  indexLockRetryMs?: number;
 }
+
+/** Default wait between re-checks while another session holds an analytics index build lock. */
+export const ANALYTICS_INDEX_LOCK_RETRY_MS = 30_000;
 
 type PgNumeric = string | number;
 type PgJsonb<T> = T | string;
@@ -258,6 +267,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
    */
   private indexBuildClient: Client | null = null;
   private indexBuild: Promise<void> | null = null;
+  /** Pending wait between lock re-checks in ensureAnalyticsIndexes; close() cuts it short. */
+  private indexRetryTimer: NodeJS.Timeout | null = null;
+  private indexRetryWake: (() => void) | null = null;
   private closing = false;
   private readonly mappers = new RowMappers(PostgresDialect);
   private webhookRepo!: WebhookPostgresRepository;
@@ -527,6 +539,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     // (pg destroys the socket when a query is active). An interrupted
     // CONCURRENTLY build leaves an INVALID index, which the next startup
     // drops and rebuilds (dropInvalidIndex).
+    if (this.indexRetryTimer) {
+      clearTimeout(this.indexRetryTimer);
+      this.indexRetryTimer = null;
+    }
+    const wake = this.indexRetryWake;
+    this.indexRetryWake = null;
+    wake?.();
     const buildClient = this.indexBuildClient;
     this.indexBuildClient = null;
     this.indexBuild = null;
@@ -1284,14 +1303,24 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) {
       return false;
     }
-    // Resolved through client_snapshots itself (search_path), so a per-tenant
-    // schema never reads another schema's index of the same name.
-    const result = await this.pool.query(
+    return this.isIndexValid(this.pool, 'idx_client_connection_captured', 'client_snapshots');
+  }
+
+  /** Whether `indexName` exists on `tableName` and is VALID (a usable, finished build). */
+  private async isIndexValid(
+    queryable: Pick<ClientBase, 'query'>,
+    indexName: string,
+    tableName: string,
+  ): Promise<boolean> {
+    // Resolved through the table itself (search_path), so a per-tenant schema
+    // never reads another schema's index of the same name.
+    const result = await queryable.query(
       `SELECT i.indisvalid AS valid
          FROM pg_index i
          JOIN pg_class c ON c.oid = i.indexrelid
-        WHERE i.indrelid = 'client_snapshots'::regclass
-          AND c.relname = 'idx_client_connection_captured'`,
+        WHERE i.indrelid = $1::regclass
+          AND c.relname = $2`,
+      [tableName, indexName],
     );
     return result.rows[0]?.valid === true;
   }
@@ -4650,6 +4679,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
    * initialize(): on a multi-million-row table the build takes minutes, and
    * CONCURRENTLY keeps writers flowing while it runs. Until it completes,
    * isClientSnapshotIndexReady() reports false.
+   *
+   * When another session holds an index's build lock this does not give up:
+   * during a rolling update that holder may be an old pod terminated
+   * mid-build, leaving the index INVALID with nobody left to rebuild it. So
+   * it waits (indexLockRetryMs), then finishes if the index has turned valid
+   * and otherwise tries the lock again, until it builds the index or close()
+   * is called.
    */
   private async ensureAnalyticsIndexes(): Promise<void> {
     const indexes: Array<[string, string, string]> = [
@@ -4669,11 +4705,25 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       for (const [indexName, tableName, columns] of indexes) {
         const started = Date.now();
         console.log(`Ensuring index ${indexName} on ${tableName}(${columns})`);
-        const built = await this.ensureIndexConcurrently(client, indexName, tableName, columns);
-        if (built) {
-          console.log(`Index ${indexName} ready after ${Date.now() - started}ms`);
-        } else {
-          console.log(`Index ${indexName} is being built by another instance; skipped`);
+        let waiting = false;
+        for (;;) {
+          if (this.closing) return;
+          if (await this.ensureIndexConcurrently(client, indexName, tableName, columns)) {
+            console.log(`Index ${indexName} ready after ${Date.now() - started}ms`);
+            break;
+          }
+          if (!waiting) {
+            waiting = true;
+            console.log(
+              `Index ${indexName} is being built by another instance; re-checking every ${this.indexLockRetryMs()}ms`,
+            );
+          }
+          await this.waitForIndexLockRetry();
+          if (this.closing) return;
+          if (await this.isIndexValid(client, indexName, tableName)) {
+            console.log(`Index ${indexName} was built by another instance; ready after ${Date.now() - started}ms`);
+            break;
+          }
         }
       }
     } finally {
@@ -4699,7 +4749,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
    * scans. So an invalid index is dropped before each build. An index that is
    * still being built concurrently also reads as invalid, so only one replica
    * per schema builds at a time (session advisory lock); a replica that finds
-   * the lock held skips, since the holder is building the index.
+   * the lock held returns false, and its caller decides whether to wait and
+   * retry (ensureAnalyticsIndexes) or skip (ensureOtelIngestedIndex).
    *
    * Identifiers are trusted constants from this file, never user input.
    * Runs on the caller's connection (the session advisory lock is bound to
@@ -4746,6 +4797,26 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       if (!this.closing) await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
     }
     return true;
+  }
+
+  private indexLockRetryMs(): number {
+    return this.config.indexLockRetryMs ?? ANALYTICS_INDEX_LOCK_RETRY_MS;
+  }
+
+  /** Sleep indexLockRetryMs, resolving early when close() is called. */
+  private waitForIndexLockRetry(): Promise<void> {
+    if (this.closing) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = () => {
+        if (this.indexRetryTimer) clearTimeout(this.indexRetryTimer);
+        this.indexRetryTimer = null;
+        this.indexRetryWake = null;
+        resolve();
+      };
+      this.indexRetryWake = done;
+      this.indexRetryTimer = setTimeout(done, this.indexLockRetryMs());
+      this.indexRetryTimer.unref?.();
+    });
   }
 
   /** Drop `indexName` on `tableName` if it exists but is INVALID (see ensureIndexConcurrently). */

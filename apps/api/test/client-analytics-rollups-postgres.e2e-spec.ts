@@ -206,6 +206,78 @@ describePostgres('client analytics rollups — postgres', () => {
         await adminPool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
       }
     });
+
+    describe('when another session holds the build lock', () => {
+      const RETRY_MS = 200;
+
+      /** A schema whose snapshot index is missing, plus a client holding that index's build lock. */
+      async function lockedSchema(suffix: string): Promise<{ schema: string; holder: Client; unlock: () => Promise<void> }> {
+        const schema = `${SCHEMA}_${suffix}`;
+        const setup = new PostgresAdapter({ connectionString: DSN, schema });
+        await setup.initialize();
+        expect(await waitFor(() => setup.isClientSnapshotIndexReady())).toBe(true);
+        await setup.close();
+        await adminPool.query(`DROP INDEX ${schema}.idx_client_connection_captured`);
+
+        // Same key as ensureIndexConcurrently: the index name and this schema's table oid.
+        const holder = new Client({ connectionString: DSN });
+        await holder.connect();
+        const lock = await holder.query(
+          `SELECT key, pg_try_advisory_lock(key) AS locked FROM (
+             SELECT hashtext($1::text || $2::regclass::oid) AS key
+           ) k`,
+          ['betterdb.idx_client_connection_captured:', `${schema}.client_snapshots`],
+        );
+        expect(lock.rows[0].locked).toBe(true);
+        const key: number = lock.rows[0].key;
+        return {
+          schema,
+          holder,
+          unlock: async () => {
+            await holder.query('SELECT pg_advisory_unlock($1)', [key]);
+          },
+        };
+      }
+
+      it('waits for the lock, then builds the index once it is released', async () => {
+        const { schema, holder, unlock } = await lockedSchema('lockwait');
+        const adapter = new PostgresAdapter({ connectionString: DSN, schema, indexLockRetryMs: RETRY_MS });
+        try {
+          await adapter.initialize();
+          // Several retry intervals pass without the index appearing while the lock is held.
+          await new Promise((resolve) => setTimeout(resolve, RETRY_MS * 4));
+          expect(await adapter.isClientSnapshotIndexReady()).toBe(false);
+
+          await unlock();
+          expect(await waitFor(() => adapter.isClientSnapshotIndexReady())).toBe(true);
+          await expect(adapter['indexBuild'] as Promise<void>).resolves.toBeUndefined();
+        } finally {
+          await adapter.close();
+          await holder.end();
+          await adminPool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+        }
+      });
+
+      it('stops waiting promptly when close() is called', async () => {
+        const { schema, holder } = await lockedSchema('lockclose');
+        // A long interval: close() must cut the wait short rather than sit it out.
+        const adapter = new PostgresAdapter({ connectionString: DSN, schema, indexLockRetryMs: 60_000 });
+        try {
+          await adapter.initialize();
+          expect(await waitFor(async () => adapter['indexRetryTimer'] !== null)).toBe(true);
+          const build = adapter['indexBuild'] as Promise<void>;
+
+          const started = Date.now();
+          await adapter.close();
+          await expect(build).resolves.toBeUndefined();
+          expect(Date.now() - started).toBeLessThan(5_000);
+          expect(adapter['indexRetryTimer']).toBeNull();
+        } finally {
+          await holder.end();
+          await adminPool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+        }
+      });
+    });
   });
 
   describe('identity with the memory adapter', () => {

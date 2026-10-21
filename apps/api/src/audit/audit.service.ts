@@ -68,9 +68,11 @@ export class AuditService extends MultiConnectionPoller implements OnModuleInit 
     // off the scrape path. Refresh after every save, once up front so a
     // connection with no new denials still exports its totals (stored earlier,
     // even if ACL LOG is unavailable now), and periodically so rows removed by
-    // the retention sweep stop being counted. The periodic refresh only runs
-    // while ACL LOG is available: without it no rows are written, so the
-    // aggregate would be re-read every interval for nothing. The stored totals
+    // the retention sweep stop being counted. The periodic refresh runs while
+    // ACL LOG is available, or while the cached totals still count stored rows
+    // (totalEntries > 0): those rows can be pruned even after ACL LOG went away,
+    // and the export must drop them. A connection with no stored rows and no
+    // ACL LOG is refreshed only once, since nothing could change. The stored totals
     // do not depend on ACL LOG succeeding, so the due refresh also runs when
     // the poll throws (the error is still rethrown).
     let saved = false;
@@ -86,7 +88,9 @@ export class AuditService extends MultiConnectionPoller implements OnModuleInit 
   private isStatsCacheDue(ctx: ConnectionContext): boolean {
     const refreshedAt = this.auditStatsCache?.getRefreshedAt(ctx.connectionId) ?? null;
     if (refreshedAt === null) return true;
-    return Date.now() - refreshedAt >= AUDIT_STATS_PERIODIC_REFRESH_MS && this.canPollAclLog(ctx);
+    if (Date.now() - refreshedAt < AUDIT_STATS_PERIODIC_REFRESH_MS) return false;
+    if (this.canPollAclLog(ctx)) return true;
+    return (this.auditStatsCache?.get(ctx.connectionId)?.totalEntries ?? 0) > 0;
   }
 
   /** Whether ACL LOG can be read for this connection; pollAclLog skips the poll when it cannot. */

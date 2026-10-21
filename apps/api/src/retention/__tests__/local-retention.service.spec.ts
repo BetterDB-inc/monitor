@@ -1,3 +1,5 @@
+import { Logger } from '@nestjs/common';
+import { clientRollupBucketStart } from '@betterdb/shared';
 import { LocalRetentionService } from '../local-retention.service';
 import { MS_PER_DAY } from '../retention-policy.service';
 import { runRetentionSweep } from '../retention-sweep';
@@ -68,7 +70,10 @@ describe('LocalRetentionService', () => {
     const expectedCutoff = NOW - 30 * MS_PER_DAY;
     for (const method of Object.keys(storage)) {
       expect(storage[method]).toHaveBeenCalledTimes(1);
-      expect(storage[method]).toHaveBeenCalledWith(expectedCutoff);
+      // Rollups compare bucket_start: the cutoff is aligned down to its bucket.
+      expect(storage[method]).toHaveBeenCalledWith(
+        method === 'pruneOldClientAnalyticsRollups' ? clientRollupBucketStart(expectedCutoff) : expectedCutoff,
+      );
     }
   });
 
@@ -83,8 +88,22 @@ describe('LocalRetentionService', () => {
     storage.pruneOldClientAnalyticsRollups.mockResolvedValue(4);
     const results = await runRetentionSweep(storage, 5_678, { error: jest.fn() } as any);
 
-    expect(storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledWith(5_678);
+    // 5_678 lies inside the first bucket: nothing wholly before it, so bucket 0 survives.
+    expect(storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledWith(0);
     expect(results.client_analytics_rollups).toBe(4);
+  });
+
+  it('keeps the rollup bucket that straddles the cutoff, whose later raw rows survive the raw prune', async () => {
+    const bucketStart = clientRollupBucketStart(NOW);
+    const cutoff = bucketStart + 120_000;
+    const logger = { error: jest.fn() } as unknown as Logger;
+    await runRetentionSweep(storage, cutoff, logger);
+
+    expect(storage.pruneOldClientSnapshots).toHaveBeenCalledWith(cutoff);
+    expect(storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledWith(bucketStart);
+    // An aligned cutoff passes through unchanged.
+    await runRetentionSweep(storage, bucketStart, logger);
+    expect(storage.pruneOldClientAnalyticsRollups).toHaveBeenLastCalledWith(bucketStart);
   });
 
   it('does nothing in cloud mode even when a window is configured', async () => {

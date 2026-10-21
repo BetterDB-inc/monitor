@@ -51,6 +51,12 @@ export interface ClientAnalyticsRollupConfig extends ClientAnalyticsRollupTuning
   rawRetentionMs: number | null;
 }
 
+/** A headline peak: the largest batch and when it was captured. */
+interface PeakPoint {
+  peak: number;
+  capturedAt: number;
+}
+
 interface ConnectionRollupState {
   /**
    * Newest captured_at folded into the rollups. Null only for a passive state
@@ -82,6 +88,18 @@ interface ConnectionRollupState {
   backfillStartedAt: number;
   backfillRowsFolded: number;
   lastRetentionAt: number;
+  /**
+   * Peak over the whole rollup retention (bucket_start >= the horizon), kept
+   * in memory instead of re-queried on every recompute: read from storage
+   * when the state is first polled, after each rollup prune, and when the
+   * horizon passes the peak's bucket; raised in between from the rows each
+   * fold writes. Null with no rollup in the retention.
+   */
+  retentionPeak: PeakPoint | null;
+  /** False until retentionPeak has been read from storage. */
+  retentionPeakLoaded: boolean;
+  /** The window merge's own peak, kept so a new retentionPeak can be re-applied without re-reading the window. */
+  windowPeak: PeakPoint | null;
 }
 
 export function readClientAnalyticsRollupConfig(
@@ -211,6 +229,34 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
   }
 
   /**
+   * Stats over the configured window for one connection with the headline
+   * peak taken over the whole rollup retention, as getLatestStats reports
+   * them: the fallback before the aggregator's first run for the connection,
+   * so the same request does not change its peak once that run completes.
+   * Reads the retention peak from the connection's state when it holds a
+   * current one, else from storage.
+   */
+  async getWindowStatsWithRetentionPeak(connectionId: string): Promise<ClientAnalyticsStats> {
+    const now = Date.now();
+    const horizon = this.retentionHorizon(now);
+    const stats = await this.getStatsForRange(now - this.config.windowMs, now, connectionId);
+    const state = this.states.get(connectionId);
+    const peak =
+      state && state.retentionPeakLoaded && !peakBeforeHorizon(state.retentionPeak, horizon)
+        ? state.retentionPeak
+        : await this.timed('getClientAnalyticsRollupPeak', connectionId, () =>
+            this.storage.getClientAnalyticsRollupPeak(connectionId, horizon),
+          );
+    applyPeak(stats, betterPeak({ peak: stats.peakConnections, capturedAt: stats.peakTimestamp }, peak));
+    return stats;
+  }
+
+  /** First bucket inside the rollup retention; older buckets are pruned. */
+  private retentionHorizon(now: number): number {
+    return clientRollupBucketStart(now - this.config.rollupRetentionMs);
+  }
+
+  /**
    * A connection counts toward cross-connection `current` if its newest batch
    * is within max(one bucket, two poll intervals) of the newest batch overall:
    * with a poll interval of 5 minutes or more, a fixed one-bucket cutoff would
@@ -242,15 +288,27 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
     const state = canFold ? await this.getOrInitState(id, now) : this.getOrCreatePassiveState(id);
     if (state === null || this.states.get(id) !== state) return;
 
+    // Read the retention peak on first use, and again once the horizon has
+    // passed the stored peak's bucket (that bucket no longer counts).
+    const horizon = this.retentionHorizon(now);
+    let peakChanged = false;
+    if (!state.retentionPeakLoaded || peakBeforeHorizon(state.retentionPeak, horizon)) {
+      peakChanged = await this.loadRetentionPeak(id, state, horizon);
+      if (this.states.get(id) !== state) return;
+    }
+
     const windowStartBucket = clientRollupBucketStart(now - this.config.windowMs);
     let windowChanged = false;
     if (canFold) {
+      const peakBeforeFold = state.retentionPeak;
       const folded = await this.runIncremental(id, state, now);
       windowChanged = folded;
       if (await this.runBackfill(id, state, now, windowStartBucket, folded)) {
         windowChanged = true;
       }
       if (this.states.get(id) !== state) return;
+      // A backfilled bucket outside the window can still raise the retention peak.
+      if (!samePeak(peakBeforeFold, state.retentionPeak)) peakChanged = true;
     }
 
     let recomputed = false;
@@ -258,33 +316,24 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
       const rows = await this.timed('getClientAnalyticsRollups', id, () =>
         this.storage.getClientAnalyticsRollups(windowStartBucket, clientRollupBucketStart(now), id),
       );
-      // Headline peak over the whole rollup retention: one primary-key range
-      // read of two numeric columns, unlike merging 90 days of per-group JSON.
-      // Per-name / per-user / per-pair peaks stay window-scoped.
-      const retentionPeak = await this.timed('getClientAnalyticsRollupPeak', id, () =>
-        this.storage.getClientAnalyticsRollupPeak(id, clientRollupBucketStart(now - this.config.rollupRetentionMs)),
-      );
       if (this.states.get(id) !== state) return;
       // An empty window merges to zero counts.
       const latest = mergeRollupsIntoStats(rows, { currentCutoffMs: this.currentCutoffMs() });
-      // Same tie rule as the merge and the adapters: an equal peak goes to
-      // the earliest capture, which the retention read may hold.
-      if (
-        retentionPeak &&
-        (retentionPeak.peak > latest.peakConnections ||
-          (retentionPeak.peak === latest.peakConnections &&
-            retentionPeak.capturedAt < latest.peakTimestamp))
-      ) {
-        latest.peakConnections = retentionPeak.peak;
-        latest.peakTimestamp = retentionPeak.capturedAt;
-      }
+      state.windowPeak = { peak: latest.peakConnections, capturedAt: latest.peakTimestamp };
       state.latest = latest;
       state.computedAt = now;
       state.lastWindowStartBucket = windowStartBucket;
       recomputed = true;
     }
+    // Headline peak over the whole rollup retention, from state (see
+    // retentionPeak); per-name / per-user / per-pair peaks stay window-scoped.
+    if (recomputed || peakChanged) this.applyRetentionPeak(state);
 
-    await this.runRetention(id, state, now);
+    if (await this.runRetention(id, state, now)) {
+      // The prune may have removed the bucket holding the peak.
+      if (this.states.get(id) !== state) return;
+      if (await this.loadRetentionPeak(id, state, horizon)) this.applyRetentionPeak(state);
+    }
     const elapsedMs = Date.now() - now;
     this.logger.debug(
       `Rollup run for ${id} took ${elapsedMs}ms (changed=${windowChanged}, recomputed=${recomputed}, ` +
@@ -312,7 +361,47 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
       backfillStartedAt: 0,
       backfillRowsFolded: 0,
       lastRetentionAt: 0,
+      retentionPeak: null,
+      retentionPeakLoaded: false,
+      windowPeak: null,
     };
+  }
+
+  /** Read the retention peak from storage into state. Returns true when it changed. */
+  private async loadRetentionPeak(id: string, state: ConnectionRollupState, horizon: number): Promise<boolean> {
+    // One primary-key range read of two numeric columns, unlike merging the
+    // whole retention's per-group JSON.
+    const peak = await this.timed('getClientAnalyticsRollupPeak', id, () =>
+      this.storage.getClientAnalyticsRollupPeak(id, horizon),
+    );
+    const changed = !state.retentionPeakLoaded || !samePeak(state.retentionPeak, peak);
+    state.retentionPeak = peak;
+    state.retentionPeakLoaded = true;
+    return changed;
+  }
+
+  /**
+   * Raise the in-state retention peak from rows just written. Rows before the
+   * horizon do not count (the storage read excludes them). Returns true when
+   * the peak changed.
+   */
+  private foldRetentionPeak(state: ConnectionRollupState, rows: ClientAnalyticsRollup[], now: number): boolean {
+    if (!state.retentionPeakLoaded) return false;
+    const horizon = this.retentionHorizon(now);
+    let peak = state.retentionPeak;
+    for (const row of rows) {
+      if (row.bucketStart < horizon) continue;
+      peak = betterPeak(peak, { peak: row.peakConnections, capturedAt: row.peakCapturedAt });
+    }
+    if (samePeak(peak, state.retentionPeak)) return false;
+    state.retentionPeak = peak;
+    return true;
+  }
+
+  /** Put the larger of the window's own peak and the retention peak into latest. */
+  private applyRetentionPeak(state: ConnectionRollupState): void {
+    if (!state.latest || !state.windowPeak) return;
+    applyPeak(state.latest, betterPeak(state.windowPeak, state.retentionPeak));
   }
 
   /**
@@ -395,6 +484,7 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
         const updated = foldGroupsIntoRollups(id, groups, byBucket(existingRows), now);
         if (updated.length > 0) {
           await this.timed('upsertClientAnalyticsRollups', id, () => this.storage.upsertClientAnalyticsRollups(updated));
+          this.foldRetentionPeak(state, updated, now);
           changed = true;
         }
         state.watermark = Math.max(state.watermark ?? last, last);
@@ -511,6 +601,7 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
         const rows = foldGroupsIntoRollups(id, groups, new Map(), now);
         if (rows.length > 0) {
           await this.timed('upsertClientAnalyticsRollups', id, () => this.storage.upsertClientAnalyticsRollups(rows));
+          this.foldRetentionPeak(state, rows, now);
           if (rows.some((r) => r.bucketStart >= windowStartBucket)) touchedWindow = true;
         }
         state.backfillRowsFolded += groups.reduce((sum, g) => sum + g.count, 0);
@@ -543,10 +634,11 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
     );
   }
 
-  private async runRetention(id: string, state: ConnectionRollupState, now: number): Promise<void> {
-    if (now - state.lastRetentionAt < RETENTION_INTERVAL_MS) return;
+  /** Returns true when the rollup prune ran (the caller re-reads the retention peak). */
+  private async runRetention(id: string, state: ConnectionRollupState, now: number): Promise<boolean> {
+    if (now - state.lastRetentionAt < RETENTION_INTERVAL_MS) return false;
     state.lastRetentionAt = now;
-    const rollupCutoff = clientRollupBucketStart(now - this.config.rollupRetentionMs);
+    const rollupCutoff = this.retentionHorizon(now);
     await this.timed('pruneOldClientAnalyticsRollups', id, () =>
       this.storage.pruneOldClientAnalyticsRollups(rollupCutoff, id),
     );
@@ -556,11 +648,40 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
       const rawCutoff = now - this.config.rawRetentionMs;
       await this.timed('pruneOldClientSnapshots', id, () => this.storage.pruneOldClientSnapshots(rawCutoff, id));
     }
+    return true;
   }
 
   private timed<T>(name: string, connectionId: string, fn: () => Promise<T>): Promise<T> {
     return this.budget.time(name, connectionId, fn);
   }
+}
+
+/** Same tie rule as the merge and the adapters: the larger peak, an equal one going to the earliest capture. */
+function betterPeak(current: PeakPoint | null, candidate: PeakPoint | null): PeakPoint | null {
+  if (!candidate) return current;
+  if (
+    !current ||
+    candidate.peak > current.peak ||
+    (candidate.peak === current.peak && candidate.capturedAt < current.capturedAt)
+  ) {
+    return candidate;
+  }
+  return current;
+}
+
+function samePeak(a: PeakPoint | null, b: PeakPoint | null): boolean {
+  return a === b || (a !== null && b !== null && a.peak === b.peak && a.capturedAt === b.capturedAt);
+}
+
+/** Whether the peak's bucket has fallen before the retention horizon (the storage read no longer covers it). */
+function peakBeforeHorizon(peak: PeakPoint | null, horizon: number): boolean {
+  return peak !== null && clientRollupBucketStart(peak.capturedAt) < horizon;
+}
+
+function applyPeak(stats: ClientAnalyticsStats, peak: PeakPoint | null): void {
+  if (!peak) return;
+  stats.peakConnections = peak.peak;
+  stats.peakTimestamp = peak.capturedAt;
 }
 
 function byBucket(rows: ClientAnalyticsRollup[]): Map<number, ClientAnalyticsRollup> {

@@ -136,8 +136,9 @@ export class ClientAnalyticsService extends MultiConnectionPoller implements OnM
       if (connectionId) {
         const latest = this.rollupService.getLatestStats(connectionId);
         if (latest) return latest;
-        const now = Date.now();
-        return this.rollupService.getStatsForRange(now - windowMs, now, connectionId);
+        // Before the first aggregator run: same window and retention-wide peak as
+        // getLatestStats will report, so the peak does not change once that run lands.
+        return this.rollupService.getWindowStatsWithRetentionPeak(connectionId);
       }
       return this.rollupService.getLatestStatsAllConnections();
     }
