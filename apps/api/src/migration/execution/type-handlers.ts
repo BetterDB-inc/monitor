@@ -2,6 +2,12 @@ import type Valkey from 'iovalkey';
 import { randomBytes } from 'crypto';
 import { execPipeline } from './pipeline-results';
 import { readStreamMeta, writeStreamMeta, type StreamMeta } from './stream-metadata';
+import {
+  applyFieldTtls,
+  createHashFieldTtlContext,
+  readFieldTtls,
+  type HashFieldTtlContext,
+} from './hash-field-ttl';
 
 // Threshold above which we use cursor-based reads (HSCAN/SSCAN/ZSCAN) instead of bulk reads
 const LARGE_KEY_THRESHOLD = 10_000;
@@ -45,6 +51,11 @@ export interface MigratedKey {
   warning?: string;
 }
 
+export interface MigrateKeyOptions {
+  /** Shared across a run so HFE support is probed once. A fresh one is created when omitted. */
+  hashFieldTtl?: HashFieldTtlContext;
+}
+
 /**
  * Migrate a single key from source to target using type-specific commands.
  * Returns success/failure per key. Never throws — errors are captured in the result.
@@ -54,6 +65,7 @@ export async function migrateKey(
   target: Valkey,
   key: string,
   type: string,
+  opts: MigrateKeyOptions = {},
 ): Promise<MigratedKey> {
   try {
     let wrote: boolean;
@@ -64,7 +76,7 @@ export async function migrateKey(
         wrote = await migrateString(source, target, key);
         break;
       case 'hash':
-        wrote = await migrateHash(source, target, key);
+        wrote = await migrateHash(source, target, key, opts.hashFieldTtl ?? createHashFieldTtlContext());
         break;
       case 'list':
         wrote = await migrateList(source, target, key);
@@ -84,6 +96,7 @@ export async function migrateKey(
     // TTL is handled atomically in each handler:
     // - String: SET PX
     // - Compound types: Lua RENAME+PEXPIRE via atomicRenameWithTtl
+    // - Hash: per-field TTLs are re-applied on the temp key before the RENAME (see hash-field-ttl.ts)
     const result: MigratedKey = { key, type, ok: true };
     if (warning) result.warning = warning;
 
@@ -129,7 +142,12 @@ async function migrateString(source: Valkey, target: Valkey, key: string): Promi
 
 // ── Hash ──
 
-async function migrateHash(source: Valkey, target: Valkey, key: string): Promise<boolean> {
+async function migrateHash(
+  source: Valkey,
+  target: Valkey,
+  key: string,
+  hfe: HashFieldTtlContext,
+): Promise<boolean> {
   const len = await source.hlen(key);
   if (len === 0) return false;
 
@@ -142,16 +160,26 @@ async function migrateHash(source: Valkey, target: Valkey, key: string): Promise
 
     // Use HSCAN for all sizes so binary field names are preserved as Buffers
     let cursor = '0';
+    let removedFields = false;
     do {
       const [next, fields] = await source.hscanBuffer(key, cursor, 'COUNT', SCAN_BATCH);
       cursor = String(next);
       if (fields.length === 0) continue;
       const args: (string | Buffer | number)[] = [writeKey];
+      const names: Buffer[] = [];
       for (let i = 0; i < fields.length; i += 2) {
         args.push(fields[i], fields[i + 1]);
+        names.push(fields[i]);
       }
       await target.call('HSET', ...args);
+      const ttls = await readFieldTtls(source, key, names, hfe);
+      if (ttls) {
+        if (ttls.includes(-2)) removedFields = true;
+        await applyFieldTtls(target, writeKey, names, ttls, hfe);
+      }
     } while (cursor !== '0');
+    // Fields that expired mid-copy were HDEL'd; if none are left the write key is gone.
+    if (removedFields && (await target.exists(writeKey)) === 0) return false;
     const pttl = await source.pttl(key);
     if (tmp) {
       await atomicRenameWithTtl(target, tmp, key, pttl);

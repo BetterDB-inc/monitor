@@ -2,6 +2,7 @@ import Valkey from 'iovalkey';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import type { ExecutionJob } from './execution-job';
 import { migrateKey } from './type-handlers';
+import { createHashFieldTtlContext } from './hash-field-ttl';
 import { createClient, createTargetClient } from './client-factory';
 
 const SCAN_COUNT = 500;
@@ -25,6 +26,7 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
   const { sourceConfig, targetConfig, sourceIsCluster, targetIsCluster, job, maxLogLines } = opts;
   const sourceClients: Valkey[] = [];
   const targetClient = createTargetClient(targetConfig, 'BetterDB-Migration-Target', targetIsCluster);
+  const hashFieldTtl = createHashFieldTtlContext();
 
   try {
     await targetClient.connect();
@@ -119,7 +121,7 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
             }
 
             batchPromises.push(
-              migrateKey(sourceClient, targetClient, key, type).then(result => {
+              migrateKey(sourceClient, targetClient, key, type, { hashFieldTtl }).then(result => {
                 if (result.ok) {
                   job.keysTransferred++;
                   if (result.warning) {
@@ -149,6 +151,14 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
     }
 
     job.progress = 100;
+    if (hashFieldTtl.fieldsWithTtl > 0) {
+      log(job, maxLogLines, `Hash field TTLs preserved on ${hashFieldTtl.fieldsWithTtl.toLocaleString()} field(s)`);
+    }
+    if (hashFieldTtl.source === 'denied') {
+      job.notices.push(
+        'Hash field TTLs were not copied: the source user may not run HPTTL (NOPERM). Allow +hpttl to preserve per-field expiry.',
+      );
+    }
     log(job, maxLogLines,
       `Migration complete: ${job.keysTransferred.toLocaleString()} transferred, ${keysSkipped} skipped out of ${totalKeys.toLocaleString()} total`);
 

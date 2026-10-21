@@ -1,4 +1,5 @@
 import { migrateKey } from '../execution/type-handlers';
+import { createHashFieldTtlContext } from '../execution/hash-field-ttl';
 
 function createMockSource(overrides: Record<string, jest.Mock> = {}) {
   return {
@@ -13,7 +14,11 @@ function createMockSource(overrides: Record<string, jest.Mock> = {}) {
     sscanBuffer: jest.fn().mockResolvedValue(['0', [Buffer.from('m1')]]),
     zcard: jest.fn().mockResolvedValue(2),
     pttl: jest.fn().mockResolvedValue(-1),
-    call: jest.fn().mockResolvedValue(['m1', '1', 'm2', '2']),
+    call: jest.fn().mockImplementation((cmd: string) =>
+      cmd === 'HPTTL'
+        ? Promise.reject(new Error("ERR unknown command 'HPTTL'"))
+        : Promise.resolve(['m1', '1', 'm2', '2']),
+    ),
     // callBuffer returns Buffers for binary-safe zset/stream migration
     callBuffer: jest.fn().mockImplementation((cmd: string) => {
       if (cmd === 'ZRANGE') {
@@ -42,10 +47,12 @@ function createMockTarget() {
     rename: jest.fn().mockResolvedValue('OK'),
     llen: jest.fn().mockResolvedValue(2),
     pexpire: jest.fn().mockResolvedValue(1),
+    exists: jest.fn().mockResolvedValue(1),
     call: jest.fn().mockResolvedValue('OK'),
     callBuffer: jest.fn().mockResolvedValue(Buffer.from('OK')),
     pipeline: jest.fn().mockReturnValue({
       zadd: jest.fn().mockReturnThis(),
+      call: jest.fn().mockReturnThis(),
       exec: jest.fn().mockResolvedValue([]),
     }),
   } as any;
@@ -428,6 +435,130 @@ describe('type-handlers / migrateKey', () => {
 
       expect(result.ok).toBe(false);
       expect(result.error).toBe('Connection lost');
+    });
+  });
+
+  describe('hash field TTLs', () => {
+    function sourceWithTtls(ttls: number[] | Error) {
+      return createMockSource({
+        call: jest.fn().mockImplementation((cmd: string) => {
+          if (cmd !== 'HPTTL') return Promise.resolve(null);
+          return ttls instanceof Error ? Promise.reject(ttls) : Promise.resolve(ttls);
+        }),
+      });
+    }
+
+    function targetWithPipeline(execResult: unknown[] = [[null, [1]]]) {
+      const hp = {
+        call: jest.fn().mockReturnThis(),
+        exec: jest.fn().mockResolvedValue(execResult),
+      };
+      const t = createMockTarget();
+      t.pipeline.mockReturnValue(hp);
+      return { t, hp };
+    }
+
+    const evalIndex = (t: { call: jest.Mock }) =>
+      t.call.mock.calls.findIndex((c: unknown[]) => c[0] === 'EVAL');
+
+    it('applies HPEXPIRE on the temp key before the rename', async () => {
+      const src = sourceWithTtls([5000]);
+      const { t, hp } = targetWithPipeline();
+
+      const result = await migrateKey(src, t, 'hash:1', 'hash');
+
+      expect(result.ok).toBe(true);
+      expect(hp.call).toHaveBeenCalledWith(
+        'HPEXPIRE', expect.stringMatching(/^__betterdb_mig_/), '5000', 'FIELDS', '1', expect.any(Buffer),
+      );
+      expect(hp.call.mock.invocationCallOrder[0]).toBeLessThan(
+        t.call.mock.invocationCallOrder[evalIndex(t)],
+      );
+    });
+
+    it('adds no round trips when the source has no HFE', async () => {
+      const src = sourceWithTtls(new Error("ERR unknown command 'HPTTL'"));
+      const { t, hp } = targetWithPipeline();
+
+      const result = await migrateKey(src, t, 'hash:1', 'hash');
+
+      expect(result.ok).toBe(true);
+      expect(hp.call).not.toHaveBeenCalled();
+      expect(t.exists).not.toHaveBeenCalled();
+    });
+
+    it('probes an unsupported source once across keys sharing a context', async () => {
+      const src = sourceWithTtls(new Error("ERR unknown command 'HPTTL'"));
+      const { t } = targetWithPipeline();
+      const hashFieldTtl = createHashFieldTtlContext();
+
+      await migrateKey(src, t, 'hash:1', 'hash', { hashFieldTtl });
+      await migrateKey(src, t, 'hash:2', 'hash', { hashFieldTtl });
+
+      const hpttl = src.call.mock.calls.filter((c: unknown[]) => c[0] === 'HPTTL');
+      expect(hpttl).toHaveLength(1);
+    });
+
+    it('fails the key and cleans up when the target lacks HFE', async () => {
+      const src = sourceWithTtls([5000]);
+      const { t } = targetWithPipeline([[new Error("ERR unknown command 'HPEXPIRE'"), null]]);
+
+      const result = await migrateKey(src, t, 'hash:1', 'hash');
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('Valkey 9.0+');
+      expect(t.del).toHaveBeenCalledWith(expect.stringMatching(/^__betterdb_mig_/));
+      expect(evalIndex(t)).toBe(-1);
+    });
+
+    it('skips the rename when every field expired mid-copy', async () => {
+      const src = sourceWithTtls([-2]);
+      const { t } = targetWithPipeline();
+      t.exists.mockResolvedValue(0);
+
+      const result = await migrateKey(src, t, 'hash:1', 'hash');
+
+      expect(result.ok).toBe(true);
+      expect(t.call).toHaveBeenCalledWith('HDEL', expect.stringMatching(/^__betterdb_mig_/), expect.any(Buffer));
+      expect(t.exists).toHaveBeenCalledTimes(1);
+      expect(evalIndex(t)).toBe(-1);
+      expect(t.rename).not.toHaveBeenCalled();
+    });
+
+    it('writes field TTLs to the real key on the direct-write path', async () => {
+      const src = sourceWithTtls([5000]);
+      const { t, hp } = targetWithPipeline();
+
+      const result = await migrateKey(src, t, 'user:{}:1', 'hash');
+
+      expect(result.ok).toBe(true);
+      expect(hp.call).toHaveBeenCalledWith('HPEXPIRE', 'user:{}:1', '5000', 'FIELDS', '1', expect.any(Buffer));
+    });
+
+    it('copies without field TTLs when HPTTL is denied', async () => {
+      const src = sourceWithTtls(new Error('NOPERM this user has no permissions to run hpttl'));
+      const { t, hp } = targetWithPipeline();
+      const hashFieldTtl = createHashFieldTtlContext();
+
+      const result = await migrateKey(src, t, 'hash:1', 'hash', { hashFieldTtl });
+
+      expect(result.ok).toBe(true);
+      expect(hp.call).not.toHaveBeenCalled();
+      expect(hashFieldTtl.source).toBe('denied');
+    });
+
+    it('reads HPTTL once per HSCAN page', async () => {
+      const src = sourceWithTtls([-1]);
+      src.hscanBuffer
+        .mockResolvedValueOnce(['5', [Buffer.from('f1'), Buffer.from('v1')]])
+        .mockResolvedValueOnce(['0', [Buffer.from('f2'), Buffer.from('v2')]]);
+      const { t } = targetWithPipeline();
+
+      const result = await migrateKey(src, t, 'hash:1', 'hash');
+
+      expect(result.ok).toBe(true);
+      const hpttl = src.call.mock.calls.filter((c: unknown[]) => c[0] === 'HPTTL');
+      expect(hpttl).toHaveLength(2);
     });
   });
 });

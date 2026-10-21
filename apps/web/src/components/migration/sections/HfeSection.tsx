@@ -21,7 +21,7 @@ export function HfeSection({ job }: Props) {
 
       {job.hfeSupported === false ? (
         <p className="text-sm text-muted-foreground">
-          HFE check not available — source is Redis (Hash Field Expiry is a Valkey-only feature).
+          HFE check not available — the source does not support Hash Field Expiry (needs Valkey 9.0+ or Redis 7.4+), so no hash on it can carry per-field TTLs.
         </p>
       ) : job.hfeDetected ? (
         <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 text-amber-800 rounded-lg p-4">
@@ -31,9 +31,9 @@ export function HfeSection({ job }: Props) {
               Hash Field Expiry keys detected (~{(job.hfeKeyCount ?? 0).toLocaleString()} estimated).
             </p>
             <p className="text-sm mt-1">
-              Hash fields with per-field TTLs will lose their expiry metadata during migration
-              unless the target instance supports HFE (Valkey 8.1+). Verify your target version
-              before proceeding.
+              Command mode copies per-field TTLs when the target supports HFE (Valkey 9.0+ or
+              Redis 7.4+); keys whose field TTLs cannot be stored on the target fail instead of
+              being copied without them. Analysis blocks targets without HFE support.
             </p>
           </div>
         </div>

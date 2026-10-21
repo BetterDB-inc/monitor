@@ -4,11 +4,13 @@ import type {
   KeyCountComparison,
   SampleValidationResult,
   BaselineComparison,
+  MigrationAnalysisResult,
 } from '@betterdb/shared';
 import { InfoTip } from '../InfoTip';
 import { KeyCountSection } from '../KeyCountSection';
 import { SampleValidationSection } from '../SampleValidationSection';
 import { BaselineSection } from '../BaselineSection';
+import { HfeSection } from '../HfeSection';
 
 afterEach(() => {
   cleanup();
@@ -248,5 +250,23 @@ describe('BaselineSection', () => {
     const gbTexts = container.querySelectorAll('td.font-mono');
     const gbValues = Array.from(gbTexts).filter(td => td.textContent === '1.00 GB');
     expect(gbValues.length).toBe(2);
+  });
+});
+
+// ── HfeSection ──
+
+describe('HfeSection', () => {
+  const asJob = (fields: Record<string, unknown>) => fields as unknown as MigrationAnalysisResult;
+
+  it('names the HFE versions when the source does not support it', () => {
+    render(<HfeSection job={asJob({ hfeSupported: false, hfeDetected: false })} />);
+    expect(screen.getByText(/needs Valkey 9\.0\+ or Redis 7\.4\+/)).toBeTruthy();
+    expect(screen.queryByText(/8\.1/)).toBeNull();
+  });
+
+  it('explains that command mode copies field TTLs when detected', () => {
+    render(<HfeSection job={asJob({ hfeSupported: true, hfeDetected: true, hfeKeyCount: 12 })} />);
+    expect(screen.getByText(/Command mode copies per-field TTLs/)).toBeTruthy();
+    expect(screen.queryByText(/8\.1/)).toBeNull();
   });
 });
