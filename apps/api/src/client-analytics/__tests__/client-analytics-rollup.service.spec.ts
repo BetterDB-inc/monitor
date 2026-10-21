@@ -27,6 +27,10 @@ function createFakeStorage(raw: RawClientRow[], options: { indexReady?: boolean 
       const ts = raw.filter((r) => r.connectionId === connectionId).map((r) => r.capturedAt);
       return ts.length ? { earliest: Math.min(...ts), latest: Math.max(...ts) } : null;
     }),
+    getClientSnapshotNextCapturedAt: jest.fn(async (connectionId: string, afterExclusive: number) => {
+      const ts = raw.filter((r) => r.connectionId === connectionId && r.capturedAt > afterExclusive).map((r) => r.capturedAt);
+      return ts.length ? Math.min(...ts) : null;
+    }),
     getClientSnapshotGroups: jest.fn(async (connectionId: string, startExclusive: number, endInclusive: number) =>
       groupsFromRaw(raw, connectionId, startExclusive, endInclusive),
     ),
@@ -163,7 +167,8 @@ describe('ClientAnalyticsRollupService', () => {
     const { service, poll } = createService(fake.storage);
 
     await poll();
-    expect(service.getLatestStats('conn-a')?.currentConnections).toBe(0);
+    // Nothing folded inside the window yet: no value, not zeros.
+    expect(service.getLatestStats('conn-a')).toBeNull();
     expect(fake.rollups.size).toBe(0);
 
     for (let i = 0; i < 3; i++) {
@@ -376,38 +381,120 @@ describe('ClientAnalyticsRollupService', () => {
     expect(indexWarnings()).toHaveLength(2);
   });
 
-  it('keeps the scan cursor past a long empty gap instead of re-scanning it from the watermark', async () => {
+  describe('catch-up after downtime', () => {
     const DAY = 24 * HOUR;
+    const SETTLE = 5 * 60_000;
     const watermark = clientRollupBucketStart(START) + 2 * 60_000;
-    // Exactly 72 one-hour chunks between the watermark and now: the newest
-    // chunk starts 71 hours past the watermark and ends 5 minutes past the
-    // settle margin, so 20 more 15s runs stay inside it.
+    // Exactly 72 one-hour chunks between the persisted watermark and now.
     const now = watermark + 3 * DAY;
-    jest.useFakeTimers({ now });
-    const history: RawClientRow[] = [
-      { connectionId: 'conn-a', capturedAt: watermark, name: 'api', user: 'default', ip: '10.0.0.1', age: 5 },
+    const batch = (capturedAt: number): RawClientRow[] => [
+      { connectionId: 'conn-a', capturedAt, name: 'api', user: 'default', ip: '10.0.0.1', age: 5 },
+      { connectionId: 'conn-a', capturedAt, name: 'worker', user: 'app', ip: '10.0.0.2', age: 9 },
     ];
-    const fake = createFakeStorage(history, { indexReady: false });
-    await fake.storage.upsertClientAnalyticsRollups(
-      foldGroupsIntoRollups('conn-a', groupsFromRaw(history, 'conn-a'), new Map(), now),
-    );
-    const { service, poll } = createService(fake.storage);
 
-    // Catch up through the gap, BACKFILL_CHUNKS_PER_RUN chunks a run.
-    for (let i = 0; i < 18; i++) await poll();
-    const state = service['states'].get('conn-a');
-    const newestChunkStart = watermark + 71 * HOUR;
-    expect(state?.watermark).toBe(watermark);
-    expect(state?.scanCursor).toBe(newestChunkStart);
-
-    for (let i = 1; i <= 4; i++) {
-      jest.setSystemTime(now + i * 15_000);
-      const before = fake.storage.getClientSnapshotGroups.mock.calls.length;
-      await poll();
-      const calls = fake.storage.getClientSnapshotGroups.mock.calls.slice(before);
-      expect(calls).toEqual([['conn-a', newestChunkStart, now + i * 15_000]]);
-      expect(state?.scanCursor).toBe(newestChunkStart);
+    /** Raw rows plus rollups already folded up to the watermark, as a restart finds them. */
+    async function restarted(fresh: RawClientRow[]) {
+      jest.useFakeTimers({ now });
+      const old = batch(watermark);
+      const fake = createFakeStorage([...old, ...fresh], { indexReady: false });
+      await fake.storage.upsertClientAnalyticsRollups(
+        foldGroupsIntoRollups('conn-a', groupsFromRaw(old, 'conn-a'), new Map(), now),
+      );
+      return { fake, ...createService(fake.storage) };
     }
+
+    it('jumps over a 72h gap and folds the newest rows in the first run', async () => {
+      // New rows only in the last hour: settled ones and one inside the settle margin.
+      const fresh = [...batch(now - 50 * 60_000), ...batch(now - 20 * 60_000), ...batch(now - 60_000)];
+      const { fake, service, poll } = await restarted(fresh);
+
+      await poll();
+      const calls = fake.storage.getClientSnapshotGroups.mock.calls;
+      // One empty settled chunk, one probe, then the chunk starting at the next batch.
+      // Walking the gap chunk by chunk took 72 reads over 18 runs.
+      expect(calls).toEqual([
+        ['conn-a', watermark, watermark + HOUR],
+        ['conn-a', now - 50 * 60_000 - 1, now],
+      ]);
+      expect(fake.storage.getClientSnapshotNextCapturedAt).toHaveBeenCalledTimes(1);
+      expect(fake.storage.getClientSnapshotNextCapturedAt).toHaveBeenCalledWith('conn-a', watermark + HOUR);
+      for (const [, startExclusive, endInclusive] of calls) {
+        expect(endInclusive - startExclusive).toBeLessThanOrEqual(HOUR + SETTLE);
+      }
+      const state = service['states'].get('conn-a');
+      expect(state?.watermark).toBe(now - 60_000);
+      const latest = service.getLatestStats('conn-a');
+      expect(normalizeStats(latest as never)).toEqual(
+        normalizeStats({ ...referenceStats(fresh), peakConnections: 2, peakTimestamp: watermark }),
+      );
+      expect(latest?.currentConnections).toBe(2);
+    });
+
+    it('lands the cursor at the settle edge when the next batch is still inside the settle margin', async () => {
+      const fresh = batch(now - 2 * 60_000);
+      const { fake, service, poll } = await restarted(fresh);
+
+      await poll();
+      // The jump never passes the settle edge: the newest chunk (edge to now)
+      // re-reads anything the writer may still be committing.
+      expect(fake.storage.getClientSnapshotGroups.mock.calls).toEqual([
+        ['conn-a', watermark, watermark + HOUR],
+        ['conn-a', now - SETTLE, now],
+      ]);
+      expect(service['states'].get('conn-a')?.watermark).toBe(now - 2 * 60_000);
+      expect(service.getLatestStats('conn-a')?.currentConnections).toBe(2);
+    });
+
+    it('probes once and stops when nothing newer exists, then keeps reading only the newest chunk', async () => {
+      const { fake, service, poll } = await restarted([]);
+
+      await poll();
+      expect(fake.storage.getClientSnapshotGroups.mock.calls).toEqual([['conn-a', watermark, watermark + HOUR]]);
+      expect(fake.storage.getClientSnapshotNextCapturedAt).toHaveBeenCalledTimes(1);
+      const state = service['states'].get('conn-a');
+      expect(state?.watermark).toBe(watermark);
+      expect(state?.scanCursor).toBe(now - SETTLE);
+      // The only rollup is 72h old, outside the 24h window: no value, not zeros.
+      expect(service.getLatestStats('conn-a')).toBeNull();
+
+      for (let i = 1; i <= 4; i++) {
+        jest.setSystemTime(now + i * 15_000);
+        const before = fake.storage.getClientSnapshotGroups.mock.calls.length;
+        await poll();
+        const calls = fake.storage.getClientSnapshotGroups.mock.calls.slice(before);
+        expect(calls).toEqual([['conn-a', now - SETTLE, now + i * 15_000]]);
+        expect(state?.scanCursor).toBe(now - SETTLE);
+      }
+      // The newest chunk is not settled, so it is never probed.
+      expect(fake.storage.getClientSnapshotNextCapturedAt).toHaveBeenCalledTimes(1);
+      expect(service.getLatestStats('conn-a')).toBeNull();
+    });
+  });
+
+  it('keeps the previous latest stats when a later recompute finds an empty window', async () => {
+    const now = START + 40 * 60_000;
+    jest.useFakeTimers({ now });
+    const fake = createFakeStorage(raw, { indexReady: false });
+    const { service, poll } = createService(fake.storage);
+    await poll();
+    const first = service.getLatestStats('conn-a');
+    expect(first?.currentConnections).toBeGreaterThan(0);
+    const peakReads = fake.storage.getClientAnalyticsRollupPeak.mock.calls.length;
+
+    // Two days later the window holds no rollups: the recompute runs but stores nothing.
+    jest.setSystemTime(now + 48 * HOUR);
+    const reads = fake.storage.getClientAnalyticsRollups.mock.calls.length;
+    await poll();
+    expect(fake.storage.getClientAnalyticsRollups.mock.calls.length).toBeGreaterThan(reads);
+    expect(service['states'].get('conn-a')?.lastWindowStartBucket).toBe(clientRollupBucketStart(now + 24 * HOUR));
+    expect(service.getLatestStats('conn-a')).toBe(first);
+    expect(fake.storage.getClientAnalyticsRollupPeak.mock.calls.length).toBe(peakReads);
+
+    // The same empty window is not re-read on every run.
+    const after = fake.storage.getClientAnalyticsRollups.mock.calls.length;
+    jest.setSystemTime(now + 48 * HOUR + 15_000);
+    await poll();
+    expect(fake.storage.getClientAnalyticsRollups.mock.calls.length).toBe(after);
   });
 
   it('memoises the all-connection window stats for one aggregate interval', async () => {

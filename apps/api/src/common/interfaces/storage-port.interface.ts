@@ -496,6 +496,12 @@ export interface StoragePort {
   // (connection_id, captured_at) index; none may scan the whole table.
   /** Oldest and newest captured_at for one connection, or null when it has no rows. */
   getClientSnapshotBounds(connectionId: string): Promise<{ earliest: number; latest: number } | null>;
+  /**
+   * Smallest captured_at among one connection's rows with captured_at > afterExclusive, or null when
+   * none is newer. A single probe of the (connection_id, captured_at) index; lets the aggregator jump
+   * over an empty gap (monitor downtime) instead of walking it chunk by chunk.
+   */
+  getClientSnapshotNextCapturedAt(connectionId: string, afterExclusive: number): Promise<number | null>;
   /** Raw rows with captured_at > startExclusive AND captured_at <= endInclusive, grouped by (captured_at, name, user, ip), ordered by captured_at ascending. */
   getClientSnapshotGroups(
     connectionId: string,

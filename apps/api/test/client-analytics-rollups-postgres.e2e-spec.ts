@@ -230,6 +230,30 @@ describePostgres('client analytics rollups — postgres', () => {
       expect(await pg.getClientSnapshotBounds('nope')).toBeNull();
     });
 
+    for (const connectionId of CONNECTIONS) {
+      it(`returns identical next captures for ${connectionId}`, async () => {
+        const bounds = (await memory.getClientSnapshotBounds(connectionId)) as { earliest: number; latest: number };
+        const probes = [0, T0 - 1, T0, T0 + 3 * BATCH_MS - 1, T0 + 3 * BATCH_MS, bounds.latest - 1, bounds.latest];
+        for (const after of probes) {
+          expect(await pg.getClientSnapshotNextCapturedAt(connectionId, after)).toBe(
+            await memory.getClientSnapshotNextCapturedAt(connectionId, after),
+          );
+        }
+      });
+    }
+
+    it('getClientSnapshotNextCapturedAt is strictly after, numeric, null past the newest row and per connection', async () => {
+      const [connectionId] = CONNECTIONS;
+      const bounds = (await pg.getClientSnapshotBounds(connectionId)) as { earliest: number; latest: number };
+      const first = await pg.getClientSnapshotNextCapturedAt(connectionId, bounds.earliest - 1);
+      expect(first).toBe(bounds.earliest);
+      expect(typeof first).toBe('number');
+      const second = await pg.getClientSnapshotNextCapturedAt(connectionId, bounds.earliest);
+      expect(second).toBeGreaterThan(bounds.earliest);
+      expect(await pg.getClientSnapshotNextCapturedAt(connectionId, bounds.latest)).toBeNull();
+      expect(await pg.getClientSnapshotNextCapturedAt('nope', 0)).toBeNull();
+    });
+
     for (const [label, start, end] of STATS_RANGES) {
       it(`returns identical stats and matches the reference (${label})`, async () => {
         const all = await pg.getClientAnalyticsStats(start, end);

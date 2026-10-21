@@ -489,6 +489,16 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return earliest === Infinity ? null : { earliest, latest };
   }
 
+  async getClientSnapshotNextCapturedAt(connectionId: string, afterExclusive: number): Promise<number | null> {
+    let next = Infinity;
+    for (const c of this.clientSnapshots) {
+      if (c.connectionId === connectionId && c.capturedAt > afterExclusive && c.capturedAt < next) {
+        next = c.capturedAt;
+      }
+    }
+    return next === Infinity ? null : next;
+  }
+
   async getClientSnapshotGroups(
     connectionId: string,
     startExclusive: number,

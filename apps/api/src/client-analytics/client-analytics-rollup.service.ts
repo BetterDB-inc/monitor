@@ -55,7 +55,8 @@ interface ConnectionRollupState {
   watermark: number | null;
   /**
    * Lower bound of the next incremental read: the watermark, or past it when
-   * settled empty chunks were skipped (at most the start of the newest chunk).
+   * settled empty chunks were skipped or jumped over (at most the start of the
+   * newest chunk).
    */
   scanCursor: number | null;
   latest: ClientAnalyticsStats | null;
@@ -154,9 +155,13 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
   }
 
   /**
-   * Latest stats over the configured window, or null before the first
-   * aggregation. peakConnections / peakTimestamp cover the whole rollup
-   * retention; every other figure covers the window.
+   * Latest stats over the configured window. Null until the aggregator has
+   * folded at least one batch inside the window: a connection with no
+   * snapshots in the window therefore exports no client series rather than
+   * zeros. Once set, a later run whose window holds no rollups keeps the
+   * previous value. peakConnections / peakTimestamp cover the whole rollup
+   * retention; every other figure covers the window. getStatsForRange
+   * (explicit ranges, the UI) still returns zeros for an empty range.
    */
   getLatestStats(connectionId: string): ClientAnalyticsStats | null {
     return this.states.get(connectionId)?.latest ?? null;
@@ -222,30 +227,37 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
     if (this.states.get(id) !== state) return;
 
     let recomputed = false;
-    if (windowChanged || state.latest === null || state.lastWindowStartBucket !== windowStartBucket) {
+    // lastWindowStartBucket is null until the first recompute, so the first run always recomputes.
+    if (windowChanged || state.lastWindowStartBucket !== windowStartBucket) {
       const rows = await this.timed('getClientAnalyticsRollups', id, () =>
         this.storage.getClientAnalyticsRollups(windowStartBucket, clientRollupBucketStart(now), id),
       );
-      // Headline peak over the whole rollup retention: one primary-key range
-      // read of two numeric columns, unlike merging 90 days of per-group JSON.
-      // Per-name / per-user / per-pair peaks stay window-scoped.
-      const retentionPeak = await this.timed('getClientAnalyticsRollupPeak', id, () =>
-        this.storage.getClientAnalyticsRollupPeak(id, clientRollupBucketStart(now - this.config.rollupRetentionMs)),
-      );
       if (this.states.get(id) !== state) return;
-      const latest = mergeRollupsIntoStats(rows);
-      // Same tie rule as the merge and the adapters: an equal peak goes to
-      // the earliest capture, which the retention read may hold.
-      if (
-        retentionPeak &&
-        (retentionPeak.peak > latest.peakConnections ||
-          (retentionPeak.peak === latest.peakConnections &&
-            retentionPeak.capturedAt < latest.peakTimestamp))
-      ) {
-        latest.peakConnections = retentionPeak.peak;
-        latest.peakTimestamp = retentionPeak.capturedAt;
+      if (rows.length > 0) {
+        // Headline peak over the whole rollup retention: one primary-key range
+        // read of two numeric columns, unlike merging 90 days of per-group JSON.
+        // Per-name / per-user / per-pair peaks stay window-scoped.
+        const retentionPeak = await this.timed('getClientAnalyticsRollupPeak', id, () =>
+          this.storage.getClientAnalyticsRollupPeak(id, clientRollupBucketStart(now - this.config.rollupRetentionMs)),
+        );
+        if (this.states.get(id) !== state) return;
+        const latest = mergeRollupsIntoStats(rows);
+        // Same tie rule as the merge and the adapters: an equal peak goes to
+        // the earliest capture, which the retention read may hold.
+        if (
+          retentionPeak &&
+          (retentionPeak.peak > latest.peakConnections ||
+            (retentionPeak.peak === latest.peakConnections &&
+              retentionPeak.capturedAt < latest.peakTimestamp))
+        ) {
+          latest.peakConnections = retentionPeak.peak;
+          latest.peakTimestamp = retentionPeak.capturedAt;
+        }
+        state.latest = latest;
       }
-      state.latest = latest;
+      // An empty window is no value, not zeros: state.latest stays as it was
+      // (null on a fresh start), so the exporter leaves the client series
+      // absent instead of exporting 0 for every connection after downtime.
       state.computedAt = now;
       state.lastWindowStartBucket = windowStartBucket;
       recomputed = true;
@@ -335,13 +347,35 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
         state.watermark = Math.max(state.watermark ?? last, last);
       }
       const watermark = state.watermark as number;
+      const settled = to <= now - EMPTY_CHUNK_SETTLE_MS;
+      if (groups.length === 0 && settled) {
+        // An empty settled chunk usually means a gap (monitor downtime): one
+        // index probe finds the next batch, and the cursor jumps over the
+        // empty time to just before it instead of walking the gap a chunk at
+        // a time. The jump stays inside the settled past, so nothing the
+        // writer may still be committing is skipped, and every chunk read
+        // afterwards keeps its usual bounds.
+        const next = await this.timed('getClientSnapshotNextCapturedAt', id, () =>
+          this.storage.getClientSnapshotNextCapturedAt(id, to),
+        );
+        if (this.states.get(id) !== state) return false;
+        const settledEdge = now - EMPTY_CHUNK_SETTLE_MS;
+        if (next === null) {
+          // Nothing newer at all: the settled past is empty, so the next run
+          // starts at the newest chunk (settle edge to now).
+          state.scanCursor = Math.max(to, watermark, settledEdge);
+          break;
+        }
+        state.scanCursor = Math.max(to, watermark, Math.min(next - 1, settledEdge));
+        continue;
+      }
       // A settled chunk moves the cursor past itself. The newest chunk (the
       // one running to now) keeps the cursor at its own start, never below:
       // falling back to the watermark would discard the progress made through
       // settled empty chunks, so a connection with a long gap would re-scan
       // the whole gap every run. Re-reading just this chunk next time still
       // picks up batches committed late.
-      state.scanCursor = to <= now - EMPTY_CHUNK_SETTLE_MS ? Math.max(to, watermark) : Math.max(from, watermark);
+      state.scanCursor = settled ? Math.max(to, watermark) : Math.max(from, watermark);
       if (to >= now) break;
     }
     return changed;

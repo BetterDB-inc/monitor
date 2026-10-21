@@ -1073,6 +1073,19 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return { earliest: Number(row.earliest), latest: Number(row.latest) };
   }
 
+  async getClientSnapshotNextCapturedAt(connectionId: string, afterExclusive: number): Promise<number | null> {
+    if (!this.pool) {
+      throw new Error('Database not initialized');
+    }
+    // MIN over a (connection_id, captured_at) range: an index-only probe of idx_client_connection_captured.
+    const result = await this.pool.query(
+      `SELECT MIN(captured_at) AS next FROM client_snapshots WHERE connection_id = $1 AND captured_at > $2`,
+      [connectionId, afterExclusive],
+    );
+    const next = result.rows[0]?.next;
+    return next === null || next === undefined ? null : Number(next);
+  }
+
   async getClientSnapshotGroups(
     connectionId: string,
     startExclusive: number,

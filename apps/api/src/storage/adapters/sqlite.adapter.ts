@@ -1446,6 +1446,19 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return { earliest: Number(row.earliest), latest: Number(row.latest) };
   }
 
+  async getClientSnapshotNextCapturedAt(connectionId: string, afterExclusive: number): Promise<number | null> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    // MIN over a (connection_id, captured_at) range: one seek into the composite index.
+    const row = this.db
+      .prepare(
+        `SELECT MIN(captured_at) AS next FROM client_snapshots WHERE connection_id = ? AND captured_at > ?`,
+      )
+      .get(connectionId, afterExclusive) as { next: number | null } | undefined;
+    return row?.next === null || row?.next === undefined ? null : Number(row.next);
+  }
+
   async getClientSnapshotGroups(
     connectionId: string,
     startExclusive: number,

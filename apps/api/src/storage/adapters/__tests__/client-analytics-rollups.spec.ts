@@ -115,6 +115,32 @@ describe.each([
     });
   });
 
+  describe('getClientSnapshotNextCapturedAt', () => {
+    it('returns the next capture strictly after the argument, as a number', async () => {
+      await save(h.storage, [client(2_000), client(2_000, { name: 'worker' }), client(5_000), client(3_000)]);
+      expect(await h.storage.getClientSnapshotNextCapturedAt('conn-x', 0)).toBe(2_000);
+      expect(await h.storage.getClientSnapshotNextCapturedAt('conn-x', 1_999)).toBe(2_000);
+      expect(await h.storage.getClientSnapshotNextCapturedAt('conn-x', 2_000)).toBe(3_000);
+      expect(await h.storage.getClientSnapshotNextCapturedAt('conn-x', 4_999)).toBe(5_000);
+      expect(typeof (await h.storage.getClientSnapshotNextCapturedAt('conn-x', 0))).toBe('number');
+    });
+
+    it('is null at or past the newest row', async () => {
+      await save(h.storage, [client(2_000), client(5_000)]);
+      expect(await h.storage.getClientSnapshotNextCapturedAt('conn-x', 5_000)).toBeNull();
+      expect(await h.storage.getClientSnapshotNextCapturedAt('conn-x', 9_000)).toBeNull();
+    });
+
+    it('scopes to the connection', async () => {
+      await save(h.storage, [client(2_000), client(8_000)]);
+      await save(h.storage, [client(3_000), client(9_000)], 'other');
+      expect(await h.storage.getClientSnapshotNextCapturedAt('conn-x', 2_000)).toBe(8_000);
+      expect(await h.storage.getClientSnapshotNextCapturedAt('other', 3_000)).toBe(9_000);
+      expect(await h.storage.getClientSnapshotNextCapturedAt('conn-x', 8_000)).toBeNull();
+      expect(await h.storage.getClientSnapshotNextCapturedAt('nope', 0)).toBeNull();
+    });
+  });
+
   describe('getClientSnapshotGroups', () => {
     it('is exclusive at the start and inclusive at the end', async () => {
       await save(h.storage, [client(1_000), client(2_000), client(3_000), client(4_000)]);
@@ -444,6 +470,13 @@ describe('SQLite ip expression matches clientAddrIp', () => {
   });
 });
 
+/** Probe points for getClientSnapshotNextCapturedAt: before, on, between and past the captures. */
+function nextProbes(bounds: { earliest: number; latest: number } | null): number[] {
+  const probes = [0, T0 - 1, T0, T0 + 3 * BATCH_MS - 1, T0 + 3 * BATCH_MS, T0 + 50 * BATCH_MS + 1];
+  if (bounds) probes.push(bounds.earliest, bounds.latest - 1, bounds.latest, bounds.latest + 1);
+  return probes;
+}
+
 describe('cross-adapter identity (MemoryAdapter vs SqliteAdapter)', () => {
   const rows = buildFixture();
   const edge = buildEdgeFixture();
@@ -488,10 +521,14 @@ describe('cross-adapter identity (MemoryAdapter vs SqliteAdapter)', () => {
   ];
 
   for (const connectionId of CONNECTIONS) {
-    it(`returns identical groups and bounds for ${connectionId}`, async () => {
-      expect(await sqlite.storage.getClientSnapshotBounds(connectionId)).toEqual(
-        await memory.storage.getClientSnapshotBounds(connectionId),
-      );
+    it(`returns identical groups, bounds and next captures for ${connectionId}`, async () => {
+      const bounds = await memory.storage.getClientSnapshotBounds(connectionId);
+      expect(await sqlite.storage.getClientSnapshotBounds(connectionId)).toEqual(bounds);
+      for (const after of nextProbes(bounds)) {
+        expect(await sqlite.storage.getClientSnapshotNextCapturedAt(connectionId, after)).toBe(
+          await memory.storage.getClientSnapshotNextCapturedAt(connectionId, after),
+        );
+      }
       for (const [start, end] of windows) {
         const expected = await memory.storage.getClientSnapshotGroups(connectionId, start, end);
         expect(await sqlite.storage.getClientSnapshotGroups(connectionId, start, end)).toEqual(expected);
