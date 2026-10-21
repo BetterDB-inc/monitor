@@ -116,6 +116,8 @@ import type {
   TokenType,
 } from '@betterdb/shared';
 import { PostgresDialect, RowMappers } from './base-sql.adapter';
+import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
+import { foldClientAnalyticsStats, mapClientAnalyticsRollupRow } from './client-analytics-stats';
 import { WebhookPostgresRepository } from './repositories/webhook.postgres.repository';
 import { SlowLogPostgresRepository } from './repositories/slowlog.postgres.repository';
 import { InvitationPostgresRepository } from './repositories/invitation.postgres.repository';
@@ -435,6 +437,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       await this.backfillMemoryProposalDiscriminators();
 
       this.ready = true;
+
+      // Deliberately not awaited: on a large client_snapshots / acl_audit table
+      // the concurrent build takes minutes and startup must not wait for it.
+      // Readers that need the index check isClientSnapshotIndexReady().
+      void this.ensureAnalyticsIndexes().catch((error: unknown) => {
+        console.warn(
+          `Building the client analytics indexes failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
 
       if (schemaName) {
         console.log(`PostgreSQL initialized with schema: ${schemaName}`);
@@ -914,207 +927,31 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    // Get latest timestamp
-    const latestResult = await this.pool.query(
-      `SELECT MAX(captured_at) as latest FROM client_snapshots ${whereClause}`,
-      params,
-    );
-    const latestTimestamp = latestResult.rows[0].latest;
+    // pg returns BIGINT / COUNT / SUM as strings; every numeric is parsed below.
+    const [groupsResult, ipsResult] = await Promise.all([
+      this.pool.query(
+        `SELECT captured_at, COALESCE(user_name, '') AS user_name, COALESCE(name, '') AS name,
+                COUNT(*) AS count, SUM(age) AS age_sum
+           FROM client_snapshots ${whereClause}
+          GROUP BY captured_at, COALESCE(user_name, ''), COALESCE(name, '')`,
+        params,
+      ),
+      this.pool.query(
+        `SELECT COUNT(DISTINCT split_part(addr, ':', 1)) AS count FROM client_snapshots ${whereClause}`,
+        params,
+      ),
+    ]);
 
-    const currentConditions = latestTimestamp
-      ? [...conditions, `captured_at = $${paramIndex++}`]
-      : conditions;
-    const currentParams = latestTimestamp ? [...params, latestTimestamp] : params;
-    const currentWhereClause =
-      currentConditions.length > 0 ? `WHERE ${currentConditions.join(' AND ')}` : '';
-
-    const currentConnectionsResult = await this.pool.query(
-      `SELECT COUNT(*) as count FROM client_snapshots ${currentWhereClause}`,
-      currentParams,
-    );
-
-    const peakResult = await this.pool.query(
-      `
-      SELECT captured_at, COUNT(*) as count
-      FROM client_snapshots ${whereClause}
-      GROUP BY captured_at
-      ORDER BY count DESC
-      LIMIT 1
-    `,
-      params,
-    );
-
-    const uniqueStatsResult = await this.pool.query(
-      `
-      SELECT
-        COUNT(DISTINCT name) as unique_names,
-        COUNT(DISTINCT user_name) as unique_users,
-        COUNT(DISTINCT SPLIT_PART(addr, ':', 1)) as unique_ips
-      FROM client_snapshots ${whereClause}
-    `,
-      params,
-    );
-
-    // Connections by name
-    const byNameResult = await this.pool.query(
-      `
-      SELECT name, COUNT(*) as total, AVG(age) as avg_age
-      FROM client_snapshots ${whereClause}
-      GROUP BY name
-    `,
-      params,
-    );
-
-    const connectionsByName: Record<string, { current: number; peak: number; avgAge: number }> = {};
-
-    for (const row of byNameResult.rows) {
-      if (row.name) {
-        const namePeakParams = [...params, row.name];
-        const namePeakResult = await this.pool.query(
-          `
-          SELECT COUNT(*) as count
-          FROM client_snapshots
-          WHERE name = $${params.length + 1} ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
-          GROUP BY captured_at
-          ORDER BY count DESC
-          LIMIT 1
-        `,
-          namePeakParams,
-        );
-
-        const nameCurrentParams = [...currentParams, row.name];
-        const nameCurrentResult = await this.pool.query(
-          `
-          SELECT COUNT(*) as count
-          FROM client_snapshots
-          WHERE name = $${currentParams.length + 1} ${currentWhereClause ? 'AND ' + currentWhereClause.substring(6) : ''}
-        `,
-          nameCurrentParams,
-        );
-
-        connectionsByName[row.name] = {
-          current: parseInt(nameCurrentResult.rows[0]?.count || '0'),
-          peak: parseInt(namePeakResult.rows[0]?.count || '0'),
-          avgAge: parseFloat(row.avg_age),
-        };
-      }
-    }
-
-    // Connections by user
-    const byUserResult = await this.pool.query(
-      `SELECT user_name, COUNT(*) as total FROM client_snapshots ${whereClause} GROUP BY user_name`,
-      params,
-    );
-
-    const connectionsByUser: Record<string, { current: number; peak: number }> = {};
-
-    for (const row of byUserResult.rows) {
-      if (row.user_name) {
-        const userPeakParams = [...params, row.user_name];
-        const userPeakResult = await this.pool.query(
-          `
-          SELECT COUNT(*) as count
-          FROM client_snapshots
-          WHERE user_name = $${params.length + 1} ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
-          GROUP BY captured_at
-          ORDER BY count DESC
-          LIMIT 1
-        `,
-          userPeakParams,
-        );
-
-        const userCurrentParams = [...currentParams, row.user_name];
-        const userCurrentResult = await this.pool.query(
-          `
-          SELECT COUNT(*) as count
-          FROM client_snapshots
-          WHERE user_name = $${currentParams.length + 1} ${currentWhereClause ? 'AND ' + currentWhereClause.substring(6) : ''}
-        `,
-          userCurrentParams,
-        );
-
-        connectionsByUser[row.user_name] = {
-          current: parseInt(userCurrentResult.rows[0]?.count || '0'),
-          peak: parseInt(userPeakResult.rows[0]?.count || '0'),
-        };
-      }
-    }
-
-    // Connections by user and name
-    const byUserAndNameResult = await this.pool.query(
-      `
-      SELECT user_name, name, COUNT(*) as total, AVG(age) as avg_age
-      FROM client_snapshots ${whereClause}
-      GROUP BY user_name, name
-    `,
-      params,
-    );
-
-    const connectionsByUserAndName: Record<
-      string,
-      { user: string; name: string; current: number; peak: number; avgAge: number }
-    > = {};
-
-    for (const row of byUserAndNameResult.rows) {
-      const key = `${row.user_name}:${row.name}`;
-
-      const combinedPeakParams = [...params, row.user_name, row.name];
-      const combinedPeakResult = await this.pool.query(
-        `
-        SELECT COUNT(*) as count
-        FROM client_snapshots
-        WHERE user_name = $${params.length + 1} AND name = $${params.length + 2} ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
-        GROUP BY captured_at
-        ORDER BY count DESC
-        LIMIT 1
-      `,
-        combinedPeakParams,
-      );
-
-      const combinedCurrentParams = [...currentParams, row.user_name, row.name];
-      const combinedCurrentResult = await this.pool.query(
-        `
-        SELECT COUNT(*) as count
-        FROM client_snapshots
-        WHERE user_name = $${currentParams.length + 1} AND name = $${currentParams.length + 2} ${currentWhereClause ? 'AND ' + currentWhereClause.substring(6) : ''}
-      `,
-        combinedCurrentParams,
-      );
-
-      connectionsByUserAndName[key] = {
+    return foldClientAnalyticsStats(
+      groupsResult.rows.map((row) => ({
+        capturedAt: Number(row.captured_at),
         user: row.user_name,
         name: row.name,
-        current: parseInt(combinedCurrentResult.rows[0]?.count || '0'),
-        peak: parseInt(combinedPeakResult.rows[0]?.count || '0'),
-        avgAge: parseFloat(row.avg_age),
-      };
-    }
-
-    const timeRangeResult = await this.pool.query(
-      `SELECT MIN(captured_at) as earliest, MAX(captured_at) as latest FROM client_snapshots ${whereClause}`,
-      params,
+        count: Number(row.count),
+        ageSum: Number(row.age_sum ?? 0),
+      })),
+      Number(ipsResult.rows[0]?.count ?? 0),
     );
-
-    const timeRange =
-      timeRangeResult.rows[0].earliest !== null && timeRangeResult.rows[0].latest !== null
-        ? {
-            earliest: parseInt(timeRangeResult.rows[0].earliest),
-            latest: parseInt(timeRangeResult.rows[0].latest),
-          }
-        : null;
-
-    return {
-      currentConnections: parseInt(currentConnectionsResult.rows[0].count),
-      peakConnections: parseInt(peakResult.rows[0]?.count || '0'),
-      peakTimestamp: parseInt(peakResult.rows[0]?.captured_at || '0'),
-      uniqueClientNames: parseInt(uniqueStatsResult.rows[0].unique_names),
-      uniqueUsers: parseInt(uniqueStatsResult.rows[0].unique_users),
-      uniqueIps: parseInt(uniqueStatsResult.rows[0].unique_ips),
-      connectionsByName,
-      connectionsByUser,
-      connectionsByUserAndName,
-      timeRange,
-    };
   }
 
   async getClientConnectionHistory(
@@ -1189,6 +1026,234 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
 
     return chunkedPostgresDelete(this.pool, 'client_snapshots', 'captured_at < $1', [olderThanTimestamp]);
+  }
+
+  async getClientSnapshotBounds(
+    connectionId: string,
+  ): Promise<{ earliest: number; latest: number } | null> {
+    if (!this.pool) {
+      throw new Error('Database not initialized');
+    }
+    const result = await this.pool.query(
+      `SELECT MIN(captured_at) AS earliest, MAX(captured_at) AS latest
+         FROM client_snapshots WHERE connection_id = $1`,
+      [connectionId],
+    );
+    const row = result.rows[0];
+    if (!row || row.earliest === null || row.latest === null) {
+      return null;
+    }
+    return { earliest: Number(row.earliest), latest: Number(row.latest) };
+  }
+
+  async getClientSnapshotGroups(
+    connectionId: string,
+    startExclusive: number,
+    endInclusive: number,
+  ): Promise<ClientSnapshotGroupRow[]> {
+    if (!this.pool) {
+      throw new Error('Database not initialized');
+    }
+    // Ties within one captured_at are ordered byte-wise (COLLATE "C") so the
+    // order matches SQLite's BINARY collation and the memory adapter.
+    const result = await this.pool.query(
+      `SELECT * FROM (
+         SELECT captured_at, COALESCE(name, '') AS name, COALESCE(user_name, '') AS user_name,
+                split_part(addr, ':', 1) AS ip, COUNT(*) AS count, SUM(age) AS age_sum
+           FROM client_snapshots
+          WHERE connection_id = $1 AND captured_at > $2 AND captured_at <= $3
+          GROUP BY captured_at, COALESCE(name, ''), COALESCE(user_name, ''), split_part(addr, ':', 1)
+       ) g
+       ORDER BY captured_at ASC, name COLLATE "C", user_name COLLATE "C", ip COLLATE "C"`,
+      [connectionId, startExclusive, endInclusive],
+    );
+    return result.rows.map((row) => ({
+      capturedAt: Number(row.captured_at),
+      name: row.name,
+      user: row.user_name,
+      ip: row.ip,
+      count: Number(row.count),
+      ageSum: Number(row.age_sum ?? 0),
+    }));
+  }
+
+  async upsertClientAnalyticsRollups(rollups: ClientAnalyticsRollup[]): Promise<void> {
+    if (!this.pool) {
+      throw new Error('Database not initialized');
+    }
+    if (rollups.length === 0) {
+      return;
+    }
+    // A multi-row ON CONFLICT DO UPDATE rejects two rows with the same key, so
+    // keep the last occurrence of each key (what a row-by-row upsert would leave).
+    const unique = new Map<string, ClientAnalyticsRollup>();
+    for (const rollup of rollups) {
+      unique.set(`${rollup.connectionId}:${rollup.bucketStart}`, rollup);
+    }
+    const rows = Array.from(unique.values());
+    const COLUMNS = 14;
+    const CHUNK = 1000; // 14k params per statement, well under pg's 65535 limit
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (let offset = 0; offset < rows.length; offset += CHUNK) {
+        const chunk = rows.slice(offset, offset + CHUNK);
+        const values: string[] = [];
+        const params: unknown[] = [];
+        chunk.forEach((r, i) => {
+          const b = i * COLUMNS;
+          values.push(
+            `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6}, $${b + 7}, $${b + 8}, $${b + 9}, ` +
+              `$${b + 10}::jsonb, $${b + 11}::jsonb, $${b + 12}::jsonb, $${b + 13}::jsonb, $${b + 14})`,
+          );
+          // JSON is stringified explicitly: pg would serialise a JS array
+          // (ips) as a Postgres array literal, not JSON.
+          params.push(
+            r.connectionId,
+            r.bucketStart,
+            r.firstCapturedAt,
+            r.lastCapturedAt,
+            r.batchCount,
+            r.rowCount,
+            r.lastConnections,
+            r.peakConnections,
+            r.peakCapturedAt,
+            JSON.stringify(r.byName),
+            JSON.stringify(r.byUser),
+            JSON.stringify(r.byUserAndName),
+            JSON.stringify(r.ips),
+            r.updatedAt,
+          );
+        });
+        await client.query(
+          `INSERT INTO client_analytics_rollups (
+             connection_id, bucket_start, first_captured_at, last_captured_at, batch_count, row_count,
+             last_connections, peak_connections, peak_captured_at, by_name, by_user, by_user_name, ips,
+             updated_at
+           ) VALUES ${values.join(', ')}
+           ON CONFLICT (connection_id, bucket_start) DO UPDATE SET
+             first_captured_at = EXCLUDED.first_captured_at,
+             last_captured_at = EXCLUDED.last_captured_at,
+             batch_count = EXCLUDED.batch_count,
+             row_count = EXCLUDED.row_count,
+             last_connections = EXCLUDED.last_connections,
+             peak_connections = EXCLUDED.peak_connections,
+             peak_captured_at = EXCLUDED.peak_captured_at,
+             by_name = EXCLUDED.by_name,
+             by_user = EXCLUDED.by_user,
+             by_user_name = EXCLUDED.by_user_name,
+             ips = EXCLUDED.ips,
+             updated_at = EXCLUDED.updated_at`,
+          params,
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getClientAnalyticsRollups(
+    startBucket: number,
+    endBucket: number,
+    connectionId?: string,
+  ): Promise<ClientAnalyticsRollup[]> {
+    if (!this.pool) {
+      throw new Error('Database not initialized');
+    }
+    const params: (string | number)[] = [startBucket, endBucket];
+    let where = 'bucket_start >= $1 AND bucket_start <= $2';
+    if (connectionId) {
+      where += ' AND connection_id = $3';
+      params.push(connectionId);
+    }
+    const result = await this.pool.query(
+      `SELECT * FROM client_analytics_rollups WHERE ${where}
+        ORDER BY bucket_start ASC, connection_id COLLATE "C" ASC`,
+      params,
+    );
+    return result.rows.map((row) => mapClientAnalyticsRollupRow(row, PostgresDialect));
+  }
+
+  async getClientAnalyticsRollupWatermark(connectionId: string): Promise<number | null> {
+    if (!this.pool) {
+      throw new Error('Database not initialized');
+    }
+    const result = await this.pool.query(
+      'SELECT MAX(last_captured_at) AS v FROM client_analytics_rollups WHERE connection_id = $1',
+      [connectionId],
+    );
+    const v = result.rows[0]?.v;
+    return v === null || v === undefined ? null : Number(v);
+  }
+
+  async getClientAnalyticsRollupFloor(connectionId: string): Promise<number | null> {
+    if (!this.pool) {
+      throw new Error('Database not initialized');
+    }
+    const result = await this.pool.query(
+      'SELECT MIN(bucket_start) AS v FROM client_analytics_rollups WHERE connection_id = $1',
+      [connectionId],
+    );
+    const v = result.rows[0]?.v;
+    return v === null || v === undefined ? null : Number(v);
+  }
+
+  async getClientAnalyticsRollupPeak(
+    connectionId: string,
+    sinceBucket: number,
+  ): Promise<{ peak: number; capturedAt: number } | null> {
+    if (!this.pool) {
+      throw new Error('Database not initialized');
+    }
+    const result = await this.pool.query(
+      `SELECT peak_connections, peak_captured_at FROM client_analytics_rollups
+        WHERE connection_id = $1 AND bucket_start >= $2
+        ORDER BY peak_connections DESC, peak_captured_at ASC
+        LIMIT 1`,
+      [connectionId, sinceBucket],
+    );
+    const row = result.rows[0];
+    return row ? { peak: Number(row.peak_connections), capturedAt: Number(row.peak_captured_at) } : null;
+  }
+
+  async pruneOldClientAnalyticsRollups(
+    olderThanBucketStart: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.pool) {
+      throw new Error('Database not initialized');
+    }
+    if (connectionId) {
+      return chunkedPostgresDelete(
+        this.pool,
+        'client_analytics_rollups',
+        'bucket_start < $1 AND connection_id = $2',
+        [olderThanBucketStart, connectionId],
+      );
+    }
+    return chunkedPostgresDelete(this.pool, 'client_analytics_rollups', 'bucket_start < $1', [
+      olderThanBucketStart,
+    ]);
+  }
+
+  async isClientSnapshotIndexReady(): Promise<boolean> {
+    if (!this.pool) {
+      return false;
+    }
+    // Resolved through client_snapshots itself (search_path), so a per-tenant
+    // schema never reads another schema's index of the same name.
+    const result = await this.pool.query(
+      `SELECT i.indisvalid AS valid
+         FROM pg_index i
+         JOIN pg_class c ON c.oid = i.indexrelid
+        WHERE i.indrelid = 'client_snapshots'::regclass
+          AND c.relname = 'idx_client_connection_captured'`,
+    );
+    return result.rows[0]?.valid === true;
   }
 
   /**
@@ -1341,6 +1406,30 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       CREATE INDEX IF NOT EXISTS idx_client_cmd ON client_snapshots(cmd);
       CREATE INDEX IF NOT EXISTS idx_client_captured_at_cmd ON client_snapshots(captured_at, cmd);
       CREATE INDEX IF NOT EXISTS idx_client_connection_id ON client_snapshots(connection_id);
+      -- idx_client_connection_captured (and idx_acl_connection_captured) are
+      -- built separately, CONCURRENTLY, after startup — see
+      -- ensureAnalyticsIndexes(). These tables reach tens of millions of rows.
+
+      -- One row per connection per fixed 5-minute bucket, folded from
+      -- client_snapshots by the background rollup aggregator.
+      CREATE TABLE IF NOT EXISTS client_analytics_rollups (
+        connection_id TEXT NOT NULL,
+        bucket_start BIGINT NOT NULL,
+        first_captured_at BIGINT NOT NULL,
+        last_captured_at BIGINT NOT NULL,
+        batch_count INTEGER NOT NULL,
+        row_count INTEGER NOT NULL,
+        last_connections INTEGER NOT NULL,
+        peak_connections INTEGER NOT NULL,
+        peak_captured_at BIGINT NOT NULL,
+        by_name JSONB NOT NULL,
+        by_user JSONB NOT NULL,
+        by_user_name JSONB NOT NULL,
+        ips JSONB NOT NULL,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY (connection_id, bucket_start)
+      );
+      CREATE INDEX IF NOT EXISTS idx_client_rollups_bucket ON client_analytics_rollups(bucket_start);
 
       -- Anomaly Events Table
       CREATE TABLE IF NOT EXISTS anomaly_events (
@@ -4477,64 +4566,119 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
    * the index.
    */
   private async ensureOtelIngestedIndex(): Promise<void> {
-    if (!this.pool) return;
+    await this.ensureIndexConcurrently('idx_otel_ingested', 'otel_spans', 'ingested_at');
+  }
+
+  /**
+   * Build the (connection_id, captured_at) indexes every bounded client
+   * analytics and audit read relies on. Called fire-and-forget from
+   * initialize(): on a multi-million-row table the build takes minutes, and
+   * CONCURRENTLY keeps writers flowing while it runs. Until it completes,
+   * isClientSnapshotIndexReady() reports false.
+   */
+  private async ensureAnalyticsIndexes(): Promise<void> {
+    const indexes: Array<[string, string, string]> = [
+      ['idx_client_connection_captured', 'client_snapshots', 'connection_id, captured_at'],
+      ['idx_acl_connection_captured', 'acl_audit', 'connection_id, captured_at'],
+    ];
+    for (const [indexName, tableName, columns] of indexes) {
+      const started = Date.now();
+      console.log(`Ensuring index ${indexName} on ${tableName}(${columns})`);
+      const built = await this.ensureIndexConcurrently(indexName, tableName, columns);
+      if (built) {
+        console.log(`Index ${indexName} ready after ${Date.now() - started}ms`);
+      } else {
+        console.log(`Index ${indexName} is being built by another instance; skipped`);
+      }
+    }
+  }
+
+  /**
+   * Build `indexName ON tableName(columns)` CONCURRENTLY, outside
+   * createSchema's transactional batch. CONCURRENTLY cannot run inside a
+   * transaction block, so it runs here as its own autocommit statement; in
+   * exchange it does not hold a write lock while it builds, which on an
+   * already-large table would otherwise stall writers at startup. Best-effort:
+   * if the concurrent build fails, fall back to a plain blocking build so the
+   * index is guaranteed present; read correctness outweighs the one-time lock.
+   *
+   * A concurrent build that fails partway (or whose process dies mid-build)
+   * leaves an INVALID index under the name, and IF NOT EXISTS would then skip
+   * it on this and every later boot, leaving the reads it serves on full
+   * scans. So an invalid index is dropped before each build. An index that is
+   * still being built concurrently also reads as invalid, so only one replica
+   * per schema builds at a time (session advisory lock); a replica that finds
+   * the lock held skips, since the holder is building the index.
+   *
+   * Identifiers are trusted constants from this file, never user input.
+   * Returns false when another session held the lock and nothing was done.
+   */
+  private async ensureIndexConcurrently(
+    indexName: string,
+    tableName: string,
+    columns: string,
+  ): Promise<boolean> {
+    if (!this.pool) return false;
     const client = await this.pool.connect();
     try {
-      // Keyed on this schema's otel_spans table, not a constant: advisory locks
-      // are database-wide, so with per-tenant schemas in one database a shared
-      // key would let tenant A's build make tenant B skip its own.
+      // Keyed on this schema's table oid, not a constant: advisory locks are
+      // database-wide, so with per-tenant schemas in one database a shared key
+      // would let tenant A's build make tenant B skip its own.
       const lock = await client.query(
         `SELECT key, pg_try_advisory_lock(key) AS locked FROM (
-           SELECT hashtext('betterdb.idx_otel_ingested:' || 'otel_spans'::regclass::oid) AS key
+           SELECT hashtext($1::text || $2::regclass::oid) AS key
          ) k`,
+        [`betterdb.${indexName}:`, tableName],
       );
-      if (!lock.rows[0]?.locked) return;
+      if (!lock.rows[0]?.locked) return false;
       const lockKey: number = lock.rows[0].key;
       try {
         try {
-          await this.dropInvalidOtelIngestedIndex(client, true);
+          await this.dropInvalidIndex(client, indexName, tableName, true);
           await client.query(
-            'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_otel_ingested ON otel_spans(ingested_at)',
+            `CREATE INDEX CONCURRENTLY IF NOT EXISTS ${indexName} ON ${tableName}(${columns})`,
           );
         } catch (error) {
           console.warn(
-            `CONCURRENT build of idx_otel_ingested failed, falling back to a blocking build: ${
+            `CONCURRENT build of ${indexName} failed, falling back to a blocking build: ${
               error instanceof Error ? error.message : String(error)
             }`,
           );
           // The failed concurrent build may have left its own invalid index.
-          await this.dropInvalidOtelIngestedIndex(client, false);
-          await client.query(
-            'CREATE INDEX IF NOT EXISTS idx_otel_ingested ON otel_spans(ingested_at)',
-          );
+          await this.dropInvalidIndex(client, indexName, tableName, false);
+          await client.query(`CREATE INDEX IF NOT EXISTS ${indexName} ON ${tableName}(${columns})`);
         }
       } finally {
         await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
       }
+      return true;
     } finally {
       client.release();
     }
   }
 
-  /** Drop idx_otel_ingested if it exists but is INVALID (see ensureOtelIngestedIndex). */
-  private async dropInvalidOtelIngestedIndex(
+  /** Drop `indexName` on `tableName` if it exists but is INVALID (see ensureIndexConcurrently). */
+  private async dropInvalidIndex(
     client: PoolClient,
+    indexName: string,
+    tableName: string,
     concurrently: boolean,
   ): Promise<void> {
-    // Resolve the index through otel_spans itself, so with a per-tenant schema
-    // this never looks at (or drops) another schema's index of the same name.
+    // Resolve the index through its table, so with a per-tenant schema this
+    // never looks at (or drops) another schema's index of the same name.
     const result = await client.query(
       `SELECT quote_ident(n.nspname) AS schema_name, i.indisvalid AS valid
          FROM pg_index i
          JOIN pg_class c ON c.oid = i.indexrelid
          JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE i.indrelid = 'otel_spans'::regclass AND c.relname = 'idx_otel_ingested'`,
+        WHERE i.indrelid = $1::regclass AND c.relname = $2`,
+      [tableName, indexName],
     );
     const row = result.rows[0];
     if (!row || row.valid) return;
-    console.warn('idx_otel_ingested is INVALID (an earlier build was interrupted); rebuilding it');
+    console.warn(`${indexName} is INVALID (an earlier build was interrupted); rebuilding it`);
     await client.query(
-      `DROP INDEX ${concurrently ? 'CONCURRENTLY ' : ''}IF EXISTS ${row.schema_name}.idx_otel_ingested`,
+      `DROP INDEX ${concurrently ? 'CONCURRENTLY ' : ''}IF EXISTS ${row.schema_name}.${indexName}`,
     );
   }
 

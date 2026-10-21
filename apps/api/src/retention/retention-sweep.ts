@@ -23,6 +23,11 @@ export async function runRetentionSweep(
     { name: 'slowlog', fn: () => storage.pruneOldSlowLogEntries(cutoff) },
     { name: 'commandlog', fn: () => storage.pruneOldCommandLogEntries(cutoff) },
     { name: 'client_snapshots', fn: () => storage.pruneOldClientSnapshots(cutoff) },
+    // The rollup poller also trims rollups hourly to
+    // CLIENT_ANALYTICS_ROLLUP_RETENTION_DAYS, but only for registered
+    // connections; this reclaims rollups of removed connections and applies
+    // the general window when it is the shorter one. Compared to bucket_start.
+    { name: 'client_analytics_rollups', fn: () => storage.pruneOldClientAnalyticsRollups(cutoff) },
     { name: 'anomaly_events', fn: () => storage.pruneOldAnomalyEvents(cutoff) },
     { name: 'correlated_groups', fn: () => storage.pruneOldCorrelatedGroups(cutoff) },
     { name: 'key_patterns', fn: () => storage.pruneOldKeyPatternSnapshots(cutoff) },

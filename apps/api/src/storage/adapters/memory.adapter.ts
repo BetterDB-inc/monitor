@@ -90,6 +90,8 @@ import {
   MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS,
   memoryForgetTargetDiscriminator,
 } from '@betterdb/shared';
+import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
+import { clientAddrIp, foldClientAnalyticsStats, type ClientStatsGroup } from './client-analytics-stats';
 import { WebhookMemoryRepository } from './repositories/webhook.memory.repository';
 import { SlowLogMemoryRepository } from './repositories/slowlog.memory.repository';
 import { InvitationMemoryRepository } from './repositories/invitation.memory.repository';
@@ -128,6 +130,8 @@ function pendingProposalSubDiscriminator(
 export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   private aclEntries: StoredAclEntry[] = [];
   private clientSnapshots: StoredClientSnapshot[] = [];
+  /** Keyed by `${connectionId}:${bucketStart}`. */
+  private clientAnalyticsRollups: Map<string, ClientAnalyticsRollup> = new Map();
   private anomalyEvents: StoredAnomalyEvent[] = [];
   private bulkDeleteAudits: StoredBulkDeleteAudit[] = [];
   private correlatedGroups: StoredCorrelatedGroup[] = [];
@@ -159,6 +163,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   async close(): Promise<void> {
     this.aclEntries = [];
     this.clientSnapshots = [];
+    this.clientAnalyticsRollups.clear();
     this.ready = false;
   }
 
@@ -399,162 +404,25 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     endTime?: number,
     connectionId?: string,
   ): Promise<ClientAnalyticsStats> {
-    let filtered = [...this.clientSnapshots];
-
-    if (connectionId) {
-      filtered = filtered.filter((c) => c.connectionId === connectionId);
-    }
-
-    if (startTime) {
-      filtered = filtered.filter((c) => c.capturedAt >= startTime);
-    }
-
-    if (endTime) {
-      filtered = filtered.filter((c) => c.capturedAt <= endTime);
-    }
-
-    const latestTimestamp =
-      filtered.length > 0 ? Math.max(...filtered.map((c) => c.capturedAt)) : 0;
-    const currentClients = filtered.filter((c) => c.capturedAt === latestTimestamp);
-
-    // Group by captured_at to find peak
-    const byTimestamp = new Map<number, number>();
-    for (const client of filtered) {
-      byTimestamp.set(client.capturedAt, (byTimestamp.get(client.capturedAt) || 0) + 1);
-    }
-
-    let peakConnections = 0;
-    let peakTimestamp = 0;
-    for (const [timestamp, count] of byTimestamp.entries()) {
-      if (count > peakConnections) {
-        peakConnections = count;
-        peakTimestamp = timestamp;
+    const groups = new Map<string, ClientStatsGroup>();
+    const ips = new Set<string>();
+    for (const c of this.clientSnapshots) {
+      if (connectionId && c.connectionId !== connectionId) continue;
+      if (startTime && c.capturedAt < startTime) continue;
+      if (endTime && c.capturedAt > endTime) continue;
+      const name = c.name || '';
+      const user = c.user || '';
+      const key = JSON.stringify([c.capturedAt, user, name]);
+      let group = groups.get(key);
+      if (!group) {
+        group = { capturedAt: c.capturedAt, name, user, count: 0, ageSum: 0 };
+        groups.set(key, group);
       }
+      group.count += 1;
+      group.ageSum += c.age;
+      ips.add(clientAddrIp(c.addr));
     }
-
-    const uniqueNames = new Set(filtered.map((c) => c.name).filter((n) => n));
-    const uniqueUsers = new Set(filtered.map((c) => c.user).filter((u) => u));
-    const uniqueIps = new Set(filtered.map((c) => c.addr.split(':')[0]));
-
-    // Connections by name
-    const connectionsByName: Record<string, { current: number; peak: number; avgAge: number }> = {};
-    const byName = new Map<string, StoredClientSnapshot[]>();
-    for (const client of filtered) {
-      if (client.name) {
-        if (!byName.has(client.name)) {
-          byName.set(client.name, []);
-        }
-        byName.get(client.name)!.push(client);
-      }
-    }
-
-    for (const [name, clients] of byName.entries()) {
-      const currentCount = currentClients.filter((c) => c.name === name).length;
-      const byTimestampForName = new Map<number, number>();
-      for (const client of clients) {
-        byTimestampForName.set(
-          client.capturedAt,
-          (byTimestampForName.get(client.capturedAt) || 0) + 1,
-        );
-      }
-      const peakForName = Math.max(...Array.from(byTimestampForName.values()));
-      const avgAge = clients.reduce((sum, c) => sum + c.age, 0) / clients.length;
-
-      connectionsByName[name] = {
-        current: currentCount,
-        peak: peakForName,
-        avgAge,
-      };
-    }
-
-    // Connections by user
-    const connectionsByUser: Record<string, { current: number; peak: number }> = {};
-    const byUser = new Map<string, StoredClientSnapshot[]>();
-    for (const client of filtered) {
-      if (client.user) {
-        if (!byUser.has(client.user)) {
-          byUser.set(client.user, []);
-        }
-        byUser.get(client.user)!.push(client);
-      }
-    }
-
-    for (const [user, clients] of byUser.entries()) {
-      const currentCount = currentClients.filter((c) => c.user === user).length;
-      const byTimestampForUser = new Map<number, number>();
-      for (const client of clients) {
-        byTimestampForUser.set(
-          client.capturedAt,
-          (byTimestampForUser.get(client.capturedAt) || 0) + 1,
-        );
-      }
-      const peakForUser = Math.max(...Array.from(byTimestampForUser.values()));
-
-      connectionsByUser[user] = {
-        current: currentCount,
-        peak: peakForUser,
-      };
-    }
-
-    // Connections by user and name
-    const connectionsByUserAndName: Record<
-      string,
-      { user: string; name: string; current: number; peak: number; avgAge: number }
-    > = {};
-    const byUserAndName = new Map<string, StoredClientSnapshot[]>();
-    for (const client of filtered) {
-      if (client.user && client.name) {
-        const key = `${client.user}:${client.name}`;
-        if (!byUserAndName.has(key)) {
-          byUserAndName.set(key, []);
-        }
-        byUserAndName.get(key)!.push(client);
-      }
-    }
-
-    for (const [key, clients] of byUserAndName.entries()) {
-      const [user, name] = key.split(':');
-      const currentCount = currentClients.filter((c) => c.user === user && c.name === name).length;
-      const byTimestampForCombined = new Map<number, number>();
-      for (const client of clients) {
-        byTimestampForCombined.set(
-          client.capturedAt,
-          (byTimestampForCombined.get(client.capturedAt) || 0) + 1,
-        );
-      }
-      const peakForCombined = Math.max(...Array.from(byTimestampForCombined.values()));
-      const avgAge = clients.reduce((sum, c) => sum + c.age, 0) / clients.length;
-
-      connectionsByUserAndName[key] = {
-        user,
-        name,
-        current: currentCount,
-        peak: peakForCombined,
-        avgAge,
-      };
-    }
-
-    let timeRange = null;
-    if (filtered.length > 0) {
-      const timestamps = filtered.map((c) => c.capturedAt).sort((a, b) => a - b);
-      timeRange = {
-        earliest: timestamps[0],
-        latest: timestamps[timestamps.length - 1],
-      };
-    }
-
-    return {
-      currentConnections: currentClients.length,
-      peakConnections,
-      peakTimestamp,
-      uniqueClientNames: uniqueNames.size,
-      uniqueUsers: uniqueUsers.size,
-      uniqueIps: uniqueIps.size,
-      connectionsByName,
-      connectionsByUser,
-      connectionsByUserAndName,
-      timeRange,
-    };
+    return foldClientAnalyticsStats(groups.values(), ips.size);
   }
 
   async getClientConnectionHistory(
@@ -606,6 +474,129 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       this.clientSnapshots = this.clientSnapshots.filter((c) => c.capturedAt >= olderThanTimestamp);
     }
     return before - this.clientSnapshots.length;
+  }
+
+  async getClientSnapshotBounds(
+    connectionId: string,
+  ): Promise<{ earliest: number; latest: number } | null> {
+    let earliest = Infinity;
+    let latest = -Infinity;
+    for (const c of this.clientSnapshots) {
+      if (c.connectionId !== connectionId) continue;
+      if (c.capturedAt < earliest) earliest = c.capturedAt;
+      if (c.capturedAt > latest) latest = c.capturedAt;
+    }
+    return earliest === Infinity ? null : { earliest, latest };
+  }
+
+  async getClientSnapshotGroups(
+    connectionId: string,
+    startExclusive: number,
+    endInclusive: number,
+  ): Promise<ClientSnapshotGroupRow[]> {
+    const groups = new Map<string, ClientSnapshotGroupRow>();
+    for (const c of this.clientSnapshots) {
+      if (c.connectionId !== connectionId) continue;
+      if (c.capturedAt <= startExclusive || c.capturedAt > endInclusive) continue;
+      const name = c.name || '';
+      const user = c.user || '';
+      const ip = clientAddrIp(c.addr);
+      const key = JSON.stringify([c.capturedAt, name, user, ip]);
+      let group = groups.get(key);
+      if (!group) {
+        group = { capturedAt: c.capturedAt, name, user, ip, count: 0, ageSum: 0 };
+        groups.set(key, group);
+      }
+      group.count += 1;
+      group.ageSum += c.age;
+    }
+    const cmp = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0);
+    return Array.from(groups.values()).sort(
+      (a, b) =>
+        a.capturedAt - b.capturedAt || cmp(a.name, b.name) || cmp(a.user, b.user) || cmp(a.ip, b.ip),
+    );
+  }
+
+  async upsertClientAnalyticsRollups(rollups: ClientAnalyticsRollup[]): Promise<void> {
+    for (const rollup of rollups) {
+      this.clientAnalyticsRollups.set(
+        `${rollup.connectionId}:${rollup.bucketStart}`,
+        structuredClone(rollup),
+      );
+    }
+  }
+
+  async getClientAnalyticsRollups(
+    startBucket: number,
+    endBucket: number,
+    connectionId?: string,
+  ): Promise<ClientAnalyticsRollup[]> {
+    const result: ClientAnalyticsRollup[] = [];
+    for (const rollup of this.clientAnalyticsRollups.values()) {
+      if (connectionId && rollup.connectionId !== connectionId) continue;
+      if (rollup.bucketStart < startBucket || rollup.bucketStart > endBucket) continue;
+      result.push(structuredClone(rollup));
+    }
+    return result.sort(
+      (a, b) =>
+        a.bucketStart - b.bucketStart ||
+        (a.connectionId < b.connectionId ? -1 : a.connectionId > b.connectionId ? 1 : 0),
+    );
+  }
+
+  async getClientAnalyticsRollupWatermark(connectionId: string): Promise<number | null> {
+    let max: number | null = null;
+    for (const rollup of this.clientAnalyticsRollups.values()) {
+      if (rollup.connectionId !== connectionId) continue;
+      if (max === null || rollup.lastCapturedAt > max) max = rollup.lastCapturedAt;
+    }
+    return max;
+  }
+
+  async getClientAnalyticsRollupFloor(connectionId: string): Promise<number | null> {
+    let min: number | null = null;
+    for (const rollup of this.clientAnalyticsRollups.values()) {
+      if (rollup.connectionId !== connectionId) continue;
+      if (min === null || rollup.bucketStart < min) min = rollup.bucketStart;
+    }
+    return min;
+  }
+
+  async getClientAnalyticsRollupPeak(
+    connectionId: string,
+    sinceBucket: number,
+  ): Promise<{ peak: number; capturedAt: number } | null> {
+    let best: { peak: number; capturedAt: number } | null = null;
+    for (const rollup of this.clientAnalyticsRollups.values()) {
+      if (rollup.connectionId !== connectionId || rollup.bucketStart < sinceBucket) continue;
+      if (
+        best === null ||
+        rollup.peakConnections > best.peak ||
+        (rollup.peakConnections === best.peak && rollup.peakCapturedAt < best.capturedAt)
+      ) {
+        best = { peak: rollup.peakConnections, capturedAt: rollup.peakCapturedAt };
+      }
+    }
+    return best;
+  }
+
+  async pruneOldClientAnalyticsRollups(
+    olderThanBucketStart: number,
+    connectionId?: string,
+  ): Promise<number> {
+    let deleted = 0;
+    for (const [key, rollup] of this.clientAnalyticsRollups) {
+      if (connectionId && rollup.connectionId !== connectionId) continue;
+      if (rollup.bucketStart < olderThanBucketStart) {
+        this.clientAnalyticsRollups.delete(key);
+        deleted++;
+      }
+    }
+    return deleted;
+  }
+
+  async isClientSnapshotIndexReady(): Promise<boolean> {
+    return true;
   }
 
   async saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string> {

@@ -11,10 +11,15 @@ import { SettingsService } from '../settings/settings.service';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
+import { ConfigService } from '@nestjs/config';
+import { ClientAnalyticsRollupService } from './client-analytics-rollup.service';
+import { QueryBudget } from './query-budget';
+import { RAW_STATS_SPAN_MAX_MS } from './client-rollup-math';
 
 @Injectable()
 export class ClientAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(ClientAnalyticsService.name);
+  private readonly budget: QueryBudget;
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -22,8 +27,11 @@ export class ClientAnalyticsService extends MultiConnectionPoller implements OnM
     private prometheusService: PrometheusService,
     private settingsService: SettingsService,
     private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
+    private readonly rollupService: ClientAnalyticsRollupService,
+    configService: ConfigService,
   ) {
     super(connectionRegistry);
+    this.budget = QueryBudget.fromConfig(configService, this.logger);
   }
 
   protected getIntervalMs(): number {
@@ -95,8 +103,32 @@ export class ClientAnalyticsService extends MultiConnectionPoller implements OnM
     return this.storage.getClientTimeSeries(startTime, endTime, bucketSizeMs, connectionId);
   }
 
+  /**
+   * Windowed stats without ever aggregating over the whole raw table:
+   * - no bounds: the aggregator's in-memory latest window (or the same window
+   *   merged from rollups when no single connection is asked for);
+   * - a span up to RAW_STATS_SPAN_MAX_MS (6 hours): a bounded raw query;
+   * - a longer span: merged from rollup buckets.
+   * A missing endTime means now; a missing startTime means one window before endTime.
+   */
   async getStats(startTime?: number, endTime?: number, connectionId?: string): Promise<ClientAnalyticsStats> {
-    return this.storage.getClientAnalyticsStats(startTime, endTime, connectionId);
+    const windowMs = this.rollupService.getWindowMs();
+    if (startTime === undefined && endTime === undefined) {
+      if (connectionId) {
+        const latest = this.rollupService.getLatestStats(connectionId);
+        if (latest) return latest;
+      }
+      const now = Date.now();
+      return this.rollupService.getStatsForRange(now - windowMs, now, connectionId);
+    }
+    const end = endTime ?? Date.now();
+    const start = startTime ?? end - windowMs;
+    if (end - start <= RAW_STATS_SPAN_MAX_MS) {
+      return this.budget.time('getClientAnalyticsStats', connectionId, () =>
+        this.storage.getClientAnalyticsStats(start, end, connectionId),
+      );
+    }
+    return this.rollupService.getStatsForRange(start, end, connectionId);
   }
 
   async getConnectionHistory(
@@ -105,7 +137,9 @@ export class ClientAnalyticsService extends MultiConnectionPoller implements OnM
     endTime?: number,
     connectionId?: string,
   ): Promise<StoredClientSnapshot[]> {
-    return this.storage.getClientConnectionHistory(identifier, startTime, endTime, connectionId);
+    // Never scan a connection's whole history: default to the stats window.
+    const start = startTime ?? (endTime ?? Date.now()) - this.rollupService.getWindowMs();
+    return this.storage.getClientConnectionHistory(identifier, start, endTime, connectionId);
   }
 
   async cleanup(olderThanTimestamp?: number, connectionId?: string): Promise<number> {

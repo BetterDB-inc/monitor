@@ -41,6 +41,21 @@ export interface ClientTimeSeriesPoint {
   byAddr: Record<string, number>;
 }
 
+/**
+ * Client analytics summary for one connection (or all connections).
+ *
+ * The figures do not all cover the same span:
+ * - peakConnections / peakTimestamp: the whole rollup retention
+ *   (CLIENT_ANALYTICS_ROLLUP_RETENTION_DAYS, default 90 days) when served from
+ *   the aggregator's latest stats (the Prometheus peak gauge and
+ *   GET /client-analytics/stats for one connection without a range); otherwise
+ *   the requested range (or the default window when no range is given).
+ * - unique counts, average ages and the per-name / per-user / per-pair `peak`
+ *   values: the window (CLIENT_ANALYTICS_WINDOW_MS, default 24 hours) for the
+ *   latest stats, or the requested range.
+ * - currentConnections and the per-group `current` values: the newest snapshot
+ *   batch inside that span.
+ */
 export interface ClientAnalyticsStats {
   currentConnections: number;
   peakConnections: number;
@@ -52,6 +67,22 @@ export interface ClientAnalyticsStats {
   connectionsByUser: Record<string, { current: number; peak: number }>;
   connectionsByUserAndName: Record<string, { user: string; name: string; current: number; peak: number; avgAge: number }>;
   timeRange: { earliest: number; latest: number } | null;
+}
+
+/** Stats for an empty range: zero counts, empty breakdowns, no time range. */
+export function emptyClientAnalyticsStats(): ClientAnalyticsStats {
+  return {
+    currentConnections: 0,
+    peakConnections: 0,
+    peakTimestamp: 0,
+    uniqueClientNames: 0,
+    uniqueUsers: 0,
+    uniqueIps: 0,
+    connectionsByName: {},
+    connectionsByUser: {},
+    connectionsByUserAndName: {},
+    timeRange: null,
+  };
 }
 
 // Advanced Analytics Interfaces
@@ -171,4 +202,70 @@ export interface SpikeDetectionResponse {
     stdDevConnections: number;
     avgCommandsPerMinute: number;
   };
+}
+
+// Client analytics rollups
+//
+// Raw client_snapshots rows are folded into one row per connection per
+// fixed-size time bucket by the background aggregator. Every field of
+// ClientAnalyticsStats can be reproduced exactly by merging bucket rows over a
+// range, so readers never aggregate over raw rows for anything historical.
+// The bucket size is fixed: changing it would make existing rows unmergeable.
+
+export const CLIENT_ANALYTICS_ROLLUP_BUCKET_MS = 5 * 60 * 1000;
+
+export function clientRollupBucketStart(timestampMs: number): number {
+  return Math.floor(timestampMs / CLIENT_ANALYTICS_ROLLUP_BUCKET_MS) * CLIENT_ANALYTICS_ROLLUP_BUCKET_MS;
+}
+
+/** Per-group stat inside one bucket. `last` is the count in the bucket's newest batch (0 when absent from it), `peak` the largest count in any one batch, `ageSum`/`rows` give the weighted average age across buckets. */
+export interface ClientRollupGroupStat {
+  last: number;
+  peak: number;
+  ageSum: number;
+  rows: number;
+}
+
+export interface ClientRollupUserStat {
+  last: number;
+  peak: number;
+}
+
+export interface ClientAnalyticsRollup {
+  connectionId: string;
+  /** Inclusive bucket start, a multiple of CLIENT_ANALYTICS_ROLLUP_BUCKET_MS. */
+  bucketStart: number;
+  firstCapturedAt: number;
+  lastCapturedAt: number;
+  /** Distinct captured_at values (poller batches) folded into this bucket. */
+  batchCount: number;
+  /** Raw rows folded into this bucket. */
+  rowCount: number;
+  /** Rows in the bucket's newest batch. */
+  lastConnections: number;
+  /** Largest batch in the bucket and when it was captured. */
+  peakConnections: number;
+  peakCapturedAt: number;
+  /** Keyed by client name; names that are empty are not tracked. */
+  byName: Record<string, ClientRollupGroupStat>;
+  /** Keyed by ACL user; empty users are not tracked. */
+  byUser: Record<string, ClientRollupUserStat>;
+  /** Keyed by `${user}:${name}`; only pairs where both are non-empty. */
+  byUserAndName: Record<string, ClientRollupGroupStat>;
+  /** Distinct client IPs (addr without port) seen in the bucket. */
+  ips: string[];
+  updatedAt: number;
+}
+
+/** One grouped raw row, as read by the aggregator: all client_snapshots rows sharing (captured_at, name, user, ip). */
+export interface ClientSnapshotGroupRow {
+  capturedAt: number;
+  /** '' when the stored name is NULL or empty. */
+  name: string;
+  /** '' when the stored user is NULL or empty. */
+  user: string;
+  /** addr with the port stripped. */
+  ip: string;
+  count: number;
+  ageSum: number;
 }

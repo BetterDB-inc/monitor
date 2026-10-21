@@ -16,6 +16,7 @@ describe('LocalRetentionService', () => {
       pruneOldSlowLogEntries: jest.fn().mockResolvedValue(1),
       pruneOldCommandLogEntries: jest.fn().mockResolvedValue(2),
       pruneOldClientSnapshots: jest.fn().mockResolvedValue(0),
+      pruneOldClientAnalyticsRollups: jest.fn().mockResolvedValue(0),
       pruneOldAnomalyEvents: jest.fn().mockResolvedValue(0),
       pruneOldCorrelatedGroups: jest.fn().mockResolvedValue(0),
       pruneOldKeyPatternSnapshots: jest.fn().mockResolvedValue(0),
@@ -76,6 +77,14 @@ describe('LocalRetentionService', () => {
 
     expect(storage.pruneOldScalingReadinessScores).toHaveBeenCalledWith(1_234);
     expect(results.scaling_readiness_scores).toBe(3);
+  });
+
+  it('sweeps client analytics rollups so removed connections do not keep them forever', async () => {
+    storage.pruneOldClientAnalyticsRollups.mockResolvedValue(4);
+    const results = await runRetentionSweep(storage, 5_678, { error: jest.fn() } as any);
+
+    expect(storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledWith(5_678);
+    expect(results.client_analytics_rollups).toBe(4);
   });
 
   it('does nothing in cloud mode even when a window is configured', async () => {

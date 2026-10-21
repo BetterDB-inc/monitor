@@ -85,7 +85,9 @@ import type {
   AppSettings,
   AuditQueryOptions,
   AuditStats,
+  ClientAnalyticsRollup,
   ClientAnalyticsStats,
+  ClientSnapshotGroupRow,
   ClientSnapshotQueryOptions,
   ClientTimeSeriesPoint,
   DatabaseConnectionConfig,
@@ -466,6 +468,16 @@ export interface StoragePort {
     bucketSizeMs?: number,
     connectionId?: string,
   ): Promise<ClientTimeSeriesPoint[]>;
+  /**
+   * Aggregate stats over raw client_snapshots rows with captured_at in [startTime, endTime].
+   * Callers must pass both bounds (and normally a connectionId): the read is a single pass over every
+   * matching row, so an unbounded call scans the connection's (or the whole table's) history.
+   * Historical / scrape-time reads should merge rollups instead. Semantics: byName / byUser
+   * track only non-empty values, byUserAndName only pairs where both are non-empty
+   * (keyed `${user}:${name}`); current = count in the latest batch in range; peak = largest
+   * single batch (ties resolve to the earliest captured_at); avgAge = mean over rows;
+   * uniqueIps counts addr up to the first ':'; timeRange is null when no rows match.
+   */
   getClientAnalyticsStats(
     startTime?: number,
     endTime?: number,
@@ -478,6 +490,42 @@ export interface StoragePort {
     connectionId?: string,
   ): Promise<StoredClientSnapshot[]>;
   pruneOldClientSnapshots(olderThanTimestamp: number, connectionId?: string): Promise<number>;
+
+  // Client Analytics Rollups - fed by ClientAnalyticsRollupService, read by Prometheus and the UI.
+  // Every raw read below is bounded by connection and a captured_at range and must be served by the
+  // (connection_id, captured_at) index; none may scan the whole table.
+  /** Oldest and newest captured_at for one connection, or null when it has no rows. */
+  getClientSnapshotBounds(connectionId: string): Promise<{ earliest: number; latest: number } | null>;
+  /** Raw rows with captured_at > startExclusive AND captured_at <= endInclusive, grouped by (captured_at, name, user, ip), ordered by captured_at ascending. */
+  getClientSnapshotGroups(
+    connectionId: string,
+    startExclusive: number,
+    endInclusive: number,
+  ): Promise<ClientSnapshotGroupRow[]>;
+  /** Insert or replace whole bucket rows keyed by (connectionId, bucketStart). */
+  upsertClientAnalyticsRollups(rollups: ClientAnalyticsRollup[]): Promise<void>;
+  /** Bucket rows with bucketStart in [startBucket, endBucket] inclusive, ordered by bucketStart then connectionId. Omitting connectionId returns every connection's rows. */
+  getClientAnalyticsRollups(
+    startBucket: number,
+    endBucket: number,
+    connectionId?: string,
+  ): Promise<ClientAnalyticsRollup[]>;
+  /** Newest lastCapturedAt among a connection's bucket rows, or null when it has none. */
+  getClientAnalyticsRollupWatermark(connectionId: string): Promise<number | null>;
+  /** Oldest bucketStart among a connection's bucket rows, or null when it has none. */
+  getClientAnalyticsRollupFloor(connectionId: string): Promise<number | null>;
+  /**
+   * Largest peakConnections among a connection's bucket rows with bucketStart >= sinceBucket, with its
+   * peakCapturedAt; ties resolve to the earliest peakCapturedAt. Null when no row matches. Reads only the
+   * two numeric columns over the primary-key range, never the JSON columns.
+   */
+  getClientAnalyticsRollupPeak(
+    connectionId: string,
+    sinceBucket: number,
+  ): Promise<{ peak: number; capturedAt: number } | null>;
+  pruneOldClientAnalyticsRollups(olderThanBucketStart: number, connectionId?: string): Promise<number>;
+  /** True once the (connection_id, captured_at) index on client_snapshots exists and is valid (always true on adapters that build it synchronously). */
+  isClientSnapshotIndexReady(): Promise<boolean>;
 
   // Anomaly Methods - connectionId required for writes, optional filter for reads
   saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string>;
