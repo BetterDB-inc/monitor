@@ -119,6 +119,8 @@ import type {
   TokenType,
 } from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
+import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
+import { clientAddrIp, foldClientAnalyticsStats, mapClientAnalyticsRollupRow } from './client-analytics-stats';
 import { openLibsqlDatabase } from './libsql-driver';
 import { loadBetterSqlite3 } from './better-sqlite3-driver';
 import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repository';
@@ -129,6 +131,17 @@ import { ActivitySqliteRepository } from './repositories/activity.sqlite.reposit
 import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
 import { encodeCveSnapshots } from './cve-snapshots.codec';
 import { readCveDataset, readCveScanResult } from './cve-storage.schema';
+
+/**
+ * addr with a trailing ':<digits>' port stripped; mirrors clientAddrIp().
+ * SQLite has no regexp, so: t = addr with trailing digits trimmed; when at
+ * least one digit was trimmed and t ends with ':', drop that ':', otherwise
+ * keep addr whole ('host:' and 'host:12a' stay as they are).
+ */
+const SQLITE_CLIENT_IP_TRIMMED = "rtrim(addr, '0123456789')";
+const SQLITE_CLIENT_IP_EXPR =
+  `CASE WHEN length(${SQLITE_CLIENT_IP_TRIMMED}) < length(addr) AND substr(${SQLITE_CLIENT_IP_TRIMMED}, -1) = ':' ` +
+  `THEN substr(addr, 1, length(${SQLITE_CLIENT_IP_TRIMMED}) - 1) ELSE addr END`;
 
 /**
  * Idempotent migration for the memory_proposals columns added with the
@@ -377,6 +390,7 @@ const ACL_AUDIT_INDEXES = `
   CREATE INDEX IF NOT EXISTS idx_acl_captured_at ON acl_audit(captured_at);
   CREATE INDEX IF NOT EXISTS idx_acl_timestamp_created ON acl_audit(timestamp_created);
   CREATE INDEX IF NOT EXISTS idx_acl_connection_id ON acl_audit(connection_id);
+  CREATE INDEX IF NOT EXISTS idx_acl_connection_captured ON acl_audit(connection_id, captured_at);
 `;
 
 const SLOW_LOG_ENTRIES_COLUMNS = `
@@ -1271,7 +1285,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       if (row.user) {
         point.byUser[row.user] = (point.byUser[row.user] || 0) + 1;
       }
-      const ip = row.addr.split(':')[0];
+      const ip = clientAddrIp(row.addr);
       point.byAddr[ip] = (point.byAddr[ip] || 0) + 1;
     }
 
@@ -1307,212 +1321,37 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const latestTimestamp = this.db
-      .prepare(`SELECT MAX(captured_at) as latest FROM client_snapshots ${whereClause}`)
-      .get(...params) as { latest: number | null };
-
-    const currentConditions = latestTimestamp.latest
-      ? [...conditions, 'captured_at = ?']
-      : conditions;
-    const currentParams = latestTimestamp.latest ? [...params, latestTimestamp.latest] : params;
-    const currentWhereClause =
-      currentConditions.length > 0 ? `WHERE ${currentConditions.join(' AND ')}` : '';
-
-    const currentConnectionsResult = this.db
-      .prepare(`SELECT COUNT(*) as count FROM client_snapshots ${currentWhereClause}`)
-      .get(...currentParams) as { count: number };
-
-    const peakQuery = `
-      SELECT captured_at, COUNT(*) as count
-      FROM client_snapshots ${whereClause}
-      GROUP BY captured_at
-      ORDER BY count DESC
-      LIMIT 1
-    `;
-    const peakResult = this.db.prepare(peakQuery).get(...params) as
-      | { captured_at: number; count: number }
-      | undefined;
-
-    const uniqueNamesResult = this.db
-      .prepare(`SELECT COUNT(DISTINCT name) as count FROM client_snapshots ${whereClause}`)
-      .get(...params) as { count: number };
-
-    const uniqueUsersResult = this.db
-      .prepare(`SELECT COUNT(DISTINCT user) as count FROM client_snapshots ${whereClause}`)
-      .get(...params) as { count: number };
-
-    const uniqueIpsResult = this.db
+    const groups = this.db
       .prepare(
-        `SELECT COUNT(DISTINCT substr(addr, 1, instr(addr, ':') - 1)) as count FROM client_snapshots ${whereClause}`,
+        `SELECT captured_at, COALESCE(user, '') AS user, COALESCE(name, '') AS name,
+                COUNT(*) AS count, SUM(age) AS age_sum
+           FROM client_snapshots ${whereClause}
+          GROUP BY captured_at, COALESCE(user, ''), COALESCE(name, '')`,
+      )
+      .all(...params) as Array<{
+      captured_at: number;
+      user: string;
+      name: string;
+      count: number;
+      age_sum: number;
+    }>;
+
+    const ips = this.db
+      .prepare(
+        `SELECT COUNT(DISTINCT ${SQLITE_CLIENT_IP_EXPR}) AS count FROM client_snapshots ${whereClause}`,
       )
       .get(...params) as { count: number };
 
-    const byNameRows = this.db
-      .prepare(
-        `
-      SELECT
-        name,
-        COUNT(*) as total,
-        AVG(age) as avg_age
-      FROM client_snapshots ${whereClause}
-      GROUP BY name
-    `,
-      )
-      .all(...params) as Array<{ name: string; total: number; avg_age: number }>;
-
-    const connectionsByName: Record<string, { current: number; peak: number; avgAge: number }> = {};
-    for (const row of byNameRows) {
-      if (row.name) {
-        const namePeakResult = this.db
-          .prepare(
-            `
-          SELECT captured_at, COUNT(*) as count
-          FROM client_snapshots
-          WHERE name = ? ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
-          GROUP BY captured_at
-          ORDER BY count DESC
-          LIMIT 1
-        `,
-          )
-          .get(row.name, ...params) as { count: number } | undefined;
-
-        const nameCurrentResult = this.db
-          .prepare(
-            `
-          SELECT COUNT(*) as count
-          FROM client_snapshots
-          WHERE name = ? ${currentWhereClause ? 'AND ' + currentWhereClause.substring(6) : ''}
-        `,
-          )
-          .get(row.name, ...currentParams) as { count: number };
-
-        connectionsByName[row.name] = {
-          current: nameCurrentResult.count,
-          peak: namePeakResult?.count || 0,
-          avgAge: row.avg_age,
-        };
-      }
-    }
-
-    const byUserRows = this.db
-      .prepare(
-        `
-      SELECT user, COUNT(*) as total
-      FROM client_snapshots ${whereClause}
-      GROUP BY user
-    `,
-      )
-      .all(...params) as Array<{ user: string; total: number }>;
-
-    const connectionsByUser: Record<string, { current: number; peak: number }> = {};
-    for (const row of byUserRows) {
-      if (row.user) {
-        const userPeakResult = this.db
-          .prepare(
-            `
-          SELECT captured_at, COUNT(*) as count
-          FROM client_snapshots
-          WHERE user = ? ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
-          GROUP BY captured_at
-          ORDER BY count DESC
-          LIMIT 1
-        `,
-          )
-          .get(row.user, ...params) as { count: number } | undefined;
-
-        const userCurrentResult = this.db
-          .prepare(
-            `
-          SELECT COUNT(*) as count
-          FROM client_snapshots
-          WHERE user = ? ${currentWhereClause ? 'AND ' + currentWhereClause.substring(6) : ''}
-        `,
-          )
-          .get(row.user, ...currentParams) as { count: number };
-
-        connectionsByUser[row.user] = {
-          current: userCurrentResult.count,
-          peak: userPeakResult?.count || 0,
-        };
-      }
-    }
-
-    const byUserAndNameRows = this.db
-      .prepare(
-        `
-      SELECT
-        user,
-        name,
-        COUNT(*) as total,
-        AVG(age) as avg_age
-      FROM client_snapshots ${whereClause}
-      GROUP BY user, name
-    `,
-      )
-      .all(...params) as Array<{ user: string; name: string; total: number; avg_age: number }>;
-
-    const connectionsByUserAndName: Record<
-      string,
-      { user: string; name: string; current: number; peak: number; avgAge: number }
-    > = {};
-    for (const row of byUserAndNameRows) {
-      const key = `${row.user}:${row.name}`;
-
-      const combinedPeakResult = this.db
-        .prepare(
-          `
-        SELECT captured_at, COUNT(*) as count
-        FROM client_snapshots
-        WHERE user = ? AND name = ? ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
-        GROUP BY captured_at
-        ORDER BY count DESC
-        LIMIT 1
-      `,
-        )
-        .get(row.user, row.name, ...params) as { count: number } | undefined;
-
-      const combinedCurrentResult = this.db
-        .prepare(
-          `
-        SELECT COUNT(*) as count
-        FROM client_snapshots
-        WHERE user = ? AND name = ? ${currentWhereClause ? 'AND ' + currentWhereClause.substring(6) : ''}
-      `,
-        )
-        .get(row.user, row.name, ...currentParams) as { count: number };
-
-      connectionsByUserAndName[key] = {
-        user: row.user,
-        name: row.name,
-        current: combinedCurrentResult.count,
-        peak: combinedPeakResult?.count || 0,
-        avgAge: row.avg_age,
-      };
-    }
-
-    const timeRangeResult = this.db
-      .prepare(
-        `SELECT MIN(captured_at) as earliest, MAX(captured_at) as latest FROM client_snapshots ${whereClause}`,
-      )
-      .get(...params) as { earliest: number | null; latest: number | null };
-
-    const timeRange =
-      timeRangeResult.earliest !== null && timeRangeResult.latest !== null
-        ? { earliest: timeRangeResult.earliest, latest: timeRangeResult.latest }
-        : null;
-
-    return {
-      currentConnections: currentConnectionsResult.count,
-      peakConnections: peakResult?.count || 0,
-      peakTimestamp: peakResult?.captured_at || 0,
-      uniqueClientNames: uniqueNamesResult.count,
-      uniqueUsers: uniqueUsersResult.count,
-      uniqueIps: uniqueIpsResult.count,
-      connectionsByName,
-      connectionsByUser,
-      connectionsByUserAndName,
-      timeRange,
-    };
+    return foldClientAnalyticsStats(
+      groups.map((g) => ({
+        capturedAt: Number(g.captured_at),
+        user: g.user,
+        name: g.name,
+        count: Number(g.count),
+        ageSum: Number(g.age_sum ?? 0),
+      })),
+      Number(ips.count),
+    );
   }
 
   async getClientConnectionHistory(
@@ -1589,6 +1428,206 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return chunkedSqliteDelete(this.db, 'client_snapshots', 'captured_at < ?', [olderThanTimestamp]);
   }
 
+  async getClientSnapshotBounds(
+    connectionId: string,
+  ): Promise<{ earliest: number; latest: number } | null> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const row = this.db
+      .prepare(
+        `SELECT MIN(captured_at) AS earliest, MAX(captured_at) AS latest
+           FROM client_snapshots WHERE connection_id = ?`,
+      )
+      .get(connectionId) as { earliest: number | null; latest: number | null } | undefined;
+    if (!row || row.earliest === null || row.latest === null) {
+      return null;
+    }
+    return { earliest: Number(row.earliest), latest: Number(row.latest) };
+  }
+
+  async getClientSnapshotNextCapturedAt(connectionId: string, afterExclusive: number): Promise<number | null> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    // MIN over a (connection_id, captured_at) range: one seek into the composite index.
+    const row = this.db
+      .prepare(
+        `SELECT MIN(captured_at) AS next FROM client_snapshots WHERE connection_id = ? AND captured_at > ?`,
+      )
+      .get(connectionId, afterExclusive) as { next: number | null } | undefined;
+    return row?.next === null || row?.next === undefined ? null : Number(row.next);
+  }
+
+  async getClientSnapshotGroups(
+    connectionId: string,
+    startExclusive: number,
+    endInclusive: number,
+  ): Promise<ClientSnapshotGroupRow[]> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT captured_at, COALESCE(name, '') AS name, COALESCE(user, '') AS user,
+                ${SQLITE_CLIENT_IP_EXPR} AS ip, COUNT(*) AS count, SUM(age) AS age_sum
+           FROM client_snapshots
+          WHERE connection_id = ? AND captured_at > ? AND captured_at <= ?
+          GROUP BY captured_at, COALESCE(name, ''), COALESCE(user, ''), ${SQLITE_CLIENT_IP_EXPR}
+          ORDER BY 1 ASC, 2 ASC, 3 ASC, 4 ASC`,
+      )
+      .all(connectionId, startExclusive, endInclusive) as Array<{
+      captured_at: number;
+      name: string;
+      user: string;
+      ip: string;
+      count: number;
+      age_sum: number | null;
+    }>;
+    return rows.map((row) => ({
+      capturedAt: Number(row.captured_at),
+      name: row.name,
+      user: row.user,
+      ip: row.ip,
+      count: Number(row.count),
+      ageSum: Number(row.age_sum ?? 0),
+    }));
+  }
+
+  async upsertClientAnalyticsRollups(rollups: ClientAnalyticsRollup[]): Promise<void> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    if (rollups.length === 0) {
+      return;
+    }
+    const upsert = this.db.prepare(`
+      INSERT INTO client_analytics_rollups (
+        connection_id, bucket_start, first_captured_at, last_captured_at, batch_count, row_count,
+        last_connections, peak_connections, peak_captured_at, by_name, by_user, by_user_name, ips,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (connection_id, bucket_start) DO UPDATE SET
+        first_captured_at = excluded.first_captured_at,
+        last_captured_at = excluded.last_captured_at,
+        batch_count = excluded.batch_count,
+        row_count = excluded.row_count,
+        last_connections = excluded.last_connections,
+        peak_connections = excluded.peak_connections,
+        peak_captured_at = excluded.peak_captured_at,
+        by_name = excluded.by_name,
+        by_user = excluded.by_user,
+        by_user_name = excluded.by_user_name,
+        ips = excluded.ips,
+        updated_at = excluded.updated_at
+    `);
+    const upsertMany = this.db.transaction((rows: ClientAnalyticsRollup[]) => {
+      for (const r of rows) {
+        upsert.run(
+          r.connectionId,
+          r.bucketStart,
+          r.firstCapturedAt,
+          r.lastCapturedAt,
+          r.batchCount,
+          r.rowCount,
+          r.lastConnections,
+          r.peakConnections,
+          r.peakCapturedAt,
+          SqliteDialect.toJson(r.byName),
+          SqliteDialect.toJson(r.byUser),
+          SqliteDialect.toJson(r.byUserAndName),
+          SqliteDialect.toJson(r.ips),
+          r.updatedAt,
+        );
+      }
+    });
+    upsertMany(rollups);
+  }
+
+  async getClientAnalyticsRollups(
+    startBucket: number,
+    endBucket: number,
+    connectionId?: string,
+  ): Promise<ClientAnalyticsRollup[]> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const params: (string | number)[] = [startBucket, endBucket];
+    let where = 'bucket_start >= ? AND bucket_start <= ?';
+    if (connectionId) {
+      where += ' AND connection_id = ?';
+      params.push(connectionId);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM client_analytics_rollups WHERE ${where} ORDER BY bucket_start ASC, connection_id ASC`,
+      )
+      .all(...params) as Array<Record<string, unknown>>;
+    return rows.map((row) => mapClientAnalyticsRollupRow(row, SqliteDialect));
+  }
+
+  async getClientAnalyticsRollupWatermark(connectionId: string): Promise<number | null> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const row = this.db
+      .prepare('SELECT MAX(last_captured_at) AS v FROM client_analytics_rollups WHERE connection_id = ?')
+      .get(connectionId) as { v: number | null } | undefined;
+    return row?.v === null || row?.v === undefined ? null : Number(row.v);
+  }
+
+  async getClientAnalyticsRollupFloor(connectionId: string): Promise<number | null> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const row = this.db
+      .prepare('SELECT MIN(bucket_start) AS v FROM client_analytics_rollups WHERE connection_id = ?')
+      .get(connectionId) as { v: number | null } | undefined;
+    return row?.v === null || row?.v === undefined ? null : Number(row.v);
+  }
+
+  async getClientAnalyticsRollupPeak(
+    connectionId: string,
+    sinceBucket: number,
+  ): Promise<{ peak: number; capturedAt: number } | null> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const row = this.db
+      .prepare(
+        `SELECT peak_connections, peak_captured_at FROM client_analytics_rollups
+          WHERE connection_id = ? AND bucket_start >= ?
+          ORDER BY peak_connections DESC, peak_captured_at ASC
+          LIMIT 1`,
+      )
+      .get(connectionId, sinceBucket) as { peak_connections: number; peak_captured_at: number } | undefined;
+    return row ? { peak: Number(row.peak_connections), capturedAt: Number(row.peak_captured_at) } : null;
+  }
+
+  async pruneOldClientAnalyticsRollups(
+    olderThanBucketStart: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    if (connectionId) {
+      return chunkedSqliteDelete(
+        this.db,
+        'client_analytics_rollups',
+        'bucket_start < ? AND connection_id = ?',
+        [olderThanBucketStart, connectionId],
+      );
+    }
+    return chunkedSqliteDelete(this.db, 'client_analytics_rollups', 'bucket_start < ?', [
+      olderThanBucketStart,
+    ]);
+  }
+
+  async isClientSnapshotIndexReady(): Promise<boolean> {
+    return true;
+  }
+
   private migrateCveAdvisoriesTable(): void {
     if (!this.db) {
       return;
@@ -1654,6 +1693,28 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       CREATE INDEX IF NOT EXISTS idx_client_cmd ON client_snapshots(cmd);
       CREATE INDEX IF NOT EXISTS idx_client_captured_at_cmd ON client_snapshots(captured_at, cmd);
       CREATE INDEX IF NOT EXISTS idx_client_connection_id ON client_snapshots(connection_id);
+      CREATE INDEX IF NOT EXISTS idx_client_connection_captured ON client_snapshots(connection_id, captured_at);
+
+      -- One row per connection per fixed 5-minute bucket, folded from
+      -- client_snapshots by the background rollup aggregator.
+      CREATE TABLE IF NOT EXISTS client_analytics_rollups (
+        connection_id TEXT NOT NULL,
+        bucket_start INTEGER NOT NULL,
+        first_captured_at INTEGER NOT NULL,
+        last_captured_at INTEGER NOT NULL,
+        batch_count INTEGER NOT NULL,
+        row_count INTEGER NOT NULL,
+        last_connections INTEGER NOT NULL,
+        peak_connections INTEGER NOT NULL,
+        peak_captured_at INTEGER NOT NULL,
+        by_name TEXT NOT NULL,
+        by_user TEXT NOT NULL,
+        by_user_name TEXT NOT NULL,
+        ips TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (connection_id, bucket_start)
+      );
+      CREATE INDEX IF NOT EXISTS idx_client_rollups_bucket ON client_analytics_rollups(bucket_start);
 
       -- Anomaly Events Table
       CREATE TABLE IF NOT EXISTS anomaly_events (
