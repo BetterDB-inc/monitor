@@ -205,6 +205,43 @@ describePostgres('postgres schema-setup lock', () => {
     }
   });
 
+  it('fails initialize() with a clear error when the schema-setup lock wait exceeds its deadline', async () => {
+    const holder = new Client({ connectionString: DSN });
+    await holder.connect();
+    const adapter = new PostgresAdapter({
+      connectionString: DSN,
+      schema: SCHEMA,
+      indexLockRetryMs: RETRY_MS,
+      schemaLockWaitMs: 1_500,
+    });
+    try {
+      const lock = await holder.query(
+        `SELECT key, pg_try_advisory_lock(key) AS locked FROM (
+           SELECT hashtext('betterdb.schema-setup:' || $1::text) AS key
+         ) k`,
+        [SCHEMA],
+      );
+      expect(lock.rows[0].locked).toBe(true);
+      const key: number = lock.rows[0].key;
+
+      const started = Date.now();
+      await expect(adapter.initialize()).rejects.toThrow(
+        /Timed out after \d+s waiting for the schema-setup lock \(schema setup\)/,
+      );
+      expect(Date.now() - started).toBeGreaterThanOrEqual(1_400);
+      expect(adapter.isReady()).toBe(false);
+
+      // Once the holder lets go, the same adapter initialises normally.
+      await holder.query('SELECT pg_advisory_unlock($1)', [key]);
+      await expect(adapter.initialize()).resolves.toBeUndefined();
+      expect(adapter.isReady()).toBe(true);
+      await adapter['indexBuild'];
+    } finally {
+      await adapter.close();
+      await holder.end();
+    }
+  });
+
   it('close() cancels an in-flight build on the server', async () => {
     await dropAnalyticsIndexes(SCHEMA);
     // An open snapshot makes CREATE INDEX CONCURRENTLY wait for it to end, so

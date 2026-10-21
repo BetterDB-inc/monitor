@@ -143,6 +143,11 @@ export interface PostgresAdapterConfig {
    * ANALYTICS_INDEX_LOCK_RETRY_MS; tests shorten it.
    */
   indexLockRetryMs?: number;
+  /**
+   * How long initialize() waits for the schema-setup lock before failing.
+   * Defaults to SCHEMA_SETUP_LOCK_DEADLINE_MS; tests shorten it.
+   */
+  schemaLockWaitMs?: number;
 }
 
 /** Default wait between re-checks while another session holds an analytics index build lock. */
@@ -159,6 +164,15 @@ const SCHEMA_SETUP_LOCK_SQL = `SELECT key, pg_try_advisory_lock(key) AS locked F
 ) k`;
 /** Poll interval while another session holds the schema-setup lock. */
 const SCHEMA_SETUP_LOCK_POLL_MS = 100;
+/** Log a line this often while waiting for the schema-setup lock. */
+const SCHEMA_SETUP_LOCK_LOG_MS = 30_000;
+/**
+ * Upper bound on initialize()'s wait for the schema-setup lock. A replica that
+ * starts while another session builds an analytics index on a large table
+ * waits for that build; this turns an indefinite wait into a startup error
+ * the orchestrator can retry. The background builder's own wait is unbounded.
+ */
+export const SCHEMA_SETUP_LOCK_DEADLINE_MS = 10 * 60_000;
 
 type PgNumeric = string | number;
 type PgJsonb<T> = T | string;
@@ -482,7 +496,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       // mutex; the work itself goes through the pool.
       const lockClient = await this.pool.connect();
       try {
-        const lockKey = await this.acquireSchemaSetupLock(lockClient);
+        const lockKey = await this.acquireSchemaSetupLock(lockClient, {
+          purpose: 'schema setup',
+          deadlineMs: this.config.schemaLockWaitMs ?? SCHEMA_SETUP_LOCK_DEADLINE_MS,
+        });
         try {
           await this.migrateConnectionId();
           await this.createSchema();
@@ -4769,7 +4786,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
           if (this.closing) return;
           // Never overlap a schema transaction (see initialize); released right
           // after the attempt so the retry wait below does not hold it.
-          const schemaLockKey = await this.acquireSchemaSetupLock(client);
+          const schemaLockKey = await this.acquireSchemaSetupLock(client, {
+            purpose: `index build ${indexName}`,
+          });
           let built: boolean;
           try {
             if (this.closing) return;
@@ -4814,13 +4833,36 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
    * snapshot, and CREATE INDEX CONCURRENTLY run by the lock holder waits for
    * every older snapshot to end, so the two would deadlock. Each try returns
    * at once, so the holder's build is never left waiting on a waiter.
-   * Rejects once close() has been called (or ended the connection).
+   * Rejects once close() has been called (or ended the connection), and, when
+   * a deadline is given, once the wait exceeds it. Logs every
+   * SCHEMA_SETUP_LOCK_LOG_MS while waiting so a replica stuck behind another
+   * session's index build says so instead of sitting silently unready.
    */
-  private async acquireSchemaSetupLock(client: ClientBase): Promise<number> {
+  private async acquireSchemaSetupLock(
+    client: ClientBase,
+    options: { purpose: string; deadlineMs?: number },
+  ): Promise<number> {
+    const started = Date.now();
+    let lastLog = started;
     for (;;) {
       const result = await client.query(SCHEMA_SETUP_LOCK_SQL);
       if (result.rows[0]?.locked) return result.rows[0].key;
       if (this.closing) throw new Error('PostgreSQL adapter is closing');
+      const now = Date.now();
+      if (options.deadlineMs !== undefined && now - started >= options.deadlineMs) {
+        throw new Error(
+          `Timed out after ${Math.round((now - started) / 1000)}s waiting for the schema-setup lock ` +
+            `(${options.purpose}): another session is still running schema setup or an analytics ` +
+            `index build on this schema. Startup can be retried once it finishes.`,
+        );
+      }
+      if (now - lastLog >= SCHEMA_SETUP_LOCK_LOG_MS) {
+        lastLog = now;
+        console.log(
+          `Waiting ${Math.round((now - started) / 1000)}s for the schema-setup lock (${options.purpose}): ` +
+            'another session is running schema setup or an analytics index build',
+        );
+      }
       await new Promise((resolve) => setTimeout(resolve, SCHEMA_SETUP_LOCK_POLL_MS));
     }
   }
