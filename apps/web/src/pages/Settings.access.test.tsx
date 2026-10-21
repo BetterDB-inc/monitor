@@ -36,7 +36,15 @@ vi.mock('../api/workspace', () => ({ workspaceApi }));
 vi.mock('../api/settings', () => ({ settingsApi }));
 vi.mock('../api/license', () => ({ licenseApi: {} }));
 vi.mock('../hooks/useLicense', () => ({
-  useLicense: () => ({ tier: 'community', license: null }),
+  useLicense: () => ({ tier: 'community', license: null, hasFeature: () => false }),
+}));
+vi.mock('../api/anomaly-detectors', () => ({
+  anomalyDetectorsApi: {
+    get: vi.fn(),
+    update: vi.fn(),
+    clearMetric: vi.fn(),
+    resetAll: vi.fn(),
+  },
 }));
 vi.mock('../hooks/useConnection', () => ({
   useConnection: () => ({ currentConnection: null }),
@@ -166,6 +174,30 @@ describe('Settings access', () => {
     expect(await screen.findByText('Source: database')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'License' })).toHaveAttribute('aria-current', 'page');
     expect(screen.queryByRole('heading', { level: 2, name: 'Team' })).not.toBeInTheDocument();
+  });
+
+  it('lets an admin open the Anomaly Thresholds section', async () => {
+    signIn(ADMIN, true);
+
+    renderApp('/settings?section=anomaly-thresholds');
+
+    expect(await screen.findByText('Source: database')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Anomaly Thresholds' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    expect(screen.getByRole('heading', { level: 2, name: 'Anomaly Thresholds' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save Changes' })).not.toBeInTheDocument();
+  });
+
+  it('hides Anomaly Thresholds from a member', async () => {
+    signIn(MEMBER, false);
+
+    renderApp('/settings?section=anomaly-thresholds');
+
+    expect(await screen.findByRole('heading', { level: 2, name: 'Team' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Anomaly Thresholds' })).not.toBeInTheDocument();
+    expect(screen.getByText('Anomaly Thresholds').closest('[aria-disabled="true"]')).not.toBeNull();
   });
 
   it('loads the admin settings and unlocks every section for an admin', async () => {

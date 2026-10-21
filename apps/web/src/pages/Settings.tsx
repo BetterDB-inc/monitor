@@ -9,6 +9,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useDemoState } from '../contexts/DemoContext';
 import { useCanMutate } from '../hooks/useCanMutate';
 import { McpTokensPanel } from '../components/pages/settings/McpTokensPanel';
+import { AnomalyThresholdsPanel } from '../components/pages/settings/anomaly-thresholds/AnomalyThresholdsPanel';
 import { Members } from './Members';
 import {
   AppSettings,
@@ -26,6 +27,7 @@ type SettingsCategory =
   | 'audit'
   | 'clientAnalytics'
   | 'anomaly'
+  | 'anomalyThresholds'
   | 'dataRetention';
 
 interface CategoryEntry {
@@ -121,6 +123,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     { id: 'audit', section: 'audit', label: 'Audit Trail', adminOnly: true },
     { id: 'clientAnalytics', section: 'client-analytics', label: 'Client Analytics', adminOnly: true },
     { id: 'anomaly', section: 'anomaly', label: 'Anomaly Detection', adminOnly: true },
+    { id: 'anomalyThresholds', section: 'anomaly-thresholds', label: 'Anomaly Thresholds', adminOnly: true },
     { id: 'dataRetention', section: 'data-retention', label: 'Data Retention', adminOnly: true },
   ];
   const categories = allCategories.filter((category) => {
@@ -724,9 +727,12 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
 
             {activeCategory === 'mcpTokens' && <McpTokensPanel />}
 
+            {activeCategory === 'anomalyThresholds' && <AnomalyThresholdsPanel />}
+
             {activeCategory !== undefined &&
               !ACCOUNT_CATEGORY_IDS.has(activeCategory) &&
-              activeCategory !== 'license' && (
+              activeCategory !== 'license' &&
+              activeCategory !== 'anomalyThresholds' && (
               <div className="flex items-center gap-3 mt-6 pt-6 border-t">
                 <button
                   onClick={handleSave}

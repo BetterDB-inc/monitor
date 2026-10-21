@@ -541,6 +541,12 @@ curl -b cookies.txt -c cookies.txt -X PUT http://localhost:3001/api/settings \
 
 ### Per-metric detector thresholds
 
+#### From the UI
+
+**Settings → Anomaly Thresholds** shows every metric with its effective value, the built-in default, and whether it is overridden. Edit any field and click **Save thresholds**; only changed fields are sent. **Reset** on a row clears that metric's override; **Reset all** clears every override. Leave an absolute threshold empty to turn it off. The page applies the same validation as the API (ranges, warning < critical) and shows server errors inline. Requires a license with anomaly detection and an admin role.
+
+#### From the API
+
 Tune Z-score, absolute, consecutive-sample, and cooldown thresholds per metric at runtime (no restart). Partial PATCH bodies only override the fields you send.
 
 ```bash
