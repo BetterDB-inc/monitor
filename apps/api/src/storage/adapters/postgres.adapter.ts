@@ -148,6 +148,18 @@ export interface PostgresAdapterConfig {
 /** Default wait between re-checks while another session holds an analytics index build lock. */
 export const ANALYTICS_INDEX_LOCK_RETRY_MS = 30_000;
 
+/**
+ * Session advisory lock serialising schema setup (initialize) with the
+ * background index builds, per schema: advisory locks are database-wide, so
+ * the key includes current_schema() and per-tenant schemas in one database do
+ * not block each other.
+ */
+const SCHEMA_SETUP_LOCK_SQL = `SELECT key, pg_try_advisory_lock(key) AS locked FROM (
+  SELECT hashtext('betterdb.schema-setup:' || current_schema()) AS key
+) k`;
+/** Poll interval while another session holds the schema-setup lock. */
+const SCHEMA_SETUP_LOCK_POLL_MS = 100;
+
 type PgNumeric = string | number;
 type PgJsonb<T> = T | string;
 
@@ -266,7 +278,11 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
    * waiting for a build that can take minutes; see ensureAnalyticsIndexes.
    */
   private indexBuildClient: Client | null = null;
+  /** Backend pid of indexBuildClient, so close() can cancel its server-side build. */
+  private indexBuildPid: number | null = null;
   private indexBuild: Promise<void> | null = null;
+  /** True while indexBuild is in flight; a second initialize() then reuses it. */
+  private indexBuildRunning = false;
   /** Pending wait between lock re-checks in ensureAnalyticsIndexes; close() cuts it short. */
   private indexRetryTimer: NodeJS.Timeout | null = null;
   private indexRetryWake: (() => void) | null = null;
@@ -457,25 +473,50 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       // Issue #9: Restore explanatory comments for migration order
       // Run migrations FIRST to add connection_id to existing tables.
       // This must happen before createSchema() which creates indexes on connection_id.
-      await this.migrateConnectionId();
-      await this.createSchema();
-      await this.ensureOtelIngestedIndex();
-      await this.backfillMemoryProposalDiscriminators();
+      //
+      // All of it runs under the schema-setup lock (see acquireSchemaSetupLock):
+      // createSchema's multi-statement batch is one transaction holding
+      // AccessExclusive locks, and a CONCURRENTLY build of another session
+      // (another replica, or this adapter's own background build) running
+      // alongside it deadlocks with it. The checked-out client only holds the
+      // mutex; the work itself goes through the pool.
+      const lockClient = await this.pool.connect();
+      try {
+        const lockKey = await this.acquireSchemaSetupLock(lockClient);
+        try {
+          await this.migrateConnectionId();
+          await this.createSchema();
+          await this.ensureOtelIngestedIndex();
+          await this.backfillMemoryProposalDiscriminators();
+        } finally {
+          await lockClient.query('SELECT pg_advisory_unlock($1)', [lockKey]);
+        }
+      } finally {
+        lockClient.release();
+      }
 
       this.ready = true;
 
       // Deliberately not awaited: on a large client_snapshots / acl_audit table
       // the concurrent build takes minutes and startup must not wait for it.
       // Readers that need the index check isClientSnapshotIndexReady().
-      this.indexBuild = this.ensureAnalyticsIndexes().catch((error: unknown) => {
-        // close() ending the build connection is expected, not a failure.
-        if (this.closing) return;
-        console.warn(
-          `Building the client analytics indexes failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      });
+      // A second initialize() on this adapter reuses the build in flight.
+      if (!this.indexBuildRunning) {
+        this.indexBuildRunning = true;
+        this.indexBuild = this.ensureAnalyticsIndexes()
+          .catch((error: unknown) => {
+            // close() ending the build connection is expected, not a failure.
+            if (this.closing) return;
+            console.warn(
+              `Building the client analytics indexes failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          })
+          .finally(() => {
+            this.indexBuildRunning = false;
+          });
+      }
 
       if (schemaName) {
         console.log(`PostgreSQL initialized with schema: ${schemaName}`);
@@ -547,9 +588,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     this.indexRetryWake = null;
     wake?.();
     const buildClient = this.indexBuildClient;
+    const buildPid = this.indexBuildPid;
     this.indexBuildClient = null;
+    this.indexBuildPid = null;
     this.indexBuild = null;
     if (buildClient) {
+      // Ending the connection alone leaves a running CREATE INDEX CONCURRENTLY
+      // going on the server (it does not notice the closed socket until it
+      // finishes), still holding its locks and blocking the next startup.
+      // Cancel it first; the INVALID index it leaves is rebuilt on next start.
+      if (buildPid !== null && this.pool) {
+        await this.pool.query('SELECT pg_cancel_backend($1)', [buildPid]).catch(() => undefined);
+      }
       await buildClient.end().catch(() => undefined);
     }
     if (this.pool) {
@@ -4696,11 +4746,20 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     // A dedicated connection, not a pooled one, so close() can end it
     // without waiting for the build (see close()).
     const client = await this.openDedicatedClient();
+    let pid: number | null;
+    try {
+      const result = await client.query('SELECT pg_backend_pid() AS pid');
+      pid = result.rows[0]?.pid ?? null;
+    } catch (error) {
+      await client.end().catch(() => undefined);
+      throw error;
+    }
     if (this.closing) {
       await client.end().catch(() => undefined);
       return;
     }
     this.indexBuildClient = client;
+    this.indexBuildPid = pid;
     try {
       for (const [indexName, tableName, columns] of indexes) {
         const started = Date.now();
@@ -4708,7 +4767,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         let waiting = false;
         for (;;) {
           if (this.closing) return;
-          if (await this.ensureIndexConcurrently(client, indexName, tableName, columns)) {
+          // Never overlap a schema transaction (see initialize); released right
+          // after the attempt so the retry wait below does not hold it.
+          const schemaLockKey = await this.acquireSchemaSetupLock(client);
+          let built: boolean;
+          try {
+            if (this.closing) return;
+            built = await this.ensureIndexConcurrently(client, indexName, tableName, columns);
+          } finally {
+            // A closed connection has already released its session lock.
+            if (!this.closing) await client.query('SELECT pg_advisory_unlock($1)', [schemaLockKey]);
+          }
+          if (built) {
             console.log(`Index ${indexName} ready after ${Date.now() - started}ms`);
             break;
           }
@@ -4729,8 +4799,29 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     } finally {
       if (this.indexBuildClient === client) {
         this.indexBuildClient = null;
+        this.indexBuildPid = null;
         await client.end().catch(() => undefined);
       }
+    }
+  }
+
+  /**
+   * Take the schema-setup advisory lock (SCHEMA_SETUP_LOCK_SQL) on `client`'s
+   * session and return its key; the caller unlocks it on the same client.
+   *
+   * Polls pg_try_advisory_lock rather than blocking in pg_advisory_lock: a
+   * session blocked in pg_advisory_lock sits inside a statement with an open
+   * snapshot, and CREATE INDEX CONCURRENTLY run by the lock holder waits for
+   * every older snapshot to end, so the two would deadlock. Each try returns
+   * at once, so the holder's build is never left waiting on a waiter.
+   * Rejects once close() has been called (or ended the connection).
+   */
+  private async acquireSchemaSetupLock(client: ClientBase): Promise<number> {
+    for (;;) {
+      const result = await client.query(SCHEMA_SETUP_LOCK_SQL);
+      if (result.rows[0]?.locked) return result.rows[0].key;
+      if (this.closing) throw new Error('PostgreSQL adapter is closing');
+      await new Promise((resolve) => setTimeout(resolve, SCHEMA_SETUP_LOCK_POLL_MS));
     }
   }
 
