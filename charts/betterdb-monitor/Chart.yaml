@@ -34,9 +34,9 @@ annotations:
       url: https://github.com/BetterDB-inc/monitor
   artifacthub.io/images: |
     - name: monitor
-      image: betterdb/monitor:0.49.0-no-ai
+      image: betterdb/monitor:0.51.1-no-ai
     - name: monitor-ai
-      image: betterdb/monitor:0.49.0
+      image: betterdb/monitor:0.51.1
   # PGP provenance: the chart is signed in CI; this points Artifact Hub at the
   # public key so it verifies the .prov and shows the Signed badge.
   artifacthub.io/signKey: |
