@@ -66,23 +66,33 @@ export class AuditService extends MultiConnectionPoller implements OnModuleInit 
     this.knownForCache.add(ctx.connectionId);
     // Totals stay all-time (unchanged semantics); they are just computed here,
     // off the scrape path. Refresh after every save, once up front so a
-    // connection with no new denials still exports its totals, and
-    // periodically so rows removed by the retention sweep stop being counted.
-    // The stored totals do not depend on ACL LOG succeeding, so the due
-    // refresh also runs when the poll throws (the error is still rethrown).
+    // connection with no new denials still exports its totals (stored earlier,
+    // even if ACL LOG is unavailable now), and periodically so rows removed by
+    // the retention sweep stop being counted. The periodic refresh only runs
+    // while ACL LOG is available: without it no rows are written, so the
+    // aggregate would be re-read every interval for nothing. The stored totals
+    // do not depend on ACL LOG succeeding, so the due refresh also runs when
+    // the poll throws (the error is still rethrown).
     let saved = false;
     try {
       saved = await this.pollAclLog(ctx);
     } finally {
-      if (this.auditStatsCache && (saved || this.isStatsCacheDue(ctx.connectionId))) {
+      if (this.auditStatsCache && (saved || this.isStatsCacheDue(ctx))) {
         await this.refreshStatsCache(ctx.connectionId);
       }
     }
   }
 
-  private isStatsCacheDue(connectionId: string): boolean {
-    const refreshedAt = this.auditStatsCache?.getRefreshedAt(connectionId) ?? null;
-    return refreshedAt === null || Date.now() - refreshedAt >= AUDIT_STATS_PERIODIC_REFRESH_MS;
+  private isStatsCacheDue(ctx: ConnectionContext): boolean {
+    const refreshedAt = this.auditStatsCache?.getRefreshedAt(ctx.connectionId) ?? null;
+    if (refreshedAt === null) return true;
+    return Date.now() - refreshedAt >= AUDIT_STATS_PERIODIC_REFRESH_MS && this.canPollAclLog(ctx);
+  }
+
+  /** Whether ACL LOG can be read for this connection; pollAclLog skips the poll when it cannot. */
+  private canPollAclLog(ctx: ConnectionContext): boolean {
+    if (!ctx.client.getCapabilities().hasAclLog) return false;
+    return !this.runtimeCapabilityTracker || this.runtimeCapabilityTracker.isAvailable(ctx.connectionId, 'canAclLog');
   }
 
   private async refreshStatsCache(connectionId: string): Promise<void> {
@@ -107,13 +117,8 @@ export class AuditService extends MultiConnectionPoller implements OnModuleInit 
     const endTimer = this.prometheusService.startPollTimer('audit', ctx.connectionId);
 
     try {
-      const capabilities = ctx.client.getCapabilities();
-      if (!capabilities.hasAclLog) {
-        this.logger.debug(`ACL LOG not supported by ${ctx.connectionName}, skipping poll`);
-        return false;
-      }
-
-      if (this.runtimeCapabilityTracker && !this.runtimeCapabilityTracker.isAvailable(ctx.connectionId, 'canAclLog')) {
+      if (!this.canPollAclLog(ctx)) {
+        this.logger.debug(`ACL LOG not available for ${ctx.connectionName}, skipping poll`);
         return false;
       }
 

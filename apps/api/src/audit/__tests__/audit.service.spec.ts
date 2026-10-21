@@ -114,6 +114,71 @@ describe('AuditService', () => {
       }
     });
 
+    describe('periodic refresh gated on the ACL LOG capability', () => {
+      const now = 1_700_000_000_000;
+      let clock: jest.SpyInstance;
+      let isAvailable: jest.Mock;
+      let hasAclLog: boolean;
+
+      beforeEach(() => {
+        clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+        isAvailable = jest.fn(() => true);
+        hasAclLog = true;
+        service = new AuditService(
+          {} as never,
+          storage as never,
+          { startPollTimer: () => () => undefined, incrementPollCounter: jest.fn() } as never,
+          {} as never,
+          undefined,
+          undefined,
+          { isAvailable, recordFailure: jest.fn(() => false) } as never,
+          cache,
+          undefined,
+        );
+      });
+
+      afterEach(() => clock.mockRestore());
+
+      const gatedPoll = () =>
+        service['pollConnection']({
+          connectionId: 'c1',
+          connectionName: 'c1',
+          host: 'h',
+          port: 1,
+          client: { getCapabilities: () => ({ hasAclLog }), getAclLog: aclLog } as never,
+        });
+
+      it.each([
+        ['the runtime tracker marks ACL LOG unavailable', () => isAvailable.mockReturnValue(false)],
+        ['the server has no ACL LOG', () => (hasAclLog = false)],
+      ])('fills the cache once but skips due refreshes when %s', async (_label, disable) => {
+        disable();
+        await gatedPoll();
+        expect(cache.get('c1')).toEqual(stats);
+        expect(storage.getAuditStats).toHaveBeenCalledTimes(1);
+        expect(aclLog).not.toHaveBeenCalled();
+
+        for (let i = 1; i <= 3; i++) {
+          clock.mockReturnValue(now + i * AUDIT_STATS_PERIODIC_REFRESH_MS);
+          await gatedPoll();
+        }
+        expect(storage.getAuditStats).toHaveBeenCalledTimes(1);
+        expect(cache.get('c1')).toEqual(stats);
+      });
+
+      it('refreshes when due while ACL LOG is available', async () => {
+        await gatedPoll();
+        expect(storage.getAuditStats).toHaveBeenCalledTimes(1);
+        clock.mockReturnValue(now + AUDIT_STATS_PERIODIC_REFRESH_MS - 1);
+        await gatedPoll();
+        expect(storage.getAuditStats).toHaveBeenCalledTimes(1);
+        clock.mockReturnValue(now + AUDIT_STATS_PERIODIC_REFRESH_MS);
+        await gatedPoll();
+        expect(storage.getAuditStats).toHaveBeenCalledTimes(2);
+        expect(isAvailable).toHaveBeenCalledWith('c1', 'canAclLog');
+      });
+    });
+
     it('drops the cached stats when the connection is removed', async () => {
       await poll();
       service['onConnectionRemoved']('c1');

@@ -1,4 +1,5 @@
 import {
+  CLIENT_ANALYTICS_ROLLUP_BUCKET_MS,
   ClientAnalyticsRollup,
   ClientAnalyticsStats,
   ClientSnapshotGroupRow,
@@ -114,6 +115,7 @@ export function referenceStats(raw: RawClientRow[]): ClientAnalyticsStats {
     newestAt.set(r.connectionId, Math.max(newestAt.get(r.connectionId) ?? -Infinity, r.capturedAt));
   }
 
+  const newestOverall = Math.max(...newestAt.values());
   let peak = -1;
   let peakAt = 0;
   const namePeak = new Map<string, number>();
@@ -126,7 +128,9 @@ export function referenceStats(raw: RawClientRow[]): ClientAnalyticsStats {
       peak = rows.length;
       peakAt = at;
     }
-    const isNewest = newestAt.get(rows[0].connectionId) === at;
+    // A connection that stopped reporting (newest batch more than a bucket
+    // older than the newest overall) is left out of `current`.
+    const isNewest = newestAt.get(rows[0].connectionId) === at && newestOverall - at <= CLIENT_ANALYTICS_ROLLUP_BUCKET_MS;
     const nameCounts = new Map<string, number>();
     const userCounts = new Map<string, number>();
     const pairCounts = new Map<string, number>();

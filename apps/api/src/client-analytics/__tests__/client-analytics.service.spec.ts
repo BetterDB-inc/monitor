@@ -20,11 +20,17 @@ describe('ClientAnalyticsService', () => {
 
   describe('getStats routing', () => {
     let storage: { getClientAnalyticsStats: jest.Mock; getClientConnectionHistory: jest.Mock };
-    let rollup: { getLatestStats: jest.Mock; getStatsForRange: jest.Mock; getWindowMs: jest.Mock };
+    let rollup: {
+      getLatestStats: jest.Mock;
+      getStatsForRange: jest.Mock;
+      getLatestStatsAllConnections: jest.Mock;
+      getWindowMs: jest.Mock;
+    };
     let service: ClientAnalyticsService;
     const latest = { currentConnections: 1 } as never;
     const ranged = { currentConnections: 2 } as never;
     const raw = { currentConnections: 3 } as never;
+    const allLatest = { currentConnections: 4 } as never;
 
     beforeEach(() => {
       jest.useFakeTimers({ now: NOW });
@@ -35,6 +41,7 @@ describe('ClientAnalyticsService', () => {
       rollup = {
         getLatestStats: jest.fn().mockReturnValue(latest),
         getStatsForRange: jest.fn().mockResolvedValue(ranged),
+        getLatestStatsAllConnections: jest.fn().mockResolvedValue(allLatest),
         getWindowMs: jest.fn().mockReturnValue(WINDOW),
       };
       service = new ClientAnalyticsService(
@@ -55,12 +62,18 @@ describe('ClientAnalyticsService', () => {
       expect(storage.getClientAnalyticsStats).not.toHaveBeenCalled();
     });
 
-    it('falls back to a rollup range when no latest exists or no connection is given', async () => {
+    it('falls back to a rollup range when no latest exists for the connection', async () => {
       rollup.getLatestStats.mockReturnValue(null);
       await expect(service.getStats(undefined, undefined, 'c1')).resolves.toBe(ranged);
       expect(rollup.getStatsForRange).toHaveBeenLastCalledWith(NOW - WINDOW, NOW, 'c1');
-      await expect(service.getStats()).resolves.toBe(ranged);
-      expect(rollup.getStatsForRange).toHaveBeenLastCalledWith(NOW - WINDOW, NOW, undefined);
+      expect(rollup.getLatestStatsAllConnections).not.toHaveBeenCalled();
+      expect(storage.getClientAnalyticsStats).not.toHaveBeenCalled();
+    });
+
+    it('serves the memoised all-connection window when unbounded without a connection', async () => {
+      await expect(service.getStats()).resolves.toBe(allLatest);
+      expect(rollup.getLatestStatsAllConnections).toHaveBeenCalledTimes(1);
+      expect(rollup.getStatsForRange).not.toHaveBeenCalled();
       expect(storage.getClientAnalyticsStats).not.toHaveBeenCalled();
     });
 
@@ -93,8 +106,8 @@ describe('ClientAnalyticsService', () => {
       expect(storage.getClientAnalyticsStats).toHaveBeenLastCalledWith(NOW - HOUR, NOW, 'c1');
       await service.getStats(NaN, NOW - HOUR, 'c1');
       expect(rollup.getStatsForRange).toHaveBeenLastCalledWith(NOW - HOUR - WINDOW, NOW - HOUR, 'c1');
-      await service.getStats(Infinity, -Infinity);
-      expect(rollup.getStatsForRange).toHaveBeenLastCalledWith(NOW - WINDOW, NOW, undefined);
+      await expect(service.getStats(Infinity, -Infinity)).resolves.toBe(allLatest);
+      expect(rollup.getLatestStatsAllConnections).toHaveBeenCalledTimes(1);
       for (const call of [...storage.getClientAnalyticsStats.mock.calls, ...rollup.getStatsForRange.mock.calls]) {
         expect(call.slice(0, 2).every((v: number) => Number.isFinite(v))).toBe(true);
       }

@@ -116,13 +116,14 @@ export class ClientAnalyticsService extends MultiConnectionPoller implements OnM
   /**
    * Windowed stats without ever aggregating over the whole raw table:
    * - no bounds: the aggregator's in-memory latest window (or the same window
-   *   merged from rollups when no single connection is asked for);
+   *   merged from rollups when no single connection is asked for, memoised
+   *   for one aggregate interval);
    * - a span up to RAW_STATS_SPAN_MAX_MS (6 hours) for one connection: a
    *   bounded raw query;
    * - a longer span, or any span without a connection: merged from rollup
    *   buckets. The raw fold takes "current" from the single newest batch
-   *   across every connection, while rollups sum each connection's newest
-   *   batch; serving cross-connection requests from rollups only keeps the
+   *   across every connection, while rollups sum the newest batch of each
+   *   connection still reporting (see mergeRollupsIntoStats); serving cross-connection requests from rollups only keeps the
    *   figures consistent across the 6-hour cut-off.
    * A missing endTime means now; a missing startTime means one window before endTime.
    * A non-finite bound (NaN from a non-numeric query parameter) counts as missing.
@@ -135,9 +136,10 @@ export class ClientAnalyticsService extends MultiConnectionPoller implements OnM
       if (connectionId) {
         const latest = this.rollupService.getLatestStats(connectionId);
         if (latest) return latest;
+        const now = Date.now();
+        return this.rollupService.getStatsForRange(now - windowMs, now, connectionId);
       }
-      const now = Date.now();
-      return this.rollupService.getStatsForRange(now - windowMs, now, connectionId);
+      return this.rollupService.getLatestStatsAllConnections();
     }
     const end = endTime ?? Date.now();
     const start = startTime ?? end - windowMs;

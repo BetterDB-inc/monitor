@@ -1,4 +1,5 @@
 import {
+  CLIENT_ANALYTICS_ROLLUP_BUCKET_MS,
   ClientAnalyticsRollup,
   ClientAnalyticsStats,
   ClientRollupGroupStat,
@@ -193,6 +194,15 @@ export function foldGroupsIntoRollups(
 /**
  * Merge bucket rows (possibly spanning several connections) into the
  * ClientAnalyticsStats shape the full raw scan used to produce.
+ *
+ * currentConnections and the per-group `current` values sum each connection's
+ * newest batch in the rows, but only for connections still reporting: a
+ * connection contributes to `current` only when its newest lastCapturedAt is
+ * within CLIENT_ANALYTICS_ROLLUP_BUCKET_MS (5 minutes) of the newest
+ * lastCapturedAt across all rows. A connection whose newest batch is older
+ * (it stopped reporting, or was removed) still contributes to the peaks,
+ * unique counts, average ages and time range. A single-connection merge is
+ * unaffected: its newest batch is the newest overall.
  */
 export function mergeRollupsIntoStats(rollups: ClientAnalyticsRollup[]): ClientAnalyticsStats {
   const stats = emptyClientAnalyticsStats();
@@ -249,7 +259,9 @@ export function mergeRollupsIntoStats(rollups: ClientAnalyticsRollup[]): ClientA
     for (const ip of row.ips) ips.add(ip);
   }
 
+  const newestOverall = Math.max(...[...newest.values()].map((r) => r.lastCapturedAt));
   for (const row of newest.values()) {
+    if (newestOverall - row.lastCapturedAt > CLIENT_ANALYTICS_ROLLUP_BUCKET_MS) continue;
     stats.currentConnections += row.lastConnections;
     for (const [name, s] of Object.entries(row.byName)) {
       const acc = names.get(name);

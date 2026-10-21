@@ -343,6 +343,110 @@ describe('ClientAnalyticsRollupService', () => {
     expect(service['states'].get('conn-b')?.backfillCursor).not.toBeNull();
   });
 
+  it('warns at most once an hour while the backfill waits for the snapshot index', async () => {
+    const t0 = START + 40 * 60_000;
+    jest.useFakeTimers({ now: t0 });
+    const fake = createFakeStorage(raw, { indexReady: false });
+    const { service, poll } = createService(fake.storage, { CLIENT_ANALYTICS_RAW_RETENTION_DAYS: '7' });
+    const warn = service['logger'].warn as unknown as jest.Mock;
+    const indexWarnings = () =>
+      warn.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('idx_client_connection_captured'));
+
+    // Many runs across two connections within the first hour: one warning.
+    for (let i = 0; i < 200; i++) {
+      jest.setSystemTime(t0 + i * 15_000);
+      await poll('conn-a');
+      await poll('conn-b');
+    }
+    expect(indexWarnings()).toHaveLength(1);
+    expect(indexWarnings()[0]).toMatch(/backfill and raw snapshot pruning/);
+    expect(indexWarnings()[0]).toMatch(/startup logs/);
+    expect(service['states'].get('conn-a')?.backfillDone).toBe(false);
+
+    // An hour after the first warning: one more.
+    jest.setSystemTime(t0 + HOUR);
+    await poll('conn-a');
+    await poll('conn-b');
+    expect(indexWarnings()).toHaveLength(2);
+
+    // Index ready: no further warnings.
+    fake.setIndexReady(true);
+    jest.setSystemTime(t0 + 3 * HOUR);
+    await poll('conn-a');
+    expect(indexWarnings()).toHaveLength(2);
+  });
+
+  it('keeps the scan cursor past a long empty gap instead of re-scanning it from the watermark', async () => {
+    const DAY = 24 * HOUR;
+    const watermark = clientRollupBucketStart(START) + 2 * 60_000;
+    // Exactly 72 one-hour chunks between the watermark and now: the newest
+    // chunk starts 71 hours past the watermark and ends 5 minutes past the
+    // settle margin, so 20 more 15s runs stay inside it.
+    const now = watermark + 3 * DAY;
+    jest.useFakeTimers({ now });
+    const history: RawClientRow[] = [
+      { connectionId: 'conn-a', capturedAt: watermark, name: 'api', user: 'default', ip: '10.0.0.1', age: 5 },
+    ];
+    const fake = createFakeStorage(history, { indexReady: false });
+    await fake.storage.upsertClientAnalyticsRollups(
+      foldGroupsIntoRollups('conn-a', groupsFromRaw(history, 'conn-a'), new Map(), now),
+    );
+    const { service, poll } = createService(fake.storage);
+
+    // Catch up through the gap, BACKFILL_CHUNKS_PER_RUN chunks a run.
+    for (let i = 0; i < 18; i++) await poll();
+    const state = service['states'].get('conn-a');
+    const newestChunkStart = watermark + 71 * HOUR;
+    expect(state?.watermark).toBe(watermark);
+    expect(state?.scanCursor).toBe(newestChunkStart);
+
+    for (let i = 1; i <= 4; i++) {
+      jest.setSystemTime(now + i * 15_000);
+      const before = fake.storage.getClientSnapshotGroups.mock.calls.length;
+      await poll();
+      const calls = fake.storage.getClientSnapshotGroups.mock.calls.slice(before);
+      expect(calls).toEqual([['conn-a', newestChunkStart, now + i * 15_000]]);
+      expect(state?.scanCursor).toBe(newestChunkStart);
+    }
+  });
+
+  it('memoises the all-connection window stats for one aggregate interval', async () => {
+    const now = START + 40 * 60_000;
+    jest.useFakeTimers({ now });
+    const fake = createFakeStorage(raw, { indexReady: false });
+    const { service, poll } = createService(fake.storage);
+    await poll('conn-a');
+    await poll('conn-b');
+    fake.storage.getClientAnalyticsRollups.mockClear();
+
+    const first = await service.getLatestStatsAllConnections();
+    jest.setSystemTime(now + AGGREGATE_INTERVAL_MS - 1);
+    const second = await service.getLatestStatsAllConnections();
+    expect(second).toBe(first);
+    expect(fake.storage.getClientAnalyticsRollups).toHaveBeenCalledTimes(1);
+    expect(fake.storage.getClientAnalyticsRollups).toHaveBeenCalledWith(
+      clientRollupBucketStart(now - 24 * HOUR),
+      clientRollupBucketStart(now),
+      undefined,
+    );
+    expect(normalizeStats(first)).toEqual(normalizeStats(referenceStats(raw)));
+
+    jest.setSystemTime(now + AGGREGATE_INTERVAL_MS);
+    await service.getLatestStatsAllConnections();
+    expect(fake.storage.getClientAnalyticsRollups).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not memoise a failed all-connection read', async () => {
+    const now = START + 40 * 60_000;
+    jest.useFakeTimers({ now });
+    const fake = createFakeStorage(raw, { indexReady: false });
+    const { service } = createService(fake.storage);
+    fake.storage.getClientAnalyticsRollups.mockRejectedValueOnce(new Error('db down'));
+    await expect(service.getLatestStatsAllConnections()).rejects.toThrow('db down');
+    await expect(service.getLatestStatsAllConnections()).resolves.toBeDefined();
+    expect(fake.storage.getClientAnalyticsRollups).toHaveBeenCalledTimes(2);
+  });
+
   it('stops the backfill at the rollup retention horizon', async () => {
     const histStart = clientRollupBucketStart(START);
     const history = buildRawFixture({ start: histStart, batches: 4 * 24 * 4, connections: ['conn-a'], seed: 3, stepMs: 15 * 60_000 });

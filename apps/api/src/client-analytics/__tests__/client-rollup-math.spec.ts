@@ -83,6 +83,62 @@ describe('client rollup math', () => {
     expect(normalizeStats(mergeRollupsIntoStats(rows))).toEqual(normalizeStats(referenceStats(raw)));
   });
 
+  it('leaves connections that stopped reporting out of current, but keeps them in peaks and uniques', () => {
+    const live = clientRollupBucketStart(NOW) + 60_000;
+    const stale = live - 20 * 60 * 60_000;
+    const rows = [
+      ...foldGroupsIntoRollups(
+        'live',
+        [
+          { capturedAt: live, name: 'api', user: 'app', ip: '10.0.0.1', count: 2, ageSum: 20 },
+          { capturedAt: live, name: 'shared', user: 'default', ip: '10.0.0.2', count: 1, ageSum: 5 },
+        ],
+        new Map(),
+        NOW,
+      ),
+      ...foldGroupsIntoRollups(
+        'gone',
+        [
+          { capturedAt: stale, name: 'cron', user: 'ops', ip: '10.0.0.9', count: 5, ageSum: 50 },
+          { capturedAt: stale, name: 'shared', user: 'default', ip: '10.0.0.8', count: 4, ageSum: 40 },
+        ],
+        new Map(),
+        NOW,
+      ),
+    ];
+    const stats = mergeRollupsIntoStats(rows);
+    expect(stats.currentConnections).toBe(3);
+    expect(stats.connectionsByName.api).toMatchObject({ current: 2, peak: 2 });
+    expect(stats.connectionsByName.shared).toMatchObject({ current: 1, peak: 4 });
+    expect(stats.connectionsByName.cron).toEqual({ current: 0, peak: 5, avgAge: 10 });
+    expect(stats.connectionsByUser).toEqual({
+      app: { current: 2, peak: 2 },
+      default: { current: 1, peak: 4 },
+      ops: { current: 0, peak: 5 },
+    });
+    expect(stats.connectionsByUserAndName['ops:cron']).toMatchObject({ current: 0, peak: 5 });
+    expect(stats.peakConnections).toBe(9);
+    expect(stats.peakTimestamp).toBe(stale);
+    expect(stats.uniqueClientNames).toBe(3);
+    expect(stats.uniqueUsers).toBe(3);
+    expect(stats.uniqueIps).toBe(4);
+    expect(stats.timeRange).toEqual({ earliest: stale, latest: live });
+
+    // Within one bucket of the newest batch overall, both still count.
+    const recent = foldGroupsIntoRollups(
+      'gone',
+      [{ capturedAt: live - CLIENT_ANALYTICS_ROLLUP_BUCKET_MS, name: 'cron', user: 'ops', ip: '10.0.0.9', count: 5, ageSum: 50 }],
+      new Map(),
+      NOW,
+    );
+    const both = mergeRollupsIntoStats([...rows.filter((r) => r.connectionId === 'live'), ...recent]);
+    expect(both.currentConnections).toBe(8);
+    expect(both.connectionsByName.cron.current).toBe(5);
+
+    // A single stale connection on its own still reports its newest batch.
+    expect(mergeRollupsIntoStats(rows.filter((r) => r.connectionId === 'gone')).currentConnections).toBe(9);
+  });
+
   it('keeps a name seen earlier in the range with current 0', () => {
     const t0 = clientRollupBucketStart(NOW) - 10 * CLIENT_ANALYTICS_ROLLUP_BUCKET_MS;
     const rows = foldGroupsIntoRollups(

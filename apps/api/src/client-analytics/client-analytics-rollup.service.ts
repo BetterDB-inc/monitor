@@ -26,10 +26,13 @@ const COLD_START_LOOKBACK_MAX_MS = HOUR_MS;
 /**
  * An empty incremental chunk only moves the scan cursor past itself once it is
  * this far in the past; nearer the present the snapshot writer may still be
- * committing the batch it captured, so the cursor stays at the watermark.
+ * committing the batch it captured, so the cursor stays at the chunk's start
+ * (or the watermark, if newer) and the chunk is re-read on the next run.
  */
 const EMPTY_CHUNK_SETTLE_MS = 5 * 60_000;
 const RETENTION_INTERVAL_MS = HOUR_MS;
+/** Minimum gap between warnings that the backfill is still waiting for the snapshot index. */
+const INDEX_WAIT_WARN_INTERVAL_MS = HOUR_MS;
 
 /** Test-only DI token: overrides the fixed cadence and chunking constants. Never bound in production. */
 export const CLIENT_ANALYTICS_ROLLUP_TUNING = Symbol('CLIENT_ANALYTICS_ROLLUP_TUNING');
@@ -50,7 +53,10 @@ export interface ClientAnalyticsRollupConfig extends ClientAnalyticsRollupTuning
 interface ConnectionRollupState {
   /** Newest captured_at folded into the rollups. */
   watermark: number | null;
-  /** Lower bound of the next incremental read (>= watermark only across settled empty chunks). */
+  /**
+   * Lower bound of the next incremental read: the watermark, or past it when
+   * settled empty chunks were skipped (at most the start of the newest chunk).
+   */
   scanCursor: number | null;
   latest: ClientAnalyticsStats | null;
   computedAt: number;
@@ -112,6 +118,10 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
   private readonly pendingInit = new Map<string, symbol>();
   /** The index never becomes invalid once valid, so a true result holds for the process lifetime. */
   private snapshotIndexReady = false;
+  /** When the index-wait warning was last logged (per process, not per connection). */
+  private lastIndexWaitWarnAt: number | null = null;
+  /** Memoised all-connection default-window stats; see getLatestStatsAllConnections. */
+  private allConnectionsLatest: { stats: Promise<ClientAnalyticsStats>; computedAt: number } | null = null;
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -154,6 +164,27 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
 
   getWindowMs(): number {
     return this.config.windowMs;
+  }
+
+  /**
+   * Stats over the configured window merged across every connection, memoised
+   * for one aggregate interval: the rollups only change once per aggregator
+   * run, so re-reading every connection's window rows per request buys nothing.
+   */
+  getLatestStatsAllConnections(): Promise<ClientAnalyticsStats> {
+    const now = Date.now();
+    const cached = this.allConnectionsLatest;
+    if (cached && now - cached.computedAt < this.config.aggregateIntervalMs && now >= cached.computedAt) {
+      return cached.stats;
+    }
+    const stats = this.getStatsForRange(now - this.config.windowMs, now, undefined);
+    const entry = { stats, computedAt: now };
+    this.allConnectionsLatest = entry;
+    // A failed read is not memoised: the next request retries.
+    stats.catch(() => {
+      if (this.allConnectionsLatest === entry) this.allConnectionsLatest = null;
+    });
+    return stats;
   }
 
   /** Stats merged from rollup buckets covering [startTime, endTime] (bucket-aligned); the peak is the peak within that range. */
@@ -304,7 +335,13 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
         state.watermark = Math.max(state.watermark ?? last, last);
       }
       const watermark = state.watermark as number;
-      state.scanCursor = to <= now - EMPTY_CHUNK_SETTLE_MS ? Math.max(to, watermark) : watermark;
+      // A settled chunk moves the cursor past itself. The newest chunk (the
+      // one running to now) keeps the cursor at its own start, never below:
+      // falling back to the watermark would discard the progress made through
+      // settled empty chunks, so a connection with a long gap would re-scan
+      // the whole gap every run. Re-reading just this chunk next time still
+      // picks up batches committed late.
+      state.scanCursor = to <= now - EMPTY_CHUNK_SETTLE_MS ? Math.max(to, watermark) : Math.max(from, watermark);
       if (to >= now) break;
     }
     return changed;
@@ -330,7 +367,10 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
     }
     if (!this.snapshotIndexReady) {
       const ready = await this.timed('isClientSnapshotIndexReady', id, () => this.storage.isClientSnapshotIndexReady());
-      if (!ready) return false;
+      if (!ready) {
+        this.warnIndexWait(now);
+        return false;
+      }
       this.snapshotIndexReady = true;
     }
     if (this.states.get(id) !== state) return false;
@@ -399,6 +439,21 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
       );
     }
     return touchedWindow;
+  }
+
+  /**
+   * Without a valid index the backfill never starts, so backfillDone stays
+   * false and the raw snapshot prune is skipped too. Say so, at most once per
+   * hour per process, instead of failing silently.
+   */
+  private warnIndexWait(now: number): void {
+    if (this.lastIndexWaitWarnAt !== null && now - this.lastIndexWaitWarnAt < INDEX_WAIT_WARN_INTERVAL_MS) return;
+    this.lastIndexWaitWarnAt = now;
+    this.logger.warn(
+      'Client analytics backfill and raw snapshot pruning (CLIENT_ANALYTICS_RAW_RETENTION_DAYS) are waiting for ' +
+        'index idx_client_connection_captured on client_snapshots to become valid; if this persists, check the ' +
+        'startup logs for a failed build of idx_client_connection_captured',
+    );
   }
 
   private async runRetention(id: string, state: ConnectionRollupState, now: number): Promise<void> {

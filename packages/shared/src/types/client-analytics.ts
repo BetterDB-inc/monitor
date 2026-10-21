@@ -54,7 +54,12 @@ export interface ClientTimeSeriesPoint {
  *   values: the window (CLIENT_ANALYTICS_WINDOW_MS, default 24 hours) for the
  *   latest stats, or the requested range.
  * - currentConnections and the per-group `current` values: the newest snapshot
- *   batch inside that span.
+ *   batch inside that span. Merged across several connections, each
+ *   connection's newest batch is summed, but only for connections still
+ *   reporting: one whose newest batch is more than
+ *   CLIENT_ANALYTICS_ROLLUP_BUCKET_MS (5 minutes) older than the newest batch
+ *   across all connections is left out of `current`, while still counting
+ *   towards the peaks, unique counts, average ages and time range.
  */
 export interface ClientAnalyticsStats {
   currentConnections: number;
