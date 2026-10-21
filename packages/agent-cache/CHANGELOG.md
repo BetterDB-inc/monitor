@@ -40,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   who opt into the wrapper; the existing `BetterDBLlmCache` (`cache=`) path is
   unchanged and retains the `(prompt, llm_string)` limitation by design.
 
+### Changed
+- **`@langchain/core` peer range is now `>=1.1.35`** (was `>=0.3.0`). The
+  `@betterdb/agent-cache/langchain` entry point imports `toJsonSchema`,
+  `isInteropZodSchema` and `getSchemaDescription`, which older `0.3.x`
+  releases do not export, so importing it on those versions failed at load
+  time. `1.1.35` matches the version the adapter is built and tested against.
+
 ### Behavior
 
 - No cache keys change for existing `BetterDBLlmCache` users or any other
