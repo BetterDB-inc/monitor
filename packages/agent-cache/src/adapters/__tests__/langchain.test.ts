@@ -795,7 +795,8 @@ describe('CachedChatModel replays responses faithfully', () => {
     expect(hit.content).toEqual(live.content);
     expect(hit.tool_calls).toEqual(live.tool_calls);
     expect(hit.invalid_tool_calls).toEqual(live.invalid_tool_calls);
-    expect(hit.id).toBe('msg_01ABC');
+    // The stored response's id is not replayed (see the id tests below).
+    expect(hit.id).not.toBe('msg_01ABC');
     expect(hit.additional_kwargs).toEqual(live.additional_kwargs);
     expect(hit.response_metadata).toEqual(expect.objectContaining(live.response_metadata));
   });
@@ -817,7 +818,7 @@ describe('CachedChatModel replays responses faithfully', () => {
 
     expect(inner.callCount).toBe(1);
     expect(hit.content).toBe('Let me check.');
-    expect(hit.id).toBe('chatcmpl-1');
+    expect(hit.id).not.toBe('chatcmpl-1');
     expect(hit.tool_calls).toEqual(inner.response.tool_calls);
   });
 
@@ -892,7 +893,7 @@ describe('CachedChatModel replays responses faithfully', () => {
       { id: 'toolu_1', name: 'get_weather', args: { city: 'Sofia' }, type: 'tool_call' },
     ]);
     expect(chunks[0].invalid_tool_calls).toEqual(anthropicThinkingToolMessage().invalid_tool_calls);
-    expect(chunks[0].id).toBe('msg_01ABC');
+    expect(chunks[0].id).not.toBe('msg_01ABC');
     expect(chunks[0].content).toEqual(anthropicThinkingToolMessage().content);
     // LangGraph streamMode "messages" reads the chunk from the token callback.
     expect(tokenFields).toHaveLength(1);
@@ -1147,5 +1148,191 @@ describe('CachedChatModel callbacks and tool binding', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+// ── Review fixes (round 2): replayed message ids, constructor-level callbacks ──
+
+/** Like real streaming providers: each chunk is also reported through the run's callbacks. */
+function emitTokensWhileStreaming(inner: FakeChatModel): void {
+  inner._streamResponseChunks = async function* (_m, _o, runManager) {
+    for (const t of this.streamChunks) {
+      const chunk = new ChatGenerationChunk({ text: t, message: new AIMessageChunk({ content: t }) });
+      await runManager?.handleLLMNewToken(t, undefined, undefined, undefined, undefined, { chunk });
+      yield chunk;
+    }
+  } as FakeChatModel['_streamResponseChunks'];
+}
+
+function recordTokens() {
+  const tokens: Array<{ token: string; runId: string }> = [];
+  const handler = {
+    handleLLMNewToken: (token: string, _idx: unknown, runId: string) => {
+      tokens.push({ token, runId });
+    },
+  };
+  return { tokens, handler };
+}
+
+/** Records the outermost chat-model run, which is the CachedChatModel's own run. */
+function recordOuterRun() {
+  const runIds: string[] = [];
+  const handler = {
+    handleChatModelStart: (_llm: unknown, _m: unknown, runId: string, parentRunId?: string) => {
+      if (parentRunId === undefined) runIds.push(runId);
+    },
+  };
+  return { runIds, handler };
+}
+
+describe('CachedChatModel replayed message ids', () => {
+  let CachedChatModel: typeof import('../langchain').CachedChatModel;
+  beforeEach(async () => {
+    ({ CachedChatModel } = await import('../langchain'));
+  });
+
+  // Any handler gives the call a run, so BaseChatModel assigns `run-<runId>` to an id-less message.
+  const noop = { handleLLMStart: () => {} };
+
+  it('does not store the response id in the entry metadata', async () => {
+    const cache = createRealCache();
+    const inner = new FakeChatModel({});
+    inner.response = anthropicThinkingToolMessage();
+    await new CachedChatModel({ model: inner, cache }).bindTools([weatherTool]).invoke([new HumanMessage('x')]);
+
+    const options = (cache.llm.storeMultipart as ReturnType<typeof vi.fn>).mock.calls[0][2];
+    expect(options.metadata).not.toHaveProperty('id');
+  });
+
+  it('two invoke hits of the same entry get distinct fresh ids, never the stored one', async () => {
+    const cache = createRealCache();
+    const inner = new FakeChatModel({});
+    inner.response = anthropicThinkingToolMessage();
+    const model = new CachedChatModel({ model: inner, cache }).bindTools([weatherTool]);
+    const messages = [new HumanMessage('Weather in Sofia?')];
+
+    const miss = (await model.invoke(messages, { callbacks: [noop] })) as AIMessage;
+    const hit1 = (await model.invoke(messages, { callbacks: [noop] })) as AIMessage;
+    const hit2 = (await model.invoke(messages, { callbacks: [noop] })) as AIMessage;
+
+    expect(inner.callCount).toBe(1);
+    expect(miss.id).toBe('msg_01ABC'); // a miss returns the provider's message untouched
+    expect(hit1.id).toMatch(/^run-/);
+    expect(hit2.id).toMatch(/^run-/);
+    expect(hit1.id).not.toBe(hit2.id);
+  });
+
+  it('two streamed hits of the same entry get distinct fresh ids, never the stored one', async () => {
+    const cache = createRealCache();
+    const inner = new FakeChatModel({});
+    inner.response = anthropicThinkingToolMessage();
+    const model = new CachedChatModel({ model: inner, cache }).bindTools([weatherTool]);
+    const messages = [new HumanMessage('Weather in Sofia?')];
+    await model.invoke(messages);
+
+    const streamedIds: Array<string | undefined> = [];
+    for (let i = 0; i < 2; i++) {
+      for await (const c of await model.stream(messages, { callbacks: [noop] })) streamedIds.push(c.id);
+    }
+
+    expect(inner.streamCount).toBe(0);
+    expect(streamedIds).toHaveLength(2);
+    expect(streamedIds[0]).toMatch(/^run-/);
+    expect(streamedIds[1]).toMatch(/^run-/);
+    expect(streamedIds[0]).not.toBe(streamedIds[1]);
+  });
+});
+
+describe('CachedChatModel constructor-level callbacks', () => {
+  let CachedChatModel: typeof import('../langchain').CachedChatModel;
+  beforeEach(async () => {
+    ({ CachedChatModel } = await import('../langchain'));
+  });
+
+  it('a constructor-level handler gets each token once on a streamed miss, under the outer run id', async () => {
+    const cache = createMockAgentCache();
+    missAll(cache);
+    const inner = new FakeChatModel({});
+    emitTokensWhileStreaming(inner);
+    const { tokens, handler } = recordTokens();
+    const outer = recordOuterRun();
+    const model = new CachedChatModel({ model: inner, cache, callbacks: [handler] });
+
+    const texts: string[] = [];
+    for await (const c of await model.stream([new HumanMessage('x')], { callbacks: [outer.handler] })) {
+      texts.push(c.text);
+    }
+
+    expect(texts).toEqual(['cached', '-', 'response']);
+    expect(tokens.map((t) => t.token)).toEqual(['cached', '-', 'response']);
+    expect(outer.runIds).toHaveLength(1);
+    expect(new Set(tokens.map((t) => t.runId))).toEqual(new Set(outer.runIds));
+  });
+
+  it('a constructor-level handler gets the replayed token once on a streamed hit', async () => {
+    const cache = createRealCache();
+    const inner = new FakeChatModel({});
+    inner.response = new AIMessage('cached-response');
+    emitTokensWhileStreaming(inner);
+    const { tokens, handler } = recordTokens();
+    const model = new CachedChatModel({ model: inner, cache, callbacks: [handler] });
+    await model.invoke([new HumanMessage('x')]); // populate
+
+    for await (const _ of await model.stream([new HumanMessage('x')])) { /* drain */ }
+
+    expect(inner.streamCount).toBe(0);
+    expect(tokens.map((t) => t.token)).toEqual(['cached-response']);
+  });
+
+  it('constructor-level and call-level handlers each see every token exactly once on a miss', async () => {
+    const cache = createMockAgentCache();
+    missAll(cache);
+    const inner = new FakeChatModel({});
+    emitTokensWhileStreaming(inner);
+    const local = recordTokens();
+    const inherited = recordTokens();
+    const model = new CachedChatModel({ model: inner, cache, callbacks: [local.handler] });
+
+    for await (const _ of await model.stream([new HumanMessage('x')], { callbacks: [inherited.handler] })) {
+      /* drain */
+    }
+
+    expect(local.tokens.map((t) => t.token)).toEqual(['cached', '-', 'response']);
+    expect(inherited.tokens.map((t) => t.token)).toEqual(['cached', '-', 'response']);
+  });
+
+  it('forwards tokens a wrapped model emits from invoke (e.g. streaming: true) to a constructor-level handler', async () => {
+    const cache = createMockAgentCache();
+    missAll(cache);
+    const inner = new FakeChatModel({});
+    inner._generate = async function (_m, _o, runManager) {
+      this.callCount += 1;
+      await runManager?.handleLLMNewToken('hello', undefined, undefined, undefined, undefined, undefined);
+      return { generations: [{ text: 'hello', message: new AIMessage('hello') }] };
+    } as FakeChatModel['_generate'];
+    const { tokens, handler } = recordTokens();
+    const model = new CachedChatModel({ model: inner, cache, callbacks: [handler] });
+
+    await model.invoke([new HumanMessage('x')]);
+
+    expect(inner.callCount).toBe(1);
+    expect(tokens.map((t) => t.token)).toEqual(['hello']);
+  });
+
+  it('does not leak constructor-level handlers into the wrapped model run', async () => {
+    const cache = createMockAgentCache();
+    missAll(cache);
+    const starts: Array<string | undefined> = [];
+    const handler = {
+      handleChatModelStart: (_l: unknown, _m: unknown, _runId: string, parentRunId?: string) => {
+        starts.push(parentRunId);
+      },
+    };
+    const model = new CachedChatModel({ model: new FakeChatModel({}), cache, callbacks: [handler] });
+
+    await model.invoke([new HumanMessage('x')]);
+
+    // Only the wrapper's own run; the wrapped model's child run is not reported to it.
+    expect(starts).toEqual([undefined]);
   });
 });

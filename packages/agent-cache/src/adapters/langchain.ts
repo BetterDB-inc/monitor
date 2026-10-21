@@ -19,7 +19,12 @@ import { RunnablePassthrough, RunnableSequence } from '@langchain/core/runnables
 import { toJsonSchema } from '@langchain/core/utils/json_schema';
 import { getSchemaDescription, isInteropZodSchema } from '@langchain/core/utils/types';
 import { concat } from '@langchain/core/utils/stream';
-import { CallbackManager, type CallbackManagerForLLMRun } from '@langchain/core/callbacks/manager';
+import {
+  BaseCallbackHandler,
+  type HandleLLMNewTokenCallbackFields,
+  type NewTokenIndices,
+} from '@langchain/core/callbacks/base';
+import { CallbackManager, CallbackManagerForLLMRun } from '@langchain/core/callbacks/manager';
 import type { AgentCache } from '../AgentCache';
 import type { LlmCacheParams, LlmCacheResult } from '../types';
 import { canonicalJson, sha256 } from '../utils';
@@ -443,6 +448,12 @@ const SNAPSHOT_VERSION = 1;
  * What CachedChatModel stores in `LlmStoreOptions.metadata`. Content itself is
  * stored as canonical ContentBlocks; this envelope records what the blocks
  * can't: the original content shape and the AIMessage fields outside content.
+ *
+ * The message `id` is deliberately not stored. A replayed entry must not carry
+ * the id of the response it was cached from: LangGraph's messagesStateReducer
+ * merges by id, so two hits of the same entry in one thread would replace each
+ * other instead of being appended. On a hit the id is left unset and
+ * BaseChatModel assigns a fresh `run-<runId>`.
  */
 interface MessageSnapshotMeta {
   langchain: number;
@@ -450,7 +461,6 @@ interface MessageSnapshotMeta {
   contentShape: 'string' | 'array';
   /** Tool calls that also appeared as `tool_use` parts inside array content. */
   toolUseIds?: string[];
-  id?: string;
   additional_kwargs?: Record<string, unknown>;
   response_metadata?: Record<string, unknown>;
   invalid_tool_calls?: Array<{ id?: string; name?: string; args?: string; error?: string }>;
@@ -541,7 +551,6 @@ function snapshotMessage(msg: AIMessage): MessageSnapshot | null {
     contentShape: isArray ? 'array' : 'string',
   };
   if (toolUseIds.length > 0) meta.toolUseIds = toolUseIds;
-  if (typeof msg.id === 'string' && msg.id !== '') meta.id = msg.id;
   const additional = toJsonSafe(msg.additional_kwargs);
   if (isNonEmptyObject(additional)) meta.additional_kwargs = additional;
   const responseMeta = toJsonSafe(msg.response_metadata);
@@ -569,7 +578,6 @@ interface RebuiltFields {
   text: string;
   toolCalls: Array<{ id: string; name: string; args: Record<string, unknown>; type: 'tool_call' }>;
   invalidToolCalls: NonNullable<MessageSnapshotMeta['invalid_tool_calls']>;
-  id?: string;
   additional_kwargs?: Record<string, unknown>;
   response_metadata?: Record<string, unknown>;
 }
@@ -624,7 +632,6 @@ function rebuildFields(cached: LlmCacheResult): RebuiltFields | null {
     text,
     toolCalls,
     invalidToolCalls: meta?.invalid_tool_calls ?? [],
-    ...(meta?.id !== undefined ? { id: meta.id } : {}),
     ...(meta?.additional_kwargs !== undefined ? { additional_kwargs: meta.additional_kwargs } : {}),
     ...(meta?.response_metadata !== undefined ? { response_metadata: meta.response_metadata } : {}),
   };
@@ -637,7 +644,6 @@ function rebuildGeneration(cached: LlmCacheResult): ChatGeneration | null {
     content: f.content as AIMessage['content'],
     tool_calls: f.toolCalls,
     invalid_tool_calls: f.invalidToolCalls as AIMessage['invalid_tool_calls'],
-    ...(f.id !== undefined ? { id: f.id } : {}),
     ...(f.additional_kwargs !== undefined ? { additional_kwargs: f.additional_kwargs } : {}),
     ...(f.response_metadata !== undefined ? { response_metadata: f.response_metadata } : {}),
   });
@@ -665,7 +671,6 @@ function rebuildChunk(cached: LlmCacheResult): ChatGenerationChunk | null {
   const message = new AIMessageChunk({
     content: f.content as AIMessageChunk['content'],
     ...(toolCallChunks.length > 0 ? { tool_call_chunks: toolCallChunks } : {}),
-    ...(f.id !== undefined ? { id: f.id } : {}),
     ...(f.additional_kwargs !== undefined ? { additional_kwargs: f.additional_kwargs } : {}),
     ...(f.response_metadata !== undefined ? { response_metadata: f.response_metadata } : {}),
   });
@@ -1058,20 +1063,83 @@ export class CachedChatModel extends BaseChatModel<CachedChatModelCallOptions> {
  * managers do), so this mirrors CallbackManagerForChainRun.getChild(): a new
  * manager whose parent is this run, carrying the inheritable handlers, tags and
  * metadata.
+ *
+ * Inheritable handlers get the wrapped model's tokens from its child run, so
+ * this run does not re-emit them (each token would be reported twice).
+ * Non-inherited handlers of this run, such as `callbacks` passed to the
+ * CachedChatModel constructor, never see the child run, so a LocalTokenRelay is
+ * added (non-inheritable) to forward each token to them as this run's token.
+ * Every handler therefore sees each token exactly once, on a miss and on a hit.
  */
 function childCallbacksOf(runManager: CallbackManagerForLLMRun | undefined): CallbackManager | undefined {
   if (!runManager) return undefined;
+  // These fields are protected on BaseRunManager (getChild() reads them from inside the class).
   const rm = runManager as unknown as {
     runId: string;
+    parentRunId?: string;
+    handlers: CallbackManager['handlers'];
     inheritableHandlers: CallbackManager['handlers'];
+    tags: string[];
     inheritableTags: string[];
+    metadata: Record<string, unknown>;
     inheritableMetadata: Record<string, unknown>;
   };
   const manager = new CallbackManager(rm.runId);
   manager.setHandlers(rm.inheritableHandlers);
   manager.addTags(rm.inheritableTags);
   manager.addMetadata(rm.inheritableMetadata);
+
+  const localHandlers = rm.handlers.filter((h) => !rm.inheritableHandlers.includes(h));
+  if (localHandlers.length > 0) {
+    const localRun = new CallbackManagerForLLMRun(
+      rm.runId,
+      localHandlers,
+      [],
+      rm.tags,
+      [],
+      rm.metadata,
+      {},
+      rm.parentRunId,
+    );
+    manager.addHandler(
+      new LocalTokenRelay({
+        target: localRun,
+        raiseError: localHandlers.some((h) => h.raiseError),
+        awaitHandlers: localHandlers.some((h) => h.awaitHandlers),
+      }),
+      false,
+    );
+  }
   return manager;
+}
+
+/**
+ * Forwards the wrapped model's tokens to this run's non-inherited handlers,
+ * reported under this run's id. Only handleLLMNewToken is implemented, so those
+ * handlers still see a single LLM run (this one), never the child run.
+ */
+class LocalTokenRelay extends BaseCallbackHandler {
+  name = 'betterdb_cached_chat_model_token_relay';
+
+  private readonly target: CallbackManagerForLLMRun;
+
+  // BaseCallbackHandler.copy() calls `new this.constructor(this)`, so the
+  // constructor reads only fields that exist on an instance.
+  constructor(input: { target: CallbackManagerForLLMRun; raiseError: boolean; awaitHandlers: boolean }) {
+    super({ raiseError: input.raiseError, _awaitHandler: input.awaitHandlers });
+    this.target = input.target;
+  }
+
+  async handleLLMNewToken(
+    token: string,
+    idx: NewTokenIndices,
+    _runId: string,
+    _parentRunId?: string,
+    _tags?: string[],
+    fields?: HandleLLMNewTokenCallbackFields,
+  ): Promise<void> {
+    await this.target.handleLLMNewToken(token, idx, undefined, undefined, undefined, fields);
+  }
 }
 
 function warnUncacheableTools(): void {

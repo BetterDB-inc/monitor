@@ -23,11 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `invocationParams()` (e.g. `response_format`, `parallel_tool_calls`,
   `reasoning_effort`, `stop_sequences`, `top_k`, `thinking`), and hits rebuild
   thinking blocks with their signatures, the provider's content shape, and the
-  message `id`, `additional_kwargs`, `response_metadata` and
-  `invalid_tool_calls`, so Anthropic extended-thinking tool loops keep working
-  across hits. `withStructuredOutput()` forces the schema tool, the wrapped
-  model's run is traced as a child run, and `bindTools` kwargs (e.g. `strict`)
-  reach the wrapped model.
+  message `additional_kwargs`, `response_metadata` and `invalid_tool_calls`, so
+  Anthropic extended-thinking tool loops keep working across hits. Hits get a
+  fresh message id rather than the cached response's, so LangGraph appends
+  repeated hits instead of merging them. `withStructuredOutput()` forces the
+  schema tool, the wrapped model's run is traced as a child run (handlers passed
+  to the wrapper's constructor still receive every token once), and `bindTools`
+  kwargs (e.g. `strict`) reach the wrapped model.
 - **`LlmCacheParams.providerParams`** (optional): provider request params with no
   first-class field. Included in the LLM cache key only when set.
 - **`LlmStoreOptions.metadata` / `LlmCacheResult.metadata`** (optional):

@@ -335,15 +335,19 @@ await withTools.invoke(messages); // keys on messages + bound tools
   (`parallel_tool_calls`, `top_k`, `thinking`, `max_completion_tokens`, …) is keyed
   under `providerParams`.
 - **Replay.** Responses are stored as content blocks (text, `reasoning` with its
-  signature, tool calls) plus the message's `id`, `additional_kwargs`,
-  `response_metadata` and `invalid_tool_calls`. A hit rebuilds the same content shape
-  the provider returned, so Anthropic extended-thinking tool loops can send a replayed
-  turn back. Cached streams replay as a single chunk that carries `tool_call_chunks`.
+  signature, tool calls) plus the message's `additional_kwargs`, `response_metadata`
+  and `invalid_tool_calls`. A hit rebuilds the same content shape the provider
+  returned, so Anthropic extended-thinking tool loops can send a replayed turn back.
+  The original message `id` is not replayed: each hit gets a fresh id from LangChain
+  (`run-<runId>`), so LangGraph's `messagesStateReducer` appends repeated hits instead
+  of merging them. Cached streams replay as a single chunk that carries `tool_call_chunks`.
 - **Structured output.** `withStructuredOutput()` binds the schema as one tool forced
   with `tool_choice: "any"` (mapped per provider), and leaves it unforced under
   Anthropic extended thinking, which rejects a forced tool.
-- **Tracing.** The wrapped model's run is a child of the wrapper's run, and the wrapper
-  reports the wrapped model's LangSmith params.
+- **Tracing and callbacks.** The wrapped model's run is a child of the wrapper's run,
+  and the wrapper reports the wrapped model's LangSmith params. Every token handler sees
+  each token exactly once, on a hit or a miss, including handlers passed to the
+  `CachedChatModel` constructor.
 
 See [`examples/langchain`](./examples/langchain) for a full working example. Sample output:
 
