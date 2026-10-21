@@ -78,6 +78,34 @@ describe('ClientAnalyticsService', () => {
       expect(rollup.getStatsForRange).toHaveBeenLastCalledWith(NOW - HOUR - WINDOW, NOW - HOUR, 'c1');
     });
 
+    it('treats non-finite stats bounds as absent', async () => {
+      await expect(service.getStats(NaN, NaN, 'c1')).resolves.toBe(latest);
+      expect(storage.getClientAnalyticsStats).not.toHaveBeenCalled();
+      expect(rollup.getStatsForRange).not.toHaveBeenCalled();
+
+      await service.getStats(NOW - HOUR, NaN, 'c1');
+      expect(storage.getClientAnalyticsStats).toHaveBeenLastCalledWith(NOW - HOUR, NOW, 'c1');
+      await service.getStats(NaN, NOW - HOUR, 'c1');
+      expect(rollup.getStatsForRange).toHaveBeenLastCalledWith(NOW - HOUR - WINDOW, NOW - HOUR, 'c1');
+      await service.getStats(Infinity, -Infinity);
+      expect(rollup.getStatsForRange).toHaveBeenLastCalledWith(NOW - WINDOW, NOW, undefined);
+      for (const call of [...storage.getClientAnalyticsStats.mock.calls, ...rollup.getStatsForRange.mock.calls]) {
+        expect(call.slice(0, 2).every((v: number) => Number.isFinite(v))).toBe(true);
+      }
+    });
+
+    it('treats non-finite connection history bounds as absent', async () => {
+      await service.getConnectionHistory({ name: 'api' }, NaN, NaN, 'c1');
+      expect(storage.getClientConnectionHistory).toHaveBeenLastCalledWith({ name: 'api' }, NOW - WINDOW, undefined, 'c1');
+      await service.getConnectionHistory({ name: 'api' }, NaN, NOW - HOUR, 'c1');
+      expect(storage.getClientConnectionHistory).toHaveBeenLastCalledWith(
+        { name: 'api' },
+        NOW - HOUR - WINDOW,
+        NOW - HOUR,
+        'c1',
+      );
+    });
+
     it('defaults connection history to the stats window', async () => {
       await service.getConnectionHistory({ name: 'api' }, undefined, undefined, 'c1');
       expect(storage.getClientConnectionHistory).toHaveBeenCalledWith({ name: 'api' }, NOW - WINDOW, undefined, 'c1');

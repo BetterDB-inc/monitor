@@ -88,6 +88,32 @@ describe('AuditService', () => {
       }
     });
 
+    it('fills the cache from stored totals even when ACL LOG fails on every poll, and still rethrows', async () => {
+      const now = 1_700_000_000_000;
+      const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+      try {
+        jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
+        aclLog.mockRejectedValue(new Error('connection reset'));
+        await expect(poll()).rejects.toThrow('connection reset');
+        expect(cache.get('c1')).toEqual(stats);
+        expect(storage.getAuditStats).toHaveBeenCalledTimes(1);
+
+        // Fresh cache: no refresh on the next failing poll.
+        await expect(poll()).rejects.toThrow('connection reset');
+        expect(storage.getAuditStats).toHaveBeenCalledTimes(1);
+
+        // Due again: the failing poll still refreshes.
+        clock.mockReturnValue(now + AUDIT_STATS_PERIODIC_REFRESH_MS);
+        storage.getAuditStats.mockResolvedValue({ ...stats, totalEntries: 4 });
+        await expect(poll()).rejects.toThrow('connection reset');
+        expect(storage.getAuditStats).toHaveBeenCalledTimes(2);
+        expect(cache.get('c1')).toEqual({ ...stats, totalEntries: 4 });
+        expect(storage.saveAclEntries).not.toHaveBeenCalled();
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
     it('drops the cached stats when the connection is removed', async () => {
       await poll();
       service['onConnectionRemoved']('c1');

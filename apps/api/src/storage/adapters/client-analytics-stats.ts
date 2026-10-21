@@ -2,6 +2,7 @@ import type {
   ClientAnalyticsRollup,
   ClientAnalyticsStats,
   ClientRollupGroupStat,
+  ClientRollupPairStat,
   ClientRollupUserStat,
 } from '@betterdb/shared';
 import { emptyClientAnalyticsStats } from '@betterdb/shared';
@@ -143,9 +144,15 @@ export function foldClientAnalyticsStats(
   };
 }
 
-/** addr with the port stripped: everything up to the first ':' (the whole addr when there is none). */
+/**
+ * addr with the port stripped: a trailing ':' followed by one or more digits
+ * is removed, anything else is kept whole. '1.2.3.4:5678' -> '1.2.3.4',
+ * '[::1]:6379' -> '[::1]', '/tmp/valkey.sock:0' -> '/tmp/valkey.sock';
+ * 'host' and 'host:' are unchanged. The PostgreSQL and SQLite adapters
+ * evaluate the same rule in SQL (PG_CLIENT_IP_EXPR, SQLITE_CLIENT_IP_EXPR).
+ */
 export function clientAddrIp(addr: string): string {
-  return addr.split(':')[0];
+  return addr.replace(/:\d+$/, '');
 }
 
 /**
@@ -170,7 +177,7 @@ export function mapClientAnalyticsRollupRow(
     peakCapturedAt: Number(row.peak_captured_at),
     byName: json<Record<string, ClientRollupGroupStat>>(row.by_name, {}),
     byUser: json<Record<string, ClientRollupUserStat>>(row.by_user, {}),
-    byUserAndName: json<Record<string, ClientRollupGroupStat>>(row.by_user_name, {}),
+    byUserAndName: json<Record<string, ClientRollupPairStat>>(row.by_user_name, {}),
     ips: json<string[]>(row.ips, []),
     updatedAt: Number(row.updated_at),
   };

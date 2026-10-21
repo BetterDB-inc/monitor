@@ -9,6 +9,7 @@ import {
 } from '../client-analytics-rollup.service';
 import { foldGroupsIntoRollups, mergeRollupsIntoStats } from '../client-rollup-math';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
+import { RuntimeCapabilityTracker } from '../../connections/runtime-capability-tracker.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { buildRawFixture, groupsFromRaw, normalizeStats, RawClientRow, referenceStats } from './client-rollup-fixture';
 
@@ -79,12 +80,14 @@ function createService(
   storage: unknown,
   env: Record<string, unknown> = {},
   tuning?: Partial<ClientAnalyticsRollupTuning>,
+  isAvailable: jest.Mock = jest.fn(() => true),
 ) {
   const config = { get: jest.fn((k: string, fallback?: unknown) => env[k] ?? fallback) } as unknown as ConfigService;
   const service = new ClientAnalyticsRollupService(
     { list: jest.fn().mockReturnValue([]) } as unknown as ConnectionRegistry,
     storage as StoragePort,
     config,
+    { isAvailable } as unknown as RuntimeCapabilityTracker,
     tuning,
   );
   const log = jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
@@ -374,9 +377,76 @@ describe('ClientAnalyticsRollupService', () => {
     await poll();
     expect(fake.storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledTimes(2);
 
-    const withRaw = createFakeStorage(raw, { indexReady: false });
-    await createService(withRaw.storage, { CLIENT_ANALYTICS_RAW_RETENTION_DAYS: '7' }).poll();
+    const withRaw = createFakeStorage(raw, { indexReady: true });
+    const rawService = createService(withRaw.storage, { CLIENT_ANALYTICS_RAW_RETENTION_DAYS: '7' });
+    await rawService.poll();
+    expect(rawService.service['states'].get('conn-a')?.backfillDone).toBe(true);
     expect(withRaw.storage.pruneOldClientSnapshots).toHaveBeenCalledWith(now + HOUR - 7 * 24 * HOUR, 'conn-a');
+  });
+
+  it('never prunes raw snapshots before the backfill has folded them, but still prunes rollups', async () => {
+    const now = START + 40 * 60_000;
+    jest.useFakeTimers({ now });
+    // Index not ready: the backfill cannot start, so older raw history is unfolded.
+    const fake = createFakeStorage(raw, { indexReady: false });
+    const { service, poll } = createService(fake.storage, { CLIENT_ANALYTICS_RAW_RETENTION_DAYS: '7' });
+    await poll();
+    expect(service['states'].get('conn-a')?.backfillDone).toBe(false);
+    expect(fake.storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledTimes(1);
+    expect(fake.storage.pruneOldClientSnapshots).not.toHaveBeenCalled();
+
+    // Backfill completes; the next retention pass prunes raw rows too.
+    fake.setIndexReady(true);
+    jest.setSystemTime(now + HOUR);
+    await poll();
+    expect(service['states'].get('conn-a')?.backfillDone).toBe(true);
+    expect(fake.storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledTimes(2);
+    expect(fake.storage.pruneOldClientSnapshots).toHaveBeenCalledWith(now + HOUR - 7 * 24 * HOUR, 'conn-a');
+  });
+
+  it('skips connections without the CLIENT LIST capability', async () => {
+    const now = START + 40 * 60_000;
+    jest.useFakeTimers({ now });
+    const fake = createFakeStorage(raw);
+    const isAvailable = jest.fn((_id: string, cap: string) => cap !== 'canClientList');
+    const { service, poll } = createService(fake.storage, {}, undefined, isAvailable);
+    await poll();
+    expect(isAvailable).toHaveBeenCalledWith('conn-a', 'canClientList');
+    expect(service['states'].has('conn-a')).toBe(false);
+    for (const fn of Object.values(fake.storage)) expect(fn).not.toHaveBeenCalled();
+
+    // Capability restored: the connection is aggregated again.
+    isAvailable.mockReturnValue(true);
+    await poll();
+    expect(service.getLatestStats('conn-a')).not.toBeNull();
+  });
+
+  it('installs no state when the connection is removed while the watermark read is pending', async () => {
+    const now = START + 40 * 60_000;
+    jest.useFakeTimers({ now });
+    const fake = createFakeStorage(raw);
+    let release: (v: number | null) => void = () => undefined;
+    fake.storage.getClientAnalyticsRollupWatermark.mockImplementationOnce(
+      () => new Promise<number | null>((resolve) => (release = resolve)),
+    );
+    const { service, poll } = createService(fake.storage);
+    const run = poll();
+    await Promise.resolve();
+    expect(fake.storage.getClientAnalyticsRollupWatermark).toHaveBeenCalledTimes(1);
+    service['onConnectionRemoved']('conn-a');
+    release(null);
+    await run;
+
+    expect(service['states'].has('conn-a')).toBe(false);
+    expect(service.getLatestStats('conn-a')).toBeNull();
+    expect(fake.storage.getClientSnapshotGroups).not.toHaveBeenCalled();
+    expect(fake.storage.getClientAnalyticsRollups).not.toHaveBeenCalled();
+    expect(fake.storage.upsertClientAnalyticsRollups).not.toHaveBeenCalled();
+    expect(fake.storage.pruneOldClientAnalyticsRollups).not.toHaveBeenCalled();
+
+    // A connection that comes back later initialises normally.
+    await poll();
+    expect(service.getLatestStats('conn-a')).not.toBeNull();
   });
 
   it('bounds every raw read by the chunk size, including catch-up after downtime', async () => {

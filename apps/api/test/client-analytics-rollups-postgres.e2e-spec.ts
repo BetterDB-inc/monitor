@@ -1,10 +1,14 @@
 import { execFileSync } from 'child_process';
-import { Pool } from 'pg';
+import { Client, Pool } from 'pg';
 import { MemoryAdapter } from '../src/storage/adapters/memory.adapter';
 import { PostgresAdapter } from '../src/storage/adapters/postgres.adapter';
+import { foldGroupsIntoRollups, mergeRollupsIntoStats } from '../src/client-analytics/client-rollup-math';
 import {
   BATCH_MS,
   CONNECTIONS,
+  EDGE_CONNECTION,
+  EDGE_IPS,
+  buildEdgeFixture,
   PEAK_CASES,
   STATS_RANGES,
   T0,
@@ -132,6 +136,73 @@ describePostgres('client analytics rollups — postgres', () => {
       expect(await waitFor(() => again.isClientSnapshotIndexReady())).toBe(true);
       await again.close();
     });
+
+    it('close() does not wait for an in-flight build, and the next startup rebuilds the interrupted index', async () => {
+      const schema = `${SCHEMA}_close`;
+      const indexState = async () => {
+        const result = await adminPool.query(
+          `SELECT i.indisvalid AS valid
+             FROM pg_index i
+             JOIN pg_class c ON c.oid = i.indexrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = $1 AND c.relname = 'idx_client_connection_captured'`,
+          [schema],
+        );
+        return result.rows[0] ? (result.rows[0].valid ? 'valid' : 'invalid') : 'missing';
+      };
+      const buildPid = async (): Promise<number | null> => {
+        const result = await adminPool.query(
+          `SELECT pid FROM pg_stat_activity
+            WHERE state = 'active'
+              AND query LIKE 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_client_connection_captured %'`,
+        );
+        return result.rows[0]?.pid ?? null;
+      };
+
+      const first = new PostgresAdapter({ connectionString: DSN, schema });
+      await first.initialize();
+      expect(await waitFor(() => first.isClientSnapshotIndexReady())).toBe(true);
+      await first.close();
+      await adminPool.query(`DROP INDEX ${schema}.idx_client_connection_captured`);
+
+      // An open snapshot makes CREATE INDEX CONCURRENTLY wait for it to end.
+      const blocker = new Client({ connectionString: DSN });
+      await blocker.connect();
+      try {
+        await blocker.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+        await blocker.query('SELECT 1');
+
+        const second = new PostgresAdapter({ connectionString: DSN, schema });
+        await second.initialize();
+        expect(await waitFor(async () => (await buildPid()) !== null)).toBe(true);
+        const pid = await buildPid();
+        const build = second['indexBuild'] as Promise<void>;
+
+        const started = Date.now();
+        await second.close();
+        expect(Date.now() - started).toBeLessThan(5_000);
+        // The abandoned build settles quietly (no unhandled rejection).
+        await expect(build).resolves.toBeUndefined();
+
+        // Simulate the build dying with the process: it leaves an INVALID index.
+        await adminPool.query('SELECT pg_terminate_backend($1)', [pid]);
+        expect(await waitFor(async () => (await buildPid()) === null)).toBe(true);
+        expect(await indexState()).toBe('invalid');
+      } finally {
+        await blocker.query('ROLLBACK').catch(() => undefined);
+        await blocker.end();
+      }
+
+      const third = new PostgresAdapter({ connectionString: DSN, schema });
+      try {
+        await third.initialize();
+        expect(await waitFor(() => third.isClientSnapshotIndexReady())).toBe(true);
+        expect(await indexState()).toBe('valid');
+      } finally {
+        await third.close();
+        await adminPool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      }
+    });
   });
 
   describe('identity with the memory adapter', () => {
@@ -255,6 +326,52 @@ describePostgres('client analytics rollups — postgres', () => {
         await adminPool.query(`DELETE FROM ${SCHEMA}.client_analytics_rollups`);
         expect(await pg.getClientAnalyticsRollupPeak('conn-a', 0)).toBeNull();
       });
+    });
+  });
+
+  describe('address and identity edge cases', () => {
+    const edge = buildEdgeFixture();
+    const end = Number.MAX_SAFE_INTEGER;
+
+    beforeAll(async () => {
+      for (const capturedAt of [...new Set(edge.map((r) => r.capturedAt))]) {
+        const batch = edge.filter((r) => r.capturedAt === capturedAt).map((r) => ({ ...r, id: 0 }));
+        await pg.saveClientSnapshot(batch, EDGE_CONNECTION);
+        await memory.saveClientSnapshot(batch, EDGE_CONNECTION);
+      }
+    });
+
+    afterAll(async () => {
+      await adminPool.query(`DELETE FROM ${SCHEMA}.client_snapshots WHERE connection_id = $1`, [EDGE_CONNECTION]);
+      await adminPool.query(`DELETE FROM ${SCHEMA}.client_analytics_rollups WHERE connection_id = $1`, [
+        EDGE_CONNECTION,
+      ]);
+      await memory.pruneOldClientSnapshots(end, EDGE_CONNECTION);
+    });
+
+    it('strips only a trailing :<digits> port, identically to the memory adapter', async () => {
+      const groups = await pg.getClientSnapshotGroups(EDGE_CONNECTION, 0, end);
+      expect([...new Set(groups.map((g) => g.ip))].sort()).toEqual(EDGE_IPS);
+      expect(groups).toEqual(await memory.getClientSnapshotGroups(EDGE_CONNECTION, 0, end));
+
+      const stats = await pg.getClientAnalyticsStats(undefined, undefined, EDGE_CONNECTION);
+      expect(stats.uniqueIps).toBe(EDGE_IPS.length);
+      expect(stats).toEqual(await memory.getClientAnalyticsStats(undefined, undefined, EDGE_CONNECTION));
+      expect(stats).toEqual(referenceStats(edge, undefined, undefined, EDGE_CONNECTION));
+
+      const series = await pg.getClientTimeSeries(0, end, 60_000, EDGE_CONNECTION);
+      expect(series).toEqual(await memory.getClientTimeSeries(0, end, 60_000, EDGE_CONNECTION));
+      expect([...new Set(series.flatMap((p) => Object.keys(p.byAddr)))].sort()).toEqual(EDGE_IPS);
+    });
+
+    it('keeps a user containing ":" intact through stored rollups, matching the raw path', async () => {
+      const groups = await pg.getClientSnapshotGroups(EDGE_CONNECTION, 0, end);
+      await pg.upsertClientAnalyticsRollups(foldGroupsIntoRollups(EDGE_CONNECTION, groups, new Map(), 1));
+      const stored = await pg.getClientAnalyticsRollups(0, end, EDGE_CONNECTION);
+      expect(stored[0].byUserAndName['svc:ro:api']).toMatchObject({ user: 'svc:ro', name: 'api' });
+      const raw = await pg.getClientAnalyticsStats(undefined, undefined, EDGE_CONNECTION);
+      expect(raw.connectionsByUserAndName['svc:ro:api']).toMatchObject({ user: 'svc:ro', name: 'api' });
+      expect(mergeRollupsIntoStats(stored)).toEqual(raw);
     });
   });
 });

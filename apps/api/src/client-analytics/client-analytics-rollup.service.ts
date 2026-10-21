@@ -9,6 +9,7 @@ import {
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ConnectionContext, MultiConnectionPoller } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 import { foldGroupsIntoRollups, mergeRollupsIntoStats } from './client-rollup-math';
 import { QueryBudget, readPositiveNumber } from './query-budget';
 
@@ -103,6 +104,12 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
   readonly config: ClientAnalyticsRollupConfig;
   private readonly budget: QueryBudget;
   private readonly states = new Map<string, ConnectionRollupState>();
+  /**
+   * One token per connection whose state is being initialised (the watermark
+   * read is awaited). onConnectionRemoved drops the token, so a state built
+   * from a read that raced a removal is never installed.
+   */
+  private readonly pendingInit = new Map<string, symbol>();
   /** The index never becomes invalid once valid, so a true result holds for the process lifetime. */
   private snapshotIndexReady = false;
 
@@ -110,6 +117,7 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
     connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     configService: ConfigService,
+    private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
     @Optional() @Inject(CLIENT_ANALYTICS_ROLLUP_TUNING) tuning?: Partial<ClientAnalyticsRollupTuning>,
   ) {
     super(connectionRegistry);
@@ -162,13 +170,17 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
 
   protected onConnectionRemoved(connectionId: string): void {
     this.states.delete(connectionId);
+    this.pendingInit.delete(connectionId);
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     const id = ctx.connectionId;
+    // Same gate as the snapshot writer: without CLIENT LIST no snapshots are
+    // ever written for this connection, so there is nothing to fold.
+    if (!this.runtimeCapabilityTracker.isAvailable(id, 'canClientList')) return;
     const now = Date.now();
     const state = await this.getOrInitState(id, now);
-    if (this.states.get(id) !== state) return;
+    if (state === null || this.states.get(id) !== state) return;
 
     const windowStartBucket = clientRollupBucketStart(now - this.config.windowMs);
     const folded = await this.runIncremental(id, state, now);
@@ -214,12 +226,19 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
     }
   }
 
-  private async getOrInitState(id: string, now: number): Promise<ConnectionRollupState> {
+  /** The connection's state, initialised from storage on first use; null when the connection was removed meanwhile. */
+  private async getOrInitState(id: string, now: number): Promise<ConnectionRollupState | null> {
     const existing = this.states.get(id);
     if (existing) return existing;
+    const token = Symbol(id);
+    this.pendingInit.set(id, token);
     const stored = await this.timed('getClientAnalyticsRollupWatermark', id, () =>
       this.storage.getClientAnalyticsRollupWatermark(id),
     );
+    // The token is gone when the connection was removed while the read was
+    // pending (or replaced by a newer init): this read is stale, install nothing.
+    if (this.pendingInit.get(id) !== token) return null;
+    this.pendingInit.delete(id);
     // Cold start: fold the recent past from a bucket boundary so the oldest
     // bucket is complete (the backfill never revisits a bucket that exists).
     const watermark =
@@ -240,7 +259,7 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
       backfillRowsFolded: 0,
       lastRetentionAt: 0,
     };
-    // A concurrent removal may have raced the read; keep whatever is there now.
+    // A state installed meanwhile wins; pollConnection then sees the mismatch and stops.
     if (!this.states.has(id)) this.states.set(id, state);
     return state;
   }
@@ -382,7 +401,9 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
     await this.timed('pruneOldClientAnalyticsRollups', id, () =>
       this.storage.pruneOldClientAnalyticsRollups(rollupCutoff, id),
     );
-    if (this.config.rawRetentionMs !== null) {
+    // Raw rows are only pruned once the backfill has folded the history they
+    // hold: pruning first would drop snapshots that never reached a rollup.
+    if (this.config.rawRetentionMs !== null && state.backfillDone) {
       const rawCutoff = now - this.config.rawRetentionMs;
       await this.timed('pruneOldClientSnapshots', id, () => this.storage.pruneOldClientSnapshots(rawCutoff, id));
     }

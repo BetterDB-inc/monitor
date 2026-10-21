@@ -16,6 +16,16 @@ import { ClientAnalyticsRollupService } from './client-analytics-rollup.service'
 import { QueryBudget } from './query-budget';
 import { RAW_STATS_SPAN_MAX_MS } from './client-rollup-math';
 
+/**
+ * Query-string bounds arrive via parseInt, so a non-numeric value is NaN.
+ * Treat any non-finite bound as absent: NaN must never reach the window
+ * arithmetic or a storage query (PostgreSQL rejects it as a BIGINT). This
+ * matches the adapters' old truthy checks, which silently dropped NaN.
+ */
+function finiteOrUndefined(value?: number): number | undefined {
+  return value !== undefined && Number.isFinite(value) ? value : undefined;
+}
+
 @Injectable()
 export class ClientAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(ClientAnalyticsService.name);
@@ -110,8 +120,11 @@ export class ClientAnalyticsService extends MultiConnectionPoller implements OnM
    * - a span up to RAW_STATS_SPAN_MAX_MS (6 hours): a bounded raw query;
    * - a longer span: merged from rollup buckets.
    * A missing endTime means now; a missing startTime means one window before endTime.
+   * A non-finite bound (NaN from a non-numeric query parameter) counts as missing.
    */
   async getStats(startTime?: number, endTime?: number, connectionId?: string): Promise<ClientAnalyticsStats> {
+    startTime = finiteOrUndefined(startTime);
+    endTime = finiteOrUndefined(endTime);
     const windowMs = this.rollupService.getWindowMs();
     if (startTime === undefined && endTime === undefined) {
       if (connectionId) {
@@ -137,6 +150,8 @@ export class ClientAnalyticsService extends MultiConnectionPoller implements OnM
     endTime?: number,
     connectionId?: string,
   ): Promise<StoredClientSnapshot[]> {
+    startTime = finiteOrUndefined(startTime);
+    endTime = finiteOrUndefined(endTime);
     // Never scan a connection's whole history: default to the stats window.
     const start = startTime ?? (endTime ?? Date.now()) - this.rollupService.getWindowMs();
     return this.storage.getClientConnectionHistory(identifier, start, endTime, connectionId);

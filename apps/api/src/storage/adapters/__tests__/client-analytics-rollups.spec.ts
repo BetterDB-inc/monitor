@@ -4,9 +4,14 @@ import { join } from 'path';
 import type { StoragePort } from '../../../common/interfaces/storage-port.interface';
 import { MemoryAdapter } from '../memory.adapter';
 import { SqliteAdapter } from '../sqlite.adapter';
+import { clientAddrIp } from '../client-analytics-stats';
+import { foldGroupsIntoRollups, mergeRollupsIntoStats } from '../../../client-analytics/client-rollup-math';
 import {
   BATCH_MS,
   CONNECTIONS,
+  EDGE_CONNECTION,
+  EDGE_IPS,
+  buildEdgeFixture,
   PEAK_CASES,
   STATS_RANGES,
   T0,
@@ -272,6 +277,44 @@ describe.each([
     expect(await h.storage.isClientSnapshotIndexReady()).toBe(true);
   });
 
+  describe('address and identity edge cases', () => {
+    const edge = buildEdgeFixture();
+
+    beforeEach(async () => {
+      for (const capturedAt of [...new Set(edge.map((r) => r.capturedAt))]) {
+        await save(h.storage, edge.filter((r) => r.capturedAt === capturedAt), EDGE_CONNECTION);
+      }
+    });
+
+    it('strips only a trailing :<digits> port (IPv6, sockets, no port, bare trailing colon)', async () => {
+      const groups = await h.storage.getClientSnapshotGroups(EDGE_CONNECTION, 0, Number.MAX_SAFE_INTEGER);
+      expect([...new Set(groups.map((g) => g.ip))].sort()).toEqual(EDGE_IPS);
+      const stats = await h.storage.getClientAnalyticsStats(undefined, undefined, EDGE_CONNECTION);
+      expect(stats.uniqueIps).toBe(EDGE_IPS.length);
+      expect(stats).toEqual(referenceStats(edge, undefined, undefined, EDGE_CONNECTION));
+    });
+
+    it('buckets the time series by the same ip as the stats', async () => {
+      const series = await h.storage.getClientTimeSeries(0, Number.MAX_SAFE_INTEGER, 60_000, EDGE_CONNECTION);
+      const addrs = new Set(series.flatMap((p) => Object.keys(p.byAddr)));
+      expect([...addrs].sort()).toEqual(EDGE_IPS);
+    });
+
+    it('keeps a user or name containing ":" intact, identically on the rollup and raw paths', async () => {
+      const raw = await h.storage.getClientAnalyticsStats(undefined, undefined, EDGE_CONNECTION);
+      expect(raw.connectionsByUserAndName['svc:ro:api']).toMatchObject({ user: 'svc:ro', name: 'api' });
+      expect(raw.connectionsByUserAndName['app:w:1']).toMatchObject({ user: 'app', name: 'w:1' });
+
+      const groups = await h.storage.getClientSnapshotGroups(EDGE_CONNECTION, 0, Number.MAX_SAFE_INTEGER);
+      const rollups = foldGroupsIntoRollups(EDGE_CONNECTION, groups, new Map(), 1);
+      await h.storage.upsertClientAnalyticsRollups(rollups);
+      const stored = await h.storage.getClientAnalyticsRollups(0, Number.MAX_SAFE_INTEGER, EDGE_CONNECTION);
+      expect(stored).toEqual(rollups);
+      expect(stored[0].byUserAndName['svc:ro:api']).toMatchObject({ user: 'svc:ro', name: 'api' });
+      expect(mergeRollupsIntoStats(stored)).toEqual(raw);
+    });
+  });
+
   describe('getClientAnalyticsStats parity with the naive reference', () => {
     const rows = buildFixture();
 
@@ -359,8 +402,51 @@ describe('SqliteAdapter client analytics specifics', () => {
   });
 });
 
+describe('clientAddrIp', () => {
+  it.each([
+    ['1.2.3.4:5678', '1.2.3.4'],
+    ['[::1]:6379', '[::1]'],
+    ['[::1]', '[::1]'],
+    ['/tmp/valkey.sock:0', '/tmp/valkey.sock'],
+    ['/tmp/valkey.sock', '/tmp/valkey.sock'],
+    ['10.0.0.1', '10.0.0.1'],
+    ['host:', 'host:'],
+    ['host:12a', 'host:12a'],
+    [':123', ''],
+    ['1234', '1234'],
+    ['a::12', 'a:'],
+  ])('%s -> %s', (addr, ip) => {
+    expect(clientAddrIp(addr)).toBe(ip);
+  });
+});
+
+describe('SQLite ip expression matches clientAddrIp', () => {
+  let h: Harness;
+
+  beforeAll(async () => {
+    h = await sqliteHarness();
+  });
+
+  afterAll(async () => {
+    await h.cleanup();
+  });
+
+  it('agrees on every edge case, including digit-only and mixed tails', async () => {
+    const addrs = ['1.2.3.4:5678', '[::1]:6379', '[::1]', '/tmp/valkey.sock:0', 'host', 'host:', 'host:12a',
+      'host:a12', ':123', ':', '1234', 'a::12', 'fe80::1', 'x:1:2', 'h:00', '9:'];
+    await save(
+      h.storage,
+      addrs.map((addr, i) => client(1_000, { addr, name: `n${i}` })),
+    );
+    const groups = await h.storage.getClientSnapshotGroups('conn-x', 0, 10_000);
+    const byName = new Map(groups.map((g) => [g.name, g.ip]));
+    addrs.forEach((addr, i) => expect([addr, byName.get(`n${i}`)]).toEqual([addr, clientAddrIp(addr)]));
+  });
+});
+
 describe('cross-adapter identity (MemoryAdapter vs SqliteAdapter)', () => {
   const rows = buildFixture();
+  const edge = buildEdgeFixture();
   let memory: Harness;
   let sqlite: Harness;
 
@@ -369,6 +455,24 @@ describe('cross-adapter identity (MemoryAdapter vs SqliteAdapter)', () => {
     sqlite = await sqliteHarness();
     await seedFixture(memory.storage, rows);
     await seedFixture(sqlite.storage, rows);
+    for (const capturedAt of [...new Set(edge.map((r) => r.capturedAt))]) {
+      const batch = edge.filter((r) => r.capturedAt === capturedAt);
+      await save(memory.storage, batch, EDGE_CONNECTION);
+      await save(sqlite.storage, batch, EDGE_CONNECTION);
+    }
+  });
+
+  it('returns identical groups, stats and time series for address edge cases', async () => {
+    const end = Number.MAX_SAFE_INTEGER;
+    expect(await sqlite.storage.getClientSnapshotGroups(EDGE_CONNECTION, 0, end)).toEqual(
+      await memory.storage.getClientSnapshotGroups(EDGE_CONNECTION, 0, end),
+    );
+    expect(await sqlite.storage.getClientAnalyticsStats(undefined, undefined, EDGE_CONNECTION)).toEqual(
+      await memory.storage.getClientAnalyticsStats(undefined, undefined, EDGE_CONNECTION),
+    );
+    expect(await sqlite.storage.getClientTimeSeries(0, end, 60_000, EDGE_CONNECTION)).toEqual(
+      await memory.storage.getClientTimeSeries(0, end, 60_000, EDGE_CONNECTION),
+    );
   });
 
   afterAll(async () => {

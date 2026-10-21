@@ -89,7 +89,7 @@ export function referenceStats(
       (!startTime || r.capturedAt >= startTime) &&
       (!endTime || r.capturedAt <= endTime),
   );
-  const ipOf = (addr: string) => addr.split(':')[0];
+  const ipOf = (addr: string) => addr.replace(/:\d+$/, '');
   const uniqueIps = new Set(f.map((r) => ipOf(r.addr))).size;
   if (f.length === 0) {
     return {
@@ -191,7 +191,7 @@ export function rollup(
     peakCapturedAt: bucketStart + 61_000,
     byName: { api: { last: 3, peak: 5, ageSum: 120, rows: 20 } },
     byUser: { default: { last: 6, peak: 9 } },
-    byUserAndName: { 'default:api': { last: 3, peak: 5, ageSum: 120, rows: 20 } },
+    byUserAndName: { 'default:api': { user: 'default', name: 'api', last: 3, peak: 5, ageSum: 120, rows: 20 } },
     ips: ['10.0.0.1', '10.0.0.2'],
     updatedAt: 1_700_000_999_000,
     ...overrides,
@@ -226,3 +226,45 @@ export const PEAK_CASES: Array<[string, string, number, { peak: number; captured
   ['scoped to the connection', 'conn-b', 0, { peak: 20, capturedAt: PEAK_BUCKET + 3_000 }],
   ['unknown connection', 'none', 0, null],
 ];
+
+/** Connection holding the address / identity edge cases (kept apart from CONNECTIONS). */
+export const EDGE_CONNECTION = 'conn-edge';
+
+/**
+ * Two batches of rows whose addr exercises the port-stripping rule (IPv6,
+ * socket paths, no port, a trailing ':' without digits) and whose user or
+ * name contains ':'.
+ */
+export function buildEdgeFixture(start = T0 + 1_000 * BATCH_MS): FixtureRow[] {
+  const base = buildFixture()[0];
+  const shapes: Array<[string, string, string]> = [
+    ['[::1]:6379', 'api', 'svc:ro'],
+    ['[::1]:6380', 'api', 'svc:ro'],
+    ['[fe80::1%eth0]:5000', 'w:1', 'app'],
+    ['/tmp/valkey.sock:0', 'api', 'default'],
+    ['/tmp/valkey.sock', 'w:1', 'svc:ro'],
+    ['10.0.0.1', 'api', 'app'],
+    ['10.0.0.1:7000', 'api', 'app'],
+    ['host:', '', 'default'],
+  ];
+  const rows: FixtureRow[] = [];
+  for (let b = 0; b < 2; b++) {
+    shapes.forEach(([addr, name, user], k) => {
+      if (b === 1 && k % 3 === 0) return;
+      rows.push({
+        ...base,
+        clientId: `edge-${b}-${k}`,
+        addr,
+        name,
+        user,
+        age: 10 + k + b,
+        capturedAt: start + b * BATCH_MS,
+        connectionId: EDGE_CONNECTION,
+      });
+    });
+  }
+  return rows;
+}
+
+/** Distinct ips of buildEdgeFixture() under the port-stripping rule. */
+export const EDGE_IPS = ['/tmp/valkey.sock', '10.0.0.1', '[::1]', '[fe80::1%eth0]', 'host:'];

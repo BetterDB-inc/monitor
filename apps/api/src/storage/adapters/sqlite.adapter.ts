@@ -120,11 +120,7 @@ import type {
 } from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
 import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
-import { foldClientAnalyticsStats, mapClientAnalyticsRollupRow } from './client-analytics-stats';
-
-/** addr up to the first ':' (the whole addr when it has none); mirrors clientAddrIp(). */
-const SQLITE_CLIENT_IP_EXPR =
-  "CASE WHEN instr(addr, ':') > 0 THEN substr(addr, 1, instr(addr, ':') - 1) ELSE addr END";
+import { clientAddrIp, foldClientAnalyticsStats, mapClientAnalyticsRollupRow } from './client-analytics-stats';
 import { openLibsqlDatabase } from './libsql-driver';
 import { loadBetterSqlite3 } from './better-sqlite3-driver';
 import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repository';
@@ -135,6 +131,17 @@ import { ActivitySqliteRepository } from './repositories/activity.sqlite.reposit
 import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
 import { encodeCveSnapshots } from './cve-snapshots.codec';
 import { readCveDataset, readCveScanResult } from './cve-storage.schema';
+
+/**
+ * addr with a trailing ':<digits>' port stripped; mirrors clientAddrIp().
+ * SQLite has no regexp, so: t = addr with trailing digits trimmed; when at
+ * least one digit was trimmed and t ends with ':', drop that ':', otherwise
+ * keep addr whole ('host:' and 'host:12a' stay as they are).
+ */
+const SQLITE_CLIENT_IP_TRIMMED = "rtrim(addr, '0123456789')";
+const SQLITE_CLIENT_IP_EXPR =
+  `CASE WHEN length(${SQLITE_CLIENT_IP_TRIMMED}) < length(addr) AND substr(${SQLITE_CLIENT_IP_TRIMMED}, -1) = ':' ` +
+  `THEN substr(addr, 1, length(${SQLITE_CLIENT_IP_TRIMMED}) - 1) ELSE addr END`;
 
 /**
  * Idempotent migration for the memory_proposals columns added with the
@@ -1278,7 +1285,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       if (row.user) {
         point.byUser[row.user] = (point.byUser[row.user] || 0) + 1;
       }
-      const ip = row.addr.split(':')[0];
+      const ip = clientAddrIp(row.addr);
       point.byAddr[ip] = (point.byAddr[ip] || 0) + 1;
     }
 

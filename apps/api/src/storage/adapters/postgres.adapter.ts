@@ -1,4 +1,4 @@
-import { Pool, PoolClient, PoolConfig } from 'pg';
+import { Client, ClientBase, ClientConfig, Pool, PoolConfig } from 'pg';
 import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
 import {
@@ -117,7 +117,7 @@ import type {
 } from '@betterdb/shared';
 import { PostgresDialect, RowMappers } from './base-sql.adapter';
 import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
-import { foldClientAnalyticsStats, mapClientAnalyticsRollupRow } from './client-analytics-stats';
+import { clientAddrIp, foldClientAnalyticsStats, mapClientAnalyticsRollupRow } from './client-analytics-stats';
 import { WebhookPostgresRepository } from './repositories/webhook.postgres.repository';
 import { SlowLogPostgresRepository } from './repositories/slowlog.postgres.repository';
 import { InvitationPostgresRepository } from './repositories/invitation.postgres.repository';
@@ -126,6 +126,9 @@ import { ActivityPostgresRepository } from './repositories/activity.postgres.rep
 import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
 import { encodeCveSnapshots } from './cve-snapshots.codec';
 import { readCveDataset, readCveScanResult } from './cve-storage.schema';
+
+/** addr with a trailing ':<digits>' port stripped; mirrors clientAddrIp(). */
+const PG_CLIENT_IP_EXPR = "regexp_replace(addr, ':[0-9]+$', '')";
 
 // Domain-specific repositories (webhooks, slowlog extracted). Remaining domains to extract:
 // ACL, anomaly, commandlog, latency, memory, hotkeys, settings,
@@ -246,6 +249,16 @@ function populatedDbsCte(where: string): string {
 export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   private pool: Pool | null = null;
   private ready: boolean = false;
+  /** Connection settings shared by the pool and the dedicated index-build client. */
+  private clientConfig: ClientConfig | null = null;
+  /**
+   * Dedicated (non-pooled) connection running the background analytics index
+   * builds, and the build itself. close() ends the connection instead of
+   * waiting for a build that can take minutes; see ensureAnalyticsIndexes.
+   */
+  private indexBuildClient: Client | null = null;
+  private indexBuild: Promise<void> | null = null;
+  private closing = false;
   private readonly mappers = new RowMappers(PostgresDialect);
   private webhookRepo!: WebhookPostgresRepository;
   private slowlogRepo!: SlowLogPostgresRepository;
@@ -394,6 +407,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         };
       }
 
+      this.clientConfig = { ...poolConfig };
       this.pool = new Pool(poolConfig);
 
       const schemaName = this.config.schema;
@@ -441,7 +455,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       // Deliberately not awaited: on a large client_snapshots / acl_audit table
       // the concurrent build takes minutes and startup must not wait for it.
       // Readers that need the index check isClientSnapshotIndexReady().
-      void this.ensureAnalyticsIndexes().catch((error: unknown) => {
+      this.indexBuild = this.ensureAnalyticsIndexes().catch((error: unknown) => {
+        // close() ending the build connection is expected, not a failure.
+        if (this.closing) return;
         console.warn(
           `Building the client analytics indexes failed: ${
             error instanceof Error ? error.message : String(error)
@@ -506,6 +522,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   async close(): Promise<void> {
+    this.closing = true;
+    // Never wait for a background index build: end its dedicated connection
+    // (pg destroys the socket when a query is active). An interrupted
+    // CONCURRENTLY build leaves an INVALID index, which the next startup
+    // drops and rebuilds (dropInvalidIndex).
+    const buildClient = this.indexBuildClient;
+    this.indexBuildClient = null;
+    this.indexBuild = null;
+    if (buildClient) {
+      await buildClient.end().catch(() => undefined);
+    }
     if (this.pool) {
       await this.pool.end();
       this.pool = null;
@@ -890,7 +917,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       if (row.user_name) {
         point.byUser[row.user_name] = (point.byUser[row.user_name] || 0) + 1;
       }
-      const ip = row.addr.split(':')[0];
+      const ip = clientAddrIp(row.addr);
       point.byAddr[ip] = (point.byAddr[ip] || 0) + 1;
     }
 
@@ -937,7 +964,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         params,
       ),
       this.pool.query(
-        `SELECT COUNT(DISTINCT split_part(addr, ':', 1)) AS count FROM client_snapshots ${whereClause}`,
+        `SELECT COUNT(DISTINCT ${PG_CLIENT_IP_EXPR}) AS count FROM client_snapshots ${whereClause}`,
         params,
       ),
     ]);
@@ -1059,10 +1086,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const result = await this.pool.query(
       `SELECT * FROM (
          SELECT captured_at, COALESCE(name, '') AS name, COALESCE(user_name, '') AS user_name,
-                split_part(addr, ':', 1) AS ip, COUNT(*) AS count, SUM(age) AS age_sum
+                ${PG_CLIENT_IP_EXPR} AS ip, COUNT(*) AS count, SUM(age) AS age_sum
            FROM client_snapshots
           WHERE connection_id = $1 AND captured_at > $2 AND captured_at <= $3
-          GROUP BY captured_at, COALESCE(name, ''), COALESCE(user_name, ''), split_part(addr, ':', 1)
+          GROUP BY captured_at, COALESCE(name, ''), COALESCE(user_name, ''), ${PG_CLIENT_IP_EXPR}
        ) g
        ORDER BY captured_at ASC, name COLLATE "C", user_name COLLATE "C", ip COLLATE "C"`,
       [connectionId, startExclusive, endInclusive],
@@ -4566,7 +4593,42 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
    * the index.
    */
   private async ensureOtelIngestedIndex(): Promise<void> {
-    await this.ensureIndexConcurrently('idx_otel_ingested', 'otel_spans', 'ingested_at');
+    if (!this.pool) return;
+    // Awaited at startup, before close() can run, so a pooled client is fine.
+    const client = await this.pool.connect();
+    try {
+      await this.ensureIndexConcurrently(client, 'idx_otel_ingested', 'otel_spans', 'ingested_at');
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * A connection outside the pool with the pool's settings (connection
+   * string, SSL) and, like the pool's on-connect hook, the schema's
+   * search_path. Used for builds close() must be able to cut short: pool.end()
+   * waits for every checked-out client, so a pooled build would hang shutdown.
+   */
+  private async openDedicatedClient(): Promise<Client> {
+    if (!this.clientConfig) throw new Error('Database not initialized');
+    const client = new Client(this.clientConfig);
+    // An error on an idle dedicated connection must not crash the process.
+    client.on('error', (err: unknown) => {
+      if (!this.closing) {
+        console.warn(`Index build connection error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    });
+    await client.connect();
+    const schemaName = this.config.schema;
+    if (schemaName) {
+      try {
+        await client.query(`SET search_path TO ${schemaName}, public`);
+      } catch (error) {
+        await client.end().catch(() => undefined);
+        throw error;
+      }
+    }
+    return client;
   }
 
   /**
@@ -4581,14 +4643,30 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       ['idx_client_connection_captured', 'client_snapshots', 'connection_id, captured_at'],
       ['idx_acl_connection_captured', 'acl_audit', 'connection_id, captured_at'],
     ];
-    for (const [indexName, tableName, columns] of indexes) {
-      const started = Date.now();
-      console.log(`Ensuring index ${indexName} on ${tableName}(${columns})`);
-      const built = await this.ensureIndexConcurrently(indexName, tableName, columns);
-      if (built) {
-        console.log(`Index ${indexName} ready after ${Date.now() - started}ms`);
-      } else {
-        console.log(`Index ${indexName} is being built by another instance; skipped`);
+    if (this.closing) return;
+    // A dedicated connection, not a pooled one, so close() can end it
+    // without waiting for the build (see close()).
+    const client = await this.openDedicatedClient();
+    if (this.closing) {
+      await client.end().catch(() => undefined);
+      return;
+    }
+    this.indexBuildClient = client;
+    try {
+      for (const [indexName, tableName, columns] of indexes) {
+        const started = Date.now();
+        console.log(`Ensuring index ${indexName} on ${tableName}(${columns})`);
+        const built = await this.ensureIndexConcurrently(client, indexName, tableName, columns);
+        if (built) {
+          console.log(`Index ${indexName} ready after ${Date.now() - started}ms`);
+        } else {
+          console.log(`Index ${indexName} is being built by another instance; skipped`);
+        }
+      }
+    } finally {
+      if (this.indexBuildClient === client) {
+        this.indexBuildClient = null;
+        await client.end().catch(() => undefined);
       }
     }
   }
@@ -4611,55 +4689,55 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
    * the lock held skips, since the holder is building the index.
    *
    * Identifiers are trusted constants from this file, never user input.
-   * Returns false when another session held the lock and nothing was done.
+   * Runs on the caller's connection (the session advisory lock is bound to
+   * it). Returns false when another session held the lock and nothing was done.
    */
   private async ensureIndexConcurrently(
+    client: ClientBase,
     indexName: string,
     tableName: string,
     columns: string,
   ): Promise<boolean> {
-    if (!this.pool) return false;
-    const client = await this.pool.connect();
+    // Keyed on this schema's table oid, not a constant: advisory locks are
+    // database-wide, so with per-tenant schemas in one database a shared key
+    // would let tenant A's build make tenant B skip its own.
+    const lock = await client.query(
+      `SELECT key, pg_try_advisory_lock(key) AS locked FROM (
+         SELECT hashtext($1::text || $2::regclass::oid) AS key
+       ) k`,
+      [`betterdb.${indexName}:`, tableName],
+    );
+    if (!lock.rows[0]?.locked) return false;
+    const lockKey: number = lock.rows[0].key;
     try {
-      // Keyed on this schema's table oid, not a constant: advisory locks are
-      // database-wide, so with per-tenant schemas in one database a shared key
-      // would let tenant A's build make tenant B skip its own.
-      const lock = await client.query(
-        `SELECT key, pg_try_advisory_lock(key) AS locked FROM (
-           SELECT hashtext($1::text || $2::regclass::oid) AS key
-         ) k`,
-        [`betterdb.${indexName}:`, tableName],
-      );
-      if (!lock.rows[0]?.locked) return false;
-      const lockKey: number = lock.rows[0].key;
       try {
-        try {
-          await this.dropInvalidIndex(client, indexName, tableName, true);
-          await client.query(
-            `CREATE INDEX CONCURRENTLY IF NOT EXISTS ${indexName} ON ${tableName}(${columns})`,
-          );
-        } catch (error) {
-          console.warn(
-            `CONCURRENT build of ${indexName} failed, falling back to a blocking build: ${
+        await this.dropInvalidIndex(client, indexName, tableName, true);
+        await client.query(
+          `CREATE INDEX CONCURRENTLY IF NOT EXISTS ${indexName} ON ${tableName}(${columns})`,
+        );
+      } catch (error) {
+        // close() ended the connection: nothing to fall back on.
+        if (this.closing) throw error;
+        console.warn(
+          `CONCURRENT build of ${indexName} failed, falling back to a blocking build, which takes a ` +
+            `SHARE lock on ${tableName} (blocking its writes) for the build's duration: ${
               error instanceof Error ? error.message : String(error)
             }`,
-          );
-          // The failed concurrent build may have left its own invalid index.
-          await this.dropInvalidIndex(client, indexName, tableName, false);
-          await client.query(`CREATE INDEX IF NOT EXISTS ${indexName} ON ${tableName}(${columns})`);
-        }
-      } finally {
-        await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
+        );
+        // The failed concurrent build may have left its own invalid index.
+        await this.dropInvalidIndex(client, indexName, tableName, false);
+        await client.query(`CREATE INDEX IF NOT EXISTS ${indexName} ON ${tableName}(${columns})`);
       }
-      return true;
     } finally {
-      client.release();
+      // A closed connection has already released its session lock.
+      if (!this.closing) await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
     }
+    return true;
   }
 
   /** Drop `indexName` on `tableName` if it exists but is INVALID (see ensureIndexConcurrently). */
   private async dropInvalidIndex(
-    client: PoolClient,
+    client: ClientBase,
     indexName: string,
     tableName: string,
     concurrently: boolean,

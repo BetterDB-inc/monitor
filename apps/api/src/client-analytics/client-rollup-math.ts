@@ -2,6 +2,7 @@ import {
   ClientAnalyticsRollup,
   ClientAnalyticsStats,
   ClientRollupGroupStat,
+  ClientRollupPairStat,
   ClientSnapshotGroupRow,
   clientRollupBucketStart,
   emptyClientAnalyticsStats,
@@ -13,12 +14,22 @@ import {
  */
 export const RAW_STATS_SPAN_MAX_MS = 6 * 60 * 60_000;
 
+interface GroupBatchEntry {
+  count: number;
+  ageSum: number;
+}
+
+interface PairBatchEntry extends GroupBatchEntry {
+  user: string;
+  name: string;
+}
+
 interface BatchTotals {
   capturedAt: number;
   total: number;
-  byName: Map<string, { count: number; ageSum: number }>;
+  byName: Map<string, GroupBatchEntry>;
   byUser: Map<string, number>;
-  byUserAndName: Map<string, { count: number; ageSum: number }>;
+  byUserAndName: Map<string, PairBatchEntry>;
   ips: Set<string>;
 }
 
@@ -42,8 +53,8 @@ function emptyRollup(connectionId: string, bucketStart: number, now: number): Cl
 }
 
 function cloneRollup(row: ClientAnalyticsRollup): ClientAnalyticsRollup {
-  const cloneGroups = (src: Record<string, ClientRollupGroupStat>) => {
-    const out: Record<string, ClientRollupGroupStat> = {};
+  const cloneGroups = <T extends ClientRollupGroupStat>(src: Record<string, T>) => {
+    const out: Record<string, T> = {};
     for (const [k, v] of Object.entries(src)) out[k] = { ...v };
     return out;
   };
@@ -85,8 +96,10 @@ function groupIntoBatches(groups: ClientSnapshotGroupRow[]): BatchTotals[] {
       batch.byUser.set(g.user, (batch.byUser.get(g.user) ?? 0) + g.count);
     }
     if (g.name && g.user) {
+      // Same key as the raw path (foldClientAnalyticsStats); user and name
+      // travel with the entry because the key alone is ambiguous.
       const key = `${g.user}:${g.name}`;
-      const p = batch.byUserAndName.get(key) ?? { count: 0, ageSum: 0 };
+      const p = batch.byUserAndName.get(key) ?? { user: g.user, name: g.name, count: 0, ageSum: 0 };
       p.count += g.count;
       p.ageSum += g.ageSum;
       batch.byUserAndName.set(key, p);
@@ -95,20 +108,31 @@ function groupIntoBatches(groups: ClientSnapshotGroupRow[]): BatchTotals[] {
   return [...batches.values()].sort((a, b) => a.capturedAt - b.capturedAt);
 }
 
-function foldGroupStats(
-  target: Record<string, ClientRollupGroupStat>,
-  batch: Map<string, { count: number; ageSum: number }>,
+function foldGroupStats<T extends ClientRollupGroupStat, B extends GroupBatchEntry>(
+  target: Record<string, T>,
+  batch: Map<string, B>,
+  create: (entry: B) => T,
 ): void {
   for (const stat of Object.values(target)) stat.last = 0;
-  for (const [key, { count, ageSum }] of batch) {
-    const stat = target[key] ?? { last: 0, peak: 0, ageSum: 0, rows: 0 };
-    stat.last = count;
-    stat.peak = Math.max(stat.peak, count);
-    stat.ageSum += ageSum;
-    stat.rows += count;
+  for (const [key, entry] of batch) {
+    const stat = target[key] ?? create(entry);
+    stat.last = entry.count;
+    stat.peak = Math.max(stat.peak, entry.count);
+    stat.ageSum += entry.ageSum;
+    stat.rows += entry.count;
     target[key] = stat;
   }
 }
+
+const newGroupStat = (): ClientRollupGroupStat => ({ last: 0, peak: 0, ageSum: 0, rows: 0 });
+const newPairStat = ({ user, name }: PairBatchEntry): ClientRollupPairStat => ({
+  user,
+  name,
+  last: 0,
+  peak: 0,
+  ageSum: 0,
+  rows: 0,
+});
 
 /**
  * Fold grouped raw rows into per-bucket rollup rows. Batches already folded
@@ -145,8 +169,8 @@ export function foldGroupsIntoRollups(
       row.peakConnections = batch.total;
       row.peakCapturedAt = batch.capturedAt;
     }
-    foldGroupStats(row.byName, batch.byName);
-    foldGroupStats(row.byUserAndName, batch.byUserAndName);
+    foldGroupStats<ClientRollupGroupStat, GroupBatchEntry>(row.byName, batch.byName, newGroupStat);
+    foldGroupStats<ClientRollupPairStat, PairBatchEntry>(row.byUserAndName, batch.byUserAndName, newPairStat);
     for (const stat of Object.values(row.byUser)) stat.last = 0;
     for (const [user, count] of batch.byUser) {
       const stat = row.byUser[user] ?? { last: 0, peak: 0 };
@@ -186,7 +210,7 @@ export function mergeRollupsIntoStats(rollups: ClientAnalyticsRollup[]): ClientA
 
   const names = new Map<string, { current: number; peak: number; ageSum: number; rows: number }>();
   const users = new Map<string, { current: number; peak: number }>();
-  const pairs = new Map<string, { current: number; peak: number; ageSum: number; rows: number }>();
+  const pairs = new Map<string, { user: string; name: string; current: number; peak: number; ageSum: number; rows: number }>();
   const ips = new Set<string>();
   let earliest = Number.POSITIVE_INFINITY;
   let latest = Number.NEGATIVE_INFINITY;
@@ -216,7 +240,7 @@ export function mergeRollupsIntoStats(rollups: ClientAnalyticsRollup[]): ClientA
       users.set(user, acc);
     }
     for (const [key, s] of Object.entries(row.byUserAndName)) {
-      const acc = pairs.get(key) ?? { current: 0, peak: 0, ageSum: 0, rows: 0 };
+      const acc = pairs.get(key) ?? { user: s.user, name: s.name, current: 0, peak: 0, ageSum: 0, rows: 0 };
       acc.peak = Math.max(acc.peak, s.peak);
       acc.ageSum += s.ageSum;
       acc.rows += s.rows;
@@ -257,10 +281,9 @@ export function mergeRollupsIntoStats(rollups: ClientAnalyticsRollup[]): ClientA
     stats.connectionsByUser[user] = { current: acc.current, peak: acc.peak };
   }
   for (const [key, acc] of pairs) {
-    const sep = key.indexOf(':');
     stats.connectionsByUserAndName[key] = {
-      user: key.slice(0, sep),
-      name: key.slice(sep + 1),
+      user: acc.user,
+      name: acc.name,
       current: acc.current,
       peak: acc.peak,
       avgAge: acc.rows > 0 ? acc.ageSum / acc.rows : 0,

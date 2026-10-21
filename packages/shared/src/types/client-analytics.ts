@@ -226,6 +226,16 @@ export interface ClientRollupGroupStat {
   rows: number;
 }
 
+/**
+ * Per-(user, name) stat inside one bucket. The pair is stored explicitly
+ * rather than recovered from the `${user}:${name}` key, which is ambiguous
+ * when either value contains ':'.
+ */
+export interface ClientRollupPairStat extends ClientRollupGroupStat {
+  user: string;
+  name: string;
+}
+
 export interface ClientRollupUserStat {
   last: number;
   peak: number;
@@ -250,8 +260,8 @@ export interface ClientAnalyticsRollup {
   byName: Record<string, ClientRollupGroupStat>;
   /** Keyed by ACL user; empty users are not tracked. */
   byUser: Record<string, ClientRollupUserStat>;
-  /** Keyed by `${user}:${name}`; only pairs where both are non-empty. */
-  byUserAndName: Record<string, ClientRollupGroupStat>;
+  /** Keyed by `${user}:${name}` (the key is display-only: read user and name from the entry); only pairs where both are non-empty. */
+  byUserAndName: Record<string, ClientRollupPairStat>;
   /** Distinct client IPs (addr without port) seen in the bucket. */
   ips: string[];
   updatedAt: number;

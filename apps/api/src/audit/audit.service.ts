@@ -64,13 +64,19 @@ export class AuditService extends MultiConnectionPoller implements OnModuleInit 
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     this.knownForCache.add(ctx.connectionId);
-    const saved = await this.pollAclLog(ctx);
     // Totals stay all-time (unchanged semantics); they are just computed here,
     // off the scrape path. Refresh after every save, once up front so a
     // connection with no new denials still exports its totals, and
     // periodically so rows removed by the retention sweep stop being counted.
-    if (this.auditStatsCache && (saved || this.isStatsCacheDue(ctx.connectionId))) {
-      await this.refreshStatsCache(ctx.connectionId);
+    // The stored totals do not depend on ACL LOG succeeding, so the due
+    // refresh also runs when the poll throws (the error is still rethrown).
+    let saved = false;
+    try {
+      saved = await this.pollAclLog(ctx);
+    } finally {
+      if (this.auditStatsCache && (saved || this.isStatsCacheDue(ctx.connectionId))) {
+        await this.refreshStatsCache(ctx.connectionId);
+      }
     }
   }
 

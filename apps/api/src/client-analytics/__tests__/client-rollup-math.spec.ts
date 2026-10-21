@@ -1,5 +1,6 @@
 import { CLIENT_ANALYTICS_ROLLUP_BUCKET_MS, ClientAnalyticsRollup, clientRollupBucketStart } from '@betterdb/shared';
 import { foldGroupsIntoRollups, mergeRollupsIntoStats } from '../client-rollup-math';
+import { foldClientAnalyticsStats } from '../../storage/adapters/client-analytics-stats';
 import {
   buildRawFixture,
   groupsFromRaw,
@@ -99,6 +100,26 @@ describe('client rollup math', () => {
     expect(stats.currentConnections).toBe(1);
     expect(stats.peakConnections).toBe(2);
     expect(stats.peakTimestamp).toBe(t0);
+  });
+
+  it('stores user and name on each pair, so a user containing ":" survives the merge like the raw path', () => {
+    const t0 = clientRollupBucketStart(NOW) - 10 * CLIENT_ANALYTICS_ROLLUP_BUCKET_MS;
+    const groups = [
+      { capturedAt: t0, name: 'api', user: 'svc:ro', ip: '1.1.1.1', count: 2, ageSum: 10 },
+      { capturedAt: t0, name: 'w:1', user: 'app', ip: '1.1.1.2', count: 1, ageSum: 4 },
+      { capturedAt: t0 + CLIENT_ANALYTICS_ROLLUP_BUCKET_MS, name: 'api', user: 'svc:ro', ip: '1.1.1.1', count: 3, ageSum: 9 },
+    ];
+    const rows = foldGroupsIntoRollups('c', groups, new Map(), NOW);
+    expect(rows[0].byUserAndName['svc:ro:api']).toEqual({ user: 'svc:ro', name: 'api', last: 2, peak: 2, ageSum: 10, rows: 2 });
+    expect(rows[0].byUserAndName['app:w:1']).toMatchObject({ user: 'app', name: 'w:1' });
+
+    const merged = mergeRollupsIntoStats(rows);
+    expect(merged.connectionsByUserAndName['svc:ro:api']).toEqual({ user: 'svc:ro', name: 'api', current: 3, peak: 3, avgAge: 19 / 5 });
+    expect(merged.connectionsByUserAndName['app:w:1']).toEqual({ user: 'app', name: 'w:1', current: 0, peak: 1, avgAge: 4 });
+
+    const rawPath = foldClientAnalyticsStats(groups, 2);
+    expect(merged.connectionsByUserAndName).toEqual(rawPath.connectionsByUserAndName);
+    expect(normalizeStats(merged)).toEqual(normalizeStats(rawPath));
   });
 
   it('returns empty stats for no rows', () => {

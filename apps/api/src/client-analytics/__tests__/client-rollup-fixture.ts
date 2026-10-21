@@ -170,11 +170,13 @@ export function referenceStats(raw: RawClientRow[]): ClientAnalyticsStats {
   for (const user of userPeak.keys()) {
     stats.connectionsByUser[user] = { current: current.user.get(user) ?? 0, peak: userPeak.get(user) ?? 0 };
   }
+  const pairOf = new Map<string, { user: string; name: string }>();
+  for (const r of raw) if (r.name && r.user) pairOf.set(`${r.user}:${r.name}`, { user: r.user, name: r.name });
   for (const [key, a] of ageAcc((r) => (r.name && r.user ? `${r.user}:${r.name}` : null))) {
-    const [user, ...rest] = key.split(':');
+    const { user, name } = pairOf.get(key) as { user: string; name: string };
     stats.connectionsByUserAndName[key] = {
       user,
-      name: rest.join(':'),
+      name,
       current: current.pair.get(key) ?? 0,
       peak: pairPeak.get(key) ?? 0,
       avgAge: a.sum / a.n,

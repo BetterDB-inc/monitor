@@ -392,7 +392,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       if (client.user) {
         point.byUser[client.user] = (point.byUser[client.user] || 0) + 1;
       }
-      const ip = client.addr.split(':')[0];
+      const ip = clientAddrIp(client.addr);
       point.byAddr[ip] = (point.byAddr[ip] || 0) + 1;
     }
 
