@@ -1,4 +1,9 @@
-import { CLIENT_ANALYTICS_ROLLUP_BUCKET_MS, ClientAnalyticsRollup, clientRollupBucketStart } from '@betterdb/shared';
+import {
+  CLIENT_ANALYTICS_ROLLUP_BUCKET_MS,
+  ClientAnalyticsRollup,
+  clientPairKey,
+  clientRollupBucketStart,
+} from '@betterdb/shared';
 import { foldGroupsIntoRollups, mergeRollupsIntoStats } from '../client-rollup-math';
 import { foldClientAnalyticsStats } from '../../storage/adapters/client-analytics-stats';
 import {
@@ -166,8 +171,8 @@ describe('client rollup math', () => {
       { capturedAt: t0 + CLIENT_ANALYTICS_ROLLUP_BUCKET_MS, name: 'api', user: 'svc:ro', ip: '1.1.1.1', count: 3, ageSum: 9 },
     ];
     const rows = foldGroupsIntoRollups('c', groups, new Map(), NOW);
-    expect(rows[0].byUserAndName['svc:ro:api']).toEqual({ user: 'svc:ro', name: 'api', last: 2, peak: 2, ageSum: 10, rows: 2 });
-    expect(rows[0].byUserAndName['app:w:1']).toMatchObject({ user: 'app', name: 'w:1' });
+    expect(rows[0].byUserAndName['["svc:ro","api"]']).toEqual({ user: 'svc:ro', name: 'api', last: 2, peak: 2, ageSum: 10, rows: 2 });
+    expect(rows[0].byUserAndName[clientPairKey('app', 'w:1')]).toMatchObject({ user: 'app', name: 'w:1' });
 
     const merged = mergeRollupsIntoStats(rows);
     expect(merged.connectionsByUserAndName['svc:ro:api']).toEqual({ user: 'svc:ro', name: 'api', current: 3, peak: 3, avgAge: 19 / 5 });
@@ -176,6 +181,79 @@ describe('client rollup math', () => {
     const rawPath = foldClientAnalyticsStats(groups, 2);
     expect(merged.connectionsByUserAndName).toEqual(rawPath.connectionsByUserAndName);
     expect(normalizeStats(merged)).toEqual(normalizeStats(rawPath));
+  });
+
+  it('keeps pairs whose `${user}:${name}` collide apart, identically on the rollup and raw paths', () => {
+    const t0 = clientRollupBucketStart(NOW) - 10 * CLIENT_ANALYTICS_ROLLUP_BUCKET_MS;
+    // ('a:b', 'c') and ('a', 'b:c') both display as 'a:b:c'.
+    const groups = [
+      { capturedAt: t0, name: 'c', user: 'a:b', ip: '1.1.1.1', count: 5, ageSum: 50 },
+      { capturedAt: t0, name: 'b:c', user: 'a', ip: '1.1.1.2', count: 2, ageSum: 4 },
+      { capturedAt: t0 + CLIENT_ANALYTICS_ROLLUP_BUCKET_MS, name: 'c', user: 'a:b', ip: '1.1.1.1', count: 7, ageSum: 70 },
+      { capturedAt: t0 + CLIENT_ANALYTICS_ROLLUP_BUCKET_MS, name: 'b:c', user: 'a', ip: '1.1.1.2', count: 1, ageSum: 3 },
+    ];
+    const rows = foldGroupsIntoRollups('c', groups, new Map(), NOW);
+    // Separate internal entries: the stored keys never collide.
+    expect(rows[0].byUserAndName).toEqual({
+      [clientPairKey('a:b', 'c')]: { user: 'a:b', name: 'c', last: 5, peak: 5, ageSum: 50, rows: 5 },
+      [clientPairKey('a', 'b:c')]: { user: 'a', name: 'b:c', last: 2, peak: 2, ageSum: 4, rows: 2 },
+    });
+
+    // One output entry under the shared key, for the pair whose internal key
+    // sorts first, with its own counts (never 5 + 2 or 7 + 1).
+    const merged = mergeRollupsIntoStats(rows);
+    expect(clientPairKey('a', 'b:c') < clientPairKey('a:b', 'c')).toBe(true);
+    expect(merged.connectionsByUserAndName).toEqual({
+      'a:b:c': { user: 'a', name: 'b:c', current: 1, peak: 2, avgAge: 7 / 3 },
+    });
+
+    const rawPath = foldClientAnalyticsStats(groups, 2);
+    expect(rawPath.connectionsByUserAndName).toEqual(merged.connectionsByUserAndName);
+    expect(normalizeStats(merged)).toEqual(normalizeStats(rawPath));
+    // The choice does not depend on input order.
+    expect(foldClientAnalyticsStats([...groups].reverse(), 2).connectionsByUserAndName).toEqual(
+      merged.connectionsByUserAndName,
+    );
+    expect(mergeRollupsIntoStats([...rows].reverse()).connectionsByUserAndName).toEqual(merged.connectionsByUserAndName);
+    // Names and users are counted on their own, unaffected.
+    expect(merged.uniqueUsers).toBe(2);
+    expect(merged.uniqueClientNames).toBe(2);
+  });
+
+  it('re-keys a resumed row stored under the old `${user}:${name}` key', () => {
+    const t0 = clientRollupBucketStart(NOW) + 60_000;
+    const [legacy] = foldGroupsIntoRollups('c', [{ capturedAt: t0, name: 'api', user: 'app', ip: '1.1.1.1', count: 2, ageSum: 6 }], new Map(), NOW);
+    const stored = { ...legacy, byUserAndName: { 'app:api': legacy.byUserAndName[clientPairKey('app', 'api')] } };
+    const [resumed] = foldGroupsIntoRollups(
+      'c',
+      [{ capturedAt: t0 + 60_000, name: 'api', user: 'app', ip: '1.1.1.1', count: 3, ageSum: 9 }],
+      new Map([[stored.bucketStart, stored]]),
+      NOW,
+    );
+    expect(resumed.byUserAndName).toEqual({
+      [clientPairKey('app', 'api')]: { user: 'app', name: 'api', last: 3, peak: 3, ageSum: 15, rows: 5 },
+    });
+  });
+
+  it('takes the current cutoff from the options, defaulting to one bucket', () => {
+    const live = clientRollupBucketStart(NOW) + 60_000;
+    const rowsBehind = (behindMs: number) => [
+      ...foldGroupsIntoRollups('live', [{ capturedAt: live, name: 'api', user: 'app', ip: '10.0.0.1', count: 2, ageSum: 2 }], new Map(), NOW),
+      ...foldGroupsIntoRollups('lag', [{ capturedAt: live - behindMs, name: 'api', user: 'app', ip: '10.0.0.2', count: 3, ageSum: 3 }], new Map(), NOW),
+    ];
+    const MIN = 60_000;
+    // Default: one bucket (5 minutes).
+    expect(mergeRollupsIntoStats(rowsBehind(5 * MIN)).currentConnections).toBe(5);
+    expect(mergeRollupsIntoStats(rowsBehind(5 * MIN + 1)).currentConnections).toBe(2);
+    // Two 10-minute poll intervals: 15 minutes behind counts, 25 does not.
+    const cutoff = { currentCutoffMs: Math.max(CLIENT_ANALYTICS_ROLLUP_BUCKET_MS, 2 * 10 * MIN) };
+    const within = mergeRollupsIntoStats(rowsBehind(15 * MIN), cutoff);
+    expect(within.currentConnections).toBe(5);
+    expect(within.connectionsByName.api.current).toBe(5);
+    expect(within.connectionsByUserAndName['app:api'].current).toBe(5);
+    const beyond = mergeRollupsIntoStats(rowsBehind(25 * MIN), cutoff);
+    expect(beyond.currentConnections).toBe(2);
+    expect(beyond.connectionsByUser.app).toEqual({ current: 2, peak: 3 });
   });
 
   it('returns empty stats for no rows', () => {

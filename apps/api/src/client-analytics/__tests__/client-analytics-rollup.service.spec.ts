@@ -11,6 +11,7 @@ import { foldGroupsIntoRollups, mergeRollupsIntoStats } from '../client-rollup-m
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../../connections/runtime-capability-tracker.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
+import { SettingsService } from '../../settings/settings.service';
 import { buildRawFixture, groupsFromRaw, normalizeStats, RawClientRow, referenceStats } from './client-rollup-fixture';
 
 const HOUR = 60 * 60_000;
@@ -85,14 +86,20 @@ function createService(
   env: Record<string, unknown> = {},
   tuning?: Partial<ClientAnalyticsRollupTuning>,
   isAvailable: jest.Mock = jest.fn(() => true),
+  clientAnalyticsPollIntervalMs?: number,
 ) {
   const config = { get: jest.fn((k: string, fallback?: unknown) => env[k] ?? fallback) } as unknown as ConfigService;
+  const settings =
+    clientAnalyticsPollIntervalMs === undefined
+      ? undefined
+      : ({ getCachedSettings: () => ({ clientAnalyticsPollIntervalMs }) } as unknown as SettingsService);
   const service = new ClientAnalyticsRollupService(
     { list: jest.fn().mockReturnValue([]) } as unknown as ConnectionRegistry,
     storage as StoragePort,
     config,
     { isAvailable } as unknown as RuntimeCapabilityTracker,
     tuning,
+    settings,
   );
   const log = jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
   jest.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
@@ -167,8 +174,8 @@ describe('ClientAnalyticsRollupService', () => {
     const { service, poll } = createService(fake.storage);
 
     await poll();
-    // Nothing folded inside the window yet: no value, not zeros.
-    expect(service.getLatestStats('conn-a')).toBeNull();
+    // The first run stores a value even before the writer's first batch: zeros.
+    expect(service.getLatestStats('conn-a')?.currentConnections).toBe(0);
     expect(fake.rollups.size).toBe(0);
 
     for (let i = 0; i < 3; i++) {
@@ -454,8 +461,17 @@ describe('ClientAnalyticsRollupService', () => {
       const state = service['states'].get('conn-a');
       expect(state?.watermark).toBe(watermark);
       expect(state?.scanCursor).toBe(now - SETTLE);
-      // The only rollup is 72h old, outside the 24h window: no value, not zeros.
-      expect(service.getLatestStats('conn-a')).toBeNull();
+      // The only rollup is 72h old, outside the 24h window: zero counts, but
+      // the headline peak still covers the rollup retention.
+      const emptyWindow = {
+        currentConnections: 0,
+        uniqueClientNames: 0,
+        connectionsByName: {},
+        timeRange: null,
+        peakConnections: 2,
+        peakTimestamp: watermark,
+      };
+      expect(service.getLatestStats('conn-a')).toMatchObject(emptyWindow);
 
       for (let i = 1; i <= 4; i++) {
         jest.setSystemTime(now + i * 15_000);
@@ -467,11 +483,11 @@ describe('ClientAnalyticsRollupService', () => {
       }
       // The newest chunk is not settled, so it is never probed.
       expect(fake.storage.getClientSnapshotNextCapturedAt).toHaveBeenCalledTimes(1);
-      expect(service.getLatestStats('conn-a')).toBeNull();
+      expect(service.getLatestStats('conn-a')).toMatchObject(emptyWindow);
     });
   });
 
-  it('keeps the previous latest stats when a later recompute finds an empty window', async () => {
+  it('stores zero counts, keeping the retention peak, when a later recompute finds an empty window', async () => {
     const now = START + 40 * 60_000;
     jest.useFakeTimers({ now });
     const fake = createFakeStorage(raw, { indexReady: false });
@@ -481,14 +497,21 @@ describe('ClientAnalyticsRollupService', () => {
     expect(first?.currentConnections).toBeGreaterThan(0);
     const peakReads = fake.storage.getClientAnalyticsRollupPeak.mock.calls.length;
 
-    // Two days later the window holds no rollups: the recompute runs but stores nothing.
+    // Two days later the window holds no rollups: the recompute stores zeros.
     jest.setSystemTime(now + 48 * HOUR);
     const reads = fake.storage.getClientAnalyticsRollups.mock.calls.length;
     await poll();
     expect(fake.storage.getClientAnalyticsRollups.mock.calls.length).toBeGreaterThan(reads);
     expect(service['states'].get('conn-a')?.lastWindowStartBucket).toBe(clientRollupBucketStart(now + 24 * HOUR));
-    expect(service.getLatestStats('conn-a')).toBe(first);
-    expect(fake.storage.getClientAnalyticsRollupPeak.mock.calls.length).toBe(peakReads);
+    const emptied = service.getLatestStats('conn-a');
+    expect(emptied).not.toBe(first);
+    expect(emptied).toEqual({
+      ...mergeRollupsIntoStats([]),
+      // The rollups are older than the window but inside the 90-day retention.
+      peakConnections: first?.peakConnections,
+      peakTimestamp: first?.peakTimestamp,
+    });
+    expect(fake.storage.getClientAnalyticsRollupPeak.mock.calls.length).toBe(peakReads + 1);
 
     // The same empty window is not re-read on every run.
     const after = fake.storage.getClientAnalyticsRollups.mock.calls.length;
@@ -595,21 +618,100 @@ describe('ClientAnalyticsRollupService', () => {
     expect(fake.storage.pruneOldClientSnapshots).toHaveBeenCalledWith(now + HOUR - 7 * 24 * HOUR, 'conn-a');
   });
 
-  it('skips connections without the CLIENT LIST capability', async () => {
-    const now = START + 40 * 60_000;
-    jest.useFakeTimers({ now });
-    const fake = createFakeStorage(raw);
-    const isAvailable = jest.fn((_id: string, cap: string) => cap !== 'canClientList');
-    const { service, poll } = createService(fake.storage, {}, undefined, isAvailable);
-    await poll();
-    expect(isAvailable).toHaveBeenCalledWith('conn-a', 'canClientList');
-    expect(service['states'].has('conn-a')).toBe(false);
-    for (const fn of Object.values(fake.storage)) expect(fn).not.toHaveBeenCalled();
+  describe('without the CLIENT LIST capability', () => {
+    const rawReads = ['getClientSnapshotGroups', 'getClientSnapshotBounds', 'getClientSnapshotNextCapturedAt'] as const;
 
-    // Capability restored: the connection is aggregated again.
-    isAvailable.mockReturnValue(true);
-    await poll();
-    expect(service.getLatestStats('conn-a')).not.toBeNull();
+    it('skips the fold and backfill after the capability flips off, but keeps the window and retention running', async () => {
+      const now = START + 40 * 60_000;
+      jest.useFakeTimers({ now });
+      const fake = createFakeStorage(raw, { indexReady: true });
+      const isAvailable = jest.fn((_id: string, _cap: string) => true);
+      const { service, poll } = createService(fake.storage, {}, undefined, isAvailable);
+      await poll();
+      const first = service.getLatestStats('conn-a');
+      expect(first?.currentConnections).toBeGreaterThan(0);
+      expect(fake.storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledTimes(1);
+
+      isAvailable.mockImplementation((_id: string, cap: string) => cap !== 'canClientList');
+      for (const name of rawReads) fake.storage[name].mockClear();
+      fake.storage.getClientAnalyticsRollupWatermark.mockClear();
+      fake.storage.getClientAnalyticsRollupFloor.mockClear();
+      fake.storage.isClientSnapshotIndexReady.mockClear();
+      fake.storage.upsertClientAnalyticsRollups.mockClear();
+
+      // Same window start bucket: nothing to recompute.
+      jest.setSystemTime(now + 15_000);
+      const reads = fake.storage.getClientAnalyticsRollups.mock.calls.length;
+      await poll();
+      expect(fake.storage.getClientAnalyticsRollups.mock.calls.length).toBe(reads);
+      expect(service.getLatestStats('conn-a')).toBe(first);
+
+      // The window start advances: the recompute reads rollups (and only rollups).
+      jest.setSystemTime(now + BUCKET);
+      await poll();
+      expect(fake.storage.getClientAnalyticsRollups.mock.calls.length).toBe(reads + 1);
+      expect(fake.storage.getClientAnalyticsRollups).toHaveBeenLastCalledWith(
+        clientRollupBucketStart(now + BUCKET - 24 * HOUR),
+        clientRollupBucketStart(now + BUCKET),
+        'conn-a',
+      );
+      expect(normalizeStats(service.getLatestStats('conn-a') as never)).toEqual(normalizeStats(first as never));
+      expect(fake.storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledTimes(1);
+
+      // An hour later: retention runs on its hourly cadence.
+      jest.setSystemTime(now + HOUR);
+      await poll();
+      expect(fake.storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledTimes(2);
+      expect(fake.storage.pruneOldClientAnalyticsRollups).toHaveBeenLastCalledWith(
+        clientRollupBucketStart(now + HOUR - 90 * 24 * HOUR),
+        'conn-a',
+      );
+
+      // Four days later the window is empty: latest reports zeros, keeping the retention peak.
+      jest.setSystemTime(now + 4 * 24 * HOUR);
+      await poll();
+      expect(service.getLatestStats('conn-a')).toEqual({
+        ...mergeRollupsIntoStats([]),
+        peakConnections: first?.peakConnections,
+        peakTimestamp: first?.peakTimestamp,
+      });
+      expect(fake.storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledTimes(3);
+
+      for (const name of rawReads) expect(fake.storage[name]).not.toHaveBeenCalled();
+      expect(fake.storage.getClientAnalyticsRollupWatermark).not.toHaveBeenCalled();
+      expect(fake.storage.getClientAnalyticsRollupFloor).not.toHaveBeenCalled();
+      expect(fake.storage.isClientSnapshotIndexReady).not.toHaveBeenCalled();
+      expect(fake.storage.upsertClientAnalyticsRollups).not.toHaveBeenCalled();
+    });
+
+    it('never initialises cold-start state while the capability is off, then initialises once it returns', async () => {
+      const now = START + 40 * 60_000;
+      jest.useFakeTimers({ now });
+      const fake = createFakeStorage(raw);
+      const isAvailable = jest.fn((_id: string, cap: string) => cap !== 'canClientList');
+      const { service, poll } = createService(fake.storage, {}, undefined, isAvailable);
+      await poll();
+      expect(isAvailable).toHaveBeenCalledWith('conn-a', 'canClientList');
+      for (const name of rawReads) expect(fake.storage[name]).not.toHaveBeenCalled();
+      expect(fake.storage.getClientAnalyticsRollupWatermark).not.toHaveBeenCalled();
+      expect(fake.storage.upsertClientAnalyticsRollups).not.toHaveBeenCalled();
+      // Nothing was ever folded: the window is empty, so zeros; retention still runs.
+      expect(service.getLatestStats('conn-a')).toEqual(mergeRollupsIntoStats([]));
+      expect(fake.storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledTimes(1);
+      expect(service['states'].get('conn-a')?.watermark).toBeNull();
+
+      // Capability restored: the state is initialised from storage and the connection folds again.
+      isAvailable.mockReturnValue(true);
+      const passive = service['states'].get('conn-a');
+      await poll();
+      expect(fake.storage.getClientAnalyticsRollupWatermark).toHaveBeenCalledTimes(1);
+      expect(service['states'].get('conn-a')).toBe(passive);
+      const lookbackStart = clientRollupBucketStart(now - HOUR);
+      const expected = raw.filter((r) => r.connectionId === 'conn-a' && r.capturedAt >= lookbackStart);
+      expect(normalizeStats(service.getLatestStats('conn-a') as never)).toEqual(normalizeStats(referenceStats(expected)));
+      // Retention keeps its hourly clock across the upgrade.
+      expect(fake.storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('installs no state when the connection is removed while the watermark read is pending', async () => {
@@ -752,5 +854,46 @@ describe('ClientAnalyticsRollupService', () => {
     service['onConnectionRemoved']('conn-a');
     expect(service.getLatestStats('conn-a')).toBeNull();
     expect(service.getLatestStats('conn-b')).not.toBeNull();
+  });
+
+  describe('cross-connection current cutoff', () => {
+    const now = clientRollupBucketStart(START) + 10 * HOUR + 30_000;
+    const at = (connectionId: string, capturedAt: number): RawClientRow => ({
+      connectionId,
+      capturedAt,
+      name: 'api',
+      user: 'default',
+      ip: '10.0.0.1',
+      age: 5,
+    });
+
+    async function seeded(behindMs: number, pollIntervalMs?: number) {
+      jest.useFakeTimers({ now });
+      const rows = [at('live', now - 10_000), at('lagging', now - 10_000 - behindMs)];
+      const fake = createFakeStorage(rows, { indexReady: false });
+      for (const id of ['live', 'lagging']) {
+        await fake.storage.upsertClientAnalyticsRollups(foldGroupsIntoRollups(id, groupsFromRaw(rows, id), new Map(), now));
+      }
+      return createService(fake.storage, {}, undefined, undefined, pollIntervalMs).service;
+    }
+
+    it('follows the poll interval: two intervals of 10 minutes keep a connection 15 minutes behind, not 25', async () => {
+      const service = await seeded(15 * 60_000, 10 * 60_000);
+      expect((await service.getStatsForRange(now - 24 * HOUR, now)).currentConnections).toBe(2);
+      expect((await service.getLatestStatsAllConnections()).currentConnections).toBe(2);
+
+      const farther = await seeded(25 * 60_000, 10 * 60_000);
+      expect((await farther.getStatsForRange(now - 24 * HOUR, now)).currentConnections).toBe(1);
+      expect((await farther.getLatestStatsAllConnections()).currentConnections).toBe(1);
+    });
+
+    it('stays one bucket (5 minutes) with the default poll interval or without settings', async () => {
+      for (const pollIntervalMs of [60_000, undefined]) {
+        const within = await seeded(5 * 60_000, pollIntervalMs);
+        expect((await within.getStatsForRange(now - 24 * HOUR, now)).currentConnections).toBe(2);
+        const behind = await seeded(6 * 60_000, pollIntervalMs);
+        expect((await behind.getStatsForRange(now - 24 * HOUR, now)).currentConnections).toBe(1);
+      }
+    });
   });
 });

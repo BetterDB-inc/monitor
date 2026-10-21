@@ -191,7 +191,7 @@ export function rollup(
     peakCapturedAt: bucketStart + 61_000,
     byName: { api: { last: 3, peak: 5, ageSum: 120, rows: 20 } },
     byUser: { default: { last: 6, peak: 9 } },
-    byUserAndName: { 'default:api': { user: 'default', name: 'api', last: 3, peak: 5, ageSum: 120, rows: 20 } },
+    byUserAndName: { '["default","api"]': { user: 'default', name: 'api', last: 3, peak: 5, ageSum: 120, rows: 20 } },
     ips: ['10.0.0.1', '10.0.0.2'],
     updatedAt: 1_700_000_999_000,
     ...overrides,
@@ -268,3 +268,36 @@ export function buildEdgeFixture(start = T0 + 1_000 * BATCH_MS): FixtureRow[] {
 
 /** Distinct ips of buildEdgeFixture() under the port-stripping rule. */
 export const EDGE_IPS = ['/tmp/valkey.sock', '10.0.0.1', '[::1]', '[fe80::1%eth0]', 'host:'];
+
+/** Connection holding two (user, name) pairs whose `${user}:${name}` collide. */
+export const COLLIDE_CONNECTION = 'conn-collide';
+
+/**
+ * Two batches of ('a:b', 'c') and ('a', 'b:c') clients: both pairs display as
+ * 'a:b:c' but must never be accumulated together.
+ */
+export function buildCollidingPairFixture(start = T0 + 2_000 * BATCH_MS): FixtureRow[] {
+  const base = buildFixture()[0];
+  const shapes: Array<[number, string, string, number]> = [
+    [0, 'a:b', 'c', 3],
+    [0, 'a', 'b:c', 1],
+    [1, 'a:b', 'c', 2],
+    [1, 'a', 'b:c', 4],
+  ];
+  const rows: FixtureRow[] = [];
+  for (const [b, user, name, n] of shapes) {
+    for (let k = 0; k < n; k++) {
+      rows.push({
+        ...base,
+        clientId: `collide-${b}-${user}-${k}`,
+        addr: `10.9.9.${k}:6000`,
+        name,
+        user,
+        age: 20 + k + b,
+        capturedAt: start + b * BATCH_MS,
+        connectionId: COLLIDE_CONNECTION,
+      });
+    }
+  }
+  return rows;
+}

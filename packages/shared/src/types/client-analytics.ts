@@ -56,10 +56,18 @@ export interface ClientTimeSeriesPoint {
  * - currentConnections and the per-group `current` values: the newest snapshot
  *   batch inside that span. Merged across several connections, each
  *   connection's newest batch is summed, but only for connections still
- *   reporting: one whose newest batch is more than
- *   CLIENT_ANALYTICS_ROLLUP_BUCKET_MS (5 minutes) older than the newest batch
- *   across all connections is left out of `current`, while still counting
- *   towards the peaks, unique counts, average ages and time range.
+ *   reporting: a connection counts toward `current` if its newest batch is
+ *   within max(one bucket, two poll intervals) of the newest batch overall,
+ *   that is max(CLIENT_ANALYTICS_ROLLUP_BUCKET_MS (5 minutes),
+ *   2 x clientAnalyticsPollIntervalMs). One further behind is left out of
+ *   `current`, while still counting towards the peaks, unique counts, average
+ *   ages and time range.
+ * - connectionsByUserAndName is keyed `${user}:${name}` (kept for API
+ *   compatibility; read user and name from the entry). Pairs are accumulated
+ *   separately internally, but two distinct pairs whose user or name contains
+ *   ':' can map to the same key (('a:b', 'c') and ('a', 'b:c') both give
+ *   'a:b:c'): only one of them is returned under that key, the one whose
+ *   clientPairKey() sorts first, so the counts are never summed across pairs.
  */
 export interface ClientAnalyticsStats {
   currentConnections: number;
@@ -232,10 +240,39 @@ export interface ClientRollupGroupStat {
 }
 
 /**
- * Per-(user, name) stat inside one bucket. The pair is stored explicitly
- * rather than recovered from the `${user}:${name}` key, which is ambiguous
- * when either value contains ':'.
+ * Unambiguous internal key for a (user, name) pair: JSON.stringify([user, name]).
+ * Distinct pairs never share a key, unlike `${user}:${name}` (which merges
+ * ('a:b', 'c') with ('a', 'b:c')).
  */
+export function clientPairKey(user: string, name: string): string {
+  return JSON.stringify([user, name]);
+}
+
+/**
+ * Re-key per-pair stats from clientPairKey(user, name) to the external
+ * `${user}:${name}` key. That key is ambiguous when user or name contains ':'
+ * (('a:b', 'c') and ('a', 'b:c') both give 'a:b:c'); the pairs stay separate
+ * and the one whose clientPairKey sorts first is returned under the shared key,
+ * so the choice does not depend on iteration order and the raw and rollup paths
+ * agree. Counts are never summed across pairs. Used by both folds
+ * (foldClientAnalyticsStats and mergeRollupsIntoStats).
+ */
+export function clientPairStatsByDisplayKey<T extends { user: string; name: string }>(
+  pairs: ReadonlyMap<string, T>,
+): Record<string, T> {
+  const out: Record<string, T> = {};
+  const owner = new Map<string, string>();
+  for (const [key, stat] of pairs) {
+    const display = `${stat.user}:${stat.name}`;
+    const current = owner.get(display);
+    if (current !== undefined && current <= key) continue;
+    owner.set(display, key);
+    out[display] = stat;
+  }
+  return out;
+}
+
+/** Per-(user, name) stat inside one bucket. The pair is stored explicitly, so readers never parse the key. */
 export interface ClientRollupPairStat extends ClientRollupGroupStat {
   user: string;
   name: string;
@@ -265,7 +302,11 @@ export interface ClientAnalyticsRollup {
   byName: Record<string, ClientRollupGroupStat>;
   /** Keyed by ACL user; empty users are not tracked. */
   byUser: Record<string, ClientRollupUserStat>;
-  /** Keyed by `${user}:${name}` (the key is display-only: read user and name from the entry); only pairs where both are non-empty. */
+  /**
+   * Keyed by clientPairKey(user, name), i.e. JSON.stringify([user, name]), so
+   * distinct pairs never collide; only pairs where both are non-empty. Read
+   * user and name from the entry rather than parsing the key.
+   */
   byUserAndName: Record<string, ClientRollupPairStat>;
   /** Distinct client IPs (addr without port) seen in the bucket. */
   ips: string[];

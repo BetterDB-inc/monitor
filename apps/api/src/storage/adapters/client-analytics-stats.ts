@@ -5,7 +5,7 @@ import type {
   ClientRollupPairStat,
   ClientRollupUserStat,
 } from '@betterdb/shared';
-import { emptyClientAnalyticsStats } from '@betterdb/shared';
+import { clientPairKey, clientPairStatsByDisplayKey, emptyClientAnalyticsStats } from '@betterdb/shared';
 import type { SqlDialect } from './base-sql.adapter';
 
 /**
@@ -52,7 +52,9 @@ function finish(acc: GroupAccumulator, latest: number): void {
  * Folds grouped raw rows into ClientAnalyticsStats in one pass. Shared by every
  * adapter so the semantics cannot drift:
  * - byName / byUser only track non-empty values; byUserAndName only pairs where
- *   both are non-empty, keyed `${user}:${name}`.
+ *   both are non-empty. Pairs accumulate under clientPairKey(user, name), so
+ *   distinct pairs never merge; the output is keyed `${user}:${name}` (see
+ *   clientPairStatsByDisplayKey for two pairs sharing that key).
  * - current = count in the latest batch (latest captured_at in range), peak =
  *   largest count in any one batch, avgAge = plain mean of age over rows.
  * - peakConnections / peakTimestamp come from the largest batch; ties resolve
@@ -84,7 +86,7 @@ export function foldClientAnalyticsStats(
       add(acc, g.capturedAt, g.count, g.ageSum);
     }
     if (g.user && g.name) {
-      const key = `${g.user}:${g.name}`;
+      const key = clientPairKey(g.user, g.name);
       let entry = byUserAndName.get(key);
       if (!entry) byUserAndName.set(key, (entry = { user: g.user, name: g.name, acc: accumulator() }));
       add(entry.acc, g.capturedAt, g.count, g.ageSum);
@@ -118,17 +120,12 @@ export function foldClientAnalyticsStats(
     finish(acc, latest);
     connectionsByUser[user] = { current: acc.current, peak: acc.peak };
   }
-  const connectionsByUserAndName: ClientAnalyticsStats['connectionsByUserAndName'] = {};
+  const pairs = new Map<string, ClientAnalyticsStats['connectionsByUserAndName'][string]>();
   for (const [key, { user, name, acc }] of byUserAndName) {
     finish(acc, latest);
-    connectionsByUserAndName[key] = {
-      user,
-      name,
-      current: acc.current,
-      peak: acc.peak,
-      avgAge: acc.ageSum / acc.rows,
-    };
+    pairs.set(key, { user, name, current: acc.current, peak: acc.peak, avgAge: acc.ageSum / acc.rows });
   }
+  const connectionsByUserAndName = clientPairStatsByDisplayKey(pairs);
 
   return {
     currentConnections: batches.get(latest) ?? 0,

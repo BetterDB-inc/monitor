@@ -10,6 +10,7 @@ import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ConnectionContext, MultiConnectionPoller } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
+import { SettingsService } from '../settings/settings.service';
 import { foldGroupsIntoRollups, mergeRollupsIntoStats } from './client-rollup-math';
 import { QueryBudget, readPositiveNumber } from './query-budget';
 
@@ -51,7 +52,12 @@ export interface ClientAnalyticsRollupConfig extends ClientAnalyticsRollupTuning
 }
 
 interface ConnectionRollupState {
-  /** Newest captured_at folded into the rollups. */
+  /**
+   * Newest captured_at folded into the rollups. Null only for a passive state
+   * (created while CLIENT LIST is unavailable, before any fold): it keeps the
+   * window recompute and retention running, and is initialised from storage
+   * once the capability returns.
+   */
   watermark: number | null;
   /**
    * Lower bound of the next incremental read: the watermark, or past it when
@@ -130,6 +136,9 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
     configService: ConfigService,
     private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
     @Optional() @Inject(CLIENT_ANALYTICS_ROLLUP_TUNING) tuning?: Partial<ClientAnalyticsRollupTuning>,
+    // Global module, so no import is needed; optional so tests and contexts
+    // without settings fall back to the one-bucket current cutoff.
+    @Optional() private readonly settingsService?: SettingsService,
   ) {
     super(connectionRegistry);
     this.config = readClientAnalyticsRollupConfig(configService, tuning ?? {});
@@ -155,13 +164,10 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
   }
 
   /**
-   * Latest stats over the configured window. Null until the aggregator has
-   * folded at least one batch inside the window: a connection with no
-   * snapshots in the window therefore exports no client series rather than
-   * zeros. Once set, a later run whose window holds no rollups keeps the
-   * previous value. peakConnections / peakTimestamp cover the whole rollup
-   * retention; every other figure covers the window. getStatsForRange
-   * (explicit ranges, the UI) still returns zeros for an empty range.
+   * Latest stats over the configured window, or null before the aggregator's
+   * first run for the connection. A window holding no rollups gives zero
+   * counts. peakConnections / peakTimestamp cover the whole rollup retention;
+   * every other figure covers the window.
    */
   getLatestStats(connectionId: string): ClientAnalyticsStats | null {
     return this.states.get(connectionId)?.latest ?? null;
@@ -201,7 +207,22 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
         connectionId,
       ),
     );
-    return mergeRollupsIntoStats(rows);
+    return mergeRollupsIntoStats(rows, { currentCutoffMs: this.currentCutoffMs() });
+  }
+
+  /**
+   * A connection counts toward cross-connection `current` if its newest batch
+   * is within max(one bucket, two poll intervals) of the newest batch overall:
+   * with a poll interval of 5 minutes or more, a fixed one-bucket cutoff would
+   * drop a connection after a single missed poll. Read per merge, so a poll
+   * interval changed in the settings applies on the next merge.
+   */
+  private currentCutoffMs(): number {
+    const pollMs = this.settingsService?.getCachedSettings().clientAnalyticsPollIntervalMs;
+    if (typeof pollMs !== 'number' || !Number.isFinite(pollMs) || pollMs <= 0) {
+      return CLIENT_ANALYTICS_ROLLUP_BUCKET_MS;
+    }
+    return Math.max(CLIENT_ANALYTICS_ROLLUP_BUCKET_MS, 2 * pollMs);
   }
 
   protected onConnectionRemoved(connectionId: string): void {
@@ -211,53 +232,53 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     const id = ctx.connectionId;
-    // Same gate as the snapshot writer: without CLIENT LIST no snapshots are
-    // ever written for this connection, so there is nothing to fold.
-    if (!this.runtimeCapabilityTracker.isAvailable(id, 'canClientList')) return;
     const now = Date.now();
-    const state = await this.getOrInitState(id, now);
+    // Same gate as the snapshot writer: without CLIENT LIST no snapshots are
+    // written for this connection, so there is nothing new to fold and no raw
+    // read is made. The window recompute (rollups only) and retention still
+    // run, so latest keeps following the window as it advances (down to zeros
+    // once it empties) and old rollups are still pruned.
+    const canFold = this.runtimeCapabilityTracker.isAvailable(id, 'canClientList');
+    const state = canFold ? await this.getOrInitState(id, now) : this.getOrCreatePassiveState(id);
     if (state === null || this.states.get(id) !== state) return;
 
     const windowStartBucket = clientRollupBucketStart(now - this.config.windowMs);
-    const folded = await this.runIncremental(id, state, now);
-    let windowChanged = folded;
-    if (await this.runBackfill(id, state, now, windowStartBucket, folded)) {
-      windowChanged = true;
+    let windowChanged = false;
+    if (canFold) {
+      const folded = await this.runIncremental(id, state, now);
+      windowChanged = folded;
+      if (await this.runBackfill(id, state, now, windowStartBucket, folded)) {
+        windowChanged = true;
+      }
+      if (this.states.get(id) !== state) return;
     }
-    if (this.states.get(id) !== state) return;
 
     let recomputed = false;
-    // lastWindowStartBucket is null until the first recompute, so the first run always recomputes.
-    if (windowChanged || state.lastWindowStartBucket !== windowStartBucket) {
+    if (windowChanged || state.latest === null || state.lastWindowStartBucket !== windowStartBucket) {
       const rows = await this.timed('getClientAnalyticsRollups', id, () =>
         this.storage.getClientAnalyticsRollups(windowStartBucket, clientRollupBucketStart(now), id),
       );
+      // Headline peak over the whole rollup retention: one primary-key range
+      // read of two numeric columns, unlike merging 90 days of per-group JSON.
+      // Per-name / per-user / per-pair peaks stay window-scoped.
+      const retentionPeak = await this.timed('getClientAnalyticsRollupPeak', id, () =>
+        this.storage.getClientAnalyticsRollupPeak(id, clientRollupBucketStart(now - this.config.rollupRetentionMs)),
+      );
       if (this.states.get(id) !== state) return;
-      if (rows.length > 0) {
-        // Headline peak over the whole rollup retention: one primary-key range
-        // read of two numeric columns, unlike merging 90 days of per-group JSON.
-        // Per-name / per-user / per-pair peaks stay window-scoped.
-        const retentionPeak = await this.timed('getClientAnalyticsRollupPeak', id, () =>
-          this.storage.getClientAnalyticsRollupPeak(id, clientRollupBucketStart(now - this.config.rollupRetentionMs)),
-        );
-        if (this.states.get(id) !== state) return;
-        const latest = mergeRollupsIntoStats(rows);
-        // Same tie rule as the merge and the adapters: an equal peak goes to
-        // the earliest capture, which the retention read may hold.
-        if (
-          retentionPeak &&
-          (retentionPeak.peak > latest.peakConnections ||
-            (retentionPeak.peak === latest.peakConnections &&
-              retentionPeak.capturedAt < latest.peakTimestamp))
-        ) {
-          latest.peakConnections = retentionPeak.peak;
-          latest.peakTimestamp = retentionPeak.capturedAt;
-        }
-        state.latest = latest;
+      // An empty window merges to zero counts.
+      const latest = mergeRollupsIntoStats(rows, { currentCutoffMs: this.currentCutoffMs() });
+      // Same tie rule as the merge and the adapters: an equal peak goes to
+      // the earliest capture, which the retention read may hold.
+      if (
+        retentionPeak &&
+        (retentionPeak.peak > latest.peakConnections ||
+          (retentionPeak.peak === latest.peakConnections &&
+            retentionPeak.capturedAt < latest.peakTimestamp))
+      ) {
+        latest.peakConnections = retentionPeak.peak;
+        latest.peakTimestamp = retentionPeak.capturedAt;
       }
-      // An empty window is no value, not zeros: state.latest stays as it was
-      // (null on a fresh start), so the exporter leaves the client series
-      // absent instead of exporting 0 for every connection after downtime.
+      state.latest = latest;
       state.computedAt = now;
       state.lastWindowStartBucket = windowStartBucket;
       recomputed = true;
@@ -276,10 +297,46 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
     }
   }
 
-  /** The connection's state, initialised from storage on first use; null when the connection was removed meanwhile. */
+  private newState(watermark: number | null, coldStartFloor: number | null): ConnectionRollupState {
+    return {
+      watermark,
+      scanCursor: watermark,
+      latest: null,
+      computedAt: 0,
+      lastWindowStartBucket: null,
+      backfillCursor: null,
+      coldStartFloor,
+      backfillTarget: null,
+      backfillDone: false,
+      backfillWaitingForData: false,
+      backfillStartedAt: 0,
+      backfillRowsFolded: 0,
+      lastRetentionAt: 0,
+    };
+  }
+
+  /**
+   * The state of a connection without CLIENT LIST: the existing one, or a
+   * passive one (no watermark read, no cold-start lookback) that only carries
+   * the window recompute and retention bookkeeping.
+   */
+  private getOrCreatePassiveState(id: string): ConnectionRollupState {
+    let state = this.states.get(id);
+    if (!state) {
+      state = this.newState(null, null);
+      this.states.set(id, state);
+    }
+    return state;
+  }
+
+  /**
+   * The connection's state, initialised from storage on first use (or when
+   * only a passive state exists); null when the connection was removed
+   * meanwhile.
+   */
   private async getOrInitState(id: string, now: number): Promise<ConnectionRollupState | null> {
     const existing = this.states.get(id);
-    if (existing) return existing;
+    if (existing && existing.watermark !== null) return existing;
     const token = Symbol(id);
     this.pendingInit.set(id, token);
     const stored = await this.timed('getClientAnalyticsRollupWatermark', id, () =>
@@ -294,23 +351,19 @@ export class ClientAnalyticsRollupService extends MultiConnectionPoller implemen
     const watermark =
       stored ??
       clientRollupBucketStart(now - Math.min(this.config.windowMs, COLD_START_LOOKBACK_MAX_MS)) - 1;
-    const state: ConnectionRollupState = {
-      watermark,
-      scanCursor: watermark,
-      latest: null,
-      computedAt: 0,
-      lastWindowStartBucket: null,
-      backfillCursor: null,
-      coldStartFloor: stored === null ? watermark + 1 : null,
-      backfillTarget: null,
-      backfillDone: false,
-      backfillWaitingForData: false,
-      backfillStartedAt: 0,
-      backfillRowsFolded: 0,
-      lastRetentionAt: 0,
-    };
+    const coldStartFloor = stored === null ? watermark + 1 : null;
+    const current = this.states.get(id);
+    if (existing && current === existing) {
+      // Upgrade the passive state in place: latest, the window bookkeeping
+      // and the retention clock carry over.
+      existing.watermark = watermark;
+      existing.scanCursor = watermark;
+      existing.coldStartFloor = coldStartFloor;
+      return existing;
+    }
+    const state = this.newState(watermark, coldStartFloor);
     // A state installed meanwhile wins; pollConnection then sees the mismatch and stops.
-    if (!this.states.has(id)) this.states.set(id, state);
+    if (!current) this.states.set(id, state);
     return state;
   }
 

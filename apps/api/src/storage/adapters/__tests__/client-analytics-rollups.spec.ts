@@ -6,11 +6,14 @@ import { MemoryAdapter } from '../memory.adapter';
 import { SqliteAdapter } from '../sqlite.adapter';
 import { clientAddrIp } from '../client-analytics-stats';
 import { foldGroupsIntoRollups, mergeRollupsIntoStats } from '../../../client-analytics/client-rollup-math';
+import { clientPairKey } from '@betterdb/shared';
 import {
   BATCH_MS,
+  COLLIDE_CONNECTION,
   CONNECTIONS,
   EDGE_CONNECTION,
   EDGE_IPS,
+  buildCollidingPairFixture,
   buildEdgeFixture,
   PEAK_CASES,
   STATS_RANGES,
@@ -336,9 +339,27 @@ describe.each([
       await h.storage.upsertClientAnalyticsRollups(rollups);
       const stored = await h.storage.getClientAnalyticsRollups(0, Number.MAX_SAFE_INTEGER, EDGE_CONNECTION);
       expect(stored).toEqual(rollups);
-      expect(stored[0].byUserAndName['svc:ro:api']).toMatchObject({ user: 'svc:ro', name: 'api' });
+      expect(stored[0].byUserAndName['["svc:ro","api"]']).toMatchObject({ user: 'svc:ro', name: 'api' });
       expect(mergeRollupsIntoStats(stored)).toEqual(raw);
     });
+  });
+
+  it('keeps pairs whose `${user}:${name}` collide apart, identically on the rollup and raw paths', async () => {
+    const rows = buildCollidingPairFixture();
+    for (const capturedAt of [...new Set(rows.map((r) => r.capturedAt))]) {
+      await save(h.storage, rows.filter((r) => r.capturedAt === capturedAt), COLLIDE_CONNECTION);
+    }
+    const raw = await h.storage.getClientAnalyticsStats(undefined, undefined, COLLIDE_CONNECTION);
+    // One output entry, for ('a', 'b:c') (its internal key sorts first), with its own counts only.
+    expect(raw.connectionsByUserAndName).toEqual({ 'a:b:c': { user: 'a', name: 'b:c', current: 4, peak: 4, avgAge: 22 } });
+
+    const groups = await h.storage.getClientSnapshotGroups(COLLIDE_CONNECTION, 0, Number.MAX_SAFE_INTEGER);
+    await h.storage.upsertClientAnalyticsRollups(foldGroupsIntoRollups(COLLIDE_CONNECTION, groups, new Map(), 1));
+    const stored = await h.storage.getClientAnalyticsRollups(0, Number.MAX_SAFE_INTEGER, COLLIDE_CONNECTION);
+    expect(Object.keys(stored[0].byUserAndName).sort()).toEqual([clientPairKey('a', 'b:c'), clientPairKey('a:b', 'c')]);
+    expect(stored[0].byUserAndName[clientPairKey('a:b', 'c')]).toMatchObject({ user: 'a:b', name: 'c', last: 2, peak: 3, rows: 5 });
+    expect(stored[0].byUserAndName[clientPairKey('a', 'b:c')]).toMatchObject({ user: 'a', name: 'b:c', last: 4, peak: 4, rows: 5 });
+    expect(mergeRollupsIntoStats(stored)).toEqual(raw);
   });
 
   describe('getClientAnalyticsStats parity with the naive reference', () => {

@@ -3,11 +3,14 @@ import { Client, Pool } from 'pg';
 import { MemoryAdapter } from '../src/storage/adapters/memory.adapter';
 import { PostgresAdapter } from '../src/storage/adapters/postgres.adapter';
 import { foldGroupsIntoRollups, mergeRollupsIntoStats } from '../src/client-analytics/client-rollup-math';
+import { clientPairKey } from '@betterdb/shared';
 import {
   BATCH_MS,
+  COLLIDE_CONNECTION,
   CONNECTIONS,
   EDGE_CONNECTION,
   EDGE_IPS,
+  buildCollidingPairFixture,
   buildEdgeFixture,
   PEAK_CASES,
   STATS_RANGES,
@@ -392,10 +395,36 @@ describePostgres('client analytics rollups — postgres', () => {
       const groups = await pg.getClientSnapshotGroups(EDGE_CONNECTION, 0, end);
       await pg.upsertClientAnalyticsRollups(foldGroupsIntoRollups(EDGE_CONNECTION, groups, new Map(), 1));
       const stored = await pg.getClientAnalyticsRollups(0, end, EDGE_CONNECTION);
-      expect(stored[0].byUserAndName['svc:ro:api']).toMatchObject({ user: 'svc:ro', name: 'api' });
+      expect(stored[0].byUserAndName['["svc:ro","api"]']).toMatchObject({ user: 'svc:ro', name: 'api' });
       const raw = await pg.getClientAnalyticsStats(undefined, undefined, EDGE_CONNECTION);
       expect(raw.connectionsByUserAndName['svc:ro:api']).toMatchObject({ user: 'svc:ro', name: 'api' });
       expect(mergeRollupsIntoStats(stored)).toEqual(raw);
+    });
+
+    it('keeps pairs whose `${user}:${name}` collide apart through stored rollups, matching the raw path', async () => {
+      const rows = buildCollidingPairFixture();
+      try {
+        for (const capturedAt of [...new Set(rows.map((r) => r.capturedAt))]) {
+          const batch = rows.filter((r) => r.capturedAt === capturedAt).map((r) => ({ ...r, id: 0 }));
+          await pg.saveClientSnapshot(batch, COLLIDE_CONNECTION);
+          await memory.saveClientSnapshot(batch, COLLIDE_CONNECTION);
+        }
+        const raw = await pg.getClientAnalyticsStats(undefined, undefined, COLLIDE_CONNECTION);
+        expect(raw).toEqual(await memory.getClientAnalyticsStats(undefined, undefined, COLLIDE_CONNECTION));
+        expect(raw.connectionsByUserAndName).toEqual({ 'a:b:c': { user: 'a', name: 'b:c', current: 4, peak: 4, avgAge: 22 } });
+
+        const groups = await pg.getClientSnapshotGroups(COLLIDE_CONNECTION, 0, end);
+        await pg.upsertClientAnalyticsRollups(foldGroupsIntoRollups(COLLIDE_CONNECTION, groups, new Map(), 1));
+        const stored = await pg.getClientAnalyticsRollups(0, end, COLLIDE_CONNECTION);
+        expect(Object.keys(stored[0].byUserAndName).sort()).toEqual([clientPairKey('a', 'b:c'), clientPairKey('a:b', 'c')]);
+        expect(mergeRollupsIntoStats(stored)).toEqual(raw);
+      } finally {
+        await adminPool.query(`DELETE FROM ${SCHEMA}.client_snapshots WHERE connection_id = $1`, [COLLIDE_CONNECTION]);
+        await adminPool.query(`DELETE FROM ${SCHEMA}.client_analytics_rollups WHERE connection_id = $1`, [
+          COLLIDE_CONNECTION,
+        ]);
+        await memory.pruneOldClientSnapshots(end, COLLIDE_CONNECTION);
+      }
     });
   });
 });

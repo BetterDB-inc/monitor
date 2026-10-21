@@ -5,6 +5,8 @@ import {
   ClientRollupGroupStat,
   ClientRollupPairStat,
   ClientSnapshotGroupRow,
+  clientPairKey,
+  clientPairStatsByDisplayKey,
   clientRollupBucketStart,
   emptyClientAnalyticsStats,
 } from '@betterdb/shared';
@@ -61,11 +63,15 @@ function cloneRollup(row: ClientAnalyticsRollup): ClientAnalyticsRollup {
   };
   const users: Record<string, { last: number; peak: number }> = {};
   for (const [k, v] of Object.entries(row.byUser)) users[k] = { ...v };
+  // Re-keyed from the entry's own user and name, so a row stored under any
+  // other key shape resumes under clientPairKey like a freshly folded one.
+  const pairs: Record<string, ClientRollupPairStat> = {};
+  for (const v of Object.values(row.byUserAndName)) pairs[clientPairKey(v.user, v.name)] = { ...v };
   return {
     ...row,
     byName: cloneGroups(row.byName),
     byUser: users,
-    byUserAndName: cloneGroups(row.byUserAndName),
+    byUserAndName: pairs,
     ips: [...row.ips],
   };
 }
@@ -97,9 +103,9 @@ function groupIntoBatches(groups: ClientSnapshotGroupRow[]): BatchTotals[] {
       batch.byUser.set(g.user, (batch.byUser.get(g.user) ?? 0) + g.count);
     }
     if (g.name && g.user) {
-      // Same key as the raw path (foldClientAnalyticsStats); user and name
-      // travel with the entry because the key alone is ambiguous.
-      const key = `${g.user}:${g.name}`;
+      // Same unambiguous key as the raw path (foldClientAnalyticsStats):
+      // distinct pairs never share an entry, whatever ':' they contain.
+      const key = clientPairKey(g.user, g.name);
       const p = batch.byUserAndName.get(key) ?? { user: g.user, name: g.name, count: 0, ageSum: 0 };
       p.count += g.count;
       p.ageSum += g.ageSum;
@@ -191,20 +197,39 @@ export function foldGroupsIntoRollups(
   return [...changed].sort((a, b) => a - b).map((b) => working.get(b) as ClientAnalyticsRollup);
 }
 
+export interface MergeRollupsOptions {
+  /**
+   * How far behind the newest batch overall a connection's newest batch may
+   * be and still count toward `current`. Defaults to
+   * CLIENT_ANALYTICS_ROLLUP_BUCKET_MS; the rollup service passes
+   * max(one bucket, two client analytics poll intervals).
+   */
+  currentCutoffMs?: number;
+}
+
 /**
  * Merge bucket rows (possibly spanning several connections) into the
  * ClientAnalyticsStats shape the full raw scan used to produce.
  *
  * currentConnections and the per-group `current` values sum each connection's
  * newest batch in the rows, but only for connections still reporting: a
- * connection contributes to `current` only when its newest lastCapturedAt is
- * within CLIENT_ANALYTICS_ROLLUP_BUCKET_MS (5 minutes) of the newest
- * lastCapturedAt across all rows. A connection whose newest batch is older
- * (it stopped reporting, or was removed) still contributes to the peaks,
- * unique counts, average ages and time range. A single-connection merge is
- * unaffected: its newest batch is the newest overall.
+ * connection counts toward `current` if its newest batch (lastCapturedAt) is
+ * within `currentCutoffMs` of the newest batch overall. The rollup service
+ * uses max(one bucket, two poll intervals), so one missed poll never drops a
+ * connection however long the poll interval is; the default is one bucket
+ * (5 minutes). A connection further behind (it stopped reporting, or was
+ * removed) still contributes to the peaks, unique counts, average ages and
+ * time range. A single-connection merge is unaffected: its newest batch is the
+ * newest overall.
+ *
+ * Pairs are merged under clientPairKey(user, name), taken from each entry's
+ * own user and name; see clientPairStatsByDisplayKey for the output key.
  */
-export function mergeRollupsIntoStats(rollups: ClientAnalyticsRollup[]): ClientAnalyticsStats {
+export function mergeRollupsIntoStats(
+  rollups: ClientAnalyticsRollup[],
+  options: MergeRollupsOptions = {},
+): ClientAnalyticsStats {
+  const currentCutoffMs = options.currentCutoffMs ?? CLIENT_ANALYTICS_ROLLUP_BUCKET_MS;
   const stats = emptyClientAnalyticsStats();
   if (rollups.length === 0) {
     return stats;
@@ -249,7 +274,8 @@ export function mergeRollupsIntoStats(rollups: ClientAnalyticsRollup[]): ClientA
       acc.peak = Math.max(acc.peak, s.peak);
       users.set(user, acc);
     }
-    for (const [key, s] of Object.entries(row.byUserAndName)) {
+    for (const s of Object.values(row.byUserAndName)) {
+      const key = clientPairKey(s.user, s.name);
       const acc = pairs.get(key) ?? { user: s.user, name: s.name, current: 0, peak: 0, ageSum: 0, rows: 0 };
       acc.peak = Math.max(acc.peak, s.peak);
       acc.ageSum += s.ageSum;
@@ -261,7 +287,7 @@ export function mergeRollupsIntoStats(rollups: ClientAnalyticsRollup[]): ClientA
 
   const newestOverall = Math.max(...[...newest.values()].map((r) => r.lastCapturedAt));
   for (const row of newest.values()) {
-    if (newestOverall - row.lastCapturedAt > CLIENT_ANALYTICS_ROLLUP_BUCKET_MS) continue;
+    if (newestOverall - row.lastCapturedAt > currentCutoffMs) continue;
     stats.currentConnections += row.lastConnections;
     for (const [name, s] of Object.entries(row.byName)) {
       const acc = names.get(name);
@@ -271,8 +297,8 @@ export function mergeRollupsIntoStats(rollups: ClientAnalyticsRollup[]): ClientA
       const acc = users.get(user);
       if (acc) acc.current += s.last;
     }
-    for (const [key, s] of Object.entries(row.byUserAndName)) {
-      const acc = pairs.get(key);
+    for (const s of Object.values(row.byUserAndName)) {
+      const acc = pairs.get(clientPairKey(s.user, s.name));
       if (acc) acc.current += s.last;
     }
   }
@@ -292,15 +318,17 @@ export function mergeRollupsIntoStats(rollups: ClientAnalyticsRollup[]): ClientA
   for (const [user, acc] of users) {
     stats.connectionsByUser[user] = { current: acc.current, peak: acc.peak };
   }
+  const pairStats = new Map<string, ClientAnalyticsStats['connectionsByUserAndName'][string]>();
   for (const [key, acc] of pairs) {
-    stats.connectionsByUserAndName[key] = {
+    pairStats.set(key, {
       user: acc.user,
       name: acc.name,
       current: acc.current,
       peak: acc.peak,
       avgAge: acc.rows > 0 ? acc.ageSum / acc.rows : 0,
-    };
+    });
   }
+  stats.connectionsByUserAndName = clientPairStatsByDisplayKey(pairStats);
   stats.timeRange = { earliest, latest };
   return stats;
 }

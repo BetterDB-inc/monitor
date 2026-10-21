@@ -272,6 +272,8 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 
 A background aggregator folds new client snapshots into 5-minute rollups and refreshes the in-memory stats every 15 seconds. Catching up after downtime and backfilling older history both read raw snapshots in 1-hour chunks, at most 4 per connection per run. The cadence and chunking are fixed.
 
+Stats merged across connections (`GET /client-analytics/stats` without a connection) sum each connection's newest snapshot batch for the current counts. A connection counts toward current if its newest batch is within max(one bucket, two poll intervals) of the newest batch overall, that is max(5 minutes, 2 × the client analytics poll interval, `CLIENT_ANALYTICS_POLL_INTERVAL_MS` or the `clientAnalyticsPollIntervalMs` setting), so a single missed poll never drops a connection; one further behind still counts toward peaks, unique counts and average ages.
+
 ### Cluster Auto-Registration
 
 | Variable                      | Required | Default | Description                                                                                                                     |
