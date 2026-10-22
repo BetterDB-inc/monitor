@@ -145,6 +145,23 @@ describe('DetectorThresholds', () => {
     expect(screen.getByText('z 2.5 / 3')).toBeInTheDocument();
   });
 
+  it('keeps untouched overrides in the cache after a partial save', async () => {
+    const stored = response({ connections: { warningZScore: 2.5 } });
+    stored.resolved = { ...stored.resolved, connections: { ...base, warningZScore: 2.5 } };
+    api.getAnomalyDetectors.mockResolvedValue(stored);
+    api.updateAnomalyDetectors.mockResolvedValue({ message: 'ok', config: {} });
+    const { queryClient } = renderAt('/settings?section=anomaly&metric=connections');
+    const input = (await screen.findByLabelText('Cooldown (seconds)')) as HTMLInputElement;
+    api.getAnomalyDetectors.mockReturnValue(new Promise(() => {}));
+    fireEvent.change(input, { target: { value: '90' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.queryByText('Unsaved')).not.toBeInTheDocument());
+    const cached = queryClient.getQueryData<AnomalyDetectorSettingsResponse>(['anomaly-detectors']);
+    expect(cached?.overrides.connections).toEqual({ warningZScore: 2.5, cooldownMs: 90000 });
+    expect(cached?.resolved.connections).toEqual({ ...base, warningZScore: 2.5, cooldownMs: 90000 });
+    expect(screen.getByText('z 2.5 / 3')).toBeInTheDocument();
+  });
+
   it('keeps the panels and their unsaved edits when a refetch fails', async () => {
     const { queryClient } = renderAt('/settings?section=anomaly&metric=connections');
     const input = (await screen.findByLabelText('Warning z-score')) as HTMLInputElement;

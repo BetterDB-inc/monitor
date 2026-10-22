@@ -653,8 +653,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                     className="w-full px-3 py-2 border rounded-md"
                   />
                 </div>
-
-                <DetectorThresholds />
               </div>
             )}
 
@@ -752,6 +750,12 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                 >
                   Reset to Defaults
                 </button>
+              </div>
+            )}
+
+            {activeCategory === 'anomaly' && (
+              <div className="mt-6 border-t pt-2">
+                <DetectorThresholds />
               </div>
             )}
           </Card>

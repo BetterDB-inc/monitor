@@ -185,4 +185,14 @@ describe('Settings access', () => {
       expect(workspaceApi.getMembers).toHaveBeenCalled();
     });
   });
+
+  it('renders the detector thresholds below the page Save bar', async () => {
+    signIn(ADMIN, true);
+
+    renderApp('/settings?section=anomaly');
+
+    const thresholds = await screen.findByRole('heading', { level: 3, name: 'Detector thresholds' });
+    const save = screen.getByRole('button', { name: 'Save Changes' });
+    expect(save.compareDocumentPosition(thresholds) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
 });

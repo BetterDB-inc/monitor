@@ -41,9 +41,13 @@ interface DetectorPanelProps {
 type TextField = 'warningZScore' | 'criticalZScore' | 'consecutiveRequired' | 'cooldownSeconds';
 type AbsoluteKey = 'warningAbsolute' | 'criticalAbsolute';
 
-function expectedResolved(save: DetectorSave, defaults: AnomalyDetectorConfigEntry) {
+function expectedResolved(
+  save: DetectorSave,
+  defaults: AnomalyDetectorConfigEntry,
+  resolved: AnomalyDetectorConfigEntry,
+) {
   if (save.kind === 'reset') return defaults;
-  const next: AnomalyDetectorConfigEntry = { ...save.entry };
+  const next: AnomalyDetectorConfigEntry = { ...resolved, ...save.entry };
   if (!next.warningAbsolute) delete next.warningAbsolute;
   if (!next.criticalAbsolute) delete next.criticalAbsolute;
   return next;
@@ -86,18 +90,24 @@ export function DetectorPanel({
   const summary = summarize(resolved, defaults);
 
   const mutation = useMutation({
-    mutationFn: ({ save }: { save: DetectorSave; submitted: DetectorFormState }) =>
+    mutationFn: ({
+      save,
+    }: {
+      save: DetectorSave;
+      submitted: DetectorFormState;
+      base: AnomalyDetectorConfigEntry;
+    }) =>
       save.kind === 'reset'
         ? settingsApi.resetAnomalyDetector(metric)
         : settingsApi.updateAnomalyDetectors({ [metric]: save.entry }),
-    onSuccess: (_data, { save, submitted }) => {
+    onSuccess: (_data, { save, submitted, base }) => {
       setError(null);
-      const next = expectedResolved(save, defaults);
+      const next = expectedResolved(save, defaults, base);
       queryClient.setQueryData<AnomalyDetectorSettingsResponse>(ANOMALY_DETECTORS_QUERY_KEY, (prev) => {
         if (!prev) return prev;
         const overrides = { ...prev.overrides };
         if (save.kind === 'reset') delete overrides[metric];
-        else overrides[metric] = save.entry;
+        else overrides[metric] = { ...overrides[metric], ...save.entry };
         return { ...prev, overrides, resolved: { ...prev.resolved, [metric]: next } };
       });
       setForm((current) => (isDirty(current, submitted) ? current : toFormState(next, defaults)));
@@ -247,7 +257,9 @@ export function DetectorPanel({
           <Button
             size="sm"
             disabled={!dirty || hasErrors || mutation.isPending}
-            onClick={() => mutation.mutate({ save: buildSave(form, defaults), submitted: form })}
+            onClick={() =>
+              mutation.mutate({ save: buildSave(form, defaults, resolved), submitted: form, base: resolved })
+            }
           >
             Save
           </Button>
@@ -255,7 +267,7 @@ export function DetectorPanel({
             size="sm"
             variant="outline"
             disabled={!hasOverride || mutation.isPending}
-            onClick={() => mutation.mutate({ save: { kind: 'reset' }, submitted: form })}
+            onClick={() => mutation.mutate({ save: { kind: 'reset' }, submitted: form, base: resolved })}
           >
             Reset to defaults
           </Button>

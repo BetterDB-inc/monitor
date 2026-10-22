@@ -72,20 +72,13 @@ describe('DetectorPanel', () => {
     expect(screen.getByTestId('customized-dot')).toHaveAttribute('data-customized', 'false');
   });
 
-  it('saves all six fields in one PATCH', async () => {
+  it('saves only the changed field in the PATCH', async () => {
     renderPanel();
     fireEvent.change(warningZ(), { target: { value: '2.5' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() =>
       expect(api.updateAnomalyDetectors).toHaveBeenCalledWith({
-        connections: {
-          warningZScore: 2.5,
-          criticalZScore: 3,
-          warningAbsolute: 0,
-          criticalAbsolute: 0,
-          consecutiveRequired: 3,
-          cooldownMs: 60000,
-        },
+        connections: { warningZScore: 2.5 },
       }),
     );
   });
@@ -179,7 +172,7 @@ describe('DetectorPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() =>
       expect(api.updateAnomalyDetectors).toHaveBeenCalledWith({
-        acl_denied: expect.objectContaining({ warningAbsolute: 10, criticalAbsolute: 0 }),
+        acl_denied: { criticalAbsolute: 0 },
       }),
     );
   });

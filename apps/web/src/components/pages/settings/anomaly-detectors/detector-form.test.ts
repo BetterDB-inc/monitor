@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { AnomalyDetectorConfigEntry } from '@betterdb/shared';
 import {
+  LIFETIME_COUNTER_METRICS,
+  METRIC_UNITS,
   buildSave,
   isCustomized,
   isDirty,
@@ -69,45 +71,68 @@ describe('toFormState', () => {
 
 describe('buildSave', () => {
   it('resets when every field equals the default', () => {
-    expect(buildSave(emptyForm(), connections)).toEqual({ kind: 'reset' });
+    expect(buildSave(emptyForm(), connections, connections)).toEqual({ kind: 'reset' });
   });
 
-  it('sends all six fields with defaults filled in', () => {
-    const form = { ...emptyForm(), warningZScore: '2.5' };
-    expect(buildSave(form, connections)).toEqual({
+  it('sends only the field that changed', () => {
+    const form = { ...emptyForm(), cooldownSeconds: '90' };
+    expect(buildSave(form, connections, connections)).toEqual({
       kind: 'patch',
-      entry: {
-        warningZScore: 2.5,
-        criticalZScore: 3,
-        warningAbsolute: 0,
-        criticalAbsolute: 0,
-        consecutiveRequired: 3,
-        cooldownMs: 60000,
-      },
+      entry: { cooldownMs: 90000 },
+    });
+  });
+
+  it('leaves out overridden fields the user did not touch', () => {
+    const resolved = { ...connections, warningZScore: 2.5 };
+    const form = { ...toFormState(resolved, connections), consecutiveRequired: '4' };
+    expect(buildSave(form, connections, resolved)).toEqual({
+      kind: 'patch',
+      entry: { consecutiveRequired: 4 },
+    });
+  });
+
+  it('sends the default for an emptied override while other fields stay customized', () => {
+    const resolved = { ...connections, warningZScore: 2.5, cooldownMs: 90000 };
+    const form = { ...toFormState(resolved, connections), warningZScore: '' };
+    expect(buildSave(form, connections, resolved)).toEqual({
+      kind: 'patch',
+      entry: { warningZScore: 2 },
     });
   });
 
   it('sends 0 for an absolute threshold toggled off', () => {
     const form = toFormState(fragmentation, fragmentation);
     form.criticalAbsolute = { enabled: false, value: '' };
-    const save = buildSave(form, fragmentation);
-    expect(save).toEqual({
+    expect(buildSave(form, fragmentation, fragmentation)).toEqual({
       kind: 'patch',
-      entry: expect.objectContaining({ warningAbsolute: 1.5, criticalAbsolute: 0 }),
+      entry: { criticalAbsolute: 0 },
     });
   });
 
-  it('converts cooldown seconds to milliseconds', () => {
-    const form = { ...emptyForm(), cooldownSeconds: '90' };
-    expect(buildSave(form, connections)).toEqual({
+  it('sends an absolute threshold turned on', () => {
+    const form = { ...emptyForm(), warningAbsolute: { enabled: true, value: '500' } };
+    expect(buildSave(form, connections, connections)).toEqual({
       kind: 'patch',
-      entry: expect.objectContaining({ cooldownMs: 90000 }),
+      entry: { warningAbsolute: 500 },
     });
   });
 
   it('resets when a typed value equals the default', () => {
     const form = { ...emptyForm(), warningZScore: '2' };
-    expect(buildSave(form, connections)).toEqual({ kind: 'reset' });
+    expect(buildSave(form, connections, connections)).toEqual({ kind: 'reset' });
+  });
+});
+
+describe('metric metadata', () => {
+  it('treats slowlog_last_id as a per-poll delta, not a lifetime counter', () => {
+    expect(LIFETIME_COUNTER_METRICS.has('slowlog_last_id')).toBe(false);
+    expect(METRIC_UNITS.slowlog_last_id).toBe('new slowlog entries per poll');
+  });
+
+  it('keeps the raw INFO counters marked as lifetime totals', () => {
+    for (const metric of ['acl_denied', 'evicted_keys', 'keyspace_misses'] as const) {
+      expect(LIFETIME_COUNTER_METRICS.has(metric)).toBe(true);
+    }
   });
 });
 

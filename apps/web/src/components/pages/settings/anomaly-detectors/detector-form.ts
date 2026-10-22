@@ -8,7 +8,7 @@ export const METRIC_UNITS: Record<AnomalyDetectorMetric, string> = {
   memory_used: 'bytes',
   input_kbps: 'KB/s',
   output_kbps: 'KB/s',
-  slowlog_last_id: 'slowlog entry id',
+  slowlog_last_id: 'new slowlog entries per poll',
   acl_denied: 'denials',
   evicted_keys: 'keys',
   blocked_clients: 'clients',
@@ -20,7 +20,6 @@ export const LIFETIME_COUNTER_METRICS: ReadonlySet<AnomalyDetectorMetric> = new 
   'acl_denied',
   'evicted_keys',
   'keyspace_misses',
-  'slowlog_last_id',
 ]);
 
 export type AbsoluteField = { enabled: boolean; value: string };
@@ -38,13 +37,18 @@ export type DetectorFormErrors = Partial<Record<keyof DetectorFormState, string>
 
 export type DetectorSave =
   | { kind: 'reset' }
-  | { kind: 'patch'; entry: Required<AnomalyDetectorConfigEntry> };
+  | { kind: 'patch'; entry: AnomalyDetectorConfigEntry };
 
 type NumericField = 'warningZScore' | 'criticalZScore' | 'consecutiveRequired';
 type AbsoluteKey = 'warningAbsolute' | 'criticalAbsolute';
 
 const NUMERIC_FIELDS: NumericField[] = ['warningZScore', 'criticalZScore', 'consecutiveRequired'];
 const ABSOLUTE_FIELDS: AbsoluteKey[] = ['warningAbsolute', 'criticalAbsolute'];
+const ENTRY_FIELDS: (keyof AnomalyDetectorConfigEntry)[] = [
+  ...NUMERIC_FIELDS,
+  ...ABSOLUTE_FIELDS,
+  'cooldownMs',
+];
 
 function parse(value: string): number {
   return value.trim() === '' ? NaN : Number(value);
@@ -147,30 +151,25 @@ export function validateForm(
 export function buildSave(
   form: DetectorFormState,
   defaults: AnomalyDetectorConfigEntry,
+  resolved: AnomalyDetectorConfigEntry,
 ): DetectorSave {
   const filled = fillDefaults(form, defaults);
-  const absolute = (key: AbsoluteKey) =>
-    filled[key].enabled ? parse(filled[key].value) : 0;
-  const entry: Required<AnomalyDetectorConfigEntry> = {
+  const target: AnomalyDetectorConfigEntry = {
     warningZScore: parse(filled.warningZScore),
     criticalZScore: parse(filled.criticalZScore),
-    warningAbsolute: absolute('warningAbsolute'),
-    criticalAbsolute: absolute('criticalAbsolute'),
     consecutiveRequired: parse(filled.consecutiveRequired),
     cooldownMs: Math.round(parse(filled.cooldownSeconds) * 1000),
   };
-  const asResolved: AnomalyDetectorConfigEntry = { ...entry };
   for (const key of ABSOLUTE_FIELDS) {
-    if (!filled[key].enabled) delete asResolved[key];
+    if (filled[key].enabled) target[key] = parse(filled[key].value);
   }
-  return isCustomized(asResolved, defaults) ? { kind: 'patch', entry } : { kind: 'reset' };
+  if (!isCustomized(target, defaults)) return { kind: 'reset' };
+  const entry: AnomalyDetectorConfigEntry = {};
+  for (const key of ENTRY_FIELDS) {
+    if (target[key] !== resolved[key]) entry[key] = target[key] ?? 0;
+  }
+  return { kind: 'patch', entry };
 }
-
-const ENTRY_FIELDS: (keyof AnomalyDetectorConfigEntry)[] = [
-  ...NUMERIC_FIELDS,
-  ...ABSOLUTE_FIELDS,
-  'cooldownMs',
-];
 
 export function isCustomized(
   resolved: AnomalyDetectorConfigEntry,
