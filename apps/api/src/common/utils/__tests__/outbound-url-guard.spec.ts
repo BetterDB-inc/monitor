@@ -291,4 +291,10 @@ describe('outbound url guard', () => {
       expect((await run(guardedLookup({ label: 'metrics URL' }), 'h', false)).error).toBe(failure);
     });
   });
+
+  it('resolves a hostname that starts like a loopback address instead of trusting it', async () => {
+    process.env.NODE_ENV = 'production';
+    jest.spyOn(dns, 'lookup').mockResolvedValue([{ address: '169.254.169.254', family: 4 }] as any);
+    await expect(assertSafeOutboundUrl('http://127.metrics.example.com/x', { label: 'metrics URL', allowPrivateNetworks: true })).rejects.toBeInstanceOf(BadRequestException);
+  });
 });

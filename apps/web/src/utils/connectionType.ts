@@ -1,3 +1,4 @@
+import { hasOwnKeyAnalytics } from '@betterdb/shared';
 import type { Connection } from '../hooks/useConnection';
 
 type WithType = Pick<Connection, 'connectionType'> | null | undefined;
@@ -15,6 +16,26 @@ export function connectionTypeSuffix(connection: WithType): string {
     return ' · OTLP push';
   }
   return ' · direct';
+}
+
+type KvCacheScope = Pick<Connection, 'host' | 'connectionType' | 'membership'> & {
+  capabilities?: Pick<NonNullable<Connection['capabilities']>, 'isSentinel'>;
+};
+
+export function hasKvCacheFootprint(connection: KvCacheScope | null | undefined): boolean {
+  if (!connection) {
+    return true;
+  }
+  if (connection.host === 'agent' || connection.connectionType === 'agent') {
+    return false;
+  }
+  if (connection.connectionType === 'external') {
+    return false;
+  }
+  if (connection.capabilities?.isSentinel) {
+    return false;
+  }
+  return hasOwnKeyAnalytics(connection.membership);
 }
 
 export function isRetiredMember(connection: WithMembership): boolean {
