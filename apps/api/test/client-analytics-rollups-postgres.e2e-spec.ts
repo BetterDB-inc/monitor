@@ -153,11 +153,18 @@ describePostgres('client analytics rollups — postgres', () => {
         );
         return result.rows[0] ? (result.rows[0].valid ? 'valid' : 'invalid') : 'missing';
       };
+      // Scoped to this schema through the build's progress row: other suites
+      // build the same index name in their own schemas in parallel.
       const buildPid = async (): Promise<number | null> => {
         const result = await adminPool.query(
-          `SELECT pid FROM pg_stat_activity
-            WHERE state = 'active'
-              AND query LIKE 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_client_connection_captured %'`,
+          `SELECT a.pid
+             FROM pg_stat_activity a
+             JOIN pg_stat_progress_create_index p ON p.pid = a.pid
+             JOIN pg_class c ON c.oid = p.relid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE a.state = 'active' AND n.nspname = $1
+              AND a.query LIKE 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_client_connection_captured %'`,
+          [schema],
         );
         return result.rows[0]?.pid ?? null;
       };
