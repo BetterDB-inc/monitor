@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { CapturedKey, KeyView, ParsedMessage, PresetId } from '@betterdb/shared';
+import { createCustomPreset } from '../presets/custom';
 import { getPreset } from '../presets/registry';
 import { decodeValue, estimateTokens } from '../presets/text';
 
@@ -173,7 +174,23 @@ describe('session presets against captured fixtures', () => {
     const preset = getPreset('llamaindex');
     const source = fixture.keys[0];
     expect(preset.parseKey({ ...source, truncated: true }).parsed).toBe(false);
-    expect(preset.parseKey({ ...source, value: { base64: '//4A' } }).parsed).toBe(false);
+    const binary = preset.parseKey({ ...source, type: 'string', value: '//4A', binary: true });
+    expect(binary).toMatchObject({ parsed: false, binary: true, reason: 'Value is not valid UTF-8' });
+  });
+
+  it('reads a JSON document with a base64 property as data, not binary', () => {
+    const preset = createCustomPreset({
+      valueType: 'json',
+      messages: { from: 'path', path: 'turns' },
+      fields: { role: 'who', content: 'text' },
+    });
+    const view = preset.parseKey({
+      key: 'k',
+      type: 'ReJSON-RL',
+      pttl: -1,
+      value: { base64: 'x', turns: [{ who: 'user', text: 'hi' }] },
+    });
+    expect(view).toMatchObject({ parsed: true, binary: false, messages: [{ content: 'hi' }] });
   });
 
   it('exposes ttl as null when the key has no expiry', () => {
@@ -203,11 +220,19 @@ describe('session presets against captured fixtures', () => {
 
 describe('decodeValue', () => {
   it('non-utf8 value falls back to base64 raw', () => {
-    expect(decodeValue(Buffer.from([0xff, 0xfe, 0x00]), 1024).value).toEqual({ base64: '//4A' });
+    expect(decodeValue(Buffer.from([0xff, 0xfe, 0x00]), 1024)).toEqual({
+      value: '//4A',
+      binary: true,
+      truncated: false,
+    });
   });
 
   it('returns utf8 text unchanged', () => {
-    expect(decodeValue(Buffer.from('héllo 🚀', 'utf8'), 1024)).toEqual({ value: 'héllo 🚀', truncated: false });
+    expect(decodeValue(Buffer.from('héllo 🚀', 'utf8'), 1024)).toEqual({
+      value: 'héllo 🚀',
+      binary: false,
+      truncated: false,
+    });
   });
 
   it('truncates at cap', () => {

@@ -6,19 +6,29 @@ export type PresetId =
   | 'custom'
   | 'raw';
 
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+export type ValkeyElement = string | { base64: string };
+
 export type ValkeyValue =
   | string
-  | string[]
-  | Record<string, string>
-  | Array<[string, number]>
-  | { base64: string }
-  | unknown;
+  | ValkeyElement[]
+  | Record<string, ValkeyElement>
+  | Array<[ValkeyElement, number]>
+  | JsonValue;
 
 export interface CapturedKey {
   key: string;
   type: string;
   pttl: number;
   value: ValkeyValue;
+  binary?: boolean;
   truncated?: boolean;
   bytes?: number;
 }
@@ -86,6 +96,7 @@ export type KeyView = {
   type: string;
   ttlMs: number | null;
   raw: ValkeyValue;
+  binary: boolean;
   truncated: boolean;
 } & (
   | { parsed: true; messages: ParsedMessage[] }
