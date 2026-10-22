@@ -1,7 +1,7 @@
 import type Valkey from 'iovalkey';
 import type { ChainableCommander } from 'iovalkey';
 import calculateSlot from 'cluster-key-slot';
-import type { CapturedKey, ValkeyValue } from '@betterdb/shared';
+import type { CapturedKey, ValkeyElement, ValkeyValue } from '@betterdb/shared';
 import type { DatabasePort } from '../common/interfaces/database-port.interface';
 import { decodeValue } from './presets/text';
 import { PrimaryClients, withPrimaries } from './primary-nodes';
@@ -44,6 +44,7 @@ interface Located {
 
 interface ReadResult {
   value: ValkeyValue;
+  binary?: boolean;
   truncated: boolean;
   bytes: number;
 }
@@ -58,7 +59,10 @@ const resultOf = (r: PipelineResult): unknown => {
 const numberOf = (r: PipelineResult): number | null =>
   r && !r[0] && typeof r[1] === 'number' ? r[1] : null;
 
-const decoded = (buf: Buffer, cap: number) => decodeValue(buf, cap).value;
+const decoded = (buf: Buffer, cap: number): ValkeyElement => {
+  const { value, binary } = decodeValue(buf, cap);
+  return binary ? { base64: value } : value;
+};
 
 function decodeCut(buf: Buffer, cap: number, cut: boolean): ReadResult {
   return { ...decodeValue(buf, cap, cut), bytes: Math.min(buf.length, cap) };
@@ -400,6 +404,7 @@ async function readNode(
           type: at.type,
           pttl: at.pttl,
           value: read.value,
+          ...(read.binary ? { binary: true } : {}),
           ...(read.truncated ? { truncated: true } : {}),
           ...(at.memory !== null ? { bytes: at.memory } : {}),
         });

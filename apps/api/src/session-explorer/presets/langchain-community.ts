@@ -2,7 +2,27 @@ import type { ParsedMessage } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
 import { fail, guardedParse, isRecord, parseJson, textContent, toolUseCalls } from './text';
 
-const ROLES = new Set(['human', 'ai', 'system', 'tool']);
+const ROLE_BY_TYPE = new Map([
+  ['human', 'human'],
+  ['ai', 'ai'],
+  ['system', 'system'],
+  ['tool', 'tool'],
+  ['function', 'tool'],
+  ['HumanMessageChunk', 'human'],
+  ['AIMessageChunk', 'ai'],
+  ['SystemMessageChunk', 'system'],
+  ['ToolMessageChunk', 'tool'],
+  ['FunctionMessageChunk', 'tool'],
+]);
+
+const CHAT_TYPES = new Set(['chat', 'generic', 'ChatMessageChunk']);
+
+function roleOf(type: string, data: Record<string, unknown>): string {
+  if (CHAT_TYPES.has(type)) {
+    return typeof data.role === 'string' && data.role !== '' ? data.role : 'chat';
+  }
+  return ROLE_BY_TYPE.get(type) ?? fail(`Unknown message type "${type}"`);
+}
 
 function parseToolCalls(raw: unknown): ParsedMessage['toolCalls'] {
   if (raw === undefined || raw === null) return undefined;
@@ -26,9 +46,8 @@ function parseElement(element: unknown): ParsedMessage {
   if (!isRecord(envelope) || typeof envelope.type !== 'string' || !isRecord(envelope.data)) {
     return fail('Element is not a {type, data} message envelope');
   }
-  const role = envelope.type;
-  if (!ROLES.has(role)) return fail(`Unknown message type "${role}"`);
   const data = envelope.data;
+  const role = roleOf(envelope.type, data);
   const message: ParsedMessage = { role, content: textContent(data.content) };
   const toolCalls = parseToolCalls(data.tool_calls) ?? toolUseCalls(data.content);
   if (toolCalls) message.toolCalls = toolCalls;

@@ -1,13 +1,17 @@
 import type { ParsedMessage } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
-import { fail, guardedParse, isRecord, parseJson } from './text';
+import { fail, guardedParse, isRecord, parseJson, textContent } from './text';
 
-const ROLE_MAP: Record<string, string> = {
-  user: 'human',
-  assistant: 'ai',
-  system: 'system',
-  tool: 'tool',
-};
+const ROLE_MAP = new Map([
+  ['user', 'human'],
+  ['assistant', 'ai'],
+  ['system', 'system'],
+  ['developer', 'system'],
+  ['tool', 'tool'],
+  ['function', 'tool'],
+  ['chatbot', 'ai'],
+  ['model', 'ai'],
+]);
 
 type ToolCall = NonNullable<ParsedMessage['toolCalls']>[number];
 
@@ -74,14 +78,17 @@ function parseElement(element: unknown): ParsedMessage {
   if (!isRecord(msg) || typeof msg.role !== 'string') {
     return fail('Element is not a {role, blocks} message');
   }
-  const role = ROLE_MAP[msg.role];
+  const role = ROLE_MAP.get(msg.role);
   if (!role) return fail(`Unknown role "${msg.role}"`);
   const kwargs = msg.additional_kwargs;
   if (kwargs !== undefined && !isRecord(kwargs)) return fail('additional_kwargs is not an object');
   const extras = kwargs ?? {};
-  const message: ParsedMessage = { role, content: blocksText(msg.blocks) };
+  const legacy = msg.blocks === undefined;
+  const content = legacy ? textContent(msg.content ?? '') : blocksText(msg.blocks);
+  const message: ParsedMessage = { role, content };
   const toolCalls =
-    parseToolCalls(extras.tool_calls) ?? blockToolCalls(msg.blocks as unknown[]);
+    parseToolCalls(extras.tool_calls) ??
+    (legacy ? undefined : blockToolCalls(msg.blocks as unknown[]));
   if (toolCalls) message.toolCalls = toolCalls;
   if (role === 'tool') {
     message.toolResult = {

@@ -1,6 +1,6 @@
 #!/usr/bin/env zsh
 # Usage: zsh scripts/session-fixtures/run.sh [--seed-only]
-# Seeds the compose valkey (6380) and valkey-bundle (6384) with session data
+# Seeds the compose valkey (6380) with session data
 # written by real client libraries under the sxfix: prefix, then captures
 # fixtures into apps/api/test/fixtures/session-explorer. Never flushes.
 set -euo pipefail
@@ -10,8 +10,8 @@ HERE="${0:A:h}"
 cd "$HERE"
 
 for port in $(grep -hoE '^(const )?PORT = [0-9]+' seed_*.py seed-*.mjs | grep -oE '[0-9]+$'); do
-  if [[ "$port" != "6380" && "$port" != "6384" ]]; then
-    echo "refusing port $port: only 6380 and 6384 are allowed" >&2
+  if [[ "$port" != "6380" ]]; then
+    echo "refusing port $port: only 6380 is allowed" >&2
     exit 1
   fi
 done

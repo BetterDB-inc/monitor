@@ -16,22 +16,22 @@ export function decodeValue(
   buf: Buffer,
   cap: number,
   more = false,
-): { value: string | { base64: string }; truncated: boolean } {
+): { value: string; binary: boolean; truncated: boolean } {
   const truncated = more || buf.length > cap;
   const slice = truncated ? buf.subarray(0, cap) : buf;
   const full = tryDecode(slice);
   if (full !== null) {
-    return { value: full, truncated };
+    return { value: full, binary: false, truncated };
   }
   if (truncated) {
     for (let trim = 1; trim <= MAX_UTF8_TAIL && trim < slice.length; trim++) {
       const decoded = tryDecode(slice.subarray(0, slice.length - trim));
       if (decoded !== null) {
-        return { value: decoded, truncated };
+        return { value: decoded, binary: false, truncated };
       }
     }
   }
-  return { value: { base64: slice.toString('base64') }, truncated };
+  return { value: slice.toString('base64'), binary: true, truncated };
 }
 
 export function estimateTokens(messages: ParsedMessage[]): number {
@@ -46,6 +46,7 @@ export const parsedView = (k: CapturedKey, messages: ParsedMessage[]): KeyView =
   type: k.type,
   ttlMs: ttlOf(k),
   raw: k.value,
+  binary: k.binary === true,
   truncated: k.truncated === true,
   parsed: true,
   messages,
@@ -56,6 +57,7 @@ export const failedView = (k: CapturedKey, reason: string): KeyView => ({
   type: k.type,
   ttlMs: ttlOf(k),
   raw: k.value,
+  binary: k.binary === true,
   truncated: k.truncated === true,
   parsed: false,
   reason,
@@ -72,9 +74,7 @@ export const fail = (reason: string): never => {
 
 export const readableValue = (k: CapturedKey): string | null => {
   if (k.truncated === true) return 'Value truncated at the byte cap';
-  if (k.type !== 'hash' && isRecord(k.value) && typeof k.value.base64 === 'string') {
-    return 'Value is not valid UTF-8';
-  }
+  if (k.binary === true) return 'Value is not valid UTF-8';
   return null;
 };
 

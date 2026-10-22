@@ -51,12 +51,24 @@ describe('readSessionKeys', () => {
     expect(key).toMatchObject({ value: 'ab€', truncated: true });
   });
 
-  it('falls back to base64 for a binary string', async () => {
+  it('flags a binary string and keeps its bytes as base64', async () => {
     const client = new FakeValkey(
       storeOf({ k: { type: 'string', value: Buffer.from([0x80, 0x81, 0xff]) } }),
     );
     const key = await readOne(client, 'k');
-    expect(key.value).toEqual({ base64: Buffer.from([0x80, 0x81, 0xff]).toString('base64') });
+    expect(key).toMatchObject({
+      value: Buffer.from([0x80, 0x81, 0xff]).toString('base64'),
+      binary: true,
+    });
+  });
+
+  it('wraps binary list elements so they stay distinguishable from text', async () => {
+    const client = new FakeValkey(
+      storeOf({ k: { type: 'list', value: [Buffer.from('ok'), Buffer.from([0xff])] } }),
+    );
+    const key = await readOne(client, 'k');
+    expect(key.value).toEqual(['ok', { base64: '/w==' }]);
+    expect(key.binary).toBeUndefined();
   });
 
   it('pipelines a session of small string keys in batches', async () => {
