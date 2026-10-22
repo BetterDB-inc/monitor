@@ -53,9 +53,13 @@ describe('NamespaceSetup', () => {
     fireEvent.change(screen.getByLabelText('Preset'), { target: { value: 'custom' } });
     fireEvent.change(screen.getByLabelText('Role field'), { target: { value: 'who' } });
     fireEvent.change(screen.getByLabelText('Content field'), { target: { value: 'text' } });
+    fireEvent.change(screen.getByLabelText('Session id template'), {
+      target: { value: ' chat:{session} ' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
     await waitFor(() => expect(screen.getByText(/No key matched/)).toBeInTheDocument());
     expect(api.preview.mock.calls[0][0].customSchema).toMatchObject({
+      sessionTemplate: 'chat:{session}',
       valueType: 'list',
       messages: { from: 'items' },
       fields: { role: 'who', content: 'text' },
@@ -105,12 +109,12 @@ describe('NamespaceSetup', () => {
     expect(onSaved).not.toHaveBeenCalled();
   });
 
-  it('suggests a session regex with the required named group', () => {
+  it('suggests a session template with the session placeholder', () => {
     render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);
     fireEvent.change(screen.getByLabelText('Preset'), { target: { value: 'custom' } });
-    expect(screen.getByLabelText('Session id regex')).toHaveAttribute(
+    expect(screen.getByLabelText('Session id template')).toHaveAttribute(
       'placeholder',
-      '^chat:(?<session>.+)$',
+      'chat:{session}',
     );
   });
 
@@ -127,14 +131,14 @@ describe('NamespaceSetup', () => {
   it('clears an earlier preview when a later preview fails', async () => {
     api.preview.mockResolvedValueOnce({ sampleKey: 'chat:1', view: parsedKey(), exhausted: true });
     api.preview.mockRejectedValueOnce(
-      new ApiError('Invalid namespace', 400, { message: 'Invalid namespace', errors: ['Bad regex'] }),
+      new ApiError('Invalid namespace', 400, { message: 'Invalid namespace', errors: ['Bad template'] }),
     );
     render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);
     fill();
     fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
     await waitFor(() => expect(screen.getByText('Where should I stay?')).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
-    await waitFor(() => expect(screen.getByText('Bad regex')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Bad template')).toBeInTheDocument());
     expect(screen.queryByText('Where should I stay?')).not.toBeInTheDocument();
   });
 

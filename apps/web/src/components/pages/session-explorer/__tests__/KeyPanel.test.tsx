@@ -28,9 +28,15 @@ describe('KeyPanel', () => {
   });
 
   it('shows the base64 notice for a binary value', () => {
-    render(<KeyPanel view={failedKey({ raw: { base64: 'AAEC' } })} />);
+    render(<KeyPanel view={failedKey({ raw: 'AAEC', binary: true })} />);
     expect(screen.getByText(/not valid UTF-8, shown as base64/)).toBeInTheDocument();
     expect(screen.getByTestId('raw-value').textContent).toBe('AAEC');
+  });
+
+  it('treats a JSON value with a base64 property as text', () => {
+    render(<KeyPanel view={failedKey({ type: 'json', raw: { base64: 'aGk=' } })} />);
+    expect(screen.queryByText(/not valid UTF-8/)).not.toBeInTheDocument();
+    expect(screen.getByTestId('raw-value').textContent).toContain('"base64": "aGk="');
   });
 
   it('shows a whole hash that has a field named base64', () => {

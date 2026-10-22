@@ -5,11 +5,8 @@ import { Button } from '../../ui/button';
 import { MessageTimeline } from './MessageTimeline';
 import { formatTtl } from './format';
 
-const isBase64 = (v: unknown): v is { base64: string } =>
-  typeof v === 'object' && v !== null && 'base64' in v && typeof v.base64 === 'string';
-
 const binaryOf = (view: KeyView): string | null =>
-  view.type !== 'hash' && isBase64(view.raw) ? view.raw.base64 : null;
+  view.binary && typeof view.raw === 'string' ? view.raw : null;
 
 function rawText(view: KeyView): string {
   const binary = binaryOf(view);

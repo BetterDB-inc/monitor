@@ -28,7 +28,7 @@ const DEFAULT_THRESHOLD = 1048576;
 const SELECT_CLASS = 'w-full rounded-md border bg-background px-3 py-2 text-sm';
 
 interface SchemaDraft {
-  sessionRegex: string;
+  sessionTemplate: string;
   valueType: CustomSchema['valueType'];
   from: 'items' | 'path' | 'key';
   path: string;
@@ -41,7 +41,7 @@ interface SchemaDraft {
 }
 
 const emptySchema = (schema: CustomSchema | null | undefined): SchemaDraft => ({
-  sessionRegex: schema?.sessionRegex ?? '',
+  sessionTemplate: schema?.sessionTemplate ?? '',
   valueType: schema?.valueType ?? 'list',
   from: schema?.messages.from ?? 'items',
   path: schema?.messages.from === 'path' ? schema.messages.path : '',
@@ -67,7 +67,9 @@ function toSchema(d: SchemaDraft): CustomSchema {
     if (value !== undefined) fields[name as keyof typeof extras] = value;
   }
   return {
-    ...(optional(d.sessionRegex) !== undefined ? { sessionRegex: d.sessionRegex.trim() } : {}),
+    ...(optional(d.sessionTemplate) !== undefined
+      ? { sessionTemplate: d.sessionTemplate.trim() }
+      : {}),
     valueType: d.valueType,
     messages: d.from === 'path' ? { from: 'path', path: d.path.trim() } : { from: d.from },
     fields,
@@ -244,7 +246,7 @@ export function NamespaceSetup({ initial, onSaved, onCancel }: Props) {
               )}
             </Field>
             {schema.from === 'path' && text('Messages path', 'path', 'messages')}
-            {text('Session id regex', 'sessionRegex', '^chat:(?<session>.+)$')}
+            {text('Session id template', 'sessionTemplate', 'chat:{session}')}
             {text('Role field', 'role', 'role')}
             {text('Content field', 'content', 'content')}
             {text('Timestamp field', 'timestamp')}

@@ -19,6 +19,7 @@ export const parsedKey = (overrides: Partial<KeyView> = {}): KeyView =>
     type: 'list',
     ttlMs: 5000,
     raw: ['{"type":"human"}'],
+    binary: false,
     truncated: false,
     parsed: true,
     messages: [
@@ -34,6 +35,7 @@ export const failedKey = (overrides: Partial<KeyView> = {}): KeyView =>
     type: 'string',
     ttlMs: null,
     raw: 'not a message',
+    binary: false,
     truncated: false,
     parsed: false,
     reason: 'Element is not a {type, data} message envelope',
