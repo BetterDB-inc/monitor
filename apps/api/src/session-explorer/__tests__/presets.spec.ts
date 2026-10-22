@@ -223,7 +223,11 @@ describe('session presets against captured fixtures', () => {
     const source = fixture.keys[0];
     expect(preset.parseKey({ ...source, truncated: true }).parsed).toBe(false);
     const binary = preset.parseKey({ ...source, type: 'string', value: '//4A', binary: true });
-    expect(binary).toMatchObject({ parsed: false, binary: true, reason: 'Value is not valid UTF-8' });
+    expect(binary).toMatchObject({
+      parsed: false,
+      binary: true,
+      reason: 'Value is not valid UTF-8',
+    });
   });
 
   it('reads a JSON document with a base64 property as data, not binary', () => {
@@ -415,6 +419,67 @@ describe('presets with content blocks beyond text', () => {
         value,
       });
       expect(view).toMatchObject({ parsed: false, reason: 'Unknown message constructor' });
+    }
+  });
+
+  it('langchain reads chunk, chat, function and generic message types', () => {
+    const view = getPreset('langchain-community').parseKey(
+      listKey([
+        { type: 'generic', data: { content: 'js chat', role: 'critic' } },
+        { type: 'function', data: { content: '{"t":21}', name: 'get_weather' } },
+        { type: 'chat', data: { content: 'py chat', role: 'narrator' } },
+        { type: 'AIMessageChunk', data: { content: 'streamed' } },
+        { type: 'HumanMessageChunk', data: { content: 'typed' } },
+      ]),
+    );
+    const messages = parsedMessages(view);
+    expect(messages.map((m) => [m.role, m.content])).toEqual([
+      ['human', 'typed'],
+      ['ai', 'streamed'],
+      ['narrator', 'py chat'],
+      ['tool', '{"t":21}'],
+      ['critic', 'js chat'],
+    ]);
+    expect(messages[3].toolResult).toEqual({ name: 'get_weather', content: '{"t":21}' });
+  });
+
+  it('langchain still rejects an unknown message type', () => {
+    const view = getPreset('langchain-community').parseKey(
+      listKey([{ type: 'constructor', data: { content: 'x' } }]),
+    );
+    expect(view).toMatchObject({ parsed: false, reason: 'Unknown message type "constructor"' });
+  });
+
+  it('llamaindex maps developer, function, chatbot and model roles', () => {
+    const block = (text: string) => [{ block_type: 'text', text }];
+    const view = getPreset('llamaindex').parseKey(
+      listKey([
+        { role: 'developer', blocks: block('rules') },
+        { role: 'chatbot', blocks: block('hi') },
+        { role: 'model', blocks: block('hello') },
+        { role: 'function', blocks: block('21C'), additional_kwargs: { name: 'get_weather' } },
+      ]),
+    );
+    expect(parsedMessages(view).map((m) => m.role)).toEqual(['system', 'ai', 'ai', 'tool']);
+  });
+
+  it('llamaindex reads messages stored before content blocks', () => {
+    const view = getPreset('llamaindex').parseKey(
+      listKey([
+        { role: 'user', content: 'hi', additional_kwargs: {} },
+        { role: 'assistant', content: null, additional_kwargs: {} },
+      ]),
+    );
+    expect(parsedMessages(view).map((m) => [m.role, m.content])).toEqual([
+      ['human', 'hi'],
+      ['ai', ''],
+    ]);
+  });
+
+  it('llamaindex rejects roles inherited from Object', () => {
+    for (const role of ['constructor', 'toString', '__proto__']) {
+      const view = getPreset('llamaindex').parseKey(listKey([{ role, content: 'x' }]));
+      expect(view).toMatchObject({ parsed: false, reason: `Unknown role "${role}"` });
     }
   });
 

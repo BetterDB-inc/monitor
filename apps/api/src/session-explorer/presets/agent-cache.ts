@@ -45,7 +45,8 @@ function parseMessage(entry: unknown): ParsedMessage {
     return fail('Message is not an lc-serialized constructor');
   }
   const constructorName = entry.id[entry.id.length - 1];
-  const role = typeof constructorName === 'string' ? ROLE_BY_CONSTRUCTOR.get(constructorName) : undefined;
+  const role =
+    typeof constructorName === 'string' ? ROLE_BY_CONSTRUCTOR.get(constructorName) : undefined;
   if (!role) return fail('Unknown message constructor');
   const kwargs = entry.kwargs;
   const message: ParsedMessage = { role, content: textContent(kwargs.content) };
@@ -85,7 +86,8 @@ function newestCheckpointKey(keys: string[]): string | undefined {
   return keys
     .filter((key) => key.includes(CHECKPOINT_MARKER))
     .reduce<string | undefined>(
-      (newest, key) => (newest === undefined || checkpointId(key) > checkpointId(newest) ? key : newest),
+      (newest, key) =>
+        newest === undefined || checkpointId(key) > checkpointId(newest) ? key : newest,
       undefined,
     );
 }
