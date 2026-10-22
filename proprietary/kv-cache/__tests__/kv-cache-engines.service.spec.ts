@@ -303,7 +303,7 @@ describe('KvCacheEnginesService', () => {
       saveKvCacheEngine: jest.fn(async (e: any) => e),
       deleteKvCacheEngine: jest.fn(() => new Promise((resolve) => (finishDelete = () => resolve(true)))),
     } as any;
-    const footprint = { onConnectionRemoval: jest.fn() } as any;
+    const footprint = { onConnectionRemoval: jest.fn(), onConnectionRestore: jest.fn() } as any;
     const samples = { forgetEngine: jest.fn(), idle: jest.fn(), deleteEngine: jest.fn().mockResolvedValue(undefined), resetBaselines: jest.fn() } as any;
     const registry = new KvCacheEngineRegistry(storage, footprint, samples);
     await registry.onModuleInit();

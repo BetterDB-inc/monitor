@@ -20,7 +20,7 @@ const engine = (over: Record<string, unknown> = {}) => ({
 
 const body = 'lmcache:num_hit_tokens_total{model_name="m",worker_id="0",role="worker"} 42\n';
 
-function setup(engines: unknown[], licensed = true) {
+function setup(engines: unknown[], licensed = true, connectionIds = ['c1']) {
   const registry = {
     list: jest.fn().mockReturnValue(engines),
     get: jest.fn((id: string) => (engines as { id: string }[]).find((e) => e.id === id) ?? null),
@@ -29,8 +29,9 @@ function setup(engines: unknown[], licensed = true) {
   const samples = { observe: jest.fn() };
   const engineService = { authHeaderFor: jest.fn().mockReturnValue(null) };
   const license = { hasFeature: jest.fn().mockReturnValue(licensed) };
-  const service = new KvCacheScrapeService(registry as any, samples as any, engineService as any, license as any);
-  return { registry, samples, engineService, license, service };
+  const connections = { getConfig: jest.fn((id: string) => (connectionIds.includes(id) ? { id } : null)) };
+  const service = new KvCacheScrapeService(registry as any, samples as any, engineService as any, license as any, connections as any);
+  return { registry, samples, engineService, license, connections, service };
 }
 
 describe('KvCacheScrapeService', () => {
@@ -46,6 +47,24 @@ describe('KvCacheScrapeService', () => {
     const { service } = setup([engine({ id: 'off', enabled: false }), engine({ id: 'otlp', source: 'otlp' })]);
     await service.tick(1000);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('skips engines whose connection was removed', async () => {
+    const { service } = setup([engine()], true, []);
+    await service.tick(1000);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('drops a result when the connection is removed mid-fetch', async () => {
+    fetchMock.mockResolvedValue(body);
+    const { service, samples, registry, connections } = setup([engine()]);
+    fetchMock.mockImplementationOnce(async () => {
+      connections.getConfig.mockReturnValue(null);
+      return body;
+    });
+    await service.tick(1000);
+    expect(samples.observe).not.toHaveBeenCalled();
+    expect(registry.recordResult).not.toHaveBeenCalled();
   });
 
   it('observes cumulative samples and records success', async () => {

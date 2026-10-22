@@ -44,6 +44,8 @@ that hold keys.
 Page controls:
 
 - A date range picker for the charts, defaulting to the last 6 hours.
+  A range covers at most 31 days and 50,000 stored samples. When a range holds more
+  samples, the page shows only the most recent ones and says so.
 - **Refresh**, which re-collects the footprint now.
 - The alert settings sheet (see [Per-connection switches](#per-connection-switches)).
 - **Rescan now** on the not-detected view, which collects the footprint again.
@@ -166,8 +168,9 @@ a bounded SCAN plus a sample, extrapolated to the whole keyspace.
 | `KV_CACHE_SAMPLE_KEYS`           | `500`    | Number of matched keys sampled with `MEMORY USAGE` and `TTL`         |
 
 An unset, non-numeric, too-small or too-large value falls back to the default.
-The interval must be between `60000` (1 minute) and `86400000` (24 hours), and
-each key budget must be at least `1`.
+The interval must be between `60000` (1 minute) and `86400000` (24 hours), the
+matched-key cap at least `5` (the detection threshold), and the other key
+budgets at least `1`.
 
 When a complete collection finds no LMCache on a connection, BetterDB backs off
 and does not collect it again for `KV_CACHE_UNDETECTED_RECHECK_MS` (default
@@ -242,6 +245,11 @@ empty value keep them allowed; any other value is logged and treated as `true`. 
 refused and the variable has no effect. Link-local addresses (`169.254.0.0/16`, which
 includes cloud metadata endpoints, and `fe80::/10`) are always refused,
 whatever the setting.
+
+The guard checks every address a hostname resolves to, and the scrape then
+connects only to an address that passed the check. A DNS answer that changes
+between the check and the connection cannot redirect a scrape to a refused
+address.
 
 When you change the metrics URL of a linked engine to a different origin
 (scheme, host or port) and a stored auth header exists, BetterDB refuses the
@@ -396,7 +404,7 @@ share it, such as agent connections.
 | -------------------------------- | -------- | ---------------------------------------------------------------------------------------------- |
 | `KV_CACHE_FOOTPRINT_INTERVAL_MS` | `300000` | Footprint collection interval. An invalid value, one below `60000` or one above `86400000` falls back to the default |
 | `KV_CACHE_SCAN_MAX_KEYS`         | `200000` | SCAN budget per collection. An invalid value or one below `1` falls back to the default        |
-| `KV_CACHE_MATCH_MAX_KEYS`        | `2000`   | Matched-key cap per collection. An invalid value or one below `1` falls back to the default    |
+| `KV_CACHE_MATCH_MAX_KEYS`        | `2000`   | Matched-key cap per collection. An invalid value or one below `5` falls back to the default    |
 | `KV_CACHE_SAMPLE_KEYS`           | `500`    | Keys sampled for size and TTL. An invalid value or one below `1` falls back to the default     |
 | `KV_CACHE_UNDETECTED_RECHECK_MS` | `1800000` | How long a connection where LMCache was not found waits before the next collection (30 minutes). An invalid value or one below `60000` falls back to the default |
 | `KV_CACHE_SCRAPE_INTERVAL_MS`    | `30000`  | Engine scrape interval, `1000` to `86400000`. Other values are logged and fall back to the default |

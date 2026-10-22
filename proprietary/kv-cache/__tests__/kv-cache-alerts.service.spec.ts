@@ -148,6 +148,70 @@ describe('KvCacheAlertsService eviction risk', () => {
     expect(evictingStates()).toEqual([true, true, true, true, true, false, false]);
   });
 
+  it('keeps the evicting state when a snapshot only read some nodes', async () => {
+    const { service, pro } = setup();
+    const evictingStates = () =>
+      pro.dispatchKvCacheEvictionRisk.mock.calls.filter(([e]) => e.reason === 'evicting').map(([e]) => e.active);
+    await service.onSnapshot(snapshot({ evictedKeysDelta: 50 }), { partial: true });
+    await service.onSnapshot(snapshot({ evictedKeysDelta: 50 }));
+    for (let i = 0; i < 3; i += 1) await service.onSnapshot(snapshot({ evictedKeysDelta: 0 }), { partial: true });
+    await service.onSnapshot(snapshot({ evictedKeysDelta: 0 }));
+    expect(evictingStates()).toEqual([false, true, true, true, true, true]);
+  });
+
+  it('keeps the evicting state when a partial snapshot does not detect LMCache', async () => {
+    const { service, pro } = setup();
+    await service.onSnapshot(snapshot({ evictedKeysDelta: 50 }));
+    await service.onSnapshot(snapshot({ detected: false, evictedKeysDelta: 0 }), { partial: true });
+    expect(pro.dispatchKvCacheEvictionRisk).toHaveBeenLastCalledWith(expect.objectContaining({ reason: 'evicting', active: true }));
+  });
+
+  it('keeps the unevictable state when a snapshot only read some nodes', async () => {
+    const { service, pro } = setup();
+    const unevictableStates = () =>
+      pro.dispatchKvCacheEvictionRisk.mock.calls.filter(([e]) => e.reason === 'unevictable').map(([e]) => e.active);
+    await service.onSnapshot(snapshot({ noTtlRatio: 0.95 }), { partial: true });
+    await service.onSnapshot(snapshot({ noTtlRatio: 0.95 }));
+    await service.onSnapshot(snapshot({ noTtlRatio: 0.1 }), { partial: true });
+    await service.onSnapshot(snapshot({ noTtlRatio: null }), { partial: true });
+    await service.onSnapshot(snapshot({ detected: false }), { partial: true });
+    await service.onSnapshot(snapshot({ noTtlRatio: 0.1 }));
+    await service.onSnapshot(snapshot({ noTtlRatio: 0.95 }), { partial: true });
+    expect(unevictableStates()).toEqual([false, true, true, true, true, false, false]);
+  });
+
+  it('forgets the unevictable state when the connection is removed or alerts are disabled', async () => {
+    const { service, pro, remove, storage } = setup();
+    const lastUnevictable = () =>
+      pro.dispatchKvCacheEvictionRisk.mock.calls.filter(([e]) => e.reason === 'unevictable').at(-1)?.[0].active;
+    service.onModuleInit();
+    await service.onSnapshot(snapshot());
+    remove('c1');
+    await service.onSnapshot(snapshot(), { partial: true });
+    expect(lastUnevictable()).toBe(false);
+    await service.onSnapshot(snapshot());
+    storage.getKvCacheSettings.mockResolvedValueOnce({
+      connectionId: 'c1',
+      hitRateAlertEnabled: true,
+      hitRateThreshold: 0.2,
+      evictionAlertEnabled: false,
+      updatedAt: 1,
+    });
+    await service.onSnapshot(snapshot());
+    await service.onSnapshot(snapshot(), { partial: true });
+    expect(lastUnevictable()).toBe(false);
+    service.onModuleDestroy();
+  });
+
+  it('passes the partial flag from footprint snapshots through', async () => {
+    const { service, pro, footprint } = setup();
+    service.onModuleInit();
+    const listener = footprint.onSnapshot.mock.calls[0][0];
+    await listener(snapshot({ evictedKeysDelta: 50 }), { partial: true });
+    expect(pro.dispatchKvCacheEvictionRisk).toHaveBeenCalledWith(expect.objectContaining({ reason: 'evicting', active: false }));
+    service.onModuleDestroy();
+  });
+
   it('forgets the evicting hold when the connection is removed', async () => {
     const { service, pro, remove } = setup();
     service.onModuleInit();

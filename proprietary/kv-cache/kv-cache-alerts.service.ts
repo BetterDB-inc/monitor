@@ -16,7 +16,7 @@ import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { LicenseService } from '@proprietary/licenses/license.service';
 import { evictionConditions, shouldCheckHitRate, windowHitRates } from './kv-cache-alert-rules';
 import { KvCacheEngineRegistry } from './kv-cache-engine-registry';
-import { KvCacheFootprintService } from './kv-cache-footprint.service';
+import { KvCacheFootprintService, type SnapshotContext } from './kv-cache-footprint.service';
 
 const EVALUATE_INTERVAL_MS = 60_000;
 const EVICTION_REASONS: KvCacheEvictionReason[] = ['unevictable', 'evicting'];
@@ -35,7 +35,7 @@ export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
   private readonly exportedConnections = new Set<string>();
   private readonly checkedWindows = new Map<string, Map<string, CheckedWindow>>();
   private readonly evictingCleanStreaks = new Map<string, number>();
-  private readonly unevictableActive = new Map<string, boolean>();
+  private readonly unevictableActive = new Set<string>();
   private evaluating = false;
 
   constructor(
@@ -51,7 +51,7 @@ export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit(): void {
-    this.footprint.onSnapshot((snapshot) => this.onSnapshot(snapshot));
+    this.footprint.onSnapshot((snapshot, context) => this.onSnapshot(snapshot, context));
     this.footprint.onConnectionRemoval((connectionId) => {
       this.exportedConnections.delete(connectionId);
       this.checkedWindows.delete(connectionId);
@@ -87,13 +87,13 @@ export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
     return this.storage.saveKvCacheSettings({ ...current, ...definedUpdate, connectionId, updatedAt: Date.now() });
   }
 
-  async onSnapshot(snapshot: KvCacheFootprintSnapshot): Promise<void> {
+  async onSnapshot(snapshot: KvCacheFootprintSnapshot, context: SnapshotContext = { partial: false }): Promise<void> {
     try {
       if (!this.licensed()) return;
       if (snapshot.scanComplete) this.prometheus?.setKvCacheFootprint(snapshot.connectionId, snapshot.perModel);
       if (!this.webhookEventsPro) return;
       const settings = await this.getSettings(snapshot.connectionId);
-      const conditions = this.evictionState(snapshot, settings.evictionAlertEnabled);
+      const conditions = this.evictionState(snapshot, settings.evictionAlertEnabled, context.partial);
       const instance = this.instanceFor(snapshot.connectionId);
       for (const reason of EVICTION_REASONS) {
         void this.webhookEventsPro
@@ -121,14 +121,24 @@ export class KvCacheAlertsService implements OnModuleInit, OnModuleDestroy {
     this.logger.warn(`Eviction risk alert failed for ${connectionId}: ${error instanceof Error ? error.message : error}`);
   }
 
-  private evictionState(snapshot: KvCacheFootprintSnapshot, enabled: boolean): Record<KvCacheEvictionReason, boolean> {
-    if (!enabled || !snapshot.detected) {
+  private evictionState(
+    snapshot: KvCacheFootprintSnapshot,
+    enabled: boolean,
+    partial: boolean,
+  ): Record<KvCacheEvictionReason, boolean> {
+    if (!enabled || (!partial && !snapshot.detected)) {
       this.evictingCleanStreaks.delete(snapshot.connectionId);
       this.unevictableActive.delete(snapshot.connectionId);
       return { unevictable: false, evicting: false };
     }
-    const conditions = evictionConditions(snapshot, this.unevictableActive.get(snapshot.connectionId));
-    if (conditions.unevictable) this.unevictableActive.set(snapshot.connectionId, true);
+    if (partial) {
+      return {
+        unevictable: this.unevictableActive.has(snapshot.connectionId),
+        evicting: this.evictingCleanStreaks.has(snapshot.connectionId),
+      };
+    }
+    const conditions = evictionConditions(snapshot, this.unevictableActive.has(snapshot.connectionId));
+    if (conditions.unevictable) this.unevictableActive.add(snapshot.connectionId);
     else this.unevictableActive.delete(snapshot.connectionId);
     conditions.evicting = this.holdEvicting(snapshot.connectionId, conditions.evicting);
     return conditions;
