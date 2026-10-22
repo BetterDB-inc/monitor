@@ -334,7 +334,9 @@ function AppLayoutInner(): ReactElement {
                 path="/session-explorer"
                 element={
                   <NoConnectionsGuard>
-                    <SessionExplorer />
+                    <LiveConnectionGuard>
+                      <SessionExplorer />
+                    </LiveConnectionGuard>
                   </NoConnectionsGuard>
                 }
               />
