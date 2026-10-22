@@ -16,6 +16,7 @@ const DENIED_MUTATION_PREFIXES = [
   '/monitor/sessions',
   '/monitor/triggers',
   '/monitor/schedules',
+  '/kv-cache',
 ];
 
 // Path prefixes that 404 on demo for any method (read leaks)

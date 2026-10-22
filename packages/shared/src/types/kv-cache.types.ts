@@ -90,11 +90,14 @@ export interface KvCacheSampleBucket extends KvCacheEngineSample {
 export interface KvCacheSamplesResponse {
   buckets: KvCacheSampleBucket[];
   rangeHitRate: number | null;
+  bucketMs: number;
 }
 
 export interface KvCacheStatus {
   hasLmcache: boolean;
   latest: KvCacheFootprintSnapshot | null;
+  recent: KvCacheFootprintSnapshot[];
+  footprintIntervalMs: number;
   sampleKey: string | null;
   engines: KvCacheEngine[];
 }

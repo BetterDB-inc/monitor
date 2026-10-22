@@ -1,12 +1,13 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { AppSidebar } from './AppSidebar';
 import { SidebarProvider } from '../ui/sidebar.tsx';
 import type { Connection } from '../../hooks/useConnection';
 
-const { connectionState, setConnection } = vi.hoisted(() => {
+const { connectionState, setConnection, license } = vi.hoisted(() => {
   return {
+    license: { licensed: false },
     connectionState: {
       currentConnection: null as Connection | null,
       connections: [] as Connection[],
@@ -30,6 +31,14 @@ vi.mock('../../hooks/useConnection', () => ({
 vi.mock('../../hooks/useCapabilities', () => ({
   useCapabilities: () => ({ hasVectorSearch: false }),
 }));
+
+vi.mock('../../hooks/useLicense', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../hooks/useLicense')>();
+  return {
+    ...actual,
+    useLicense: () => ({ ...actual.useLicense(), hasFeature: () => license.licensed }),
+  };
+});
 
 vi.mock('../../hooks/useCacheProposals', () => ({
   useCacheProposalsUnread: () => ({ unreadCount: 0 }),
@@ -123,5 +132,29 @@ describe('AppSidebar cluster nav gating', () => {
     expect(screen.getByRole('link', { name: /^Cluster/ })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /^Key Analytics/ })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /^Migration/ })).toBeInTheDocument();
+  });
+});
+
+describe('AppSidebar KV Cache entry', () => {
+  afterEach(() => {
+    license.licensed = false;
+  });
+
+  it('shows KV Cache to licensed users on a seed connection', () => {
+    license.licensed = true;
+    mockCurrent({ id: 's', name: 'prod' }, []);
+    renderSidebar();
+    expect(screen.getByRole('link', { name: /^KV Cache/ })).toBeInTheDocument();
+  });
+
+  it.each([
+    ['a cluster member', { id: 'k', name: 'prod · 10.0.0.2:7002', membership: { seedId: 's', nodeId: 'n', origin: 'auto' as const, source: 'cluster' as const } }],
+    ['a Sentinel replica', { id: 'r', name: 'ha · 10.0.0.6:6379', membership: { seedId: 's', nodeId: 'n', origin: 'auto' as const, source: 'sentinel' as const, group: 'g', role: 'replica' as const } }],
+    ['an agent connection', { id: 'a', name: 'agent', host: 'agent', connectionType: 'agent' as const }],
+  ])('hides KV Cache on %s', (_case, current) => {
+    license.licensed = true;
+    mockCurrent(current, [{ id: 's', name: 'prod' }]);
+    renderSidebar();
+    expect(screen.queryByRole('link', { name: /^KV Cache/ })).toBeNull();
   });
 });

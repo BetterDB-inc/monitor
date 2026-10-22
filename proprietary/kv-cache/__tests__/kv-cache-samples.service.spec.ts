@@ -192,6 +192,14 @@ describe('KvCacheSamplesService', () => {
     expect(storage.getKvCacheEngineSamples.mock.calls[1][0].bucketMs).toBe(60_000);
   });
 
+  it('reports the chart bucket size it used', async () => {
+    const { service, storage } = setup();
+    const to = 10 * 24 * 60 * 60_000;
+    const response = await service.getSamples('c1', { from: to - 7 * 24 * 60 * 60_000, to });
+    expect(response.bucketMs).toBe(storage.getKvCacheEngineSamples.mock.calls[0][0].bucketMs);
+    expect(response.bucketMs).toBe(7 * 60_000);
+  });
+
   it('computes the range hit rate from totals over the whole range, not the capped rows', async () => {
     const { service, storage } = setup();
     storage.getKvCacheEngineSamples.mockResolvedValue([sample({ requestedTokens: 100, hitTokens: 100 })]);
@@ -201,7 +209,7 @@ describe('KvCacheSamplesService', () => {
 
   it('returns a null range hit rate when nothing was requested', async () => {
     const { service } = setup();
-    expect(await service.getSamples('c1', { from: 0, to: 1000 })).toEqual({ buckets: [], rangeHitRate: null });
+    expect(await service.getSamples('c1', { from: 0, to: 1000 })).toEqual({ buckets: [], rangeHitRate: null, bucketMs: 60_000 });
   });
 
   it('waits for an in-flight save even when there is nothing new to drain', async () => {

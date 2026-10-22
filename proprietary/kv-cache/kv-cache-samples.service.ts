@@ -104,10 +104,11 @@ export class KvCacheSamplesService implements OnModuleInit, OnModuleDestroy {
       engineId: query.engineId,
       modelName: query.model,
     };
+    const bucketMs = chartBucketMs(filter.from, filter.to);
     const [rows, totals] = await Promise.all([
-      this.storage.getKvCacheEngineSamples({ ...filter, limit: SAMPLES_LIMIT, bucketMs: chartBucketMs(filter.from, filter.to) }),
+      this.storage.getKvCacheEngineSamples({ ...filter, limit: SAMPLES_LIMIT, bucketMs }),
       this.storage.getKvCacheSampleTotals(filter),
     ]);
-    return { buckets: mergeBuckets(rows), rangeHitRate: hitRate(totals.requestedTokens, totals.hitTokens) };
+    return { buckets: mergeBuckets(rows), rangeHitRate: hitRate(totals.requestedTokens, totals.hitTokens), bucketMs };
   }
 }

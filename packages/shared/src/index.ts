@@ -13,6 +13,7 @@ export * from './types/version.types';
 export * from './types/agent-protocol';
 export * from './utils/key-patterns';
 export * from './utils/key-sizes';
+export * from './utils/url-credentials';
 export * from './license/index';
 export * from './auth/broker';
 export * from './webhooks/index';

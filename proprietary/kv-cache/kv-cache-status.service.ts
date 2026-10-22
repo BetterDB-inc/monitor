@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import type { KvCacheEngine, KvCacheFootprintSnapshot, KvCacheStatus } from '@betterdb/shared';
+import { maskUrlCredentials, type KvCacheEngine, type KvCacheFootprintSnapshot, type KvCacheStatus } from '@betterdb/shared';
 import type { StoragePort, StoredKvCacheEngine } from '@app/common/interfaces/storage-port.interface';
 import { KvCacheEngineRegistry } from './kv-cache-engine-registry';
 import { KvCacheFootprintService } from './kv-cache-footprint.service';
@@ -7,26 +7,28 @@ import { KvCacheFootprintService } from './kv-cache-footprint.service';
 export const FOOTPRINT_HISTORY_MAX_RANGE_MS = 31 * 24 * 60 * 60_000;
 export const FOOTPRINT_HISTORY_POINTS = 1000;
 
-function maskScrapeUrl(url: string | null): string | null {
-  if (!url) return url;
-  try {
-    const parsed = new URL(url);
-    if (!parsed.username && !parsed.password && !parsed.search && !parsed.hash) return url;
-    parsed.username = '';
-    parsed.password = '';
-    parsed.hash = '';
-    for (const name of new Set(parsed.searchParams.keys())) {
-      parsed.searchParams.set(name, parsed.searchParams.get(name) ? '***' : '');
-    }
-    return parsed.toString();
-  } catch {
-    return url;
-  }
+function maskQueryValues(url: string): string {
+  const base = url.split('#')[0];
+  const queryStart = base.indexOf('?');
+  if (queryStart < 0) return base;
+  const query = base
+    .slice(queryStart + 1)
+    .split('&')
+    .map((part) => {
+      const eq = part.indexOf('=');
+      return eq < 0 || eq === part.length - 1 ? part : `${part.slice(0, eq)}=***`;
+    })
+    .join('&');
+  return `${base.slice(0, queryStart)}?${query}`;
 }
 
 export function toPublicEngine(engine: StoredKvCacheEngine): KvCacheEngine {
   const { scrapeAuthHeader, scrapeAuthEncrypted: _encrypted, ...rest } = engine;
-  return { ...rest, scrapeUrl: maskScrapeUrl(rest.scrapeUrl), hasScrapeAuth: scrapeAuthHeader !== null };
+  return {
+    ...rest,
+    scrapeUrl: rest.scrapeUrl === null ? null : maskQueryValues(maskUrlCredentials(rest.scrapeUrl)),
+    hasScrapeAuth: scrapeAuthHeader !== null,
+  };
 }
 
 @Injectable()
@@ -38,10 +40,13 @@ export class KvCacheStatusService {
   ) {}
 
   async getStatus(connectionId: string): Promise<KvCacheStatus> {
-    const [latest] = await this.storage.getKvCacheFootprintSnapshots({ connectionId, limit: 1 });
+    const recent = await this.storage.getKvCacheFootprintSnapshots({ connectionId, limit: 2 });
+    const latest = recent[recent.length - 1];
     return {
       hasLmcache: latest?.detected === true,
       latest: latest ?? null,
+      recent,
+      footprintIntervalMs: this.footprint.getFootprintIntervalMs(),
       sampleKey: this.footprint.getSampleKey(connectionId),
       engines: this.engines.list(connectionId).map(toPublicEngine),
     };

@@ -11,6 +11,7 @@ import { useCapabilities } from '../hooks/useCapabilities';
 import { metricsApi } from '../api/metrics';
 import { LineChart, Line, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import type { VectorIndexInfo, VectorIndexField, VectorSearchResult, VectorIndexSnapshot, TextSearchResult, FieldDistribution, ProfileResult, ProfileIterator } from '../types/metrics';
+import { copyToClipboard } from '../lib/clipboard';
 
 interface PollingData {
   indexes: string[];
@@ -786,20 +787,6 @@ function formatRelativeTime(timestamp: number): string {
   const months = days / 30.44;
   if (months < 12) return rtf.format(Math.round(sign * months), 'month');
   return rtf.format(Math.round(sign * days / 365.25), 'year');
-}
-
-async function copyToClipboard(text: string): Promise<void> {
-  if (navigator.clipboard) {
-    try { await navigator.clipboard.writeText(text); return; } catch { /* fallback */ }
-  }
-  const ta = document.createElement('textarea');
-  ta.value = text;
-  ta.style.position = 'fixed';
-  ta.style.opacity = '0';
-  document.body.appendChild(ta);
-  ta.select();
-  document.execCommand('copy');
-  document.body.removeChild(ta);
 }
 
 function buildFtCreateCommand(info: VectorIndexInfo, opts?: { forceHnsw?: boolean }): string {

@@ -188,6 +188,10 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     this.listeners.push(listener);
   }
 
+  getFootprintIntervalMs(): number {
+    return this.intervalMs;
+  }
+
   getSampleKey(connectionId: string): string | null {
     return this.sampleKeys.get(connectionId) ?? null;
   }
