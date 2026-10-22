@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { LicenseService } from '../license.service';
+import { Feature, Tier } from '../types';
 import { TelemetryPort } from '@app/common/interfaces/telemetry-port.interface';
 
 const createMockTelemetryClient = (): jest.Mocked<TelemetryPort> => ({
@@ -570,6 +571,60 @@ describe('LicenseService', () => {
       expect(stats.container).toBe('kubernetes');
 
       delete process.env.KUBERNETES_SERVICE_HOST;
+    });
+  });
+
+  describe('hasFeature tier safety', () => {
+    let dataDir: string;
+    let safetyService: LicenseService;
+
+    beforeEach(async () => {
+      // Isolate persisted state (no leaked token from another test's cwd/data
+      // can resurrect a paid tier under this keyless instance).
+      dataDir = mkdtempSync(join(tmpdir(), 'betterdb-license-'));
+      process.env.BETTERDB_DATA_DIR = dataDir;
+      process.env.BETTERDB_TELEMETRY = 'false';
+      delete process.env.BETTERDB_LICENSE_KEY;
+
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          LicenseService,
+          { provide: ConfigService, useValue: { get: jest.fn() } },
+          { provide: 'TELEMETRY_CLIENT', useValue: mockTelemetryClient },
+        ],
+      }).compile();
+      safetyService = module.get<LicenseService>(LicenseService);
+    });
+
+    afterEach(() => {
+      safetyService.onModuleDestroy();
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+
+    it('normalizes an unknown online tier to community before caching', async () => {
+      // Version skew: the server reports a tier this build doesn't know.
+      mockFetch.mockResolvedValue(
+        createMockResponse({ valid: true, tier: 'suspended', expiresAt: null }),
+      );
+
+      await safetyService.onModuleInit();
+      await flushPromises();
+
+      expect(safetyService.getLicenseTier()).toBe(Tier.community);
+      expect(safetyService.hasFeature(Feature.KEY_ANALYTICS)).toBe(false);
+    });
+
+    it('degrades (not throws) when a cache predating normalization holds an unknown tier', () => {
+      // Simulate a cache written by an older build, before checkOnline pinned
+      // the tier — TIER_FEATURES['suspended'] is undefined and would otherwise
+      // throw on .includes, crashing the process via unhandledRejection.
+      (safetyService as any).cache = {
+        response: { valid: true, tier: 'suspended', expiresAt: null },
+        cachedAt: Date.now(),
+      };
+
+      expect(() => safetyService.hasFeature(Feature.KEY_ANALYTICS)).not.toThrow();
+      expect(safetyService.hasFeature(Feature.KEY_ANALYTICS)).toBe(false);
     });
   });
 });

@@ -742,22 +742,68 @@ describe('PrometheusService staleness bounds', () => {
   });
 
   it('skips the storage pass for a connection removed during its INFO pass', async () => {
+    // The storage phase runs under its own epoch, retired only by removal.
     const getAuditStats = jest
       .fn()
-      .mockResolvedValue({ totalEntries: 7, entriesByReason: {}, entriesByUser: {} });
-    (service as unknown as Record<string, unknown>)['storage'] = { getAuditStats };
+      .mockReturnValue({ totalEntries: 7, entriesByReason: {}, entriesByUser: {} });
+    (service as unknown as Record<string, unknown>)['auditStatsCache'] = { get: getAuditStats };
 
     await update('conn-1');
-    const epoch = service['currentEpoch']('conn-1');
+    const storageEpoch = service['currentStorageEpoch']('conn-1');
     service.cleanupConnectionMetrics('conn-1');
 
-    await service['updateStorageBasedMetricsForConnection']('conn-1', epoch);
+    await service['updateStorageBasedMetricsForConnection']('conn-1', storageEpoch);
     await jest.runAllTimersAsync();
 
     const text = await service.getMetrics();
 
     expect(getAuditStats).not.toHaveBeenCalled();
-    expect(text).not.toContain(`betterdb_acl_denied_total{connection="${LABEL}"}`);
+    expect(text).not.toContain(`betterdb_acl_denied{connection="${LABEL}"}`);
+  });
+
+  it('does not start a storage refresh for a connection removed during its INFO phase', async () => {
+    let resolveInfo: (info: unknown) => void = () => undefined;
+    const slow = {
+      getInfoParsed: jest.fn().mockReturnValue(
+        new Promise((resolve) => {
+          resolveInfo = resolve;
+        }),
+      ),
+    };
+    (service['connectionRegistry'].get as jest.Mock).mockReturnValue(slow);
+    const storagePhase = jest
+      .spyOn(service as never, 'updateStorageBasedMetricsForConnection' as never)
+      .mockResolvedValue(undefined as never);
+
+    const pass = service['updateMetricsForConnection']('conn-1');
+    service.cleanupConnectionMetrics('conn-1');
+    resolveInfo({ server: { uptime_in_seconds: '42' } });
+    await pass;
+
+    expect(storagePhase).not.toHaveBeenCalled();
+    expect(service['storageRefreshInFlight'].size).toBe(0);
+  });
+
+  it('keeps INFO passes from retiring a running storage pass', async () => {
+    const getAuditStats = jest
+      .fn()
+      .mockReturnValue({ totalEntries: 7, entriesByReason: {}, entriesByUser: {} });
+    (service as unknown as Record<string, unknown>)['auditStatsCache'] = { get: getAuditStats };
+    await update('conn-1');
+    const storageEpoch = service['currentStorageEpoch']('conn-1');
+
+    // Several INFO passes start (and retire the INFO epoch) meanwhile.
+    for (let i = 0; i < 3; i++) {
+      await service['updateMetricsForConnection']('conn-1');
+    }
+    await service.flushStorageRefreshes();
+    expect(service['currentStorageEpoch']('conn-1')).toBe(storageEpoch);
+    service['aclDeniedTotal'].remove(LABEL);
+
+    await service['updateStorageBasedMetricsForConnection']('conn-1', storageEpoch);
+    expect(await service['registry'].metrics()).toContain(
+      `betterdb_acl_denied{connection="${LABEL}"} 7`,
+    );
   });
 
   it('does not page twice when a pass is abandoned mid failover dispatch', async () => {

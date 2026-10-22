@@ -1,9 +1,26 @@
-import type Valkey from 'iovalkey';
+import Valkey, { Cluster } from 'iovalkey';
 import type { KeyCountComparison, MigrationAnalysisResult } from '@betterdb/shared';
 
 /**
- * Compare key counts between source and target using DBSIZE.
- * Optionally enrich with per-type breakdown from Phase 1 analysis.
+ * DBSIZE that covers the whole dataset. On a Cluster client a bare DBSIZE goes
+ * to one random node, so sum it over every master instead.
+ */
+export async function countKeys(client: Valkey): Promise<number> {
+  // createTargetClient() casts Cluster to Valkey, so narrow from unknown.
+  const maybeCluster: unknown = client;
+  if (maybeCluster instanceof Cluster) {
+    const masters = maybeCluster.nodes('master');
+    if (masters.length === 0) throw new Error('No cluster masters available to count keys');
+    const counts = await Promise.all(masters.map((node) => node.dbsize()));
+    return counts.reduce((sum, count) => sum + count, 0);
+  }
+  return client.dbsize();
+}
+
+/**
+ * Compare key counts between source and target using DBSIZE (summed over all
+ * masters for cluster clients). Optionally enrich with per-type breakdown from
+ * Phase 1 analysis.
  */
 export async function compareKeyCounts(
   sourceClient: Valkey,
@@ -11,8 +28,8 @@ export async function compareKeyCounts(
   analysisResult?: Partial<MigrationAnalysisResult>,
 ): Promise<KeyCountComparison> {
   const [sourceKeys, targetKeys] = await Promise.all([
-    sourceClient.dbsize(),
-    targetClient.dbsize(),
+    countKeys(sourceClient),
+    countKeys(targetClient),
   ]);
 
   const discrepancy = targetKeys - sourceKeys;

@@ -98,9 +98,13 @@ export class CommandExecutor {
   private async executeCollectKeyAnalytics(optionsJson: string): Promise<string> {
     const options: KeyAnalyticsOptions = JSON.parse(optionsJson);
     const dbSize = await this.client.dbsize();
+    // Tag the result with the logical database the agent is connected to
+    // (`--valkey-db`), so the cloud attributes the analytics to the right db
+    // instead of defaulting everything to db0.
+    const db = this.client.options?.db ?? 0;
 
     if (dbSize === 0) {
-      return JSON.stringify({ dbSize: 0, scanned: 0, patterns: [] });
+      return JSON.stringify({ dbSize: 0, scanned: 0, patterns: [], db });
     }
 
     const patternsMap = new Map<string, KeyPatternData>();
@@ -240,6 +244,7 @@ export class CommandExecutor {
       scanned,
       patterns: Array.from(patternsMap.values()),
       keyDetails: pruneKeyDetails(keyDetails),
+      db,
     });
   }
 }

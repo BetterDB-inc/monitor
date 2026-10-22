@@ -58,7 +58,7 @@ Supported data types:
 | list | `LRANGE` in 1,000-element chunks | `RPUSH` to temp key, then `RENAME` | Lua `RENAME` + `PEXPIRE` |
 | set | `SMEMBERS` or `SSCAN` (>10 K) | `SADD` to temp key, then `RENAME` | Lua `RENAME` + `PEXPIRE` |
 | sorted set | `ZRANGE` or `ZSCAN` (>10 K) | `ZADD` to temp key, then `RENAME` | Lua `RENAME` + `PEXPIRE` |
-| stream | `XRANGE` in 1,000-entry chunks | `XADD` to temp key, then `RENAME` | Lua `RENAME` + `PEXPIRE` |
+| stream | `XRANGE` in 1,000-entry chunks, plus `XINFO` / `XPENDING` for groups | `XADD`, `XSETID`, `XGROUP CREATE`, `XCLAIM … FORCE` to temp key, then `RENAME` | Lua `RENAME` + `PEXPIRE` |
 
 Compound types (everything except string) are written to a temporary key first,
 then atomically renamed to the final key. This avoids partial writes if the
@@ -231,6 +231,25 @@ via `HEXPIRETIME`, but **command-mode migration does not transfer per-field
 expirations**. Only the overall key-level TTL is preserved. If the target does
 not support HFE, analysis flags this as a blocking incompatibility.
 
+### Streams and consumer groups
+
+Command mode copies a stream's consumer groups along with its entries: each
+group's last-delivered ID and entries-read counter, its consumers, and its
+pending entries (owner, idle time and delivery count, recreated with
+`XCLAIM … FORCE JUSTID`). The stream's last-generated ID, entries-added and
+max-deleted-entry ID are restored with `XSETID`, so new IDs on the target never
+go backwards. Streams that are empty but still hold groups are migrated too.
+
+A pending entry whose message is not in the copy cannot be recreated: the
+message was trimmed or deleted on the source, or was added and delivered after
+the entries were copied (group state is read after the entries, so on a live
+source this can happen). The migration log lists a `WARN` line with the count
+for that key. On targets older than 7.0, `XSETID` and `XGROUP CREATE` run without
+the 7.0-only counters.
+
+Validation compares each stream's group names and last-delivered IDs as well as
+its length.
+
 ### Large keys
 
 Keys with more than 10,000 elements use cursor-based reads (`HSCAN`, `SSCAN`,
@@ -254,11 +273,12 @@ reported. If the source has custom ACL users missing from the target, analysis
 issues a warning. If the source uses modules not loaded on the target, analysis
 flags a blocking incompatibility.
 
-### DBSIZE accuracy in cluster mode
+### Key counts in cluster mode
 
-`DBSIZE` on a cluster client is sent to a single random node, returning a
-partial count. This means the key count comparison in validation may be
-inaccurate for cluster targets. This is a known limitation.
+Validation sums `DBSIZE` over every master of a cluster source or target, so
+the key count comparison covers the whole dataset. The sample spot-check still
+reads keys from the source connection's node; on a cluster source that is one
+shard's keys.
 
 ### Concurrent writes on the source
 

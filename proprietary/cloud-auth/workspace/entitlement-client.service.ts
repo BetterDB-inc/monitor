@@ -84,7 +84,7 @@ export class EntitlementClientService {
   }
 
   async getMembers(tenantId: string) {
-    return this.request<any[]>(`/users/by-tenant/${tenantId}`);
+    return this.request<any[]>(`/users/by-tenant/${encodeURIComponent(tenantId)}`);
   }
 
   async createInvitation(data: { tenantId: string; email: string; role: string; invitedBy: string }) {
@@ -98,10 +98,17 @@ export class EntitlementClientService {
     return this.request<any[]>(`/invitations?tenantId=${encodeURIComponent(tenantId)}`);
   }
 
-  async revokeInvitation(id: string) {
-    return this.request<any>(`/invitations/${id}`, {
-      method: 'DELETE',
-    });
+  /**
+   * tenantId is required: entitlement's delete-by-id acts on ANY tenant's
+   * invitation (the only guard is the shared admin bearer every tenant pod
+   * holds), so an unscoped call from a pod is a cross-tenant mutation
+   * (GHSA-2rwf-9ffp-8pf2). The server 404s on a tenant mismatch.
+   */
+  async revokeInvitation(id: string, tenantId: string) {
+    return this.request<any>(
+      `/invitations/${encodeURIComponent(id)}?tenantId=${encodeURIComponent(tenantId)}`,
+      { method: 'DELETE' },
+    );
   }
 
   async checkInvitation(email: string, tenantId?: string) {
@@ -112,17 +119,25 @@ export class EntitlementClientService {
     return this.request<any>(url);
   }
 
-  async acceptInvitation(id: string, userId: string) {
-    return this.request<any>(`/invitations/${id}/accept`, {
+  async acceptInvitation(id: string, userId: string, tenantId?: string) {
+    const query = tenantId ? `?tenantId=${encodeURIComponent(tenantId)}` : '';
+    return this.request<any>(`/invitations/${encodeURIComponent(id)}/accept${query}`, {
       method: 'POST',
       body: JSON.stringify({ userId }),
     });
   }
 
-  async deleteUser(userId: string) {
-    return this.request<any>(`/users/${userId}`, {
-      method: 'DELETE',
-    });
+  /**
+   * tenantId is required: entitlement's delete-by-id acts on ANY tenant's
+   * user (the only guard is the shared admin bearer every tenant pod holds),
+   * so an unscoped call from a pod is a cross-tenant deletion
+   * (GHSA-2rwf-9ffp-8pf2). The server 404s on a tenant mismatch.
+   */
+  async deleteUser(userId: string, tenantId: string) {
+    return this.request<any>(
+      `/users/${encodeURIComponent(userId)}?tenantId=${encodeURIComponent(tenantId)}`,
+      { method: 'DELETE' },
+    );
   }
 
   async listValkeyInstances(tenantId: string) {
@@ -140,13 +155,13 @@ export class EntitlementClientService {
 
   async getValkeyInstanceCredentials(id: string, tenantId: string) {
     return this.request<any>(
-      `/valkey-instances/${id}/credentials?tenantId=${encodeURIComponent(tenantId)}`,
+      `/valkey-instances/${encodeURIComponent(id)}/credentials?tenantId=${encodeURIComponent(tenantId)}`,
     );
   }
 
   async deleteValkeyInstance(id: string, tenantId: string) {
     return this.request<any>(
-      `/valkey-instances/${id}?tenantId=${encodeURIComponent(tenantId)}`,
+      `/valkey-instances/${encodeURIComponent(id)}?tenantId=${encodeURIComponent(tenantId)}`,
       { method: 'DELETE' },
     );
   }

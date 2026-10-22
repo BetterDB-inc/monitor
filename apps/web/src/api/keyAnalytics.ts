@@ -4,27 +4,34 @@ import type { KeyPatternSnapshot, KeyAnalyticsSummary, PatternTrend, HotKeyEntry
 export type { KeyPatternSnapshot, KeyAnalyticsSummary, PatternTrend, HotKeyEntry, KeySizeDistribution };
 
 export const keyAnalyticsApi = {
-  getSummary: (startTime?: number, endTime?: number) => {
+  getSummary: (startTime?: number, endTime?: number, db?: number) => {
     const params = new URLSearchParams();
     if (startTime) params.append('startTime', startTime.toString());
     if (endTime) params.append('endTime', endTime.toString());
+    if (db !== undefined) params.append('db', db.toString());
     const query = params.toString();
     return fetchApi<KeyAnalyticsSummary>(query ? `/key-analytics/summary?${query}` : '/key-analytics/summary');
   },
 
-  getPatterns: (options?: { pattern?: string; startTime?: number; endTime?: number; limit?: number }) => {
+  getPatterns: (options?: { pattern?: string; startTime?: number; endTime?: number; limit?: number; db?: number }) => {
     const params = new URLSearchParams();
     if (options?.pattern) params.append('pattern', options.pattern);
     if (options?.startTime) params.append('startTime', options.startTime.toString());
     if (options?.endTime) params.append('endTime', options.endTime.toString());
     if (options?.limit) params.append('limit', options.limit.toString());
+    if (options?.db !== undefined) params.append('db', options.db.toString());
     const query = params.toString();
     return fetchApi<KeyPatternSnapshot[]>(query ? `/key-analytics/patterns?${query}` : '/key-analytics/patterns');
   },
 
-  getPatternTrends: (pattern: string, startTime: number, endTime: number) => {
+  getPatternTrends: (pattern: string, startTime: number, endTime: number, db?: number) => {
     const params = new URLSearchParams({ pattern, startTime: startTime.toString(), endTime: endTime.toString() });
+    if (db !== undefined) params.append('db', db.toString());
     return fetchApi<PatternTrend[]>(`/key-analytics/trends?${params}`);
+  },
+
+  getDatabases: () => {
+    return fetchApi<number[]>('/key-analytics/databases');
   },
 
   triggerCollection: (deep?: boolean) => {
@@ -36,35 +43,38 @@ export const keyAnalyticsApi = {
     return fetchApi<KeySizeDistribution>('/key-analytics/key-sizes');
   },
 
-  getLargestKeys: (options?: { limit?: number; startTime?: number; endTime?: number; latest?: boolean; oldest?: boolean }) => {
+  getLargestKeys: (options?: { limit?: number; startTime?: number; endTime?: number; latest?: boolean; oldest?: boolean; db?: number }) => {
     const params = new URLSearchParams();
     if (options?.limit) params.append('limit', options.limit.toString());
     if (options?.startTime) params.append('startTime', options.startTime.toString());
     if (options?.endTime) params.append('endTime', options.endTime.toString());
     if (options?.latest !== undefined) params.append('latest', options.latest ? 'true' : 'false');
     if (options?.oldest) params.append('oldest', 'true');
+    if (options?.db !== undefined) params.append('db', options.db.toString());
     const query = params.toString();
     return fetchApi<HotKeyEntry[]>(query ? `/key-analytics/largest-keys?${query}` : '/key-analytics/largest-keys');
   },
 
-  getCompositeKeys: (options?: { limit?: number; startTime?: number; endTime?: number; latest?: boolean; oldest?: boolean }) => {
+  getCompositeKeys: (options?: { limit?: number; startTime?: number; endTime?: number; latest?: boolean; oldest?: boolean; db?: number }) => {
     const params = new URLSearchParams();
     if (options?.limit) params.append('limit', options.limit.toString());
     if (options?.startTime) params.append('startTime', options.startTime.toString());
     if (options?.endTime) params.append('endTime', options.endTime.toString());
     if (options?.latest !== undefined) params.append('latest', options.latest ? 'true' : 'false');
     if (options?.oldest) params.append('oldest', 'true');
+    if (options?.db !== undefined) params.append('db', options.db.toString());
     const query = params.toString();
     return fetchApi<HotKeyEntry[]>(query ? `/key-analytics/composite-keys?${query}` : '/key-analytics/composite-keys');
   },
 
-  getHotKeys: (options?: { limit?: number; startTime?: number; endTime?: number; latest?: boolean; oldest?: boolean }) => {
+  getHotKeys: (options?: { limit?: number; startTime?: number; endTime?: number; latest?: boolean; oldest?: boolean; db?: number }) => {
     const params = new URLSearchParams();
     if (options?.limit) params.append('limit', options.limit.toString());
     if (options?.startTime) params.append('startTime', options.startTime.toString());
     if (options?.endTime) params.append('endTime', options.endTime.toString());
     if (options?.latest) params.append('latest', 'true');
     if (options?.oldest) params.append('oldest', 'true');
+    if (options?.db !== undefined) params.append('db', options.db.toString());
     const query = params.toString();
     return fetchApi<HotKeyEntry[]>(query ? `/key-analytics/hot-keys?${query}` : '/key-analytics/hot-keys');
   },

@@ -266,6 +266,13 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_instantaneous_output_kbps` | `betterdb.net.output_rate` | `KiBy/s` |
 | `betterdb_pubsub_channels` | `betterdb.pubsub.channels` | `{channel}` |
 | `betterdb_pubsub_patterns` | `betterdb.pubsub.patterns` | `{pattern}` |
+| `betterdb_key_pattern_memory_bytes` | `betterdb.key_pattern.memory.total` | `By` |
+| `betterdb_key_pattern_avg_memory_bytes` | `betterdb.key_pattern.memory.avg` | `By` |
+| `betterdb_key_pattern_max_memory_bytes` | `betterdb.key_pattern.memory.max` | `By` |
+| `betterdb_key_pattern_keys` | `betterdb.key_pattern.keys` | `{key}` |
+| `betterdb_key_memory_bytes` | `betterdb.key.memory` | `By` |
+| `betterdb_key_cardinality` | `betterdb.key.cardinality` | `{element}` |
+| `betterdb_keysize_bucket_keys` | `betterdb.keysizes.bucket.keys` | `{key}` |
 | `betterdb_repl_output_buffer_ratio` | `betterdb.replication.output_buffer_ratio` | `1` |
 | `betterdb_master_link_up` | `betterdb.replication.master_link_up` | `1` |
 | `betterdb_master_last_io_seconds_ago` | `betterdb.replication.master_last_io_age` | `s` |
@@ -312,6 +319,7 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_anomaly_by_severity` | `betterdb.anomaly.by_severity` | `{event}` |
 | `betterdb_anomaly_by_metric` | `betterdb.anomaly.by_metric` | `{event}` |
 | `betterdb_correlated_groups_total` | `betterdb.anomaly.correlated_groups` | `{group}` |
+| `betterdb_detector_config_updates_total` | `betterdb.anomaly.detector_config_updates` | `{update}` |
 | `betterdb_correlated_groups_by_severity` | `betterdb.anomaly.correlated_groups_by_severity` | `{group}` |
 | `betterdb_correlated_groups_by_pattern` | `betterdb.anomaly.correlated_groups_by_pattern` | `{group}` |
 | `betterdb_anomaly_buffer_ready` | `betterdb.anomaly.buffer.ready` | `1` |

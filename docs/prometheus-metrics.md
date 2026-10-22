@@ -26,6 +26,7 @@ Complete reference for all metrics exposed by BetterDB Monitor at the `/api/prom
   - [CPU Metrics](#cpu-metrics)
   - [Replication Metrics](#replication-metrics)
   - [Keyspace Metrics](#keyspace-metrics)
+  - [Key Size Metrics](#key-size-metrics)
   - [Persistence Metrics](#persistence-metrics)
   - [Cluster Metrics](#cluster-metrics)
   - [Anomaly Detection Metrics](#anomaly-detection-metrics)
@@ -50,7 +51,7 @@ All custom metrics are prefixed with `betterdb_`. Standard Node.js process metri
 Sentinel connections are not polled for INFO series (the keyspace and INFO pollers skip them), so a Sentinel seed has no `betterdb_*` series of its own in the scrape. The data nodes it auto-registers are exported like any other connection. See [Sentinel auto-registration](sentinel-auto-registration.md).
 
 **Scrape Interval**: Recommended 15s
-**Metrics Update**: Metrics are computed on-demand during each scrape
+**Metrics Update**: `INFO`-based metrics are refreshed by a background poller every `PROMETHEUS_POLL_INTERVAL_MS` (a scrape older than that triggers one bounded refresh); ACL audit and client analytics gauges are served from in-memory values maintained by their own collectors, never computed during a scrape
 
 ## Export Profiles
 
@@ -137,8 +138,8 @@ The `full` column starts from the INFO-derived series: the `vitals` families plu
 
 | Family                                                                                   | Series | Present when                                                                                    |
 | ---------------------------------------------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------- |
-| `betterdb_acl_denied`                                                                    | 1      | ACL audit data is stored                                                                        |
-| `betterdb_client_connections_current`, `betterdb_client_connections_peak`                | 2      | client snapshots are stored                                                                     |
+| `betterdb_acl_denied`                                                                    | 1      | the audit poller has completed an ACL LOG poll for the connection                               |
+| `betterdb_client_connections_current`, `betterdb_client_connections_peak`                | 2      | the client analytics aggregator has run for the connection (within one aggregator run, 15 seconds, of startup) |
 | `betterdb_slowlog_length`, `betterdb_slowlog_last_id`                                    | 2      | the slowlog is readable                                                                         |
 | `betterdb_commandlog_large_request`, `betterdb_commandlog_large_reply`                   | 2      | the server supports COMMANDLOG (Valkey 8.1+)                                                    |
 | `betterdb_cluster_stats_messages_crc_mismatch`                                           | 1      | cluster mode, when the server reports it                                                        |
@@ -166,9 +167,12 @@ A family marked **removed** tracks only its current label values: a value that d
 | `betterdb_inference_bucket_p50_us`, `_p95_us`, `_p99_us`, `betterdb_inference_unhealthy`     | 4 × (2 + I′) | One `read` bucket, one `write` bucket, and one `FT.SEARCH:<index>` bucket for each of the I′ indexes that appear in the slowlog or COMMANDLOG window.                         | removed      |
 | `betterdb_inference_sla_breach`                                                              | ≤ I          | One per index with an SLA configured.                                                                                                                                         | removed      |
 | `betterdb_metric_forecast_time_to_limit_seconds`                                             | ≤ 4          | The four forecast metric kinds.                                                                                                                                               | removed      |
+| `betterdb_key_pattern_memory_bytes`, `_avg_memory_bytes`, `_max_memory_bytes`, `betterdb_key_pattern_keys` | 4 × P        | P is `METRICS_KEY_PATTERNS_TOP_N` (default 100, `0` disables): the top `(pattern, db)` series by total memory from the latest key analytics run (a pattern in several logical databases is several series, each carrying a `db` label). Pro connections only.                       | removed      |
+| `betterdb_key_memory_bytes`, `betterdb_key_cardinality`                                      | 2 × K        | K is `METRICS_KEY_DETAILS_TOP_N` (default 10, maximum 50, `0` disables): the top tracked keys by memory, each a `(key, type, db)` series. Key names become label values. Pro connections only.                  | removed      |
+| `betterdb_keysize_bucket_keys`                                                               | D × T × B    | One series per populated database (D) × data type (T, ≤ 6) × log2 bucket (B, ≤ 64) from `INFO keysizes`. Only on Redis 8.0+ (no Valkey version emits it).                      | removed      |
 | `betterdb_acl_denied_by_reason`                                                              | ≤ 4          | The ACL LOG reasons: `auth`, `command`, `key`, `channel`.                                                                                                                     | zeroed       |
 | `betterdb_acl_denied_by_user`                                                                | U            | Distinct usernames seen in ACL audit data since BetterDB started.                                                                                                             | zeroed       |
-| `betterdb_client_connections_by_name`, `betterdb_client_connections_by_user`                 | K + L        | Distinct client names (K) and users (L) seen in client snapshots since BetterDB started.                                                                                      | zeroed       |
+| `betterdb_client_connections_by_name`, `betterdb_client_connections_by_user`                 | K + L        | Distinct client names (K) and users (L) that have been inside the client analytics window (`CLIENT_ANALYTICS_WINDOW_MS`, default 24 hours) at any point since BetterDB started.| zeroed       |
 | `betterdb_slowlog_pattern_count`, `_avg_duration_us`, `_percentage`                          | 3 × S        | S is the number of distinct command/key patterns seen since start. Each poll reads the latest 128 slowlog entries, so one poll adds at most 128.                              | zeroed       |
 | `betterdb_commandlog_large_request_by_pattern`, `betterdb_commandlog_large_reply_by_pattern` | Q + Q′       | Q and Q′ are the distinct large-request and large-reply patterns seen since start. Each poll reads the latest 128 entries of each type, so one poll adds at most 128 to each. | zeroed       |
 | `betterdb_anomaly_events_total` (counter)                                                    | ≤ 240        | 3 severities × 40 metric types × 2 anomaly types.                                                                                                                             | counter      |
@@ -181,11 +185,13 @@ Patterns are fingerprinted before they become label values. Each key segment is 
 - **Full slot coverage.** With `METRICS_SLOT_STATS_TOP_N=16384`, one cluster connection exports 65,536 slot series. At the default of 100 it exports at most 400.
 - **Pattern churn.** Fingerprinting does not catch short, non-hex dynamic segments such as `session:ab12x` or `user:alice`. Each distinct key then becomes its own pattern. A workload like this can add up to 128 new slowlog patterns per poll. On servers with COMMANDLOG (Valkey 8.1+) it can also add up to 128 new large-request and 128 new large-reply patterns per poll. Because the pattern families are zeroed rather than removed, over the process lifetime they are bounded only by the number of distinct patterns each source has produced since BetterDB started. The client-name and ACL-username families behave the same way when names are generated per session.
 - **Many databases.** A standalone server that uses all 16 databases adds 48 per-db series.
+- **Keysize buckets.** `betterdb_keysize_bucket_keys` has no top-N knob: it is bounded only by the server (populated databases × data types × log2 buckets, up to D × T × B ≈ 6,144 series for a 16-database Redis 8 connection using every type and bucket; a single-db instance typically emits a few dozen). The only mitigations are `METRICS_EXPORT_PROFILE=vitals` or `metric_relabel_configs`.
 
 If a worst case applies, use one of these:
 
 - Switch to `METRICS_EXPORT_PROFILE=vitals`, which drops every variable family.
 - Lower `METRICS_SLOT_STATS_TOP_N`.
+- Lower `METRICS_KEY_PATTERNS_TOP_N` or `METRICS_KEY_DETAILS_TOP_N` (either can be `0` to drop its family; per-key is the riskier one since key names become label values).
 - Drop the pattern families with `metric_relabel_configs`.
 
 ### Worked example
@@ -221,6 +227,8 @@ The total with `full` is 55 + 5 × 263 + 2 × 667 = **2,704 series**. Add up to 
 
 The same fleet under `vitals` exports 55 + 5 × 33 + 2 × 39 = **298 series**, and that number does not change with key count, database count, pattern churn or cluster size.
 
+On Pro deployments with key analytics running, add the [Key Size Metrics](#key-size-metrics) families per owning connection: up to 4 × `METRICS_KEY_PATTERNS_TOP_N` + 2 × `METRICS_KEY_DETAILS_TOP_N` series (420 at the defaults — more than the example's entire standalone per-connection budget), plus the keysize bucket series on Redis 8.0+ (see Worst cases above). All three families are dropped under `vitals`.
+
 The OTLP export in `semconv` mode (see [OpenTelemetry export modes](opentelemetry.md#export-modes)) carries the same series under different names, split into one resource per node, minus `betterdb_keyspace_keys`, `betterdb_keyspace_keys_expiring` and `betterdb_poll_duration_seconds`. The counts above are therefore upper bounds for it too.
 
 ## Metrics Categories
@@ -235,6 +243,8 @@ Track ACL denied events captured from the monitored Valkey/Redis instance.
 | `betterdb_acl_denied_by_reason` | gauge | `reason`   | ACL denied events by reason (auth, command, key, channel) | `15`    |
 | `betterdb_acl_denied_by_user`   | gauge | `username` | ACL denied events by username                             | `8`     |
 
+These are all-time totals over the stored ACL audit data. They are computed by the audit poller (every `AUDIT_POLL_INTERVAL_MS`, default 60s) after a poll that saves new ACL entries, and at least every 10 minutes otherwise so entries removed by the retention sweep stop being counted, and held in memory; a scrape reads that cached value and never queries the audit table. The values therefore move at most once per audit poll, not once per scrape.
+
 **Cardinality Warning**: `betterdb_acl_denied_by_user` cardinality scales with number of unique usernames experiencing failures.
 
 ### Client Analytics Metrics
@@ -244,12 +254,14 @@ Monitor client connection patterns and trends.
 | Metric                                | Type  | Labels        | Description                                      | Example |
 | ------------------------------------- | ----- | ------------- | ------------------------------------------------ | ------- |
 | `betterdb_client_connections_current` | gauge | -             | Current number of client connections             | `127`   |
-| `betterdb_client_connections_peak`    | gauge | -             | Peak connections in retention period             | `256`   |
+| `betterdb_client_connections_peak`    | gauge | -             | Peak connections within the rollup retention (default 90 days) | `256`   |
 | `betterdb_client_connections_by_name` | gauge | `client_name` | Current connections by client name               | `12`    |
 | `betterdb_client_connections_by_user` | gauge | `user`        | Current connections by ACL user                  | `25`    |
 | `betterdb_connected_clients`          | gauge | -             | Number of client connections (from INFO clients) | `127`   |
 | `betterdb_blocked_clients`            | gauge | -             | Clients blocked on BLPOP, BRPOP, etc             | `2`     |
 | `betterdb_tracking_clients`           | gauge | -             | Clients being tracked for client-side caching    | `5`     |
+
+The `betterdb_client_connections_*` gauges come from a background aggregator that folds client snapshots into 5-minute rollups every 15 seconds and keeps the latest stats per connection in memory. A scrape reads that value and performs no client analytics storage I/O. `betterdb_client_connections_current`, `_by_name` and `_by_user` reflect the newest snapshot batch. `betterdb_client_connections_peak` is the headline peak over the whole rollup retention (`CLIENT_ANALYTICS_ROLLUP_RETENTION_DAYS`, default 90 days), read from each 5-minute rollup's stored peak rather than from raw snapshots, so it stays cheap however long the retention is. The unique name, user and IP counts, the average connection age and the per-name and per-user figures in `GET /client-analytics/stats` cover the last `CLIENT_ANALYTICS_WINDOW_MS` (default 24 hours) instead of all stored history: computing them over all history has to scan every stored snapshot on each refresh, which on large `client_snapshots` tables made scrapes time out. With a window, the cost grows with the window, not the table. These series are absent for a connection until the aggregator's first run for it (within one aggregator run, 15 seconds, of startup); a window that holds no snapshots reports 0. After downtime the aggregator jumps over the gap with one indexed lookup and folds the newest snapshots in its first run, so the series reflect the newest snapshots within one run instead of reading 0 while it catches up. If CLIENT LIST becomes unavailable for a connection, no new snapshots are folded, but the window keeps advancing (so the counts fall to 0 once it holds no snapshots) and old rollups are still pruned.
 
 **Cardinality Warning**: Label-based metrics scale with unique client names and usernames.
 
@@ -411,9 +423,32 @@ Per-database key statistics.
 | `betterdb_keyspace_keys`          | gauge | -      | Total keys across all databases              | `125000` |
 | `betterdb_keyspace_keys_expiring` | gauge | -      | Keys with an expiration across all databases | `45000`  |
 
-**Label Example**: `db="db0"`, `db="db1"`
+**Label Example**: `db="0"`, `db="1"` — the bare logical-database index (not `db0`), consistent with the key-analytics and keysize families so a PromQL join on `db` across all of them matches.
 
 **Externally monitored (OTLP-push) connections**: `betterdb_db_keys_expiring` is exported for databases whose expiry count was pushed, and `betterdb_db_avg_ttl_seconds` for databases whose average TTL was pushed. Each is omitted, never reported as 0, when its value was not pushed. `betterdb_keyspace_keys_expiring` is omitted when no database pushed an expiry count.
+
+### Key Size Metrics
+
+Key memory per pattern, per tracked key, and the whole-keyspace size distribution. Two data sources with different cadences:
+
+- The **pattern and per-key gauges** come from the latest key analytics run (a Pro feature; the collector runs every `KEY_ANALYTICS_INTERVAL_MS`, default 5 minutes). Values hold between runs. When no run newer than 3× the collector interval exists for a connection — feature disabled, managed service, non-owning topology member, collector stopped — the series are removed, never zero-filled. The exporter re-reads the stored run every 30 seconds.
+- **`betterdb_keysize_bucket_keys`** reads `INFO keysizes` directly (server-maintained; Redis 8.0+ — no Valkey version emits the section yet), refreshed every 30 seconds. Servers without the section export no series. Cluster members are monitored as their own connections, so these series are per node; the pattern and per-key gauges live under the label of the connection that owns key analytics — a standalone connection, a cluster seed, or the **current sentinel primary** (after a failover the series move to the new primary's `connection` label).
+
+| Metric                                  | Type  | Labels                          | Description                                                                        | Example   |
+| --------------------------------------- | ----- | ------------------------------- | ---------------------------------------------------------------------------------- | --------- |
+| `betterdb_key_pattern_memory_bytes`     | gauge | `pattern`, `db`                 | Estimated total memory of keys matching pattern in a logical database, extrapolated from the sampled keys of the latest run (not the raw sampled sum) | `1048576` |
+| `betterdb_key_pattern_avg_memory_bytes` | gauge | `pattern`, `db`                 | Average per-key memory across the sampled keys matching pattern in a logical database                   | `1024`    |
+| `betterdb_key_pattern_max_memory_bytes` | gauge | `pattern`, `db`                 | Largest single-key memory among the sampled keys matching pattern in a logical database                 | `65536`   |
+| `betterdb_key_pattern_keys`             | gauge | `pattern`, `db`                 | Estimated keys matching pattern in a logical database (extrapolated from the sample)                    | `1000`    |
+| `betterdb_key_memory_bytes`             | gauge | `key`, `type`, `db`             | Memory of a single tracked key (the collector's tracked keys ranked by memory; a huge-by-memory key the collector did not track may be absent) | `65536`   |
+| `betterdb_key_cardinality`              | gauge | `key`, `type`, `db`             | Elements in a tracked collection key, or byte length for strings                   | `4000`    |
+| `betterdb_keysize_bucket_keys`          | gauge | `db`, `type`, `metric`, `bucket` | Keys per `INFO keysizes` bucket; `metric="sizes"` is byte length, `"items"` is element count. Per node, so with several connections (or auto-registered replicas) selected the counts sum across nodes — select a single connection for a true per-server distribution. `type` is normalized to the singular form (`string`, `hash`, …) and `db` to the bare logical-database index (`0`, `1`, … — not `db0`), so both join with the per-pattern (`pattern`, `db`) and per-key (`key`, `type`, `db`) families | `655`     |
+
+**Cardinality bounds**: pattern series are capped at the top `METRICS_KEY_PATTERNS_TOP_N` patterns by total memory (default 100, `0` disables them). Per-key series are capped at the top `METRICS_KEY_DETAILS_TOP_N` keys by memory (default 10, maximum 50, `0` disables only the per-key family). Per-key series put raw key names in the `key` label — keep the cap conservative, or disable the family, if key names embed user identifiers. Bucket series are bounded by the server: one per populated database × data type × log2 bucket.
+
+**Sampling note**: pattern memory and key counts are extrapolated from a sample (`sampled value / sampling ratio`), so on a keyspace larger than the sample they are estimates, not exact totals. `*_avg_memory_bytes` and `*_max_memory_bytes` describe only the sampled keys.
+
+**Label Example**: `pattern="user:*"`, `key="user:1:profile"`, `type="hash"`, `db="0"`, `metric="sizes"`, `bucket="16K"`
 
 ### Persistence Metrics
 
@@ -458,12 +493,13 @@ Real-time anomaly detection system metrics.
 
 #### Event Metrics
 
-| Metric                            | Type    | Labels                                    | Description                        | Example |
-| --------------------------------- | ------- | ----------------------------------------- | ---------------------------------- | ------- |
-| `betterdb_anomaly_events_total`   | counter | `severity`, `metric_type`, `anomaly_type` | Total anomaly events detected      | `42`    |
-| `betterdb_anomaly_events_current` | gauge   | `severity`                                | Unresolved anomalies by severity   | `3`     |
-| `betterdb_anomaly_by_severity`    | gauge   | `severity`                                | Anomalies in last hour by severity | `12`    |
-| `betterdb_anomaly_by_metric`      | gauge   | `metric_type`                             | Anomalies in last hour by metric   | `8`     |
+| Metric                                   | Type    | Labels                                    | Description                                               | Example |
+| ---------------------------------------- | ------- | ----------------------------------------- | --------------------------------------------------------- | ------- |
+| `betterdb_anomaly_events_total`          | counter | `severity`, `metric_type`, `anomaly_type` | Total anomaly events detected                             | `42`    |
+| `betterdb_anomaly_events_current`        | gauge   | `severity`                                | Unresolved anomalies by severity                          | `3`     |
+| `betterdb_anomaly_by_severity`           | gauge   | `severity`                                | Anomalies in last hour by severity                        | `12`    |
+| `betterdb_anomaly_by_metric`             | gauge   | `metric_type`                             | Anomalies in last hour by metric                          | `8`     |
+| `betterdb_detector_config_updates_total` | counter | -                                         | Anomaly detector threshold updates that changed stored config (PATCH, DELETE, reset). No-op requests are not counted. | `3`     |
 
 **Label Values**:
 
@@ -521,7 +557,7 @@ BetterDB Monitor application health metrics.
 
 **Service Values**: Names of polling services (audit, client-analytics, metrics, etc.)
 
-**Staleness**: If a connection has no successful `INFO` read within `PROMETHEUS_STALENESS_MS` (default: 3 × `PROMETHEUS_POLL_INTERVAL_MS`), all of its gauge series are removed from the exposition and from the OTLP mirror. A dead or wedged connection then shows up as a gap instead of a flat line. Counters and `betterdb_poll_stale` stay, so `betterdb_poll_stale == 1` tells a stale connection apart from one that was never collected. The anomaly summary gauges (`betterdb_anomaly_events_current`, `betterdb_anomaly_by_severity`, `betterdb_anomaly_by_metric`, `betterdb_correlated_groups_by_severity`, `betterdb_correlated_groups_by_pattern`) are the exception: they describe recorded anomalies rather than the last poll, so they stay while the connection is stale. INFO-based series return on the next successful poll; series owned by other collectors (commandstats and inference latency refresh every 60s, the vector index every 30s) return on their own refresh cycle instead. Deleting a connection removes its gauge series on the next poll cycle, not immediately, and a connection whose `host:port` changes has the series under its old label removed the same way. For an OTLP-push connection the clock starts only once its pushed data goes stale: its series keep their last pushed values for `OTEL_METRICS_STALE_AFTER_MS` (default 5 minutes) after the last push, then disappear after the staleness bound.
+**Staleness**: If a connection has no successful `INFO` read within `PROMETHEUS_STALENESS_MS` (default: 3 × `PROMETHEUS_POLL_INTERVAL_MS`), all of its gauge series are removed from the exposition and from the OTLP mirror. A dead or wedged connection then shows up as a gap instead of a flat line. Counters and `betterdb_poll_stale` stay, so `betterdb_poll_stale == 1` tells a stale connection apart from one that was never collected. The anomaly summary gauges (`betterdb_anomaly_events_current`, `betterdb_anomaly_by_severity`, `betterdb_anomaly_by_metric`, `betterdb_correlated_groups_by_severity`, `betterdb_correlated_groups_by_pattern`) are the exception: they describe recorded anomalies rather than the last poll, so they stay while the connection is stale. INFO-based series return on the next successful poll; series owned by other collectors (commandstats and inference latency refresh every 60s, the vector index every 30s) return on their own refresh cycle instead. `betterdb_poll_stale` reflects `INFO` reachability only. The storage-based refresh (ACL audit and client analytics gauges) runs separately and cannot delay `INFO` polls or the scrape response, so a slow storage backend no longer marks a connection stale; if that refresh overruns a poll tick, a warning is logged once per connection per 5 minutes. The client analytics gauges are absent until the aggregator's first run (within 15 seconds of startup). Deleting a connection removes its gauge series on the next poll cycle, not immediately, and a connection whose `host:port` changes has the series under its old label removed the same way. For an OTLP-push connection the clock starts only once its pushed data goes stale: its series keep their last pushed values for `OTEL_METRICS_STALE_AFTER_MS` (default 5 minutes) after the last push, then disappear after the staleness bound.
 
 **Alerting note**: this is a behaviour change — alert rules that test a gauge's value directly (e.g. `betterdb_inference_unhealthy == 1`) will now resolve when a connection dies or is removed, since the series disappears instead of holding its last value. Alert on `betterdb_poll_stale == 1` as well to catch that case.
 
@@ -793,6 +829,31 @@ betterdb_anomaly_by_severity{severity!="info"} > 10
 for: 30m
 ```
 
+**BetterDBKeyMemoryGrowth** - A tracked key ballooning in size (requires Pro key analytics; 104857600 = 100 MiB growth over an hour — tune to your workload)
+
+```promql
+delta(max_over_time(betterdb_key_memory_bytes[15m])[1h:5m]) > 104857600
+for: 10m
+```
+
+> This is a growth rule, matching the name: the inner `max_over_time[15m]`
+> smooths a single key's series, and the outer `delta(...[1h:5m])` measures how
+> much it grew over the last hour — so it fires on a key that *balloons*, not on
+> one that is merely large. (For a static "this key is too big" alert instead,
+> drop the `delta` and compare `max_over_time(betterdb_key_memory_bytes[15m])`
+> to an absolute threshold, and rename it, e.g. `BetterDBLargeKey`.)
+>
+> It alerts on `betterdb_key_memory_bytes` (a specific tracked key), not
+> `betterdb_key_pattern_max_memory_bytes`: on a keyspace larger than the sample
+> the pattern max is the largest key *among the sampled keys of one run*, so each
+> run can pick a different key and the value jumps with no real growth.
+>
+> Because `delta()` is the difference between the first and last samples *within
+> the window*, a key that simply enters the tracked top-N at a steady large size
+> has a delta near zero and does not trip this rule — only actual growth within
+> the window does. To also catch keys that are already large but not growing, use
+> the absolute-size variant above (`BetterDBLargeKey`).
+
 ### Info Alerts
 
 **BetterDBAnomalyDetectionWarming** - Anomaly detection system warming up
@@ -882,7 +943,7 @@ If cardinality becomes an issue, consider:
 - Setting `METRICS_EXPORT_PROFILE=vitals` for a fixed, bounded series budget per connection regardless of key count, database count, or cluster size
 - Aggregating client names using `relabel_configs` in Prometheus
 - Filtering specific labels using `metric_relabel_configs`
-- Reducing retention period for client analytics data
+- Lowering `CLIENT_ANALYTICS_WINDOW_MS`, since the client name and user label values come from that window
 
 ## Troubleshooting
 

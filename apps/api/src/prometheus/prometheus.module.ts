@@ -9,6 +9,8 @@ import { CommandLogAnalyticsModule } from '../commandlog-analytics/commandlog-an
 import { HealthModule } from '../health/health.module';
 import { MetricForecastingModule } from '../metric-forecasting/metric-forecasting.module';
 import { ClusterModule } from '../cluster/cluster.module';
+import { ClientAnalyticsRollupModule } from '../client-analytics/client-analytics-rollup.module';
+import { AuditStatsModule } from '../audit/audit-stats.module';
 
 @Module({
   imports: [
@@ -19,6 +21,8 @@ import { ClusterModule } from '../cluster/cluster.module';
     forwardRef(() => HealthModule),
     MetricForecastingModule,
     ClusterModule,
+    ClientAnalyticsRollupModule,
+    AuditStatsModule,
   ],
   controllers: [PrometheusController],
   providers: [PrometheusService, PrometheusMetricsGuard],

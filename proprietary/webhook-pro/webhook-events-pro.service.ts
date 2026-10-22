@@ -3,6 +3,8 @@ import { WebhookDispatcherService } from '@app/webhooks/webhook-dispatcher.servi
 import {
   WebhookEventType,
   type CveCriticalDetectedData,
+  type KvCacheEvictionRiskData,
+  type KvCacheHitRateLowData,
   type LatencyRegressionDetectedData,
   type MetricKind,
   type ScalingReadinessLowData,
@@ -68,19 +70,19 @@ export class WebhookEventsProService implements OnModuleInit {
       return;
     }
 
-    await this.webhookDispatcher.dispatchThresholdAlert(
+    await this.webhookDispatcher.dispatchThresholdAlertPerWebhook(
       WebhookEventType.SLOWLOG_THRESHOLD,
       'slowlog_threshold',
       data.slowlogCount,
-      data.threshold,
+      'slowlogCount',
       true, // isAbove
-      {
+      (threshold) => ({
         slowlogCount: data.slowlogCount,
-        threshold: data.threshold,
-        message: `Slowlog count (${data.slowlogCount}) exceeds threshold (${data.threshold})`,
+        threshold,
+        message: `Slowlog count (${data.slowlogCount}) exceeds threshold (${threshold})`,
         timestamp: data.timestamp,
         instance: data.instance,
-      },
+      }),
       data.connectionId,
     );
   }
@@ -102,20 +104,20 @@ export class WebhookEventsProService implements OnModuleInit {
       return;
     }
 
-    await this.webhookDispatcher.dispatchThresholdAlert(
+    await this.webhookDispatcher.dispatchThresholdAlertPerWebhook(
       WebhookEventType.REPLICATION_LAG,
       'replication_lag',
       data.lagSeconds,
-      data.threshold,
+      'replicationLagSeconds',
       true, // isAbove
-      {
+      (threshold) => ({
         lagSeconds: data.lagSeconds,
-        threshold: data.threshold,
+        threshold,
         masterLinkStatus: data.masterLinkStatus,
-        message: `Replication lag (${data.lagSeconds}s) exceeds threshold (${data.threshold}s)`,
+        message: `Replication lag (${data.lagSeconds}s) exceeds threshold (${threshold}s)`,
         timestamp: data.timestamp,
         instance: data.instance,
-      },
+      }),
       data.connectionId,
     );
   }
@@ -426,7 +428,7 @@ export class WebhookEventsProService implements OnModuleInit {
 
     await this.webhookDispatcher.dispatchThresholdAlert(
       WebhookEventType.LATENCY_SPIKE,
-      'latency_spike',
+      `latency_spike:${data.connectionId ?? 'default'}`,
       data.currentLatency,
       data.threshold,
       true, // isAbove
@@ -461,7 +463,7 @@ export class WebhookEventsProService implements OnModuleInit {
 
     await this.webhookDispatcher.dispatchThresholdAlert(
       WebhookEventType.CONNECTION_SPIKE,
-      'connection_spike',
+      `connection_spike:${data.connectionId ?? 'default'}`,
       data.currentConnections,
       data.threshold,
       true, // isAbove
@@ -542,6 +544,47 @@ export class WebhookEventsProService implements OnModuleInit {
         message: `Scaling readiness ${data.score} dropped to ${data.threshold} or below: ${data.summary}`,
         timestamp: data.timestamp,
         instance: data.instance,
+      },
+      data.connectionId,
+    );
+  }
+
+  async dispatchKvCacheHitRateLow(data: KvCacheHitRateLowData): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.log('KV cache hit rate low event skipped - requires PRO license');
+      return;
+    }
+    await this.webhookDispatcher.dispatchThresholdAlert(
+      WebhookEventType.KV_CACHE_HIT_RATE_LOW,
+      `kv_cache_hit_rate_low:${data.engineId}:${data.model}`,
+      data.hitRate,
+      data.threshold,
+      false,
+      {
+        ...data,
+        message: `LMCache hit rate for ${data.model} on ${data.engineName} is ${(data.hitRate * 100).toFixed(1)}% (threshold ${(data.threshold * 100).toFixed(1)}%)`,
+      },
+      data.connectionId,
+    );
+  }
+
+  async dispatchKvCacheEvictionRisk(data: KvCacheEvictionRiskData): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.log('KV cache eviction risk event skipped - requires PRO license');
+      return;
+    }
+    await this.webhookDispatcher.dispatchThresholdAlert(
+      WebhookEventType.KV_CACHE_EVICTION_RISK,
+      `kv_cache_eviction_risk:${data.connectionId}:${data.reason}`,
+      data.active ? 1 : 0,
+      1,
+      true,
+      {
+        ...data,
+        message:
+          data.reason === 'unevictable'
+            ? `LMCache keys have no TTL under ${data.policy}; Valkey cannot evict them`
+            : 'Valkey is evicting keys while LMCache holds most of its memory',
       },
       data.connectionId,
     );

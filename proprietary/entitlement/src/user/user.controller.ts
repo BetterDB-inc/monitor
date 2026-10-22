@@ -5,6 +5,7 @@ import {
   Delete,
   Body,
   Param,
+  Query,
   UseGuards,
   ValidationPipe,
   NotFoundException,
@@ -38,16 +39,14 @@ export class UserController {
   }
 
   @Get(':id')
-  async getUser(@Param('id') id: string) {
-    const user = await this.userService.getUser(id);
-    if (!user) {
-      throw new NotFoundException(`User ${id} not found`);
-    }
-    return user;
+  getUser(@Param('id') id: string, @Query('tenantId') tenantId?: string) {
+    // Scope to the caller's workspace so a tenant can't read another
+    // tenant's user record by id.
+    return this.userService.getUserForTenant(id, tenantId);
   }
 
   @Delete(':id')
-  deleteUser(@Param('id') id: string) {
-    return this.userService.deleteUser(id);
+  deleteUser(@Param('id') id: string, @Query('tenantId') tenantId?: string) {
+    return this.userService.deleteUser(id, tenantId);
   }
 }

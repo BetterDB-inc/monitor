@@ -36,13 +36,15 @@ const cache = new SemanticCache({
 });
 
 // Mock judge: accepts if the response contains key words from the prompt.
-// Replace this with a real LLM call in production.
+// Replace this with a real LLM call in production; pass input.signal to your
+// HTTP client (fetch, OpenAI/Anthropic SDK) so timeout cancels the request.
 async function mockJudge(input: {
   prompt: string;
   response: string;
   similarity: number;
   threshold: number;
   category: string | undefined;
+  signal: AbortSignal;
 }): Promise<boolean> {
   const promptWords = new Set(input.prompt.toLowerCase().split(/\W+/).filter(Boolean));
   const responseWords = input.response.toLowerCase().split(/\W+/).filter(Boolean);

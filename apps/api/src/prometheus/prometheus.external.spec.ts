@@ -135,6 +135,21 @@ describe('PrometheusService external connections', () => {
       { dispatchThresholdAlertPerWebhook } as unknown as WebhookDispatcherService,
       undefined,
       { dispatchComplianceAlert } as unknown as IWebhookEventsEnterpriseService,
+      undefined,
+      undefined,
+      undefined,
+      // Storage-fed gauges come from the aggregator / audit-poller caches.
+      {
+        getLatestStats: jest.fn().mockReturnValue({
+          currentConnections: 0,
+          peakConnections: 0,
+          connectionsByName: {},
+          connectionsByUser: {},
+        }),
+      } as never,
+      {
+        get: jest.fn().mockReturnValue({ totalEntries: 0, entriesByReason: {}, entriesByUser: {} }),
+      } as never,
     );
     jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
     jest.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
@@ -500,6 +515,10 @@ describe('PrometheusService external connections', () => {
       directInfo.mockResolvedValue({ memory: { used_memory: '900', maxmemory: '1000' } });
       push({ 'memory.used_memory': '900', 'memory.maxmemory': '1000' });
 
+      await service.getMetrics();
+      // The scrape awaits INFO only; storage-fed series land once the
+      // background storage refresh settles, and the next scrape serves them.
+      await service.flushStorageRefreshes();
       const text = await service.getMetrics();
 
       expect(complianceConnectionIds()).toEqual(['direct-1']);
@@ -514,6 +533,8 @@ describe('PrometheusService external connections', () => {
       service['clientConnectionsPeak'].labels(EXT_LABEL).set(9);
       push({ 'memory.used_memory': '1024' });
 
+      await service.getMetrics();
+      await service.flushStorageRefreshes();
       expectNoLiveAnalyticsSeries(await service.getMetrics());
     });
 
@@ -529,6 +550,8 @@ describe('PrometheusService external connections', () => {
       state.currentClientUserLabels = new Set(['bob']);
       push({ 'memory.used_memory': '1024' });
 
+      await service.getMetrics();
+      await service.flushStorageRefreshes();
       const text = await service.getMetrics();
 
       expect(text).not.toMatch(anySeries('acl_denied_by_reason', EXT_LABEL));

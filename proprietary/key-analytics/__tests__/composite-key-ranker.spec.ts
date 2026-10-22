@@ -144,3 +144,29 @@ describe('rankCompositeKeys', () => {
     ).toEqual([]);
   });
 });
+
+describe('rankCompositeKeys across logical databases', () => {
+  it('treats the same key name in two databases as two distinct keys', () => {
+    const candidates: CompositeCandidate[] = [
+      candidate({ keyName: 'shared', db: 0, freqScore: 200, cardinality: 5000 }),
+      candidate({ keyName: 'shared', db: 1, freqScore: 100, cardinality: 2500 }),
+    ];
+
+    const ranked = rankCompositeKeys(candidates, 5);
+
+    // Both place on both dimensions independently — no cross-db merge.
+    expect(ranked).toHaveLength(2);
+    expect(ranked.map((r) => [r.keyName, r.db])).toEqual([
+      ['shared', 0],
+      ['shared', 1],
+    ]);
+  });
+
+  it('passes the db through on the ranked entry', () => {
+    const ranked = rankCompositeKeys(
+      [candidate({ keyName: 'hotbig', db: 3, freqScore: 10, cardinality: 10 })],
+      5,
+    );
+    expect(ranked[0].db).toBe(3);
+  });
+});

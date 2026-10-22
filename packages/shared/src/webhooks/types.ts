@@ -3,6 +3,8 @@ export enum WebhookEventType {
   INSTANCE_UP = 'instance.up',
   MEMORY_CRITICAL = 'memory.critical',
   CONNECTION_CRITICAL = 'connection.critical',
+  WRITES_REJECTED = 'writes.rejected',
+  WRITES_RECOVERED = 'writes.recovered',
   ANOMALY_DETECTED = 'anomaly.detected',
   SLOWLOG_THRESHOLD = 'slowlog.threshold',
   LATENCY_SPIKE = 'latency.spike',
@@ -23,6 +25,8 @@ export enum WebhookEventType {
   COMPLIANCE_ALERT = 'compliance.alert',
   METRIC_FORECAST_LIMIT = 'metric_forecast.limit',
   SCALING_READINESS_LOW = 'scaling_readiness.low',
+  KV_CACHE_HIT_RATE_LOW = 'kv_cache.hit_rate_low',
+  KV_CACHE_EVICTION_RISK = 'kv_cache.eviction_risk',
   INFERENCE_SLA_BREACH = 'inference.sla.breach',
   CVE_CRITICAL_DETECTED = 'cve.critical_detected',
   CVE_KEV_DETECTED = 'cve.kev_detected',
@@ -43,6 +47,8 @@ export const FREE_EVENTS: WebhookEventType[] = [
   WebhookEventType.MEMORY_CRITICAL,
   WebhookEventType.CONNECTION_CRITICAL,
   WebhookEventType.CLIENT_BLOCKED,
+  WebhookEventType.WRITES_REJECTED,
+  WebhookEventType.WRITES_RECOVERED,
   WebhookEventType.MONITOR_SESSION_STARTED,
   WebhookEventType.MONITOR_SESSION_COMPLETED,
   WebhookEventType.MONITOR_SESSION_TRUNCATED,
@@ -61,6 +67,8 @@ export const PRO_EVENTS: WebhookEventType[] = [
   WebhookEventType.CONNECTION_SPIKE,
   WebhookEventType.METRIC_FORECAST_LIMIT,
   WebhookEventType.SCALING_READINESS_LOW,
+  WebhookEventType.KV_CACHE_HIT_RATE_LOW,
+  WebhookEventType.KV_CACHE_EVICTION_RISK,
   WebhookEventType.FAILOVER_STARTED,
   WebhookEventType.FAILOVER_COMPLETED,
   WebhookEventType.DATA_LOSS_DETECTED,
@@ -87,6 +95,7 @@ export const ENTERPRISE_EVENTS: WebhookEventType[] = [
 import { Tier } from '../license/types';
 import type { CveWebhookFindingSummary } from '../types/cve';
 import type { MetricKind } from '../types/metric-forecasting.types';
+import type { KvCacheEvictionRiskData, KvCacheHitRateLowData } from '../types/kv-cache.types';
 import type { ScalingReadinessLowData } from '../types/scaling-readiness.types';
 export { Tier };
 
@@ -100,6 +109,8 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.MEMORY_CRITICAL]: Tier.community,
   [WebhookEventType.CONNECTION_CRITICAL]: Tier.community,
   [WebhookEventType.CLIENT_BLOCKED]: Tier.community,
+  [WebhookEventType.WRITES_REJECTED]: Tier.community,
+  [WebhookEventType.WRITES_RECOVERED]: Tier.community,
   [WebhookEventType.MONITOR_SESSION_STARTED]: Tier.community,
   [WebhookEventType.MONITOR_SESSION_COMPLETED]: Tier.community,
   [WebhookEventType.MONITOR_SESSION_TRUNCATED]: Tier.community,
@@ -116,6 +127,8 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.CONNECTION_SPIKE]: Tier.pro,
   [WebhookEventType.METRIC_FORECAST_LIMIT]: Tier.pro,
   [WebhookEventType.SCALING_READINESS_LOW]: Tier.pro,
+  [WebhookEventType.KV_CACHE_HIT_RATE_LOW]: Tier.pro,
+  [WebhookEventType.KV_CACHE_EVICTION_RISK]: Tier.pro,
   [WebhookEventType.FAILOVER_STARTED]: Tier.pro,
   [WebhookEventType.FAILOVER_COMPLETED]: Tier.pro,
   [WebhookEventType.DATA_LOSS_DETECTED]: Tier.pro,
@@ -510,6 +523,10 @@ export interface IWebhookEventsProService {
   }): Promise<void>;
 
   dispatchScalingReadinessLow(data: ScalingReadinessLowData): Promise<void>;
+
+  dispatchKvCacheHitRateLow(data: KvCacheHitRateLowData): Promise<void>;
+
+  dispatchKvCacheEvictionRisk(data: KvCacheEvictionRiskData): Promise<void>;
 
   dispatchInferenceSlaBreach(data: {
     indexName: string;

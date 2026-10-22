@@ -64,14 +64,18 @@ Yes! BetterDB automatically detects cluster mode and:
 
 ### Can I run multiple BetterDB instances?
 
-Yes! Self-hosted BetterDB has no instance limits. You can run as many BetterDB monitors as you need.
+Yes! Self-hosted BetterDB has no instance limits. You can run as many BetterDB monitors as you need, each with its own storage database and its own set of Valkey connections (for example one per environment or per team).
+
+Running several instances against the **same** storage database or the **same** Valkey connections is not supported. Every instance runs its own collectors (client snapshots, ACL audit, slowlog, anomaly detection, webhooks), so two instances sharing a database would record every sample twice, fire every alert twice, and race each other when they aggregate history.
 
 ### Does BetterDB support high availability?
 
-For the self-hosted version:
-- BetterDB itself is stateless (state is in PostgreSQL)
-- Run multiple instances behind a load balancer
-- Each instance connects to the same PostgreSQL database
+For the self-hosted version, run a single instance and rely on your platform to restart it:
+- All persistent state lives in PostgreSQL, so a restarted or rescheduled instance resumes where it left off (collectors catch up from their last stored position)
+- Use a Kubernetes Deployment with one replica, or an equivalent restart policy, and the provided health endpoint for liveness checks
+- Back up PostgreSQL as described below; the instance itself holds nothing that needs preserving
+
+Active-active or multi-replica deployments sharing one database are not supported.
 
 ### How do I backup BetterDB data?
 

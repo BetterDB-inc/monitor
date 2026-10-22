@@ -91,14 +91,33 @@ export class InvitationService {
     };
   }
 
-  async accept(invitationId: string, userId: string) {
+  /**
+   * Fetch an invitation scoped to a tenant: 404 if the id does not exist OR
+   * belongs to a different tenant, so a foreign id is indistinguishable from
+   * a missing one. Every id-addressed mutation must go through this —
+   * operating on the bare primary key let any holder of the shared admin
+   * token (every tenant pod) revoke or accept another tenant's invitations
+   * by id (GHSA-2rwf-9ffp-8pf2). Mirrors
+   * ValkeyInstanceService.getInstanceForTenant.
+   *
+   * The scoping check is on `tenantId !== undefined`, not truthiness: a
+   * present-but-empty tenantId (e.g. `?tenantId=`) is a mismatch and 404s,
+   * so only a genuinely absent param grants unscoped admin access. A
+   * truthiness check would let an empty tenantId skip scoping and fail open.
+   */
+  private async getInvitationForTenant(id: string, tenantId?: string) {
     const invitation = await this.prisma.invitation.findUnique({
-      where: { id: invitationId },
+      where: { id },
     });
-
-    if (!invitation) {
+    if (!invitation || (tenantId !== undefined && invitation.tenantId !== tenantId)) {
       throw new NotFoundException('Invitation not found');
     }
+    return invitation;
+  }
+
+  async accept(invitationId: string, userId: string, tenantId?: string) {
+    const invitation = await this.getInvitationForTenant(invitationId, tenantId);
+
     if (invitation.status !== 'pending') {
       throw new BadRequestException(`Invitation is ${invitation.status}`);
     }
@@ -115,14 +134,9 @@ export class InvitationService {
     return updated;
   }
 
-  async revoke(invitationId: string) {
-    const invitation = await this.prisma.invitation.findUnique({
-      where: { id: invitationId },
-    });
+  async revoke(invitationId: string, tenantId?: string) {
+    const invitation = await this.getInvitationForTenant(invitationId, tenantId);
 
-    if (!invitation) {
-      throw new NotFoundException('Invitation not found');
-    }
     if (invitation.status !== 'pending') {
       throw new BadRequestException(`Cannot revoke invitation with status ${invitation.status}`);
     }
