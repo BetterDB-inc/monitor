@@ -260,6 +260,10 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
   betterdb_anomaly_by_severity: gauge('betterdb.anomaly.by_severity', '{event}'),
   betterdb_anomaly_by_metric: gauge('betterdb.anomaly.by_metric', '{event}'),
   betterdb_correlated_groups_total: counter('betterdb.anomaly.correlated_groups', '{group}'),
+  betterdb_detector_config_updates_total: counter(
+    'betterdb.anomaly.detector_config_updates',
+    '{update}',
+  ),
   betterdb_correlated_groups_by_severity: gauge(
     'betterdb.anomaly.correlated_groups_by_severity',
     '{group}',
@@ -275,6 +279,9 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
   betterdb_cve_findings: gauge('betterdb.cve.findings', '{finding}'),
   betterdb_cve_kev: gauge('betterdb.cve.kev', '{finding}'),
   betterdb_cve_dataset_stale: gauge('betterdb.cve.dataset_stale', '1'),
+  betterdb_kv_cache_hit_rate: gauge('betterdb.kv_cache.hit_rate', '1'),
+  betterdb_kv_cache_chunks: gauge('betterdb.kv_cache.chunks', '{chunk}'),
+  betterdb_kv_cache_bytes: gauge('betterdb.kv_cache.bytes', 'By'),
   betterdb_otlp_metric_points_accepted_total: counter('betterdb.otlp.metric_points.accepted', '{point}'),
   betterdb_otlp_metric_points_dropped_total: counter('betterdb.otlp.metric_points.dropped', '{point}'),
   betterdb_process_cpu_user_seconds_total: described(

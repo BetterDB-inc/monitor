@@ -42,6 +42,7 @@ export enum Feature {
   MONITOR_SCHEDULED_CAPTURES = 'monitorScheduledCaptures',
   MONITOR_CAPTURE_DIFF = 'monitorCaptureDiff',
   SCALING_READINESS_HISTORY = 'scalingReadinessHistory',
+  KV_CACHE_MONITORING = 'kvCacheMonitoring',
   // Enterprise-only features
   SSO_SAML = 'ssoSaml',
   COMPLIANCE_EXPORT = 'complianceExport',
@@ -72,6 +73,7 @@ export const TIER_FEATURES: Record<Tier, Feature[]> = {
     Feature.MONITOR_SCHEDULED_CAPTURES,
     Feature.MONITOR_CAPTURE_DIFF,
     Feature.SCALING_READINESS_HISTORY,
+    Feature.KV_CACHE_MONITORING,
   ],
   [Tier.enterprise]: Object.values(Feature),
 };

@@ -20,6 +20,8 @@ import { ENV_DEFAULT_ID } from './connection.constants';
 
 export const CHILD_CONNECT_TIMEOUT_MS = 10_000;
 
+export type ConnectionRemovalListener = (id: string) => void | Promise<void>;
+
 function certificateHint(errorMsg: string, node: DesiredNode): string {
   if (node.hostname !== undefined || !/altnames|ERR_TLS_CERT_ALTNAME_INVALID/i.test(errorMsg)) {
     return '';
@@ -91,6 +93,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   private readonly encryption: EnvelopeEncryptionService | null;
   private startupConnectionErrors: Array<{ name: string; host: string; port: number; error: string }> = [];
   private readonly seedLocks = new Map<string, Promise<unknown>>();
+  private readonly removalListeners = new Set<ConnectionRemovalListener>();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -709,6 +712,27 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     this.discoveredInstances?.forgetPushed(discoveredHost, discoveredPort, Date.now());
   }
 
+  addConnectionRemovalListener(listener: ConnectionRemovalListener): () => void {
+    this.removalListeners.add(listener);
+    return () => {
+      this.removalListeners.delete(listener);
+    };
+  }
+
+  private notifyRemoved(id: string): void {
+    const report = (error: unknown) => {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Connection removal listener failed for ${id}: ${reason}`);
+    };
+    for (const listener of this.removalListeners) {
+      try {
+        void Promise.resolve(listener(id)).catch(report);
+      } catch (error: unknown) {
+        report(error);
+      }
+    }
+  }
+
   async removeConnection(id: string): Promise<void> {
     if (id === ENV_DEFAULT_ID) {
       throw new Error('Cannot remove the default environment connection');
@@ -751,6 +775,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     this.runtimeCapabilityTracker.removeConnection(id);
     this.externalMetricsStore.clear(id);
     await this.storage.deleteConnection(id);
+    this.notifyRemoved(id);
 
     if (removedConfig) {
       this.usageTelemetry?.trackDbRemove({

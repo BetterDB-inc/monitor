@@ -100,6 +100,12 @@ export const envSchema = z
     // Polling intervals
     AUDIT_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(60000),
     CLIENT_ANALYTICS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(60000),
+    // Client analytics rollup aggregator (defaults applied by ClientAnalyticsRollupService).
+    CLIENT_ANALYTICS_WINDOW_MS: z.coerce.number().int().min(60000).optional(),
+    CLIENT_ANALYTICS_ROLLUP_RETENTION_DAYS: z.coerce.number().int().min(1).optional(),
+    // Unset keeps raw client snapshots forever; a positive value prunes older rows.
+    CLIENT_ANALYTICS_RAW_RETENTION_DAYS: z.coerce.number().int().min(1).optional(),
+    CLIENT_ANALYTICS_QUERY_BUDGET_MS: z.coerce.number().int().min(1).optional(),
     AI_OBS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(15000),
     ACTIVITY_RETENTION_DAYS: z
       .string()
@@ -162,6 +168,12 @@ export const envSchema = z
     ANOMALY_POLL_INTERVAL_MS: z.coerce.number().int().min(100).default(1000),
     ANOMALY_CACHE_TTL_MS: z.coerce.number().int().min(1000).default(3600000),
     ANOMALY_PROMETHEUS_INTERVAL_MS: z.coerce.number().int().min(1000).default(30000),
+
+    KV_CACHE_FOOTPRINT_INTERVAL_MS: z.string().optional(),
+    KV_CACHE_SCAN_MAX_KEYS: z.string().optional(),
+    KV_CACHE_MATCH_MAX_KEYS: z.string().optional(),
+    KV_CACHE_SAMPLE_KEYS: z.string().optional(),
+    KV_CACHE_UNDETECTED_RECHECK_MS: z.string().optional(),
 
     // License configuration (optional)
     BETTERDB_LICENSE_KEY: z.string().optional(),

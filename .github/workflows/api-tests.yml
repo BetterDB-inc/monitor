@@ -240,6 +240,8 @@ jobs:
 
       - name: Run API tests
         working-directory: apps/api
+        env:
+          KV_CACHE_IT_VALKEY_PORT: '6390'
         run: pnpm test
 
       - name: Run entitlement unit tests

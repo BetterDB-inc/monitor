@@ -1,3 +1,5 @@
+import { Logger } from '@nestjs/common';
+import { clientRollupBucketStart } from '@betterdb/shared';
 import { LocalRetentionService } from '../local-retention.service';
 import { MS_PER_DAY } from '../retention-policy.service';
 import { runRetentionSweep } from '../retention-sweep';
@@ -16,6 +18,7 @@ describe('LocalRetentionService', () => {
       pruneOldSlowLogEntries: jest.fn().mockResolvedValue(1),
       pruneOldCommandLogEntries: jest.fn().mockResolvedValue(2),
       pruneOldClientSnapshots: jest.fn().mockResolvedValue(0),
+      pruneOldClientAnalyticsRollups: jest.fn().mockResolvedValue(0),
       pruneOldAnomalyEvents: jest.fn().mockResolvedValue(0),
       pruneOldCorrelatedGroups: jest.fn().mockResolvedValue(0),
       pruneOldKeyPatternSnapshots: jest.fn().mockResolvedValue(0),
@@ -26,6 +29,8 @@ describe('LocalRetentionService', () => {
       pruneOldLatencyHistograms: jest.fn().mockResolvedValue(0),
       pruneOldMemorySnapshots: jest.fn().mockResolvedValue(0),
       pruneOldScalingReadinessScores: jest.fn().mockResolvedValue(3),
+      pruneOldKvCacheFootprintSnapshots: jest.fn().mockResolvedValue(4),
+      pruneOldKvCacheEngineSamples: jest.fn().mockResolvedValue(5),
       pruneOldCaptureChunks: jest.fn().mockResolvedValue(0),
       pruneOldCaptureSessions: jest.fn().mockResolvedValue(0),
       pruneOldCaptureTriggers: jest.fn().mockResolvedValue(0),
@@ -67,7 +72,10 @@ describe('LocalRetentionService', () => {
     const expectedCutoff = NOW - 30 * MS_PER_DAY;
     for (const method of Object.keys(storage)) {
       expect(storage[method]).toHaveBeenCalledTimes(1);
-      expect(storage[method]).toHaveBeenCalledWith(expectedCutoff);
+      // Rollups compare bucket_start: the cutoff is aligned down to its bucket.
+      expect(storage[method]).toHaveBeenCalledWith(
+        method === 'pruneOldClientAnalyticsRollups' ? clientRollupBucketStart(expectedCutoff) : expectedCutoff,
+      );
     }
   });
 
@@ -76,6 +84,37 @@ describe('LocalRetentionService', () => {
 
     expect(storage.pruneOldScalingReadinessScores).toHaveBeenCalledWith(1_234);
     expect(results.scaling_readiness_scores).toBe(3);
+  });
+
+  it('reports pruned kv cache rows under their own names', async () => {
+    const results = await runRetentionSweep(storage, 1_234, { error: jest.fn() } as any);
+
+    expect(storage.pruneOldKvCacheFootprintSnapshots).toHaveBeenCalledWith(1_234);
+    expect(storage.pruneOldKvCacheEngineSamples).toHaveBeenCalledWith(1_234);
+    expect(results.kv_cache_footprint_snapshots).toBe(4);
+    expect(results.kv_cache_engine_samples).toBe(5);
+  });
+
+  it('sweeps client analytics rollups so removed connections do not keep them forever', async () => {
+    storage.pruneOldClientAnalyticsRollups.mockResolvedValue(4);
+    const results = await runRetentionSweep(storage, 5_678, { error: jest.fn() } as any);
+
+    // 5_678 lies inside the first bucket: nothing wholly before it, so bucket 0 survives.
+    expect(storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledWith(0);
+    expect(results.client_analytics_rollups).toBe(4);
+  });
+
+  it('keeps the rollup bucket that straddles the cutoff, whose later raw rows survive the raw prune', async () => {
+    const bucketStart = clientRollupBucketStart(NOW);
+    const cutoff = bucketStart + 120_000;
+    const logger = { error: jest.fn() } as unknown as Logger;
+    await runRetentionSweep(storage, cutoff, logger);
+
+    expect(storage.pruneOldClientSnapshots).toHaveBeenCalledWith(cutoff);
+    expect(storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledWith(bucketStart);
+    // An aligned cutoff passes through unchanged.
+    await runRetentionSweep(storage, bucketStart, logger);
+    expect(storage.pruneOldClientAnalyticsRollups).toHaveBeenLastCalledWith(bucketStart);
   });
 
   it('does nothing in cloud mode even when a window is configured', async () => {

@@ -65,6 +65,7 @@ export const DROP_REASONS = [
   'unmapped_metric',
   'invalid_value',
   'cardinality_limit',
+  'unknown_engine',
 ] as const;
 
 export type DropReason = (typeof DROP_REASONS)[number];

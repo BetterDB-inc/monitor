@@ -206,4 +206,13 @@ describe('SpikeDetector', () => {
       expect(config.detectDrops).toBe(false);
     });
   });
+
+  describe('updateConfig', () => {
+    it('preserves detectDrops set at construction', () => {
+      const detector = new SpikeDetector(MetricType.CPU_UTILIZATION, { detectDrops: true });
+      detector.updateConfig({ ...detector.getConfig(), warningZScore: 2.2, detectDrops: false });
+      expect(detector.getConfig().detectDrops).toBe(true);
+      expect(detector.getConfig().warningZScore).toBe(2.2);
+    });
+  });
 });

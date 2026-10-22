@@ -39,6 +39,10 @@ import type {
   ReadinessDimension,
   ReadinessDimensionKey,
   ScalingReadinessSettings,
+  KvCacheEngineSample,
+  KvCacheEngineSource,
+  KvCacheFootprintSnapshot,
+  KvCacheSettings,
 } from '@betterdb/shared';
 export type { MetricForecastSettings, MetricKind } from '@betterdb/shared';
 export type { StoredCveDataset, CveScanResult } from '@betterdb/shared';
@@ -85,7 +89,9 @@ import type {
   AppSettings,
   AuditQueryOptions,
   AuditStats,
+  ClientAnalyticsRollup,
   ClientAnalyticsStats,
+  ClientSnapshotGroupRow,
   ClientSnapshotQueryOptions,
   ClientTimeSeriesPoint,
   DatabaseConnectionConfig,
@@ -403,6 +409,43 @@ export interface ScalingReadinessScoreQuery {
   limit?: number;
 }
 
+export interface StoredKvCacheEngine {
+  id: string;
+  connectionId: string;
+  name: string;
+  source: KvCacheEngineSource;
+  scrapeUrl: string | null;
+  scrapeAuthHeader: string | null;
+  scrapeAuthEncrypted: boolean;
+  otlpEngineId: string | null;
+  enabled: boolean;
+  createdAt: number;
+  lastSeenAt: number | null;
+  lastError: string | null;
+}
+
+export interface KvCacheRangeQuery {
+  connectionId: string;
+  from?: number;
+  to?: number;
+  limit?: number;
+}
+
+export interface KvCacheFootprintQuery extends KvCacheRangeQuery {
+  bucketMs?: number;
+}
+
+export interface KvCacheSampleQuery extends KvCacheRangeQuery {
+  engineId?: string;
+  modelName?: string;
+  bucketMs?: number;
+}
+
+export interface KvCacheSampleTotals {
+  requestedTokens: number;
+  hitTokens: number;
+}
+
 export interface MemorySnapshotQueryOptions {
   connectionId?: string;
   startTime?: number;
@@ -466,6 +509,16 @@ export interface StoragePort {
     bucketSizeMs?: number,
     connectionId?: string,
   ): Promise<ClientTimeSeriesPoint[]>;
+  /**
+   * Aggregate stats over raw client_snapshots rows with captured_at in [startTime, endTime].
+   * Callers must pass both bounds (and normally a connectionId): the read is a single pass over every
+   * matching row, so an unbounded call scans the connection's (or the whole table's) history.
+   * Historical / scrape-time reads should merge rollups instead. Semantics: byName / byUser
+   * track only non-empty values, byUserAndName only pairs where both are non-empty
+   * (keyed `${user}:${name}`); current = count in the latest batch in range; peak = largest
+   * single batch (ties resolve to the earliest captured_at); avgAge = mean over rows;
+   * uniqueIps counts addr up to the first ':'; timeRange is null when no rows match.
+   */
   getClientAnalyticsStats(
     startTime?: number,
     endTime?: number,
@@ -478,6 +531,48 @@ export interface StoragePort {
     connectionId?: string,
   ): Promise<StoredClientSnapshot[]>;
   pruneOldClientSnapshots(olderThanTimestamp: number, connectionId?: string): Promise<number>;
+
+  // Client Analytics Rollups - fed by ClientAnalyticsRollupService, read by Prometheus and the UI.
+  // Every raw read below is bounded by connection and a captured_at range and must be served by the
+  // (connection_id, captured_at) index; none may scan the whole table.
+  /** Oldest and newest captured_at for one connection, or null when it has no rows. */
+  getClientSnapshotBounds(connectionId: string): Promise<{ earliest: number; latest: number } | null>;
+  /**
+   * Smallest captured_at among one connection's rows with captured_at > afterExclusive, or null when
+   * none is newer. A single probe of the (connection_id, captured_at) index; lets the aggregator jump
+   * over an empty gap (monitor downtime) instead of walking it chunk by chunk.
+   */
+  getClientSnapshotNextCapturedAt(connectionId: string, afterExclusive: number): Promise<number | null>;
+  /** Raw rows with captured_at > startExclusive AND captured_at <= endInclusive, grouped by (captured_at, name, user, ip), ordered by captured_at ascending. */
+  getClientSnapshotGroups(
+    connectionId: string,
+    startExclusive: number,
+    endInclusive: number,
+  ): Promise<ClientSnapshotGroupRow[]>;
+  /** Insert or replace whole bucket rows keyed by (connectionId, bucketStart). */
+  upsertClientAnalyticsRollups(rollups: ClientAnalyticsRollup[]): Promise<void>;
+  /** Bucket rows with bucketStart in [startBucket, endBucket] inclusive, ordered by bucketStart then connectionId. Omitting connectionId returns every connection's rows. */
+  getClientAnalyticsRollups(
+    startBucket: number,
+    endBucket: number,
+    connectionId?: string,
+  ): Promise<ClientAnalyticsRollup[]>;
+  /** Newest lastCapturedAt among a connection's bucket rows, or null when it has none. */
+  getClientAnalyticsRollupWatermark(connectionId: string): Promise<number | null>;
+  /** Oldest bucketStart among a connection's bucket rows, or null when it has none. */
+  getClientAnalyticsRollupFloor(connectionId: string): Promise<number | null>;
+  /**
+   * Largest peakConnections among a connection's bucket rows with bucketStart >= sinceBucket, with its
+   * peakCapturedAt; ties resolve to the earliest peakCapturedAt. Null when no row matches. Reads only the
+   * two numeric columns over the primary-key range, never the JSON columns.
+   */
+  getClientAnalyticsRollupPeak(
+    connectionId: string,
+    sinceBucket: number,
+  ): Promise<{ peak: number; capturedAt: number } | null>;
+  pruneOldClientAnalyticsRollups(olderThanBucketStart: number, connectionId?: string): Promise<number>;
+  /** True once the (connection_id, captured_at) index on client_snapshots exists and is valid (always true on adapters that build it synchronously). */
+  isClientSnapshotIndexReady(): Promise<boolean>;
 
   // Anomaly Methods - connectionId required for writes, optional filter for reads
   saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string>;
@@ -541,7 +636,7 @@ export interface StoragePort {
   // Settings Methods (global, not connection-scoped)
   getSettings(): Promise<AppSettings | null>;
   saveSettings(settings: AppSettings): Promise<AppSettings>;
-  updateSettings(updates: SettingsUpdateRequest): Promise<AppSettings>;
+  updateSettings(updates: Partial<AppSettings>): Promise<AppSettings>;
 
   // Webhook Methods - connectionId optional filter for scoping webhooks to connections
   createWebhook(webhook: Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>): Promise<Webhook>;
@@ -615,6 +710,21 @@ export interface StoragePort {
   pruneOldScalingReadinessScores(cutoffTimestamp: number, connectionId?: string): Promise<number>;
   getScalingReadinessSettings(connectionId: string): Promise<ScalingReadinessSettings | null>;
   saveScalingReadinessSettings(settings: ScalingReadinessSettings): Promise<ScalingReadinessSettings>;
+  saveKvCacheFootprintSnapshot(snapshot: KvCacheFootprintSnapshot): Promise<void>;
+  getKvCacheFootprintSnapshots(query: KvCacheFootprintQuery): Promise<KvCacheFootprintSnapshot[]>;
+  pruneOldKvCacheFootprintSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+  saveKvCacheEngineSamples(samples: KvCacheEngineSample[]): Promise<void>;
+  getKvCacheEngineSamples(query: KvCacheSampleQuery): Promise<KvCacheEngineSample[]>;
+  getKvCacheSampleTotals(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): Promise<KvCacheSampleTotals>;
+  pruneOldKvCacheEngineSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+  deleteKvCacheEngineSamples(engineId: string): Promise<void>;
+  saveKvCacheEngine(engine: StoredKvCacheEngine): Promise<StoredKvCacheEngine>;
+  getKvCacheEngines(connectionId?: string): Promise<StoredKvCacheEngine[]>;
+  getKvCacheEngine(id: string): Promise<StoredKvCacheEngine | null>;
+  deleteKvCacheEngine(id: string): Promise<boolean>;
+  getKvCacheSettings(connectionId: string): Promise<KvCacheSettings | null>;
+  saveKvCacheSettings(settings: KvCacheSettings): Promise<KvCacheSettings>;
+  deleteKvCacheConnectionData(connectionId: string): Promise<void>;
 
   // Command Stats Sample Methods - connectionId required for writes
   saveCommandStatsSamples(

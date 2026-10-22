@@ -138,6 +138,25 @@ PostgreSQL instance — with in-memory storage it is lost on every restart.
   `VERSION_CHECK_INTERVAL_MS` environment variable (see
   [Configuration](configuration)).
 
+## Schema changes on large databases
+
+Some releases add indexes or tables. How that affects startup depends on the
+storage backend:
+
+- **PostgreSQL**: new indexes on large history tables are built in the
+  background with `CREATE INDEX CONCURRENTLY` after the API is ready, so
+  startup is not blocked and writes continue during the build. A build cut
+  short by a restart leaves an invalid index that the next startup drops and
+  rebuilds. The startup log reports when each index is ready.
+- **SQLite**: indexes are created during schema setup, before the HTTP server
+  starts listening, at roughly 1.5 seconds per million rows in the table
+  (measured: 15 seconds for 8 million `client_snapshots` rows). The build is
+  a single transaction, so a restart mid-build leaves nothing behind and the
+  next start simply builds it again. On Kubernetes this time counts against
+  the startup probe (the chart allows 150 seconds), not the liveness probe.
+  Only a SQLite database approaching 100 million history rows would need
+  the probe budget raised; at that size PostgreSQL is the better backend.
+
 ## Release notes
 
 Every banner links to the release notes for the target version. You can also

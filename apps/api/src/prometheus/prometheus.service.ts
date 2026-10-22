@@ -34,7 +34,7 @@ import {
   ConnectionContext,
 } from '../common/services/multi-connection-poller';
 import { MetricForecastingService } from '../metric-forecasting/metric-forecasting.service';
-import { ALL_METRIC_KINDS } from '@betterdb/shared';
+import { ALL_METRIC_KINDS, type KvCacheModelFootprint } from '@betterdb/shared';
 import { isCveEnabled } from '../cve/cve.constants';
 import { OtelEventDispatcherService } from '../otel-telemetry/otel-event-dispatcher.service';
 import {
@@ -69,6 +69,8 @@ import {
   resolveSlotStatsTopN,
 } from './export-profile';
 import { DropReason } from '../external-metrics/otlp-metrics-types';
+import { ClientAnalyticsRollupService } from '../client-analytics/client-analytics-rollup.service';
+import { AuditStatsCacheService } from '../audit/audit-stats-cache.service';
 import {
   createWriteRejectionState,
   evaluateWriteRejection,
@@ -77,6 +79,9 @@ import {
 
 /** How long a CONFIG GET of the BGSAVE stop-writes settings stays fresh. */
 const RDB_STOPS_WRITES_TTL_MS = 5 * 60_000;
+
+/** Minimum gap between "storage refresh outran the tick" warnings per connection. */
+const STORAGE_REFRESH_WARN_INTERVAL_MS = 5 * 60_000;
 
 /**
  * Ceiling on the demoted-node read, clamped down to the poll interval when that
@@ -209,6 +214,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private updateMetricsInFlight = new Map<string, Promise<number>>();
   private healthChecksInFlight = new Map<string, Promise<void>>();
   private infoReadsInFlight = new Map<string, Promise<InfoResponse>>();
+  // Per-connection in-flight storage-phase refreshes. Kept apart from the INFO
+  // entry so a slow storage read can never delay the next INFO (and with it the
+  // freshness stamp behind betterdb_poll_stale). Joined, never stacked.
+  private storageRefreshInFlight = new Map<string, Promise<void>>();
+  // Per-connection storage epoch, retired ONLY by connection removal/cleanup —
+  // never by an INFO pass — so concurrent INFO passes cannot make storage
+  // passes drop each other's writes.
+  private storageEpochs = new Map<string, number>();
+  private lastStorageRefreshWarnAt = new Map<string, number>();
 
   // Per-connection pass epoch. Removing a connection or abandoning a pass at
   // its bound retires the epoch, so a reply that lands afterwards is dropped
@@ -348,6 +362,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private anomalyBySeverity: Gauge;
   private anomalyByMetric: Gauge;
   private correlatedGroupsTotal: Counter;
+  private detectorConfigUpdatesTotal: Counter;
   private correlatedGroupsBySeverity: Gauge;
   private correlatedGroupsByPattern: Gauge;
   private anomalyDetectionBufferReady: Gauge;
@@ -361,6 +376,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private cveFindings: Gauge;
   private cveKev: Gauge;
   private cveDatasetStale: Gauge;
+
+  private kvCacheHitRate: Gauge;
+  private kvCacheChunks: Gauge;
+  private kvCacheBytes: Gauge;
+  private readonly kvCacheSeries = new Map<string, { label: string; models: Set<string>; rates: Set<string> }>();
 
   // OTLP Ingest Metrics
   private otlpPointsAccepted: Counter;
@@ -387,6 +407,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     private readonly otelEvents?: OtelEventDispatcherService,
     @Optional()
     private readonly clusterMetricsService?: ClusterMetricsService,
+    @Optional()
+    private readonly clientAnalyticsRollup?: ClientAnalyticsRollupService,
+    @Optional()
+    private readonly auditStatsCache?: AuditStatsCacheService,
   ) {
     super(connectionRegistry);
     this.pollIntervalMs = Number(
@@ -453,10 +477,14 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // connection before the next tick, so stacking a second full bound here
     // would push healthy connections past their own staleness bound.
     const deadline = Date.now() + this.pollIntervalMs;
+    // A refresh already running before this tick has overrun a previous tick:
+    // it is joined by the INFO pass but not waited on again, so persistently
+    // slow storage cannot stretch the INFO cadence.
+    const carriedOver = this.storageRefreshInFlight.get(ctx.connectionId);
     try {
-      // The shared in-flight entry covers both the INFO phase and the
-      // storage phase, so a concurrent scrape joins the whole pass rather
-      // than racing the storage reads after the INFO phase settles.
+      // The in-flight entry covers the INFO phase only; a concurrent scrape
+      // joins it. Its completion kicks off the (separately coalesced) storage
+      // refresh, which this tick then waits on within its remaining budget.
       await this.updateMetricsForConnection(ctx.connectionId);
 
       // Trigger health check on successful metrics update - may fire instance.up webhook if recovered
@@ -465,6 +493,48 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       // Trigger health check on failure - may fire instance.down webhook
       await this.pingHealth(ctx.connectionId, deadline);
       throw error; // Re-throw so base class logs the error
+    }
+    // Outside the try: a slow storage phase is not a connection failure and
+    // must never take the health "failure" path INFO errors take.
+    await this.awaitStorageRefresh(ctx.connectionId, deadline, carriedOver);
+  }
+
+  /**
+   * Wait for the connection's storage refresh up to the tick deadline. On
+   * timeout the refresh keeps running and the next tick joins it.
+   */
+  private async awaitStorageRefresh(
+    connectionId: string,
+    deadline: number,
+    carriedOver: Promise<void> | undefined,
+  ): Promise<void> {
+    const refresh = this.storageRefreshInFlight.get(connectionId);
+    if (refresh === undefined || refresh === carriedOver) {
+      return;
+    }
+    const budgetMs = deadline - Date.now();
+    if (budgetMs <= 0) {
+      return;
+    }
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = await Promise.race([
+      refresh.then(() => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(true), budgetMs);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (!timedOut) {
+      return;
+    }
+    const now = Date.now();
+    const lastWarned = this.lastStorageRefreshWarnAt.get(connectionId);
+    if (lastWarned === undefined || now - lastWarned >= STORAGE_REFRESH_WARN_INTERVAL_MS) {
+      this.lastStorageRefreshWarnAt.set(connectionId, now);
+      this.logger.warn(
+        `Storage-based metrics refresh for ${connectionId} is still running at the end of the ` +
+          `${this.pollIntervalMs}ms poll tick; INFO metrics are unaffected and the refresh is joined next tick`,
+      );
     }
   }
 
@@ -1003,6 +1073,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       labelNames: ['connection', 'pattern', 'severity'],
       registers: [this.registry],
     });
+    this.detectorConfigUpdatesTotal = new Counter({
+      name: 'betterdb_detector_config_updates_total',
+      help: 'Successful anomaly detector threshold config updates',
+      registers: [this.registry],
+    });
     this.anomalyEventsCurrent = this.createGauge('anomaly_events_current', 'Unresolved anomalies', [
       'severity',
     ]);
@@ -1064,6 +1139,20 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       'Whether the CVE scan is partial or sources are missing: 1 stale, 0 ok',
     );
 
+    this.kvCacheHitRate = this.createGauge(
+      'kv_cache_hit_rate',
+      'LMCache token hit rate over the last 15 minutes',
+      ['connection_id', 'engine', 'model'],
+    );
+    this.kvCacheChunks = this.createGauge('kv_cache_chunks', 'Estimated LMCache chunks stored', [
+      'connection_id',
+      'model',
+    ]);
+    this.kvCacheBytes = this.createGauge('kv_cache_bytes', 'Estimated bytes held by LMCache keys', [
+      'connection_id',
+      'model',
+    ]);
+
     // OTLP Ingest Metrics
     this.otlpPointsAccepted = new Counter({
       name: 'betterdb_otlp_metric_points_accepted_total',
@@ -1103,14 +1192,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const connections = this.connectionRegistry.list();
     const connectedConnections = connections.filter((c) => c.isConnected && !this.isSentinelConnection(c.id));
 
-    // Update both INFO-based and storage-based metrics for all connections.
+    // Refresh INFO-based metrics for all connections; the scrape awaits only
+    // the INFO phase and serves whatever storage-fed gauges the registry holds.
     // Connections refresh concurrently so a wedged node costs the pass one
     // bounded read instead of one per connection.
     await Promise.allSettled(
       connectedConnections.map(async (conn) => {
         try {
-          // One coalesced entry covers INFO + storage; a poll already in
-          // flight for this connection is joined rather than duplicated.
+          // A poll already in flight for this connection is joined rather
+          // than duplicated.
           await this.updateMetricsForConnection(conn.id);
         } catch (error) {
           this.logger.warn(
@@ -1126,9 +1216,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
    */
   private async updateStorageBasedMetricsForConnection(
     connectionId: string,
-    epoch: number = this.currentEpoch(connectionId),
+    epoch: number = this.currentStorageEpoch(connectionId),
   ): Promise<void> {
-    if (this.isSuperseded(connectionId, epoch)) {
+    if (this.isStorageSuperseded(connectionId, epoch)) {
       return;
     }
     if (this.freshness.isStale(connectionId, Date.now())) {
@@ -1141,22 +1231,31 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
     const state = this.getConnectionState(connectionId);
 
+    // Besides the storage epoch, every step re-checks that the per-connection
+    // state object and label are still the ones this pass started with (the
+    // same identity checks updateCveMetrics applies), so a pass that outlives
+    // a removal + re-add cannot write into the replacement's state.
+    const stillOwned = (): boolean =>
+      !this.isStorageSuperseded(connectionId, epoch) &&
+      this.perConnectionState.get(connectionId) === state &&
+      this.getConnectionLabel(connectionId) === connLabel;
+
     if (this.isExternalConnection(connectionId)) {
       this.removeLiveAnalyticsSeries(connLabel, state);
     } else {
       await this.updateAclMetrics(connectionId, connLabel, state, epoch);
-      if (this.isSuperseded(connectionId, epoch)) return;
+      if (!stillOwned()) return;
       await this.updateClientMetrics(connectionId, connLabel, state, epoch);
-      if (this.isSuperseded(connectionId, epoch)) return;
+      if (!stillOwned()) return;
       await this.updateKeyAnalyticsMetrics(connectionId, connLabel, state, epoch);
-      if (this.isSuperseded(connectionId, epoch)) return;
+      if (!stillOwned()) return;
     }
     await this.updateSlowlogMetrics(connectionId, connLabel, state);
-    if (this.isSuperseded(connectionId, epoch)) return;
+    if (!stillOwned()) return;
     await this.updateCommandlogMetrics(connectionId, connLabel, state);
-    if (this.isSuperseded(connectionId, epoch)) return;
+    if (!stillOwned()) return;
     await this.updateMetricForecastMetrics(connectionId, connLabel, epoch);
-    if (this.isSuperseded(connectionId, epoch)) return;
+    if (!stillOwned()) return;
     await this.updateCveMetrics(connectionId, connLabel);
   }
 
@@ -1291,10 +1390,88 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
   }
 
+  setKvCacheFootprint(connectionId: string, perModel: KvCacheModelFootprint[]): void {
+    const series = this.kvCacheSeriesFor(connectionId);
+    if (!series) return;
+    const totals = new Map<string, { chunks: number; bytes: number | null }>();
+    for (const entry of perModel) {
+      const total = totals.get(entry.model) ?? { chunks: 0, bytes: 0 };
+      total.chunks += entry.chunksEst;
+      total.bytes = total.bytes === null || entry.bytesEst === null ? null : total.bytes + entry.bytesEst;
+      totals.set(entry.model, total);
+    }
+    for (const model of series.models) {
+      if (!totals.has(model)) {
+        this.kvCacheChunks.remove(series.label, connectionId, model);
+        this.kvCacheBytes.remove(series.label, connectionId, model);
+      }
+    }
+    for (const [model, total] of totals) {
+      this.kvCacheChunks.labels(series.label, connectionId, model).set(total.chunks);
+      if (total.bytes === null) this.kvCacheBytes.remove(series.label, connectionId, model);
+      else this.kvCacheBytes.labels(series.label, connectionId, model).set(total.bytes);
+    }
+    series.models = new Set(totals.keys());
+  }
+
+  setKvCacheHitRates(
+    connectionId: string,
+    rates: Array<{ engine: string; model: string; hitRate: number }>,
+  ): void {
+    const series = this.kvCacheSeriesFor(connectionId);
+    if (!series) return;
+    const next = new Set(rates.map((rate) => `${rate.engine}\u0000${rate.model}`));
+    for (const key of series.rates) {
+      if (!next.has(key)) {
+        const [engine, model] = key.split('\u0000');
+        this.kvCacheHitRate.remove(series.label, connectionId, engine, model);
+      }
+    }
+    for (const rate of rates) {
+      this.kvCacheHitRate.labels(series.label, connectionId, rate.engine, rate.model).set(rate.hitRate);
+    }
+    series.rates = next;
+  }
+
+  clearAllKvCache(): void {
+    for (const connectionId of [...this.kvCacheSeries.keys()]) this.clearKvCache(connectionId);
+  }
+
+  clearKvCache(connectionId: string): void {
+    const series = this.kvCacheSeries.get(connectionId);
+    if (!series) return;
+    this.kvCacheSeries.delete(connectionId);
+    for (const model of series.models) {
+      this.kvCacheChunks.remove(series.label, connectionId, model);
+      this.kvCacheBytes.remove(series.label, connectionId, model);
+    }
+    for (const key of series.rates) {
+      const [engine, model] = key.split('\u0000');
+      this.kvCacheHitRate.remove(series.label, connectionId, engine, model);
+    }
+  }
+
+  private kvCacheSeriesFor(
+    connectionId: string,
+  ): { label: string; models: Set<string>; rates: Set<string> } | null {
+    const label = this.getConnectionLabel(connectionId);
+    if (label === null) return null;
+    const existing = this.kvCacheSeries.get(connectionId);
+    if (existing && existing.label !== label) {
+      this.clearKvCache(connectionId);
+    }
+    let series = this.kvCacheSeries.get(connectionId);
+    if (!series) {
+      series = { label, models: new Set(), rates: new Set() };
+      this.kvCacheSeries.set(connectionId, series);
+    }
+    return series;
+  }
+
   private async updateMetricForecastMetrics(
     connectionId: string,
     connLabel: string,
-    epoch: number = this.currentEpoch(connectionId),
+    epoch: number = this.currentStorageEpoch(connectionId),
   ): Promise<void> {
     if (!this.metricForecastingService) return;
 
@@ -1303,7 +1480,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     for (const metricKind of ALL_METRIC_KINDS) {
       try {
         const settings = await this.storage.getMetricForecastSettings(connectionId, metricKind);
-        if (this.isSuperseded(connectionId, epoch)) {
+        if (this.isStorageSuperseded(connectionId, epoch)) {
           return;
         }
         if (!settings || !settings.enabled) {
@@ -1312,7 +1489,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         }
 
         const forecast = await this.metricForecastingService.getForecast(connectionId, metricKind);
-        if (this.isSuperseded(connectionId, epoch)) {
+        if (this.isStorageSuperseded(connectionId, epoch)) {
           return;
         }
         if (forecast.ceiling === null || !forecast.enabled) {
@@ -1339,22 +1516,23 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   /**
-   * Run — and coalesce — a full metrics pass for ONE connection: the INFO
-   * phase followed by the storage phase, under a single in-flight entry.
+   * Run — and coalesce — the INFO phase of a metrics pass for ONE connection,
+   * then start (without awaiting) the connection's storage refresh.
    *
    * Two independent entry points reach here — the background poller
-   * (pollConnection) and the /metrics scrape (updateMetrics). Coalescing both
-   * phases onto one promise closes two distinct races:
-   *   - Concurrent INFO: a poll and a scrape running getClusterInfo() at once,
-   *     where an older response completing last would move
-   *     state.previousCrcMismatch backward and re-emit the same
-   *     cluster.bus.corruption delta on the next poll.
-   *   - Mid-storage retirement: when callers ran the storage phase themselves
-   *     (outside the tracked promise), a scraper at a cadence <= pollIntervalMs
-   *     whose storage reads outran the gap would start a new pass that retires
-   *     the running pass's epoch mid-storage, and the two would supersede each
-   *     other forever. Folding storage inside the entry keeps retireEpoch
-   *     unreachable while any phase of the pass is still running.
+   * (pollConnection) and the /metrics scrape (updateMetrics). Coalescing the
+   * INFO phase onto one promise closes the concurrent-INFO race: a poll and a
+   * scrape running getClusterInfo() at once, where an older response
+   * completing last would move state.previousCrcMismatch backward and re-emit
+   * the same cluster.bus.corruption delta on the next poll.
+   *
+   * The storage phase runs outside this entry, under its own coalesced
+   * in-flight promise (startStorageRefresh) and its own epoch that only
+   * connection removal retires. That closes the mid-storage-retirement race
+   * (a new INFO pass retiring a running storage pass's epoch so that passes
+   * drop each other's writes forever) without letting a slow storage read hold
+   * the INFO entry: the next INFO can always start on time, so the freshness
+   * stamp — and betterdb_poll_stale — depends on INFO replies alone.
    */
   private updateMetricsForConnection(connectionId: string): Promise<number> {
     const existing = this.updateMetricsInFlight.get(connectionId);
@@ -1365,31 +1543,66 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // this pass is abandoned cannot write metrics behind a newer pass.
     this.retireEpoch(connectionId);
     const epoch = this.currentEpoch(connectionId);
+    // Captured now: a removal during the INFO phase must stop this pass from
+    // starting storage work for the (possibly re-added) connection.
+    const storageEpoch = this.currentStorageEpoch(connectionId);
     const run: Promise<number> = (async () => {
-      // The timeout bounds the INFO phase ONLY: a hung INFO releases the
-      // in-flight entry when the bound expires (otherwise the entry would
-      // outlive every later pass and no connection would ever be re-read). The
-      // storage phase is deliberately left unbounded by this race — the base
-      // poller already waits for every connection before the next tick, and
-      // each storage read carries its own supersede/freshness guards.
+      // A hung INFO releases the in-flight entry when the bound expires
+      // (otherwise the entry would outlive every later pass and no connection
+      // would ever be re-read).
       await this.readWithTimeout(
         this.runUpdateMetricsForConnection(connectionId, epoch),
         this.pollIntervalMs,
         `INFO update for ${connectionId}`,
       );
-      await this.updateStorageBasedMetricsForConnection(connectionId, epoch);
+      if (!this.isStorageSuperseded(connectionId, storageEpoch)) {
+        void this.startStorageRefresh(connectionId);
+      }
       return epoch;
     })().finally(() => {
-      // Compare-and-delete: only clear the entry once the FULL pass settles and
-      // only if it is still ours. If the connection was removed
-      // (cleanupConnectionMetrics) or re-added with a fresh in-flight update
-      // while this one ran, we must not evict that newer entry.
+      // Compare-and-delete: only clear the entry if it is still ours. If the
+      // connection was removed (cleanupConnectionMetrics) or re-added with a
+      // fresh in-flight update while this one ran, we must not evict that
+      // newer entry.
       if (this.updateMetricsInFlight.get(connectionId) === run) {
         this.updateMetricsInFlight.delete(connectionId);
       }
     });
     this.updateMetricsInFlight.set(connectionId, run);
     return run;
+  }
+
+  /**
+   * Start the storage-based metrics refresh for a connection, or join the one
+   * already running (refreshes never stack). The returned promise never
+   * rejects.
+   */
+  private startStorageRefresh(connectionId: string): Promise<void> {
+    const existing = this.storageRefreshInFlight.get(connectionId);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const storageEpoch = this.currentStorageEpoch(connectionId);
+    const run: Promise<void> = (async () => {
+      try {
+        await this.updateStorageBasedMetricsForConnection(connectionId, storageEpoch);
+      } catch (error) {
+        this.logger.warn(
+          `Storage-based metrics refresh failed for ${connectionId}: ${error instanceof Error ? error.message : error}`,
+        );
+      }
+    })().finally(() => {
+      if (this.storageRefreshInFlight.get(connectionId) === run) {
+        this.storageRefreshInFlight.delete(connectionId);
+      }
+    });
+    this.storageRefreshInFlight.set(connectionId, run);
+    return run;
+  }
+
+  /** Test hook: wait for every storage refresh currently in flight to settle. */
+  async flushStorageRefreshes(): Promise<void> {
+    await Promise.allSettled([...this.storageRefreshInFlight.values()]);
   }
 
   private readInfo(connectionId: string, client: DatabasePort): Promise<InfoResponse> {
@@ -1418,6 +1631,18 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   private isSuperseded(connectionId: string, epoch: number): boolean {
     return this.currentEpoch(connectionId) !== epoch;
+  }
+
+  private currentStorageEpoch(connectionId: string): number {
+    return this.storageEpochs.get(connectionId) ?? 0;
+  }
+
+  private retireStorageEpoch(connectionId: string): void {
+    this.storageEpochs.set(connectionId, this.currentStorageEpoch(connectionId) + 1);
+  }
+
+  private isStorageSuperseded(connectionId: string, epoch: number): boolean {
+    return this.currentStorageEpoch(connectionId) !== epoch;
   }
 
   private async runUpdateMetricsForConnection(
@@ -2409,11 +2634,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     connectionId: string,
     connLabel: string,
     state: ConnectionMetricState,
-    epoch: number = this.currentEpoch(connectionId),
+    epoch: number = this.currentStorageEpoch(connectionId),
   ): Promise<void> {
     try {
-      const stats = await this.storage.getAuditStats(undefined, undefined, connectionId);
-      if (this.isSuperseded(connectionId, epoch)) {
+      // Computed by the AuditService poller; the scrape never aggregates the
+      // ACL table. Nothing cached yet: leave the series and label state alone.
+      const stats = this.auditStatsCache?.get(connectionId) ?? null;
+      if (stats === null || this.isStorageSuperseded(connectionId, epoch)) {
         return;
       }
 
@@ -2454,11 +2681,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     connectionId: string,
     connLabel: string,
     state: ConnectionMetricState,
-    epoch: number = this.currentEpoch(connectionId),
+    epoch: number = this.currentStorageEpoch(connectionId),
   ): Promise<void> {
     try {
-      const stats = await this.storage.getClientAnalyticsStats(undefined, undefined, connectionId);
-      if (this.isSuperseded(connectionId, epoch)) {
+      // The rollup aggregator's in-memory window; the scrape never aggregates
+      // client_snapshots. Nothing aggregated yet: leave gauges and state alone.
+      const stats = this.clientAnalyticsRollup?.getLatestStats(connectionId) ?? null;
+      if (stats === null || this.isStorageSuperseded(connectionId, epoch)) {
         return;
       }
 
@@ -2663,7 +2892,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           startTime,
           limit: 1,
         });
-        if (this.isSuperseded(connectionId, epoch)) {
+        if (this.isStorageSuperseded(connectionId, epoch)) {
           // Superseded: nothing written. Leave the refresh throttle unstamped
           // so the superseding pass (or next tick) refreshes immediately.
           return;
@@ -2703,7 +2932,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
               signalTypes: ['cardinality'],
               limit: 1,
             });
-            if (this.isSuperseded(connectionId, epoch)) {
+            if (this.isStorageSuperseded(connectionId, epoch)) {
               return;
             }
             keyDetailsCurrent =
@@ -2729,7 +2958,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
                 endTime: latestTimestamp,
                 limit: KEY_ANALYTICS_FETCH_CAP,
               });
-        if (this.isSuperseded(connectionId, epoch)) {
+        if (this.isStorageSuperseded(connectionId, epoch)) {
           return;
         }
         // Decorate-sort-undecorate: coerce totalMemoryBytes once per row rather
@@ -2793,7 +3022,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           signalTypes: ['cardinality'],
           limit: KEY_ANALYTICS_FETCH_CAP,
         });
-        if (this.isSuperseded(connectionId, epoch)) {
+        if (this.isStorageSuperseded(connectionId, epoch)) {
           return;
         }
         // The Postgres adapter surfaces BIGINT columns as strings, so coerce
@@ -3306,6 +3535,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.pollsTotal.labels(connLabel).inc();
   }
 
+  incrementDetectorConfigUpdates(): void {
+    this.detectorConfigUpdatesTotal.inc();
+  }
+
   updateVectorIndexMetrics(
     connectionId: string,
     indexes: ReadonlyArray<{
@@ -3576,6 +3809,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (cveLabel !== null) {
       this.removeCveSeries(cveLabel);
     }
+    this.clearKvCache(connectionId);
     this.perConnectionState.delete(connectionId);
     this.webhookEventsProService?.clearReplicationLag(connectionId);
     // Drop any in-flight metric update so a reused connection ID cannot join
@@ -3584,7 +3818,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.updateMetricsInFlight.delete(connectionId);
     this.healthChecksInFlight.delete(connectionId);
     this.infoReadsInFlight.delete(connectionId);
+    this.storageRefreshInFlight.delete(connectionId);
+    this.lastStorageRefreshWarnAt.delete(connectionId);
     this.retireEpoch(connectionId);
+    this.retireStorageEpoch(connectionId);
     const label = this.freshness.forget(connectionId);
     if (label !== undefined) {
       this.releaseLabel(label);

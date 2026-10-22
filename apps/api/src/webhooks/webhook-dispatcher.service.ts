@@ -21,6 +21,8 @@ import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { WebhooksService } from './webhooks.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { formatWebhookBody } from './webhook-payload-formatter';
+import { BlockedAddressError, guardedLookup } from '../common/utils/outbound-url-guard';
+import { pinnedRequest } from '../common/utils/pinned-request';
 
 interface AlertState {
   fired: boolean;
@@ -682,6 +684,11 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     return delivery.id;
   }
 
+  private post(url: string, headers: Record<string, string>, body: string, signal: AbortSignal): Promise<Response> {
+    const lookup = process.env.NODE_ENV === 'production' ? guardedLookup({ label: 'webhook URL' }) : undefined;
+    return pinnedRequest(url, { method: 'POST', headers, body, signal, lookup });
+  }
+
   /**
    * Send webhook HTTP request
    * @returns The status for this attempt (SUCCESS only on 2xx).
@@ -730,12 +737,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       try {
-        const response = await fetch(webhook.url, {
-          method: 'POST',
-          headers,
-          body: payloadString,
-          signal: controller.signal,
-        });
+        const response = await this.post(webhook.url, headers, payloadString, controller.signal);
 
         clearTimeout(timeoutId);
 
@@ -746,6 +748,11 @@ export class WebhookDispatcherService implements OnModuleDestroy {
         if (response.ok) {
           status = DeliveryStatus.SUCCESS;
           this.logger.log(`Webhook delivered successfully: ${webhook.id} -> ${webhook.url}`);
+        } else if (statusCode >= 300 && statusCode < 400) {
+          status = DeliveryStatus.FAILED;
+          this.logger.warn(
+            `Webhook delivery redirect not followed (HTTP ${statusCode}): ${webhook.id} -> ${webhook.url}`,
+          );
         } else if (statusCode >= 400 && statusCode < 500) {
           // 4xx errors are client errors - don't retry
           status = DeliveryStatus.FAILED;
@@ -763,7 +770,11 @@ export class WebhookDispatcherService implements OnModuleDestroy {
         clearTimeout(timeoutId);
 
         // Handle specific errors
-        if (fetchError instanceof Error && fetchError.name === 'AbortError') {
+        if (fetchError instanceof BlockedAddressError) {
+          status = DeliveryStatus.FAILED;
+          responseBody = fetchError.message;
+          this.logger.warn(`Webhook delivery blocked: ${webhook.id} -> ${webhook.url}`);
+        } else if (fetchError instanceof Error && fetchError.name === 'AbortError') {
           status = DeliveryStatus.RETRYING;
           responseBody = 'Request timeout';
           this.logger.warn(`Webhook delivery timeout: ${webhook.id} -> ${webhook.url}`);
@@ -920,12 +931,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-      const response = await fetch(webhook.url, {
-        method: 'POST',
-        headers,
-        body: payloadString,
-        signal: controller.signal,
-      });
+      const response = await this.post(webhook.url, headers, payloadString, controller.signal);
 
       clearTimeout(timeoutId);
 
