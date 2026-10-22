@@ -90,10 +90,11 @@ export async function assertSafeOutboundUrl(rawUrl: string, options: OutboundUrl
 
     const isProduction = process.env.NODE_ENV === 'production';
     const host = unmapIpv4(bareHost(parsed.hostname));
-    const isLocalhost = host === 'localhost' || LOOPBACK.some((pattern) => pattern.test(host));
+    const isLocalhost =
+      host === 'localhost' || (isIP(host) !== 0 && LOOPBACK.some((pattern) => pattern.test(host)));
 
     if (isLocalhost && (!isProduction || allowPrivateNetworks)) {
-      logger.debug(`Allowing localhost ${label} in ${process.env.NODE_ENV || 'development'} mode: ${rawUrl}`);
+      logger.debug(`Allowing localhost ${label} in ${process.env.NODE_ENV || 'development'} mode: ${parsed.host}`);
       return parsed;
     }
 

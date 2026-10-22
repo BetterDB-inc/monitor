@@ -100,7 +100,7 @@ export function KvCacheCards({ latest, history, engines, recentHitRate, recentBu
         value={latest ? (bytes === null ? 'Unknown' : formatBytes(bytes)) : '—'}
         subtitle={
           latest
-            ? `${latest.chunksEst.toLocaleString()} per-worker chunks · ${footprintDetails.join(' · ')}`
+            ? [`${latest.chunksEst.toLocaleString()} per-worker chunks`, ...footprintDetails].join(' · ')
             : 'No footprint snapshot yet'
         }
       />
