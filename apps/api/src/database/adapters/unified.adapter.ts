@@ -135,9 +135,6 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   // configured dbIndex, or 0 when its SELECT was rejected and the connection
   // fell back (see doConnect). Null until a connect has run.
   private activeDbIndex: number | null = null;
-  // FalkorDB's "graph" module is loaded (detected with the capabilities). Key
-  // analytics then sizes graphdata keys with GRAPH.* commands; see probeGraphKey.
-  private hasGraphModule: boolean = false;
 
   private createValkeyClient(connectionName: string, db?: number): Valkey {
     return new Valkey({
@@ -456,7 +453,6 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       (info.server ?? info) as Record<string, unknown>,
     );
     if (isSentinel) {
-      this.hasGraphModule = false;
       this.capabilities = {
         dbType: isValkey ? 'valkey' : 'redis',
         version,
@@ -496,8 +492,6 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // Search module not loaded
     }
 
-    this.hasGraphModule = await this.detectGraphModule();
-
     let clusterEnabled = false;
     try {
       const clusterInfo = await this.getInfo(['cluster']);
@@ -523,26 +517,6 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // isSentinel: true, so reaching here means this is not a Sentinel.
       isSentinel: false,
     };
-  }
-
-  // MODULE LIST replies with one flat [name, <name>, ver, <ver>, ...] array per
-  // module. A refused MODULE LIST (ACL, managed service) means no graph sizing.
-  private async detectGraphModule(): Promise<boolean> {
-    try {
-      const modules: unknown = await this.client.call('MODULE', 'LIST');
-      if (!Array.isArray(modules)) return false;
-      return modules.some((entry) => {
-        if (!Array.isArray(entry)) return false;
-        for (let i = 0; i + 1 < entry.length; i += 2) {
-          if (String(entry[i]) === 'name') {
-            return String(entry[i + 1]).toLowerCase() === 'graph';
-          }
-        }
-        return false;
-      });
-    } catch {
-      return false;
-    }
   }
 
   // MEMORY USAGE on a FalkorDB graphdata key sees only the module's key header
@@ -1181,7 +1155,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
               cardinality = num(xlenResult);
               break;
           }
-          if (keyType === 'graphdata' && this.hasGraphModule) {
+          // Only FalkorDB's graph module registers the graphdata type, so TYPE
+          // alone proves the GRAPH.* commands exist.
+          if (keyType === 'graphdata') {
             const graph = await this.probeGraphKey(client, key);
             // A graph under 1 MB reads as 0 MB; keep MEMORY USAGE when larger.
             if (graph.memoryBytes !== null && (mem === null || graph.memoryBytes > mem)) {
