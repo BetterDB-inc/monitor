@@ -75,6 +75,19 @@ describe('NamespaceSetup', () => {
     expect(screen.queryByText('No key matched this pattern.')).not.toBeInTheDocument();
   });
 
+  it('says the sampled key could not be read instead of reporting no match', async () => {
+    api.preview.mockResolvedValue({ sampleKey: 'chat:1', view: null, exhausted: true });
+    render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);
+    fill();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    await waitFor(() =>
+      expect(
+        screen.getByText('Matched chat:1, but it could not be read. It may have expired.'),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText('No key matched this pattern.')).not.toBeInTheDocument();
+  });
+
   it('shows server validation errors inline', async () => {
     api.createNamespace.mockRejectedValue(
       new ApiError('Invalid namespace', 400, {

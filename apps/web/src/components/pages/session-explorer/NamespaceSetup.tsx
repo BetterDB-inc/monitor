@@ -286,9 +286,11 @@ export function NamespaceSetup({ initial, onSaved, onCancel }: Props) {
             </div>
           ) : (
             <p className="text-sm text-muted-foreground">
-              {preview.exhausted
-                ? 'No key matched this pattern.'
-                : 'No matching key in the first 10,000 keys scanned on each node.'}
+              {preview.sampleKey !== null
+                ? `Matched ${preview.sampleKey}, but it could not be read. It may have expired.`
+                : preview.exhausted
+                  ? 'No key matched this pattern.'
+                  : 'No matching key in the first 10,000 keys scanned on each node.'}
             </p>
           ))}
       </CardContent>
