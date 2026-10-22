@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { CapturedKey, KeyView, ParsedMessage, PresetId } from '@betterdb/shared';
 import { createCustomPreset } from '../presets/custom';
-import { getPreset } from '../presets/registry';
+import { getPreset, parseSessionKeys } from '../presets/registry';
 import { decodeValue, estimateTokens } from '../presets/text';
 
 interface Expectation {
@@ -146,9 +146,57 @@ describe('session presets against captured fixtures', () => {
     expect(preset.sessionIdOf('sxfix:ac:session:t1:__checkpoint_latest')).toBe('t1');
     expect(preset.sessionIdOf('sxfix:ac:session:t1:checkpoint:abc')).toBe('t1');
     expect(preset.sessionIdOf('sxfix:ac:session:t1:writes:abc%7Ctask%7Cmessages%7C0')).toBe('t1');
-    expect(preset.sessionIdOf('sxfix:ac:session:t1:unknown')).toBeNull();
+    expect(preset.sessionIdOf('sxfix:ac:session:t1:last_intent')).toBe('t1');
+    expect(preset.sessionIdOf('app:session:store:session:t1:checkpoint:abc')).toBe('t1');
+    expect(preset.sessionIdOf('app:session:store:session:t1:last_intent')).toBe('t1');
+    expect(preset.sessionIdOf('sxfix:ac:session::last_intent')).toBeNull();
     expect(preset.sessionIdOf('other:session:t1')).toBeNull();
     expect(preset.defaultPattern('sxfix:ac')).toBe('sxfix:ac:session:*');
+  });
+
+  it('agent-cache shows session store fields as parsed state', () => {
+    const view = getPreset('agent-cache').parseKey({
+      key: 'sxfix:ac:session:t1:last_intent',
+      type: 'string',
+      pttl: -1,
+      value: 'book a flight',
+    });
+    expect(view).toMatchObject({ parsed: true, messages: [] });
+  });
+
+  it('agent-cache shows the newest checkpoint as unreadable instead of an older one', () => {
+    const fixture = fixtures.find((f) => f.preset === 'agent-cache')!;
+    const keys = fixture.keys.filter(
+      (k) => k.key.includes(':session:multi-turn:') && !k.key.endsWith('__checkpoint_latest'),
+    );
+    const newest = keys
+      .filter((k) => k.key.includes(':checkpoint:'))
+      .map((k) => k.key)
+      .sort()
+      .pop();
+    const capped = keys.map((k) => (k.key === newest ? { ...k, truncated: true } : k));
+    const preset = getPreset('agent-cache');
+    expect(preset.mergeSession(capped.map((k) => preset.parseKey(k)))).toEqual([]);
+    expect(preset.mergeSession(parseSessionKeys(preset, capped))).toEqual([]);
+  });
+
+  it('agent-cache fully parses only the newest checkpoint of a session', () => {
+    const fixture = fixtures.find((f) => f.preset === 'agent-cache')!;
+    const preset = getPreset('agent-cache');
+    const session = fixture.keys.filter((k) => k.key.includes(':session:multi-turn:'));
+    const checkpoints = (views: KeyView[]) =>
+      views
+        .filter((v) => v.key.includes(':checkpoint:') || v.key.endsWith('__checkpoint_latest'))
+        .map((v) => (v.parsed ? v.messages.length : -1));
+
+    const withLatest = parseSessionKeys(preset, session);
+    expect(checkpoints(withLatest).sort()).toEqual([0, 0, 0, 7]);
+    expect(preset.mergeSession(withLatest)).toHaveLength(7);
+
+    const withoutLatest = session.filter((k) => !k.key.endsWith('__checkpoint_latest'));
+    const views = parseSessionKeys(preset, withoutLatest);
+    expect(checkpoints(views).sort()).toEqual([0, 0, 7]);
+    expect(preset.mergeSession(views)).toHaveLength(7);
   });
 
   it('malformed value falls back to raw with reason', () => {
@@ -334,6 +382,40 @@ describe('presets with content blocks beyond text', () => {
       value,
     });
     expect(parsedMessages(view).map((m) => m.role)).toEqual(['human', 'ai']);
+  });
+
+  it('agent-cache counts a checkpoint without a messages channel as empty', () => {
+    const preset = getPreset('agent-cache');
+    const checkpoint = (channel_values: Record<string, unknown>) => ({
+      key: 'p:session:t1:__checkpoint_latest',
+      type: 'string',
+      pttl: -1,
+      value: JSON.stringify({ checkpoint: { channel_values } }),
+    });
+    for (const channels of [{ __start__: { messages: [] } }, { state: { step: 1 } }]) {
+      const view = preset.parseKey(checkpoint(channels));
+      expect(view).toMatchObject({ parsed: true, messages: [] });
+      expect(preset.mergeSession([view])).toEqual([]);
+    }
+  });
+
+  it('agent-cache rejects constructor names inherited from Object', () => {
+    for (const name of ['constructor', 'toString', '__proto__']) {
+      const value = JSON.stringify({
+        checkpoint: {
+          channel_values: {
+            messages: [{ lc: 1, type: 'constructor', id: ['x', name], kwargs: { content: 'hi' } }],
+          },
+        },
+      });
+      const view = getPreset('agent-cache').parseKey({
+        key: 'p:session:t1:__checkpoint_latest',
+        type: 'string',
+        pttl: -1,
+        value,
+      });
+      expect(view).toMatchObject({ parsed: false, reason: 'Unknown message constructor' });
+    }
   });
 
   it('llamaindex keeps a malformed tool-call argument string as raw text', () => {
