@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import type { SessionNamespace } from '@betterdb/shared';
 import { sessionExplorerApi } from '../api/session-explorer';
 
 const ROOT = 'session-explorer';
@@ -13,6 +14,16 @@ export const sessionExplorerKeys = {
   session: (connectionId: string | undefined, nsId: string, sessionId: string) =>
     [...sessionExplorerKeys.namespaces(connectionId), nsId, 'session', sessionId] as const,
 };
+
+export function upsertNamespace(
+  list: SessionNamespace[] | undefined,
+  ns: SessionNamespace,
+): SessionNamespace[] {
+  const current = list ?? [];
+  return current.some((n) => n.id === ns.id)
+    ? current.map((n) => (n.id === ns.id ? ns : n))
+    : [...current, ns];
+}
 
 export function useSessionNamespaces(connectionId?: string) {
   return useQuery({

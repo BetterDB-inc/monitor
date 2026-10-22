@@ -6,6 +6,7 @@ import { useConnection } from '../hooks/useConnection';
 import { useLicense } from '../hooks/useLicense';
 import {
   sessionExplorerKeys,
+  upsertNamespace,
   useOversizeSessions,
   useSessionDetail,
   useSessionList,
@@ -59,6 +60,10 @@ export function SessionExplorer() {
 
   const onSaved = (ns: SessionNamespace) => {
     setEditing(null);
+    queryClient.setQueryData<SessionNamespace[]>(
+      sessionExplorerKeys.namespaces(connectionId),
+      (old) => upsertNamespace(old, ns),
+    );
     selectNamespace(ns.id);
     void queryClient.invalidateQueries({ queryKey: sessionExplorerKeys.namespaces(connectionId) });
   };
