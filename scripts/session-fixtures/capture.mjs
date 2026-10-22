@@ -1,4 +1,4 @@
-import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import Valkey from 'iovalkey';
 import { HERE, PASSWORD, assertPort } from './common.mjs';
@@ -78,7 +78,11 @@ for (const [library, entry] of Object.entries(seed)) {
     expectations: entry.expectations,
   };
   await client.quit();
-  const file = join(OUT_DIR, `${entry.preset}@${entry.version}.json`);
+  const name = `${entry.preset}@${entry.version}.json`;
+  for (const old of readdirSync(OUT_DIR)) {
+    if (old.startsWith(`${entry.preset}@`) && old !== name) rmSync(join(OUT_DIR, old));
+  }
+  const file = join(OUT_DIR, name);
   writeFileSync(file, JSON.stringify(fixture, null, 2) + '\n');
   console.log(`${library}: ${keys.length} keys -> ${file}`);
 }
