@@ -8,9 +8,9 @@ import { StoragePort } from '../common/interfaces/storage-port.interface';
  * self-hosted local sweep so the two never drift on which tables are covered.
  *
  * `sampleCutoff` applies to the high-volume sample stores (command/latency
- * stats samples, vector index snapshots), which in cloud keep a tighter 7-day
- * cap than the tier's analytics window. Self-hosted passes one cutoff for
- * everything, so it defaults to `cutoff`.
+ * stats samples, vector index snapshots, KV cache engine samples), which in
+ * cloud keep a tighter 7-day cap than the tier's analytics window.
+ * Self-hosted passes one cutoff for everything, so it defaults to `cutoff`.
  *
  * A store that fails to prune is reported as -1 and does not stop the sweep.
  */
@@ -46,6 +46,8 @@ export async function runRetentionSweep(
     { name: 'latency_histograms', fn: () => storage.pruneOldLatencyHistograms(cutoff) },
     { name: 'memory_snapshots', fn: () => storage.pruneOldMemorySnapshots(cutoff) },
     { name: 'scaling_readiness_scores', fn: () => storage.pruneOldScalingReadinessScores(cutoff) },
+    { name: 'kv_cache_footprint_snapshots', fn: () => storage.pruneOldKvCacheFootprintSnapshots(cutoff) },
+    { name: 'kv_cache_engine_samples', fn: () => storage.pruneOldKvCacheEngineSamples(sampleCutoff) },
     { name: 'capture_chunks', fn: () => storage.pruneOldCaptureChunks(cutoff) },
     { name: 'capture_sessions', fn: () => storage.pruneOldCaptureSessions(cutoff) },
     { name: 'capture_triggers', fn: () => storage.pruneOldCaptureTriggers(cutoff) },

@@ -169,6 +169,12 @@ export const envSchema = z
     ANOMALY_CACHE_TTL_MS: z.coerce.number().int().min(1000).default(3600000),
     ANOMALY_PROMETHEUS_INTERVAL_MS: z.coerce.number().int().min(1000).default(30000),
 
+    KV_CACHE_FOOTPRINT_INTERVAL_MS: z.string().optional(),
+    KV_CACHE_SCAN_MAX_KEYS: z.string().optional(),
+    KV_CACHE_MATCH_MAX_KEYS: z.string().optional(),
+    KV_CACHE_SAMPLE_KEYS: z.string().optional(),
+    KV_CACHE_UNDETECTED_RECHECK_MS: z.string().optional(),
+
     // License configuration (optional)
     BETTERDB_LICENSE_KEY: z.string().optional(),
     // Offline (air-gapped) license: the signed token itself, or a path to it

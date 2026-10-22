@@ -7,6 +7,7 @@ import {
 } from '../../common/interfaces/database-port.interface';
 import { InfoParser } from '../parsers/info.parser';
 import { MetricsParser } from '../parsers/metrics.parser';
+import { parseKeyspaceDatabases, type KeyspaceDatabase } from '../parsers/keyspace-databases';
 import { CLUSTER_TOTAL_SLOTS } from '../../common/constants/cluster.constants';
 import {
   InfoResponse,
@@ -884,22 +885,13 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
    * proxies that hide it), in which case the caller falls back to scanning
    * the connection's own database.
    */
-  private async listKeyspaceDatabases(): Promise<Array<{ db: number; keys: number }>> {
+  private async listKeyspaceDatabases(): Promise<KeyspaceDatabase[]> {
     try {
       // Reuse the centralized INFO keyspace parser (MetricsParser via
       // getInfoParsed) rather than a second regex: it is the single definition
       // of a db entry and already drops malformed `db<N>:` lines as raw strings.
       const { keyspace } = await this.getInfoParsed(['keyspace']);
-      const dbs: Array<{ db: number; keys: number }> = [];
-      for (const [key, info] of Object.entries(keyspace ?? {})) {
-        const match = /^db(\d+)$/.exec(key);
-        // A raw-string value is a malformed line the parser kept verbatim; only
-        // typed entries with a positive key count are non-empty databases.
-        if (match && typeof info === 'object' && info.keys > 0) {
-          dbs.push({ db: parseInt(match[1], 10), keys: info.keys });
-        }
-      }
-      return dbs.sort((a, b) => a.db - b.db);
+      return parseKeyspaceDatabases(keyspace);
     } catch (error) {
       this.logger.debug(
         `Could not list keyspace databases: ${error instanceof Error ? error.message : error}`,
