@@ -19,6 +19,7 @@ const clean: IngestResult = {
     unmapped_metric: 0,
     invalid_value: 0,
     cardinality_limit: 0,
+    unknown_engine: 0,
   },
 };
 

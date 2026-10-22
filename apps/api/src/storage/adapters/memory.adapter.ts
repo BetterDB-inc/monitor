@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { KV_CACHE_SAMPLE_COUNTER_FIELDS } from './kv-cache-sample-columns';
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
   approxOtelSpanBytes,
@@ -106,6 +107,7 @@ import type {
   KvCacheRangeQuery,
   KvCacheFootprintQuery,
   KvCacheSampleQuery,
+  KvCacheSampleTotals,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   ReadinessBand,
@@ -1278,16 +1280,44 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   async getKvCacheEngineSamples(query: KvCacheSampleQuery): Promise<KvCacheEngineSample[]> {
-    return this.kvCacheSamples
-      .filter(
-        (r) =>
-          this.inKvCacheRange(r, query) &&
-          (query.engineId === undefined || r.engineId === query.engineId) &&
-          (query.modelName === undefined || r.modelName === query.modelName),
-      )
-      .sort((a, b) => a.timestamp - b.timestamp)
-      .slice(-(query.limit ?? 50_000))
-      .map((r) => ({ ...r }));
+    const rows = query.bucketMs
+      ? this.bucketKvCacheSamples(this.matchingKvCacheSamples(query), Math.ceil(query.bucketMs))
+      : this.matchingKvCacheSamples(query).sort((a, b) => a.timestamp - b.timestamp);
+    return rows.slice(-(query.limit ?? 50_000)).map((r) => ({ ...r }));
+  }
+
+  private bucketKvCacheSamples(rows: KvCacheEngineSample[], bucketMs: number): KvCacheEngineSample[] {
+    const buckets = new Map<string, KvCacheEngineSample>();
+    for (const row of rows) {
+      const timestamp = Math.floor(row.timestamp / bucketMs) * bucketMs;
+      const key = JSON.stringify([row.engineId, row.connectionId, row.modelName, timestamp]);
+      const bucket = buckets.get(key);
+      if (!bucket) {
+        buckets.set(key, { ...row, timestamp });
+        continue;
+      }
+      for (const field of KV_CACHE_SAMPLE_COUNTER_FIELDS) bucket[field] += row[field];
+    }
+    const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+    return [...buckets.values()].sort(
+      (a, b) => a.timestamp - b.timestamp || compare(a.engineId, b.engineId) || compare(a.modelName, b.modelName),
+    );
+  }
+
+  async getKvCacheSampleTotals(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): Promise<KvCacheSampleTotals> {
+    return this.matchingKvCacheSamples(query).reduce(
+      (totals, r) => ({ requestedTokens: totals.requestedTokens + r.requestedTokens, hitTokens: totals.hitTokens + r.hitTokens }),
+      { requestedTokens: 0, hitTokens: 0 },
+    );
+  }
+
+  private matchingKvCacheSamples(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): KvCacheEngineSample[] {
+    return this.kvCacheSamples.filter(
+      (r) =>
+        this.inKvCacheRange(r, query) &&
+        (query.engineId === undefined || r.engineId === query.engineId) &&
+        (query.modelName === undefined || r.modelName === query.modelName),
+    );
   }
 
   async pruneOldKvCacheEngineSamples(cutoffTimestamp: number, connectionId?: string): Promise<number> {
@@ -1296,6 +1326,10 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       (r) => r.timestamp >= cutoffTimestamp || (connectionId !== undefined && r.connectionId !== connectionId),
     );
     return before - this.kvCacheSamples.length;
+  }
+
+  async deleteKvCacheEngineSamples(engineId: string): Promise<void> {
+    this.kvCacheSamples = this.kvCacheSamples.filter((r) => r.engineId !== engineId);
   }
 
   async saveKvCacheEngine(engine: StoredKvCacheEngine): Promise<StoredKvCacheEngine> {

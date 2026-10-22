@@ -438,6 +438,12 @@ export interface KvCacheFootprintQuery extends KvCacheRangeQuery {
 export interface KvCacheSampleQuery extends KvCacheRangeQuery {
   engineId?: string;
   modelName?: string;
+  bucketMs?: number;
+}
+
+export interface KvCacheSampleTotals {
+  requestedTokens: number;
+  hitTokens: number;
 }
 
 export interface MemorySnapshotQueryOptions {
@@ -709,7 +715,9 @@ export interface StoragePort {
   pruneOldKvCacheFootprintSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
   saveKvCacheEngineSamples(samples: KvCacheEngineSample[]): Promise<void>;
   getKvCacheEngineSamples(query: KvCacheSampleQuery): Promise<KvCacheEngineSample[]>;
+  getKvCacheSampleTotals(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): Promise<KvCacheSampleTotals>;
   pruneOldKvCacheEngineSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+  deleteKvCacheEngineSamples(engineId: string): Promise<void>;
   saveKvCacheEngine(engine: StoredKvCacheEngine): Promise<StoredKvCacheEngine>;
   getKvCacheEngines(connectionId?: string): Promise<StoredKvCacheEngine[]>;
   getKvCacheEngine(id: string): Promise<StoredKvCacheEngine | null>;

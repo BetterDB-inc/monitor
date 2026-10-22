@@ -10,6 +10,9 @@ import {
   type WebhookPayload,
 } from '@betterdb/shared';
 import { ConfigService } from '@nestjs/config';
+import { createServer, type Server } from 'http';
+import type { AddressInfo } from 'net';
+import { promises as dns } from 'dns';
 
 describe('WebhookDispatcherService', () => {
   let service: WebhookDispatcherService;
@@ -863,6 +866,104 @@ describe('WebhookDispatcherService', () => {
       expect(sendWebhook.mock.calls[0][2].data).toEqual(
         expect.objectContaining({ usedPercent: 95, thresholdKey: 'memoryCriticalPercent' }),
       );
+    });
+  });
+
+  describe('Delivery transport', () => {
+    let server: Server;
+    let port: number;
+    let hits: Record<string, { body: string; headers: Record<string, unknown> }[]>;
+    const env = process.env.NODE_ENV;
+
+    const hook = (url: string) => ({
+      id: '1',
+      name: 'Receiver',
+      url,
+      enabled: true,
+      events: [WebhookEventType.INSTANCE_DOWN],
+      headers: {},
+      retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    const payload = {
+      id: 'p1',
+      event: WebhookEventType.INSTANCE_DOWN,
+      timestamp: Date.now(),
+      instance: { host: 'localhost', port: 6379 },
+      data: { reason: 'test' },
+    } as WebhookPayload;
+
+    beforeAll(async () => {
+      server = createServer((req, res) => {
+        let body = '';
+        req.on('data', (chunk) => (body += chunk));
+        req.on('end', () => {
+          (hits[req.url ?? ''] ??= []).push({ body, headers: req.headers });
+          if (req.url === '/redirect') {
+            res.writeHead(302, { Location: '/target' }).end();
+          } else {
+            res.writeHead(200).end('ok');
+          }
+        });
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      port = (server.address() as AddressInfo).port;
+    });
+
+    afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));
+
+    beforeEach(() => {
+      hits = {};
+      storageClient.getDelivery.mockResolvedValue({ id: 'd1', attempts: 0 } as any);
+      storageClient.updateDelivery.mockResolvedValue(undefined as any);
+      webhooksService.generateSignature.mockReturnValue('test-signature');
+    });
+
+    afterEach(() => {
+      process.env.NODE_ENV = env;
+      jest.restoreAllMocks();
+    });
+
+    it('delivers the signed JSON body', async () => {
+      await expect(service.sendWebhook(hook(`http://127.0.0.1:${port}/ok`), 'd1', payload)).resolves.toBe(DeliveryStatus.SUCCESS);
+      expect(hits['/ok']).toHaveLength(1);
+      expect(JSON.parse(hits['/ok'][0].body)).toMatchObject({ id: 'p1', event: WebhookEventType.INSTANCE_DOWN });
+      expect(hits['/ok'][0].headers['content-type']).toBe('application/json');
+      expect(hits['/ok'][0].headers['x-webhook-signature']).toBe('test-signature');
+    });
+
+    it('does not follow a redirect on delivery', async () => {
+      await expect(service.sendWebhook(hook(`http://127.0.0.1:${port}/redirect`), 'd1', payload)).resolves.toBe(DeliveryStatus.FAILED);
+      expect(hits['/target']).toBeUndefined();
+      expect(storageClient.updateDelivery).toHaveBeenCalledWith('d1', expect.objectContaining({ status: DeliveryStatus.FAILED, statusCode: 302 }));
+    });
+
+    it('does not follow a redirect on a test delivery', async () => {
+      const result = await service.testWebhook(hook(`http://127.0.0.1:${port}/redirect`));
+      expect(result).toMatchObject({ success: false, statusCode: 302 });
+      expect(hits['/target']).toBeUndefined();
+    });
+
+    it('refuses to connect when the hostname resolves to a blocked address in production', async () => {
+      process.env.NODE_ENV = 'production';
+      jest.spyOn(dns, 'lookup').mockResolvedValue([{ address: '10.1.2.3', family: 4 }] as any);
+      await expect(service.sendWebhook(hook(`http://hooks.example.com:${port}/ok`), 'd1', payload)).resolves.toBe(DeliveryStatus.FAILED);
+      expect(storageClient.updateDelivery).toHaveBeenCalledWith(
+        'd1',
+        expect.objectContaining({ status: DeliveryStatus.FAILED, responseBody: 'Webhook URL resolves to a blocked address' }),
+      );
+      const result = await service.testWebhook(hook(`http://hooks.example.com:${port}/ok`));
+      expect(result).toMatchObject({ success: false, error: 'Webhook URL resolves to a blocked address' });
+      expect(hits['/ok']).toBeUndefined();
+    });
+
+    it('connects to the pinned address in production', async () => {
+      process.env.NODE_ENV = 'production';
+      jest.spyOn(dns, 'lookup').mockResolvedValue([{ address: '8.8.8.8', family: 4 }, { address: '10.1.2.3', family: 4 }] as any);
+      await expect(service.sendWebhook(hook(`http://hooks.example.com:${port}/ok`), 'd1', payload)).resolves.toBe(DeliveryStatus.FAILED);
+      expect(hits['/ok']).toBeUndefined();
     });
   });
 });

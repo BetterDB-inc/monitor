@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { KV_CACHE_SAMPLE_COUNTER_COLUMNS } from './kv-cache-sample-columns';
 import { chunkedSqliteDelete } from './sqlite-chunked-delete';
 import {
   otelSpanCap,
@@ -16,6 +17,7 @@ import type {
   KvCacheRangeQuery,
   KvCacheFootprintQuery,
   KvCacheSampleQuery,
+  KvCacheSampleTotals,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   ReadinessBand,
@@ -4264,16 +4266,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async getKvCacheEngineSamples(query: KvCacheSampleQuery): Promise<KvCacheEngineSample[]> {
     if (!this.db) throw new Error('Database not initialized');
-    const where = ['connection_id = ?', 'timestamp >= ?', 'timestamp <= ?'];
-    const params: unknown[] = [query.connectionId, query.from ?? 0, query.to ?? Number.MAX_SAFE_INTEGER];
-    if (query.engineId !== undefined) {
-      where.push('engine_id = ?');
-      params.push(query.engineId);
-    }
-    if (query.modelName !== undefined) {
-      where.push('model_name = ?');
-      params.push(query.modelName);
-    }
+    if (query.bucketMs) return this.getBucketedKvCacheEngineSamples(query, Math.ceil(query.bucketMs));
+    const { where, params } = this.kvCacheSampleFilter(query);
     params.push(query.limit ?? 50_000);
     const rows = this.db
       .prepare(
@@ -4286,12 +4280,59 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return rows.map((r) => this.kvCacheSampleFromRow(r));
   }
 
+  private getBucketedKvCacheEngineSamples(query: KvCacheSampleQuery, bucketMs: number): KvCacheEngineSample[] {
+    const { where, params } = this.kvCacheSampleFilter(query);
+    const sums = KV_CACHE_SAMPLE_COUNTER_COLUMNS.map((column) => `SUM(${column}) AS ${column}`).join(', ');
+    const rows = this.db!
+      .prepare(
+        `SELECT * FROM (
+           SELECT engine_id, connection_id, model_name, (timestamp / CAST(? AS INTEGER)) * CAST(? AS INTEGER) AS bucket_ts, ${sums}
+           FROM kv_cache_engine_samples WHERE ${where.join(' AND ')}
+           GROUP BY engine_id, connection_id, model_name, bucket_ts
+           ORDER BY bucket_ts DESC, engine_id DESC, model_name DESC LIMIT ?
+         ) ORDER BY bucket_ts ASC, engine_id ASC, model_name ASC`,
+      )
+      .all(bucketMs, bucketMs, ...params, query.limit ?? 50_000) as Record<string, any>[];
+    return rows.map((r) => this.kvCacheSampleFromRow({ ...r, timestamp: r.bucket_ts }));
+  }
+
+  async getKvCacheSampleTotals(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): Promise<KvCacheSampleTotals> {
+    if (!this.db) throw new Error('Database not initialized');
+    const { where, params } = this.kvCacheSampleFilter(query);
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(requested_tokens), 0) AS requested, COALESCE(SUM(hit_tokens), 0) AS hit
+         FROM kv_cache_engine_samples WHERE ${where.join(' AND ')}`,
+      )
+      .get(...params) as { requested: number; hit: number };
+    return { requestedTokens: Number(row.requested), hitTokens: Number(row.hit) };
+  }
+
+  private kvCacheSampleFilter(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): { where: string[]; params: unknown[] } {
+    const where = ['connection_id = ?', 'timestamp >= ?', 'timestamp <= ?'];
+    const params: unknown[] = [query.connectionId, query.from ?? 0, query.to ?? Number.MAX_SAFE_INTEGER];
+    if (query.engineId !== undefined) {
+      where.push('engine_id = ?');
+      params.push(query.engineId);
+    }
+    if (query.modelName !== undefined) {
+      where.push('model_name = ?');
+      params.push(query.modelName);
+    }
+    return { where, params };
+  }
+
   async pruneOldKvCacheEngineSamples(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
     if (connectionId) {
       return chunkedSqliteDelete(this.db, 'kv_cache_engine_samples', 'timestamp < ? AND connection_id = ?', [cutoffTimestamp, connectionId]);
     }
     return chunkedSqliteDelete(this.db, 'kv_cache_engine_samples', 'timestamp < ?', [cutoffTimestamp]);
+  }
+
+  async deleteKvCacheEngineSamples(engineId: string): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+    await chunkedSqliteDelete(this.db, 'kv_cache_engine_samples', 'engine_id = ?', [engineId]);
   }
 
   async saveKvCacheEngine(e: StoredKvCacheEngine): Promise<StoredKvCacheEngine> {
