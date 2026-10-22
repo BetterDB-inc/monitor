@@ -9,10 +9,10 @@ const engine = {
 describe('KvCacheStatusService', () => {
   const storage = {
     getKvCacheFootprintSnapshots: jest.fn(),
-    getKvCacheEngines: jest.fn().mockResolvedValue([engine]),
   } as any;
+  const registry = { list: jest.fn().mockReturnValue([engine]) } as any;
   const footprint = { getSampleKey: jest.fn().mockReturnValue('m@1@0@abc…@bfloat16') } as any;
-  const service = new KvCacheStatusService(storage, footprint);
+  const service = new KvCacheStatusService(storage, footprint, registry);
 
   it('never exposes the auth header', () => {
     const pub = toPublicEngine(engine as any);
@@ -21,19 +21,27 @@ describe('KvCacheStatusService', () => {
     expect(pub.hasScrapeAuth).toBe(true);
   });
 
+  it('strips credentials from the scrape URL', () => {
+    expect(toPublicEngine({ ...engine, scrapeUrl: 'http://admin:secret@vllm:8000/metrics' } as any).scrapeUrl).toBe('http://vllm:8000/metrics');
+    expect(toPublicEngine({ ...engine, scrapeUrl: 'http://token@vllm/metrics' } as any).scrapeUrl).toBe('http://vllm/metrics');
+    expect(toPublicEngine(engine as any).scrapeUrl).toBe('http://x/metrics');
+    expect(toPublicEngine({ ...engine, source: 'otlp', scrapeUrl: null } as any).scrapeUrl).toBeNull();
+  });
+
+  it('masks query values in the scrape URL', () => {
+    expect(toPublicEngine({ ...engine, scrapeUrl: 'http://vllm:8000/metrics?token=s3cret&format=text' } as any).scrapeUrl).toBe(
+      'http://vllm:8000/metrics?token=***&format=***',
+    );
+    expect(toPublicEngine({ ...engine, scrapeUrl: 'http://admin:pw@vllm/metrics?key=abc#frag' } as any).scrapeUrl).toBe('http://vllm/metrics?key=***');
+    expect(toPublicEngine({ ...engine, scrapeUrl: 'http://vllm/metrics?flag' } as any).scrapeUrl).toBe('http://vllm/metrics?flag=');
+  });
+
   it('builds status from the latest snapshot', async () => {
     storage.getKvCacheFootprintSnapshots.mockResolvedValue([{ detected: true }]);
     const status = await service.getStatus('c1');
     expect(storage.getKvCacheFootprintSnapshots).toHaveBeenCalledWith({ connectionId: 'c1', limit: 1 });
+    expect(registry.list).toHaveBeenCalledWith('c1');
     expect(status).toEqual({ hasLmcache: true, latest: { detected: true }, sampleKey: 'm@1@0@abc…@bfloat16', engines: [toPublicEngine(engine as any)] });
-  });
-
-  it('reads the snapshot and the engines in parallel', async () => {
-    storage.getKvCacheFootprintSnapshots.mockReturnValue(new Promise(() => undefined));
-    storage.getKvCacheEngines.mockClear();
-    void service.getStatus('c1');
-    await Promise.resolve();
-    expect(storage.getKvCacheEngines).toHaveBeenCalledWith('c1');
   });
 
   it('reports not detected without a snapshot', async () => {

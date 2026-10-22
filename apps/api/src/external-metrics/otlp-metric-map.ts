@@ -1,4 +1,6 @@
-import type { InfoTarget, InstanceKey, OtlpKeyValue, OtlpNumberDataPoint } from './otlp-metrics-types';
+import type { InfoTarget, InstanceKey, OtlpKeyValue, OtlpMetric, OtlpNumberDataPoint } from './otlp-metrics-types';
+
+export const NO_RECORDED_VALUE = 1;
 
 export interface MappedPoint {
   target: InfoTarget;
@@ -168,6 +170,10 @@ export function resolveInstanceKeys(attrs: Record<string, string>): InstanceKey[
   return keys;
 }
 
+export function isDeltaTemporality(temporality: number | string | undefined): boolean {
+  return temporality === 1 || temporality === 'AGGREGATION_TEMPORALITY_DELTA';
+}
+
 export function pointValue(dp: OtlpNumberDataPoint): string | null {
   if (dp.asInt !== undefined && dp.asInt !== null) {
     const s = String(dp.asInt);
@@ -186,4 +192,15 @@ export function nanosToMs(v: string | number | undefined): number | null {
   if (!/^\d+$/.test(v)) return null;
   const ms = Number(BigInt(v) / 1_000_000n);
   return ms > 0 ? ms : null;
+}
+
+export function metricPointCount(metric: OtlpMetric): number {
+  const points =
+    metric.gauge?.dataPoints ??
+    metric.sum?.dataPoints ??
+    metric.histogram?.dataPoints ??
+    metric.exponentialHistogram?.dataPoints ??
+    metric.summary?.dataPoints ??
+    [];
+  return points.length;
 }

@@ -653,6 +653,8 @@ describe('KvCacheFootprintService', () => {
 
   it('runs connection removal cleanup while unlicensed', async () => {
     const { service, storage, registry } = setup(undefined, false);
+    const listener = jest.fn();
+    service.onConnectionRemoval(listener);
     jest.spyOn(service as any, 'start').mockImplementation(() => undefined);
     await service.onModuleInit();
     await (service as any).tick();
@@ -660,11 +662,14 @@ describe('KvCacheFootprintService', () => {
     await new Promise((resolve) => setImmediate(resolve));
     expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
     expect(storage.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
+    expect(listener).toHaveBeenCalledWith('c1');
     await service.onModuleDestroy();
   });
 
   it('stops polling a retired member but keeps its data', async () => {
     const { service, storage, client, registry } = setup();
+    const listener = jest.fn();
+    service.onConnectionRemoval(listener);
     jest.spyOn(service as any, 'start').mockImplementation(() => undefined);
     await service.onModuleInit();
     await (service as any).tick();
@@ -676,6 +681,7 @@ describe('KvCacheFootprintService', () => {
     await new Promise((resolve) => setImmediate(resolve));
     expect(client.getDbSize).toHaveBeenCalledTimes(1);
     expect(storage.deleteKvCacheConnectionData).not.toHaveBeenCalled();
+    expect(listener).not.toHaveBeenCalled();
     expect(service.getSampleKey('c1')).toBe('m/x@1@0@1…@bfloat16');
     await service.onModuleDestroy();
   });
@@ -788,6 +794,37 @@ describe('KvCacheFootprintService', () => {
     jest.spyOn(service as any, 'start').mockImplementation(() => undefined);
     await service.onModuleInit();
     registry.removed('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
+    await service.onModuleDestroy();
+  });
+
+  it('notifies removal listeners with the connection id', async () => {
+    const { service, registry } = setup();
+    jest.spyOn(service as any, 'start').mockImplementation(() => undefined);
+    await service.onModuleInit();
+    const listener = jest.fn();
+    const failing = jest.fn(() => { throw new Error('x'); });
+    service.onConnectionRemoval(failing);
+    service.onConnectionRemoval(listener);
+    registry.removed('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(listener).toHaveBeenCalledWith('c1');
+    await service.onModuleDestroy();
+  });
+
+  it('finishes removal listeners before deleting stored data', async () => {
+    const { service, storage, registry } = setup();
+    jest.spyOn(service as any, 'start').mockImplementation(() => undefined);
+    await service.onModuleInit();
+    let finish: () => void = () => undefined;
+    const listener = jest.fn(() => new Promise<void>((resolve) => (finish = resolve)));
+    service.onConnectionRemoval(listener);
+    registry.removed('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(listener).toHaveBeenCalledWith('c1');
+    expect(storage.deleteKvCacheConnectionData).not.toHaveBeenCalled();
+    finish();
     await new Promise((resolve) => setImmediate(resolve));
     expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
     await service.onModuleDestroy();

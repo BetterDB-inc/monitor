@@ -33,6 +33,7 @@ import { hasSingleKeyEvidence, hasTwoKeyEvidence, maskKey, resolveTagSuffixes } 
 import { slotOwner, type SlotOwnership } from './key-slot';
 
 export type SnapshotListener = (snapshot: KvCacheFootprintSnapshot) => void | Promise<void>;
+export type RemovalListener = (connectionId: string) => void | Promise<void>;
 
 interface NodeReading {
   nodeKey: string;
@@ -119,6 +120,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   private readonly undetectedUntil = new Map<string, number>();
   private readonly partialMisses = new Map<string, number>();
   private readonly listeners: SnapshotListener[] = [];
+  private readonly removalListeners: RemovalListener[] = [];
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -166,9 +168,20 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     this.sampleKeys.delete(connectionId);
     this.undetectedUntil.delete(connectionId);
     this.partialMisses.delete(connectionId);
+    for (const listener of this.removalListeners) {
+      try {
+        await listener(connectionId);
+      } catch (error) {
+        this.logger.warn(`KV cache removal listener failed: ${errorMessage(error)}`);
+      }
+    }
     await this.storage
       .deleteKvCacheConnectionData(connectionId)
       .catch((error) => this.logger.warn(`Could not delete KV cache data for ${connectionId}: ${errorMessage(error)}`));
+  }
+
+  onConnectionRemoval(listener: RemovalListener): void {
+    this.removalListeners.push(listener);
   }
 
   onSnapshot(listener: SnapshotListener): void {

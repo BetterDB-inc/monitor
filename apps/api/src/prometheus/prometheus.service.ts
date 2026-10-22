@@ -34,7 +34,7 @@ import {
   ConnectionContext,
 } from '../common/services/multi-connection-poller';
 import { MetricForecastingService } from '../metric-forecasting/metric-forecasting.service';
-import { ALL_METRIC_KINDS } from '@betterdb/shared';
+import { ALL_METRIC_KINDS, type KvCacheModelFootprint } from '@betterdb/shared';
 import { isCveEnabled } from '../cve/cve.constants';
 import { OtelEventDispatcherService } from '../otel-telemetry/otel-event-dispatcher.service';
 import {
@@ -376,6 +376,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private cveFindings: Gauge;
   private cveKev: Gauge;
   private cveDatasetStale: Gauge;
+
+  private kvCacheHitRate: Gauge;
+  private kvCacheChunks: Gauge;
+  private kvCacheBytes: Gauge;
+  private readonly kvCacheSeries = new Map<string, { label: string; models: Set<string>; rates: Set<string> }>();
 
   // OTLP Ingest Metrics
   private otlpPointsAccepted: Counter;
@@ -1134,6 +1139,20 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       'Whether the CVE scan is partial or sources are missing: 1 stale, 0 ok',
     );
 
+    this.kvCacheHitRate = this.createGauge(
+      'kv_cache_hit_rate',
+      'LMCache token hit rate over the last 15 minutes',
+      ['connection_id', 'engine', 'model'],
+    );
+    this.kvCacheChunks = this.createGauge('kv_cache_chunks', 'Estimated LMCache chunks stored', [
+      'connection_id',
+      'model',
+    ]);
+    this.kvCacheBytes = this.createGauge('kv_cache_bytes', 'Estimated bytes held by LMCache keys', [
+      'connection_id',
+      'model',
+    ]);
+
     // OTLP Ingest Metrics
     this.otlpPointsAccepted = new Counter({
       name: 'betterdb_otlp_metric_points_accepted_total',
@@ -1369,6 +1388,84 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     } catch {
       // Best effort: a missing child must never fail a scrape.
     }
+  }
+
+  setKvCacheFootprint(connectionId: string, perModel: KvCacheModelFootprint[]): void {
+    const series = this.kvCacheSeriesFor(connectionId);
+    if (!series) return;
+    const totals = new Map<string, { chunks: number; bytes: number | null }>();
+    for (const entry of perModel) {
+      const total = totals.get(entry.model) ?? { chunks: 0, bytes: 0 };
+      total.chunks += entry.chunksEst;
+      total.bytes = total.bytes === null || entry.bytesEst === null ? null : total.bytes + entry.bytesEst;
+      totals.set(entry.model, total);
+    }
+    for (const model of series.models) {
+      if (!totals.has(model)) {
+        this.kvCacheChunks.remove(series.label, connectionId, model);
+        this.kvCacheBytes.remove(series.label, connectionId, model);
+      }
+    }
+    for (const [model, total] of totals) {
+      this.kvCacheChunks.labels(series.label, connectionId, model).set(total.chunks);
+      if (total.bytes === null) this.kvCacheBytes.remove(series.label, connectionId, model);
+      else this.kvCacheBytes.labels(series.label, connectionId, model).set(total.bytes);
+    }
+    series.models = new Set(totals.keys());
+  }
+
+  setKvCacheHitRates(
+    connectionId: string,
+    rates: Array<{ engine: string; model: string; hitRate: number }>,
+  ): void {
+    const series = this.kvCacheSeriesFor(connectionId);
+    if (!series) return;
+    const next = new Set(rates.map((rate) => `${rate.engine}\u0000${rate.model}`));
+    for (const key of series.rates) {
+      if (!next.has(key)) {
+        const [engine, model] = key.split('\u0000');
+        this.kvCacheHitRate.remove(series.label, connectionId, engine, model);
+      }
+    }
+    for (const rate of rates) {
+      this.kvCacheHitRate.labels(series.label, connectionId, rate.engine, rate.model).set(rate.hitRate);
+    }
+    series.rates = next;
+  }
+
+  clearAllKvCache(): void {
+    for (const connectionId of [...this.kvCacheSeries.keys()]) this.clearKvCache(connectionId);
+  }
+
+  clearKvCache(connectionId: string): void {
+    const series = this.kvCacheSeries.get(connectionId);
+    if (!series) return;
+    this.kvCacheSeries.delete(connectionId);
+    for (const model of series.models) {
+      this.kvCacheChunks.remove(series.label, connectionId, model);
+      this.kvCacheBytes.remove(series.label, connectionId, model);
+    }
+    for (const key of series.rates) {
+      const [engine, model] = key.split('\u0000');
+      this.kvCacheHitRate.remove(series.label, connectionId, engine, model);
+    }
+  }
+
+  private kvCacheSeriesFor(
+    connectionId: string,
+  ): { label: string; models: Set<string>; rates: Set<string> } | null {
+    const label = this.getConnectionLabel(connectionId);
+    if (label === null) return null;
+    const existing = this.kvCacheSeries.get(connectionId);
+    if (existing && existing.label !== label) {
+      this.clearKvCache(connectionId);
+    }
+    let series = this.kvCacheSeries.get(connectionId);
+    if (!series) {
+      series = { label, models: new Set(), rates: new Set() };
+      this.kvCacheSeries.set(connectionId, series);
+    }
+    return series;
   }
 
   private async updateMetricForecastMetrics(
@@ -3708,6 +3805,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (cveLabel !== null) {
       this.removeCveSeries(cveLabel);
     }
+    this.clearKvCache(connectionId);
     this.perConnectionState.delete(connectionId);
     // Drop any in-flight metric update so a reused connection ID cannot join
     // stale work. The promise itself still settles; its compare-and-delete

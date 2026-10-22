@@ -1,4 +1,5 @@
 import { Client, ClientBase, ClientConfig, Pool, PoolConfig } from 'pg';
+import { KV_CACHE_SAMPLE_COUNTER_COLUMNS } from './kv-cache-sample-columns';
 import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
 import {
@@ -15,6 +16,7 @@ import type {
   KvCacheRangeQuery,
   KvCacheFootprintQuery,
   KvCacheSampleQuery,
+  KvCacheSampleTotals,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   ReadinessDimension,
@@ -4333,16 +4335,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async getKvCacheEngineSamples(query: KvCacheSampleQuery): Promise<KvCacheEngineSample[]> {
     if (!this.pool) throw new Error('Database not initialized');
-    const params: unknown[] = [query.connectionId, query.from ?? 0, query.to ?? Number.MAX_SAFE_INTEGER];
-    const where = ['connection_id = $1', 'timestamp >= $2', 'timestamp <= $3'];
-    if (query.engineId !== undefined) {
-      params.push(query.engineId);
-      where.push(`engine_id = $${params.length}`);
-    }
-    if (query.modelName !== undefined) {
-      params.push(query.modelName);
-      where.push(`model_name = $${params.length}`);
-    }
+    if (query.bucketMs) return this.getBucketedKvCacheEngineSamples(query, Math.ceil(query.bucketMs));
+    const { where, params } = this.kvCacheSampleFilter(query);
     params.push(query.limit ?? 50_000);
     const result = await this.pool.query(
       `SELECT * FROM (
@@ -4354,12 +4348,60 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rows.map((r) => this.kvCacheSampleFromRow(r));
   }
 
+  private async getBucketedKvCacheEngineSamples(query: KvCacheSampleQuery, bucketMs: number): Promise<KvCacheEngineSample[]> {
+    const { where, params } = this.kvCacheSampleFilter(query);
+    params.push(bucketMs);
+    const bucket = `$${params.length}::bigint`;
+    params.push(query.limit ?? 50_000);
+    const sums = KV_CACHE_SAMPLE_COUNTER_COLUMNS.map((column) => `SUM(${column}) AS ${column}`).join(', ');
+    const result = await this.pool!.query(
+      `SELECT * FROM (
+         SELECT engine_id, connection_id, model_name, (timestamp / ${bucket}) * ${bucket} AS bucket_ts, ${sums}
+         FROM kv_cache_engine_samples WHERE ${where.join(' AND ')}
+         GROUP BY engine_id, connection_id, model_name, bucket_ts
+         ORDER BY bucket_ts DESC, engine_id DESC, model_name DESC LIMIT $${params.length}
+       ) AS recent ORDER BY bucket_ts ASC, engine_id ASC, model_name ASC`,
+      params,
+    );
+    return result.rows.map((r) => this.kvCacheSampleFromRow({ ...r, timestamp: r.bucket_ts }));
+  }
+
+  async getKvCacheSampleTotals(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): Promise<KvCacheSampleTotals> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const { where, params } = this.kvCacheSampleFilter(query);
+    const result = await this.pool.query(
+      `SELECT COALESCE(SUM(requested_tokens), 0) AS requested, COALESCE(SUM(hit_tokens), 0) AS hit
+       FROM kv_cache_engine_samples WHERE ${where.join(' AND ')}`,
+      params,
+    );
+    return { requestedTokens: Number(result.rows[0].requested), hitTokens: Number(result.rows[0].hit) };
+  }
+
+  private kvCacheSampleFilter(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): { where: string[]; params: unknown[] } {
+    const params: unknown[] = [query.connectionId, query.from ?? 0, query.to ?? Number.MAX_SAFE_INTEGER];
+    const where = ['connection_id = $1', 'timestamp >= $2', 'timestamp <= $3'];
+    if (query.engineId !== undefined) {
+      params.push(query.engineId);
+      where.push(`engine_id = $${params.length}`);
+    }
+    if (query.modelName !== undefined) {
+      params.push(query.modelName);
+      where.push(`model_name = $${params.length}`);
+    }
+    return { where, params };
+  }
+
   async pruneOldKvCacheEngineSamples(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
     if (connectionId) {
       return chunkedPostgresDelete(this.pool, 'kv_cache_engine_samples', 'timestamp < $1 AND connection_id = $2', [cutoffTimestamp, connectionId]);
     }
     return chunkedPostgresDelete(this.pool, 'kv_cache_engine_samples', 'timestamp < $1', [cutoffTimestamp]);
+  }
+
+  async deleteKvCacheEngineSamples(engineId: string): Promise<void> {
+    if (!this.pool) throw new Error('Database not initialized');
+    await chunkedPostgresDelete(this.pool, 'kv_cache_engine_samples', 'engine_id = $1', [engineId]);
   }
 
   async saveKvCacheEngine(e: StoredKvCacheEngine): Promise<StoredKvCacheEngine> {

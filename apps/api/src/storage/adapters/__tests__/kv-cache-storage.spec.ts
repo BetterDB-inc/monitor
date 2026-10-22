@@ -225,9 +225,66 @@ describe.each<[string, AdapterFactory]>([
     expect(rows).toEqual([sample()]);
   });
 
+  it('sums every counter per engine, model and epoch-aligned bucket when bucketing', async () => {
+    await storage.saveKvCacheEngineSamples([
+      sample({ timestamp: 60_000 }),
+      sample({ timestamp: 120_000 }),
+      sample({ timestamp: 180_000 }),
+      sample({ timestamp: 120_000, engineId: 'eng-2' }),
+      sample({ timestamp: 240_000, modelName: 'other' }),
+      sample({ timestamp: 999_999 }),
+    ]);
+    const doubled = {
+      requestedTokens: 2000,
+      hitTokens: 1400,
+      lookupTokens: 2000,
+      lookupHits: 6,
+      remoteReadBytes: 20,
+      remoteWriteBytes: 40,
+      remoteReadRequests: 2,
+      remoteWriteRequests: 4,
+      remotePingErrors: 0,
+    };
+    const query = { connectionId: 'conn-a', from: 0, to: 300_000, bucketMs: 120_000 };
+    expect(await storage.getKvCacheEngineSamples(query)).toEqual([
+      sample({ timestamp: 0 }),
+      sample({ timestamp: 120_000, ...doubled }),
+      sample({ timestamp: 120_000, engineId: 'eng-2' }),
+      sample({ timestamp: 240_000, modelName: 'other' }),
+    ]);
+    expect(await storage.getKvCacheEngineSamples({ ...query, limit: 1 })).toEqual([sample({ timestamp: 240_000, modelName: 'other' })]);
+    expect(await storage.getKvCacheEngineSamples({ ...query, engineId: 'eng-2' })).toEqual([sample({ timestamp: 120_000, engineId: 'eng-2' })]);
+  });
+
+  it('sums requested and hit tokens over the whole filtered range', async () => {
+    await storage.saveKvCacheEngineSamples([
+      sample({ timestamp: 1, requestedTokens: 100, hitTokens: 10 }),
+      sample({ timestamp: 2, requestedTokens: 200, hitTokens: 20 }),
+      sample({ timestamp: 2, engineId: 'eng-2', requestedTokens: 1000, hitTokens: 1000 }),
+      sample({ timestamp: 999_999, requestedTokens: 5000, hitTokens: 0 }),
+    ]);
+    expect(await storage.getKvCacheSampleTotals({ connectionId: 'conn-a', engineId: 'eng-1', from: 0, to: 100_000 })).toEqual({
+      requestedTokens: 300,
+      hitTokens: 30,
+    });
+    expect(await storage.getKvCacheSampleTotals({ connectionId: 'conn-a', from: 0, to: 100_000 })).toEqual({ requestedTokens: 1300, hitTokens: 1030 });
+    expect(await storage.getKvCacheSampleTotals({ connectionId: 'conn-b' })).toEqual({ requestedTokens: 0, hitTokens: 0 });
+  });
+
   it('prunes samples', async () => {
     await storage.saveKvCacheEngineSamples([sample({ timestamp: 1 }), sample({ timestamp: 10 })]);
     expect(await storage.pruneOldKvCacheEngineSamples(5)).toBe(1);
+  });
+
+  it('deletes the samples of one engine only', async () => {
+    await storage.saveKvCacheEngineSamples([
+      sample({ timestamp: 60_000 }),
+      sample({ timestamp: 120_000 }),
+      sample({ engineId: 'eng-2', timestamp: 60_000 }),
+    ]);
+    await storage.deleteKvCacheEngineSamples('eng-1');
+    const rows = await storage.getKvCacheEngineSamples({ connectionId: 'conn-a' });
+    expect(rows.map((r) => r.engineId)).toEqual(['eng-2']);
   });
 
   it('upserts, lists, reads and deletes engines', async () => {
