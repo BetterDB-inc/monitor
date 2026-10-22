@@ -1,4 +1,4 @@
-import type { CustomSchema, PresetId } from '@betterdb/shared';
+import type { CapturedKey, CustomSchema, KeyView, PresetId } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
 import { agentCachePreset } from './agent-cache';
 import { langchainCommunityPreset } from './langchain-community';
@@ -37,3 +37,6 @@ export function getPreset(id: PresetId, custom?: CustomSchema | null): PresetDef
       return createCustomPreset(custom);
   }
 }
+
+export const parseSessionKeys = (preset: PresetDefinition, keys: CapturedKey[]): KeyView[] =>
+  preset.parseKeys ? preset.parseKeys(keys) : keys.map((k) => preset.parseKey(k));

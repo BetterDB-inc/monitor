@@ -5,9 +5,9 @@ import { fail, failedView, guardedParse, isRecord, parseJson, textContent } from
 const VALUE_TYPES = ['list', 'string', 'hash', 'json'] as const;
 const MESSAGE_SOURCES = ['items', 'path', 'key'] as const;
 const OPTIONAL_FIELDS = ['timestamp', 'toolName', 'toolArgs', 'toolResult'] as const;
-const MAX_REGEX_LENGTH = 200;
-const MAX_KEY_LENGTH = 1024;
-const OPEN_BOUND = /^\{\d+,\}/;
+const MAX_TEMPLATE_LENGTH = 200;
+const SESSION_TOKEN = '{session}';
+const WILDCARD = '*';
 const SEGMENT = /^([^.[\]]*)((?:\[\d+\])*)$/;
 const INDEX = /\[(\d+)\]/g;
 
@@ -39,37 +39,74 @@ const isValidPath = (path: string): boolean =>
     return match !== null && !(match[1] === '' && match[2] === '');
   });
 
-const startsUnboundedRepeat = (src: string, i: number): boolean =>
-  src[i] === '+' || src[i] === '*' || (src[i] === '{' && OPEN_BOUND.test(src.slice(i)));
+type Gap = 'session' | 'wildcard';
 
-function hasNestedRepetition(src: string): boolean {
-  const stack: boolean[] = [];
-  let inClass = false;
-  for (let i = 0; i < src.length; i++) {
-    const c = src[i];
-    if (c === '\\') {
-      i++;
-    } else if (inClass) {
-      if (c === ']') inClass = false;
-    } else if (c === '[') {
-      inClass = true;
-    } else if (c === '(') {
-      stack.push(false);
-    } else if (c === ')') {
-      const innerRepeats = stack.pop() ?? false;
-      if (innerRepeats && startsUnboundedRepeat(src, i + 1)) return true;
-      if (innerRepeats && stack.length > 0) stack[stack.length - 1] = true;
-    } else if (startsUnboundedRepeat(src, i) && stack.length > 0) {
-      stack[stack.length - 1] = true;
-    }
-  }
-  return false;
+interface SessionTemplate {
+  literals: string[];
+  gaps: Gap[];
 }
 
-const hasSessionGroup = (src: string): boolean =>
-  'session' in (new RegExp(`(?:${src})|`).exec('')?.groups ?? {});
+export function parseSessionTemplate(template: string): SessionTemplate {
+  const literals: string[] = [];
+  const gaps: Gap[] = [];
+  let literal = '';
+  for (let i = 0; i < template.length; i++) {
+    if (template.startsWith(SESSION_TOKEN, i)) {
+      literals.push(literal);
+      gaps.push('session');
+      literal = '';
+      i += SESSION_TOKEN.length - 1;
+    } else if (template[i] === WILDCARD) {
+      literals.push(literal);
+      gaps.push('wildcard');
+      literal = '';
+    } else {
+      literal += template[i];
+    }
+  }
+  literals.push(literal);
+  return { literals, gaps };
+}
+
+function templateErrors(template: string): string[] {
+  if (template.length > MAX_TEMPLATE_LENGTH) {
+    return [`Session template must be at most ${MAX_TEMPLATE_LENGTH} characters`];
+  }
+  const { literals, gaps } = parseSessionTemplate(template);
+  const errors: string[] = [];
+  if (gaps.filter((gap) => gap === 'session').length !== 1) {
+    errors.push('Session template must contain {session} exactly once');
+  }
+  if (literals.slice(1, -1).some((literal) => literal === '')) {
+    errors.push('Session template needs text between {session} and *');
+  }
+  return errors;
+}
+
+export function matchSessionTemplate(template: SessionTemplate, key: string): string | null {
+  const { literals, gaps } = template;
+  const first = literals[0];
+  const last = literals[literals.length - 1];
+  if (key.length < first.length + last.length) return null;
+  if (!key.startsWith(first) || !key.endsWith(last)) return null;
+  const end = key.length - last.length;
+  let pos = first.length;
+  let session: string | null = null;
+  for (let i = 0; i < gaps.length; i++) {
+    const isLast = i === gaps.length - 1;
+    const next = literals[i + 1];
+    const stop = isLast ? end : key.indexOf(next, pos);
+    if (stop < 0 || stop > end || (!isLast && stop + next.length > end)) return null;
+    if (gaps[i] === 'session') session = key.slice(pos, stop);
+    pos = isLast ? end : stop + next.length;
+  }
+  return session || null;
+}
 
 const isNonEmptyString = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
+
+const isBlank = (v: unknown): boolean =>
+  v === undefined || v === null || (typeof v === 'string' && v.trim() === '');
 
 export function validateCustomSchema(
   s: unknown,
@@ -77,27 +114,9 @@ export function validateCustomSchema(
   const errors: string[] = [];
   if (!isRecord(s)) return { ok: false, errors: ['Schema must be an object'] };
 
-  if (s.sessionRegex !== undefined) {
-    if (typeof s.sessionRegex !== 'string') {
-      errors.push('sessionRegex must be a string');
-    } else {
-      const src = s.sessionRegex;
-      if (src.length > MAX_REGEX_LENGTH) {
-        errors.push(`Session regex must be at most ${MAX_REGEX_LENGTH} characters`);
-      } else {
-        try {
-          new RegExp(src);
-          if (!hasSessionGroup(src)) {
-            errors.push('sessionRegex must contain a named group "session"');
-          }
-          if (hasNestedRepetition(src)) {
-            errors.push('Session regex has nested repetition that could hang the server');
-          }
-        } catch {
-          errors.push('sessionRegex is not a valid regular expression');
-        }
-      }
-    }
+  if (!isBlank(s.sessionTemplate)) {
+    if (typeof s.sessionTemplate !== 'string') errors.push('sessionTemplate must be a string');
+    else errors.push(...templateErrors(s.sessionTemplate));
   }
 
   if (!VALUE_TYPES.includes(s.valueType as (typeof VALUE_TYPES)[number])) {
@@ -128,7 +147,7 @@ export function validateCustomSchema(
     }
     for (const name of OPTIONAL_FIELDS) {
       const value = fields[name];
-      if (value === undefined) continue;
+      if (isBlank(value)) continue;
       if (!isNonEmptyString(value)) errors.push(`fields.${name} must be a non-empty string`);
       else if (!isValidPath(value)) errors.push(`fields.${name} is not a valid path`);
     }
@@ -137,7 +156,7 @@ export function validateCustomSchema(
   if (errors.length > 0) return { ok: false, errors };
   const input = s as unknown as CustomSchema;
   const schema: CustomSchema = {
-    ...(input.sessionRegex !== undefined ? { sessionRegex: input.sessionRegex } : {}),
+    ...(!isBlank(input.sessionTemplate) ? { sessionTemplate: input.sessionTemplate } : {}),
     valueType: input.valueType,
     messages:
       input.messages.from === 'path'
@@ -147,7 +166,7 @@ export function validateCustomSchema(
       role: input.fields.role,
       content: input.fields.content,
       ...Object.fromEntries(
-        OPTIONAL_FIELDS.filter((name) => input.fields[name] !== undefined).map((name) => [
+        OPTIONAL_FIELDS.filter((name) => !isBlank(input.fields[name])).map((name) => [
           name,
           input.fields[name],
         ]),
@@ -166,13 +185,23 @@ const TYPE_MATCHES: Record<CustomSchema['valueType'], string[]> = {
 
 const parseIfString = (v: unknown): unknown => (typeof v === 'string' ? parseJson(v) : v);
 
+const JSON_CONTAINER = /^\s*[[{]/;
+
 const parseIfJson = (v: string): unknown => {
+  if (!JSON_CONTAINER.test(v)) return v;
   try {
     return parseJson(v);
   } catch {
     return v;
   }
 };
+
+const fieldOrder = new Intl.Collator('en', { numeric: true });
+
+const byFieldName = (hash: Record<string, unknown>): unknown[] =>
+  Object.entries(hash)
+    .sort(([a], [b]) => fieldOrder.compare(a, b))
+    .map(([, value]) => value);
 
 function readRoot(k: CapturedKey, valueType: CustomSchema['valueType']): unknown {
   switch (valueType) {
@@ -200,7 +229,7 @@ function selectEntries(root: unknown, schema: CustomSchema): unknown[] {
       return [root];
     case 'items': {
       if (Array.isArray(root)) return root;
-      if (schema.valueType === 'hash' && isRecord(root)) return Object.values(root);
+      if (schema.valueType === 'hash' && isRecord(root)) return byFieldName(root);
       return fail('Value has no message items');
     }
     case 'path': {
@@ -240,16 +269,12 @@ function toMessage(entry: unknown, fields: CustomSchema['fields']): ParsedMessag
 }
 
 export function createCustomPreset(schema: CustomSchema): PresetDefinition {
-  const sessionRegex = schema.sessionRegex ? new RegExp(schema.sessionRegex) : null;
+  const template = schema.sessionTemplate ? parseSessionTemplate(schema.sessionTemplate) : null;
   const expectedTypes = TYPE_MATCHES[schema.valueType];
   return {
     id: 'custom',
     defaultPattern: (prefix) => `${prefix}*`,
-    sessionIdOf: (key) => {
-      if (!sessionRegex) return key;
-      if (key.length > MAX_KEY_LENGTH) return null;
-      return sessionRegex.exec(key)?.groups?.session || null;
-    },
+    sessionIdOf: (key) => (template ? matchSessionTemplate(template, key) : key),
     parseKey: (k) => {
       if (!expectedTypes.includes(k.type)) {
         return failedView(k, `Expected ${schema.valueType}, found ${k.type}`);

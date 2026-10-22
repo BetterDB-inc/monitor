@@ -18,7 +18,7 @@ import type {
 import type { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { validateNamespaceInput } from './namespace-validation';
-import { getPreset } from './presets/registry';
+import { getPreset, parseSessionKeys } from './presets/registry';
 import { estimateTokens } from './presets/text';
 import type { PresetDefinition } from './presets/types';
 import { withPrimaries } from './primary-nodes';
@@ -147,7 +147,7 @@ export class SessionExplorerService {
     const read = await readSessionKeys(db, scan.keys);
     if (read.keys.length === 0) throw sessionMissing(read.failedNodes);
 
-    const views = read.keys.map((k) => preset.parseKey(k));
+    const views = parseSessionKeys(preset, read.keys);
     const messages = preset.mergeSession(views);
     const unparsedKeys = views.filter((v) => !v.parsed).length;
     const truncated = scan.truncated || read.truncated;

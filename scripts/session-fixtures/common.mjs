@@ -3,13 +3,13 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const HERE = dirname(fileURLToPath(import.meta.url));
-export const ALLOWED_PORTS = [6380, 6384];
+export const ALLOWED_PORTS = [6380];
 export const PASSWORD = process.env.VALKEY_PASSWORD ?? 'devpassword';
 const FILLER = 'The quick brown fox jumps over the lazy dog. ';
 
 export function assertPort(port) {
   if (!ALLOWED_PORTS.includes(port)) {
-    console.error(`refusing port ${port}: only 6380 and 6384 are allowed`);
+    console.error(`refusing port ${port}: only 6380 is allowed`);
     process.exit(1);
   }
 }

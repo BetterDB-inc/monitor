@@ -1,17 +1,16 @@
 # Session fixtures harness
 
-Seeds the compose `valkey` (6380) and `valkey-bundle` (6384) with chat/session
-data written by real client libraries, then captures every key into committed
+Seeds the compose `valkey` (6380) with chat/session data written by real client libraries, then captures every key into committed
 fixtures under `apps/api/test/fixtures/session-explorer/`. Parsers in the
 Session Explorer are tested against these captures.
 
 ```
-docker compose up -d valkey valkey-bundle
+docker compose up -d valkey
 zsh scripts/session-fixtures/run.sh              # seed + capture
 zsh scripts/session-fixtures/run.sh --seed-only  # seed only
 ```
 
-Safety: only ports 6380 and 6384 are accepted. The harness never flushes; it
+Safety: only port 6380 is accepted. The harness never flushes; it
 writes under `sxfix:` prefixes and deletes only keys matching its own prefixes
 (SCAN + UNLINK) before seeding. Password comes from `VALKEY_PASSWORD`
 (default `devpassword`). No LLM is called; messages are built with each

@@ -4,14 +4,14 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ALLOWED_PORTS = (6380, 6384)
+ALLOWED_PORTS = (6380,)
 PASSWORD = os.environ.get("VALKEY_PASSWORD", "devpassword")
 FILLER = "The quick brown fox jumps over the lazy dog. "
 
 
 def assert_port(port):
     if port not in ALLOWED_PORTS:
-        sys.exit(f"refusing port {port}: only 6380 and 6384 are allowed")
+        sys.exit(f"refusing port {port}: only 6380 is allowed")
 
 
 def url(port):
