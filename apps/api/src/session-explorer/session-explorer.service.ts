@@ -87,11 +87,19 @@ export class SessionExplorerService {
     const preset = this.presetOf(input);
     const db = this.registry.get(connectionId);
     const sampleKey = await withPrimaries(db, async ({ clients }) => {
+      let lastError: unknown;
+      let succeeded = 0;
       for (const client of clients) {
-        const [, page] = await client.scan('0', 'MATCH', input.pattern, 'COUNT', PREVIEW_SCAN_COUNT);
-        const key = page.find((k) => preset.sessionIdOf(k) !== null) ?? page[0];
-        if (key !== undefined) return key;
+        try {
+          const [, page] = await client.scan('0', 'MATCH', input.pattern, 'COUNT', PREVIEW_SCAN_COUNT);
+          succeeded++;
+          const key = page.find((k) => preset.sessionIdOf(k) !== null) ?? page[0];
+          if (key !== undefined) return key;
+        } catch (err) {
+          lastError = err;
+        }
       }
+      if (succeeded === 0 && lastError !== undefined) throw lastError;
       return null;
     });
     if (sampleKey === null) return { sampleKey: null, view: null };

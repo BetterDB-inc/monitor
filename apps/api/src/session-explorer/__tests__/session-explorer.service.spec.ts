@@ -1,8 +1,12 @@
 import { NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import type { CapturedKey, SessionNamespace } from '@betterdb/shared';
+import Valkey from 'iovalkey';
 import { SessionExplorerService } from '../session-explorer.service';
 import { keysForSession, scanSessions } from '../session-scanner';
 import { readSessionKeys } from '../session-reader';
+import { FakeValkey, fakeDb, masterNode } from './fake-valkey';
+
+jest.mock('iovalkey', () => ({ __esModule: true, default: jest.fn() }));
 
 jest.mock('../session-scanner', () => ({
   ...jest.requireActual('../session-scanner'),
@@ -16,6 +20,7 @@ jest.mock('../session-reader', () => ({
 
 const keysFor = keysForSession as jest.MockedFunction<typeof keysForSession>;
 const read = readSessionKeys as jest.MockedFunction<typeof readSessionKeys>;
+const ValkeyMock = Valkey as unknown as jest.Mock;
 
 const ns: SessionNamespace = {
   id: 'ns-1',
@@ -162,5 +167,43 @@ describe('SessionExplorerService.oversizeSessions', () => {
       partial: true,
       failedNodes: 1,
     });
+  });
+});
+
+describe('SessionExplorerService.preview', () => {
+  const input = { name: 'LangChain', pattern: 'lc:*', preset: 'langchain-community' };
+  const failing = (message: string) => {
+    const node = new FakeValkey();
+    node.scan = async () => {
+      throw new Error(message);
+    };
+    return node;
+  };
+  const serviceOver = (nodes: Record<number, FakeValkey>) => {
+    ValkeyMock.mockImplementation((opts: { port: number }) => nodes[opts.port]);
+    const db = fakeDb(new FakeValkey(), {
+      nodes: Object.keys(nodes).map((port) => masterNode(port, `10.0.0.1:${port}`)),
+    });
+    return new SessionExplorerService({ get: jest.fn(() => db) } as never, {} as never);
+  };
+
+  beforeEach(() => {
+    ValkeyMock.mockReset();
+    read.mockResolvedValue({ keys: [captured()], truncated: false, failedNodes: 0, missingKeys: 0 });
+  });
+
+  it('keeps searching the other primaries when one scan fails', async () => {
+    const healthy = new FakeValkey(new Map([['lc:1', { type: 'list' }]]));
+    const service = serviceOver({ 7001: failing('LOADING'), 7002: healthy });
+
+    const result = await service.preview('conn-1', input);
+
+    expect(result.sampleKey).toBe('lc:1');
+  });
+
+  it('rethrows when every primary scan fails', async () => {
+    const service = serviceOver({ 7001: failing('LOADING'), 7002: failing('LOADING') });
+
+    await expect(service.preview('conn-1', input)).rejects.toThrow('LOADING');
   });
 });
