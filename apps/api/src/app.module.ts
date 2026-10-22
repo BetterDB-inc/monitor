@@ -53,6 +53,7 @@ let MemoryProposalsModule: any = null;
 let AgentModule: any = null;
 let SelfHostedAgentModule: any = null;
 let DataRetentionModule: any = null;
+let CacheSimulatorModule: any = null;
 
 try {
   // Use relative path for runtime resolution (tsconfig paths only work at compile time)
@@ -147,6 +148,14 @@ try {
   const memoryProposalsModule = require('../../../proprietary/memory-proposals/memory-proposals.module');
   MemoryProposalsModule = memoryProposalsModule.MemoryProposalsModule;
   console.log('[MemoryProposals] Proprietary module loaded');
+} catch {
+  // Proprietary module not available
+}
+
+try {
+  const cacheSimulatorModule = require('../../../proprietary/cache-simulator/cache-simulator.module');
+  CacheSimulatorModule = cacheSimulatorModule.CacheSimulatorModule;
+  console.log('[CacheSimulator] Proprietary module loaded');
 } catch {
   // Proprietary module not available
 }
@@ -257,6 +266,7 @@ const proprietaryImports = [
   AgentModule,
   SelfHostedAgentModule,
   DataRetentionModule,
+  CacheSimulatorModule,
 ].filter(Boolean);
 
 @Module({
