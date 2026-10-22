@@ -1,0 +1,118 @@
+import { useMemo, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { project, type CacheSimulatorSnapshot } from '@betterdb/shared';
+import { cacheSimulatorApi, cacheSimulatorKeys } from '../api/cache-simulator';
+import { useConnection } from '../hooks/useConnection';
+import { Button } from '../components/ui/button';
+import { Skeleton } from '../components/ui/skeleton';
+import { CurrentStateCard, HORIZONS, OutcomePanel, ProjectionInputs, isSetupFailure, keepPreviousEstimate, measuredInputs, projectionInputs, steadyBytes, type SimulatorInputs } from '../components/pages/cache-simulator';
+import { ProjectionChart } from '../components/pages/cache-simulator/ProjectionChart';
+
+const SIX_MONTHS = HORIZONS[HORIZONS.length - 1];
+
+export function CacheSimulator() {
+  const { currentConnection } = useConnection();
+  const connectionId = currentConnection?.id ?? null;
+  const queryClient = useQueryClient();
+  const [horizon, setHorizon] = useState(HORIZONS[0]);
+  const [overrides, setOverrides] = useState<{ connectionId: string | null; values: Partial<SimulatorInputs> } | null>(null);
+  const [refreshingId, setRefreshingId] = useState<string | null | undefined>(undefined);
+  const [refreshFailure, setRefreshFailure] = useState<{ connectionId: string | null; message: string } | null>(null);
+  const isRefreshing = refreshingId === connectionId;
+  const refreshError = refreshFailure?.connectionId === connectionId ? refreshFailure.message : null;
+
+  const snapshotKey = cacheSimulatorKeys.snapshot(connectionId);
+  const snapshot = useQuery({
+    queryKey: snapshotKey,
+    queryFn: async ({ signal }) =>
+      keepPreviousEstimate(queryClient.getQueryData<CacheSimulatorSnapshot>(snapshotKey), await cacheSimulatorApi.getSnapshot(connectionId, false, signal)),
+    refetchInterval: (query: { state: { data?: CacheSimulatorSnapshot } }) => (query.state.data?.status === 'sampling' ? 2000 : false),
+  });
+
+  if (overrides && overrides.connectionId !== connectionId) setOverrides(null);
+
+  const data = snapshot.data;
+  const measured = useMemo(() => (data ? measuredInputs(data) : null), [data]);
+  const overrideValues = overrides && overrides.connectionId === connectionId ? overrides.values : null;
+  const inputs = useMemo(() => (measured ? { ...measured, ...overrideValues } : null), [measured, overrideValues]);
+
+  const projection = useMemo(() => (data && inputs ? project(projectionInputs(data, inputs, horizon.days)) : null), [data, inputs, horizon]);
+  const sizingInputs = useMemo(() => (data && inputs ? projectionInputs(data, inputs, SIX_MONTHS.days) : null), [data, inputs]);
+  const sizing = useMemo(() => (sizingInputs ? project(sizingInputs) : null), [sizingInputs]);
+
+  const refresh = async () => {
+    if (isRefreshing) return;
+    const refreshedId = connectionId;
+    setRefreshingId(refreshedId);
+    setRefreshFailure(null);
+    try {
+      const queryKey = cacheSimulatorKeys.snapshot(refreshedId);
+      await queryClient.cancelQueries({ queryKey });
+      const next = await cacheSimulatorApi.getSnapshot(refreshedId, true);
+      queryClient.setQueryData(queryKey, keepPreviousEstimate(queryClient.getQueryData<CacheSimulatorSnapshot>(queryKey), next));
+      setOverrides((current) => (current?.connectionId === refreshedId ? null : current));
+    } catch (error) {
+      setRefreshFailure({ connectionId: refreshedId, message: error instanceof Error ? error.message : 'Refresh failed' });
+    } finally {
+      setRefreshingId((current) => (current === refreshedId ? undefined : current));
+    }
+  };
+
+  if (data && isSetupFailure(data)) {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-semibold">Cache Size Simulator</h1>
+          <Button variant="outline" size="sm" onClick={refresh} disabled={isRefreshing}>
+            Refresh sample
+          </Button>
+        </div>
+        {refreshError && <p className="text-sm text-destructive">Could not refresh the sample: {refreshError}</p>}
+        <p className="text-sm text-destructive">Could not read this instance: {data.error}</p>
+      </div>
+    );
+  }
+
+  if (!data || !inputs || !projection || !sizing) {
+    return snapshot.isError ? (
+      <div className="space-y-2">
+        <p className="text-sm text-destructive">Could not load the cache size simulator: {snapshot.error.message}</p>
+        <Button variant="outline" size="sm" onClick={() => snapshot.refetch()} disabled={snapshot.isFetching}>
+          Retry
+        </Button>
+      </div>
+    ) : (
+      <div className="space-y-4">
+        <Skeleton className="h-8 w-48" />
+        <Skeleton className="h-40 w-full" />
+      </div>
+    );
+  }
+
+  const maxmemory = inputs.maxmemory > 0 ? inputs.maxmemory : null;
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">Cache Size Simulator</h1>
+        <Button variant="outline" size="sm" onClick={refresh} disabled={isRefreshing || data.status === 'sampling'}>
+          Refresh sample
+        </Button>
+      </div>
+      {refreshError && <p className="text-sm text-destructive">Could not refresh the sample: {refreshError}</p>}
+      {snapshot.isError && <p className="text-sm text-destructive">Could not update the snapshot, showing the last result: {snapshot.error.message}</p>}
+      <CurrentStateCard snapshot={data} />
+      <ProjectionInputs key={connectionId ?? ''} inputs={inputs} hasGrowth={data.growth !== null} onChange={(change) =>
+          setOverrides((current) => ({ connectionId, values: { ...(current?.connectionId === connectionId ? current.values : {}), ...change } }))
+        } onReset={() => setOverrides(null)} />
+      <div className="flex gap-2">
+        {HORIZONS.map((entry) => (
+          <Button key={entry.label} size="sm" variant={entry.label === horizon.label ? 'default' : 'outline'} onClick={() => setHorizon(entry)}>
+            {entry.label}
+          </Button>
+        ))}
+      </div>
+      <ProjectionChart projection={projection} maxmemory={maxmemory} />
+      <OutcomePanel projection={projection} sizingProjection={sizing} maxmemory={maxmemory} policy={data.instant.maxmemoryPolicy} plateauBytes={sizingInputs ? steadyBytes(sizingInputs) : null} horizonLabel={horizon.label === '6m' ? '6 months' : `${horizon.days} days`} />
+    </div>
+  );
+}
