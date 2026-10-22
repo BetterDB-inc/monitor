@@ -96,6 +96,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
 
   // Track alert states with LRU cache to prevent memory leak
   private alertStates: LRUCache<string, AlertState>;
+  private readonly pendingLookups = new Map<string, { count: number; generation: number }>();
 
   // Instance context
   private readonly sourceHost: string;
@@ -414,6 +415,17 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     return false;
   }
 
+  clearThresholdAlertPerWebhook(alertKeyPrefix: string, connectionId: string): void {
+    const generationKey = `${alertKeyPrefix}:${connectionId}`;
+    const pending = this.pendingLookups.get(generationKey);
+    if (pending) pending.generation += 1;
+    const connectionPrefix = `${generationKey}:`;
+    const keys = [...this.alertStates.keys()].filter((key) => key.startsWith(connectionPrefix));
+    for (const key of keys) {
+      this.alertStates.delete(key);
+    }
+  }
+
   /**
    * Dispatch threshold-based alert (e.g., memory.critical, connection.critical)
    * Uses global threshold - consider using dispatchThresholdAlertPerWebhook for per-webhook thresholds
@@ -450,6 +462,24 @@ export class WebhookDispatcherService implements OnModuleDestroy {
    * @param data Event data payload
    * @param connectionId Optional connection ID to filter webhooks and include in payload
    */
+  private trackLookup(alertKeyPrefix: string, connectionId?: string): () => boolean {
+    if (!connectionId) return () => true;
+    const key = `${alertKeyPrefix}:${connectionId}`;
+    const pending = this.pendingLookups.get(key) ?? { count: 0, generation: 0 };
+    pending.count += 1;
+    this.pendingLookups.set(key, pending);
+    const generation = pending.generation;
+    let settled = false;
+    return () => {
+      if (!settled) {
+        settled = true;
+        pending.count -= 1;
+        if (pending.count === 0) this.pendingLookups.delete(key);
+      }
+      return pending.generation === generation;
+    };
+  }
+
   async dispatchThresholdAlertPerWebhook(
     eventType: WebhookEventType,
     alertKeyPrefix: string,
@@ -460,9 +490,13 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     connectionId?: string,
   ): Promise<boolean> {
     let firedAny = false;
+    const settleLookup = this.trackLookup(alertKeyPrefix, connectionId);
     try {
       // Get webhooks subscribed to this event, filtered by connectionId
       const webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
+      if (!settleLookup()) {
+        return false;
+      }
 
       if (webhooks.length === 0) {
         this.logger.debug(
@@ -516,6 +550,8 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       );
     } catch (error) {
       this.logger.error(`Failed to dispatch per-webhook threshold alert ${eventType}:`, error);
+    } finally {
+      settleLookup();
     }
     return firedAny;
   }

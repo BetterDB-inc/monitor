@@ -224,6 +224,82 @@ describe('WebhookDispatcherService', () => {
     });
   });
 
+  describe('Clearing a threshold alert', () => {
+    it('re-arms every webhook of one connection without touching others', () => {
+      const fire = (key: string) => service.shouldFireAlert(key, 30, 10, true);
+      const keys = [
+        'replication_lag:conn-1:wh-1',
+        'replication_lag:conn-1:wh-2',
+        'replication_lag:conn-10:wh-1',
+        'replication_lag:conn-2:wh-1',
+        'slowlog_threshold:conn-1:wh-1',
+      ];
+
+      keys.forEach((key) => expect(fire(key)).toBe(true));
+      service.clearThresholdAlertPerWebhook('replication_lag', 'conn-1');
+
+      expect(keys.map(fire)).toEqual([true, true, false, false, false]);
+    });
+
+    it('drops a dispatch whose webhook lookup was still pending when the alert was cleared', async () => {
+      let resolveLookup: (webhooks: any[]) => void = () => undefined;
+      webhooksService.getWebhooksByEvent.mockReturnValue(new Promise((resolve) => (resolveLookup = resolve)));
+      const dispatched = jest.spyOn(service as any, 'dispatchPendingEvent').mockResolvedValue(undefined);
+
+      const pending = service.dispatchThresholdAlertPerWebhook(
+        WebhookEventType.REPLICATION_LAG,
+        'replication_lag',
+        30,
+        'replicationLagSeconds',
+        true,
+        { message: 'lag' },
+        'conn-1',
+      );
+      service.clearThresholdAlertPerWebhook('replication_lag', 'conn-1');
+      resolveLookup([{ id: 'wh-1', thresholds: {} }]);
+
+      await expect(pending).resolves.toBe(false);
+      expect(dispatched).not.toHaveBeenCalled();
+      expect(service.shouldFireAlert('replication_lag:conn-1:wh-1', 30, 10, true)).toBe(true);
+    });
+
+    it('does not restore a latch cleared in the microtask right after the lookup resolves', async () => {
+      webhooksService.getWebhooksByEvent.mockResolvedValue([{ id: 'wh-1', thresholds: {} }] as any);
+      jest.spyOn(service as any, 'dispatchPendingEvent').mockResolvedValue(undefined);
+
+      const pending = service.dispatchThresholdAlertPerWebhook(
+        WebhookEventType.REPLICATION_LAG,
+        'replication_lag',
+        30,
+        'replicationLagSeconds',
+        true,
+        { message: 'lag' },
+        'conn-1',
+      );
+      const cleared = Promise.resolve().then(() => service.clearThresholdAlertPerWebhook('replication_lag', 'conn-1'));
+      await Promise.all([pending, cleared]);
+
+      expect(service.shouldFireAlert('replication_lag:conn-1:wh-1', 30, 10, true)).toBe(true);
+    });
+
+    it('keeps no generation state once lookups settle, however many connections are cleared', async () => {
+      webhooksService.getWebhooksByEvent.mockResolvedValue([]);
+      for (let i = 0; i < 50; i++) {
+        service.clearThresholdAlertPerWebhook('replication_lag', `conn-${i}`);
+        await service.dispatchThresholdAlertPerWebhook(
+          WebhookEventType.REPLICATION_LAG,
+          'replication_lag',
+          30,
+          'replicationLagSeconds',
+          true,
+          { message: 'lag' },
+          `conn-${i}`,
+        );
+      }
+      expect((service as any).pendingLookups.size).toBe(0);
+    });
+  });
+
   describe('Signature Generation', () => {
     it('should generate signature with timestamp', () => {
       webhooksService.generateSignature.mockReturnValue('test-signature');

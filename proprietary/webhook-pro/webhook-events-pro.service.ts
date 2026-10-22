@@ -3,6 +3,7 @@ import { WebhookDispatcherService } from '@app/webhooks/webhook-dispatcher.servi
 import {
   WebhookEventType,
   type CveCriticalDetectedData,
+  type IWebhookEventsProService,
   type KvCacheEvictionRiskData,
   type KvCacheHitRateLowData,
   type LatencyRegressionDetectedData,
@@ -28,7 +29,7 @@ import { LicenseService } from '@proprietary/licenses';
  * - connection.spike - Connection spike detected
  */
 @Injectable()
-export class WebhookEventsProService implements OnModuleInit {
+export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProService {
   private readonly logger = new Logger(WebhookEventsProService.name);
 
   constructor(
@@ -97,7 +98,7 @@ export class WebhookEventsProService implements OnModuleInit {
     masterLinkStatus: string;
     timestamp: number;
     instance: { host: string; port: number };
-    connectionId?: string;
+    connectionId: string;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('Replication lag event skipped - requires PRO license');
@@ -120,6 +121,10 @@ export class WebhookEventsProService implements OnModuleInit {
       }),
       data.connectionId,
     );
+  }
+
+  clearReplicationLag(connectionId: string): void {
+    this.webhookDispatcher.clearThresholdAlertPerWebhook('replication_lag', connectionId);
   }
 
   /**

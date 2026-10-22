@@ -2179,6 +2179,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
 
     if (role !== 'master' && !isReplica) {
+      this.webhookEventsProService?.clearReplicationLag(connectionId);
       this.clearRoleSpecificReplicationSeries(connLabel);
       if (!absentAsZero) {
         this.replicationOffset.remove(connLabel);
@@ -2187,6 +2188,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
 
     if (role === 'master') {
+      this.webhookEventsProService?.clearReplicationLag(connectionId);
       this.masterLinkUp.remove(connLabel);
       this.masterLastIoSecondsAgo.remove(connLabel);
       this.setInfoGauge(
@@ -2238,6 +2240,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           .catch((err) => {
             this.logger.error('Failed to dispatch replication.lag webhook', err);
           });
+      } else if (masterLinkStatus !== undefined && masterLinkStatus !== 'up') {
+        this.webhookEventsProService?.clearReplicationLag(connectionId);
       }
     }
   }
@@ -3807,6 +3811,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
     this.clearKvCache(connectionId);
     this.perConnectionState.delete(connectionId);
+    this.webhookEventsProService?.clearReplicationLag(connectionId);
     // Drop any in-flight metric update so a reused connection ID cannot join
     // stale work. The promise itself still settles; its compare-and-delete
     // finally then no-ops because the entry is already gone.
