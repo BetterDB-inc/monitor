@@ -2,7 +2,7 @@ import { BadRequestException, Logger } from '@nestjs/common';
 import { promises as dns } from 'dns';
 import { createServer, type IncomingHttpHeaders, type Server } from 'http';
 import { createServer as createTcpServer, type AddressInfo } from 'net';
-import { assertSafeOutboundUrl } from '@app/common/utils/outbound-url-guard';
+import { assertSafeOutboundUrl, BlockedAddressError } from '@app/common/utils/outbound-url-guard';
 import { fetchMetricsText, scrapeAllowsPrivateNetworks, ScrapeError } from '../metrics-fetch';
 
 jest.mock('@app/common/utils/outbound-url-guard', () => ({
@@ -45,6 +45,16 @@ describe('fetchMetricsText', () => {
       await expect(fetchMetricsText('http://x', null, jest.fn().mockResolvedValue(response))).rejects.toBeInstanceOf(ScrapeError);
       expect(cancel).toHaveBeenCalled();
     }
+  });
+
+  it('surfaces a connect-time blocked address', async () => {
+    const blocked = jest.fn().mockRejectedValue(new BlockedAddressError('Metrics URL resolves to a blocked address'));
+    await expect(fetchMetricsText('http://x', null, blocked)).rejects.toThrow(new ScrapeError('Metrics URL resolves to a blocked address'));
+  });
+
+  it('reports a DNS failure', async () => {
+    const missing = jest.fn().mockRejectedValue(Object.assign(new Error('getaddrinfo ENOTFOUND x'), { code: 'ENOTFOUND' }));
+    await expect(fetchMetricsText('http://x', null, missing)).rejects.toThrow(new ScrapeError('DNS lookup failed (ENOTFOUND)'));
   });
 
   it('maps fetch failures to timeout and connection failed', async () => {

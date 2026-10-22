@@ -150,10 +150,17 @@ export function KvCache() {
             recentBuckets={recent.data?.buckets ?? []}
           />
           {latest && <KvCacheAdvisories advisories={advisoriesFor(latest)} />}
-          {samplesSince !== null && (
-            <p className="text-xs text-muted-foreground">
-              Showing engine data since {new Date(samplesSince).toLocaleString()}
+          {samples.data?.truncated ? (
+            <p className="text-sm text-muted-foreground">
+              This range holds more samples than can be shown, so the charts and table cover only its most recent
+              part. Pick a shorter range to see all of it.
             </p>
+          ) : (
+            samplesSince !== null && (
+              <p className="text-xs text-muted-foreground">
+                Showing engine data since {new Date(samplesSince).toLocaleString()}
+              </p>
+            )
           )}
           <KvCacheCharts
             buckets={buckets}

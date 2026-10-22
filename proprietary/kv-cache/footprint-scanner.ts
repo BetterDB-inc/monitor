@@ -16,6 +16,8 @@ export interface ScanResult {
 }
 
 const SCAN_COUNT = 1000;
+const PROBE_PAGES = 2;
+const SAMPLE_BATCH = 100;
 const GLIDE_LMCACHE = /(?:^| )lib-name=GlidePySync\(lmcache(?::|\))/;
 const CLIENT_DB = /(?:^| )db=(\d+)(?: |$)/;
 
@@ -25,7 +27,12 @@ function isLmcacheClientOn(line: string, db: number): boolean {
   return clientDb === undefined || Number(clientDb) === db;
 }
 
-export async function scanLmcacheKeys(client: DatabasePort, budgets: ScanBudgets, dbSize: number): Promise<ScanResult> {
+export async function scanLmcacheKeys(
+  client: DatabasePort,
+  budgets: ScanBudgets,
+  dbSize: number,
+  probe = false,
+): Promise<ScanResult> {
   let cursor = '0';
   let iterations = 0;
   let returned = 0;
@@ -43,6 +50,7 @@ export async function scanLmcacheKeys(client: DatabasePort, budgets: ScanBudgets
       seen.add(key);
       matched.push(parsed);
     }
+    if (probe && iterations >= PROBE_PAGES && matched.length === 0) break;
   } while (
     cursor !== '0' &&
     returned < budgets.maxScanned &&
@@ -59,38 +67,43 @@ export async function scanLmcacheKeys(client: DatabasePort, budgets: ScanBudgets
   };
 }
 
+type Settled = { ok: true; value: unknown } | { ok: false; error: unknown };
+
+const settle = (promise: Promise<unknown>): Promise<Settled> =>
+  promise.then(
+    (value) => ({ ok: true as const, value }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+
+async function sampleKey(client: DatabasePort, parsed: ParsedLmcacheKey, ownsSlot?: SlotOwnership): Promise<KeySample> {
+  const { key } = parsed;
+  const candidate = siblingKey(parsed);
+  const sibling = candidate && (!ownsSlot || ownsSlot(keySlot(candidate))) ? candidate : null;
+  const [memory, ttl, exists] = await Promise.all([
+    settle(client.call('MEMORY', ['USAGE', key])),
+    settle(client.call('TTL', [key])),
+    sibling ? settle(client.call('EXISTS', [sibling])) : Promise.resolve(null),
+  ]);
+  if (!memory.ok && !ttl.ok && exists?.ok !== true) throw ttl.error;
+  return {
+    parsed,
+    memoryBytes: memory.ok && memory.value !== null ? Number(memory.value) : null,
+    ttl: ttl.ok ? Number(ttl.value) : null,
+    siblingExists: exists?.ok ? Number(exists.value) === 1 : null,
+  };
+}
+
 export async function sampleLmcacheKeys(
   client: DatabasePort,
   keys: ParsedLmcacheKey[],
   ownsSlot?: SlotOwnership,
 ): Promise<KeySample[]> {
-  if (keys.length === 0) return [];
-  const pipeline = client.getClient().pipeline();
-  const plan = keys.map((parsed) => {
-    const candidate = siblingKey(parsed);
-    const sibling = candidate && (!ownsSlot || ownsSlot(keySlot(candidate))) ? candidate : null;
-    pipeline.call('MEMORY', 'USAGE', parsed.key);
-    pipeline.ttl(parsed.key);
-    if (sibling) pipeline.exists(sibling);
-    return { parsed, sibling };
-  });
-  const replies = ((await pipeline.exec()) ?? []) as Array<[Error | null, unknown]>;
-  let index = 0;
-  return plan.map(({ parsed, sibling }) => {
-    const [memoryErr, memory] = replies[index++] ?? [new Error('missing'), null];
-    const [ttlErr, ttl] = replies[index++] ?? [new Error('missing'), null];
-    let siblingExists: boolean | null = null;
-    if (sibling) {
-      const [existsErr, exists] = replies[index++] ?? [new Error('missing'), null];
-      siblingExists = existsErr ? null : Number(exists) === 1;
-    }
-    return {
-      parsed,
-      memoryBytes: memoryErr || memory === null ? null : Number(memory),
-      ttl: ttlErr ? null : Number(ttl),
-      siblingExists,
-    };
-  });
+  const samples: KeySample[] = [];
+  for (let start = 0; start < keys.length; start += SAMPLE_BATCH) {
+    const batch = keys.slice(start, start + SAMPLE_BATCH);
+    samples.push(...(await Promise.all(batch.map((parsed) => sampleKey(client, parsed, ownsSlot)))));
+  }
+  return samples;
 }
 
 export async function hasLmcacheGlideClient(client: DatabasePort, db: number): Promise<boolean> {

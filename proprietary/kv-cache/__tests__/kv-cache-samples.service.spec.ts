@@ -166,7 +166,7 @@ describe('KvCacheSamplesService', () => {
       connectionId: 'c1',
       from: to - SAMPLES_MAX_RANGE_MS,
       to,
-      limit: SAMPLES_LIMIT,
+      limit: SAMPLES_LIMIT + 1,
       bucketMs: expect.any(Number),
       engineId: 'e1',
       modelName: 'm',
@@ -207,9 +207,45 @@ describe('KvCacheSamplesService', () => {
     expect((await service.getSamples('c1', { from: 0, to: 1000 })).rangeHitRate).toBe(0.75);
   });
 
+  it('flags a result only when rows beyond the limit exist', async () => {
+    const { service, storage } = setup();
+    storage.getKvCacheEngineSamples.mockResolvedValue(Array.from({ length: SAMPLES_LIMIT }, (_, i) => sample({ timestamp: i })));
+    expect((await service.getSamples('c1', { from: 0, to: 1000 })).truncated).toBe(false);
+    storage.getKvCacheEngineSamples.mockResolvedValue(Array.from({ length: SAMPLES_LIMIT + 1 }, (_, i) => sample({ timestamp: i })));
+    const result = await service.getSamples('c1', { from: 0, to: 1000 });
+    expect(result.truncated).toBe(true);
+    expect(result.buckets).toHaveLength(SAMPLES_LIMIT);
+    expect(result.buckets[0].timestamp).toBe(1);
+  });
+
+  it('drops the oldest bucket when the row limit splits it', async () => {
+    const { service, storage } = setup();
+    const boundary = [sample({ timestamp: 0, requestedTokens: 1, hitTokens: 1 }), sample({ timestamp: 0, engineId: 'e2', requestedTokens: 1 })];
+    const newer = Array.from({ length: SAMPLES_LIMIT - 1 }, (_, i) => sample({ timestamp: Math.floor(i / 2) + 1, engineId: i % 2 ? 'e2' : 'e1', requestedTokens: 2, hitTokens: 1 }));
+    storage.getKvCacheEngineSamples.mockResolvedValue([...boundary, ...newer]);
+    storage.getKvCacheSampleTotals.mockResolvedValue({ requestedTokens: 4, hitTokens: 3 });
+    const result = await service.getSamples('c1', { from: 0, to: 1_000_000 });
+    expect(result.truncated).toBe(true);
+    expect(result.buckets.some((bucket) => bucket.timestamp === 0)).toBe(false);
+    expect(result.buckets[0]).toMatchObject({ timestamp: 1, requestedTokens: 2 });
+    expect(result.rangeHitRate).toBe(0.75);
+  });
+
+  it('keeps the newest rows when every fetched row shares the oldest timestamp', async () => {
+    const { service, storage } = setup();
+    const rows = Array.from({ length: SAMPLES_LIMIT + 1 }, (_, i) => sample({ timestamp: 5, engineId: `e${i}`, requestedTokens: 2, hitTokens: 1 }));
+    storage.getKvCacheEngineSamples.mockResolvedValue(rows);
+    storage.getKvCacheSampleTotals.mockResolvedValue({ requestedTokens: 4, hitTokens: 3 });
+    const result = await service.getSamples('c1', { from: 0, to: 1000 });
+    expect(result.truncated).toBe(true);
+    expect(result.buckets).toHaveLength(SAMPLES_LIMIT);
+    expect(result.buckets.some((bucket) => bucket.engineId === 'e0')).toBe(false);
+    expect(result.rangeHitRate).toBe(0.75);
+  });
+
   it('returns a null range hit rate when nothing was requested', async () => {
     const { service } = setup();
-    expect(await service.getSamples('c1', { from: 0, to: 1000 })).toEqual({ buckets: [], rangeHitRate: null, bucketMs: 60_000 });
+    expect(await service.getSamples('c1', { from: 0, to: 1000 })).toEqual({ buckets: [], rangeHitRate: null, truncated: false, bucketMs: 60_000 });
   });
 
   it('waits for an in-flight save even when there is nothing new to drain', async () => {

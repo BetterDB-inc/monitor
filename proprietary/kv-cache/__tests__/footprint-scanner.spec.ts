@@ -65,19 +65,46 @@ describe('scanLmcacheKeys', () => {
     expect(client.call).toHaveBeenCalledTimes(2);
     expect(result.scanComplete).toBe(false);
   });
+
+  it('gives up after the probe pages when no LMCache key is found', async () => {
+    const pages: Array<[string, string[]]> = [['7', ['user:1']], ['8', ['a@b@c@d@e']], ['0', [k(0)]]];
+    const probing = scanClient(pages);
+    await scanLmcacheKeys(probing, { maxScanned: 200_000, maxMatched: 2000 }, 10_000, true);
+    expect(probing.call).toHaveBeenCalledTimes(2);
+
+    const full = scanClient(pages);
+    const result = await scanLmcacheKeys(full, { maxScanned: 200_000, maxMatched: 2000 }, 10_000);
+    expect(result.matchedKeys).toEqual(p(k(0)));
+  });
+
+  it('keeps scanning past the probe pages once an LMCache key is found', async () => {
+    const client = scanClient([['7', [k(1)]], ['8', []], ['0', [k(0)]]]);
+    const result = await scanLmcacheKeys(client, { maxScanned: 200_000, maxMatched: 2000 }, 3000, true);
+    expect(result.matchedKeys).toEqual(p(k(1), k(0)));
+  });
 });
 
+function sampleClient(replies: Record<string, unknown | Error>) {
+  const call = jest.fn(async (command: string, args: string[]) => {
+    const reply = replies[`${command} ${args.join(' ')}`];
+    if (reply instanceof Error) throw reply;
+    return reply;
+  });
+  return { call, getClient: () => { throw new Error('Raw client access not available through agent connections'); } } as any;
+}
+
 describe('sampleLmcacheKeys', () => {
-  it('reads memory, ttl and sibling existence in one pipeline', async () => {
-    const pipeline = { call: jest.fn().mockReturnThis(), ttl: jest.fn().mockReturnThis(), exists: jest.fn().mockReturnThis(), exec: jest.fn() };
-    pipeline.exec.mockResolvedValue([
-      [null, 3670112], [null, -1], [null, 0],
-      [null, 120], [null, 50],
-      [null, null], [null, -2],
-    ]);
-    const client = { getClient: () => ({ pipeline: () => pipeline }) } as any;
+  it('reads memory, ttl and sibling existence through call only', async () => {
+    const client = sampleClient({
+      [`MEMORY USAGE ${k(0, 'kv_bytes')}`]: 3670112,
+      [`TTL ${k(0, 'kv_bytes')}`]: -1,
+      [`EXISTS ${k(0, 'metadata')}`]: 0,
+      [`MEMORY USAGE ${k(1)}`]: 120,
+      [`TTL ${k(1)}`]: 50,
+      [`MEMORY USAGE ${k(2)}`]: null,
+      [`TTL ${k(2)}`]: -2,
+    });
     const samples = await sampleLmcacheKeys(client, p(k(0, 'kv_bytes'), k(1), k(2)));
-    expect(pipeline.exists).toHaveBeenCalledWith(k(0, 'metadata'));
     expect(samples.map(({ memoryBytes, ttl, siblingExists }) => ({ memoryBytes, ttl, siblingExists }))).toEqual([
       { memoryBytes: 3670112, ttl: -1, siblingExists: false },
       { memoryBytes: 120, ttl: 50, siblingExists: null },
@@ -86,41 +113,77 @@ describe('sampleLmcacheKeys', () => {
   });
 
   it('treats a cross-slot sibling probe rejected with MOVED as unknown, not orphaned', async () => {
-    const pipeline = { call: jest.fn().mockReturnThis(), ttl: jest.fn().mockReturnThis(), exists: jest.fn().mockReturnThis(), exec: jest.fn() };
-    pipeline.exec.mockResolvedValue([
-      [null, 3670112], [null, -1], [new Error('MOVED 1234 10.0.0.2:6379'), null],
-      [null, 3670112], [null, -1], [null, 1],
-      [null, 3670112], [null, -1], [null, 0],
-    ]);
-    const client = { getClient: () => ({ pipeline: () => pipeline }) } as any;
-    const samples = await sampleLmcacheKeys(client, p(k(0, 'kv_bytes'), k(1, 'kv_bytes'), k(2, 'kv_bytes')));
-    expect(samples.map((s) => s.siblingExists)).toEqual([null, true, false]);
+    const client = sampleClient({
+      [`MEMORY USAGE ${k(0, 'kv_bytes')}`]: 3670112,
+      [`TTL ${k(0, 'kv_bytes')}`]: -1,
+      [`EXISTS ${k(0, 'metadata')}`]: new Error('MOVED 1234 10.0.0.2:6379'),
+      [`MEMORY USAGE ${k(1, 'kv_bytes')}`]: 3670112,
+      [`TTL ${k(1, 'kv_bytes')}`]: -1,
+      [`EXISTS ${k(1, 'metadata')}`]: 1,
+    });
+    const samples = await sampleLmcacheKeys(client, p(k(0, 'kv_bytes'), k(1, 'kv_bytes')));
+    expect(samples.map((s) => s.siblingExists)).toEqual([null, true]);
+  });
+
+  it('reports a key as unsized when MEMORY is unavailable', async () => {
+    const client = sampleClient({
+      [`MEMORY USAGE ${k(0)}`]: new Error("ERR unknown command 'MEMORY'"),
+      [`TTL ${k(0)}`]: -1,
+    });
+    const [sample] = await sampleLmcacheKeys(client, p(k(0)));
+    expect(sample.memoryBytes).toBeNull();
+  });
+
+  it('fails the read when every command for a key is rejected', async () => {
+    const closed = new Error('Connection is closed.');
+    const client = sampleClient({
+      [`MEMORY USAGE ${k(0)}`]: 120,
+      [`TTL ${k(0)}`]: 50,
+      [`MEMORY USAGE ${k(1, 'kv_bytes')}`]: closed,
+      [`TTL ${k(1, 'kv_bytes')}`]: closed,
+      [`EXISTS ${k(1, 'metadata')}`]: closed,
+    });
+    await expect(sampleLmcacheKeys(client, p(k(0), k(1, 'kv_bytes')))).rejects.toThrow('Connection is closed.');
+  });
+
+  it('keeps the ttl of a key whose MEMORY and sibling probes are rejected', async () => {
+    const client = sampleClient({
+      [`MEMORY USAGE ${k(0, 'kv_bytes')}`]: new Error("ERR unknown command 'MEMORY'"),
+      [`TTL ${k(0, 'kv_bytes')}`]: 30,
+      [`EXISTS ${k(0, 'metadata')}`]: new Error('MOVED 1234 10.0.0.2:6379'),
+    });
+    const [sample] = await sampleLmcacheKeys(client, p(k(0, 'kv_bytes')));
+    expect(sample).toMatchObject({ memoryBytes: null, ttl: 30, siblingExists: null });
+  });
+
+  it('issues no commands for no keys', async () => {
+    const client = sampleClient({});
+    expect(await sampleLmcacheKeys(client, [])).toEqual([]);
+    expect(client.call).not.toHaveBeenCalled();
   });
 
   it('skips the sibling probe when the node does not own the sibling slot', async () => {
-    const pipeline = { call: jest.fn().mockReturnThis(), ttl: jest.fn().mockReturnThis(), exists: jest.fn().mockReturnThis(), exec: jest.fn() };
-    pipeline.exec.mockResolvedValue([
-      [null, 3670112], [null, -1],
-      [null, 3670112], [null, -1], [null, 1],
-    ]);
-    const client = { getClient: () => ({ pipeline: () => pipeline }) } as any;
+    const client = sampleClient({
+      [`MEMORY USAGE ${k(0, 'kv_bytes')}`]: 3670112,
+      [`TTL ${k(0, 'kv_bytes')}`]: -1,
+      [`MEMORY USAGE ${k(1, 'kv_bytes')}`]: 3670112,
+      [`TTL ${k(1, 'kv_bytes')}`]: -1,
+      [`EXISTS ${k(1, 'metadata')}`]: 1,
+    });
     const owned = keySlot(k(1, 'metadata'));
     const samples = await sampleLmcacheKeys(client, p(k(0, 'kv_bytes'), k(1, 'kv_bytes')), (slot) => slot === owned);
-    expect(pipeline.exists).toHaveBeenCalledTimes(1);
-    expect(pipeline.exists).toHaveBeenCalledWith(k(1, 'metadata'));
+    const exists = client.call.mock.calls.filter(([command]: [string]) => command === 'EXISTS');
+    expect(exists).toEqual([['EXISTS', [k(1, 'metadata')]]]);
     expect(samples.map((s) => s.siblingExists)).toEqual([null, true]);
   });
 
   it('reports an unknown TTL when the TTL call fails', async () => {
-    const pipeline = { call: jest.fn().mockReturnThis(), ttl: jest.fn().mockReturnThis(), exists: jest.fn().mockReturnThis(), exec: jest.fn() };
-    pipeline.exec.mockResolvedValue([[null, 120], [new Error('NOPERM'), null]]);
-    const client = { getClient: () => ({ pipeline: () => pipeline }) } as any;
+    const client = sampleClient({
+      [`MEMORY USAGE ${k(0)}`]: 120,
+      [`TTL ${k(0)}`]: new Error('NOPERM'),
+    });
     const [sample] = await sampleLmcacheKeys(client, p(k(0)));
     expect(sample).toMatchObject({ memoryBytes: 120, ttl: null });
-  });
-
-  it('skips the pipeline for no keys', async () => {
-    expect(await sampleLmcacheKeys({ getClient: () => { throw new Error('unused'); } } as any, [])).toEqual([]);
   });
 });
 
@@ -148,6 +211,11 @@ describe('helpers', () => {
     const client = { call: jest.fn().mockResolvedValue(reply) } as any;
     expect(await hasLmcacheGlideClient(client, 0)).toBe(false);
     expect(await hasLmcacheGlideClient(client, 3)).toBe(true);
+  });
+
+  it('ignores a client name that imitates the GLIDE library field', async () => {
+    const list = 'id=1 name=lib-name=GlidePySync(lmcache:0.5.5) lib-name=redis-py lib-ver=5.0\n';
+    expect(await hasLmcacheGlideClient({ call: jest.fn().mockResolvedValue(list) } as any, 0)).toBe(false);
   });
 
   it('reads memory stats', () => {
