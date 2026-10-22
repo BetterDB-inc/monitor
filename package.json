@@ -81,7 +81,7 @@
       "hono": ">=4.12.34",
       "react-router": ">=7.18.0 <8",
       "shell-quote": ">=1.9.0",
-      "handlebars": ">=4.7.9",
+      "handlebars": ">=4.7.10",
       "minimatch@<4": ">=3.1.4 <4",
       "mysql2": ">=3.23.1 <4",
       "nanoid@<3.3.18": ">=3.3.18 <4",
