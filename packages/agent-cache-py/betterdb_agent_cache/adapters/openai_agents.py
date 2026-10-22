@@ -39,7 +39,9 @@ Limitations
   per-part added/delta/done, completed). The replayed ``Response`` has
   ``id=None`` (like a non-streamed hit, so ``previous_response_id`` chaining is
   never pointed at a cache entry) and its usage reports zero model requests.
-* Responses with no text output (e.g. reasoning-only) are never stored.
+* Responses with neither text nor a tool call (e.g. reasoning-only, empty text)
+  are never stored, on either path. An existing entry with no answer is treated
+  as a miss and overwritten.
 * Binary / multimodal content in input items is JSON-serialised raw via
   ``_to_text()``.  A follow-up can add explicit normalizer dispatch
   matching ``openai.py``.
@@ -417,6 +419,39 @@ def _has_text_block(blocks: list[Any] | None) -> bool:
     )
 
 
+# Block types a cache hit can replay as a non-empty answer besides text.
+# get_response() caches tool calls (#149), so a tool-call-only response is a valid entry.
+_TOOL_CALL_BLOCK_TYPES = frozenset({"tool_call"})
+
+
+def _has_answer_block(blocks: list[Any] | None) -> bool:
+    """True if ``blocks`` hold something a hit can replay: non-empty text or a tool call.
+
+    Reasoning-only and empty-text responses fail this check. ``_extract_blocks``
+    drops reasoning items, so they would be stored as ``[]`` and every later hit
+    (streamed or not) would replay an empty answer.
+    """
+    if _has_text_block(blocks):
+        return True
+    return any(
+        isinstance(b, dict) and b.get("type") in _TOOL_CALL_BLOCK_TYPES
+        for b in (blocks or [])
+    )
+
+
+def _is_replayable_hit(cached: Any) -> bool:
+    """A hit is usable only if it carries an answer.
+
+    Entries written before this gate existed (``get_response`` stored
+    reasoning-only responses with ``contentBlocks=[]``) are treated as a miss,
+    so the model is called and the entry is overwritten with a real answer.
+    Plain-text entries (no blocks, non-empty ``response``) stay hits.
+    """
+    if _has_answer_block(getattr(cached, "content_blocks", None)):
+        return True
+    return bool(getattr(cached, "response", None))
+
+
 def _output_is_final_answer(output: list[Any]) -> bool:
     """True if every output item is a final-answer item (no tool/agent steps)."""
     if not output:
@@ -658,7 +693,9 @@ class CachedModel(_ModelBase):
         )
 
         cached = await self._cache.llm.check(params)
-        if cached.hit:
+        # Entries without an answer (pre-gate reasoning-only stores) are treated as a miss and overwritten.
+        # check() has already counted this as a hit; acceptable for a one-time self-heal.
+        if cached.hit and _is_replayable_hit(cached):
             try:
                 replay = _synthesize_stream_events(
                     cached.content_blocks,
@@ -724,7 +761,7 @@ class CachedModel(_ModelBase):
         """Persist a completed streamed response. Fail-open: never raises."""
         try:
             blocks = _extract_blocks(response)
-            if not _has_text_block(blocks):
+            if not _has_answer_block(blocks):
                 _LOGGER.debug("agent-cache: streamed response has no text output; not storing")
                 return
             usage = getattr(response, "usage", None)
@@ -768,7 +805,9 @@ class CachedModel(_ModelBase):
         )
 
         cached = await self._cache.llm.check(params)
-        if cached.hit:
+        # Entries without an answer (pre-gate reasoning-only stores) are treated as a miss and overwritten.
+        # check() has already counted this as a hit; acceptable for a one-time self-heal.
+        if cached.hit and _is_replayable_hit(cached):
             output = _rebuild_output(cached.content_blocks, cached.response)
             return _cache_hit_model_response(
                 output,
@@ -792,14 +831,17 @@ class CachedModel(_ModelBase):
         # the live response — same fail-open convention llm_cache._inc_stats uses.
         try:
             store_blocks = _extract_blocks(response)
-            usage = getattr(response, "usage", None)
-            inp = int(getattr(usage, "input_tokens", 0) or 0)
-            out_tok = int(getattr(usage, "output_tokens", 0) or 0)
-            await self._cache.llm.store_multipart(
-                params,
-                store_blocks,
-                LlmStoreOptions(tokens={"input": inp, "output": out_tok}),
-            )
+            if not _has_answer_block(store_blocks):
+                _LOGGER.debug("agent-cache: response has no text or tool-call output; not storing")
+            else:
+                usage = getattr(response, "usage", None)
+                inp = int(getattr(usage, "input_tokens", 0) or 0)
+                out_tok = int(getattr(usage, "output_tokens", 0) or 0)
+                await self._cache.llm.store_multipart(
+                    params,
+                    store_blocks,
+                    LlmStoreOptions(tokens={"input": inp, "output": out_tok}),
+                )
         except ValkeyCommandError as exc:
             _LOGGER.warning("agent-cache store failed; returning live response: %s", exc)
         except Exception as exc:  # defensive: store must fail open, never crash the run

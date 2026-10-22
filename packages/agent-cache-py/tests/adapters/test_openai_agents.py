@@ -1305,3 +1305,122 @@ async def test_stream_hit_runner_output_not_duplicated():
     assert len(result.raw_responses) == 1
     assert len(result.raw_responses[0].output) == 1
     assert result.final_output == "from cache"
+
+
+# ---------------------------------------------------------------------------
+# Round 3: get_response uses the same answer gate; empty legacy entries are a miss
+# ---------------------------------------------------------------------------
+
+
+async def _key(prompt: str = "prompt"):
+    return await prepare_params(None, prompt, "fake-model")
+
+
+@pytest.mark.asyncio
+async def test_get_response_reasoning_only_is_not_stored():
+    cache = _make_cache()
+    resp = _make_text_response("unused")
+    resp.output = [_reasoning_item()]
+    base = _FakeModel(resp)
+    wrapped = CachedModel(base, cache)
+
+    out = await wrapped.get_response(None, "prompt", None, **_DEFAULT_KWARGS)
+
+    assert out is resp                                   # live response still returned
+    assert (await cache.llm.check(await _key())).hit is False
+    await wrapped.get_response(None, "prompt", None, **_DEFAULT_KWARGS)
+    assert base.calls == 2                               # second call is a miss too
+
+
+@pytest.mark.asyncio
+async def test_get_response_empty_text_is_not_stored():
+    cache = _make_cache()
+    base = _FakeModel(_make_text_response(""))
+    await CachedModel(base, cache).get_response(None, "prompt", None, **_DEFAULT_KWARGS)
+    assert (await cache.llm.check(await _key())).hit is False
+
+
+@pytest.mark.asyncio
+async def test_get_response_tool_call_only_is_still_stored():
+    """#149 regression guard: the gate must not drop tool-call entries (they have no text)."""
+    cache = _make_cache()
+    base = _FakeModel(_make_tool_response("call_1", "get_weather", '{"city":"Sofia"}'))
+    await CachedModel(base, cache).get_response(None, "prompt", None, **_DEFAULT_KWARGS)
+    assert (await cache.llm.check(await _key())).hit is True
+
+
+@pytest.mark.asyncio
+async def test_get_response_reasoning_plus_text_is_stored_as_text():
+    cache = _make_cache()
+    resp = _make_text_response("answer")
+    resp.output = [_reasoning_item(), *resp.output]
+    await CachedModel(_FakeModel(resp), cache).get_response(
+        None, "prompt", None, **_DEFAULT_KWARGS,
+    )
+    cached = await cache.llm.check(await _key())
+    assert cached.hit is True
+    assert [b["text"] for b in cached.content_blocks if b["type"] == "text"] == ["answer"]
+
+
+@pytest.mark.asyncio
+async def test_nonstream_reasoning_only_then_stream_calls_model():
+    """A reasoning-only get_response must not make the next stream replay an empty answer."""
+    cache = _make_cache()
+    resp = _make_text_response("unused")
+    resp.output = [_reasoning_item()]
+    await CachedModel(_FakeModel(resp), cache).get_response(
+        None, "prompt", None, **_DEFAULT_KWARGS,
+    )
+
+    live = [_text_delta_event("live"), _completed_event(_make_text_response("live"))]
+    stream_base = _StreamingFakeModel(live)
+    received = await _drain(
+        CachedModel(stream_base, cache).stream_response(None, "prompt", None, **_DEFAULT_KWARGS),
+    )
+    assert stream_base.stream_calls == 1
+    assert received == live
+
+
+@pytest.mark.asyncio
+async def test_get_response_legacy_empty_entry_is_a_miss_and_self_heals():
+    cache = _make_cache()
+    await cache.llm.store_multipart(await _key(), [])    # what pre-gate get_response wrote
+    base = _FakeModel(_make_text_response("fresh"))
+
+    out = await CachedModel(base, cache).get_response(None, "prompt", None, **_DEFAULT_KWARGS)
+
+    assert base.calls == 1
+    assert out is base.response
+    cached = await cache.llm.check(await _key())
+    assert [b["text"] for b in cached.content_blocks if b["type"] == "text"] == ["fresh"]
+
+
+@pytest.mark.asyncio
+async def test_stream_legacy_empty_entry_is_a_miss_and_self_heals():
+    cache = _make_cache()
+    await cache.llm.store_multipart(await _key(), [])
+    live = [_text_delta_event("fresh"), _completed_event(_make_text_response("fresh"))]
+    base = _StreamingFakeModel(live)
+
+    received = await _drain(
+        CachedModel(base, cache).stream_response(None, "prompt", None, **_DEFAULT_KWARGS),
+    )
+
+    assert base.stream_calls == 1
+    assert received == live
+    cached = await cache.llm.check(await _key())
+    assert [b["text"] for b in cached.content_blocks if b["type"] == "text"] == ["fresh"]
+
+
+@pytest.mark.asyncio
+async def test_plain_text_entry_is_still_a_hit_on_both_paths():
+    cache = _make_cache()
+    await cache.llm.store(await _key(), "plain answer")
+    nonstream = _FakeModel(_make_text_response("unused"))
+    await CachedModel(nonstream, cache).get_response(None, "prompt", None, **_DEFAULT_KWARGS)
+    assert nonstream.calls == 0
+    stream_base = _StreamingFakeModel(events=[])
+    await _drain(
+        CachedModel(stream_base, cache).stream_response(None, "prompt", None, **_DEFAULT_KWARGS),
+    )
+    assert stream_base.stream_calls == 0
