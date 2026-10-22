@@ -541,6 +541,12 @@ curl -b cookies.txt -c cookies.txt -X PUT http://localhost:3001/api/settings \
 
 ### Per-metric detector thresholds
 
+#### From the UI
+
+**Settings → Anomaly Detection → Detector thresholds** lists every metric with its effective values. A filled dot marks a metric with a stored override, and customized values are shown in bold. Expand a metric to edit it: each field shows the built-in default as a placeholder, and an empty field means "use the default". Use the switch next to an absolute threshold to turn it on or off. **Save** sends only the fields you changed. **Reset to defaults** on a metric clears its override, and **Reset all to defaults** clears every override. These thresholds save on their own, separately from the page's **Save Changes** button. The panel applies the same validation as the API (ranges, warning below critical) and shows server errors inline. Anomaly events link to the matching metric's panel. Requires a license with anomaly detection.
+
+#### From the API
+
 Tune Z-score, absolute, consecutive-sample, and cooldown thresholds per metric at runtime (no restart). Partial PATCH bodies only override the fields you send.
 
 ```bash
