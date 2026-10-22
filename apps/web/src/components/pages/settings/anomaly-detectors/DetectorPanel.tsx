@@ -19,7 +19,6 @@ import {
   LIFETIME_COUNTER_METRICS,
   METRIC_UNITS,
   buildSave,
-  isCustomized,
   isDirty,
   summarize,
   toFormState,
@@ -86,7 +85,6 @@ export function DetectorPanel({
   const dirty = isDirty(form, baseline);
   const errors = validateForm(form, defaults);
   const hasErrors = Object.keys(errors).length > 0;
-  const customized = isCustomized(resolved, defaults);
   const summary = summarize(resolved, defaults);
 
   const mutation = useMutation({
@@ -206,10 +204,10 @@ export function DetectorPanel({
       <CollapsibleTrigger className="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-muted/50">
         <span
           data-testid="customized-dot"
-          data-customized={String(customized)}
+          data-customized={String(hasOverride)}
           className={cn(
             'size-2.5 shrink-0 rounded-full',
-            customized
+            hasOverride
               ? 'bg-primary shadow-[0_0_6px_2px] shadow-primary/60'
               : 'border border-muted-foreground',
           )}

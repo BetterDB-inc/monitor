@@ -60,11 +60,16 @@ describe('DetectorPanel', () => {
   });
 
   it('shows the metric key, customized dot and summary when collapsed', () => {
-    renderPanel({ resolved: { ...connections, warningZScore: 2.5 }, open: false });
+    renderPanel({ resolved: { ...connections, warningZScore: 2.5 }, hasOverride: true, open: false });
     expect(screen.getByText('connections')).toBeInTheDocument();
     expect(screen.getByTestId('customized-dot')).toHaveAttribute('data-customized', 'true');
     expect(screen.getByText('z 2.5 / 3')).toBeInTheDocument();
     expect(screen.queryByLabelText('Warning z-score')).not.toBeInTheDocument();
+  });
+
+  it('fills the dot for a stored override equal to the default', () => {
+    renderPanel({ hasOverride: true, open: false });
+    expect(screen.getByTestId('customized-dot')).toHaveAttribute('data-customized', 'true');
   });
 
   it('shows a hollow dot for a metric on defaults', () => {
