@@ -35,6 +35,11 @@ Limitations
   half-executed agent steps.  Non-streaming ``get_response()`` continues to
   cache tool calls; a streamed request can still hit (and replay) a
   tool-call entry stored by get_response().
+* A streamed hit replays the full Responses event shape (created, per-item and
+  per-part added/delta/done, completed). The replayed ``Response`` has
+  ``id=None`` (like a non-streamed hit, so ``previous_response_id`` chaining is
+  never pointed at a cache entry) and its usage reports zero model requests.
+* Responses with no text output (e.g. reasoning-only) are never stored.
 * Binary / multimodal content in input items is JSON-serialised raw via
   ``_to_text()``.  A follow-up can add explicit normalizer dispatch
   matching ``openai.py``.
@@ -47,6 +52,7 @@ Limitations
 """
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 import logging
@@ -60,6 +66,9 @@ from ..types import ContentBlock, LlmCacheParams, LlmStoreOptions
 from ..utils import parse_tool_call_args
 
 _LOGGER = logging.getLogger(__name__)
+
+# Output-item id for rebuilt cache-hit messages (items need an id; the Response itself has none).
+_CACHE_ITEM_ID = "msg_betterdb_cache"
 
 if TYPE_CHECKING:
     from ..agent_cache import AgentCache
@@ -312,7 +321,7 @@ def _rebuild_output(
                 output.insert(
                     0,
                     ResponseOutputMessage.model_construct(
-                        id="betterdb-cache",
+                        id=_CACHE_ITEM_ID,
                         type="message",
                         role="assistant",
                         status="completed",
@@ -324,7 +333,7 @@ def _rebuild_output(
                     output.insert(
                         0,
                         ResponseOutputMessage.model_construct(
-                            id="betterdb-cache",
+                            id=_CACHE_ITEM_ID,
                             type="message",
                             role="assistant",
                             content=text_parts,
@@ -400,9 +409,16 @@ def _is_cacheable_terminal(event_type: str | None, response: Any) -> bool:
 _STORABLE_OUTPUT_TYPES = frozenset({"message", "reasoning"})
 
 
-def _response_is_final_answer(response: Any) -> bool:
+def _has_text_block(blocks: list[Any] | None) -> bool:
+    """A stored answer must contain at least one non-empty text block."""
+    return any(
+        isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+        for b in (blocks or [])
+    )
+
+
+def _output_is_final_answer(output: list[Any]) -> bool:
     """True if every output item is a final-answer item (no tool/agent steps)."""
-    output = getattr(response, "output", None) or []
     if not output:
         return False
     for item in output:
@@ -412,6 +428,66 @@ def _response_is_final_answer(response: Any) -> bool:
     return True
 
 
+def _with_output(response: Any, output: list[Any]) -> Any:
+    """Return ``response`` with ``output`` set, without mutating the caller's object."""
+    if getattr(response, "output", None):
+        return response
+    model_copy = getattr(response, "model_copy", None)
+    if model_copy is not None:
+        return model_copy(update={"output": output})
+    return SimpleNamespace(**{**vars(response), "output": output})
+
+
+def _copy(obj: Any, **update: Any) -> Any:
+    model_copy = getattr(obj, "model_copy", None)
+    return model_copy(update=update) if model_copy is not None else obj
+
+
+def _build_response_usage(input_tokens: int, output_tokens: int) -> Any:
+    """Validated Responses ``ResponseUsage`` (handles SDKs with/without cache_write_tokens)."""
+    from openai.types.responses.response_usage import (  # type: ignore
+        InputTokensDetails,
+        OutputTokensDetails,
+        ResponseUsage,
+    )
+
+    input_details: dict[str, int] = {"cached_tokens": 0}
+    if "cache_write_tokens" in InputTokensDetails.model_fields:
+        input_details["cache_write_tokens"] = 0
+    return ResponseUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=input_tokens + output_tokens,
+        input_tokens_details=InputTokensDetails(**input_details),
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
+    )
+
+
+def _mark_cache_hit_usage(usage: Any) -> Any:
+    """A cache hit made no model request: report requests=0 to the Agents SDK,
+    matching the non-streamed hit (``_make_usage``)."""
+    # Same mechanism the SDK itself uses to annotate a ResponseUsage (see
+    # agents.usage._response_usage_to_usage); keeps the pydantic model's dump clean.
+    object.__setattr__(usage, "_agents_sdk_request_count", 0)
+    return usage
+
+
+@contextlib.asynccontextmanager
+async def _aclosing(stream: Any) -> Any:
+    """Like ``contextlib.aclosing`` but tolerates async iterators without ``aclose``.
+
+    Guarantees the upstream stream (and its HTTP connection) is closed as soon as
+    our generator exits — normal drain, consumer ``aclose()``/break, cancellation,
+    or upstream error — instead of whenever GC finalizes it.
+    """
+    try:
+        yield stream
+    finally:
+        aclose = getattr(stream, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+
 def _synthesize_stream_events(
     content_blocks: list[ContentBlock] | None,
     response_text: str | None,
@@ -419,112 +495,97 @@ def _synthesize_stream_events(
     output_tokens: int,
     model_name: str,
 ) -> list[Any]:
-    """Build a minimal, valid Responses event stream for a cache hit.
+    """Rebuild a Responses event stream for a cache hit.
 
-    Best-effort emits an ``output_text.delta`` for cached text, then a terminal
-    ``response.completed`` carrying a ``Response`` rebuilt via ``_rebuild_output``.
-    Falls back to a ``SimpleNamespace`` terminal event if the SDK event models
-    are unavailable — the terminal ``response.completed`` is the contract.
+    Emits the same event shape a live stream produces (created, in_progress,
+    per-item added/done, per-part text delta/done, function-call argument
+    delta/done, completed) so raw-event consumers see no difference from a miss.
+
+    The synthesized ``Response`` has ``id=None`` (a cache hit has no server-side
+    response to chain from, matching the non-streamed hit), and its usage reports
+    zero model requests. Raises if the SDK models cannot be built; the caller
+    then falls back to the live model.
     """
-    events: list[Any] = []
-
-    text = response_text or "".join(
-        b.get("text", "")
-        for b in (content_blocks or [])
-        if b.get("type") == "text"
+    from openai.types.responses import (  # type: ignore
+        ResponseCompletedEvent,
+        ResponseContentPartAddedEvent,
+        ResponseContentPartDoneEvent,
+        ResponseCreatedEvent,
+        ResponseFunctionCallArgumentsDeltaEvent,
+        ResponseFunctionCallArgumentsDoneEvent,
+        ResponseInProgressEvent,
+        ResponseOutputItemAddedEvent,
+        ResponseOutputItemDoneEvent,
+        ResponseTextDeltaEvent,
+        ResponseTextDoneEvent,
     )
-
-    if text:
-        try:
-            from openai.types.responses import ResponseTextDeltaEvent  # type: ignore
-
-            events.append(
-                ResponseTextDeltaEvent.model_construct(
-                    type="response.output_text.delta",
-                    delta=text,
-                    output_index=0,
-                    content_index=0,
-                    item_id="betterdb-cache",
-                    sequence_number=0,
-                ),
-            )
-        except Exception:
-            events.append(SimpleNamespace(
-                type="response.output_text.delta",
-                delta=text,
-                output_index=0,
-                content_index=0,
-            ))
+    from openai.types.responses.response import Response  # type: ignore
 
     output = _rebuild_output(content_blocks, response_text)
+    final = Response(
+        id="placeholder",  # required by validation; cleared below
+        object="response",
+        created_at=0,
+        model=model_name,
+        output=output,
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+        status="completed",
+        usage=_build_response_usage(input_tokens, output_tokens),
+    ).model_copy(update={"id": None})
+    _mark_cache_hit_usage(final.usage)
+    started = final.model_copy(update={"status": "in_progress", "output": [], "usage": None})
 
-    # The Runner treats only an ``isinstance(event, ResponseCompletedEvent)`` as
-    # terminal and reads ``response.output``, ``response.usage`` (as a Responses
-    # ``ResponseUsage``) and ``response.id``, so build validated models here.
-    try:
-        from openai.types.responses import ResponseCompletedEvent  # type: ignore
-        from openai.types.responses.response import Response  # type: ignore
-        from openai.types.responses.response_usage import (  # type: ignore
-            InputTokensDetails,
-            OutputTokensDetails,
-            ResponseUsage,
-        )
+    events: list[Any] = []
 
-        # Newer SDKs require ``cache_write_tokens``; older ones don't define it.
-        input_details: dict[str, int] = {"cached_tokens": 0}
-        if "cache_write_tokens" in InputTokensDetails.model_fields:
-            input_details["cache_write_tokens"] = 0
+    def emit(cls: Any, **fields: Any) -> None:
+        # model_construct: these intermediate events gained/renamed optional fields
+        # across openai releases; the Runner only type-checks them.
+        events.append(cls.model_construct(sequence_number=len(events), **fields))
 
-        response = Response(
-            id="betterdb-cache",
-            object="response",
-            created_at=0,
-            model=model_name,
-            output=output,
-            parallel_tool_calls=False,
-            tool_choice="auto",
-            tools=[],
-            status="completed",
-            usage=ResponseUsage(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                total_tokens=input_tokens + output_tokens,
-                input_tokens_details=InputTokensDetails(**input_details),
-                output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
-            ),
-        )
-        events.append(
-            ResponseCompletedEvent(
-                type="response.completed",
-                response=response,
-                sequence_number=len(events),
-            )
-        )
-    except Exception:
-        # Older/newer SDK shapes: fall back to construct() so a hit still replays.
-        usage = _make_usage(input_tokens, output_tokens)
-        try:
-            from openai.types.responses import ResponseCompletedEvent  # type: ignore
-            from openai.types.responses.response import Response  # type: ignore
+    emit(ResponseCreatedEvent, type="response.created", response=started)
+    emit(ResponseInProgressEvent, type="response.in_progress", response=started)
 
-            response = Response.model_construct(
-                id="betterdb-cache",
-                object="response",
-                output=output,
-                usage=usage,
-                status="completed",
-            )
-            events.append(ResponseCompletedEvent.model_construct(
-                type="response.completed",
-                response=response,
-                sequence_number=len(events),
-            ))
-        except Exception:
-            events.append(SimpleNamespace(
-                type="response.completed",
-                response=SimpleNamespace(output=output, usage=usage),
-            ))
+    for out_idx, item in enumerate(final.output):
+        item_type = getattr(item, "type", None)
+        item_id = getattr(item, "id", None) or ""
 
+        if item_type == "message":
+            emit(ResponseOutputItemAddedEvent, type="response.output_item.added",
+                 output_index=out_idx, item=_copy(item, status="in_progress", content=[]))
+            for c_idx, part in enumerate(getattr(item, "content", None) or []):
+                is_text = getattr(part, "type", None) == "output_text"
+                text = (getattr(part, "text", None) or "") if is_text else ""
+                common = {"item_id": item_id, "output_index": out_idx, "content_index": c_idx}
+                emit(ResponseContentPartAddedEvent, type="response.content_part.added",
+                     part=_copy(part, text="") if is_text else part, **common)
+                if is_text:
+                    emit(ResponseTextDeltaEvent, type="response.output_text.delta",
+                         delta=text, logprobs=[], **common)
+                    emit(ResponseTextDoneEvent, type="response.output_text.done",
+                         text=text, logprobs=[], **common)
+                emit(ResponseContentPartDoneEvent, type="response.content_part.done",
+                     part=part, **common)
+        elif item_type == "function_call":
+            args = getattr(item, "arguments", None) or ""
+            emit(ResponseOutputItemAddedEvent, type="response.output_item.added",
+                 output_index=out_idx, item=_copy(item, status="in_progress", arguments=""))
+            emit(ResponseFunctionCallArgumentsDeltaEvent,
+                 type="response.function_call_arguments.delta",
+                 item_id=item_id, output_index=out_idx, delta=args)
+            emit(ResponseFunctionCallArgumentsDoneEvent,
+                 type="response.function_call_arguments.done",
+                 item_id=item_id, output_index=out_idx, arguments=args,
+                 name=getattr(item, "name", None))
+        else:
+            emit(ResponseOutputItemAddedEvent, type="response.output_item.added",
+                 output_index=out_idx, item=item)
+
+        emit(ResponseOutputItemDoneEvent, type="response.output_item.done",
+             output_index=out_idx, item=item)
+
+    emit(ResponseCompletedEvent, type="response.completed", response=final)
     return events
 
 
@@ -546,8 +607,9 @@ class CachedModel(_ModelBase):
     def __getattr__(self, name: str) -> Any:
         return getattr(self._model, name)
 
-    # Model defines these as no-ops, which would shadow __getattr__ delegation;
-    # forward them so the wrapped model still releases its resources.
+    # Model defines close(), _cleanup_on_run_end() and get_retry_advice() as concrete
+    # defaults, which would shadow __getattr__ delegation; forward them so the wrapped
+    # model still releases its resources and surfaces provider retry advice.
     async def close(self) -> None:
         close = getattr(self._model, "close", None)
         if close is not None:
@@ -557,6 +619,12 @@ class CachedModel(_ModelBase):
         cleanup = getattr(self._model, "_cleanup_on_run_end", None)
         if cleanup is not None:
             await cleanup(owner)
+
+    def get_retry_advice(self, request: Any) -> Any:
+        """Forward to the wrapped model; ``Model`` defines a concrete default that
+        would otherwise shadow ``__getattr__`` and drop provider retry-after advice."""
+        advice = getattr(self._model, "get_retry_advice", None)
+        return advice(request) if advice is not None else None
 
     async def stream_response(
         self,
@@ -573,72 +641,92 @@ class CachedModel(_ModelBase):
     ) -> Any:
         """Cache-aware streaming.
 
-        On a cache hit, synthesize the event stream from the stored response and
-        skip the underlying model.  On a miss, pass every upstream event through
-        unchanged while capturing the terminal ``response.completed`` event, then
-        persist on completion (fail-open).
+        Hit: replay the stored response as a Responses event stream; the underlying
+        model is not called. If the replay cannot be built, fall back to the model.
 
-        Cache-key parity with :meth:`get_response` means a streamed request can
-        hit an entry stored by its non-streamed twin, and vice-versa.  Tool-call
-        streams are not stored — mirrors the ``@betterdb/agent-cache`` v0.11.0
-        ``wrapStream`` convention.
+        Miss: pass every upstream event through unchanged. Once the stream has fully
+        drained, store it if it completed normally and holds only a final answer
+        with text. Early exit, cancellation and upstream errors never store, and the
+        upstream stream is always closed on exit.
+
+        Same cache key as :meth:`get_response`, so streamed and non-streamed calls
+        share entries in both directions.
         """
         model_name = str(getattr(self._model, "model", "unknown"))
-
         params = await prepare_params(
             system_instructions, input, model_name, model_settings, self._opts,
         )
 
         cached = await self._cache.llm.check(params)
         if cached.hit:
-            for event in _synthesize_stream_events(
-                cached.content_blocks,
-                cached.response,
-                cached.input_tokens,
-                cached.output_tokens,
-                model_name,
-            ):
-                yield event
-            return
+            try:
+                replay = _synthesize_stream_events(
+                    cached.content_blocks,
+                    cached.response,
+                    cached.input_tokens,
+                    cached.output_tokens,
+                    model_name,
+                )
+            except Exception as exc:  # replay must never break the run
+                _LOGGER.warning(
+                    "agent-cache: could not replay cached stream, calling the model: %s", exc,
+                )
+            else:
+                for event in replay:
+                    yield event
+                return
 
         terminal_type: str | None = None
         terminal_response: Any = None
+        done_items: list[Any] = []
 
-        # Upstream exceptions (and cancellation) propagate unchanged and skip
-        # the store below: only a stream that drained normally is cacheable.
-        async for event in self._model.stream_response(
-            system_instructions,
-            input,
-            model_settings,
-            tools,
-            output_schema,
-            handoffs,
-            tracing,
-            previous_response_id=previous_response_id,
-            **kwargs,
+        async with _aclosing(
+            self._model.stream_response(
+                system_instructions,
+                input,
+                model_settings,
+                tools,
+                output_schema,
+                handoffs,
+                tracing,
+                previous_response_id=previous_response_id,
+                **kwargs,
+            )
+        ) as upstream:
+            async for event in upstream:
+                etype = getattr(event, "type", None)
+                if etype == "response.output_item.done":
+                    item = getattr(event, "item", None)
+                    if item is not None:
+                        done_items.append(item)
+                resp = _terminal_response_from_event(event)
+                if resp is not None:
+                    terminal_type = etype
+                    terminal_response = resp
+                yield event
+
+        # Reached only after a normal, complete drain. Early exit / cancellation
+        # raise at the `yield` above (upstream is closed by _aclosing), and
+        # upstream errors propagate, so nothing partial is ever stored.
+        if terminal_response is None or not _is_cacheable_terminal(
+            terminal_type, terminal_response,
         ):
-            resp = _terminal_response_from_event(event)
-            if resp is not None:
-                terminal_type = getattr(event, "type", None)
-                terminal_response = resp
-            yield event
-
-        # Reached only when upstream finished without raising AND the consumer
-        # iterated to the end. A consumer that stops early (break / aclose) or a
-        # cancelled task raises GeneratorExit / CancelledError at the `yield`
-        # above, so this code never runs and nothing partial is stored.
-        if terminal_response is None:
             return
-        if not _is_cacheable_terminal(terminal_type, terminal_response):
+        # Providers may send response.completed with an empty output; fall back to
+        # the items streamed via output_item.done rather than relying on the
+        # consumer to have filled the terminal response in place.
+        output = list(getattr(terminal_response, "output", None) or []) or done_items
+        if not _output_is_final_answer(output):
             return
-        if not _response_is_final_answer(terminal_response):
-            return
-        await self._store_stream_result(params, terminal_response)
+        await self._store_stream_result(params, _with_output(terminal_response, output))
 
     async def _store_stream_result(self, params: Any, response: Any) -> None:
         """Persist a completed streamed response. Fail-open: never raises."""
         try:
             blocks = _extract_blocks(response)
+            if not _has_text_block(blocks):
+                _LOGGER.debug("agent-cache: streamed response has no text output; not storing")
+                return
             usage = getattr(response, "usage", None)
             inp = int(getattr(usage, "input_tokens", 0) or 0)
             out_tok = int(getattr(usage, "output_tokens", 0) or 0)

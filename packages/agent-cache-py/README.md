@@ -362,6 +362,11 @@ containing tool or agent steps (mirrors the `@betterdb/agent-cache`
 `wrapStream` convention). Non-streaming `get_response()` continues to cache
 tool calls, and a streamed request can hit those entries.
 
+A replayed stream has the same event shape as a live one, carries
+`response.id = None` (same as a non-streamed hit) and counts zero requests in
+`usage`. Responses with no text output are not stored, and the upstream stream
+is closed as soon as the consumer stops reading.
+
 ### Anthropic
 
 ```python
