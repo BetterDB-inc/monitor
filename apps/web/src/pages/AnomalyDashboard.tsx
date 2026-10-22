@@ -12,6 +12,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card'
 import { EmptyState } from '../components/ui/empty-state';
 import { CaptureOnNextModal, type CaptureOnNextContext } from './anomalies/capture-on-next-modal';
 import { DataLossAlertBanner } from '../components/anomalies/DataLossAlertBanner';
+import { ThresholdsLink } from '../components/anomalies/ThresholdsLink';
 import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressionBanner';
 import { RaftHealthBanner } from '../components/anomalies/RaftHealthBanner';
 import { ReplicaSlotStateBanner } from '../components/anomalies/ReplicaSlotStateBanner';
@@ -585,6 +586,7 @@ export function AnomalyDashboard() {
                                     Capture next
                                   </Button>
                                 )}
+                                <ThresholdsLink metricType={anomaly.metricType} />
                               </div>
                             </div>
                           ))}
@@ -664,6 +666,7 @@ export function AnomalyDashboard() {
                           Capture next
                         </Button>
                       )}
+                      <ThresholdsLink metricType={event.metricType} />
                     </div>
                   </div>
                 );
