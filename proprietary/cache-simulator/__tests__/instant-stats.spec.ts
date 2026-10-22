@@ -1,0 +1,50 @@
+import { readInstantStats } from '../instant-stats';
+
+describe('readInstantStats', () => {
+  it('parses memory figures', () => {
+    const info: any = {
+      memory: { used_memory: '1024', maxmemory: '4096', maxmemory_policy: 'allkeys-lru', used_memory_dataset: '900' },
+    };
+    expect(readInstantStats(info)).toEqual({
+      usedMemory: 1024,
+      maxmemory: 4096,
+      maxmemoryPolicy: 'allkeys-lru',
+      datasetMemory: 900,
+    });
+  });
+
+  it('defaults missing sections to zero and unknown policy', () => {
+    expect(readInstantStats({})).toEqual({
+      usedMemory: 0,
+      maxmemory: 0,
+      maxmemoryPolicy: 'unknown',
+      datasetMemory: null,
+    });
+  });
+
+  it('drops a dataset figure that underflowed past used memory', () => {
+    const info: any = {
+      memory: { used_memory: '1024', maxmemory: '0', maxmemory_policy: 'noeviction', used_memory_dataset: '18446744073709551000' },
+    };
+    expect(readInstantStats(info).datasetMemory).toBeNull();
+  });
+
+  it('treats non-numeric values as zero and an unparseable dataset as unknown', () => {
+    const info: any = {
+      memory: { used_memory: 'abc', maxmemory: '', maxmemory_policy: '', used_memory_dataset: 'NaN' },
+    };
+    expect(readInstantStats(info)).toEqual({
+      usedMemory: 0,
+      maxmemory: 0,
+      maxmemoryPolicy: 'unknown',
+      datasetMemory: null,
+    });
+  });
+
+  it('treats an empty or null dataset figure as unknown', () => {
+    const empty: any = { memory: { used_memory: '100', used_memory_dataset: '' } };
+    const missing: any = { memory: { used_memory: '100', used_memory_dataset: null } };
+    expect(readInstantStats(empty).datasetMemory).toBeNull();
+    expect(readInstantStats(missing).datasetMemory).toBeNull();
+  });
+});

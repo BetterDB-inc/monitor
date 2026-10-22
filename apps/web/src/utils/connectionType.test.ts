@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   connectionTypeSuffix,
   formatRelative,
+  hasKvCacheFootprint,
   isClusterChild,
   isExternalConnection,
   isRetiredMember,
@@ -54,5 +55,31 @@ describe('cluster membership helpers', () => {
 describe('formatRelative', () => {
   it('formats hours ago', () => {
     expect(formatRelative(0, 3 * 3_600_000)).toBe('3h ago');
+  });
+});
+
+describe('hasKvCacheFootprint', () => {
+  it('limits KV cache footprint to connections the scan covers', () => {
+    expect(hasKvCacheFootprint({ host: 'h', connectionType: 'direct' })).toBe(true);
+    expect(hasKvCacheFootprint(null)).toBe(true);
+    expect(hasKvCacheFootprint({ host: 'agent', connectionType: 'agent' })).toBe(false);
+    expect(hasKvCacheFootprint({ host: 'h', connectionType: 'external' })).toBe(false);
+    expect(
+      hasKvCacheFootprint({
+        host: 'h',
+        membership: { seedId: 's', nodeId: 'n', origin: 'auto', source: 'cluster' },
+      }),
+    ).toBe(false);
+    expect(
+      hasKvCacheFootprint({
+        host: 'h',
+        membership: { seedId: 's', nodeId: 'n', origin: 'auto', source: 'sentinel', group: 'g', role: 'primary' },
+      }),
+    ).toBe(true);
+  });
+
+  it('hides KV cache footprint on Sentinel connections', () => {
+    expect(hasKvCacheFootprint({ host: 'h', connectionType: 'direct', capabilities: { isSentinel: true } })).toBe(false);
+    expect(hasKvCacheFootprint({ host: 'h', connectionType: 'direct', capabilities: { isSentinel: false } })).toBe(true);
   });
 });

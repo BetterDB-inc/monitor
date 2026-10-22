@@ -1,4 +1,5 @@
 import { Injectable, Inject, Logger, HttpException, HttpStatus } from '@nestjs/common';
+import { ClientAnalyticsRollupService } from './client-analytics-rollup.service';
 import {
   StoragePort,
   StoredClientSnapshot,
@@ -22,6 +23,7 @@ export class ClientAnalyticsAnalysisService {
 
   constructor(
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
+    private readonly rollupService: ClientAnalyticsRollupService,
   ) {}
 
   async getCommandDistribution(params: CommandDistributionParams, connectionId?: string): Promise<CommandDistributionResponse> {
@@ -120,7 +122,11 @@ export class ClientAnalyticsAnalysisService {
 
     let snapshots: StoredClientSnapshot[];
     try {
+      // Bounded to the stats window (CLIENT_ANALYTICS_WINDOW_MS) so the read is
+      // served by the (connection_id, captured_at) index instead of scanning all history.
+      const windowMs = this.rollupService.getWindowMs();
       snapshots = await this.storage.getClientSnapshots({
+        startTime: Date.now() - windowMs,
         limit: MAX_SNAPSHOT_LIMIT,
         connectionId,
       });

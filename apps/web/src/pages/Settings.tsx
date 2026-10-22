@@ -9,6 +9,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useDemoState } from '../contexts/DemoContext';
 import { useCanMutate } from '../hooks/useCanMutate';
 import { McpTokensPanel } from '../components/pages/settings/McpTokensPanel';
+import { DetectorThresholds } from '../components/pages/settings/anomaly-detectors/DetectorThresholds';
 import { Members } from './Members';
 import {
   AppSettings,
@@ -749,6 +750,12 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                 >
                   Reset to Defaults
                 </button>
+              </div>
+            )}
+
+            {activeCategory === 'anomaly' && (
+              <div className="mt-6 border-t pt-2">
+                <DetectorThresholds />
               </div>
             )}
           </Card>

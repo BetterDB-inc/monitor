@@ -224,6 +224,11 @@ async function bootstrap(): Promise<void> {
     new Logger('CLI').log('WebSocket upgrade handler registered');
   }
 
+  // Node runs as PID 1 in the container and ignores SIGTERM unless a handler
+  // is installed, so without this every stop waited out the grace period and
+  // was killed before the storage pool and pollers could close.
+  app.enableShutdownHooks();
+
   const port = process.env.PORT || 3001;
   await app.listen(port, '0.0.0.0');
   console.log(`API server running on http://localhost:${port}`);

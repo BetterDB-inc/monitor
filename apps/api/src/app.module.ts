@@ -47,11 +47,13 @@ let LatencyRegressionModule: any = null;
 let WebhookProModule: any = null;
 let InferenceLatencyProModule: any = null;
 let ScalingReadinessProModule: any = null;
+let KvCacheModule: any = null;
 let CacheProposalsModule: any = null;
 let MemoryProposalsModule: any = null;
 let AgentModule: any = null;
 let SelfHostedAgentModule: any = null;
 let DataRetentionModule: any = null;
+let CacheSimulatorModule: any = null;
 
 try {
   // Use relative path for runtime resolution (tsconfig paths only work at compile time)
@@ -127,6 +129,14 @@ try {
 }
 
 try {
+  const kvCacheModule = require('../../../proprietary/kv-cache/kv-cache.module');
+  KvCacheModule = kvCacheModule.KvCacheModule;
+  console.log('[KvCache] Proprietary module loaded');
+} catch {
+  // Proprietary module not available
+}
+
+try {
   const cacheProposalsModule = require('../../../proprietary/cache-proposals/cache-proposals.module');
   CacheProposalsModule = cacheProposalsModule.CacheProposalsModule;
   console.log('[CacheProposals] Proprietary module loaded');
@@ -138,6 +148,14 @@ try {
   const memoryProposalsModule = require('../../../proprietary/memory-proposals/memory-proposals.module');
   MemoryProposalsModule = memoryProposalsModule.MemoryProposalsModule;
   console.log('[MemoryProposals] Proprietary module loaded');
+} catch {
+  // Proprietary module not available
+}
+
+try {
+  const cacheSimulatorModule = require('../../../proprietary/cache-simulator/cache-simulator.module');
+  CacheSimulatorModule = cacheSimulatorModule.CacheSimulatorModule;
+  console.log('[CacheSimulator] Proprietary module loaded');
 } catch {
   // Proprietary module not available
 }
@@ -241,12 +259,14 @@ const proprietaryImports = [
   WebhookProModule,
   InferenceLatencyProModule,
   ScalingReadinessProModule,
+  KvCacheModule,
   CacheProposalsModule,
   MemoryProposalsModule,
   AiModule,
   AgentModule,
   SelfHostedAgentModule,
   DataRetentionModule,
+  CacheSimulatorModule,
 ].filter(Boolean);
 
 @Module({

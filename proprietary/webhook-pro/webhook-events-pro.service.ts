@@ -3,6 +3,9 @@ import { WebhookDispatcherService } from '@app/webhooks/webhook-dispatcher.servi
 import {
   WebhookEventType,
   type CveCriticalDetectedData,
+  type IWebhookEventsProService,
+  type KvCacheEvictionRiskData,
+  type KvCacheHitRateLowData,
   type LatencyRegressionDetectedData,
   type MetricKind,
   type ScalingReadinessLowData,
@@ -26,7 +29,7 @@ import { LicenseService } from '@proprietary/licenses';
  * - connection.spike - Connection spike detected
  */
 @Injectable()
-export class WebhookEventsProService implements OnModuleInit {
+export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProService {
   private readonly logger = new Logger(WebhookEventsProService.name);
 
   constructor(
@@ -95,7 +98,7 @@ export class WebhookEventsProService implements OnModuleInit {
     masterLinkStatus: string;
     timestamp: number;
     instance: { host: string; port: number };
-    connectionId?: string;
+    connectionId: string;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('Replication lag event skipped - requires PRO license');
@@ -118,6 +121,10 @@ export class WebhookEventsProService implements OnModuleInit {
       }),
       data.connectionId,
     );
+  }
+
+  clearReplicationLag(connectionId: string): void {
+    this.webhookDispatcher.clearThresholdAlertPerWebhook('replication_lag', connectionId);
   }
 
   /**
@@ -542,6 +549,47 @@ export class WebhookEventsProService implements OnModuleInit {
         message: `Scaling readiness ${data.score} dropped to ${data.threshold} or below: ${data.summary}`,
         timestamp: data.timestamp,
         instance: data.instance,
+      },
+      data.connectionId,
+    );
+  }
+
+  async dispatchKvCacheHitRateLow(data: KvCacheHitRateLowData): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.log('KV cache hit rate low event skipped - requires PRO license');
+      return;
+    }
+    await this.webhookDispatcher.dispatchThresholdAlert(
+      WebhookEventType.KV_CACHE_HIT_RATE_LOW,
+      `kv_cache_hit_rate_low:${data.engineId}:${data.model}`,
+      data.hitRate,
+      data.threshold,
+      false,
+      {
+        ...data,
+        message: `LMCache hit rate for ${data.model} on ${data.engineName} is ${(data.hitRate * 100).toFixed(1)}% (threshold ${(data.threshold * 100).toFixed(1)}%)`,
+      },
+      data.connectionId,
+    );
+  }
+
+  async dispatchKvCacheEvictionRisk(data: KvCacheEvictionRiskData): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.log('KV cache eviction risk event skipped - requires PRO license');
+      return;
+    }
+    await this.webhookDispatcher.dispatchThresholdAlert(
+      WebhookEventType.KV_CACHE_EVICTION_RISK,
+      `kv_cache_eviction_risk:${data.connectionId}:${data.reason}`,
+      data.active ? 1 : 0,
+      1,
+      true,
+      {
+        ...data,
+        message:
+          data.reason === 'unevictable'
+            ? `LMCache keys have no TTL under ${data.policy}; Valkey cannot evict them`
+            : 'Valkey is evicting keys while LMCache holds most of its memory',
       },
       data.connectionId,
     );

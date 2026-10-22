@@ -1,4 +1,5 @@
 import { Logger } from '@nestjs/common';
+import { clientRollupBucketStart } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 
 /**
@@ -7,9 +8,9 @@ import { StoragePort } from '../common/interfaces/storage-port.interface';
  * self-hosted local sweep so the two never drift on which tables are covered.
  *
  * `sampleCutoff` applies to the high-volume sample stores (command/latency
- * stats samples, vector index snapshots), which in cloud keep a tighter 7-day
- * cap than the tier's analytics window. Self-hosted passes one cutoff for
- * everything, so it defaults to `cutoff`.
+ * stats samples, vector index snapshots, KV cache engine samples), which in
+ * cloud keep a tighter 7-day cap than the tier's analytics window.
+ * Self-hosted passes one cutoff for everything, so it defaults to `cutoff`.
  *
  * A store that fails to prune is reported as -1 and does not stop the sweep.
  */
@@ -23,6 +24,18 @@ export async function runRetentionSweep(
     { name: 'slowlog', fn: () => storage.pruneOldSlowLogEntries(cutoff) },
     { name: 'commandlog', fn: () => storage.pruneOldCommandLogEntries(cutoff) },
     { name: 'client_snapshots', fn: () => storage.pruneOldClientSnapshots(cutoff) },
+    // The rollup poller also trims rollups hourly to
+    // CLIENT_ANALYTICS_ROLLUP_RETENTION_DAYS, but only for registered
+    // connections; this reclaims rollups of removed connections and applies
+    // the general window when it is the shorter one. Compared to bucket_start,
+    // so the cutoff is aligned down to its bucket: only buckets wholly before
+    // the cutoff go. Deleting the bucket that straddles it would drop the
+    // rollup while the raw snapshots captured after the cutoff survive (raw
+    // rows compare captured_at), and those are never re-folded.
+    {
+      name: 'client_analytics_rollups',
+      fn: () => storage.pruneOldClientAnalyticsRollups(clientRollupBucketStart(cutoff)),
+    },
     { name: 'anomaly_events', fn: () => storage.pruneOldAnomalyEvents(cutoff) },
     { name: 'correlated_groups', fn: () => storage.pruneOldCorrelatedGroups(cutoff) },
     { name: 'key_patterns', fn: () => storage.pruneOldKeyPatternSnapshots(cutoff) },
@@ -33,6 +46,8 @@ export async function runRetentionSweep(
     { name: 'latency_histograms', fn: () => storage.pruneOldLatencyHistograms(cutoff) },
     { name: 'memory_snapshots', fn: () => storage.pruneOldMemorySnapshots(cutoff) },
     { name: 'scaling_readiness_scores', fn: () => storage.pruneOldScalingReadinessScores(cutoff) },
+    { name: 'kv_cache_footprint_snapshots', fn: () => storage.pruneOldKvCacheFootprintSnapshots(cutoff) },
+    { name: 'kv_cache_engine_samples', fn: () => storage.pruneOldKvCacheEngineSamples(sampleCutoff) },
     { name: 'capture_chunks', fn: () => storage.pruneOldCaptureChunks(cutoff) },
     { name: 'capture_sessions', fn: () => storage.pruneOldCaptureSessions(cutoff) },
     { name: 'capture_triggers', fn: () => storage.pruneOldCaptureTriggers(cutoff) },

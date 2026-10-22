@@ -63,4 +63,20 @@ describe('DemoModeGuard', () => {
     const ctx = makeContext(DEMO_HOST, 'GET', '/api/monitor/sessions');
     expect(guard.canActivate(ctx)).toBe(true);
   });
+
+  it.each([
+    ['POST', '/api/kv-cache/engines'],
+    ['PATCH', '/api/kv-cache/engines/e1'],
+    ['DELETE', '/api/kv-cache/engines/e1'],
+    ['PUT', '/api/kv-cache/settings'],
+    ['POST', '/api/kv-cache/footprint/refresh'],
+  ])('throws NotFoundException on demo host %s %s', (method, url) => {
+    const ctx = makeContext(DEMO_HOST, method, url);
+    expect(() => guard.canActivate(ctx)).toThrow(NotFoundException);
+  });
+
+  it('passes on demo host GET /kv-cache/status (read is allowed for demo browsing)', () => {
+    const ctx = makeContext(DEMO_HOST, 'GET', '/api/kv-cache/status');
+    expect(guard.canActivate(ctx)).toBe(true);
+  });
 });

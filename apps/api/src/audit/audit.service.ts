@@ -8,6 +8,16 @@ import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
+import { ConfigService } from '@nestjs/config';
+import { QueryBudget } from '../client-analytics/query-budget';
+import { AuditStatsCacheService } from './audit-stats-cache.service';
+
+/**
+ * Upper bound on the age of the cached ACL totals. The retention sweep deletes
+ * acl_audit rows without the poller noticing, so a connection with no new
+ * denials would otherwise export its pre-prune totals forever.
+ */
+export const AUDIT_STATS_PERIODIC_REFRESH_MS = 10 * 60_000;
 
 @Injectable()
 export class AuditService extends MultiConnectionPoller implements OnModuleInit {
@@ -15,6 +25,9 @@ export class AuditService extends MultiConnectionPoller implements OnModuleInit 
 
   // Per-connection state: track last seen timestamp for each connection
   private lastSeenTimestamps = new Map<string, number>();
+  // Connections polled since their last removal; guards late cache writes.
+  private knownForCache = new Set<string>();
+  private readonly budget: QueryBudget;
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -25,8 +38,11 @@ export class AuditService extends MultiConnectionPoller implements OnModuleInit 
     @Optional() private readonly webhookDispatcher?: WebhookDispatcherService,
     @Optional() @Inject(WEBHOOK_EVENTS_ENTERPRISE_SERVICE) private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
     private readonly runtimeCapabilityTracker?: RuntimeCapabilityTracker,
+    @Optional() private readonly auditStatsCache?: AuditStatsCacheService,
+    @Optional() configService?: ConfigService,
   ) {
     super(connectionRegistry);
+    this.budget = QueryBudget.fromConfig(configService, this.logger);
   }
 
   protected getIntervalMs(): number {
@@ -47,24 +63,74 @@ export class AuditService extends MultiConnectionPoller implements OnModuleInit 
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    this.knownForCache.add(ctx.connectionId);
+    // Totals stay all-time (unchanged semantics); they are just computed here,
+    // off the scrape path. Refresh after every save, once up front so a
+    // connection with no new denials still exports its totals (stored earlier,
+    // even if ACL LOG is unavailable now), and periodically so rows removed by
+    // the retention sweep stop being counted. The periodic refresh runs while
+    // ACL LOG is available, or while the cached totals still count stored rows
+    // (totalEntries > 0): those rows can be pruned even after ACL LOG went away,
+    // and the export must drop them. A connection with no stored rows and no
+    // ACL LOG is refreshed only once, since nothing could change. The stored totals
+    // do not depend on ACL LOG succeeding, so the due refresh also runs when
+    // the poll throws (the error is still rethrown).
+    let saved = false;
+    try {
+      saved = await this.pollAclLog(ctx);
+    } finally {
+      if (this.auditStatsCache && (saved || this.isStatsCacheDue(ctx))) {
+        await this.refreshStatsCache(ctx.connectionId);
+      }
+    }
+  }
+
+  private isStatsCacheDue(ctx: ConnectionContext): boolean {
+    const refreshedAt = this.auditStatsCache?.getRefreshedAt(ctx.connectionId) ?? null;
+    if (refreshedAt === null) return true;
+    if (Date.now() - refreshedAt < AUDIT_STATS_PERIODIC_REFRESH_MS) return false;
+    if (this.canPollAclLog(ctx)) return true;
+    return (this.auditStatsCache?.get(ctx.connectionId)?.totalEntries ?? 0) > 0;
+  }
+
+  /** Whether ACL LOG can be read for this connection; pollAclLog skips the poll when it cannot. */
+  private canPollAclLog(ctx: ConnectionContext): boolean {
+    if (!ctx.client.getCapabilities().hasAclLog) return false;
+    return !this.runtimeCapabilityTracker || this.runtimeCapabilityTracker.isAvailable(ctx.connectionId, 'canAclLog');
+  }
+
+  private async refreshStatsCache(connectionId: string): Promise<void> {
+    const startedAt = Date.now();
+    try {
+      const stats = await this.budget.time('getAuditStats', connectionId, () =>
+        this.storageClient.getAuditStats(undefined, undefined, connectionId),
+      );
+      // Skip the write when the connection was removed while the read ran.
+      if (this.knownForCache.has(connectionId)) {
+        this.auditStatsCache?.set(connectionId, stats, startedAt);
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Failed to refresh ACL audit stats for ${connectionId}: ${error instanceof Error ? error.message : error}`,
+      );
+    }
+  }
+
+  /** Returns true when new ACL entries were saved. */
+  private async pollAclLog(ctx: ConnectionContext): Promise<boolean> {
     const endTimer = this.prometheusService.startPollTimer('audit', ctx.connectionId);
 
     try {
-      const capabilities = ctx.client.getCapabilities();
-      if (!capabilities.hasAclLog) {
-        this.logger.debug(`ACL LOG not supported by ${ctx.connectionName}, skipping poll`);
-        return;
-      }
-
-      if (this.runtimeCapabilityTracker && !this.runtimeCapabilityTracker.isAvailable(ctx.connectionId, 'canAclLog')) {
-        return;
+      if (!this.canPollAclLog(ctx)) {
+        this.logger.debug(`ACL LOG not available for ${ctx.connectionName}, skipping poll`);
+        return false;
       }
 
       // Get ACL log entries
       const aclEntries = await ctx.client.getAclLog(100);
 
       if (aclEntries.length === 0) {
-        return;
+        return false;
       }
 
       // Get last seen timestamp for this connection
@@ -74,7 +140,7 @@ export class AuditService extends MultiConnectionPoller implements OnModuleInit 
       const newEntries = this.deduplicateEntries(aclEntries, lastSeenTimestamp);
 
       if (newEntries.length === 0) {
-        return;
+        return false;
       }
 
       // Enrich entries with metadata
@@ -174,10 +240,11 @@ export class AuditService extends MultiConnectionPoller implements OnModuleInit 
       const latestTimestamp = Math.max(...newEntries.map((e) => e.timestampLastUpdated));
       this.lastSeenTimestamps.set(ctx.connectionId, latestTimestamp);
       this.prometheusService.incrementPollCounter(ctx.connectionId);
+      return true;
     } catch (error) {
       if (this.runtimeCapabilityTracker?.recordFailure(ctx.connectionId, 'canAclLog', error instanceof Error ? error : String(error))) {
         this.logger.warn(`ACL log disabled for ${ctx.connectionName} due to blocked command`);
-        return;
+        return false;
       }
       this.logger.error(`Error polling ACL log for ${ctx.connectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
       throw error;
@@ -188,6 +255,8 @@ export class AuditService extends MultiConnectionPoller implements OnModuleInit 
 
   protected onConnectionRemoved(connectionId: string): void {
     this.lastSeenTimestamps.delete(connectionId);
+    this.knownForCache.delete(connectionId);
+    this.auditStatsCache?.delete(connectionId);
     this.logger.debug(`Cleaned up state for removed connection ${connectionId}`);
   }
 

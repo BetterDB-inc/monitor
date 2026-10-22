@@ -5,6 +5,7 @@ import { useCapabilities } from '../../hooks/useCapabilities';
 import { useCacheProposalsUnread } from '../../hooks/useCacheProposals';
 import { useConnection } from '../../hooks/useConnection';
 import { ConnectionSelector } from '../ConnectionSelector';
+import { hasKvCacheFootprint } from '../../utils/connectionType';
 import { CloudUser } from '../../api/workspace';
 import { NavItem } from './NavItem';
 import { SidebarUserMenu } from './SidebarUserMenu';
@@ -101,6 +102,13 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
             Scaling Readiness
           </NavItem>
           <NavItem
+            to="/cache-simulator"
+            active={location.pathname === '/cache-simulator'}
+            requiredFeature={Feature.CACHE_SIZE_SIMULATOR}
+          >
+            Cache Size Simulator
+          </NavItem>
+          <NavItem
             to="/anomalies"
             active={location.pathname === '/anomalies'}
             requiredFeature={Feature.ANOMALY_DETECTION}
@@ -134,6 +142,15 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
           {hasVectorSearch && (
             <NavItem to="/vector-ai" active={location.pathname === '/vector-ai'}>
               Vector / AI
+            </NavItem>
+          )}
+          {hasKvCacheFootprint(currentConnection) && (
+            <NavItem
+              to="/kv-cache"
+              active={location.pathname === '/kv-cache'}
+              requiredFeature={Feature.KV_CACHE_MONITORING}
+            >
+              KV Cache
             </NavItem>
           )}
           <NavItem to="/ai-cache-memory" active={location.pathname === '/ai-cache-memory'}>
