@@ -135,6 +135,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   // configured dbIndex, or 0 when its SELECT was rejected and the connection
   // fell back (see doConnect). Null until a connect has run.
   private activeDbIndex: number | null = null;
+  // FalkorDB's "graph" module is loaded (detected with the capabilities). Key
+  // analytics then sizes graphdata keys with GRAPH.* commands; see probeGraphKey.
+  private hasGraphModule: boolean = false;
 
   private createValkeyClient(connectionName: string, db?: number): Valkey {
     return new Valkey({
@@ -453,6 +456,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       (info.server ?? info) as Record<string, unknown>,
     );
     if (isSentinel) {
+      this.hasGraphModule = false;
       this.capabilities = {
         dbType: isValkey ? 'valkey' : 'redis',
         version,
@@ -492,6 +496,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // Search module not loaded
     }
 
+    this.hasGraphModule = await this.detectGraphModule();
+
     let clusterEnabled = false;
     try {
       const clusterInfo = await this.getInfo(['cluster']);
@@ -517,6 +523,67 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // isSentinel: true, so reaching here means this is not a Sentinel.
       isSentinel: false,
     };
+  }
+
+  // MODULE LIST replies with one flat [name, <name>, ver, <ver>, ...] array per
+  // module. A refused MODULE LIST (ACL, managed service) means no graph sizing.
+  private async detectGraphModule(): Promise<boolean> {
+    try {
+      const modules: unknown = await this.client.call('MODULE', 'LIST');
+      if (!Array.isArray(modules)) return false;
+      return modules.some((entry) => {
+        if (!Array.isArray(entry)) return false;
+        for (let i = 0; i + 1 < entry.length; i += 2) {
+          if (String(entry[i]) === 'name') {
+            return String(entry[i + 1]).toLowerCase() === 'graph';
+          }
+        }
+        return false;
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  // MEMORY USAGE on a FalkorDB graphdata key sees only the module's key header
+  // (~32 bytes), so graphs are sized with GRAPH.MEMORY USAGE and get node + edge
+  // count as their cardinality. Either value is null when its command fails
+  // (e.g. an older FalkorDB without GRAPH.MEMORY), leaving the caller's own
+  // figures in place.
+  private async probeGraphKey(
+    client: Valkey,
+    key: string,
+  ): Promise<{ memoryBytes: number | null; cardinality: number | null }> {
+    const [memResult, statsResult] =
+      (await client
+        .pipeline()
+        .call('GRAPH.MEMORY', 'USAGE', key)
+        .call(
+          'GRAPH.RO_QUERY',
+          key,
+          'CALL db.meta.stats() YIELD nodeCount, relCount RETURN nodeCount + relCount',
+        )
+        .exec()) || [];
+
+    // Flat [field, value, ...] reply; total_graph_sz_mb is whole megabytes,
+    // rounded down.
+    let memoryBytes: number | null = null;
+    if (memResult && !memResult[0] && Array.isArray(memResult[1])) {
+      const reply = memResult[1] as unknown[];
+      const idx = reply.findIndex((field) => String(field) === 'total_graph_sz_mb');
+      const mb = idx >= 0 ? Number(reply[idx + 1]) : NaN;
+      if (Number.isFinite(mb)) memoryBytes = mb * 1024 * 1024;
+    }
+
+    // [header, rows, statistics] with a single row holding the count.
+    let cardinality: number | null = null;
+    if (statsResult && !statsResult[0] && Array.isArray(statsResult[1])) {
+      const rows = (statsResult[1] as unknown[])[1];
+      const count = Array.isArray(rows) && Array.isArray(rows[0]) ? Number(rows[0][0]) : NaN;
+      if (Number.isFinite(count)) cardinality = count;
+    }
+
+    return { memoryBytes, cardinality };
   }
 
   async getInfoParsed(sections?: string[]): Promise<InfoResponse> {
@@ -1088,12 +1155,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
           const num = (r: [Error | null, unknown] | undefined): number | null =>
             r && !r[0] && r[1] != null ? (r[1] as number) : null;
 
-          const mem =
+          let mem =
             memResult && !memResult[0] && memResult[1] != null ? (memResult[1] as number) : null;
-          if (mem !== null) {
-            stats.totalMemory += mem;
-            if (mem > stats.maxMemory) stats.maxMemory = mem;
-          }
 
           const keyType =
             typeResult && !typeResult[0] && typeResult[1] != null ? String(typeResult[1]) : null;
@@ -1117,6 +1180,18 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
             case 'stream':
               cardinality = num(xlenResult);
               break;
+          }
+          if (keyType === 'graphdata' && this.hasGraphModule) {
+            const graph = await this.probeGraphKey(client, key);
+            // A graph under 1 MB reads as 0 MB; keep MEMORY USAGE when larger.
+            if (graph.memoryBytes !== null && (mem === null || graph.memoryBytes > mem)) {
+              mem = graph.memoryBytes;
+            }
+            cardinality = graph.cardinality;
+          }
+          if (mem !== null) {
+            stats.totalMemory += mem;
+            if (mem > stats.maxMemory) stats.maxMemory = mem;
           }
           if (cardinality !== null) {
             stats.totalCardinality += cardinality;

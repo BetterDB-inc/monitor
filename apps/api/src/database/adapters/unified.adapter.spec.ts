@@ -542,3 +542,131 @@ describe('UnifiedDatabaseAdapter — configured dbIndex', () => {
     expect((adapter as unknown as { _client: unknown })._client).toBeNull();
   });
 });
+
+describe('UnifiedDatabaseAdapter — FalkorDB graph keys', () => {
+  const MB = 1024 * 1024;
+  type Reply = [Error | null, unknown];
+
+  function makeGraphAdapter(opts: {
+    hasGraphModule: boolean;
+    keyType: string;
+    memoryUsage: number;
+    graphMemory: Reply;
+    graphStats: Reply;
+  }) {
+    const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+    const graphCalls: string[] = [];
+    const pipeline = () => {
+      let graphPipeline = false;
+      const chain = {
+        memory: () => chain,
+        object: () => chain,
+        ttl: () => chain,
+        type: () => chain,
+        strlen: () => chain,
+        llen: () => chain,
+        hlen: () => chain,
+        scard: () => chain,
+        zcard: () => chain,
+        xlen: () => chain,
+        call: (command: string) => {
+          graphPipeline = true;
+          graphCalls.push(command);
+          return chain;
+        },
+        exec: async () =>
+          graphPipeline
+            ? [opts.graphMemory, opts.graphStats]
+            : [
+                [null, opts.memoryUsage],
+                [null, 5],
+                [null, null],
+                [null, -1],
+                [null, opts.keyType],
+              ],
+      };
+      return chain;
+    };
+    (adapter as unknown as { _client: unknown })._client = {
+      dbsize: jest.fn().mockResolvedValue(1),
+      scan: jest.fn().mockResolvedValue(['0', ['social']]),
+      info: jest.fn().mockResolvedValue('# Keyspace\r\ndb0:keys=1,expires=0,avg_ttl=0'),
+      pipeline,
+    };
+    (adapter as unknown as { config: unknown }).config = {};
+    (adapter as unknown as { hasGraphModule: boolean }).hasGraphModule = opts.hasGraphModule;
+    return { adapter, graphCalls };
+  }
+
+  const graphMemoryReply: Reply = [
+    null,
+    ['total_graph_sz_mb', 3, 'label_matrices_sz_mb', 0, 'amortized_node_attributes_by_label_sz_mb', ['Person', 0]],
+  ];
+  const graphStatsReply: Reply = [null, [['nodeCount + relCount'], [[54995]], ['Cached execution: 0']]];
+
+  it('sizes a graphdata key with GRAPH.MEMORY USAGE and node + edge cardinality', async () => {
+    const { adapter } = makeGraphAdapter({
+      hasGraphModule: true,
+      keyType: 'graphdata',
+      memoryUsage: 32,
+      graphMemory: graphMemoryReply,
+      graphStats: graphStatsReply,
+    });
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    expect(result.keyDetails?.[0]).toMatchObject({ keyType: 'graphdata', memoryBytes: 3 * MB, cardinality: 54995 });
+    expect(result.patterns[0].totalMemory).toBe(3 * MB);
+  });
+
+  it('keeps MEMORY USAGE when GRAPH.MEMORY fails or reports under 1 MB', async () => {
+    for (const graphMemory of [
+      [new Error('ERR unknown command'), null] as Reply,
+      [null, ['total_graph_sz_mb', 0]] as Reply,
+    ]) {
+      const { adapter } = makeGraphAdapter({
+        hasGraphModule: true,
+        keyType: 'graphdata',
+        memoryUsage: 24,
+        graphMemory,
+        graphStats: [new Error('ERR boom'), null],
+      });
+
+      const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+      expect(result.keyDetails?.[0]).toMatchObject({ memoryBytes: 24, cardinality: null });
+    }
+  });
+
+  it('issues no GRAPH.* commands without the graph module', async () => {
+    const { adapter, graphCalls } = makeGraphAdapter({
+      hasGraphModule: false,
+      keyType: 'graphdata',
+      memoryUsage: 32,
+      graphMemory: graphMemoryReply,
+      graphStats: graphStatsReply,
+    });
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    expect(graphCalls).toEqual([]);
+    expect(result.keyDetails?.[0]).toMatchObject({ memoryBytes: 32, cardinality: null });
+  });
+
+  it('detects the graph module from MODULE LIST and tolerates a refused MODULE LIST', async () => {
+    const detect = async (call: jest.Mock) => {
+      const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+      (adapter as unknown as { _client: unknown })._client = { call };
+      return (adapter as unknown as { detectGraphModule(): Promise<boolean> }).detectGraphModule();
+    };
+
+    await expect(
+      detect(jest.fn().mockResolvedValue([
+        ['name', 'vectorset', 'ver', 1],
+        ['name', 'graph', 'ver', 42202],
+      ])),
+    ).resolves.toBe(true);
+    await expect(detect(jest.fn().mockResolvedValue([['name', 'search', 'ver', 1]]))).resolves.toBe(false);
+    await expect(detect(jest.fn().mockRejectedValue(new Error('NOPERM')))).resolves.toBe(false);
+  });
+});
