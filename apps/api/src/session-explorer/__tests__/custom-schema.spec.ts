@@ -297,6 +297,56 @@ describe('custom preset', () => {
     expect(view).toMatchObject({ parsed: true, messages: [{ role: 'user', content: 'hello' }] });
   });
 
+  it('keeps plain-text hash fields that look like JSON scalars as text', () => {
+    const preset = createCustomPreset({
+      valueType: 'hash',
+      messages: { from: 'key' },
+      fields: { role: 'role', content: 'body' },
+    });
+    for (const [role, body] of [
+      ['user', '42'],
+      ['user', 'null'],
+      ['user', '"hi"'],
+      ['true', 'yes'],
+    ]) {
+      const view = preset.parseKey(key({ type: 'hash', value: { role, body } }));
+      expect(view).toMatchObject({ parsed: true, messages: [{ role, content: body }] });
+    }
+  });
+
+  it('still parses JSON objects stored in hash fields', () => {
+    const preset = createCustomPreset({
+      valueType: 'hash',
+      messages: { from: 'items' },
+      fields: { role: 'role', content: 'text' },
+    });
+    const view = preset.parseKey(
+      key({ type: 'hash', value: { m1: '{"role":"user","text":"hi"}' } }),
+    );
+    expect(view).toMatchObject({ parsed: true, messages: [{ role: 'user', content: 'hi' }] });
+  });
+
+  it('orders hash items by field name, numbers by value', () => {
+    const preset = createCustomPreset({
+      valueType: 'hash',
+      messages: { from: 'items' },
+      fields: { role: 'role', content: 'text' },
+    });
+    const msg = (text: string) => JSON.stringify({ role: 'user', text });
+    const view = preset.parseKey(
+      key({
+        type: 'hash',
+        value: { 'msg:10': msg('ten'), 'msg:2': msg('two'), 'msg:1': msg('one'), 3: msg('3') },
+      }),
+    );
+    expect(view.parsed && view.messages.map((m) => m.content)).toEqual([
+      '3',
+      'one',
+      'two',
+      'ten',
+    ]);
+  });
+
   it('registry requires a schema for custom', () => {
     expect(() => getPreset('custom', null)).toThrow();
     expect(getPreset('custom', baseSchema).id).toBe('custom');

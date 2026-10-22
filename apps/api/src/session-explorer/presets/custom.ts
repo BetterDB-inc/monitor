@@ -185,13 +185,23 @@ const TYPE_MATCHES: Record<CustomSchema['valueType'], string[]> = {
 
 const parseIfString = (v: unknown): unknown => (typeof v === 'string' ? parseJson(v) : v);
 
+const JSON_CONTAINER = /^\s*[[{]/;
+
 const parseIfJson = (v: string): unknown => {
+  if (!JSON_CONTAINER.test(v)) return v;
   try {
     return parseJson(v);
   } catch {
     return v;
   }
 };
+
+const fieldOrder = new Intl.Collator('en', { numeric: true });
+
+const byFieldName = (hash: Record<string, unknown>): unknown[] =>
+  Object.entries(hash)
+    .sort(([a], [b]) => fieldOrder.compare(a, b))
+    .map(([, value]) => value);
 
 function readRoot(k: CapturedKey, valueType: CustomSchema['valueType']): unknown {
   switch (valueType) {
@@ -219,7 +229,7 @@ function selectEntries(root: unknown, schema: CustomSchema): unknown[] {
       return [root];
     case 'items': {
       if (Array.isArray(root)) return root;
-      if (schema.valueType === 'hash' && isRecord(root)) return Object.values(root);
+      if (schema.valueType === 'hash' && isRecord(root)) return byFieldName(root);
       return fail('Value has no message items');
     }
     case 'path': {
