@@ -195,9 +195,14 @@ export class FakeValkey {
       case 'xrangeBuffer': {
         const [, start, , , count] = args as [string, string, string, string, number];
         const entries = (raw as Array<[string, Record<string, string>]>) ?? [];
-        const from = start.startsWith('(')
-          ? entries.findIndex(([id]) => id === start.slice(1)) + 1
-          : 0;
+        if (start.startsWith('(')) throw new Error('ERR Invalid stream ID specified as stream command argument');
+        const idOf = (id: string) => id.split('-').map(BigInt) as [bigint, bigint];
+        const [startMs, startSeq] = start === '-' ? [0n, 0n] : idOf(start);
+        const index = entries.findIndex(([id]) => {
+          const [ms, seq] = idOf(id);
+          return ms > startMs || (ms === startMs && seq >= startSeq);
+        });
+        const from = index === -1 ? entries.length : index;
         return entries
           .slice(from, from + Number(count))
           .map(([id, fields]) => [

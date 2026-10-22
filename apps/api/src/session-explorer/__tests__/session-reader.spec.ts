@@ -156,6 +156,29 @@ describe('readSessionKeys', () => {
     expect((key.value as Array<[string, unknown]>)[1199]).toEqual(['1200-0', { m: 'e1199' }]);
   });
 
+  it('pages a stream with ids older servers accept, across a sequence rollover', async () => {
+    const value = Array.from(
+      { length: 1200 },
+      (_, i) =>
+        [i % 2 === 0 ? `${i + 1}-18446744073709551615` : `${i}-0`, { m: `e${i}` }] as [
+          string,
+          Record<string, string>,
+        ],
+    ).sort(([a], [b]) => {
+      const [am, as] = a.split('-').map(BigInt);
+      const [bm, bs] = b.split('-').map(BigInt);
+      return am === bm ? Number(as - bs) : Number(am - bm);
+    });
+    const client = new FakeValkey(storeOf({ s: { type: 'stream', value } }));
+
+    const key = await readOne(client, 's');
+
+    expect((key.value as unknown[]).length).toBe(1200);
+    expect(client.callsOf('xrangeBuffer').every((c) => !String(c.args[1]).startsWith('('))).toBe(
+      true,
+    );
+  });
+
   it('reads a hash as a record of strings', async () => {
     const client = new FakeValkey(
       storeOf({ h: { type: 'hash', value: { a: '1', b: '2' }, memory: 50 } }),

@@ -287,6 +287,13 @@ async function readJson(
   return { ...decodeValue(buf, cap), bytes: Math.min(buf.length, cap) };
 }
 
+const MAX_STREAM_SEQ = 2n ** 64n - 1n;
+
+function streamIdAfter(id: string): string {
+  const [ms, seq] = id.split('-').map(BigInt);
+  return seq === MAX_STREAM_SEQ ? `${ms + 1n}-0` : `${ms}-${seq + 1n}`;
+}
+
 async function readStream(
   client: Valkey,
   at: Located,
@@ -313,7 +320,7 @@ async function readStream(
     if (acc.full || entries.length < size) break;
     const lastId = entries[entries.length - 1][0].toString();
     size = nextWindow(acc, opts);
-    entries = (await client.xrangeBuffer(at.key, `(${lastId}`, '+', 'COUNT', size)) as Array<
+    entries = (await client.xrangeBuffer(at.key, streamIdAfter(lastId), '+', 'COUNT', size)) as Array<
       [Buffer, Buffer[]]
     >;
   }
