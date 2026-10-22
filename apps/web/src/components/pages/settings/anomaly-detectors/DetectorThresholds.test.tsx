@@ -109,6 +109,22 @@ describe('DetectorThresholds', () => {
     await waitFor(() => expect(api.resetAllAnomalyDetectors).toHaveBeenCalled());
   });
 
+  it('shows every metric on defaults after reset all, before the refetch returns', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    const stored = response({ connections: { warningZScore: 2.5 } });
+    stored.resolved = { ...stored.resolved, connections: { ...base, warningZScore: 2.5 } };
+    api.getAnomalyDetectors.mockResolvedValue(stored);
+    api.resetAllAnomalyDetectors.mockResolvedValue({ message: 'ok', config: {} });
+    const { queryClient } = renderAt('/settings?section=anomaly');
+    expect(await screen.findByText('z 2.5 / 3')).toBeInTheDocument();
+    api.getAnomalyDetectors.mockReturnValue(new Promise(() => {}));
+    fireEvent.click(screen.getByRole('button', { name: 'Reset all to defaults' }));
+    await waitFor(() => expect(screen.queryByText('z 2.5 / 3')).not.toBeInTheDocument());
+    const cached = queryClient.getQueryData<AnomalyDetectorSettingsResponse>(['anomaly-detectors']);
+    expect(cached?.overrides).toEqual({});
+    expect(cached?.resolved).toEqual(cached?.defaults);
+  });
+
   it('does not reset all when confirmation is declined', async () => {
     vi.stubGlobal('confirm', vi.fn(() => false));
     api.getAnomalyDetectors.mockResolvedValue(response({ connections: { warningZScore: 2.5 } }));

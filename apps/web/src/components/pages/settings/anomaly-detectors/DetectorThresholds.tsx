@@ -5,6 +5,7 @@ import {
   ANOMALY_DETECTOR_METRICS,
   Feature,
   type AnomalyDetectorMetric,
+  type AnomalyDetectorSettingsResponse,
 } from '@betterdb/shared';
 import { settingsApi } from '../../../../api/settings';
 import { useLicense } from '../../../../hooks/useLicense';
@@ -45,6 +46,9 @@ export function DetectorThresholds() {
     mutationFn: () => settingsApi.resetAllAnomalyDetectors(),
     onSuccess: () => {
       setResetError(null);
+      queryClient.setQueryData<AnomalyDetectorSettingsResponse>(ANOMALY_DETECTORS_QUERY_KEY, (prev) =>
+        prev ? { ...prev, overrides: {}, resolved: prev.defaults } : prev,
+      );
       queryClient.invalidateQueries({ queryKey: ANOMALY_DETECTORS_QUERY_KEY });
     },
     onError: (err) => setResetError(err instanceof Error ? err.message : 'Failed to reset'),
