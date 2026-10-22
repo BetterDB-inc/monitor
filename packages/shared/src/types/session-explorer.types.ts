@@ -24,7 +24,7 @@ export interface CapturedKey {
 }
 
 export interface CustomSchema {
-  sessionRegex?: string;
+  sessionTemplate?: string;
   valueType: 'list' | 'string' | 'hash' | 'json';
   messages:
     | { from: 'items' }

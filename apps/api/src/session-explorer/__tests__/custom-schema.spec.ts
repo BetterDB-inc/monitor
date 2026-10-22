@@ -1,7 +1,13 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { CapturedKey, CustomSchema } from '@betterdb/shared';
-import { createCustomPreset, getPath, validateCustomSchema } from '../presets/custom';
+import {
+  createCustomPreset,
+  getPath,
+  matchSessionTemplate,
+  parseSessionTemplate,
+  validateCustomSchema,
+} from '../presets/custom';
 import { getPreset } from '../presets/registry';
 
 const FIXTURE = path.join(
@@ -54,19 +60,48 @@ describe('validateCustomSchema', () => {
     expect(validateCustomSchema(baseSchema)).toEqual({ ok: true, schema: baseSchema });
   });
 
-  it('rejects a sessionRegex without a session group', () => {
-    const result = validateCustomSchema({ ...baseSchema, sessionRegex: '^chat:(\\w+)$' });
+  it('rejects a sessionTemplate without {session}', () => {
+    expect(validateCustomSchema({ ...baseSchema, sessionTemplate: 'chat:*' })).toEqual({
+      ok: false,
+      errors: ['Session template must contain {session} exactly once'],
+    });
+  });
+
+  it('rejects a sessionTemplate with {session} twice', () => {
+    const result = validateCustomSchema({ ...baseSchema, sessionTemplate: '{session}:{session}' });
     expect(result.ok).toBe(false);
   });
 
-  it('rejects an invalid regex', () => {
-    const result = validateCustomSchema({ ...baseSchema, sessionRegex: '(?<session>' });
-    expect(result.ok).toBe(false);
+  it('rejects adjacent gaps that make the session ambiguous', () => {
+    for (const sessionTemplate of ['chat:{session}*', 'chat:*{session}', 'a:**:{session}']) {
+      expect(validateCustomSchema({ ...baseSchema, sessionTemplate })).toEqual({
+        ok: false,
+        errors: ['Session template needs text between {session} and *'],
+      });
+    }
   });
 
-  it('accepts a sessionRegex with a session group', () => {
-    const result = validateCustomSchema({ ...baseSchema, sessionRegex: '^chat:(?<session>\\w+)$' });
-    expect(result.ok).toBe(true);
+  it('accepts a sessionTemplate with {session}', () => {
+    const result = validateCustomSchema({ ...baseSchema, sessionTemplate: 'chat:{session}:*' });
+    expect(result).toEqual({
+      ok: true,
+      schema: { ...baseSchema, sessionTemplate: 'chat:{session}:*' },
+    });
+  });
+
+  it('rejects a non-string sessionTemplate', () => {
+    expect(validateCustomSchema({ ...baseSchema, sessionTemplate: 7 }).ok).toBe(false);
+  });
+
+  it('treats blank optional inputs as not set', () => {
+    for (const blank of ['', '   ', null]) {
+      const result = validateCustomSchema({
+        ...baseSchema,
+        sessionTemplate: blank,
+        fields: { ...baseSchema.fields, timestamp: blank, toolName: blank },
+      });
+      expect(result).toEqual({ ok: true, schema: baseSchema });
+    }
   });
 
   it('rejects missing role or content', () => {
@@ -81,40 +116,15 @@ describe('validateCustomSchema', () => {
     expect(result.ok).toBe(false);
   });
 
-  it('rejects regexes that could backtrack catastrophically', () => {
-    for (const sessionRegex of ['^(a+)+$', '(\\w+)*:(?<session>x)', '(?<session>(a*)*)']) {
-      const result = validateCustomSchema({ ...baseSchema, sessionRegex });
-      expect(result).toMatchObject({ ok: false });
-      if (!result.ok) {
-        expect(result.errors).toContain(
-          'Session regex has nested repetition that could hang the server',
-        );
-      }
-    }
-  });
-
-  it('rejects an over-long regex', () => {
+  it('rejects an over-long template', () => {
     const result = validateCustomSchema({
       ...baseSchema,
-      sessionRegex: `(?<session>${'a'.repeat(200)})`,
+      sessionTemplate: `{session}${'a'.repeat(200)}`,
     });
     expect(result).toEqual({
       ok: false,
-      errors: ['Session regex must be at most 200 characters'],
+      errors: ['Session template must be at most 200 characters'],
     });
-  });
-
-  it('accepts a normal regex', () => {
-    const result = validateCustomSchema({
-      ...baseSchema,
-      sessionRegex: '^app:(?<session>[^:]+):',
-    });
-    expect(result.ok).toBe(true);
-  });
-
-  it('requires a real session group', () => {
-    expect(validateCustomSchema({ ...baseSchema, sessionRegex: '\\(?<session>x' }).ok).toBe(false);
-    expect(validateCustomSchema({ ...baseSchema, sessionRegex: '[(?<session>]' }).ok).toBe(false);
   });
 
   it('rejects malformed paths and names the field', () => {
@@ -175,21 +185,34 @@ describe('custom preset', () => {
     expect(view).toMatchObject({ parsed: false, reason: 'Expected hash, found list' });
   });
 
-  it('treats each key as its own session without sessionRegex', () => {
+  it('treats each key as its own session without sessionTemplate', () => {
     const preset = createCustomPreset(baseSchema);
     expect(preset.sessionIdOf('chat:abc')).toBe('chat:abc');
   });
 
-  it('extracts the session group and ignores non-matching keys', () => {
-    const preset = createCustomPreset({ ...baseSchema, sessionRegex: '^chat:(?<session>\\w+)$' });
+  it('extracts the session from the template and ignores non-matching keys', () => {
+    const preset = createCustomPreset({ ...baseSchema, sessionTemplate: 'chat:{session}' });
     expect(preset.sessionIdOf('chat:abc')).toBe('abc');
     expect(preset.sessionIdOf('other:abc')).toBeNull();
+    expect(preset.sessionIdOf('chat:')).toBeNull();
   });
 
-  it('returns null for oversized keys without running the regex', () => {
-    const preset = createCustomPreset({ ...baseSchema, sessionRegex: '^(?<session>a+)$' });
-    expect(preset.sessionIdOf('a'.repeat(2000))).toBeNull();
-    expect(preset.sessionIdOf('aaa')).toBe('aaa');
+  it('matches a suffix and wildcards around the session', () => {
+    const t = (template: string, key: string) =>
+      matchSessionTemplate(parseSessionTemplate(template), key);
+    expect(t('app:{session}:messages', 'app:t1:messages')).toBe('t1');
+    expect(t('app:{session}:messages', 'app:t1:meta')).toBeNull();
+    expect(t('app:{session}:*', 'app:t1:meta:2')).toBe('t1');
+    expect(t('*:session:{session}:*', 'cache:session:t1:last')).toBe('t1');
+    expect(t('{session}', 'anything')).toBe('anything');
+    expect(t('ab{session}ba', 'aba')).toBeNull();
+  });
+
+  it('matches hostile keys in linear time', () => {
+    const preset = createCustomPreset({ ...baseSchema, sessionTemplate: '*a*a*a:{session}=' });
+    const started = Date.now();
+    expect(preset.sessionIdOf('a'.repeat(100_000))).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 
   it('reads messages from a path inside a JSON string', () => {
