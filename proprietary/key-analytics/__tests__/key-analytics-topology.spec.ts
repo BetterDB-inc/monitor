@@ -11,7 +11,7 @@ import type { ConnectionRegistry } from '@app/connections/connection-registry.se
 import type { StoragePort } from '@app/common/interfaces/storage-port.interface';
 import type { LicenseService } from '@proprietary/licenses';
 import { KeyAnalyticsService } from '../key-analytics.service';
-import { collectionPlan } from '../key-analytics-plan';
+import { collectionPlan, planForConnection, resolvePlan } from '../key-analytics-plan';
 import { buildPatternSnapshots, mergePatternSnapshots } from '../key-pattern-snapshots';
 
 function connection(id: string, over: Partial<ConnectionStatus> = {}): ConnectionStatus {
@@ -102,6 +102,30 @@ describe('collectionPlan', () => {
   it('still treats the seed as a cluster when none of its nodes are reachable', () => {
     const down = connection('down', { membership: member(), isConnected: false });
     expect(collectionPlan(seed, [seed, down])).toEqual({ kind: 'cluster', members: [] });
+  });
+});
+
+describe('planForConnection', () => {
+  const seed = connection('seed');
+  const node = connection('node', { membership: member() });
+  const registry = { list: () => [seed, node] } as unknown as ConnectionRegistry;
+
+  it('plans a listed connection against the registry', () => {
+    expect(planForConnection(registry, 'seed')).toEqual({ kind: 'cluster', members: [node] });
+    expect(planForConnection(registry, 'node')).toEqual({ kind: 'skip' });
+  });
+
+  it('scans an unlisted connection on its own', () => {
+    expect(planForConnection(registry, 'missing')).toEqual({ kind: 'single' });
+  });
+
+  it('skips a retired member that only the retired listing includes', () => {
+    const retired = connection('retired', { membership: member({ retiredAt: 1 }) });
+    const withRetired = {
+      list: (options?: { includeRetired?: boolean }) => (options?.includeRetired ? [seed, node, retired] : [seed, node]),
+    } as unknown as ConnectionRegistry;
+    expect(planForConnection(withRetired, 'retired')).toEqual({ kind: 'skip' });
+    expect(resolvePlan(withRetired, 'retired')).toEqual({ connection: retired, plan: { kind: 'skip' } });
   });
 });
 

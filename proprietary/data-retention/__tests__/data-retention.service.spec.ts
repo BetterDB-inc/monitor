@@ -42,6 +42,8 @@ describe('DataRetentionService', () => {
       pruneOldCommandStatsSamples: jest.fn().mockResolvedValue(18),
       pruneOldLatencyStatsSamples: jest.fn().mockResolvedValue(19),
       pruneOldVectorIndexSnapshots: jest.fn().mockResolvedValue(20),
+      pruneOldKvCacheFootprintSnapshots: jest.fn().mockResolvedValue(22),
+      pruneOldKvCacheEngineSamples: jest.fn().mockResolvedValue(23),
     } as any;
 
     licenseService = {
@@ -97,6 +99,7 @@ describe('DataRetentionService', () => {
     'pruneOldScheduledCaptures',
     'pruneOldAiCacheSamples',
     'pruneOldOtelSpans',
+    'pruneOldKvCacheFootprintSnapshots',
   ] as const;
 
   // Rollups compare bucket_start, so they get the cutoff aligned down to its
@@ -115,6 +118,7 @@ describe('DataRetentionService', () => {
     'pruneOldCommandStatsSamples',
     'pruneOldLatencyStatsSamples',
     'pruneOldVectorIndexSnapshots',
+    'pruneOldKvCacheEngineSamples',
   ] as const;
 
   it('community tier uses 7-day cutoff and calls all prune methods', async () => {
