@@ -254,15 +254,25 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 | `PROMETHEUS_STALENESS_MS`     | No       | 3 × poll interval | Drop a connection's gauge series after this long without a successful `INFO` read (ms, ≥ 1000, raised to 3 × poll interval if lower)                                                  |
 | `METRICS_EXPORT_PROFILE`      | No       | `full`            | `vitals` exports a fixed set of series per connection (no per-db, per-slot or pattern-labelled series); `full` exports everything. Applies to the scrape endpoint and the OTLP mirror |
 | `METRICS_SLOT_STATS_TOP_N`    | No       | `100`             | Export slot stats for the top N slots by key count (0–16384, `0` disables). Ignored under `vitals`                                                                                    |
+| `METRICS_KEY_PATTERNS_TOP_N`  | No       | `100`             | Export key-size gauges for the top N key patterns by total memory from the latest key analytics run (Pro; 0–10000, `0` disables). Ignored under `vitals`                              |
+| `METRICS_KEY_DETAILS_TOP_N`   | No       | `10`              | Export per-key size gauges for the top N largest keys (Pro; 0–50, `0` disables only the per-key family — key names become label values). Ignored under `vitals`                       |
 | `PROMETHEUS_METRICS_ENABLED`  | No       | `true`            | Set to `false` to disable `/api/prometheus/metrics` entirely (the OTLP mirror keeps exporting)                                                                                        |
 | `PROMETHEUS_METRICS_TOKEN`    | No       | _(none)_          | Bearer token required to scrape the metrics endpoint; required when `CLOUD_MODE` is set and the endpoint is enabled                                                                   |
 | `PROMETHEUS_METRICS_PUBLIC_TOKEN` | No   | _(none)_          | Optional second accepted scrape token, meant to be published (e.g. a live demo). Configuring either token switches the endpoint to bearer-required; rotating this one never affects scrapes using the primary |
 
 ### Client Analytics
 
-| Variable                            | Required | Default | Description                                      |
-| ----------------------------------- | -------- | ------- | ------------------------------------------------ |
-| `CLIENT_ANALYTICS_POLL_INTERVAL_MS` | No       | `60000` | Client analytics polling interval (milliseconds) |
+| Variable                                   | Required | Default    | Description                                                                                                                                  |
+| ------------------------------------------ | -------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLIENT_ANALYTICS_POLL_INTERVAL_MS`        | No       | `60000`    | Client analytics polling interval (milliseconds)                                                                                             |
+| `CLIENT_ANALYTICS_WINDOW_MS`               | No       | `86400000` | Window for unique name/user/IP counts, average age and per-name/per-user figures, in the Prometheus gauges and the default stats response (24 hours) |
+| `CLIENT_ANALYTICS_ROLLUP_RETENTION_DAYS`   | No       | `90`       | Days of 5-minute rollup rows to keep (pruned hourly; the general retention window also applies, shorter wins). Also the furthest back the backfill reaches and the span of the headline peak       |
+| `CLIENT_ANALYTICS_RAW_RETENTION_DAYS`      | No       | -          | Days of raw client snapshots to keep, pruned hourly in chunks; unset = keep forever                                                         |
+| `CLIENT_ANALYTICS_QUERY_BUDGET_MS`         | No       | `2000`     | Client analytics and audit stats storage calls slower than this log one warning per method, then stay quiet for that method for 5 minutes  |
+
+A background aggregator folds new client snapshots into 5-minute rollups and refreshes the in-memory stats every 15 seconds. Catching up after downtime and backfilling older history both read raw snapshots in 1-hour chunks, at most 4 per connection per run. The cadence and chunking are fixed.
+
+Stats merged across connections (`GET /client-analytics/stats` without a connection) sum each connection's newest snapshot batch for the current counts. A connection counts toward current if its newest batch is within max(one bucket, two poll intervals) of the newest batch overall, that is max(5 minutes, 2 × the client analytics poll interval, `CLIENT_ANALYTICS_POLL_INTERVAL_MS` or the `clientAnalyticsPollIntervalMs` setting), so a single missed poll never drops a connection; one further behind still counts toward peaks, unique counts and average ages.
 
 ### Cluster Auto-Registration
 
@@ -280,6 +290,8 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 Self-hosted BetterDB keeps stored monitoring history **indefinitely by default**, bounded only by your storage backend's capacity and disk space. The retention window, once set, covers every store: slow log and command log entries, client/latency/memory snapshots, latency histograms, anomaly events and correlated groups, **ACL audit entries**, key pattern snapshots and hot keys, webhook deliveries, monitor captures (sessions, chunks, triggers, scheduled), AI cache samples, OTel spans, command/latency stats samples, and vector index snapshots.
 
 To keep the database from growing forever, set a retention window from **Settings → Data Retention** in the UI. On a fresh install the window can also be seeded with `LOCAL_RETENTION_DAYS` — the env var applies only when the settings row is first created; after that the settings page owns the value, so clearing it there sticks even if the env var stays set. A daily sweep then deletes history older than the window, and the high-volume sample stores (command/latency stats samples, vector index snapshots, AI cache samples, OTel spans) are additionally trimmed to the same window on an hourly cycle. Nothing is deleted while the window is unset.
+
+Client analytics keeps two stores. Raw client snapshots (`client_snapshots`) follow the retention window above like every other store, and can additionally be capped with `CLIENT_ANALYTICS_RAW_RETENTION_DAYS` (unset by default, so raw snapshots are kept until the retention window removes them). The 5-minute rollups (`client_analytics_rollups`, 288 rows per connection per day) are also swept by the retention window like every other store, and are additionally pruned hourly after `CLIENT_ANALYTICS_ROLLUP_RETENTION_DAYS` (default 90); whichever is shorter wins. The sweep also removes rollups left behind by removed connections. Capping raw snapshots with `CLIENT_ANALYTICS_RAW_RETENTION_DAYS` therefore does not remove the long-range history served from rollups.
 
 **BetterDB Cloud** applies the tier-based retention policy (Community 7 days, Pro 90, Enterprise 365) automatically; the local retention setting has no effect there.
 
@@ -630,6 +642,10 @@ member takes effect within that window rather than on the next request.
 | `/client-analytics/buffer-anomalies`     | GET    | Detect clients with unusual buffer sizes       |
 | `/client-analytics/activity-timeline`    | GET    | Get activity over time for correlation         |
 | `/client-analytics/spike-detection`      | GET    | Automatically detect unusual activity spikes   |
+
+`/client-analytics/stats` without `startTime`/`endTime` covers the last `CLIENT_ANALYTICS_WINDOW_MS` (default 24 hours) and is served from the 5-minute rollups. With an explicit range (a missing `endTime` means now; a missing `startTime` means one window before `endTime`), spans up to 6 hours for a single connection are computed exactly from raw snapshots. Longer spans, and any range without a connection header, are served from the rollups and are aligned to 5-minute bucket boundaries: a range edge inside a bucket includes the whole bucket. With an explicit range, peak connections, the unique name/user/IP counts and the per-name/per-user figures all describe the requested range. Without a range, for a single connection, the headline `peakConnections`/`peakTimestamp` cover the whole rollup retention (`CLIENT_ANALYTICS_ROLLUP_RETENTION_DAYS`, default 90 days), while the unique counts, average age and per-name/per-user figures (including their peaks) cover the window.
+
+`/client-analytics/history` defaults `startTime` to one window before `endTime` when it is omitted, and `/client-analytics/idle-connections` looks at the last window instead of all history. The other analysis endpoints keep their existing 1-hour or 24-hour defaults.
 
 ### Metrics
 

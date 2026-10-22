@@ -161,6 +161,198 @@ describe('type-handlers / migrateKey', () => {
     });
   });
 
+  describe('stream metadata (consumer groups, PEL, ID counters)', () => {
+    function routeSourceCall(overrides: Record<string, unknown> = {}) {
+      return jest.fn().mockImplementation((cmd: string, sub?: string) => {
+        const route = sub && cmd === 'XINFO' ? `XINFO ${sub}` : cmd;
+        if (route in overrides) {
+          const value = overrides[route];
+          return value instanceof Error ? Promise.reject(value) : Promise.resolve(value);
+        }
+        if (route === 'XINFO STREAM') {
+          return Promise.resolve([
+            'length', 1, 'last-generated-id', '5-0', 'max-deleted-entry-id', '5-0', 'entries-added', 5, 'groups', 1,
+          ]);
+        }
+        if (route === 'XINFO GROUPS') {
+          return Promise.resolve([
+            ['name', 'workers', 'consumers', 2, 'pending', 1, 'last-delivered-id', '3-0', 'entries-read', 3, 'lag', null],
+          ]);
+        }
+        if (route === 'XINFO CONSUMERS') {
+          return Promise.resolve([
+            ['name', 'c1', 'pending', 1, 'idle', 10],
+            ['name', 'idle-consumer', 'pending', 0, 'idle', 20],
+          ]);
+        }
+        if (route === 'XPENDING') return Promise.resolve([['2-0', 'c1', '1234', '2']]);
+        return Promise.resolve(null);
+      });
+    }
+
+    interface ClaimPipeline {
+      call: jest.Mock<ClaimPipeline, unknown[]>;
+      exec: jest.Mock<Promise<Array<[Error | null, unknown]>>, []>;
+    }
+
+    /** Pipeline double for the batched XCLAIMs: every queued command gets `reply`. */
+    function claimPipeline(reply: unknown): ClaimPipeline {
+      const queued: unknown[][] = [];
+      const pipeline: ClaimPipeline = {
+        call: jest.fn((...args: unknown[]) => {
+          queued.push(args);
+          return pipeline;
+        }),
+        exec: jest.fn(() =>
+          Promise.resolve(
+            queued.map((): [Error | null, unknown] => (reply instanceof Error ? [reply, null] : [null, reply])),
+          ),
+        ),
+      };
+      return pipeline;
+    }
+
+    let claims: ClaimPipeline;
+
+    beforeEach(() => {
+      source.call = routeSourceCall();
+      claims = claimPipeline(['2-0']);
+      target.pipeline.mockReturnValue(claims);
+    });
+
+    it('recreates ID counters, groups, consumers and pending entries on the temp key before the rename', async () => {
+      const result = await migrateKey(source, target, 'jobs', 'stream');
+
+      expect(result.ok).toBe(true);
+      expect(result.warning).toBeUndefined();
+      const tmp = expect.stringContaining('__betterdb_mig_');
+      expect(target.call).toHaveBeenCalledWith('XSETID', tmp, '5-0', 'ENTRIESADDED', '5', 'MAXDELETEDID', '5-0');
+      expect(target.call).toHaveBeenCalledWith('XGROUP', 'CREATE', tmp, 'workers', '3-0', 'ENTRIESREAD', '3');
+      expect(target.call).toHaveBeenCalledWith('XGROUP', 'CREATECONSUMER', tmp, 'workers', 'idle-consumer');
+      expect(claims.call).toHaveBeenCalledWith(
+        'XCLAIM', tmp, 'workers', 'c1', '0', '2-0', 'IDLE', '1234', 'RETRYCOUNT', '2', 'FORCE', 'JUSTID',
+      );
+
+      const evalIndex = target.call.mock.calls.findIndex((c: unknown[]) => c[0] === 'EVAL');
+      expect(target.call.mock.invocationCallOrder[evalIndex]).toBeGreaterThan(claims.exec.mock.invocationCallOrder[0]);
+    });
+
+    it('pages through a pending entries list larger than one XPENDING page', async () => {
+      const firstPage = Array.from({ length: 1000 }, (_, i) => [`${i + 1}-0`, 'c1', '5', '1']);
+      const xpending = jest
+        .fn()
+        .mockResolvedValueOnce(firstPage)
+        .mockResolvedValueOnce([['1001-0', 'c1', '5', '1']]);
+      source.call = routeSourceCall();
+      const route = source.call.getMockImplementation();
+      source.call.mockImplementation((cmd: string, ...args: unknown[]) =>
+        cmd === 'XPENDING' ? xpending(cmd, ...args) : route(cmd, ...args),
+      );
+
+      const result = await migrateKey(source, target, 'jobs', 'stream');
+
+      expect(result.ok).toBe(true);
+      expect(xpending).toHaveBeenNthCalledWith(1, 'XPENDING', 'jobs', 'workers', '-', '+', '1000');
+      expect(xpending).toHaveBeenNthCalledWith(2, 'XPENDING', 'jobs', 'workers', '1000-1', '+', '1000');
+      expect(claims.call).toHaveBeenCalledTimes(1001);
+      expect(claims.exec).toHaveBeenCalledTimes(3); // 500 + 500 + 1
+    });
+
+    it('migrates an empty stream that only holds a consumer group', async () => {
+      source.callBuffer.mockImplementation(() => Promise.resolve([]));
+
+      const result = await migrateKey(source, target, 'jobs', 'stream');
+
+      expect(result.ok).toBe(true);
+      const tmp = expect.stringContaining('__betterdb_mig_');
+      expect(target.call).toHaveBeenCalledWith('XGROUP', 'CREATE', tmp, '__betterdb_mig_placeholder', '0', 'MKSTREAM');
+      expect(target.call).toHaveBeenCalledWith('XGROUP', 'DESTROY', tmp, '__betterdb_mig_placeholder');
+      expect(target.call).toHaveBeenCalledWith('EVAL', expect.any(String), '2', tmp, 'jobs', '-1');
+    });
+
+    it('skips a stream deleted since SCAN without writing anything', async () => {
+      source.callBuffer.mockImplementation(() => Promise.resolve([]));
+      source.call = routeSourceCall({ 'XINFO STREAM': new Error('ERR no such key') });
+
+      const result = await migrateKey(source, target, 'gone', 'stream');
+
+      expect(result.ok).toBe(true);
+      expect(target.call).not.toHaveBeenCalled();
+    });
+
+    it('warns when a pending entry points at a message that is no longer in the stream', async () => {
+      target.pipeline.mockReturnValue(claimPipeline([]));
+
+      const result = await migrateKey(source, target, 'jobs', 'stream');
+
+      expect(result.ok).toBe(true);
+      expect(result.warning).toBe('1 pending entry not restored (message deleted from the source, or added after the copy)');
+    });
+
+    it('falls back to plain XSETID and XGROUP CREATE on targets older than 7.0', async () => {
+      target.call = jest.fn().mockImplementation((cmd: string, ...args: string[]) => {
+        if ((cmd === 'XSETID' && args.includes('ENTRIESADDED')) || (cmd === 'XGROUP' && args.includes('ENTRIESREAD'))) {
+          return Promise.reject(new Error('ERR syntax error'));
+        }
+        return Promise.resolve('OK');
+      });
+
+      const result = await migrateKey(source, target, 'jobs', 'stream');
+
+      expect(result.ok).toBe(true);
+      const tmp = expect.stringContaining('__betterdb_mig_');
+      expect(target.call).toHaveBeenCalledWith('XSETID', tmp, '5-0');
+      expect(target.call).toHaveBeenCalledWith('XGROUP', 'CREATE', tmp, 'workers', '3-0');
+    });
+
+    it('deletes the temp key and fails the key when a group cannot be recreated', async () => {
+      target.call = jest.fn().mockImplementation((cmd: string) =>
+        cmd === 'XGROUP' ? Promise.reject(new Error('OOM command not allowed')) : Promise.resolve('OK'),
+      );
+
+      const result = await migrateKey(source, target, 'jobs', 'stream');
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('OOM');
+      expect(target.del).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'));
+    });
+
+    it('deletes a directly written stream when its metadata cannot be recreated', async () => {
+      target.call = jest.fn().mockImplementation((cmd: string) =>
+        cmd === 'XGROUP' ? Promise.reject(new Error('OOM command not allowed')) : Promise.resolve('OK'),
+      );
+
+      const result = await migrateKey(source, target, 'user:{}:jobs', 'stream');
+
+      expect(result.ok).toBe(false);
+      expect(target.del).toHaveBeenCalledWith('user:{}:jobs');
+    });
+
+    it('deletes a directly written empty stream when its metadata cannot be recreated', async () => {
+      source.callBuffer.mockImplementation(() => Promise.resolve([]));
+      target.call = jest.fn().mockImplementation((cmd: string) =>
+        cmd === 'XSETID' ? Promise.reject(new Error('OOM command not allowed')) : Promise.resolve('OK'),
+      );
+
+      const result = await migrateKey(source, target, 'user:{}:jobs', 'stream');
+
+      expect(result.ok).toBe(false);
+      expect(target.call).toHaveBeenCalledWith('XGROUP', 'CREATE', 'user:{}:jobs', '__betterdb_mig_placeholder', '0', 'MKSTREAM');
+      expect(target.del).toHaveBeenLastCalledWith('user:{}:jobs');
+    });
+
+    it('fails the key when a pending entry cannot be claimed', async () => {
+      target.pipeline.mockReturnValue(claimPipeline(new Error("NOPERM this user has no permissions to run the 'xclaim' command")));
+
+      const result = await migrateKey(source, target, 'jobs', 'stream');
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('NOPERM');
+      expect(target.call).not.toHaveBeenCalledWith('EVAL', expect.anything(), '2', expect.anything(), 'jobs', expect.anything());
+      expect(target.del).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'));
+    });
+  });
+
   describe('TTL preservation', () => {
     it('should use atomic SET PX for strings when source TTL > 0', async () => {
       source.pttl.mockResolvedValue(60000);
@@ -210,6 +402,23 @@ describe('type-handlers / migrateKey', () => {
 
       expect(result.ok).toBe(false);
       expect(result.error).toContain('Unsupported type');
+    });
+
+    it('fails a sorted set when a pipelined ZADD is rejected by the target', async () => {
+      target.pipeline.mockReturnValue({
+        zadd: jest.fn().mockReturnThis(),
+        exec: jest.fn().mockResolvedValue([
+          [null, 1],
+          [new Error("OOM command not allowed when used memory > 'maxmemory'."), null],
+        ]),
+      });
+
+      const result = await migrateKey(source, target, 'z', 'zset');
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('OOM');
+      expect(target.call).not.toHaveBeenCalledWith('EVAL', expect.anything(), expect.anything(), expect.anything(), 'z', expect.anything());
+      expect(target.del).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'));
     });
 
     it('should capture errors and return ok: false', async () => {

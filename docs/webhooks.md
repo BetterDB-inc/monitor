@@ -61,6 +61,8 @@ All self-hosted BetterDB installations have access to these events:
 | `memory.critical` | Memory usage critical | Memory exceeds 90% of maxmemory |
 | `connection.critical` | Connection limit critical | Connections exceed 90% of maxclients |
 | `client.blocked` | Authentication failure | ACL log entry with reason `auth` |
+| `writes.rejected` | Server is refusing writes | BGSAVE or AOF write failed, or `errorstat_MISCONF` / `OOM` / `READONLY` / `NOREPLICAS` rose since the last poll |
+| `writes.recovered` | Server accepts writes again | No new write-rejection errors for 60s, memory below maxmemory for OOM, and persistence reported ok for BGSAVE/AOF causes |
 
 ### Pro Tier
 
@@ -264,6 +266,67 @@ X-Webhook-Event: <event-type>
   "count": 5,
   "timestamp": 1706457600,
   "message": "Client blocked: authentication failure by app_user@192.168.1.100:54321 (count: 5)"
+}
+```
+
+#### writes.rejected / writes.recovered
+
+Fired when the server starts and stops refusing writes. None of these conditions moves memory, CPU or latency, so they are read from the `persistence` and `errorstats` INFO sections the metrics poll already fetches.
+
+`writes.rejected` opens with `severity: "warning"` as soon as persistence fails (`rdb_last_bgsave_status:err`, which makes the server reply `MISCONF` to writes under the default `stop-writes-on-bgsave-error yes`, or `aof_last_write_status:err`), before any client has been refused. When it opens because clients already received errors, `severity` is `"critical"` and `rejectedSinceLastPoll` holds the per-code counts. `OOM`, `READONLY` and `NOREPLICAS` leave no persistent "still broken" flag, so one quiet poll is not proof of recovery. `writes.recovered` fires when:
+
+- 60 seconds pass with no new rejections and, for `maxmemory_reached`, `used_memory` minus `mem_not_counted_for_evict` is below `maxmemory` (matching Redis' own check).
+- Only edges with `rdb_bgsave_failed` or `aof_write_failed` also require INFO persistence to report the statuses as `ok`; a missing persistence section keeps those open. The RDB status is ignored when a failed BGSAVE doesn't stop writes (`stop-writes-on-bgsave-error no` or no `save` points).
+- Errorstats-only edges (`maxmemory_reached`, `write_to_replica`, `min_replicas_not_met`, `persistence_failed`) don't depend on persistence, so they also recover on hosts that hide the persistence section.
+
+| Cause | Meaning |
+|-------|---------|
+| `rdb_bgsave_failed` | Last BGSAVE failed (disk full, fork ENOMEM, permissions) — clients get `MISCONF`. Only reported when `stop-writes-on-bgsave-error yes` and save points are configured; if `CONFIG GET` is blocked it is assumed to be on |
+| `aof_write_failed` | Last AOF write failed — clients get `MISCONF` |
+| `maxmemory_reached` | `OOM command not allowed` (e.g. `noeviction` at `maxmemory`) |
+| `write_to_replica` | `READONLY` — clients writing to a replica, typically stale topology after failover |
+| `min_replicas_not_met` | `NOREPLICAS` — `min-replicas-to-write` not satisfied |
+| `persistence_failed` | `MISCONF` seen with no blocking persistence failure visible (status cleared, persistence section absent, or BGSAVE failure not configured to stop writes) |
+
+`READONLY` from a node that reports `role:slave` is expected (probes, misrouted clients) and never opens an edge; it only alerts on a node that reports `role:master`.
+
+On the first poll error counters are only baselined, so historical counts never alert; a persistence failure is still detected immediately. A counter drop (restart, `CONFIG RESETSTAT`) re-baselines instead of firing. `errorstats` needs Redis 6.2+ or Valkey; on older servers only the persistence causes are detected.
+
+If clients start receiving errors (or a new cause appears) while an edge is open, `writes.rejected` is sent once more with `escalated: true`. Its `severity` is `"critical"` when clients are receiving errors; a new persistence cause with no client errors yet keeps `"warning"`. It is not re-sent while the edge stays critical with the same causes, and once an edge has gone critical every later escalation reports `"critical"`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `causes` | string[] | Active causes on this poll (see table above); empty on `writes.recovered` |
+| `severity` | `"warning"` \| `"critical"` | `critical` once clients have received a rejection error on this edge |
+| `rejectedSinceLastPoll` | object | Rejection errors returned to clients since the last poll, by code (`MISCONF`, `OOM`, `READONLY`, `NOREPLICAS`) |
+| `rejectingForMs` | number | Time since the edge opened; on `writes.recovered`, how long writes were rejected |
+| `escalated` | boolean | Present and `true` only on a repeated `writes.rejected` for an edge that is already open |
+| `message` | string | Human-readable summary |
+
+Escalation of an open edge, after clients start receiving `MISCONF`:
+
+```json
+{
+  "causes": ["rdb_bgsave_failed"],
+  "severity": "critical",
+  "rejectedSinceLastPoll": { "MISCONF": 250 },
+  "rejectingForMs": 5000,
+  "escalated": true,
+  "message": "Writes are being rejected (rdb_bgsave_failed) and clients are receiving errors",
+  "timestamp": 1706457600000,
+  "instance": { "host": "localhost", "port": 6379 }
+}
+```
+
+```json
+{
+  "causes": [],
+  "severity": "warning",
+  "rejectedSinceLastPoll": {},
+  "rejectingForMs": 95000,
+  "message": "Writes accepted again after 95s",
+  "timestamp": 1706457695000,
+  "instance": { "host": "localhost", "port": 6379 }
 }
 ```
 
@@ -833,9 +896,9 @@ To prevent alert fatigue from metrics oscillating around thresholds, BetterDB im
 ### Alert State Tracking
 
 BetterDB maintains alert state in memory using an LRU cache:
-- **Max alerts:** 1000 (sufficient for 100 instances × 10 metrics)
-- **TTL:** 24 hours (prevents indefinite growth)
-- **Eviction:** Oldest alerts evicted if limit exceeded
+- **Max alerts:** 10,000 by default, one entry per alert type × connection × webhook (plus one OTLP compliance entry per connection). Raise it for large fleets with the `WEBHOOK_ALERT_STATE_MAX` environment variable.
+- **TTL:** 24 hours. A condition that is still breached after a day re-fires once as a reminder.
+- **Eviction:** Oldest alerts evicted if limit exceeded; an evicted alert that is still breached re-fires on the next poll
 
 ### Threshold-Based Events
 
@@ -864,6 +927,8 @@ These events fire immediately without hysteresis:
 - `audit.policy.violation` (each violation)
 - `acl.modified` (each change)
 - `config.changed` (each change)
+
+`writes.rejected` fires immediately; `writes.recovered` waits for a 60s quiet window (see [writes.rejected / writes.recovered](#writesrejected--writesrecovered) above).
 
 ## API Reference
 
@@ -1032,6 +1097,8 @@ Returns webhook events allowed for your current license tier.
     "memory.critical",
     "connection.critical",
     "client.blocked",
+    "writes.rejected",
+    "writes.recovered",
     "slowlog.threshold",
     "replication.lag",
     "cluster.failover",

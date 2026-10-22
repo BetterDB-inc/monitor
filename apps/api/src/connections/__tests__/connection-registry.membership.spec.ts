@@ -635,4 +635,35 @@ describe('ConnectionRegistry membership', () => {
     await registry.retireChild('adopted');
     expect(registry.getDefaultId()).toBe('seed');
   });
+
+  it('notifies removal listeners after a connection and its auto children are deleted', async () => {
+    const { registry, storage } = build();
+    put(registry, seed);
+    put(registry, { id: 'child', membership: { seedId: 'seed', nodeId: 'c', origin: 'auto', source: 'cluster' } });
+    const removed: string[] = [];
+    registry.addConnectionRemovalListener((id) => {
+      expect(storage.deleteConnection).toHaveBeenCalledWith(id);
+      removed.push(id);
+    });
+    const unsubscribe = registry.addConnectionRemovalListener(() => {
+      throw new Error('boom');
+    });
+    await registry.removeConnection('seed');
+    expect(removed).toEqual(['child', 'seed']);
+    unsubscribe();
+  });
+
+  it('logs a removal listener that rejects asynchronously', async () => {
+    const { registry } = build();
+    put(registry, seed);
+    const warn = jest
+      .spyOn((registry as unknown as { logger: { warn: (message: string) => void } }).logger, 'warn')
+      .mockImplementation(() => undefined);
+    registry.addConnectionRemovalListener(async () => {
+      throw new Error('async boom');
+    });
+    await registry.removeConnection('seed');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('async boom'));
+  });
 });

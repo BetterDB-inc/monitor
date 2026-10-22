@@ -34,11 +34,15 @@
  * SDK-free and side-effect-free so it can be unit-tested directly.
  */
 
+import { dbScopedIdentity } from '@betterdb/shared';
+
 export type CompositeDimension = 'hotness' | 'cardinality';
 
 export interface CompositeCandidate {
   keyName: string;
   keyType: string | null;
+  /** Logical database index the key lives in; part of the key's identity. */
+  db?: number;
   /** LFU access frequency (OBJECT FREQ). Null unless an LFU maxmemory-policy is set. */
   freqScore: number | null;
   /** Idle seconds (OBJECT IDLETIME). The recency fallback when freqScore is absent. */
@@ -52,6 +56,8 @@ export interface CompositeCandidate {
 export interface CompositeKeyRank {
   keyName: string;
   keyType: string | null;
+  /** Logical database index the key lives in, passed through from the candidate. */
+  db?: number;
   ttl: number | null;
   /** Dimensions on which the key placed in that dimension's top-N (length >= 2). */
   dimensions: CompositeDimension[];
@@ -131,7 +137,12 @@ export function rankCompositeKeys(
     return [];
   }
 
-  // keyName -> (dimension -> ranking value) for the dimensions where the key made top-N.
+  // The same key name in two logical databases is two distinct keys, so the
+  // identity used for membership / dedupe includes the database index.
+  const identityOf = (candidate: CompositeCandidate): string =>
+    dbScopedIdentity(candidate.db, candidate.keyName);
+
+  // key identity -> (dimension -> ranking value) for the dimensions where the key made top-N.
   const membership = new Map<string, Map<CompositeDimension, number>>();
   const dimensionMax = new Map<CompositeDimension, number>();
 
@@ -147,10 +158,10 @@ export function rankCompositeKeys(
     dimensionMax.set(dimension, withValue[0].value);
 
     for (const { candidate, value } of withValue.slice(0, perDimensionTopN)) {
-      let dims = membership.get(candidate.keyName);
+      let dims = membership.get(identityOf(candidate));
       if (!dims) {
         dims = new Map<CompositeDimension, number>();
-        membership.set(candidate.keyName, dims);
+        membership.set(identityOf(candidate), dims);
       }
       // Keep the largest value if a key somehow appears twice for a dimension.
       dims.set(dimension, Math.max(value, dims.get(dimension) ?? value));
@@ -161,14 +172,14 @@ export function rankCompositeKeys(
   const seen = new Set<string>();
 
   for (const candidate of candidates) {
-    if (seen.has(candidate.keyName)) {
+    if (seen.has(identityOf(candidate))) {
       continue;
     }
-    const dims = membership.get(candidate.keyName);
+    const dims = membership.get(identityOf(candidate));
     if (!dims || dims.size < COMPOSITE_MIN_DIMENSIONS) {
       continue;
     }
-    seen.add(candidate.keyName);
+    seen.add(identityOf(candidate));
 
     let score = 0;
     for (const [dimension, value] of dims) {
@@ -182,6 +193,7 @@ export function rankCompositeKeys(
     ranked.push({
       keyName: candidate.keyName,
       keyType: candidate.keyType,
+      db: candidate.db,
       ttl: candidate.ttl,
       dimensions: [...dims.keys()],
       // Report the raw signal the hotness placement came from, not the derived magnitude.

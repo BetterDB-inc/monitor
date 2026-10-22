@@ -2,7 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { DataRetentionService } from '../data-retention.service';
 import { LicenseService } from '@proprietary/licenses/license.service';
 import { Tier } from '@proprietary/licenses/types';
-import { TIER_RETENTION_DAYS } from '@betterdb/shared';
+import { TIER_RETENTION_DAYS, clientRollupBucketStart } from '@betterdb/shared';
 import { RetentionPolicyService } from '@app/retention/retention-policy.service';
 import { StoragePort } from '@app/common/interfaces/storage-port.interface';
 
@@ -23,6 +23,7 @@ describe('DataRetentionService', () => {
       pruneOldSlowLogEntries: jest.fn().mockResolvedValue(1),
       pruneOldCommandLogEntries: jest.fn().mockResolvedValue(2),
       pruneOldClientSnapshots: jest.fn().mockResolvedValue(3),
+      pruneOldClientAnalyticsRollups: jest.fn().mockResolvedValue(22),
       pruneOldAnomalyEvents: jest.fn().mockResolvedValue(4),
       pruneOldCorrelatedGroups: jest.fn().mockResolvedValue(5),
       pruneOldKeyPatternSnapshots: jest.fn().mockResolvedValue(6),
@@ -41,6 +42,8 @@ describe('DataRetentionService', () => {
       pruneOldCommandStatsSamples: jest.fn().mockResolvedValue(18),
       pruneOldLatencyStatsSamples: jest.fn().mockResolvedValue(19),
       pruneOldVectorIndexSnapshots: jest.fn().mockResolvedValue(20),
+      pruneOldKvCacheFootprintSnapshots: jest.fn().mockResolvedValue(22),
+      pruneOldKvCacheEngineSamples: jest.fn().mockResolvedValue(23),
     } as any;
 
     licenseService = {
@@ -80,6 +83,7 @@ describe('DataRetentionService', () => {
     'pruneOldSlowLogEntries',
     'pruneOldCommandLogEntries',
     'pruneOldClientSnapshots',
+    'pruneOldClientAnalyticsRollups',
     'pruneOldAnomalyEvents',
     'pruneOldCorrelatedGroups',
     'pruneOldKeyPatternSnapshots',
@@ -95,7 +99,18 @@ describe('DataRetentionService', () => {
     'pruneOldScheduledCaptures',
     'pruneOldAiCacheSamples',
     'pruneOldOtelSpans',
+    'pruneOldKvCacheFootprintSnapshots',
   ] as const;
+
+  // Rollups compare bucket_start, so they get the cutoff aligned down to its
+  // bucket (the straddling bucket survives with its raw rows); every other
+  // store gets the cutoff itself.
+  const exactCutoffPruneMethods = allPruneMethods.filter((m) => m !== 'pruneOldClientAnalyticsRollups');
+  const expectRollupCutoff = (cutoff: number) => {
+    expect(clientRollupBucketStart(cutoff)).toBeLessThan(cutoff);
+    expect(storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledTimes(1);
+    expect(storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledWith(clientRollupBucketStart(cutoff));
+  };
 
   // The high-volume sample stores are swept at the tighter cloud sample cap,
   // not the tier window.
@@ -103,6 +118,7 @@ describe('DataRetentionService', () => {
     'pruneOldCommandStatsSamples',
     'pruneOldLatencyStatsSamples',
     'pruneOldVectorIndexSnapshots',
+    'pruneOldKvCacheEngineSamples',
   ] as const;
 
   it('community tier uses 7-day cutoff and calls all prune methods', async () => {
@@ -111,10 +127,11 @@ describe('DataRetentionService', () => {
 
     await service.runRetention();
 
-    for (const method of allPruneMethods) {
+    for (const method of exactCutoffPruneMethods) {
       expect(storage[method]).toHaveBeenCalledTimes(1);
       expect(storage[method]).toHaveBeenCalledWith(expectedCutoff);
     }
+    expectRollupCutoff(expectedCutoff);
     for (const method of samplePruneMethods) {
       expect(storage[method]).toHaveBeenCalledTimes(1);
       expect(storage[method]).toHaveBeenCalledWith(NOW - 7 * MS_PER_DAY);
@@ -127,9 +144,10 @@ describe('DataRetentionService', () => {
 
     await service.runRetention();
 
-    for (const method of allPruneMethods) {
+    for (const method of exactCutoffPruneMethods) {
       expect(storage[method]).toHaveBeenCalledWith(expectedCutoff);
     }
+    expectRollupCutoff(expectedCutoff);
     for (const method of samplePruneMethods) {
       expect(storage[method]).toHaveBeenCalledWith(NOW - 7 * MS_PER_DAY);
     }
@@ -141,9 +159,10 @@ describe('DataRetentionService', () => {
 
     await service.runRetention();
 
-    for (const method of allPruneMethods) {
+    for (const method of exactCutoffPruneMethods) {
       expect(storage[method]).toHaveBeenCalledWith(expectedCutoff);
     }
+    expectRollupCutoff(expectedCutoff);
     for (const method of samplePruneMethods) {
       expect(storage[method]).toHaveBeenCalledWith(NOW - 7 * MS_PER_DAY);
     }

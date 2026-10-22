@@ -5,9 +5,10 @@ import { ClientAnalyticsAnalysisService } from './client-analytics-analysis.serv
 import { StorageModule } from '../storage/storage.module';
 import { PrometheusModule } from '../prometheus/prometheus.module';
 import { LicenseModule } from '@proprietary/licenses';
+import { ClientAnalyticsRollupModule } from './client-analytics-rollup.module';
 
 @Module({
-  imports: [StorageModule, PrometheusModule, LicenseModule],
+  imports: [StorageModule, PrometheusModule, LicenseModule, ClientAnalyticsRollupModule],
   controllers: [ClientAnalyticsController],
   providers: [ClientAnalyticsService, ClientAnalyticsAnalysisService],
   exports: [ClientAnalyticsService, ClientAnalyticsAnalysisService],

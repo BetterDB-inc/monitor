@@ -50,12 +50,15 @@ export class InvitationController {
   accept(
     @Param('id') id: string,
     @Body(new ValidationPipe({ whitelist: true })) dto: AcceptInvitationDto,
+    @Query('tenantId') tenantId?: string,
   ) {
-    return this.invitationService.accept(id, dto.userId);
+    // Scope to the caller's workspace so a tenant can't accept another
+    // tenant's invitation by id.
+    return this.invitationService.accept(id, dto.userId, tenantId);
   }
 
   @Delete(':id')
-  revoke(@Param('id') id: string) {
-    return this.invitationService.revoke(id);
+  revoke(@Param('id') id: string, @Query('tenantId') tenantId?: string) {
+    return this.invitationService.revoke(id, tenantId);
   }
 }

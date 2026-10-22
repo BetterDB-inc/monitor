@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   omitted when the embedder is undescribed.
 - Optional `logger` option (default: `console`) for the operational warnings
   above. Pass `{ warn: () => {} }` to silence them.
+- **Judge cancellation via AbortSignal** — the `judgeFn` input now includes a
+  `signal: AbortSignal`. The cache creates an `AbortController` per judge
+  invocation and aborts it when `timeoutMs` elapses. Forward `signal` to your
+  LLM client (`fetch`, OpenAI/Anthropic SDKs) to cancel the in-flight request on
+  timeout instead of letting it run to completion and consume API quota. A
+  `judgeFn` that ignores `signal` behaves exactly as before.
 
 ### Changed
 
@@ -38,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`{name}:embed:{tag}:{hash}`). Existing embedding-cache entries are not
   read after upgrade and expire on their own TTL; cached *responses* are
   untouched.
+- `JudgeOptions.timeoutMs` JSDoc updated to describe the abort behavior.
+- Additive, not breaking for judges that ignore `signal`. Code that calls
+  `judgeFn` directly (e.g. custom tests) must now supply `signal`, since the
+  type field is required.
 
 ## [0.11.0] - 2026-07-12
 

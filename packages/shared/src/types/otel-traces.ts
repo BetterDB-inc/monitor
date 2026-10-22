@@ -18,7 +18,11 @@ export interface StoredOtelSpan {
   kind: number;
   startTimeUnixNano: string;
   endTimeUnixNano: string;
-  /** Derived ms epoch of start, for indexing / ordering / retention. */
+  /**
+   * Derived ms epoch of start, for indexing / ordering. Sender-supplied
+   * (clamped to small future skew at ingest) — never used for retention,
+   * which keys on the server-stamped `ingestedAt`.
+   */
   startTimeMs: number;
   /** Duration in nanoseconds (fits a JS safe integer for any realistic span). */
   durationNs: number;

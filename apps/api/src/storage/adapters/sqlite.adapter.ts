@@ -1,5 +1,11 @@
 import type Database from 'better-sqlite3';
+import { KV_CACHE_SAMPLE_COUNTER_COLUMNS } from './kv-cache-sample-columns';
 import { chunkedSqliteDelete } from './sqlite-chunked-delete';
+import {
+  otelSpanCap,
+  otelSpanCapCheckInterval,
+  otelSpanLowWaterMark,
+} from '../otel-span-cap';
 import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
@@ -7,12 +13,21 @@ import { parseSshTunnel, parseMembership } from '@betterdb/shared';
 import type {
   StoredScalingReadinessScore,
   ScalingReadinessScoreQuery,
+  StoredKvCacheEngine,
+  KvCacheRangeQuery,
+  KvCacheFootprintQuery,
+  KvCacheSampleQuery,
+  KvCacheSampleTotals,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   ReadinessBand,
   ReadinessDimension,
   ReadinessDimensionKey,
   ScalingReadinessSettings,
+  KvCacheEngineSample,
+  KvCacheFootprintSnapshot,
+  KvCacheModelFootprint,
+  KvCacheSettings,
 } from '@betterdb/shared';
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
@@ -34,7 +49,6 @@ import {
   KeyPatternQueryOptions,
   KeyAnalyticsSummary,
   AppSettings,
-  SettingsUpdateRequest,
   Webhook,
   WebhookDelivery,
   WebhookEventType,
@@ -115,6 +129,8 @@ import type {
   TokenType,
 } from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
+import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
+import { clientAddrIp, foldClientAnalyticsStats, mapClientAnalyticsRollupRow } from './client-analytics-stats';
 import { openLibsqlDatabase } from './libsql-driver';
 import { loadBetterSqlite3 } from './better-sqlite3-driver';
 import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repository';
@@ -125,6 +141,17 @@ import { ActivitySqliteRepository } from './repositories/activity.sqlite.reposit
 import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
 import { encodeCveSnapshots } from './cve-snapshots.codec';
 import { readCveDataset, readCveScanResult } from './cve-storage.schema';
+
+/**
+ * addr with a trailing ':<digits>' port stripped; mirrors clientAddrIp().
+ * SQLite has no regexp, so: t = addr with trailing digits trimmed; when at
+ * least one digit was trimmed and t ends with ':', drop that ':', otherwise
+ * keep addr whole ('host:' and 'host:12a' stay as they are).
+ */
+const SQLITE_CLIENT_IP_TRIMMED = "rtrim(addr, '0123456789')";
+const SQLITE_CLIENT_IP_EXPR =
+  `CASE WHEN length(${SQLITE_CLIENT_IP_TRIMMED}) < length(addr) AND substr(${SQLITE_CLIENT_IP_TRIMMED}, -1) = ':' ` +
+  `THEN substr(addr, 1, length(${SQLITE_CLIENT_IP_TRIMMED}) - 1) ELSE addr END`;
 
 /**
  * Idempotent migration for the memory_proposals columns added with the
@@ -255,6 +282,20 @@ function addMemoryProposalIntegrityColumns(db: Database.Database): void {
  * Idempotent migrations for capture_sessions columns landed across PR 14a + 14b.
  * Extracted so the call-site in createSchema stays readable.
  */
+function addKvCacheCoverageColumns(db: Database.Database): void {
+  const cols = db.prepare(`PRAGMA table_info(kv_cache_footprint_snapshots)`).all() as { name: string }[];
+  if (cols.length === 0) return;
+  if (!cols.some((c) => c.name === 'primaries_scanned')) {
+    db.prepare(`ALTER TABLE kv_cache_footprint_snapshots ADD COLUMN primaries_scanned INTEGER NOT NULL DEFAULT 1`).run();
+  }
+  if (!cols.some((c) => c.name === 'primaries_total')) {
+    db.prepare(`ALTER TABLE kv_cache_footprint_snapshots ADD COLUMN primaries_total INTEGER`).run();
+  }
+  if (!cols.some((c) => c.name === 'evicted_keys_interval_ms')) {
+    db.prepare(`ALTER TABLE kv_cache_footprint_snapshots ADD COLUMN evicted_keys_interval_ms INTEGER`).run();
+  }
+}
+
 function addCaptureSessionsTargetNodeColumn(db: Database.Database): void {
   try {
     const cols = db.prepare(`PRAGMA table_info(capture_sessions)`).all() as { name: string }[];
@@ -340,6 +381,123 @@ const COMMAND_STATS_SAMPLES_NULLABLE = [
   'failed_calls',
   'usec_delta',
 ] as const;
+
+// Tables whose composite UNIQUE constraint gained connection_id in the
+// multi-connection change. These DDL constants are the single source of truth,
+// shared by createSchema and the legacy-constraint rebuild in
+// migrateConnectionIdUniqueConstraints, so the rebuilt table matches the schema
+// a fresh database gets exactly (same columns, same connection_id-inclusive
+// UNIQUE). The matching ON CONFLICT / INSERT OR IGNORE targets live in
+// saveAclEntries and the slow/command log repositories.
+const ACL_AUDIT_COLUMNS = `
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  count INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  context TEXT NOT NULL,
+  object TEXT NOT NULL,
+  username TEXT NOT NULL,
+  age_seconds INTEGER NOT NULL,
+  client_info TEXT NOT NULL,
+  timestamp_created INTEGER NOT NULL,
+  timestamp_last_updated INTEGER NOT NULL,
+  captured_at INTEGER NOT NULL,
+  source_host TEXT NOT NULL,
+  source_port INTEGER NOT NULL,
+  connection_id TEXT NOT NULL DEFAULT 'env-default',
+  created_at INTEGER DEFAULT (strftime('%s', 'now')),
+  UNIQUE(timestamp_created, username, object, reason, source_host, source_port, connection_id)
+`;
+
+const ACL_AUDIT_INDEXES = `
+  CREATE INDEX IF NOT EXISTS idx_acl_username ON acl_audit(username);
+  CREATE INDEX IF NOT EXISTS idx_acl_reason ON acl_audit(reason);
+  CREATE INDEX IF NOT EXISTS idx_acl_captured_at ON acl_audit(captured_at);
+  CREATE INDEX IF NOT EXISTS idx_acl_timestamp_created ON acl_audit(timestamp_created);
+  CREATE INDEX IF NOT EXISTS idx_acl_connection_id ON acl_audit(connection_id);
+  CREATE INDEX IF NOT EXISTS idx_acl_connection_captured ON acl_audit(connection_id, captured_at);
+`;
+
+const SLOW_LOG_ENTRIES_COLUMNS = `
+  pk INTEGER PRIMARY KEY AUTOINCREMENT,
+  slowlog_id INTEGER NOT NULL,
+  timestamp INTEGER NOT NULL,
+  duration INTEGER NOT NULL,
+  command TEXT NOT NULL DEFAULT '[]',
+  client_address TEXT,
+  client_name TEXT,
+  captured_at INTEGER NOT NULL,
+  source_host TEXT NOT NULL,
+  source_port INTEGER NOT NULL,
+  connection_id TEXT NOT NULL DEFAULT 'env-default',
+  UNIQUE(slowlog_id, source_host, source_port, connection_id)
+`;
+
+const SLOW_LOG_ENTRIES_INDEXES = `
+  CREATE INDEX IF NOT EXISTS idx_slowlog_timestamp ON slow_log_entries(timestamp DESC);
+  CREATE INDEX IF NOT EXISTS idx_slowlog_command ON slow_log_entries(command);
+  CREATE INDEX IF NOT EXISTS idx_slowlog_duration ON slow_log_entries(duration DESC);
+  CREATE INDEX IF NOT EXISTS idx_slowlog_client_name ON slow_log_entries(client_name);
+  CREATE INDEX IF NOT EXISTS idx_slowlog_captured_at ON slow_log_entries(captured_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_slowlog_connection_id ON slow_log_entries(connection_id);
+`;
+
+const COMMAND_LOG_ENTRIES_COLUMNS = `
+  pk INTEGER PRIMARY KEY AUTOINCREMENT,
+  commandlog_id INTEGER NOT NULL,
+  timestamp INTEGER NOT NULL,
+  duration INTEGER NOT NULL,
+  command TEXT NOT NULL DEFAULT '[]',
+  client_address TEXT,
+  client_name TEXT,
+  log_type TEXT NOT NULL,
+  captured_at INTEGER NOT NULL,
+  source_host TEXT NOT NULL,
+  source_port INTEGER NOT NULL,
+  connection_id TEXT NOT NULL DEFAULT 'env-default',
+  UNIQUE(commandlog_id, log_type, source_host, source_port, connection_id)
+`;
+
+const COMMAND_LOG_ENTRIES_INDEXES = `
+  CREATE INDEX IF NOT EXISTS idx_commandlog_timestamp ON command_log_entries(timestamp DESC);
+  CREATE INDEX IF NOT EXISTS idx_commandlog_type ON command_log_entries(log_type);
+  CREATE INDEX IF NOT EXISTS idx_commandlog_duration ON command_log_entries(duration DESC);
+  CREATE INDEX IF NOT EXISTS idx_commandlog_client_name ON command_log_entries(client_name);
+  CREATE INDEX IF NOT EXISTS idx_commandlog_captured_at ON command_log_entries(captured_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_commandlog_connection_id ON command_log_entries(connection_id);
+`;
+
+// Rebuild spec per table, consumed by migrateConnectionIdUniqueConstraints.
+const CONNECTION_ID_UNIQUE_REBUILDS = [
+  { table: 'acl_audit', columns: ACL_AUDIT_COLUMNS, indexes: ACL_AUDIT_INDEXES },
+  { table: 'slow_log_entries', columns: SLOW_LOG_ENTRIES_COLUMNS, indexes: SLOW_LOG_ENTRIES_INDEXES },
+  {
+    table: 'command_log_entries',
+    columns: COMMAND_LOG_ENTRIES_COLUMNS,
+    indexes: COMMAND_LOG_ENTRIES_INDEXES,
+  },
+] as const;
+
+// Loose index scan that enumerates the populated logical databases: one MIN(db)
+// index seek per database via a recursive CTE, since neither SQLite nor Postgres
+// skip-scans DISTINCT over an index prefix (a plain SELECT DISTINCT db would walk
+// every index entry — O(history)). The `where` fragment is spliced twice (the
+// anchor and the recursive step), so callers must bind its params twice. Single
+// definition shared by getKeyPatternSnapshots and getKeyAnalyticsDatabases.
+function populatedDbsCte(where: string): string {
+  return `
+    WITH RECURSIVE dbs(db) AS (
+      SELECT MIN(db) FROM key_pattern_snapshots ${where}
+      UNION ALL
+      SELECT (
+        SELECT MIN(db) FROM key_pattern_snapshots
+        ${where ? `${where} AND` : 'WHERE'} db > dbs.db
+      )
+      FROM dbs
+      WHERE dbs.db IS NOT NULL
+    )
+    SELECT db FROM dbs WHERE db IS NOT NULL ORDER BY db ASC
+  `;
+}
 
 function rebuildWithNullableColumns(
   db: Database.Database,
@@ -490,6 +648,14 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     try {
       this.db = await this.openDatabase();
 
+      // Columns first: createSchema's index DDL references connection_id,
+      // which legacy tables (pre multi-connection) only gain through this
+      // migration — CREATE TABLE IF NOT EXISTS will not add it to an existing
+      // table, so running createSchema first throws `no such column` and the
+      // migration that would fix it never gets to run. Same hazard as
+      // documented on addMemoryProposalIntegrityColumns. On a fresh database
+      // the tables don't exist yet and this is a no-op.
+      this.migrateConnectionId();
       // Create schema
       this.createSchema();
       // Run migrations for existing databases
@@ -577,6 +743,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         type: 'INTEGER NOT NULL DEFAULT 7200000',
       },
       { name: 'inference_sla_config', type: "TEXT NOT NULL DEFAULT '{}'" },
+      { name: 'anomaly_detector_config', type: "TEXT NOT NULL DEFAULT '{}'" },
       { name: 'local_retention_days', type: 'INTEGER' },
     ];
     for (const col of appSettingsMigrations) {
@@ -585,7 +752,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       }
     }
 
-    // Lazy ALTERs for hot_key_stats columns added to support largest-key ranking.
+    // Lazy ALTERs for hot_key_stats columns added to support largest-key ranking
+    // and the per-logical-database dimension.
     const hotKeyInfo = this.db.prepare('PRAGMA table_info(hot_key_stats)').all() as {
       name: string;
     }[];
@@ -593,6 +761,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const hotKeyMigrations = [
       { name: 'cardinality', type: 'INTEGER' },
       { name: 'key_type', type: 'TEXT' },
+      { name: 'db', type: 'INTEGER NOT NULL DEFAULT 0' },
     ];
     for (const col of hotKeyMigrations) {
       if (!hotKeyColumns.has(col.name)) {
@@ -600,8 +769,28 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       }
     }
 
-    // Migrate connection_id to all data tables for multi-database support
-    this.migrateConnectionId();
+    // Lazy ALTER for the key_pattern_snapshots logical-database dimension.
+    // Pre-existing rows were all collected from the connected database, which
+    // was db0 before dbIndex support — the DEFAULT 0 backfill is accurate.
+    const kpsInfo = this.db.prepare('PRAGMA table_info(key_pattern_snapshots)').all() as {
+      name: string;
+    }[];
+    if (!kpsInfo.some((col) => col.name === 'db')) {
+      this.db.exec('ALTER TABLE key_pattern_snapshots ADD COLUMN db INTEGER NOT NULL DEFAULT 0');
+    }
+    // Backs the 60s-polled SELECT DISTINCT db query (prefix) AND the per-db
+    // newest-rows scans of the patterns view (full key: each per-db query
+    // walks timestamps backwards and stops at its LIMIT instead of sorting
+    // the connection's whole history). The column must exist before the
+    // index can be created; the trailing timestamp supersedes the earlier
+    // two-column shape from this branch.
+    this.db.exec('DROP INDEX IF EXISTS idx_kps_connection_db');
+    this.db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_kps_connection_db_ts ON key_pattern_snapshots(connection_id, db, timestamp DESC, pattern ASC)',
+    );
+
+    // connection_id is migrated in initialize(), before createSchema — see the
+    // ordering note there.
   }
 
   /**
@@ -628,15 +817,115 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         // Check if column exists
         const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
         if (!columns.some((c) => c.name === 'connection_id')) {
-          // Add connection_id column with default value
+          // Add connection_id column with default value. The matching index is
+          // NOT created here: createSchema runs right after this migration and
+          // creates the canonical per-table index (the names here used to
+          // differ from the schema's, leaving legacy databases with duplicate
+          // indexes on the same column).
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN connection_id TEXT DEFAULT 'env-default'`);
-          // Create index
-          this.db.exec(
-            `CREATE INDEX IF NOT EXISTS idx_${table}_connection_id ON ${table}(connection_id)`,
-          );
         }
       } catch (error) {
-        // Table might not exist yet - that's fine, createSchema will handle it
+        // This migration runs BEFORE createSchema, so a missing table is the
+        // expected fresh-database case — but only that. Swallowing a real
+        // ALTER failure (busy/locked database, disk full) here would let
+        // createSchema's index DDL rethrow the misleading
+        // `no such column: connection_id` with the root cause erased.
+        // Same pattern as addMemoryProposalIntegrityColumns.
+        const message = error instanceof Error ? error.message : String(error);
+        if (/no such table/i.test(message)) {
+          continue;
+        }
+        throw new Error(`connection_id migration failed for ${table}: ${message}`, {
+          cause: error,
+        });
+      }
+    }
+
+    this.migrateConnectionIdUniqueConstraints();
+  }
+
+  /**
+   * Replace the pre-multi-connection UNIQUE constraint on legacy tables with the
+   * connection_id-inclusive one the current schema (and the upsert paths)
+   * require. `ALTER TABLE ADD COLUMN` cannot alter a UNIQUE constraint and a
+   * standalone unique index only *adds* a second rule — the old connection_id-
+   * less constraint stays and SQLite keeps enforcing it, so `saveAclEntries`
+   * (`ON CONFLICT(... connection_id)`) still aborts when two connections share
+   * source_host/source_port, and the slow/command log `INSERT OR IGNORE` paths
+   * still dedup on the wrong (connection_id-less) key. SQLite can only drop an
+   * inline constraint via a table rebuild, so rebuild the table to the canonical
+   * schema (same create/copy/drop/rename pattern as rebuildWithNullableColumns).
+   *
+   * Idempotent and safe:
+   * - Runs before createSchema, so a brand-new database has none of these tables
+   *   yet (`no such table` → skip); the rebuild only ever touches a pre-existing
+   *   legacy table.
+   * - Rebuilds only when the table is NOT already canonical — i.e. it lacks a
+   *   connection_id-inclusive unique index or still carries a connection_id-less
+   *   one (the partially-migrated case left by the earlier index-only fix).
+   * - Copies rows with INSERT OR IGNORE: widening the key cannot turn previously
+   *   unique rows into duplicates, but a legacy table with a weaker/no unique
+   *   constraint could hold genuine duplicates, and dropping those is exactly
+   *   what the canonical constraint enforces going forward.
+   */
+  private migrateConnectionIdUniqueConstraints(): void {
+    if (!this.db) return;
+    const db = this.db;
+
+    for (const { table, columns, indexes: indexesDdl } of CONNECTION_ID_UNIQUE_REBUILDS) {
+      try {
+        // PRAGMA statements return an empty result (not an error) for a missing
+        // table, so check existence explicitly: a brand-new database has none of
+        // these tables yet and createSchema will build them canonically.
+        const exists = db
+          .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`)
+          .get(table);
+        if (!exists) continue;
+
+        const uniqueColumnSets = (
+          db.prepare(`PRAGMA index_list(${table})`).all() as { name: string; unique: number }[]
+        )
+          .filter((index) => index.unique)
+          .map((index) =>
+            (db.prepare(`PRAGMA index_info(${index.name})`).all() as { name: string }[]).map(
+              (c) => c.name,
+            ),
+          );
+        const hasCanonicalUnique = uniqueColumnSets.some((cols) => cols.includes('connection_id'));
+        const hasStaleUnique = uniqueColumnSets.some((cols) => !cols.includes('connection_id'));
+        // Canonical already: exactly the connection_id-inclusive constraint and
+        // no leftover narrow one. Nothing to do.
+        if (hasCanonicalUnique && !hasStaleUnique) continue;
+
+        const existingColumns = (
+          db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+        ).map((c) => c.name);
+
+        const rebuilt = `${table}_rebuild`;
+        db.transaction(() => {
+          db.exec(`DROP TABLE IF EXISTS ${rebuilt}`);
+          db.exec(`CREATE TABLE ${rebuilt} (${columns})`);
+          const target = new Set(
+            (db.prepare(`PRAGMA table_info(${rebuilt})`).all() as { name: string }[]).map(
+              (c) => c.name,
+            ),
+          );
+          const shared = existingColumns.filter((name) => target.has(name)).join(', ');
+          db.exec(`INSERT OR IGNORE INTO ${rebuilt} (${shared}) SELECT ${shared} FROM ${table}`);
+          db.exec(`DROP TABLE ${table}`);
+          db.exec(`ALTER TABLE ${rebuilt} RENAME TO ${table}`);
+          db.exec(indexesDdl);
+        })();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Fresh database: createSchema has not built the table yet and will add
+        // the canonical constraint itself. Any other failure must surface.
+        if (/no such table/i.test(message)) {
+          continue;
+        }
+        throw new Error(`connection_id unique-constraint migration failed for ${table}: ${message}`, {
+          cause: error,
+        });
       }
     }
   }
@@ -1020,7 +1309,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       if (row.user) {
         point.byUser[row.user] = (point.byUser[row.user] || 0) + 1;
       }
-      const ip = row.addr.split(':')[0];
+      const ip = clientAddrIp(row.addr);
       point.byAddr[ip] = (point.byAddr[ip] || 0) + 1;
     }
 
@@ -1056,212 +1345,37 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const latestTimestamp = this.db
-      .prepare(`SELECT MAX(captured_at) as latest FROM client_snapshots ${whereClause}`)
-      .get(...params) as { latest: number | null };
-
-    const currentConditions = latestTimestamp.latest
-      ? [...conditions, 'captured_at = ?']
-      : conditions;
-    const currentParams = latestTimestamp.latest ? [...params, latestTimestamp.latest] : params;
-    const currentWhereClause =
-      currentConditions.length > 0 ? `WHERE ${currentConditions.join(' AND ')}` : '';
-
-    const currentConnectionsResult = this.db
-      .prepare(`SELECT COUNT(*) as count FROM client_snapshots ${currentWhereClause}`)
-      .get(...currentParams) as { count: number };
-
-    const peakQuery = `
-      SELECT captured_at, COUNT(*) as count
-      FROM client_snapshots ${whereClause}
-      GROUP BY captured_at
-      ORDER BY count DESC
-      LIMIT 1
-    `;
-    const peakResult = this.db.prepare(peakQuery).get(...params) as
-      | { captured_at: number; count: number }
-      | undefined;
-
-    const uniqueNamesResult = this.db
-      .prepare(`SELECT COUNT(DISTINCT name) as count FROM client_snapshots ${whereClause}`)
-      .get(...params) as { count: number };
-
-    const uniqueUsersResult = this.db
-      .prepare(`SELECT COUNT(DISTINCT user) as count FROM client_snapshots ${whereClause}`)
-      .get(...params) as { count: number };
-
-    const uniqueIpsResult = this.db
+    const groups = this.db
       .prepare(
-        `SELECT COUNT(DISTINCT substr(addr, 1, instr(addr, ':') - 1)) as count FROM client_snapshots ${whereClause}`,
+        `SELECT captured_at, COALESCE(user, '') AS user, COALESCE(name, '') AS name,
+                COUNT(*) AS count, SUM(age) AS age_sum
+           FROM client_snapshots ${whereClause}
+          GROUP BY captured_at, COALESCE(user, ''), COALESCE(name, '')`,
+      )
+      .all(...params) as Array<{
+      captured_at: number;
+      user: string;
+      name: string;
+      count: number;
+      age_sum: number;
+    }>;
+
+    const ips = this.db
+      .prepare(
+        `SELECT COUNT(DISTINCT ${SQLITE_CLIENT_IP_EXPR}) AS count FROM client_snapshots ${whereClause}`,
       )
       .get(...params) as { count: number };
 
-    const byNameRows = this.db
-      .prepare(
-        `
-      SELECT
-        name,
-        COUNT(*) as total,
-        AVG(age) as avg_age
-      FROM client_snapshots ${whereClause}
-      GROUP BY name
-    `,
-      )
-      .all(...params) as Array<{ name: string; total: number; avg_age: number }>;
-
-    const connectionsByName: Record<string, { current: number; peak: number; avgAge: number }> = {};
-    for (const row of byNameRows) {
-      if (row.name) {
-        const namePeakResult = this.db
-          .prepare(
-            `
-          SELECT captured_at, COUNT(*) as count
-          FROM client_snapshots
-          WHERE name = ? ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
-          GROUP BY captured_at
-          ORDER BY count DESC
-          LIMIT 1
-        `,
-          )
-          .get(row.name, ...params) as { count: number } | undefined;
-
-        const nameCurrentResult = this.db
-          .prepare(
-            `
-          SELECT COUNT(*) as count
-          FROM client_snapshots
-          WHERE name = ? ${currentWhereClause ? 'AND ' + currentWhereClause.substring(6) : ''}
-        `,
-          )
-          .get(row.name, ...currentParams) as { count: number };
-
-        connectionsByName[row.name] = {
-          current: nameCurrentResult.count,
-          peak: namePeakResult?.count || 0,
-          avgAge: row.avg_age,
-        };
-      }
-    }
-
-    const byUserRows = this.db
-      .prepare(
-        `
-      SELECT user, COUNT(*) as total
-      FROM client_snapshots ${whereClause}
-      GROUP BY user
-    `,
-      )
-      .all(...params) as Array<{ user: string; total: number }>;
-
-    const connectionsByUser: Record<string, { current: number; peak: number }> = {};
-    for (const row of byUserRows) {
-      if (row.user) {
-        const userPeakResult = this.db
-          .prepare(
-            `
-          SELECT captured_at, COUNT(*) as count
-          FROM client_snapshots
-          WHERE user = ? ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
-          GROUP BY captured_at
-          ORDER BY count DESC
-          LIMIT 1
-        `,
-          )
-          .get(row.user, ...params) as { count: number } | undefined;
-
-        const userCurrentResult = this.db
-          .prepare(
-            `
-          SELECT COUNT(*) as count
-          FROM client_snapshots
-          WHERE user = ? ${currentWhereClause ? 'AND ' + currentWhereClause.substring(6) : ''}
-        `,
-          )
-          .get(row.user, ...currentParams) as { count: number };
-
-        connectionsByUser[row.user] = {
-          current: userCurrentResult.count,
-          peak: userPeakResult?.count || 0,
-        };
-      }
-    }
-
-    const byUserAndNameRows = this.db
-      .prepare(
-        `
-      SELECT
-        user,
-        name,
-        COUNT(*) as total,
-        AVG(age) as avg_age
-      FROM client_snapshots ${whereClause}
-      GROUP BY user, name
-    `,
-      )
-      .all(...params) as Array<{ user: string; name: string; total: number; avg_age: number }>;
-
-    const connectionsByUserAndName: Record<
-      string,
-      { user: string; name: string; current: number; peak: number; avgAge: number }
-    > = {};
-    for (const row of byUserAndNameRows) {
-      const key = `${row.user}:${row.name}`;
-
-      const combinedPeakResult = this.db
-        .prepare(
-          `
-        SELECT captured_at, COUNT(*) as count
-        FROM client_snapshots
-        WHERE user = ? AND name = ? ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
-        GROUP BY captured_at
-        ORDER BY count DESC
-        LIMIT 1
-      `,
-        )
-        .get(row.user, row.name, ...params) as { count: number } | undefined;
-
-      const combinedCurrentResult = this.db
-        .prepare(
-          `
-        SELECT COUNT(*) as count
-        FROM client_snapshots
-        WHERE user = ? AND name = ? ${currentWhereClause ? 'AND ' + currentWhereClause.substring(6) : ''}
-      `,
-        )
-        .get(row.user, row.name, ...currentParams) as { count: number };
-
-      connectionsByUserAndName[key] = {
-        user: row.user,
-        name: row.name,
-        current: combinedCurrentResult.count,
-        peak: combinedPeakResult?.count || 0,
-        avgAge: row.avg_age,
-      };
-    }
-
-    const timeRangeResult = this.db
-      .prepare(
-        `SELECT MIN(captured_at) as earliest, MAX(captured_at) as latest FROM client_snapshots ${whereClause}`,
-      )
-      .get(...params) as { earliest: number | null; latest: number | null };
-
-    const timeRange =
-      timeRangeResult.earliest !== null && timeRangeResult.latest !== null
-        ? { earliest: timeRangeResult.earliest, latest: timeRangeResult.latest }
-        : null;
-
-    return {
-      currentConnections: currentConnectionsResult.count,
-      peakConnections: peakResult?.count || 0,
-      peakTimestamp: peakResult?.captured_at || 0,
-      uniqueClientNames: uniqueNamesResult.count,
-      uniqueUsers: uniqueUsersResult.count,
-      uniqueIps: uniqueIpsResult.count,
-      connectionsByName,
-      connectionsByUser,
-      connectionsByUserAndName,
-      timeRange,
-    };
+    return foldClientAnalyticsStats(
+      groups.map((g) => ({
+        capturedAt: Number(g.captured_at),
+        user: g.user,
+        name: g.name,
+        count: Number(g.count),
+        ageSum: Number(g.age_sum ?? 0),
+      })),
+      Number(ips.count),
+    );
   }
 
   async getClientConnectionHistory(
@@ -1338,6 +1452,206 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return chunkedSqliteDelete(this.db, 'client_snapshots', 'captured_at < ?', [olderThanTimestamp]);
   }
 
+  async getClientSnapshotBounds(
+    connectionId: string,
+  ): Promise<{ earliest: number; latest: number } | null> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const row = this.db
+      .prepare(
+        `SELECT MIN(captured_at) AS earliest, MAX(captured_at) AS latest
+           FROM client_snapshots WHERE connection_id = ?`,
+      )
+      .get(connectionId) as { earliest: number | null; latest: number | null } | undefined;
+    if (!row || row.earliest === null || row.latest === null) {
+      return null;
+    }
+    return { earliest: Number(row.earliest), latest: Number(row.latest) };
+  }
+
+  async getClientSnapshotNextCapturedAt(connectionId: string, afterExclusive: number): Promise<number | null> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    // MIN over a (connection_id, captured_at) range: one seek into the composite index.
+    const row = this.db
+      .prepare(
+        `SELECT MIN(captured_at) AS next FROM client_snapshots WHERE connection_id = ? AND captured_at > ?`,
+      )
+      .get(connectionId, afterExclusive) as { next: number | null } | undefined;
+    return row?.next === null || row?.next === undefined ? null : Number(row.next);
+  }
+
+  async getClientSnapshotGroups(
+    connectionId: string,
+    startExclusive: number,
+    endInclusive: number,
+  ): Promise<ClientSnapshotGroupRow[]> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT captured_at, COALESCE(name, '') AS name, COALESCE(user, '') AS user,
+                ${SQLITE_CLIENT_IP_EXPR} AS ip, COUNT(*) AS count, SUM(age) AS age_sum
+           FROM client_snapshots
+          WHERE connection_id = ? AND captured_at > ? AND captured_at <= ?
+          GROUP BY captured_at, COALESCE(name, ''), COALESCE(user, ''), ${SQLITE_CLIENT_IP_EXPR}
+          ORDER BY 1 ASC, 2 ASC, 3 ASC, 4 ASC`,
+      )
+      .all(connectionId, startExclusive, endInclusive) as Array<{
+      captured_at: number;
+      name: string;
+      user: string;
+      ip: string;
+      count: number;
+      age_sum: number | null;
+    }>;
+    return rows.map((row) => ({
+      capturedAt: Number(row.captured_at),
+      name: row.name,
+      user: row.user,
+      ip: row.ip,
+      count: Number(row.count),
+      ageSum: Number(row.age_sum ?? 0),
+    }));
+  }
+
+  async upsertClientAnalyticsRollups(rollups: ClientAnalyticsRollup[]): Promise<void> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    if (rollups.length === 0) {
+      return;
+    }
+    const upsert = this.db.prepare(`
+      INSERT INTO client_analytics_rollups (
+        connection_id, bucket_start, first_captured_at, last_captured_at, batch_count, row_count,
+        last_connections, peak_connections, peak_captured_at, by_name, by_user, by_user_name, ips,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (connection_id, bucket_start) DO UPDATE SET
+        first_captured_at = excluded.first_captured_at,
+        last_captured_at = excluded.last_captured_at,
+        batch_count = excluded.batch_count,
+        row_count = excluded.row_count,
+        last_connections = excluded.last_connections,
+        peak_connections = excluded.peak_connections,
+        peak_captured_at = excluded.peak_captured_at,
+        by_name = excluded.by_name,
+        by_user = excluded.by_user,
+        by_user_name = excluded.by_user_name,
+        ips = excluded.ips,
+        updated_at = excluded.updated_at
+    `);
+    const upsertMany = this.db.transaction((rows: ClientAnalyticsRollup[]) => {
+      for (const r of rows) {
+        upsert.run(
+          r.connectionId,
+          r.bucketStart,
+          r.firstCapturedAt,
+          r.lastCapturedAt,
+          r.batchCount,
+          r.rowCount,
+          r.lastConnections,
+          r.peakConnections,
+          r.peakCapturedAt,
+          SqliteDialect.toJson(r.byName),
+          SqliteDialect.toJson(r.byUser),
+          SqliteDialect.toJson(r.byUserAndName),
+          SqliteDialect.toJson(r.ips),
+          r.updatedAt,
+        );
+      }
+    });
+    upsertMany(rollups);
+  }
+
+  async getClientAnalyticsRollups(
+    startBucket: number,
+    endBucket: number,
+    connectionId?: string,
+  ): Promise<ClientAnalyticsRollup[]> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const params: (string | number)[] = [startBucket, endBucket];
+    let where = 'bucket_start >= ? AND bucket_start <= ?';
+    if (connectionId) {
+      where += ' AND connection_id = ?';
+      params.push(connectionId);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM client_analytics_rollups WHERE ${where} ORDER BY bucket_start ASC, connection_id ASC`,
+      )
+      .all(...params) as Array<Record<string, unknown>>;
+    return rows.map((row) => mapClientAnalyticsRollupRow(row, SqliteDialect));
+  }
+
+  async getClientAnalyticsRollupWatermark(connectionId: string): Promise<number | null> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const row = this.db
+      .prepare('SELECT MAX(last_captured_at) AS v FROM client_analytics_rollups WHERE connection_id = ?')
+      .get(connectionId) as { v: number | null } | undefined;
+    return row?.v === null || row?.v === undefined ? null : Number(row.v);
+  }
+
+  async getClientAnalyticsRollupFloor(connectionId: string): Promise<number | null> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const row = this.db
+      .prepare('SELECT MIN(bucket_start) AS v FROM client_analytics_rollups WHERE connection_id = ?')
+      .get(connectionId) as { v: number | null } | undefined;
+    return row?.v === null || row?.v === undefined ? null : Number(row.v);
+  }
+
+  async getClientAnalyticsRollupPeak(
+    connectionId: string,
+    sinceBucket: number,
+  ): Promise<{ peak: number; capturedAt: number } | null> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const row = this.db
+      .prepare(
+        `SELECT peak_connections, peak_captured_at FROM client_analytics_rollups
+          WHERE connection_id = ? AND bucket_start >= ?
+          ORDER BY peak_connections DESC, peak_captured_at ASC
+          LIMIT 1`,
+      )
+      .get(connectionId, sinceBucket) as { peak_connections: number; peak_captured_at: number } | undefined;
+    return row ? { peak: Number(row.peak_connections), capturedAt: Number(row.peak_captured_at) } : null;
+  }
+
+  async pruneOldClientAnalyticsRollups(
+    olderThanBucketStart: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    if (connectionId) {
+      return chunkedSqliteDelete(
+        this.db,
+        'client_analytics_rollups',
+        'bucket_start < ? AND connection_id = ?',
+        [olderThanBucketStart, connectionId],
+      );
+    }
+    return chunkedSqliteDelete(this.db, 'client_analytics_rollups', 'bucket_start < ?', [
+      olderThanBucketStart,
+    ]);
+  }
+
+  async isClientSnapshotIndexReady(): Promise<boolean> {
+    return true;
+  }
+
   private migrateCveAdvisoriesTable(): void {
     if (!this.db) {
       return;
@@ -1366,30 +1680,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     this.migrateCveAdvisoriesTable();
 
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS acl_audit (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        count INTEGER NOT NULL,
-        reason TEXT NOT NULL,
-        context TEXT NOT NULL,
-        object TEXT NOT NULL,
-        username TEXT NOT NULL,
-        age_seconds INTEGER NOT NULL,
-        client_info TEXT NOT NULL,
-        timestamp_created INTEGER NOT NULL,
-        timestamp_last_updated INTEGER NOT NULL,
-        captured_at INTEGER NOT NULL,
-        source_host TEXT NOT NULL,
-        source_port INTEGER NOT NULL,
-        connection_id TEXT NOT NULL DEFAULT 'env-default',
-        created_at INTEGER DEFAULT (strftime('%s', 'now')),
-        UNIQUE(timestamp_created, username, object, reason, source_host, source_port, connection_id)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_acl_username ON acl_audit(username);
-      CREATE INDEX IF NOT EXISTS idx_acl_reason ON acl_audit(reason);
-      CREATE INDEX IF NOT EXISTS idx_acl_captured_at ON acl_audit(captured_at);
-      CREATE INDEX IF NOT EXISTS idx_acl_timestamp_created ON acl_audit(timestamp_created);
-      CREATE INDEX IF NOT EXISTS idx_acl_connection_id ON acl_audit(connection_id);
+      CREATE TABLE IF NOT EXISTS acl_audit (${ACL_AUDIT_COLUMNS});
+      ${ACL_AUDIT_INDEXES}
 
       CREATE TABLE IF NOT EXISTS client_snapshots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1425,6 +1717,28 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       CREATE INDEX IF NOT EXISTS idx_client_cmd ON client_snapshots(cmd);
       CREATE INDEX IF NOT EXISTS idx_client_captured_at_cmd ON client_snapshots(captured_at, cmd);
       CREATE INDEX IF NOT EXISTS idx_client_connection_id ON client_snapshots(connection_id);
+      CREATE INDEX IF NOT EXISTS idx_client_connection_captured ON client_snapshots(connection_id, captured_at);
+
+      -- One row per connection per fixed 5-minute bucket, folded from
+      -- client_snapshots by the background rollup aggregator.
+      CREATE TABLE IF NOT EXISTS client_analytics_rollups (
+        connection_id TEXT NOT NULL,
+        bucket_start INTEGER NOT NULL,
+        first_captured_at INTEGER NOT NULL,
+        last_captured_at INTEGER NOT NULL,
+        batch_count INTEGER NOT NULL,
+        row_count INTEGER NOT NULL,
+        last_connections INTEGER NOT NULL,
+        peak_connections INTEGER NOT NULL,
+        peak_captured_at INTEGER NOT NULL,
+        by_name TEXT NOT NULL,
+        by_user TEXT NOT NULL,
+        by_user_name TEXT NOT NULL,
+        ips TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (connection_id, bucket_start)
+      );
+      CREATE INDEX IF NOT EXISTS idx_client_rollups_bucket ON client_analytics_rollups(bucket_start);
 
       -- Anomaly Events Table
       CREATE TABLE IF NOT EXISTS anomaly_events (
@@ -1523,6 +1837,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         min_ttl_seconds INTEGER,
         max_ttl_seconds INTEGER,
         connection_id TEXT NOT NULL DEFAULT 'env-default',
+        db INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
       );
 
@@ -1543,7 +1858,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         cardinality INTEGER,
         key_type TEXT,
         ttl INTEGER,
-        rank INTEGER NOT NULL
+        rank INTEGER NOT NULL,
+        db INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE INDEX IF NOT EXISTS idx_hks_connection_captured
@@ -1562,6 +1878,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
         throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
         inference_sla_config TEXT NOT NULL DEFAULT '{}',
+        anomaly_detector_config TEXT NOT NULL DEFAULT '{}',
         local_retention_days INTEGER,
         updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
         created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
@@ -1596,6 +1913,79 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         connection_id TEXT PRIMARY KEY,
         alert_enabled INTEGER NOT NULL DEFAULT 1,
         alert_threshold INTEGER NOT NULL DEFAULT 40,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS kv_cache_engines (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        source TEXT NOT NULL,
+        scrape_url TEXT,
+        scrape_auth_header TEXT,
+        scrape_auth_encrypted INTEGER NOT NULL DEFAULT 0,
+        otlp_engine_id TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        last_seen_at INTEGER,
+        last_error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_kv_cache_engines_conn ON kv_cache_engines(connection_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_kv_cache_engines_otlp ON kv_cache_engines(otlp_engine_id);
+
+      CREATE TABLE IF NOT EXISTS kv_cache_engine_samples (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        engine_id TEXT NOT NULL,
+        connection_id TEXT NOT NULL,
+        model_name TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        requested_tokens REAL NOT NULL,
+        hit_tokens REAL NOT NULL,
+        lookup_tokens REAL NOT NULL,
+        lookup_hits REAL NOT NULL,
+        remote_read_bytes REAL NOT NULL,
+        remote_write_bytes REAL NOT NULL,
+        remote_read_requests REAL NOT NULL,
+        remote_write_requests REAL NOT NULL,
+        remote_ping_errors REAL NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_kv_cache_samples_conn_ts ON kv_cache_engine_samples(connection_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_kv_cache_samples_engine_ts ON kv_cache_engine_samples(engine_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_kv_cache_samples_ts ON kv_cache_engine_samples(timestamp);
+
+      CREATE TABLE IF NOT EXISTS kv_cache_footprint_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        connection_id TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        detected INTEGER NOT NULL,
+        layout TEXT,
+        scanned_keys INTEGER NOT NULL,
+        matched_keys INTEGER NOT NULL,
+        sampled_keys INTEGER NOT NULL,
+        scan_complete INTEGER NOT NULL,
+        primaries_scanned INTEGER NOT NULL DEFAULT 1,
+        primaries_total INTEGER,
+        chunks_est REAL NOT NULL,
+        bytes_est REAL,
+        used_memory REAL NOT NULL,
+        maxmemory REAL NOT NULL,
+        maxmemory_policy TEXT NOT NULL,
+        lmcache_memory_share REAL,
+        no_ttl_ratio REAL,
+        orphan_ratio REAL,
+        evicted_keys_delta REAL,
+        evicted_keys_interval_ms INTEGER,
+        other_dbs TEXT NOT NULL,
+        per_model TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_kv_cache_footprint_conn_ts ON kv_cache_footprint_snapshots(connection_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_kv_cache_footprint_ts ON kv_cache_footprint_snapshots(timestamp);
+
+      CREATE TABLE IF NOT EXISTS kv_cache_settings (
+        connection_id TEXT PRIMARY KEY,
+        hit_rate_alert_enabled INTEGER NOT NULL DEFAULT 1,
+        hit_rate_threshold REAL NOT NULL DEFAULT 0.2,
+        eviction_alert_enabled INTEGER NOT NULL DEFAULT 1,
         updated_at INTEGER NOT NULL
       );
 
@@ -1640,51 +2030,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_connection_id ON webhook_deliveries(connection_id);
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_created_at ON webhook_deliveries(created_at);
 
-      CREATE TABLE IF NOT EXISTS slow_log_entries (
-        pk INTEGER PRIMARY KEY AUTOINCREMENT,
-        slowlog_id INTEGER NOT NULL,
-        timestamp INTEGER NOT NULL,
-        duration INTEGER NOT NULL,
-        command TEXT NOT NULL DEFAULT '[]',
-        client_address TEXT,
-        client_name TEXT,
-        captured_at INTEGER NOT NULL,
-        source_host TEXT NOT NULL,
-        source_port INTEGER NOT NULL,
-        connection_id TEXT NOT NULL DEFAULT 'env-default',
-        UNIQUE(slowlog_id, source_host, source_port, connection_id)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_slowlog_timestamp ON slow_log_entries(timestamp DESC);
-      CREATE INDEX IF NOT EXISTS idx_slowlog_command ON slow_log_entries(command);
-      CREATE INDEX IF NOT EXISTS idx_slowlog_duration ON slow_log_entries(duration DESC);
-      CREATE INDEX IF NOT EXISTS idx_slowlog_client_name ON slow_log_entries(client_name);
-      CREATE INDEX IF NOT EXISTS idx_slowlog_captured_at ON slow_log_entries(captured_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_slowlog_connection_id ON slow_log_entries(connection_id);
+      CREATE TABLE IF NOT EXISTS slow_log_entries (${SLOW_LOG_ENTRIES_COLUMNS});
+      ${SLOW_LOG_ENTRIES_INDEXES}
 
       -- Command Log Entries Table (Valkey-specific)
-      CREATE TABLE IF NOT EXISTS command_log_entries (
-        pk INTEGER PRIMARY KEY AUTOINCREMENT,
-        commandlog_id INTEGER NOT NULL,
-        timestamp INTEGER NOT NULL,
-        duration INTEGER NOT NULL,
-        command TEXT NOT NULL DEFAULT '[]',
-        client_address TEXT,
-        client_name TEXT,
-        log_type TEXT NOT NULL,
-        captured_at INTEGER NOT NULL,
-        source_host TEXT NOT NULL,
-        source_port INTEGER NOT NULL,
-        connection_id TEXT NOT NULL DEFAULT 'env-default',
-        UNIQUE(commandlog_id, log_type, source_host, source_port, connection_id)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_commandlog_timestamp ON command_log_entries(timestamp DESC);
-      CREATE INDEX IF NOT EXISTS idx_commandlog_type ON command_log_entries(log_type);
-      CREATE INDEX IF NOT EXISTS idx_commandlog_duration ON command_log_entries(duration DESC);
-      CREATE INDEX IF NOT EXISTS idx_commandlog_client_name ON command_log_entries(client_name);
-      CREATE INDEX IF NOT EXISTS idx_commandlog_captured_at ON command_log_entries(captured_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_commandlog_connection_id ON command_log_entries(connection_id);
+      CREATE TABLE IF NOT EXISTS command_log_entries (${COMMAND_LOG_ENTRIES_COLUMNS});
+      ${COMMAND_LOG_ENTRIES_INDEXES}
 
       CREATE TABLE IF NOT EXISTS latency_snapshots (
         id TEXT PRIMARY KEY,
@@ -1779,6 +2130,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
       CREATE INDEX IF NOT EXISTS idx_otel_trace ON otel_spans(trace_id);
       CREATE INDEX IF NOT EXISTS idx_otel_start ON otel_spans(start_time_ms);
+      CREATE INDEX IF NOT EXISTS idx_otel_ingested ON otel_spans(ingested_at);
 
       CREATE TABLE IF NOT EXISTS vector_index_snapshots (
         id TEXT PRIMARY KEY,
@@ -2108,6 +2460,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     );
     addCaptureSessionsTargetNodeColumn(this.db!);
     addMemoryProposalIntegrityColumns(this.db!);
+    addKvCacheCoverageColumns(this.db!);
 
     // Agent Tokens Table (cloud-only, but created in all environments for interface compliance)
     this.db.exec(`
@@ -2580,8 +2933,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         keys_with_ttl, keys_expiring_soon, total_memory_bytes,
         avg_memory_bytes, max_memory_bytes, avg_access_frequency,
         hot_key_count, cold_key_count, avg_idle_time_seconds,
-        stale_key_count, avg_ttl_seconds, min_ttl_seconds, max_ttl_seconds, connection_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        stale_key_count, avg_ttl_seconds, min_ttl_seconds, max_ttl_seconds, connection_id, db
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const insertMany = this.db.transaction((snapshots: KeyPatternSnapshot[], connId: string) => {
@@ -2606,6 +2959,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           snapshot.minTtlSeconds ?? null,
           snapshot.maxTtlSeconds ?? null,
           connId,
+          snapshot.db ?? 0,
         );
       }
     });
@@ -2638,29 +2992,69 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push('pattern = ?');
       params.push(options.pattern);
     }
+    if (options.db !== undefined) {
+      conditions.push('db = ?');
+      params.push(options.db);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 100;
     const offset = options.offset ?? 0;
 
-    const query = `
+    if (options.db !== undefined) {
+      const query = `
+        SELECT * FROM key_pattern_snapshots
+        ${whereClause}
+        ORDER BY timestamp DESC, db ASC, pattern ASC
+        LIMIT ? OFFSET ?
+      `;
+      const rows = this.db.prepare(query).all(...params, limit, offset) as any[];
+      return rows.map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
+    }
+
+    // Without a db filter the limit applies PER logical database, not
+    // globally: rows sort db0-first within a collection, so a global limit
+    // would let a pattern-heavy db0 fill the page and hide later databases
+    // from the all-databases view. One small LIMITed query per populated
+    // database (each an early-terminating scan of the (connection_id, db,
+    // timestamp) index) rather than a ROW_NUMBER() window, which would have
+    // to number and sort the connection's full snapshot history on every
+    // request — including the web's 60s patterns poll.
+    //
+    // The database list itself is enumerated with a loose index scan (one
+    // MIN(db) index seek per populated database via the recursive CTE):
+    // neither SQLite nor Postgres skip-scans DISTINCT over an index prefix,
+    // so a plain SELECT DISTINCT db would still walk every index entry for
+    // the connection — O(history) on every request.
+    const dbRows = this.db
+      .prepare(populatedDbsCte(whereClause))
+      .all(...params, ...params) as Array<{ db: number | null }>;
+
+    const perDbQuery = `
       SELECT * FROM key_pattern_snapshots
-      ${whereClause}
-      ORDER BY timestamp DESC
-      LIMIT ? OFFSET ?
+      ${whereClause ? `${whereClause} AND` : 'WHERE'} db = ?
+      ORDER BY timestamp DESC, pattern ASC
+      LIMIT ?
     `;
+    const rows: any[] = [];
+    for (const { db: dbValue } of dbRows) {
+      rows.push(...(this.db.prepare(perDbQuery).all(...params, dbValue ?? 0, limit) as any[]));
+    }
+    rows.sort(
+      (a, b) =>
+        b.timestamp - a.timestamp || a.db - b.db || String(a.pattern).localeCompare(String(b.pattern)),
+    );
 
-    params.push(limit, offset);
-
-    const rows = this.db.prepare(query).all(...params) as any[];
-
-    return rows.map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
+    return rows
+      .slice(offset, offset + limit * Math.max(1, dbRows.length))
+      .map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
   }
 
   async getKeyAnalyticsSummary(
     startTime?: number,
     endTime?: number,
     connectionId?: string,
+    db?: number,
   ): Promise<KeyAnalyticsSummary | null> {
     if (!this.db) throw new Error('Database not initialized');
 
@@ -2679,74 +3073,85 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push('timestamp <= ?');
       params.push(endTime);
     }
+    if (db !== undefined) {
+      conditions.push('db = ?');
+      params.push(db);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    // Get the latest snapshot for each pattern within the time range
-    const latestSnapshotsQuery = `
-      SELECT
-        pattern,
-        MAX(timestamp) as latest_timestamp
-      FROM key_pattern_snapshots
-      ${whereClause}
-      GROUP BY pattern
+    // Aggregate over the latest snapshot per (pattern, logical database)
+    // within the time range. Per db, not per pattern: a partial collection
+    // (one database scanned, a sibling's scan failed) legitimately moves the
+    // pattern's newest timestamp forward for only some databases, and pinning
+    // one MAX(timestamp) per pattern would silently drop the sibling's last
+    // row and undercount the headline totals. The latest rows are selected by
+    // JOINing a grouped subquery rather than expanding each (pattern, db,
+    // timestamp) triple into an OR term with three bind parameters — that
+    // expansion scales with patterns x databases and can exceed the engine's
+    // bind-parameter limit (32766 for SQLite).
+    //
+    // connection scoping is re-applied on the outer rows: a (pattern, db,
+    // timestamp) triple is not unique across connections, so without it
+    // another connection's snapshot at the same triple would be summed in.
+    const latestJoin = `
+      FROM key_pattern_snapshots s
+      JOIN (
+        SELECT pattern, db, MAX(timestamp) as latest_timestamp
+        FROM key_pattern_snapshots
+        ${whereClause}
+        GROUP BY pattern, db
+      ) latest
+        ON s.pattern = latest.pattern
+        AND s.db = latest.db
+        AND s.timestamp = latest.latest_timestamp
+      ${connectionId ? 'WHERE s.connection_id = ?' : ''}
     `;
-
-    const latestSnapshots = this.db.prepare(latestSnapshotsQuery).all(...params) as Array<{
-      pattern: string;
-      latest_timestamp: number;
-    }>;
-
-    if (latestSnapshots.length === 0) {
-      return null;
-    }
-
-    // Build aggregation query for latest snapshots only
-    const patternConditions = latestSnapshots
-      .map(() => '(pattern = ? AND timestamp = ?)')
-      .join(' OR ');
-    const patternParams: any[] = [];
-    for (const snapshot of latestSnapshots) {
-      patternParams.push(snapshot.pattern, snapshot.latest_timestamp);
-    }
+    const latestParams = connectionId ? [...params, connectionId] : params;
 
     const summaryQuery = `
       SELECT
-        COUNT(DISTINCT pattern) as total_patterns,
-        SUM(key_count) as total_keys,
-        SUM(total_memory_bytes) as total_memory_bytes,
-        SUM(stale_key_count) as stale_key_count,
-        SUM(hot_key_count) as hot_key_count,
-        SUM(cold_key_count) as cold_key_count,
-        SUM(keys_expiring_soon) as keys_expiring_soon
-      FROM key_pattern_snapshots
-      WHERE ${patternConditions}
+        COUNT(DISTINCT s.pattern) as total_patterns,
+        SUM(s.key_count) as total_keys,
+        SUM(s.total_memory_bytes) as total_memory_bytes,
+        SUM(s.stale_key_count) as stale_key_count,
+        SUM(s.hot_key_count) as hot_key_count,
+        SUM(s.cold_key_count) as cold_key_count,
+        SUM(s.keys_expiring_soon) as keys_expiring_soon
+      ${latestJoin}
     `;
 
-    const summary = this.db.prepare(summaryQuery).get(...patternParams) as any;
+    const summary = this.db.prepare(summaryQuery).get(...latestParams) as any;
 
-    // Get per-pattern breakdown
+    if (!summary || !summary.total_patterns) {
+      return null;
+    }
+
+    // Get per-pattern breakdown, aggregated across the per-database rows of
+    // each pattern (avg weighted by key count via the summed totals).
     const byPatternQuery = `
       SELECT
-        pattern,
-        key_count,
-        total_memory_bytes,
-        avg_memory_bytes,
-        stale_key_count,
-        hot_key_count,
-        cold_key_count
-      FROM key_pattern_snapshots
-      WHERE ${patternConditions}
+        s.pattern,
+        SUM(s.key_count) as key_count,
+        SUM(s.total_memory_bytes) as total_memory_bytes,
+        SUM(s.stale_key_count) as stale_key_count,
+        SUM(s.hot_key_count) as hot_key_count,
+        SUM(s.cold_key_count) as cold_key_count,
+        SUM(s.sampled_key_count) as sampled_key_count,
+        SUM(s.avg_memory_bytes * s.sampled_key_count) as weighted_avg_memory
+      ${latestJoin}
+      GROUP BY s.pattern
     `;
 
-    const patternRows = this.db.prepare(byPatternQuery).all(...patternParams) as any[];
+    const patternRows = this.db.prepare(byPatternQuery).all(...latestParams) as any[];
 
     const byPattern: Record<string, any> = {};
     for (const row of patternRows) {
       byPattern[row.pattern] = {
         keyCount: row.key_count,
         memoryBytes: row.total_memory_bytes,
-        avgMemoryBytes: row.avg_memory_bytes,
+        avgMemoryBytes:
+          row.sampled_key_count > 0 ? Math.round(row.weighted_avg_memory / row.sampled_key_count) : 0,
         staleCount: row.stale_key_count ?? null,
         hotCount: row.hot_key_count ?? 0,
         coldCount: row.cold_key_count ?? 0,
@@ -2783,6 +3188,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     startTime: number,
     endTime: number,
     connectionId?: string,
+    db?: number,
   ): Promise<
     Array<{
       timestamp: number;
@@ -2800,15 +3206,25 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push('connection_id = ?');
       params.push(connectionId);
     }
+    if (db !== undefined) {
+      conditions.push('db = ?');
+      params.push(db);
+    }
 
+    // One collection writes one row per logical database; aggregate them per
+    // timestamp so an unfiltered trend stays a single series. When no
+    // connectionId is given, also group by connection_id so trends from
+    // different connections aren't merged into one series.
+    const groupBy = connectionId ? 'timestamp' : 'timestamp, connection_id';
     const query = `
       SELECT
         timestamp,
-        key_count,
-        total_memory_bytes,
-        stale_key_count
+        SUM(key_count) as key_count,
+        SUM(total_memory_bytes) as total_memory_bytes,
+        SUM(stale_key_count) as stale_key_count
       FROM key_pattern_snapshots
       WHERE ${conditions.join(' AND ')}
+      GROUP BY ${groupBy}
       ORDER BY timestamp ASC
     `;
 
@@ -2844,8 +3260,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const stmt = this.db.prepare(`
       INSERT INTO hot_key_stats (
         id, key_name, connection_id, captured_at, signal_type,
-        freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank, db
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const insertMany = this.db.transaction((entries: HotKeyEntry[], connId: string) => {
@@ -2863,6 +3279,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           entry.keyType ?? null,
           entry.ttl ?? null,
           entry.rank,
+          entry.db ?? 0,
         );
       }
     });
@@ -2895,6 +3312,10 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push('captured_at <= ?');
       params.push(options.endTime);
     }
+    if (options.db !== undefined) {
+      conditions.push('db = ?');
+      params.push(options.db);
+    }
     if (options.latest || options.oldest) {
       const agg = options.latest ? 'MAX' : 'MIN';
       const subConditions: string[] = [`signal_type IN (${signalPlaceholders})`];
@@ -2911,6 +3332,10 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         subConditions.push('captured_at <= ?');
         subParams.push(options.endTime);
       }
+      if (options.db !== undefined) {
+        subConditions.push('db = ?');
+        subParams.push(options.db);
+      }
       const subWhere = subConditions.length > 0 ? `WHERE ${subConditions.join(' AND ')}` : '';
       conditions.push(`captured_at = (SELECT ${agg}(captured_at) FROM hot_key_stats ${subWhere})`);
       params.push(...subParams);
@@ -2925,7 +3350,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       .prepare(
         `
       SELECT id, key_name, connection_id, captured_at, signal_type,
-             freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank
+             freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank, db
       FROM hot_key_stats
       ${whereClause}
       ORDER BY captured_at DESC, rank ASC
@@ -2947,7 +3372,38 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       keyType: row.key_type ?? undefined,
       ttl: row.ttl ?? undefined,
       rank: row.rank,
+      db: row.db ?? 0,
     }));
+  }
+
+  async getKeyAnalyticsDatabases(connectionId?: string): Promise<number[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    // Loose index scan (one MIN(db) seek per populated database): this is
+    // polled every 60s per open Key Analytics tab, and a plain DISTINCT would
+    // walk every index entry for the connection on each poll.
+    const where = connectionId ? 'WHERE connection_id = ?' : '';
+    const params = connectionId ? [connectionId] : [];
+    const rows = this.db
+      .prepare(populatedDbsCte(where))
+      .all(...params, ...params) as Array<{ db: number | null }>;
+    return rows.map((row) => row.db ?? 0);
+  }
+
+  async getHotKeyDatabases(connectionId?: string): Promise<number[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    // Distinct logical databases present in hot_key_stats. Composite/hot-key
+    // rows live here, not in key_pattern_snapshots (which can diverge — e.g.
+    // pattern-only retention pruning), so the composite read enumerates from
+    // this table. A plain DISTINCT: hot_key_stats has no db index, and this
+    // backs only the (infrequent) composite endpoint.
+    const where = connectionId ? 'WHERE connection_id = ?' : '';
+    const params = connectionId ? [connectionId] : [];
+    const rows = this.db
+      .prepare(`SELECT DISTINCT db FROM hot_key_stats ${where} ORDER BY db ASC`)
+      .all(...params) as Array<{ db: number | null }>;
+    return rows.map((row) => row.db ?? 0);
   }
 
   async pruneOldHotKeys(cutoffTimestamp: number, connectionId?: string): Promise<number> {
@@ -2984,9 +3440,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         id, audit_poll_interval_ms, client_analytics_poll_interval_ms,
         anomaly_poll_interval_ms, anomaly_cache_ttl_ms, anomaly_prometheus_interval_ms,
         throughput_forecasting_enabled, throughput_forecasting_default_rolling_window_ms, throughput_forecasting_default_alert_threshold_ms,
-        inference_sla_config, local_retention_days,
+        inference_sla_config, anomaly_detector_config, local_retention_days,
         updated_at, created_at
-      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         audit_poll_interval_ms = excluded.audit_poll_interval_ms,
         client_analytics_poll_interval_ms = excluded.client_analytics_poll_interval_ms,
@@ -2997,6 +3453,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         throughput_forecasting_default_rolling_window_ms = excluded.throughput_forecasting_default_rolling_window_ms,
         throughput_forecasting_default_alert_threshold_ms = excluded.throughput_forecasting_default_alert_threshold_ms,
         inference_sla_config = excluded.inference_sla_config,
+        anomaly_detector_config = excluded.anomaly_detector_config,
         local_retention_days = excluded.local_retention_days,
         updated_at = excluded.updated_at
     `);
@@ -3011,6 +3468,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       settings.metricForecastingDefaultRollingWindowMs,
       settings.metricForecastingDefaultAlertThresholdMs,
       JSON.stringify(settings.inferenceSlaConfig ?? {}),
+      JSON.stringify(settings.anomalyDetectorConfig ?? {}),
       settings.localRetentionDays ?? null,
       now,
       settings.createdAt || now,
@@ -3023,7 +3481,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return saved;
   }
 
-  async updateSettings(updates: SettingsUpdateRequest): Promise<AppSettings> {
+  async updateSettings(updates: Partial<AppSettings>): Promise<AppSettings> {
     if (!this.db) throw new Error('Database not initialized');
 
     const current = await this.getSettings();
@@ -3661,6 +4119,310 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return settings;
   }
 
+
+  private kvCacheSnapshotFromRow(r: Record<string, any>): KvCacheFootprintSnapshot {
+    return {
+      connectionId: r.connection_id,
+      timestamp: r.timestamp,
+      detected: r.detected === 1,
+      layout: r.layout,
+      scannedKeys: r.scanned_keys,
+      matchedKeys: r.matched_keys,
+      sampledKeys: r.sampled_keys,
+      scanComplete: r.scan_complete === 1,
+      primariesScanned: r.primaries_scanned,
+      primariesTotal: r.primaries_total,
+      chunksEst: r.chunks_est,
+      bytesEst: r.bytes_est,
+      usedMemory: r.used_memory,
+      maxmemory: r.maxmemory,
+      maxmemoryPolicy: r.maxmemory_policy,
+      lmcacheMemoryShare: r.lmcache_memory_share,
+      noTtlRatio: r.no_ttl_ratio,
+      orphanRatio: r.orphan_ratio,
+      evictedKeysDelta: r.evicted_keys_delta,
+      evictedKeysIntervalMs: r.evicted_keys_interval_ms ?? null,
+      otherDbs: JSON.parse(r.other_dbs) as number[],
+      perModel: JSON.parse(r.per_model) as KvCacheModelFootprint[],
+    };
+  }
+
+  private kvCacheSampleFromRow(r: Record<string, any>): KvCacheEngineSample {
+    return {
+      engineId: r.engine_id,
+      connectionId: r.connection_id,
+      modelName: r.model_name,
+      timestamp: r.timestamp,
+      requestedTokens: r.requested_tokens,
+      hitTokens: r.hit_tokens,
+      lookupTokens: r.lookup_tokens,
+      lookupHits: r.lookup_hits,
+      remoteReadBytes: r.remote_read_bytes,
+      remoteWriteBytes: r.remote_write_bytes,
+      remoteReadRequests: r.remote_read_requests,
+      remoteWriteRequests: r.remote_write_requests,
+      remotePingErrors: r.remote_ping_errors,
+    };
+  }
+
+  private kvCacheEngineFromRow(r: Record<string, any>): StoredKvCacheEngine {
+    return {
+      id: r.id,
+      connectionId: r.connection_id,
+      name: r.name,
+      source: r.source,
+      scrapeUrl: r.scrape_url,
+      scrapeAuthHeader: r.scrape_auth_header,
+      scrapeAuthEncrypted: r.scrape_auth_encrypted === 1,
+      otlpEngineId: r.otlp_engine_id,
+      enabled: r.enabled === 1,
+      createdAt: r.created_at,
+      lastSeenAt: r.last_seen_at,
+      lastError: r.last_error,
+    };
+  }
+
+  async saveKvCacheFootprintSnapshot(s: KvCacheFootprintSnapshot): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db
+      .prepare(
+        `INSERT INTO kv_cache_footprint_snapshots
+          (connection_id, timestamp, detected, layout, scanned_keys, matched_keys, sampled_keys,
+           scan_complete, primaries_scanned, primaries_total, chunks_est, bytes_est, used_memory, maxmemory,
+           maxmemory_policy, lmcache_memory_share, no_ttl_ratio, orphan_ratio, evicted_keys_delta, evicted_keys_interval_ms,
+           other_dbs, per_model)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        s.connectionId, s.timestamp, s.detected ? 1 : 0, s.layout, s.scannedKeys, s.matchedKeys,
+        s.sampledKeys, s.scanComplete ? 1 : 0, s.primariesScanned, s.primariesTotal, s.chunksEst, s.bytesEst, s.usedMemory, s.maxmemory,
+        s.maxmemoryPolicy, s.lmcacheMemoryShare, s.noTtlRatio, s.orphanRatio, s.evictedKeysDelta, s.evictedKeysIntervalMs,
+        JSON.stringify(s.otherDbs), JSON.stringify(s.perModel),
+      );
+  }
+
+  async getKvCacheFootprintSnapshots(query: KvCacheFootprintQuery): Promise<KvCacheFootprintSnapshot[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const from = query.from ?? 0;
+    const range = [query.connectionId, from, query.to ?? Number.MAX_SAFE_INTEGER];
+    const limit = query.limit ?? 2000;
+    const rows = (
+      query.bucketMs
+        ? this.db
+            .prepare(
+              `SELECT * FROM (
+                 SELECT * FROM (
+                   SELECT *, ROW_NUMBER() OVER (
+                     PARTITION BY CAST((timestamp - ?) / ? AS INTEGER) ORDER BY timestamp DESC, id DESC
+                   ) AS bucket_rank
+                   FROM kv_cache_footprint_snapshots
+                   WHERE connection_id = ? AND timestamp >= ? AND timestamp <= ?
+                 ) WHERE bucket_rank = 1
+                 ORDER BY timestamp DESC, id DESC LIMIT ?
+               ) ORDER BY timestamp ASC, id ASC`,
+            )
+            .all(from, Math.ceil(query.bucketMs), ...range, limit)
+        : this.db
+            .prepare(
+              `SELECT * FROM (
+                 SELECT * FROM kv_cache_footprint_snapshots
+                 WHERE connection_id = ? AND timestamp >= ? AND timestamp <= ?
+                 ORDER BY timestamp DESC, id DESC LIMIT ?
+               ) ORDER BY timestamp ASC, id ASC`,
+            )
+            .all(...range, limit)
+    ) as Record<string, any>[];
+    return rows.map((r) => this.kvCacheSnapshotFromRow(r));
+  }
+
+  async pruneOldKvCacheFootprintSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    if (connectionId) {
+      return chunkedSqliteDelete(this.db, 'kv_cache_footprint_snapshots', 'timestamp < ? AND connection_id = ?', [cutoffTimestamp, connectionId]);
+    }
+    return chunkedSqliteDelete(this.db, 'kv_cache_footprint_snapshots', 'timestamp < ?', [cutoffTimestamp]);
+  }
+
+  async saveKvCacheEngineSamples(samples: KvCacheEngineSample[]): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+    const insert = this.db.prepare(
+      `INSERT INTO kv_cache_engine_samples
+        (engine_id, connection_id, model_name, timestamp, requested_tokens, hit_tokens, lookup_tokens,
+         lookup_hits, remote_read_bytes, remote_write_bytes, remote_read_requests, remote_write_requests,
+         remote_ping_errors)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const insertAll = this.db.transaction((rows: KvCacheEngineSample[]) => {
+      for (const s of rows) {
+        insert.run(
+          s.engineId, s.connectionId, s.modelName, s.timestamp, s.requestedTokens, s.hitTokens,
+          s.lookupTokens, s.lookupHits, s.remoteReadBytes, s.remoteWriteBytes, s.remoteReadRequests,
+          s.remoteWriteRequests, s.remotePingErrors,
+        );
+      }
+    });
+    insertAll(samples);
+  }
+
+  async getKvCacheEngineSamples(query: KvCacheSampleQuery): Promise<KvCacheEngineSample[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    if (query.bucketMs) return this.getBucketedKvCacheEngineSamples(query, Math.ceil(query.bucketMs));
+    const { where, params } = this.kvCacheSampleFilter(query);
+    params.push(query.limit ?? 50_000);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM (
+           SELECT * FROM kv_cache_engine_samples WHERE ${where.join(' AND ')}
+           ORDER BY timestamp DESC, id DESC LIMIT ?
+         ) ORDER BY timestamp ASC, id ASC`,
+      )
+      .all(...params) as Record<string, any>[];
+    return rows.map((r) => this.kvCacheSampleFromRow(r));
+  }
+
+  private getBucketedKvCacheEngineSamples(query: KvCacheSampleQuery, bucketMs: number): KvCacheEngineSample[] {
+    const { where, params } = this.kvCacheSampleFilter(query);
+    const sums = KV_CACHE_SAMPLE_COUNTER_COLUMNS.map((column) => `SUM(${column}) AS ${column}`).join(', ');
+    const rows = this.db!
+      .prepare(
+        `SELECT * FROM (
+           SELECT engine_id, connection_id, model_name, (timestamp / CAST(? AS INTEGER)) * CAST(? AS INTEGER) AS bucket_ts, ${sums}
+           FROM kv_cache_engine_samples WHERE ${where.join(' AND ')}
+           GROUP BY engine_id, connection_id, model_name, bucket_ts
+           ORDER BY bucket_ts DESC, engine_id DESC, model_name DESC LIMIT ?
+         ) ORDER BY bucket_ts ASC, engine_id ASC, model_name ASC`,
+      )
+      .all(bucketMs, bucketMs, ...params, query.limit ?? 50_000) as Record<string, any>[];
+    return rows.map((r) => this.kvCacheSampleFromRow({ ...r, timestamp: r.bucket_ts }));
+  }
+
+  async getKvCacheSampleTotals(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): Promise<KvCacheSampleTotals> {
+    if (!this.db) throw new Error('Database not initialized');
+    const { where, params } = this.kvCacheSampleFilter(query);
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(requested_tokens), 0) AS requested, COALESCE(SUM(hit_tokens), 0) AS hit
+         FROM kv_cache_engine_samples WHERE ${where.join(' AND ')}`,
+      )
+      .get(...params) as { requested: number; hit: number };
+    return { requestedTokens: Number(row.requested), hitTokens: Number(row.hit) };
+  }
+
+  private kvCacheSampleFilter(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): { where: string[]; params: unknown[] } {
+    const where = ['connection_id = ?', 'timestamp >= ?', 'timestamp <= ?'];
+    const params: unknown[] = [query.connectionId, query.from ?? 0, query.to ?? Number.MAX_SAFE_INTEGER];
+    if (query.engineId !== undefined) {
+      where.push('engine_id = ?');
+      params.push(query.engineId);
+    }
+    if (query.modelName !== undefined) {
+      where.push('model_name = ?');
+      params.push(query.modelName);
+    }
+    return { where, params };
+  }
+
+  async pruneOldKvCacheEngineSamples(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    if (connectionId) {
+      return chunkedSqliteDelete(this.db, 'kv_cache_engine_samples', 'timestamp < ? AND connection_id = ?', [cutoffTimestamp, connectionId]);
+    }
+    return chunkedSqliteDelete(this.db, 'kv_cache_engine_samples', 'timestamp < ?', [cutoffTimestamp]);
+  }
+
+  async deleteKvCacheEngineSamples(engineId: string): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+    await chunkedSqliteDelete(this.db, 'kv_cache_engine_samples', 'engine_id = ?', [engineId]);
+  }
+
+  async saveKvCacheEngine(e: StoredKvCacheEngine): Promise<StoredKvCacheEngine> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db
+      .prepare(
+        `INSERT INTO kv_cache_engines
+          (id, connection_id, name, source, scrape_url, scrape_auth_header, scrape_auth_encrypted,
+           otlp_engine_id, enabled, created_at, last_seen_at, last_error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           scrape_url = excluded.scrape_url,
+           scrape_auth_header = excluded.scrape_auth_header,
+           scrape_auth_encrypted = excluded.scrape_auth_encrypted,
+           otlp_engine_id = excluded.otlp_engine_id,
+           enabled = excluded.enabled,
+           last_seen_at = excluded.last_seen_at,
+           last_error = excluded.last_error
+         RETURNING *`,
+      )
+      .get(
+        e.id, e.connectionId, e.name, e.source, e.scrapeUrl, e.scrapeAuthHeader,
+        e.scrapeAuthEncrypted ? 1 : 0, e.otlpEngineId, e.enabled ? 1 : 0, e.createdAt,
+        e.lastSeenAt, e.lastError,
+      ) as Record<string, any>;
+    return this.kvCacheEngineFromRow(row);
+  }
+
+  async getKvCacheEngines(connectionId?: string): Promise<StoredKvCacheEngine[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = (connectionId === undefined
+      ? this.db.prepare('SELECT * FROM kv_cache_engines ORDER BY created_at ASC').all()
+      : this.db.prepare('SELECT * FROM kv_cache_engines WHERE connection_id = ? ORDER BY created_at ASC').all(connectionId)) as Record<string, any>[];
+    return rows.map((r) => this.kvCacheEngineFromRow(r));
+  }
+
+  async getKvCacheEngine(id: string): Promise<StoredKvCacheEngine | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare('SELECT * FROM kv_cache_engines WHERE id = ?').get(id) as Record<string, any> | undefined;
+    return row ? this.kvCacheEngineFromRow(row) : null;
+  }
+
+  async deleteKvCacheEngine(id: string): Promise<boolean> {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db.prepare('DELETE FROM kv_cache_engines WHERE id = ?').run(id).changes > 0;
+  }
+
+  async getKvCacheSettings(connectionId: string): Promise<KvCacheSettings | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare('SELECT * FROM kv_cache_settings WHERE connection_id = ?').get(connectionId) as Record<string, any> | undefined;
+    if (!row) return null;
+    return {
+      connectionId: row.connection_id,
+      hitRateAlertEnabled: row.hit_rate_alert_enabled === 1,
+      hitRateThreshold: row.hit_rate_threshold,
+      evictionAlertEnabled: row.eviction_alert_enabled === 1,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async saveKvCacheSettings(settings: KvCacheSettings): Promise<KvCacheSettings> {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db
+      .prepare(
+        `INSERT INTO kv_cache_settings (connection_id, hit_rate_alert_enabled, hit_rate_threshold, eviction_alert_enabled, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(connection_id) DO UPDATE SET
+           hit_rate_alert_enabled = excluded.hit_rate_alert_enabled,
+           hit_rate_threshold = excluded.hit_rate_threshold,
+           eviction_alert_enabled = excluded.eviction_alert_enabled,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        settings.connectionId,
+        settings.hitRateAlertEnabled ? 1 : 0,
+        settings.hitRateThreshold,
+        settings.evictionAlertEnabled ? 1 : 0,
+        settings.updatedAt,
+      );
+    return settings;
+  }
+
+  async deleteKvCacheConnectionData(connectionId: string): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+    for (const table of ['kv_cache_footprint_snapshots', 'kv_cache_engine_samples', 'kv_cache_engines', 'kv_cache_settings']) {
+      await chunkedSqliteDelete(this.db, table, 'connection_id = ?', [connectionId]);
+    }
+  }
+
   // Command Stats Sample Methods
   async saveCommandStatsSamples(
     samples: Omit<StoredCommandStatsSample, 'id' | 'connectionId'>[],
@@ -4007,7 +4769,22 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       }
     });
     transaction();
+    await this.maybeEnforceOtelSpanCapOnSave(spans.length);
     return count;
+  }
+
+  // Inserts since the cap was last checked on save. The time-based retention
+  // sweep is the primary bound, but between sweeps the public ingest route can
+  // still grow the table; checking on save every `check interval` inserts keeps
+  // the disk bound at ~cap regardless of the sweep interval, without paying a
+  // COUNT per request.
+  private otelSpansSinceCapCheck = 0;
+
+  private async maybeEnforceOtelSpanCapOnSave(inserted: number): Promise<void> {
+    this.otelSpansSinceCapCheck += inserted;
+    if (this.otelSpansSinceCapCheck < otelSpanCapCheckInterval()) return;
+    this.otelSpansSinceCapCheck = 0;
+    await this.enforceOtelSpanCap();
   }
 
   async getOtelTraces(options: OtelTraceQueryOptions): Promise<OtelTraceSummary[]> {
@@ -4100,9 +4877,11 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async pruneOldOtelSpans(cutoffTimestamp: number): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
-    // Prune whole traces (by trace-level start), not individual spans, so a long
-    // trace never loses its root/early spans while later ones survive.
-    // "MIN(start_time_ms) < c" is equivalent to "any span < c", so the
+    // Prune whole traces (never split one) by the server-stamped ingest time,
+    // NOT the sender-supplied start time: start_time_ms comes from the OTLP
+    // payload, so keying retention on it let a far-future value make spans
+    // permanently un-prunable (unbounded growth via the public ingest route).
+    // "MIN(ingested_at) < c" is equivalent to "any span < c", so the
     // index-driven DISTINCT probe replaces the full GROUP BY aggregate scan.
     //
     // Batched per TRACE, not per row: a generic rowid-chunked delete would
@@ -4115,12 +4894,62 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const TRACE_BATCH = 1_000;
     const deleteBatch = this.db.prepare(
       `DELETE FROM otel_spans WHERE trace_id IN (
-         SELECT DISTINCT trace_id FROM otel_spans WHERE start_time_ms < ? LIMIT ?
+         SELECT DISTINCT trace_id FROM otel_spans WHERE ingested_at < ? LIMIT ?
        )`,
     );
     let total = 0;
     for (;;) {
       const { changes } = deleteBatch.run(cutoffTimestamp, TRACE_BATCH);
+      if (changes === 0) break;
+      total += changes;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    total += await this.enforceOtelSpanCap();
+    return total;
+  }
+
+  /**
+   * Hard backstop for the public ingest route: time-based retention cannot
+   * bound the store within the window, so after the time prune, evict whole
+   * traces oldest-ingested-first until the span count is back under the cap.
+   * The GROUP BY probe only runs while the store is over the cap.
+   */
+  private async enforceOtelSpanCap(): Promise<number> {
+    if (!this.db) return 0;
+    const cap = otelSpanCap();
+    const lowWater = otelSpanLowWaterMark(cap);
+    const countStmt = this.db.prepare('SELECT COUNT(*) AS c FROM otel_spans');
+    // Find the ingested_at boundary that leaves ~lowWater newest spans, then
+    // evict whole traces that have any span at or below it. Both the boundary
+    // probe (an OFFSET walk) and the delete's inner filter ride
+    // idx_otel_ingested / idx_otel_trace, so a pass costs O(spans removed), not
+    // a full-table `GROUP BY trace_id ORDER BY MIN(ingested_at)` per batch — the
+    // old approach ran that aggregate scan ~once per 500 traces, which at a
+    // large OTEL_MAX_RETAINED_SPANS meant minutes of synchronous event-loop
+    // blocking. Draining to the low-water mark (not just back to the cap) keeps
+    // the amortized cost down under a sustained flood on the public route.
+    const boundaryStmt = this.db.prepare(
+      'SELECT ingested_at FROM otel_spans ORDER BY ingested_at ASC LIMIT 1 OFFSET ?',
+    );
+    const evictBatch = this.db.prepare(
+      `DELETE FROM otel_spans WHERE trace_id IN (
+         SELECT DISTINCT trace_id FROM otel_spans WHERE ingested_at <= ?
+       )`,
+    );
+    let total = 0;
+    for (;;) {
+      const count = (countStmt.get() as { c: number }).c;
+      if (count <= cap) break;
+      // Position of the first span to KEEP in ascending ingest order; `<=` on
+      // its ingest time removes the older ones plus any ties on the boundary
+      // value, so a flood that stamps many spans the same millisecond still
+      // makes progress (whole-trace eviction may overshoot the low-water mark —
+      // the price of never splitting a trace).
+      const boundary = boundaryStmt.get(count - lowWater) as
+        | { ingested_at: number }
+        | undefined;
+      if (boundary === undefined) break;
+      const { changes } = evictBatch.run(boundary.ingested_at);
       if (changes === 0) break;
       total += changes;
       await new Promise<void>((resolve) => setImmediate(resolve));

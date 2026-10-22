@@ -63,6 +63,9 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
   protected abstract readonly logger: Logger;
   private intervalHandle: NodeJS.Timeout | null = null;
   private polling = false;
+  // Permanent latch set by stop() (only ever reached via onModuleDestroy): once
+  // torn down, a deferred start() must stay suppressed — see start()/stop().
+  private stopped = false;
   private knownConnections = new Set<string>();
 
   constructor(protected readonly connectionRegistry: ConnectionRegistry) {}
@@ -124,6 +127,15 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
    * Call this in onModuleInit().
    */
   protected start(): void {
+    if (this.stopped) {
+      // onModuleDestroy already latched this poller shut. A start() deferred
+      // past teardown (e.g. a subclass's ensureValidated().finally(start)
+      // resolving after app.close() within its validation window) must NOT
+      // re-arm the timer chain — an unstoppable tick loop holds the event loop
+      // open and blocks a clean shutdown.
+      this.logger.debug('Poller already destroyed, ignoring start call');
+      return;
+    }
     if (this.intervalHandle) {
       this.logger.warn('Polling already started, ignoring duplicate start call');
       return;
@@ -153,6 +165,9 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
    * Called automatically on module destroy.
    */
   protected stop(): void {
+    // Latch before clearing: stop() is reached only from onModuleDestroy, so
+    // this permanently suppresses any start() that races teardown.
+    this.stopped = true;
     if (this.intervalHandle) {
       clearTimeout(this.intervalHandle);
       this.intervalHandle = null;

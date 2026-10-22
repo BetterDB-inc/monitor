@@ -1,5 +1,13 @@
 import { randomUUID } from 'crypto';
+import { KV_CACHE_SAMPLE_COUNTER_FIELDS } from './kv-cache-sample-columns';
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
+import {
+  approxOtelSpanBytes,
+  otelSpanByteCap,
+  otelSpanCap,
+  otelSpanLowWaterMark,
+  OTEL_SPAN_CAP_LOW_WATER_RATIO,
+} from '../otel-span-cap';
 import {
   StoragePort,
   StoredAclEntry,
@@ -19,7 +27,6 @@ import {
   KeyPatternQueryOptions,
   KeyAnalyticsSummary,
   AppSettings,
-  SettingsUpdateRequest,
   Webhook,
   WebhookDelivery,
   WebhookEventType,
@@ -84,6 +91,8 @@ import {
   MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS,
   memoryForgetTargetDiscriminator,
 } from '@betterdb/shared';
+import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
+import { clientAddrIp, foldClientAnalyticsStats, type ClientStatsGroup } from './client-analytics-stats';
 import { WebhookMemoryRepository } from './repositories/webhook.memory.repository';
 import { SlowLogMemoryRepository } from './repositories/slowlog.memory.repository';
 import { InvitationMemoryRepository } from './repositories/invitation.memory.repository';
@@ -94,12 +103,20 @@ import type { ActivityRepository } from '../../common/interfaces/activity-reposi
 import type {
   StoredScalingReadinessScore,
   ScalingReadinessScoreQuery,
+  StoredKvCacheEngine,
+  KvCacheRangeQuery,
+  KvCacheFootprintQuery,
+  KvCacheSampleQuery,
+  KvCacheSampleTotals,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   ReadinessBand,
   ReadinessDimension,
   ReadinessDimensionKey,
   ScalingReadinessSettings,
+  KvCacheEngineSample,
+  KvCacheFootprintSnapshot,
+  KvCacheSettings,
 } from '@betterdb/shared';
 
 const NULL_SUB_DISCRIMINATOR = '__betterdb_null__';
@@ -122,6 +139,8 @@ function pendingProposalSubDiscriminator(
 export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   private aclEntries: StoredAclEntry[] = [];
   private clientSnapshots: StoredClientSnapshot[] = [];
+  /** Keyed by `${connectionId}:${bucketStart}`. */
+  private clientAnalyticsRollups: Map<string, ClientAnalyticsRollup> = new Map();
   private anomalyEvents: StoredAnomalyEvent[] = [];
   private bulkDeleteAudits: StoredBulkDeleteAudit[] = [];
   private correlatedGroups: StoredCorrelatedGroup[] = [];
@@ -153,6 +172,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   async close(): Promise<void> {
     this.aclEntries = [];
     this.clientSnapshots = [];
+    this.clientAnalyticsRollups.clear();
     this.ready = false;
   }
 
@@ -381,7 +401,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       if (client.user) {
         point.byUser[client.user] = (point.byUser[client.user] || 0) + 1;
       }
-      const ip = client.addr.split(':')[0];
+      const ip = clientAddrIp(client.addr);
       point.byAddr[ip] = (point.byAddr[ip] || 0) + 1;
     }
 
@@ -393,162 +413,25 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     endTime?: number,
     connectionId?: string,
   ): Promise<ClientAnalyticsStats> {
-    let filtered = [...this.clientSnapshots];
-
-    if (connectionId) {
-      filtered = filtered.filter((c) => c.connectionId === connectionId);
-    }
-
-    if (startTime) {
-      filtered = filtered.filter((c) => c.capturedAt >= startTime);
-    }
-
-    if (endTime) {
-      filtered = filtered.filter((c) => c.capturedAt <= endTime);
-    }
-
-    const latestTimestamp =
-      filtered.length > 0 ? Math.max(...filtered.map((c) => c.capturedAt)) : 0;
-    const currentClients = filtered.filter((c) => c.capturedAt === latestTimestamp);
-
-    // Group by captured_at to find peak
-    const byTimestamp = new Map<number, number>();
-    for (const client of filtered) {
-      byTimestamp.set(client.capturedAt, (byTimestamp.get(client.capturedAt) || 0) + 1);
-    }
-
-    let peakConnections = 0;
-    let peakTimestamp = 0;
-    for (const [timestamp, count] of byTimestamp.entries()) {
-      if (count > peakConnections) {
-        peakConnections = count;
-        peakTimestamp = timestamp;
+    const groups = new Map<string, ClientStatsGroup>();
+    const ips = new Set<string>();
+    for (const c of this.clientSnapshots) {
+      if (connectionId && c.connectionId !== connectionId) continue;
+      if (startTime && c.capturedAt < startTime) continue;
+      if (endTime && c.capturedAt > endTime) continue;
+      const name = c.name || '';
+      const user = c.user || '';
+      const key = JSON.stringify([c.capturedAt, user, name]);
+      let group = groups.get(key);
+      if (!group) {
+        group = { capturedAt: c.capturedAt, name, user, count: 0, ageSum: 0 };
+        groups.set(key, group);
       }
+      group.count += 1;
+      group.ageSum += c.age;
+      ips.add(clientAddrIp(c.addr));
     }
-
-    const uniqueNames = new Set(filtered.map((c) => c.name).filter((n) => n));
-    const uniqueUsers = new Set(filtered.map((c) => c.user).filter((u) => u));
-    const uniqueIps = new Set(filtered.map((c) => c.addr.split(':')[0]));
-
-    // Connections by name
-    const connectionsByName: Record<string, { current: number; peak: number; avgAge: number }> = {};
-    const byName = new Map<string, StoredClientSnapshot[]>();
-    for (const client of filtered) {
-      if (client.name) {
-        if (!byName.has(client.name)) {
-          byName.set(client.name, []);
-        }
-        byName.get(client.name)!.push(client);
-      }
-    }
-
-    for (const [name, clients] of byName.entries()) {
-      const currentCount = currentClients.filter((c) => c.name === name).length;
-      const byTimestampForName = new Map<number, number>();
-      for (const client of clients) {
-        byTimestampForName.set(
-          client.capturedAt,
-          (byTimestampForName.get(client.capturedAt) || 0) + 1,
-        );
-      }
-      const peakForName = Math.max(...Array.from(byTimestampForName.values()));
-      const avgAge = clients.reduce((sum, c) => sum + c.age, 0) / clients.length;
-
-      connectionsByName[name] = {
-        current: currentCount,
-        peak: peakForName,
-        avgAge,
-      };
-    }
-
-    // Connections by user
-    const connectionsByUser: Record<string, { current: number; peak: number }> = {};
-    const byUser = new Map<string, StoredClientSnapshot[]>();
-    for (const client of filtered) {
-      if (client.user) {
-        if (!byUser.has(client.user)) {
-          byUser.set(client.user, []);
-        }
-        byUser.get(client.user)!.push(client);
-      }
-    }
-
-    for (const [user, clients] of byUser.entries()) {
-      const currentCount = currentClients.filter((c) => c.user === user).length;
-      const byTimestampForUser = new Map<number, number>();
-      for (const client of clients) {
-        byTimestampForUser.set(
-          client.capturedAt,
-          (byTimestampForUser.get(client.capturedAt) || 0) + 1,
-        );
-      }
-      const peakForUser = Math.max(...Array.from(byTimestampForUser.values()));
-
-      connectionsByUser[user] = {
-        current: currentCount,
-        peak: peakForUser,
-      };
-    }
-
-    // Connections by user and name
-    const connectionsByUserAndName: Record<
-      string,
-      { user: string; name: string; current: number; peak: number; avgAge: number }
-    > = {};
-    const byUserAndName = new Map<string, StoredClientSnapshot[]>();
-    for (const client of filtered) {
-      if (client.user && client.name) {
-        const key = `${client.user}:${client.name}`;
-        if (!byUserAndName.has(key)) {
-          byUserAndName.set(key, []);
-        }
-        byUserAndName.get(key)!.push(client);
-      }
-    }
-
-    for (const [key, clients] of byUserAndName.entries()) {
-      const [user, name] = key.split(':');
-      const currentCount = currentClients.filter((c) => c.user === user && c.name === name).length;
-      const byTimestampForCombined = new Map<number, number>();
-      for (const client of clients) {
-        byTimestampForCombined.set(
-          client.capturedAt,
-          (byTimestampForCombined.get(client.capturedAt) || 0) + 1,
-        );
-      }
-      const peakForCombined = Math.max(...Array.from(byTimestampForCombined.values()));
-      const avgAge = clients.reduce((sum, c) => sum + c.age, 0) / clients.length;
-
-      connectionsByUserAndName[key] = {
-        user,
-        name,
-        current: currentCount,
-        peak: peakForCombined,
-        avgAge,
-      };
-    }
-
-    let timeRange = null;
-    if (filtered.length > 0) {
-      const timestamps = filtered.map((c) => c.capturedAt).sort((a, b) => a - b);
-      timeRange = {
-        earliest: timestamps[0],
-        latest: timestamps[timestamps.length - 1],
-      };
-    }
-
-    return {
-      currentConnections: currentClients.length,
-      peakConnections,
-      peakTimestamp,
-      uniqueClientNames: uniqueNames.size,
-      uniqueUsers: uniqueUsers.size,
-      uniqueIps: uniqueIps.size,
-      connectionsByName,
-      connectionsByUser,
-      connectionsByUserAndName,
-      timeRange,
-    };
+    return foldClientAnalyticsStats(groups.values(), ips.size);
   }
 
   async getClientConnectionHistory(
@@ -600,6 +483,139 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       this.clientSnapshots = this.clientSnapshots.filter((c) => c.capturedAt >= olderThanTimestamp);
     }
     return before - this.clientSnapshots.length;
+  }
+
+  async getClientSnapshotBounds(
+    connectionId: string,
+  ): Promise<{ earliest: number; latest: number } | null> {
+    let earliest = Infinity;
+    let latest = -Infinity;
+    for (const c of this.clientSnapshots) {
+      if (c.connectionId !== connectionId) continue;
+      if (c.capturedAt < earliest) earliest = c.capturedAt;
+      if (c.capturedAt > latest) latest = c.capturedAt;
+    }
+    return earliest === Infinity ? null : { earliest, latest };
+  }
+
+  async getClientSnapshotNextCapturedAt(connectionId: string, afterExclusive: number): Promise<number | null> {
+    let next = Infinity;
+    for (const c of this.clientSnapshots) {
+      if (c.connectionId === connectionId && c.capturedAt > afterExclusive && c.capturedAt < next) {
+        next = c.capturedAt;
+      }
+    }
+    return next === Infinity ? null : next;
+  }
+
+  async getClientSnapshotGroups(
+    connectionId: string,
+    startExclusive: number,
+    endInclusive: number,
+  ): Promise<ClientSnapshotGroupRow[]> {
+    const groups = new Map<string, ClientSnapshotGroupRow>();
+    for (const c of this.clientSnapshots) {
+      if (c.connectionId !== connectionId) continue;
+      if (c.capturedAt <= startExclusive || c.capturedAt > endInclusive) continue;
+      const name = c.name || '';
+      const user = c.user || '';
+      const ip = clientAddrIp(c.addr);
+      const key = JSON.stringify([c.capturedAt, name, user, ip]);
+      let group = groups.get(key);
+      if (!group) {
+        group = { capturedAt: c.capturedAt, name, user, ip, count: 0, ageSum: 0 };
+        groups.set(key, group);
+      }
+      group.count += 1;
+      group.ageSum += c.age;
+    }
+    const cmp = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0);
+    return Array.from(groups.values()).sort(
+      (a, b) =>
+        a.capturedAt - b.capturedAt || cmp(a.name, b.name) || cmp(a.user, b.user) || cmp(a.ip, b.ip),
+    );
+  }
+
+  async upsertClientAnalyticsRollups(rollups: ClientAnalyticsRollup[]): Promise<void> {
+    for (const rollup of rollups) {
+      this.clientAnalyticsRollups.set(
+        `${rollup.connectionId}:${rollup.bucketStart}`,
+        structuredClone(rollup),
+      );
+    }
+  }
+
+  async getClientAnalyticsRollups(
+    startBucket: number,
+    endBucket: number,
+    connectionId?: string,
+  ): Promise<ClientAnalyticsRollup[]> {
+    const result: ClientAnalyticsRollup[] = [];
+    for (const rollup of this.clientAnalyticsRollups.values()) {
+      if (connectionId && rollup.connectionId !== connectionId) continue;
+      if (rollup.bucketStart < startBucket || rollup.bucketStart > endBucket) continue;
+      result.push(structuredClone(rollup));
+    }
+    return result.sort(
+      (a, b) =>
+        a.bucketStart - b.bucketStart ||
+        (a.connectionId < b.connectionId ? -1 : a.connectionId > b.connectionId ? 1 : 0),
+    );
+  }
+
+  async getClientAnalyticsRollupWatermark(connectionId: string): Promise<number | null> {
+    let max: number | null = null;
+    for (const rollup of this.clientAnalyticsRollups.values()) {
+      if (rollup.connectionId !== connectionId) continue;
+      if (max === null || rollup.lastCapturedAt > max) max = rollup.lastCapturedAt;
+    }
+    return max;
+  }
+
+  async getClientAnalyticsRollupFloor(connectionId: string): Promise<number | null> {
+    let min: number | null = null;
+    for (const rollup of this.clientAnalyticsRollups.values()) {
+      if (rollup.connectionId !== connectionId) continue;
+      if (min === null || rollup.bucketStart < min) min = rollup.bucketStart;
+    }
+    return min;
+  }
+
+  async getClientAnalyticsRollupPeak(
+    connectionId: string,
+    sinceBucket: number,
+  ): Promise<{ peak: number; capturedAt: number } | null> {
+    let best: { peak: number; capturedAt: number } | null = null;
+    for (const rollup of this.clientAnalyticsRollups.values()) {
+      if (rollup.connectionId !== connectionId || rollup.bucketStart < sinceBucket) continue;
+      if (
+        best === null ||
+        rollup.peakConnections > best.peak ||
+        (rollup.peakConnections === best.peak && rollup.peakCapturedAt < best.capturedAt)
+      ) {
+        best = { peak: rollup.peakConnections, capturedAt: rollup.peakCapturedAt };
+      }
+    }
+    return best;
+  }
+
+  async pruneOldClientAnalyticsRollups(
+    olderThanBucketStart: number,
+    connectionId?: string,
+  ): Promise<number> {
+    let deleted = 0;
+    for (const [key, rollup] of this.clientAnalyticsRollups) {
+      if (connectionId && rollup.connectionId !== connectionId) continue;
+      if (rollup.bucketStart < olderThanBucketStart) {
+        this.clientAnalyticsRollups.delete(key);
+        deleted++;
+      }
+    }
+    return deleted;
+  }
+
+  async isClientSnapshotIndexReady(): Promise<boolean> {
+    return true;
   }
 
   async saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string> {
@@ -800,12 +816,22 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return 0;
   }
 
+  async getKeyAnalyticsDatabases(_connectionId?: string): Promise<number[]> {
+    // Nothing is ever stored here, so no databases have analytics data.
+    return [];
+  }
+
   async saveHotKeys(_entries: HotKeyEntry[], _connectionId: string): Promise<number> {
     throw new Error('Hot key stats not supported in memory adapter');
   }
 
   async getHotKeys(_options?: HotKeyQueryOptions): Promise<HotKeyEntry[]> {
     throw new Error('Hot key stats not supported in memory adapter');
+  }
+
+  async getHotKeyDatabases(_connectionId?: string): Promise<number[]> {
+    // Nothing is ever stored here, so no databases have hot-key data.
+    return [];
   }
 
   async pruneOldHotKeys(_cutoffTimestamp: number, _connectionId?: string): Promise<number> {
@@ -830,7 +856,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return { ...this.settings };
   }
 
-  async updateSettings(updates: SettingsUpdateRequest): Promise<AppSettings> {
+  async updateSettings(updates: Partial<AppSettings>): Promise<AppSettings> {
     if (!this.settings) {
       throw new Error('Settings not found. Initialize settings first.');
     }
@@ -865,6 +891,9 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
     if (updates.inferenceSlaConfig !== undefined) {
       validUpdates.inferenceSlaConfig = updates.inferenceSlaConfig;
+    }
+    if (updates.anomalyDetectorConfig !== undefined) {
+      validUpdates.anomalyDetectorConfig = updates.anomalyDetectorConfig;
     }
     if (updates.localRetentionDays !== undefined) {
       validUpdates.localRetentionDays = updates.localRetentionDays;
@@ -1208,6 +1237,145 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return settings;
   }
 
+  private kvCacheSnapshots: KvCacheFootprintSnapshot[] = [];
+  private kvCacheSamples: KvCacheEngineSample[] = [];
+  private kvCacheEngines = new Map<string, StoredKvCacheEngine>();
+  private kvCacheSettings = new Map<string, KvCacheSettings>();
+
+  private inKvCacheRange(row: { connectionId: string; timestamp: number }, query: KvCacheRangeQuery): boolean {
+    return (
+      row.connectionId === query.connectionId &&
+      (query.from === undefined || row.timestamp >= query.from) &&
+      (query.to === undefined || row.timestamp <= query.to)
+    );
+  }
+
+  async saveKvCacheFootprintSnapshot(snapshot: KvCacheFootprintSnapshot): Promise<void> {
+    this.kvCacheSnapshots.push(structuredClone(snapshot));
+  }
+
+  async getKvCacheFootprintSnapshots(query: KvCacheFootprintQuery): Promise<KvCacheFootprintSnapshot[]> {
+    const rows = this.kvCacheSnapshots
+      .filter((r) => this.inKvCacheRange(r, query))
+      .sort((a, b) => a.timestamp - b.timestamp);
+    const bucketMs = query.bucketMs;
+    const bucketed = bucketMs
+      ? [
+          ...new Map(rows.map((r) => [Math.floor((r.timestamp - (query.from ?? 0)) / bucketMs), r])).values(),
+        ]
+      : rows;
+    return bucketed.slice(-(query.limit ?? 2000)).map((r) => structuredClone(r));
+  }
+
+  async pruneOldKvCacheFootprintSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    const before = this.kvCacheSnapshots.length;
+    this.kvCacheSnapshots = this.kvCacheSnapshots.filter(
+      (r) => r.timestamp >= cutoffTimestamp || (connectionId !== undefined && r.connectionId !== connectionId),
+    );
+    return before - this.kvCacheSnapshots.length;
+  }
+
+  async saveKvCacheEngineSamples(samples: KvCacheEngineSample[]): Promise<void> {
+    this.kvCacheSamples.push(...samples.map((s) => ({ ...s })));
+  }
+
+  async getKvCacheEngineSamples(query: KvCacheSampleQuery): Promise<KvCacheEngineSample[]> {
+    const rows = query.bucketMs
+      ? this.bucketKvCacheSamples(this.matchingKvCacheSamples(query), Math.ceil(query.bucketMs))
+      : this.matchingKvCacheSamples(query).sort((a, b) => a.timestamp - b.timestamp);
+    return rows.slice(-(query.limit ?? 50_000)).map((r) => ({ ...r }));
+  }
+
+  private bucketKvCacheSamples(rows: KvCacheEngineSample[], bucketMs: number): KvCacheEngineSample[] {
+    const buckets = new Map<string, KvCacheEngineSample>();
+    for (const row of rows) {
+      const timestamp = Math.floor(row.timestamp / bucketMs) * bucketMs;
+      const key = JSON.stringify([row.engineId, row.connectionId, row.modelName, timestamp]);
+      const bucket = buckets.get(key);
+      if (!bucket) {
+        buckets.set(key, { ...row, timestamp });
+        continue;
+      }
+      for (const field of KV_CACHE_SAMPLE_COUNTER_FIELDS) bucket[field] += row[field];
+    }
+    const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+    return [...buckets.values()].sort(
+      (a, b) => a.timestamp - b.timestamp || compare(a.engineId, b.engineId) || compare(a.modelName, b.modelName),
+    );
+  }
+
+  async getKvCacheSampleTotals(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): Promise<KvCacheSampleTotals> {
+    return this.matchingKvCacheSamples(query).reduce(
+      (totals, r) => ({ requestedTokens: totals.requestedTokens + r.requestedTokens, hitTokens: totals.hitTokens + r.hitTokens }),
+      { requestedTokens: 0, hitTokens: 0 },
+    );
+  }
+
+  private matchingKvCacheSamples(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): KvCacheEngineSample[] {
+    return this.kvCacheSamples.filter(
+      (r) =>
+        this.inKvCacheRange(r, query) &&
+        (query.engineId === undefined || r.engineId === query.engineId) &&
+        (query.modelName === undefined || r.modelName === query.modelName),
+    );
+  }
+
+  async pruneOldKvCacheEngineSamples(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    const before = this.kvCacheSamples.length;
+    this.kvCacheSamples = this.kvCacheSamples.filter(
+      (r) => r.timestamp >= cutoffTimestamp || (connectionId !== undefined && r.connectionId !== connectionId),
+    );
+    return before - this.kvCacheSamples.length;
+  }
+
+  async deleteKvCacheEngineSamples(engineId: string): Promise<void> {
+    this.kvCacheSamples = this.kvCacheSamples.filter((r) => r.engineId !== engineId);
+  }
+
+  async saveKvCacheEngine(engine: StoredKvCacheEngine): Promise<StoredKvCacheEngine> {
+    const existing = this.kvCacheEngines.get(engine.id);
+    const stored = existing
+      ? { ...engine, connectionId: existing.connectionId, source: existing.source, createdAt: existing.createdAt }
+      : { ...engine };
+    this.kvCacheEngines.set(engine.id, stored);
+    return { ...stored };
+  }
+
+  async getKvCacheEngines(connectionId?: string): Promise<StoredKvCacheEngine[]> {
+    return [...this.kvCacheEngines.values()]
+      .filter((e) => connectionId === undefined || e.connectionId === connectionId)
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((e) => ({ ...e }));
+  }
+
+  async getKvCacheEngine(id: string): Promise<StoredKvCacheEngine | null> {
+    const engine = this.kvCacheEngines.get(id);
+    return engine ? { ...engine } : null;
+  }
+
+  async deleteKvCacheEngine(id: string): Promise<boolean> {
+    return this.kvCacheEngines.delete(id);
+  }
+
+  async getKvCacheSettings(connectionId: string): Promise<KvCacheSettings | null> {
+    const settings = this.kvCacheSettings.get(connectionId);
+    return settings ? { ...settings } : null;
+  }
+
+  async saveKvCacheSettings(settings: KvCacheSettings): Promise<KvCacheSettings> {
+    this.kvCacheSettings.set(settings.connectionId, { ...settings });
+    return settings;
+  }
+
+  async deleteKvCacheConnectionData(connectionId: string): Promise<void> {
+    this.kvCacheSnapshots = this.kvCacheSnapshots.filter((r) => r.connectionId !== connectionId);
+    this.kvCacheSamples = this.kvCacheSamples.filter((r) => r.connectionId !== connectionId);
+    for (const [id, engine] of this.kvCacheEngines) {
+      if (engine.connectionId === connectionId) this.kvCacheEngines.delete(id);
+    }
+    this.kvCacheSettings.delete(connectionId);
+  }
+
   // Command Stats Sample Methods
   private commandStatsSamples: StoredCommandStatsSample[] = [];
 
@@ -1385,17 +1553,75 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   // OTLP Trace Methods
-  private otelSpans: StoredOtelSpan[] = [];
+  // Keyed by `${traceId}:${spanId}` so a save is an O(1) upsert. The previous
+  // array + findIndex per span was O(n) per insert, which let an anonymous
+  // flood on the public ingest route degrade the event loop as the store grew.
+  private otelSpans = new Map<string, StoredOtelSpan>();
+  // Running approxOtelSpanBytes total of the store, for the byte budget. Kept
+  // in step by setOtelSpan / deleteOtelSpan — every mutation goes through them.
+  private otelSpanBytes = 0;
+
+  private setOtelSpan(s: StoredOtelSpan): void {
+    const key = `${s.traceId}:${s.spanId}`;
+    const prev = this.otelSpans.get(key);
+    if (prev) this.otelSpanBytes -= approxOtelSpanBytes(prev);
+    this.otelSpans.set(key, s);
+    this.otelSpanBytes += approxOtelSpanBytes(s);
+  }
+
+  private deleteOtelSpan(key: string, s: StoredOtelSpan): void {
+    if (this.otelSpans.delete(key)) this.otelSpanBytes -= approxOtelSpanBytes(s);
+  }
 
   async saveOtelSpans(spans: StoredOtelSpan[]): Promise<number> {
     for (const s of spans) {
-      const idx = this.otelSpans.findIndex(
-        (e) => e.traceId === s.traceId && e.spanId === s.spanId,
-      );
-      if (idx >= 0) this.otelSpans[idx] = s;
-      else this.otelSpans.push(s);
+      this.setOtelSpan(s);
     }
+    this.enforceOtelSpanCap();
     return spans.length;
+  }
+
+  /**
+   * Hard backstop for the public ingest route: when the store exceeds the
+   * cap, evict whole traces oldest-ingested-first down to the low-water mark.
+   * Whole traces, never individual spans, so the cap keeps the same no-split
+   * invariant as pruneOldOtelSpans. Draining to the low-water mark (not just
+   * back to the cap) is what keeps this O(n log n) pass off the event loop on
+   * every save once the store sits at the cap under a sustained flood.
+   *
+   * The same pass enforces the byte budget (otelSpanByteCap): the store holds
+   * everything on the heap, so a flood of max-size spans must not OOM the
+   * process before the count cap is reached. Eviction drains until both the
+   * count and the bytes are at their low-water marks.
+   */
+  private enforceOtelSpanCap(): void {
+    const cap = otelSpanCap();
+    const byteCap = otelSpanByteCap();
+    if (this.otelSpans.size <= cap && this.otelSpanBytes <= byteCap) return;
+    const lowWater = otelSpanLowWaterMark(cap);
+    const byteLowWater = Math.floor(byteCap * OTEL_SPAN_CAP_LOW_WATER_RATIO);
+    const minIngestByTrace = new Map<string, number>();
+    const spanCountByTrace = new Map<string, number>();
+    const bytesByTrace = new Map<string, number>();
+    for (const s of this.otelSpans.values()) {
+      const cur = minIngestByTrace.get(s.traceId);
+      if (cur === undefined || s.ingestedAt < cur) minIngestByTrace.set(s.traceId, s.ingestedAt);
+      spanCountByTrace.set(s.traceId, (spanCountByTrace.get(s.traceId) ?? 0) + 1);
+      bytesByTrace.set(s.traceId, (bytesByTrace.get(s.traceId) ?? 0) + approxOtelSpanBytes(s));
+    }
+    const oldestFirst = [...minIngestByTrace.entries()].sort((a, b) => a[1] - b[1]);
+    const evict = new Set<string>();
+    let remaining = this.otelSpans.size;
+    let remainingBytes = this.otelSpanBytes;
+    for (const [traceId] of oldestFirst) {
+      if (remaining <= lowWater && remainingBytes <= byteLowWater) break;
+      evict.add(traceId);
+      remaining -= spanCountByTrace.get(traceId) ?? 0;
+      remainingBytes -= bytesByTrace.get(traceId) ?? 0;
+    }
+    for (const [key, s] of this.otelSpans) {
+      if (evict.has(s.traceId)) this.deleteOtelSpan(key, s);
+    }
   }
 
   async getOtelTraces(options: OtelTraceQueryOptions): Promise<OtelTraceSummary[]> {
@@ -1403,8 +1629,13 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     // trace-level start / service — so a boundary trace still gets a complete
     // summary (span count, root, duration) rather than a partial one.
     const byTrace = new Map<string, StoredOtelSpan[]>();
-    for (const s of this.otelSpans) {
-      byTrace.set(s.traceId, [...(byTrace.get(s.traceId) ?? []), s]);
+    for (const s of this.otelSpans.values()) {
+      // Push into the existing array; spreading it per span is O(n^2) in the
+      // trace's span count, so a single large trace (within the cap) froze the
+      // UI on every listing.
+      const spans = byTrace.get(s.traceId);
+      if (spans) spans.push(s);
+      else byTrace.set(s.traceId, [s]);
     }
     const summaries: OtelTraceSummary[] = [];
     for (const [traceId, spans] of byTrace) {
@@ -1434,7 +1665,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   async getOtelTraceSpans(traceId: string): Promise<StoredOtelSpan[]> {
-    return this.otelSpans
+    return [...this.otelSpans.values()]
       .filter((s) => s.traceId === traceId)
       .sort(
         (a, b) =>
@@ -1444,18 +1675,24 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   async pruneOldOtelSpans(cutoffTimestamp: number): Promise<number> {
-    // Prune whole traces (by trace-level start), not individual spans, so a long
-    // trace never loses its root/early spans while later ones survive.
-    const minStartByTrace = new Map<string, number>();
-    for (const s of this.otelSpans) {
-      const cur = minStartByTrace.get(s.traceId);
-      if (cur === undefined || s.startTimeMs < cur) minStartByTrace.set(s.traceId, s.startTimeMs);
+    // Prune whole traces (never split one) by the server-stamped ingest time,
+    // NOT the sender-supplied start time: startTimeMs comes from the OTLP
+    // payload, so keying retention on it let a far-future value make spans
+    // permanently un-prunable (unbounded growth via the public ingest route).
+    // A trace ages out a fixed window after its first span was received;
+    // later spans cannot extend it.
+    const minIngestByTrace = new Map<string, number>();
+    for (const s of this.otelSpans.values()) {
+      const cur = minIngestByTrace.get(s.traceId);
+      if (cur === undefined || s.ingestedAt < cur) minIngestByTrace.set(s.traceId, s.ingestedAt);
     }
-    const before = this.otelSpans.length;
-    this.otelSpans = this.otelSpans.filter(
-      (s) => (minStartByTrace.get(s.traceId) ?? s.startTimeMs) >= cutoffTimestamp,
-    );
-    return before - this.otelSpans.length;
+    const before = this.otelSpans.size;
+    for (const [key, s] of this.otelSpans) {
+      if ((minIngestByTrace.get(s.traceId) ?? s.ingestedAt) < cutoffTimestamp) {
+        this.deleteOtelSpan(key, s);
+      }
+    }
+    return before - this.otelSpans.size;
   }
 
   // Vector Index Snapshot Methods
