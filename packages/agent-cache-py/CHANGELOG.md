@@ -19,7 +19,7 @@
   the Vercel AI SDK `wrapStream` streaming cache added to `@betterdb/agent-cache`
   in v0.11.0.
 
-### Behavior
+### Changed
 
 - Only fully completed streams are stored: `response.incomplete` /
   `response.failed`, upstream errors, cancelled streams, and streams the
@@ -32,7 +32,7 @@
   an entry and replays it intact.
 - Store runs after the stream is fully delivered; failures log a warning and
   never surface to the caller.
-- Responses with no text output (e.g. reasoning-only) are not stored.
+- Responses with neither text nor a tool call (e.g. reasoning-only) are not stored, on either path.
 - The upstream stream is closed as soon as the consumer stops (break,
   `aclose()`, cancellation), not left to garbage collection.
 - If `response.completed` arrives with an empty `output`, the items streamed
@@ -49,6 +49,12 @@
   model, so provider retry-after advice is preserved on both the streaming and
   non-streaming paths.
   `CachedModelProvider` was unaffected.
+- `get_response()` no longer stores responses with neither text nor a tool call
+  (e.g. reasoning-only or empty text), which previously cached `contentBlocks=[]`
+  and made later hits, streamed or not, replay an empty answer. Both paths now
+  share one store gate, and an existing entry with no answer is treated as a
+  miss and overwritten. Tool-call entries from `get_response()` (#149) are
+  unaffected.
 
 ## [0.11.0] - 2026-07-10
 

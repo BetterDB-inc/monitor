@@ -322,7 +322,7 @@ cache_params = await prepare_params(responses_params, opts)
 
 ### OpenAI Agents SDK
 
-Caches at the Agents SDK `Model.get_response()` level, so agent runs that replay the same tool-call sequences (evaluation, testing, multi-agent orchestration) skip the API. Requires `pip install "betterdb-agent-cache[openai_agents]"`.
+Caches at the Agents SDK `Model.get_response()` and `Model.stream_response()` level (both share one cache key), so agent runs that replay the same tool-call sequences (evaluation, testing, multi-agent orchestration) skip the API. Requires `pip install "betterdb-agent-cache[openai_agents]"`.
 
 Wrap the model provider (recommended) so every model an agent run resolves is cache-enabled:
 
@@ -364,7 +364,7 @@ tool calls, and a streamed request can hit those entries.
 
 A replayed stream has the same event shape as a live one, carries
 `response.id = None` (same as a non-streamed hit) and counts zero requests in
-`usage`. Responses with no text output are not stored, and the upstream stream
+`usage`. Responses with neither text nor a tool call (e.g. reasoning-only) are not stored on either path, and an existing entry with no answer is treated as a miss. The upstream stream
 is closed as soon as the consumer stops reading.
 
 ### Anthropic
