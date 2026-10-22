@@ -66,6 +66,27 @@ describe('scanSessions', () => {
     expect(nodes.every((n) => n.disconnected)).toBe(true);
   });
 
+  it('sets truncated when the last page holds more keys than the cap', async () => {
+    const client = new FakeValkey();
+    client.scanPages = [keyRange(0, 3)];
+    for (const key of client.scanPages[0]) client.store.set(key, { type: 'string' });
+
+    const result = await scanSessions(fakeDb(client), 's:*', preset, { keyCap: 2 });
+
+    expect(result.scannedKeys).toBe(2);
+    expect(result.truncated).toBe(true);
+  });
+
+  it('is not truncated when the last page fills the cap exactly', async () => {
+    const client = new FakeValkey();
+    client.scanPages = [keyRange(0, 2)];
+    for (const key of client.scanPages[0]) client.store.set(key, { type: 'string' });
+
+    const result = await scanSessions(fakeDb(client), 's:*', preset, { keyCap: 2 });
+
+    expect(result.truncated).toBe(false);
+  });
+
   it('is not truncated when the scan completes under the cap', async () => {
     const client = new FakeValkey(storeOf({ 's:a:1': { type: 'string' } }));
     const result = await scanSessions(fakeDb(client), 's:*', preset);

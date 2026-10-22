@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import type { CapturedKey, SessionNamespace } from '@betterdb/shared';
 import { SessionExplorerService } from '../session-explorer.service';
 import { keysForSession, scanSessions } from '../session-scanner';
@@ -106,6 +106,20 @@ describe('SessionExplorerService.getSession', () => {
     read.mockResolvedValue({ keys: [], truncated: false, failedNodes: 0, missingKeys: 1 });
     await expect(service.getSession('conn-1', 'ns-1', 'lc:1')).rejects.toBeInstanceOf(
       NotFoundException,
+    );
+  });
+
+  it('answers unavailable when no keys were found and a primary failed', async () => {
+    keysFor.mockResolvedValue({ keys: [], truncated: false, failedNodes: 1 });
+    await expect(service.getSession('conn-1', 'ns-1', 'lc:1')).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
+
+  it('answers unavailable when no key was read and a primary failed', async () => {
+    read.mockResolvedValue({ keys: [], truncated: false, failedNodes: 1, missingKeys: 1 });
+    await expect(service.getSession('conn-1', 'ns-1', 'lc:1')).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
     );
   });
 

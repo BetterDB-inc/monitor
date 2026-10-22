@@ -1,5 +1,11 @@
 import { randomUUID } from 'crypto';
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import type {
   CapturedKey,
   SessionDetail,
@@ -20,6 +26,11 @@ import { keysForSession, scanSessions } from './session-scanner';
 import { readSessionKeys } from './session-reader';
 
 const PREVIEW_SCAN_COUNT = 1000;
+
+const sessionMissing = (failedNodes: number) =>
+  failedNodes > 0
+    ? new ServiceUnavailableException('Session keys may live on primaries that could not be read')
+    : new NotFoundException('Session not found');
 
 export interface SessionCapture {
   namespace: SessionNamespace;
@@ -124,9 +135,9 @@ export class SessionExplorerService {
     const preset = this.presetOf(namespace);
     const db = this.registry.get(connectionId);
     const scan = await keysForSession(db, namespace.pattern, preset, sessionId);
-    if (scan.keys.length === 0) throw new NotFoundException('Session not found');
+    if (scan.keys.length === 0) throw sessionMissing(scan.failedNodes);
     const read = await readSessionKeys(db, scan.keys);
-    if (read.keys.length === 0) throw new NotFoundException('Session not found');
+    if (read.keys.length === 0) throw sessionMissing(read.failedNodes);
 
     const views = read.keys.map((k) => preset.parseKey(k));
     const messages = preset.mergeSession(views);

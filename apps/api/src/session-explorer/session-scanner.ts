@@ -51,15 +51,20 @@ async function scanNode(
 ): Promise<ScanOutcome> {
   const seen = new Set<string>();
   let cursor = '0';
+  let overflowed = false;
   do {
     const [next, page] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', SCAN_COUNT);
     cursor = next;
     for (const key of page) {
-      if (seen.size >= limit) break;
-      if (accept(key)) seen.add(key);
+      if (!accept(key) || seen.has(key)) continue;
+      if (seen.size >= limit) {
+        overflowed = true;
+        break;
+      }
+      seen.add(key);
     }
   } while (cursor !== '0' && seen.size < limit);
-  return { keys: [...seen], exhausted: cursor === '0' };
+  return { keys: [...seen], exhausted: cursor === '0' && !overflowed };
 }
 
 async function scanAll(
