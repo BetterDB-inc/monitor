@@ -102,9 +102,15 @@ describe('SessionExplorerService.getSession', () => {
     read.mockResolvedValue({ keys: [captured()], truncated: false, failedNodes: 1, missingKeys: 1 });
     expect(await service.getSession('conn-1', 'ns-1', 'lc:1')).toMatchObject({
       complete: false,
-      failedNodes: 2,
+      failedNodes: 1,
       missingKeys: 1,
     });
+  });
+
+  it('counts a node that failed both the scan and the read once', async () => {
+    keysFor.mockResolvedValue({ keys: ['lc:1'], truncated: false, failedNodes: 2 });
+    read.mockResolvedValue({ keys: [captured()], truncated: false, failedNodes: 1, missingKeys: 0 });
+    expect(await service.getSession('conn-1', 'ns-1', 'lc:1')).toMatchObject({ failedNodes: 2 });
   });
 
   it('answers not found when every key vanished before the read', async () => {

@@ -151,7 +151,7 @@ export class SessionExplorerService {
     const messages = preset.mergeSession(views);
     const unparsedKeys = views.filter((v) => !v.parsed).length;
     const truncated = scan.truncated || read.truncated;
-    const failedNodes = scan.failedNodes + read.failedNodes;
+    const failedNodes = Math.max(scan.failedNodes, read.failedNodes);
     const complete =
       unparsedKeys === 0 &&
       !truncated &&
