@@ -262,6 +262,33 @@ In BetterDB Cloud, the connection appears in the **Via Agent** tab with a **Conn
 
 *Feature availability on managed providers changes frequently. Always consult the [AWS ElastiCache documentation](https://docs.aws.amazon.com/elasticache/) for the most up-to-date information on supported commands.*
 
+## Migrating to or from ElastiCache
+
+ElastiCache can be the source or the target of a BetterDB [migration](../migration).
+Both connections go through the agent (or an SSH tunnel), so the only
+requirement beyond monitoring is that BetterDB can reach both sides. The
+continuous `redis_shake_sync` mode is only available when ElastiCache is the
+target: AWS restricts the replication commands on its caches (see
+[restricted commands](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/SupportedCommands.html#RestrictedCommandsRedis)),
+so nothing can attach to an ElastiCache cache as a replica.
+
+| Direction | Mode | Notes |
+|-----------|------|-------|
+| Anything → ElastiCache node-based | `redis_shake_sync`, `redis_shake`, `command` | Use the Configuration endpoint for cluster mode enabled targets |
+| Anything → ElastiCache Serverless | `redis_shake_sync`, `command` | Serverless requires TLS. `redis_shake` (DUMP/RESTORE) depends on matching RDB versions, so prefer sync or command mode |
+| ElastiCache node-based → anything | `redis_shake`, `command` | AWS restricts `PSYNC` and `SYNC` on every ElastiCache cache, so `redis_shake_sync` cannot attach to it as a replica. Quiesce writes for a consistent copy |
+| ElastiCache Serverless → anything | `command` | Same `PSYNC` restriction. `MEMORY USAGE` is also blocked on Serverless, so analysis cannot estimate dataset size |
+
+**AWS's own online migration** (announced October 2026) moves self-managed
+cluster-mode Valkey or Redis OSS on EC2 into an empty ElastiCache Serverless
+cache through a proxy endpoint. It does not accept node-based ElastiCache,
+MemoryDB, Serverless or standalone sources, and Serverless is never a source.
+BetterDB covers those directions. If you do use the AWS tool, BetterDB is
+still useful on the source side: the AWS migration nodes attach as replicas,
+so replication offsets and lag, CPU and fork-memory headroom on the primaries,
+and any client still writing directly to the source (which permanently fails an
+AWS migration) all show up in the dashboard.
+
 ## Known Limitations
 
 **No CONFIG access.** AWS blocks `CONFIG GET` and `CONFIG SET` on all ElastiCache clusters. The configuration panel in BetterDB will be unavailable.

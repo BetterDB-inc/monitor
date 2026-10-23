@@ -150,6 +150,22 @@ is below 1%.
 | Cluster | Cluster | Supported | Per-master scanning, slot-aware writes |
 | Cluster | Standalone | **Blocked** | Analysis reports a blocking incompatibility. The data is spread across slots and cannot be safely collapsed into a single node. |
 
+### Managed providers
+
+Managed services are supported on either side as long as BetterDB can reach
+them (see the [provider guides](providers/)). Two constraints follow from the
+mechanisms above:
+
+- **`redis_shake_sync` needs a replica connection to the source.** Managed
+  providers commonly restrict `PSYNC` and `SYNC` (AWS does on every ElastiCache
+  and MemoryDB cache), so a managed source can only be migrated with
+  `redis_shake` (DUMP/RESTORE, same RDB version) or `command` mode. Both read a
+  point-in-time copy per key, so quiesce writes on the source for a consistent
+  result.
+- **`redis_shake` (DUMP/RESTORE) needs matching RDB versions.** Managed
+  providers do not always run the engine version their name suggests, so for
+  a managed target prefer `redis_shake_sync` or `command`.
+
 ## Compatibility checks
 
 Analysis detects the following incompatibilities:
