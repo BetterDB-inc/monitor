@@ -73,8 +73,16 @@ export async function readFieldTtls(
 }
 
 /**
+ * HPTTL -2 (field gone) and 0 (under 1 ms left) both mean the field must not
+ * survive on the target — same rule as migrateString and RENAME_WITH_TTL_LUA.
+ */
+export function isExpiredFieldTtl(ttl: number): boolean {
+  return ttl === -2 || ttl === 0;
+}
+
+/**
  * Re-apply one page's field TTLs on the write key. ttls[i] belongs to fields[i].
- * -1: no TTL. -2: field expired after it was read, so remove it.
+ * -1: no TTL. -2 or 0: field expired (or is about to) after it was read, so remove it.
  * Returns the number of fields given a TTL. Throws when the target cannot store field TTLs.
  */
 export async function applyFieldTtls(
@@ -91,7 +99,7 @@ export async function applyFieldTtls(
       const group = byTtl.get(ttl);
       if (group) group.push(fields[i]);
       else byTtl.set(ttl, [fields[i]]);
-    } else if (ttl === -2) {
+    } else if (isExpiredFieldTtl(ttl)) {
       expired.push(fields[i]);
     }
   });

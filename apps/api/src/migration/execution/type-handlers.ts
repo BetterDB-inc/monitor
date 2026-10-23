@@ -5,6 +5,7 @@ import { readStreamMeta, writeStreamMeta, type StreamMeta } from './stream-metad
 import {
   applyFieldTtls,
   createHashFieldTtlContext,
+  isExpiredFieldTtl,
   readFieldTtls,
   type HashFieldTtlContext,
 } from './hash-field-ttl';
@@ -174,7 +175,7 @@ async function migrateHash(
       await target.call('HSET', ...args);
       const ttls = await readFieldTtls(source, key, names, hfe);
       if (ttls) {
-        if (ttls.includes(-2)) removedFields = true;
+        if (ttls.some(isExpiredFieldTtl)) removedFields = true;
         await applyFieldTtls(target, writeKey, names, ttls, hfe);
       }
     } while (cursor !== '0');
@@ -187,7 +188,10 @@ async function migrateHash(
       await applyTtl(target, key, pttl);
     }
   } catch (err) {
-    if (tmp) { try { await target.del(tmp); } catch { /* best-effort cleanup */ } }
+    // On the direct-write path the real key was already deleted and partially
+    // written, so remove it too (same as migrateStream) instead of leaving a
+    // partial hash with permanent fields behind a failed key.
+    try { await target.del(tmp ?? key); } catch { /* best-effort cleanup */ }
     throw err;
   }
   return true;

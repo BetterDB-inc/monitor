@@ -511,8 +511,41 @@ describe('type-handlers / migrateKey', () => {
       expect(evalIndex(t)).toBe(-1);
     });
 
+    it('removes the partial hash on the direct-write path when the target lacks HFE', async () => {
+      const src = sourceWithTtls([5000]);
+      const { t, hp } = targetWithPipeline([[new Error("ERR unknown command 'HPEXPIRE'"), null]]);
+
+      const result = await migrateKey(src, t, 'user:{}:1', 'hash');
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('Valkey 9.0+');
+
+      // The key is also deleted before the write, so require a delete of the real key
+      // after the failed HPEXPIRE pipeline: that one is the cleanup.
+      const failedAt = hp.exec.mock.invocationCallOrder[0];
+      const cleanedUp = t.del.mock.calls.some(
+        (c: unknown[], i: number) =>
+          c[0] === 'user:{}:1' && t.del.mock.invocationCallOrder[i] > failedAt,
+      );
+      expect(cleanedUp).toBe(true);
+    });
+
     it('skips the rename when every field expired mid-copy', async () => {
       const src = sourceWithTtls([-2]);
+      const { t } = targetWithPipeline();
+      t.exists.mockResolvedValue(0);
+
+      const result = await migrateKey(src, t, 'hash:1', 'hash');
+
+      expect(result.ok).toBe(true);
+      expect(t.call).toHaveBeenCalledWith('HDEL', expect.stringMatching(/^__betterdb_mig_/), expect.any(Buffer));
+      expect(t.exists).toHaveBeenCalledTimes(1);
+      expect(evalIndex(t)).toBe(-1);
+      expect(t.rename).not.toHaveBeenCalled();
+    });
+
+    it('treats a 0 ms field TTL as expired and skips the rename when nothing is left', async () => {
+      const src = sourceWithTtls([0]);
       const { t } = targetWithPipeline();
       t.exists.mockResolvedValue(0);
 

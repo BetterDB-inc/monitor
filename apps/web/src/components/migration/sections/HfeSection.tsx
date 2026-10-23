@@ -32,8 +32,10 @@ export function HfeSection({ job }: Props) {
             </p>
             <p className="text-sm mt-1">
               Command mode copies per-field TTLs when the target supports HFE (Valkey 9.0+ or
-              Redis 7.4+); keys whose field TTLs cannot be stored on the target fail instead of
-              being copied without them. Analysis blocks targets without HFE support.
+              Redis 7.4+). A target without HFE is a blocking incompatibility: execution is
+              rejected unless it is explicitly forced with a reason, and even then command mode
+              fails the hashes whose field TTLs it cannot store instead of copying them without
+              those TTLs.
             </p>
           </div>
         </div>

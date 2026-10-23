@@ -2,6 +2,7 @@ import type Valkey from 'iovalkey';
 import {
   applyFieldTtls,
   createHashFieldTtlContext,
+  isExpiredFieldTtl,
   readFieldTtls,
 } from '../execution/hash-field-ttl';
 
@@ -113,6 +114,18 @@ describe('hash-field-ttl / applyFieldTtls', () => {
     expect(pipelineCall).toHaveBeenCalledWith('HPEXPIRE', 'tmp', '5000', 'FIELDS', '1', f2);
   });
 
+  it('treats a 0 ms TTL as expired and HDELs the field', async () => {
+    const { target, pipelineCall } = createTarget();
+    const ctx = createHashFieldTtlContext();
+
+    const n = await applyFieldTtls(asValkey(target), 'tmp', [f1, f2], [0, 5000], ctx);
+
+    expect(n).toBe(1);
+    expect(target.call).toHaveBeenCalledWith('HDEL', 'tmp', f1);
+    expect(pipelineCall).toHaveBeenCalledTimes(1);
+    expect(pipelineCall).toHaveBeenCalledWith('HPEXPIRE', 'tmp', '5000', 'FIELDS', '1', f2);
+  });
+
   it('fails loudly when the target lacks HFE, then fails fast without a pipeline', async () => {
     const { target, pipeline } = createTarget([
       [new Error("ERR unknown command 'HPEXPIRE'"), null],
@@ -140,5 +153,17 @@ describe('hash-field-ttl / applyFieldTtls', () => {
 
     await expect(applyFieldTtls(asValkey(target), 'tmp', [f1], [5000], ctx)).rejects.toBe(oom);
     expect(ctx.target).toBe('unknown');
+  });
+});
+
+describe('hash-field-ttl / isExpiredFieldTtl', () => {
+  it.each([
+    [-2, true],
+    [0, true],
+    [-1, false],
+    [1, false],
+    [5000, false],
+  ])('%d -> %s', (ttl, expected) => {
+    expect(isExpiredFieldTtl(ttl)).toBe(expected);
   });
 });

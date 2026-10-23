@@ -167,9 +167,9 @@ Analysis detects the following incompatibilities:
 | `acl` | warning | Source has custom ACL users that do not exist on target |
 | `persistence` | info | Persistence configuration differs |
 
-Blocking incompatibilities are advisory — the execution endpoint does not
-currently enforce them. A future release will reject execution when blocking
-incompatibilities exist.
+Execution rejects a migration whose analysis reported any `blocking`
+incompatibility. To run it anyway, the execution request must set `force: true`
+with a non-empty `forceReason`; `warning` and `info` items never block.
 
 ## Limitations
 
@@ -226,7 +226,7 @@ connection strings) containing control characters (`\x00–\x08`, `\x0b`, `\x0c`
 
 ### Hash Field Expiry (HFE)
 
-Valkey 9.0+ and Redis 7.4+ support per-field TTLs within a hash. Analysis detects HFE usage via `HEXPIRETIME` on a sample of hashes; if the target does not support HFE, analysis flags a blocking incompatibility.
+Valkey 9.0+ and Redis 7.4+ support per-field TTLs within a hash. Analysis detects HFE usage via `HEXPIRETIME` on a sample of hashes; if the target does not support HFE, analysis flags a blocking incompatibility, so execution is rejected unless forced (see [Compatibility checks](#compatibility-checks)).
 
 **Command mode** copies per-field TTLs: for each page of fields it reads `HPTTL` on the source and re-applies the remaining time with `HPEXPIRE` on the temporary key before it is renamed into place, so the final key never exists without its field TTLs. Fields that expire while they are being copied are removed. If the target cannot store field TTLs, hashes that have them fail (logged as `SKIP`) instead of being copied without them. If the source user may not run `HPTTL`, hashes are copied without field TTLs and the job shows a notice.
 

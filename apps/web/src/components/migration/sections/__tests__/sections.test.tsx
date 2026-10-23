@@ -268,5 +268,8 @@ describe('HfeSection', () => {
     render(<HfeSection job={asJob({ hfeSupported: true, hfeDetected: true, hfeKeyCount: 12 })} />);
     expect(screen.getByText(/Command mode copies per-field TTLs/)).toBeTruthy();
     expect(screen.queryByText(/8\.1/)).toBeNull();
+    expect(screen.getByText(/blocking incompatibility/)).toBeTruthy();
+    expect(screen.getByText(/forced with a reason/)).toBeTruthy();
+    expect(screen.queryByText(/Analysis blocks/)).toBeNull();
   });
 });
