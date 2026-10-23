@@ -54,6 +54,7 @@ import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_S
 import type { SshTunnelConfig } from '@betterdb/shared';
 import { SshTunnelService } from '../ssh/ssh-tunnel.service';
 import { tlsIdentityOptions } from './tls-servername';
+import { describeConnectError } from './connect-error';
 
 export interface UnifiedDatabaseAdapterConfig {
   host: string;
@@ -191,6 +192,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       this.logger.error(`Connection error: ${err.message}`);
       if (this._client !== client) return;
       this.connected = false;
+      this.lastSocketError = err as NodeJS.ErrnoException;
     });
 
     client.on('close', () => {
@@ -297,6 +299,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   }
 
   private connectPromise: Promise<void> | null = null;
+  // Most recent socket error from the current client. iovalkey rejects a
+  // failed connect() with a bare "Connection is closed." and only reports the
+  // real cause (ENOTFOUND, ECONNREFUSED, ...) via the 'error' event.
+  private lastSocketError: NodeJS.ErrnoException | null = null;
 
   async connect(): Promise<void> {
     if (this.connectPromise) {
@@ -311,6 +317,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   }
 
   private async doConnect(): Promise<void> {
+    this.lastSocketError = null;
     try {
       if (this.usesTunnel && !this.tunnelActive) {
         await this.establishTunnel();
@@ -375,8 +382,21 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
         this._client = null;
       }
       this.logger.error(`Connection failed: ${error instanceof Error ? error.message : error}`);
-      throw error;
+      throw this.explainConnectError(error);
     }
+  }
+
+  /**
+   * Swap iovalkey's generic "Connection is closed." for a message built from
+   * the socket error that caused it. Other errors (AUTH, TLS, SELECT) already
+   * say what went wrong and pass through unchanged.
+   */
+  private explainConnectError(error: unknown): unknown {
+    if (!(error instanceof Error) || !/^Connection is closed\.?$/.test(error.message)) {
+      return error;
+    }
+    const described = describeConnectError(this.lastSocketError, this.config.host, this.config.port);
+    return described ? new Error(described, { cause: this.lastSocketError }) : error;
   }
 
   async disconnect(): Promise<void> {

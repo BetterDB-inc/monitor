@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { parseConnectionUrl, looksLikeConnectionUrl } from './connectionUrl';
+import {
+  parseConnectionUrl,
+  looksLikeConnectionUrl,
+  isSingleLabelHost,
+  singleLabelHostCloudError,
+} from './connectionUrl';
 
 function expectOk(input: string) {
   const result = parseConnectionUrl(input);
@@ -119,5 +124,26 @@ describe('looksLikeConnectionUrl', () => {
   it('rejects bare hostnames', () => {
     expect(looksLikeConnectionUrl('redis.example.com')).toBe(false);
     expect(looksLikeConnectionUrl('localhost')).toBe(false);
+  });
+});
+
+describe('isSingleLabelHost', () => {
+  it('flags hosts without a domain', () => {
+    expect(isSingleLabelHost('Fffhgddgbgf345544')).toBe(true);
+    expect(isSingleLabelHost('valkey')).toBe(true);
+    expect(isSingleLabelHost('my-db.')).toBe(true);
+  });
+
+  it('accepts fully qualified hosts, IPs and localhost', () => {
+    expect(isSingleLabelHost('my-db.upstash.io')).toBe(false);
+    expect(isSingleLabelHost('10.0.0.5')).toBe(false);
+    expect(isSingleLabelHost('::1')).toBe(false);
+    expect(isSingleLabelHost('2001:db8::1')).toBe(false);
+    expect(isSingleLabelHost('localhost')).toBe(false);
+    expect(isSingleLabelHost('')).toBe(false);
+  });
+
+  it('names the host in the cloud error', () => {
+    expect(singleLabelHostCloudError(' valkey ')).toContain('"valkey"');
   });
 });

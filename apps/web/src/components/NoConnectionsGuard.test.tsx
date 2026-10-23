@@ -223,6 +223,63 @@ describe('NoConnectionsGuard - quick connect', () => {
     expect(fetchApi).not.toHaveBeenCalledWith('/connections', expect.anything());
   });
 
+  describe('on the cloud domain', () => {
+    const originalLocation = window.location;
+    beforeEach(() => {
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: { ...originalLocation, hostname: 'acme.app.betterdb.com' },
+      });
+    });
+    afterEach(() => {
+      Object.defineProperty(window, 'location', { configurable: true, value: originalLocation });
+    });
+
+    it('rejects a single-label host without calling the API', () => {
+      renderAt('/');
+
+      fireEvent.change(screen.getByLabelText(/quick connect/i), {
+        target: { value: 'Fffhgddgbgf345544' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+
+      expect(screen.getByText(/isn't a full hostname/i)).toBeInTheDocument();
+      expect(fetchApi).not.toHaveBeenCalledWith('/connections', expect.anything());
+      expect(mockCapture).toHaveBeenCalledWith(
+        'quick_connect_failed',
+        expect.objectContaining({ reason: 'single_label_host' }),
+      );
+    });
+
+    it('still connects to a fully qualified host', async () => {
+      installFetch({ onConnections: () => Promise.resolve({ id: 'conn-1' }) });
+      renderAt('/');
+
+      fireEvent.change(screen.getByLabelText(/quick connect/i), {
+        target: { value: 'my-db.upstash.io:6379' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+
+      await waitFor(() => expect(mockRefreshConnections).toHaveBeenCalled());
+    });
+  });
+
+  it('allows a single-label host when self-hosted', async () => {
+    installFetch({ onConnections: () => Promise.resolve({ id: 'conn-1' }) });
+    renderAt('/');
+
+    fireEvent.change(screen.getByLabelText(/quick connect/i), {
+      target: { value: 'valkey:6379' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+
+    await waitFor(() => expect(mockRefreshConnections).toHaveBeenCalled());
+    expect(fetchApi).toHaveBeenCalledWith(
+      '/connections',
+      expect.objectContaining({ body: expect.stringContaining('"host":"valkey"') }),
+    );
+  });
+
   it('offers the full form prefilled when the connection fails', async () => {
     installFetch({ onConnections: () => Promise.reject(new Error('Connection refused')) });
     const eventListener = vi.fn();

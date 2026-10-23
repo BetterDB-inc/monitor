@@ -4,7 +4,12 @@ import { useAuth } from '../contexts/AuthContext';
 import { useCanMutate } from '../hooks/useCanMutate';
 import { useConnection } from '../hooks/useConnection';
 import { fetchApi } from '../api/client';
-import { parseConnectionUrl, looksLikeConnectionUrl } from '../utils/connectionUrl';
+import {
+  parseConnectionUrl,
+  looksLikeConnectionUrl,
+  isSingleLabelHost,
+  singleLabelHostCloudError,
+} from '../utils/connectionUrl';
 import {
   consumePendingAddConnection,
   OPEN_ADD_CONNECTION_EVENT,
@@ -233,6 +238,11 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   // tunnel the bastion resolves the host, so localhost/127.* is valid there.
   const cloudLoopbackBlocked =
     !!isCloudMode && !formData.ssh.enabled && isLocalhostHost(formData.host);
+  // Same idea for a single-label host ("valkey", "my-db"): it only resolves via
+  // a local search domain, never from the cloud. Checked on Test/Save rather
+  // than live, so typing "my-db" on the way to "my-db.example.com" isn't flagged.
+  const cloudSingleLabelBlocked =
+    !!isCloudMode && !formData.ssh.enabled && isSingleLabelHost(formData.host);
 
   // Pasting a full connection URL (redis://user:pass@host:6379/0) into Host fills the whole
   // form. Paste-only on purpose: expanding on change would fire on intermediate keystrokes
@@ -263,6 +273,10 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
         message:
           'localhost is not reachable from the cloud. Please provide a publicly accessible host.',
       });
+      return;
+    }
+    if (cloudSingleLabelBlocked) {
+      setTestResult({ success: false, message: singleLabelHostCloudError(formData.host) });
       return;
     }
     setTesting(true);
@@ -316,6 +330,10 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
         message:
           'localhost is not reachable from the cloud. Please provide a publicly accessible host.',
       });
+      return;
+    }
+    if (cloudSingleLabelBlocked) {
+      setTestResult({ success: false, message: singleLabelHostCloudError(formData.host) });
       return;
     }
 

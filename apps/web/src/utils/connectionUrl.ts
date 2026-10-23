@@ -134,3 +134,18 @@ export function parseConnectionUrl(input: string): ParseConnectionUrlResult {
     },
   };
 }
+
+/**
+ * True for a single-label hostname such as "valkey" or "my-db": no dots, not an
+ * IP address, not localhost. Those resolve only through a local search domain
+ * (Docker service names, /etc/hosts), so self-hosted setups use them, but the
+ * cloud can never reach one. Callers apply this in cloud mode only.
+ */
+export function isSingleLabelHost(host: string): boolean {
+  const h = host.trim().replace(/\.$/, '');
+  return h.length > 0 && !h.includes('.') && !h.includes(':') && h.toLowerCase() !== 'localhost';
+}
+
+export function singleLabelHostCloudError(host: string): string {
+  return `"${host.trim()}" isn't a full hostname, so it can't be reached from the cloud. Use the complete address, e.g. my-db.example.com.`;
+}
