@@ -6,7 +6,7 @@ import {
   type PresetId,
 } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
-import { agentCachePreset } from './agent-cache';
+import { createAgentCachePreset } from './agent-cache';
 import { langchainCommunityPreset } from './langchain-community';
 import { llamaindexPreset } from './llamaindex';
 import { createCustomPreset, validateCustomSchema } from './custom';
@@ -37,7 +37,11 @@ function customPreset(custom: CustomSchema | null | undefined): PresetDefinition
   return result.ok ? createCustomPreset(result.schema) : invalidSchemaPreset(result.errors);
 }
 
-export function getPreset(id: PresetId, custom?: CustomSchema | null): PresetDefinition {
+export function getPreset(
+  id: PresetId,
+  custom?: CustomSchema | null,
+  pattern?: string,
+): PresetDefinition {
   switch (id) {
     case 'langchain-community':
       return langchainCommunityPreset;
@@ -46,7 +50,7 @@ export function getPreset(id: PresetId, custom?: CustomSchema | null): PresetDef
     case 'llamaindex':
       return llamaindexPreset;
     case 'agent-cache':
-      return agentCachePreset;
+      return createAgentCachePreset(pattern);
     case 'raw':
       return rawPreset;
     case 'custom':

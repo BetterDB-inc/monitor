@@ -162,11 +162,53 @@ describe('session presets against captured fixtures', () => {
     expect(preset.sessionIdOf('sxfix:ac:session:t1:checkpoint:abc')).toBe('t1');
     expect(preset.sessionIdOf('sxfix:ac:session:t1:writes:abc%7Ctask%7Cmessages%7C0')).toBe('t1');
     expect(preset.sessionIdOf('sxfix:ac:session:t1:last_intent')).toBe('t1');
-    expect(preset.sessionIdOf('app:session:store:session:t1:checkpoint:abc')).toBe('t1');
-    expect(preset.sessionIdOf('app:session:store:session:t1:last_intent')).toBe('t1');
+    expect(preset.sessionIdOf('app:session:store:session:t1:checkpoint:abc')).toBe(
+      'store:session:t1',
+    );
     expect(preset.sessionIdOf('sxfix:ac:session::last_intent')).toBeNull();
     expect(preset.sessionIdOf('other:session:t1')).toBeNull();
     expect(preset.defaultPattern('sxfix:ac')).toBe('sxfix:ac:session:*');
+  });
+
+  it('agent-cache reads the thread id after the namespace prefix', () => {
+    const preset = getPreset('agent-cache', null, 'app:session:*');
+    expect(preset.sessionIdOf('app:session:t1:prefs:lang')).toBe('t1');
+    expect(preset.sessionIdOf('app:session:t1:last_intent')).toBe('t1');
+    expect(preset.sessionIdOf('app:session:run:checkpoint:7:checkpoint:abc')).toBe('run:checkpoint:7');
+    expect(preset.sessionIdOf('app:session:run:checkpoint:7:__checkpoint_latest')).toBe(
+      'run:checkpoint:7',
+    );
+    expect(preset.sessionIdOf('app:session:run:checkpoint:7:writes:abc|task|messages|0')).toBe(
+      'run:checkpoint:7',
+    );
+    expect(preset.sessionIdOf('app:session:run:writes:x:checkpoint:abc')).toBe('run:writes:x');
+    expect(preset.sessionIdOf('app:session:t1:checkpoint:abc')).toBe('t1');
+    expect(preset.sessionIdOf('app:session:store:session:t1:checkpoint:abc')).toBe(
+      'store:session:t1',
+    );
+    expect(preset.sessionIdOf('app:session:store:session:t1:last_intent')).toBe('store');
+    expect(preset.sessionIdOf('other:session:t1:checkpoint:abc')).toBeNull();
+    expect(preset.sessionIdOf('app:session::last_intent')).toBeNull();
+  });
+
+  it('agent-cache takes the namespace prefix from an escaped or narrowed pattern', () => {
+    const escaped = getPreset('agent-cache', null, 'tenant\\[1\\]:session:*');
+    expect(escaped.sessionIdOf('tenant[1]:session:t1:prefs:lang')).toBe('t1');
+    const narrowed = getPreset('agent-cache', null, 'app:session:t*');
+    expect(narrowed.sessionIdOf('app:session:t1:prefs:lang')).toBe('t1');
+  });
+
+  it('agent-cache tells writes and checkpoints apart by the rightmost marker', () => {
+    const preset = getPreset('agent-cache', null, 'app:session:*');
+    const p = 'app:session:run:checkpoint:7';
+    expect(
+      preset.selectKeys!([
+        `${p}:checkpoint:a`,
+        `${p}:checkpoint:b`,
+        `${p}:writes:a|t|messages|0`,
+        `${p}:writes:b|t|messages|0`,
+      ]),
+    ).toEqual([`${p}:checkpoint:b`, `${p}:writes:b|t|messages|0`]);
   });
 
   it('agent-cache default pattern accepts a trailing colon and escapes the name', () => {
