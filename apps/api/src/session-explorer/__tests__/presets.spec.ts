@@ -498,6 +498,23 @@ describe('presets with content blocks beyond text', () => {
     expect(parsedMessages(view)[0].toolCalls).toEqual([{ name: 'lookup', args: '{"q": ', id: 'c1' }]);
   });
 
+  it('llamaindex reads tool-call arguments stored as an object', () => {
+    const view = getPreset('llamaindex').parseKey(
+      listKey([
+        {
+          role: 'assistant',
+          blocks: [],
+          additional_kwargs: {
+            tool_calls: [{ function: { name: 'get_weather', arguments: { city: 'Sofia' } } }],
+          },
+        },
+      ]),
+    );
+    expect(parsedMessages(view)[0].toolCalls).toEqual([
+      { name: 'get_weather', args: { city: 'Sofia' } },
+    ]);
+  });
+
   it('llamaindex reads tool_call blocks, Anthropic tool_use dicts and marks other blocks', () => {
     const view = getPreset('llamaindex').parseKey(
       listKey([

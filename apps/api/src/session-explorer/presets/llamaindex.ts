@@ -31,20 +31,20 @@ function blocksText(blocks: unknown): string {
 
 const withId = (id: unknown) => (typeof id === 'string' ? { id } : {});
 
-function argsOf(text: string): unknown {
+function argsOf(args: unknown): unknown {
+  if (isRecord(args)) return args;
+  if (typeof args !== 'string') return fail('Tool call arguments are not a string or object');
   try {
-    return parseJson(text);
+    return parseJson(args);
   } catch {
-    return text;
+    return args;
   }
 }
 
 function parseToolCall(call: unknown): ToolCall {
   if (!isRecord(call)) return fail('Malformed tool call');
   if (isRecord(call.function) && typeof call.function.name === 'string') {
-    const argText = call.function.arguments;
-    if (typeof argText !== 'string') return fail('Tool call arguments are not a string');
-    return { name: call.function.name, args: argsOf(argText), ...withId(call.id) };
+    return { name: call.function.name, args: argsOf(call.function.arguments), ...withId(call.id) };
   }
   if (typeof call.name === 'string') {
     return { name: call.name, args: call.input, ...withId(call.id) };
