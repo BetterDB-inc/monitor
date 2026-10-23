@@ -259,6 +259,17 @@ describe('SessionExplorerService.preview', () => {
     expect(result.sampleKey).toBe('lc:1');
   });
 
+  it('reports no failed nodes when every primary was searched', async () => {
+    const service = serviceOver({ 7001: new FakeValkey(), 7002: new FakeValkey() });
+
+    expect(await service.preview('conn-1', input)).toEqual({
+      sampleKey: null,
+      view: null,
+      exhausted: true,
+      failedNodes: 0,
+    });
+  });
+
   it('rethrows when every primary scan fails', async () => {
     const service = serviceOver({ 7001: failing('LOADING'), 7002: failing('LOADING') });
 
@@ -272,6 +283,7 @@ describe('SessionExplorerService.preview', () => {
       sampleKey: null,
       view: null,
       exhausted: false,
+      failedNodes: 1,
     });
   });
 
@@ -282,6 +294,6 @@ describe('SessionExplorerService.preview', () => {
     );
     const service = new SessionExplorerService({ get: jest.fn(() => ({})) } as never, {} as never);
     const result = await service.preview('conn-1', { name: 'n', pattern: 'lc:*', preset: 'langchain-community' });
-    expect(result).toEqual({ sampleKey: null, view: null, exhausted: false });
+    expect(result).toEqual({ sampleKey: null, view: null, exhausted: false, failedNodes: 1 });
   });
 });

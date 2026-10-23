@@ -231,7 +231,7 @@ describe('SessionExplorerController', () => {
         payload: input,
       });
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ sampleKey: null, view: null, exhausted: true });
+      expect(res.json()).toEqual({ sampleKey: null, view: null, exhausted: true, failedNodes: 0 });
     });
 
     it('follows the SCAN cursor past empty pages', async () => {
@@ -254,7 +254,7 @@ describe('SessionExplorerController', () => {
         headers,
         payload: input,
       });
-      expect(res.json()).toEqual({ sampleKey: null, view: null, exhausted: false });
+      expect(res.json()).toEqual({ sampleKey: null, view: null, exhausted: false, failedNodes: 0 });
       expect(valkey.callsOf('scan')).toHaveLength(10);
     });
 

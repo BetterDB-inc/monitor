@@ -292,7 +292,9 @@ export function NamespaceSetup({ initial, onSaved, onCancel }: Props) {
                 ? `Matched ${preview.sampleKey}, but it could not be read. It may have expired.`
                 : preview.exhausted
                   ? 'No key matched this pattern.'
-                  : 'No matching key in the first 10,000 keys scanned on each node.'}
+                  : preview.failedNodes > 0
+                    ? 'No matching key found, but part of the cluster could not be scanned.'
+                    : 'No matching key in the first 10,000 keys scanned on each node.'}
             </p>
           ))}
       </CardContent>

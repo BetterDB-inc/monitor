@@ -35,7 +35,7 @@ describe('NamespaceSetup', () => {
   });
 
   it('previews against a sampled key and renders the returned view', async () => {
-    api.preview.mockResolvedValue({ sampleKey: 'chat:1', view: parsedKey(), exhausted: true });
+    api.preview.mockResolvedValue({ sampleKey: 'chat:1', view: parsedKey(), exhausted: true, failedNodes: 0 });
     render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);
     fill();
     fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
@@ -47,7 +47,7 @@ describe('NamespaceSetup', () => {
   });
 
   it('sends the custom schema with the preview', async () => {
-    api.preview.mockResolvedValue({ sampleKey: null, view: null, exhausted: true });
+    api.preview.mockResolvedValue({ sampleKey: null, view: null, exhausted: true, failedNodes: 0 });
     render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);
     fill();
     fireEvent.change(screen.getByLabelText('Preset'), { target: { value: 'custom' } });
@@ -66,8 +66,25 @@ describe('NamespaceSetup', () => {
     });
   });
 
+  it('says part of the cluster was not searched when a node failed', async () => {
+    api.preview.mockResolvedValue({ sampleKey: null, view: null, exhausted: false, failedNodes: 1 });
+    render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);
+    fill();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          'No matching key found, but part of the cluster could not be scanned.',
+        ),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByText('No matching key in the first 10,000 keys scanned on each node.'),
+    ).not.toBeInTheDocument();
+  });
+
   it('says the preview search was partial when the scan budget ran out', async () => {
-    api.preview.mockResolvedValue({ sampleKey: null, view: null, exhausted: false });
+    api.preview.mockResolvedValue({ sampleKey: null, view: null, exhausted: false, failedNodes: 0 });
     render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);
     fill();
     fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
@@ -80,7 +97,7 @@ describe('NamespaceSetup', () => {
   });
 
   it('says the sampled key could not be read instead of reporting no match', async () => {
-    api.preview.mockResolvedValue({ sampleKey: 'chat:1', view: null, exhausted: true });
+    api.preview.mockResolvedValue({ sampleKey: 'chat:1', view: null, exhausted: true, failedNodes: 0 });
     render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);
     fill();
     fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
@@ -119,7 +136,7 @@ describe('NamespaceSetup', () => {
   });
 
   it('clears an earlier preview when the inputs change', async () => {
-    api.preview.mockResolvedValue({ sampleKey: 'chat:1', view: parsedKey(), exhausted: true });
+    api.preview.mockResolvedValue({ sampleKey: 'chat:1', view: parsedKey(), exhausted: true, failedNodes: 0 });
     render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);
     fill();
     fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
@@ -129,7 +146,7 @@ describe('NamespaceSetup', () => {
   });
 
   it('clears an earlier preview when a later preview fails', async () => {
-    api.preview.mockResolvedValueOnce({ sampleKey: 'chat:1', view: parsedKey(), exhausted: true });
+    api.preview.mockResolvedValueOnce({ sampleKey: 'chat:1', view: parsedKey(), exhausted: true, failedNodes: 0 });
     api.preview.mockRejectedValueOnce(
       new ApiError('Invalid namespace', 400, { message: 'Invalid namespace', errors: ['Bad template'] }),
     );

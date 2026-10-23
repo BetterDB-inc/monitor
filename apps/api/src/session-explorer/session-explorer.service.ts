@@ -87,8 +87,9 @@ export class SessionExplorerService {
     const input = this.validate(body);
     const preset = this.presetOf(input);
     const db = this.registry.get(connectionId);
-    const { sampleKey, exhausted } = await withPrimaries(db, async ({ clients, failed }) => {
+    const scanned = await withPrimaries(db, async ({ clients, failed }) => {
       let fallback: string | null = null;
+      let failedNodes = failed;
       let searchedAll = failed === 0;
       let lastError: unknown;
       let succeeded = 0;
@@ -107,23 +108,32 @@ export class SessionExplorerService {
             cursor = next;
             pages++;
             const accepted = page.find((k) => preset.sessionIdOf(k) !== null);
-            if (accepted !== undefined) return { sampleKey: accepted, exhausted: true };
+            if (accepted !== undefined) {
+              return { sampleKey: accepted, exhausted: true, failedNodes };
+            }
             fallback ??= page[0] ?? null;
           } while (cursor !== '0' && pages < PREVIEW_SCAN_PAGES);
           succeeded++;
         } catch (err) {
           lastError = err;
+          failedNodes++;
           cursor = '';
         }
         if (cursor !== '0') searchedAll = false;
       }
       if (succeeded === 0 && fallback === null && lastError !== undefined) throw lastError;
-      return { sampleKey: fallback, exhausted: searchedAll };
+      return { sampleKey: fallback, exhausted: searchedAll, failedNodes };
     });
-    if (sampleKey === null) return { sampleKey: null, view: null, exhausted };
+    const { sampleKey, exhausted, failedNodes } = scanned;
+    if (sampleKey === null) return { sampleKey: null, view: null, exhausted, failedNodes };
     const read = await readSessionKeys(db, [sampleKey]);
     const captured = read.keys[0];
-    return { sampleKey, view: captured ? preset.parseKey(captured) : null, exhausted };
+    return {
+      sampleKey,
+      view: captured ? preset.parseKey(captured) : null,
+      exhausted,
+      failedNodes,
+    };
   }
 
   async listSessions(connectionId: string, id: string): Promise<SessionListResponse> {
