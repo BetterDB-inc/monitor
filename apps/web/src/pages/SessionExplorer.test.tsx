@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { SessionNamespace } from '@betterdb/shared';
 import { SessionExplorer } from './SessionExplorer';
+import { sessionExplorerKeys } from '../hooks/useSessionExplorer';
 import { listResponse } from '../components/pages/session-explorer/__tests__/fixtures';
 
 const { api } = vi.hoisted(() => ({
@@ -38,12 +39,15 @@ const ns = (id: string): SessionNamespace => ({
   updatedAt: 1,
 });
 
-const renderPage = () =>
+const renderPage = () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
-    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <QueryClientProvider client={client}>
       <SessionExplorer />
     </QueryClientProvider>,
   );
+  return client;
+};
 
 describe('SessionExplorer', () => {
   beforeEach(() => {
@@ -73,5 +77,33 @@ describe('SessionExplorer', () => {
     await waitFor(() => expect(api.listSessions).toHaveBeenCalledWith('b', expect.anything()));
     expect(api.listSessions.mock.calls.map(([id]) => id)).not.toContain('a');
     expect(screen.queryByRole('option', { name: 'ns-a' })).toBeNull();
+  });
+
+  it('keeps the page when a namespace refetch fails after a successful load', async () => {
+    api.listNamespaces
+      .mockResolvedValueOnce([ns('a'), ns('b')])
+      .mockRejectedValue(new Error('namespaces unavailable'));
+    const client = renderPage();
+
+    await screen.findByLabelText('Namespace');
+    await act(() =>
+      client
+        .invalidateQueries({ queryKey: sessionExplorerKeys.namespaces('c1'), exact: true })
+        .catch(() => undefined),
+    );
+
+    await screen.findByText('namespaces unavailable');
+    expect((screen.getByLabelText('Namespace') as HTMLSelectElement).value).toBe('a');
+    expect(screen.getByText('Sessions')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeTruthy();
+  });
+
+  it('shows the error view when the first namespace load fails', async () => {
+    api.listNamespaces.mockRejectedValue(new Error('namespaces unavailable'));
+    renderPage();
+
+    await screen.findByText('namespaces unavailable');
+    expect(screen.queryByLabelText('Namespace')).toBeNull();
+    expect(screen.queryByText('Sessions')).toBeNull();
   });
 });

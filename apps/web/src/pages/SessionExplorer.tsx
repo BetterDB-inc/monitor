@@ -134,7 +134,7 @@ export function SessionExplorer() {
     );
   }
 
-  if (namespaces.isError) {
+  if (namespaces.isError && !namespaces.data) {
     return (
       <div className="space-y-6">
         {header}
@@ -186,6 +186,12 @@ export function SessionExplorer() {
           </Button>
         </div>
       </div>
+
+      {namespaces.isError && (
+        <Alert variant="destructive">
+          <AlertDescription>{errorText(namespaces.error)}</AlertDescription>
+        </Alert>
+      )}
 
       {actionError && (
         <Alert variant="destructive">
