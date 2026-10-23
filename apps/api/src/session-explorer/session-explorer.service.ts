@@ -162,7 +162,8 @@ export class SessionExplorerService {
     const db = this.registry.get(connectionId);
     const scan = await keysForSession(db, namespace.pattern, preset, sessionId);
     if (scan.keys.length === 0) throw sessionMissing(scan.failedNodes);
-    const read = await readSessionKeys(db, scan.keys);
+    const selected = preset.selectKeys ? preset.selectKeys(scan.keys) : scan.keys;
+    const read = await readSessionKeys(db, selected);
     if (read.keys.length === 0) throw sessionMissing(read.failedNodes);
 
     const views = parseSessionKeys(preset, read.keys);

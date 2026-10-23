@@ -104,6 +104,28 @@ describe('validateCustomSchema', () => {
     }
   });
 
+  it('trims pasted inputs and rejects whitespace-only required fields', () => {
+    expect(
+      validateCustomSchema({
+        ...baseSchema,
+        sessionTemplate: ' chat:{session} ',
+        messages: { from: 'path', path: ' turns ' },
+        fields: { role: ' type ', content: 'data.content\n', toolName: ' tool ' },
+      }),
+    ).toEqual({
+      ok: true,
+      schema: {
+        ...baseSchema,
+        sessionTemplate: 'chat:{session}',
+        messages: { from: 'path', path: 'turns' },
+        fields: { role: 'type', content: 'data.content', toolName: 'tool' },
+      },
+    });
+    expect(
+      validateCustomSchema({ ...baseSchema, fields: { role: '   ', content: 'c' } }),
+    ).toEqual({ ok: false, errors: ['fields.role is required'] });
+  });
+
   it('rejects missing role or content', () => {
     const noRole = validateCustomSchema({ ...baseSchema, fields: { content: 'c' } });
     const noContent = validateCustomSchema({ ...baseSchema, fields: { role: 'r' } });
@@ -204,6 +226,9 @@ describe('custom preset', () => {
     expect(t('app:{session}:messages', 'app:t1:meta')).toBeNull();
     expect(t('app:{session}:*', 'app:t1:meta:2')).toBe('t1');
     expect(t('*:session:{session}:*', 'cache:session:t1:last')).toBe('t1');
+    expect(t('*:session:{session}:*', 'app:session:store:session:t1:checkpoint:abc')).toBe('t1');
+    expect(t('*:{session}:*', 'a:b:c:d')).toBe('c');
+    expect(t('*:session:{session}', 'a:session:b:session:')).toBe('b:session:');
     expect(t('{session}', 'anything')).toBe('anything');
     expect(t('ab{session}ba', 'aba')).toBeNull();
   });
@@ -326,6 +351,34 @@ describe('custom preset', () => {
     expect(view).toMatchObject({ parsed: true, messages: [{ role: 'user', content: 'hi' }] });
   });
 
+  it('keeps hash fields read as message fields as text even when they hold JSON', () => {
+    const preset = createCustomPreset({
+      valueType: 'hash',
+      messages: { from: 'key' },
+      fields: { role: 'role', content: 'body' },
+    });
+    for (const body of ['{"city":"Sofia","tempC":21}', '[1,2,3]']) {
+      const view = preset.parseKey(key({ type: 'hash', value: { role: 'tool', body } }));
+      expect(view).toMatchObject({ parsed: true, messages: [{ role: 'tool', content: body }] });
+    }
+  });
+
+  it('walks into JSON stored in a hash field when a path goes through it', () => {
+    const preset = createCustomPreset({
+      valueType: 'hash',
+      messages: { from: 'path', path: 'history.turns' },
+      fields: { role: 'meta.role', content: 'body' },
+    });
+    const history = JSON.stringify({
+      turns: [{ meta: { role: 'user' }, body: '{"q":"weather"}' }],
+    });
+    const view = preset.parseKey(key({ type: 'hash', value: { history } }));
+    expect(view).toMatchObject({
+      parsed: true,
+      messages: [{ role: 'user', content: '{"q":"weather"}' }],
+    });
+  });
+
   it('orders hash items by field name, numbers by value', () => {
     const preset = createCustomPreset({
       valueType: 'hash',
@@ -347,8 +400,44 @@ describe('custom preset', () => {
     ]);
   });
 
+  it('orders time-sortable ids in hash items by byte order', () => {
+    const preset = createCustomPreset({
+      valueType: 'hash',
+      messages: { from: 'items' },
+      fields: { role: 'role', content: 'text' },
+    });
+    const msg = (text: string) => JSON.stringify({ role: 'user', text });
+    for (const [first, second] of [
+      ['0190a3b2-10ab', '0190a3b2-9fff'],
+      ['01J9X99A', '01J9X9A0'],
+    ]) {
+      const view = preset.parseKey(
+        key({ type: 'hash', value: { [second]: msg('second'), [first]: msg('first') } }),
+      );
+      expect(view.parsed && view.messages.map((m) => m.content)).toEqual(['first', 'second']);
+    }
+  });
+
   it('registry requires a schema for custom', () => {
     expect(() => getPreset('custom', null)).toThrow();
     expect(getPreset('custom', baseSchema).id).toBe('custom');
+  });
+
+  it('registry turns an invalid stored schema into unparsed views', () => {
+    const invalid = [
+      { ...baseSchema, messages: { from: 'path' } },
+      { ...baseSchema, valueType: 'set' },
+    ] as unknown as CustomSchema[];
+    for (const schema of invalid) {
+      const preset = getPreset('custom', schema);
+      const view = preset.parseKey(key({ type: 'list', value: ['{}'] }));
+      expect(view.parsed).toBe(false);
+      expect(view.parsed === false && view.reason).toMatch(/^Invalid custom schema: /);
+      expect(preset.sessionIdOf('k')).toBe('k');
+    }
+  });
+
+  it('registry throws on an unknown preset id', () => {
+    expect(() => getPreset('bogus' as never)).toThrow('Unknown preset "bogus"');
   });
 });

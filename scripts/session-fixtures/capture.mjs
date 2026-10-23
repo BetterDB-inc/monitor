@@ -14,18 +14,31 @@ function decodeString(buf) {
   }
 }
 
+function decodeElement(buf) {
+  const { value, binary } = decodeString(buf);
+  return binary ? { base64: value } : value;
+}
+
 async function readValue(client, key, type) {
   switch (type) {
     case 'string':
       return decodeString(await client.getBuffer(key));
     case 'list':
-      return { value: await client.lrange(key, 0, -1) };
-    case 'hash':
-      return { value: await client.hgetall(key) };
+      return { value: (await client.lrangeBuffer(key, 0, -1)).map(decodeElement) };
+    case 'hash': {
+      const flat = await client.hgetallBuffer(key);
+      return {
+        value: Object.fromEntries(
+          Object.entries(flat).map(([field, v]) => [field, decodeElement(v)]),
+        ),
+      };
+    }
     case 'zset': {
-      const flat = await client.zrange(key, 0, -1, 'WITHSCORES');
+      const flat = await client.zrangeBuffer(key, 0, -1, 'WITHSCORES');
       const out = [];
-      for (let i = 0; i < flat.length; i += 2) out.push([flat[i], Number(flat[i + 1])]);
+      for (let i = 0; i < flat.length; i += 2) {
+        out.push([decodeElement(flat[i]), Number(flat[i + 1].toString())]);
+      }
       return { value: out };
     }
     case 'ReJSON-RL':

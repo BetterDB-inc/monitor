@@ -124,7 +124,9 @@ keys[{key,type,pttl,value}], expectations }`. `pttl` is `-1` when no TTL.
   - `checkpoint:<checkpoint_id>`: one per checkpoint (uuid6 id).
   - `__checkpoint_latest`: byte-identical copy of the newest checkpoint value.
   - `writes:<checkpoint_id>|<task_id>|<channel>|<idx>` (URL-encoded parts):
-    pending writes, value is `JSON.stringify(writeValue)`.
+    writes made by a step that ran from `<checkpoint_id>`, value is
+    `JSON.stringify(writeValue)`. Once the step finishes they are folded into
+    the next checkpoint; writes on the newest checkpoint are still pending.
   - Non-session key under the prefix: `<name>:__stats` (`hash`,
     `{"session:writes": "<n>"}`).
 - Checkpoint value: JSON `{config: {configurable: {thread_id, checkpoint_ns,
@@ -135,8 +137,12 @@ keys[{key,type,pttl,value}], expectations }`. `pttl` is `-1` when no TTL.
   "messages", "HumanMessage|AIMessage|SystemMessage|ToolMessage"], "kwargs":
   {content, tool_calls?, tool_call_id?, ...}}`. Each checkpoint holds the full
   history so far, so the newest checkpoint (`__checkpoint_latest`) is the
-  authoritative message list. Sessions with at most 12 messages get one
-  checkpoint per turn plus one `writes:` key each; `oversize` gets a single
-  checkpoint and no writes, and uses 30 turns so the two checkpoint keys
-  together exceed 1 MiB.
+  authoritative message list, followed by any pending `messages` writes on
+  it. Sessions with at most 12 messages get one checkpoint per turn, and each
+  turn after the first stores its AI reply as a write on the previous
+  checkpoint, as LangGraph does; `oversize` gets a single checkpoint and no
+  writes, and uses 30 turns so the two checkpoint keys together exceed 1 MiB.
+  The agent-cache-only `pending-write` session has one checkpoint (system,
+  human) plus a pending AI message and an `__interrupt__` write on it, as left
+  by an `interrupt()` before the step finished.
 - TTL: applied to every key of the thread (`ttl` session only).

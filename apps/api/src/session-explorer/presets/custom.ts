@@ -1,6 +1,14 @@
 import type { CapturedKey, CustomSchema, ParsedMessage } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
-import { fail, failedView, guardedParse, isRecord, parseJson, textContent } from './text';
+import {
+  concatSession,
+  fail,
+  failedView,
+  guardedParse,
+  isRecord,
+  parseJson,
+  textContent,
+} from './text';
 
 const VALUE_TYPES = ['list', 'string', 'hash', 'json'] as const;
 const MESSAGE_SOURCES = ['items', 'path', 'key'] as const;
@@ -11,7 +19,13 @@ const WILDCARD = '*';
 const SEGMENT = /^([^.[\]]*)((?:\[\d+\])*)$/;
 const INDEX = /\[(\d+)\]/g;
 
-export function getPath(obj: unknown, path: string): unknown {
+const asIs = (v: unknown): unknown => v;
+
+export function getPath(
+  obj: unknown,
+  path: string,
+  open: (v: unknown) => unknown = asIs,
+): unknown {
   if (path === '') return undefined;
   let current: unknown = obj;
   for (const segment of path.split('.')) {
@@ -19,12 +33,14 @@ export function getPath(obj: unknown, path: string): unknown {
     if (!match || (match[1] === '' && match[2] === '')) return undefined;
     const [, name, indices] = match;
     if (name !== '') {
+      current = open(current);
       if (!isRecord(current) || !Object.prototype.hasOwnProperty.call(current, name)) {
         return undefined;
       }
       current = current[name];
     }
     for (const index of indices.matchAll(INDEX)) {
+      current = open(current);
       if (!Array.isArray(current)) return undefined;
       current = current[Number(index[1])];
     }
@@ -89,18 +105,32 @@ export function matchSessionTemplate(template: SessionTemplate, key: string): st
   const last = literals[literals.length - 1];
   if (key.length < first.length + last.length) return null;
   if (!key.startsWith(first) || !key.endsWith(last)) return null;
+  const sessionGap = gaps.indexOf('session');
+  const start = first.length;
   const end = key.length - last.length;
-  let pos = first.length;
-  let session: string | null = null;
-  for (let i = 0; i < gaps.length; i++) {
-    const isLast = i === gaps.length - 1;
-    const next = literals[i + 1];
-    const stop = isLast ? end : key.indexOf(next, pos);
-    if (stop < 0 || stop > end || (!isLast && stop + next.length > end)) return null;
-    if (gaps[i] === 'session') session = key.slice(pos, stop);
-    pos = isLast ? end : stop + next.length;
+
+  let right = end;
+  for (let i = gaps.length - 1; i > sessionGap; i--) {
+    const at = key.lastIndexOf(literals[i], right - literals[i].length);
+    if (at < start || at + literals[i].length > right) return null;
+    right = at;
   }
-  return session || null;
+
+  let sessionStart = start;
+  let bound = right - 1;
+  for (let i = sessionGap; i > 0; i--) {
+    const at = key.lastIndexOf(literals[i], bound - literals[i].length);
+    if (at < start || at + literals[i].length > bound) return null;
+    if (i === sessionGap) sessionStart = at + literals[i].length;
+    bound = at;
+  }
+
+  let sessionEnd = end;
+  if (sessionGap < gaps.length - 1) {
+    sessionEnd = key.indexOf(literals[sessionGap + 1], sessionStart + 1);
+    if (sessionEnd < 0) return null;
+  }
+  return sessionStart < sessionEnd ? key.slice(sessionStart, sessionEnd) : null;
 }
 
 const isNonEmptyString = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
@@ -108,11 +138,22 @@ const isNonEmptyString = (v: unknown): v is string => typeof v === 'string' && v
 const isBlank = (v: unknown): boolean =>
   v === undefined || v === null || (typeof v === 'string' && v.trim() === '');
 
+const trimmed = (v: unknown): unknown => (typeof v === 'string' ? v.trim() : v);
+
+const trimValues = (v: unknown): unknown =>
+  isRecord(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, trimmed(x)])) : v;
+
 export function validateCustomSchema(
-  s: unknown,
+  input: unknown,
 ): { ok: true; schema: CustomSchema } | { ok: false; errors: string[] } {
   const errors: string[] = [];
-  if (!isRecord(s)) return { ok: false, errors: ['Schema must be an object'] };
+  if (!isRecord(input)) return { ok: false, errors: ['Schema must be an object'] };
+  const s: Record<string, unknown> = {
+    ...input,
+    sessionTemplate: trimmed(input.sessionTemplate),
+    messages: trimValues(input.messages),
+    fields: trimValues(input.fields),
+  };
 
   if (!isBlank(s.sessionTemplate)) {
     if (typeof s.sessionTemplate !== 'string') errors.push('sessionTemplate must be a string');
@@ -154,21 +195,21 @@ export function validateCustomSchema(
   }
 
   if (errors.length > 0) return { ok: false, errors };
-  const input = s as unknown as CustomSchema;
+  const valid = s as unknown as CustomSchema;
   const schema: CustomSchema = {
-    ...(!isBlank(input.sessionTemplate) ? { sessionTemplate: input.sessionTemplate } : {}),
-    valueType: input.valueType,
+    ...(!isBlank(valid.sessionTemplate) ? { sessionTemplate: valid.sessionTemplate } : {}),
+    valueType: valid.valueType,
     messages:
-      input.messages.from === 'path'
-        ? { from: 'path', path: input.messages.path }
-        : { from: input.messages.from },
+      valid.messages.from === 'path'
+        ? { from: 'path', path: valid.messages.path }
+        : { from: valid.messages.from },
     fields: {
-      role: input.fields.role,
-      content: input.fields.content,
+      role: valid.fields.role,
+      content: valid.fields.content,
       ...Object.fromEntries(
-        OPTIONAL_FIELDS.filter((name) => !isBlank(input.fields[name])).map((name) => [
+        OPTIONAL_FIELDS.filter((name) => !isBlank(valid.fields[name])).map((name) => [
           name,
-          input.fields[name],
+          valid.fields[name],
         ]),
       ),
     },
@@ -187,8 +228,8 @@ const parseIfString = (v: unknown): unknown => (typeof v === 'string' ? parseJso
 
 const JSON_CONTAINER = /^\s*[[{]/;
 
-const parseIfJson = (v: string): unknown => {
-  if (!JSON_CONTAINER.test(v)) return v;
+const parseIfJson = (v: unknown): unknown => {
+  if (typeof v !== 'string' || !JSON_CONTAINER.test(v)) return v;
   try {
     return parseJson(v);
   } catch {
@@ -196,11 +237,20 @@ const parseIfJson = (v: string): unknown => {
   }
 };
 
-const fieldOrder = new Intl.Collator('en', { numeric: true });
+const NUMBERED = /^(.*?)(\d+)$/;
+
+function compareFieldNames(a: string, b: string): number {
+  const na = NUMBERED.exec(a);
+  const nb = NUMBERED.exec(b);
+  if (na && nb && na[1] === nb[1] && na[2].length !== nb[2].length) {
+    return Number(na[2]) - Number(nb[2]);
+  }
+  return a < b ? -1 : a > b ? 1 : 0;
+}
 
 const byFieldName = (hash: Record<string, unknown>): unknown[] =>
   Object.entries(hash)
-    .sort(([a], [b]) => fieldOrder.compare(a, b))
+    .sort(([a], [b]) => compareFieldNames(a, b))
     .map(([, value]) => value);
 
 function readRoot(k: CapturedKey, valueType: CustomSchema['valueType']): unknown {
@@ -210,12 +260,7 @@ function readRoot(k: CapturedKey, valueType: CustomSchema['valueType']): unknown
       return k.value.map(parseIfString);
     case 'hash':
       if (!isRecord(k.value)) return fail('Expected a hash value');
-      return Object.fromEntries(
-        Object.entries(k.value).map(([field, v]) => [
-          field,
-          typeof v === 'string' ? parseIfJson(v) : v,
-        ]),
-      );
+      return k.value;
     default:
       if (k.type === 'ReJSON-RL' && typeof k.value !== 'string') return k.value;
       if (typeof k.value !== 'string') return fail('Expected a string value');
@@ -223,7 +268,11 @@ function readRoot(k: CapturedKey, valueType: CustomSchema['valueType']): unknown
   }
 }
 
-function selectEntries(root: unknown, schema: CustomSchema): unknown[] {
+function selectEntries(
+  root: unknown,
+  schema: CustomSchema,
+  open: (v: unknown) => unknown,
+): unknown[] {
   switch (schema.messages.from) {
     case 'key':
       return [root];
@@ -233,32 +282,37 @@ function selectEntries(root: unknown, schema: CustomSchema): unknown[] {
       return fail('Value has no message items');
     }
     case 'path': {
-      const found = getPath(root, schema.messages.path);
+      const found = open(getPath(root, schema.messages.path, open));
       if (!Array.isArray(found)) return fail(`No message list at "${schema.messages.path}"`);
       return found;
     }
   }
 }
 
-function toMessage(entry: unknown, fields: CustomSchema['fields']): ParsedMessage {
-  const role = getPath(entry, fields.role);
+function toMessage(
+  entry: unknown,
+  fields: CustomSchema['fields'],
+  open: (v: unknown) => unknown,
+): ParsedMessage {
+  const at = (path: string) => getPath(entry, path, open);
+  const role = at(fields.role);
   if (typeof role !== 'string' || role === '') return fail(`Missing role at "${fields.role}"`);
-  const rawContent = getPath(entry, fields.content);
+  const rawContent = at(fields.content);
   if (rawContent === undefined) return fail(`Missing content at "${fields.content}"`);
   const message: ParsedMessage = { role, content: textContent(rawContent ?? '') };
 
   if (fields.timestamp) {
-    const ts = getPath(entry, fields.timestamp);
+    const ts = at(fields.timestamp);
     if (typeof ts === 'string' || typeof ts === 'number') message.timestamp = String(ts);
   }
-  const toolName = fields.toolName ? getPath(entry, fields.toolName) : undefined;
+  const toolName = fields.toolName ? at(fields.toolName) : undefined;
   const hasToolName = typeof toolName === 'string' && toolName !== '';
   if (hasToolName) {
     message.toolCalls = [
-      { name: toolName, args: fields.toolArgs ? getPath(entry, fields.toolArgs) : undefined },
+      { name: toolName, args: fields.toolArgs ? at(fields.toolArgs) : undefined },
     ];
   }
-  const toolResult = fields.toolResult ? getPath(entry, fields.toolResult) : undefined;
+  const toolResult = fields.toolResult ? at(fields.toolResult) : undefined;
   if (toolResult !== undefined) {
     message.toolResult = {
       ...(hasToolName ? { name: toolName } : {}),
@@ -271,6 +325,7 @@ function toMessage(entry: unknown, fields: CustomSchema['fields']): ParsedMessag
 export function createCustomPreset(schema: CustomSchema): PresetDefinition {
   const template = schema.sessionTemplate ? parseSessionTemplate(schema.sessionTemplate) : null;
   const expectedTypes = TYPE_MATCHES[schema.valueType];
+  const open = schema.valueType === 'hash' ? parseIfJson : asIs;
   return {
     id: 'custom',
     defaultPattern: (prefix) => `${prefix}*`,
@@ -280,11 +335,11 @@ export function createCustomPreset(schema: CustomSchema): PresetDefinition {
         return failedView(k, `Expected ${schema.valueType}, found ${k.type}`);
       }
       return guardedParse(k, () =>
-        selectEntries(readRoot(k, schema.valueType), schema).map((entry) =>
-          toMessage(entry, schema.fields),
+        selectEntries(readRoot(k, schema.valueType), schema, open).map((entry) =>
+          toMessage(entry, schema.fields, open),
         ),
       );
     },
-    mergeSession: (views) => views.flatMap((v) => (v.parsed ? v.messages : [])),
+    mergeSession: concatSession,
   };
 }

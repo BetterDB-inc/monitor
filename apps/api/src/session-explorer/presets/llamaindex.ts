@@ -1,6 +1,16 @@
 import type { ParsedMessage } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
-import { fail, guardedParse, isRecord, parseJson, textContent } from './text';
+import {
+  concatSession,
+  fail,
+  guardedParse,
+  isRecord,
+  parseJson,
+  parseToolCalls,
+  textContent,
+  toolResultOf,
+  type ToolCall,
+} from './text';
 
 const ROLE_MAP = new Map([
   ['user', 'human'],
@@ -13,50 +23,43 @@ const ROLE_MAP = new Map([
   ['model', 'ai'],
 ]);
 
-type ToolCall = NonNullable<ParsedMessage['toolCalls']>[number];
+const HIDDEN_BLOCKS = new Set(['tool_call', 'cache', 'citation']);
 
 function blocksText(blocks: unknown): string {
   if (!Array.isArray(blocks)) return fail('blocks is not a list');
   return blocks
-    .map((block) => {
+    .flatMap((block) => {
       if (!isRecord(block) || typeof block.block_type !== 'string') {
         return fail('Unsupported content block');
       }
-      if (block.block_type === 'text' && typeof block.text === 'string') return block.text;
-      if (block.block_type === 'tool_call') return '';
-      return `[${block.block_type}]`;
+      if (block.block_type === 'text' && typeof block.text === 'string') return [block.text];
+      if (HIDDEN_BLOCKS.has(block.block_type)) return [];
+      return [`[${block.block_type}]`];
     })
-    .join('');
+    .join('\n');
 }
 
 const withId = (id: unknown) => (typeof id === 'string' ? { id } : {});
 
-function argsOf(text: string): unknown {
+function argsOf(args: unknown): unknown {
+  if (isRecord(args)) return args;
+  if (typeof args !== 'string') return fail('Tool call arguments are not a string or object');
   try {
-    return parseJson(text);
+    return parseJson(args);
   } catch {
-    return text;
+    return args;
   }
 }
 
 function parseToolCall(call: unknown): ToolCall {
   if (!isRecord(call)) return fail('Malformed tool call');
   if (isRecord(call.function) && typeof call.function.name === 'string') {
-    const argText = call.function.arguments;
-    if (typeof argText !== 'string') return fail('Tool call arguments are not a string');
-    return { name: call.function.name, args: argsOf(argText), ...withId(call.id) };
+    return { name: call.function.name, args: argsOf(call.function.arguments), ...withId(call.id) };
   }
   if (typeof call.name === 'string') {
     return { name: call.name, args: call.input, ...withId(call.id) };
   }
   return fail('Malformed tool call');
-}
-
-function parseToolCalls(raw: unknown): ParsedMessage['toolCalls'] {
-  if (raw === undefined || raw === null) return undefined;
-  if (!Array.isArray(raw)) return fail('tool_calls is not a list');
-  if (raw.length === 0) return undefined;
-  return raw.map(parseToolCall);
 }
 
 function blockToolCalls(blocks: unknown[]): ParsedMessage['toolCalls'] {
@@ -87,16 +90,10 @@ function parseElement(element: unknown): ParsedMessage {
   const content = legacy ? textContent(msg.content ?? '') : blocksText(msg.blocks);
   const message: ParsedMessage = { role, content };
   const toolCalls =
-    parseToolCalls(extras.tool_calls) ??
+    parseToolCalls(extras.tool_calls, parseToolCall) ??
     (legacy ? undefined : blockToolCalls(msg.blocks as unknown[]));
   if (toolCalls) message.toolCalls = toolCalls;
-  if (role === 'tool') {
-    message.toolResult = {
-      ...(typeof extras.name === 'string' ? { name: extras.name } : {}),
-      content: message.content,
-      ...(typeof extras.tool_call_id === 'string' ? { callId: extras.tool_call_id } : {}),
-    };
-  }
+  if (role === 'tool') message.toolResult = toolResultOf(message.content, extras);
   return message;
 }
 
@@ -109,6 +106,5 @@ export const llamaindexPreset: PresetDefinition = {
       if (k.type !== 'list' || !Array.isArray(k.value)) return fail('Expected a list value');
       return k.value.map(parseElement);
     }),
-  mergeSession: (views) =>
-    views.flatMap((v) => (v.parsed ? v.messages : [])),
+  mergeSession: concatSession,
 };
