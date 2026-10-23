@@ -243,15 +243,29 @@ const parseIfJson = (v: unknown): unknown => {
   }
 };
 
-const NUMBERED = /^(.*?)(\d+)$/;
+const LEADING_ZEROS = /^0+/;
+
+const isDigit = (c: string) => c >= '0' && c <= '9';
+
+function splitTrailingDigits(name: string): [string, string] {
+  let at = name.length;
+  while (at > 0 && isDigit(name[at - 1])) at--;
+  return [name.slice(0, at), name.slice(at)];
+}
+
+const byBytes = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+function compareDigits(a: string, b: string): number {
+  if (a === '' || b === '') return byBytes(a, b);
+  const x = a.replace(LEADING_ZEROS, '');
+  const y = b.replace(LEADING_ZEROS, '');
+  return x.length - y.length || byBytes(x, y);
+}
 
 function compareFieldNames(a: string, b: string): number {
-  const na = NUMBERED.exec(a);
-  const nb = NUMBERED.exec(b);
-  if (na && nb && na[1] === nb[1] && na[2].length !== nb[2].length) {
-    return Number(na[2]) - Number(nb[2]);
-  }
-  return a < b ? -1 : a > b ? 1 : 0;
+  const [pa, da] = splitTrailingDigits(a);
+  const [pb, db] = splitTrailingDigits(b);
+  return byBytes(pa, pb) || compareDigits(da, db) || byBytes(a, b);
 }
 
 const byFieldName = (hash: Record<string, unknown>): unknown[] =>

@@ -442,6 +442,33 @@ describe('custom preset', () => {
     ]);
   });
 
+  it('orders hash items the same whatever order HGETALL returns them in', () => {
+    const preset = createCustomPreset({
+      valueType: 'hash',
+      messages: { from: 'items' },
+      fields: { role: 'role', content: 'text' },
+    });
+    const names = ['msg:9', 'msg:10', 'msg:1a', 'msg:2', 'msg:010', 'note', 'msg:'];
+    const permutations = (items: string[]): string[][] =>
+      items.length <= 1
+        ? [items]
+        : items.flatMap((item, i) =>
+            permutations([...items.slice(0, i), ...items.slice(i + 1)]).map((rest) => [item, ...rest]),
+          );
+    const orders = new Set(
+      permutations(names).map((order) => {
+        const value = Object.fromEntries(
+          order.map((name) => [name, JSON.stringify({ role: 'user', text: name })]),
+        );
+        const view = preset.parseKey(key({ type: 'hash', value }));
+        return JSON.stringify(view.parsed && view.messages.map((m) => m.content));
+      }),
+    );
+    expect([...orders]).toEqual([
+      JSON.stringify(['msg:', 'msg:2', 'msg:9', 'msg:010', 'msg:10', 'msg:1a', 'note']),
+    ]);
+  });
+
   it('orders time-sortable ids in hash items by byte order', () => {
     const preset = createCustomPreset({
       valueType: 'hash',
