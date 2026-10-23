@@ -130,6 +130,7 @@ export function matchSessionTemplate(template: SessionTemplate, key: string): st
     if (i === sessionGap) sessionStart = at + literals[i].length;
     bound = at;
   }
+  if (sessionStart >= right) return null;
 
   let sessionEnd = end;
   if (sessionGap < gaps.length - 1) {

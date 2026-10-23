@@ -233,6 +233,52 @@ describe('custom preset', () => {
     expect(t('ab{session}ba', 'aba')).toBeNull();
   });
 
+  it('does not match keys that leave no room for the session before the next literal', () => {
+    const t = (template: string, key: string) =>
+      matchSessionTemplate(parseSessionTemplate(template), key);
+    expect(t('app:{session}:*:messages', 'app::x:messages')).toBeNull();
+    expect(t('app:{session}:*:messages', 'app:s:x:messages')).toBe('s');
+    expect(t('{session}:*:m', '::m')).toBeNull();
+  });
+
+  it('agrees with an equivalent glob regex on generated keys', () => {
+    let seed = 551;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    const pick = <T,>(items: readonly T[]): T => items[Math.floor(random() * items.length)];
+    const TOKENS = ['a', 'b', ':', ':', '*', '{session}'] as const;
+    const KEY_CHARS = ['a', 'b', ':'] as const;
+    const escapeRegex = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const toRegex = (template: string) =>
+      new RegExp(
+        `^${template
+          .split('{session}')
+          .map((part) => part.split('*').map(escapeRegex).join('.*'))
+          .join('(.+?)')}$`,
+      );
+    const isValid = (template: string) =>
+      validateCustomSchema({ ...baseSchema, sessionTemplate: template }).ok;
+
+    const mismatches: string[] = [];
+    let checked = 0;
+    while (checked < 300) {
+      const template = Array.from({ length: 1 + Math.floor(random() * 6) }, () => pick(TOKENS)).join('');
+      if (!isValid(template)) continue;
+      checked++;
+      const parsed = parseSessionTemplate(template);
+      const regex = toRegex(template);
+      for (let i = 0; i < 200; i++) {
+        const key = Array.from({ length: Math.floor(random() * 10) }, () => pick(KEY_CHARS)).join('');
+        const expected = regex.exec(key)?.[1] ?? null;
+        const actual = matchSessionTemplate(parsed, key);
+        if (actual !== expected) mismatches.push(`${template} ${key} ${actual} ${expected}`);
+      }
+    }
+    expect(mismatches).toEqual([]);
+  });
+
   it('matches hostile keys in linear time', () => {
     const preset = createCustomPreset({ ...baseSchema, sessionTemplate: '*a*a*a:{session}=' });
     const started = Date.now();
