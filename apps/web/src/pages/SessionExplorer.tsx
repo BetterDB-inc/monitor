@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
 import { Feature, type SessionNamespace } from '@betterdb/shared';
@@ -36,13 +36,15 @@ export function SessionExplorer() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [shownConnection, setShownConnection] = useState(connectionId);
 
-  useEffect(() => {
+  if (shownConnection !== connectionId) {
+    setShownConnection(connectionId);
     setSelectedNs(null);
     setSessionId(null);
     setEditing(null);
     setActionError(null);
-  }, [connectionId]);
+  }
 
   const namespaces = useSessionNamespaces(connectionId);
   const list = namespaces.data ?? [];

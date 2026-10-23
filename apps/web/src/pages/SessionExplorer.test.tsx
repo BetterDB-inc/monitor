@@ -6,7 +6,8 @@ import { SessionExplorer } from './SessionExplorer';
 import { sessionExplorerKeys } from '../hooks/useSessionExplorer';
 import { listResponse } from '../components/pages/session-explorer/__tests__/fixtures';
 
-const { api } = vi.hoisted(() => ({
+const { api, connection } = vi.hoisted(() => ({
+  connection: { id: 'c1' },
   api: {
     listNamespaces: vi.fn(),
     deleteNamespace: vi.fn(),
@@ -20,7 +21,7 @@ const { api } = vi.hoisted(() => ({
 vi.mock('../api/session-explorer', () => ({ sessionExplorerApi: api }));
 
 vi.mock('../hooks/useConnection', () => ({
-  useConnection: () => ({ currentConnection: { id: 'c1' } }),
+  useConnection: () => ({ currentConnection: { id: connection.id } }),
 }));
 
 vi.mock('../hooks/useLicense', () => ({
@@ -41,17 +42,19 @@ const ns = (id: string): SessionNamespace => ({
 
 const renderPage = () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
+  const page = () => (
     <QueryClientProvider client={client}>
       <SessionExplorer />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
-  return client;
+  const { rerender } = render(page());
+  return { client, rerender: () => rerender(page()) };
 };
 
 describe('SessionExplorer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    connection.id = 'c1';
     vi.stubGlobal('confirm', vi.fn(() => true));
     api.listSessions.mockResolvedValue(listResponse());
     api.deleteNamespace.mockResolvedValue(undefined);
@@ -83,7 +86,7 @@ describe('SessionExplorer', () => {
     api.listNamespaces
       .mockResolvedValueOnce([ns('a'), ns('b')])
       .mockRejectedValue(new Error('namespaces unavailable'));
-    const client = renderPage();
+    const { client } = renderPage();
 
     await screen.findByLabelText('Namespace');
     await act(() =>
@@ -105,5 +108,25 @@ describe('SessionExplorer', () => {
     await screen.findByText('namespaces unavailable');
     expect(screen.queryByLabelText('Namespace')).toBeNull();
     expect(screen.queryByText('Sessions')).toBeNull();
+  });
+
+  it('does not request the previous session after switching connections', async () => {
+    api.listNamespaces.mockResolvedValue([ns('a')]);
+    api.getSession.mockReturnValue(new Promise(() => {}));
+    const { client, rerender } = renderPage();
+    client.setQueryData(sessionExplorerKeys.namespaces('c2'), [ns('b')]);
+
+    fireEvent.click(await screen.findByText('alpha'));
+    await waitFor(() => expect(api.getSession).toHaveBeenCalledWith('a', 'alpha', expect.anything()));
+    api.getSession.mockClear();
+
+    connection.id = 'c2';
+    rerender();
+
+    await waitFor(() =>
+      expect((screen.getByLabelText('Namespace') as HTMLSelectElement).value).toBe('b'),
+    );
+    await waitFor(() => expect(api.listSessions).toHaveBeenCalledWith('b', expect.anything()));
+    expect(api.getSession).not.toHaveBeenCalled();
   });
 });
