@@ -123,6 +123,21 @@ The binary is found in this order:
 2. `/usr/local/bin/redis-shake` (Docker image)
 3. `~/.betterdb/bin/redis-shake` (npx install)
 
+#### Shutdown and restarts (all modes)
+
+Stopping BetterDB (SIGTERM, `docker stop`, Ctrl-C on the CLI) stops every running
+migration the way **Stop Migration** does: RedisShake gets SIGTERM, then SIGKILL if
+it is still running 3 seconds later, and command-mode migrations stop at their next
+batch. Migrations do not resume after a restart; start them again.
+
+Each RedisShake run writes its configuration, including the source and target
+credentials, to `<tmpdir>/<job id>.toml` (mode `0600`) and removes it when the run
+ends. If BetterDB is killed before it can clean up (SIGKILL, out of memory), the
+next start removes those files once their RedisShake process is gone, and logs a
+warning for any whose process is still running. Because that check relies on the
+PID file, a RedisShake run whose PID file cannot be written is stopped straight
+away and the migration fails with an error, rather than running untracked.
+
 ### 3. Validation (Pro tier)
 
 Spot-checks the target after migration to verify data integrity.

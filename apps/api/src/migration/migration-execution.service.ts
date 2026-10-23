@@ -1,4 +1,12 @@
-import { Injectable, Logger, BadRequestException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  BadRequestException,
+  NotFoundException,
+  ServiceUnavailableException,
+  type OnModuleDestroy,
+  type OnModuleInit,
+} from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
@@ -17,6 +25,14 @@ import { runCommandMigration } from './execution/command-migration-worker';
 import { shouldExcludeFunctions, isRdbRestoreCompatible } from './fork-compat';
 import { probeSourceFunctionsClusterAware, parseNodeAddress } from './function-presence';
 import { assertLiveMigrationPair } from './live-connections';
+import { sweepStaleJobFiles } from './execution/stale-job-files';
+
+/** Set on jobs stopped by an API shutdown rather than by the user. */
+export const SHUTDOWN_CANCEL_MESSAGE = 'Stopped because BetterDB shut down';
+
+/** Returned (503) for a migration requested once shutdown has begun. */
+export const SHUTDOWN_START_MESSAGE =
+  'BetterDB is shutting down; start the migration again after it restarts.';
 
 /**
  * Everything runRedisShake needs to do before it spawns the process: the
@@ -40,19 +56,119 @@ interface RedisShakePreSpawn {
 }
 
 @Injectable()
-export class MigrationExecutionService {
+export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MigrationExecutionService.name);
   private jobs = new Map<string, ExecutionJob>();
   private readonly MAX_JOBS = 10;
   private readonly MAX_LOG_LINES = 500;
   private readonly ANALYSIS_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+  // How long shutdown waits for stopped jobs to finish their own cleanup before
+  // SIGKILLing RedisShake. Matches stopExecution's SIGTERM -> SIGKILL escalation
+  // and stays under the CLI's 5 s force-kill and Docker's 10 s stop timeout.
+  private readonly SHUTDOWN_GRACE_MS = 3_000;
+  // The in-flight run of each job (runRedisShake / runCommandMode), so shutdown
+  // can wait for their finally blocks to remove the credential-bearing TOML.
+  private readonly runs = new Map<string, Promise<void>>();
+  private shuttingDown = false;
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
     private readonly migrationService: MigrationService,
   ) {}
 
+  /**
+   * A crash, OOM kill or SIGKILL skips runRedisShake's cleanup and leaves the
+   * job's TOML (source and target credentials) in the temp dir. Remove those
+   * left by earlier runs whose RedisShake process is gone.
+   */
+  onModuleInit(): void {
+    try {
+      const { removed, kept } = sweepStaleJobFiles(os.tmpdir());
+      if (removed.length > 0) {
+        this.logger.warn(
+          `Removed ${removed.length} RedisShake config file(s) left by a migration that did not shut down cleanly`,
+        );
+      }
+      for (const { tomlPath, pid } of kept) {
+        this.logger.warn(
+          `Left ${tomlPath} in place: its RedisShake process (pid ${pid}) is still running. Stop it before removing the file.`,
+        );
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`Could not sweep stale migration files: ${message}`);
+    }
+  }
+
+  /**
+   * main.ts enables shutdown hooks, so SIGTERM lands here. Stop every pending or
+   * running migration so RedisShake does not outlive the API (a redis_shake_sync
+   * job would keep writing to the target with nothing left to stop it) and its
+   * TOML is removed instead of left behind.
+   */
+  async onModuleDestroy(): Promise<void> {
+    this.shuttingDown = true;
+    // Not status alone: a job the user just stopped is already 'cancelled' but
+    // its RedisShake can still be running (stopExecution's SIGKILL timer would
+    // die with this process). Anything with an in-flight run or a live process
+    // is still ours to stop and clean up.
+    const active = [...this.jobs.values()].filter(
+      (job) =>
+        job.status === 'pending' ||
+        job.status === 'running' ||
+        this.runs.has(job.id) ||
+        job.process !== null,
+    );
+    if (active.length === 0) return;
+
+    this.logger.warn(`Stopping ${active.length} migration(s) because BetterDB is shutting down`);
+    for (const job of active) {
+      if (job.status === 'pending' || job.status === 'running') {
+        job.status = 'cancelled';
+        job.error = job.error ?? SHUTDOWN_CANCEL_MESSAGE;
+      }
+      if (job.process) {
+        try {
+          job.process.kill('SIGTERM');
+        } catch { /* process may already be dead */ }
+      }
+    }
+
+    const runs = active
+      .map((job) => this.runs.get(job.id))
+      .filter((run): run is Promise<void> => run !== undefined);
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      Promise.allSettled(runs),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, this.SHUTDOWN_GRACE_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+
+    // Anything still alive ignored SIGTERM. Kill it and remove its files here,
+    // since its run's finally block may never get to.
+    for (const job of active) {
+      job.completedAt = job.completedAt ?? Date.now();
+      if (job.process) {
+        try {
+          job.process.kill('SIGKILL');
+        } catch { /* ignore */ }
+      }
+      for (const path of [job.tomlPath, job.pidPath]) {
+        if (path) {
+          try {
+            if (existsSync(path)) unlinkSync(path);
+          } catch { /* ignore cleanup errors */ }
+        }
+      }
+    }
+  }
+
   async startExecution(req: MigrationExecutionRequest): Promise<StartExecutionResponse> {
+    if (this.shuttingDown) {
+      throw new ServiceUnavailableException(SHUTDOWN_START_MESSAGE);
+    }
     const mode: ExecutionMode = req.mode ?? 'redis_shake';
 
     // 1. Resolve both connections (throws NotFoundException if missing)
@@ -102,6 +218,14 @@ export class MigrationExecutionService {
         const message = err instanceof Error ? err.message : String(err);
         throw new ServiceUnavailableException(message);
       }
+    }
+
+    // Re-check after the awaits above: shutdown may have started (and taken its
+    // snapshot of jobs and runs) while the cluster probes were outstanding. From
+    // here to trackRun() there is no await, so a job registered below is always
+    // visible to onModuleDestroy.
+    if (this.shuttingDown) {
+      throw new ServiceUnavailableException(SHUTDOWN_START_MESSAGE);
     }
 
     // 5. Create the job
@@ -177,13 +301,9 @@ export class MigrationExecutionService {
         targetIsCluster,
       };
 
-      this.runRedisShake(job, binaryPath!, preSpawn).catch(err => {
-        this.logger.error(`Execution ${id} failed: ${err.message}`);
-      });
+      this.trackRun(id, this.runRedisShake(job, binaryPath!, preSpawn));
     } else {
-      this.runCommandMode(job, sourceConfig, targetConfig, clusterEnabled, targetIsCluster).catch(err => {
-        this.logger.error(`Execution ${id} failed: ${err.message}`);
-      });
+      this.trackRun(id, this.runCommandMode(job, sourceConfig, targetConfig, clusterEnabled, targetIsCluster));
     }
 
     return { id, status: 'pending' };
@@ -307,12 +427,22 @@ export class MigrationExecutionService {
       job.process = proc;
       job.status = 'running';
 
-      // Write PID file for orphan detection on server restart
+      // The PID file is what lets the startup sweep (stale-job-files.ts) tell a
+      // live RedisShake from a dead one. Without it the sweep would delete this
+      // run's TOML after ORPHAN_TOML_MIN_AGE_MS while the process is still
+      // running, so a run whose PID cannot be recorded is stopped instead. The
+      // process was spawned a moment ago, so nothing has been written yet.
       const pidPath = join(os.tmpdir(), `${job.id}.pid`);
       try {
         writeFileSync(pidPath, String(proc.pid), { encoding: 'utf-8', mode: 0o600 });
         job.pidPath = pidPath;
-      } catch { /* non-fatal — orphan detection is best-effort */ }
+      } catch (err: unknown) {
+        try {
+          proc.kill('SIGKILL');
+        } catch { /* process may already be dead */ }
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(`Could not record the RedisShake PID file: ${message}`, { cause: err });
+      }
 
       const processLine = (rawLine: string) => {
         // Strip ANSI first: RedisShake colourises output, and the codes otherwise
@@ -459,6 +589,18 @@ export class MigrationExecutionService {
 
   // ── Shared methods ──
 
+  private trackRun(id: string, run: Promise<void>): void {
+    const tracked = run
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.error(`Execution ${id} failed: ${message}`);
+      })
+      .finally(() => {
+        this.runs.delete(id);
+      });
+    this.runs.set(id, tracked);
+  }
+
   stopExecution(id: string): boolean {
     const job = this.jobs.get(id);
     if (!job) return false;
@@ -521,8 +663,15 @@ export class MigrationExecutionService {
   private evictOldJobs(): void {
     if (this.jobs.size < this.MAX_JOBS) return;
 
+    // A cancelled job can still have its run in flight or its RedisShake alive
+    // (stopExecution SIGTERMs and only SIGKILLs 3 s later). Keep it until both
+    // are gone, or onModuleDestroy could no longer find, stop and clean it up.
     const terminal = Array.from(this.jobs.entries())
-      .filter(([, j]) => j.status === 'completed' || j.status === 'failed' || j.status === 'cancelled')
+      .filter(([id, j]) =>
+        (j.status === 'completed' || j.status === 'failed' || j.status === 'cancelled') &&
+        !this.runs.has(id) &&
+        j.process === null,
+      )
       .sort((a, b) => a[1].startedAt - b[1].startedAt);
 
     for (const [id] of terminal) {
@@ -532,7 +681,7 @@ export class MigrationExecutionService {
 
     if (this.jobs.size >= this.MAX_JOBS) {
       throw new ServiceUnavailableException(
-        `Execution job limit reached (${this.MAX_JOBS}). All slots occupied by running jobs — try again later.`,
+        `Execution job limit reached (${this.MAX_JOBS}). All slots occupied by running or stopping jobs — try again later.`,
       );
     }
   }
