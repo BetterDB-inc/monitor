@@ -56,24 +56,40 @@ describe('CVE-2025-49844 (affected "All", patched on five branches)', () => {
 describe('matchRanges wildcard precedence', () => {
   const ranges: BranchRange[] = [
     { branch: '7.2', vulnerableBelow: '7.2.11', patchedAt: '7.2.11' },
-    { branch: '*', vulnerableBelow: '8.2.2' },
+    { branch: '*', vulnerableFrom: '0.0.0', vulnerableBelow: '8.4.0', inferred: true },
   ];
-
-  it('never lets a wildcard re-flag a version past its own branch fix', () => {
+  it('never lets an inferred wildcard re-flag a version past its own branch fix', () => {
     expect(matchRanges('7.2.11', ranges).vulnerable).toBe(false);
   });
-
-  it('applies the wildcard to a branch with no range of its own', () => {
-    expect(matchRanges('7.0.15', ranges).vulnerable).toBe(true);
+  it('applies the inferred wildcard to a branch with no range of its own', () => {
+    expect(matchRanges('7.0.15', ranges)).toMatchObject({ vulnerable: true, inferred: true });
   });
-
-  it('lets the wildcard apply past an on-branch upper bound that has no published fix', () => {
+  it('lets the inferred wildcard apply past an on-branch upper bound that has no published fix', () => {
     const unfixed: BranchRange[] = [
       { branch: '7.2', vulnerableBelow: '7.2.5' },
-      { branch: '*', vulnerableBelow: '7.2.10' },
+      { branch: '*', vulnerableFrom: '0.0.0', vulnerableBelow: '8.4.0', inferred: true },
     ];
-
     expect(matchRanges('7.2.6', unfixed).vulnerable).toBe(true);
+  });
+  it('prefers a stated wildcard over the inferred one, so the match is not labelled inferred (jamby77)', () => {
+    const both: BranchRange[] = [
+      { branch: '*', vulnerableFrom: '0.0.0', vulnerableBelow: '8.4.0', inferred: true },
+      { branch: '*', vulnerableBelow: '7.2.0' },
+    ];
+    const match = matchRanges('7.0.10', both);
+    expect(match.vulnerable).toBe(true);
+    expect(match).not.toHaveProperty('inferred');
+  });
+  it('keeps master behaviour for a stated wildcard next to an on-branch fix (NVD-only shape, jamby77)', () => {
+    // NVD: [7.0.0, 7.0.5) on 7.0 plus "* < 7.2.0". Only the inferred wildcard is
+    // suppressed by an on-branch fix; NVD's own wildcard still flags 7.0.10.
+    const nvdOnly: BranchRange[] = [
+      { branch: '7.0', vulnerableFrom: '7.0.0', vulnerableBelow: '7.0.5', patchedAt: '7.0.5' },
+      { branch: '*', vulnerableBelow: '7.2.0' },
+    ];
+    expect(matchRanges('7.0.10', nvdOnly).vulnerable).toBe(true);
+    expect(matchRanges('7.0.10', nvdOnly)).not.toHaveProperty('inferred');
+    expect(matchRanges('7.2.0', nvdOnly).vulnerable).toBe(false);
   });
 });
 
@@ -188,7 +204,17 @@ describe('GHSA unlisted-branch wildcard rules', () => {
 
   it('(b) "All" with only 6.2/7.2 patched still flags unpatched 7.4/8.0 released before disclosure', async () => {
     const ds = await datasetFor([adv('All', '6.2.20, 7.2.11')]);
-    for (const v of ['5.0.14', '6.0.20', '7.0.15', '6.2.19', '7.2.10', '7.4.0', '7.4.5', '8.0.0', '8.2.0']) {
+    for (const v of [
+      '5.0.14',
+      '6.0.20',
+      '7.0.15',
+      '6.2.19',
+      '7.2.10',
+      '7.4.0',
+      '7.4.5',
+      '8.0.0',
+      '8.2.0',
+    ]) {
       expect(isVulnerable(ds, v)).toBe(true);
     }
     for (const v of ['6.2.20', '7.2.11']) {
@@ -258,7 +284,11 @@ describe('GHSA unlisted-branch wildcard rules', () => {
   });
 
   it('Valkey with no published fix still never gets a wildcard', async () => {
-    const ds = await datasetFor([adv('All', 'TBD', 'valkey-io/valkey')], 'valkey-io/valkey', 'valkey');
+    const ds = await datasetFor(
+      [adv('All', 'TBD', 'valkey-io/valkey')],
+      'valkey-io/valkey',
+      'valkey',
+    );
     expect(ds.flatMap((a) => a.affected).some((r) => r.branch === '*')).toBe(false);
   });
 
@@ -304,8 +334,22 @@ describe('GHSA unlisted-branch wildcard rules', () => {
   });
 
   it.each([
-    ['CVE-2021-32626', '2.6 or newer', '5.0.14, 6.0.16, 6.2.6', '8.2.3', '6.0.15', '2021-10-04T11:30:20Z'],
-    ['CVE-2024-31449', '>= 2.8.18', '6.2.16, 7.2.6, 7.4.1', '8.0.4', '7.0.15', '2024-10-06T18:16:07Z'],
+    [
+      'CVE-2021-32626',
+      '2.6 or newer',
+      '5.0.14, 6.0.16, 6.2.6',
+      '8.2.3',
+      '6.0.15',
+      '2021-10-04T11:30:20Z',
+    ],
+    [
+      'CVE-2024-31449',
+      '>= 2.8.18',
+      '6.2.16, 7.2.6, 7.4.1',
+      '8.0.4',
+      '7.0.15',
+      '2024-10-06T18:16:07Z',
+    ],
     ['CVE-2025-62507', '>= 8.2.0', '8.2.3', '8.4.0', '8.2.2', '2025-11-02T13:49:19Z'],
   ])(
     '%s: no finding on a branch cut after the advisory',
@@ -384,5 +428,63 @@ describe('GHSA unlisted-branch wildcard rules', () => {
     const ds = await datasetFor([adv('>= 7.0.0', '7.2.11')]);
     expect(isVulnerable(ds, '6.2.20')).toBe(false);
     expect(isVulnerable(ds, '7.0.15')).toBe(true);
+  });
+  it.each(['7.1.0', '7.3.2', '7.9.240', '8.1.0', '8.3.0'])(
+    'does not flag %s: a minor that never shipped as a Redis GA branch (KIvanow #3)',
+    async (version) => {
+      expect(isVulnerable(await redisDataset(), version)).toBe(false);
+    },
+  );
+  it('still flags branches newer than the release table or older than it (fail safe)', async () => {
+    const ds = await datasetFor([adv('All', '6.2.20, 7.2.11', 'redis/redis', 'GHSA-x', null)]);
+    // Above the last row we cannot tell a GA line from a minor, so never clear it.
+    for (const v of ['8.11.0', '8.12.0', '9.0.0', '2.4.18']) {
+      expect(isVulnerable(ds, v)).toBe(true);
+    }
+  });
+  it('infers nothing from a platform-qualified range (CVE-2021-21309 real shape, KIvanow #5)', async () => {
+    const ds = await datasetFor([
+      adv(
+        '>= 4.0 (32-bit only)',
+        '6.0.11, 5.0.11, 6.2',
+        'redis/redis',
+        'GHSA-x',
+        '2021-02-27T00:00:00Z',
+      ),
+    ]);
+    expect(ds.flatMap((a) => a.affected).some((r) => r.branch === '*')).toBe(false);
+    for (const v of ['4.0.14', '6.2.0', '7.0.15']) {
+      expect(isVulnerable(ds, v)).toBe(false);
+    }
+    expect(isVulnerable(ds, '6.0.10')).toBe(true); // vendor fix on its own branch still applies
+  });
+  it.each(['>= 7.0, < 7.2', '7.0 and newer on 32-bit', '>= 7.0 (see notes)'])(
+    'infers nothing when the floor is qualified: %s',
+    async (range) => {
+      const ds = await datasetFor([adv(range, '7.2.11')]);
+      expect(ds.flatMap((a) => a.affected).some((r) => r.inferred === true)).toBe(false);
+    },
+  );
+  it('reports exact, not broad, when a stated wildcard also covers the version (jamby77)', async () => {
+    const base = adv('All', '6.2.20, 7.2.11');
+    const both = {
+      ...base,
+      vulnerabilities: [
+        ...base.vulnerabilities,
+        {
+          package: { ecosystem: '', name: 'redis' },
+          vulnerable_version_range: '< 7.2.0',
+          patched_versions: '',
+        },
+      ],
+    };
+    const ds = await datasetFor([both]);
+    const affected = ds.flatMap((a) => a.affected);
+    expect(affected.some((r) => r.branch === '*' && r.inferred === true)).toBe(true);
+    expect(affected.some((r) => r.branch === '*' && r.inferred !== true)).toBe(true);
+    const finding = (v: string) =>
+      matchAdvisories({ product: 'redis', engineVersion: v, modules: [] }, ds).findings[0];
+    expect(finding('7.0.15').confidence).toBe('exact'); // vendor's "< 7.2.0" covers it
+    expect(finding('7.4.0').confidence).toBe('broad'); // only the inferred wildcard does
   });
 });

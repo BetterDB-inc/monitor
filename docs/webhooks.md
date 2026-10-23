@@ -349,7 +349,7 @@ Notes:
   "fingerprint": "a1b2c3d4e5f60718",
   "datasetVersion": "2026-09-15T00:00:00Z",
   "topFindings": [
-    { "cveId": "CVE-2026-12345", "severity": "critical", "knownExploited": true, "fixedIn": "8.0.10" }
+    { "cveId": "CVE-2026-12345", "severity": "critical", "knownExploited": true, "fixedIn": "8.0.10", "confidence": "exact" }
   ],
   "drift": false,
   "partial": false,
@@ -390,7 +390,7 @@ previous stored scan, even when severity is below critical.
   "fingerprint": "a1b2c3d4e5f60718",
   "datasetVersion": "2026-09-15T00:00:00Z",
   "topFindings": [
-    { "cveId": "CVE-2026-54321", "severity": "high", "knownExploited": true, "fixedIn": "8.0.10" }
+    { "cveId": "CVE-2026-54321", "severity": "high", "knownExploited": true, "fixedIn": "8.0.10", "confidence": "exact" }
   ],
   "drift": false,
   "partial": false,

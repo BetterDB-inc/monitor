@@ -1,6 +1,7 @@
 import type { BranchRange, CveProduct } from '@betterdb/shared';
 import type { ModuleVersionEncoding } from '../cve.constants';
 import { MODULE_VERSION_ENCODINGS } from '../cve.constants';
+import { inferredWildcardCovers } from '../sources/branch-releases';
 
 export interface VersionMatch {
   vulnerable: boolean;
@@ -150,9 +151,9 @@ function lowestPatchedAt(ranges: BranchRange[]): string | undefined {
 
 /**
  * True when the version sits at or above a fix published for its own branch,
- * i.e. the branch says "fixed here". A wildcard range must never override
- * that, or a broad cross-branch range would re-flag patched builds. An upper
- * bound without a patchedAt is not a fix and does not suppress the wildcard.
+ * i.e. the branch says "fixed here". An inferred wildcard must never override
+ * that, or the unlisted-branch inference would re-flag patched builds. An upper
+ * bound without a patchedAt is not a fix and does not suppress it.
  */
 function pastBranchFix(version: string, onBranch: BranchRange[]): boolean {
   return onBranch.some((range) => {
@@ -160,6 +161,14 @@ function pastBranchFix(version: string, onBranch: BranchRange[]): boolean {
   });
 }
 
+/**
+ * Order of precedence: on-branch ranges, then vendor/NVD-stated wildcards, then
+ * the inferred unlisted-branch wildcard. Stated wildcards behave exactly as
+ * before the inference existed. The inferred one only applies when the version
+ * has not reached a fix on its own branch and sits on a real Redis GA branch
+ * (inferredWildcardCovers), and a version a stated range also covers is never
+ * reported as inferred.
+ */
 export function matchRanges(version: string, ranges: BranchRange[]): VersionMatch {
   const branch = branchOf(version);
   const onBranch = ranges.filter((range) => {
@@ -168,10 +177,20 @@ export function matchRanges(version: string, ranges: BranchRange[]): VersionMatc
   const wildcard = ranges.filter((range) => {
     return range.branch === WILDCARD_BRANCH;
   });
+  const statedWildcard = wildcard.filter((range) => {
+    return range.inferred !== true;
+  });
+  const inferredApplies = !pastBranchFix(version, onBranch) && inferredWildcardCovers(branch);
+  const inferredWildcard = inferredApplies
+    ? wildcard.filter((range) => {
+        return range.inferred === true;
+      })
+    : [];
 
   const vulnerable =
     firstVulnerable(version, onBranch) ??
-    (pastBranchFix(version, onBranch) ? null : firstVulnerable(version, wildcard));
+    firstVulnerable(version, statedWildcard) ??
+    firstVulnerable(version, inferredWildcard);
   if (vulnerable !== null) {
     return vulnerable;
   }

@@ -214,8 +214,14 @@ interface AffectedRanges {
 }
 
 const ALL_VERSIONS_PATTERN = /^\s*(all|any|\*)(\s+versions?)?\s*$/i;
-const ANY_UPPER_BOUND_PATTERN = /<=?\s*\d+\.\d+(?:\.\d+)?/g;
-const AND_BELOW_PATTERN = /\band below\b/i;
+// The whole range must be a bare floor: ">= 7.0", "7.0 or newer", "7.0 and
+// later". Anything after the bound (an upper bound, "(32-bit only)", other
+// prose) qualifies which builds are affected, so it is not an unlisted-branch
+// claim and nothing is inferred from it.
+const BARE_LOWER_BOUND_PATTERN = new RegExp(
+  String.raw`^\s*(?:>=\s*${VER}|${VER}\s+(?:or|and)\s+(?:newer|later|above))\s*$`,
+  'i',
+);
 
 /**
  * `patched_versions` only names branches that received a fix. When the
@@ -230,7 +236,8 @@ const AND_BELOW_PATTERN = /\band below\b/i;
  * wildcard override a fix published on the version's own branch.
  *
  * Nothing is inferred when: the range has any upper bound (already
- * branch-scoped); the range is missing/unparseable; there is no published
+ * branch-scoped) or is qualified by prose ("(32-bit only)"); the range is
+ * missing/unparseable; there is no published
  * fix ("TBD", NVD wins); or a patched token cannot be placed ("6.2.X").
  */
 function unlistedBranchFallback(
@@ -252,9 +259,8 @@ function unlistedBranchFallback(
     return { branch: '*', vulnerableFrom: '0.0.0', ...bound, inferred: true };
   }
 
-  const upperBounds = range.match(ANY_UPPER_BOUND_PATTERN) ?? [];
-  const lower = lowerBoundOf(range);
-  if (lower !== null && upperBounds.length === 0 && !AND_BELOW_PATTERN.test(range)) {
+  const lower = BARE_LOWER_BOUND_PATTERN.test(range) ? lowerBoundOf(range) : null;
+  if (lower !== null) {
     return { branch: '*', vulnerableFrom: lower, ...bound, inferred: true };
   }
 
@@ -280,7 +286,9 @@ function toAffectedRanges(
       exact.push(
         ...exactRangesFromPatchedVersions(patched.versions, normalizeRange(rawRange ?? '')),
       );
-      const fallback = allowWildcard ? unlistedBranchFallback(rawRange, patched, publishedAt) : null;
+      const fallback = allowWildcard
+        ? unlistedBranchFallback(rawRange, patched, publishedAt)
+        : null;
       if (fallback) {
         exact.push(fallback);
       }

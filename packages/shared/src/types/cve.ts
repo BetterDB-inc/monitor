@@ -155,4 +155,6 @@ export interface CveWebhookFindingSummary {
   severity: CveSeverity;
   knownExploited: boolean;
   fixedIn?: string;
+  /** 'broad' when the finding matched only through an inferred range. */
+  confidence?: CveConfidence;
 }

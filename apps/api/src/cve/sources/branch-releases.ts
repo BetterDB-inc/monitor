@@ -6,7 +6,7 @@
  * released before the advisory and absent from patched_versions is affected.
  *
  * Source: `gh release view <branch>.0 --repo redis/redis --json publishedAt`
- * (5.0 and 6.0 have no GitHub release; their dates are the tag's date).
+ * (2.6 through 6.0 have no GitHub release; their dates are the tag's date).
  * MAINTENANCE: append a row when Redis cuts a new branch. A branch missing
  * here is never cleared (see unlistedBranchCeiling), so a stale table errs
  * toward flagging, not toward a false all-clear. Adding the row is part of
@@ -14,6 +14,11 @@
  * `last known branch` test there must be updated in the same PR.
  */
 export const REDIS_BRANCH_FIRST_RELEASE: ReadonlyArray<{ branch: string; releasedAt: string }> = [
+  { branch: '2.6', releasedAt: '2012-10-22T21:27:28Z' },
+  { branch: '2.8', releasedAt: '2013-11-22T09:25:57Z' },
+  { branch: '3.0', releasedAt: '2015-04-01T14:02:50Z' },
+  { branch: '3.2', releasedAt: '2016-05-06T10:14:05Z' },
+  { branch: '4.0', releasedAt: '2017-07-14T13:06:26Z' },
   { branch: '5.0', releasedAt: '2018-10-17T15:32:28Z' },
   { branch: '6.0', releasedAt: '2020-04-30T13:05:12Z' },
   { branch: '6.2', releasedAt: '2021-02-22T21:35:15Z' },
@@ -44,4 +49,43 @@ export function unlistedBranchCeiling(publishedAt: string | null | undefined): s
     return Date.parse(entry.releasedAt) >= published;
   });
   return carried ? `${carried.branch}.0` : undefined;
+}
+
+function branchParts(branch: string): [number, number] {
+  const [major, minor] = branch.split('.').map((part) => {
+    const numeric = parseInt(part, 10);
+    return Number.isNaN(numeric) ? 0 : numeric;
+  });
+  return [major ?? 0, minor ?? 0];
+}
+
+function compareBranches(a: string, b: string): number {
+  const [aMajor, aMinor] = branchParts(a);
+  const [bMajor, bMinor] = branchParts(b);
+  return aMajor !== bMajor ? aMajor - bMajor : aMinor - bMinor;
+}
+
+const KNOWN_BRANCHES: ReadonlySet<string> = new Set(
+  REDIS_BRANCH_FIRST_RELEASE.map((entry) => entry.branch),
+);
+
+/**
+ * Whether an inferred unlisted-branch wildcard may flag a version on `branch`.
+ * The wildcard's ceiling is a version number, so on its own it would also
+ * cover minors that never shipped as a Redis GA line (7.1, 8.3, or a
+ * pre-release/managed-service minor). Those sit between two known branches
+ * and are skipped. A branch in the table is covered (the ceiling already clears
+ * branches cut after disclosure). A branch newer than the last row, or older
+ * than the first, is covered too: we have no release date for it, so we never
+ * clear it on missing evidence.
+ */
+export function inferredWildcardCovers(branch: string): boolean {
+  if (KNOWN_BRANCHES.has(branch)) {
+    return true;
+  }
+
+  const first = REDIS_BRANCH_FIRST_RELEASE[0].branch;
+  const last = REDIS_BRANCH_FIRST_RELEASE[REDIS_BRANCH_FIRST_RELEASE.length - 1].branch;
+
+  return compareBranches(branch, last) > 0 || compareBranches(branch, first) < 0;
 }

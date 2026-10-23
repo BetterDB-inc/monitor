@@ -3,6 +3,7 @@ import { Badge } from '../../ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../ui/table';
 import { AdvisoryCell } from './AdvisoryCell';
 import { affectedRangesLabel } from './affected-range';
+import { findingConfidence } from './finding-confidence';
 
 interface FindingsTableProps {
   findings: CveFinding[];
@@ -125,7 +126,7 @@ export function FindingsTable({ findings, unversioned, showChips = false }: Find
                 </TableCell>
                 <TableCell>{epssLabel(entry.advisory)}</TableCell>
                 <TableCell>{entry.fixedIn ?? '-'}</TableCell>
-                <TableCell>{entry.advisory.confidence}</TableCell>
+                <TableCell>{findingConfidence(entry)}</TableCell>
               </TableRow>
             );
           })}
