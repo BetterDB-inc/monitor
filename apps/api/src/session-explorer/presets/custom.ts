@@ -11,7 +11,13 @@ const WILDCARD = '*';
 const SEGMENT = /^([^.[\]]*)((?:\[\d+\])*)$/;
 const INDEX = /\[(\d+)\]/g;
 
-export function getPath(obj: unknown, path: string): unknown {
+const asIs = (v: unknown): unknown => v;
+
+export function getPath(
+  obj: unknown,
+  path: string,
+  open: (v: unknown) => unknown = asIs,
+): unknown {
   if (path === '') return undefined;
   let current: unknown = obj;
   for (const segment of path.split('.')) {
@@ -19,12 +25,14 @@ export function getPath(obj: unknown, path: string): unknown {
     if (!match || (match[1] === '' && match[2] === '')) return undefined;
     const [, name, indices] = match;
     if (name !== '') {
+      current = open(current);
       if (!isRecord(current) || !Object.prototype.hasOwnProperty.call(current, name)) {
         return undefined;
       }
       current = current[name];
     }
     for (const index of indices.matchAll(INDEX)) {
+      current = open(current);
       if (!Array.isArray(current)) return undefined;
       current = current[Number(index[1])];
     }
@@ -187,8 +195,8 @@ const parseIfString = (v: unknown): unknown => (typeof v === 'string' ? parseJso
 
 const JSON_CONTAINER = /^\s*[[{]/;
 
-const parseIfJson = (v: string): unknown => {
-  if (!JSON_CONTAINER.test(v)) return v;
+const parseIfJson = (v: unknown): unknown => {
+  if (typeof v !== 'string' || !JSON_CONTAINER.test(v)) return v;
   try {
     return parseJson(v);
   } catch {
@@ -210,12 +218,7 @@ function readRoot(k: CapturedKey, valueType: CustomSchema['valueType']): unknown
       return k.value.map(parseIfString);
     case 'hash':
       if (!isRecord(k.value)) return fail('Expected a hash value');
-      return Object.fromEntries(
-        Object.entries(k.value).map(([field, v]) => [
-          field,
-          typeof v === 'string' ? parseIfJson(v) : v,
-        ]),
-      );
+      return k.value;
     default:
       if (k.type === 'ReJSON-RL' && typeof k.value !== 'string') return k.value;
       if (typeof k.value !== 'string') return fail('Expected a string value');
@@ -223,7 +226,11 @@ function readRoot(k: CapturedKey, valueType: CustomSchema['valueType']): unknown
   }
 }
 
-function selectEntries(root: unknown, schema: CustomSchema): unknown[] {
+function selectEntries(
+  root: unknown,
+  schema: CustomSchema,
+  open: (v: unknown) => unknown,
+): unknown[] {
   switch (schema.messages.from) {
     case 'key':
       return [root];
@@ -233,32 +240,37 @@ function selectEntries(root: unknown, schema: CustomSchema): unknown[] {
       return fail('Value has no message items');
     }
     case 'path': {
-      const found = getPath(root, schema.messages.path);
+      const found = open(getPath(root, schema.messages.path, open));
       if (!Array.isArray(found)) return fail(`No message list at "${schema.messages.path}"`);
       return found;
     }
   }
 }
 
-function toMessage(entry: unknown, fields: CustomSchema['fields']): ParsedMessage {
-  const role = getPath(entry, fields.role);
+function toMessage(
+  entry: unknown,
+  fields: CustomSchema['fields'],
+  open: (v: unknown) => unknown,
+): ParsedMessage {
+  const at = (path: string) => getPath(entry, path, open);
+  const role = at(fields.role);
   if (typeof role !== 'string' || role === '') return fail(`Missing role at "${fields.role}"`);
-  const rawContent = getPath(entry, fields.content);
+  const rawContent = at(fields.content);
   if (rawContent === undefined) return fail(`Missing content at "${fields.content}"`);
   const message: ParsedMessage = { role, content: textContent(rawContent ?? '') };
 
   if (fields.timestamp) {
-    const ts = getPath(entry, fields.timestamp);
+    const ts = at(fields.timestamp);
     if (typeof ts === 'string' || typeof ts === 'number') message.timestamp = String(ts);
   }
-  const toolName = fields.toolName ? getPath(entry, fields.toolName) : undefined;
+  const toolName = fields.toolName ? at(fields.toolName) : undefined;
   const hasToolName = typeof toolName === 'string' && toolName !== '';
   if (hasToolName) {
     message.toolCalls = [
-      { name: toolName, args: fields.toolArgs ? getPath(entry, fields.toolArgs) : undefined },
+      { name: toolName, args: fields.toolArgs ? at(fields.toolArgs) : undefined },
     ];
   }
-  const toolResult = fields.toolResult ? getPath(entry, fields.toolResult) : undefined;
+  const toolResult = fields.toolResult ? at(fields.toolResult) : undefined;
   if (toolResult !== undefined) {
     message.toolResult = {
       ...(hasToolName ? { name: toolName } : {}),
@@ -271,6 +283,7 @@ function toMessage(entry: unknown, fields: CustomSchema['fields']): ParsedMessag
 export function createCustomPreset(schema: CustomSchema): PresetDefinition {
   const template = schema.sessionTemplate ? parseSessionTemplate(schema.sessionTemplate) : null;
   const expectedTypes = TYPE_MATCHES[schema.valueType];
+  const open = schema.valueType === 'hash' ? parseIfJson : asIs;
   return {
     id: 'custom',
     defaultPattern: (prefix) => `${prefix}*`,
@@ -280,8 +293,8 @@ export function createCustomPreset(schema: CustomSchema): PresetDefinition {
         return failedView(k, `Expected ${schema.valueType}, found ${k.type}`);
       }
       return guardedParse(k, () =>
-        selectEntries(readRoot(k, schema.valueType), schema).map((entry) =>
-          toMessage(entry, schema.fields),
+        selectEntries(readRoot(k, schema.valueType), schema, open).map((entry) =>
+          toMessage(entry, schema.fields, open),
         ),
       );
     },

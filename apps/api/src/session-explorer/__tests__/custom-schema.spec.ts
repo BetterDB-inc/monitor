@@ -326,6 +326,34 @@ describe('custom preset', () => {
     expect(view).toMatchObject({ parsed: true, messages: [{ role: 'user', content: 'hi' }] });
   });
 
+  it('keeps hash fields read as message fields as text even when they hold JSON', () => {
+    const preset = createCustomPreset({
+      valueType: 'hash',
+      messages: { from: 'key' },
+      fields: { role: 'role', content: 'body' },
+    });
+    for (const body of ['{"city":"Sofia","tempC":21}', '[1,2,3]']) {
+      const view = preset.parseKey(key({ type: 'hash', value: { role: 'tool', body } }));
+      expect(view).toMatchObject({ parsed: true, messages: [{ role: 'tool', content: body }] });
+    }
+  });
+
+  it('walks into JSON stored in a hash field when a path goes through it', () => {
+    const preset = createCustomPreset({
+      valueType: 'hash',
+      messages: { from: 'path', path: 'history.turns' },
+      fields: { role: 'meta.role', content: 'body' },
+    });
+    const history = JSON.stringify({
+      turns: [{ meta: { role: 'user' }, body: '{"q":"weather"}' }],
+    });
+    const view = preset.parseKey(key({ type: 'hash', value: { history } }));
+    expect(view).toMatchObject({
+      parsed: true,
+      messages: [{ role: 'user', content: '{"q":"weather"}' }],
+    });
+  });
+
   it('orders hash items by field name, numbers by value', () => {
     const preset = createCustomPreset({
       valueType: 'hash',
