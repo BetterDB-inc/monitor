@@ -207,6 +207,51 @@ describe('MigrationExecutionService shutdown', () => {
     expect(removed.some((path) => path.endsWith(`${id}.toml`))).toBe(true);
   });
 
+  it('does not evict a cancelled job whose RedisShake is still running, so shutdown still stops it', async () => {
+    const proc = fakeProcess(['SIGKILL']);
+    spawn.mockReturnValue(proc);
+    const service = createService();
+    const { id } = await service.startExecution(request);
+    await waitFor(() => service.getExecution(id)?.status === 'running');
+    service.stopExecution(id); // SIGTERM, which this process ignores
+
+    // Fill the other slots with newer finished jobs, so the stopping job is the
+    // oldest terminal one when the next start has to evict.
+    const jobs = service['jobs'] as Map<string, unknown>;
+    for (let i = 0; i < 9; i++) {
+      jobs.set(`done-${i}`, {
+        id: `done-${i}`,
+        status: 'completed',
+        startedAt: Date.now() + i + 1,
+        process: null,
+      });
+    }
+    runCommandMigration.mockResolvedValue(undefined);
+    await service.startExecution({ ...request, mode: 'command' });
+
+    expect(jobs.has(id)).toBe(true);
+    expect(jobs.has('done-0')).toBe(false);
+    await service.onModuleDestroy();
+    expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
+    const removed = unlinkSync.mock.calls.map(([path]) => String(path));
+    expect(removed.some((path) => path.endsWith(`${id}.toml`))).toBe(true);
+  });
+
+  it('refuses a start when every slot holds a running or stopping job', async () => {
+    const service = createService();
+    const jobs = service['jobs'] as Map<string, unknown>;
+    for (let i = 0; i < 10; i++) {
+      jobs.set(`stopping-${i}`, {
+        id: `stopping-${i}`,
+        status: 'cancelled',
+        startedAt: Date.now() - 1000 + i,
+        process: { kill: jest.fn() },
+      });
+    }
+    await expect(service.startExecution(request)).rejects.toThrow('running or stopping jobs');
+    expect(jobs.size).toBe(10);
+  });
+
   it('rejects a start whose probes were still running when shutdown began', async () => {
     // Every INFO probe waits on one gate, so startExecution is parked mid-way.
     let releaseProbes: () => void = () => undefined;

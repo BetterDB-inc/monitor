@@ -663,8 +663,15 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
   private evictOldJobs(): void {
     if (this.jobs.size < this.MAX_JOBS) return;
 
+    // A cancelled job can still have its run in flight or its RedisShake alive
+    // (stopExecution SIGTERMs and only SIGKILLs 3 s later). Keep it until both
+    // are gone, or onModuleDestroy could no longer find, stop and clean it up.
     const terminal = Array.from(this.jobs.entries())
-      .filter(([, j]) => j.status === 'completed' || j.status === 'failed' || j.status === 'cancelled')
+      .filter(([id, j]) =>
+        (j.status === 'completed' || j.status === 'failed' || j.status === 'cancelled') &&
+        !this.runs.has(id) &&
+        j.process === null,
+      )
       .sort((a, b) => a[1].startedAt - b[1].startedAt);
 
     for (const [id] of terminal) {
@@ -674,7 +681,7 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
 
     if (this.jobs.size >= this.MAX_JOBS) {
       throw new ServiceUnavailableException(
-        `Execution job limit reached (${this.MAX_JOBS}). All slots occupied by running jobs — try again later.`,
+        `Execution job limit reached (${this.MAX_JOBS}). All slots occupied by running or stopping jobs — try again later.`,
       );
     }
   }

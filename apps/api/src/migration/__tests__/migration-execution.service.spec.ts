@@ -526,6 +526,14 @@ describe('MigrationExecutionService', () => {
         service.stopExecution(id); // Mark as cancelled (terminal)
       }
 
+      // A cancelled job is evictable only once its run has settled and its
+      // RedisShake has exited, so let the stopped runs finish first.
+      const runs = (service as unknown as { runs: Map<string, Promise<void>> }).runs;
+      for (let i = 0; i < 200 && runs.size > 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(runs.size).toBe(0);
+
       // One more should trigger eviction
       const { id: newId } = await service.startExecution({
         sourceConnectionId: 'conn-1',
