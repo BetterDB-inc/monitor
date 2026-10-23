@@ -8,7 +8,12 @@ export interface FakeEntry {
   memory?: number | null;
   jsonMemory?: number | null;
   idle?: number;
-  value?: string | Buffer | Array<string | Buffer> | Record<string, string | Buffer>;
+  value?:
+    | string
+    | Buffer
+    | Array<string | Buffer>
+    | Record<string, string | Buffer>
+    | Array<[string, Record<string, string>]>;
 }
 
 const WRITE_COMMANDS = [
@@ -177,8 +182,24 @@ export class FakeValkey {
           .slice(start * 2, (Number(stop) + 1) * 2)
           .map((v) => Buffer.from(v));
       }
-      case 'xrangeBuffer':
-        return [];
+      case 'xrangeBuffer': {
+        const [, start, , , count] = args as [string, string, string, string, number];
+        const entries = (raw as Array<[string, Record<string, string>]>) ?? [];
+        if (start.startsWith('(')) throw new Error('ERR Invalid stream ID specified as stream command argument');
+        const idOf = (id: string) => id.split('-').map(BigInt) as [bigint, bigint];
+        const [startMs, startSeq] = start === '-' ? [0n, 0n] : idOf(start);
+        const index = entries.findIndex(([id]) => {
+          const [ms, seq] = idOf(id);
+          return ms > startMs || (ms === startMs && seq >= startSeq);
+        });
+        const from = index === -1 ? entries.length : index;
+        return entries
+          .slice(from, from + Number(count))
+          .map(([id, fields]) => [
+            Buffer.from(id),
+            Object.entries(fields).flatMap(([f, v]) => [Buffer.from(f), Buffer.from(v)]),
+          ]);
+      }
       case 'call':
       case 'callBuffer': {
         const command = String(args[0]).toUpperCase();

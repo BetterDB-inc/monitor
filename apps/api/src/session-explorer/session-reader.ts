@@ -169,7 +169,7 @@ function queueFirstRead(pipeline: ChainableCommander, at: Located, opts: ReadOpt
       pipeline.callBuffer('JSON.GET', key);
       return 1;
     case 'stream':
-      pipeline.xrangeBuffer(key, '-', '+', 'COUNT', opts.listWindow + 1);
+      pipeline.xrangeBuffer(key, '-', '+', 'COUNT', opts.listWindow);
       return 1;
     default:
       return 0;
@@ -281,23 +281,43 @@ async function readJson(
   return { ...decodeValue(buf, cap), bytes: Math.min(buf.length, cap) };
 }
 
-function readStream(results: PipelineResult[], cap: number, opts: ReadOpts): ReadResult {
-  const entries = resultOf(results[0]) as Array<[Buffer, Buffer[]]>;
+const MAX_STREAM_SEQ = 2n ** 64n - 1n;
+
+function streamIdAfter(id: string): string {
+  const [ms, seq] = id.split('-').map(BigInt);
+  return seq === MAX_STREAM_SEQ ? `${ms + 1n}-0` : `${ms}-${seq + 1n}`;
+}
+
+async function readStream(
+  client: Valkey,
+  at: Located,
+  results: PipelineResult[],
+  cap: number,
+  opts: ReadOpts,
+): Promise<ReadResult> {
+  let entries = resultOf(results[0]) as Array<[Buffer, Buffer[]]>;
   const acc = new Accumulator<[string, Record<string, ValkeyValue>]>(cap);
-  for (const [id, flat] of entries.slice(0, opts.listWindow)) {
-    const fields: Record<string, ValkeyValue> = {};
-    let size = 0;
-    for (let i = 0; i + 1 < flat.length; i += 2) {
-      size += flat[i].length + flat[i + 1].length;
-      fields[flat[i].toString()] = decoded(flat[i + 1], cap);
+  for (;;) {
+    for (const [id, flat] of entries) {
+      const fields: Record<string, ValkeyValue> = {};
+      let size = 0;
+      for (let i = 0; i + 1 < flat.length; i += 2) {
+        size += flat[i].length + flat[i + 1].length;
+        fields[flat[i].toString()] = decoded(flat[i + 1], cap);
+      }
+      if (!acc.add(size, () => [id.toString(), fields])) break;
     }
-    if (!acc.add(size, () => [id.toString(), fields])) break;
+    if (acc.full || entries.length < opts.listWindow) break;
+    const lastId = entries[entries.length - 1][0].toString();
+    entries = (await client.xrangeBuffer(
+      at.key,
+      streamIdAfter(lastId),
+      '+',
+      'COUNT',
+      opts.listWindow,
+    )) as Array<[Buffer, Buffer[]]>;
   }
-  return {
-    value: acc.items,
-    truncated: acc.full || entries.length > opts.listWindow,
-    bytes: acc.bytes,
-  };
+  return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
 }
 
 function finishRead(
@@ -319,7 +339,7 @@ function finishRead(
     case 'ReJSON-RL':
       return readJson(client, at, results, cap, opts);
     case 'stream':
-      return readStream(results, cap, opts);
+      return readStream(client, at, results, cap, opts);
     default:
       return { value: null, truncated: false, bytes: 0 };
   }
