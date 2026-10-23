@@ -310,6 +310,23 @@ describe('custom preset', () => {
     });
   });
 
+  it('treats a null tool result as absent', () => {
+    const preset = createCustomPreset({
+      valueType: 'list',
+      messages: { from: 'items' },
+      fields: { role: 'role', content: 'text', toolResult: 'result' },
+    });
+    const entries = [
+      { role: 'user', text: 'hi', result: null },
+      { role: 'tool', text: 'done', result: { ok: true } },
+    ];
+    const view = preset.parseKey(key({ type: 'list', value: entries.map((e) => JSON.stringify(e)) }));
+    expect(view.parsed && view.messages).toEqual([
+      { role: 'user', content: 'hi' },
+      { role: 'tool', content: 'done', toolResult: { content: { ok: true } } },
+    ]);
+  });
+
   it('parses a hash with a field named base64', () => {
     const preset = createCustomPreset({
       valueType: 'hash',

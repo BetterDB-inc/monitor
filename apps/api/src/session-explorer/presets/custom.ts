@@ -318,7 +318,7 @@ function toMessage(
     ];
   }
   const toolResult = fields.toolResult ? at(fields.toolResult) : undefined;
-  if (toolResult !== undefined) {
+  if (toolResult !== undefined && toolResult !== null) {
     message.toolResult = {
       ...(hasToolName ? { name: toolName } : {}),
       content: toolResult,
