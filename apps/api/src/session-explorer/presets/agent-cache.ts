@@ -1,6 +1,16 @@
 import type { CapturedKey, KeyView, ParsedMessage } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
-import { fail, guardedParse, isRecord, parseJson, textContent, toolUseCalls } from './text';
+import {
+  chatRole,
+  fail,
+  guardedParse,
+  isRecord,
+  parseJson,
+  parseToolCalls,
+  textContent,
+  toolResultOf,
+  toolUseCalls,
+} from './text';
 
 const SESSION_MARKER = ':session:';
 const CHECKPOINT_MARKER = ':checkpoint:';
@@ -16,22 +26,16 @@ const ROLE_BY_CONSTRUCTOR = new Map([
   ['AIMessageChunk', 'ai'],
   ['SystemMessageChunk', 'system'],
   ['ToolMessageChunk', 'tool'],
+  ['FunctionMessage', 'tool'],
+  ['FunctionMessageChunk', 'tool'],
 ]);
 
-function parseToolCalls(raw: unknown): ParsedMessage['toolCalls'] {
-  if (raw === undefined || raw === null) return undefined;
-  if (!Array.isArray(raw)) return fail('tool_calls is not a list');
-  if (raw.length === 0) return undefined;
-  return raw.map((call) => {
-    if (!isRecord(call) || typeof call.name !== 'string') {
-      return fail('Malformed tool call');
-    }
-    return {
-      name: call.name,
-      args: call.args,
-      ...(typeof call.id === 'string' ? { id: call.id } : {}),
-    };
-  });
+const CHAT_CONSTRUCTORS = new Set(['ChatMessage', 'ChatMessageChunk']);
+
+function roleOf(constructorName: unknown, kwargs: Record<string, unknown>): string {
+  if (typeof constructorName !== 'string') return fail('Unknown message constructor');
+  if (CHAT_CONSTRUCTORS.has(constructorName)) return chatRole(kwargs.role);
+  return ROLE_BY_CONSTRUCTOR.get(constructorName) ?? fail('Unknown message constructor');
 }
 
 function parseMessage(entry: unknown): ParsedMessage {
@@ -44,21 +48,12 @@ function parseMessage(entry: unknown): ParsedMessage {
   ) {
     return fail('Message is not an lc-serialized constructor');
   }
-  const constructorName = entry.id[entry.id.length - 1];
-  const role =
-    typeof constructorName === 'string' ? ROLE_BY_CONSTRUCTOR.get(constructorName) : undefined;
-  if (!role) return fail('Unknown message constructor');
   const kwargs = entry.kwargs;
+  const role = roleOf(entry.id[entry.id.length - 1], kwargs);
   const message: ParsedMessage = { role, content: textContent(kwargs.content) };
   const toolCalls = parseToolCalls(kwargs.tool_calls) ?? toolUseCalls(kwargs.content);
   if (toolCalls) message.toolCalls = toolCalls;
-  if (role === 'tool') {
-    message.toolResult = {
-      ...(typeof kwargs.name === 'string' ? { name: kwargs.name } : {}),
-      content: message.content,
-      ...(typeof kwargs.tool_call_id === 'string' ? { callId: kwargs.tool_call_id } : {}),
-    };
-  }
+  if (role === 'tool') message.toolResult = toolResultOf(message.content, kwargs);
   return message;
 }
 
@@ -80,16 +75,68 @@ const isCheckpointKey = (key: string) =>
 const checkpointId = (key: string) =>
   key.slice(key.indexOf(CHECKPOINT_MARKER) + CHECKPOINT_MARKER.length);
 
+interface WriteKey {
+  checkpointId: string;
+  taskId: string;
+  channel: string;
+  idx: number;
+}
+
+function writeOf(key: string): WriteKey | null {
+  const at = key.indexOf(WRITES_MARKER);
+  if (at < 0) return null;
+  const parts = key.slice(at + WRITES_MARKER.length).split('|');
+  if (parts.length !== 4) return null;
+  try {
+    const [cid, taskId, channel] = parts.slice(0, 3).map(decodeURIComponent);
+    return { checkpointId: cid, taskId, channel, idx: Number(parts[3]) };
+  } catch {
+    return null;
+  }
+}
+
+const maxId = (ids: string[]): string | undefined =>
+  ids.reduce<string | undefined>((newest, id) => (newest === undefined || id > newest ? id : newest), undefined);
+
+const checkpointIds = (keys: string[]) =>
+  keys.filter((key) => key.includes(CHECKPOINT_MARKER)).map(checkpointId);
+
 function newestCheckpointKey(keys: string[]): string | undefined {
   const latest = keys.find((key) => key.endsWith(LATEST_SUFFIX));
   if (latest) return latest;
-  return keys
-    .filter((key) => key.includes(CHECKPOINT_MARKER))
-    .reduce<string | undefined>(
-      (newest, key) =>
-        newest === undefined || checkpointId(key) > checkpointId(newest) ? key : newest,
-      undefined,
-    );
+  const id = maxId(checkpointIds(keys));
+  return keys.find((key) => key.includes(CHECKPOINT_MARKER) && checkpointId(key) === id);
+}
+
+const newestCheckpointId = (keys: string[]): string | undefined =>
+  maxId([
+    ...checkpointIds(keys),
+    ...keys.flatMap((key) => writeOf(key)?.checkpointId ?? []),
+  ]);
+
+function selectKeys(keys: string[]): string[] {
+  const newest = newestCheckpointKey(keys);
+  const newestId = newestCheckpointId(keys);
+  return keys.filter((key) => {
+    if (isCheckpointKey(key)) return key === newest;
+    if (!key.includes(WRITES_MARKER)) return true;
+    return newestId !== undefined && writeOf(key)?.checkpointId === newestId;
+  });
+}
+
+const pendingOrder = (a: WriteKey, b: WriteKey) =>
+  a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : a.idx - b.idx;
+
+function pendingMessages(views: KeyView[], newestId: string | undefined): ParsedMessage[] {
+  if (newestId === undefined) return [];
+  return views
+    .map((view) => ({ view, write: writeOf(view.key) }))
+    .filter(
+      (p): p is { view: KeyView; write: WriteKey } =>
+        p.write !== null && p.write.checkpointId === newestId && p.write.channel === 'messages',
+    )
+    .sort((a, b) => pendingOrder(a.write, b.write))
+    .flatMap(({ view }) => (view.parsed ? view.messages : []));
 }
 
 function sessionPrefix(key: string): string | null {
@@ -110,11 +157,21 @@ function sessionIdOf(key: string): string | null {
   return prefix.slice(at + SESSION_MARKER.length) || null;
 }
 
+const escapeGlob = (text: string) => text.replace(/\\/g, '\\\\').replace(/([*?[\]])/g, '\\$1');
+
+const defaultPattern = (prefix: string) =>
+  `${escapeGlob(prefix.replace(/:+$/, ''))}${SESSION_MARKER}*`;
+
+function parseWrite(value: string): ParsedMessage[] {
+  const written = parseJson(value);
+  return (Array.isArray(written) ? written : [written]).map(parseMessage);
+}
+
 const parseKey = (k: CapturedKey): KeyView =>
   guardedParse(k, () => {
     if (k.type !== 'string' || typeof k.value !== 'string') return fail('Expected a string value');
     if (isCheckpointKey(k.key)) return parseCheckpoint(k.value);
-    if (k.key.includes(WRITES_MARKER)) parseJson(k.value);
+    if (writeOf(k.key)?.channel === 'messages') return parseWrite(k.value);
     return [];
   });
 
@@ -123,16 +180,19 @@ const skipKey = (k: CapturedKey): KeyView =>
 
 export const agentCachePreset: PresetDefinition = {
   id: 'agent-cache',
-  defaultPattern: (prefix) => `${prefix}:session:*`,
+  defaultPattern,
   sessionIdOf,
   parseKey,
+  selectKeys,
   parseKeys: (keys) => {
-    const newest = newestCheckpointKey(keys.map((k) => k.key));
-    return keys.map((k) => (isCheckpointKey(k.key) && k.key !== newest ? skipKey(k) : parseKey(k)));
+    const selected = new Set(selectKeys(keys.map((k) => k.key)));
+    return keys.map((k) => (selected.has(k.key) ? parseKey(k) : skipKey(k)));
   },
   mergeSession: (views) => {
-    const newest = newestCheckpointKey(views.map((v) => v.key));
+    const keys = views.map((v) => v.key);
+    const newest = newestCheckpointKey(keys);
     const view = views.find((v) => v.key === newest);
-    return view && view.parsed ? view.messages : [];
+    if (!view || !view.parsed) return [];
+    return [...view.messages, ...pendingMessages(views, newestCheckpointId(keys))];
   },
 };

@@ -3,7 +3,7 @@ import type { PresetDefinition } from './types';
 import { agentCachePreset } from './agent-cache';
 import { langchainCommunityPreset } from './langchain-community';
 import { llamaindexPreset } from './llamaindex';
-import { createCustomPreset } from './custom';
+import { createCustomPreset, validateCustomSchema } from './custom';
 import { failedView } from './text';
 
 const langchainJsPreset: PresetDefinition = {
@@ -20,6 +20,18 @@ const rawPreset: PresetDefinition = {
   mergeSession: () => [],
 };
 
+const invalidSchemaPreset = (errors: string[]): PresetDefinition => ({
+  ...rawPreset,
+  id: 'custom',
+  parseKey: (k) => failedView(k, `Invalid custom schema: ${errors.join('; ')}`),
+});
+
+function customPreset(custom: CustomSchema | null | undefined): PresetDefinition {
+  if (!custom) throw new Error('Custom preset requires a schema');
+  const result = validateCustomSchema(custom);
+  return result.ok ? createCustomPreset(result.schema) : invalidSchemaPreset(result.errors);
+}
+
 export function getPreset(id: PresetId, custom?: CustomSchema | null): PresetDefinition {
   switch (id) {
     case 'langchain-community':
@@ -33,8 +45,9 @@ export function getPreset(id: PresetId, custom?: CustomSchema | null): PresetDef
     case 'raw':
       return rawPreset;
     case 'custom':
-      if (!custom) throw new Error('Custom preset requires a schema');
-      return createCustomPreset(custom);
+      return customPreset(custom);
+    default:
+      throw new Error(`Unknown preset "${id as string}"`);
   }
 }
 

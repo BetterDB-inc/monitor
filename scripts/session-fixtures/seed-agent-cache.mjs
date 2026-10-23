@@ -8,6 +8,7 @@ const PORT = 6380;
 const NAME = 'sxfix:ac';
 const OVERSIZE_PAIRS = 30;
 const MAX_PER_TURN_CHECKPOINT_MESSAGES = 12;
+const PENDING_SESSION = 'pending-write';
 assertPort(PORT);
 
 const version = packageVersion('@betterdb/agent-cache');
@@ -44,8 +45,12 @@ for (const [sid, s] of Object.entries(sessions)) {
   const cuts = perTurn ? boundaries : [messages.length];
 
   let config = { configurable: { thread_id: sid, checkpoint_ns: '' } };
+  let parent = null;
   for (const cut of cuts) {
     step += 1;
+    if (perTurn && parent) {
+      await saver.putWrites(parent, [['messages', [messages[cut - 1]]]], `task-${step}`);
+    }
     const checkpoint = {
       ...emptyCheckpoint(),
       id: uuid6(step),
@@ -54,10 +59,46 @@ for (const [sid, s] of Object.entries(sessions)) {
     };
     const metadata = { source: 'loop', step, parents: {} };
     config = await saver.put(config, checkpoint, metadata, { messages: step });
-    if (perTurn) {
-      await saver.putWrites(config, [['messages', [messages[cut - 1]]]], `task-${step}`);
-    }
+    parent = config;
   }
+}
+
+const pending = {
+  checkpointed: [
+    { role: 'system', content: 'You book restaurant tables.' },
+    { role: 'human', content: 'Book a table for two at 8pm.' },
+  ],
+  written: { role: 'ai', content: 'Taberna has a table at 20:00. Shall I confirm it?' },
+};
+{
+  const cache = newCache();
+  caches.push(cache);
+  const saver = new BetterDBSaver({ cache });
+  step += 1;
+  const checkpoint = {
+    ...emptyCheckpoint(),
+    id: uuid6(step),
+    channel_values: { messages: await Promise.all(pending.checkpointed.map(lcMessage)) },
+    channel_versions: { messages: step },
+  };
+  const config = await saver.put(
+    { configurable: { thread_id: PENDING_SESSION, checkpoint_ns: '' } },
+    checkpoint,
+    { source: 'loop', step, parents: {} },
+    { messages: step },
+  );
+  await saver.putWrites(
+    config,
+    [
+      ['messages', [await lcMessage(pending.written)]],
+      ['__interrupt__', [{ value: 'Confirm the booking?', resumable: true }]],
+    ],
+    'agent',
+  );
+  sessions[PENDING_SESSION] = {
+    messages: [...pending.checkpointed, pending.written],
+    ttl: null,
+  };
 }
 
 for (const cache of caches) await cache.shutdown();
