@@ -129,15 +129,30 @@ describe('session presets against captured fixtures', () => {
     expect(preset.mergeSession(withoutLatest)).toHaveLength(7);
   });
 
-  it('agent-cache writes keys parse as empty messages', () => {
+  it('agent-cache shows a pending write that no checkpoint holds yet', () => {
+    const fixture = fixtures.find((f) => f.preset === 'agent-cache')!;
+    const { preset, groups } = loadSessions(fixture);
+    const views = groups.get('pending-write')!;
+    const latest = views.find((v) => v.key.endsWith('__checkpoint_latest'))!;
+    expect(latest.parsed && latest.messages).toHaveLength(2);
+    expect(preset.mergeSession(views).map((m) => m.content)).toEqual(
+      fixture.expectations['pending-write'].contents,
+    );
+  });
+
+  it('agent-cache leaves writes folded into a newer checkpoint out of the merge', () => {
     const fixture = fixtures.find((f) => f.preset === 'agent-cache')!;
     const preset = getPreset('agent-cache');
-    const writes = fixture.keys.filter((k) => k.key.includes(':writes:'));
+    const session = fixture.keys.filter((k) => k.key.includes(':session:multi-turn:'));
+    const writes = session.filter((k) => k.key.includes(':writes:'));
     expect(writes.length).toBeGreaterThan(0);
     for (const k of writes) {
-      const view = preset.parseKey(k);
-      expect(view).toMatchObject({ parsed: true, messages: [] });
+      expect(preset.parseKey(k)).toMatchObject({ parsed: true, messages: [{ role: 'ai' }] });
     }
+    expect(preset.selectKeys!(session.map((k) => k.key))).toEqual([
+      'sxfix:ac:session:multi-turn:__checkpoint_latest',
+    ]);
+    expect(preset.mergeSession(session.map((k) => preset.parseKey(k)))).toHaveLength(7);
   });
 
   it('ignores non-session keys under the prefix', () => {
@@ -434,6 +449,65 @@ describe('presets with content blocks beyond text', () => {
       ['tool', '{"t":22}'],
     ]);
     expect(messages[3].toolResult).toEqual({ name: 'get_weather', content: '{"t":21}' });
+  });
+
+  describe('agent-cache pending writes', () => {
+    const lc = (name: string, content: string) => ({
+      lc: 1,
+      type: 'constructor',
+      id: ['langchain_core', 'messages', name],
+      kwargs: { content },
+    });
+    const checkpointValue = (id: string, contents: string[]) =>
+      JSON.stringify({
+        checkpoint: {
+          id,
+          channel_values: {
+            messages: contents.map((c, i) => lc(i % 2 === 0 ? 'HumanMessage' : 'AIMessage', c)),
+          },
+        },
+      });
+    const str = (key: string, value: string): CapturedKey => ({ key, type: 'string', pttl: -1, value });
+    const p = 'app:session:t1';
+    const keys: CapturedKey[] = [
+      str(`${p}:checkpoint:1f0-a`, checkpointValue('1f0-a', ['hi'])),
+      str(`${p}:checkpoint:1f0-b`, checkpointValue('1f0-b', ['hi', 'hello'])),
+      str(`${p}:__checkpoint_latest`, checkpointValue('1f0-b', ['hi', 'hello'])),
+      str(`${p}:writes:1f0-a|task-1|messages|0`, JSON.stringify([lc('AIMessage', 'hello')])),
+      str(`${p}:writes:1f0-b|task-3|messages|0`, JSON.stringify(lc('AIMessage', 'second'))),
+      str(`${p}:writes:1f0-b|task-2|messages|1`, JSON.stringify([lc('AIMessage', 'first b')])),
+      str(`${p}:writes:1f0-b|task-2|messages|0`, JSON.stringify([lc('AIMessage', 'first a')])),
+      str(`${p}:writes:1f0-b|task-2|__interrupt__|0`, JSON.stringify([{ value: 'ask' }])),
+      str(`${p}:last_intent`, 'book a flight'),
+    ];
+    const preset = getPreset('agent-cache');
+
+    it('selects the newest checkpoint and its writes from key names alone', () => {
+      expect(preset.selectKeys!(keys.map((k) => k.key))).toEqual([
+        `${p}:__checkpoint_latest`,
+        `${p}:writes:1f0-b|task-3|messages|0`,
+        `${p}:writes:1f0-b|task-2|messages|1`,
+        `${p}:writes:1f0-b|task-2|messages|0`,
+        `${p}:writes:1f0-b|task-2|__interrupt__|0`,
+        `${p}:last_intent`,
+      ]);
+      const withoutLatest = keys.map((k) => k.key).filter((k) => !k.endsWith('__checkpoint_latest'));
+      expect(preset.selectKeys!(withoutLatest)).toContain(`${p}:checkpoint:1f0-b`);
+      expect(preset.selectKeys!(withoutLatest)).not.toContain(`${p}:checkpoint:1f0-a`);
+    });
+
+    it('matches writes by URL-decoded checkpoint id', () => {
+      const encoded = [`${p}:checkpoint:a|b`, `${p}:writes:a%7Cb|t|messages|0`];
+      expect(preset.selectKeys!(encoded)).toEqual(encoded);
+    });
+
+    it('appends pending message writes of the newest checkpoint in task and index order', () => {
+      const merged = preset.mergeSession(parseSessionKeys(preset, keys));
+      expect(merged.map((m) => m.content)).toEqual(['hi', 'hello', 'first a', 'first b', 'second']);
+      const selected = new Set(preset.selectKeys!(keys.map((k) => k.key)));
+      const fetched = keys.filter((k) => selected.has(k.key));
+      expect(preset.mergeSession(parseSessionKeys(preset, fetched))).toEqual(merged);
+    });
   });
 
   it('agent-cache counts a checkpoint without a messages channel as empty', () => {
