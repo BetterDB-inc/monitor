@@ -1,4 +1,9 @@
-import { buildInstanceMeta, checkCompatibility, InstanceMeta } from '../analysis/compatibility-checker';
+import {
+  buildInstanceMeta,
+  checkCompatibility,
+  getBlockingIssues,
+  InstanceMeta,
+} from '../analysis/compatibility-checker';
 import type { DatabaseCapabilities } from '../../common/interfaces/database-port.interface';
 
 function makeMeta(overrides: Partial<InstanceMeta> = {}): InstanceMeta {
@@ -261,5 +266,30 @@ describe('compatibility-checker', () => {
       expect(evictionIssue).toBeDefined();
       expect(evictionIssue!.severity).toBe('warning');
     });
+  });
+});
+
+describe('getBlockingIssues', () => {
+  const unscoped = { severity: 'blocking' as const, category: 'hfe', title: 'HFE', detail: 'd' };
+  const shakeOnly = {
+    severity: 'blocking' as const,
+    category: 'capacity',
+    title: 'Target does not have enough memory (RedisShake modes)',
+    detail: 'd',
+    modes: ['redis_shake' as const, 'redis_shake_sync' as const],
+  };
+  const warning = { severity: 'warning' as const, category: 'capacity', title: 'w', detail: 'd' };
+
+  it('returns every blocker when no mode is given', () => {
+    expect(getBlockingIssues([unscoped, shakeOnly, warning])).toEqual([unscoped, shakeOnly]);
+  });
+
+  it('leaves out blockers scoped to other modes', () => {
+    expect(getBlockingIssues([unscoped, shakeOnly, warning], 'command')).toEqual([unscoped]);
+    expect(getBlockingIssues([unscoped, shakeOnly], 'redis_shake_sync')).toEqual([unscoped, shakeOnly]);
+  });
+
+  it('handles a missing list', () => {
+    expect(getBlockingIssues(undefined, 'command')).toEqual([]);
   });
 });

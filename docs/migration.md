@@ -166,10 +166,41 @@ Analysis detects the following incompatibilities:
 | `maxmemory_policy` | warning | Eviction policy differs between source and target |
 | `acl` | warning | Source has custom ACL users that do not exist on target |
 | `persistence` | info | Persistence configuration differs |
+| `capacity` | blocking | A target master cannot evict (`noeviction`; or `volatile-*` with no TTL keys in the source, and either none on the master or the source share alone exceeds `maxmemory` by >10%) and its share of the source exceeds the room it would have after emptying the target by more than 10% |
+| `capacity` | warning | A non-evicting master's share fits only once the target is emptied (`emptyDbBeforeSync` or `FLUSHALL`); or is within 10% of the room after emptying (too close to call); or the master evicts (`allkeys-*`, `volatile-*` with TTL keys); or it fits with under 10% headroom; or a blocker whose source size is only the source's `used_memory` (`MEMORY USAGE` unavailable) |
+| `capacity` | info | The capacity and key-overlap checks could not run (for example NOPERM on `INFO`, or an unreachable master) |
+| `key_overlap` | warning | Sampled source keys (up to 200, spread across source nodes) already exist in the target's db0 (command mode overwrites them; RedisShake modes stop with `BUSYKEY` unless the target is flushed first) |
+| `key_overlap` | info | The target's db0 already holds keys and none of the sampled source keys collide; or no source keys were sampled; or the overlap check could not run (e.g. `EXISTS` denied) |
 
-Blocking incompatibilities are advisory — the execution endpoint does not
-currently enforce them. A future release will reject execution when blocking
-incompatibilities exist.
+The capacity check runs per target master. The source size is the analysis
+estimate (sampled `MEMORY USAGE` scaled to the key count) restricted to db0's
+share of the source's keys, since command mode copies db0. When a standalone
+source also has keys outside db0, the check runs a second time for the
+RedisShake modes, which copy every db, sized by the source's
+`used_memory_dataset` and its TTL keys in every db. Each of those results is
+labelled "(command mode)" or "(RedisShake modes)" and only blocks execution in
+the modes it names. Each master's share
+of it is weighted by the hash slots it owns, or split equally when the slot map
+is unavailable, and compared with the master's free memory: `maxmemory -
+(used_memory - mem_not_counted_for_evict)`, the figure Valkey uses to decide
+when to evict or reject writes. Each master is judged by its own
+`maxmemory-policy`; masters without `maxmemory` are skipped, while capped
+masters in the same cluster are still checked.
+
+A master that cannot evict is also judged against the room it would have after
+emptying the target: `emptyDbBeforeSync` runs `FLUSHALL` on every master, which
+frees `used_memory_dataset` in every db, never the baseline. If the share fits there, the analysis warns to empty the target first;
+it blocks only when the share exceeds that room by more than 10%, because the
+source size is a sampled estimate. When sampling is unavailable the source's
+`used_memory` is used instead, which includes buffers and overhead, so it
+produces a warning rather than a block. The analysis reports the master with the
+least room and how many masters were flagged. Slot weighting assumes keys are
+spread evenly across slots, so heavy hash tags or a few very large keys can
+still overload one shard; leave headroom in that case.
+
+Execution is refused while the latest analysis for the pair has blocking
+incompatibilities that apply to the requested mode, unless the request sets
+`force: true` with a `forceReason`.
 
 ## Limitations
 

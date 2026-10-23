@@ -10,6 +10,18 @@ import { detectHfe } from './analysis/hfe-detector';
 import { analyzeCommands } from './analysis/commandlog-analyzer';
 import { buildInstanceMeta, checkCompatibility } from './analysis/compatibility-checker';
 import {
+  allDbsSourceSize,
+  capacitySourceSize,
+  db0Keyspace,
+  pickOverlapSample,
+  probeTargetCapacity,
+  sourceDb0Share,
+  sourceExpiringKeysFrom,
+  sourceHasKeysOutsideDb0,
+  type SourceSizing,
+  type TtlSample,
+} from './analysis/capacity-checker';
+import {
   loadAnalysisVerdict,
   resolveVerdictDir,
   saveAnalysisVerdict,
@@ -508,6 +520,77 @@ export class MigrationService {
       } catch { /* ignore */ }
 
       const incompatibilities = checkCompatibility(sourceMeta, targetMeta, job.result.hfeDetected ?? false, sourceHasFunctions);
+
+      // Capacity + key-overlap preflight. Best-effort: a target that cannot be
+      // probed (ACL, unreachable master) adds an info item and never fails analysis.
+      if (targetConfig) {
+        // INFO keyspace already read in step 2, as text.
+        let keyspaceText = '';
+        try {
+          keyspaceText = Object.entries(keyspaceSection)
+            .filter(([key, val]) => key.startsWith('db') && typeof val === 'string')
+            .map(([key, val]) => `${key}:${val}`)
+            .join('\n');
+        } catch { /* no keyspace text: db0 share 1, TTL count from the sample */ }
+        // Command mode copies db0, so size the source by db0's share of its keys.
+        // (The RedisShake modes get their own all-db sizing below.)
+        const sourceSize = capacitySourceSize({
+          estimatedBytes: job.result.estimatedTotalMemoryBytes ?? 0,
+          db0Share: sourceDb0Share(keyspaceText, isCluster),
+          usedMemory: job.result.totalMemoryBytes ?? 0,
+        });
+        // TTL keys on the source. That INFO came from one node, so a zero on a
+        // cluster source is unknown. db0 alone for command mode; every db for
+        // the RedisShake modes when the source has keys outside db0.
+        let sourceExpiringKeys: number | null = null;
+        let allDbsExpiringKeys: number | null = null;
+        try {
+          const ttl = job.result.ttlDistribution;
+          const ttlSample: TtlSample | null = ttl
+            ? {
+                sampled:
+                  ttl.noExpiry +
+                  ttl.expiresWithin1h +
+                  ttl.expiresWithin24h +
+                  ttl.expiresWithin7d +
+                  ttl.expiresAfter7d,
+                noExpiry: ttl.noExpiry,
+              }
+            : null;
+          sourceExpiringKeys = sourceExpiringKeysFrom(db0Keyspace(keyspaceText), !isCluster, ttlSample);
+          allDbsExpiringKeys = sourceExpiringKeysFrom(keyspaceText, !isCluster, ttlSample);
+        } catch { /* unknown TTL count: the capacity check treats null as "not none" */ }
+        // RedisShake's scan and sync readers copy every db, so a standalone source
+        // with keys outside db0 gets a second, all-db sizing for those modes.
+        let allDbsSource: SourceSizing | undefined;
+        if (sourceHasKeysOutsideDb0(keyspaceText, isCluster)) {
+          const size = allDbsSourceSize({
+            datasetBytes: Number(memorySection['used_memory_dataset']) || 0,
+            usedMemory: job.result.totalMemoryBytes ?? 0,
+          });
+          allDbsSource = { bytes: size.bytes, rough: size.rough, expiringKeys: allDbsExpiringKeys };
+        }
+        try {
+          incompatibilities.push(...await probeTargetCapacity({
+            targetConfig,
+            targetIsCluster: job.result.targetIsCluster === true,
+            sourceBytes: sourceSize.bytes,
+            roughSourceSize: sourceSize.rough,
+            sampledKeys: pickOverlapSample(sampledKeys),
+            sourceExpiringKeys,
+            allDbsSource,
+          }));
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          this.logger.warn(`Analysis ${job.id}: capacity preflight skipped: ${message}`);
+          incompatibilities.push({
+            severity: 'info',
+            category: 'capacity',
+            title: 'Capacity and key-overlap checks did not run',
+            detail: `The target's memory and keys could not be read (${message}), so this analysis did not check whether the source fits or whether its keys already exist there. Allow INFO and EXISTS for the target user, or check target capacity manually before migrating.`,
+          });
+        }
+      }
       job.result.incompatibilities = incompatibilities;
       job.result.blockingCount = incompatibilities.filter(i => i.severity === 'blocking').length;
       job.result.warningCount = incompatibilities.filter(i => i.severity === 'warning').length;

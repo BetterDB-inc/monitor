@@ -174,6 +174,48 @@ describe('migration safety gate regressions', () => {
     expect(found!.id).toBe('a-target');
   });
 
+  it('a blocker scoped to the RedisShake modes does not stop command mode', async () => {
+    const now = Date.now();
+    const analysis = {
+      findLatestCompletedAnalysis: () => ({
+        id: 'a-scoped',
+        status: 'completed',
+        progress: 100,
+        createdAt: now - 1000,
+        completedAt: now,
+        incompatibilities: [
+          {
+            severity: 'blocking',
+            category: 'capacity',
+            title: 'Target does not have enough memory (RedisShake modes)',
+            detail: 'd',
+            modes: ['redis_shake', 'redis_shake_sync'],
+          },
+        ],
+      }),
+    };
+    type Ctor = ConstructorParameters<typeof MigrationExecutionService>;
+    const svc = new MigrationExecutionService(
+      mockRegistry() as unknown as Ctor[0],
+      analysis as unknown as Ctor[1],
+    );
+
+    const blocked: unknown = await svc
+      .startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode: 'redis_shake_sync' })
+      .catch((e: unknown) => e);
+    expect(blocked).toBeInstanceOf(BadRequestException);
+    expect(((blocked as BadRequestException).getResponse() as { code: string }).code).toBe(
+      'BLOCKING_INCOMPATIBILITIES',
+    );
+
+    const allowed = await svc.startExecution({
+      sourceConnectionId: 'conn-1',
+      targetConnectionId: 'conn-2',
+      mode: 'command',
+    });
+    expect(allowed.status).toBe('pending');
+  });
+
   it('P1-2 stale file verdict surfaces ANALYSIS_STALE (not silent pass)', async () => {
     const staleAt = Date.now() - 25 * 3600 * 1000;
     const svc = new MigrationExecutionService(
