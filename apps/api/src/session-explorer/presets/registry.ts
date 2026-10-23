@@ -33,7 +33,6 @@ const invalidSchemaPreset = (errors: string[]): PresetDefinition => ({
 });
 
 function customPreset(custom: CustomSchema | null | undefined): PresetDefinition {
-  if (!custom) throw new Error('Custom preset requires a schema');
   const result = validateCustomSchema(custom);
   return result.ok ? createCustomPreset(result.schema) : invalidSchemaPreset(result.errors);
 }

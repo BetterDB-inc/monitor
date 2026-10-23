@@ -418,8 +418,14 @@ describe('custom preset', () => {
     }
   });
 
-  it('registry requires a schema for custom', () => {
-    expect(() => getPreset('custom', null)).toThrow();
+  it('registry shows keys as unparsed when the custom schema is missing', () => {
+    for (const schema of [null, undefined]) {
+      const preset = getPreset('custom', schema);
+      expect(preset.id).toBe('custom');
+      const view = preset.parseKey(key({ type: 'list', value: ['{}'] }));
+      expect(view.parsed === false && view.reason).toMatch(/^Invalid custom schema: /);
+      expect(preset.sessionIdOf('k')).toBe('k');
+    }
     expect(getPreset('custom', baseSchema).id).toBe('custom');
   });
 
