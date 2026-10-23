@@ -72,7 +72,9 @@ const connectNode = (parent: Valkey, node: ClusterNode) =>
   openReader(() => nodeClient(parent, node));
 
 const sharedReader = async (parent: Valkey) =>
-  (await openReader(() => parent.duplicate(READER_OPTIONS))) ?? parent;
+  (await openReader(() =>
+    parent.duplicate({ ...READER_OPTIONS, commandTimeout: parent.options.commandTimeout }),
+  )) ?? parent;
 
 export async function primaryClients(db: DatabasePort): Promise<PrimaryClients> {
   const parent = db.getClient();

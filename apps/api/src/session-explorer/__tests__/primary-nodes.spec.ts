@@ -26,6 +26,15 @@ describe('withPrimaries', () => {
     expect(parent.disconnected).toBe(false);
   });
 
+  it('keeps the shared client command timeout on its own reader', async () => {
+    const parent = new FakeValkey(new Map(), { host: 'seed', port: 7000, commandTimeout: 30_000 });
+    parent.duplicateWith = new FakeValkey();
+
+    await withPrimaries(fakeDb(parent), async ({ clients }) => clients);
+
+    expect(parent.callsOf('duplicate')[0].args[0]).toMatchObject({ commandTimeout: 30_000 });
+  });
+
   it('falls back to the shared connection when a reader cannot connect', async () => {
     const parent = new FakeValkey();
     const reader = new FakeValkey();
