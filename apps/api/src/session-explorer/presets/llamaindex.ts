@@ -23,18 +23,20 @@ const ROLE_MAP = new Map([
   ['model', 'ai'],
 ]);
 
+const HIDDEN_BLOCKS = new Set(['tool_call', 'cache', 'citation']);
+
 function blocksText(blocks: unknown): string {
   if (!Array.isArray(blocks)) return fail('blocks is not a list');
   return blocks
-    .map((block) => {
+    .flatMap((block) => {
       if (!isRecord(block) || typeof block.block_type !== 'string') {
         return fail('Unsupported content block');
       }
-      if (block.block_type === 'text' && typeof block.text === 'string') return block.text;
-      if (block.block_type === 'tool_call') return '';
-      return `[${block.block_type}]`;
+      if (block.block_type === 'text' && typeof block.text === 'string') return [block.text];
+      if (HIDDEN_BLOCKS.has(block.block_type)) return [];
+      return [`[${block.block_type}]`];
     })
-    .join('');
+    .join('\n');
 }
 
 const withId = (id: unknown) => (typeof id === 'string' ? { id } : {});

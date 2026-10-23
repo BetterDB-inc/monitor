@@ -535,6 +535,23 @@ describe('presets with content blocks beyond text', () => {
     expect(parsedMessages(view)[0].toolCalls).toEqual([{ name: 'lookup', args: '{"q": ', id: 'c1' }]);
   });
 
+  it('llamaindex joins text blocks with newlines and skips blocks with nothing to show', () => {
+    const view = getPreset('llamaindex').parseKey(
+      listKey([
+        {
+          role: 'assistant',
+          blocks: [
+            { block_type: 'text', text: 'First paragraph.' },
+            { block_type: 'cache', cache_control: { type: 'ephemeral' } },
+            { block_type: 'citation', cited_content: { block_type: 'text', text: 'x' } },
+            { block_type: 'text', text: 'Second paragraph.' },
+          ],
+        },
+      ]),
+    );
+    expect(parsedMessages(view)[0].content).toBe('First paragraph.\nSecond paragraph.');
+  });
+
   it('llamaindex reads tool-call arguments stored as an object', () => {
     const view = getPreset('llamaindex').parseKey(
       listKey([
@@ -575,7 +592,7 @@ describe('presets with content blocks beyond text', () => {
     const [first, second] = parsedMessages(view);
     expect(first).toEqual({
       role: 'ai',
-      content: '[thinking]Checking',
+      content: '[thinking]\nChecking',
       toolCalls: [{ name: 'lookup', args: { q: 1 }, id: 'c1' }],
     });
     expect(second).toEqual({
