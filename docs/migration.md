@@ -20,8 +20,8 @@ What it checks:
   full keyspace.
 - **TTL distribution** — Groups keys into buckets (no expiry, <1 h, <24 h,
   <7 d, >7 d).
-- **Hash Field Expiry (HFE)** — Detects per-field TTLs on Valkey 8.1+ via
-  `HEXPIRETIME`. Skipped on Redis or older Valkey.
+- **Hash Field Expiry (HFE)** — Detects per-field TTLs on Valkey 9.0+ / Redis 7.4+
+  via `HEXPIRETIME`. Skipped on servers without HFE.
 - **Compatibility** — Produces a list of incompatibilities with severity levels
   (`blocking`, `warning`, `info`). See [Compatibility checks](#compatibility-checks).
 - **Command distribution** — Top commands by frequency from `COMMANDLOG` (Valkey
@@ -159,7 +159,7 @@ Analysis detects the following incompatibilities:
 | `cluster_topology` | blocking | Cluster source, standalone target |
 | `cluster_topology` | warning | Standalone source, cluster target (keys will be resharded) |
 | `type_direction` | blocking | Valkey source, Redis target (Valkey-specific features may be lost) |
-| `hfe` | blocking | Hash Field Expiry detected on source, target does not support it |
+| `hfe` | blocking | Hash Field Expiry detected on source, target does not support it (needs Valkey 9.0+ or Redis 7.4+) |
 | `modules` | blocking | Source uses a module not present on target (one entry per module) |
 | `multi_db` | blocking | Source uses multiple databases and target is a cluster (clusters only support db0) |
 | `multi_db` | warning | Source uses multiple databases, target is standalone but may not be configured for it |
@@ -167,9 +167,9 @@ Analysis detects the following incompatibilities:
 | `acl` | warning | Source has custom ACL users that do not exist on target |
 | `persistence` | info | Persistence configuration differs |
 
-Blocking incompatibilities are advisory — the execution endpoint does not
-currently enforce them. A future release will reject execution when blocking
-incompatibilities exist.
+Execution rejects a migration whose analysis reported any `blocking`
+incompatibility. To run it anyway, the execution request must set `force: true`
+with a non-empty `forceReason`; `warning` and `info` items never block.
 
 ## Limitations
 
@@ -226,10 +226,11 @@ connection strings) containing control characters (`\x00–\x08`, `\x0b`, `\x0c`
 
 ### Hash Field Expiry (HFE)
 
-Valkey 8.1+ supports per-field TTLs within a hash. Analysis detects HFE usage
-via `HEXPIRETIME`, but **command-mode migration does not transfer per-field
-expirations**. Only the overall key-level TTL is preserved. If the target does
-not support HFE, analysis flags this as a blocking incompatibility.
+Valkey 9.0+ and Redis 7.4+ support per-field TTLs within a hash. Analysis detects HFE usage via `HEXPIRETIME` on a sample of hashes; if the target does not support HFE, analysis flags a blocking incompatibility, so execution is rejected unless forced (see [Compatibility checks](#compatibility-checks)).
+
+**Command mode** copies per-field TTLs: for each page of fields it reads `HPTTL` on the source and re-applies the remaining time with `HPEXPIRE` on the temporary key before it is renamed into place, so the final key never exists without its field TTLs. Fields that expire while they are being copied are removed. If the target cannot store field TTLs, hashes that have them fail (logged as `SKIP`) instead of being copied without them. If the source user may not run `HPTTL`, hashes are copied without field TTLs and the job shows a notice.
+
+Validation compares, for hashes of up to 100 fields, whether each field has a TTL on both sides. The check is skipped, and never fails validation, for larger hashes and when either side cannot run `HPTTL` (no HFE support, or the user is denied it with `NOPERM`).
 
 ### Streams and consumer groups
 

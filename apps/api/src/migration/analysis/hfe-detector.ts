@@ -84,7 +84,7 @@ export async function detectHfe(
     return result;
   }
 
-  // Pipeline HEXPIRETIME — wrap in try/catch for Redis (unknown command)
+  // Pipeline HEXPIRETIME — wrap in try/catch for servers without HFE (Valkey < 9.0, Redis < 7.4)
   try {
     let hfePositiveKeys = 0;
     const checkedKeys = new Set<string>();
@@ -124,7 +124,7 @@ export async function detectHfe(
         : 0;
     }
   } catch {
-    // HEXPIRETIME not supported (Redis)
+    // HEXPIRETIME not supported (servers without HFE: Valkey < 9.0, Redis < 7.4)
     result.hfeSupported = false;
     result.hfeDetected = false;
   }

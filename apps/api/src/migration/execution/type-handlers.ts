@@ -2,6 +2,13 @@ import type Valkey from 'iovalkey';
 import { randomBytes } from 'crypto';
 import { execPipeline } from './pipeline-results';
 import { readStreamMeta, writeStreamMeta, type StreamMeta } from './stream-metadata';
+import {
+  applyFieldTtls,
+  createHashFieldTtlContext,
+  isExpiredFieldTtl,
+  readFieldTtls,
+  type HashFieldTtlContext,
+} from './hash-field-ttl';
 
 // Threshold above which we use cursor-based reads (HSCAN/SSCAN/ZSCAN) instead of bulk reads
 const LARGE_KEY_THRESHOLD = 10_000;
@@ -45,6 +52,11 @@ export interface MigratedKey {
   warning?: string;
 }
 
+export interface MigrateKeyOptions {
+  /** Shared across a run so HFE support is probed once. A fresh one is created when omitted. */
+  hashFieldTtl?: HashFieldTtlContext;
+}
+
 /**
  * Migrate a single key from source to target using type-specific commands.
  * Returns success/failure per key. Never throws — errors are captured in the result.
@@ -54,6 +66,7 @@ export async function migrateKey(
   target: Valkey,
   key: string,
   type: string,
+  opts: MigrateKeyOptions = {},
 ): Promise<MigratedKey> {
   try {
     let wrote: boolean;
@@ -64,7 +77,7 @@ export async function migrateKey(
         wrote = await migrateString(source, target, key);
         break;
       case 'hash':
-        wrote = await migrateHash(source, target, key);
+        wrote = await migrateHash(source, target, key, opts.hashFieldTtl ?? createHashFieldTtlContext());
         break;
       case 'list':
         wrote = await migrateList(source, target, key);
@@ -84,6 +97,7 @@ export async function migrateKey(
     // TTL is handled atomically in each handler:
     // - String: SET PX
     // - Compound types: Lua RENAME+PEXPIRE via atomicRenameWithTtl
+    // - Hash: per-field TTLs are re-applied on the temp key before the RENAME (see hash-field-ttl.ts)
     const result: MigratedKey = { key, type, ok: true };
     if (warning) result.warning = warning;
 
@@ -129,29 +143,51 @@ async function migrateString(source: Valkey, target: Valkey, key: string): Promi
 
 // ── Hash ──
 
-async function migrateHash(source: Valkey, target: Valkey, key: string): Promise<boolean> {
+async function migrateHash(
+  source: Valkey,
+  target: Valkey,
+  key: string,
+  hfe: HashFieldTtlContext,
+): Promise<boolean> {
   const len = await source.hlen(key);
   if (len === 0) return false;
 
   const tmp = tempKey(key);
   const writeKey = tmp ?? key;
+  // Key to remove if the copy fails. On the direct-write path the real key only
+  // becomes ours once its DEL succeeded; if that DEL itself failed, the existing
+  // destination is still intact and must be left alone.
+  let cleanupKey: string | null = tmp;
 
   try {
     // DEL the target when writing directly (no temp key)
-    if (!tmp) await target.del(key);
+    if (!tmp) {
+      await target.del(key);
+      cleanupKey = key;
+    }
 
     // Use HSCAN for all sizes so binary field names are preserved as Buffers
     let cursor = '0';
+    let removedFields = false;
     do {
       const [next, fields] = await source.hscanBuffer(key, cursor, 'COUNT', SCAN_BATCH);
       cursor = String(next);
       if (fields.length === 0) continue;
       const args: (string | Buffer | number)[] = [writeKey];
+      const names: Buffer[] = [];
       for (let i = 0; i < fields.length; i += 2) {
         args.push(fields[i], fields[i + 1]);
+        names.push(fields[i]);
       }
       await target.call('HSET', ...args);
+      const ttls = await readFieldTtls(source, key, names, hfe);
+      if (ttls) {
+        if (ttls.some(isExpiredFieldTtl)) removedFields = true;
+        await applyFieldTtls(target, writeKey, names, ttls, hfe);
+      }
     } while (cursor !== '0');
+    // Fields that expired mid-copy were HDEL'd; if none are left the write key is gone.
+    if (removedFields && (await target.exists(writeKey)) === 0) return false;
     const pttl = await source.pttl(key);
     if (tmp) {
       await atomicRenameWithTtl(target, tmp, key, pttl);
@@ -159,7 +195,12 @@ async function migrateHash(source: Valkey, target: Valkey, key: string): Promise
       await applyTtl(target, key, pttl);
     }
   } catch (err) {
-    if (tmp) { try { await target.del(tmp); } catch { /* best-effort cleanup */ } }
+    // On the direct-write path the real key was already deleted and partially
+    // written, so remove it too (same as migrateStream) instead of leaving a
+    // partial hash with permanent fields behind a failed key.
+    if (cleanupKey) {
+      try { await target.del(cleanupKey); } catch { /* best-effort cleanup */ }
+    }
     throw err;
   }
   return true;
@@ -302,9 +343,14 @@ async function migrateStream(
   const tmp = tempKey(key);
   const writeKey = tmp ?? key;
   let wrote = false;
+  // As in migrateHash: the real key is only ours to remove once its DEL succeeded.
+  let cleanupKey: string | null = tmp;
 
   try {
-    if (!tmp) await target.del(key);
+    if (!tmp) {
+      await target.del(key);
+      cleanupKey = key;
+    }
 
     let lastId = '-';
     let hasMore = true;
@@ -357,7 +403,10 @@ async function migrateStream(
     // Direct-write path (no same-slot temp key): the target key was deleted up front
     // and may have been partly rewritten (entries, or an empty stream created for its
     // groups), so remove it rather than leave a partial stream without its TTL.
-    try { await target.del(tmp ?? key); } catch { /* best-effort cleanup */ }
+    // If that initial DEL failed, the destination is untouched and is left alone.
+    if (cleanupKey) {
+      try { await target.del(cleanupKey); } catch { /* best-effort cleanup */ }
+    }
     throw err;
   }
 }
