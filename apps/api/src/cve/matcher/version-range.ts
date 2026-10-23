@@ -1,10 +1,13 @@
 import type { BranchRange, CveProduct } from '@betterdb/shared';
 import type { ModuleVersionEncoding } from '../cve.constants';
 import { MODULE_VERSION_ENCODINGS } from '../cve.constants';
+import { inferredWildcardCovers } from '../sources/branch-releases';
 
 export interface VersionMatch {
   vulnerable: boolean;
   fixedIn?: string;
+  /** Set when the vulnerable match came from an inferred (date-derived) range. */
+  inferred?: true;
 }
 
 const WILDCARD_BRANCH = '*';
@@ -80,6 +83,19 @@ export function branchOf(version: string): string {
 }
 
 function belowUpperBoundOf(version: string, range: BranchRange): boolean {
+  // An inferred unlisted-branch wildcard with no known ceiling (no branch in
+  // branch-releases.ts was cut after disclosure) is open-ended: it matches
+  // everything at or above vulnerableFrom. Any other range without an upper
+  // bound still matches nothing.
+  const openEnded =
+    range.inferred === true &&
+    range.vulnerableBelow === undefined &&
+    range.vulnerableAtOrBelow === undefined &&
+    range.vulnerableFrom !== undefined;
+  if (openEnded) {
+    return true;
+  }
+
   if (range.vulnerableBelow !== undefined) {
     return compareVersions(version, range.vulnerableBelow) < 0;
   }
@@ -95,9 +111,12 @@ function matchRange(version: string, range: BranchRange): VersionMatch {
   const aboveLowerBound =
     range.vulnerableFrom === undefined || compareVersions(version, range.vulnerableFrom) >= 0;
 
+  const vulnerable = aboveLowerBound && belowUpperBoundOf(version, range);
+
   return {
-    vulnerable: aboveLowerBound && belowUpperBoundOf(version, range),
+    vulnerable,
     ...(range.patchedAt ? { fixedIn: range.patchedAt } : {}),
+    ...(vulnerable && range.inferred === true ? { inferred: true as const } : {}),
   };
 }
 
@@ -130,6 +149,26 @@ function lowestPatchedAt(ranges: BranchRange[]): string | undefined {
   });
 }
 
+/**
+ * True when the version sits at or above a fix published for its own branch,
+ * i.e. the branch says "fixed here". An inferred wildcard must never override
+ * that, or the unlisted-branch inference would re-flag patched builds. An upper
+ * bound without a patchedAt is not a fix and does not suppress it.
+ */
+function pastBranchFix(version: string, onBranch: BranchRange[]): boolean {
+  return onBranch.some((range) => {
+    return range.patchedAt !== undefined && compareVersions(version, range.patchedAt) >= 0;
+  });
+}
+
+/**
+ * Order of precedence: on-branch ranges, then vendor/NVD-stated wildcards, then
+ * the inferred unlisted-branch wildcard. Stated wildcards behave exactly as
+ * before the inference existed. The inferred one only applies when the version
+ * has not reached a fix on its own branch and sits on a real Redis GA branch
+ * (inferredWildcardCovers), and a version a stated range also covers is never
+ * reported as inferred.
+ */
 export function matchRanges(version: string, ranges: BranchRange[]): VersionMatch {
   const branch = branchOf(version);
   const onBranch = ranges.filter((range) => {
@@ -138,8 +177,20 @@ export function matchRanges(version: string, ranges: BranchRange[]): VersionMatc
   const wildcard = ranges.filter((range) => {
     return range.branch === WILDCARD_BRANCH;
   });
+  const statedWildcard = wildcard.filter((range) => {
+    return range.inferred !== true;
+  });
+  const inferredApplies = !pastBranchFix(version, onBranch) && inferredWildcardCovers(branch);
+  const inferredWildcard = inferredApplies
+    ? wildcard.filter((range) => {
+        return range.inferred === true;
+      })
+    : [];
 
-  const vulnerable = firstVulnerable(version, onBranch) ?? firstVulnerable(version, wildcard);
+  const vulnerable =
+    firstVulnerable(version, onBranch) ??
+    firstVulnerable(version, statedWildcard) ??
+    firstVulnerable(version, inferredWildcard);
   if (vulnerable !== null) {
     return vulnerable;
   }

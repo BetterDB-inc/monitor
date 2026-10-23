@@ -36,6 +36,8 @@ interface CanonicalRange {
   vulnerableBelow: string | null;
   vulnerableFrom: string | null;
   patchedAt: string | null;
+  // Present only when true, so datasets without inferred ranges keep their hash.
+  inferred?: true;
 }
 
 type OptionalAdvisoryNumber = 'cvssScore' | 'epssScore' | 'epssPercentile';
@@ -384,6 +386,7 @@ function canonicalRanges(ranges: BranchRange[]): CanonicalRange[] {
         vulnerableBelow: range.vulnerableBelow ?? null,
         vulnerableFrom: range.vulnerableFrom ?? null,
         patchedAt: range.patchedAt ?? null,
+        ...(range.inferred === true ? { inferred: true as const } : {}),
       };
     })
     .sort((a, b) => {
@@ -400,7 +403,12 @@ function canonicalRanges(ranges: BranchRange[]): CanonicalRange[] {
         return byBound;
       }
 
-      return compareStrings(a.patchedAt ?? '', b.patchedAt ?? '');
+      const byPatch = compareStrings(a.patchedAt ?? '', b.patchedAt ?? '');
+      if (byPatch !== 0) {
+        return byPatch;
+      }
+
+      return Number(a.inferred === true) - Number(b.inferred === true);
     });
 }
 

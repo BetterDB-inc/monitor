@@ -10,6 +10,12 @@ export function affectedRangeLabel(range: BranchRange): string | null {
   }
 
   if (range.vulnerableAtOrBelow === undefined) {
+    // An inferred wildcard with no ceiling is open-ended; any other range
+    // without an upper bound has nothing to show.
+    if (range.inferred === true && range.vulnerableFrom !== undefined) {
+      return range.vulnerableFrom === '0.0.0' ? 'all versions' : `≥ ${range.vulnerableFrom}`;
+    }
+
     return null;
   }
 

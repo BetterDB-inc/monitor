@@ -192,22 +192,26 @@ describe('normalizeAdvisories - one CVE affecting two products', () => {
       branch: '7.4',
       vulnerableBelow: '7.4.3',
       vulnerableFrom: '7.4.0',
+      patchedAt: '7.4.3',
     });
     expect(valkey?.affected).toHaveLength(3);
     expect(valkey?.affected).toContainEqual({
       branch: '7.2',
       vulnerableBelow: '7.2.9',
       vulnerableFrom: '7.2.4',
+      patchedAt: '7.2.9',
     });
     expect(valkey?.affected).toContainEqual({
       branch: '8.0',
       vulnerableBelow: '8.0.3',
       vulnerableFrom: '8.0.0',
+      patchedAt: '8.0.3',
     });
     expect(valkey?.affected).toContainEqual({
       branch: '8.1',
       vulnerableBelow: '8.1.1',
       vulnerableFrom: '8.1.0',
+      patchedAt: '8.1.1',
     });
     expect(redis?.affected).not.toContainEqual({ branch: '8.0', vulnerableBelow: '8.0.3' });
   });

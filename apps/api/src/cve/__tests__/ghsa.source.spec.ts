@@ -54,12 +54,13 @@ describe('GhsaSource', () => {
     const source = new GhsaSource(fetchStub(ghsaValkey));
     const result = await source.fetchAdvisories();
     const advisory = result.advisories.find((a) => {
-      return a.cveId === 'CVE-2026-21863';
+      return a.cveId === 'CVE-2026-21863' && a.product === 'valkey';
     });
 
     expect(advisory).toBeDefined();
     expect(advisory?.confidence).toBe('exact');
     expect(advisory?.affected).toHaveLength(4);
+    expect(advisory?.affected.some((range) => range.branch === '*')).toBe(false);
     expect(advisory?.affected).toContainEqual({
       branch: '8.1',
       vulnerableBelow: '8.1.6',
@@ -188,12 +189,31 @@ describe('GhsaSource', () => {
     expect(matchRanges('7.0.13', advisory.affected).vulnerable).toBe(false);
   });
 
-  it('reports unversioned when neither field yields a parseable version', async () => {
+  it('infers no wildcard for a lower bound with no published fix', async () => {
     const fixture = [
       ghsaAdvisory({
         cve_id: 'CVE-9999-00003',
         vulnerable_version_range: '>= 7.2',
         patched_versions: null,
+      }),
+    ];
+    const source = new GhsaSource(fetchStub(fixture));
+    const result = await source.fetchAdvisories();
+    const redis = result.advisories.find((a) => a.product === 'redis');
+    const valkey = result.advisories.find((a) => a.product === 'valkey');
+
+    expect(redis?.confidence).toBe('unversioned');
+    expect(redis?.affected).toEqual([]);
+    expect(valkey?.confidence).toBe('unversioned');
+    expect(valkey?.affected).toEqual([]);
+  });
+
+  it('reports unversioned when neither field yields a parseable version', async () => {
+    const fixture = [
+      ghsaAdvisory({
+        cve_id: 'CVE-9999-00004',
+        vulnerable_version_range: 'see vendor notes',
+        patched_versions: 'TBD',
       }),
     ];
     const source = new GhsaSource(fetchStub(fixture));

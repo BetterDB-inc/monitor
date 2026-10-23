@@ -35,6 +35,15 @@ describe('affectedRangeLabel', () => {
     ).toBe('< 8.0.10');
   });
 
+  it('renders an inferred range with no ceiling as open-ended, never a sentinel', () => {
+    expect(
+      affectedRangeLabel({ branch: '*', vulnerableFrom: '0.0.0', inferred: true }),
+    ).toBe('all versions');
+    expect(
+      affectedRangeLabel({ branch: '*', vulnerableFrom: '7.0.0', inferred: true }),
+    ).toBe('≥ 7.0.0');
+  });
+
   it('renders nothing when the advisory has no affected range at all', () => {
     expect(affectedRangesLabel([])).toBeNull();
   });
