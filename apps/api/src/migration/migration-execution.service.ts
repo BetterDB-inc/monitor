@@ -30,6 +30,10 @@ import { sweepStaleJobFiles } from './execution/stale-job-files';
 /** Set on jobs stopped by an API shutdown rather than by the user. */
 export const SHUTDOWN_CANCEL_MESSAGE = 'Stopped because BetterDB shut down';
 
+/** Returned (503) for a migration requested once shutdown has begun. */
+export const SHUTDOWN_START_MESSAGE =
+  'BetterDB is shutting down; start the migration again after it restarts.';
+
 /**
  * Everything runRedisShake needs to do before it spawns the process: the
  * function-presence notice and the optional target pre-flush. Both run inside
@@ -104,15 +108,25 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
    */
   async onModuleDestroy(): Promise<void> {
     this.shuttingDown = true;
+    // Not status alone: a job the user just stopped is already 'cancelled' but
+    // its RedisShake can still be running (stopExecution's SIGKILL timer would
+    // die with this process). Anything with an in-flight run or a live process
+    // is still ours to stop and clean up.
     const active = [...this.jobs.values()].filter(
-      (job) => job.status === 'pending' || job.status === 'running',
+      (job) =>
+        job.status === 'pending' ||
+        job.status === 'running' ||
+        this.runs.has(job.id) ||
+        job.process !== null,
     );
     if (active.length === 0) return;
 
     this.logger.warn(`Stopping ${active.length} migration(s) because BetterDB is shutting down`);
     for (const job of active) {
-      job.status = 'cancelled';
-      job.error = job.error ?? SHUTDOWN_CANCEL_MESSAGE;
+      if (job.status === 'pending' || job.status === 'running') {
+        job.status = 'cancelled';
+        job.error = job.error ?? SHUTDOWN_CANCEL_MESSAGE;
+      }
       if (job.process) {
         try {
           job.process.kill('SIGTERM');
@@ -153,9 +167,7 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
 
   async startExecution(req: MigrationExecutionRequest): Promise<StartExecutionResponse> {
     if (this.shuttingDown) {
-      throw new ServiceUnavailableException(
-        'BetterDB is shutting down; start the migration again after it restarts.',
-      );
+      throw new ServiceUnavailableException(SHUTDOWN_START_MESSAGE);
     }
     const mode: ExecutionMode = req.mode ?? 'redis_shake';
 
@@ -206,6 +218,14 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
         const message = err instanceof Error ? err.message : String(err);
         throw new ServiceUnavailableException(message);
       }
+    }
+
+    // Re-check after the awaits above: shutdown may have started (and taken its
+    // snapshot of jobs and runs) while the cluster probes were outstanding. From
+    // here to trackRun() there is no await, so a job registered below is always
+    // visible to onModuleDestroy.
+    if (this.shuttingDown) {
+      throw new ServiceUnavailableException(SHUTDOWN_START_MESSAGE);
     }
 
     // 5. Create the job
@@ -407,12 +427,22 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
       job.process = proc;
       job.status = 'running';
 
-      // Write PID file for orphan detection on server restart
+      // The PID file is what lets the startup sweep (stale-job-files.ts) tell a
+      // live RedisShake from a dead one. Without it the sweep would delete this
+      // run's TOML after ORPHAN_TOML_MIN_AGE_MS while the process is still
+      // running, so a run whose PID cannot be recorded is stopped instead. The
+      // process was spawned a moment ago, so nothing has been written yet.
       const pidPath = join(os.tmpdir(), `${job.id}.pid`);
       try {
         writeFileSync(pidPath, String(proc.pid), { encoding: 'utf-8', mode: 0o600 });
         job.pidPath = pidPath;
-      } catch { /* non-fatal — orphan detection is best-effort */ }
+      } catch (err: unknown) {
+        try {
+          proc.kill('SIGKILL');
+        } catch { /* process may already be dead */ }
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(`Could not record the RedisShake PID file: ${message}`, { cause: err });
+      }
 
       const processLine = (rawLine: string) => {
         // Strip ANSI first: RedisShake colourises output, and the codes otherwise

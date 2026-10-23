@@ -1,6 +1,10 @@
 import { EventEmitter } from 'events';
 import { ServiceUnavailableException } from '@nestjs/common';
-import { MigrationExecutionService, SHUTDOWN_CANCEL_MESSAGE } from '../migration-execution.service';
+import {
+  MigrationExecutionService,
+  SHUTDOWN_CANCEL_MESSAGE,
+  SHUTDOWN_START_MESSAGE,
+} from '../migration-execution.service';
 
 jest.mock('../execution/redisshake-runner', () => ({
   findRedisShakeBinary: jest.fn().mockReturnValue('/usr/local/bin/redis-shake'),
@@ -28,7 +32,10 @@ jest.mock('../execution/stale-job-files', () => ({
 }));
 
 const { spawn } = jest.requireMock('child_process') as { spawn: jest.Mock };
-const { unlinkSync } = jest.requireMock('fs') as { unlinkSync: jest.Mock };
+const { unlinkSync, writeFileSync } = jest.requireMock('fs') as {
+  unlinkSync: jest.Mock;
+  writeFileSync: jest.Mock;
+};
 const { runCommandMigration } = jest.requireMock('../execution/command-migration-worker') as {
   runCommandMigration: jest.Mock;
 };
@@ -69,9 +76,11 @@ function adapter() {
   };
 }
 
-function createService(): MigrationExecutionService {
+function createService(
+  makeAdapter: () => ReturnType<typeof adapter> = adapter,
+): MigrationExecutionService {
   const registry = {
-    get: jest.fn().mockImplementation(() => adapter()),
+    get: jest.fn().mockImplementation(() => makeAdapter()),
     getConfig: jest.fn().mockImplementation((id: string) => ({
       id,
       name: id,
@@ -177,6 +186,67 @@ describe('MigrationExecutionService shutdown', () => {
 
     expect(service.getExecution(id)!.status).toBe('completed');
     expect(service.getExecution(id)!.error).toBeUndefined();
+  });
+
+  it('also stops a job the user already cancelled whose RedisShake is still running', async () => {
+    const proc = fakeProcess(['SIGKILL']);
+    spawn.mockReturnValue(proc);
+    const service = createService();
+    const { id } = await service.startExecution(request);
+    await waitFor(() => service.getExecution(id)?.status === 'running');
+    service.stopExecution(id); // SIGTERM, which this process ignores
+
+    await service.onModuleDestroy();
+
+    expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
+    const job = service.getExecution(id)!;
+    expect(job.status).toBe('cancelled');
+    // A user stop is not relabelled as a shutdown stop.
+    expect(job.error).toBeUndefined();
+    const removed = unlinkSync.mock.calls.map(([path]) => String(path));
+    expect(removed.some((path) => path.endsWith(`${id}.toml`))).toBe(true);
+  });
+
+  it('rejects a start whose probes were still running when shutdown began', async () => {
+    // Every INFO probe waits on one gate, so startExecution is parked mid-way.
+    let releaseProbes: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseProbes = resolve;
+    });
+    const slowAdapter = () => {
+      const a = adapter();
+      a.getInfo = jest.fn(async () => {
+        await gate;
+        return { cluster: { cluster_enabled: '0' } };
+      });
+      return a;
+    };
+    const service = createService(slowAdapter);
+    const start = service.startExecution(request);
+    await service.onModuleDestroy();
+    releaseProbes();
+
+    await expect(start).rejects.toThrow(SHUTDOWN_START_MESSAGE);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(service['jobs'].size).toBe(0);
+  });
+
+  it('stops RedisShake and fails the job when its PID file cannot be written', async () => {
+    const proc = fakeProcess(['SIGKILL']);
+    spawn.mockReturnValue(proc);
+    writeFileSync.mockImplementation((path: string) => {
+      if (String(path).endsWith('.pid')) throw new Error('ENOSPC');
+    });
+    const service = createService();
+    const { id } = await service.startExecution(request);
+
+    await waitFor(() => service.getExecution(id)?.status === 'failed');
+
+    expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(service.getExecution(id)!.error).toContain('Could not record the RedisShake PID file');
+    const removed = unlinkSync.mock.calls.map(([path]) => String(path));
+    expect(removed.some((path) => path.endsWith(`${id}.toml`))).toBe(true);
+    writeFileSync.mockReset();
   });
 
   it('refuses to start a migration once shutdown has begun', async () => {
