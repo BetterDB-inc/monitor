@@ -158,11 +158,12 @@ mechanisms above:
 
 - **`redis_shake_sync` needs a replica connection to the source.** Managed
   providers commonly restrict `PSYNC` and `SYNC` (AWS does on every ElastiCache
-  and MemoryDB cache), so a managed source can only be migrated with
-  `redis_shake` (DUMP/RESTORE, same RDB version) or `command` mode, and only
-  where the provider guide lists that mode for that direction. Both read a
-  point-in-time copy per key, so quiesce writes on the source for a consistent
-  result.
+  and MemoryDB cache). A managed source that restricts them can only be
+  migrated with `redis_shake` (DUMP/RESTORE, same RDB version) or `command`
+  mode, and only where the provider guide lists that mode for that direction.
+  Both read a point-in-time copy per key, so quiesce writes on the source for a
+  consistent result. A managed source that permits the replication commands
+  can use `redis_shake_sync` as usual.
 - **`redis_shake` (DUMP/RESTORE) needs matching RDB versions.** Managed
   providers do not always run the engine version their name suggests, so for
   a managed target prefer `redis_shake_sync` or `command`.
