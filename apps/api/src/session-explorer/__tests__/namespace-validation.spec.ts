@@ -43,6 +43,16 @@ describe('validateNamespaceInput', () => {
     expect(errorsOf({ ...valid, pattern: 'app: *' })).toContain('Pattern must not contain whitespace');
   });
 
+  it('rejects a name over 200 characters and a pattern over 1024', () => {
+    expect(errorsOf({ ...valid, name: 'n'.repeat(201) })).toEqual([
+      'Name must be at most 200 characters',
+    ]);
+    expect(errorsOf({ ...valid, pattern: `p${'x'.repeat(1024)}` })).toEqual([
+      'Pattern must be at most 1024 characters',
+    ]);
+    expect(errorsOf({ ...valid, name: 'n'.repeat(200), pattern: `p${'x'.repeat(1023)}` })).toEqual([]);
+  });
+
   it('rejects an empty name', () => {
     expect(errorsOf({ ...valid, name: '   ' })).toContain('Name is required');
   });
