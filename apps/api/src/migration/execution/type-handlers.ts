@@ -154,10 +154,17 @@ async function migrateHash(
 
   const tmp = tempKey(key);
   const writeKey = tmp ?? key;
+  // Key to remove if the copy fails. On the direct-write path the real key only
+  // becomes ours once its DEL succeeded; if that DEL itself failed, the existing
+  // destination is still intact and must be left alone.
+  let cleanupKey: string | null = tmp;
 
   try {
     // DEL the target when writing directly (no temp key)
-    if (!tmp) await target.del(key);
+    if (!tmp) {
+      await target.del(key);
+      cleanupKey = key;
+    }
 
     // Use HSCAN for all sizes so binary field names are preserved as Buffers
     let cursor = '0';
@@ -191,7 +198,9 @@ async function migrateHash(
     // On the direct-write path the real key was already deleted and partially
     // written, so remove it too (same as migrateStream) instead of leaving a
     // partial hash with permanent fields behind a failed key.
-    try { await target.del(tmp ?? key); } catch { /* best-effort cleanup */ }
+    if (cleanupKey) {
+      try { await target.del(cleanupKey); } catch { /* best-effort cleanup */ }
+    }
     throw err;
   }
   return true;
@@ -334,9 +343,14 @@ async function migrateStream(
   const tmp = tempKey(key);
   const writeKey = tmp ?? key;
   let wrote = false;
+  // As in migrateHash: the real key is only ours to remove once its DEL succeeded.
+  let cleanupKey: string | null = tmp;
 
   try {
-    if (!tmp) await target.del(key);
+    if (!tmp) {
+      await target.del(key);
+      cleanupKey = key;
+    }
 
     let lastId = '-';
     let hasMore = true;
@@ -389,7 +403,10 @@ async function migrateStream(
     // Direct-write path (no same-slot temp key): the target key was deleted up front
     // and may have been partly rewritten (entries, or an empty stream created for its
     // groups), so remove it rather than leave a partial stream without its TTL.
-    try { await target.del(tmp ?? key); } catch { /* best-effort cleanup */ }
+    // If that initial DEL failed, the destination is untouched and is left alone.
+    if (cleanupKey) {
+      try { await target.del(cleanupKey); } catch { /* best-effort cleanup */ }
+    }
     throw err;
   }
 }

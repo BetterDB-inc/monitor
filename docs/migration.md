@@ -230,7 +230,7 @@ Valkey 9.0+ and Redis 7.4+ support per-field TTLs within a hash. Analysis detect
 
 **Command mode** copies per-field TTLs: for each page of fields it reads `HPTTL` on the source and re-applies the remaining time with `HPEXPIRE` on the temporary key before it is renamed into place, so the final key never exists without its field TTLs. Fields that expire while they are being copied are removed. If the target cannot store field TTLs, hashes that have them fail (logged as `SKIP`) instead of being copied without them. If the source user may not run `HPTTL`, hashes are copied without field TTLs and the job shows a notice.
 
-Validation compares, for hashes of up to 100 fields, whether each field has a TTL on both sides.
+Validation compares, for hashes of up to 100 fields, whether each field has a TTL on both sides. The check is skipped, and never fails validation, for larger hashes and when either side cannot run `HPTTL` (no HFE support, or the user is denied it with `NOPERM`).
 
 ### Streams and consumer groups
 

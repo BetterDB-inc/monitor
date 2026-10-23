@@ -594,4 +594,27 @@ describe('type-handlers / migrateKey', () => {
       expect(hpttl).toHaveLength(2);
     });
   });
+
+  describe('direct-write cleanup when the initial DEL fails', () => {
+    // 'user:{}:1' has an empty hash tag, so no same-slot temp key exists and the
+    // handler writes to the real key after DELeting it.
+    it('leaves an intact hash destination alone', async () => {
+      const src = createMockSource();
+      const t = createMockTarget();
+      t.del.mockRejectedValueOnce(new Error('LOADING dataset'));
+      const result = await migrateKey(src, t, 'user:{}:1', 'hash');
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe('LOADING dataset');
+      expect(t.del).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves an intact stream destination alone', async () => {
+      const src = createMockSource();
+      const t = createMockTarget();
+      t.del.mockRejectedValueOnce(new Error('LOADING dataset'));
+      const result = await migrateKey(src, t, 'user:{}:1', 'stream');
+      expect(result.ok).toBe(false);
+      expect(t.del).toHaveBeenCalledTimes(1);
+    });
+  });
 });
