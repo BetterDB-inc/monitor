@@ -414,9 +414,10 @@ describe('SessionExplorerController', () => {
     it('is gated by the license guard on the session oversize feature', () => {
       expect(Reflect.getMetadata('requiredFeature', handler)).toBe(Feature.SESSION_OVERSIZE_FLAGS);
       expect(Feature.SESSION_OVERSIZE_FLAGS).toBe('sessionOversizeFlags');
-      expect(Reflect.getMetadata('__guards__', handler)).toEqual(
-        expect.arrayContaining([LiveConnectionGuard, LicenseGuard]),
-      );
+      expect(Reflect.getMetadata('__guards__', handler)).toEqual([
+        LicenseGuard,
+        LiveConnectionGuard,
+      ]);
     });
 
     it('flags only sessions strictly above the threshold', async () => {
