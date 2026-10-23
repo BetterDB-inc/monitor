@@ -181,23 +181,28 @@ function routeKeys(
   return { groups, unrouted };
 }
 
-async function measureCollections(client: Valkey, collections: Located[]): Promise<void> {
-  if (collections.length === 0) return;
-  const lengths = client.pipeline();
-  for (const at of collections) {
-    if (isCollection(at.type)) lengths[LENGTH_COMMANDS[at.type]](at.key);
+async function measure(client: Valkey, found: Located[]): Promise<void> {
+  const collections = found.filter((at) => isCollection(at.type));
+  if (collections.length > 0) {
+    const lengths = client.pipeline();
+    for (const at of collections) {
+      if (isCollection(at.type)) lengths[LENGTH_COMMANDS[at.type]](at.key);
+    }
+    const counted = (await lengths.exec()) ?? [];
+    collections.forEach((at, i) => {
+      at.length = numberOf(counted[i] as PipelineResult);
+    });
   }
-  const counted = (await lengths.exec()) ?? [];
-  collections.forEach((at, i) => {
-    at.length = numberOf(counted[i] as PipelineResult);
-  });
 
-  const small = collections.filter((at) => at.length !== null && at.length <= EXACT_MEMORY_LENGTH);
-  if (small.length === 0) return;
+  const exactly = found.filter(
+    (at) =>
+      at.type === 'ReJSON-RL' || (at.length !== null && at.length <= EXACT_MEMORY_LENGTH),
+  );
+  if (exactly.length === 0) return;
   const exact = client.pipeline();
-  for (const at of small) exact.memory('USAGE', at.key, 'SAMPLES', 0);
+  for (const at of exactly) exact.memory('USAGE', at.key, 'SAMPLES', 0);
   const measured = (await exact.exec()) ?? [];
-  small.forEach((at, i) => {
+  exactly.forEach((at, i) => {
     at.memory = numberOf(measured[i] as PipelineResult);
     at.exact = at.memory !== null;
   });
@@ -235,10 +240,7 @@ async function locate(
         exact: false,
       });
     });
-    await measureCollections(
-      client,
-      found.filter((at) => isCollection(at.type)),
-    );
+    await measure(client, found);
     located.push(...found);
   }
   return { located, missing };
