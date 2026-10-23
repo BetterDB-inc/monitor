@@ -94,20 +94,22 @@ export function parseJson(text: string): unknown {
   return JSON.parse(text);
 }
 
+const TOOL_CALL_BLOCKS = new Set(['tool_use', 'tool_call', 'tool_call_chunk']);
+
 export function textContent(content: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
     return content
-      .map((part) => {
-        if (typeof part === 'string') return part;
+      .flatMap((part) => {
+        if (typeof part === 'string') return [part];
         if (!isRecord(part) || typeof part.type !== 'string') {
           return fail('Unsupported content block');
         }
-        if (part.type === 'text' && typeof part.text === 'string') return part.text;
-        if (part.type === 'tool_use') return '';
-        return `[${part.type}]`;
+        if (part.type === 'text' && typeof part.text === 'string') return [part.text];
+        if (TOOL_CALL_BLOCKS.has(part.type)) return [];
+        return [`[${part.type}]`];
       })
-      .join('');
+      .join('\n');
   }
   return fail('Message content is not text');
 }

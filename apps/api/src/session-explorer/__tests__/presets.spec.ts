@@ -421,12 +421,37 @@ describe('presets with content blocks beyond text', () => {
       ]),
     );
     const [human, ai] = parsedMessages(view);
-    expect(human.content).toBe('What is this?[image_url]');
+    expect(human.content).toBe('What is this?\n[image_url]');
     expect(ai).toEqual({
       role: 'ai',
       content: 'Let me check',
       toolCalls: [{ name: 'get_weather', args: { city: 'Sofia' }, id: 'toolu_1' }],
     });
+  });
+
+  it('langchain keeps text blocks apart and hides v1 tool_call blocks', () => {
+    const view = getPreset('langchain-community').parseKey(
+      listKey([
+        {
+          type: 'ai',
+          data: {
+            content: [
+              { type: 'text', text: 'First.' },
+              { type: 'text', text: 'Second.' },
+              { type: 'tool_call', id: 'call_1', name: 'lookup', args: { q: 1 } },
+            ],
+            tool_calls: [{ name: 'lookup', args: { q: 1 }, id: 'call_1' }],
+          },
+        },
+      ]),
+    );
+    expect(parsedMessages(view)).toEqual([
+      {
+        role: 'ai',
+        content: 'First.\nSecond.',
+        toolCalls: [{ name: 'lookup', args: { q: 1 }, id: 'call_1' }],
+      },
+    ]);
   });
 
   it('langchain prefers tool_calls over tool_use blocks when both are present', () => {
