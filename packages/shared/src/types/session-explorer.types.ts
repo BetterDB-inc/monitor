@@ -131,6 +131,8 @@ export interface SessionOversizeResponse {
 export interface SessionPreview {
   sampleKey: string | null;
   view: KeyView | null;
+  exhausted: boolean;
+  failedNodes: number;
 }
 
 export interface SessionExport {

@@ -19,6 +19,20 @@ library's message classes and written through its own history/store/saver API.
 Environment: Python 3.12.15 (venv in `.venv`, needs >= 3.10), Node 22.22.3,
 Valkey 8.1.6 on 6380.
 
+## End-to-end test
+
+`apps/api/test/session-explorer.e2e-spec.ts` seeds with `--seed-only`, boots
+the API against 6380, creates one namespace per preset and checks every seeded
+session through the HTTP API. It is skipped unless
+`RUN_SESSION_EXPLORER_E2E=true`, because seeding needs Python and the Node
+client libraries:
+
+```
+docker compose up -d valkey
+RUN_SESSION_EXPLORER_E2E=true SKIP_DOCKER_SETUP=true \
+  npx -y pnpm@9.15.0 -C apps/api exec jest -w 2 session-explorer.e2e
+```
+
 ## Sessions seeded per library
 
 `multi-turn` (system + 3 human/ai pairs), `tool-call` (human, ai with tool

@@ -26,6 +26,7 @@ import { keysForSession, scanSessions } from './session-scanner';
 import { readSessionKeys } from './session-reader';
 
 const PREVIEW_SCAN_COUNT = 1000;
+const PREVIEW_SCAN_PAGES = 10;
 
 const sessionMissing = (failedNodes: number) =>
   failedNodes > 0
@@ -86,26 +87,53 @@ export class SessionExplorerService {
     const input = this.validate(body);
     const preset = this.presetOf(input);
     const db = this.registry.get(connectionId);
-    const sampleKey = await withPrimaries(db, async ({ clients }) => {
+    const scanned = await withPrimaries(db, async ({ clients, failed }) => {
+      let fallback: string | null = null;
+      let failedNodes = failed;
+      let searchedAll = failed === 0;
       let lastError: unknown;
       let succeeded = 0;
       for (const client of clients) {
+        let cursor = '0';
+        let pages = 0;
         try {
-          const [, page] = await client.scan('0', 'MATCH', input.pattern, 'COUNT', PREVIEW_SCAN_COUNT);
+          do {
+            const [next, page] = await client.scan(
+              cursor,
+              'MATCH',
+              input.pattern,
+              'COUNT',
+              PREVIEW_SCAN_COUNT,
+            );
+            cursor = next;
+            pages++;
+            const accepted = page.find((k) => preset.sessionIdOf(k) !== null);
+            if (accepted !== undefined) {
+              return { sampleKey: accepted, exhausted: true, failedNodes };
+            }
+            fallback ??= page[0] ?? null;
+          } while (cursor !== '0' && pages < PREVIEW_SCAN_PAGES);
           succeeded++;
-          const key = page.find((k) => preset.sessionIdOf(k) !== null) ?? page[0];
-          if (key !== undefined) return key;
         } catch (err) {
           lastError = err;
+          failedNodes++;
+          cursor = '';
         }
+        if (cursor !== '0') searchedAll = false;
       }
-      if (succeeded === 0 && lastError !== undefined) throw lastError;
-      return null;
+      if (succeeded === 0 && fallback === null && lastError !== undefined) throw lastError;
+      return { sampleKey: fallback, exhausted: searchedAll, failedNodes };
     });
-    if (sampleKey === null) return { sampleKey: null, view: null };
+    const { sampleKey, exhausted, failedNodes } = scanned;
+    if (sampleKey === null) return { sampleKey: null, view: null, exhausted, failedNodes };
     const read = await readSessionKeys(db, [sampleKey]);
     const captured = read.keys[0];
-    return { sampleKey, view: captured ? preset.parseKey(captured) : null };
+    return {
+      sampleKey,
+      view: captured ? preset.parseKey(captured) : null,
+      exhausted,
+      failedNodes,
+    };
   }
 
   async listSessions(connectionId: string, id: string): Promise<SessionListResponse> {
