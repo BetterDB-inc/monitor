@@ -128,14 +128,14 @@ Total: 9 + 40 + 12 + 120 = 181.
 
 | Connection type    | `vitals` | `full` |
 | ------------------ | -------- | ------ |
-| Standalone primary | 33       | 73     |
-| Standalone replica | 34       | 74     |
-| Cluster primary    | 39       | 80     |
-| Cluster replica    | 40       | 81     |
+| Standalone primary | 33       | 80     |
+| Standalone replica | 34       | 81     |
+| Cluster primary    | 39       | 87     |
+| Cluster replica    | 40       | 88     |
 
 The `vitals` column is the budget from [Export Profiles](#export-profiles).
 
-The `full` column starts from the INFO-derived series: the `vitals` families plus `betterdb_pubsub_channels` and `betterdb_pubsub_patterns`. That gives 35, 36, 41 and 42 series. Each family below then adds its series once its collector has data. The `full` column is the ceiling with every one of them present:
+The `full` column starts from the INFO-derived series: the `vitals` families plus `betterdb_pubsub_channels`, `betterdb_pubsub_patterns` and the seven counters `betterdb_rejected_connections_total`, `betterdb_sync_full_total`, `betterdb_sync_partial_ok_total`, `betterdb_sync_partial_err_total`, `betterdb_net_input_bytes_total`, `betterdb_net_output_bytes_total` and `betterdb_error_replies_total` (the last one only on Redis 6.2+ / Valkey). That gives 42, 43, 48 and 49 series. Each family below then adds its series once its collector has data. The `full` column is the ceiling with every one of them present:
 
 | Family                                                                                   | Series | Present when                                                                                    |
 | ---------------------------------------------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------- |
@@ -215,7 +215,7 @@ This example uses `full` with 5 standalone primaries and 2 cluster primaries, as
 
 | Term                | Standalone primary | Cluster primary |
 | ------------------- | ------------------ | --------------- |
-| `F`                 | 73                 | 80              |
+| `F`                 | 80                 | 87              |
 | Per-db              | 6                  | 3               |
 | Slot stats          | 0                  | 400             |
 | Commandstats        | 80                 | 80              |
@@ -225,9 +225,9 @@ This example uses `full` with 5 standalone primaries and 2 cluster primaries, as
 | COMMANDLOG patterns | 20                 | 20              |
 | Client name/user    | 7                  | 7               |
 | ACL reason/user     | 5                  | 5               |
-| **Per connection**  | **263**            | **667**         |
+| **Per connection**  | **270**            | **674**         |
 
-The total with `full` is 55 + 5 × 263 + 2 × 667 = **2,704 series**. Add up to 181 more while anomaly detection runs.
+The total with `full` is 55 + 5 × 270 + 2 × 674 = **2,753 series**. Add up to 181 more while anomaly detection runs.
 
 The same fleet under `vitals` exports 55 + 5 × 33 + 2 × 39 = **298 series**, and that number does not change with key count, database count, pattern churn or cluster size.
 
@@ -383,6 +383,15 @@ Operational statistics and throughput.
 | `betterdb_expired_keys_total`         | gauge | -      | Total expired keys                  | `56789`    |
 | `betterdb_pubsub_channels`            | gauge | -      | Number of pub/sub channels          | `12`       |
 | `betterdb_pubsub_patterns`            | gauge | -      | Number of pub/sub patterns          | `3`        |
+| `betterdb_rejected_connections_total` | gauge | -      | Connections refused because `maxclients` was reached | `0` |
+| `betterdb_sync_full_total`            | gauge | -      | Full resyncs this node has served to replicas        | `2` |
+| `betterdb_sync_partial_ok_total`      | gauge | -      | Partial resync requests accepted                     | `14` |
+| `betterdb_sync_partial_err_total`     | gauge | -      | Partial resync requests denied (each forces a full sync) | `1` |
+| `betterdb_net_input_bytes_total`      | gauge | -      | Total bytes read from the network                    | `9876543210` |
+| `betterdb_net_output_bytes_total`     | gauge | -      | Total bytes written to the network                   | `12345678901` |
+| `betterdb_error_replies_total`        | gauge | -      | Total error replies sent to clients (Redis 6.2+ / Valkey; omitted on older servers) | `37` |
+
+The counters above are cumulative since the server started (they reset on restart), so use `rate()` or `increase()` on them. `sync_*` counts resyncs this node **served** as a primary; on a replica they only move for replicas chained below it. These counters are exported under `full` only.
 
 ### CPU Metrics
 
@@ -730,6 +739,18 @@ rate(betterdb_commands_processed_total[5m])
 
 # Network throughput (combined input + output)
 betterdb_instantaneous_input_kbps + betterdb_instantaneous_output_kbps
+
+# Network throughput from the cumulative byte counters (bytes/second)
+rate(betterdb_net_input_bytes_total[5m]) + rate(betterdb_net_output_bytes_total[5m])
+
+# Connections refused because maxclients was reached (per minute)
+increase(betterdb_rejected_connections_total[1m])
+
+# Error replies per second
+rate(betterdb_error_replies_total[5m])
+
+# Share of resync requests that fell back to a full sync
+increase(betterdb_sync_full_total[1h]) / clamp_min(increase(betterdb_sync_full_total[1h]) + increase(betterdb_sync_partial_ok_total[1h]), 1)
 ```
 
 ### Client Analytics
@@ -808,6 +829,12 @@ increase(betterdb_correlated_groups_total{pattern="memory_pressure"}[10m]) > 0
 increase(betterdb_correlated_groups_total{pattern="auth_attack"}[5m]) > 0
 ```
 
+**BetterDBConnectionsRejected** - `maxclients` reached; new clients are being refused
+
+```promql
+increase(betterdb_rejected_connections_total[5m]) > 0
+```
+
 ### Warning Alerts
 
 **BetterDBWarningSpike** - Multiple warning anomalies in short period
@@ -867,6 +894,12 @@ for: 10m
 > has a delta near zero and does not trip this rule — only actual growth within
 > the window does. To also catch keys that are already large but not growing, use
 > the absolute-size variant above (`BetterDBLargeKey`).
+
+**BetterDBRepeatedFullResyncs** - Replicas keep needing full syncs instead of partial ones
+
+```promql
+increase(betterdb_sync_full_total[15m]) > 2
+```
 
 ### Info Alerts
 
