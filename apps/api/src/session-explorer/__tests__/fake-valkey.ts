@@ -6,6 +6,7 @@ export interface FakeEntry {
   type: string;
   pttl?: number;
   memory?: number | null;
+  sampledMemory?: number;
   jsonMemory?: number | null;
   idle?: number;
   value?:
@@ -171,6 +172,7 @@ export class FakeValkey {
         return e ? (e.pttl ?? -1) : -2;
       case 'memory':
         if (e && e.memory === null) throw new Error('NOPERM memory');
+        if (e && e.sampledMemory !== undefined && !args.includes('SAMPLES')) return e.sampledMemory;
         return e ? (e.memory ?? 100) : null;
       case 'object':
         if (!e) throw new Error('ERR no such key');

@@ -401,6 +401,16 @@ describe('readSessionKeys', () => {
     expect(client.callsOf('callBuffer')).toHaveLength(0);
   });
 
+  it('measures JSON exactly before trusting a sampled size', async () => {
+    const client = new FakeValkey(
+      storeOf({ j: { type: 'ReJSON-RL', value: '{}', memory: 100 * MB, sampledMemory: 100 } }),
+    );
+    const key = await readOne(client, 'j', { byteCap: MB });
+    expect(key).toMatchObject({ value: '', truncated: true });
+    expect(client.callsOf('pipeline.callBuffer')).toHaveLength(0);
+    expect(client.callsOf('callBuffer')).toHaveLength(0);
+  });
+
   it('sizes JSON with JSON.DEBUG MEMORY when MEMORY USAGE is unavailable', async () => {
     const client = new FakeValkey(
       storeOf({ j: { type: 'ReJSON-RL', value: '{"a":1}', memory: null, jsonMemory: 40 } }),
