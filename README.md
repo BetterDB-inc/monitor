@@ -107,7 +107,7 @@ Requires Node.js >= 20.0.0 and a Valkey or Redis instance to monitor. For SQLite
 - **Anomaly detection** (Pro, free in early access) - automatic baseline learning with correlated events and plain-English diagnoses. 20+ detectors, no manual thresholds.
 - **Capacity forecasting** - projected time-to-ceiling for memory, ops/sec, CPU, and fragmentation.
 - **Webhooks** - HMAC-signed alert deliveries with retries and a full delivery log.
-- **Live migration** - move any Redis or Valkey to any Redis or Valkey, in either direction: self-hosted, ElastiCache (node-based or Serverless), MemoryDB, Redis Cloud, Upstash, standalone or cluster. Three-phase analysis, execution, and validation workflow with PSYNC-based continuous replication for near-zero-downtime cutovers. See [docs/migration.md](docs/migration.md).
+- **Live migration** - move any Redis or Valkey to any Redis or Valkey: self-hosted, ElastiCache (node-based or Serverless), MemoryDB, Redis Cloud, Upstash, standalone or cluster (a cluster source needs a cluster target). Three-phase analysis, execution, and validation workflow, with PSYNC-based continuous replication for near-zero-downtime cutovers when the source permits replication commands. See [docs/migration.md](docs/migration.md).
 
 ### Built for the AI era
 

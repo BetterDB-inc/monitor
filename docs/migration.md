@@ -159,12 +159,20 @@ mechanisms above:
 - **`redis_shake_sync` needs a replica connection to the source.** Managed
   providers commonly restrict `PSYNC` and `SYNC` (AWS does on every ElastiCache
   and MemoryDB cache), so a managed source can only be migrated with
-  `redis_shake` (DUMP/RESTORE, same RDB version) or `command` mode. Both read a
+  `redis_shake` (DUMP/RESTORE, same RDB version) or `command` mode, and only
+  where the provider guide lists that mode for that direction. Both read a
   point-in-time copy per key, so quiesce writes on the source for a consistent
   result.
 - **`redis_shake` (DUMP/RESTORE) needs matching RDB versions.** Managed
   providers do not always run the engine version their name suggests, so for
   a managed target prefer `redis_shake_sync` or `command`.
+- **Execution and validation connect to the stored host and port directly.**
+  They do not go through the BetterDB Agent or an SSH tunnel; an agent
+  connection has no addressable endpoint and a tunnelled connection is reached
+  at its remote address. Those connection types support monitoring and the
+  analysis phase only. To execute a migration involving a VPC-only cache, run
+  BetterDB Monitor on a host that can reach both caches directly, for example
+  self-hosted on an EC2 instance in the same VPC.
 
 ## Compatibility checks
 

@@ -253,7 +253,7 @@ In BetterDB Cloud, the connection appears in the **Via Agent** tab with a **Conn
 | Key analytics (SCAN) | ✅ | SCAN is supported |
 | Anomaly detection | ✅ | Based on INFO polling |
 | Webhooks & alerts | ✅ | |
-| Migration (source or target) | ✅ | All data types supported |
+| Migration (source or target) | ⚠️ | Analysis works through the agent. Execution and validation need BetterDB Monitor running with direct reachability to the cache (see [Migrating to or from ElastiCache](#migrating-to-or-from-elasticache)) |
 | Client analytics | ⚠️ | `CLIENT LIST` is restricted - returns limited data |
 | ACL audit trail | ⚠️ | Available on Redis 6+ / Valkey clusters with ACL enabled |
 | CONFIG inspection | ❌ | `CONFIG GET/SET` is blocked by AWS |
@@ -264,11 +264,18 @@ In BetterDB Cloud, the connection appears in the **Via Agent** tab with a **Conn
 
 ## Migrating to or from ElastiCache
 
-ElastiCache can be the source or the target of a BetterDB [migration](../migration).
-Both connections go through the agent (or an SSH tunnel), so the only
-requirement beyond monitoring is that BetterDB can reach both sides. The
-continuous `redis_shake_sync` mode is only available when ElastiCache is the
-target: AWS restricts the replication commands on its caches (see
+ElastiCache can be the source or the target of a BetterDB [migration](../migration),
+with one reachability requirement that differs from monitoring: the execution
+and validation phases connect to the cache's host and port directly, not
+through the agent or an SSH tunnel. The agent has no addressable endpoint and a
+tunnelled connection is dialled at its remote address, so those connection
+types cover monitoring and the analysis phase only. To run a migration, deploy
+BetterDB Monitor (self-hosted, via Docker or Helm) on a host that reaches both
+caches directly, for example on the same EC2 instance that runs the agent, and
+register the ElastiCache endpoint there as a direct connection.
+
+The continuous `redis_shake_sync` mode is only available when ElastiCache is
+the target: AWS restricts the replication commands on its caches (see
 [restricted commands](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/SupportedCommands.html#RestrictedCommandsRedis)),
 so nothing can attach to an ElastiCache cache as a replica.
 
@@ -286,8 +293,10 @@ MemoryDB, Serverless or standalone sources, and Serverless is never a source.
 BetterDB covers those directions. If you do use the AWS tool, BetterDB is
 still useful on the source side: the AWS migration nodes attach as replicas,
 so replication offsets and lag, CPU and fork-memory headroom on the primaries,
-and any client still writing directly to the source (which permanently fails an
-AWS migration) all show up in the dashboard.
+and any client still writing directly to the source all show up in the
+dashboard. The last one matters because a direct write of a command Serverless
+does not support is not replicated, and AWS reports that as a permanent
+migration error.
 
 ## Known Limitations
 
