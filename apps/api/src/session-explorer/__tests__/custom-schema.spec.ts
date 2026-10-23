@@ -327,6 +327,31 @@ describe('custom preset', () => {
     ]);
   });
 
+  it('shows non-text content as text instead of dropping the key', () => {
+    const preset = createCustomPreset({
+      valueType: 'list',
+      messages: { from: 'items' },
+      fields: { role: 'role', content: 'text' },
+    });
+    const entries = [
+      { role: 'user', text: 42 },
+      { role: 'ai', text: { text: 'hi', score: 1 } },
+      { role: 'ai', text: true },
+      { role: 'ai', text: [{ type: 'text', text: 'a' }, { kind: 'x' }] },
+      { role: 'ai', text: [{ type: 'text', text: 'b' }] },
+      { role: 'user', text: 'plain' },
+    ];
+    const view = preset.parseKey(key({ type: 'list', value: entries.map((e) => JSON.stringify(e)) }));
+    expect(view.parsed && view.messages.map((m) => m.content)).toEqual([
+      '42',
+      '{"text":"hi","score":1}',
+      'true',
+      '[{"type":"text","text":"a"},{"kind":"x"}]',
+      'b',
+      'plain',
+    ]);
+  });
+
   it('parses a hash with a field named base64', () => {
     const preset = createCustomPreset({
       valueType: 'hash',

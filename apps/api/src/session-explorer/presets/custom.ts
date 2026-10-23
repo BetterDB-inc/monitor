@@ -12,6 +12,7 @@ import {
   guardedParse,
   isRecord,
   parseJson,
+  ShapeError,
   textContent,
 } from './text';
 
@@ -294,6 +295,23 @@ function selectEntries(
   }
 }
 
+function blocksOrJson(blocks: unknown[]): string {
+  try {
+    return textContent(blocks);
+  } catch (err) {
+    if (err instanceof ShapeError) return JSON.stringify(blocks);
+    throw err;
+  }
+}
+
+function contentText(raw: unknown): string {
+  if (raw === null) return '';
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'number' || typeof raw === 'boolean') return String(raw);
+  if (Array.isArray(raw)) return blocksOrJson(raw);
+  return JSON.stringify(raw);
+}
+
 function toMessage(
   entry: unknown,
   fields: CustomSchema['fields'],
@@ -304,7 +322,7 @@ function toMessage(
   if (typeof role !== 'string' || role === '') return fail(`Missing role at "${fields.role}"`);
   const rawContent = at(fields.content);
   if (rawContent === undefined) return fail(`Missing content at "${fields.content}"`);
-  const message: ParsedMessage = { role, content: textContent(rawContent ?? '') };
+  const message: ParsedMessage = { role, content: contentText(rawContent) };
 
   if (fields.timestamp) {
     const ts = at(fields.timestamp);
