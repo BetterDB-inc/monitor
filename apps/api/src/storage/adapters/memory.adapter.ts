@@ -1382,7 +1382,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   async listSessionNamespaces(connectionId: string): Promise<SessionNamespace[]> {
     return [...this.sessionNamespaces.values()]
       .filter((n) => n.connectionId === connectionId)
-      .sort((a, b) => a.createdAt - b.createdAt)
+      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       .map((n) => ({ ...n }));
   }
 
