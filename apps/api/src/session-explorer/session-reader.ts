@@ -73,7 +73,7 @@ class Accumulator<T> {
   bytes = 0;
   full = false;
 
-  constructor(private readonly cap: number) {}
+  constructor(readonly cap: number) {}
 
   add(size: number, item: () => T): boolean {
     if (this.bytes + size > this.cap) {
@@ -84,6 +84,24 @@ class Accumulator<T> {
     this.items.push(item());
     return true;
   }
+}
+
+const firstWindow = (at: Located, opts: ReadOpts): number =>
+  at.memory !== null && at.memory <= opts.byteCap ? opts.listWindow : 1;
+
+function nextWindow(
+  acc: Accumulator<unknown>,
+  at: Located,
+  read: number,
+  length: number,
+  opts: ReadOpts,
+): number {
+  const unreadBytes = at.memory === null ? 0 : at.memory - acc.bytes;
+  const average =
+    unreadBytes > 0
+      ? unreadBytes / Math.max(1, length - read)
+      : Math.max(1, acc.bytes / Math.max(1, acc.items.length));
+  return Math.max(1, Math.min(opts.listWindow, Math.floor((acc.cap - acc.bytes) / average) + 1));
 }
 
 function routeKeys(
@@ -125,7 +143,7 @@ async function locate(
     for (const key of slice) {
       pipeline.type(key);
       pipeline.pttl(key);
-      pipeline.memory('USAGE', key);
+      pipeline.memory('USAGE', key, 'SAMPLES', 0);
     }
     const results = (await pipeline.exec()) ?? [];
     slice.forEach((key, i) => {
@@ -149,15 +167,15 @@ function queueFirstRead(pipeline: ChainableCommander, at: Located, opts: ReadOpt
       return 2;
     case 'list':
       pipeline.llen(key);
-      pipeline.lrangeBuffer(key, 0, opts.listWindow - 1);
+      pipeline.lrangeBuffer(key, 0, firstWindow(at, opts) - 1);
       return 2;
     case 'hash':
-      if (memory === null || memory > opts.byteCap) return 0;
-      pipeline.hgetallBuffer(key);
+      if (memory === null || memory > opts.byteCap) pipeline.hlen(key);
+      else pipeline.hgetallBuffer(key);
       return 1;
     case 'zset':
       pipeline.zcard(key);
-      pipeline.zrangeBuffer(key, 0, String(opts.listWindow - 1), 'WITHSCORES');
+      pipeline.zrangeBuffer(key, 0, String(firstWindow(at, opts) - 1), 'WITHSCORES');
       return 2;
     case 'ReJSON-RL':
       if (memory === null) {
@@ -168,8 +186,9 @@ function queueFirstRead(pipeline: ChainableCommander, at: Located, opts: ReadOpt
       pipeline.callBuffer('JSON.GET', key);
       return 1;
     case 'stream':
-      pipeline.xrangeBuffer(key, '-', '+', 'COUNT', opts.listWindow);
-      return 1;
+      pipeline.xlen(key);
+      pipeline.xrangeBuffer(key, '-', '+', 'COUNT', firstWindow(at, opts));
+      return 2;
     default:
       return 0;
   }
@@ -191,13 +210,15 @@ async function readList(
   const length = resultOf(results[0]) as number;
   let window = resultOf(results[1]) as Buffer[];
   const acc = new Accumulator<ValkeyValue>(cap);
+  let size = firstWindow(at, opts);
   for (let start = 0; ; ) {
     for (const item of window) {
       if (!acc.add(item.length, () => decoded(item, cap))) break;
     }
-    start += opts.listWindow;
-    if (acc.full || window.length < opts.listWindow || start >= length) break;
-    window = await client.lrangeBuffer(at.key, start, start + opts.listWindow - 1);
+    start += window.length;
+    if (acc.full || window.length < size || start >= length) break;
+    size = nextWindow(acc, at, start, length, opts);
+    window = await client.lrangeBuffer(at.key, start, start + size - 1);
   }
   return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
 }
@@ -210,16 +231,20 @@ async function readHash(
   opts: ReadOpts,
 ): Promise<ReadResult> {
   const acc = new Accumulator<[string, ValkeyValue]>(cap);
-  if (results.length > 0) {
-    const all = resultOf(results[0]) as Record<string, Buffer>;
+  const first = resultOf(results[0]);
+  if (typeof first !== 'number') {
+    const all = first as Record<string, Buffer>;
     for (const [field, v] of Object.entries(all)) {
       if (!acc.add(Buffer.byteLength(field) + v.length, () => [field, decoded(v, cap)])) break;
     }
   } else {
     let cursor = '0';
+    let read = 0;
     do {
-      const [next, flat] = await client.hscanBuffer(at.key, cursor, 'COUNT', opts.listWindow);
+      const count = nextWindow(acc, at, read, first, opts);
+      const [next, flat] = await client.hscanBuffer(at.key, cursor, 'COUNT', count);
       cursor = next.toString();
+      read += flat.length / 2;
       for (let i = 0; i + 1 < flat.length; i += 2) {
         const [field, v] = [flat[i], flat[i + 1]];
         if (!acc.add(field.length + v.length, () => [field.toString(), decoded(v, cap)])) break;
@@ -239,19 +264,16 @@ async function readZset(
   const length = resultOf(results[0]) as number;
   let flat = resultOf(results[1]) as Buffer[];
   const acc = new Accumulator<[ValkeyValue, number]>(cap);
+  let size = firstWindow(at, opts);
   for (let start = 0; ; ) {
     for (let i = 0; i + 1 < flat.length; i += 2) {
       const [member, score] = [flat[i], flat[i + 1]];
       if (!acc.add(member.length, () => [decoded(member, cap), Number(score.toString())])) break;
     }
-    start += opts.listWindow;
-    if (acc.full || flat.length < opts.listWindow * 2 || start >= length) break;
-    flat = await client.zrangeBuffer(
-      at.key,
-      start,
-      String(start + opts.listWindow - 1),
-      'WITHSCORES',
-    );
+    start += flat.length / 2;
+    if (acc.full || flat.length < size * 2 || start >= length) break;
+    size = nextWindow(acc, at, start, length, opts);
+    flat = await client.zrangeBuffer(at.key, start, String(start + size - 1), 'WITHSCORES');
   }
   return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
 }
@@ -294,9 +316,11 @@ async function readStream(
   cap: number,
   opts: ReadOpts,
 ): Promise<ReadResult> {
-  let entries = resultOf(results[0]) as Array<[Buffer, Buffer[]]>;
+  const length = resultOf(results[0]) as number;
+  let entries = resultOf(results[1]) as Array<[Buffer, Buffer[]]>;
   const acc = new Accumulator<[string, Record<string, ValkeyValue>]>(cap);
-  for (;;) {
+  let size = firstWindow(at, opts);
+  for (let read = 0; ; ) {
     for (const [id, flat] of entries) {
       const fields: Record<string, ValkeyValue> = {};
       let size = 0;
@@ -306,14 +330,16 @@ async function readStream(
       }
       if (!acc.add(size, () => [id.toString(), fields])) break;
     }
-    if (acc.full || entries.length < opts.listWindow) break;
+    read += entries.length;
+    if (acc.full || entries.length < size || read >= length) break;
     const lastId = entries[entries.length - 1][0].toString();
+    size = nextWindow(acc, at, read, length, opts);
     entries = (await client.xrangeBuffer(
       at.key,
       streamIdAfter(lastId),
       '+',
       'COUNT',
-      opts.listWindow,
+      size,
     )) as Array<[Buffer, Buffer[]]>;
   }
   return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
