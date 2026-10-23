@@ -379,4 +379,22 @@ describe('custom preset', () => {
     expect(() => getPreset('custom', null)).toThrow();
     expect(getPreset('custom', baseSchema).id).toBe('custom');
   });
+
+  it('registry turns an invalid stored schema into unparsed views', () => {
+    const invalid = [
+      { ...baseSchema, messages: { from: 'path' } },
+      { ...baseSchema, valueType: 'set' },
+    ] as unknown as CustomSchema[];
+    for (const schema of invalid) {
+      const preset = getPreset('custom', schema);
+      const view = preset.parseKey(key({ type: 'list', value: ['{}'] }));
+      expect(view.parsed).toBe(false);
+      expect(view.parsed === false && view.reason).toMatch(/^Invalid custom schema: /);
+      expect(preset.sessionIdOf('k')).toBe('k');
+    }
+  });
+
+  it('registry throws on an unknown preset id', () => {
+    expect(() => getPreset('bogus' as never)).toThrow('Unknown preset "bogus"');
+  });
 });
