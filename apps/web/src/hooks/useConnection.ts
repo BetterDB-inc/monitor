@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import type { TopologyMembership } from '@betterdb/shared';
+import type { SshTunnelStatus, TopologyMembership } from '@betterdb/shared';
 import { setCurrentConnectionId, fetchApi } from '../api/client';
 import { isUnavailableMember } from '../utils/connectionType';
 
@@ -20,6 +20,8 @@ export interface Connection {
   connectionType?: 'direct' | 'agent' | 'external';
   autoRegisterNodes?: boolean;
   membership?: TopologyMembership;
+  /** Redacted tunnel summary; present when the connection is reached through SSH. */
+  sshTunnel?: SshTunnelStatus;
 }
 
 export interface ConnectionContextValue {
