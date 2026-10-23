@@ -177,6 +177,28 @@ describe('readSessionKeys', () => {
     expect(client.fetchedBytes).toBeLessThanOrEqual(256 * 1024 + 64 * 1024 + 1024);
   });
 
+  it('grows windows gradually when MEMORY USAGE is unavailable', async () => {
+    const items = ['hi', ...Array.from({ length: 20 }, () => 'x'.repeat(512 * 1024))];
+    const client = new FakeValkey(storeOf({ l: { type: 'list', value: items, memory: null } }));
+
+    const key = await readOne(client, 'l', { byteCap: 2 * MB });
+
+    expect(key.truncated).toBe(true);
+    expect(client.fetchedBytes).toBeLessThanOrEqual(2 * MB + 512 * 1024 + 2);
+  });
+
+  it('scans an unmeasured hash from one field and grows by the largest seen', async () => {
+    const value: Record<string, string> = {};
+    for (let i = 0; i < 40; i++) value[`f${i}`] = 'x'.repeat(64 * 1024);
+    const client = new FakeValkey(storeOf({ h: { type: 'hash', value, memory: null } }));
+
+    const key = await readOne(client, 'h', { byteCap: 256 * 1024 });
+
+    expect(client.callsOf('hscanBuffer')[0].args[3]).toBe(1);
+    expect(key.truncated).toBe(true);
+    expect(client.fetchedBytes).toBeLessThanOrEqual(256 * 1024 + 64 * 1024 + 1024);
+  });
+
   it('reads a whole stream of small entries across pages', async () => {
     const value = Array.from(
       { length: 1200 },
