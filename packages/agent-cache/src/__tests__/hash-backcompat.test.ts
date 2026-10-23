@@ -40,4 +40,17 @@ describe("llmCacheHash v0.2.0 backward compatibility", () => {
     };
     expect(llmCacheHash(textOnly)).not.toBe(llmCacheHash(blocks));
   });
+
+  it("providerParams: undefined leaves the hash unchanged, a value changes it", () => {
+    const params = {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+    };
+    const fixture = "029b2f180b42427a44aa63db387e7b421c8454ae987a6a41d3099363a67f67c5";
+    expect(llmCacheHash({ ...params, providerParams: undefined })).toBe(fixture);
+    expect(llmCacheHash({ ...params, providerParams: { top_k: 5 } })).not.toBe(fixture);
+    expect(llmCacheHash({ ...params, providerParams: { top_k: 5 } })).not.toBe(
+      llmCacheHash({ ...params, providerParams: { top_k: 6 } }),
+    );
+  });
 });

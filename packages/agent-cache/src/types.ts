@@ -89,11 +89,24 @@ export interface LlmCacheParams {
   responseFormat?: unknown;
   reasoningEffort?: string;
   promptCacheKey?: string;
+  /**
+   * Provider request params that have no first-class field above (e.g. top_k,
+   * thinking, parallel_tool_calls, max_completion_tokens). Set by adapters that
+   * forward a model's full invocation params. When undefined it is dropped from
+   * the canonical JSON, so existing keys are unchanged.
+   */
+  providerParams?: Record<string, unknown>;
 }
 
 export interface LlmStoreOptions {
   ttl?: number;
   tokens?: { input: number; output: number };
+  /**
+   * Adapter-owned, JSON-safe data needed to rebuild the response faithfully on a
+   * hit (e.g. message ids, provider metadata). Stored alongside the entry and
+   * returned as `LlmCacheResult.metadata`. Not part of the cache key.
+   */
+  metadata?: Record<string, unknown>;
 }
 
 export interface CacheResult {
@@ -106,6 +119,8 @@ export interface CacheResult {
 export interface LlmCacheResult extends CacheResult {
   tier: 'llm';
   contentBlocks?: ContentBlock[];
+  /** Whatever was passed as `LlmStoreOptions.metadata` when the entry was stored. */
+  metadata?: Record<string, unknown>;
 }
 
 // --- Tool tier ---

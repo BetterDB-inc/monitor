@@ -385,6 +385,40 @@ describe('LlmCache', () => {
       expect(result.hit).toBe(true);
       expect(result.contentBlocks).toBeUndefined();
     });
+
+    it('returns metadata only when the stored entry has it', async () => {
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce(JSON.stringify({
+        response: 'Hello',
+        model: 'gpt-4o',
+        storedAt: Date.now(),
+        metadata: { id: 'msg_1' },
+      }));
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce(JSON.stringify({
+        response: 'Hello',
+        model: 'gpt-4o',
+        storedAt: Date.now(),
+      }));
+      const params = { model: 'gpt-4o', messages: [{ role: 'user', content: 'Hi' }] };
+
+      expect((await cache.check(params)).metadata).toEqual({ id: 'msg_1' });
+      expect(await cache.check(params)).not.toHaveProperty('metadata');
+    });
+  });
+
+  describe('store options metadata', () => {
+    it('writes metadata from store() and storeMultipart(), and omits the field when absent', async () => {
+      (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
+      const params = { model: 'gpt-4o', messages: [{ role: 'user', content: 'Hello' }] };
+
+      await cache.store(params, 'Hi', { metadata: { id: 'msg_1' } });
+      await cache.storeMultipart(params, [{ type: 'text', text: 'Hi' }], { metadata: { id: 'msg_2' } });
+      await cache.store(params, 'Hi');
+
+      const values = (client.set as ReturnType<typeof vi.fn>).mock.calls.map((c) => JSON.parse(c[1]));
+      expect(values[0].metadata).toEqual({ id: 'msg_1' });
+      expect(values[1].metadata).toEqual({ id: 'msg_2' });
+      expect(values[2]).not.toHaveProperty('metadata');
+    });
   });
 
   describe('invalidateByModel()', () => {

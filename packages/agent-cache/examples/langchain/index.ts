@@ -19,7 +19,7 @@ import Valkey, { Cluster } from 'iovalkey';
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage } from '@langchain/core/messages';
 import { AgentCache } from '@betterdb/agent-cache';
-import { BetterDBLlmCache } from '@betterdb/agent-cache/langchain';
+import { BetterDBLlmCache, CachedChatModel } from '@betterdb/agent-cache/langchain';
 
 // ── 1. Connect to Valkey (standalone or cluster) ─────────────────────
 let valkey: Valkey;
@@ -52,11 +52,44 @@ const cache = new AgentCache({
 });
 
 // ── 3. Create a ChatOpenAI model with the cache ─────────────────────
+const baseModel = new ChatOpenAI({
+  model: 'gpt-4o-mini',
+  temperature: 0,
+});
+
 const model = new ChatOpenAI({
   model: 'gpt-4o-mini',
   temperature: 0,
   cache: new BetterDBLlmCache({ cache }),
 });
+
+const cachedModel = new CachedChatModel({ model: baseModel, cache });
+
+const weatherToolDef = {
+  type: 'function' as const,
+  function: {
+    name: 'get_weather',
+    description: 'Get weather for a city',
+    parameters: {
+      type: 'object',
+      properties: { city: { type: 'string' } },
+      required: ['city'],
+    },
+  },
+};
+
+const searchToolDef = {
+  type: 'function' as const,
+  function: {
+    name: 'search_web',
+    description: 'Search the web',
+    parameters: {
+      type: 'object',
+      properties: { q: { type: 'string' } },
+      required: ['q'],
+    },
+  },
+};
 
 // ── 4. Define a cached tool ─────────────────────────────────────────
 async function getWeather(city: string): Promise<string> {
@@ -92,6 +125,19 @@ async function askSimple(prompt: string) {
   console.log(`  (${elapsed}ms)`);
 }
 
+async function askWithTools(
+  prompt: string,
+  tools: Array<typeof weatherToolDef | typeof searchToolDef>,
+) {
+  console.log(`\nUser (with tools): ${prompt}`);
+  const start = Date.now();
+  const withTools = cachedModel.bindTools(tools);
+  const response = await withTools.invoke([new HumanMessage(prompt)]);
+  const elapsed = Date.now() - start;
+  console.log(`Assistant: ${response.content}`);
+  console.log(`  (${elapsed}ms)`);
+}
+
 // ── 6. Run the demo ─────────────────────────────────────────────────
 async function main() {
   console.log('═══ Part 1: LLM Response Caching ═══');
@@ -99,6 +145,13 @@ async function main() {
 
   await askSimple('What is the capital of Bulgaria?');
   await askSimple('What is the capital of Bulgaria?');
+
+  console.log('\n═══ Part 1b: Tool-schema-aware caching (CachedChatModel) ═══');
+  console.log('Same prompt, different bound tools — second tool set is a cache miss.');
+
+  await askWithTools('Look up the weather', [weatherToolDef]);
+  await askWithTools('Look up the weather', [weatherToolDef]);
+  await askWithTools('Look up the weather', [searchToolDef]);
 
   console.log('\n═══ Part 2: Tool Result Caching ═══');
   console.log('Same tool calls twice — second call skips the API.');
