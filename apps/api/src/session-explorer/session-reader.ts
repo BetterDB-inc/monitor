@@ -10,6 +10,8 @@ export const DEFAULT_BYTE_CAP = 2 * 1024 * 1024;
 export const DEFAULT_TOTAL_BYTE_CAP = 32 * 1024 * 1024;
 export const DEFAULT_LIST_WINDOW = 500;
 export const DEFAULT_READ_BATCH = 1000;
+export const UNMEASURED_WINDOW = 4;
+export const EXACT_MEMORY_LENGTH = 128;
 const JSON_MEMORY_HEADROOM = 4;
 
 type PipelineResult = [Error | null, unknown] | undefined;
@@ -40,6 +42,8 @@ interface Located {
   type: string;
   pttl: number;
   memory: number | null;
+  length: number | null;
+  exact: boolean;
 }
 
 interface ReadResult {
@@ -47,7 +51,19 @@ interface ReadResult {
   binary?: boolean;
   truncated: boolean;
   bytes: number;
+  fetched: number;
 }
+
+const LENGTH_COMMANDS = {
+  list: 'llen',
+  hash: 'hlen',
+  set: 'scard',
+  zset: 'zcard',
+  stream: 'xlen',
+} as const;
+
+const isCollection = (type: string): type is keyof typeof LENGTH_COMMANDS =>
+  type in LENGTH_COMMANDS;
 
 class KeyReadError extends Error {}
 
@@ -59,26 +75,33 @@ const resultOf = (r: PipelineResult): unknown => {
 const numberOf = (r: PipelineResult): number | null =>
   r && !r[0] && typeof r[1] === 'number' ? r[1] : null;
 
+const lengthOf = (at: Located): number => {
+  if (at.length === null) throw new KeyReadError();
+  return at.length;
+};
+
+const bulk = (length: number): number => length + String(length).length + 5;
+
+const arrayHeader = (count: number): number => String(count).length + 3;
+
 const decoded = (buf: Buffer, cap: number): ValkeyElement => {
   const { value, binary } = decodeValue(buf, cap);
   return binary ? { base64: value } : value;
 };
 
-function decodeCut(buf: Buffer, cap: number, cut: boolean): ReadResult {
-  return { ...decodeValue(buf, cap, cut), bytes: Math.min(buf.length, cap) };
-}
-
 class Accumulator<T> {
   items: T[] = [];
   bytes = 0;
+  fetched = 0;
   largest = 0;
   full = false;
 
   constructor(readonly cap: number) {}
 
   add(size: number, item: () => T): boolean {
+    this.fetched += size;
     this.largest = Math.max(this.largest, size);
-    if (this.bytes + size > this.cap) {
+    if (this.full || this.bytes + size > this.cap) {
       this.full = true;
       return false;
     }
@@ -86,28 +109,50 @@ class Accumulator<T> {
     this.items.push(item());
     return true;
   }
+
+  result(value: ValkeyValue): ReadResult {
+    return { value, truncated: this.full, bytes: this.bytes, fetched: this.fetched };
+  }
 }
 
-const firstWindow = (at: Located, opts: ReadOpts): number =>
-  at.memory !== null && at.memory <= opts.byteCap ? opts.listWindow : 1;
+const readsWhole = (at: Located, opts: ReadOpts): boolean =>
+  at.exact && at.memory !== null && at.memory <= opts.byteCap && at.type !== 'list';
 
 function nextWindow(
   acc: Accumulator<unknown>,
   at: Located,
   read: number,
-  length: number,
   previous: number,
   opts: ReadOpts,
 ): number {
-  const unreadBytes = at.memory === null ? 0 : at.memory - acc.bytes;
-  if (unreadBytes > 0) {
-    const average = unreadBytes / Math.max(1, length - read);
-    return Math.max(1, Math.min(opts.listWindow, Math.floor((acc.cap - acc.bytes) / average) + 1));
-  }
-  const doubled = Math.max(1, previous * 2);
+  const unreadBytes = at.memory === null ? 0 : at.memory - acc.fetched;
+  const left = Math.max(1, (at.length ?? 0) - read);
+  const pessimistic = Math.max(acc.largest, unreadBytes > 0 ? unreadBytes / left : 0);
   const fit =
-    acc.largest > 0 ? Math.floor((acc.cap - acc.bytes) / acc.largest) + 1 : Number.POSITIVE_INFINITY;
-  return Math.max(1, Math.min(opts.listWindow, doubled, fit));
+    pessimistic > 0
+      ? Math.floor((acc.cap - acc.bytes) / pessimistic) + 1
+      : Number.POSITIVE_INFINITY;
+  const ceiling = at.memory === null ? UNMEASURED_WINDOW : opts.listWindow;
+  return Math.max(1, Math.min(ceiling, previous * 2, fit));
+}
+
+type Window = (read: number, size: number) => Promise<[number, boolean]>;
+
+async function readWindows(
+  acc: Accumulator<unknown>,
+  at: Located,
+  opts: ReadOpts,
+  fetch: Window,
+): Promise<void> {
+  let read = 0;
+  let size = 0;
+  let more = true;
+  while (more && !acc.full) {
+    size = nextWindow(acc, at, read, size, opts);
+    let received: number;
+    [received, more] = await fetch(read, size);
+    read += received;
+  }
 }
 
 function routeKeys(
@@ -136,6 +181,28 @@ function routeKeys(
   return { groups, unrouted };
 }
 
+async function measureCollections(client: Valkey, collections: Located[]): Promise<void> {
+  if (collections.length === 0) return;
+  const lengths = client.pipeline();
+  for (const at of collections) {
+    if (isCollection(at.type)) lengths[LENGTH_COMMANDS[at.type]](at.key);
+  }
+  const counted = (await lengths.exec()) ?? [];
+  collections.forEach((at, i) => {
+    at.length = numberOf(counted[i] as PipelineResult);
+  });
+
+  const small = collections.filter((at) => at.length !== null && at.length <= EXACT_MEMORY_LENGTH);
+  if (small.length === 0) return;
+  const exact = client.pipeline();
+  for (const at of small) exact.memory('USAGE', at.key, 'SAMPLES', 0);
+  const measured = (await exact.exec()) ?? [];
+  small.forEach((at, i) => {
+    at.memory = numberOf(measured[i] as PipelineResult);
+    at.exact = at.memory !== null;
+  });
+}
+
 async function locate(
   client: Valkey,
   keys: string[],
@@ -149,43 +216,45 @@ async function locate(
     for (const key of slice) {
       pipeline.type(key);
       pipeline.pttl(key);
-      pipeline.memory('USAGE', key, 'SAMPLES', 0);
+      pipeline.memory('USAGE', key);
     }
     const results = (await pipeline.exec()) ?? [];
+    const found: Located[] = [];
     slice.forEach((key, i) => {
       const [type, pttl, memory] = results.slice(i * 3, i * 3 + 3) as PipelineResult[];
       if (!type || type[0] || typeof type[1] !== 'string' || type[1] === 'none') {
         missing++;
         return;
       }
-      located.push({ key, type: type[1], pttl: numberOf(pttl) ?? -1, memory: numberOf(memory) });
+      found.push({
+        key,
+        type: type[1],
+        pttl: numberOf(pttl) ?? -1,
+        memory: numberOf(memory),
+        length: null,
+        exact: false,
+      });
     });
+    await measureCollections(
+      client,
+      found.filter((at) => isCollection(at.type)),
+    );
+    located.push(...found);
   }
   return { located, missing };
 }
 
-function queueFirstRead(pipeline: ChainableCommander, at: Located, opts: ReadOpts): number {
+function queueFirstRead(
+  pipeline: ChainableCommander,
+  at: Located,
+  cap: number,
+  opts: ReadOpts,
+): number {
   const { key, memory } = at;
   switch (at.type) {
     case 'string':
       pipeline.strlen(key);
-      pipeline.getrangeBuffer(key, 0, opts.byteCap - 1);
-      return 2;
-    case 'list':
-      pipeline.llen(key);
-      pipeline.lrangeBuffer(key, 0, firstWindow(at, opts) - 1);
-      return 2;
-    case 'hash':
-      if (memory === null || memory > opts.byteCap) pipeline.hlen(key);
-      else pipeline.hgetallBuffer(key);
-      return 1;
-    case 'set':
-      if (memory === null || memory > opts.byteCap) pipeline.scard(key);
-      else pipeline.smembersBuffer(key);
-      return 1;
-    case 'zset':
-      pipeline.zcard(key);
-      pipeline.zrangeBuffer(key, 0, String(firstWindow(at, opts) - 1), 'WITHSCORES');
+      pipeline.getrangeBuffer(key, 0, cap - 1);
       return 2;
     case 'ReJSON-RL':
       if (memory === null) {
@@ -195,10 +264,21 @@ function queueFirstRead(pipeline: ChainableCommander, at: Located, opts: ReadOpt
       if (memory > opts.byteCap * JSON_MEMORY_HEADROOM) return 0;
       pipeline.callBuffer('JSON.GET', key);
       return 1;
+  }
+  if (!readsWhole(at, opts)) return 0;
+  switch (at.type) {
+    case 'hash':
+      pipeline.hgetallBuffer(key);
+      return 1;
+    case 'set':
+      pipeline.smembersBuffer(key);
+      return 1;
+    case 'zset':
+      pipeline.zrangeBuffer(key, 0, String(lengthOf(at) - 1), 'WITHSCORES');
+      return 1;
     case 'stream':
-      pipeline.xlen(key);
-      pipeline.xrangeBuffer(key, '-', '+', 'COUNT', firstWindow(at, opts));
-      return 2;
+      pipeline.xrangeBuffer(key, '-', '+', 'COUNT', lengthOf(at));
+      return 1;
     default:
       return 0;
   }
@@ -207,30 +287,27 @@ function queueFirstRead(pipeline: ChainableCommander, at: Located, opts: ReadOpt
 function readString(results: PipelineResult[], cap: number): ReadResult {
   const length = resultOf(results[0]) as number;
   const buf = resultOf(results[1]) as Buffer;
-  return decodeCut(buf, cap, length > buf.length);
+  return {
+    ...decodeValue(buf, cap, length > buf.length),
+    bytes: Math.min(buf.length, cap),
+    fetched: buf.length,
+  };
 }
 
 async function readList(
   client: Valkey,
   at: Located,
-  results: PipelineResult[],
   cap: number,
   opts: ReadOpts,
 ): Promise<ReadResult> {
-  const length = resultOf(results[0]) as number;
-  let window = resultOf(results[1]) as Buffer[];
+  const length = lengthOf(at);
   const acc = new Accumulator<ValkeyValue>(cap);
-  let size = firstWindow(at, opts);
-  for (let start = 0; ; ) {
-    for (const item of window) {
-      if (!acc.add(item.length, () => decoded(item, cap))) break;
-    }
-    start += window.length;
-    if (acc.full || window.length < size || start >= length) break;
-    size = nextWindow(acc, at, start, length, size, opts);
-    window = await client.lrangeBuffer(at.key, start, start + size - 1);
-  }
-  return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
+  await readWindows(acc, at, opts, async (read, size) => {
+    const window = await client.lrangeBuffer(at.key, read, read + size - 1);
+    for (const item of window) acc.add(bulk(item.length), () => decoded(item, cap));
+    return [window.length, window.length === size && read + size < length];
+  });
+  return acc.result(acc.items);
 }
 
 async function readHash(
@@ -240,29 +317,26 @@ async function readHash(
   cap: number,
   opts: ReadOpts,
 ): Promise<ReadResult> {
+  lengthOf(at);
   const acc = new Accumulator<[string, ValkeyValue]>(cap);
-  const first = resultOf(results[0]);
-  if (typeof first !== 'number') {
-    const all = first as Record<string, Buffer>;
+  if (readsWhole(at, opts)) {
+    const all = resultOf(results[0]) as Record<string, Buffer>;
     for (const [field, v] of Object.entries(all)) {
-      if (!acc.add(Buffer.byteLength(field) + v.length, () => [field, decoded(v, cap)])) break;
+      acc.add(bulk(Buffer.byteLength(field)) + bulk(v.length), () => [field, decoded(v, cap)]);
     }
   } else {
     let cursor = '0';
-    let read = 0;
-    let count = 0;
-    do {
-      count = nextWindow(acc, at, read, first, count, opts);
-      const [next, flat] = await client.hscanBuffer(at.key, cursor, 'COUNT', count);
+    await readWindows(acc, at, opts, async (_, size) => {
+      const [next, flat] = await client.hscanBuffer(at.key, cursor, 'COUNT', size);
       cursor = next.toString();
-      read += flat.length / 2;
       for (let i = 0; i + 1 < flat.length; i += 2) {
         const [field, v] = [flat[i], flat[i + 1]];
-        if (!acc.add(field.length + v.length, () => [field.toString(), decoded(v, cap)])) break;
+        acc.add(bulk(field.length) + bulk(v.length), () => [field.toString(), decoded(v, cap)]);
       }
-    } while (cursor !== '0' && !acc.full);
+      return [flat.length / 2, cursor !== '0'];
+    });
   }
-  return { value: Object.fromEntries(acc.items), truncated: acc.full, bytes: acc.bytes };
+  return acc.result(Object.fromEntries(acc.items));
 }
 
 async function readSet(
@@ -272,27 +346,23 @@ async function readSet(
   cap: number,
   opts: ReadOpts,
 ): Promise<ReadResult> {
+  lengthOf(at);
   const acc = new Accumulator<ValkeyElement>(cap);
-  const first = resultOf(results[0]);
-  if (typeof first !== 'number') {
-    for (const member of first as Buffer[]) {
-      if (!acc.add(member.length, () => decoded(member, cap))) break;
-    }
+  const addMembers = (members: Buffer[]) => {
+    for (const member of members) acc.add(bulk(member.length), () => decoded(member, cap));
+  };
+  if (readsWhole(at, opts)) {
+    addMembers(resultOf(results[0]) as Buffer[]);
   } else {
     let cursor = '0';
-    let read = 0;
-    let count = 0;
-    do {
-      count = nextWindow(acc, at, read, first, count, opts);
-      const [next, members] = await client.sscanBuffer(at.key, cursor, 'COUNT', count);
+    await readWindows(acc, at, opts, async (_, size) => {
+      const [next, members] = await client.sscanBuffer(at.key, cursor, 'COUNT', size);
       cursor = next.toString();
-      read += members.length;
-      for (const member of members) {
-        if (!acc.add(member.length, () => decoded(member, cap))) break;
-      }
-    } while (cursor !== '0' && !acc.full);
+      addMembers(members);
+      return [members.length, cursor !== '0'];
+    });
   }
-  return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
+  return acc.result(acc.items);
 }
 
 async function readZset(
@@ -302,24 +372,31 @@ async function readZset(
   cap: number,
   opts: ReadOpts,
 ): Promise<ReadResult> {
-  const length = resultOf(results[0]) as number;
-  let flat = resultOf(results[1]) as Buffer[];
+  const length = lengthOf(at);
   const acc = new Accumulator<[ValkeyValue, number]>(cap);
-  let size = firstWindow(at, opts);
-  for (let start = 0; ; ) {
+  const addPairs = (flat: Buffer[]) => {
     for (let i = 0; i + 1 < flat.length; i += 2) {
       const [member, score] = [flat[i], flat[i + 1]];
-      if (!acc.add(member.length, () => [decoded(member, cap), Number(score.toString())])) break;
+      acc.add(bulk(member.length) + bulk(score.length), () => [
+        decoded(member, cap),
+        Number(score.toString()),
+      ]);
     }
-    start += flat.length / 2;
-    if (acc.full || flat.length < size * 2 || start >= length) break;
-    size = nextWindow(acc, at, start, length, size, opts);
-    flat = await client.zrangeBuffer(at.key, start, String(start + size - 1), 'WITHSCORES');
+  };
+  if (readsWhole(at, opts)) {
+    addPairs(resultOf(results[0]) as Buffer[]);
+  } else {
+    await readWindows(acc, at, opts, async (read, size) => {
+      const flat = await client.zrangeBuffer(at.key, read, String(read + size - 1), 'WITHSCORES');
+      addPairs(flat);
+      const received = flat.length / 2;
+      return [received, received === size && read + size < length];
+    });
   }
-  return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
+  return acc.result(acc.items);
 }
 
-const UNREAD_JSON: ReadResult = { value: '', truncated: true, bytes: 0 };
+const UNREAD_JSON: ReadResult = { value: '', truncated: true, bytes: 0, fetched: 0 };
 
 async function readJson(
   client: Valkey,
@@ -340,7 +417,7 @@ async function readJson(
     buf = resultOf(results[0]) as Buffer | null;
   }
   if (buf === null) return null;
-  return { ...decodeValue(buf, cap), bytes: Math.min(buf.length, cap) };
+  return { ...decodeValue(buf, cap), bytes: Math.min(buf.length, cap), fetched: buf.length };
 }
 
 const MAX_STREAM_SEQ = 2n ** 64n - 1n;
@@ -357,36 +434,35 @@ async function readStream(
   cap: number,
   opts: ReadOpts,
 ): Promise<ReadResult> {
-  const length = resultOf(results[0]) as number;
-  let entries = resultOf(results[1]) as Array<[Buffer, Buffer[]]>;
+  const length = lengthOf(at);
   const acc = new Accumulator<[string, Record<string, ValkeyValue>]>(cap);
-  let size = firstWindow(at, opts);
-  for (let read = 0; ; ) {
+  const addEntries = (entries: Array<[Buffer, Buffer[]]>) => {
     for (const [id, flat] of entries) {
-      let entryBytes = 0;
-      for (let i = 0; i + 1 < flat.length; i += 2) entryBytes += flat[i].length + flat[i + 1].length;
-      const fields = () => {
-        const out: Record<string, ValkeyValue> = {};
+      let size = arrayHeader(2) + bulk(id.length) + arrayHeader(flat.length);
+      for (const part of flat) size += bulk(part.length);
+      acc.add(size, () => {
+        const fields: Record<string, ValkeyValue> = {};
         for (let i = 0; i + 1 < flat.length; i += 2) {
-          out[flat[i].toString()] = decoded(flat[i + 1], cap);
+          fields[flat[i].toString()] = decoded(flat[i + 1], cap);
         }
-        return out;
-      };
-      if (!acc.add(entryBytes, () => [id.toString(), fields()])) break;
+        return [id.toString(), fields];
+      });
     }
-    read += entries.length;
-    if (acc.full || entries.length < size || read >= length) break;
-    const lastId = entries[entries.length - 1][0].toString();
-    size = nextWindow(acc, at, read, length, size, opts);
-    entries = (await client.xrangeBuffer(
-      at.key,
-      streamIdAfter(lastId),
-      '+',
-      'COUNT',
-      size,
-    )) as Array<[Buffer, Buffer[]]>;
+  };
+  if (readsWhole(at, opts)) {
+    addEntries(resultOf(results[0]) as Array<[Buffer, Buffer[]]>);
+  } else {
+    let from = '-';
+    await readWindows(acc, at, opts, async (read, size) => {
+      const entries = (await client.xrangeBuffer(at.key, from, '+', 'COUNT', size)) as Array<
+        [Buffer, Buffer[]]
+      >;
+      addEntries(entries);
+      if (entries.length > 0) from = streamIdAfter(entries[entries.length - 1][0].toString());
+      return [entries.length, entries.length === size && read + size < length];
+    });
   }
-  return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
+  return acc.result(acc.items);
 }
 
 function finishRead(
@@ -400,7 +476,7 @@ function finishRead(
     case 'string':
       return readString(results, cap);
     case 'list':
-      return readList(client, at, results, cap, opts);
+      return readList(client, at, cap, opts);
     case 'hash':
       return readHash(client, at, results, cap, opts);
     case 'set':
@@ -412,12 +488,16 @@ function finishRead(
     case 'stream':
       return readStream(client, at, results, cap, opts);
     default:
-      return { value: null, truncated: true, bytes: 0 };
+      return { value: null, truncated: true, bytes: 0, fetched: 0 };
   }
 }
 
-const estimate = (at: Located, opts: ReadOpts) =>
-  Math.max(1, Math.min(at.memory ?? opts.byteCap, opts.byteCap));
+function reservation(at: Located, opts: ReadOpts): number {
+  if (at.type === 'string' || at.type === 'ReJSON-RL') {
+    return Math.max(1, Math.min(at.memory ?? opts.byteCap, opts.byteCap));
+  }
+  return readsWhole(at, opts) ? Math.max(1, at.memory ?? 0) : 0;
+}
 
 interface ReadState {
   remaining: number;
@@ -441,27 +521,32 @@ async function readNode(
     const batch: Located[] = [];
     let reserved = 0;
     while (next < located.length && batch.length < opts.batch) {
-      const cost = estimate(located[next], opts);
+      const cost = reservation(located[next], opts);
       if (batch.length > 0 && reserved + cost > state.remaining) break;
       reserved += cost;
       batch.push(located[next++]);
     }
 
     const pipeline = client.pipeline();
-    const counts = batch.map((at) => queueFirstRead(pipeline, at, opts));
+    const firstCap = Math.min(opts.byteCap, state.remaining);
+    const counts = batch.map((at) => queueFirstRead(pipeline, at, firstCap, opts));
     const results = counts.some((n) => n > 0) ? ((await pipeline.exec()) ?? []) : [];
 
     let offset = 0;
     for (const [i, at] of batch.entries()) {
       const own = results.slice(offset, offset + counts[i]) as PipelineResult[];
       offset += counts[i];
+      if (state.remaining <= 0) {
+        state.exhausted = true;
+        return;
+      }
       try {
         const read = await finishRead(client, at, own, Math.min(opts.byteCap, state.remaining), opts);
         if (!read) {
           state.missing++;
           continue;
         }
-        state.remaining -= read.bytes;
+        state.remaining -= read.fetched;
         state.captured.set(at.key, {
           key: at.key,
           type: at.type,

@@ -90,10 +90,18 @@ describe('readSessionKeys', () => {
 
     const key = await readOne(client, 'l');
 
-    expect(client.callsOf('pipeline.lrangeBuffer').map((c) => c.args.slice(1))).toEqual([[0, 499]]);
     expect(client.callsOf('lrangeBuffer').map((c) => c.args.slice(1))).toEqual([
-      [500, 999],
-      [1000, 1499],
+      [0, 0],
+      [1, 2],
+      [3, 6],
+      [7, 14],
+      [15, 30],
+      [31, 62],
+      [63, 126],
+      [127, 254],
+      [255, 510],
+      [511, 1010],
+      [1011, 1510],
     ]);
     expect(key.value).toEqual(items);
     expect(key.truncated).toBeFalsy();
@@ -106,17 +114,26 @@ describe('readSessionKeys', () => {
     const key = await readOne(client, 'l', { byteCap: 1000, listWindow: 20 });
 
     expect(key.truncated).toBe(true);
-    expect((key.value as string[]).length).toBe(10);
-    expect(client.callsOf('lrangeBuffer')).toHaveLength(0);
+    expect((key.value as string[]).length).toBe(9);
+    expect(client.fetchedBytes).toBeLessThanOrEqual(1000 + 100);
   });
 
-  it('sizes keys with MEMORY USAGE over every element', async () => {
-    const client = new FakeValkey(storeOf({ k: { type: 'string', value: 'v' } }));
+  it('measures small collections over every element and samples large ones', async () => {
+    const large: Record<string, string> = {};
+    for (let i = 0; i < 200; i++) large[`f${i}`] = 'v';
+    const client = new FakeValkey(
+      storeOf({
+        small: { type: 'hash', value: { a: '1', b: '2' } },
+        large: { type: 'hash', value: large },
+      }),
+    );
 
-    await readOne(client, 'k');
+    await readSessionKeys(fakeDb(client), ['small', 'large']);
 
     expect(client.callsOf('pipeline.memory').map((c) => c.args)).toEqual([
-      ['USAGE', 'k', 'SAMPLES', 0],
+      ['USAGE', 'small'],
+      ['USAGE', 'large'],
+      ['USAGE', 'small', 'SAMPLES', 0],
     ]);
   });
 
@@ -127,7 +144,7 @@ describe('readSessionKeys', () => {
     const key = await readOne(client, 'l', { byteCap: 128 * 1024 });
 
     expect(key.truncated).toBe(true);
-    expect((key.value as string[]).length).toBe(2);
+    expect((key.value as string[]).length).toBe(1);
     expect(client.fetchedBytes).toBeLessThanOrEqual(128 * 1024 + 64 * 1024);
   });
 
@@ -199,6 +216,58 @@ describe('readSessionKeys', () => {
     expect(client.fetchedBytes).toBeLessThanOrEqual(256 * 1024 + 64 * 1024 + 1024);
   });
 
+  it.each(['list', 'zset', 'stream'])(
+    'fetches about one cap from a %s whose large elements precede many small ones',
+    async (type) => {
+      const big = Array.from({ length: 100 }, (_, i) => `${i}`.padEnd(512 * 1024, 'b'));
+      const small = Array.from({ length: 50_000 }, (_, i) => `s${i}`);
+      const members = ['a', ...big, ...small];
+      const value =
+        type === 'list'
+          ? members
+          : type === 'zset'
+            ? members.flatMap((m, i) => [m, `${i}`])
+            : members.map((m, i) => [`${i + 1}-0`, { m }] as [string, Record<string, string>]);
+      const memory = 100 * 512 * 1024 + 50_000 * 8;
+      const client = new FakeValkey(storeOf({ k: { type, value, memory } }));
+
+      const key = await readOne(client, 'k', { byteCap: 2 * MB });
+
+      expect(key.truncated).toBe(true);
+      expect(client.fetchedBytes).toBeLessThanOrEqual(2 * MB + 512 * 1024 + 1024);
+    },
+  );
+
+  it('bounds an unmeasured list whose large elements follow many small ones', async () => {
+    const items = [...Array.from({ length: 31 }, () => 't'), ...Array.from({ length: 32 }, () => 'x'.repeat(MB))];
+    const client = new FakeValkey(storeOf({ l: { type: 'list', value: items, memory: null } }));
+
+    const key = await readOne(client, 'l', { byteCap: 2 * MB });
+
+    expect(key.truncated).toBe(true);
+    expect(client.fetchedBytes).toBeLessThanOrEqual(2 * MB + 4 * MB);
+  });
+
+  it('does not trust MEMORY USAGE far below the real size of a list', async () => {
+    const items = Array.from({ length: 500 }, () => 'x'.repeat(64 * 1024));
+    const client = new FakeValkey(storeOf({ l: { type: 'list', value: items, memory: 533 * 1024 } }));
+
+    const key = await readOne(client, 'l', { byteCap: 2 * MB });
+
+    expect(key.truncated).toBe(true);
+    expect(client.fetchedBytes).toBeLessThanOrEqual(2 * MB + 64 * 1024 + 1024);
+  });
+
+  it('counts per-element wire overhead against the cap', async () => {
+    const items = Array.from({ length: 100_000 }, () => 'x');
+    const client = new FakeValkey(storeOf({ l: { type: 'list', value: items } }));
+
+    const key = await readOne(client, 'l', { byteCap: 100_000 });
+
+    expect(key.truncated).toBe(true);
+    expect((key.value as string[]).length).toBe(Math.floor(100_000 / 7));
+  });
+
   it('reads a whole stream of small entries across pages', async () => {
     const value = Array.from(
       { length: 1200 },
@@ -234,6 +303,20 @@ describe('readSessionKeys', () => {
     expect(client.callsOf('xrangeBuffer').every((c) => !String(c.args[1]).startsWith('('))).toBe(
       true,
     );
+  });
+
+  it('stops paging a stream at the byte cap', async () => {
+    const value = Array.from(
+      { length: 1200 },
+      (_, i) => [`${i + 1}-0`, { m: 'x'.repeat(1000) }] as [string, Record<string, string>],
+    );
+    const client = new FakeValkey(storeOf({ s: { type: 'stream', value } }));
+
+    const key = await readOne(client, 's', { byteCap: 600_000 });
+
+    expect(key.truncated).toBe(true);
+    expect((key.value as unknown[]).length).toBeLessThan(1200);
+    expect(client.fetchedBytes).toBeLessThanOrEqual(600_000 + 2_000);
   });
 
   it('reads a hash as a record of strings', async () => {
@@ -374,6 +457,19 @@ describe('readSessionKeys', () => {
     expect(result.keys.map((k) => k.key)).toEqual(['k0', 'k1', 'k2', 'k3']);
     expect(result.keys[2].truncated).toBeFalsy();
     expect(result.keys[3]).toMatchObject({ value: 'x'.repeat(50), truncated: true });
+  });
+
+  it('charges the total budget for oversize elements it fetched and dropped', async () => {
+    const huge = 'h'.repeat(6 * MB);
+    const entries: Record<string, FakeEntry> = {};
+    const keys = Array.from({ length: 20 }, (_, i) => `l${i}`);
+    for (const key of keys) entries[key] = { type: 'list', value: [huge, 'tail'], memory: 6 * MB };
+    const client = new FakeValkey(storeOf(entries));
+
+    const result = await readSessionKeys(fakeDb(client), keys);
+
+    expect(result.truncated).toBe(true);
+    expect(client.fetchedBytes).toBeLessThanOrEqual(32 * MB + 6 * MB);
   });
 
   it('reads a key larger than the remaining budget up to the budget', async () => {
