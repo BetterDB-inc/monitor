@@ -71,11 +71,13 @@ function decodeCut(buf: Buffer, cap: number, cut: boolean): ReadResult {
 class Accumulator<T> {
   items: T[] = [];
   bytes = 0;
+  largest = 0;
   full = false;
 
   constructor(readonly cap: number) {}
 
   add(size: number, item: () => T): boolean {
+    this.largest = Math.max(this.largest, size);
     if (this.bytes + size > this.cap) {
       this.full = true;
       return false;
@@ -94,14 +96,18 @@ function nextWindow(
   at: Located,
   read: number,
   length: number,
+  previous: number,
   opts: ReadOpts,
 ): number {
   const unreadBytes = at.memory === null ? 0 : at.memory - acc.bytes;
-  const average =
-    unreadBytes > 0
-      ? unreadBytes / Math.max(1, length - read)
-      : Math.max(1, acc.bytes / Math.max(1, acc.items.length));
-  return Math.max(1, Math.min(opts.listWindow, Math.floor((acc.cap - acc.bytes) / average) + 1));
+  if (unreadBytes > 0) {
+    const average = unreadBytes / Math.max(1, length - read);
+    return Math.max(1, Math.min(opts.listWindow, Math.floor((acc.cap - acc.bytes) / average) + 1));
+  }
+  const doubled = Math.max(1, previous * 2);
+  const fit =
+    acc.largest > 0 ? Math.floor((acc.cap - acc.bytes) / acc.largest) + 1 : Number.POSITIVE_INFINITY;
+  return Math.max(1, Math.min(opts.listWindow, doubled, fit));
 }
 
 function routeKeys(
@@ -221,7 +227,7 @@ async function readList(
     }
     start += window.length;
     if (acc.full || window.length < size || start >= length) break;
-    size = nextWindow(acc, at, start, length, opts);
+    size = nextWindow(acc, at, start, length, size, opts);
     window = await client.lrangeBuffer(at.key, start, start + size - 1);
   }
   return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
@@ -244,8 +250,9 @@ async function readHash(
   } else {
     let cursor = '0';
     let read = 0;
+    let count = 0;
     do {
-      const count = nextWindow(acc, at, read, first, opts);
+      count = nextWindow(acc, at, read, first, count, opts);
       const [next, flat] = await client.hscanBuffer(at.key, cursor, 'COUNT', count);
       cursor = next.toString();
       read += flat.length / 2;
@@ -274,8 +281,9 @@ async function readSet(
   } else {
     let cursor = '0';
     let read = 0;
+    let count = 0;
     do {
-      const count = nextWindow(acc, at, read, first, opts);
+      count = nextWindow(acc, at, read, first, count, opts);
       const [next, members] = await client.sscanBuffer(at.key, cursor, 'COUNT', count);
       cursor = next.toString();
       read += members.length;
@@ -305,7 +313,7 @@ async function readZset(
     }
     start += flat.length / 2;
     if (acc.full || flat.length < size * 2 || start >= length) break;
-    size = nextWindow(acc, at, start, length, opts);
+    size = nextWindow(acc, at, start, length, size, opts);
     flat = await client.zrangeBuffer(at.key, start, String(start + size - 1), 'WITHSCORES');
   }
   return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
@@ -366,7 +374,7 @@ async function readStream(
     read += entries.length;
     if (acc.full || entries.length < size || read >= length) break;
     const lastId = entries[entries.length - 1][0].toString();
-    size = nextWindow(acc, at, read, length, opts);
+    size = nextWindow(acc, at, read, length, size, opts);
     entries = (await client.xrangeBuffer(
       at.key,
       streamIdAfter(lastId),
