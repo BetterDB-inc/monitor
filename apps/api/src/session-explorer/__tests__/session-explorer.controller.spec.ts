@@ -10,6 +10,7 @@ import { LiveConnectionGuard } from '../../external-metrics/live-connection.guar
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { SessionExplorerController } from '../session-explorer.controller';
 import { SessionExplorerService } from '../session-explorer.service';
+import { fastifyAdapterOptions } from '../../config/fastify-options';
 import { FakeEntry, FakeValkey, fakeDb } from './fake-valkey';
 
 const human = (content: string) => JSON.stringify({ type: 'human', data: { content } });
@@ -103,7 +104,9 @@ describe('SessionExplorerController', () => {
       .overrideGuard(LicenseGuard)
       .useValue({ canActivate: () => true })
       .compile();
-    app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
+    app = moduleRef.createNestApplication<NestFastifyApplication>(
+      new FastifyAdapter(fastifyAdapterOptions({})),
+    );
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
   });
@@ -327,6 +330,19 @@ describe('SessionExplorerController', () => {
       expect(res.json()).toMatchObject({ complete: false, unparsedKeys: 1 });
     });
 
+    it('reads a session whose id is a key name over 100 characters', async () => {
+      const id = `chat:tenant:${'a'.repeat(36)}:session:${'b'.repeat(200)}`;
+      valkey.store.set(id, { type: 'string', pttl: -1, memory: 10, value: 'hello' });
+      valkey.scanPages = [[id]];
+      const res = await app.inject({
+        method: 'GET',
+        url: `/session-explorer/namespaces/ns-raw/sessions/${encodeURIComponent(id)}`,
+        headers,
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().keys.map((k: { key: string }) => k.key)).toEqual([id]);
+    });
+
     it('answers 404 for a session with no keys without echoing its id', async () => {
       valkey.scanPages = [['chat:1']];
       const res = await app.inject({
@@ -422,9 +438,10 @@ describe('SessionExplorerController', () => {
     it('is gated by the license guard on the session oversize feature', () => {
       expect(Reflect.getMetadata('requiredFeature', handler)).toBe(Feature.SESSION_OVERSIZE_FLAGS);
       expect(Feature.SESSION_OVERSIZE_FLAGS).toBe('sessionOversizeFlags');
-      expect(Reflect.getMetadata('__guards__', handler)).toEqual(
-        expect.arrayContaining([LiveConnectionGuard, LicenseGuard]),
-      );
+      expect(Reflect.getMetadata('__guards__', handler)).toEqual([
+        LicenseGuard,
+        LiveConnectionGuard,
+      ]);
     });
 
     it('flags only sessions strictly above the threshold', async () => {

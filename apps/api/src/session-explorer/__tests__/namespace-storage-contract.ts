@@ -41,6 +41,12 @@ export function runNamespaceStorageContract(getStorage: () => StoragePort): void
     expect((await storage.listSessionNamespaces('conn-b')).map((n) => n.id)).toEqual(['c']);
   });
 
+  it('orders namespaces created at the same time by id', async () => {
+    await storage.saveSessionNamespace(ns({ id: 'b', createdAt: 1_000 }));
+    await storage.saveSessionNamespace(ns({ id: 'a', createdAt: 1_000 }));
+    expect((await storage.listSessionNamespaces('conn-a')).map((n) => n.id)).toEqual(['a', 'b']);
+  });
+
   it('does not expose a namespace through another connection', async () => {
     await storage.saveSessionNamespace(ns());
     expect(await storage.getSessionNamespace('conn-b', 'ns-1')).toBeNull();

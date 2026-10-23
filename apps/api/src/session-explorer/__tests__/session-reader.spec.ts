@@ -110,48 +110,71 @@ describe('readSessionKeys', () => {
     expect(client.callsOf('lrangeBuffer')).toHaveLength(0);
   });
 
-  const fetchedItems = (client: FakeValkey, command: string) =>
-    [...client.callsOf(`pipeline.${command}`), ...client.callsOf(command)].reduce((sum, c) => {
-      const [, start, stop] = c.args as [string, number, number | string];
-      return sum + Number(stop) - start + 1;
-    }, 0);
+  it('sizes keys with MEMORY USAGE over every element', async () => {
+    const client = new FakeValkey(storeOf({ k: { type: 'string', value: 'v' } }));
 
-  it('fetches only a few elements past the cap from a list of large items', async () => {
-    const items = Array.from({ length: 50 }, () => 'y'.repeat(100_000));
-    const client = new FakeValkey(storeOf({ l: { type: 'list', value: items, memory: 5 * MB } }));
+    await readOne(client, 'k');
 
-    const key = await readOne(client, 'l', { byteCap: 250_000 });
+    expect(client.callsOf('pipeline.memory').map((c) => c.args)).toEqual([
+      ['USAGE', 'k', 'SAMPLES', 0],
+    ]);
+  });
+
+  it('fetches about one cap from a list of large items', async () => {
+    const items = Array.from({ length: 500 }, () => 'x'.repeat(64 * 1024));
+    const client = new FakeValkey(storeOf({ l: { type: 'list', value: items, memory: 33 * MB } }));
+
+    const key = await readOne(client, 'l', { byteCap: 128 * 1024 });
 
     expect(key.truncated).toBe(true);
     expect((key.value as string[]).length).toBe(2);
-    expect(fetchedItems(client, 'lrangeBuffer')).toBeLessThanOrEqual(4);
+    expect(client.fetchedBytes).toBeLessThanOrEqual(128 * 1024 + 64 * 1024);
   });
 
-  it('fetches only a few members past the cap from a sorted set of large members', async () => {
-    const value = Array.from({ length: 50 }, (_, i) => ['z'.repeat(100_000) + i, String(i)]).flat();
-    const client = new FakeValkey(storeOf({ z: { type: 'zset', value, memory: 5 * MB } }));
+  it('fetches about one cap from a list whose large items follow a small one', async () => {
+    const items = ['hi', ...Array.from({ length: 20 }, () => 'x'.repeat(512 * 1024))];
+    const client = new FakeValkey(storeOf({ l: { type: 'list', value: items, memory: 11 * MB } }));
 
-    const key = await readOne(client, 'z', { byteCap: 250_000 });
+    const key = await readOne(client, 'l', { byteCap: 2 * MB });
 
     expect(key.truncated).toBe(true);
-    expect((key.value as unknown[]).length).toBe(2);
-    expect(fetchedItems(client, 'zrangeBuffer')).toBeLessThanOrEqual(4);
+    expect((key.value as string[]).length).toBe(4);
+    expect(client.fetchedBytes).toBeLessThanOrEqual(2 * MB + 512 * 1024);
   });
 
-  it('pages a stream of large entries and stops at the cap', async () => {
-    const value = Array.from(
-      { length: 50 },
-      (_, i) => [`${i + 1}-0`, { m: 's'.repeat(100_000) }] as [string, Record<string, string>],
-    );
-    const client = new FakeValkey(storeOf({ s: { type: 'stream', value, memory: 5 * MB } }));
+  it('fetches about one cap from a sorted set of large members', async () => {
+    const flat = Array.from({ length: 300 }, (_, i) => [`${i}`.padEnd(64 * 1024, 'm'), `${i}`]).flat();
+    const client = new FakeValkey(storeOf({ z: { type: 'zset', value: flat, memory: 20 * MB } }));
 
-    const key = await readOne(client, 's', { byteCap: 250_000 });
+    const key = await readOne(client, 'z', { byteCap: 128 * 1024 });
 
     expect(key.truncated).toBe(true);
-    expect((key.value as unknown[]).length).toBe(2);
-    const counts = [...client.callsOf('pipeline.xrangeBuffer'), ...client.callsOf('xrangeBuffer')]
-      .map((c) => Number(c.args[4]));
-    expect(counts.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(4);
+    expect(client.fetchedBytes).toBeLessThanOrEqual(128 * 1024 + 64 * 1024 + 1024);
+  });
+
+  it('fetches about one cap from a stream whose large entries follow a small one', async () => {
+    const value = [
+      ['1-0', { m: 'hi' }],
+      ...Array.from({ length: 20 }, (_, i) => [`${i + 2}-0`, { m: 'x'.repeat(512 * 1024) }]),
+    ] as Array<[string, Record<string, string>]>;
+    const client = new FakeValkey(storeOf({ s: { type: 'stream', value, memory: 11 * MB } }));
+
+    const key = await readOne(client, 's', { byteCap: 2 * MB });
+
+    expect(key.truncated).toBe(true);
+    expect(client.fetchedBytes).toBeLessThanOrEqual(2 * MB + 512 * 1024 + 1024);
+  });
+
+  it('scans a hash over the cap in windows sized from its unread bytes', async () => {
+    const value: Record<string, string> = {};
+    for (let i = 0; i < 40; i++) value[`f${i}`] = 'x'.repeat(64 * 1024);
+    const client = new FakeValkey(storeOf({ h: { type: 'hash', value, memory: 3 * MB } }));
+
+    const key = await readOne(client, 'h', { byteCap: 256 * 1024 });
+
+    expect(client.callsOf('pipeline.hgetallBuffer')).toHaveLength(0);
+    expect(key.truncated).toBe(true);
+    expect(client.fetchedBytes).toBeLessThanOrEqual(256 * 1024 + 64 * 1024 + 1024);
   });
 
   it('reads a whole stream of small entries across pages', async () => {
@@ -206,20 +229,37 @@ describe('readSessionKeys', () => {
     );
     const key = await readOne(client, 'h', { byteCap: 100 });
     expect(client.callsOf('pipeline.hgetallBuffer')).toHaveLength(0);
-    expect(client.callsOf('hscanBuffer')).toHaveLength(2);
+    expect(client.callsOf('hscanBuffer').map((c) => c.args[3])).toEqual([1, 1]);
     expect(key.truncated).toBe(true);
     expect(Object.keys(key.value as object)).toEqual(['a']);
   });
 
-  it('starts HSCAN at one field and sizes later pages from the field average', async () => {
-    const value = Object.fromEntries(
-      Array.from({ length: 10 }, (_, i) => [String(i), 'v'.repeat(9)]),
-    );
-    const client = new FakeValkey(storeOf({ h: { type: 'hash', value, memory: 5000 } }));
-    const key = await readOne(client, 'h', { byteCap: 1000, listWindow: 500 });
-    expect(client.callsOf('hscanBuffer').map((c) => c.args[3])).toEqual([1, 100]);
-    expect(Object.keys(key.value as object)).toHaveLength(10);
+  it('reads a set as its members', async () => {
+    const client = new FakeValkey(storeOf({ s: { type: 'set', value: ['a', 'b'], memory: 50 } }));
+
+    const key = await readOne(client, 's');
+
+    expect(key.value).toEqual(['a', 'b']);
     expect(key.truncated).toBeFalsy();
+  });
+
+  it('scans a set over the cap up to about one cap', async () => {
+    const members = Array.from({ length: 40 }, (_, i) => `${i}`.padEnd(64 * 1024, 'x'));
+    const client = new FakeValkey(storeOf({ s: { type: 'set', value: members, memory: 3 * MB } }));
+
+    const key = await readOne(client, 's', { byteCap: 256 * 1024 });
+
+    expect(client.callsOf('pipeline.smembersBuffer')).toHaveLength(0);
+    expect(key.truncated).toBe(true);
+    expect(client.fetchedBytes).toBeLessThanOrEqual(256 * 1024 + 64 * 1024 + 1024);
+  });
+
+  it('marks a module type it cannot read as truncated', async () => {
+    const client = new FakeValkey(storeOf({ b: { type: 'MBbloom--', memory: 50 } }));
+
+    const key = await readOne(client, 'b');
+
+    expect(key).toMatchObject({ type: 'MBbloom--', value: null, truncated: true });
   });
 
   it('reads a sorted set as member and score pairs', async () => {

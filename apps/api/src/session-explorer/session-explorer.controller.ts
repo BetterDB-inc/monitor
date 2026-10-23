@@ -107,7 +107,7 @@ export class SessionExplorerController {
   }
 
   @Get('namespaces/:id/oversize')
-  @UseGuards(LiveConnectionGuard, LicenseGuard)
+  @UseGuards(LicenseGuard, LiveConnectionGuard)
   @RequiresFeature(Feature.SESSION_OVERSIZE_FLAGS)
   @ApiOperation({ summary: 'Sessions whose memory exceeds the namespace threshold' })
   oversizeSessions(

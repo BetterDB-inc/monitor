@@ -89,10 +89,19 @@ class Accumulator<T> {
 const firstWindow = (at: Located, opts: ReadOpts): number =>
   at.memory !== null && at.memory <= opts.byteCap ? opts.listWindow : 1;
 
-function nextWindow(acc: Accumulator<unknown>, opts: ReadOpts): number {
-  const average = Math.max(1, acc.bytes / Math.max(1, acc.items.length));
-  const fits = Math.floor((acc.cap - acc.bytes) / average) + 1;
-  return Math.max(1, Math.min(opts.listWindow, fits));
+function nextWindow(
+  acc: Accumulator<unknown>,
+  at: Located,
+  read: number,
+  length: number,
+  opts: ReadOpts,
+): number {
+  const unreadBytes = at.memory === null ? 0 : at.memory - acc.bytes;
+  const average =
+    unreadBytes > 0
+      ? unreadBytes / Math.max(1, length - read)
+      : Math.max(1, acc.bytes / Math.max(1, acc.items.length));
+  return Math.max(1, Math.min(opts.listWindow, Math.floor((acc.cap - acc.bytes) / average) + 1));
 }
 
 function routeKeys(
@@ -134,7 +143,7 @@ async function locate(
     for (const key of slice) {
       pipeline.type(key);
       pipeline.pttl(key);
-      pipeline.memory('USAGE', key);
+      pipeline.memory('USAGE', key, 'SAMPLES', 0);
     }
     const results = (await pipeline.exec()) ?? [];
     slice.forEach((key, i) => {
@@ -161,8 +170,12 @@ function queueFirstRead(pipeline: ChainableCommander, at: Located, opts: ReadOpt
       pipeline.lrangeBuffer(key, 0, firstWindow(at, opts) - 1);
       return 2;
     case 'hash':
-      if (memory === null || memory > opts.byteCap) return 0;
-      pipeline.hgetallBuffer(key);
+      if (memory === null || memory > opts.byteCap) pipeline.hlen(key);
+      else pipeline.hgetallBuffer(key);
+      return 1;
+    case 'set':
+      if (memory === null || memory > opts.byteCap) pipeline.scard(key);
+      else pipeline.smembersBuffer(key);
       return 1;
     case 'zset':
       pipeline.zcard(key);
@@ -177,8 +190,9 @@ function queueFirstRead(pipeline: ChainableCommander, at: Located, opts: ReadOpt
       pipeline.callBuffer('JSON.GET', key);
       return 1;
     case 'stream':
+      pipeline.xlen(key);
       pipeline.xrangeBuffer(key, '-', '+', 'COUNT', firstWindow(at, opts));
-      return 1;
+      return 2;
     default:
       return 0;
   }
@@ -207,7 +221,7 @@ async function readList(
     }
     start += window.length;
     if (acc.full || window.length < size || start >= length) break;
-    size = nextWindow(acc, opts);
+    size = nextWindow(acc, at, start, length, opts);
     window = await client.lrangeBuffer(at.key, start, start + size - 1);
   }
   return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
@@ -221,25 +235,56 @@ async function readHash(
   opts: ReadOpts,
 ): Promise<ReadResult> {
   const acc = new Accumulator<[string, ValkeyValue]>(cap);
-  if (results.length > 0) {
-    const all = resultOf(results[0]) as Record<string, Buffer>;
+  const first = resultOf(results[0]);
+  if (typeof first !== 'number') {
+    const all = first as Record<string, Buffer>;
     for (const [field, v] of Object.entries(all)) {
       if (!acc.add(Buffer.byteLength(field) + v.length, () => [field, decoded(v, cap)])) break;
     }
   } else {
     let cursor = '0';
-    let count = firstWindow(at, opts);
+    let read = 0;
     do {
+      const count = nextWindow(acc, at, read, first, opts);
       const [next, flat] = await client.hscanBuffer(at.key, cursor, 'COUNT', count);
       cursor = next.toString();
+      read += flat.length / 2;
       for (let i = 0; i + 1 < flat.length; i += 2) {
         const [field, v] = [flat[i], flat[i + 1]];
         if (!acc.add(field.length + v.length, () => [field.toString(), decoded(v, cap)])) break;
       }
-      if (acc.items.length > 0) count = nextWindow(acc, opts);
     } while (cursor !== '0' && !acc.full);
   }
   return { value: Object.fromEntries(acc.items), truncated: acc.full, bytes: acc.bytes };
+}
+
+async function readSet(
+  client: Valkey,
+  at: Located,
+  results: PipelineResult[],
+  cap: number,
+  opts: ReadOpts,
+): Promise<ReadResult> {
+  const acc = new Accumulator<ValkeyElement>(cap);
+  const first = resultOf(results[0]);
+  if (typeof first !== 'number') {
+    for (const member of first as Buffer[]) {
+      if (!acc.add(member.length, () => decoded(member, cap))) break;
+    }
+  } else {
+    let cursor = '0';
+    let read = 0;
+    do {
+      const count = nextWindow(acc, at, read, first, opts);
+      const [next, members] = await client.sscanBuffer(at.key, cursor, 'COUNT', count);
+      cursor = next.toString();
+      read += members.length;
+      for (const member of members) {
+        if (!acc.add(member.length, () => decoded(member, cap))) break;
+      }
+    } while (cursor !== '0' && !acc.full);
+  }
+  return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
 }
 
 async function readZset(
@@ -260,7 +305,7 @@ async function readZset(
     }
     start += flat.length / 2;
     if (acc.full || flat.length < size * 2 || start >= length) break;
-    size = nextWindow(acc, opts);
+    size = nextWindow(acc, at, start, length, opts);
     flat = await client.zrangeBuffer(at.key, start, String(start + size - 1), 'WITHSCORES');
   }
   return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
@@ -304,10 +349,11 @@ async function readStream(
   cap: number,
   opts: ReadOpts,
 ): Promise<ReadResult> {
-  let entries = resultOf(results[0]) as Array<[Buffer, Buffer[]]>;
+  const length = resultOf(results[0]) as number;
+  let entries = resultOf(results[1]) as Array<[Buffer, Buffer[]]>;
   const acc = new Accumulator<[string, Record<string, ValkeyValue>]>(cap);
   let size = firstWindow(at, opts);
-  for (;;) {
+  for (let read = 0; ; ) {
     for (const [id, flat] of entries) {
       let entryBytes = 0;
       for (let i = 0; i + 1 < flat.length; i += 2) entryBytes += flat[i].length + flat[i + 1].length;
@@ -320,12 +366,17 @@ async function readStream(
       };
       if (!acc.add(entryBytes, () => [id.toString(), fields()])) break;
     }
-    if (acc.full || entries.length < size) break;
+    read += entries.length;
+    if (acc.full || entries.length < size || read >= length) break;
     const lastId = entries[entries.length - 1][0].toString();
-    size = nextWindow(acc, opts);
-    entries = (await client.xrangeBuffer(at.key, streamIdAfter(lastId), '+', 'COUNT', size)) as Array<
-      [Buffer, Buffer[]]
-    >;
+    size = nextWindow(acc, at, read, length, opts);
+    entries = (await client.xrangeBuffer(
+      at.key,
+      streamIdAfter(lastId),
+      '+',
+      'COUNT',
+      size,
+    )) as Array<[Buffer, Buffer[]]>;
   }
   return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
 }
@@ -344,6 +395,8 @@ function finishRead(
       return readList(client, at, results, cap, opts);
     case 'hash':
       return readHash(client, at, results, cap, opts);
+    case 'set':
+      return readSet(client, at, results, cap, opts);
     case 'zset':
       return readZset(client, at, results, cap, opts);
     case 'ReJSON-RL':
@@ -351,7 +404,7 @@ function finishRead(
     case 'stream':
       return readStream(client, at, results, cap, opts);
     default:
-      return { value: null, truncated: false, bytes: 0 };
+      return { value: null, truncated: true, bytes: 0 };
   }
 }
 

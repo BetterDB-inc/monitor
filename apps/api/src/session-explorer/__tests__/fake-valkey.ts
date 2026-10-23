@@ -39,11 +39,16 @@ const READ_COMMANDS = [
   'strlen',
   'llen',
   'zcard',
+  'xlen',
+  'hlen',
+  'scard',
   'getBuffer',
   'getrangeBuffer',
   'lrangeBuffer',
   'hgetallBuffer',
   'hscanBuffer',
+  'smembersBuffer',
+  'sscanBuffer',
   'zrangeBuffer',
   'xrangeBuffer',
   'callBuffer',
@@ -52,8 +57,16 @@ const READ_COMMANDS = [
 
 const KEY_INDEPENDENT = new Set(['memory', 'object']);
 
+const sizeOf = (v: unknown): number => {
+  if (Buffer.isBuffer(v)) return v.length;
+  if (Array.isArray(v)) return v.reduce((sum: number, x) => sum + sizeOf(x), 0);
+  if (v && typeof v === 'object') return Object.values(v).reduce((sum: number, x) => sum + sizeOf(x), 0);
+  return 0;
+};
+
 export class FakeValkey {
   calls: Array<{ name: string; args: unknown[] }> = [];
+  fetchedBytes = 0;
   pipelineExecs = 0;
   scanPages?: string[][];
   connectError?: Error;
@@ -138,6 +151,12 @@ export class FakeValkey {
   }
 
   private run(name: string, args: unknown[]): unknown {
+    const result = this.answer(name, args);
+    this.fetchedBytes += sizeOf(result);
+    return result;
+  }
+
+  private answer(name: string, args: unknown[]): unknown {
     const key = this.keyOf(name, args);
     if (this.movedKeys.has(key)) throw new Error('MOVED 1 10.0.0.9:7000');
     if (this.failKeys.has(key) && !['type', 'pttl', 'memory', 'object'].includes(name)) {
@@ -162,6 +181,24 @@ export class FakeValkey {
         return e ? (raw as unknown[]).length : 0;
       case 'zcard':
         return e ? (raw as unknown[]).length / 2 : 0;
+      case 'xlen':
+        return e ? (raw as unknown[]).length : 0;
+      case 'scard':
+        return e ? (raw as unknown[]).length : 0;
+      case 'smembersBuffer':
+        return ((raw as string[]) ?? []).map((v) => Buffer.from(v));
+      case 'sscanBuffer': {
+        const [, cursor, , count] = args as [string, string, string, number];
+        const members = (raw as string[]) ?? [];
+        const from = Number(cursor);
+        const to = from + Number(count);
+        return [
+          Buffer.from(to >= members.length ? '0' : String(to)),
+          members.slice(from, to).map((v) => Buffer.from(v)),
+        ];
+      }
+      case 'hlen':
+        return e ? Object.keys(raw as object).length : 0;
       case 'getBuffer':
         return e ? Buffer.from(raw as string | Buffer) : null;
       case 'getrangeBuffer': {
@@ -179,11 +216,11 @@ export class FakeValkey {
       case 'hscanBuffer': {
         const [, cursor, , count] = args as [string, string, string, number];
         const fields = Object.entries((raw as Record<string, string>) ?? {});
-        const start = Number(cursor);
-        const end = start + count;
+        const from = Number(cursor);
+        const to = from + Number(count);
         return [
-          Buffer.from(end >= fields.length ? '0' : String(end)),
-          fields.slice(start, end).flatMap(([k, v]) => [Buffer.from(k), Buffer.from(v)]),
+          Buffer.from(to >= fields.length ? '0' : String(to)),
+          fields.slice(from, to).flatMap(([k, v]) => [Buffer.from(k), Buffer.from(v)]),
         ];
       }
       case 'zrangeBuffer': {
