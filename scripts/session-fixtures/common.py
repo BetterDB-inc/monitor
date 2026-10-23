@@ -2,6 +2,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 HERE = Path(__file__).resolve().parent
 ALLOWED_PORTS = (6380,)
@@ -16,7 +17,7 @@ def assert_port(port):
 
 def url(port):
     assert_port(port)
-    return f"redis://:{PASSWORD}@localhost:{port}/0"
+    return f"redis://:{quote(PASSWORD, safe='')}@localhost:{port}/0"
 
 
 def filler(chars, tag):

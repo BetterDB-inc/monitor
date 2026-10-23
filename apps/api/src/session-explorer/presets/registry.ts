@@ -1,6 +1,12 @@
-import type { CapturedKey, CustomSchema, KeyView, PresetId } from '@betterdb/shared';
+import {
+  escapeGlob,
+  type CapturedKey,
+  type CustomSchema,
+  type KeyView,
+  type PresetId,
+} from '@betterdb/shared';
 import type { PresetDefinition } from './types';
-import { agentCachePreset } from './agent-cache';
+import { createAgentCachePreset } from './agent-cache';
 import { langchainCommunityPreset } from './langchain-community';
 import { llamaindexPreset } from './llamaindex';
 import { createCustomPreset, validateCustomSchema } from './custom';
@@ -9,12 +15,12 @@ import { failedView } from './text';
 const langchainJsPreset: PresetDefinition = {
   ...langchainCommunityPreset,
   id: 'langchain-js',
-  defaultPattern: (prefix) => `${prefix}*`,
+  defaultPattern: (prefix) => `${escapeGlob(prefix)}*`,
 };
 
 const rawPreset: PresetDefinition = {
   id: 'raw',
-  defaultPattern: (prefix) => `${prefix}*`,
+  defaultPattern: (prefix) => `${escapeGlob(prefix)}*`,
   sessionIdOf: (key) => key,
   parseKey: (k) => failedView(k, 'No schema configured'),
   mergeSession: () => [],
@@ -27,12 +33,15 @@ const invalidSchemaPreset = (errors: string[]): PresetDefinition => ({
 });
 
 function customPreset(custom: CustomSchema | null | undefined): PresetDefinition {
-  if (!custom) throw new Error('Custom preset requires a schema');
   const result = validateCustomSchema(custom);
   return result.ok ? createCustomPreset(result.schema) : invalidSchemaPreset(result.errors);
 }
 
-export function getPreset(id: PresetId, custom?: CustomSchema | null): PresetDefinition {
+export function getPreset(
+  id: PresetId,
+  custom?: CustomSchema | null,
+  pattern?: string,
+): PresetDefinition {
   switch (id) {
     case 'langchain-community':
       return langchainCommunityPreset;
@@ -41,7 +50,7 @@ export function getPreset(id: PresetId, custom?: CustomSchema | null): PresetDef
     case 'llamaindex':
       return llamaindexPreset;
     case 'agent-cache':
-      return agentCachePreset;
+      return createAgentCachePreset(pattern);
     case 'raw':
       return rawPreset;
     case 'custom':

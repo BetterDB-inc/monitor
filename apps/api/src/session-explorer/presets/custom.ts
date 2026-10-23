@@ -1,4 +1,9 @@
-import type { CapturedKey, CustomSchema, ParsedMessage } from '@betterdb/shared';
+import {
+  escapeGlob,
+  type CapturedKey,
+  type CustomSchema,
+  type ParsedMessage,
+} from '@betterdb/shared';
 import type { PresetDefinition } from './types';
 import {
   concatSession,
@@ -7,6 +12,7 @@ import {
   guardedParse,
   isRecord,
   parseJson,
+  ShapeError,
   textContent,
 } from './text';
 
@@ -124,6 +130,7 @@ export function matchSessionTemplate(template: SessionTemplate, key: string): st
     if (i === sessionGap) sessionStart = at + literals[i].length;
     bound = at;
   }
+  if (sessionStart >= right) return null;
 
   let sessionEnd = end;
   if (sessionGap < gaps.length - 1) {
@@ -237,15 +244,29 @@ const parseIfJson = (v: unknown): unknown => {
   }
 };
 
-const NUMBERED = /^(.*?)(\d+)$/;
+const LEADING_ZEROS = /^0+/;
+
+const isDigit = (c: string) => c >= '0' && c <= '9';
+
+function splitTrailingDigits(name: string): [string, string] {
+  let at = name.length;
+  while (at > 0 && isDigit(name[at - 1])) at--;
+  return [name.slice(0, at), name.slice(at)];
+}
+
+const byBytes = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+function compareDigits(a: string, b: string): number {
+  if (a === '' || b === '') return byBytes(a, b);
+  const x = a.replace(LEADING_ZEROS, '');
+  const y = b.replace(LEADING_ZEROS, '');
+  return x.length - y.length || byBytes(x, y);
+}
 
 function compareFieldNames(a: string, b: string): number {
-  const na = NUMBERED.exec(a);
-  const nb = NUMBERED.exec(b);
-  if (na && nb && na[1] === nb[1] && na[2].length !== nb[2].length) {
-    return Number(na[2]) - Number(nb[2]);
-  }
-  return a < b ? -1 : a > b ? 1 : 0;
+  const [pa, da] = splitTrailingDigits(a);
+  const [pb, db] = splitTrailingDigits(b);
+  return byBytes(pa, pb) || compareDigits(da, db) || byBytes(a, b);
 }
 
 const byFieldName = (hash: Record<string, unknown>): unknown[] =>
@@ -289,6 +310,23 @@ function selectEntries(
   }
 }
 
+function blocksOrJson(blocks: unknown[]): string {
+  try {
+    return textContent(blocks);
+  } catch (err) {
+    if (err instanceof ShapeError) return JSON.stringify(blocks);
+    throw err;
+  }
+}
+
+function contentText(raw: unknown): string {
+  if (raw === null) return '';
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'number' || typeof raw === 'boolean') return String(raw);
+  if (Array.isArray(raw)) return blocksOrJson(raw);
+  return JSON.stringify(raw);
+}
+
 function toMessage(
   entry: unknown,
   fields: CustomSchema['fields'],
@@ -299,7 +337,7 @@ function toMessage(
   if (typeof role !== 'string' || role === '') return fail(`Missing role at "${fields.role}"`);
   const rawContent = at(fields.content);
   if (rawContent === undefined) return fail(`Missing content at "${fields.content}"`);
-  const message: ParsedMessage = { role, content: textContent(rawContent ?? '') };
+  const message: ParsedMessage = { role, content: contentText(rawContent) };
 
   if (fields.timestamp) {
     const ts = at(fields.timestamp);
@@ -313,7 +351,7 @@ function toMessage(
     ];
   }
   const toolResult = fields.toolResult ? at(fields.toolResult) : undefined;
-  if (toolResult !== undefined) {
+  if (toolResult !== undefined && toolResult !== null) {
     message.toolResult = {
       ...(hasToolName ? { name: toolName } : {}),
       content: toolResult,
@@ -328,7 +366,7 @@ export function createCustomPreset(schema: CustomSchema): PresetDefinition {
   const open = schema.valueType === 'hash' ? parseIfJson : asIs;
   return {
     id: 'custom',
-    defaultPattern: (prefix) => `${prefix}*`,
+    defaultPattern: (prefix) => `${escapeGlob(prefix)}*`,
     sessionIdOf: (key) => (template ? matchSessionTemplate(template, key) : key),
     parseKey: (k) => {
       if (!expectedTypes.includes(k.type)) {

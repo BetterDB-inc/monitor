@@ -16,7 +16,7 @@ export function assertPort(port) {
 
 export function url(port) {
   assertPort(port);
-  return `redis://:${PASSWORD}@localhost:${port}/0`;
+  return `redis://:${encodeURIComponent(PASSWORD)}@localhost:${port}/0`;
 }
 
 function filler(chars, tag) {

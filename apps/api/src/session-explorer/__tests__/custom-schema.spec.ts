@@ -233,6 +233,52 @@ describe('custom preset', () => {
     expect(t('ab{session}ba', 'aba')).toBeNull();
   });
 
+  it('does not match keys that leave no room for the session before the next literal', () => {
+    const t = (template: string, key: string) =>
+      matchSessionTemplate(parseSessionTemplate(template), key);
+    expect(t('app:{session}:*:messages', 'app::x:messages')).toBeNull();
+    expect(t('app:{session}:*:messages', 'app:s:x:messages')).toBe('s');
+    expect(t('{session}:*:m', '::m')).toBeNull();
+  });
+
+  it('agrees with an equivalent glob regex on generated keys', () => {
+    let seed = 551;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    const pick = <T,>(items: readonly T[]): T => items[Math.floor(random() * items.length)];
+    const TOKENS = ['a', 'b', ':', ':', '*', '{session}'] as const;
+    const KEY_CHARS = ['a', 'b', ':'] as const;
+    const escapeRegex = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const toRegex = (template: string) =>
+      new RegExp(
+        `^${template
+          .split('{session}')
+          .map((part) => part.split('*').map(escapeRegex).join('.*'))
+          .join('(.+?)')}$`,
+      );
+    const isValid = (template: string) =>
+      validateCustomSchema({ ...baseSchema, sessionTemplate: template }).ok;
+
+    const mismatches: string[] = [];
+    let checked = 0;
+    while (checked < 300) {
+      const template = Array.from({ length: 1 + Math.floor(random() * 6) }, () => pick(TOKENS)).join('');
+      if (!isValid(template)) continue;
+      checked++;
+      const parsed = parseSessionTemplate(template);
+      const regex = toRegex(template);
+      for (let i = 0; i < 200; i++) {
+        const key = Array.from({ length: Math.floor(random() * 10) }, () => pick(KEY_CHARS)).join('');
+        const expected = regex.exec(key)?.[1] ?? null;
+        const actual = matchSessionTemplate(parsed, key);
+        if (actual !== expected) mismatches.push(`${template} ${key} ${actual} ${expected}`);
+      }
+    }
+    expect(mismatches).toEqual([]);
+  });
+
   it('matches hostile keys in linear time', () => {
     const preset = createCustomPreset({ ...baseSchema, sessionTemplate: '*a*a*a:{session}=' });
     const started = Date.now();
@@ -308,6 +354,48 @@ describe('custom preset', () => {
       parsed: true,
       messages: [{ role: 'assistant', content: '', toolCalls: [{ name: 'lookup' }] }],
     });
+  });
+
+  it('treats a null tool result as absent', () => {
+    const preset = createCustomPreset({
+      valueType: 'list',
+      messages: { from: 'items' },
+      fields: { role: 'role', content: 'text', toolResult: 'result' },
+    });
+    const entries = [
+      { role: 'user', text: 'hi', result: null },
+      { role: 'tool', text: 'done', result: { ok: true } },
+    ];
+    const view = preset.parseKey(key({ type: 'list', value: entries.map((e) => JSON.stringify(e)) }));
+    expect(view.parsed && view.messages).toEqual([
+      { role: 'user', content: 'hi' },
+      { role: 'tool', content: 'done', toolResult: { content: { ok: true } } },
+    ]);
+  });
+
+  it('shows non-text content as text instead of dropping the key', () => {
+    const preset = createCustomPreset({
+      valueType: 'list',
+      messages: { from: 'items' },
+      fields: { role: 'role', content: 'text' },
+    });
+    const entries = [
+      { role: 'user', text: 42 },
+      { role: 'ai', text: { text: 'hi', score: 1 } },
+      { role: 'ai', text: true },
+      { role: 'ai', text: [{ type: 'text', text: 'a' }, { kind: 'x' }] },
+      { role: 'ai', text: [{ type: 'text', text: 'b' }] },
+      { role: 'user', text: 'plain' },
+    ];
+    const view = preset.parseKey(key({ type: 'list', value: entries.map((e) => JSON.stringify(e)) }));
+    expect(view.parsed && view.messages.map((m) => m.content)).toEqual([
+      '42',
+      '{"text":"hi","score":1}',
+      'true',
+      '[{"type":"text","text":"a"},{"kind":"x"}]',
+      'b',
+      'plain',
+    ]);
   });
 
   it('parses a hash with a field named base64', () => {
@@ -400,6 +488,33 @@ describe('custom preset', () => {
     ]);
   });
 
+  it('orders hash items the same whatever order HGETALL returns them in', () => {
+    const preset = createCustomPreset({
+      valueType: 'hash',
+      messages: { from: 'items' },
+      fields: { role: 'role', content: 'text' },
+    });
+    const names = ['msg:9', 'msg:10', 'msg:1a', 'msg:2', 'msg:010', 'note', 'msg:'];
+    const permutations = (items: string[]): string[][] =>
+      items.length <= 1
+        ? [items]
+        : items.flatMap((item, i) =>
+            permutations([...items.slice(0, i), ...items.slice(i + 1)]).map((rest) => [item, ...rest]),
+          );
+    const orders = new Set(
+      permutations(names).map((order) => {
+        const value = Object.fromEntries(
+          order.map((name) => [name, JSON.stringify({ role: 'user', text: name })]),
+        );
+        const view = preset.parseKey(key({ type: 'hash', value }));
+        return JSON.stringify(view.parsed && view.messages.map((m) => m.content));
+      }),
+    );
+    expect([...orders]).toEqual([
+      JSON.stringify(['msg:', 'msg:2', 'msg:9', 'msg:010', 'msg:10', 'msg:1a', 'note']),
+    ]);
+  });
+
   it('orders time-sortable ids in hash items by byte order', () => {
     const preset = createCustomPreset({
       valueType: 'hash',
@@ -418,8 +533,14 @@ describe('custom preset', () => {
     }
   });
 
-  it('registry requires a schema for custom', () => {
-    expect(() => getPreset('custom', null)).toThrow();
+  it('registry shows keys as unparsed when the custom schema is missing', () => {
+    for (const schema of [null, undefined]) {
+      const preset = getPreset('custom', schema);
+      expect(preset.id).toBe('custom');
+      const view = preset.parseKey(key({ type: 'list', value: ['{}'] }));
+      expect(view.parsed === false && view.reason).toMatch(/^Invalid custom schema: /);
+      expect(preset.sessionIdOf('k')).toBe('k');
+    }
     expect(getPreset('custom', baseSchema).id).toBe('custom');
   });
 
