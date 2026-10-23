@@ -44,6 +44,7 @@ export enum Feature {
   SCALING_READINESS_HISTORY = 'scalingReadinessHistory',
   CACHE_SIZE_SIMULATOR = 'cacheSizeSimulator',
   KV_CACHE_MONITORING = 'kvCacheMonitoring',
+  SESSION_OVERSIZE_FLAGS = 'sessionOversizeFlags',
   // Enterprise-only features
   SSO_SAML = 'ssoSaml',
   COMPLIANCE_EXPORT = 'complianceExport',
@@ -76,6 +77,7 @@ export const TIER_FEATURES: Record<Tier, Feature[]> = {
     Feature.SCALING_READINESS_HISTORY,
     Feature.CACHE_SIZE_SIMULATOR,
     Feature.KV_CACHE_MONITORING,
+    Feature.SESSION_OVERSIZE_FLAGS,
   ],
   [Tier.enterprise]: Object.values(Feature),
 };
