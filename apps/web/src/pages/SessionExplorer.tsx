@@ -72,11 +72,17 @@ export function SessionExplorer() {
     if (!namespace || !window.confirm(`Delete namespace "${namespace.name}"?`)) return;
     setActionError(null);
     try {
-      await sessionExplorerApi.deleteNamespace(namespace.id);
+      const { id } = namespace;
+      await sessionExplorerApi.deleteNamespace(id);
       setSelectedNs(null);
       setSessionId(null);
+      queryClient.setQueryData<SessionNamespace[]>(
+        sessionExplorerKeys.namespaces(connectionId),
+        (old) => old?.filter((n) => n.id !== id),
+      );
       await queryClient.invalidateQueries({
         queryKey: sessionExplorerKeys.namespaces(connectionId),
+        exact: true,
       });
     } catch (err) {
       setActionError(errorText(err));
