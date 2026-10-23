@@ -248,6 +248,34 @@ describe('readSessionKeys', () => {
     expect(Object.keys(key.value as object)).toEqual(['a']);
   });
 
+  it('reads a set as its members', async () => {
+    const client = new FakeValkey(storeOf({ s: { type: 'set', value: ['a', 'b'], memory: 50 } }));
+
+    const key = await readOne(client, 's');
+
+    expect(key.value).toEqual(['a', 'b']);
+    expect(key.truncated).toBeFalsy();
+  });
+
+  it('scans a set over the cap up to about one cap', async () => {
+    const members = Array.from({ length: 40 }, (_, i) => `${i}`.padEnd(64 * 1024, 'x'));
+    const client = new FakeValkey(storeOf({ s: { type: 'set', value: members, memory: 3 * MB } }));
+
+    const key = await readOne(client, 's', { byteCap: 256 * 1024 });
+
+    expect(client.callsOf('pipeline.smembersBuffer')).toHaveLength(0);
+    expect(key.truncated).toBe(true);
+    expect(client.fetchedBytes).toBeLessThanOrEqual(256 * 1024 + 64 * 1024 + 1024);
+  });
+
+  it('marks a module type it cannot read as truncated', async () => {
+    const client = new FakeValkey(storeOf({ b: { type: 'MBbloom--', memory: 50 } }));
+
+    const key = await readOne(client, 'b');
+
+    expect(key).toMatchObject({ type: 'MBbloom--', value: null, truncated: true });
+  });
+
   it('reads a sorted set as member and score pairs', async () => {
     const client = new FakeValkey(storeOf({ z: { type: 'zset', value: ['m1', '1', 'm2', '2.5'] } }));
     const key = await readOne(client, 'z');

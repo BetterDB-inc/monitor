@@ -173,6 +173,10 @@ function queueFirstRead(pipeline: ChainableCommander, at: Located, opts: ReadOpt
       if (memory === null || memory > opts.byteCap) pipeline.hlen(key);
       else pipeline.hgetallBuffer(key);
       return 1;
+    case 'set':
+      if (memory === null || memory > opts.byteCap) pipeline.scard(key);
+      else pipeline.smembersBuffer(key);
+      return 1;
     case 'zset':
       pipeline.zcard(key);
       pipeline.zrangeBuffer(key, 0, String(firstWindow(at, opts) - 1), 'WITHSCORES');
@@ -252,6 +256,35 @@ async function readHash(
     } while (cursor !== '0' && !acc.full);
   }
   return { value: Object.fromEntries(acc.items), truncated: acc.full, bytes: acc.bytes };
+}
+
+async function readSet(
+  client: Valkey,
+  at: Located,
+  results: PipelineResult[],
+  cap: number,
+  opts: ReadOpts,
+): Promise<ReadResult> {
+  const acc = new Accumulator<ValkeyElement>(cap);
+  const first = resultOf(results[0]);
+  if (typeof first !== 'number') {
+    for (const member of first as Buffer[]) {
+      if (!acc.add(member.length, () => decoded(member, cap))) break;
+    }
+  } else {
+    let cursor = '0';
+    let read = 0;
+    do {
+      const count = nextWindow(acc, at, read, first, opts);
+      const [next, members] = await client.sscanBuffer(at.key, cursor, 'COUNT', count);
+      cursor = next.toString();
+      read += members.length;
+      for (const member of members) {
+        if (!acc.add(member.length, () => decoded(member, cap))) break;
+      }
+    } while (cursor !== '0' && !acc.full);
+  }
+  return { value: acc.items, truncated: acc.full, bytes: acc.bytes };
 }
 
 async function readZset(
@@ -359,6 +392,8 @@ function finishRead(
       return readList(client, at, results, cap, opts);
     case 'hash':
       return readHash(client, at, results, cap, opts);
+    case 'set':
+      return readSet(client, at, results, cap, opts);
     case 'zset':
       return readZset(client, at, results, cap, opts);
     case 'ReJSON-RL':
@@ -366,7 +401,7 @@ function finishRead(
     case 'stream':
       return readStream(client, at, results, cap, opts);
     default:
-      return { value: null, truncated: false, bytes: 0 };
+      return { value: null, truncated: true, bytes: 0 };
   }
 }
 

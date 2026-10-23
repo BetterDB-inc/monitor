@@ -41,11 +41,14 @@ const READ_COMMANDS = [
   'zcard',
   'xlen',
   'hlen',
+  'scard',
   'getBuffer',
   'getrangeBuffer',
   'lrangeBuffer',
   'hgetallBuffer',
   'hscanBuffer',
+  'smembersBuffer',
+  'sscanBuffer',
   'zrangeBuffer',
   'xrangeBuffer',
   'callBuffer',
@@ -172,6 +175,20 @@ export class FakeValkey {
         return e ? (raw as unknown[]).length / 2 : 0;
       case 'xlen':
         return e ? (raw as unknown[]).length : 0;
+      case 'scard':
+        return e ? (raw as unknown[]).length : 0;
+      case 'smembersBuffer':
+        return ((raw as string[]) ?? []).map((v) => Buffer.from(v));
+      case 'sscanBuffer': {
+        const [, cursor, , count] = args as [string, string, string, number];
+        const members = (raw as string[]) ?? [];
+        const from = Number(cursor);
+        const to = from + Number(count);
+        return [
+          Buffer.from(to >= members.length ? '0' : String(to)),
+          members.slice(from, to).map((v) => Buffer.from(v)),
+        ];
+      }
       case 'hlen':
         return e ? Object.keys(raw as object).length : 0;
       case 'getBuffer':
