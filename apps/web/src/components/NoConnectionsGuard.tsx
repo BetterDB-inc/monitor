@@ -9,6 +9,7 @@ import {
   parseConnectionUrl,
   ParsedConnection,
   isSingleLabelHost,
+  isLocalhostHost,
   singleLabelHostCloudError,
 } from '../utils/connectionUrl';
 import { openAddConnection } from '../lib/addConnectionIntent';
@@ -234,10 +235,6 @@ function ProviderGuidesInfo() {
   );
 }
 
-function isLocalhostHost(host: string): boolean {
-  const h = host.trim().toLowerCase();
-  return h === 'localhost' || h === '::1' || h === '0.0.0.0' || /^127\./.test(h);
-}
 
 interface QuickConnectProps {
   isCloudDomain: boolean;

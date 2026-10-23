@@ -243,6 +243,36 @@ describe('ConnectionSelector - open-add-connection event prefill', () => {
   });
 });
 
+describe('ConnectionSelector - cloud host checks', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function openCloudForm(host: string) {
+    render(<ConnectionSelector isCloudMode />);
+    fireEvent(window, new CustomEvent('betterdb:open-add-connection'));
+    fireEvent.change(screen.getByPlaceholderText('your-redis-host.example.com'), {
+      target: { value: host },
+    });
+  }
+
+  it('blocks the trailing-dot form of localhost', () => {
+    openCloudForm('localhost.');
+
+    expect(screen.getByText(/localhost won't work on the cloud/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Test Connection' })).toBeDisabled();
+  });
+
+  it('rejects a single-label host on Test Connection without calling the API', () => {
+    openCloudForm('valkey');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Test Connection' }));
+
+    expect(screen.getByText(/isn't a full hostname/i)).toBeInTheDocument();
+    expect(fetchApi).not.toHaveBeenCalledWith('/connections/test', expect.anything());
+  });
+});
+
 describe('ConnectionSelector - add-connection tab bar', () => {
   beforeEach(() => {
     vi.clearAllMocks();

@@ -143,7 +143,17 @@ export function parseConnectionUrl(input: string): ParseConnectionUrlResult {
  */
 export function isSingleLabelHost(host: string): boolean {
   const h = host.trim().replace(/\.$/, '');
-  return h.length > 0 && !h.includes('.') && !h.includes(':') && h.toLowerCase() !== 'localhost';
+  return h.length > 0 && !h.includes('.') && !h.includes(':') && !isLocalhostHost(h);
+}
+
+/**
+ * True for a loopback host: localhost, 127.x, ::1 or 0.0.0.0. A trailing dot
+ * ("localhost.") is the fully qualified form of the same name and still
+ * resolves to loopback, so it is stripped first.
+ */
+export function isLocalhostHost(host: string): boolean {
+  const h = host.trim().toLowerCase().replace(/\.$/, '');
+  return h === 'localhost' || h === '::1' || h === '0.0.0.0' || /^127\./.test(h);
 }
 
 export function singleLabelHostCloudError(host: string): string {

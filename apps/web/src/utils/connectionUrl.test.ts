@@ -3,6 +3,7 @@ import {
   parseConnectionUrl,
   looksLikeConnectionUrl,
   isSingleLabelHost,
+  isLocalhostHost,
   singleLabelHostCloudError,
 } from './connectionUrl';
 
@@ -145,5 +146,23 @@ describe('isSingleLabelHost', () => {
 
   it('names the host in the cloud error', () => {
     expect(singleLabelHostCloudError(' valkey ')).toContain('"valkey"');
+  });
+});
+
+describe('isLocalhostHost', () => {
+  it('matches loopback hosts, including the trailing-dot form', () => {
+    for (const host of ['localhost', 'LOCALHOST', 'localhost.', '127.0.0.1', '127.1.2.3', '::1', '0.0.0.0']) {
+      expect(isLocalhostHost(host)).toBe(true);
+    }
+  });
+
+  it('does not match other hosts', () => {
+    expect(isLocalhostHost('my-db.example.com')).toBe(false);
+    expect(isLocalhostHost('localhost.example.com')).toBe(false);
+    expect(isLocalhostHost('10.0.0.5')).toBe(false);
+  });
+
+  it('keeps localhost. out of the single-label bucket', () => {
+    expect(isSingleLabelHost('localhost.')).toBe(false);
   });
 });

@@ -251,6 +251,18 @@ describe('NoConnectionsGuard - quick connect', () => {
       );
     });
 
+    it('rejects the trailing-dot form of localhost', () => {
+      renderAt('/');
+
+      fireEvent.change(screen.getByLabelText(/quick connect/i), {
+        target: { value: 'redis://localhost.:6379' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+
+      expect(screen.getByText(/localhost is not reachable from the cloud/i)).toBeInTheDocument();
+      expect(fetchApi).not.toHaveBeenCalledWith('/connections', expect.anything());
+    });
+
     it('still connects to a fully qualified host', async () => {
       installFetch({ onConnections: () => Promise.resolve({ id: 'conn-1' }) });
       renderAt('/');
