@@ -37,7 +37,7 @@ describe('scanSessions', () => {
 
     expect(result.scannedKeys).toBe(10000);
     expect(result.truncated).toBe(true);
-    expect(client.callsOf('scan')).toHaveLength(2);
+    expect(client.callsOf('scan')).toHaveLength(3);
     expect(result.sessions).toEqual([expect.objectContaining({ sessionId: 'a', keyCount: 10000 })]);
   });
 
@@ -62,7 +62,7 @@ describe('scanSessions', () => {
 
     expect(result.scannedKeys).toBe(10000);
     expect(result.truncated).toBe(true);
-    expect(nodes[2].callsOf('scan')).toHaveLength(0);
+    expect(nodes[2].callsOf('scan')).toHaveLength(1);
     expect(nodes.every((n) => n.disconnected)).toBe(true);
   });
 
@@ -84,6 +84,37 @@ describe('scanSessions', () => {
 
     const result = await scanSessions(fakeDb(client), 's:*', preset, { keyCap: 2 });
 
+    expect(result.truncated).toBe(false);
+  });
+
+  it('is not truncated when the cap fills at a page boundary and nothing follows', async () => {
+    const client = new FakeValkey();
+    client.scanPages = [keyRange(0, 2), []];
+    for (const key of client.scanPages[0]) client.store.set(key, { type: 'string' });
+
+    const result = await scanSessions(fakeDb(client), 's:*', preset, { keyCap: 2 });
+
+    expect(result.scannedKeys).toBe(2);
+    expect(result.truncated).toBe(false);
+  });
+
+  it('is not truncated when the cap fills on a primary and the rest are empty', async () => {
+    const pages = [keyRange(0, 2), []];
+    const nodes = pages.map((page) => {
+      const node = new FakeValkey();
+      node.scanPages = [page];
+      for (const key of page) node.store.set(key, { type: 'string' });
+      return node;
+    });
+    const byPort: Record<number, FakeValkey> = { 7001: nodes[0], 7002: nodes[1] };
+    ValkeyMock.mockImplementation((opts: { port: number }) => byPort[opts.port]);
+    const db = fakeDb(new FakeValkey(), {
+      nodes: [masterNode('a', '10.0.0.1:7001'), masterNode('b', '10.0.0.2:7002')],
+    });
+
+    const result = await scanSessions(db, 's:*', preset, { keyCap: 2 });
+
+    expect(result.scannedKeys).toBe(2);
     expect(result.truncated).toBe(false);
   });
 

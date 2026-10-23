@@ -63,7 +63,7 @@ async function scanNode(
       }
       seen.add(key);
     }
-  } while (cursor !== '0' && seen.size < limit);
+  } while (cursor !== '0' && !overflowed);
   return { keys: [...seen], exhausted: cursor === '0' && !overflowed };
 }
 
@@ -79,16 +79,15 @@ async function scanAll(
   let failed = 0;
   let lastError: unknown;
 
-  for (const [index, client] of clients.entries()) {
-    if (scannedKeys >= keyCap) {
-      truncated = true;
-      break;
-    }
+  for (const client of clients) {
     try {
       const { keys, exhausted } = await scanNode(client, pattern, keyCap - scannedKeys, accept);
       scannedKeys += keys.length;
-      if (!exhausted || (scannedKeys >= keyCap && index < clients.length - 1)) truncated = true;
       nodes.push({ client, keys });
+      if (!exhausted) {
+        truncated = true;
+        break;
+      }
     } catch (err) {
       failed++;
       lastError = err;
