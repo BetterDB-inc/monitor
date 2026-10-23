@@ -105,18 +105,32 @@ export function matchSessionTemplate(template: SessionTemplate, key: string): st
   const last = literals[literals.length - 1];
   if (key.length < first.length + last.length) return null;
   if (!key.startsWith(first) || !key.endsWith(last)) return null;
+  const sessionGap = gaps.indexOf('session');
+  const start = first.length;
   const end = key.length - last.length;
-  let pos = first.length;
-  let session: string | null = null;
-  for (let i = 0; i < gaps.length; i++) {
-    const isLast = i === gaps.length - 1;
-    const next = literals[i + 1];
-    const stop = isLast ? end : key.indexOf(next, pos);
-    if (stop < 0 || stop > end || (!isLast && stop + next.length > end)) return null;
-    if (gaps[i] === 'session') session = key.slice(pos, stop);
-    pos = isLast ? end : stop + next.length;
+
+  let right = end;
+  for (let i = gaps.length - 1; i > sessionGap; i--) {
+    const at = key.lastIndexOf(literals[i], right - literals[i].length);
+    if (at < start || at + literals[i].length > right) return null;
+    right = at;
   }
-  return session || null;
+
+  let sessionStart = start;
+  let bound = right - 1;
+  for (let i = sessionGap; i > 0; i--) {
+    const at = key.lastIndexOf(literals[i], bound - literals[i].length);
+    if (at < start || at + literals[i].length > bound) return null;
+    if (i === sessionGap) sessionStart = at + literals[i].length;
+    bound = at;
+  }
+
+  let sessionEnd = end;
+  if (sessionGap < gaps.length - 1) {
+    sessionEnd = key.indexOf(literals[sessionGap + 1], sessionStart + 1);
+    if (sessionEnd < 0) return null;
+  }
+  return sessionStart < sessionEnd ? key.slice(sessionStart, sessionEnd) : null;
 }
 
 const isNonEmptyString = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
@@ -212,11 +226,20 @@ const parseIfJson = (v: unknown): unknown => {
   }
 };
 
-const fieldOrder = new Intl.Collator('en', { numeric: true });
+const NUMBERED = /^(.*?)(\d+)$/;
+
+function compareFieldNames(a: string, b: string): number {
+  const na = NUMBERED.exec(a);
+  const nb = NUMBERED.exec(b);
+  if (na && nb && na[1] === nb[1] && na[2].length !== nb[2].length) {
+    return Number(na[2]) - Number(nb[2]);
+  }
+  return a < b ? -1 : a > b ? 1 : 0;
+}
 
 const byFieldName = (hash: Record<string, unknown>): unknown[] =>
   Object.entries(hash)
-    .sort(([a], [b]) => fieldOrder.compare(a, b))
+    .sort(([a], [b]) => compareFieldNames(a, b))
     .map(([, value]) => value);
 
 function readRoot(k: CapturedKey, valueType: CustomSchema['valueType']): unknown {

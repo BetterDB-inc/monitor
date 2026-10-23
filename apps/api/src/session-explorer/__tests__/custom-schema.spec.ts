@@ -204,6 +204,9 @@ describe('custom preset', () => {
     expect(t('app:{session}:messages', 'app:t1:meta')).toBeNull();
     expect(t('app:{session}:*', 'app:t1:meta:2')).toBe('t1');
     expect(t('*:session:{session}:*', 'cache:session:t1:last')).toBe('t1');
+    expect(t('*:session:{session}:*', 'app:session:store:session:t1:checkpoint:abc')).toBe('t1');
+    expect(t('*:{session}:*', 'a:b:c:d')).toBe('c');
+    expect(t('*:session:{session}', 'a:session:b:session:')).toBe('b:session:');
     expect(t('{session}', 'anything')).toBe('anything');
     expect(t('ab{session}ba', 'aba')).toBeNull();
   });
@@ -373,6 +376,24 @@ describe('custom preset', () => {
       'two',
       'ten',
     ]);
+  });
+
+  it('orders time-sortable ids in hash items by byte order', () => {
+    const preset = createCustomPreset({
+      valueType: 'hash',
+      messages: { from: 'items' },
+      fields: { role: 'role', content: 'text' },
+    });
+    const msg = (text: string) => JSON.stringify({ role: 'user', text });
+    for (const [first, second] of [
+      ['0190a3b2-10ab', '0190a3b2-9fff'],
+      ['01J9X99A', '01J9X9A0'],
+    ]) {
+      const view = preset.parseKey(
+        key({ type: 'hash', value: { [second]: msg('second'), [first]: msg('first') } }),
+      );
+      expect(view.parsed && view.messages.map((m) => m.content)).toEqual(['first', 'second']);
+    }
   });
 
   it('registry requires a schema for custom', () => {
