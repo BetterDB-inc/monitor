@@ -71,6 +71,27 @@ describe('SessionExplorerService.getSession', () => {
     });
   });
 
+  it('reads only the keys the preset selects from their names', async () => {
+    storage.getSessionNamespace.mockResolvedValueOnce({ ...ns, preset: 'agent-cache' });
+    const p = 'ac:session:t1';
+    keysFor.mockResolvedValue({
+      keys: [
+        `${p}:checkpoint:1f0-a`,
+        `${p}:checkpoint:1f0-b`,
+        `${p}:__checkpoint_latest`,
+        `${p}:writes:1f0-a|task-1|messages|0`,
+        `${p}:writes:1f0-b|task-2|messages|0`,
+      ],
+      truncated: false,
+      failedNodes: 0,
+    });
+    await service.getSession('conn-1', 'ns-1', 't1');
+    expect(read).toHaveBeenLastCalledWith(expect.anything(), [
+      `${p}:__checkpoint_latest`,
+      `${p}:writes:1f0-b|task-2|messages|0`,
+    ]);
+  });
+
   it('is incomplete when the key scan was capped', async () => {
     keysFor.mockResolvedValue({ keys: ['lc:1'], truncated: true, failedNodes: 0 });
     expect(await service.getSession('conn-1', 'ns-1', 'lc:1')).toMatchObject({
