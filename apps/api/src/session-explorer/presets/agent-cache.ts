@@ -1,6 +1,16 @@
 import type { CapturedKey, KeyView, ParsedMessage } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
-import { fail, guardedParse, isRecord, parseJson, textContent, toolUseCalls } from './text';
+import {
+  chatRole,
+  fail,
+  guardedParse,
+  isRecord,
+  parseJson,
+  parseToolCalls,
+  textContent,
+  toolResultOf,
+  toolUseCalls,
+} from './text';
 
 const SESSION_MARKER = ':session:';
 const CHECKPOINT_MARKER = ':checkpoint:';
@@ -24,26 +34,8 @@ const CHAT_CONSTRUCTORS = new Set(['ChatMessage', 'ChatMessageChunk']);
 
 function roleOf(constructorName: unknown, kwargs: Record<string, unknown>): string {
   if (typeof constructorName !== 'string') return fail('Unknown message constructor');
-  if (CHAT_CONSTRUCTORS.has(constructorName)) {
-    return typeof kwargs.role === 'string' && kwargs.role !== '' ? kwargs.role : 'chat';
-  }
+  if (CHAT_CONSTRUCTORS.has(constructorName)) return chatRole(kwargs.role);
   return ROLE_BY_CONSTRUCTOR.get(constructorName) ?? fail('Unknown message constructor');
-}
-
-function parseToolCalls(raw: unknown): ParsedMessage['toolCalls'] {
-  if (raw === undefined || raw === null) return undefined;
-  if (!Array.isArray(raw)) return fail('tool_calls is not a list');
-  if (raw.length === 0) return undefined;
-  return raw.map((call) => {
-    if (!isRecord(call) || typeof call.name !== 'string') {
-      return fail('Malformed tool call');
-    }
-    return {
-      name: call.name,
-      args: call.args,
-      ...(typeof call.id === 'string' ? { id: call.id } : {}),
-    };
-  });
 }
 
 function parseMessage(entry: unknown): ParsedMessage {
@@ -61,13 +53,7 @@ function parseMessage(entry: unknown): ParsedMessage {
   const message: ParsedMessage = { role, content: textContent(kwargs.content) };
   const toolCalls = parseToolCalls(kwargs.tool_calls) ?? toolUseCalls(kwargs.content);
   if (toolCalls) message.toolCalls = toolCalls;
-  if (role === 'tool') {
-    message.toolResult = {
-      ...(typeof kwargs.name === 'string' ? { name: kwargs.name } : {}),
-      content: message.content,
-      ...(typeof kwargs.tool_call_id === 'string' ? { callId: kwargs.tool_call_id } : {}),
-    };
-  }
+  if (role === 'tool') message.toolResult = toolResultOf(message.content, kwargs);
   return message;
 }
 

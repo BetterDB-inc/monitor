@@ -1,6 +1,14 @@
 import type { CapturedKey, CustomSchema, ParsedMessage } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
-import { fail, failedView, guardedParse, isRecord, parseJson, textContent } from './text';
+import {
+  concatSession,
+  fail,
+  failedView,
+  guardedParse,
+  isRecord,
+  parseJson,
+  textContent,
+} from './text';
 
 const VALUE_TYPES = ['list', 'string', 'hash', 'json'] as const;
 const MESSAGE_SOURCES = ['items', 'path', 'key'] as const;
@@ -298,6 +306,6 @@ export function createCustomPreset(schema: CustomSchema): PresetDefinition {
         ),
       );
     },
-    mergeSession: (views) => views.flatMap((v) => (v.parsed ? v.messages : [])),
+    mergeSession: concatSession,
   };
 }

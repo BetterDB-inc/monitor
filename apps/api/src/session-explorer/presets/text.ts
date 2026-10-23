@@ -1,4 +1,5 @@
 import type { CapturedKey, KeyView, ParsedMessage } from '@betterdb/shared';
+import type { PresetDefinition } from './types';
 
 const MAX_UTF8_TAIL = 3;
 
@@ -124,3 +125,41 @@ export function toolUseCalls(content: unknown): ParsedMessage['toolCalls'] {
     ...(typeof part.id === 'string' ? { id: part.id } : {}),
   }));
 }
+
+export type ToolCall = NonNullable<ParsedMessage['toolCalls']>[number];
+
+function langchainToolCall(call: unknown): ToolCall {
+  if (!isRecord(call) || typeof call.name !== 'string') {
+    return fail('Malformed tool call');
+  }
+  return {
+    name: call.name,
+    args: call.args,
+    ...(typeof call.id === 'string' ? { id: call.id } : {}),
+  };
+}
+
+export function parseToolCalls(
+  raw: unknown,
+  parseCall: (call: unknown) => ToolCall = langchainToolCall,
+): ParsedMessage['toolCalls'] {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) return fail('tool_calls is not a list');
+  if (raw.length === 0) return undefined;
+  return raw.map(parseCall);
+}
+
+export const chatRole = (role: unknown): string =>
+  typeof role === 'string' && role !== '' ? role : 'chat';
+
+export const toolResultOf = (
+  content: string,
+  source: Record<string, unknown>,
+): ParsedMessage['toolResult'] => ({
+  ...(typeof source.name === 'string' ? { name: source.name } : {}),
+  content,
+  ...(typeof source.tool_call_id === 'string' ? { callId: source.tool_call_id } : {}),
+});
+
+export const concatSession: PresetDefinition['mergeSession'] = (views) =>
+  views.flatMap((v) => (v.parsed ? v.messages : []));

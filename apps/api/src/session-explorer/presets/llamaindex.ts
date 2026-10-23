@@ -1,6 +1,16 @@
 import type { ParsedMessage } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
-import { fail, guardedParse, isRecord, parseJson, textContent } from './text';
+import {
+  concatSession,
+  fail,
+  guardedParse,
+  isRecord,
+  parseJson,
+  parseToolCalls,
+  textContent,
+  toolResultOf,
+  type ToolCall,
+} from './text';
 
 const ROLE_MAP = new Map([
   ['user', 'human'],
@@ -12,8 +22,6 @@ const ROLE_MAP = new Map([
   ['chatbot', 'ai'],
   ['model', 'ai'],
 ]);
-
-type ToolCall = NonNullable<ParsedMessage['toolCalls']>[number];
 
 function blocksText(blocks: unknown): string {
   if (!Array.isArray(blocks)) return fail('blocks is not a list');
@@ -52,13 +60,6 @@ function parseToolCall(call: unknown): ToolCall {
   return fail('Malformed tool call');
 }
 
-function parseToolCalls(raw: unknown): ParsedMessage['toolCalls'] {
-  if (raw === undefined || raw === null) return undefined;
-  if (!Array.isArray(raw)) return fail('tool_calls is not a list');
-  if (raw.length === 0) return undefined;
-  return raw.map(parseToolCall);
-}
-
 function blockToolCalls(blocks: unknown[]): ParsedMessage['toolCalls'] {
   const calls = blocks.filter(
     (block): block is Record<string, unknown> =>
@@ -87,16 +88,10 @@ function parseElement(element: unknown): ParsedMessage {
   const content = legacy ? textContent(msg.content ?? '') : blocksText(msg.blocks);
   const message: ParsedMessage = { role, content };
   const toolCalls =
-    parseToolCalls(extras.tool_calls) ??
+    parseToolCalls(extras.tool_calls, parseToolCall) ??
     (legacy ? undefined : blockToolCalls(msg.blocks as unknown[]));
   if (toolCalls) message.toolCalls = toolCalls;
-  if (role === 'tool') {
-    message.toolResult = {
-      ...(typeof extras.name === 'string' ? { name: extras.name } : {}),
-      content: message.content,
-      ...(typeof extras.tool_call_id === 'string' ? { callId: extras.tool_call_id } : {}),
-    };
-  }
+  if (role === 'tool') message.toolResult = toolResultOf(message.content, extras);
   return message;
 }
 
@@ -109,6 +104,5 @@ export const llamaindexPreset: PresetDefinition = {
       if (k.type !== 'list' || !Array.isArray(k.value)) return fail('Expected a list value');
       return k.value.map(parseElement);
     }),
-  mergeSession: (views) =>
-    views.flatMap((v) => (v.parsed ? v.messages : [])),
+  mergeSession: concatSession,
 };
