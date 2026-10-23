@@ -162,10 +162,12 @@ describe('MigrationValidationService', () => {
       expect(clusterRegistry.mockAdapter.getInfo).toHaveBeenCalledWith(['cluster']);
     });
 
-    it('counts a cluster source through a cluster client, not the seed node alone', async () => {
+    it('counts and samples a cluster source through a cluster client, not the seed node alone', async () => {
       const { compareKeyCounts } = jest.requireMock('../validation/key-count-comparator');
+      const { validateSample } = jest.requireMock('../validation/sample-validator');
       const { Cluster } = jest.requireMock('iovalkey');
       compareKeyCounts.mockClear();
+      validateSample.mockClear();
       Cluster.mockClear();
 
       const sourceAdapter = {
@@ -182,9 +184,31 @@ describe('MigrationValidationService', () => {
 
       expect(service.getValidation(id)!.status).toBe('completed');
       expect(Cluster).toHaveBeenCalledTimes(1);
-      const sourceCountClient = Cluster.mock.results[0].value;
-      expect(compareKeyCounts).toHaveBeenCalledWith(sourceCountClient, expect.anything(), undefined);
-      expect(sourceCountClient.quit).toHaveBeenCalled();
+      const sourceClusterClient = Cluster.mock.results[0].value;
+      expect(compareKeyCounts).toHaveBeenCalledWith(sourceClusterClient, expect.anything(), undefined);
+      expect(validateSample).toHaveBeenCalledWith(sourceClusterClient, expect.anything(), 500);
+      expect(sourceClusterClient.quit).toHaveBeenCalled();
+    });
+
+    it('samples a standalone source through its own client', async () => {
+      const { validateSample } = jest.requireMock('../validation/sample-validator');
+      const Valkey = jest.requireMock('iovalkey');
+      const { Cluster } = Valkey;
+      validateSample.mockClear();
+      Valkey.mockClear();
+      Cluster.mockClear();
+
+      const { id } = await service.startValidation({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+      });
+      await new Promise(r => setTimeout(r, 100));
+
+      expect(service.getValidation(id)!.status).toBe('completed');
+      expect(Cluster).not.toHaveBeenCalled();
+      // createClient(source) is the first standalone client the job builds.
+      const sourceClient = Valkey.mock.results[0].value;
+      expect(validateSample).toHaveBeenCalledWith(sourceClient, expect.anything(), 500);
     });
 
     it('should use Phase 1 analysis result when analysisId provided', async () => {
