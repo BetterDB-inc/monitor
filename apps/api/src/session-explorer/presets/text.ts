@@ -112,6 +112,8 @@ export function textContent(content: unknown): string {
   return fail('Message content is not text');
 }
 
+export const withId = (id: unknown) => (typeof id === 'string' ? { id } : {});
+
 export function toolUseCalls(content: unknown): ParsedMessage['toolCalls'] {
   if (!Array.isArray(content)) return undefined;
   const calls = content.filter(
@@ -122,7 +124,7 @@ export function toolUseCalls(content: unknown): ParsedMessage['toolCalls'] {
   return calls.map((part) => ({
     name: part.name as string,
     args: part.input,
-    ...(typeof part.id === 'string' ? { id: part.id } : {}),
+    ...withId(part.id),
   }));
 }
 
@@ -135,7 +137,7 @@ function langchainToolCall(call: unknown): ToolCall {
   return {
     name: call.name,
     args: call.args,
-    ...(typeof call.id === 'string' ? { id: call.id } : {}),
+    ...withId(call.id),
   };
 }
 

@@ -10,6 +10,7 @@ import {
   textContent,
   toolResultOf,
   type ToolCall,
+  withId,
 } from './text';
 
 const ROLE_MAP = new Map([
@@ -38,8 +39,6 @@ function blocksText(blocks: unknown): string {
     })
     .join('\n');
 }
-
-const withId = (id: unknown) => (typeof id === 'string' ? { id } : {});
 
 function argsOf(args: unknown): unknown {
   if (isRecord(args)) return args;
