@@ -35,7 +35,7 @@ const isServingPrimary =(node: ClusterNode) =>
 function nodeClient(parent: Valkey, node: ClusterNode): Valkey | null {
   const address = parseNodeAddress(node.address);
   if (!address) return null;
-  const { username, password, tls } = parent.options;
+  const { username, password, tls, commandTimeout } = parent.options;
   const {
     servername: _servername,
     checkServerIdentity: _checkServerIdentity,
@@ -48,6 +48,7 @@ function nodeClient(parent: Valkey, node: ClusterNode): Valkey | null {
     password,
     tls: tls ? { ...nodeTls, ...tlsIdentityOptions(address.host, node.hostname) } : undefined,
     ...READER_OPTIONS,
+    commandTimeout,
   });
   client.on('error', () => undefined);
   return client;
