@@ -1,4 +1,4 @@
-import type { CapturedKey, KeyView, ParsedMessage } from '@betterdb/shared';
+import { escapeGlob, type CapturedKey, type KeyView, type ParsedMessage } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
 import {
   chatRole,
@@ -156,8 +156,6 @@ function sessionIdOf(key: string): string | null {
   if (at < 0) return null;
   return prefix.slice(at + SESSION_MARKER.length) || null;
 }
-
-const escapeGlob = (text: string) => text.replace(/\\/g, '\\\\').replace(/([*?[\]])/g, '\\$1');
 
 const defaultPattern = (prefix: string) =>
   `${escapeGlob(prefix.replace(/:+$/, ''))}${SESSION_MARKER}*`;

@@ -14,6 +14,7 @@ export * from './types/agent-protocol';
 export * from './utils/key-patterns';
 export * from './utils/key-sizes';
 export * from './utils/url-credentials';
+export * from './utils/glob';
 export * from './license/index';
 export * from './auth/broker';
 export * from './webhooks/index';
