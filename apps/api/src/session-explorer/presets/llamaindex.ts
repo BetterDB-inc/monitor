@@ -1,4 +1,4 @@
-import type { ParsedMessage } from '@betterdb/shared';
+import { escapeGlob, type ParsedMessage } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
 import {
   concatSession,
@@ -98,7 +98,7 @@ function parseElement(element: unknown): ParsedMessage {
 
 export const llamaindexPreset: PresetDefinition = {
   id: 'llamaindex',
-  defaultPattern: (prefix) => `${prefix}*`,
+  defaultPattern: (prefix) => `${escapeGlob(prefix)}*`,
   sessionIdOf: (key) => key,
   parseKey: (k) =>
     guardedParse(k, () => {

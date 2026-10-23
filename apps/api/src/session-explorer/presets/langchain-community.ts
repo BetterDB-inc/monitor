@@ -1,4 +1,4 @@
-import type { ParsedMessage } from '@betterdb/shared';
+import { escapeGlob, type ParsedMessage } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
 import {
   chatRole,
@@ -50,7 +50,7 @@ function parseElement(element: unknown): ParsedMessage {
 
 export const langchainCommunityPreset: PresetDefinition = {
   id: 'langchain-community',
-  defaultPattern: (prefix) => `${prefix}*`,
+  defaultPattern: (prefix) => `${escapeGlob(prefix)}*`,
   sessionIdOf: (key) => key,
   parseKey: (k) =>
     guardedParse(k, () => {

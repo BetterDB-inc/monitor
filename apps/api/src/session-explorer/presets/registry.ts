@@ -1,4 +1,10 @@
-import type { CapturedKey, CustomSchema, KeyView, PresetId } from '@betterdb/shared';
+import {
+  escapeGlob,
+  type CapturedKey,
+  type CustomSchema,
+  type KeyView,
+  type PresetId,
+} from '@betterdb/shared';
 import type { PresetDefinition } from './types';
 import { agentCachePreset } from './agent-cache';
 import { langchainCommunityPreset } from './langchain-community';
@@ -9,12 +15,12 @@ import { failedView } from './text';
 const langchainJsPreset: PresetDefinition = {
   ...langchainCommunityPreset,
   id: 'langchain-js',
-  defaultPattern: (prefix) => `${prefix}*`,
+  defaultPattern: (prefix) => `${escapeGlob(prefix)}*`,
 };
 
 const rawPreset: PresetDefinition = {
   id: 'raw',
-  defaultPattern: (prefix) => `${prefix}*`,
+  defaultPattern: (prefix) => `${escapeGlob(prefix)}*`,
   sessionIdOf: (key) => key,
   parseKey: (k) => failedView(k, 'No schema configured'),
   mergeSession: () => [],

@@ -283,6 +283,22 @@ describe('session presets against captured fixtures', () => {
     expect(js.defaultPattern('app:')).toBe('app:*');
   });
 
+  it.each(['langchain-community', 'langchain-js', 'llamaindex', 'raw'] as const)(
+    '%s default pattern escapes the prefix',
+    (id) => {
+      expect(getPreset(id).defaultPattern('tenant[1]*:')).toBe('tenant\\[1\\]\\*:*');
+    },
+  );
+
+  it('custom default pattern escapes the prefix', () => {
+    const preset = createCustomPreset({
+      valueType: 'list',
+      messages: { from: 'items' },
+      fields: { role: 'role', content: 'content' },
+    });
+    expect(preset.defaultPattern('tenant[1]?:')).toBe('tenant\\[1\\]\\?:*');
+  });
+
   it('raw preset never parses', () => {
     const preset = getPreset('raw');
     expect(preset.sessionIdOf('a:b')).toBe('a:b');

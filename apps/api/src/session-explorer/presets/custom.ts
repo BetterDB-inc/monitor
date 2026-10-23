@@ -1,4 +1,9 @@
-import type { CapturedKey, CustomSchema, ParsedMessage } from '@betterdb/shared';
+import {
+  escapeGlob,
+  type CapturedKey,
+  type CustomSchema,
+  type ParsedMessage,
+} from '@betterdb/shared';
 import type { PresetDefinition } from './types';
 import {
   concatSession,
@@ -328,7 +333,7 @@ export function createCustomPreset(schema: CustomSchema): PresetDefinition {
   const open = schema.valueType === 'hash' ? parseIfJson : asIs;
   return {
     id: 'custom',
-    defaultPattern: (prefix) => `${prefix}*`,
+    defaultPattern: (prefix) => `${escapeGlob(prefix)}*`,
     sessionIdOf: (key) => (template ? matchSessionTemplate(template, key) : key),
     parseKey: (k) => {
       if (!expectedTypes.includes(k.type)) {
