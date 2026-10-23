@@ -216,7 +216,9 @@ export class SessionExplorerService {
     return namespace;
   }
 
-  private presetOf(ns: Pick<SessionNamespace, 'preset' | 'customSchema'>): PresetDefinition {
-    return getPreset(ns.preset, ns.customSchema);
+  private presetOf(
+    ns: Pick<SessionNamespace, 'preset' | 'customSchema' | 'pattern'>,
+  ): PresetDefinition {
+    return getPreset(ns.preset, ns.customSchema, ns.pattern);
   }
 }

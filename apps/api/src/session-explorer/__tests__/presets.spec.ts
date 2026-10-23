@@ -162,11 +162,53 @@ describe('session presets against captured fixtures', () => {
     expect(preset.sessionIdOf('sxfix:ac:session:t1:checkpoint:abc')).toBe('t1');
     expect(preset.sessionIdOf('sxfix:ac:session:t1:writes:abc%7Ctask%7Cmessages%7C0')).toBe('t1');
     expect(preset.sessionIdOf('sxfix:ac:session:t1:last_intent')).toBe('t1');
-    expect(preset.sessionIdOf('app:session:store:session:t1:checkpoint:abc')).toBe('t1');
-    expect(preset.sessionIdOf('app:session:store:session:t1:last_intent')).toBe('t1');
+    expect(preset.sessionIdOf('app:session:store:session:t1:checkpoint:abc')).toBe(
+      'store:session:t1',
+    );
     expect(preset.sessionIdOf('sxfix:ac:session::last_intent')).toBeNull();
     expect(preset.sessionIdOf('other:session:t1')).toBeNull();
     expect(preset.defaultPattern('sxfix:ac')).toBe('sxfix:ac:session:*');
+  });
+
+  it('agent-cache reads the thread id after the namespace prefix', () => {
+    const preset = getPreset('agent-cache', null, 'app:session:*');
+    expect(preset.sessionIdOf('app:session:t1:prefs:lang')).toBe('t1');
+    expect(preset.sessionIdOf('app:session:t1:last_intent')).toBe('t1');
+    expect(preset.sessionIdOf('app:session:run:checkpoint:7:checkpoint:abc')).toBe('run:checkpoint:7');
+    expect(preset.sessionIdOf('app:session:run:checkpoint:7:__checkpoint_latest')).toBe(
+      'run:checkpoint:7',
+    );
+    expect(preset.sessionIdOf('app:session:run:checkpoint:7:writes:abc|task|messages|0')).toBe(
+      'run:checkpoint:7',
+    );
+    expect(preset.sessionIdOf('app:session:run:writes:x:checkpoint:abc')).toBe('run:writes:x');
+    expect(preset.sessionIdOf('app:session:t1:checkpoint:abc')).toBe('t1');
+    expect(preset.sessionIdOf('app:session:store:session:t1:checkpoint:abc')).toBe(
+      'store:session:t1',
+    );
+    expect(preset.sessionIdOf('app:session:store:session:t1:last_intent')).toBe('store');
+    expect(preset.sessionIdOf('other:session:t1:checkpoint:abc')).toBeNull();
+    expect(preset.sessionIdOf('app:session::last_intent')).toBeNull();
+  });
+
+  it('agent-cache takes the namespace prefix from an escaped or narrowed pattern', () => {
+    const escaped = getPreset('agent-cache', null, 'tenant\\[1\\]:session:*');
+    expect(escaped.sessionIdOf('tenant[1]:session:t1:prefs:lang')).toBe('t1');
+    const narrowed = getPreset('agent-cache', null, 'app:session:t*');
+    expect(narrowed.sessionIdOf('app:session:t1:prefs:lang')).toBe('t1');
+  });
+
+  it('agent-cache tells writes and checkpoints apart by the rightmost marker', () => {
+    const preset = getPreset('agent-cache', null, 'app:session:*');
+    const p = 'app:session:run:checkpoint:7';
+    expect(
+      preset.selectKeys!([
+        `${p}:checkpoint:a`,
+        `${p}:checkpoint:b`,
+        `${p}:writes:a|t|messages|0`,
+        `${p}:writes:b|t|messages|0`,
+      ]),
+    ).toEqual([`${p}:checkpoint:b`, `${p}:writes:b|t|messages|0`]);
   });
 
   it('agent-cache default pattern accepts a trailing colon and escapes the name', () => {
@@ -283,6 +325,22 @@ describe('session presets against captured fixtures', () => {
     expect(js.defaultPattern('app:')).toBe('app:*');
   });
 
+  it.each(['langchain-community', 'langchain-js', 'llamaindex', 'raw'] as const)(
+    '%s default pattern escapes the prefix',
+    (id) => {
+      expect(getPreset(id).defaultPattern('tenant[1]*:')).toBe('tenant\\[1\\]\\*:*');
+    },
+  );
+
+  it('custom default pattern escapes the prefix', () => {
+    const preset = createCustomPreset({
+      valueType: 'list',
+      messages: { from: 'items' },
+      fields: { role: 'role', content: 'content' },
+    });
+    expect(preset.defaultPattern('tenant[1]?:')).toBe('tenant\\[1\\]\\?:*');
+  });
+
   it('raw preset never parses', () => {
     const preset = getPreset('raw');
     expect(preset.sessionIdOf('a:b')).toBe('a:b');
@@ -318,6 +376,19 @@ describe('decodeValue', () => {
   it('strips a leading UTF-8 BOM so JSON values still parse', () => {
     const buf = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('{"a":1}')]);
     expect(decodeValue(buf, 1024)).toEqual({ value: '{"a":1}', binary: false, truncated: false });
+  });
+
+  it('reports invalid bytes at the cap as binary', () => {
+    for (const bytes of [[0x61, 0xff, 0x62], [0x61, 0x80, 0x62], [0x61, 0xc3, 0xc3, 0x62]]) {
+      const result = decodeValue(Buffer.from(bytes), bytes.length - 1);
+      expect(result).toMatchObject({ binary: true, truncated: true });
+    }
+  });
+
+  it('trims every incomplete multibyte character at the cap', () => {
+    expect(decodeValue(Buffer.from('a€', 'utf8'), 2).value).toBe('a');
+    expect(decodeValue(Buffer.from('a€', 'utf8'), 3).value).toBe('a');
+    expect(decodeValue(Buffer.from('a😀', 'utf8'), 4)).toMatchObject({ value: 'a', binary: false });
   });
 
   it('does not report a multibyte cut at the cap as binary', () => {
@@ -363,12 +434,37 @@ describe('presets with content blocks beyond text', () => {
       ]),
     );
     const [human, ai] = parsedMessages(view);
-    expect(human.content).toBe('What is this?[image_url]');
+    expect(human.content).toBe('What is this?\n[image_url]');
     expect(ai).toEqual({
       role: 'ai',
       content: 'Let me check',
       toolCalls: [{ name: 'get_weather', args: { city: 'Sofia' }, id: 'toolu_1' }],
     });
+  });
+
+  it('langchain keeps text blocks apart and hides v1 tool_call blocks', () => {
+    const view = getPreset('langchain-community').parseKey(
+      listKey([
+        {
+          type: 'ai',
+          data: {
+            content: [
+              { type: 'text', text: 'First.' },
+              { type: 'text', text: 'Second.' },
+              { type: 'tool_call', id: 'call_1', name: 'lookup', args: { q: 1 } },
+            ],
+            tool_calls: [{ name: 'lookup', args: { q: 1 }, id: 'call_1' }],
+          },
+        },
+      ]),
+    );
+    expect(parsedMessages(view)).toEqual([
+      {
+        role: 'ai',
+        content: 'First.\nSecond.',
+        toolCalls: [{ name: 'lookup', args: { q: 1 }, id: 'call_1' }],
+      },
+    ]);
   });
 
   it('langchain prefers tool_calls over tool_use blocks when both are present', () => {
@@ -499,6 +595,55 @@ describe('presets with content blocks beyond text', () => {
     it('matches writes by URL-decoded checkpoint id', () => {
       const encoded = [`${p}:checkpoint:a|b`, `${p}:writes:a%7Cb|t|messages|0`];
       expect(preset.selectKeys!(encoded)).toEqual(encoded);
+    });
+
+    it('reads pending writes in the raw forms add_messages accepts', () => {
+      const write = (value: unknown) =>
+        parsedMessages(
+          preset.parseKey(str(`${p}:writes:1f0-b|task-9|messages|0`, JSON.stringify(value))),
+        );
+      expect(write([{ role: 'user', content: 'hi' }])).toEqual([{ role: 'human', content: 'hi' }]);
+      expect(write({ role: 'developer', content: 'rules' })).toEqual([
+        { role: 'system', content: 'rules' },
+      ]);
+      expect(
+        write({ type: 'ai', content: 'ok', tool_calls: [{ name: 'lookup', args: { q: 1 }, id: 'c1' }] }),
+      ).toEqual([
+        { role: 'ai', content: 'ok', toolCalls: [{ name: 'lookup', args: { q: 1 }, id: 'c1' }] },
+      ]);
+      expect(write([{ role: 'tool', content: '42', name: 'lookup', tool_call_id: 'c1' }])).toEqual([
+        { role: 'tool', content: '42', toolResult: { name: 'lookup', content: '42', callId: 'c1' } },
+      ]);
+      expect(
+        write([
+          ['user', 'hi'],
+          ['assistant', 'yo'],
+        ]),
+      ).toEqual([
+        { role: 'human', content: 'hi' },
+        { role: 'ai', content: 'yo' },
+      ]);
+      expect(write('hello')).toEqual([{ role: 'human', content: 'hello' }]);
+      expect(write(['hello', lc('AIMessage', 'there')])).toEqual([
+        { role: 'human', content: 'hello' },
+        { role: 'ai', content: 'there' },
+      ]);
+    });
+
+    it('merges raw-form pending writes into the session', () => {
+      const raw = str(
+        `${p}:writes:1f0-b|task-4|messages|0`,
+        JSON.stringify([{ role: 'user', content: 'interrupted' }]),
+      );
+      const merged = preset.mergeSession(parseSessionKeys(preset, [...keys, raw]));
+      expect(merged.map((m) => m.content)).toEqual([
+        'hi',
+        'hello',
+        'first a',
+        'first b',
+        'second',
+        'interrupted',
+      ]);
     });
 
     it('appends pending message writes of the newest checkpoint in task and index order', () => {

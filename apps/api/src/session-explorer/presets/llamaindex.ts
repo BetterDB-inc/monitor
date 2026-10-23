@@ -1,4 +1,4 @@
-import type { ParsedMessage } from '@betterdb/shared';
+import { escapeGlob, type ParsedMessage } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
 import {
   concatSession,
@@ -10,6 +10,7 @@ import {
   textContent,
   toolResultOf,
   type ToolCall,
+  withId,
 } from './text';
 
 const ROLE_MAP = new Map([
@@ -38,8 +39,6 @@ function blocksText(blocks: unknown): string {
     })
     .join('\n');
 }
-
-const withId = (id: unknown) => (typeof id === 'string' ? { id } : {});
 
 function argsOf(args: unknown): unknown {
   if (isRecord(args)) return args;
@@ -99,7 +98,7 @@ function parseElement(element: unknown): ParsedMessage {
 
 export const llamaindexPreset: PresetDefinition = {
   id: 'llamaindex',
-  defaultPattern: (prefix) => `${prefix}*`,
+  defaultPattern: (prefix) => `${escapeGlob(prefix)}*`,
   sessionIdOf: (key) => key,
   parseKey: (k) =>
     guardedParse(k, () => {

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import {
   AGENT_CACHE,
   SEMANTIC_CACHE,
+  escapeGlob,
   type AgentInvalidatePayload,
   type AgentToolTtlAdjustPayload,
   type SemanticInvalidatePayload,
@@ -328,10 +329,6 @@ function parseFtSearchKeys(raw: unknown): string[] {
     }
   }
   return keys;
-}
-
-function escapeGlob(value: string): string {
-  return value.replace(/[\\*?[\]]/g, (c) => `\\${c}`);
 }
 
 async function scanAndDelete(client: Valkey, pattern: string): Promise<number> {

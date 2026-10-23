@@ -202,6 +202,32 @@ describe('SessionExplorerService.oversizeSessions', () => {
   });
 });
 
+describe('SessionExplorerService.listSessions', () => {
+  const scan = scanSessions as jest.MockedFunction<typeof scanSessions>;
+
+  it('gives the agent-cache preset the namespace pattern', async () => {
+    const storage = {
+      getSessionNamespace: jest.fn(async () => ({
+        ...ns,
+        preset: 'agent-cache' as const,
+        pattern: 'tenant:session:app:session:*',
+      })),
+    };
+    const service = new SessionExplorerService({ get: jest.fn(() => ({})) } as never, storage as never);
+    scan.mockResolvedValue({
+      sessions: [],
+      scannedKeys: 0,
+      truncated: false,
+      partial: false,
+      failedNodes: 0,
+    });
+    await service.listSessions('conn-1', 'ns-1');
+    const preset = scan.mock.lastCall![2];
+    expect(preset.sessionIdOf('tenant:session:app:session:t1:prefs:lang')).toBe('t1');
+    expect(preset.sessionIdOf('tenant:session:app:session:t1:checkpoint:abc')).toBe('t1');
+  });
+});
+
 describe('SessionExplorerService.preview', () => {
   const input = { name: 'LangChain', pattern: 'lc:*', preset: 'langchain-community' };
   const failing = (message: string) => {

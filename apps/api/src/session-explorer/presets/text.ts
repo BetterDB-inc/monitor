@@ -13,6 +13,21 @@ const tryDecode = (buf: Buffer): string | null => {
   }
 };
 
+const isContinuation = (byte: number) => (byte & 0xc0) === 0x80;
+
+const sequenceLength = (lead: number) =>
+  lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+
+function incompleteTail(buf: Buffer): number {
+  let start = buf.length - 1;
+  while (start > 0 && buf.length - start < MAX_UTF8_TAIL && isContinuation(buf[start])) start--;
+  if (start < 0) return 0;
+  const tail = buf.length - start;
+  const lead = buf[start];
+  if (lead < 0xc2 || lead > 0xf4) return 0;
+  return sequenceLength(lead) > tail ? tail : 0;
+}
+
 export function decodeValue(
   buf: Buffer,
   cap: number,
@@ -24,13 +39,10 @@ export function decodeValue(
   if (full !== null) {
     return { value: full, binary: false, truncated };
   }
-  if (truncated) {
-    for (let trim = 1; trim <= MAX_UTF8_TAIL && trim < slice.length; trim++) {
-      const decoded = tryDecode(slice.subarray(0, slice.length - trim));
-      if (decoded !== null) {
-        return { value: decoded, binary: false, truncated };
-      }
-    }
+  const tail = truncated ? incompleteTail(slice) : 0;
+  const trimmed = tail > 0 ? tryDecode(slice.subarray(0, slice.length - tail)) : null;
+  if (trimmed !== null) {
+    return { value: trimmed, binary: false, truncated };
   }
   return { value: slice.toString('base64'), binary: true, truncated };
 }
@@ -95,23 +107,27 @@ export function parseJson(text: string): unknown {
   return JSON.parse(text);
 }
 
+const TOOL_CALL_BLOCKS = new Set(['tool_use', 'tool_call', 'tool_call_chunk']);
+
 export function textContent(content: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
     return content
-      .map((part) => {
-        if (typeof part === 'string') return part;
+      .flatMap((part) => {
+        if (typeof part === 'string') return [part];
         if (!isRecord(part) || typeof part.type !== 'string') {
           return fail('Unsupported content block');
         }
-        if (part.type === 'text' && typeof part.text === 'string') return part.text;
-        if (part.type === 'tool_use') return '';
-        return `[${part.type}]`;
+        if (part.type === 'text' && typeof part.text === 'string') return [part.text];
+        if (TOOL_CALL_BLOCKS.has(part.type)) return [];
+        return [`[${part.type}]`];
       })
-      .join('');
+      .join('\n');
   }
   return fail('Message content is not text');
 }
+
+export const withId = (id: unknown) => (typeof id === 'string' ? { id } : {});
 
 export function toolUseCalls(content: unknown): ParsedMessage['toolCalls'] {
   if (!Array.isArray(content)) return undefined;
@@ -123,7 +139,7 @@ export function toolUseCalls(content: unknown): ParsedMessage['toolCalls'] {
   return calls.map((part) => ({
     name: part.name as string,
     args: part.input,
-    ...(typeof part.id === 'string' ? { id: part.id } : {}),
+    ...withId(part.id),
   }));
 }
 
@@ -136,7 +152,7 @@ function langchainToolCall(call: unknown): ToolCall {
   return {
     name: call.name,
     args: call.args,
-    ...(typeof call.id === 'string' ? { id: call.id } : {}),
+    ...withId(call.id),
   };
 }
 

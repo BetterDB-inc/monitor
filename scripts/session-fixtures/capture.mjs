@@ -4,7 +4,7 @@ import Valkey from 'iovalkey';
 import { HERE, PASSWORD, assertPort } from './common.mjs';
 
 const OUT_DIR = resolve(HERE, '../../apps/api/test/fixtures/session-explorer');
-const decoder = new TextDecoder('utf-8', { fatal: true });
+const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 function decodeString(buf) {
   try {
@@ -41,10 +41,16 @@ async function readValue(client, key, type) {
       }
       return { value: out };
     }
+    case 'set':
+      return { value: (await client.smembersBuffer(key)).map(decodeElement) };
     case 'ReJSON-RL':
       return { value: JSON.parse(await client.call('JSON.GET', key, '.')) };
-    case 'stream':
-      return { value: await client.xrange(key, '-', '+') };
+    case 'stream': {
+      const entries = await client.xrangeBuffer(key, '-', '+');
+      return {
+        value: entries.map(([id, fields]) => [id.toString(), fields.map(decodeElement)]),
+      };
+    }
     default:
       return { value: null };
   }
