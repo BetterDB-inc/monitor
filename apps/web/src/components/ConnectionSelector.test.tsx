@@ -263,6 +263,22 @@ describe('ConnectionSelector - cloud host checks', () => {
     expect(screen.getByRole('button', { name: 'Test Connection' })).toBeDisabled();
   });
 
+  it('blocks localhost typed with a port', () => {
+    openCloudForm('localhost:6379');
+
+    expect(screen.getByText(/localhost won't work on the cloud/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Test Connection' })).toBeDisabled();
+  });
+
+  it('rejects a single-label host typed with a port', () => {
+    openCloudForm('valkey:6379');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Test Connection' }));
+
+    expect(screen.getByText(/isn't a full hostname/i)).toBeInTheDocument();
+    expect(fetchApi).not.toHaveBeenCalledWith('/connections/test', expect.anything());
+  });
+
   it('rejects a single-label host on Test Connection without calling the API', () => {
     openCloudForm('valkey');
 

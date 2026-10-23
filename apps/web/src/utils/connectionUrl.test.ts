@@ -166,3 +166,22 @@ describe('isLocalhostHost', () => {
     expect(isSingleLabelHost('localhost.')).toBe(false);
   });
 });
+
+describe('host checks on raw Host-field input', () => {
+  it('strips a trailing port before checking', () => {
+    expect(isSingleLabelHost('valkey:6379')).toBe(true);
+    expect(isSingleLabelHost('my-db.example.com:6379')).toBe(false);
+    expect(isLocalhostHost('localhost:6379')).toBe(true);
+    expect(isLocalhostHost('localhost.:6379')).toBe(true);
+    expect(isLocalhostHost('127.0.0.1:6379')).toBe(true);
+    expect(isSingleLabelHost('localhost:6379')).toBe(false);
+  });
+
+  it('keeps bare and bracketed IPv6 addresses intact', () => {
+    expect(isLocalhostHost('::1')).toBe(true);
+    expect(isLocalhostHost('[::1]')).toBe(true);
+    expect(isLocalhostHost('[::1]:6379')).toBe(true);
+    expect(isSingleLabelHost('2001:db8::1')).toBe(false);
+    expect(isSingleLabelHost('[2001:db8::1]:6379')).toBe(false);
+  });
+});
