@@ -1,4 +1,9 @@
-import { QUIT_TIMEOUT_MS, UnifiedDatabaseAdapter } from './unified.adapter';
+import {
+  GRAPH_MEMORY_PROBES_PER_SCAN,
+  GRAPH_MEMORY_TTL_MS,
+  QUIT_TIMEOUT_MS,
+  UnifiedDatabaseAdapter,
+} from './unified.adapter';
 
 // getInfo is exercised in isolation with a mocked client. Object.create bypasses
 // the real constructor (which would open a live Valkey connection).
@@ -183,6 +188,7 @@ describe('UnifiedDatabaseAdapter.collectKeyAnalytics — stale keys', () => {
       pipeline,
     };
     (adapter as unknown as { config: unknown }).config = {};
+    (adapter as unknown as { graphMemoryCache: Map<string, unknown> }).graphMemoryCache = new Map();
     return adapter;
   }
 
@@ -254,6 +260,7 @@ describe('UnifiedDatabaseAdapter.collectKeyAnalytics — multiple logical databa
     };
     (adapter as unknown as { _client: unknown })._client = ownClient;
     (adapter as unknown as { config: unknown }).config = { dbIndex: options.dbIndex };
+    (adapter as unknown as { graphMemoryCache: Map<string, unknown> }).graphMemoryCache = new Map();
     // Object.create bypasses the constructor, so the logger field is unset.
     (adapter as unknown as { logger: unknown }).logger = {
       debug: jest.fn(),
@@ -474,6 +481,7 @@ describe('UnifiedDatabaseAdapter — configured dbIndex', () => {
     };
     (adapter as unknown as { _client: unknown })._client = client;
     (adapter as unknown as { config: unknown }).config = { dbIndex: 5 };
+    (adapter as unknown as { graphMemoryCache: Map<string, unknown> }).graphMemoryCache = new Map();
     (adapter as unknown as { usesTunnel: boolean }).usesTunnel = false;
     (adapter as unknown as { tunnelActive: boolean }).tunnelActive = false;
     (adapter as unknown as { detectCapabilities: unknown }).detectCapabilities = jest
@@ -540,5 +548,160 @@ describe('UnifiedDatabaseAdapter — configured dbIndex', () => {
     // failed attempt.
     expect(client.disconnect).toHaveBeenCalled();
     expect((adapter as unknown as { _client: unknown })._client).toBeNull();
+  });
+});
+
+describe('UnifiedDatabaseAdapter — FalkorDB graph keys', () => {
+  const MB = 1024 * 1024;
+  type Reply = [Error | null, unknown];
+
+  function makeGraphAdapter(opts: {
+    keyType: string;
+    memoryUsage: number;
+    graphMemory: Reply;
+    graphStats: Reply;
+    keys?: string[];
+  }) {
+    const keys = opts.keys ?? ['social'];
+    const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+    const graphCalls: string[] = [];
+    const pipeline = () => {
+      const pipelineCalls: string[] = [];
+      const chain = {
+        memory: () => chain,
+        object: () => chain,
+        ttl: () => chain,
+        type: () => chain,
+        strlen: () => chain,
+        llen: () => chain,
+        hlen: () => chain,
+        scard: () => chain,
+        zcard: () => chain,
+        xlen: () => chain,
+        call: (command: string) => {
+          pipelineCalls.push(command);
+          graphCalls.push(command);
+          return chain;
+        },
+        exec: async () =>
+          pipelineCalls.length > 0
+            ? pipelineCalls.map((command) =>
+                command === 'GRAPH.MEMORY' ? opts.graphMemory : opts.graphStats,
+              )
+            : [
+                [null, opts.memoryUsage],
+                [null, 5],
+                [null, null],
+                [null, -1],
+                [null, opts.keyType],
+              ],
+      };
+      return chain;
+    };
+    (adapter as unknown as { _client: unknown })._client = {
+      dbsize: jest.fn().mockResolvedValue(keys.length),
+      scan: jest.fn().mockResolvedValue(['0', keys]),
+      info: jest.fn().mockResolvedValue(`# Keyspace\r\ndb0:keys=${keys.length},expires=0,avg_ttl=0`),
+      pipeline,
+    };
+    (adapter as unknown as { config: unknown }).config = {};
+    (adapter as unknown as { graphMemoryCache: Map<string, unknown> }).graphMemoryCache = new Map();
+    return { adapter, graphCalls };
+  }
+
+  const graphMemoryReply: Reply = [
+    null,
+    ['total_graph_sz_mb', 3, 'label_matrices_sz_mb', 0, 'amortized_node_attributes_by_label_sz_mb', ['Person', 0]],
+  ];
+  const graphStatsReply: Reply = [null, [['nodeCount + relCount'], [[54995]], ['Cached execution: 0']]];
+
+  it('sizes a graphdata key with GRAPH.MEMORY USAGE and node + edge cardinality', async () => {
+    const { adapter } = makeGraphAdapter({
+      keyType: 'graphdata',
+      memoryUsage: 32,
+      graphMemory: graphMemoryReply,
+      graphStats: graphStatsReply,
+    });
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    expect(result.keyDetails?.[0]).toMatchObject({ keyType: 'graphdata', memoryBytes: 3 * MB, cardinality: 54995 });
+    expect(result.patterns[0].totalMemory).toBe(3 * MB);
+  });
+
+  it('keeps MEMORY USAGE when GRAPH.MEMORY fails or reports under 1 MB', async () => {
+    for (const graphMemory of [
+      [new Error('ERR unknown command'), null] as Reply,
+      [null, ['total_graph_sz_mb', 0]] as Reply,
+    ]) {
+      const { adapter } = makeGraphAdapter({
+          keyType: 'graphdata',
+        memoryUsage: 24,
+        graphMemory,
+        graphStats: [new Error('ERR boom'), null],
+      });
+
+      const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+      expect(result.keyDetails?.[0]).toMatchObject({ memoryBytes: 24, cardinality: null });
+    }
+  });
+
+  it('issues no GRAPH.* commands for non-graph keys', async () => {
+    const { adapter, graphCalls } = makeGraphAdapter({
+      keyType: 'hash',
+      memoryUsage: 32,
+      graphMemory: graphMemoryReply,
+      graphStats: graphStatsReply,
+    });
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    expect(graphCalls).toEqual([]);
+    expect(result.keyDetails?.[0]).toMatchObject({ memoryBytes: 32 });
+  });
+
+  it('reuses a GRAPH.MEMORY result within the TTL and re-measures after it', async () => {
+    const now = jest.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const { adapter, graphCalls } = makeGraphAdapter({
+      keyType: 'graphdata',
+      memoryUsage: 32,
+      graphMemory: graphMemoryReply,
+      graphStats: graphStatsReply,
+    });
+    const memoryProbes = () => graphCalls.filter((c) => c === 'GRAPH.MEMORY').length;
+
+    await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+    const [cached] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+    expect(memoryProbes()).toBe(1);
+    expect(cached.keyDetails?.[0]).toMatchObject({ memoryBytes: 3 * MB, cardinality: 54995 });
+
+    now.mockReturnValue(1_000_000 + GRAPH_MEMORY_TTL_MS);
+    await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+    expect(memoryProbes()).toBe(2);
+    now.mockRestore();
+  });
+
+  it('caps fresh GRAPH.MEMORY probes per collection but counts every graph', async () => {
+    const keys = Array.from({ length: GRAPH_MEMORY_PROBES_PER_SCAN + 5 }, (_, i) => `g${i}`);
+    const { adapter, graphCalls } = makeGraphAdapter({
+      keyType: 'graphdata',
+      memoryUsage: 32,
+      graphMemory: graphMemoryReply,
+      graphStats: graphStatsReply,
+      keys,
+    });
+
+    const [first] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+    expect(graphCalls.filter((c) => c === 'GRAPH.MEMORY')).toHaveLength(GRAPH_MEMORY_PROBES_PER_SCAN);
+    expect(graphCalls.filter((c) => c === 'GRAPH.RO_QUERY')).toHaveLength(keys.length);
+    const sizes = first.keyDetails?.map((d) => d.memoryBytes);
+    expect(sizes?.filter((b) => b === 3 * MB)).toHaveLength(GRAPH_MEMORY_PROBES_PER_SCAN);
+    expect(sizes?.filter((b) => b === 32)).toHaveLength(5);
+
+    // The next collection measures the 5 left over and reuses the cached 20.
+    const [second] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+    expect(graphCalls.filter((c) => c === 'GRAPH.MEMORY')).toHaveLength(keys.length);
+    expect(second.keyDetails?.every((d) => d.memoryBytes === 3 * MB)).toBe(true);
   });
 });
