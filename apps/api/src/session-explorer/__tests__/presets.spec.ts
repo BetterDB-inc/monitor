@@ -300,6 +300,11 @@ describe('decodeValue', () => {
     expect((result.value as string).length).toBe(cap);
   });
 
+  it('strips a leading UTF-8 BOM so JSON values still parse', () => {
+    const buf = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('{"a":1}')]);
+    expect(decodeValue(buf, 1024)).toEqual({ value: '{"a":1}', binary: false, truncated: false });
+  });
+
   it('does not report a multibyte cut at the cap as binary', () => {
     const result = decodeValue(Buffer.from('aé', 'utf8'), 2);
     expect(result.truncated).toBe(true);

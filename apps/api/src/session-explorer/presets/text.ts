@@ -3,7 +3,7 @@ import type { PresetDefinition } from './types';
 
 const MAX_UTF8_TAIL = 3;
 
-const strictDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+const strictDecoder = new TextDecoder('utf-8', { fatal: true });
 
 const tryDecode = (buf: Buffer): string | null => {
   try {
