@@ -105,6 +105,11 @@ function sessionIdOf(key: string): string | null {
   return prefix.slice(at + SESSION_MARKER.length) || null;
 }
 
+const escapeGlob = (text: string) => text.replace(/\\/g, '\\\\').replace(/([*?[\]])/g, '\\$1');
+
+const defaultPattern = (prefix: string) =>
+  `${escapeGlob(prefix.replace(/:+$/, ''))}${SESSION_MARKER}*`;
+
 const parseKey = (k: CapturedKey): KeyView =>
   guardedParse(k, () => {
     if (k.type !== 'string' || typeof k.value !== 'string') return fail('Expected a string value');
@@ -118,7 +123,7 @@ const skipKey = (k: CapturedKey): KeyView =>
 
 export const agentCachePreset: PresetDefinition = {
   id: 'agent-cache',
-  defaultPattern: (prefix) => `${prefix}:session:*`,
+  defaultPattern,
   sessionIdOf,
   parseKey,
   parseKeys: (keys) => {

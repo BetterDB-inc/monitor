@@ -154,6 +154,12 @@ describe('session presets against captured fixtures', () => {
     expect(preset.defaultPattern('sxfix:ac')).toBe('sxfix:ac:session:*');
   });
 
+  it('agent-cache default pattern accepts a trailing colon and escapes the name', () => {
+    const preset = getPreset('agent-cache');
+    expect(preset.defaultPattern('myapp:')).toBe('myapp:session:*');
+    expect(preset.defaultPattern('my*app[1]?\\')).toBe('my\\*app\\[1\\]\\?\\\\:session:*');
+  });
+
   it('agent-cache shows session store fields as parsed state', () => {
     const view = getPreset('agent-cache').parseKey({
       key: 'sxfix:ac:session:t1:last_intent',
