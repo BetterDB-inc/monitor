@@ -138,11 +138,22 @@ const isNonEmptyString = (v: unknown): v is string => typeof v === 'string' && v
 const isBlank = (v: unknown): boolean =>
   v === undefined || v === null || (typeof v === 'string' && v.trim() === '');
 
+const trimmed = (v: unknown): unknown => (typeof v === 'string' ? v.trim() : v);
+
+const trimValues = (v: unknown): unknown =>
+  isRecord(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, trimmed(x)])) : v;
+
 export function validateCustomSchema(
-  s: unknown,
+  input: unknown,
 ): { ok: true; schema: CustomSchema } | { ok: false; errors: string[] } {
   const errors: string[] = [];
-  if (!isRecord(s)) return { ok: false, errors: ['Schema must be an object'] };
+  if (!isRecord(input)) return { ok: false, errors: ['Schema must be an object'] };
+  const s: Record<string, unknown> = {
+    ...input,
+    sessionTemplate: trimmed(input.sessionTemplate),
+    messages: trimValues(input.messages),
+    fields: trimValues(input.fields),
+  };
 
   if (!isBlank(s.sessionTemplate)) {
     if (typeof s.sessionTemplate !== 'string') errors.push('sessionTemplate must be a string');
@@ -184,21 +195,21 @@ export function validateCustomSchema(
   }
 
   if (errors.length > 0) return { ok: false, errors };
-  const input = s as unknown as CustomSchema;
+  const valid = s as unknown as CustomSchema;
   const schema: CustomSchema = {
-    ...(!isBlank(input.sessionTemplate) ? { sessionTemplate: input.sessionTemplate } : {}),
-    valueType: input.valueType,
+    ...(!isBlank(valid.sessionTemplate) ? { sessionTemplate: valid.sessionTemplate } : {}),
+    valueType: valid.valueType,
     messages:
-      input.messages.from === 'path'
-        ? { from: 'path', path: input.messages.path }
-        : { from: input.messages.from },
+      valid.messages.from === 'path'
+        ? { from: 'path', path: valid.messages.path }
+        : { from: valid.messages.from },
     fields: {
-      role: input.fields.role,
-      content: input.fields.content,
+      role: valid.fields.role,
+      content: valid.fields.content,
       ...Object.fromEntries(
-        OPTIONAL_FIELDS.filter((name) => !isBlank(input.fields[name])).map((name) => [
+        OPTIONAL_FIELDS.filter((name) => !isBlank(valid.fields[name])).map((name) => [
           name,
-          input.fields[name],
+          valid.fields[name],
         ]),
       ),
     },

@@ -104,6 +104,28 @@ describe('validateCustomSchema', () => {
     }
   });
 
+  it('trims pasted inputs and rejects whitespace-only required fields', () => {
+    expect(
+      validateCustomSchema({
+        ...baseSchema,
+        sessionTemplate: ' chat:{session} ',
+        messages: { from: 'path', path: ' turns ' },
+        fields: { role: ' type ', content: 'data.content\n', toolName: ' tool ' },
+      }),
+    ).toEqual({
+      ok: true,
+      schema: {
+        ...baseSchema,
+        sessionTemplate: 'chat:{session}',
+        messages: { from: 'path', path: 'turns' },
+        fields: { role: 'type', content: 'data.content', toolName: 'tool' },
+      },
+    });
+    expect(
+      validateCustomSchema({ ...baseSchema, fields: { role: '   ', content: 'c' } }),
+    ).toEqual({ ok: false, errors: ['fields.role is required'] });
+  });
+
   it('rejects missing role or content', () => {
     const noRole = validateCustomSchema({ ...baseSchema, fields: { content: 'c' } });
     const noContent = validateCustomSchema({ ...baseSchema, fields: { role: 'r' } });
