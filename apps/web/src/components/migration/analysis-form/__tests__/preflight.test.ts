@@ -7,6 +7,8 @@ import {
   isPlanComplete,
   planBlock,
   preflightNotes,
+  SSH_TUNNEL_BLOCK_MESSAGE,
+  usesSshTunnel,
 } from '../preflight';
 
 function conn(partial: Partial<Connection> & Pick<Connection, 'id'>): Connection {
@@ -141,6 +143,24 @@ describe('planBlock', () => {
     const child = conn({ id: 'child', membership: { seedId: 'seed', nodeId: 'n', origin: 'auto' } });
     expect(planBlock(REDIS_72, child)).toBe(CLUSTER_MEMBER_BLOCK_MESSAGE);
     expect(planBlock(child, VALKEY_81)).toBe(CLUSTER_MEMBER_BLOCK_MESSAGE);
+  });
+
+  it('blocks an SSH-tunneled connection as source or target', () => {
+    const tunneled = conn({
+      id: 'tunneled',
+      sshTunnel: { enabled: true, host: 'bastion', port: 22, username: 'ops', authMethod: 'password' },
+    });
+    expect(planBlock(tunneled, VALKEY_81)).toBe(SSH_TUNNEL_BLOCK_MESSAGE);
+    expect(planBlock(REDIS_72, tunneled)).toBe(SSH_TUNNEL_BLOCK_MESSAGE);
+  });
+
+  it('does not block a connection whose saved tunnel is disabled', () => {
+    const tunnelOff = conn({
+      id: 'off',
+      sshTunnel: { enabled: false, host: 'bastion', port: 22, username: 'ops', authMethod: 'password' },
+    });
+    expect(usesSshTunnel(tunnelOff)).toBe(false);
+    expect(planBlock(tunnelOff, VALKEY_81)).toBeNull();
   });
 
   it('blocks external connections as source or target', () => {
