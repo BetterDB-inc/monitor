@@ -102,7 +102,7 @@ export class MigrationValidationService {
     analysisResult?: MigrationAnalysisResult,
   ): Promise<void> {
     let sourceClient: Valkey | null = null;
-    let sourceCountClient: Valkey | null = null;
+    let sourceClusterClient: Valkey | null = null;
     let targetClient: Valkey | null = null;
 
     try {
@@ -156,19 +156,20 @@ export class MigrationValidationService {
 
       // Step 2: Key count comparison (20%)
       // The standalone source client only sees the seed node of a cluster, so
-      // count a cluster source through a Cluster client that reaches every master.
+      // count and sample a cluster source through a Cluster client that reaches
+      // every master.
       if (sourceIsCluster) {
-        sourceCountClient = createTargetClient(sourceConfig, 'BetterDB-Validation-Source-Count', true);
-        await sourceCountClient.connect();
+        sourceClusterClient = createTargetClient(sourceConfig, 'BetterDB-Validation-Source-Cluster', true);
+        await sourceClusterClient.connect();
       }
-      const keyCount = await compareKeyCounts(sourceCountClient ?? sourceClient, targetClient, analysisResult);
+      const keyCount = await compareKeyCounts(sourceClusterClient ?? sourceClient, targetClient, analysisResult);
       job.result.keyCount = keyCount;
       job.progress = 20;
 
       if (job.cancelled) return;
 
       // Step 3: Sample validation (20–70%)
-      const sampleValidation = await validateSample(sourceClient, targetClient, 500);
+      const sampleValidation = await validateSample(sourceClusterClient ?? sourceClient, targetClient, 500);
       job.result.sampleValidation = sampleValidation;
       job.progress = 70;
 
@@ -227,7 +228,7 @@ export class MigrationValidationService {
       }
       job.completedAt = Date.now();
       // Graceful cleanup — never Promise.all, never disconnect()
-      const clients = [sourceClient, sourceCountClient, targetClient].filter((c): c is Valkey => c !== null);
+      const clients = [sourceClient, sourceClusterClient, targetClient].filter((c): c is Valkey => c !== null);
       await Promise.allSettled(clients.map(c => c.quit()));
     }
   }

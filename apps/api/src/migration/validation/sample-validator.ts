@@ -1,4 +1,4 @@
-import type Valkey from 'iovalkey';
+import Valkey, { Cluster } from 'iovalkey';
 import type { SampleValidationResult, SampleKeyResult, SampleKeyStatus } from '@betterdb/shared';
 import { describeStreamGroups } from '../execution/stream-metadata';
 
@@ -9,6 +9,11 @@ const LARGE_KEY_THRESHOLD = 100;
 /**
  * Spot-check a random sample of keys: type match + value comparison on target.
  * Never throws — per-key errors are captured as 'missing' with detail.
+ *
+ * A cluster source (a Cluster client, as createTargetClient() builds it) is
+ * sampled on every master: SCAN is node-local, so sampling one node would only
+ * ever check that shard's keys. The budget is split by each master's DBSIZE
+ * (see splitSampleBudget), and each key is read from the master it was found on.
  */
 export async function validateSample(
   sourceClient: Valkey,
@@ -16,14 +21,25 @@ export async function validateSample(
   sampleSize: number = 500,
 ): Promise<SampleValidationResult> {
   // 1. Collect sample keys from source via SCAN with random starting cursor
-  const keys = await collectSampleKeys(sourceClient, sampleSize);
+  const groups = await collectSampleGroups(sourceClient, sampleSize);
+  const keys: string[] = [];
+  const owners: Valkey[] = [];
+  for (const group of groups) {
+    for (const key of group.keys) {
+      keys.push(key);
+      owners.push(group.node);
+    }
+  }
 
   if (keys.length === 0) {
     return { sampledKeys: 0, matched: 0, missing: 0, typeMismatches: 0, valueMismatches: 0, issues: [] };
   }
 
-  // 2. Batch TYPE lookup on source
-  const sourceTypes = await batchType(sourceClient, keys);
+  // 2. Batch TYPE lookup on source (per node: a pipeline cannot span masters)
+  const sourceTypes: string[] = [];
+  for (const group of groups) {
+    sourceTypes.push(...(await batchType(group.node, group.keys)));
+  }
 
   // 3. Validate each key against target
   let matched = 0;
@@ -42,7 +58,7 @@ export async function validateSample(
     }
 
     try {
-      const result = await validateKey(sourceClient, targetClient, key, sourceType);
+      const result = await validateKey(owners[i], targetClient, key, sourceType);
 
       switch (result.status) {
         case 'match':
@@ -81,6 +97,73 @@ export async function validateSample(
 }
 
 // ── Helpers ──
+
+interface SampleGroup {
+  node: Valkey;
+  keys: string[];
+}
+
+async function collectSampleGroups(client: Valkey, sampleSize: number): Promise<SampleGroup[]> {
+  // createTargetClient() casts Cluster to Valkey, so narrow from unknown.
+  const maybeCluster: unknown = client;
+  if (!(maybeCluster instanceof Cluster)) {
+    return [{ node: client, keys: await collectSampleKeys(client, sampleSize) }];
+  }
+  const masters = maybeCluster.nodes('master');
+  if (masters.length === 0) throw new Error('No cluster masters available to sample keys');
+  const sizes = await Promise.all(masters.map((node) => node.dbsize()));
+  const quotas = splitSampleBudget(sampleSize, sizes);
+  return Promise.all(
+    masters.map(async (node, index) => ({
+      node,
+      keys: quotas[index] > 0 ? await collectSampleKeys(node, quotas[index]) : [],
+    })),
+  );
+}
+
+/**
+ * Split a sample budget across nodes in proportion to their key counts. Every
+ * node that holds keys gets at least one sample while the budget allows, so a
+ * small shard that never reached the target is still caught. Quotas never
+ * exceed a node's key count and add up to min(total, sum of key counts).
+ */
+export function splitSampleBudget(total: number, sizes: number[]): number[] {
+  const quotas = sizes.map(() => 0);
+  const keyTotal = sizes.reduce((sum, size) => sum + Math.max(0, size), 0);
+  let budget = Math.min(Math.max(0, Math.floor(total)), keyTotal);
+  if (budget === 0) return quotas;
+
+  const nonEmpty = sizes.filter((size) => size > 0).length;
+  if (budget >= nonEmpty) {
+    sizes.forEach((size, index) => {
+      if (size > 0) quotas[index] = 1;
+    });
+    budget -= nonEmpty;
+  }
+
+  // Largest-remainder split of what is left, by the keys not yet counted.
+  const remaining = sizes.map((size, index) => Math.max(0, size - quotas[index]));
+  const remainingTotal = remaining.reduce((sum, size) => sum + size, 0);
+  if (budget === 0 || remainingTotal === 0) return quotas;
+  const shares = remaining.map((size) => (budget * size) / remainingTotal);
+  let left = budget;
+  shares.forEach((share, index) => {
+    const whole = Math.floor(share);
+    quotas[index] += whole;
+    left -= whole;
+  });
+  const byRemainder = shares
+    .map((share, index) => ({ index, remainder: share - Math.floor(share) }))
+    .sort((a, b) => b.remainder - a.remainder);
+  for (const { index } of byRemainder) {
+    if (left === 0) break;
+    if (quotas[index] < sizes[index]) {
+      quotas[index] += 1;
+      left -= 1;
+    }
+  }
+  return quotas;
+}
 
 async function collectSampleKeys(client: Valkey, sampleSize: number): Promise<string[]> {
   const keys: string[] = [];
