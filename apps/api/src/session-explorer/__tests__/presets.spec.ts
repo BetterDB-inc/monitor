@@ -378,6 +378,19 @@ describe('decodeValue', () => {
     expect(decodeValue(buf, 1024)).toEqual({ value: '{"a":1}', binary: false, truncated: false });
   });
 
+  it('reports invalid bytes at the cap as binary', () => {
+    for (const bytes of [[0x61, 0xff, 0x62], [0x61, 0x80, 0x62], [0x61, 0xc3, 0xc3, 0x62]]) {
+      const result = decodeValue(Buffer.from(bytes), bytes.length - 1);
+      expect(result).toMatchObject({ binary: true, truncated: true });
+    }
+  });
+
+  it('trims every incomplete multibyte character at the cap', () => {
+    expect(decodeValue(Buffer.from('a€', 'utf8'), 2).value).toBe('a');
+    expect(decodeValue(Buffer.from('a€', 'utf8'), 3).value).toBe('a');
+    expect(decodeValue(Buffer.from('a😀', 'utf8'), 4)).toMatchObject({ value: 'a', binary: false });
+  });
+
   it('does not report a multibyte cut at the cap as binary', () => {
     const result = decodeValue(Buffer.from('aé', 'utf8'), 2);
     expect(result.truncated).toBe(true);
