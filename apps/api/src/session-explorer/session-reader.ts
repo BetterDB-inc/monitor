@@ -139,11 +139,10 @@ async function locate(
     const results = (await pipeline.exec()) ?? [];
     slice.forEach((key, i) => {
       const [type, pttl, memory] = results.slice(i * 3, i * 3 + 3) as PipelineResult[];
-      if (!type || type[0] || typeof type[1] !== 'string') {
+      if (!type || type[0] || typeof type[1] !== 'string' || type[1] === 'none') {
         missing++;
         return;
       }
-      if (type[1] === 'none') return;
       located.push({ key, type: type[1], pttl: numberOf(pttl) ?? -1, memory: numberOf(memory) });
     });
   }
@@ -397,7 +396,10 @@ async function readNode(
       offset += counts[i];
       try {
         const read = await finishRead(client, at, own, Math.min(opts.byteCap, state.remaining), opts);
-        if (!read) continue;
+        if (!read) {
+          state.missing++;
+          continue;
+        }
         state.remaining -= read.bytes;
         state.captured.set(at.key, {
           key: at.key,

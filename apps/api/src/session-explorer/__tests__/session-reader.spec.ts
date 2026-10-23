@@ -275,11 +275,11 @@ describe('readSessionKeys', () => {
     expect(client.calls.some((c) => c.args[0] === 'JSON.GET')).toBe(false);
   });
 
-  it('omits a missing key', async () => {
+  it('omits a missing key and counts it as missing', async () => {
     const client = new FakeValkey(storeOf({ k: { type: 'string', value: 'v' } }));
     const result = await readSessionKeys(fakeDb(client), ['gone', 'k']);
     expect(result.keys.map((k) => k.key)).toEqual(['k']);
-    expect(result.missingKeys).toBe(0);
+    expect(result.missingKeys).toBe(1);
   });
 
   it('omits a key whose read fails without failing the request', async () => {
