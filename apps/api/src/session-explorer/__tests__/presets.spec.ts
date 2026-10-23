@@ -559,6 +559,55 @@ describe('presets with content blocks beyond text', () => {
       expect(preset.selectKeys!(encoded)).toEqual(encoded);
     });
 
+    it('reads pending writes in the raw forms add_messages accepts', () => {
+      const write = (value: unknown) =>
+        parsedMessages(
+          preset.parseKey(str(`${p}:writes:1f0-b|task-9|messages|0`, JSON.stringify(value))),
+        );
+      expect(write([{ role: 'user', content: 'hi' }])).toEqual([{ role: 'human', content: 'hi' }]);
+      expect(write({ role: 'developer', content: 'rules' })).toEqual([
+        { role: 'system', content: 'rules' },
+      ]);
+      expect(
+        write({ type: 'ai', content: 'ok', tool_calls: [{ name: 'lookup', args: { q: 1 }, id: 'c1' }] }),
+      ).toEqual([
+        { role: 'ai', content: 'ok', toolCalls: [{ name: 'lookup', args: { q: 1 }, id: 'c1' }] },
+      ]);
+      expect(write([{ role: 'tool', content: '42', name: 'lookup', tool_call_id: 'c1' }])).toEqual([
+        { role: 'tool', content: '42', toolResult: { name: 'lookup', content: '42', callId: 'c1' } },
+      ]);
+      expect(
+        write([
+          ['user', 'hi'],
+          ['assistant', 'yo'],
+        ]),
+      ).toEqual([
+        { role: 'human', content: 'hi' },
+        { role: 'ai', content: 'yo' },
+      ]);
+      expect(write('hello')).toEqual([{ role: 'human', content: 'hello' }]);
+      expect(write(['hello', lc('AIMessage', 'there')])).toEqual([
+        { role: 'human', content: 'hello' },
+        { role: 'ai', content: 'there' },
+      ]);
+    });
+
+    it('merges raw-form pending writes into the session', () => {
+      const raw = str(
+        `${p}:writes:1f0-b|task-4|messages|0`,
+        JSON.stringify([{ role: 'user', content: 'interrupted' }]),
+      );
+      const merged = preset.mergeSession(parseSessionKeys(preset, [...keys, raw]));
+      expect(merged.map((m) => m.content)).toEqual([
+        'hi',
+        'hello',
+        'first a',
+        'first b',
+        'second',
+        'interrupted',
+      ]);
+    });
+
     it('appends pending message writes of the newest checkpoint in task and index order', () => {
       const merged = preset.mergeSession(parseSessionKeys(preset, keys));
       expect(merged.map((m) => m.content)).toEqual(['hi', 'hello', 'first a', 'first b', 'second']);

@@ -63,6 +63,39 @@ function parseMessage(entry: unknown): ParsedMessage {
   return message;
 }
 
+const ROLE_BY_TYPE = new Map([
+  ['human', 'human'],
+  ['user', 'human'],
+  ['ai', 'ai'],
+  ['assistant', 'ai'],
+  ['system', 'system'],
+  ['developer', 'system'],
+  ['tool', 'tool'],
+  ['function', 'tool'],
+]);
+
+const rawRole = (type: unknown): string =>
+  (typeof type === 'string' && ROLE_BY_TYPE.get(type)) || fail('Unknown message role');
+
+function parseRawMessage(entry: Record<string, unknown>): ParsedMessage {
+  const role = rawRole(entry.role ?? entry.type);
+  const message: ParsedMessage = { role, content: textContent(entry.content) };
+  const toolCalls = parseToolCalls(entry.tool_calls) ?? toolUseCalls(entry.content);
+  if (toolCalls) message.toolCalls = toolCalls;
+  if (role === 'tool') message.toolResult = toolResultOf(message.content, entry);
+  return message;
+}
+
+function parseWritten(entry: unknown): ParsedMessage {
+  if (typeof entry === 'string') return { role: 'human', content: entry };
+  if (Array.isArray(entry) && entry.length === 2) {
+    return parseRawMessage({ role: entry[0], content: entry[1] });
+  }
+  if (isRecord(entry) && entry.lc === 1) return parseMessage(entry);
+  if (isRecord(entry)) return parseRawMessage(entry);
+  return fail('Write is not a message');
+}
+
 function parseCheckpoint(value: unknown): ParsedMessage[] {
   if (typeof value !== 'string') return fail('Expected a string value');
   const doc = parseJson(value);
@@ -178,7 +211,7 @@ const defaultPattern = (prefix: string) =>
 
 function parseWrite(value: string): ParsedMessage[] {
   const written = parseJson(value);
-  return (Array.isArray(written) ? written : [written]).map(parseMessage);
+  return (Array.isArray(written) ? written : [written]).map(parseWritten);
 }
 
 const skipKey = (k: CapturedKey): KeyView =>
