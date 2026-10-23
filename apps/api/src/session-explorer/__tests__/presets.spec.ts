@@ -388,6 +388,43 @@ describe('presets with content blocks beyond text', () => {
     expect(parsedMessages(view).map((m) => m.role)).toEqual(['human', 'ai']);
   });
 
+  it('agent-cache reads chat and function message classes', () => {
+    const lc = (name: string, kwargs: Record<string, unknown>) => ({
+      lc: 1,
+      type: 'constructor',
+      id: ['langchain_core', 'messages', name],
+      kwargs,
+    });
+    const value = JSON.stringify({
+      checkpoint: {
+        channel_values: {
+          messages: [
+            lc('ChatMessage', { content: 'too long', role: 'critic' }),
+            lc('ChatMessageChunk', { content: 'streamed', role: 'narrator' }),
+            lc('ChatMessage', { content: 'no role' }),
+            lc('FunctionMessage', { content: '{"t":21}', name: 'get_weather' }),
+            lc('FunctionMessageChunk', { content: '{"t":22}', name: 'get_weather' }),
+          ],
+        },
+      },
+    });
+    const view = getPreset('agent-cache').parseKey({
+      key: 'p:session:t1:__checkpoint_latest',
+      type: 'string',
+      pttl: -1,
+      value,
+    });
+    const messages = parsedMessages(view);
+    expect(messages.map((m) => [m.role, m.content])).toEqual([
+      ['critic', 'too long'],
+      ['narrator', 'streamed'],
+      ['chat', 'no role'],
+      ['tool', '{"t":21}'],
+      ['tool', '{"t":22}'],
+    ]);
+    expect(messages[3].toolResult).toEqual({ name: 'get_weather', content: '{"t":21}' });
+  });
+
   it('agent-cache counts a checkpoint without a messages channel as empty', () => {
     const preset = getPreset('agent-cache');
     const checkpoint = (channel_values: Record<string, unknown>) => ({

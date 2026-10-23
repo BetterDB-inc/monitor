@@ -16,7 +16,19 @@ const ROLE_BY_CONSTRUCTOR = new Map([
   ['AIMessageChunk', 'ai'],
   ['SystemMessageChunk', 'system'],
   ['ToolMessageChunk', 'tool'],
+  ['FunctionMessage', 'tool'],
+  ['FunctionMessageChunk', 'tool'],
 ]);
+
+const CHAT_CONSTRUCTORS = new Set(['ChatMessage', 'ChatMessageChunk']);
+
+function roleOf(constructorName: unknown, kwargs: Record<string, unknown>): string {
+  if (typeof constructorName !== 'string') return fail('Unknown message constructor');
+  if (CHAT_CONSTRUCTORS.has(constructorName)) {
+    return typeof kwargs.role === 'string' && kwargs.role !== '' ? kwargs.role : 'chat';
+  }
+  return ROLE_BY_CONSTRUCTOR.get(constructorName) ?? fail('Unknown message constructor');
+}
 
 function parseToolCalls(raw: unknown): ParsedMessage['toolCalls'] {
   if (raw === undefined || raw === null) return undefined;
@@ -44,11 +56,8 @@ function parseMessage(entry: unknown): ParsedMessage {
   ) {
     return fail('Message is not an lc-serialized constructor');
   }
-  const constructorName = entry.id[entry.id.length - 1];
-  const role =
-    typeof constructorName === 'string' ? ROLE_BY_CONSTRUCTOR.get(constructorName) : undefined;
-  if (!role) return fail('Unknown message constructor');
   const kwargs = entry.kwargs;
+  const role = roleOf(entry.id[entry.id.length - 1], kwargs);
   const message: ParsedMessage = { role, content: textContent(kwargs.content) };
   const toolCalls = parseToolCalls(kwargs.tool_calls) ?? toolUseCalls(kwargs.content);
   if (toolCalls) message.toolCalls = toolCalls;
