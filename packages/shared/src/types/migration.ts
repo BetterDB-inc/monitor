@@ -12,6 +12,11 @@ export interface Incompatibility {
   category: string;
   title: string;
   detail: string;
+  /**
+   * Execution modes this issue applies to. Omitted means every mode. A
+   * blocking issue only stops execution in the modes it lists.
+   */
+  modes?: ExecutionMode[];
 }
 
 export interface MigrationAnalysisRequest {

@@ -10,11 +10,15 @@ import { detectHfe } from './analysis/hfe-detector';
 import { analyzeCommands } from './analysis/commandlog-analyzer';
 import { buildInstanceMeta, checkCompatibility } from './analysis/compatibility-checker';
 import {
+  allDbsSourceSize,
   capacitySourceSize,
+  db0Keyspace,
   pickOverlapSample,
   probeTargetCapacity,
   sourceDb0Share,
   sourceExpiringKeysFrom,
+  sourceHasKeysOutsideDb0,
+  type SourceSizing,
   type TtlSample,
 } from './analysis/capacity-checker';
 import {
@@ -529,14 +533,17 @@ export class MigrationService {
             .join('\n');
         } catch { /* no keyspace text: db0 share 1, TTL count from the sample */ }
         // Command mode copies db0, so size the source by db0's share of its keys.
+        // (The RedisShake modes get their own all-db sizing below.)
         const sourceSize = capacitySourceSize({
           estimatedBytes: job.result.estimatedTotalMemoryBytes ?? 0,
           db0Share: sourceDb0Share(keyspaceText, isCluster),
           usedMemory: job.result.totalMemoryBytes ?? 0,
         });
         // TTL keys on the source. That INFO came from one node, so a zero on a
-        // cluster source is unknown.
+        // cluster source is unknown. db0 alone for command mode; every db for
+        // the RedisShake modes when the source has keys outside db0.
         let sourceExpiringKeys: number | null = null;
+        let allDbsExpiringKeys: number | null = null;
         try {
           const ttl = job.result.ttlDistribution;
           const ttlSample: TtlSample | null = ttl
@@ -550,8 +557,19 @@ export class MigrationService {
                 noExpiry: ttl.noExpiry,
               }
             : null;
-          sourceExpiringKeys = sourceExpiringKeysFrom(keyspaceText, !isCluster, ttlSample);
+          sourceExpiringKeys = sourceExpiringKeysFrom(db0Keyspace(keyspaceText), !isCluster, ttlSample);
+          allDbsExpiringKeys = sourceExpiringKeysFrom(keyspaceText, !isCluster, ttlSample);
         } catch { /* unknown TTL count: the capacity check treats null as "not none" */ }
+        // RedisShake's scan and sync readers copy every db, so a standalone source
+        // with keys outside db0 gets a second, all-db sizing for those modes.
+        let allDbsSource: SourceSizing | undefined;
+        if (sourceHasKeysOutsideDb0(keyspaceText, isCluster)) {
+          const size = allDbsSourceSize({
+            datasetBytes: Number(memorySection['used_memory_dataset']) || 0,
+            usedMemory: job.result.totalMemoryBytes ?? 0,
+          });
+          allDbsSource = { bytes: size.bytes, rough: size.rough, expiringKeys: allDbsExpiringKeys };
+        }
         try {
           incompatibilities.push(...await probeTargetCapacity({
             targetConfig,
@@ -560,6 +578,7 @@ export class MigrationService {
             roughSourceSize: sourceSize.rough,
             sampledKeys: pickOverlapSample(sampledKeys),
             sourceExpiringKeys,
+            allDbsSource,
           }));
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);

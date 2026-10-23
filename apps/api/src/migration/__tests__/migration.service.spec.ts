@@ -184,12 +184,13 @@ describe('MigrationService capacity preflight', () => {
     else process.env.MIGRATION_VERDICT_DIR = OLD_VERDICT_DIR;
   });
 
-  async function analyze(usedMemory?: string) {
+  async function analyze(usedMemory?: string, sections: Record<string, unknown> = {}) {
     const mock = createMockRegistry();
-    if (usedMemory) {
+    if (usedMemory || Object.keys(sections).length > 0) {
       mock.mockAdapter.getInfo.mockResolvedValue({
         ...(await mock.mockAdapter.getInfo()),
-        memory: { used_memory: usedMemory },
+        ...(usedMemory ? { memory: { used_memory: usedMemory } } : {}),
+        ...sections,
       });
     }
     const registry = mock as unknown as ConstructorParameters<typeof MigrationService>[0];
@@ -234,6 +235,29 @@ describe('MigrationService capacity preflight', () => {
     expect(job.totalMemoryBytes).toBe(5000000);
     expect(probe).toHaveBeenCalledWith(
       expect.objectContaining({ sourceBytes: 5000000, roughSourceSize: true }),
+    );
+  });
+
+  it('passes no all-db sizing when the source only has db0', async () => {
+    probe.mockResolvedValue([]);
+    await analyze();
+    expect(probe.mock.calls[0][0].allDbsSource).toBeUndefined();
+  });
+
+  it('sizes RedisShake by every db and command mode by db0 TTLs when the source has keys outside db0', async () => {
+    probe.mockResolvedValue([]);
+    await analyze(undefined, {
+      keyspace: {
+        db0: 'keys=100,expires=0,avg_ttl=0',
+        db1: 'keys=300,expires=40,avg_ttl=0',
+      },
+      memory: { used_memory: '9000000', used_memory_dataset: '7000000' },
+    });
+    expect(probe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceExpiringKeys: 0,
+        allDbsSource: { bytes: 7000000, rough: false, expiringKeys: 40 },
+      }),
     );
   });
 

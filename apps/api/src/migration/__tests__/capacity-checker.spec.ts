@@ -1,6 +1,8 @@
 import Valkey, { Cluster } from 'iovalkey';
 import {
+  allDbsSourceSize,
   capacitySourceSize,
+  db0Keyspace,
   checkKeyOverlap,
   checkTargetCapacity,
   keyspaceTotals,
@@ -10,6 +12,7 @@ import {
   sampleKeyOverlap,
   sourceDb0Share,
   sourceExpiringKeysFrom,
+  sourceHasKeysOutsideDb0,
   type MasterMemory,
   type TargetMemory,
 } from '../analysis/capacity-checker';
@@ -19,7 +22,7 @@ jest.mock('../execution/client-factory', () => ({ createTargetClient: jest.fn() 
 
 const GiB = 1024 ** 3;
 
-/** 10 GiB maxmemory, 2 GiB used, nothing in db0 (a flush frees nothing). */
+/** 10 GiB maxmemory, 2 GiB used, no keys (emptying the target frees nothing). */
 function master(overrides: Partial<MasterMemory> = {}): MasterMemory {
   return {
     name: 'target',
@@ -103,21 +106,21 @@ describe('capacity-checker / checkTargetCapacity (standalone)', () => {
     expect(issue.detail).not.toContain('emptyDbBeforeSync');
   });
 
-  it('treats data outside db0 as not freed by emptying the target', () => {
-    const [issue] = checkTargetCapacity(
-      5 * GiB,
-      target(master({ usedMemory: 7 * GiB, datasetMemory: 6 * GiB, keys: 100, db0Keys: 0 })),
-    );
-    expect(issue.severity).toBe('blocking');
+  it('counts data in every db as freed by emptying the target (emptyDbBeforeSync runs FLUSHALL)', () => {
+    // 6 GiB dataset, all of it outside db0, 1 GiB baseline: FLUSHALL leaves 9 GiB of room.
+    const m = master({ usedMemory: 7 * GiB, datasetMemory: 6 * GiB, keys: 100, db0Keys: 0 });
+    const [fits] = checkTargetCapacity(5 * GiB, target(m));
+    expect(fits).toMatchObject({
+      severity: 'warning',
+      title: 'Target only has room if it is emptied first',
+    });
+    expect(fits.detail).toContain('9 GB would be available after emptying it');
+    expect(checkTargetCapacity(10.5 * GiB, target(m))[0].severity).toBe('blocking');
   });
 
-  it('counts only db0 share of the dataset as freed by emptying the target', () => {
-    // 6 GiB dataset, half the keys in db0: a flush frees 3 GiB, leaving 6 GiB of room.
-    const m = master({ usedMemory: 7 * GiB, datasetMemory: 6 * GiB, keys: 100, db0Keys: 50 });
-    expect(checkTargetCapacity(5 * GiB, target(m))[0].title).toBe(
-      'Target only has room if it is emptied first',
-    );
-    expect(checkTargetCapacity(7 * GiB, target(m))[0].severity).toBe('blocking');
+  it('frees nothing when the target holds no keys, whatever used_memory_dataset says', () => {
+    const m = master({ usedMemory: 7 * GiB, datasetMemory: 6 * GiB, keys: 0, db0Keys: 0 });
+    expect(checkTargetCapacity(5 * GiB, target(m))[0].severity).toBe('blocking');
   });
 
   it('warns to empty first when the source fits once the target is emptied', () => {
@@ -462,6 +465,37 @@ describe('capacity-checker / source size and TTL helpers', () => {
     expect(sourceDb0Share('# Keyspace\r\n', false)).toBe(1);
   });
 
+  it('reads db0 alone from a keyspace reply', () => {
+    expect(db0Keyspace(info)).toBe('db0:keys=5,expires=2,avg_ttl=0');
+    expect(db0Keyspace('# Keyspace\r\ndb1:keys=3,expires=3,avg_ttl=0\r\n')).toBe('');
+    expect(db0Keyspace(undefined)).toBe('');
+  });
+
+  it('gives the db0 TTL count when only another db has TTL keys', () => {
+    const ttlOutsideDb0 =
+      '# Keyspace\r\ndb0:keys=5,expires=0,avg_ttl=0\r\ndb1:keys=5,expires=5,avg_ttl=0\r\n';
+    expect(sourceExpiringKeysFrom(db0Keyspace(ttlOutsideDb0), true)).toBe(0);
+    expect(sourceExpiringKeysFrom(ttlOutsideDb0, true)).toBe(5);
+  });
+
+  it('detects a standalone source with keys outside db0', () => {
+    expect(sourceHasKeysOutsideDb0(info, false)).toBe(true);
+    expect(sourceHasKeysOutsideDb0(info, true)).toBe(false);
+    expect(sourceHasKeysOutsideDb0(noTtl, false)).toBe(false);
+    expect(sourceHasKeysOutsideDb0(undefined, false)).toBe(false);
+  });
+
+  it('sizes every db by used_memory_dataset, falling back to a rough used_memory', () => {
+    expect(allDbsSourceSize({ datasetBytes: 3 * GiB, usedMemory: 5 * GiB })).toEqual({
+      bytes: 3 * GiB,
+      rough: false,
+    });
+    expect(allDbsSourceSize({ datasetBytes: 0, usedMemory: 5 * GiB })).toEqual({
+      bytes: 5 * GiB,
+      rough: true,
+    });
+  });
+
   it('scales the estimate to db0, and flags the used_memory fallback as rough', () => {
     expect(capacitySourceSize({ estimatedBytes: 10 * GiB, db0Share: 0.5, usedMemory: 50 * GiB })).toEqual({
       bytes: 5 * GiB,
@@ -511,6 +545,73 @@ describe('capacity-checker / pickOverlapSample', () => {
 });
 
 describe('capacity-checker / probeTargetCapacity', () => {
+  function probeClient(spec: NodeSpec) {
+    const client = {
+      ...node(spec),
+      connect: jest.fn().mockResolvedValue(undefined),
+      quit: jest.fn().mockResolvedValue('OK'),
+    };
+    client.exists.mockResolvedValue(0);
+    jest
+      .mocked(createTargetClient)
+      .mockReturnValue(client as unknown as ReturnType<typeof createTargetClient>);
+    return client;
+  }
+
+  const probeBase = {
+    targetConfig: {} as Parameters<typeof createTargetClient>[0],
+    targetIsCluster: false,
+    sampledKeys: [] as string[],
+    sourceExpiringKeys: 0,
+  };
+
+  it('returns unscoped capacity issues when the source only has db0', async () => {
+    probeClient({ maxmemory: 10 * GiB, used: 2 * GiB, policy: 'noeviction' });
+    const issues = await probeTargetCapacity({ ...probeBase, sourceBytes: 12 * GiB });
+    expect(issues).toEqual([
+      expect.objectContaining({ severity: 'blocking', title: 'Target does not have enough memory' }),
+    ]);
+    expect(issues[0].modes).toBeUndefined();
+  });
+
+  it('blocks only the RedisShake modes when just the all-db size overflows', async () => {
+    probeClient({ maxmemory: 10 * GiB, used: 2 * GiB, policy: 'noeviction' });
+    const issues = await probeTargetCapacity({
+      ...probeBase,
+      sourceBytes: GiB,
+      allDbsSource: { bytes: 20 * GiB, rough: false, expiringKeys: 0 },
+    });
+    expect(issues).toEqual([
+      expect.objectContaining({
+        severity: 'blocking',
+        title: 'Target does not have enough memory (RedisShake modes)',
+        modes: ['redis_shake', 'redis_shake_sync'],
+      }),
+    ]);
+    expect(issues[0].detail).toContain('copy every db');
+  });
+
+  it('scopes each mode family separately when both overflow', async () => {
+    probeClient({ maxmemory: 10 * GiB, used: 2 * GiB, policy: 'noeviction' });
+    const issues = await probeTargetCapacity({
+      ...probeBase,
+      sourceBytes: 9 * GiB,
+      allDbsSource: { bytes: 20 * GiB, rough: true, expiringKeys: null },
+    });
+    expect(issues).toEqual([
+      expect.objectContaining({
+        severity: 'blocking',
+        modes: ['command'],
+        title: 'Target does not have enough memory (command mode)',
+      }),
+      expect.objectContaining({
+        severity: 'warning',
+        modes: ['redis_shake', 'redis_shake_sync'],
+        title: 'Target may not have enough memory (RedisShake modes)',
+      }),
+    ]);
+  });
+
   it('keeps the capacity finding when the overlap check fails', async () => {
     const target = {
       ...node({ maxmemory: GiB, used: GiB, policy: 'noeviction', keys: 5 }),

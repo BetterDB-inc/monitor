@@ -1,5 +1,5 @@
 import Valkey, { Cluster } from 'iovalkey';
-import type { DatabaseConnectionConfig, Incompatibility } from '@betterdb/shared';
+import type { DatabaseConnectionConfig, ExecutionMode, Incompatibility } from '@betterdb/shared';
 import { formatBytes } from '../../scaling-readiness/dimension-inputs';
 import { createTargetClient } from '../execution/client-factory';
 import { masterNodes } from '../validation/key-count-comparator';
@@ -16,11 +16,11 @@ export interface MasterMemory {
    * are excluded).
    */
   usedMemory: number;
-  /** `used_memory_dataset`: memory held by keys, which a flush can free (the rest is baseline). */
+  /** `used_memory_dataset`: memory held by keys, which FLUSHALL frees (the rest is baseline). */
   datasetMemory: number;
   /** This master's own maxmemory-policy. */
   policy: string;
-  /** Keys in every db; with db0Keys, gives db0's share of datasetMemory. */
+  /** Keys in every db. 0 means FLUSHALL has nothing to free. */
   keys: number;
   /** Keys in db0 only. */
   db0Keys: number;
@@ -118,6 +118,40 @@ export function sourceDb0Share(
   if (isClusterSource || !keyspaceInfo) return 1;
   const { keys, db0Keys } = keyspaceTotals(keyspaceInfo);
   return keys > 0 ? db0Keys / keys : 1;
+}
+
+/** The db0 line of an INFO keyspace reply, so TTL counts can be read for db0 alone. */
+export function db0Keyspace(keyspaceInfo: string | null | undefined): string {
+  if (!keyspaceInfo) return '';
+  return keyspaceInfo.match(/^db0:.*$/m)?.[0] ?? '';
+}
+
+/**
+ * true when a standalone source holds keys outside db0. Command mode copies
+ * db0 only, while the RedisShake modes copy every db, so the two need
+ * different source sizes. A cluster source only has db0.
+ */
+export function sourceHasKeysOutsideDb0(
+  keyspaceInfo: string | null | undefined,
+  isClusterSource: boolean,
+): boolean {
+  if (isClusterSource || !keyspaceInfo) return false;
+  const { keys, db0Keys } = keyspaceTotals(keyspaceInfo);
+  return keys > db0Keys;
+}
+
+/**
+ * Size of every db on the source, for the RedisShake modes. Uses the source's
+ * `used_memory_dataset` (measured memory of all keys, without buffers or
+ * baseline) rather than the sampled estimate, whose per-key average comes from
+ * db0 only. Without it, falls back to used_memory, flagged `rough`.
+ */
+export function allDbsSourceSize(input: {
+  datasetBytes: number;
+  usedMemory: number;
+}): { bytes: number; rough: boolean } {
+  if (input.datasetBytes > 0) return { bytes: input.datasetBytes, rough: false };
+  return { bytes: Math.max(0, input.usedMemory), rough: true };
 }
 
 /**
@@ -244,16 +278,19 @@ interface MasterFinding {
   need: number;
   /** Bytes this master can take now, before it reaches maxmemory. */
   free: number;
-  /** Bytes this master could take after db0 is flushed. */
+  /** Bytes this master could take after the target is emptied (FLUSHALL). */
   roomAfterFlush: number;
   /** volatile-* policy and the source has no TTL keys, so its keys can't be evicted. */
   volatileNoSourceTtl: boolean;
 }
 
-/** Memory a FLUSHDB of db0 would free: db0's share of the dataset. 0 when db0 is empty. */
+/**
+ * Memory that emptying the target frees. emptyDbBeforeSync runs FLUSHALL on
+ * every master, which frees the dataset in every db but never the baseline.
+ * 0 when the master holds no keys.
+ */
 function flushableBytes(master: MasterMemory): number {
-  if (master.db0Keys <= 0 || master.keys <= 0) return 0;
-  return master.datasetMemory * Math.min(1, master.db0Keys / master.keys);
+  return master.keys > 0 ? master.datasetMemory : 0;
 }
 
 function assessMaster(
@@ -286,8 +323,8 @@ function assessMaster(
   const canEvict = master.policy.startsWith('allkeys-') || (volatile && !volatileCannotEvict);
   if (canEvict) return { ...base, kind: 'evict' };
 
-  // Cannot evict. A flush (emptyDbBeforeSync) frees db0's dataset, never the
-  // baseline, so judge against the room a flush would leave.
+  // Cannot evict. Emptying the target (FLUSHALL, as emptyDbBeforeSync does)
+  // frees the dataset, never the baseline, so judge against the room it leaves.
   if (need > roomAfterFlush * BLOCK_MARGIN) return { ...base, kind: 'oom' };
   if (need <= roomAfterFlush) return { ...base, kind: 'flush' };
   return { ...base, kind: 'marginal' };
@@ -336,7 +373,7 @@ export interface CapacityCheckOptions {
  * Per master, with need = source x slot share:
  * - fits, but uses more than TIGHT_FIT_RATIO of free memory -> warning (tight).
  * - does not fit and the master can evict -> warning (evict).
- * - cannot evict, fits once db0 is flushed -> warning (empty it first).
+ * - cannot evict, fits once the target is emptied -> warning (empty it first).
  * - cannot evict, within BLOCK_MARGIN of the room after a flush -> warning (marginal).
  * - cannot evict, beyond BLOCK_MARGIN of the room after a flush -> blocking,
  *   unless the source size is rough, which caps it at a warning.
@@ -391,7 +428,7 @@ export function checkTargetCapacity(
         severity: 'warning',
         category: 'capacity',
         title: 'Target only has room if it is emptied first',
-        detail: `${fit} (policy '${policy}'). The source does not fit next to the data already on the target, but about ${afterFlush} would be available after emptying it, which is enough. Use a RedisShake mode with emptyDbBeforeSync or flush the target before migrating; otherwise writes fail with OOM part-way through.${volatileNote(worst)}${spread}`,
+        detail: `${fit} (policy '${policy}'). The source does not fit next to the data already on the target, but about ${afterFlush} would be available after emptying it, which is enough. Use a RedisShake mode with emptyDbBeforeSync or run FLUSHALL on the target before migrating; otherwise writes fail with OOM part-way through.${volatileNote(worst)}${spread}`,
       },
     ];
   }
@@ -429,6 +466,44 @@ export function checkTargetCapacity(
       detail: `${fit}. That leaves under ${Math.round((1 - TIGHT_FIT_RATIO) * 100)}% headroom, and encoding or fragmentation differences between engines can use it up.${spread}`,
     },
   ];
+}
+
+/** Execution modes and the label a mode-scoped capacity issue carries. */
+export interface CapacityScope {
+  modes: ExecutionMode[];
+  label: string;
+  note: string;
+}
+
+export const COMMAND_SCOPE: CapacityScope = {
+  modes: ['command'],
+  label: 'command mode',
+  note: 'This applies to command mode, which copies db0 only.',
+};
+
+export const REDISSHAKE_SCOPE: CapacityScope = {
+  modes: ['redis_shake', 'redis_shake_sync'],
+  label: 'RedisShake modes',
+  note: 'This applies to the RedisShake modes, which copy every db; the source has keys outside db0, so the source size here covers every db.',
+};
+
+/** Tag issues with the execution modes they apply to, so the safety gate only enforces them there. */
+export function scopeIssues(issues: Incompatibility[], scope: CapacityScope): Incompatibility[] {
+  return issues.map((issue) => ({
+    ...issue,
+    title: `${issue.title} (${scope.label})`,
+    detail: `${issue.detail} ${scope.note}`,
+    modes: scope.modes,
+  }));
+}
+
+/** A source size and its TTL key count, as one capacity check needs them. */
+export interface SourceSizing {
+  bytes: number;
+  /** true when bytes is the source's used_memory rather than a dataset figure. */
+  rough: boolean;
+  /** Source keys with a TTL; null when unknown. */
+  expiringKeys: number | null;
 }
 
 /** Does the target's db0 already hold data, and do source keys collide with it? */
@@ -469,14 +544,23 @@ export function checkKeyOverlap(targetKeys: number, overlap: KeyOverlap | null):
 export interface CapacityProbeInput {
   targetConfig: DatabaseConnectionConfig;
   targetIsCluster: boolean;
-  /** Source size for the capacity check, in bytes (0 when unknown). See capacitySourceSize. */
+  /**
+   * Size of what command mode copies (db0), in bytes (0 when unknown). See
+   * capacitySourceSize. Used for every mode unless `allDbsSource` is set.
+   */
   sourceBytes: number;
   /** true when sourceBytes is the source's used_memory rather than a dataset estimate. */
   roughSourceSize?: boolean;
   /** Source key names to check on the target (see pickOverlapSample). */
   sampledKeys: string[];
-  /** Source keys with a TTL; null or omitted when unknown. */
+  /** Source db0 keys with a TTL; null or omitted when unknown. */
   sourceExpiringKeys?: number | null;
+  /**
+   * Set when a standalone source has keys outside db0: the size and TTL count
+   * of every db, which the RedisShake modes copy. The capacity check then runs
+   * once per mode family and tags each result with the modes it applies to.
+   */
+  allDbsSource?: SourceSizing;
 }
 
 /**
@@ -496,12 +580,26 @@ export async function probeTargetCapacity(input: CapacityProbeInput): Promise<In
   try {
     await client.connect();
     const target = await readTargetMemory(client);
-    const capacity = checkTargetCapacity(
+    const db0Capacity = checkTargetCapacity(
       input.sourceBytes,
       target,
       input.sourceExpiringKeys ?? null,
       { roughSourceSize: input.roughSourceSize === true },
     );
+    const capacity = input.allDbsSource
+      ? [
+          ...scopeIssues(db0Capacity, COMMAND_SCOPE),
+          ...scopeIssues(
+            checkTargetCapacity(
+              input.allDbsSource.bytes,
+              target,
+              input.allDbsSource.expiringKeys,
+              { roughSourceSize: input.allDbsSource.rough },
+            ),
+            REDISSHAKE_SCOPE,
+          ),
+        ]
+      : db0Capacity;
     let overlap: Incompatibility[];
     try {
       const sampled =
