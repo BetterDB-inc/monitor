@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { BetterDBConfig, DEFAULT_CONFIG } from './types';
@@ -33,19 +33,38 @@ export function configExists(): boolean {
 }
 
 /**
- * Ensure all required directories exist
+ * Best-effort owner-only permissions. The config holds the database password
+ * (plaintext unless ENCRYPTION_KEY is set) and the license key. POSIX modes
+ * don't apply on Windows, and a chmod failure must never stop the CLI.
+ */
+function restrictPermissions(path: string, mode: number): void {
+  if (process.platform === 'win32') {
+    return;
+  }
+  try {
+    chmodSync(path, mode);
+  } catch {
+    // ignore: e.g. a directory owned by another user
+  }
+}
+
+/**
+ * Ensure all required directories exist, readable only by the current user
  */
 export function ensureDirectories(): void {
   const configDir = getConfigDir();
   const dataDir = getDataDir();
 
   if (!existsSync(configDir)) {
-    mkdirSync(configDir, { recursive: true });
+    mkdirSync(configDir, { recursive: true, mode: 0o700 });
   }
+  // mkdir's mode is ignored for existing dirs, so tighten them on every run
+  restrictPermissions(configDir, 0o700);
 
   if (!existsSync(dataDir)) {
-    mkdirSync(dataDir, { recursive: true });
+    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   }
+  restrictPermissions(dataDir, 0o700);
 }
 
 /**
@@ -57,6 +76,10 @@ export function loadConfig(): BetterDBConfig {
   if (!existsSync(configPath)) {
     return DEFAULT_CONFIG;
   }
+  // Tighten installs written by older versions, which used the default modes
+  restrictPermissions(getConfigDir(), 0o700);
+  restrictPermissions(getDataDir(), 0o700);
+  restrictPermissions(configPath, 0o600);
 
   let parsed: Partial<BetterDBConfig>;
   try {
@@ -88,7 +111,9 @@ export function saveConfig(config: BetterDBConfig): void {
     ...config,
     security: { ...config.security, encryptionKey: undefined },
   });
-  writeFileSync(configPath, JSON.stringify(configToSave, null, 2));
+  writeFileSync(configPath, JSON.stringify(configToSave, null, 2), { mode: 0o600 });
+  // writeFileSync's mode only applies when it creates the file
+  restrictPermissions(configPath, 0o600);
 }
 
 /**
