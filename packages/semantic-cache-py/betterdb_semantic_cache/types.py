@@ -64,6 +64,16 @@ class DiscoveryOptions:
 
 
 @dataclass
+class UsageTrackingOptions:
+    """Per-entry hit tracking on the hit path.
+
+    When enabled (default), records per-entry ``hit_count`` and ``last_accessed_at``
+    on every genuine cache hit without blocking the hit path.
+    """
+    enabled: bool = True
+
+
+@dataclass
 class SemanticCacheOptions:
     client: Any  # valkey.asyncio.Valkey or ValkeyCluster
     embed_fn: EmbedFn
@@ -80,6 +90,8 @@ class SemanticCacheOptions:
     analytics: AnalyticsOptions = field(default_factory=AnalyticsOptions)
     config_refresh: ConfigRefreshOptions = field(default_factory=ConfigRefreshOptions)
     discovery: DiscoveryOptions = field(default_factory=DiscoveryOptions)
+    usage_tracking: UsageTrackingOptions = field(default_factory=UsageTrackingOptions)
+    logger: Any = None
 
 
 @dataclass
@@ -210,3 +222,39 @@ class ThresholdEffectivenessResult:
     recommendation: str  # 'tighten_threshold' | 'loosen_threshold' | 'optimal' | 'insufficient_data'
     reasoning: str
     recommended_threshold: float | None = None
+
+
+@dataclass
+class EntryAnalyticsOptions:
+    """Options for entry_analytics()."""
+    top_n: int = 10
+    """Number of hottest entries to return. Must be an integer in [0, 10000];
+    0 returns an empty top_entries and skips the SORTBY query entirely (counts only).
+    """
+    cold_after_days: float = 7.0
+    """An entry is "cold" if it has not been accessed within this many days.
+    A never-hit entry is always counted as cold. Must be a non-negative finite number.
+    """
+
+
+@dataclass
+class EntrySummary:
+    """Lightweight summary of a single cache entry for analytics output."""
+    key: str
+    hit_count: int
+    last_accessed_at: int
+    inserted_at: int
+    category: str
+    model: str
+
+
+@dataclass
+class EntryAnalyticsResult:
+    """Result of entry_analytics()."""
+    total_entries: int
+    never_hit_count: int
+    hit_at_least_once_count: int
+    cold_entry_count: int
+    top_entries: list[EntrySummary]
+    cold_after_days: float
+    sampled: bool

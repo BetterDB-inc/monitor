@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import time
 import uuid
@@ -11,7 +12,7 @@ from typing import Any
 from opentelemetry.trace import StatusCode
 
 from .analytics import NOOP_ANALYTICS, Analytics, create_analytics
-from .cluster import cluster_scan
+from .cluster import cluster_scan, is_cluster_client
 from .constants import TTL_SECONDS_MAX, TTL_SECONDS_MIN
 from .default_cost_table import DEFAULT_COST_TABLE
 from .discovery import (
@@ -28,6 +29,9 @@ from .types import (
     CacheCheckResult,
     CacheStats,
     EmbedFn,
+    EntryAnalyticsOptions,
+    EntryAnalyticsResult,
+    EntrySummary,
     IndexInfo,
     InvalidateResult,
     JudgeOptions,
@@ -45,6 +49,21 @@ from .normalizer import BinaryNormalizer, default_normalizer
 from .utils import ContentBlock, encode_float32, decode_float32, escape_glob_pattern, escape_tag, extract_binary_refs, extract_text, parse_ft_search_response
 
 INVALIDATE_BATCH_SIZE = 1000
+CLUSTER_USAGE_CONCURRENCY = 32
+ENTRY_ANALYTICS_LIMIT = 10000
+ENTRY_ANALYTICS_TOP_N_MAX = 10000
+
+RECORD_USAGE_LUA = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+redis.call('HINCRBY', KEYS[1], 'hit_count', 1)
+redis.call('HSET', KEYS[1], 'last_accessed_at', ARGV[1])
+if ARGV[2] ~= '' then redis.call('EXPIRE', KEYS[1], ARGV[2]) end
+return 1"""
+
+RECORD_USAGE_SHA = hashlib.sha1(RECORD_USAGE_LUA.encode("utf-8")).hexdigest()
+
+ALL_ENTRIES_QUERY = "@inserted_at:[-inf +inf]"
+HIT_AT_LEAST_ONCE_QUERY = "@hit_count:[1 +inf]"
 
 
 class SemanticCache:
@@ -107,7 +126,13 @@ class SemanticCache:
         self._initialized = False
         self._dimension = 0
         self._has_binary_refs = False
+        self._has_usage_fields = False
         self._init_lock = asyncio.Lock()
+
+        # Usage tracking
+        self._usage_tracking_enabled = options.usage_tracking.enabled
+        self._logger = options.logger or logging.getLogger("betterdb_semantic_cache")
+        self._pending_usage_writes: set[asyncio.Task[None]] = set()
 
         # Analytics
         self._analytics_opts: AnalyticsOptions = options.analytics
@@ -191,6 +216,7 @@ class SemanticCache:
         if self._stats_task is not None:
             self._stats_task.cancel()
             self._stats_task = None
+        await self._drain_usage_writes()
         if self._discovery is not None:
             await self._discovery.stop(delete_heartbeat=True)
             self._discovery = None
@@ -410,8 +436,8 @@ class SemanticCache:
             ).inc()
 
             matched_key = winner["key"]
-            if self._default_ttl is not None and matched_key:
-                await self._client.expire(matched_key, self._default_ttl)
+            if matched_key:
+                await self._record_entry_usage(matched_key)
 
             cost_saved: float | None = None
             cost_micros_str = winner["fields"].get("cost_micros")
@@ -494,6 +520,8 @@ class SemanticCache:
                 "model": model,
                 "category": category,
                 "inserted_at": str(int(time.time() * 1000)),
+                "hit_count": "0",
+                "last_accessed_at": "0",
                 "metadata": json.dumps(opts.metadata or {}),
                 "embedding": encode_float32(vector),
             }
@@ -563,6 +591,8 @@ class SemanticCache:
                 "model": model,
                 "category": category,
                 "inserted_at": str(int(time.time() * 1000)),
+                "hit_count": "0",
+                "last_accessed_at": "0",
                 "metadata": json.dumps(opts.metadata or {}),
                 "embedding": encode_float32(vector),
                 "content_blocks": json.dumps(blocks),
@@ -667,7 +697,7 @@ class SemanticCache:
 
             results: list[CacheCheckResult] = []
             category_label = category or "none"
-            keys_to_expire: list[str] = []
+            hit_keys: list[str] = []
             total_cost_micros = 0
 
             for i in range(len(prompts)):
@@ -722,8 +752,8 @@ class SemanticCache:
                 ).inc()
 
                 matched_key = parsed[0]["key"]
-                if self._default_ttl is not None and matched_key:
-                    keys_to_expire.append(matched_key)
+                if matched_key:
+                    hit_keys.append(matched_key)
 
                 cost_saved: float | None = None
                 cost_micros_str = parsed[0]["fields"].get("cost_micros")
@@ -760,21 +790,13 @@ class SemanticCache:
                     r.content_blocks = content_blocks
                 results.append(r)
 
-            # Single pipeline for all post-loop Valkey writes (TTL refreshes + cost stats).
-            # Note: cost_saved_total Prometheus counter is incremented per-hit above (same
-            # as check()), while the stats-hash hincrby is batched here. If the pipeline
-            # fails, Prometheus and stats().cost_saved_micros may diverge by at most the
-            # batch total — both paths are best-effort and this is an accepted trade-off.
-            if keys_to_expire or total_cost_micros:
+            if total_cost_micros:
                 try:
-                    post_pipe = self._client.pipeline()
-                    for expire_key in keys_to_expire:
-                        post_pipe.expire(expire_key, self._default_ttl)
-                    if total_cost_micros:
-                        post_pipe.hincrby(self._stats_key, "cost_saved_micros", total_cost_micros)
-                    await post_pipe.execute()
+                    await self._client.hincrby(self._stats_key, "cost_saved_micros", total_cost_micros)
                 except Exception:
-                    pass  # best-effort
+                    pass
+
+            await self._record_entry_usage_batch(hit_keys)
 
             return results
 
@@ -1156,9 +1178,10 @@ class SemanticCache:
     async def _do_initialize(self) -> None:
         with self._telemetry.tracer.start_as_current_span("semantic_cache.initialize") as span:
             try:
-                dim, has_binary_refs = await self._ensure_index_and_get_dimension()
+                dim, has_binary_refs, has_usage_fields = await self._ensure_index_and_get_dimension()
                 self._dimension = dim
                 self._has_binary_refs = has_binary_refs
+                self._has_usage_fields = has_usage_fields
                 self._initialized = True
                 self._start_config_refresh()
                 await self._register_discovery()
@@ -1273,15 +1296,16 @@ class SemanticCache:
             except Exception:
                 pass
 
-    async def _ensure_index_and_get_dimension(self) -> tuple[int, bool]:
+    async def _ensure_index_and_get_dimension(self) -> tuple[int, bool, bool]:
         try:
             raw = await self._client.execute_command("FT.INFO", self._index_name)
             dim = self._parse_dimension_from_info(raw)
-            has_binary_refs = self._parse_has_binary_refs_from_info(raw)
+            has_binary_refs = self._parse_has_field_from_info(raw, "binary_refs")
+            has_usage_fields = self._parse_has_field_from_info(raw, "hit_count")
             if dim > 0:
-                return dim, has_binary_refs
+                return dim, has_binary_refs, has_usage_fields
             probe_vector, _ = await self._embed("probe")
-            return len(probe_vector), has_binary_refs
+            return len(probe_vector), has_binary_refs, has_usage_fields
         except EmbeddingError:
             raise
         except Exception as err:
@@ -1304,14 +1328,16 @@ class SemanticCache:
                 "temperature", "NUMERIC",
                 "top_p", "NUMERIC",
                 "seed", "NUMERIC",
+                "hit_count", "NUMERIC", "SORTABLE",
+                "last_accessed_at", "NUMERIC", "SORTABLE",
                 "embedding", "VECTOR", "HNSW", "6",
                 "TYPE", "FLOAT32", "DIM", str(dim), "DISTANCE_METRIC", "COSINE",
             )
         except Exception as err:
             raise ValkeyCommandError("FT.CREATE", err)
-        return dim, True
+        return dim, True, True
 
-    def _parse_has_binary_refs_from_info(self, info: Any) -> bool:
+    def _parse_has_field_from_info(self, info: Any, field_name: str) -> bool:
         if not isinstance(info, (list, tuple)):
             return False
         i = 0
@@ -1337,11 +1363,14 @@ class SemanticCache:
                         ak = ak.decode()
                     if isinstance(av, bytes):
                         av = av.decode()
-                    if str(ak) == "identifier" and str(av) == "binary_refs":
+                    if str(ak) == "identifier" and str(av) == field_name:
                         return True
                     j += 2
             i += 2
         return False
+
+    def _parse_has_binary_refs_from_info(self, info: Any) -> bool:
+        return self._parse_has_field_from_info(info, "binary_refs")
 
     def _parse_dimension_from_info(self, info: Any) -> int:
         if not isinstance(info, (list, tuple)):
@@ -1501,6 +1530,383 @@ class SemanticCache:
 
     def _is_index_not_found_error(self, err: Exception) -> bool:
         return is_index_not_found_error(err)
+
+    # -- Entry Usage Tracking & Analytics --
+
+    async def _record_entry_usage(self, matched_key: str) -> None:
+        await self._record_entry_usage_batch([matched_key])
+
+    async def _record_entry_usage_batch(self, matched_keys: list[str]) -> None:
+        if not matched_keys:
+            return
+        if not self._usage_tracking_enabled:
+            if self._default_ttl is None:
+                return
+            for key in matched_keys:
+                await self._client.expire(key, self._default_ttl)
+            return
+
+        async def _run() -> None:
+            try:
+                await self._track_entry_usage(matched_keys)
+            except Exception:
+                pass
+
+        try:
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(_run())
+            self._pending_usage_writes.add(task)
+            task.add_done_callback(self._pending_usage_writes.discard)
+        except RuntimeError:
+            pass
+
+    async def _drain_usage_writes(self) -> None:
+        """Wait for every in-flight usage write started by a hit.
+
+        Called by shutdown(); tests use it to observe fire-and-forget writes
+        deterministically.
+        """
+        while self._pending_usage_writes:
+            pending = list(self._pending_usage_writes)
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _track_entry_usage(self, matched_keys: list[str]) -> None:
+        now = str(int(time.time() * 1000))
+        commands_per_key = 1
+        failed = 0
+        first_error: Exception | None = None
+
+        def tally(key_count: int, outcome: Any) -> None:
+            nonlocal failed, first_error
+            if isinstance(outcome, Exception):
+                failed += key_count
+                if first_error is None:
+                    first_error = outcome
+            else:
+                f, err = self._count_failed_usage_keys(outcome, key_count, commands_per_key)
+                failed += f
+                if first_error is None and err is not None:
+                    first_error = err
+
+        if not is_cluster_client(self._client):
+            try:
+                res = await self._exec_entry_usage(matched_keys, now)
+                tally(len(matched_keys), res)
+            except Exception as exc:
+                tally(len(matched_keys), exc)
+        else:
+            for i in range(0, len(matched_keys), CLUSTER_USAGE_CONCURRENCY):
+                chunk = matched_keys[i : i + CLUSTER_USAGE_CONCURRENCY]
+                chunk_tasks = [self._exec_entry_usage([k], now) for k in chunk]
+                results = await asyncio.gather(*chunk_tasks, return_exceptions=True)
+                for res in results:
+                    tally(1, res)
+
+        if failed > 0:
+            first_msg = str(first_error) if first_error else "unknown error"
+            hint = ""
+            if any(h in first_msg.upper() for h in ("READONLY", "UNKNOWN COMMAND", "NOT ALLOWED", "NOPERM")):
+                hint = " — hits may be served from a read replica or scripting is blocked; set `usage_tracking=UsageTrackingOptions(enabled=False)` to stop usage writes"
+            msg = (
+                f"@betterdb/semantic-cache '{self._name}': failed to record entry usage for "
+                f"{failed}/{len(matched_keys)} key(s); hit_count/last_accessed_at and TTL "
+                f"refresh were skipped: {first_msg}{hint}"
+            )
+            try:
+                if hasattr(self._logger, "warning"):
+                    self._logger.warning(msg)
+                elif hasattr(self._logger, "warn"):
+                    self._logger.warn(msg)
+            except Exception:
+                pass
+
+    async def _exec_entry_usage(self, keys: list[str], now: str) -> list[Any] | None:
+        ttl = str(self._default_ttl) if self._default_ttl is not None else ""
+
+        async def _send(command: str, batch: list[str]) -> list[Any] | None:
+            pipe = self._client.pipeline()
+            script = RECORD_USAGE_SHA if command == "EVALSHA" else RECORD_USAGE_LUA
+            for key in batch:
+                pipe.execute_command(command, script, "1", key, now, ttl)
+            return await pipe.execute(raise_on_error=False)
+
+        results = await _send("EVALSHA", keys)
+        if results is None:
+            return None
+
+        missing_indices: list[int] = []
+        for idx, res in enumerate(results):
+            if isinstance(res, Exception) and "NOSCRIPT" in str(res).upper():
+                missing_indices.append(idx)
+
+        if not missing_indices:
+            return results
+
+        retried = await _send("EVAL", [keys[i] for i in missing_indices])
+        for j, idx in enumerate(missing_indices):
+            results[idx] = retried[j] if retried and j < len(retried) else Exception("pipeline returned no results")
+
+        return results
+
+    def _count_failed_usage_keys(
+        self,
+        results: list[Any] | None,
+        key_count: int,
+        commands_per_key: int,
+    ) -> tuple[int, Exception | None]:
+        if results is None:
+            return key_count, RuntimeError("pipeline returned no results")
+        failed = 0
+        first_error: Exception | None = None
+        for k in range(key_count):
+            slice_results = results[k * commands_per_key : (k + 1) * commands_per_key]
+            err = next((r for r in slice_results if isinstance(r, Exception)), None)
+            if err is not None:
+                failed += 1
+                if first_error is None:
+                    first_error = err
+        return failed, first_error
+
+    async def entry_analytics(
+        self,
+        options: EntryAnalyticsOptions | None = None,
+    ) -> EntryAnalyticsResult:
+        """Per-entry usage analytics: how many entries have ever been hit,
+        which are hottest, and how many are cold (never hit, or not accessed recently).
+
+        When the FT index includes the hit_count / last_accessed_at sortable fields,
+        counts use server-side FT.SEARCH with LIMIT 0 0; top entries use
+        SORTBY hit_count DESC with LIMIT 0 top_n. For an older index it falls back
+        to a SCAN + pipelined HMGET (sampled, max 10,000).
+
+        top_n must be an integer in [0, 10000]; cold_after_days must be a non-negative
+        finite number.
+        """
+        self._assert_initialized("entry_analytics")
+        top_n = options.top_n if options and options.top_n is not None else 10
+        cold_after_days = options.cold_after_days if options and options.cold_after_days is not None else 7.0
+
+        if not isinstance(top_n, int) or isinstance(top_n, bool) or not (0 <= top_n <= ENTRY_ANALYTICS_TOP_N_MAX):
+            raise ValueError(
+                f"entry_analytics: top_n must be an integer in [0, {ENTRY_ANALYTICS_TOP_N_MAX}], got {top_n}"
+            )
+        if (
+            not isinstance(cold_after_days, (int, float))
+            or isinstance(cold_after_days, bool)
+            or not math.isfinite(cold_after_days)
+            or cold_after_days < 0
+        ):
+            raise ValueError(
+                f"entry_analytics: cold_after_days must be a non-negative number, got {cold_after_days}"
+            )
+
+        async def _run(span: Any) -> EntryAnalyticsResult:
+            cold_cutoff = int((time.time() - cold_after_days * 86400) * 1000)
+            sampled = False
+
+            if self._has_usage_fields:
+                try:
+                    total_entries, never_hit_count, cold_entry_count, top_entries = (
+                        await self._collect_analytics_via_search(cold_cutoff, top_n)
+                    )
+                except Exception as err:
+                    msg = (
+                        f"@betterdb/semantic-cache '{self._name}': entry_analytics FT.SEARCH failed, "
+                        f"falling back to sampled SCAN (up to {ENTRY_ANALYTICS_LIMIT} entries): {err}"
+                    )
+                    try:
+                        if hasattr(self._logger, "warning"):
+                            self._logger.warning(msg)
+                        elif hasattr(self._logger, "warn"):
+                            self._logger.warn(msg)
+                    except Exception:
+                        pass
+                    (
+                        total_entries,
+                        never_hit_count,
+                        cold_entry_count,
+                        top_entries,
+                        sampled,
+                    ) = await self._collect_analytics_via_scan(cold_cutoff, top_n)
+            else:
+                (
+                    total_entries,
+                    never_hit_count,
+                    cold_entry_count,
+                    top_entries,
+                    sampled,
+                ) = await self._collect_analytics_via_scan(cold_cutoff, top_n)
+
+            hit_at_least_once_count = max(0, total_entries - never_hit_count)
+
+            _set_span_attrs(
+                span,
+                {
+                    "cache.name": self._name,
+                    "cache.entry_total": total_entries,
+                    "cache.entry_never_hit": never_hit_count,
+                    "cache.entry_cold": cold_entry_count,
+                    "cache.entry_analytics_sampled": sampled,
+                },
+            )
+
+            return EntryAnalyticsResult(
+                total_entries=total_entries,
+                never_hit_count=never_hit_count,
+                hit_at_least_once_count=hit_at_least_once_count,
+                cold_entry_count=cold_entry_count,
+                top_entries=top_entries,
+                cold_after_days=cold_after_days,
+                sampled=sampled,
+            )
+
+        return await self._traced("entry_analytics", _run)
+
+    async def _collect_analytics_via_search(
+        self,
+        cold_cutoff: int,
+        top_n: int,
+    ) -> tuple[int, int, int, list[EntrySummary]]:
+        async def _count_of(filter_str: str) -> int:
+            resp = await self._client.execute_command(
+                "FT.SEARCH",
+                self._index_name,
+                filter_str,
+                "LIMIT",
+                "0",
+                "0",
+            )
+            if isinstance(resp, (list, tuple)) and resp:
+                try:
+                    return int(resp[0])
+                except (ValueError, TypeError):
+                    return 0
+            try:
+                return int(resp)
+            except (ValueError, TypeError):
+                return 0
+
+        total_entries, hit_at_least_once_count, warm_count = await asyncio.gather(
+            _count_of(ALL_ENTRIES_QUERY),
+            _count_of(HIT_AT_LEAST_ONCE_QUERY),
+            _count_of(f"@last_accessed_at:[{cold_cutoff} +inf]"),
+        )
+
+        never_hit_count = max(0, total_entries - hit_at_least_once_count)
+        cold_entry_count = max(0, total_entries - warm_count)
+
+        if top_n == 0:
+            return total_entries, never_hit_count, cold_entry_count, []
+
+        try:
+            top_resp = await self._client.execute_command(
+                "FT.SEARCH",
+                self._index_name,
+                HIT_AT_LEAST_ONCE_QUERY,
+                "RETURN",
+                "5",
+                "hit_count",
+                "last_accessed_at",
+                "inserted_at",
+                "category",
+                "model",
+                "SORTBY",
+                "hit_count",
+                "DESC",
+                "LIMIT",
+                "0",
+                str(top_n),
+                "DIALECT",
+                "2",
+            )
+        except Exception as err:
+            raise ValkeyCommandError("FT.SEARCH", err) from err
+
+        parsed = parse_ft_search_response(top_resp)
+        top_entries = [self._row_to_entry_summary(row["key"], row["fields"]) for row in parsed]
+
+        return total_entries, never_hit_count, cold_entry_count, top_entries
+
+    async def _collect_analytics_via_scan(
+        self,
+        cold_cutoff: int,
+        top_n: int,
+    ) -> tuple[int, int, int, list[EntrySummary], bool]:
+        needed_fields = ("hit_count", "last_accessed_at", "inserted_at", "category", "model")
+        summaries: list[EntrySummary] = []
+        pattern = f"{self._entry_prefix}*"
+        limit_reached = False
+
+        async def _on_keys(keys: list[str], node_client: Any) -> bool | None:
+            nonlocal limit_reached
+            if limit_reached:
+                return False
+
+            remaining = ENTRY_ANALYTICS_LIMIT - len(summaries)
+            batch = keys if len(keys) <= remaining else keys[:remaining]
+            if len(batch) < len(keys):
+                limit_reached = True
+
+            pipe = node_client.pipeline()
+            for key in batch:
+                pipe.hmget(key, *needed_fields)
+            results = await pipe.execute(raise_on_error=False)
+
+            for i, key in enumerate(batch):
+                values = results[i] if results and i < len(results) else None
+                if isinstance(values, Exception) or not values:
+                    continue
+                fields: dict[str, str] = {}
+                for j, f in enumerate(needed_fields):
+                    if j < len(values) and values[j] is not None:
+                        val = values[j]
+                        fields[f] = val.decode() if isinstance(val, bytes) else str(val)
+                summaries.append(self._row_to_entry_summary(key, fields))
+
+            if limit_reached or len(summaries) >= ENTRY_ANALYTICS_LIMIT:
+                limit_reached = True
+                return False
+            return None
+
+        await cluster_scan(self._client, pattern, _on_keys)
+
+        total_entries = len(summaries)
+        never_hit_count = sum(1 for e in summaries if e.hit_count == 0)
+        cold_entry_count = sum(
+            1 for e in summaries if e.hit_count == 0 or e.last_accessed_at < cold_cutoff
+        )
+        hit_entries = [e for e in summaries if e.hit_count >= 1]
+        hit_entries.sort(key=lambda e: e.hit_count, reverse=True)
+        top_entries = hit_entries[:top_n]
+
+        return total_entries, never_hit_count, cold_entry_count, top_entries, limit_reached
+
+    def _row_to_entry_summary(self, key: str, fields: dict[str, Any]) -> EntrySummary:
+        def _to_int(val: Any) -> int:
+            if val is None:
+                return 0
+            if isinstance(val, bytes):
+                val = val.decode()
+            try:
+                return int(val)
+            except (ValueError, TypeError):
+                return 0
+
+        def _to_str(val: Any) -> str:
+            if val is None:
+                return ""
+            if isinstance(val, bytes):
+                return val.decode()
+            return str(val)
+
+        return EntrySummary(
+            key=key,
+            hit_count=_to_int(fields.get("hit_count")),
+            last_accessed_at=_to_int(fields.get("last_accessed_at")),
+            inserted_at=_to_int(fields.get("inserted_at")),
+            category=_to_str(fields.get("category")),
+            model=_to_str(fields.get("model")),
+        )
 
 
 def _safe_float(value: Any, default: float = float("nan")) -> float:
