@@ -34,6 +34,7 @@ import {
 } from '@betterdb/valkey-search-kit';
 import {
   encodeFloat32,
+  escapeGlobPattern,
   escapeTag,
   parseFtSearchResponse,
   extractText,
@@ -255,8 +256,10 @@ export class SemanticCache {
       }
     }
 
-    // Cluster-aware SCAN for entry keys and embed cache keys
-    const patterns = [`${this.name}:entry:*`, `${this.name}:embed:*`];
+    // Cluster-aware SCAN for entry keys and embed cache keys. The name is
+    // glob-escaped so a name like `app?` can't match another cache's keys.
+    const safeName = escapeGlobPattern(this.name);
+    const patterns = [`${safeName}:entry:*`, `${safeName}:embed:*`];
 
     for (const pattern of patterns) {
       await clusterScan(this.client, pattern, async (keys, nodeClient) => {

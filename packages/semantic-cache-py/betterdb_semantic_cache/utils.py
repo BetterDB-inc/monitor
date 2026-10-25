@@ -16,6 +16,18 @@ def sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def escape_glob_pattern(s: str) -> str:
+    """Escape glob metacharacters for use in SCAN MATCH patterns.
+
+    Backslash is escaped first so the later replacements don't double-escape.
+    Mirrors ``escapeGlobPattern`` in the TypeScript package.
+    """
+    s = s.replace("\\", "\\\\")
+    for ch in "*?[]":
+        s = s.replace(ch, "\\" + ch)
+    return s
+
+
 # --- Content block types ---
 
 class BlockHints(TypedDict, total=False):
