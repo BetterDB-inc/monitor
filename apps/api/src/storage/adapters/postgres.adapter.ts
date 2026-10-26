@@ -647,7 +647,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       const result = await this.pool
         .query('SELECT 1 FROM pg_stat_activity WHERE pid = $1', [pid])
         .catch(() => null);
-      if (!result || result.rowCount === 0) return;
+      if (result?.rowCount === 0) return;
       await new Promise((resolve) => setTimeout(resolve, BACKEND_EXIT_POLL_MS));
     }
   }
