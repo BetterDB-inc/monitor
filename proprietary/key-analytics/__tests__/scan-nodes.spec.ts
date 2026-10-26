@@ -38,4 +38,28 @@ describe('scan nodes', () => {
     );
     expect(nodes.map((n) => [n.name, n.nodeId])).toEqual([['dns-seed', id], ['other', other], ['no-id', undefined], ['no-call', undefined]]);
   });
+
+  it('falls back to the myself entry of CLUSTER NODES when CLUSTER MYID is denied or invalid', async () => {
+    const id = 'c'.repeat(40);
+    const viaNodes = (myId: () => Promise<unknown>, selfId: string) =>
+      ({
+        getRole: jest.fn().mockResolvedValue({ role: 'master' }),
+        call: jest.fn(myId),
+        getClusterNodes: jest.fn().mockResolvedValue([
+          { id: 'd'.repeat(40), flags: ['master'], slots: [] },
+          { id: selfId, flags: ['myself', 'master'], slots: [] },
+        ]),
+      }) as any;
+    const denied = () => Promise.reject(new Error('NOPERM this user has no permissions to run the cluster|myid command'));
+    const nodes = await primaryScanNodes(
+      [
+        { name: 'dns-seed', client: viaNodes(denied, id) },
+        { name: 'ip-member', client: viaNodes(async () => 'junk', id), connectionId: 'm1', nodeId: 'stale' },
+        { name: 'bad-self', client: viaNodes(denied, 'not-an-id') },
+      ],
+      logger,
+      'KV cache',
+    );
+    expect(nodes.map((n) => [n.name, n.nodeId])).toEqual([['dns-seed', id], ['bad-self', undefined]]);
+  });
 });

@@ -23,20 +23,6 @@ export interface MemoryStats {
   evictedKeys: number;
 }
 
-export function evictedKeysDelta(
-  previous: Record<string, number> | null,
-  current: Record<string, number>,
-): number | null {
-  if (previous === null) return null;
-  const shared = Object.keys(current).filter((node) => node in previous);
-  if (shared.length === 0) return null;
-  return shared.reduce((sum, node) => {
-    const before = previous[node];
-    const now = current[node];
-    return sum + (now >= before ? now - before : now);
-  }, 0);
-}
-
 export interface ScanCoverage {
   primariesScanned: number;
   primariesTotal: number | null;
@@ -56,6 +42,17 @@ export interface SnapshotInput {
 }
 
 export const DETECTION_MIN_MATCHES = 5;
+
+export function evictedKeysDelta(previous: Map<string, number> | undefined, current: Map<string, number>): number | null {
+  if (!previous) return null;
+  let delta: number | null = null;
+  for (const [node, evicted] of current) {
+    const before = previous.get(node);
+    if (before === undefined) continue;
+    delta = (delta ?? 0) + (evicted >= before ? evicted - before : evicted);
+  }
+  return delta;
+}
 
 const ratio = (value: number) => Math.round(value * 1e4) / 1e4;
 

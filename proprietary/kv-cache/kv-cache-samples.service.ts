@@ -34,6 +34,12 @@ export function mergeBuckets(samples: KvCacheEngineSample[]): KvCacheSampleBucke
     .map((row) => ({ ...row, hitRate: hitRate(row.requestedTokens, row.hitTokens) }));
 }
 
+function dropOldestTimestamp(samples: KvCacheEngineSample[]): KvCacheEngineSample[] {
+  const oldest = samples.reduce((min, row) => Math.min(min, row.timestamp), Infinity);
+  const newer = samples.filter((row) => row.timestamp > oldest);
+  return newer.length > 0 ? newer : samples.slice(-SAMPLES_LIMIT);
+}
+
 @Injectable()
 export class KvCacheSamplesService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(KvCacheSamplesService.name);
@@ -66,7 +72,7 @@ export class KvCacheSamplesService implements OnModuleInit, OnModuleDestroy {
     this.tracker.forgetEngine(engineId);
   }
 
-  idle(): Promise<void> {
+  settled(): Promise<void> {
     return this.flushing;
   }
 
@@ -105,10 +111,12 @@ export class KvCacheSamplesService implements OnModuleInit, OnModuleDestroy {
       modelName: query.model,
     };
     const bucketMs = chartBucketMs(filter.from, filter.to);
-    const [rows, totals] = await Promise.all([
-      this.storage.getKvCacheEngineSamples({ ...filter, limit: SAMPLES_LIMIT, bucketMs }),
+    const [fetched, totals] = await Promise.all([
+      this.storage.getKvCacheEngineSamples({ ...filter, limit: SAMPLES_LIMIT + 1, bucketMs }),
       this.storage.getKvCacheSampleTotals(filter),
     ]);
-    return { buckets: mergeBuckets(rows), rangeHitRate: hitRate(totals.requestedTokens, totals.hitTokens), bucketMs };
+    const truncated = fetched.length > SAMPLES_LIMIT;
+    const rows = truncated ? dropOldestTimestamp(fetched) : fetched;
+    return { buckets: mergeBuckets(rows), rangeHitRate: hitRate(totals.requestedTokens, totals.hitTokens), truncated, bucketMs };
   }
 }

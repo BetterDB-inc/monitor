@@ -323,18 +323,12 @@ describe('buildSnapshot', () => {
   });
 
   it('computes the eviction delta per node and treats a lower counter as a restart', () => {
-    expect(evictedKeysDelta(null, { a: 5 })).toBeNull();
-    expect(evictedKeysDelta({ a: 20 }, { a: 50 })).toBe(30);
-    expect(evictedKeysDelta({ a: 20 }, { a: 5 })).toBe(5);
-    expect(evictedKeysDelta({ a: 10, b: 1000 }, { a: 12 })).toBe(2);
-    expect(evictedKeysDelta({ a: 10 }, { a: 12, b: 1000 })).toBe(2);
-    expect(evictedKeysDelta({ a: 10 }, { b: 1000 })).toBeNull();
-  });
-
-  it('passes the eviction delta through to the snapshot', () => {
-    const node: NodeObservation = { scannedKeys: 0, matchedKeys: [], scanComplete: true, dbSize: 0, samples: [] };
-    expect(buildSnapshot({ ...base, nodes: [node] }).evictedKeysDelta).toBeNull();
-    expect(buildSnapshot({ ...base, nodes: [node], evictedKeysDelta: 7 }).evictedKeysDelta).toBe(7);
+    expect(evictedKeysDelta(undefined, new Map([['a', 5]]))).toBeNull();
+    expect(evictedKeysDelta(new Map([['a', 20]]), new Map([['a', 50]]))).toBe(30);
+    expect(evictedKeysDelta(new Map([['a', 20]]), new Map([['a', 5]]))).toBe(5);
+    expect(evictedKeysDelta(new Map([['a', 20], ['b', 1000]]), new Map([['a', 25]]))).toBe(5);
+    expect(evictedKeysDelta(new Map([['a', 20]]), new Map([['a', 20], ['b', 1000]]))).toBe(0);
+    expect(evictedKeysDelta(new Map([['a', 20]]), new Map([['b', 1000]]))).toBeNull();
   });
 
   it('passes the eviction interval through only alongside a delta', () => {
@@ -356,5 +350,17 @@ describe('buildSnapshot', () => {
     const n2: NodeObservation = { scannedKeys: 5, matchedKeys: parse([key(2)]), scanComplete: true, dbSize: 5, samples: [sample(key(2), { memoryBytes: 30 })] };
     const s = buildSnapshot({ ...base, nodes: [n1, n2] });
     expect(s).toMatchObject({ scannedKeys: 10, matchedKeys: 3, chunksEst: 3, bytesEst: 50 });
+  });
+
+  it('weights each node sample by the keys it stands for when splitting per model', () => {
+    const a = Array.from({ length: 100 }, (_, i) => key(i));
+    const b = key(0, '', 'other', 'half');
+    const n1: NodeObservation = { scannedKeys: 100, matchedKeys: parse(a), scanComplete: true, dbSize: 100, samples: [sample(a[0], { memoryBytes: 100 })] };
+    const n2: NodeObservation = { scannedKeys: 1, matchedKeys: parse([b]), scanComplete: true, dbSize: 1, samples: [sample(b, { memoryBytes: 100 })] };
+    const s = buildSnapshot({ ...base, nodes: [n1, n2] });
+    expect(s.perModel).toEqual([
+      { model: M, dtype: 'bfloat16', chunksEst: 100, bytesEst: 10_000 },
+      { model: 'other', dtype: 'half', chunksEst: 1, bytesEst: 100 },
+    ]);
   });
 });

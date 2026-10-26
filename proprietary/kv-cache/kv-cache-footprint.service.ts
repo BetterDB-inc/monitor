@@ -1,4 +1,12 @@
-import { BadRequestException, Inject, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+  OnModuleInit,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import {
   Feature,
   type ConnectionStatus,
@@ -18,6 +26,7 @@ import {
   buildSnapshot,
   DETECTION_MIN_MATCHES,
   evictedKeysDelta,
+  type KeySample,
   type MemoryStats,
   type NodeObservation,
   type ScanCoverage,
@@ -32,7 +41,11 @@ import {
 import { hasSingleKeyEvidence, hasTwoKeyEvidence, maskKey, resolveTagSuffixes } from './key-classifier';
 import { slotOwner, type SlotOwnership } from './key-slot';
 
-export type SnapshotListener = (snapshot: KvCacheFootprintSnapshot) => void | Promise<void>;
+export interface SnapshotContext {
+  partial: boolean;
+}
+
+export type SnapshotListener = (snapshot: KvCacheFootprintSnapshot, context: SnapshotContext) => void | Promise<void>;
 export type RemovalListener = (connectionId: string) => void | Promise<void>;
 
 interface NodeReading {
@@ -105,7 +118,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   );
   private readonly budgets = {
     maxScanned: this.setting('KV_CACHE_SCAN_MAX_KEYS', 200000, 1),
-    maxMatched: this.setting('KV_CACHE_MATCH_MAX_KEYS', 2000, 1),
+    maxMatched: this.setting('KV_CACHE_MATCH_MAX_KEYS', 2000, DETECTION_MIN_MATCHES),
   };
   private readonly sampleSize = this.setting('KV_CACHE_SAMPLE_KEYS', 500, 1);
   private readonly undetectedRecheckMs = this.setting(
@@ -113,14 +126,23 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     1800000,
     MIN_FOOTPRINT_INTERVAL_MS,
   );
-  private readonly inFlight = new Map<string, Promise<KvCacheFootprintSnapshot | null>>();
-  private readonly lastEvicted = new Map<string, { timestamp: number; counts: Record<string, number> }>();
-  private unsubscribeRemoval: (() => void) | null = null;
+  private readonly running = new Map<string, Promise<KvCacheFootprintSnapshot | null>>();
+  private readonly generations = new Map<string, number>();
+  private readonly deleting = new Map<string, Promise<void>>();
+  private readonly removing = new Map<string, Promise<void>>();
+  private readonly announcing = new Map<string, Promise<void>>();
+  private readonly lastEvicted = new Map<string, { timestamp: number; counts: Map<string, number> }>();
   private readonly sampleKeys = new Map<string, string>();
   private readonly undetectedUntil = new Map<string, number>();
+  private readonly undetected = new Set<string>();
   private readonly partialMisses = new Map<string, number>();
+  private retired = new Set<string>();
+  private sweepTimer: NodeJS.Timeout | null = null;
+  private unsubscribeRemoval: (() => void) | null = null;
+  private readonly memoryBlocked = new Set<string>();
   private readonly listeners: SnapshotListener[] = [];
   private readonly removalListeners: RemovalListener[] = [];
+  private readonly restoreListeners: RemovalListener[] = [];
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -133,9 +155,14 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   async onModuleInit(): Promise<void> {
     this.unsubscribeRemoval = this.connectionRegistry.addConnectionRemovalListener((id) => this.forget(id));
     this.start();
+    this.sweepDeletedRetirees();
+    this.sweepTimer = setInterval(() => this.sweepDeletedRetirees(), this.intervalMs);
+    this.sweepTimer.unref?.();
   }
 
   async onModuleDestroy(): Promise<void> {
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
+    this.sweepTimer = null;
     this.unsubscribeRemoval?.();
     this.unsubscribeRemoval = null;
     await super.onModuleDestroy();
@@ -162,26 +189,99 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     await this.collect(ctx);
   }
 
-  private async forget(connectionId: string): Promise<void> {
-    await this.inFlight.get(connectionId)?.catch(() => null);
+  private forget(connectionId: string): void {
+    const active = this.running.get(connectionId);
+    this.running.delete(connectionId);
+    const generation = this.generationOf(connectionId) + 1;
+    this.generations.set(connectionId, generation);
     this.lastEvicted.delete(connectionId);
     this.sampleKeys.delete(connectionId);
     this.undetectedUntil.delete(connectionId);
+    this.undetected.delete(connectionId);
     this.partialMisses.delete(connectionId);
-    for (const listener of this.removalListeners) {
+    const settled = active?.then(
+      () => undefined,
+      () => undefined,
+    );
+    const announcing = this.announcing.get(connectionId);
+    const removed = announcing
+      ? announcing.then(() => this.announceRemoval(connectionId))
+      : this.announceRemoval(connectionId);
+    const removal = removed.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.removing.set(connectionId, removal);
+    void removal.then(() => {
+      if (this.removing.get(connectionId) === removal) this.removing.delete(connectionId);
+    });
+    void Promise.all([removed, settled])
+      .then(() => this.deleteRemovedData(connectionId, generation))
+      .catch((error) => this.logger.warn(`Could not delete KV cache data for ${connectionId}: ${errorMessage(error)}`));
+  }
+
+  private async announceRemoval(connectionId: string): Promise<void> {
+    await Promise.all(
+      this.removalListeners.map(async (listener) => {
+        try {
+          await listener(connectionId);
+        } catch (error) {
+          this.logger.warn(`KV cache removal listener failed: ${errorMessage(error)}`);
+        }
+      }),
+    );
+  }
+
+  private sweepDeletedRetirees(): void {
+    const all = this.connectionRegistry.list({ includeRetired: true }).map((connection) => connection.id);
+    const live = new Set(this.connectionRegistry.list().map((connection) => connection.id));
+    const known = new Set(all);
+    const deleted = [...this.retired].filter((id) => !known.has(id));
+    this.retired = new Set(all.filter((id) => !live.has(id)));
+    for (const id of deleted) this.forget(id);
+  }
+
+  private async deleteRemovedData(connectionId: string, generation: number): Promise<void> {
+    if (this.generationOf(connectionId) !== generation) return;
+    if (this.isRegistered(connectionId)) return this.announceRestore(connectionId);
+    if (!this.running.has(connectionId)) this.generations.delete(connectionId);
+    const deletion = this.storage.deleteKvCacheConnectionData(connectionId);
+    const settled = deletion.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.deleting.set(connectionId, settled);
+    try {
+      await deletion;
+    } finally {
+      if (this.deleting.get(connectionId) === settled) this.deleting.delete(connectionId);
+    }
+  }
+
+  private async announceRestore(connectionId: string): Promise<void> {
+    for (const listener of this.restoreListeners) {
       try {
         await listener(connectionId);
       } catch (error) {
-        this.logger.warn(`KV cache removal listener failed: ${errorMessage(error)}`);
+        this.logger.warn(`KV cache restore listener failed: ${errorMessage(error)}`);
       }
     }
-    await this.storage
-      .deleteKvCacheConnectionData(connectionId)
-      .catch((error) => this.logger.warn(`Could not delete KV cache data for ${connectionId}: ${errorMessage(error)}`));
+  }
+
+  private isRegistered(connectionId: string): boolean {
+    return this.connectionRegistry.list({ includeRetired: true }).some((connection) => connection.id === connectionId);
+  }
+
+  hasConnection(connectionId: string): boolean {
+    return Boolean(this.connectionRegistry.getConfig(connectionId));
   }
 
   onConnectionRemoval(listener: RemovalListener): void {
     this.removalListeners.push(listener);
+  }
+
+  onConnectionRestore(listener: RemovalListener): void {
+    this.restoreListeners.push(listener);
   }
 
   onSnapshot(listener: SnapshotListener): void {
@@ -200,7 +300,10 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     const target = this.target(connectionId);
     if (!target) throw new NotFoundException(`Connection '${connectionId}' not found`);
     if (target.rejection) throw new BadRequestException(target.rejection);
-    const running = this.inFlight.get(connectionId);
+    if (target.connection && !target.connection.isConnected) {
+      throw new ServiceUnavailableException(`Connection '${connectionId}' is not connected`);
+    }
+    const running = this.running.get(connectionId);
     if (running) return running;
     const recent = await this.recentSnapshot(connectionId);
     if (recent) return recent;
@@ -213,6 +316,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   }
 
   async collect(ctx: ConnectionContext): Promise<KvCacheFootprintSnapshot | null> {
+    await this.deleting.get(ctx.connectionId);
     const target = this.target(ctx.connectionId);
     if (!target || target.rejection) return null;
     return this.collectWith(ctx, target.plan);
@@ -220,11 +324,16 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
 
   private target(
     connectionId: string,
-  ): { config: DatabaseConnectionConfig; plan: CollectionPlan; rejection: string | null } | null {
+  ): {
+    config: DatabaseConnectionConfig;
+    connection: ConnectionStatus | undefined;
+    plan: CollectionPlan;
+    rejection: string | null;
+  } | null {
     const config = this.connectionRegistry.getConfig(connectionId);
     if (!config) return null;
     const { connection, plan } = resolvePlan(this.connectionRegistry, connectionId);
-    return { config, plan, rejection: this.rejection(connectionId, config, connection, plan) };
+    return { config, connection, plan, rejection: this.rejection(connectionId, config, connection, plan) };
   }
 
   private async recentSnapshot(connectionId: string): Promise<KvCacheFootprintSnapshot | null> {
@@ -238,44 +347,54 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     connection: ConnectionStatus | undefined,
     plan: CollectionPlan,
   ): string | null {
+    if (this.isSentinelConnection(connectionId)) return 'Sentinel connections have no keyspace to scan';
     if (config.host === 'agent') return 'KV cache footprint is not available for agent connections';
     if (config.connectionType === 'external') return 'KV cache footprint is not available for external connections';
-    if (connection?.isConnected === false) return 'The connection is not connected';
-    if (this.isSentinelConnection(connectionId)) return 'Sentinel connections have no keyspace to scan';
     if (connection?.membership?.retiredAt !== undefined) return 'This node has been retired from its topology';
     if (plan.kind === 'skip') return 'KV cache footprint for this node is collected through its seed or primary connection';
     return null;
   }
 
   private async collectWith(ctx: ConnectionContext, plan: CollectionPlan): Promise<KvCacheFootprintSnapshot | null> {
-    const running = this.inFlight.get(ctx.connectionId);
+    await this.deleting.get(ctx.connectionId);
+    if (!this.connectionRegistry.getConfig(ctx.connectionId)) return null;
+    const running = this.running.get(ctx.connectionId);
     if (running) return running;
-    const run = this.run(ctx, plan);
-    this.inFlight.set(ctx.connectionId, run);
+    const run = this.runCollection(ctx, plan);
+    this.running.set(ctx.connectionId, run);
     try {
       return await run;
     } finally {
-      this.inFlight.delete(ctx.connectionId);
+      if (this.running.get(ctx.connectionId) === run) this.running.delete(ctx.connectionId);
     }
   }
 
-  private async run(ctx: ConnectionContext, plan: CollectionPlan): Promise<KvCacheFootprintSnapshot> {
+  private generationOf(connectionId: string): number {
+    return this.generations.get(connectionId) ?? 0;
+  }
+
+  private async runCollection(ctx: ConnectionContext, plan: CollectionPlan): Promise<KvCacheFootprintSnapshot | null> {
+    const generation = this.generationOf(ctx.connectionId);
+    const current = () => this.generationOf(ctx.connectionId) === generation;
     const targets = await this.nodesFor(ctx, plan);
     const { nodes, skipped } = targets;
-    const settled = await this.readAll(nodes, targets.slots?.rangesByNode.map(slotOwner), targets.replicaSeed === true);
+    const probe = this.undetected.has(ctx.connectionId);
+    const settled = await this.readAll(nodes, probe, targets.slots?.rangesByNode.map(slotOwner), targets.replicaSeed === true);
     const readings: NodeReading[] = [];
     const readIndexes: number[] = [];
+    const evicted = new Map<string, number>();
     settled.forEach((result, index) => {
       if (result.status === 'fulfilled') {
         readings.push(result.value);
         readIndexes.push(index);
-      } else this.logger.warn(`KV cache read failed on ${nodes[index].name}: ${errorMessage(result.reason)}`);
+        evicted.set(result.value.nodeKey, result.value.memory.evictedKeys);
+      } else {
+        this.logger.warn(`KV cache read failed on ${nodes[index].name}: ${errorMessage(result.reason)}`);
+      }
     });
     const failed = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected');
     if (readings.length === 0 && failed) throw failed.reason;
-    const partial = failed !== undefined || skipped > 0;
     const memory = this.sumMemory(readings.map((reading) => reading.memory));
-    const evicted = Object.fromEntries(readings.map((reading) => [reading.nodeKey, reading.memory.evictedKeys]));
     const timestamp = Date.now();
     const previousEvicted = this.lastEvicted.get(ctx.connectionId);
     const built = buildSnapshot({
@@ -283,24 +402,42 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
       timestamp,
       nodes: readings.map((reading) => reading.observation),
       memory,
-      evictedKeysDelta: evictedKeysDelta(previousEvicted?.counts ?? null, evicted),
+      evictedKeysDelta: evictedKeysDelta(previousEvicted?.counts, evicted),
       evictedKeysIntervalMs: previousEvicted ? timestamp - previousEvicted.timestamp : null,
       otherDbs: readings[0]?.otherDbs ?? [],
       clientDetected: readings.some((reading) => reading.glide),
       coverage: this.coverage(targets, readIndexes),
     });
-    const detected = partial && !built.detected ? await this.carriedDetection(ctx.connectionId) : built.detected;
-    if (!partial || built.detected) this.partialMisses.delete(ctx.connectionId);
+    const partial = failed !== undefined || skipped > 0;
+    const missed = partial && !built.detected;
+    const misses = missed ? (this.partialMisses.get(ctx.connectionId) ?? 0) + 1 : 0;
+    const detected = missed ? await this.carriedDetection(ctx.connectionId, misses) : built.detected;
     const keepsEarlier = partial && detected;
     const snapshot = partial ? { ...built, scanComplete: false, detected } : built;
+    await this.deleting.get(ctx.connectionId);
+    if (current()) await this.removing.get(ctx.connectionId);
+    const live = () => current() && Boolean(this.connectionRegistry.getConfig(ctx.connectionId));
+    if (!live()) return null;
     await this.storage.saveKvCacheFootprintSnapshot(snapshot);
+    if (!live()) return null;
     this.lastEvicted.set(ctx.connectionId, { timestamp, counts: evicted });
-    if (built.detected) this.undetectedUntil.delete(ctx.connectionId);
-    else if (!snapshot.detected && (!partial || this.partialMissesExhausted(ctx.connectionId))) {
+    if (missed) this.partialMisses.set(ctx.connectionId, misses);
+    else this.partialMisses.delete(ctx.connectionId);
+    if (built.detected) {
+      this.undetectedUntil.delete(ctx.connectionId);
+      this.undetected.delete(ctx.connectionId);
+    } else if (!snapshot.detected && (!partial || misses >= PARTIAL_MISSES_BEFORE_CLEAR)) {
       this.undetectedUntil.set(ctx.connectionId, snapshot.timestamp + this.undetectedRecheckMs);
+      this.undetected.add(ctx.connectionId);
     }
     this.rememberSampleKey(ctx.connectionId, readings, keepsEarlier);
-    await this.announce(snapshot);
+    const announced = this.announce(snapshot, { partial });
+    this.announcing.set(ctx.connectionId, announced);
+    try {
+      await announced;
+    } finally {
+      if (this.announcing.get(ctx.connectionId) === announced) this.announcing.delete(ctx.connectionId);
+    }
     return snapshot;
   }
 
@@ -383,10 +520,11 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
 
   private async readAll(
     nodes: ScanNode[],
+    probe: boolean,
     ownership?: SlotOwnership[],
     replicaSeed = false,
   ): Promise<PromiseSettledResult<NodeReading>[]> {
-    const scanned = await Promise.allSettled(nodes.map((node) => this.scanNode(node)));
+    const scanned = await Promise.allSettled(nodes.map((node) => this.scanNode(node, probe)));
     const runKeys = scanned.flatMap((result) => (result.status === 'fulfilled' ? result.value.scan.matchedKeys : []));
     const evidence = { twoKey: hasTwoKeyEvidence(runKeys), singleKey: hasSingleKeyEvidence(runKeys) };
     const checkClients = runKeys.length < DETECTION_MIN_MATCHES;
@@ -399,8 +537,17 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     );
   }
 
-  private async scanNode(node: ScanNode): Promise<NodeScan> {
-    const [scan, info] = await Promise.all([this.scanKeys(node), node.client.getInfoParsed(['memory', 'stats', 'keyspace'])]);
+  private async carriedDetection(connectionId: string, misses: number): Promise<boolean> {
+    if (misses >= PARTIAL_MISSES_BEFORE_CLEAR) return false;
+    const [previous] = await this.storage.getKvCacheFootprintSnapshots({ connectionId, limit: 1 });
+    return previous?.detected === true;
+  }
+
+  private async scanNode(node: ScanNode, probe: boolean): Promise<NodeScan> {
+    const [scan, info] = await Promise.all([
+      this.scanKeys(node, probe),
+      node.client.getInfoParsed(['memory', 'stats', 'keyspace']),
+    ]);
     const ownDb = node.client.getActiveDbIndex?.() ?? 0;
     return {
       node,
@@ -412,9 +559,9 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     };
   }
 
-  private async scanKeys(node: ScanNode): Promise<ScanResult & { dbSize: number }> {
+  private async scanKeys(node: ScanNode, probe: boolean): Promise<ScanResult & { dbSize: number }> {
     const dbSize = await node.client.getDbSize();
-    return { ...(await scanLmcacheKeys(node.client, this.budgets, dbSize)), dbSize };
+    return { ...(await scanLmcacheKeys(node.client, this.budgets, dbSize, probe)), dbSize };
   }
 
   private async sampleNode(
@@ -426,10 +573,21 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   ): Promise<NodeReading> {
     const matchedKeys = resolveTagSuffixes(scan.matchedKeys, twoKey, singleKey);
     const [samples, glide] = await Promise.all([
-      replica ? [] : sampleLmcacheKeys(node.client, downsampleSeries(matchedKeys, this.sampleSize), ownsSlot),
+      replica ? ([] as KeySample[]) : sampleLmcacheKeys(node.client, downsampleSeries(matchedKeys, this.sampleSize), ownsSlot),
       checkClients ? hasLmcacheGlideClient(node.client, node.client.getActiveDbIndex?.() ?? 0) : false,
     ]);
+    this.noteMemoryAccess(node.name, samples.length > 0 && samples.every((sample) => sample.memoryBytes === null));
     return { ...rest, glide, nodeKey: node.connectionId ?? node.name, observation: { ...scan, matchedKeys, samples } };
+  }
+
+  private noteMemoryAccess(nodeName: string, blocked: boolean): void {
+    if (!blocked) {
+      this.memoryBlocked.delete(nodeName);
+      return;
+    }
+    if (this.memoryBlocked.has(nodeName)) return;
+    this.memoryBlocked.add(nodeName);
+    this.logger.warn(`MEMORY USAGE returned nothing on ${nodeName}; KV cache byte estimates will read as unknown`);
   }
 
   private sumMemory(stats: MemoryStats[]): MemoryStats {
@@ -443,28 +601,16 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     };
   }
 
-  private async carriedDetection(connectionId: string): Promise<boolean> {
-    const misses = (this.partialMisses.get(connectionId) ?? 0) + 1;
-    this.partialMisses.set(connectionId, misses);
-    if (misses >= PARTIAL_MISSES_BEFORE_CLEAR) return false;
-    const [previous] = await this.storage.getKvCacheFootprintSnapshots({ connectionId, limit: 1 });
-    return previous?.detected === true;
-  }
-
-  private partialMissesExhausted(connectionId: string): boolean {
-    return (this.partialMisses.get(connectionId) ?? 0) >= PARTIAL_MISSES_BEFORE_CLEAR;
-  }
-
   private rememberSampleKey(connectionId: string, readings: NodeReading[], keepsEarlier: boolean): void {
     const parsed = readings.flatMap((reading) => reading.observation.matchedKeys)[0];
     if (parsed) this.sampleKeys.set(connectionId, maskKey(parsed));
     else if (!keepsEarlier) this.sampleKeys.delete(connectionId);
   }
 
-  private async announce(snapshot: KvCacheFootprintSnapshot): Promise<void> {
+  private async announce(snapshot: KvCacheFootprintSnapshot, context: SnapshotContext): Promise<void> {
     for (const listener of this.listeners) {
       try {
-        await listener(snapshot);
+        await listener(snapshot, context);
       } catch (error) {
         this.logger.warn(`KV cache snapshot listener failed: ${errorMessage(error)}`);
       }

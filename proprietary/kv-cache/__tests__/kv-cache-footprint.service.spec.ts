@@ -1,4 +1,4 @@
-import { BadRequestException, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { Feature } from '@betterdb/shared';
 import * as classifier from '../key-classifier';
 import * as scanner from '../footprint-scanner';
@@ -12,13 +12,15 @@ import {
 
 const KEY = (i: number) => `m/x@1@0@${(i + 1).toString(16)}@bfloat16`;
 
+const REPLIES: Record<string, unknown> = { MEMORY: 100, TTL: -1, EXISTS: 0, CLIENT: 'id=1 lib-name=redis-py\n' };
+
 function fakeClient(keys: string[]) {
-  const pipeline = { call: jest.fn().mockReturnThis(), ttl: jest.fn().mockReturnThis(), exists: jest.fn().mockReturnThis(), exec: jest.fn() };
-  pipeline.exec.mockImplementation(async () => keys.flatMap(() => [[null, 100], [null, -1]]));
   return {
     getDbSize: jest.fn().mockResolvedValue(keys.length),
-    call: jest.fn(async (cmd: string) => (cmd === 'SCAN' ? ['0', keys] : 'id=1 lib-name=redis-py\n')),
-    getClient: () => ({ pipeline: () => pipeline }),
+    call: jest.fn(async (cmd: string) => (cmd === 'SCAN' ? ['0', keys] : REPLIES[cmd])),
+    getClient: () => {
+      throw new Error('Raw client access not available through agent connections');
+    },
     getInfoParsed: jest.fn().mockResolvedValue({
       memory: { used_memory: '1000', maxmemory: '0', maxmemory_policy: 'noeviction' },
       stats: { evicted_keys: '3' },
@@ -59,8 +61,48 @@ describe('KvCacheFootprintService', () => {
     const snapshot = await service.triggerCollection('c1');
     expect(snapshot).toMatchObject({ connectionId: 'c1', detected: true, matchedKeys: 6, chunksEst: 6, evictedKeysDelta: null, evictedKeysIntervalMs: null });
     expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledWith(snapshot);
-    expect(listener).toHaveBeenCalledWith(snapshot);
+    expect(listener).toHaveBeenCalledWith(snapshot, { partial: false });
     expect(service.getSampleKey('c1')).toBe('m/x@1@0@1…@bfloat16');
+  });
+
+  it('reports the eviction delta on the second run', async () => {
+    const { service } = setup();
+    await service.triggerCollection('c1');
+    expect((await service.triggerCollection('c1'))?.evictedKeysDelta).toBe(0);
+  });
+
+  it('returns the in-flight collection to a manual trigger', async () => {
+    const { service, client, storage } = setup();
+    let finishRead: (size: number) => void = () => undefined;
+    client.getDbSize.mockImplementationOnce(() => new Promise((resolve) => (finishRead = resolve)));
+    const first = service.triggerCollection('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    const second = service.triggerCollection('c1');
+    finishRead(6);
+    const [a, b] = await Promise.all([first, second]);
+    expect(b).not.toBeNull();
+    expect(b).toBe(a);
+    expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns the in-flight collection to a trigger that starts in the same tick', async () => {
+    const { service, storage } = setup();
+    const first = service.triggerCollection('c1');
+    const second = service.triggerCollection('c1');
+    const [a, b] = await Promise.all([first, second]);
+    expect(a).not.toBeNull();
+    expect(b).toBe(a);
+    expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns the in-flight collection to a poll that overlaps a manual trigger', async () => {
+    const { service, client } = setup();
+    const ctx = { connectionId: 'c1', connectionName: 'one', client, host: 'h', port: 6379 };
+    const manual = service.triggerCollection('c1');
+    const polled = service.collect(ctx);
+    const [a, b] = await Promise.all([manual, polled]);
+    expect(a).not.toBeNull();
+    expect(b).toBe(a);
   });
 
   it('classifies each scanned key once per collection', async () => {
@@ -74,10 +116,39 @@ describe('KvCacheFootprintService', () => {
     }
   });
 
-  it('reports the eviction delta on the second run', async () => {
-    const { service } = setup();
-    await service.triggerCollection('c1');
-    expect((await service.triggerCollection('c1'))?.evictedKeysDelta).toBe(0);
+  it('rejects a manual trigger for a cluster member, which its seed collects', async () => {
+    const { service, client, registry } = setup();
+    registry.list.mockReturnValue([
+      { id: 'seed', name: 'seed', isConnected: true, connectionType: 'direct' },
+      {
+        id: 'c1',
+        name: 'one',
+        isConnected: true,
+        connectionType: 'direct',
+        membership: { seedId: 'seed', nodeId: 'n', origin: 'auto', source: 'cluster' },
+      },
+    ]);
+    await expect(service.triggerCollection('c1')).rejects.toThrow(/seed/);
+    await expect(service.triggerCollection('c1')).rejects.toBeInstanceOf(BadRequestException);
+    expect(client.getDbSize).not.toHaveBeenCalled();
+  });
+
+  it('rejects a manual trigger for an external connection', async () => {
+    const { service, client, registry } = setup();
+    registry.list.mockReturnValue([{ id: 'c1', name: 'one', isConnected: true, connectionType: 'external' }]);
+    registry.getConfig.mockReturnValue({ id: 'c1', name: 'one', host: 'h', port: 6379, connectionType: 'external' });
+    registry.get.mockImplementation(() => {
+      throw new Error('external connections have no client');
+    });
+    await expect(service.triggerCollection('c1')).rejects.toBeInstanceOf(BadRequestException);
+    expect(client.getDbSize).not.toHaveBeenCalled();
+  });
+
+  it('rejects a manual trigger for a sentinel connection', async () => {
+    const { service, client } = setup();
+    client.getCapabilities = () => ({ isSentinel: true });
+    await expect(service.triggerCollection('c1')).rejects.toBeInstanceOf(BadRequestException);
+    expect(client.getDbSize).not.toHaveBeenCalled();
   });
 
   it('reports the time since the run the eviction delta is measured from', async () => {
@@ -216,8 +287,8 @@ describe('KvCacheFootprintService', () => {
     expect((await service.triggerCollection('c1'))?.evictedKeysDelta).toBe(1);
   });
 
-  it('keeps the readable primaries and marks the scan incomplete when one primary fails', async () => {
-    const { service, client, storage } = setup();
+  it('keeps the readable nodes and marks the scan incomplete when one node fails', async () => {
+    const { service, client } = setup();
     const broken = fakeClient([]);
     broken.getDbSize.mockRejectedValue(new Error('LOADING'));
     jest.spyOn(service as any, 'nodesFor').mockResolvedValue({
@@ -228,38 +299,27 @@ describe('KvCacheFootprintService', () => {
       skipped: 0,
     });
     const snapshot = await service.triggerCollection('c1');
-    expect(snapshot).toMatchObject({ matchedKeys: 6, detected: true, scanComplete: false });
-    expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledWith(snapshot);
+    expect(snapshot).toMatchObject({ matchedKeys: 6, scanComplete: false });
   });
 
-  it('keeps the previous detection and sample key when a partial read finds too few keys', async () => {
-    const { service, storage } = setup();
-    await service.triggerCollection('c1');
-    storage.getKvCacheFootprintSnapshots.mockResolvedValue([{ connectionId: 'c1', detected: true }]);
-    const sparse = fakeClient([KEY(0)]);
+  it('tells snapshot listeners whether every node was read', async () => {
+    const { service, client } = setup();
+    const listener = jest.fn();
+    service.onSnapshot(listener);
     const broken = fakeClient([]);
     broken.getDbSize.mockRejectedValue(new Error('LOADING'));
     const nodes = jest.spyOn(service as any, 'nodesFor').mockResolvedValue({
       nodes: [
-        { name: 'a', client: sparse },
-        { name: 'b', client: broken },
-      ],
-      skipped: 0,
-    });
-    const snapshot = await service.triggerCollection('c1');
-    expect(snapshot).toMatchObject({ detected: true, scanComplete: false });
-    expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenLastCalledWith(snapshot);
-    expect(storage.getKvCacheFootprintSnapshots).toHaveBeenCalledWith({ connectionId: 'c1', limit: 1 });
-    expect(service.getSampleKey('c1')).toBe('m/x@1@0@1…@bfloat16');
-    nodes.mockResolvedValue({
-      nodes: [
-        { name: 'a', client: fakeClient([]) },
+        { name: 'a', client },
         { name: 'b', client: broken },
       ],
       skipped: 0,
     });
     await service.triggerCollection('c1');
-    expect(service.getSampleKey('c1')).toBe('m/x@1@0@1…@bfloat16');
+    expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({ connectionId: 'c1' }), { partial: true });
+    nodes.mockResolvedValue({ nodes: [{ name: 'a', client }], skipped: 0 });
+    await service.triggerCollection('c1');
+    expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({ connectionId: 'c1' }), { partial: false });
   });
 
   it('clears an earlier detection after consecutive partial runs that find no LMCache', async () => {
@@ -305,6 +365,27 @@ describe('KvCacheFootprintService', () => {
     expect(await service.triggerCollection('c1')).toMatchObject({ detected: false, scanComplete: false });
   });
 
+  it('marks the snapshot partial when a node drops its connection while sampling', async () => {
+    const { service, client } = setup();
+    const listener = jest.fn();
+    service.onSnapshot(listener);
+    const dropped = fakeClient(Array.from({ length: 6 }, (_, i) => KEY(i + 10)));
+    dropped.call.mockImplementation(async (cmd: string) => {
+      if (cmd === 'SCAN') return ['0', Array.from({ length: 6 }, (_, i) => KEY(i + 10))];
+      throw new Error('Connection is closed.');
+    });
+    jest.spyOn(service as any, 'nodesFor').mockResolvedValue({
+      nodes: [
+        { name: 'a', client },
+        { name: 'b', client: dropped },
+      ],
+      skipped: 0,
+    });
+    const snapshot = await service.triggerCollection('c1');
+    expect(snapshot).toMatchObject({ matchedKeys: 6, scanComplete: false });
+    expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({ connectionId: 'c1' }), { partial: true });
+  });
+
   describe('cluster members that were never read', () => {
     const primary = (id: string, slots: number[][], flags: string[] = []) => ({ id, flags: [...flags, 'master'], slots });
     const replica = (id: string) => ({ id, flags: ['slave'], slots: [] });
@@ -314,6 +395,8 @@ describe('KvCacheFootprintService', () => {
       view: unknown[] = [primary('n0', [[0, 8191]], ['myself']), member === 'replica' ? replica('n1') : primary('n1', [[8192, 16383]])],
     ) {
       const ctx = setup();
+      const listener = jest.fn();
+      ctx.service.onSnapshot(listener);
       const other = fakeClient([]);
       ctx.client.getClusterNodes = jest.fn().mockResolvedValue(view);
       if (member === 'role-failed') other.getRole.mockRejectedValue(new Error('timeout'));
@@ -332,19 +415,21 @@ describe('KvCacheFootprintService', () => {
           membership: { seedId: 'c1', nodeId: 'n1', origin: 'auto', source: 'cluster' },
         },
       ]);
-      return ctx;
+      return { ...ctx, listener };
     }
 
-    it.each(['deregistered', 'role-failed'] as const)('marks the snapshot incomplete when a member is %s', async (member) => {
-      const { service, storage } = clusterSetup(member);
+    it.each(['deregistered', 'role-failed'] as const)('marks the snapshot partial when a member is %s', async (member) => {
+      const { service, listener } = clusterSetup(member);
       const snapshot = await service.triggerCollection('c1');
-      expect(snapshot).toMatchObject({ matchedKeys: 6, scanComplete: false });
-      expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledWith(snapshot);
+      expect(snapshot).toMatchObject({ scanComplete: false });
+      expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({ connectionId: 'c1' }), { partial: true });
     });
 
     it('does not treat a replica as unread', async () => {
-      const { service } = clusterSetup('replica');
-      expect(await service.triggerCollection('c1')).toMatchObject({ scanComplete: true });
+      const { service, listener } = clusterSetup('replica');
+      const snapshot = await service.triggerCollection('c1');
+      expect(snapshot).toMatchObject({ scanComplete: true });
+      expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({ connectionId: 'c1' }), { partial: false });
     });
 
     it('keeps the snapshot complete when every slot owner was scanned', async () => {
@@ -570,6 +655,8 @@ describe('KvCacheFootprintService', () => {
   describe('disconnected cluster members', () => {
     function offlineSetup(clusterNodes: () => Promise<unknown>) {
       const ctx = setup();
+      const listener = jest.fn();
+      ctx.service.onSnapshot(listener);
       ctx.registry.list.mockReturnValue([
         { id: 'c1', name: 'one', isConnected: true, connectionType: 'direct' },
         {
@@ -581,35 +668,129 @@ describe('KvCacheFootprintService', () => {
         },
       ]);
       ctx.client.getClusterNodes = jest.fn(clusterNodes);
-      return ctx;
+      return { ...ctx, listener };
     }
 
-    it('marks the snapshot incomplete when a disconnected member still owns slots as a primary', async () => {
-      const { service } = offlineSetup(async () => [{ id: 'n1', flags: ['master', 'fail?'], slots: [[0, 5460]] }]);
-      expect(await service.triggerCollection('c1')).toMatchObject({ scanComplete: false });
+    it('marks the snapshot partial when a disconnected member still owns slots as a primary', async () => {
+      const { service, listener } = offlineSetup(async () => [{ id: 'n1', flags: ['master', 'fail?'], slots: [[0, 5460]] }]);
+      const snapshot = await service.triggerCollection('c1');
+      expect(snapshot).toMatchObject({ scanComplete: false });
+      expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({ connectionId: 'c1' }), { partial: true });
     });
 
-    it('marks the snapshot incomplete when the cluster view cannot be read', async () => {
-      const { service } = offlineSetup(async () => {
+    it('marks the snapshot partial when the cluster view cannot be read', async () => {
+      const { service, listener } = offlineSetup(async () => {
         throw new Error('timeout');
       });
-      expect(await service.triggerCollection('c1')).toMatchObject({ scanComplete: false });
+      await service.triggerCollection('c1');
+      expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({ connectionId: 'c1' }), { partial: true });
     });
 
     it.each([
       ['a replica', { id: 'n1', flags: ['slave'], slots: [] }],
       ['a failed-over primary without slots', { id: 'n1', flags: ['master', 'fail'], slots: [] }],
     ])('does not treat %s as unread', async (_label, node) => {
-      const { service } = offlineSetup(async () => [node]);
-      expect(await service.triggerCollection('c1')).toMatchObject({ scanComplete: true });
+      const { service, listener } = offlineSetup(async () => [node]);
+      const snapshot = await service.triggerCollection('c1');
+      expect(snapshot).toMatchObject({ scanComplete: true });
+      expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({ connectionId: 'c1' }), { partial: false });
     });
   });
 
-  it('fails the collection when every primary fails', async () => {
-    const { service, client, storage } = setup();
+  describe('partial reads with too few keys', () => {
+    function partialSetup() {
+      const ctx = setup([KEY(0)]);
+      const broken = fakeClient([]);
+      broken.getDbSize.mockRejectedValue(new Error('LOADING'));
+      jest.spyOn(ctx.service as any, 'nodesFor').mockResolvedValue({
+        nodes: [
+          { name: 'a', client: ctx.client },
+          { name: 'b', client: broken },
+        ],
+        skipped: 0,
+      });
+      return ctx;
+    }
+
+    it('keeps the previous detection instead of flipping to not detected', async () => {
+      const { service, storage } = partialSetup();
+      storage.getKvCacheFootprintSnapshots.mockResolvedValue([{ connectionId: 'c1', detected: true }]);
+      const snapshot = await service.triggerCollection('c1');
+      expect(snapshot).toMatchObject({ detected: true, scanComplete: false });
+      expect(storage.getKvCacheFootprintSnapshots).toHaveBeenCalledWith({ connectionId: 'c1', limit: 1 });
+    });
+
+    it('keeps the sample key when the readable nodes hold no LMCache keys', async () => {
+      const { service, storage } = partialSetup();
+      storage.getKvCacheFootprintSnapshots.mockResolvedValue([{ connectionId: 'c1', detected: true }]);
+      await service.triggerCollection('c1');
+      expect(service.getSampleKey('c1')).toBe('m/x@1@0@1…@bfloat16');
+      const broken = fakeClient([]);
+      broken.getDbSize.mockRejectedValue(new Error('LOADING'));
+      (service as any).nodesFor.mockResolvedValue({
+        nodes: [
+          { name: 'a', client: fakeClient([]) },
+          { name: 'b', client: broken },
+        ],
+        skipped: 0,
+      });
+      await service.triggerCollection('c1');
+      expect(service.getSampleKey('c1')).toBe('m/x@1@0@1…@bfloat16');
+    });
+
+    it('neither backs off polling nor switches the next scan to a probe', async () => {
+      const { service, storage, client } = partialSetup();
+      await service.triggerCollection('c1');
+      expect(storage.saveKvCacheFootprintSnapshot.mock.calls[0][0].detected).toBe(false);
+      expect((service as any).undetected.has('c1')).toBe(false);
+      client.getDbSize.mockClear();
+      await (service as any).tick();
+      expect(client.getDbSize).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('fails the collection when every node fails', async () => {
+    const { service, client } = setup();
     client.getDbSize.mockRejectedValue(new Error('LOADING'));
     await expect(service.triggerCollection('c1')).rejects.toThrow('LOADING');
-    expect(storage.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('scans fully first and only probes a connection whose last snapshot was undetected', async () => {
+    const { service, client } = setup();
+    client.call.mockImplementation(async (cmd: string) => (cmd === 'SCAN' ? ['7', []] : REPLIES[cmd]));
+    client.getDbSize.mockResolvedValue(1_000_000);
+    const scans = () => client.call.mock.calls.filter(([cmd]: [string]) => cmd === 'SCAN').length;
+    await service.triggerCollection('c1');
+    expect(scans()).toBe(200);
+
+    client.call.mockClear();
+    await service.triggerCollection('c1');
+    expect(scans()).toBe(2);
+
+    (service as any).forget('c1');
+    client.call.mockClear();
+    await service.triggerCollection('c1');
+    expect(scans()).toBe(200);
+  });
+
+  it('deletes the data of a retired member once it is deleted, even with no connected connections', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+    const { service, storage, registry } = setup();
+    const member = { id: 'm1', name: 'member', isConnected: false, connectionType: 'direct' };
+    registry.list.mockImplementation((options?: { includeRetired?: boolean }) => (options?.includeRetired ? [member] : []));
+    try {
+      await service.onModuleInit();
+      await jest.advanceTimersByTimeAsync(300000);
+      expect(storage.deleteKvCacheConnectionData).not.toHaveBeenCalled();
+
+      registry.list.mockImplementation(() => []);
+      await jest.advanceTimersByTimeAsync(300000);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('m1');
+    } finally {
+      await service.onModuleDestroy();
+      jest.useRealTimers();
+    }
   });
 
   it('lists other databases relative to the database the client actually selected', async () => {
@@ -658,6 +839,7 @@ describe('KvCacheFootprintService', () => {
     jest.spyOn(service as any, 'start').mockImplementation(() => undefined);
     await service.onModuleInit();
     await (service as any).tick();
+    registry.list.mockReturnValue([]);
     registry.removed('c1');
     await new Promise((resolve) => setImmediate(resolve));
     expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
@@ -668,8 +850,10 @@ describe('KvCacheFootprintService', () => {
 
   it('stops polling a retired member but keeps its data', async () => {
     const { service, storage, client, registry } = setup();
-    const listener = jest.fn();
-    service.onConnectionRemoval(listener);
+    const removed = jest.fn();
+    const restored = jest.fn();
+    service.onConnectionRemoval(removed);
+    service.onConnectionRestore(restored);
     jest.spyOn(service as any, 'start').mockImplementation(() => undefined);
     await service.onModuleInit();
     await (service as any).tick();
@@ -681,7 +865,8 @@ describe('KvCacheFootprintService', () => {
     await new Promise((resolve) => setImmediate(resolve));
     expect(client.getDbSize).toHaveBeenCalledTimes(1);
     expect(storage.deleteKvCacheConnectionData).not.toHaveBeenCalled();
-    expect(listener).not.toHaveBeenCalled();
+    expect(removed).not.toHaveBeenCalled();
+    expect(restored).not.toHaveBeenCalled();
     expect(service.getSampleKey('c1')).toBe('m/x@1@0@1…@bfloat16');
     await service.onModuleDestroy();
   });
@@ -715,6 +900,25 @@ describe('KvCacheFootprintService', () => {
       ]);
       return ctx;
     }
+
+    it('does not let a discarded run touch the miss count of a re-registered connection', async () => {
+      const { service, storage, client, registry } = partialSetup();
+      storage.getKvCacheFootprintSnapshots.mockResolvedValue([{ connectionId: 'c1', detected: true }]);
+      const listed = registry.list();
+      let finishRead: (size: number) => void = () => undefined;
+      client.getDbSize.mockImplementationOnce(() => new Promise((resolve) => (finishRead = resolve)));
+      const stale = service.triggerCollection('c1');
+      await new Promise((resolve) => setImmediate(resolve));
+      registry.list.mockReturnValue([]);
+      (service as any).forget('c1');
+      registry.list.mockReturnValue(listed);
+      await new Promise((resolve) => setImmediate(resolve));
+      finishRead(0);
+      await expect(stale).resolves.toBeNull();
+      for (let i = 0; i < PARTIAL_MISSES_BEFORE_CLEAR; i += 1) await service.triggerCollection('c1');
+      const saved = storage.saveKvCacheFootprintSnapshot.mock.calls.map(([snapshot]: [any]) => snapshot.detected);
+      expect(saved).toEqual([true, true, false]);
+    });
 
     it('keeps polling when slot owners were left unscanned and nothing was detected', async () => {
       const { service, storage } = partialSetup();
@@ -775,8 +979,7 @@ describe('KvCacheFootprintService', () => {
     await (service as any).tick();
     expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledTimes(1);
     client.getDbSize.mockResolvedValue(keys.length);
-    client.call.mockImplementation(async (cmd: string) => (cmd === 'SCAN' ? ['0', keys] : ''));
-    client.getClient().pipeline().exec.mockImplementation(async () => keys.flatMap(() => [[null, 100], [null, -1]]));
+    client.call.mockImplementation(async (cmd: string) => (cmd === 'SCAN' ? ['0', keys] : REPLIES[cmd]));
     expect((await service.triggerCollection('c1'))?.detected).toBe(true);
     await (service as any).tick();
     expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledTimes(3);
@@ -791,111 +994,281 @@ describe('KvCacheFootprintService', () => {
 
   it('deletes stored data when a connection is removed', async () => {
     const { service, storage, registry } = setup();
-    jest.spyOn(service as any, 'start').mockImplementation(() => undefined);
-    await service.onModuleInit();
-    registry.removed('c1');
+    registry.list.mockReturnValue([]);
+    (service as any).forget('c1');
     await new Promise((resolve) => setImmediate(resolve));
     expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
-    await service.onModuleDestroy();
   });
 
-  it('notifies removal listeners with the connection id', async () => {
-    const { service, registry } = setup();
-    jest.spyOn(service as any, 'start').mockImplementation(() => undefined);
-    await service.onModuleInit();
+  it('deletes stored data only after async removal listeners settle', async () => {
+    const { service, storage, registry } = setup();
+    registry.list.mockReturnValue([]);
+    let release: () => void = () => undefined;
+    service.onConnectionRemoval(() => new Promise<void>((resolve) => (release = resolve)));
+    (service as any).forget('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).not.toHaveBeenCalled();
+    release();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
+  });
+
+  it('discards an in-flight collection and deletes data after it settles when the connection is removed', async () => {
+    const { service, storage, client, registry } = setup();
+    let finishRead: (size: number) => void = () => undefined;
+    client.getDbSize.mockImplementationOnce(() => new Promise((resolve) => (finishRead = resolve)));
+    const listener = jest.fn();
+    service.onSnapshot(listener);
+    const collecting = service.triggerCollection('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    registry.list.mockReturnValue([]);
+    (service as any).forget('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).not.toHaveBeenCalled();
+    finishRead(6);
+    await expect(collecting).resolves.toBeNull();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
+    expect(listener).not.toHaveBeenCalled();
+    expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
+  });
+
+  it('keeps fresh data when the connection is re-registered before an in-flight run settles', async () => {
+    const { service, storage, client, registry } = setup();
+    const listed = registry.list();
+    let finishRead: (size: number) => void = () => undefined;
+    client.getDbSize.mockImplementationOnce(() => new Promise((resolve) => (finishRead = resolve)));
+    const stale = service.triggerCollection('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    registry.list.mockReturnValue([]);
+    (service as any).forget('c1');
+    registry.list.mockReturnValue(listed);
+    const fresh = await service.triggerCollection('c1');
+    expect(fresh).not.toBeNull();
+    expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledTimes(1);
+    finishRead(6);
+    await expect(stale).resolves.toBeNull();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledTimes(1);
+    expect(storage.deleteKvCacheConnectionData).not.toHaveBeenCalled();
+    expect(await service.triggerCollection('c1')).not.toBeNull();
+  });
+
+  it('announces a restore instead of deleting when the connection is registered again', async () => {
+    const { service, storage } = setup();
+    const restored = jest.fn();
+    service.onConnectionRestore(restored);
+    (service as any).forget('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).not.toHaveBeenCalled();
+    expect(restored).toHaveBeenCalledWith('c1');
+  });
+
+  it('announces a restore instead of deleting when the connection was only retired', async () => {
+    const { service, storage, registry } = setup();
+    const restored = jest.fn();
+    service.onConnectionRestore(restored);
+    registry.list.mockImplementation((options?: { includeRetired?: boolean }) =>
+      options?.includeRetired ? [{ id: 'c1', name: 'one', isConnected: true, connectionType: 'direct' }] : [],
+    );
+    (service as any).forget('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).not.toHaveBeenCalled();
+    expect(restored).toHaveBeenCalledWith('c1');
+  });
+
+  it('does not announce a restore when the connection stays removed', async () => {
+    const { service, storage, registry } = setup();
+    const restored = jest.fn();
+    service.onConnectionRestore(restored);
+    registry.list.mockReturnValue([]);
+    (service as any).forget('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
+    expect(restored).not.toHaveBeenCalled();
+  });
+
+  it('waits for an in-flight removal delete before saving for a re-registered connection', async () => {
+    const { service, storage, registry } = setup();
+    const listed = registry.list();
+    const order: string[] = [];
+    let finishDelete: () => void = () => undefined;
+    storage.deleteKvCacheConnectionData.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (finishDelete = () => { order.push('delete'); resolve(); })),
+    );
+    storage.saveKvCacheFootprintSnapshot.mockImplementation(async () => { order.push('save'); });
+    registry.list.mockReturnValue([]);
+    (service as any).forget('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
+    registry.list.mockReturnValue(listed);
+    const collecting = service.triggerCollection('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
+    finishDelete();
+    await expect(collecting).resolves.not.toBeNull();
+    expect(order).toEqual(['delete', 'save']);
+  });
+
+  it('holds a save that races an in-flight removal delete until the delete completes', async () => {
+    const { service, storage, client, registry } = setup();
+    const listed = registry.list();
+    const order: string[] = [];
+    let release: () => void = () => undefined;
+    let finishRead: (size: number) => void = () => undefined;
+    let finishDelete: () => void = () => undefined;
+    service.onConnectionRemoval(() => new Promise<void>((resolve) => (release = resolve)));
+    client.getDbSize.mockImplementationOnce(() => new Promise((resolve) => (finishRead = resolve)));
+    storage.deleteKvCacheConnectionData.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (finishDelete = () => { order.push('delete'); resolve(); })),
+    );
+    storage.saveKvCacheFootprintSnapshot.mockImplementation(async () => { order.push('save'); });
+    registry.list.mockReturnValue([]);
+    (service as any).forget('c1');
+    const collecting = service.collect({ connectionId: 'c1', connectionName: 'one', client, host: 'h', port: 6379 });
+    await new Promise((resolve) => setImmediate(resolve));
+    release();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
+    registry.list.mockReturnValue(listed);
+    finishRead(6);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
+    finishDelete();
+    await expect(collecting).resolves.not.toBeNull();
+    expect(order).toEqual(['delete', 'save']);
+  });
+
+  it('drops a poll that waited on the removal delete when the connection stays removed', async () => {
+    const { service, storage, client, registry } = setup();
+    const listener = jest.fn();
+    service.onSnapshot(listener);
+    let finishDelete: () => void = () => undefined;
+    storage.deleteKvCacheConnectionData.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (finishDelete = resolve)),
+    );
+    registry.list.mockReturnValue([]);
+    registry.getConfig.mockReturnValue(null);
+    (service as any).forget('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
+    const collecting = service.collect({ connectionId: 'c1', connectionName: 'one', client, host: 'h', port: 6379 });
+    await new Promise((resolve) => setImmediate(resolve));
+    finishDelete();
+    await expect(collecting).resolves.toBeNull();
+    expect(storage.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('does not save or announce when the connection disappears mid-collect', async () => {
+    const { service, storage, client, registry } = setup();
+    const listener = jest.fn();
+    service.onSnapshot(listener);
+    let finishRead: (size: number) => void = () => undefined;
+    client.getDbSize.mockImplementationOnce(() => new Promise((resolve) => (finishRead = resolve)));
+    const collecting = service.collect({ connectionId: 'c1', connectionName: 'one', client, host: 'h', port: 6379 });
+    await new Promise((resolve) => setImmediate(resolve));
+    registry.getConfig.mockReturnValue(null);
+    finishRead(6);
+    await expect(collecting).resolves.toBeNull();
+    expect(storage.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('deletes once for the latest removal when a connection is removed again before data is deleted', async () => {
+    const { service, storage, registry } = setup();
+    registry.list.mockReturnValue([]);
+    const releases: Array<() => void> = [];
+    service.onConnectionRemoval(() => new Promise<void>((resolve) => releases.push(resolve)));
+    (service as any).forget('c1');
+    (service as any).forget('c1');
+    releases.forEach((release) => release());
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledTimes(1);
+  });
+
+  it('forgets the removal generation once the data is deleted', async () => {
+    const { service, storage, registry } = setup();
+    registry.list.mockReturnValue([]);
+    (service as any).forget('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
+    expect((service as any).generations.has('c1')).toBe(false);
+  });
+
+  it('notifies removal listeners with the connection id', () => {
+    const { service } = setup();
     const listener = jest.fn();
     const failing = jest.fn(() => { throw new Error('x'); });
     service.onConnectionRemoval(failing);
     service.onConnectionRemoval(listener);
-    registry.removed('c1');
-    await new Promise((resolve) => setImmediate(resolve));
+    (service as any).forget('c1');
     expect(listener).toHaveBeenCalledWith('c1');
-    await service.onModuleDestroy();
   });
 
-  it('finishes removal listeners before deleting stored data', async () => {
-    const { service, storage, registry } = setup();
-    jest.spyOn(service as any, 'start').mockImplementation(() => undefined);
-    await service.onModuleInit();
-    let finish: () => void = () => undefined;
-    const listener = jest.fn(() => new Promise<void>((resolve) => (finish = resolve)));
-    service.onConnectionRemoval(listener);
-    registry.removed('c1');
+  it('runs removal listeners only after an in-flight snapshot announce finishes', async () => {
+    const { service, registry } = setup();
+    const order: string[] = [];
+    let release: () => void = () => undefined;
+    service.onSnapshot(async () => {
+      order.push('announce:start');
+      await new Promise<void>((resolve) => (release = resolve));
+      order.push('announce:end');
+    });
+    service.onConnectionRemoval(() => {
+      order.push('removed');
+    });
+    const collecting = service.triggerCollection('c1');
+    while (!order.includes('announce:start')) await new Promise((resolve) => setImmediate(resolve));
+    registry.list.mockReturnValue([]);
+    (service as any).forget('c1');
     await new Promise((resolve) => setImmediate(resolve));
-    expect(listener).toHaveBeenCalledWith('c1');
-    expect(storage.deleteKvCacheConnectionData).not.toHaveBeenCalled();
-    finish();
+    expect(order).toEqual(['announce:start']);
+    release();
+    await collecting;
     await new Promise((resolve) => setImmediate(resolve));
-    expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c1');
-    await service.onModuleDestroy();
+    expect(order).toEqual(['announce:start', 'announce:end', 'removed']);
+  });
+
+  it('keeps the snapshot of a re-registered connection when the older announce finishes after it', async () => {
+    const { service } = setup();
+    const order: string[] = [];
+    let release: () => void = () => undefined;
+    let calls = 0;
+    service.onSnapshot(async () => {
+      calls += 1;
+      if (calls > 1) {
+        order.push('snapshot:new');
+        return;
+      }
+      order.push('announce:start');
+      await new Promise<void>((resolve) => (release = resolve));
+      order.push('announce:end');
+    });
+    service.onConnectionRemoval(() => {
+      order.push('removed');
+    });
+    const stale = service.triggerCollection('c1');
+    while (!order.includes('announce:start')) await new Promise((resolve) => setImmediate(resolve));
+    (service as any).forget('c1');
+    const fresh = service.triggerCollection('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    release();
+    await stale;
+    await expect(fresh).resolves.not.toBeNull();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(order).toEqual(['announce:start', 'announce:end', 'removed', 'snapshot:new']);
   });
 
   it('deletes data for a connection removed from the registry before the poller saw it', async () => {
     const { service, storage, registry } = setup();
     jest.spyOn(service as any, 'start').mockImplementation(() => undefined);
     await service.onModuleInit();
+    registry.list.mockReturnValue([]);
     registry.removed('c2');
     await new Promise((resolve) => setImmediate(resolve));
     expect(storage.deleteKvCacheConnectionData).toHaveBeenCalledWith('c2');
     await service.onModuleDestroy();
-  });
-
-  it('waits for an in-flight collection before deleting a removed connection', async () => {
-    const { service, storage, client, registry } = setup();
-    jest.spyOn(service as any, 'start').mockImplementation(() => undefined);
-    await service.onModuleInit();
-    let release!: () => void;
-    const info = client.getInfoParsed.getMockImplementation();
-    client.getInfoParsed.mockImplementationOnce(
-      () => new Promise((resolve) => { release = () => resolve(info!()); }),
-    );
-    const collecting = service.triggerCollection('c1');
-    await new Promise((resolve) => setImmediate(resolve));
-    registry.removed('c1');
-    await new Promise((resolve) => setImmediate(resolve));
-    expect(storage.deleteKvCacheConnectionData).not.toHaveBeenCalled();
-    release();
-    await collecting;
-    await new Promise((resolve) => setImmediate(resolve));
-    const saved = storage.saveKvCacheFootprintSnapshot.mock.invocationCallOrder[0];
-    const deleted = storage.deleteKvCacheConnectionData.mock.invocationCallOrder[0];
-    expect(deleted).toBeGreaterThan(saved);
-    expect(service.getSampleKey('c1')).toBeNull();
-    await service.onModuleDestroy();
-  });
-
-  it('returns the in-flight collection to a refresh', async () => {
-    const { service, client, storage } = setup();
-    let release!: () => void;
-    const info = client.getInfoParsed.getMockImplementation();
-    client.getInfoParsed.mockImplementationOnce(
-      () => new Promise((resolve) => { release = () => resolve(info!()); }),
-    );
-    const first = service.triggerCollection('c1');
-    await new Promise((resolve) => setImmediate(resolve));
-    const second = service.triggerCollection('c1');
-    release();
-    const [a, b] = await Promise.all([first, second]);
-    expect(b).not.toBeNull();
-    expect(b).toBe(a);
-    expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledTimes(1);
-  });
-
-  it('rejects a refresh for a cluster member, which its seed collects', async () => {
-    const { service, client, registry } = setup();
-    registry.list.mockReturnValue([
-      { id: 'seed', name: 'seed', isConnected: true, connectionType: 'direct' },
-      {
-        id: 'c1',
-        name: 'one',
-        isConnected: true,
-        connectionType: 'direct',
-        membership: { seedId: 'seed', nodeId: 'n', origin: 'auto', source: 'cluster' },
-      },
-    ]);
-    await expect(service.triggerCollection('c1')).rejects.toThrow(/seed/);
-    await expect(service.triggerCollection('c1')).rejects.toBeInstanceOf(BadRequestException);
-    expect(client.getDbSize).not.toHaveBeenCalled();
   });
 
   it('rejects a refresh for a retired member without scanning it', async () => {
@@ -922,7 +1295,7 @@ describe('KvCacheFootprintService', () => {
   it('rejects a refresh for a disconnected connection without scanning it', async () => {
     const { service, client, registry } = setup();
     registry.list.mockReturnValue([{ id: 'c1', name: 'one', isConnected: false, connectionType: 'direct' }]);
-    await expect(service.triggerCollection('c1')).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.triggerCollection('c1')).rejects.toBeInstanceOf(ServiceUnavailableException);
     expect(client.getDbSize).not.toHaveBeenCalled();
   });
 
