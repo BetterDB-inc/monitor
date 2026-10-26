@@ -281,9 +281,9 @@ so nothing can attach to an ElastiCache cache as a replica.
 
 | Direction | Mode | Notes |
 |-----------|------|-------|
-| Anything → ElastiCache node-based | `redis_shake_sync`, `redis_shake`, `command` | Use the Configuration endpoint for cluster mode enabled targets |
+| Anything → ElastiCache node-based | `redis_shake_sync`, `redis_shake`, `command` | Use the Configuration endpoint for cluster mode enabled targets. `redis_shake` (DUMP/RESTORE) needs matching RDB versions, so use sync or command mode for Redis 7.4+ ↔ Valkey |
 | Anything → ElastiCache Serverless | `redis_shake_sync`, `command` | Serverless requires TLS. `redis_shake` (DUMP/RESTORE) depends on matching RDB versions, so prefer sync or command mode |
-| ElastiCache node-based → anything | `redis_shake`, `command` | AWS restricts `PSYNC` and `SYNC` on every ElastiCache cache, so `redis_shake_sync` cannot attach to it as a replica. Quiesce writes for a consistent copy |
+| ElastiCache node-based → anything | `redis_shake`, `command` | AWS restricts `PSYNC` and `SYNC` on every ElastiCache cache, so `redis_shake_sync` cannot attach to it as a replica. `redis_shake` needs matching RDB versions; use `command` for Redis 7.4+ ↔ Valkey. Quiesce writes for a consistent copy |
 | ElastiCache Serverless → anything | `command` | Same `PSYNC` restriction. `MEMORY USAGE` is also blocked on Serverless, so analysis cannot estimate dataset size |
 
 **AWS's own online migration** (announced October 2026) moves self-managed

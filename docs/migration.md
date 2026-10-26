@@ -150,6 +150,23 @@ is below 1%.
 | Cluster | Cluster | Supported | Per-master scanning, slot-aware writes |
 | Cluster | Standalone | **Blocked** | Analysis reports a blocking incompatibility. The data is spread across slots and cannot be safely collapsed into a single node. |
 
+### Other engines
+
+BetterDB detects the engine from `INFO server`: a `valkey_version` field means
+`valkey`, anything else is `redis`. Redis and Valkey are what the migration
+test suite covers. Other RESP-compatible engines are reachable because the
+three modes only need standard commands, but each mode has a protocol
+requirement the engine has to meet, and neither KeyDB nor Dragonfly is
+exercised by the tests. The rows below come from the engines' source and
+docs, not from a test run.
+
+| Engine | Detected as | `redis_shake_sync` | `redis_shake` | `command` | Notes |
+|--------|-------------|:------------------:|:-------------:|:---------:|-------|
+| Redis 7.x, Valkey 7.x/8.x | `redis` / `valkey` | ✅ | ✅ (same RDB version) | ✅ | Tested. See [RDB format compatibility](#rdb-format-compatibility). |
+| Redis < 7 | `redis` | ✅ | ✅ as source (RDB v9/v10 restores on newer targets); ❌ as target from a 7.x source | ✅ | Analysis probes `INFO` section by section because these engines reject the multi-section form. |
+| KeyDB | `redis` | ✅ as source (Redis 6.2 fork, serves `PSYNC`) | ✅ as source (RDB v9); ❌ as target from a 7.x source | ✅ | Same `INFO` handling as Redis < 7. Keys of KeyDB's own `CRON` type have no equivalent on the target. Untested. |
+| Dragonfly | `redis` (reports `redis_version 7.4.0`) | ❌ as source: Dragonfly implements `REPLICAOF`, `REPLCONF` and `ROLE` but not `PSYNC` or `SYNC`, so nothing can attach to it as a Redis-protocol replica. ✅ as target | Untested in either direction. Dragonfly's `RESTORE` rejects payloads newer than the RDB version it implements, and the analysis RDB check treats it as Redis, so it will not warn you. | ✅ | `command` mode is the dependable path out of Dragonfly. Untested. |
+
 ### Managed providers
 
 Managed services are supported on either side as long as BetterDB can reach
