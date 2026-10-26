@@ -1,4 +1,4 @@
-import { Injectable, Logger, BadRequestException, NotFoundException, ServiceUnavailableException, NotImplementedException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, NotFoundException, ServiceUnavailableException, ConflictException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
@@ -15,6 +15,13 @@ import { buildScanReaderToml, buildSyncReaderToml } from './execution/toml-build
 import { parseLogLine, classifyRedisShakeFailure, stripAnsi } from './execution/log-parser';
 import { applyLagUpdate, buildLagSnapshot, countSourceShards } from './execution/replication-lag';
 import { runCommandMigration } from './execution/command-migration-worker';
+import {
+  CUTOVER_KILL_GRACE_MS,
+  CUTOVER_POLL_MS,
+  cutoverStableWindowMs,
+  cutoverTimeoutNotice,
+  forcedCutoverNotice,
+} from './execution/cutover';
 import { shouldExcludeFunctions, isRdbRestoreCompatible } from './fork-compat';
 import { probeSourceFunctionsClusterAware, parseNodeAddress } from './function-presence';
 import { assertLiveMigrationPair } from './live-connections';
@@ -126,6 +133,10 @@ export class MigrationExecutionService {
       syncStage: null,
       replicationLag: mode === 'redis_shake_sync' ? new Map() : null,
       expectedShards,
+      cutover: null,
+      cutoverTimer: null,
+      cutoverStableSince: null,
+      terminating: null,
       process: null,
       tomlPath: null,
       pidPath: null,
@@ -393,7 +404,10 @@ export class MigrationExecutionService {
 
       // Status may have been set to 'cancelled' by stopExecution() while the process was running
       const statusAfterExit = job.status as string;
-      if (code === 0) {
+      this.clearCutoverTimer(job);
+      if (job.terminating === 'cutover' && statusAfterExit !== 'cancelled') {
+        this.finishCutover(job);
+      } else if (code === 0) {
         if (statusAfterExit !== 'cancelled') {
           job.status = 'completed';
           job.progress = 100;
@@ -412,6 +426,7 @@ export class MigrationExecutionService {
         this.logger.error(`Execution ${job.id} error: ${message}`);
       }
     } finally {
+      this.clearCutoverTimer(job);
       if (!job.completedAt) {
         job.completedAt = Date.now();
       }
@@ -476,30 +491,131 @@ export class MigrationExecutionService {
       return true;
     }
 
+    this.clearCutoverTimer(job);
     job.status = 'cancelled';
-
-    // For redis_shake mode, kill the subprocess
-    if (job.process) {
-      const proc = job.process;
-      try {
-        proc.kill('SIGTERM');
-      } catch { /* process may already be dead */ }
-
-      setTimeout(() => {
-        if (job.process) {
-          try {
-            proc.kill('SIGKILL');
-          } catch { /* ignore */ }
-        }
-      }, 3000);
-    }
+    job.terminating = 'cancel';
+    this.killProcess(job);
     // For command mode, the worker checks job.status === 'cancelled' between batches
 
     return true;
   }
 
   completeExecution(id: string, options: { force: boolean; timeoutSeconds: number }): CompleteExecutionResponse {
-    throw new NotImplementedException(`Cutover for '${id}' (force: ${options.force}) is not available`);
+    const job = this.jobs.get(id);
+    if (!job) {
+      throw new NotFoundException(`Execution job '${id}' not found`);
+    }
+    const canStart = job.status === 'running' && job.syncStage === 'aof_replicating';
+    if (job.mode !== 'redis_shake_sync' || (!canStart && job.status !== 'completing')) {
+      throw new ConflictException('Cutover is available only while a sync migration is replicating');
+    }
+    if (job.terminating !== 'cutover') {
+      const now = Date.now();
+      if (options.force) {
+        this.forceCutover(job, now);
+      } else if (job.status === 'running') {
+        this.beginCutoverWait(job, now, options.timeoutSeconds);
+      }
+    }
+    return { status: job.status, cutover: this.copyCutover(job.cutover)! };
+  }
+
+  private beginCutoverWait(job: ExecutionJob, now: number, timeoutSeconds: number): void {
+    this.clearCutoverTimer(job);
+    job.status = 'completing';
+    job.cutover = { requestedAt: now, deadlineAt: now + timeoutSeconds * 1000, outcome: 'waiting' };
+    job.cutoverStableSince = null;
+    this.evaluateCutover(job, now);
+    if (job.terminating !== 'cutover') {
+      job.cutoverTimer = setInterval(() => this.tickCutover(job), CUTOVER_POLL_MS);
+    }
+  }
+
+  private tickCutover(job: ExecutionJob): void {
+    if (job.status !== 'completing' || !job.cutover) {
+      this.clearCutoverTimer(job);
+      return;
+    }
+    const now = Date.now();
+    this.evaluateCutover(job, now);
+    if (job.terminating === 'cutover' || now < job.cutover.deadlineAt) {
+      return;
+    }
+    this.clearCutoverTimer(job);
+    job.status = 'running';
+    job.cutover.outcome = 'timed_out';
+    job.notices.push(cutoverTimeoutNotice(job.expectedShards));
+  }
+
+  private evaluateCutover(job: ExecutionJob, now: number): void {
+    const { fullySynced } = buildLagSnapshot(job.replicationLag, job.expectedShards, job.syncStage, now);
+    if (!fullySynced) {
+      job.cutoverStableSince = null;
+      return;
+    }
+    job.cutoverStableSince ??= now;
+    if (now - job.cutoverStableSince >= cutoverStableWindowMs(job.expectedShards)) {
+      this.clearCutoverTimer(job);
+      job.terminating = 'cutover';
+      this.killProcess(job);
+    }
+  }
+
+  private forceCutover(job: ExecutionJob, now: number): void {
+    this.clearCutoverTimer(job);
+    const inProgress = job.status === 'completing' ? job.cutover : null;
+    const { replicationLag } = buildLagSnapshot(job.replicationLag, job.expectedShards, job.syncStage, now);
+    job.cutover = {
+      requestedAt: inProgress?.requestedAt ?? now,
+      deadlineAt: inProgress?.deadlineAt ?? now,
+      outcome: 'forced',
+      forcedLag: replicationLag ?? [],
+    };
+    job.notices.push(forcedCutoverNotice(replicationLag, job.expectedShards));
+    job.status = 'completing';
+    job.terminating = 'cutover';
+    this.killProcess(job);
+  }
+
+  private finishCutover(job: ExecutionJob): void {
+    job.status = 'completed';
+    job.progress = 100;
+    job.cutoverAt = Date.now();
+    if (job.cutover && job.cutover.outcome !== 'forced') {
+      job.cutover.outcome = 'completed';
+    }
+  }
+
+  private clearCutoverTimer(job: ExecutionJob): void {
+    if (job.cutoverTimer) {
+      clearInterval(job.cutoverTimer);
+      job.cutoverTimer = null;
+    }
+  }
+
+  private killProcess(job: ExecutionJob): void {
+    if (!job.process) {
+      return;
+    }
+    const proc = job.process;
+    try {
+      proc.kill('SIGTERM');
+    } catch { /* process may already be dead */ }
+
+    setTimeout(() => {
+      if (job.process) {
+        try {
+          proc.kill('SIGKILL');
+        } catch { /* ignore */ }
+      }
+    }, CUTOVER_KILL_GRACE_MS);
+  }
+
+  private copyCutover(cutover: ExecutionJob['cutover']): ExecutionJob['cutover'] {
+    if (!cutover) {
+      return null;
+    }
+    return { ...cutover, ...(cutover.forcedLag ? { forcedLag: cutover.forcedLag.map((entry) => ({ ...entry })) } : {}) };
   }
 
   getExecution(id: string): MigrationExecutionResult | undefined {
@@ -530,8 +646,9 @@ export class MigrationExecutionService {
       syncStage: job.syncStage,
       replicationLag: lag.replicationLag,
       expectedShards: job.expectedShards,
-      fullySynced: lag.fullySynced && job.status === 'running',
-      cutover: null,
+      fullySynced: lag.fullySynced && (job.status === 'running' || job.status === 'completing'),
+      cutover: this.copyCutover(job.cutover),
+      cutoverAt: job.cutoverAt,
     };
   }
 
