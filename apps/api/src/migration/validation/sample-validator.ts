@@ -9,7 +9,9 @@ const LARGE_KEY_THRESHOLD = 100;
 
 /**
  * Spot-check a random sample of keys: type match + value comparison on target.
- * Never throws — per-key errors are captured as 'missing' with detail.
+ * Per-key value-read errors are captured as 'missing' with
+ * detail. Failing to enumerate or TYPE the source sample (SCAN, DBSIZE, cluster TYPE)
+ * rejects, so an unreadable source is never reported as a clean sample.
  *
  * A cluster source (a Cluster client, as createTargetClient() builds it) is
  * sampled on every master: SCAN runs on every master (it is node-local), and the
@@ -227,9 +229,7 @@ async function batchTypeViaCluster(client: Valkey, keys: string[]): Promise<stri
   const results: string[] = [];
   for (let i = 0; i < keys.length; i += CLUSTER_TYPE_CONCURRENCY) {
     const chunk = keys.slice(i, i + CLUSTER_TYPE_CONCURRENCY);
-    results.push(
-      ...(await Promise.all(chunk.map((key) => client.type(key).catch(() => 'none')))),
-    );
+    results.push(...(await Promise.all(chunk.map((key) => client.type(key)))));
   }
   return results;
 }

@@ -114,6 +114,16 @@ describe('validateSample / cluster source', () => {
     expect(result.sampledKeys).toBe(6);
   });
 
+  it('rejects when a TYPE request through the cluster client fails', async () => {
+    const a = shard('a', 3);
+    const source = cluster([node(a)]);
+    (source.type as jest.Mock).mockRejectedValueOnce(new Error('Too many Cluster redirections'));
+
+    await expect(validateSample(source, node(a) as unknown as Valkey, 3)).rejects.toThrow(
+      'Too many Cluster redirections',
+    );
+  });
+
   it('catches a shard that never reached the target', async () => {
     const a = shard('a', 4);
     const b = shard('b', 4);

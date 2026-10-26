@@ -280,10 +280,11 @@ the key count comparison covers the whole dataset. The sample spot-check also
 covers every master of a cluster source: the ~500-key budget is split across
 masters in proportion to their `DBSIZE`, and every master that holds keys gets
 at least one sample as long as the budget is at least the number of non-empty
-masters (above ~500 masters, the smallest shards may get none). Values are read
-through the cluster client, so a slot migration or failover during validation is
-followed rather than reported as missing keys. A shard whose keys never reached the target therefore shows up as missing keys
-rather than passing unnoticed.
+masters (above ~500 masters, the smallest shards may get none). A shard whose
+keys never reached the target therefore shows up as missing keys rather than
+passing unnoticed. Keys are found with a per-master `SCAN`, but `TYPE` and
+values are read through the cluster client, so a slot migration or failover
+during validation is followed rather than reported as missing keys.
 
 ### Concurrent writes on the source
 
