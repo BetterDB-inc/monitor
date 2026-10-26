@@ -13,6 +13,15 @@ import type { ExecutionJob } from './execution/execution-job';
 import { findRedisShakeBinary } from './execution/redisshake-runner';
 import { buildScanReaderToml, buildSyncReaderToml } from './execution/toml-builder';
 import { parseLogLine, classifyRedisShakeFailure, stripAnsi } from './execution/log-parser';
+import {
+  applyStatusPoll,
+  buildLagSnapshot,
+  countSourceShards,
+  createLagState,
+  STATUS_POLL_MS,
+  STATUS_POLL_TIMEOUT_MS,
+} from './execution/replication-lag';
+import { fetchShakeStatus, reservePort, type PortReservation } from './execution/shake-status';
 import { runCommandMigration } from './execution/command-migration-worker';
 import { shouldExcludeFunctions, isRdbRestoreCompatible } from './fork-compat';
 import { probeSourceFunctionsClusterAware, parseNodeAddress } from './function-presence';
@@ -37,6 +46,7 @@ interface RedisShakePreSpawn {
   targetAdapter: ReturnType<ConnectionRegistry['get']>;
   targetConfig: NonNullable<ReturnType<ConnectionRegistry['getConfig']>>;
   targetIsCluster: boolean;
+  statusPortReservation: PortReservation | null;
 }
 
 @Injectable()
@@ -93,6 +103,10 @@ export class MigrationExecutionService {
     const targetClusterSection = (targetInfo as Record<string, Record<string, string>>).cluster ?? {};
     const targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
 
+    const expectedShards = mode === 'redis_shake_sync'
+      ? await countSourceShards(sourceAdapter, clusterEnabled)
+      : null;
+
     // 4. For redis_shake modes, locate the binary upfront
     let binaryPath: string | undefined;
     if (mode === 'redis_shake' || mode === 'redis_shake_sync') {
@@ -103,6 +117,9 @@ export class MigrationExecutionService {
         throw new ServiceUnavailableException(message);
       }
     }
+
+    const statusPortReservation = mode === 'redis_shake_sync' ? await reservePort() : null;
+    const statusPort = statusPortReservation?.port ?? null;
 
     // 5. Create the job
     const id = randomUUID();
@@ -119,12 +136,21 @@ export class MigrationExecutionService {
       notices: [],
       progress: null,
       syncStage: null,
+      replicationLag: mode === 'redis_shake_sync' ? createLagState() : null,
+      expectedShards,
+      statusPort,
+      statusPoller: null,
       process: null,
       tomlPath: null,
       pidPath: null,
     };
     // 6. Evict old jobs before inserting the new one
-    this.evictOldJobs();
+    try {
+      this.evictOldJobs();
+    } catch (err) {
+      await statusPortReservation?.release();
+      throw err;
+    }
 
     this.jobs.set(id, job);
 
@@ -141,23 +167,29 @@ export class MigrationExecutionService {
       const targetDbType = targetAdapter.getCapabilities().dbType;
       const excludeFunctions = shouldExcludeFunctions(sourceDbType, targetDbType);
 
-      const tomlContent = mode === 'redis_shake_sync'
-        ? buildSyncReaderToml(sourceConfig, targetConfig, {
-            sourceIsCluster: clusterEnabled,
-            syncReaderOptions: req.syncReaderOptions ?? {},
-            targetIsCluster,
-            rsOptions,
-            excludeFunctions,
-          })
-        : buildScanReaderToml(sourceConfig, targetConfig, {
-            sourceIsCluster: clusterEnabled,
-            targetIsCluster,
-            rsOptions,
-            excludeFunctions,
-          });
-      const tomlPath = join(os.tmpdir(), `${id}.toml`);
-      writeFileSync(tomlPath, tomlContent, { encoding: 'utf-8', mode: 0o600 });
-      job.tomlPath = tomlPath;
+      try {
+        const tomlContent = mode === 'redis_shake_sync'
+          ? buildSyncReaderToml(sourceConfig, targetConfig, {
+              sourceIsCluster: clusterEnabled,
+              syncReaderOptions: req.syncReaderOptions ?? {},
+              targetIsCluster,
+              rsOptions,
+              excludeFunctions,
+              statusPort: statusPort ?? undefined,
+            })
+          : buildScanReaderToml(sourceConfig, targetConfig, {
+              sourceIsCluster: clusterEnabled,
+              targetIsCluster,
+              rsOptions,
+              excludeFunctions,
+            });
+        const tomlPath = join(os.tmpdir(), `${id}.toml`);
+        writeFileSync(tomlPath, tomlContent, { encoding: 'utf-8', mode: 0o600 });
+        job.tomlPath = tomlPath;
+      } catch (err) {
+        await statusPortReservation?.release();
+        throw err;
+      }
 
       // The function-presence notice and the optional target pre-flush both run inside
       // runRedisShake, before it spawns the process (see RedisShakePreSpawn): the POST
@@ -175,6 +207,7 @@ export class MigrationExecutionService {
         targetAdapter,
         targetConfig,
         targetIsCluster,
+        statusPortReservation,
       };
 
       this.runRedisShake(job, binaryPath!, preSpawn).catch(err => {
@@ -301,6 +334,9 @@ export class MigrationExecutionService {
         if ((job.status as string) === 'cancelled') return;
       }
 
+      await preSpawn.statusPortReservation?.release();
+      if ((job.status as string) === 'cancelled') return;
+
       const proc = spawn(binaryPath, [job.tomlPath!], {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -313,6 +349,8 @@ export class MigrationExecutionService {
         writeFileSync(pidPath, String(proc.pid), { encoding: 'utf-8', mode: 0o600 });
         job.pidPath = pidPath;
       } catch { /* non-fatal — orphan detection is best-effort */ }
+
+      this.startStatusPoller(job);
 
       const processLine = (rawLine: string) => {
         // Strip ANSI first: RedisShake colourises output, and the codes otherwise
@@ -404,6 +442,7 @@ export class MigrationExecutionService {
         this.logger.error(`Execution ${job.id} error: ${message}`);
       }
     } finally {
+      await preSpawn.statusPortReservation?.release();
       if (!job.completedAt) {
         job.completedAt = Date.now();
       }
@@ -414,9 +453,33 @@ export class MigrationExecutionService {
           } catch { /* ignore cleanup errors */ }
         }
       }
+      this.stopStatusPoller(job);
       job.process = null;
       job.tomlPath = null;
       job.pidPath = null;
+    }
+  }
+
+  private startStatusPoller(job: ExecutionJob): void {
+    const port = job.statusPort;
+    const lag = job.replicationLag;
+    if (port === null || lag === null) return;
+    let inFlight = false;
+    job.statusPoller = setInterval(() => {
+      if (inFlight) return;
+      inFlight = true;
+      void fetchShakeStatus(port, STATUS_POLL_TIMEOUT_MS).then((status) => {
+        inFlight = false;
+        if (job.statusPoller === null) return;
+        applyStatusPoll(lag, status, Date.now());
+      });
+    }, STATUS_POLL_MS);
+  }
+
+  private stopStatusPoller(job: ExecutionJob): void {
+    if (job.statusPoller !== null) {
+      clearInterval(job.statusPoller);
+      job.statusPoller = null;
     }
   }
 
@@ -494,6 +557,7 @@ export class MigrationExecutionService {
     const job = this.jobs.get(id);
     if (!job) return undefined;
 
+    const lag = buildLagSnapshot(job.replicationLag, Date.now());
     return {
       id: job.id,
       status: job.status,
@@ -515,6 +579,9 @@ export class MigrationExecutionService {
       notices: [...job.notices],
       progress: job.progress,
       syncStage: job.syncStage,
+      replicationLag: lag.replicationLag,
+      expectedShards: lag.shards ?? job.expectedShards,
+      fullySynced: lag.fullySynced && job.status === 'running',
     };
   }
 

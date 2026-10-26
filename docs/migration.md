@@ -91,14 +91,36 @@ source — the same protocol a replica uses. This means:
    in near real-time.
 
 The migration **runs continuously** and never exits on its own. The UI shows a
-stage chip that transitions from **Initial sync (RDB)** to
-**Replicating · ready for cutover** once the snapshot phase finishes.
+stage chip that transitions from **Initial sync (RDB)** to **Replicating** once
+the snapshot phase finishes. Next to the chip, a lag readout shows how far
+RedisShake is behind the source on the slowest shard; click it for a per-shard
+breakdown. BetterDB reads this from RedisShake's status endpoint (`status_port`,
+a free local port chosen per run) once a second. Lag is the replication-stream
+bytes RedisShake has received from a shard but not yet handed to its writer,
+so it is not the same as "written to the target". A shard shows *initial sync*
+until its first replicated command has been processed, which on an idle source
+can take a few seconds after the snapshot.
+
+The chip turns **Fully synced** only when RedisShake itself reports the run as
+consistent on two polls in a row: every shard has handed off everything it
+received, its internal queue is empty, and the target has acknowledged every
+write sent to it. A command in transit between RedisShake's reader and writer
+is not counted for that instant, which is why two polls in a row are required.
+If the status endpoint stops answering, the readout is marked
+as not updated recently and the chip drops back to *Replicating*.
+
+RedisShake reads the source topology once, at start. A shard added or resharded
+to a new master during the migration is not replicated; restart the migration
+after a topology change.
+
+The status endpoint listens on all interfaces of the host running RedisShake and
+reports source and target addresses (no credentials). In a container it is
+reachable only if you publish that port.
 
 **Cutover procedure**:
-1. Wait for the stage chip to show *Replicating · ready for cutover*.
+1. Wait for the stage chip to show *Replicating* or *Fully synced*.
 2. Pause or quiesce writes on the source (brief read-only window).
-3. Wait a few seconds for the replication lag to drain to zero (`diff=[0]` in
-   the log).
+3. Wait until the stage chip shows *Fully synced*.
 4. Click **Stop Migration** in the execution panel.
 5. Point your application at the target.
 
@@ -339,8 +361,8 @@ starting.
 **redis_shake_sync mode** is specifically designed for live sources. It replicates
 writes continuously via PSYNC, so keys created or modified after the initial RDB
 sync are captured. The intended workflow is to keep the source running normally,
-wait for the stage to show *Replicating · ready for cutover*, then apply a brief
-read-only window only at the moment of cutover.
+wait for the stage to show *Replicating*, then apply a brief read-only window
+only at the moment of cutover and wait for *Fully synced*.
 
 ### RDB format compatibility
 

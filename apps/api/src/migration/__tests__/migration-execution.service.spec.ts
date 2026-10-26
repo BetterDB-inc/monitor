@@ -10,6 +10,13 @@ jest.mock('../execution/toml-builder', () => ({
   buildSyncReaderToml: jest.fn().mockReturnValue('[sync_reader]\naddress = "127.0.0.1:6379"\n'),
 }));
 
+const mockReleaseStatusPort = jest.fn().mockResolvedValue(undefined);
+
+jest.mock('../execution/shake-status', () => ({
+  reservePort: jest.fn().mockImplementation(async () => ({ port: 45678, release: mockReleaseStatusPort })),
+  fetchShakeStatus: jest.fn().mockResolvedValue(null),
+}));
+
 jest.mock('child_process', () => ({
   spawn: jest.fn().mockReturnValue({
     stdout: { on: jest.fn(), setEncoding: jest.fn() },
@@ -44,7 +51,7 @@ function sourceFunctionCall(kind: SourceFunctions): jest.Mock {
   return jest.fn().mockResolvedValue(kind === 'present' ? [['library_name', 'mylib']] : []);
 }
 
-function createMockRegistry(overrides?: { sourceClusterEnabled?: boolean; targetClusterEnabled?: boolean; sourceDbType?: 'valkey' | 'redis'; targetDbType?: 'valkey' | 'redis'; sourceFunctions?: SourceFunctions }) {
+function createMockRegistry(overrides?: { sourceClusterEnabled?: boolean; targetClusterEnabled?: boolean; sourceDbType?: 'valkey' | 'redis'; targetDbType?: 'valkey' | 'redis'; sourceFunctions?: SourceFunctions; sourceClusterNodes?: Array<{ flags: string[]; slots: number[][] }> }) {
   const sourceCluster = overrides?.sourceClusterEnabled ?? false;
   const targetCluster = overrides?.targetClusterEnabled ?? false;
   const sourceDbType = overrides?.sourceDbType ?? 'valkey';
@@ -57,6 +64,9 @@ function createMockRegistry(overrides?: { sourceClusterEnabled?: boolean; target
     // getClient now carries `call` so the probe exercises a real FUNCTION LIST path
     // rather than throwing TypeError and passing through the error branch by accident.
     getClient: jest.fn().mockReturnValue({ call: sourceFunctionCall(sourceFunctions), quit: jest.fn() }),
+    ...(overrides?.sourceClusterNodes
+      ? { getClusterNodes: jest.fn().mockResolvedValue(overrides.sourceClusterNodes) }
+      : {}),
   };
   const mockTargetAdapter = {
     getCapabilities: jest.fn().mockReturnValue({ dbType: targetDbType, version: '8.1.0' }),
@@ -337,6 +347,55 @@ describe('MigrationExecutionService', () => {
       expect(flushall).not.toHaveBeenCalled();
     });
 
+    it('releases the status port when cancelled before spawning', async () => {
+      mockReleaseStatusPort.mockClear();
+      const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'present' });
+      const crossForkService = createExecutionService(crossForkRegistry);
+
+      const { id } = await crossForkService.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake_sync',
+      });
+      crossForkService.stopExecution(id);
+      await new Promise(r => setTimeout(r, 30));
+
+      expect(mockReleaseStatusPort).toHaveBeenCalled();
+    });
+
+    it('releases the status port when the sync TOML cannot be built', async () => {
+      mockReleaseStatusPort.mockClear();
+      const { buildSyncReaderToml } = require('../execution/toml-builder');
+      (buildSyncReaderToml as jest.Mock).mockImplementationOnce(() => { throw new Error('Invalid host: empty or too long'); });
+
+      await expect(service.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake_sync',
+      })).rejects.toThrow('Invalid host');
+      expect(mockReleaseStatusPort).toHaveBeenCalled();
+    });
+
+    it('holds the status port through pre-spawn work and releases it just before spawning', async () => {
+      const { spawn } = require('child_process');
+      (spawn as jest.Mock).mockClear();
+      mockReleaseStatusPort.mockClear();
+      const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'present' });
+      const crossForkService = createExecutionService(crossForkRegistry);
+
+      await crossForkService.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake_sync',
+      });
+      expect(mockReleaseStatusPort).not.toHaveBeenCalled();
+      await new Promise(r => setTimeout(r, 5));
+
+      expect(spawn).toHaveBeenCalled();
+      expect(mockReleaseStatusPort.mock.invocationCallOrder[0])
+        .toBeLessThan((spawn as jest.Mock).mock.invocationCallOrder[0]);
+    });
+
     it('still surfaces the notice when the source probe fails (unknown presence)', async () => {
       // 'throw' -> 'unknown': the filter is written regardless, so an indeterminate
       // probe must not silently drop the warning.
@@ -512,6 +571,146 @@ describe('MigrationExecutionService', () => {
     it('should return undefined for unknown job ID', () => {
       expect(service.getExecution('nonexistent')).toBeUndefined();
     });
+
+    it('reports expectedShards 1 and an empty lag list for a standalone sync job', async () => {
+      const { id } = await service.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake_sync',
+      });
+      expect(service.getExecution(id)).toMatchObject({ expectedShards: 1, replicationLag: [], fullySynced: false });
+    });
+
+    it('counts cluster masters into expectedShards for a sync job', async () => {
+      const clusterRegistry = createMockRegistry({
+        sourceClusterEnabled: true,
+        sourceClusterNodes: [
+          { flags: ['master'], slots: [[0, 5460]] },
+          { flags: ['master'], slots: [[5461, 10922]] },
+          { flags: ['slave'], slots: [] },
+          { flags: ['myself', 'master'], slots: [[10923, 16383]] },
+        ],
+      });
+      const clusterService = createExecutionService(clusterRegistry);
+      const { id } = await clusterService.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake_sync',
+      });
+      expect(clusterService.getExecution(id)?.expectedShards).toBe(3);
+    });
+
+    it('reports null lag fields for a redis_shake job', async () => {
+      const { id } = await service.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake',
+      });
+      expect(service.getExecution(id)).toMatchObject({ replicationLag: null, expectedShards: null, fullySynced: false });
+    });
+
+    describe('with a running RedisShake process', () => {
+      let emitStdout: (chunk: string) => void;
+
+      beforeEach(() => {
+        const { spawn } = require('child_process');
+        (spawn as jest.Mock).mockReturnValueOnce({
+          stdout: {
+            on: jest.fn().mockImplementation((_e: string, cb: (chunk: string) => void) => { emitStdout = cb; }),
+            setEncoding: jest.fn(),
+          },
+          stderr: { on: jest.fn(), setEncoding: jest.fn() },
+          on: jest.fn(),
+          kill: jest.fn(),
+          pid: 12345,
+        });
+      });
+
+      async function startRunningSyncJob(): Promise<string> {
+        const { id } = await service.startExecution({
+          sourceConnectionId: 'conn-1',
+          targetConnectionId: 'conn-2',
+          mode: 'redis_shake_sync',
+        });
+        for (let i = 0; i < 50 && service.getExecution(id)?.status !== 'running'; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        return id;
+      }
+
+      async function poll(times: number): Promise<void> {
+        for (let i = 0; i < times; i++) {
+          jest.advanceTimersByTime(1000);
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+      }
+
+      beforeEach(() => {
+        jest.useFakeTimers({ doNotFake: ['setTimeout', 'setImmediate', 'nextTick'] });
+        const { fetchShakeStatus } = require('../execution/shake-status');
+        (fetchShakeStatus as jest.Mock).mockResolvedValue({
+          consistent: true,
+          shards: [{ shard: 'src-0', inAof: true, diff: 0 }],
+        });
+      });
+
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it('passes a free status port to the sync TOML', async () => {
+        await startRunningSyncJob();
+        const { buildSyncReaderToml } = require('../execution/toml-builder');
+        expect(buildSyncReaderToml).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.anything(),
+          expect.objectContaining({ statusPort: 45678 }),
+        );
+      });
+
+      it('reports Fully synced after two consistent status polls', async () => {
+        const id = await startRunningSyncJob();
+        const { fetchShakeStatus } = require('../execution/shake-status');
+        await poll(1);
+        expect(service.getExecution(id)?.fullySynced).toBe(false);
+        await poll(1);
+        expect(fetchShakeStatus).toHaveBeenCalledWith(45678, expect.any(Number));
+        expect(service.getExecution(id)).toMatchObject({
+          replicationLag: [{ shard: 'src-0', diff: 0, stale: false }],
+          fullySynced: true,
+        });
+      });
+
+      it('takes the shard count from the status RedisShake reports', async () => {
+        const { fetchShakeStatus } = require('../execution/shake-status');
+        (fetchShakeStatus as jest.Mock).mockResolvedValue({
+          consistent: false,
+          shards: [
+            { shard: 'src-0', inAof: true, diff: 0 },
+            { shard: 'src-1', inAof: true, diff: 10 },
+          ],
+        });
+        const id = await startRunningSyncJob();
+        await poll(1);
+        expect(service.getExecution(id)?.expectedShards).toBe(2);
+      });
+
+      it('ignores stdout diff lines', async () => {
+        const { fetchShakeStatus } = require('../execution/shake-status');
+        (fetchShakeStatus as jest.Mock).mockResolvedValue(null);
+        const id = await startRunningSyncJob();
+        emitStdout('read_count=[1], read_ops=[0.00], write_count=[1], write_ops=[0.00], syncing aof, diff=[0]\n');
+        await poll(2);
+        expect(service.getExecution(id)).toMatchObject({ replicationLag: [], fullySynced: false });
+      });
+
+      it('never reports fullySynced once the job is no longer running', async () => {
+        const id = await startRunningSyncJob();
+        await poll(2);
+        await service.stopExecution(id);
+        expect(service.getExecution(id)?.fullySynced).toBe(false);
+      });
+    });
   });
 
   describe('job eviction', () => {
@@ -535,6 +734,19 @@ describe('MigrationExecutionService', () => {
       expect(service.getExecution(newId)).toBeDefined();
       // Oldest should be evicted
       expect(service.getExecution(ids[0])).toBeUndefined();
+    });
+
+    it('releases the status port when every job slot is running', async () => {
+      const jobs = (service as unknown as { jobs: Map<string, { status: string; startedAt: number }> }).jobs;
+      for (let i = 0; i < 10; i++) jobs.set(`running-${i}`, { status: 'running', startedAt: i });
+      mockReleaseStatusPort.mockClear();
+
+      await expect(service.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake_sync',
+      })).rejects.toThrow(ServiceUnavailableException);
+      expect(mockReleaseStatusPort).toHaveBeenCalled();
     });
   });
 });
