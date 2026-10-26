@@ -26,6 +26,10 @@ function readout(entries: ReplicationLagEntry[], expectedShards: number | null):
   return withWaiting(withSyncing, entries.length, expectedShards);
 }
 
+function withStale(text: string, entries: ReplicationLagEntry[]): string {
+  return entries.some((e) => e.stale) ? `${text} · not updated recently` : text;
+}
+
 export function ReplicationLag({ entries, expectedShards }: Props) {
   const [expanded, setExpanded] = useState(false);
   if (entries.length === 0) return null;
@@ -38,7 +42,7 @@ export function ReplicationLag({ entries, expectedShards }: Props) {
         aria-expanded={expanded}
         className="text-sm text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
       >
-        {readout(entries, expectedShards)}
+        {withStale(readout(entries, expectedShards), entries)}
       </button>
       {expanded && (
         <ul className="absolute z-10 mt-1 min-w-48 rounded-md border bg-card p-2 text-xs shadow-sm space-y-0.5">

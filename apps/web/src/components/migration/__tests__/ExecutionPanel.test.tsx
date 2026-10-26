@@ -70,6 +70,22 @@ describe('ExecutionPanel replication lag', () => {
     }
   });
 
+  it('marks the lag readout stale while the latest poll has failed', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(fetchApi)
+        .mockResolvedValueOnce(syncResult({}))
+        .mockRejectedValueOnce(new Error('network'));
+      render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.queryByText(/not updated recently/)).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(screen.getByText(/not updated recently/)).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('points the replicating banner at Complete cutover', async () => {
     vi.mocked(fetchApi).mockResolvedValue(syncResult({}));
     render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);

@@ -58,6 +58,16 @@ describe('ReplicationLag', () => {
     expect(screen.getByText('src-0: 0 B')).toBeTruthy();
   });
 
+  it('marks the readout when any shard is stale', () => {
+    render(
+      <ReplicationLag
+        entries={[{ shard: 'src-0', diff: 0, stale: false }, { shard: 'src-1', diff: 512, stale: true }]}
+        expectedShards={2}
+      />,
+    );
+    expect(screen.getByRole('button').textContent).toBe('Lag: 512.00 B behind · not updated recently');
+  });
+
   it('renders nothing for an empty list', () => {
     const { container } = render(<ReplicationLag entries={[]} expectedShards={3} />);
     expect(container.innerHTML).toBe('');
