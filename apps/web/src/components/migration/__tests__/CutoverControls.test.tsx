@@ -15,7 +15,7 @@ function execution(partial: Partial<MigrationExecutionResult>): MigrationExecuti
     logs: [],
     progress: null,
     syncStage: 'aof_replicating',
-    replicationLag: [{ shard: 'src-0', diff: 0, updatedAt: Date.now() }],
+    replicationLag: [{ shard: 'src-0', diff: 0, stale: false }],
     expectedShards: 1,
     fullySynced: false,
     cutover: null,
@@ -92,8 +92,8 @@ describe('CutoverControls', () => {
           cutover: timedOut,
           expectedShards: 2,
           replicationLag: [
-            { shard: 'src-1', diff: 4096, updatedAt: Date.now() },
-            { shard: 'src-2', diff: null, updatedAt: Date.now() },
+            { shard: 'src-1', diff: 4096, stale: false },
+            { shard: 'src-2', diff: null, stale: false },
           ],
         })}
         onComplete={onComplete}
@@ -113,7 +113,7 @@ describe('CutoverControls', () => {
         execution={execution({
           cutover: timedOut,
           expectedShards: 3,
-          replicationLag: [{ shard: 'src-0', diff: 4096, updatedAt: Date.now() }],
+          replicationLag: [{ shard: 'src-0', diff: 4096, stale: false }],
         })}
         onComplete={vi.fn()}
       />,
