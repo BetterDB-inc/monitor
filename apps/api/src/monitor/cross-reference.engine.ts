@@ -1,9 +1,11 @@
 import { Inject, Injectable } from '@nestjs/common';
+import type { CaptureCounterDeltas } from '@betterdb/shared';
 import {
   StoragePort,
   StoredCaptureSession,
   StoredSlowLogEntry,
 } from '../common/interfaces/storage-port.interface';
+import { computeCounterDeltas } from './capture-counters';
 import { ParsedMonitorLine, parseMonitorLine } from './monitor-line.parser';
 
 /** Baseline window selector. `same-hour-last-week` shifts the window to the same hour-of-day 7 days ago. */
@@ -56,9 +58,10 @@ export interface AclDeltas {
   /** Audit-trail entries persisted with `captured_at` inside the session window. Empty when the audit module is not in use. */
   auditEntriesInWindow: number;
   /**
-   * INFO counter snapshots are not yet captured at session start/end. v1 surfaces a
-   * placeholder so the UI shape is final; PR 9-era pre-flight INFO + future session-
-   * boundary snapshots will populate these.
+   * Session-boundary INFO counter deltas for the capture window, mirrored
+   * from {@link CrossReferenceResult.counterDeltas}. Null when the session has
+   * no counter snapshots (recorded before they existed, or INFO was unreachable)
+   * or the server does not report the field.
    */
   counters: {
     aclAccessDeniedAuthDelta: number | null;
@@ -84,6 +87,10 @@ export interface CrossReferenceResult {
   hotKeyDelta: HotKeyDelta;
   slowlogRegressions: SlowlogRegression[];
   aclDeltas: AclDeltas;
+  /** INFO `# Stats` counter deltas measured at session start/end (per node, summed). */
+  counterDeltas: CaptureCounterDeltas;
+  /** Capture-vs-capture diff only: the baseline capture's own counter deltas. */
+  baselineCounterDeltas?: CaptureCounterDeltas;
 }
 
 /**
@@ -156,6 +163,7 @@ export class CrossReferenceEngine {
       sessionStartMs,
       sessionEndMs,
     );
+    const counterDeltas = computeCounterDeltas(session.counterSnapshots);
 
     return {
       sessionId: input.sessionId,
@@ -175,18 +183,20 @@ export class CrossReferenceEngine {
       aclDeltas: {
         auditEntriesInWindow: auditEntries.length,
         counters: {
-          aclAccessDeniedAuthDelta: null,
-          rejectedConnectionsDelta: null,
+          aclAccessDeniedAuthDelta: counterDeltas.deltas.acl_access_denied_auth,
+          rejectedConnectionsDelta: counterDeltas.deltas.rejected_connections,
         },
       },
+      counterDeltas,
     };
   }
 
   /**
    * Capture-vs-capture diff. Treats {@code baselineSessionId} as the baseline
    * source for shapes and hot keys; returns the same result shape as
-   * {@link compute} but with empty slowlog/ACL deltas (those axes are scoped to
-   * connection history, not a single capture).
+   * {@link compute}; slowlog regressions and the audit-entry count stay empty (they
+   * are scoped to connection history), while INFO counter deltas are reported for
+   * both captures.
    */
   async computeCaptureDiff(
     sessionId: string,
@@ -216,6 +226,8 @@ export class CrossReferenceEngine {
 
     const newShapes = computeNewShapes(capturedLines, baselineShapes);
     const hotKeyDelta = computeHotKeyDelta(capturedLines, baselineKeyCounts);
+    const counterDeltas = computeCounterDeltas(session.counterSnapshots);
+    const baselineCounterDeltas = computeCounterDeltas(baselineSession.counterSnapshots);
 
     return {
       sessionId,
@@ -236,10 +248,12 @@ export class CrossReferenceEngine {
       aclDeltas: {
         auditEntriesInWindow: 0,
         counters: {
-          aclAccessDeniedAuthDelta: null,
-          rejectedConnectionsDelta: null,
+          aclAccessDeniedAuthDelta: counterDeltas.deltas.acl_access_denied_auth,
+          rejectedConnectionsDelta: counterDeltas.deltas.rejected_connections,
         },
       },
+      counterDeltas,
+      baselineCounterDeltas,
     };
   }
 

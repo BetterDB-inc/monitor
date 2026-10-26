@@ -12,6 +12,15 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { CaptureWriter, CaptureWriterResult, MonitorSource } from './capture-writer';
 import { createIovalkeyMonitorSource } from './iovalkey-monitor-source';
+import {
+  CounterSampleOutcome,
+  CounterSampleReader,
+  buildStartSnapshots,
+  counterNodeKey,
+  readCounterSample,
+  sampleFromInfoText,
+  withEndSamples,
+} from './capture-counters';
 
 /** Default capture duration if the caller does not specify one. Matches the start-session modal default. */
 export const DEFAULT_DURATION_MS = 30_000;
@@ -86,6 +95,7 @@ export class MonitorCaptureService {
   private readonly logger = new Logger(MonitorCaptureService.name);
   private readonly active = new Map<string, ActiveSession>();
   private monitorSourceFactory: MonitorSourceFactory;
+  private counterSampleReader: CounterSampleReader;
 
   constructor(
     @Inject('STORAGE_CLIENT')
@@ -105,11 +115,29 @@ export class MonitorCaptureService {
       const port = this.connectionRegistry.get(connectionId);
       return createIovalkeyMonitorSource(port.getClient());
     };
+    this.counterSampleReader = async (connectionId, nodeId) => {
+      // Same client selection as the MONITOR source factory, so the INFO
+      // sample comes from the node whose traffic is being captured.
+      const client = nodeId
+        ? await this.clusterDiscovery.getNodeConnection(nodeId, connectionId)
+        : this.connectionRegistry.get(connectionId).getClient();
+      const infoText = await client.info('stats');
+      return sampleFromInfoText(infoText, Date.now());
+    };
   }
 
   /** Test seam — overrides the default iovalkey-backed source factory. */
   setMonitorSourceFactory(factory: MonitorSourceFactory): void {
     this.monitorSourceFactory = factory;
+  }
+
+  /** Test seam — overrides how session-boundary INFO stats samples are read. */
+  setCounterSampleReader(reader: CounterSampleReader): void {
+    this.counterSampleReader = reader;
+  }
+
+  private sampleCounters(connectionId: string, nodeId?: string): Promise<CounterSampleOutcome> {
+    return readCounterSample(this.counterSampleReader, connectionId, nodeId);
   }
 
   listSessions(options: CaptureSessionQueryOptions = {}): Promise<StoredCaptureSession[]> {
@@ -145,6 +173,25 @@ export class MonitorCaptureService {
       ? undefined
       : await this.resolveTargetNodeAddress(connectionId, input.targetNodeId);
 
+    // Start samples are taken before any MONITOR connection opens so the
+    // window never includes traffic from before the capture. Fail-open and
+    // bounded (2 s per node, in parallel).
+    const startTargets = isFanOut
+      ? await Promise.all(
+          fanOutNodes.map(async (n) => ({
+            nodeId: n.id,
+            address: n.address,
+            outcome: await this.sampleCounters(connectionId, n.id),
+          })),
+        )
+      : [
+          {
+            nodeId: input.targetNodeId,
+            address: targetNode,
+            outcome: await this.sampleCounters(connectionId, input.targetNodeId),
+          },
+        ];
+
     const initialSegments: CaptureNodeSegment[] = isFanOut
       ? fanOutNodes.map((n) => ({
           nodeId: n.id,
@@ -170,6 +217,7 @@ export class MonitorCaptureService {
       lineCap,
       targetNode,
       nodeSegments: isFanOut ? initialSegments : undefined,
+      counterSnapshots: buildStartSnapshots(startTargets),
     };
 
     await this.storage.saveCaptureSession(session, connectionId);
@@ -210,6 +258,13 @@ export class MonitorCaptureService {
       byteCap,
       lineCap,
       durationMs,
+      endSampler: () => this.sampleCounters(session.connectionId, targetNodeId),
+      buildFinalizePatch: (endSample) => ({
+        counterSnapshots: withEndSamples(
+          session.counterSnapshots,
+          new Map(endSample === null ? [] : [[counterNodeKey(targetNodeId), endSample]]),
+        ),
+      }),
     });
 
     const finalize = writer
@@ -253,6 +308,7 @@ export class MonitorCaptureService {
     }
 
     const segmentPromises: Array<Promise<void>> = [];
+    const endSamples = new Map<string, CounterSampleOutcome>();
 
     for (let i = 0; i < nodes.length; i++) {
       const node = nodes[i];
@@ -284,6 +340,7 @@ export class MonitorCaptureService {
         nodeId: node.id,
         startChunkIndex: i * CHUNK_INDEX_NAMESPACE,
         skipSessionFinalize: true,
+        endSampler: () => this.sampleCounters(session.connectionId, node.id),
       });
 
       writers.push({ writer, nodeId: node.id, address: node.address });
@@ -292,6 +349,9 @@ export class MonitorCaptureService {
         writer
           .start()
           .then((result) => {
+            if (result.endSample) {
+              endSamples.set(counterNodeKey(node.id), result.endSample);
+            }
             const seg = segments.get(node.id);
             if (!seg) return;
             seg.status = result.status === 'failed' ? 'failed' : result.status;
@@ -314,7 +374,7 @@ export class MonitorCaptureService {
     }
 
     const finalize = Promise.all(segmentPromises)
-      .then(() => this.finalizeFanOutSession(session, segments))
+      .then(() => this.finalizeFanOutSession(session, segments, endSamples))
       .finally(() => {
         this.active.delete(session.connectionId);
       });
@@ -333,6 +393,7 @@ export class MonitorCaptureService {
   private async finalizeFanOutSession(
     session: StoredCaptureSession,
     segments: Map<string, CaptureNodeSegment>,
+    endSamples: ReadonlyMap<string, CounterSampleOutcome>,
   ): Promise<void> {
     const segmentList = Array.from(segments.values());
     const totalBytes = segmentList.reduce((s, x) => s + x.byteCount, 0);
@@ -353,6 +414,7 @@ export class MonitorCaptureService {
         lineCount: totalLines,
         terminationReason: reason,
         nodeSegments: segmentList,
+        counterSnapshots: withEndSamples(session.counterSnapshots, endSamples),
       });
     } catch (err) {
       this.logger.error(`Fan-out finalize failed: ${(err as Error).message}`);

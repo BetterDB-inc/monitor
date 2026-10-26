@@ -19,8 +19,8 @@ diff, and export.
    background; close the tab and come back any time — the session keeps
    running until the duration cap, byte cap, line cap, or a manual stop.
 4. When the session finishes, the detail page surfaces filters, export
-   (JSON / CSV), a four-axis cross-reference against connection history,
-   and (Pro+) a capture-vs-capture diff.
+   (JSON / CSV), a four-axis cross-reference against connection history
+   plus INFO counter deltas for the capture window, and (Pro+) a capture-vs-capture diff.
 
 ## Tiers and feature gating
 
@@ -94,8 +94,31 @@ reference engine with another capture as the baseline source. The
 session detail page exposes this via the **Compare with another
 capture** card — pick any other completed capture on the same
 connection and the four-section panel populates with the new shapes
-and hot-key delta. Slowlog and ACL deltas are scoped to connection
-history and stay empty in this mode.
+and hot-key delta. Slowlog regressions and the audit-entry count are
+scoped to connection history and stay empty in this mode; INFO counter
+deltas are shown for both captures side by side.
+
+## Session-boundary INFO counters
+
+Every capture samples `INFO stats` on each captured node twice: once just
+before MONITOR opens and once right after it stops (so the probe itself is
+never captured). The cross-reference panel shows the difference for 17
+monotonic counters — commands processed, connections received/rejected,
+keyspace hits/misses, expired and evicted keys, network in/out, error
+replies, ACL denials (auth / command / key / channel) and full/partial
+resyncs — plus commands/sec and the keyspace hit ratio over the window.
+Fan-out captures sum across primaries.
+
+- Each sample has a 2 s budget and fails open: an unreachable node never
+  delays or fails the capture; it is reported as not measured.
+- Coverage is `complete`, `partial` (a node missing a sample, or a counter
+  that went backwards because of `CONFIG RESETSTAT` / a restart — that
+  node's value is excluded and named), or `unavailable` (sessions recorded
+  before this feature).
+- `aclDeltas.counters.aclAccessDeniedAuthDelta` / `rejectedConnectionsDelta`
+  in the API response are populated from the same samples.
+- Counters a server version does not report (e.g. `total_error_replies`
+  before Redis 6.2) are shown as `—`, never as 0.
 
 ## Value redaction
 
@@ -131,6 +154,7 @@ Manual lifecycle:
 - `GET  /api/monitor/sessions/:id`
 - `DELETE /api/monitor/sessions/:id`
 - `GET  /api/monitor/sessions/:id/cross-reference?baseline=<6h|24h|7d|same-hour-last-week>`
+  Response includes counterDeltas (and baselineCounterDeltas on /diff).
 - `GET  /api/monitor/sessions/:id/export?format=<json|csv>&command=&client=&key=&afterTs=&beforeTs=`
 
 Pro+:

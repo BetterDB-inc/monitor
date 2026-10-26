@@ -8,6 +8,7 @@ import {
   CrossReferenceSlowlogRegression,
   monitorApi,
 } from '../../api/monitor';
+import { CounterDeltasTable } from './counter-deltas-table';
 
 const BASELINE_OPTIONS: Array<{ value: BaselineWindow; label: string }> = [
   { value: '6h', label: 'Last 6 hours' },
@@ -98,6 +99,15 @@ export function CrossReferenceSections({ result }: { result: CrossReferenceResul
       >
         <AclDeltas result={result} />
       </Section>
+
+      <div className="md:col-span-2" data-testid="counter-deltas-section">
+        <Section
+          title="INFO counters during capture"
+          subtitle="INFO stats sampled at session start and end"
+        >
+          <CounterDeltasTable deltas={result.counterDeltas} baseline={result.baselineCounterDeltas} />
+        </Section>
+      </div>
     </div>
   );
 }
@@ -222,9 +232,7 @@ function RegressionsList({ regressions }: { regressions: CrossReferenceSlowlogRe
 }
 
 function AclDeltas({ result }: { result: CrossReferenceResult }) {
-  const counterDeltaUnknown =
-    result.aclDeltas.counters.aclAccessDeniedAuthDelta === null &&
-    result.aclDeltas.counters.rejectedConnectionsDelta === null;
+  const countersUnavailable = result.counterDeltas.coverage === 'unavailable';
   return (
     <dl className="space-y-1 text-xs">
       <Row label="Audit entries in window">{result.aclDeltas.auditEntriesInWindow}</Row>
@@ -234,9 +242,9 @@ function AclDeltas({ result }: { result: CrossReferenceResult }) {
       <Row label="rejected_connections Δ">
         {result.aclDeltas.counters.rejectedConnectionsDelta ?? '—'}
       </Row>
-      {counterDeltaUnknown && (
+      {countersUnavailable && (
         <p className="pt-1 text-[10px] text-muted-foreground">
-          INFO counter deltas pending session-boundary snapshots (follow-up PR).
+          INFO counters were not recorded for this capture.
         </p>
       )}
     </dl>

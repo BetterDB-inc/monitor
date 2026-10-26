@@ -2,6 +2,7 @@ import { Client, ClientBase, ClientConfig, Pool, PoolConfig } from 'pg';
 import { KV_CACHE_SAMPLE_COUNTER_COLUMNS } from './kv-cache-sample-columns';
 import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
+import { decodeCounterSnapshots, encodeCounterSnapshots } from './capture-counter-snapshots.codec';
 import {
   otelSpanCap,
   otelSpanCapCheckInterval,
@@ -2451,6 +2452,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         termination_reason TEXT,
         target_node TEXT,
         node_segments JSONB,
+        counter_snapshots JSONB,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         CHECK (status IN ('running','completed','truncated','failed','skipped')),
         CHECK (source IN ('manual','trigger','schedule'))
@@ -2458,6 +2460,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
       ALTER TABLE capture_sessions ADD COLUMN IF NOT EXISTS target_node TEXT;
       ALTER TABLE capture_sessions ADD COLUMN IF NOT EXISTS node_segments JSONB;
+      ALTER TABLE capture_sessions ADD COLUMN IF NOT EXISTS counter_snapshots JSONB;
 
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_connection_id ON capture_sessions(connection_id);
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_started_at ON capture_sessions(started_at DESC);
@@ -6450,8 +6453,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO capture_sessions (
         id, connection_id, status, source, trigger_id, schedule_id, requested_by,
         started_at, ended_at, duration_ms, byte_count, line_count, byte_cap, line_cap,
-        termination_reason, target_node, node_segments
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+        termination_reason, target_node, node_segments, counter_snapshots
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
       [
         session.id,
         connectionId,
@@ -6470,6 +6473,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         session.terminationReason ?? null,
         session.targetNode ?? null,
         session.nodeSegments ? JSON.stringify(session.nodeSegments) : null,
+        encodeCounterSnapshots(session.counterSnapshots),
       ],
     );
 
@@ -6553,6 +6557,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       terminationReason: (row.termination_reason as string | null) ?? undefined,
       targetNode: (row.target_node as string | null) ?? undefined,
       nodeSegments: normaliseNodeSegments(row.node_segments),
+      counterSnapshots: decodeCounterSnapshots(row.counter_snapshots),
     };
   }
 
@@ -6589,6 +6594,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (patch.nodeSegments !== undefined) {
       sets.push(`node_segments = $${p++}`);
       params.push(JSON.stringify(patch.nodeSegments));
+    }
+    if (patch.counterSnapshots !== undefined) {
+      sets.push(`counter_snapshots = $${p++}`);
+      params.push(encodeCounterSnapshots(patch.counterSnapshots));
     }
 
     if (sets.length === 0) return false;

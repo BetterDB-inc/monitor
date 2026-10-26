@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { KV_CACHE_SAMPLE_COUNTER_COLUMNS } from './kv-cache-sample-columns';
 import { chunkedSqliteDelete } from './sqlite-chunked-delete';
+import { decodeCounterSnapshots, encodeCounterSnapshots } from './capture-counter-snapshots.codec';
 import {
   otelSpanCap,
   otelSpanCapCheckInterval,
@@ -293,6 +294,17 @@ function addKvCacheCoverageColumns(db: Database.Database): void {
   }
   if (!cols.some((c) => c.name === 'evicted_keys_interval_ms')) {
     db.prepare(`ALTER TABLE kv_cache_footprint_snapshots ADD COLUMN evicted_keys_interval_ms INTEGER`).run();
+  }
+}
+
+function addCaptureSessionsCounterSnapshotsColumn(db: Database.Database): void {
+  try {
+    const cols = db.prepare(`PRAGMA table_info(capture_sessions)`).all() as { name: string }[];
+    if (cols.length > 0 && !cols.some((c) => c.name === 'counter_snapshots')) {
+      db.prepare(`ALTER TABLE capture_sessions ADD COLUMN counter_snapshots TEXT`).run();
+    }
+  } catch {
+    // Table may not exist yet — createSchema's CREATE TABLE includes the column from day one.
   }
 }
 
@@ -2291,6 +2303,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         termination_reason TEXT,
         target_node TEXT,
         node_segments TEXT,
+        counter_snapshots TEXT,
         created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
       );
 
@@ -2459,6 +2472,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       COMMAND_STATS_SAMPLES_NULLABLE,
     );
     addCaptureSessionsTargetNodeColumn(this.db!);
+    addCaptureSessionsCounterSnapshotsColumn(this.db!);
     addMemoryProposalIntegrityColumns(this.db!);
     addKvCacheCoverageColumns(this.db!);
 
@@ -6027,8 +6041,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO capture_sessions (
         id, connection_id, status, source, trigger_id, schedule_id, requested_by,
         started_at, ended_at, duration_ms, byte_count, line_count, byte_cap, line_cap,
-        termination_reason, target_node, node_segments
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        termination_reason, target_node, node_segments, counter_snapshots
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       )
       .run(
@@ -6049,6 +6063,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         session.terminationReason ?? null,
         session.targetNode ?? null,
         session.nodeSegments ? JSON.stringify(session.nodeSegments) : null,
+        encodeCounterSnapshots(session.counterSnapshots),
       );
 
     return session.id;
@@ -6125,6 +6140,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       terminationReason: (row.termination_reason as string | null) ?? undefined,
       targetNode: (row.target_node as string | null) ?? undefined,
       nodeSegments: parseNodeSegmentsJson(row.node_segments),
+      counterSnapshots: decodeCounterSnapshots(row.counter_snapshots),
     };
   }
 
@@ -6160,6 +6176,10 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (patch.nodeSegments !== undefined) {
       sets.push('node_segments = ?');
       params.push(JSON.stringify(patch.nodeSegments));
+    }
+    if (patch.counterSnapshots !== undefined) {
+      sets.push('counter_snapshots = ?');
+      params.push(encodeCounterSnapshots(patch.counterSnapshots));
     }
 
     if (sets.length === 0) return false;

@@ -1,4 +1,5 @@
 import type {
+  CaptureCounterDeltas,
   CaptureTriggerStatus,
   ScheduledCaptureStatus,
   StoredCaptureSession,
@@ -159,6 +160,9 @@ export interface CrossReferenceResult {
       rejectedConnectionsDelta: number | null;
     };
   };
+  counterDeltas: CaptureCounterDeltas;
+  /** Set on capture-vs-capture diffs. */
+  baselineCounterDeltas?: CaptureCounterDeltas;
 }
 
 export interface ExportFilters {

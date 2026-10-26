@@ -480,3 +480,159 @@ describe('MonitorCaptureService', () => {
     });
   });
 });
+
+describe('MonitorCaptureService session-boundary counter snapshots', () => {
+  function makeReader() {
+    let clock = 1_000;
+    return jest.fn(async (_connectionId: string, _nodeId?: string) => ({
+      capturedAt: (clock += 10),
+      counters: { total_commands_processed: clock },
+    }));
+  }
+
+  function configureCluster(cluster: { discoverNodes: jest.Mock }, ids: string[]) {
+    cluster.discoverNodes.mockResolvedValue(
+      ids.map((id) => ({
+        id,
+        address: `${id.toLowerCase()}:6379`,
+        role: 'master',
+        slots: [],
+        healthy: true,
+      })),
+    );
+  }
+
+  it('stores start and end samples for a single session', async () => {
+    const { service, storage, source } = makeService();
+    const reader = makeReader();
+    service.setCounterSampleReader(reader);
+
+    const session = await service.startSession({ connectionId: CONNECTION_ID });
+    source.push('1700000000.0 [0 1:1] "PING"');
+    await service.stopSession(session.id);
+
+    const persisted = await storage.getCaptureSession(session.id);
+    const nodes = persisted?.counterSnapshots?.nodes ?? [];
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].nodeId).toBeUndefined();
+    expect(nodes[0].start?.capturedAt).toBeLessThan(nodes[0].end?.capturedAt ?? 0);
+    expect(reader).toHaveBeenCalledTimes(2);
+    expect(reader).toHaveBeenNthCalledWith(1, CONNECTION_ID, undefined);
+    expect(reader).toHaveBeenNthCalledWith(2, CONNECTION_ID, undefined);
+  });
+
+  it('takes the start sample before MONITOR opens', async () => {
+    const { service, source } = makeService();
+    const reader = makeReader();
+    const factory = jest.fn().mockResolvedValue(source);
+    service.setCounterSampleReader(reader);
+    service.setMonitorSourceFactory(factory);
+
+    const session = await service.startSession({ connectionId: CONNECTION_ID });
+    await service.stopSession(session.id);
+
+    expect(reader.mock.invocationCallOrder[0]).toBeLessThan(factory.mock.invocationCallOrder[0]);
+  });
+
+  it('samples the targeted node', async () => {
+    const { service, storage, cluster } = makeService();
+    cluster.discoverNodes.mockResolvedValueOnce([
+      { id: 'node-a', address: 'cluster-1:6379', role: 'master', slots: [], healthy: true },
+      { id: 'node-b', address: 'cluster-2:6379', role: 'master', slots: [], healthy: true },
+    ]);
+    const reader = makeReader();
+    service.setCounterSampleReader(reader);
+
+    const session = await service.startSession({
+      connectionId: CONNECTION_ID,
+      targetNodeId: 'node-b',
+    });
+    await service.stopSession(session.id);
+
+    expect(reader).toHaveBeenCalledWith(CONNECTION_ID, 'node-b');
+    const persisted = await storage.getCaptureSession(session.id);
+    expect(persisted?.counterSnapshots?.nodes[0]).toMatchObject({
+      nodeId: 'node-b',
+      address: 'cluster-2:6379',
+    });
+  });
+
+  it('stores one entry per primary for fan-out', async () => {
+    const { service, storage, cluster } = makeService();
+    configureCluster(cluster, ['A', 'B', 'C']);
+    const reader = makeReader();
+    service.setCounterSampleReader(reader);
+    service.setMonitorSourceFactory(async () => new FakeSource());
+
+    const session = await service.startSession({ connectionId: CONNECTION_ID, fanOut: true });
+    await service.stopSession(session.id);
+
+    const persisted = await storage.getCaptureSession(session.id);
+    const nodes = persisted?.counterSnapshots?.nodes ?? [];
+    expect(nodes.map((n) => n.nodeId)).toEqual(['A', 'B', 'C']);
+    expect(nodes.every((n) => n.start !== null && n.end !== null)).toBe(true);
+    expect(reader).toHaveBeenCalledTimes(6);
+  });
+
+  it('marks a fan-out node whose MONITOR open fails as having no end sample', async () => {
+    const { service, storage, cluster } = makeService();
+    configureCluster(cluster, ['A', 'B']);
+    service.setCounterSampleReader(makeReader());
+    service.setMonitorSourceFactory(async (_connId, nodeId) => {
+      if (nodeId === 'B') throw new Error('connect ECONNREFUSED');
+      return new FakeSource();
+    });
+
+    const session = await service.startSession({ connectionId: CONNECTION_ID, fanOut: true });
+    await service.stopSession(session.id);
+
+    const persisted = await storage.getCaptureSession(session.id);
+    const byId = Object.fromEntries(
+      (persisted?.counterSnapshots?.nodes ?? []).map((n) => [n.nodeId, n]),
+    );
+    expect(byId.B.start).not.toBeNull();
+    expect(byId.B.end).toBeNull();
+    expect(byId.B.endError).toBe('no_end_sample');
+    expect(byId.A.end).not.toBeNull();
+    expect(persisted?.status).toBe('failed');
+  });
+
+  it('never blocks a capture when the reader fails', async () => {
+    const { service, storage } = makeService();
+    service.setCounterSampleReader(jest.fn().mockRejectedValue(new Error('ECONNREFUSED')));
+
+    const session = await service.startSession({ connectionId: CONNECTION_ID });
+    await service.stopSession(session.id);
+
+    const persisted = await storage.getCaptureSession(session.id);
+    expect(persisted?.status).toBe('completed');
+    expect(persisted?.counterSnapshots?.nodes[0]).toMatchObject({
+      start: null,
+      startError: 'ECONNREFUSED',
+      end: null,
+      endError: 'ECONNREFUSED',
+    });
+  });
+
+  it('bounds a hung reader', async () => {
+    const { service, storage } = makeService();
+    service.setCounterSampleReader(() => new Promise(() => undefined));
+
+    const session = await service.startSession({ connectionId: CONNECTION_ID });
+    await service.stopSession(session.id);
+
+    const persisted = await storage.getCaptureSession(session.id);
+    expect(persisted?.counterSnapshots?.nodes[0].startError).toMatch(/timed out after 2000 ms/);
+  }, 10_000);
+
+  it('fails open with the default reader when the registry has no client', async () => {
+    const { service, storage } = makeService();
+
+    const session = await service.startSession({ connectionId: CONNECTION_ID });
+    await service.stopSession(session.id);
+
+    const persisted = await storage.getCaptureSession(session.id);
+    expect(persisted?.status).toBe('completed');
+    expect(typeof persisted?.counterSnapshots?.nodes[0].startError).toBe('string');
+  });
+});
