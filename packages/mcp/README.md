@@ -160,6 +160,41 @@ Once connected, your AI assistant can query your databases directly:
 | `get_forecast` | Capacity forecast for a metric (`opsPerSec`, `usedMemory`, `cpuTotal`, `memFragmentation`) with projected time to ceiling |
 | `get_latency_regressions` | Detected sustained p99 latency regressions vs baseline from the anomaly store *(Pro)* |
 | `get_largest_keys` | Largest keys by measured memory usage from key analytics snapshots *(Pro)* |
+| `get_key_analytics_summary` | Keyspace totals, hot/cold/stale counts, per-pattern breakdown and databases with stored analytics *(Pro)* |
+| `get_key_patterns` | Per-pattern key count, memory, TTL coverage and hot/cold/stale counts *(Pro)* |
+| `get_key_pattern_trend` | Time series for one key pattern *(Pro)* |
+
+### Capacity & Scaling Tools
+
+| Tool | Description |
+|---|---|
+| `get_scaling_readiness` | Current 0-100 scaling readiness score with band, binding dimension and per-dimension breakdown |
+| `get_scaling_readiness_history` | Stored readiness scores over time *(Pro)* |
+| `get_cache_size_estimate` | Cache Size Simulator: sampled dataset size, memory state and fitted growth; poll until `status` is `ready` *(Pro)* |
+
+### LLM KV Cache Tools
+
+For deployments running [LMCache](https://github.com/LMCache/LMCache) with a Valkey backend.
+
+| Tool | Description |
+|---|---|
+| `get_kv_cache_status` | LMCache detection, latest footprint and linked inference engines (credentials redacted) *(Pro)* |
+| `get_kv_cache_hit_rate` | Per-minute requested vs hit tokens and hit rate, filterable by engine or model *(Pro)* |
+| `get_kv_cache_footprint_history` | Stored KV-cache footprint snapshots over time *(Pro)* |
+
+### Security & Fleet Tools
+
+| Tool | Description |
+|---|---|
+| `get_cve_exposure` | CVEs matching the running version(s), per node, plus advisory dataset health |
+| `get_fleet_summary` | Health overview of every registered instance (not scoped to the selected instance) |
+
+### MONITOR Capture Tools
+
+| Tool | Description |
+|---|---|
+| `list_capture_sessions` | Recent MONITOR capture sessions with status, duration and size |
+| `get_capture_cross_reference` | Diff a capture against recent history: new command shapes, hot-key shifts, slowlog regressions, ACL activity |
 
 ### Vector Search Tools
 

@@ -5,6 +5,26 @@ All notable changes to `@betterdb/mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-10-26
+
+### Added
+
+- **13 read-only tools** covering monitor features shipped since 1.4.0 (60 → 73 tools):
+  - Capacity & scaling: `get_scaling_readiness` (current 0-100 score, band,
+    binding dimension and breakdown), `get_scaling_readiness_history`
+    *(Pro)*, `get_cache_size_estimate` — Cache Size Simulator snapshot with
+    sampled dataset size (95% CI, per type) and fitted growth *(Pro)*.
+  - LLM KV cache (LMCache): `get_kv_cache_status`, `get_kv_cache_hit_rate`,
+    `get_kv_cache_footprint_history` *(Pro)*. Engine scrape URLs are reduced
+    to scheme://host/path and credentials are stripped from errors.
+  - Security & fleet: `get_cve_exposure` (per-node CVE matches plus advisory
+    dataset health; works for OTLP-pushed instances) and `get_fleet_summary`.
+  - Key analytics: `get_key_analytics_summary` (multi-database aware),
+    `get_key_patterns`, `get_key_pattern_trend` *(Pro)*.
+  - MONITOR captures: `list_capture_sessions` and
+    `get_capture_cross_reference`. Cross-reference lookups are scoped to the
+    selected instance; a session id from another instance returns not found.
+
 ## [1.4.0] - 2026-07-28
 
 ### Added

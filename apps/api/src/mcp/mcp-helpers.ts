@@ -84,3 +84,82 @@ export function mapMcpError(
   logger.error(logMessage, error instanceof Error ? error.stack : String(error));
   return new HttpException(fallback, HttpStatus.INTERNAL_SERVER_ERROR);
 }
+
+export const HOUR_MS = 60 * 60 * 1000;
+export const DAY_MS = 24 * HOUR_MS;
+
+function isBlank(value: string | undefined): boolean {
+  return value === undefined || value.trim() === '';
+}
+
+/**
+ * Resolve an optional [startTime, endTime] millisecond range for MCP history
+ * routes. A missing endTime means "now"; a missing startTime means
+ * `defaultLookbackMs` before endTime. Inverted, non-integer, negative or
+ * wider-than-`maxSpanMs` ranges are rejected with 400 so an agent gets a
+ * clear error instead of a silently clamped answer.
+ */
+export function resolveTimeRange(
+  startTime: string | undefined,
+  endTime: string | undefined,
+  defaultLookbackMs: number,
+  maxSpanMs: number,
+  now: number = Date.now(),
+): { from: number; to: number } {
+  const to = isBlank(endTime) ? now : Number(endTime);
+  const from = isBlank(startTime) ? Math.max(0, to - defaultLookbackMs) : Number(startTime);
+  if (Number.isSafeInteger(from) === false || Number.isSafeInteger(to) === false) {
+    throw new BadRequestException('startTime and endTime must be integer millisecond timestamps');
+  }
+  if (from < 0 || to < 0) {
+    throw new BadRequestException('startTime and endTime must not be negative');
+  }
+  if (from > to) {
+    throw new BadRequestException('startTime must be less than or equal to endTime');
+  }
+  if (to - from > maxSpanMs) {
+    throw new BadRequestException(
+      `time range must not exceed ${Math.round(maxSpanMs / HOUR_MS)} hours`,
+    );
+  }
+  return { from, to };
+}
+
+/** Largest logical-database index accepted by MCP routes (sanity bound, not a Valkey limit). */
+export const MAX_DB_INDEX = 65_535;
+
+/** Parse an optional logical-database index query param; 400 on anything but an integer in [0, MAX_DB_INDEX]. */
+export function parseOptionalDbIndex(value: string | undefined): number | undefined {
+  if (isBlank(value)) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (Number.isInteger(parsed) === false || parsed < 0 || parsed > MAX_DB_INDEX) {
+    throw new BadRequestException(`db must be an integer between 0 and ${MAX_DB_INDEX}`);
+  }
+  return parsed;
+}
+
+const URL_USERINFO_RE = /([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@]+@/gi;
+
+/** Strip `user:pass@` userinfo from every URL embedded in free text (error messages, logs). */
+export function redactUrlCredentials(text: string): string {
+  return text.replace(URL_USERINFO_RE, '$1');
+}
+
+/**
+ * Reduce a scrape URL to scheme://host/path. Drops userinfo, query string and
+ * fragment, the places a token could be embedded. Falls back to regex redaction
+ * when the value does not parse as a URL.
+ */
+export function redactScrapeUrl(raw: string | null): string | null {
+  if (raw === null) {
+    return null;
+  }
+  try {
+    const url = new URL(raw);
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return redactUrlCredentials(raw.split(/[?#]/)[0]);
+  }
+}
