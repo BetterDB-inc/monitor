@@ -13,6 +13,7 @@ export interface RedisShakeTomlOptions {
   rsOptions?: RedisShakeOptions;
   /** sync_reader only; ignored by the scan_reader builder. */
   syncReaderOptions?: SyncReaderOptions;
+  statusPort?: number;
 }
 
 // eslint-disable-next-line no-control-regex
@@ -141,6 +142,7 @@ export function buildSyncReaderToml(
   const targetIsCluster = opts.targetIsCluster ?? false;
   const rsOptions = opts.rsOptions ?? {};
   const excludeFunctions = opts.excludeFunctions ?? false;
+  const statusPortLine = opts.statusPort === undefined ? '' : `status_port = ${validatePort(opts.statusPort)}\n`;
 
   const srcHost = validateHost(source.host);
   const srcPort = validatePort(source.port);
@@ -175,8 +177,7 @@ tls = ${target.tls ? 'true' : 'false'}
 
 ${buildFilterSection(excludeFunctions)}[advanced]
 log_level = "info"
-log_interval = 1
-pipeline_count_limit = 256
+${statusPortLine}pipeline_count_limit = 256
 try_diskless = ${rsOptions.tryDiskless ? 'true' : 'false'}
 `;
 

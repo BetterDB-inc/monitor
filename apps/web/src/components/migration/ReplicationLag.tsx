@@ -5,11 +5,7 @@ import { formatBytes } from '../../lib/utils';
 interface Props {
   entries: ReplicationLagEntry[];
   expectedShards: number | null;
-  now: number;
 }
-
-const FRESHNESS_FLOOR_MS = 10_000;
-const LOG_INTERVAL_MS = 1_000;
 
 function withWaiting(text: string, reported: number, expectedShards: number | null): string {
   if (expectedShards !== null && reported < expectedShards) {
@@ -30,11 +26,9 @@ function readout(entries: ReplicationLagEntry[], expectedShards: number | null):
   return withWaiting(withSyncing, entries.length, expectedShards);
 }
 
-export function ReplicationLag({ entries, expectedShards, now }: Props) {
+export function ReplicationLag({ entries, expectedShards }: Props) {
   const [expanded, setExpanded] = useState(false);
   if (entries.length === 0) return null;
-
-  const window = Math.max(FRESHNESS_FLOOR_MS, 3 * (expectedShards ?? entries.length) * LOG_INTERVAL_MS);
 
   return (
     <div className="relative">
@@ -50,8 +44,7 @@ export function ReplicationLag({ entries, expectedShards, now }: Props) {
         <ul className="absolute z-10 mt-1 min-w-48 rounded-md border bg-card p-2 text-xs shadow-sm space-y-0.5">
           {entries.map((e) => {
             const value = e.diff === null ? 'initial sync' : formatBytes(e.diff);
-            const age = now - e.updatedAt;
-            const stale = age > window ? ` · updated ${Math.round(age / 1000)}s ago` : '';
+            const stale = e.stale ? ' · not updated recently' : '';
             return (
               <li key={e.shard} className={stale ? 'text-amber-600' : 'text-muted-foreground'}>
                 {`${e.shard}: ${value}${stale}`}

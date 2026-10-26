@@ -13,15 +13,22 @@ import type { ExecutionJob } from './execution/execution-job';
 import { findRedisShakeBinary } from './execution/redisshake-runner';
 import { buildScanReaderToml, buildSyncReaderToml } from './execution/toml-builder';
 import { parseLogLine, classifyRedisShakeFailure, stripAnsi } from './execution/log-parser';
-import { applyLagUpdate, buildLagSnapshot, countSourceShards } from './execution/replication-lag';
+import {
+  applyStatusPoll,
+  buildLagSnapshot,
+  countSourceShards,
+  createLagState,
+  STATUS_POLL_MS,
+  STATUS_POLL_TIMEOUT_MS,
+} from './execution/replication-lag';
+import { fetchShakeStatus, findFreePort } from './execution/shake-status';
 import { runCommandMigration } from './execution/command-migration-worker';
 import {
   CUTOVER_DRAIN_LIMIT_MS,
   CUTOVER_KILL_GRACE_MS,
-  CUTOVER_MIN_REPORTS,
+  CUTOVER_STABLE_MS,
   CUTOVER_POLL_MS,
-  cutoverStableWindowMs,
-  cutoverTimeoutNotice,
+  CUTOVER_TIMEOUT_NOTICE,
   forcedCutoverNotice,
 } from './execution/cutover';
 import { shouldExcludeFunctions, isRdbRestoreCompatible } from './fork-compat';
@@ -106,6 +113,7 @@ export class MigrationExecutionService {
     const expectedShards = mode === 'redis_shake_sync'
       ? await countSourceShards(sourceAdapter, clusterEnabled)
       : null;
+    const statusPort = mode === 'redis_shake_sync' ? await findFreePort() : null;
 
     // 4. For redis_shake modes, locate the binary upfront
     let binaryPath: string | undefined;
@@ -133,12 +141,13 @@ export class MigrationExecutionService {
       notices: [],
       progress: null,
       syncStage: null,
-      replicationLag: mode === 'redis_shake_sync' ? new Map() : null,
+      replicationLag: mode === 'redis_shake_sync' ? createLagState() : null,
       expectedShards,
+      statusPort,
+      statusPoller: null,
       cutover: null,
       cutoverTimer: null,
       cutoverStableSince: null,
-      cutoverReports: new Map(),
       cutoverKilled: false,
       terminating: null,
       process: null,
@@ -170,6 +179,7 @@ export class MigrationExecutionService {
             targetIsCluster,
             rsOptions,
             excludeFunctions,
+            statusPort: statusPort ?? undefined,
           })
         : buildScanReaderToml(sourceConfig, targetConfig, {
             sourceIsCluster: clusterEnabled,
@@ -336,6 +346,8 @@ export class MigrationExecutionService {
         job.pidPath = pidPath;
       } catch { /* non-fatal — orphan detection is best-effort */ }
 
+      this.startStatusPoller(job);
+
       const processLine = (rawLine: string) => {
         // Strip ANSI first: RedisShake colourises output, and the codes otherwise
         // break the log viewer, progress parsing, and failure classification alike.
@@ -352,11 +364,6 @@ export class MigrationExecutionService {
         if (parsed.bytesTransferred !== null) job.bytesTransferred = parsed.bytesTransferred;
         if (parsed.progress !== null) job.progress = parsed.progress;
         if (parsed.syncStage !== null && job.mode === 'redis_shake_sync') job.syncStage = parsed.syncStage;
-        if (job.replicationLag) applyLagUpdate(job.replicationLag, parsed, Date.now());
-        if (job.cutoverStableSince !== null && parsed.shardLag) {
-          const shard = parsed.shardLag.shard;
-          job.cutoverReports.set(shard, (job.cutoverReports.get(shard) ?? 0) + 1);
-        }
       };
 
       // Decode both pipes as UTF-8 at the stream level so a multi-byte sequence
@@ -451,9 +458,33 @@ export class MigrationExecutionService {
           } catch { /* ignore cleanup errors */ }
         }
       }
+      this.stopStatusPoller(job);
       job.process = null;
       job.tomlPath = null;
       job.pidPath = null;
+    }
+  }
+
+  private startStatusPoller(job: ExecutionJob): void {
+    const port = job.statusPort;
+    const lag = job.replicationLag;
+    if (port === null || lag === null) return;
+    let inFlight = false;
+    job.statusPoller = setInterval(() => {
+      if (inFlight) return;
+      inFlight = true;
+      void fetchShakeStatus(port, STATUS_POLL_TIMEOUT_MS).then((status) => {
+        inFlight = false;
+        if (job.statusPoller === null) return;
+        applyStatusPoll(lag, status, Date.now());
+      });
+    }, STATUS_POLL_MS);
+  }
+
+  private stopStatusPoller(job: ExecutionJob): void {
+    if (job.statusPoller !== null) {
+      clearInterval(job.statusPoller);
+      job.statusPoller = null;
     }
   }
 
@@ -563,23 +594,19 @@ export class MigrationExecutionService {
     this.clearCutoverTimer(job);
     job.status = 'running';
     job.cutover.outcome = 'timed_out';
-    job.notices.push(cutoverTimeoutNotice(job.expectedShards));
+    job.notices.push(CUTOVER_TIMEOUT_NOTICE);
   }
 
   private evaluateCutover(job: ExecutionJob, now: number): void {
-    const { fullySynced } = buildLagSnapshot(job.replicationLag, job.expectedShards, job.syncStage, now);
+    const { fullySynced } = buildLagSnapshot(job.replicationLag, now);
     if (!fullySynced) {
       job.cutoverStableSince = null;
       return;
     }
     if (job.cutoverStableSince === null) {
       job.cutoverStableSince = now;
-      job.cutoverReports = new Map();
     }
-    const enoughReports = [...(job.replicationLag?.keys() ?? [])].every(
-      (shard) => (job.cutoverReports.get(shard) ?? 0) >= CUTOVER_MIN_REPORTS,
-    );
-    if (enoughReports && now - job.cutoverStableSince >= cutoverStableWindowMs(job.expectedShards)) {
+    if (now - job.cutoverStableSince >= CUTOVER_STABLE_MS) {
       this.clearCutoverTimer(job);
       job.terminating = 'cutover';
       this.killForCutover(job);
@@ -589,14 +616,14 @@ export class MigrationExecutionService {
   private forceCutover(job: ExecutionJob, now: number): void {
     this.clearCutoverTimer(job);
     const inProgress = job.status === 'completing' ? job.cutover : null;
-    const { replicationLag } = buildLagSnapshot(job.replicationLag, job.expectedShards, job.syncStage, now);
+    const { replicationLag, shards } = buildLagSnapshot(job.replicationLag, now);
     job.cutover = {
       requestedAt: inProgress?.requestedAt ?? now,
       deadlineAt: inProgress?.deadlineAt ?? now,
       outcome: 'forced',
       forcedLag: replicationLag ?? [],
     };
-    job.notices.push(forcedCutoverNotice(replicationLag, job.expectedShards));
+    job.notices.push(forcedCutoverNotice(replicationLag, shards ?? job.expectedShards));
     job.status = 'completing';
     job.terminating = 'cutover';
     job.cutoverKilled = false;
@@ -674,7 +701,7 @@ export class MigrationExecutionService {
     const job = this.jobs.get(id);
     if (!job) return undefined;
 
-    const lag = buildLagSnapshot(job.replicationLag, job.expectedShards, job.syncStage, Date.now());
+    const lag = buildLagSnapshot(job.replicationLag, Date.now());
     return {
       id: job.id,
       status: job.status,
@@ -697,7 +724,7 @@ export class MigrationExecutionService {
       progress: job.progress,
       syncStage: job.syncStage,
       replicationLag: lag.replicationLag,
-      expectedShards: job.expectedShards,
+      expectedShards: lag.shards ?? job.expectedShards,
       fullySynced: lag.fullySynced && (job.status === 'running' || job.status === 'completing'),
       cutover: this.copyCutover(job.cutover),
       cutoverAt: job.cutoverAt,

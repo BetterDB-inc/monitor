@@ -1,6 +1,7 @@
 import { MigrationExecutionService } from '../migration-execution.service';
 import { BadRequestException, ConflictException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
-import { CUTOVER_DRAIN_LIMIT_MS, cutoverTimeoutNotice } from '../execution/cutover';
+import { CUTOVER_DRAIN_LIMIT_MS, CUTOVER_TIMEOUT_NOTICE } from '../execution/cutover';
+import type { ShakeStatus } from '../execution/shake-status';
 
 jest.mock('../execution/redisshake-runner', () => ({
   findRedisShakeBinary: jest.fn().mockReturnValue('/usr/local/bin/redis-shake'),
@@ -9,6 +10,11 @@ jest.mock('../execution/redisshake-runner', () => ({
 jest.mock('../execution/toml-builder', () => ({
   buildScanReaderToml: jest.fn().mockReturnValue('[scan_reader]\naddress = "127.0.0.1:6379"\n'),
   buildSyncReaderToml: jest.fn().mockReturnValue('[sync_reader]\naddress = "127.0.0.1:6379"\n'),
+}));
+
+jest.mock('../execution/shake-status', () => ({
+  findFreePort: jest.fn().mockResolvedValue(45678),
+  fetchShakeStatus: jest.fn().mockResolvedValue(null),
 }));
 
 jest.mock('child_process', () => ({
@@ -583,18 +589,75 @@ describe('MigrationExecutionService', () => {
         return id;
       }
 
-      it('updates lag from RedisShake stdout lines', async () => {
+      async function poll(times: number): Promise<void> {
+        for (let i = 0; i < times; i++) {
+          jest.advanceTimersByTime(1000);
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+      }
+
+      beforeEach(() => {
+        jest.useFakeTimers({ doNotFake: ['setTimeout', 'setImmediate', 'nextTick'] });
+        const { fetchShakeStatus } = require('../execution/shake-status');
+        (fetchShakeStatus as jest.Mock).mockResolvedValue({
+          consistent: true,
+          shards: [{ shard: 'src-0', inAof: true, diff: 0 }],
+        });
+      });
+
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it('passes a free status port to the sync TOML', async () => {
+        await startRunningSyncJob();
+        const { buildSyncReaderToml } = require('../execution/toml-builder');
+        expect(buildSyncReaderToml).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.anything(),
+          expect.objectContaining({ statusPort: 45678 }),
+        );
+      });
+
+      it('reports Fully synced after two consistent status polls', async () => {
         const id = await startRunningSyncJob();
-        emitStdout('read_count=[1], read_ops=[0.00], write_count=[1], write_ops=[0.00], syncing aof, diff=[0]\n');
+        const { fetchShakeStatus } = require('../execution/shake-status');
+        await poll(1);
+        expect(service.getExecution(id)?.fullySynced).toBe(false);
+        await poll(1);
+        expect(fetchShakeStatus).toHaveBeenCalledWith(45678, expect.any(Number));
         expect(service.getExecution(id)).toMatchObject({
-          replicationLag: [{ shard: 'src-0', diff: 0, updatedAt: expect.any(Number) }],
+          replicationLag: [{ shard: 'src-0', diff: 0, stale: false }],
           fullySynced: true,
         });
       });
 
-      it('never reports fullySynced once the job is no longer running', async () => {
+      it('takes the shard count from the status RedisShake reports', async () => {
+        const { fetchShakeStatus } = require('../execution/shake-status');
+        (fetchShakeStatus as jest.Mock).mockResolvedValue({
+          consistent: false,
+          shards: [
+            { shard: 'src-0', inAof: true, diff: 0 },
+            { shard: 'src-1', inAof: true, diff: 10 },
+          ],
+        });
+        const id = await startRunningSyncJob();
+        await poll(1);
+        expect(service.getExecution(id)?.expectedShards).toBe(2);
+      });
+
+      it('ignores stdout diff lines', async () => {
+        const { fetchShakeStatus } = require('../execution/shake-status');
+        (fetchShakeStatus as jest.Mock).mockResolvedValue(null);
         const id = await startRunningSyncJob();
         emitStdout('read_count=[1], read_ops=[0.00], write_count=[1], write_ops=[0.00], syncing aof, diff=[0]\n');
+        await poll(2);
+        expect(service.getExecution(id)).toMatchObject({ replicationLag: [], fullySynced: false });
+      });
+
+      it('never reports fullySynced once the job is no longer running', async () => {
+        const id = await startRunningSyncJob();
+        await poll(2);
         await service.stopExecution(id);
         expect(service.getExecution(id)?.fullySynced).toBe(false);
       });
@@ -626,31 +689,43 @@ describe('MigrationExecutionService', () => {
       });
     }
 
+    let shakeStatus: ShakeStatus | null = null;
+
+    beforeEach(() => {
+      shakeStatus = null;
+      const { fetchShakeStatus } = require('../execution/shake-status');
+      (fetchShakeStatus as jest.Mock).mockImplementation(async () => shakeStatus);
+    });
+
     afterEach(() => {
       jest.useRealTimers();
     });
 
-    const line = (diff: number) => emitStdout(`${STATS}, syncing aof, diff=[${diff}]\n`);
+    const line = (diff: number) => {
+      shakeStatus = { consistent: diff === 0, shards: [{ shard: 'src-0', inAof: true, diff }] };
+    };
 
     async function startJob(mode: 'redis_shake_sync' | 'redis_shake' = 'redis_shake_sync'): Promise<string> {
+      jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
       queueProcess();
       const { id } = await service.startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode });
       for (let i = 0; i < 50 && service.getExecution(id)?.status !== 'running'; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 5));
+        await new Promise((resolve) => setImmediate(resolve));
       }
       return id;
     }
 
     async function startAofJob(diff = 0): Promise<string> {
       const id = await startJob();
+      emitStdout(`${STATS}, syncing aof, diff=[${diff}]\n`);
       line(diff);
-      jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+      await jest.advanceTimersByTimeAsync(2000);
       return id;
     }
 
     async function stream(diff: number, ms: number): Promise<void> {
+      line(diff);
       for (let t = 0; t < ms; t += 500) {
-        line(diff);
         await jest.advanceTimersByTimeAsync(500);
       }
     }
@@ -701,7 +776,7 @@ describe('MigrationExecutionService', () => {
       await stream(10, 500);
       await stream(0, 1500);
       expect(kill).not.toHaveBeenCalled();
-      await stream(0, 1000);
+      await stream(0, 2500);
       expect(kill).toHaveBeenCalledWith('SIGTERM');
     });
 
@@ -751,14 +826,15 @@ describe('MigrationExecutionService', () => {
       expect(exec.error).toMatch(/did not finish writing to the target/);
     });
 
-    it('needs two reports from every shard inside the stable window', async () => {
+    it('restarts the stable window while the status endpoint stops answering', async () => {
       const id = await startAofJob();
       service.completeExecution(id, { force: false, timeoutSeconds: 300 });
-      await jest.advanceTimersByTimeAsync(100);
-      line(0);
+      shakeStatus = null;
       await jest.advanceTimersByTimeAsync(3_000);
       expect(kill).not.toHaveBeenCalled();
-      await stream(0, 1000);
+      await stream(0, 3500);
+      expect(kill).not.toHaveBeenCalled();
+      await stream(0, 500);
       expect(kill).toHaveBeenCalledWith('SIGTERM');
     });
 
@@ -768,7 +844,7 @@ describe('MigrationExecutionService', () => {
       await stream(5, 10_500);
       const exec = service.getExecution(id)!;
       expect(exec).toMatchObject({ status: 'running', cutover: { outcome: 'timed_out' } });
-      expect(exec.notices).toContain(cutoverTimeoutNotice(1));
+      expect(exec.notices).toContain(CUTOVER_TIMEOUT_NOTICE);
       expect(kill).not.toHaveBeenCalled();
     });
 
@@ -780,7 +856,7 @@ describe('MigrationExecutionService', () => {
       expect(retry.status).toBe('completing');
       expect(retry.cutover.outcome).toBe('waiting');
       expect(retry.cutover.requestedAt).toBeGreaterThan(first.cutover.requestedAt);
-      expect(service.getExecution(id)!.notices).toContain(cutoverTimeoutNotice(1));
+      expect(service.getExecution(id)!.notices).toContain(CUTOVER_TIMEOUT_NOTICE);
     });
 
     it('returns the current attempt on a second non-force call while completing', async () => {
@@ -797,7 +873,7 @@ describe('MigrationExecutionService', () => {
       expect(kill).toHaveBeenCalledWith('SIGTERM');
       expect(result.cutover).toMatchObject({
         outcome: 'forced',
-        forcedLag: [{ shard: 'src-0', diff: 4096, updatedAt: expect.any(Number) }],
+        forcedLag: [{ shard: 'src-0', diff: 4096, stale: false }],
       });
       await exitWith(0);
       const exec = service.getExecution(id)!;
@@ -815,7 +891,7 @@ describe('MigrationExecutionService', () => {
       expect(kill).toHaveBeenCalledWith('SIGTERM');
       await jest.advanceTimersByTimeAsync(12_000);
       expect(service.getExecution(id)!.cutover?.outcome).toBe('forced');
-      expect(service.getExecution(id)!.notices).not.toContain(cutoverTimeoutNotice(1));
+      expect(service.getExecution(id)!.notices).not.toContain(CUTOVER_TIMEOUT_NOTICE);
     });
 
     it('cancels a cutover in progress on stop', async () => {
@@ -826,7 +902,7 @@ describe('MigrationExecutionService', () => {
       await jest.advanceTimersByTimeAsync(11_000);
       await exitWith(1);
       expect(service.getExecution(id)!.status).toBe('cancelled');
-      expect(service.getExecution(id)!.notices).not.toContain(cutoverTimeoutNotice(1));
+      expect(service.getExecution(id)!.notices).not.toContain(CUTOVER_TIMEOUT_NOTICE);
     });
 
     it('fails normally when RedisShake exits by itself while completing', async () => {
@@ -836,15 +912,6 @@ describe('MigrationExecutionService', () => {
       expect(service.getExecution(id)).toMatchObject({ status: 'failed', cutover: { outcome: 'failed' } });
       await jest.advanceTimersByTimeAsync(61_000);
       expect(service.getExecution(id)!.status).toBe('failed');
-    });
-
-    it('waits for a fresh report from every shard before killing', async () => {
-      const id = await startAofJob();
-      service.completeExecution(id, { force: false, timeoutSeconds: 300 });
-      await jest.advanceTimersByTimeAsync(2_500);
-      expect(kill).not.toHaveBeenCalled();
-      await stream(0, 1000);
-      expect(kill).toHaveBeenCalledWith('SIGTERM');
     });
 
     it('keeps a cutover that is already stopping RedisShake when stop is clicked', async () => {

@@ -186,12 +186,8 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
               </span>
             );
           })()}
-          {execution.replicationLag && (
-            <ReplicationLag
-              entries={execution.replicationLag}
-              expectedShards={execution.expectedShards}
-              now={Date.now()}
-            />
+          {(execution.status === 'running' || execution.status === 'completing') && execution.replicationLag && (
+            <ReplicationLag entries={execution.replicationLag} expectedShards={execution.expectedShards} />
           )}
           <span className="text-sm text-muted-foreground">
             {(execution.keysTransferred ?? 0).toLocaleString()}
@@ -209,7 +205,7 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
             <span className="text-sm text-amber-700">
               {execution.cutover.outcome === 'forced'
                 ? 'Forcing cutover · waiting for RedisShake to finish writing'
-                : `Waiting for zero lag · ${formatRemaining(execution.cutover.deadlineAt)} left`}
+                : `Waiting for Fully synced · ${formatRemaining(execution.cutover.deadlineAt)} left`}
             </span>
           )}
         </div>

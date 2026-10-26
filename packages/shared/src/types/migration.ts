@@ -235,7 +235,7 @@ export interface CompleteExecutionResponse {
 export interface ReplicationLagEntry {
   shard: string;
   diff: number | null;
-  updatedAt: number;
+  stale: boolean;
 }
 
 export interface StartExecutionResponse {

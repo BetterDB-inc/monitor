@@ -5,23 +5,11 @@ export const CUTOVER_POLL_MS = 500;
 export const CUTOVER_DEFAULT_TIMEOUT_S = 300;
 export const CUTOVER_KILL_GRACE_MS = 3000;
 export const CUTOVER_DRAIN_LIMIT_MS = 60_000;
-export const CUTOVER_MIN_REPORTS = 2;
+export const CUTOVER_STABLE_MS = 2000;
 const CUTOVER_MIN_TIMEOUT_S = 10;
 const CUTOVER_MAX_TIMEOUT_S = 3600;
-const STABLE_WINDOW_FLOOR_MS = 2000;
-const LOG_INTERVAL_MS = 1000;
-
-export function cutoverStableWindowMs(expectedShards: number | null): number {
-  return Math.max(STABLE_WINDOW_FLOOR_MS, 2 * (expectedShards ?? 0) * LOG_INTERVAL_MS);
-}
-
-export function cutoverTimeoutNotice(expectedShards: number | null): string {
-  const base =
-    'Cutover timed out: lag did not stay at 0 on every shard. Make sure writes on the source are paused, then retry or force the cutover.';
-  return expectedShards === null
-    ? `${base} The number of source shards is unknown, so a normal cutover cannot confirm zero lag.`
-    : base;
-}
+export const CUTOVER_TIMEOUT_NOTICE =
+  'Cutover timed out: RedisShake did not stay fully synced. Make sure writes on the source are paused, then retry or force the cutover.';
 
 export function forcedCutoverNotice(
   entries: ReplicationLagEntry[] | null,

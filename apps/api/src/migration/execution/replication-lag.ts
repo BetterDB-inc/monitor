@@ -1,52 +1,49 @@
-import type { ReplicationLagEntry, SyncStage } from '@betterdb/shared';
-import type { ParsedLogLine } from './log-parser';
+import type { ReplicationLagEntry } from '@betterdb/shared';
+import type { ShakeStatus } from './shake-status';
 
-export type ReplicationLagMap = Map<string, { diff: number | null; updatedAt: number }>;
+export const STATUS_POLL_MS = 1_000;
+export const STATUS_POLL_TIMEOUT_MS = 900;
+export const LAG_STALE_MS = 5_000;
+const MIN_CONSISTENT_POLLS = 2;
 
-export const LAG_FRESHNESS_FLOOR_MS = 10_000;
-const LOG_INTERVAL_MS = 1_000;
+export interface LagState {
+  status: ShakeStatus | null;
+  updatedAt: number;
+  consistentPolls: number;
+}
 
-export function applyLagUpdate(
-  map: ReplicationLagMap,
-  parsed: Pick<ParsedLogLine, 'shardLag' | 'shardState'>,
-  now: number,
-): void {
-  if (parsed.shardLag) {
-    map.set(parsed.shardLag.shard, { diff: parsed.shardLag.diff, updatedAt: now });
+export function createLagState(): LagState {
+  return { status: null, updatedAt: 0, consistentPolls: 0 };
+}
+
+export function applyStatusPoll(state: LagState, status: ShakeStatus | null, now: number): void {
+  if (status === null) {
+    state.consistentPolls = 0;
     return;
   }
-  if (parsed.shardState && !parsed.shardState.inAof) {
-    map.set(parsed.shardState.shard, { diff: null, updatedAt: now });
-  }
-}
-
-function lagFreshnessWindowMs(expectedShards: number): number {
-  return Math.max(LAG_FRESHNESS_FLOOR_MS, 3 * expectedShards * LOG_INTERVAL_MS);
-}
-
-function shardIndex(shard: string): number {
-  return parseInt(shard.slice('src-'.length), 10);
+  state.status = status;
+  state.updatedAt = now;
+  state.consistentPolls = status.consistent ? state.consistentPolls + 1 : 0;
 }
 
 export function buildLagSnapshot(
-  map: ReplicationLagMap | null,
-  expectedShards: number | null,
-  syncStage: SyncStage | null,
+  state: LagState | null,
   now: number,
-): { replicationLag: ReplicationLagEntry[] | null; fullySynced: boolean } {
-  if (map === null) {
-    return { replicationLag: null, fullySynced: false };
+): { replicationLag: ReplicationLagEntry[] | null; shards: number | null; fullySynced: boolean } {
+  if (state === null) {
+    return { replicationLag: null, shards: null, fullySynced: false };
   }
-  const replicationLag = [...map.entries()]
-    .map(([shard, { diff, updatedAt }]) => ({ shard, diff, updatedAt }))
-    .sort((a, b) => shardIndex(a.shard) - shardIndex(b.shard));
-
-  if (syncStage !== 'aof_replicating' || expectedShards === null || replicationLag.length < expectedShards) {
-    return { replicationLag, fullySynced: false };
+  if (state.status === null) {
+    return { replicationLag: [], shards: null, fullySynced: false };
   }
-  const window = lagFreshnessWindowMs(expectedShards);
-  const fullySynced = replicationLag.every((e) => e.diff === 0 && now - e.updatedAt <= window);
-  return { replicationLag, fullySynced };
+  const stale = now - state.updatedAt > LAG_STALE_MS;
+  const { shards } = state.status;
+  const replicationLag = shards.map(({ shard, diff }) => ({ shard, diff, stale }));
+  const fullySynced =
+    !stale &&
+    state.consistentPolls >= MIN_CONSISTENT_POLLS &&
+    shards.every((s) => s.inAof);
+  return { replicationLag, shards: shards.length, fullySynced };
 }
 
 export async function countSourceShards(

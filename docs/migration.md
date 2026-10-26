@@ -92,40 +92,54 @@ source — the same protocol a replica uses. This means:
 
 The migration **runs continuously** and never exits on its own. The UI shows a
 stage chip that transitions from **Initial sync (RDB)** to **Replicating** once
-the snapshot phase finishes. Next to the chip, a lag readout shows how far the
-target is behind the source on the slowest shard; click it for a per-shard
-breakdown. Lag is measured in replication-stream bytes: data RedisShake has received
-from the source but not yet forwarded to the target, so allow a moment after
-*Fully synced* for in-flight writes to land. The chip turns **Fully synced** only
-when every source shard has reported recently and every shard's lag is 0. If the
-number of source shards can't be determined, the readout still shows lag but the
-chip never claims *Fully synced*.
+the snapshot phase finishes. Next to the chip, a lag readout shows how far
+RedisShake is behind the source on the slowest shard; click it for a per-shard
+breakdown. BetterDB reads this from RedisShake's status endpoint (`status_port`,
+a free local port chosen per run) once a second. Lag is the replication-stream
+bytes RedisShake has received from a shard but not yet handed to its writer,
+so it is not the same as "written to the target". A shard shows *initial sync*
+until its first replicated command has been processed, which on an idle source
+can take a few seconds after the snapshot.
+
+The chip turns **Fully synced** only when RedisShake itself reports the run as
+consistent on two polls in a row: every shard has handed off everything it
+received, its internal queue is empty, and the target has acknowledged every
+write sent to it. A command in transit between RedisShake's reader and writer
+is not counted for that instant, which is why two polls in a row are required.
+If the status endpoint stops answering, the readout is marked
+as not updated recently and the chip drops back to *Replicating*.
+
+RedisShake reads the source topology once, at start. A shard added or resharded
+to a new master during the migration is not replicated; restart the migration
+after a topology change.
+
+The status endpoint listens on all interfaces of the host running RedisShake and
+reports source and target addresses (no credentials). In a container it is
+reachable only if you publish that port.
 
 **Cutover procedure**:
 1. Wait for the stage chip to show *Replicating* or *Fully synced*.
 2. Pause or quiesce writes on the source (brief read-only window).
 3. Click **Complete cutover** in the execution panel and confirm. The job shows
-   *Completing* and waits until every shard's lag stays at 0 for a few seconds
-   (default limit: 5 minutes), then stops RedisShake. The raw log still prints
-   `diff=[N]` per shard if you want to cross-check.
+   *Completing* and waits until RedisShake stays *Fully synced* for a few
+   seconds (default limit: 5 minutes), then stops RedisShake.
 4. When the job shows *Completed* ("Cutover complete at …"), point your
    application at the target.
 
-Lag 0 cannot detect writes that are still arriving: under a steady write load
-every shard can report 0 while writes continue, and anything written to the
-source after the cutover is lost. Pausing writes in step 2 is what makes the
-cutover safe; the zero-lag check only confirms that RedisShake has caught up.
+*Fully synced* cannot detect writes that are still arriving: under a steady
+write load RedisShake can briefly report itself consistent while writes
+continue, and anything written to the source after the cutover is lost. Pausing
+writes in step 2 is what makes the cutover safe; the check only confirms that
+RedisShake has caught up.
 RedisShake is given up to 60 seconds after the stop to finish writing to the
 target; if it exits with an error or has to be killed, the cutover ends as
 *Failed* rather than *Completed*.
 
-**If the cutover times out**: lag did not stay at 0 on every shard, so the
+**If the cutover times out**: RedisShake did not stay *Fully synced*, so the
 migration goes back to *Replicating* and keeps running. Pause writes and
 click **Retry cutover**, or click **Force cutover** to end the migration now.
 A forced cutover finishes as *Completed* and records the per-shard lag you
-accepted; those writes may be missing on the target. When the number of source
-shards can't be determined, a normal cutover can't confirm zero lag and always
-times out, so force is the only way to finish.
+accepted; those writes may be missing on the target.
 
 **Stop Migration** cancels the migration without a cutover and ends as
 *Cancelled*, at any point, including while a cutover is waiting.
