@@ -1,88 +1,80 @@
 import {
-  applyLagUpdate,
+  applyStatusPoll,
   buildLagSnapshot,
   countSourceShards,
-  type ReplicationLagMap,
+  createLagState,
+  LAG_STALE_MS,
 } from '../execution/replication-lag';
+import type { ShakeStatus } from '../execution/shake-status';
 
 const NOW = 1_000_000;
-const lag = (shard: string, diff: number) => ({ shardLag: { shard, diff }, shardState: { shard, inAof: true } });
-const rdb = (shard: string) => ({ shardLag: null, shardState: { shard, inAof: false } });
 
-function mapOf(entries: Array<[string, number | null, number]>): ReplicationLagMap {
-  return new Map(entries.map(([shard, diff, updatedAt]) => [shard, { diff, updatedAt }]));
+const status = (consistent: boolean, diffs: Array<number | null>, inAof = true): ShakeStatus => ({
+  consistent,
+  shards: diffs.map((diff, i) => ({ shard: `src-${i}`, inAof, diff })),
+});
+
+function polled(...polls: Array<ShakeStatus | null>) {
+  const state = createLagState();
+  polls.forEach((poll, i) => applyStatusPoll(state, poll, NOW - (polls.length - 1 - i) * 1000));
+  return state;
 }
 
-describe('applyLagUpdate', () => {
-  it('records diff and timestamp for a shard in aof', () => {
-    const map: ReplicationLagMap = new Map();
-    applyLagUpdate(map, lag('src-0', 0), NOW);
-    expect(map.get('src-0')).toEqual({ diff: 0, updatedAt: NOW });
+describe('applyStatusPoll', () => {
+  it('counts consecutive consistent polls', () => {
+    expect(polled(status(true, [0]), status(true, [0])).consistentPolls).toBe(2);
   });
 
-  it('resets a shard to null diff when it reports a non-aof state', () => {
-    const map: ReplicationLagMap = new Map();
-    applyLagUpdate(map, lag('src-1', 0), NOW);
-    applyLagUpdate(map, rdb('src-1'), NOW + 1);
-    expect(map.get('src-1')).toEqual({ diff: null, updatedAt: NOW + 1 });
+  it('resets the count on an inconsistent poll', () => {
+    expect(polled(status(true, [0]), status(false, [0])).consistentPolls).toBe(0);
   });
 
-  it('ignores a parse with no shard fields', () => {
-    const map: ReplicationLagMap = new Map();
-    applyLagUpdate(map, { shardLag: null, shardState: null }, NOW);
-    expect(map.size).toBe(0);
+  it('resets the count on a failed poll and keeps the last status', () => {
+    const state = polled(status(true, [0]), null);
+    expect(state.consistentPolls).toBe(0);
+    expect(state.status).toEqual(status(true, [0]));
+    expect(state.updatedAt).toBe(NOW - 1000);
   });
 });
 
 describe('buildLagSnapshot', () => {
-  it('returns null lag and false for a null map', () => {
-    expect(buildLagSnapshot(null, null, null, NOW)).toEqual({ replicationLag: null, fullySynced: false });
+  it('returns null lag and false for a null state', () => {
+    expect(buildLagSnapshot(null, NOW)).toEqual({ replicationLag: null, shards: null, fullySynced: false });
   });
 
-  it('sorts entries by numeric shard index', () => {
-    const map = mapOf([['src-10', 0, NOW], ['src-2', 0, NOW], ['src-0', 0, NOW]]);
-    const { replicationLag } = buildLagSnapshot(map, 3, 'aof_replicating', NOW);
-    expect(replicationLag?.map((e) => e.shard)).toEqual(['src-0', 'src-2', 'src-10']);
+  it('returns an empty list before the first poll', () => {
+    expect(buildLagSnapshot(createLagState(), NOW)).toEqual({ replicationLag: [], shards: null, fullySynced: false });
   });
 
-  it('is fully synced when every expected shard is fresh and zero in aof_replicating', () => {
-    const map = mapOf([['src-0', 0, NOW], ['src-1', 0, NOW], ['src-2', 0, NOW]]);
-    expect(buildLagSnapshot(map, 3, 'aof_replicating', NOW).fullySynced).toBe(true);
+  it('lists each shard with a stale flag computed on the server', () => {
+    expect(buildLagSnapshot(polled(status(false, [0, 2048])), NOW)).toEqual({
+      replicationLag: [
+        { shard: 'src-0', diff: 0, stale: false },
+        { shard: 'src-1', diff: 2048, stale: false },
+      ],
+      shards: 2,
+      fullySynced: false,
+    });
+    const old = polled(status(false, [0]));
+    expect(buildLagSnapshot(old, NOW + LAG_STALE_MS + 1).replicationLag?.[0].stale).toBe(true);
   });
 
-  it('is not fully synced before every expected shard has reported', () => {
-    expect(buildLagSnapshot(mapOf([['src-0', 0, NOW]]), 6, 'aof_replicating', NOW).fullySynced).toBe(false);
+  it('is fully synced after two consecutive consistent polls in AOF', () => {
+    expect(buildLagSnapshot(polled(status(true, [0, 0]), status(true, [0, 0])), NOW).fullySynced).toBe(true);
   });
 
-  it('is not fully synced when expectedShards is null', () => {
-    expect(buildLagSnapshot(mapOf([['src-0', 0, NOW]]), null, 'aof_replicating', NOW).fullySynced).toBe(false);
+  it('is not fully synced after a single consistent poll', () => {
+    expect(buildLagSnapshot(polled(status(true, [0])), NOW).fullySynced).toBe(false);
   });
 
-  it('is not fully synced when any shard lags', () => {
-    const map = mapOf([['src-0', 0, NOW], ['src-1', 1, NOW]]);
-    expect(buildLagSnapshot(map, 2, 'aof_replicating', NOW).fullySynced).toBe(false);
+  it('is not fully synced when the latest poll is stale', () => {
+    const state = polled(status(true, [0]), status(true, [0]));
+    expect(buildLagSnapshot(state, NOW + LAG_STALE_MS + 1).fullySynced).toBe(false);
   });
 
-  it('is not fully synced when any shard is in initial sync', () => {
-    const map = mapOf([['src-0', 0, NOW], ['src-1', null, NOW]]);
-    expect(buildLagSnapshot(map, 2, 'aof_replicating', NOW).fullySynced).toBe(false);
-  });
-
-  it('is not fully synced outside aof_replicating', () => {
-    expect(buildLagSnapshot(mapOf([['src-0', 0, NOW]]), 1, 'rdb_syncing', NOW).fullySynced).toBe(false);
-  });
-
-  it('treats a report older than max(10s, 3 × shards × 1s) as stale', () => {
-    const two = (age: number) => mapOf([['src-0', 0, NOW], ['src-1', 0, NOW - age]]);
-    expect(buildLagSnapshot(two(10_001), 2, 'aof_replicating', NOW).fullySynced).toBe(false);
-    expect(buildLagSnapshot(two(9_999), 2, 'aof_replicating', NOW).fullySynced).toBe(true);
-    const five = mapOf([['src-0', 0, NOW], ['src-1', 0, NOW], ['src-2', 0, NOW], ['src-3', 0, NOW], ['src-4', 0, NOW - 14_000]]);
-    expect(buildLagSnapshot(five, 5, 'aof_replicating', NOW).fullySynced).toBe(true);
-  });
-
-  it('is not fully synced when a reported extra shard is stale or lagging', () => {
-    const map = mapOf([['src-0', 0, NOW], ['src-1', 0, NOW], ['src-2', 0, NOW - 60_000]]);
-    expect(buildLagSnapshot(map, 2, 'aof_replicating', NOW).fullySynced).toBe(false);
+  it('is not fully synced while any shard is outside AOF', () => {
+    const state = polled(status(true, [null], false), status(true, [null], false));
+    expect(buildLagSnapshot(state, NOW).fullySynced).toBe(false);
   });
 });
 

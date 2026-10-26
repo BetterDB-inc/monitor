@@ -17,7 +17,7 @@ function syncResult(partial: Partial<MigrationExecutionResult>): MigrationExecut
     logs: [],
     progress: null,
     syncStage: 'aof_replicating',
-    replicationLag: [{ shard: 'src-0', diff: 0, updatedAt: Date.now() }],
+    replicationLag: [{ shard: 'src-0', diff: 0, stale: false }],
     expectedShards: 1,
     fullySynced: false,
     ...partial,
@@ -38,11 +38,18 @@ describe('ExecutionPanel replication lag', () => {
 
   it('shows Replicating while lag is non-zero', async () => {
     vi.mocked(fetchApi).mockResolvedValue(
-      syncResult({ replicationLag: [{ shard: 'src-0', diff: 512, updatedAt: Date.now() }] }),
+      syncResult({ replicationLag: [{ shard: 'src-0', diff: 512, stale: false }] }),
     );
     render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
     expect(await screen.findByText('Replicating')).toBeTruthy();
     expect(screen.getByText('Lag: 512.00 B behind')).toBeTruthy();
+  });
+
+  it('hides the lag readout once the job has stopped', async () => {
+    vi.mocked(fetchApi).mockResolvedValue(syncResult({ status: 'cancelled' }));
+    render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+    expect(await screen.findByText('Cancelled')).toBeTruthy();
+    expect(screen.queryByText(/^Lag:/)).toBeNull();
   });
 
   it('drops Fully synced while the latest poll has failed', async () => {
@@ -62,9 +69,9 @@ describe('ExecutionPanel replication lag', () => {
     }
   });
 
-  it('points the banner at the lag readout', async () => {
+  it('points the banner at Fully synced', async () => {
     vi.mocked(fetchApi).mockResolvedValue(syncResult({}));
     render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
-    expect(await screen.findByText(/the chip turns Fully synced/)).toBeTruthy();
+    expect(await screen.findByText(/wait for the chip to turn Fully synced/)).toBeTruthy();
   });
 });

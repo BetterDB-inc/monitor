@@ -171,14 +171,14 @@ describe('buildScanReaderToml', () => {
 });
 
 describe('buildSyncReaderToml', () => {
-  it('sets log_interval = 1 for the sync reader', () => {
-    const toml = buildSyncReaderToml(makeConfig(), makeConfig(), { sourceIsCluster: false });
-    expect(toml).toMatch(/\[advanced\][\s\S]*\nlog_interval = 1\n/);
+  it('sets status_port for the sync reader when given', () => {
+    const toml = buildSyncReaderToml(makeConfig(), makeConfig(), { sourceIsCluster: false, statusPort: 45678 });
+    expect(toml).toMatch(/\[advanced\][\s\S]*\nstatus_port = 45678\n/);
   });
 
-  it('does not set log_interval for the scan reader', () => {
-    const toml = buildScanReaderToml(makeConfig(), makeConfig(), { sourceIsCluster: false });
-    expect(toml).not.toContain('log_interval');
+  it('omits status_port without a port', () => {
+    expect(buildSyncReaderToml(makeConfig(), makeConfig(), { sourceIsCluster: false })).not.toContain('status_port');
+    expect(buildScanReaderToml(makeConfig(), makeConfig(), { sourceIsCluster: false })).not.toContain('status_port');
   });
 
   it('should generate valid TOML for single-node source and target', () => {

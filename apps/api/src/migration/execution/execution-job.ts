@@ -1,5 +1,5 @@
 import type { ChildProcess } from 'child_process';
-import type { ReplicationLagMap } from './replication-lag';
+import type { LagState } from './replication-lag';
 import type { ExecutionJobStatus, ExecutionMode, SyncStage, ExecutionFailureCode } from '@betterdb/shared';
 
 export interface ExecutionJob {
@@ -18,8 +18,10 @@ export interface ExecutionJob {
   notices: string[];       // durable job-level notices, never evicted by the log cap
   progress: number | null;
   syncStage: SyncStage;
-  replicationLag: ReplicationLagMap | null;
+  replicationLag: LagState | null;
   expectedShards: number | null;
+  statusPort: number | null;
+  statusPoller: ReturnType<typeof setInterval> | null;
   process: ChildProcess | null;   // redis_shake mode only
   tomlPath: string | null;        // redis_shake mode only
   pidPath: string | null;         // redis_shake mode only — for orphan detection

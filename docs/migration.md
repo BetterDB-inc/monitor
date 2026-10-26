@@ -92,20 +92,35 @@ source — the same protocol a replica uses. This means:
 
 The migration **runs continuously** and never exits on its own. The UI shows a
 stage chip that transitions from **Initial sync (RDB)** to **Replicating** once
-the snapshot phase finishes. Next to the chip, a lag readout shows how far the
-target is behind the source on the slowest shard; click it for a per-shard
-breakdown. Lag is measured in replication-stream bytes: data RedisShake has received
-from the source but not yet forwarded to the target, so allow a moment after
-*Fully synced* for in-flight writes to land. The chip turns **Fully synced** only
-when every source shard has reported recently and every shard's lag is 0. If the
-number of source shards can't be determined, the readout still shows lag but the
-chip never claims *Fully synced*.
+the snapshot phase finishes. Next to the chip, a lag readout shows how far
+RedisShake is behind the source on the slowest shard; click it for a per-shard
+breakdown. BetterDB reads this from RedisShake's status endpoint (`status_port`,
+a free local port chosen per run) once a second. Lag is the replication-stream
+bytes RedisShake has received from a shard but not yet handed to its writer,
+so it is not the same as "written to the target". A shard shows *initial sync*
+until its first replicated command has been processed, which on an idle source
+can take a few seconds after the snapshot.
+
+The chip turns **Fully synced** only when RedisShake itself reports the run as
+consistent on two polls in a row: every shard has handed off everything it
+received, its internal queue is empty, and the target has acknowledged every
+write sent to it. A command in transit between RedisShake's reader and writer
+is not counted for that instant, which is why two polls in a row are required.
+If the status endpoint stops answering, the readout is marked
+as not updated recently and the chip drops back to *Replicating*.
+
+RedisShake reads the source topology once, at start. A shard added or resharded
+to a new master during the migration is not replicated; restart the migration
+after a topology change.
+
+The status endpoint listens on all interfaces of the host running RedisShake and
+reports source and target addresses (no credentials). In a container it is
+reachable only if you publish that port.
 
 **Cutover procedure**:
 1. Wait for the stage chip to show *Replicating* or *Fully synced*.
 2. Pause or quiesce writes on the source (brief read-only window).
-3. Wait until the stage chip shows *Fully synced* (every shard's lag is 0).
-   The raw log still prints `diff=[N]` per shard if you need to cross-check.
+3. Wait until the stage chip shows *Fully synced*.
 4. Click **Stop Migration** in the execution panel.
 5. Point your application at the target.
 

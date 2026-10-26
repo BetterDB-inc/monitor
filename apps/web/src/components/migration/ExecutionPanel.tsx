@@ -138,12 +138,8 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
               </span>
             );
           })()}
-          {execution.replicationLag && (
-            <ReplicationLag
-              entries={execution.replicationLag}
-              expectedShards={execution.expectedShards}
-              now={Date.now()}
-            />
+          {execution.status === 'running' && execution.replicationLag && (
+            <ReplicationLag entries={execution.replicationLag} expectedShards={execution.expectedShards} />
           )}
           <span className="text-sm text-muted-foreground">
             {(execution.keysTransferred ?? 0).toLocaleString()}
@@ -191,9 +187,8 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
           <p className="font-medium">Initial sync complete. Replicating new writes.</p>
           <p>
             The migration will keep replicating from source to target until you stop it.
-            When you're ready to cut over: pause writes on the source, wait for the lag above to
-            reach 0 on every shard (the chip turns Fully synced), then click Stop Migration and
-            point your application at the target.
+            When you're ready to cut over: pause writes on the source, wait for the chip to turn
+            Fully synced, then click Stop Migration and point your application at the target.
           </p>
         </div>
       )}

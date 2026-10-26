@@ -10,6 +10,11 @@ jest.mock('../execution/toml-builder', () => ({
   buildSyncReaderToml: jest.fn().mockReturnValue('[sync_reader]\naddress = "127.0.0.1:6379"\n'),
 }));
 
+jest.mock('../execution/shake-status', () => ({
+  findFreePort: jest.fn().mockResolvedValue(45678),
+  fetchShakeStatus: jest.fn().mockResolvedValue(null),
+}));
+
 jest.mock('child_process', () => ({
   spawn: jest.fn().mockReturnValue({
     stdout: { on: jest.fn(), setEncoding: jest.fn() },
@@ -582,18 +587,75 @@ describe('MigrationExecutionService', () => {
         return id;
       }
 
-      it('updates lag from RedisShake stdout lines', async () => {
+      async function poll(times: number): Promise<void> {
+        for (let i = 0; i < times; i++) {
+          jest.advanceTimersByTime(1000);
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+      }
+
+      beforeEach(() => {
+        jest.useFakeTimers({ doNotFake: ['setTimeout', 'setImmediate', 'nextTick'] });
+        const { fetchShakeStatus } = require('../execution/shake-status');
+        (fetchShakeStatus as jest.Mock).mockResolvedValue({
+          consistent: true,
+          shards: [{ shard: 'src-0', inAof: true, diff: 0 }],
+        });
+      });
+
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it('passes a free status port to the sync TOML', async () => {
+        await startRunningSyncJob();
+        const { buildSyncReaderToml } = require('../execution/toml-builder');
+        expect(buildSyncReaderToml).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.anything(),
+          expect.objectContaining({ statusPort: 45678 }),
+        );
+      });
+
+      it('reports Fully synced after two consistent status polls', async () => {
         const id = await startRunningSyncJob();
-        emitStdout('read_count=[1], read_ops=[0.00], write_count=[1], write_ops=[0.00], syncing aof, diff=[0]\n');
+        const { fetchShakeStatus } = require('../execution/shake-status');
+        await poll(1);
+        expect(service.getExecution(id)?.fullySynced).toBe(false);
+        await poll(1);
+        expect(fetchShakeStatus).toHaveBeenCalledWith(45678, expect.any(Number));
         expect(service.getExecution(id)).toMatchObject({
-          replicationLag: [{ shard: 'src-0', diff: 0, updatedAt: expect.any(Number) }],
+          replicationLag: [{ shard: 'src-0', diff: 0, stale: false }],
           fullySynced: true,
         });
       });
 
-      it('never reports fullySynced once the job is no longer running', async () => {
+      it('takes the shard count from the status RedisShake reports', async () => {
+        const { fetchShakeStatus } = require('../execution/shake-status');
+        (fetchShakeStatus as jest.Mock).mockResolvedValue({
+          consistent: false,
+          shards: [
+            { shard: 'src-0', inAof: true, diff: 0 },
+            { shard: 'src-1', inAof: true, diff: 10 },
+          ],
+        });
+        const id = await startRunningSyncJob();
+        await poll(1);
+        expect(service.getExecution(id)?.expectedShards).toBe(2);
+      });
+
+      it('ignores stdout diff lines', async () => {
+        const { fetchShakeStatus } = require('../execution/shake-status');
+        (fetchShakeStatus as jest.Mock).mockResolvedValue(null);
         const id = await startRunningSyncJob();
         emitStdout('read_count=[1], read_ops=[0.00], write_count=[1], write_ops=[0.00], syncing aof, diff=[0]\n');
+        await poll(2);
+        expect(service.getExecution(id)).toMatchObject({ replicationLag: [], fullySynced: false });
+      });
+
+      it('never reports fullySynced once the job is no longer running', async () => {
+        const id = await startRunningSyncJob();
+        await poll(2);
         await service.stopExecution(id);
         expect(service.getExecution(id)?.fullySynced).toBe(false);
       });
