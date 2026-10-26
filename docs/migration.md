@@ -94,8 +94,9 @@ The migration **runs continuously** and never exits on its own. The UI shows a
 stage chip that transitions from **Initial sync (RDB)** to **Replicating** once
 the snapshot phase finishes. Next to the chip, a lag readout shows how far the
 target is behind the source on the slowest shard; click it for a per-shard
-breakdown. Lag is measured in replication-stream bytes: data the source has sent
-that has not yet been written to the target. The chip turns **Fully synced** only
+breakdown. Lag is measured in replication-stream bytes: data RedisShake has received
+from the source but not yet forwarded to the target, so allow a moment after
+*Fully synced* for in-flight writes to land. The chip turns **Fully synced** only
 when every source shard has reported recently and every shard's lag is 0. If the
 number of source shards can't be determined, the readout still shows lag but the
 chip never claims *Fully synced*.
