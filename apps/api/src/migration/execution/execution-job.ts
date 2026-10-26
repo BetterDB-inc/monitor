@@ -24,6 +24,8 @@ export interface ExecutionJob {
   cutoverAt?: number;
   cutoverTimer: ReturnType<typeof setInterval> | null;
   cutoverStableSince: number | null;
+  cutoverReports: Map<string, number>;
+  cutoverKilled: boolean;
   terminating: 'cancel' | 'cutover' | null;
   process: ChildProcess | null;   // redis_shake mode only
   tomlPath: string | null;        // redis_shake mode only

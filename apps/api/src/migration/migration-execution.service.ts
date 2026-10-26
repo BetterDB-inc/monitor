@@ -16,7 +16,9 @@ import { parseLogLine, classifyRedisShakeFailure, stripAnsi } from './execution/
 import { applyLagUpdate, buildLagSnapshot, countSourceShards } from './execution/replication-lag';
 import { runCommandMigration } from './execution/command-migration-worker';
 import {
+  CUTOVER_DRAIN_LIMIT_MS,
   CUTOVER_KILL_GRACE_MS,
+  CUTOVER_MIN_REPORTS,
   CUTOVER_POLL_MS,
   cutoverStableWindowMs,
   cutoverTimeoutNotice,
@@ -136,6 +138,8 @@ export class MigrationExecutionService {
       cutover: null,
       cutoverTimer: null,
       cutoverStableSince: null,
+      cutoverReports: new Map(),
+      cutoverKilled: false,
       terminating: null,
       process: null,
       tomlPath: null,
@@ -349,6 +353,10 @@ export class MigrationExecutionService {
         if (parsed.progress !== null) job.progress = parsed.progress;
         if (parsed.syncStage !== null && job.mode === 'redis_shake_sync') job.syncStage = parsed.syncStage;
         if (job.replicationLag) applyLagUpdate(job.replicationLag, parsed, Date.now());
+        if (job.cutoverStableSince !== null && parsed.shardLag) {
+          const shard = parsed.shardLag.shard;
+          job.cutoverReports.set(shard, (job.cutoverReports.get(shard) ?? 0) + 1);
+        }
       };
 
       // Decode both pipes as UTF-8 at the stream level so a multi-byte sequence
@@ -406,7 +414,11 @@ export class MigrationExecutionService {
       const statusAfterExit = job.status as string;
       this.clearCutoverTimer(job);
       if (job.terminating === 'cutover' && statusAfterExit !== 'cancelled') {
-        this.finishCutover(job);
+        if (code === 0 && !job.cutoverKilled) {
+          this.finishCutover(job);
+        } else {
+          this.failCutover(job, code);
+        }
       } else if (code === 0) {
         if (statusAfterExit !== 'cancelled') {
           job.status = 'completed';
@@ -417,10 +429,12 @@ export class MigrationExecutionService {
         job.status = 'failed';
         job.error = failure.message;
         job.failureCode = failure.code;
+        this.markCutoverFailed(job);
       }
     } catch (err: unknown) {
       if ((job.status as string) !== 'cancelled') {
         const message = err instanceof Error ? err.message : String(err);
+        this.markCutoverFailed(job);
         job.status = 'failed';
         job.error = message;
         this.logger.error(`Execution ${job.id} error: ${message}`);
@@ -529,6 +543,7 @@ export class MigrationExecutionService {
     job.status = 'completing';
     job.cutover = { requestedAt: now, deadlineAt: now + timeoutSeconds * 1000, outcome: 'waiting' };
     job.cutoverStableSince = null;
+    job.cutoverKilled = false;
     this.evaluateCutover(job, now);
     if (job.terminating !== 'cutover') {
       job.cutoverTimer = setInterval(() => this.tickCutover(job), CUTOVER_POLL_MS);
@@ -557,14 +572,17 @@ export class MigrationExecutionService {
       job.cutoverStableSince = null;
       return;
     }
-    const stableSince = (job.cutoverStableSince ??= now);
-    const reportedSinceStable = [...(job.replicationLag?.values() ?? [])].every(
-      (entry) => entry.updatedAt > stableSince,
+    if (job.cutoverStableSince === null) {
+      job.cutoverStableSince = now;
+      job.cutoverReports = new Map();
+    }
+    const enoughReports = [...(job.replicationLag?.keys() ?? [])].every(
+      (shard) => (job.cutoverReports.get(shard) ?? 0) >= CUTOVER_MIN_REPORTS,
     );
-    if (reportedSinceStable && now - stableSince >= cutoverStableWindowMs(job.expectedShards)) {
+    if (enoughReports && now - job.cutoverStableSince >= cutoverStableWindowMs(job.expectedShards)) {
       this.clearCutoverTimer(job);
       job.terminating = 'cutover';
-      this.killProcess(job);
+      this.killForCutover(job);
     }
   }
 
@@ -581,7 +599,8 @@ export class MigrationExecutionService {
     job.notices.push(forcedCutoverNotice(replicationLag, job.expectedShards));
     job.status = 'completing';
     job.terminating = 'cutover';
-    this.killProcess(job);
+    job.cutoverKilled = false;
+    this.killForCutover(job);
   }
 
   private finishCutover(job: ExecutionJob): void {
@@ -593,6 +612,31 @@ export class MigrationExecutionService {
     }
   }
 
+  private failCutover(job: ExecutionJob, code: number): void {
+    if (job.cutoverKilled) {
+      job.error = `RedisShake did not finish writing to the target within ${CUTOVER_DRAIN_LIMIT_MS / 1000}s of the cutover stop and was killed. The target may be missing writes; validate it before switching your application.`;
+      job.failureCode = 'UNKNOWN';
+    } else {
+      const failure = classifyRedisShakeFailure(code, job.logs);
+      job.error = failure.message;
+      job.failureCode = failure.code;
+    }
+    job.status = 'failed';
+    this.markCutoverFailed(job);
+  }
+
+  private markCutoverFailed(job: ExecutionJob): void {
+    if (job.cutover && job.cutover.outcome !== 'timed_out') {
+      job.cutover.outcome = 'failed';
+    }
+  }
+
+  private killForCutover(job: ExecutionJob): void {
+    this.killProcess(job, CUTOVER_DRAIN_LIMIT_MS, () => {
+      job.cutoverKilled = true;
+    });
+  }
+
   private clearCutoverTimer(job: ExecutionJob): void {
     if (job.cutoverTimer) {
       clearInterval(job.cutoverTimer);
@@ -600,7 +644,7 @@ export class MigrationExecutionService {
     }
   }
 
-  private killProcess(job: ExecutionJob): void {
+  private killProcess(job: ExecutionJob, graceMs = CUTOVER_KILL_GRACE_MS, beforeKill?: () => void): void {
     if (!job.process) {
       return;
     }
@@ -611,11 +655,12 @@ export class MigrationExecutionService {
 
     setTimeout(() => {
       if (job.process) {
+        beforeKill?.();
         try {
           proc.kill('SIGKILL');
         } catch { /* ignore */ }
       }
-    }, CUTOVER_KILL_GRACE_MS);
+    }, graceMs);
   }
 
   private copyCutover(cutover: ExecutionJob['cutover']): ExecutionJob['cutover'] {

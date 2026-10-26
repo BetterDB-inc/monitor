@@ -17,7 +17,7 @@ describe('cutover helpers', () => {
 
   it('builds the timeout notice', () => {
     expect(cutoverTimeoutNotice(3)).toBe(
-      'Cutover timed out: writes on the source are keeping the target behind. Pause writes and retry, or force the cutover.',
+      'Cutover timed out: lag did not stay at 0 on every shard. Make sure writes on the source are paused, then retry or force the cutover.',
     );
     expect(cutoverTimeoutNotice(null)).toMatch(
       / The number of source shards is unknown, so a normal cutover cannot confirm zero lag\.$/,

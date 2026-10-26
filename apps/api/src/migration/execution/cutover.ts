@@ -4,6 +4,8 @@ import { formatBytes } from '../../scaling-readiness/dimension-inputs';
 export const CUTOVER_POLL_MS = 500;
 export const CUTOVER_DEFAULT_TIMEOUT_S = 300;
 export const CUTOVER_KILL_GRACE_MS = 3000;
+export const CUTOVER_DRAIN_LIMIT_MS = 60_000;
+export const CUTOVER_MIN_REPORTS = 2;
 const CUTOVER_MIN_TIMEOUT_S = 10;
 const CUTOVER_MAX_TIMEOUT_S = 3600;
 const STABLE_WINDOW_FLOOR_MS = 2000;
@@ -15,7 +17,7 @@ export function cutoverStableWindowMs(expectedShards: number | null): number {
 
 export function cutoverTimeoutNotice(expectedShards: number | null): string {
   const base =
-    'Cutover timed out: writes on the source are keeping the target behind. Pause writes and retry, or force the cutover.';
+    'Cutover timed out: lag did not stay at 0 on every shard. Make sure writes on the source are paused, then retry or force the cutover.';
   return expectedShards === null
     ? `${base} The number of source shards is unknown, so a normal cutover cannot confirm zero lag.`
     : base;

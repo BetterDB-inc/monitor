@@ -1,6 +1,6 @@
 import { MigrationExecutionService } from '../migration-execution.service';
 import { BadRequestException, ConflictException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
-import { cutoverTimeoutNotice } from '../execution/cutover';
+import { CUTOVER_DRAIN_LIMIT_MS, cutoverTimeoutNotice } from '../execution/cutover';
 
 jest.mock('../execution/redisshake-runner', () => ({
   findRedisShakeBinary: jest.fn().mockReturnValue('/usr/local/bin/redis-shake'),
@@ -604,7 +604,7 @@ describe('MigrationExecutionService', () => {
   describe('completeExecution', () => {
     const STATS = 'read_count=[1], read_ops=[0.00], write_count=[1], write_ops=[0.00]';
     let emitStdout: (chunk: string) => void;
-    let exitCb: (code: number) => void;
+    let exitCb: (code: number | null, signal: string | null) => void;
     let closeCb: () => void;
     let kill: jest.Mock;
 
@@ -618,7 +618,7 @@ describe('MigrationExecutionService', () => {
         },
         stderr: { on: jest.fn(), setEncoding: jest.fn() },
         on: jest.fn().mockImplementation((event: string, cb: (code?: number) => void) => {
-          if (event === 'exit') exitCb = cb as (code: number) => void;
+          if (event === 'exit') exitCb = cb as (code: number | null, signal: string | null) => void;
           if (event === 'close') closeCb = cb as () => void;
         }),
         kill,
@@ -655,8 +655,8 @@ describe('MigrationExecutionService', () => {
       }
     }
 
-    async function exitWith(code: number): Promise<void> {
-      exitCb(code);
+    async function exitWith(code: number | null, signal: string | null = null): Promise<void> {
+      exitCb(code, signal);
       closeCb();
       await flushProbe();
       await flushProbe();
@@ -705,17 +705,61 @@ describe('MigrationExecutionService', () => {
       expect(kill).toHaveBeenCalledWith('SIGTERM');
     });
 
-    it('completes as completed when RedisShake exits non-zero after a cutover kill', async () => {
+    it('completes when RedisShake exits cleanly after a cutover stop', async () => {
       const id = await startAofJob();
       service.completeExecution(id, { force: false, timeoutSeconds: 300 });
       await stream(0, 2000);
       expect(kill).toHaveBeenCalledWith('SIGTERM');
-      await exitWith(1);
+      await exitWith(0);
       const exec = service.getExecution(id)!;
       expect(exec).toMatchObject({ status: 'completed', progress: 100, cutover: { outcome: 'completed' } });
       expect(exec.cutoverAt).toEqual(expect.any(Number));
       expect(exec.error).toBeUndefined();
       expect(exec.failureCode).toBeUndefined();
+    });
+
+    it('fails the cutover when RedisShake crashes after the cutover stop', async () => {
+      const id = await startAofJob();
+      service.completeExecution(id, { force: false, timeoutSeconds: 300 });
+      await stream(0, 2000);
+      emitStdout('panic: redis writer: OOM command not allowed\n');
+      await exitWith(2);
+      const exec = service.getExecution(id)!;
+      expect(exec).toMatchObject({ status: 'failed', cutover: { outcome: 'failed' } });
+      expect(exec.error).toEqual(expect.any(String));
+      expect(exec.cutoverAt).toBeUndefined();
+    });
+
+    it('lets RedisShake drain after a cutover stop instead of killing it after 3s', async () => {
+      const id = await startAofJob();
+      service.completeExecution(id, { force: false, timeoutSeconds: 300 });
+      await stream(0, 2000);
+      await jest.advanceTimersByTimeAsync(10_000);
+      expect(kill).toHaveBeenCalledTimes(1);
+      expect(service.getExecution(id)!.status).toBe('completing');
+    });
+
+    it('fails the cutover when RedisShake has to be killed after the drain limit', async () => {
+      const id = await startAofJob();
+      service.completeExecution(id, { force: false, timeoutSeconds: 300 });
+      await stream(0, 2000);
+      await jest.advanceTimersByTimeAsync(CUTOVER_DRAIN_LIMIT_MS);
+      expect(kill).toHaveBeenLastCalledWith('SIGKILL');
+      await exitWith(null, 'SIGKILL');
+      const exec = service.getExecution(id)!;
+      expect(exec).toMatchObject({ status: 'failed', cutover: { outcome: 'failed' } });
+      expect(exec.error).toMatch(/did not finish writing to the target/);
+    });
+
+    it('needs two reports from every shard inside the stable window', async () => {
+      const id = await startAofJob();
+      service.completeExecution(id, { force: false, timeoutSeconds: 300 });
+      await jest.advanceTimersByTimeAsync(100);
+      line(0);
+      await jest.advanceTimersByTimeAsync(3_000);
+      expect(kill).not.toHaveBeenCalled();
+      await stream(0, 1000);
+      expect(kill).toHaveBeenCalledWith('SIGTERM');
     });
 
     it('times out back to running with the timeout notice', async () => {
@@ -755,7 +799,7 @@ describe('MigrationExecutionService', () => {
         outcome: 'forced',
         forcedLag: [{ shard: 'src-0', diff: 4096, updatedAt: expect.any(Number) }],
       });
-      await exitWith(1);
+      await exitWith(0);
       const exec = service.getExecution(id)!;
       expect(exec).toMatchObject({ status: 'completed', cutover: { outcome: 'forced' } });
       expect(exec.cutoverAt).toEqual(expect.any(Number));
@@ -789,7 +833,7 @@ describe('MigrationExecutionService', () => {
       const id = await startAofJob(5);
       service.completeExecution(id, { force: false, timeoutSeconds: 60 });
       await exitWith(1);
-      expect(service.getExecution(id)!.status).toBe('failed');
+      expect(service.getExecution(id)).toMatchObject({ status: 'failed', cutover: { outcome: 'failed' } });
       await jest.advanceTimersByTimeAsync(61_000);
       expect(service.getExecution(id)!.status).toBe('failed');
     });
@@ -809,7 +853,7 @@ describe('MigrationExecutionService', () => {
       await stream(0, 2000);
       expect(kill).toHaveBeenCalledWith('SIGTERM');
       expect(service.stopExecution(id)).toBe(true);
-      await exitWith(1);
+      await exitWith(0);
       expect(service.getExecution(id)).toMatchObject({ status: 'completed', cutover: { outcome: 'completed' } });
     });
 
