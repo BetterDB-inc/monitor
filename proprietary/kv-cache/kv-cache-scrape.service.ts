@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Feature } from '@betterdb/shared';
 import type { StoredKvCacheEngine } from '@app/common/interfaces/storage-port.interface';
+import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { LicenseService } from '@proprietary/licenses/license.service';
 import { labelSeries } from './counter-deltas';
 import { KvCacheEngineRegistry } from './kv-cache-engine-registry';
@@ -35,6 +36,7 @@ export class KvCacheScrapeService implements OnModuleInit, OnModuleDestroy {
     private readonly samples: KvCacheSamplesService,
     private readonly engines: KvCacheEnginesService,
     private readonly license: LicenseService,
+    private readonly connections: ConnectionRegistry,
   ) {}
 
   onModuleInit(): void {
@@ -53,7 +55,9 @@ export class KvCacheScrapeService implements OnModuleInit, OnModuleDestroy {
     if (this.running || !this.license.hasFeature(Feature.KV_CACHE_MONITORING)) return;
     this.running = true;
     try {
-      const targets = this.registry.list().filter((e) => e.enabled && e.source === 'scrape' && e.scrapeUrl);
+      const targets = this.registry
+        .list()
+        .filter((e) => e.enabled && e.source === 'scrape' && e.scrapeUrl && this.connectionExists(e.connectionId));
       await Promise.allSettled(targets.map((engine) => this.scrape(engine, now)));
     } finally {
       this.running = false;
@@ -98,6 +102,10 @@ export class KvCacheScrapeService implements OnModuleInit, OnModuleDestroy {
 
   private stillCurrent(engine: StoredKvCacheEngine): boolean {
     const current = this.registry.get(engine.id);
-    return !!current?.enabled && current.scrapeUrl === engine.scrapeUrl;
+    return !!current?.enabled && current.scrapeUrl === engine.scrapeUrl && this.connectionExists(engine.connectionId);
+  }
+
+  private connectionExists(connectionId: string): boolean {
+    return this.connections.getConfig(connectionId) !== null;
   }
 }

@@ -35,14 +35,21 @@ export function clusterScanNodes(
 
 const CLUSTER_NODE_ID = /^[0-9a-f]{40}$/;
 
+const validNodeId = (id: unknown): string | undefined => {
+  const text = Buffer.isBuffer(id) ? id.toString() : id;
+  return typeof text === 'string' && CLUSTER_NODE_ID.test(text) ? text : undefined;
+};
+
+const attempt = <T>(read: () => Promise<T>): Promise<T | undefined> =>
+  Promise.resolve()
+    .then(read)
+    .catch(() => undefined);
+
 async function clusterNodeId(node: ScanNode): Promise<string | undefined> {
-  try {
-    const reply = await node.client.call('CLUSTER', ['MYID']);
-    const id = Buffer.isBuffer(reply) ? reply.toString() : reply;
-    return typeof id === 'string' && CLUSTER_NODE_ID.test(id) ? id : undefined;
-  } catch {
-    return undefined;
-  }
+  const reported = validNodeId(await attempt(() => node.client.call('CLUSTER', ['MYID'])));
+  if (reported !== undefined) return reported;
+  const view = await attempt(() => node.client.getClusterNodes());
+  return validNodeId(view?.find((peer) => peer.flags.includes('myself'))?.id);
 }
 
 export async function primaryScanNodes(nodes: ScanNode[], logger: Logger, label: string): Promise<ScanNode[]> {

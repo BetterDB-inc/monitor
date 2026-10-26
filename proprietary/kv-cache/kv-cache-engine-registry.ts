@@ -13,6 +13,7 @@ export class KvCacheEngineRegistry implements OnModuleInit {
   private readonly writes = new Map<string, Promise<unknown>>();
   private readonly statusVersions = new Map<string, number>();
   private readonly removed = new Map<string, number>();
+  private readonly removals = new Map<string, number>();
   private readonly removedConnections = new Map<string, number>();
   private readonly persistedSeenAt = new Map<string, number | null>();
 
@@ -28,6 +29,7 @@ export class KvCacheEngineRegistry implements OnModuleInit {
       this.persistedSeenAt.set(engine.id, engine.lastSeenAt);
     }
     this.footprint.onConnectionRemoval(async (connectionId) => {
+      this.removals.set(connectionId, (this.removals.get(connectionId) ?? 0) + 1);
       this.tombstone(this.removedConnections, connectionId);
       const ids = this.list(connectionId).map((engine) => engine.id);
       for (const id of ids) {
@@ -37,8 +39,46 @@ export class KvCacheEngineRegistry implements OnModuleInit {
         this.persistedSeenAt.delete(id);
         this.samples.forgetEngine(id);
       }
-      await Promise.all([...ids.map((id) => this.writes.get(id)), this.samples.idle()]);
+      await Promise.all(ids.map((id) => this.writes.get(id)));
+      return this.samples.settled();
     });
+    this.footprint.onConnectionRestore((connectionId) => this.restore(connectionId));
+  }
+
+  private async restore(connectionId: string): Promise<void> {
+    this.removedConnections.delete(connectionId);
+    const removals = this.removals.get(connectionId);
+    const stored = (await this.storage.getKvCacheEngines()).filter((engine) => engine.connectionId === connectionId);
+    if (this.removals.get(connectionId) !== removals) return;
+    const superseded: string[] = [];
+    for (const engine of stored) {
+      if (this.engines.has(engine.id)) continue;
+      if (this.clashes(engine)) {
+        superseded.push(engine.id);
+        continue;
+      }
+      this.removed.delete(engine.id);
+      this.engines.set(engine.id, engine);
+      this.persistedSeenAt.set(engine.id, engine.lastSeenAt);
+    }
+    await Promise.all(
+      superseded.map((id) =>
+        this.serialize(id, async () => {
+          if (this.removals.get(connectionId) !== removals || this.engines.has(id)) return;
+          await this.storage.deleteKvCacheEngine(id);
+        }).catch((error) =>
+          this.logger.warn(`Could not delete superseded KV cache engine ${id}: ${error instanceof Error ? error.message : String(error)}`),
+        ),
+      ),
+    );
+  }
+
+  private clashes(engine: StoredKvCacheEngine): boolean {
+    return [...this.engines.values()].some(
+      (other) =>
+        (other.connectionId === engine.connectionId && other.name === engine.name) ||
+        (engine.otlpEngineId !== null && other.otlpEngineId === engine.otlpEngineId),
+    );
   }
 
   list(connectionId?: string): StoredKvCacheEngine[] {
@@ -62,10 +102,14 @@ export class KvCacheEngineRegistry implements OnModuleInit {
     return this.serialize(engine.id, async () => {
       if (this.removed.has(engine.id)) throw new NotFoundException(`KV cache engine ${engine.id} not found`);
       this.assertConnectionLive(engine.connectionId);
+      const removals = this.removals.get(engine.connectionId);
       const saved = await this.storage.saveKvCacheEngine(engine);
-      if (this.removedConnections.has(saved.connectionId)) {
+      if (this.removals.get(saved.connectionId) !== removals && !this.footprint.hasConnection(saved.connectionId)) {
+        this.engines.delete(saved.id);
+        this.statusVersions.delete(saved.id);
+        this.persistedSeenAt.delete(saved.id);
         await this.storage.deleteKvCacheEngine(saved.id);
-        this.assertConnectionLive(saved.connectionId);
+        throw new NotFoundException(`Connection '${saved.connectionId}' not found`);
       }
       if (this.removed.has(saved.id)) throw new NotFoundException(`KV cache engine ${saved.id} not found`);
       const latest = this.engines.get(saved.id);
@@ -130,7 +174,9 @@ export class KvCacheEngineRegistry implements OnModuleInit {
   }
 
   private assertConnectionLive(connectionId: string): void {
-    if (this.removedConnections.has(connectionId)) throw new NotFoundException(`Connection '${connectionId}' not found`);
+    if (this.removedConnections.has(connectionId) && !this.footprint.hasConnection(connectionId)) {
+      throw new NotFoundException(`Connection '${connectionId}' not found`);
+    }
   }
 
   private serialize<T>(id: string, task: () => Promise<T>): Promise<T> {

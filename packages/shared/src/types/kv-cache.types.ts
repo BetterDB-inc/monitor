@@ -90,6 +90,7 @@ export interface KvCacheSampleBucket extends KvCacheEngineSample {
 export interface KvCacheSamplesResponse {
   buckets: KvCacheSampleBucket[];
   rangeHitRate: number | null;
+  truncated: boolean;
   bucketMs: number;
 }
 
