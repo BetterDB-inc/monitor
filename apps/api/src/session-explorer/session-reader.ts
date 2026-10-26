@@ -196,7 +196,9 @@ async function measure(client: Valkey, found: Located[]): Promise<void> {
 
   const exactly = found.filter(
     (at) =>
-      at.type === 'ReJSON-RL' || (at.length !== null && at.length <= EXACT_MEMORY_LENGTH),
+      at.type === 'ReJSON-RL' ||
+      at.type === 'list' ||
+      (at.length !== null && at.length <= EXACT_MEMORY_LENGTH),
   );
   if (exactly.length === 0) return;
   const exact = client.pipeline();
@@ -495,8 +497,11 @@ function finishRead(
 }
 
 function reservation(at: Located, opts: ReadOpts): number {
-  if (at.type === 'string' || at.type === 'ReJSON-RL') {
+  if (at.type === 'string') {
     return Math.max(1, Math.min(at.memory ?? opts.byteCap, opts.byteCap));
+  }
+  if (at.type === 'ReJSON-RL') {
+    return Math.max(1, Math.min(at.memory ?? opts.byteCap, opts.byteCap * JSON_MEMORY_HEADROOM));
   }
   return readsWhole(at, opts) ? Math.max(1, at.memory ?? 0) : 0;
 }
