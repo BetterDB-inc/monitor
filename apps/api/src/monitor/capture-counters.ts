@@ -174,9 +174,12 @@ export function deriveCounterRates(
  * - A node counts as measured only when it has both samples and end.capturedAt >= start.capturedAt.
  * - A counter that went backwards on a node (CONFIG RESETSTAT, restart) is
  *   excluded for that node and reported in `resets`; the other nodes still sum.
- * - The window includes the boundary INFO probes themselves, so
- *   total_commands_processed can be up to one higher per node than the
- *   captured traffic.
+ * - The window includes the capture's own footprint on each node:
+ *   total_commands_processed can be up to two higher than the captured traffic
+ *   (the start INFO and the MONITOR command), and total_connections_received
+ *   includes the MONITOR connection (+1). total_net_output_bytes is
+ *   deliberately not tracked: the server counts the MONITOR stream it sends to
+ *   the capture connection in it.
  */
 export function computeCounterDeltas(
   snapshots: CaptureCounterSnapshots | undefined,

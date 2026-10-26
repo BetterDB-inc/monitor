@@ -6,10 +6,7 @@ import {
 } from '@betterdb/shared';
 import { formatBytes } from '../../lib/utils';
 
-const BYTE_COUNTERS: ReadonlySet<CaptureCounterName> = new Set([
-  'total_net_input_bytes',
-  'total_net_output_bytes',
-]);
+const BYTE_COUNTERS: ReadonlySet<CaptureCounterName> = new Set(['total_net_input_bytes']);
 
 function formatCounterValue(name: CaptureCounterName, value: number | null): string {
   if (value === null) {

@@ -673,4 +673,75 @@ describe('MonitorCaptureService session-boundary counter snapshots', () => {
     expect(persisted?.status).toBe('completed');
     expect(typeof persisted?.counterSnapshots?.nodes[0].startError).toBe('string');
   });
+
+  function gate() {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { promise, release };
+  }
+
+  it('rejects a concurrent startSession while the first is still opening MONITOR', async () => {
+    const { service, source } = makeService();
+    service.setCounterSampleReader(makeReader());
+    const opening = gate();
+    const factory = jest.fn(async () => {
+      await opening.promise;
+      return source;
+    });
+    service.setMonitorSourceFactory(factory);
+
+    const first = service.startSession({ connectionId: CONNECTION_ID });
+    for (let i = 0; i < 50 && factory.mock.calls.length === 0; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+    expect(factory).toHaveBeenCalledTimes(1);
+
+    await expect(service.startSession({ connectionId: CONNECTION_ID })).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+
+    opening.release();
+    const session = await first;
+    expect(session.status).toBe('running');
+    expect(await service.listSessions({ connectionId: CONNECTION_ID })).toHaveLength(1);
+
+    await service.stopSession(session.id);
+  });
+
+  it('hasActiveSessionOn is true while a session is starting', async () => {
+    const { service } = makeService();
+    const sampling = gate();
+    service.setCounterSampleReader(async () => {
+      await sampling.promise;
+      return { capturedAt: 1, counters: { total_commands_processed: 1 } };
+    });
+
+    const first = service.startSession({ connectionId: CONNECTION_ID });
+    expect(service.hasActiveSessionOn(CONNECTION_ID)).toBe(true);
+
+    sampling.release();
+    const session = await first;
+    expect(service.hasActiveSessionOn(CONNECTION_ID)).toBe(true);
+
+    await service.stopSession(session.id);
+    expect(service.hasActiveSessionOn(CONNECTION_ID)).toBe(false);
+  });
+
+  it('records no_end_sample when MONITOR fails to open on a single session', async () => {
+    const { service, storage } = makeService();
+    service.setCounterSampleReader(makeReader());
+    service.setMonitorSourceFactory(async () => {
+      throw new Error('boom');
+    });
+
+    await expect(service.startSession({ connectionId: CONNECTION_ID })).rejects.toThrow('boom');
+
+    const [persisted] = await service.listSessions({ connectionId: CONNECTION_ID });
+    expect(persisted.status).toBe('failed');
+    const node = persisted.counterSnapshots?.nodes[0];
+    expect(node?.start).toBeTruthy();
+    expect(node?.endError).toBe('no_end_sample');
+  });
 });

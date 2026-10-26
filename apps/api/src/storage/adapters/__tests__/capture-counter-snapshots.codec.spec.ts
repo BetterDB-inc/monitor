@@ -32,6 +32,20 @@ describe('capture counter snapshots codec', () => {
     expect(decodeCounterSnapshots(JSON.parse(JSON.stringify(SNAPSHOTS)))).toEqual(SNAPSHOTS);
   });
 
+  it('drops a stored total_net_output_bytes counter on decode', () => {
+    const decoded = decodeCounterSnapshots({
+      version: 1,
+      nodes: [
+        {
+          start: { capturedAt: 1, counters: { keyspace_hits: 5, total_net_output_bytes: 100 } },
+          end: { capturedAt: 2, counters: { keyspace_hits: 9, total_net_output_bytes: 200 } },
+        },
+      ],
+    });
+    expect(decoded?.nodes[0].start?.counters).toEqual({ keyspace_hits: 5 });
+    expect(decoded?.nodes[0].end?.counters).toEqual({ keyspace_hits: 9 });
+  });
+
   it('decodes null and undefined to undefined', () => {
     expect(decodeCounterSnapshots(null)).toBeUndefined();
     expect(decodeCounterSnapshots(undefined)).toBeUndefined();

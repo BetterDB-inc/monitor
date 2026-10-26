@@ -58,8 +58,8 @@ describe('CounterDeltasTable', () => {
   });
 
   it('formats byte counters with formatBytes', () => {
-    render(<CounterDeltasTable deltas={deltas({ deltas: { total_net_output_bytes: 8192 } })} />);
-    expect(screen.getByText('Network out').nextSibling?.textContent).toBe(formatBytes(8192));
+    render(<CounterDeltasTable deltas={deltas({ deltas: { total_net_input_bytes: 8192 } })} />);
+    expect(screen.getByText('Network in').nextSibling?.textContent).toBe(formatBytes(8192));
   });
 
   it('omits rows that are null on every side', () => {

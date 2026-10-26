@@ -50,12 +50,12 @@ describe('extractCaptureCounters / sampleFromInfoText', () => {
       expired_keys: 3,
       evicted_keys: 0,
       total_net_input_bytes: 4096,
-      total_net_output_bytes: 8192,
       total_error_replies: 1,
       acl_access_denied_auth: 4,
       sync_full: 0,
     });
     expect(s.counters).not.toHaveProperty('instantaneous_ops_per_sec');
+    expect(s.counters).not.toHaveProperty('total_net_output_bytes');
   });
 
   it('leaves fields an older server does not emit absent rather than 0', () => {
@@ -76,8 +76,8 @@ describe('extractCaptureCounters / sampleFromInfoText', () => {
     ).toEqual({ evicted_keys: 7 });
   });
 
-  it('declares 17 counter fields', () => {
-    expect(CAPTURE_COUNTER_FIELDS).toHaveLength(17);
+  it('declares 16 counter fields', () => {
+    expect(CAPTURE_COUNTER_FIELDS).toHaveLength(16);
   });
 });
 

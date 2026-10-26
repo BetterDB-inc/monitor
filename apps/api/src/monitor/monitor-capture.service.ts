@@ -226,10 +226,10 @@ export class MonitorCaptureService {
       await this.storage.saveCaptureSession(session, connectionId);
 
       if (isFanOut) {
-        return this.startFanOutSession(session, fanOutNodes, durationMs, byteCap, lineCap);
+        return await this.startFanOutSession(session, fanOutNodes, durationMs, byteCap, lineCap);
       }
 
-      return this.startSingleSession(session, input.targetNodeId, durationMs, byteCap, lineCap);
+      return await this.startSingleSession(session, input.targetNodeId, durationMs, byteCap, lineCap);
     } finally {
       this.starting.delete(connectionId);
     }
@@ -253,6 +253,7 @@ export class MonitorCaptureService {
         status: 'failed',
         endedAt: Date.now(),
         terminationReason: `monitor_open_failed: ${(err as Error).message}`,
+        counterSnapshots: withEndSamples(session.counterSnapshots, new Map()),
       });
       throw err;
     }
@@ -526,8 +527,9 @@ export class MonitorCaptureService {
     return this.active.get(connectionId)?.writers[0]?.writer;
   }
 
+  /** True while a session on the connection is active or still starting. */
   hasActiveSessionOn(connectionId: string): boolean {
-    return this.active.has(connectionId);
+    return this.active.has(connectionId) || this.starting.has(connectionId);
   }
 
   private findActiveById(sessionId: string): ActiveSession | undefined {

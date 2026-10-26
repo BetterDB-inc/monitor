@@ -102,9 +102,9 @@ deltas are shown for both captures side by side.
 
 Every capture samples `INFO stats` on each captured node twice: once just
 before MONITOR opens and once right after it stops (so the probe itself is
-never captured). The cross-reference panel shows the difference for 17
+never captured). The cross-reference panel shows the difference for 16
 monotonic counters — commands processed, connections received/rejected,
-keyspace hits/misses, expired and evicted keys, network in/out, error
+keyspace hits/misses, expired and evicted keys, network bytes in, error
 replies, ACL denials (auth / command / key / channel) and full/partial
 resyncs — plus commands/sec and the keyspace hit ratio over the window.
 Fan-out captures sum across primaries.
@@ -117,6 +117,13 @@ Fan-out captures sum across primaries.
   before this feature).
 - `aclDeltas.counters.aclAccessDeniedAuthDelta` / `rejectedConnectionsDelta`
   in the API response are populated from the same samples.
+- Self-measurement: each node's window includes the capture's own
+  footprint — up to 2 extra commands (the start `INFO` and `MONITOR`) and 1
+  extra connection (the MONITOR connection). Outbound network bytes are not
+  tracked because the server counts the MONITOR stream itself in
+  `total_net_output_bytes`.
+- Start sampling happens before the session starts, so a start request can
+  take up to 2 s longer when a node is slow or unreachable.
 - Counters a server version does not report (e.g. `total_error_replies`
   before Redis 6.2) are shown as `—`, never as 0.
 
@@ -154,7 +161,7 @@ Manual lifecycle:
 - `GET  /api/monitor/sessions/:id`
 - `DELETE /api/monitor/sessions/:id`
 - `GET  /api/monitor/sessions/:id/cross-reference?baseline=<6h|24h|7d|same-hour-last-week>`
-  Response includes counterDeltas (and baselineCounterDeltas on /diff).
+  Response includes `counterDeltas` (and `baselineCounterDeltas` on the capture diff).
 - `GET  /api/monitor/sessions/:id/export?format=<json|csv>&command=&client=&key=&afterTs=&beforeTs=`
 
 Pro+:
