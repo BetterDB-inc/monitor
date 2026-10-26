@@ -55,14 +55,24 @@ export async function fetchShakeStatus(port: number, timeoutMs: number): Promise
   }
 }
 
-export function findFreePort(): Promise<number> {
+export interface PortReservation {
+  port: number;
+  release: () => Promise<void>;
+}
+
+export function reservePort(): Promise<PortReservation> {
   return new Promise((resolve, reject) => {
     const server = createServer();
     server.unref();
     server.on('error', reject);
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address() as AddressInfo;
-      server.close(() => resolve(port));
+      let released: Promise<void> | null = null;
+      const release = () => {
+        released ??= new Promise<void>((done) => server.close(() => done()));
+        return released;
+      };
+      resolve({ port, release });
     });
   });
 }
