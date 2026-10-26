@@ -2080,6 +2080,11 @@ function notFoundResult(err: ApiHttpError, featureLabel: string, requiresPro = t
   return { content: [{ type: 'text' as const, text: detail }], isError: true };
 }
 
+/** Non-404 API errors: surface the server's message (e.g. "CVE inspection is turned off…", "time range must not exceed 744 hours") instead of the generic HTTP status text. */
+function apiErrorResult(err: ApiHttpError): ToolResult {
+  return { content: [{ type: 'text' as const, text: err.detail ?? err.message }], isError: true };
+}
+
 // --- Capacity & scaling ---
 
 server.tool(
@@ -2097,6 +2102,9 @@ server.tool(
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
           return notFoundResult(err, 'Scaling readiness', false);
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
         }
         throw err;
       }
@@ -2122,6 +2130,9 @@ server.tool(
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
           return notFoundResult(err, 'Scaling readiness history');
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
         }
         throw err;
       }
@@ -2150,6 +2161,9 @@ server.tool(
         if (err instanceof ApiHttpError && err.status === 404) {
           return notFoundResult(err, 'Cache size simulator');
         }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
         throw err;
       }
       if (isLicenseError(data)) {
@@ -2176,6 +2190,9 @@ server.tool(
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
           return notFoundResult(err, 'KV cache monitoring');
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
         }
         throw err;
       }
@@ -2207,6 +2224,9 @@ server.tool(
         if (err instanceof ApiHttpError && err.status === 404) {
           return notFoundResult(err, 'KV cache monitoring');
         }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
         throw err;
       }
       if (isLicenseError(data)) {
@@ -2235,6 +2255,9 @@ server.tool(
         if (err instanceof ApiHttpError && err.status === 404) {
           return notFoundResult(err, 'KV cache monitoring');
         }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
         throw err;
       }
       if (isLicenseError(data)) {
@@ -2262,8 +2285,8 @@ server.tool(
         if (err instanceof ApiHttpError && err.status === 404) {
           return notFoundResult(err, 'CVE inspection', false);
         }
-        if (err instanceof ApiHttpError && err.status === 503) {
-          return textResult(err.message);
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
         }
         throw err;
       }
@@ -2283,6 +2306,9 @@ server.tool(
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
           return notFoundResult(err, 'Fleet summary', false);
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
         }
         throw err;
       }
@@ -2311,6 +2337,9 @@ server.tool(
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
           return notFoundResult(err, 'Key analytics');
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
         }
         throw err;
       }
@@ -2343,6 +2372,9 @@ server.tool(
         if (err instanceof ApiHttpError && err.status === 404) {
           return notFoundResult(err, 'Key analytics');
         }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
         throw err;
       }
       if (isLicenseError(data)) {
@@ -2372,6 +2404,9 @@ server.tool(
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
           return notFoundResult(err, 'Key analytics');
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
         }
         throw err;
       }
@@ -2406,6 +2441,9 @@ server.tool(
         if (err instanceof ApiHttpError && err.status === 404) {
           return notFoundResult(err, 'MONITOR capture sessions', false);
         }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
         throw err;
       }
       return jsonResult(data);
@@ -2435,6 +2473,9 @@ server.tool(
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
           return notFoundResult(err, 'MONITOR capture sessions', false);
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
         }
         throw err;
       }
