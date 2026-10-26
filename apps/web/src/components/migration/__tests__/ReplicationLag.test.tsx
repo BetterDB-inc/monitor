@@ -26,6 +26,17 @@ describe('ReplicationLag', () => {
     expect(screen.getByRole('button').textContent).toBe('Lag: initial sync');
   });
 
+  it('says how many reported shards are still in initial sync', () => {
+    render(
+      <ReplicationLag
+        entries={[{ shard: 'src-0', diff: 0, updatedAt: NOW }, { shard: 'src-1', diff: null, updatedAt: NOW }]}
+        expectedShards={2}
+        now={NOW}
+      />,
+    );
+    expect(screen.getByRole('button').textContent).toBe('Lag: 0 B behind · 1 of 2 shards in initial sync');
+  });
+
   it('expands a per-shard breakdown on click', () => {
     render(
       <ReplicationLag

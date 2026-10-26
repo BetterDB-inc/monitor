@@ -11,13 +11,23 @@ interface Props {
 const FRESHNESS_FLOOR_MS = 10_000;
 const LOG_INTERVAL_MS = 1_000;
 
+function withWaiting(text: string, reported: number, expectedShards: number | null): string {
+  if (expectedShards !== null && reported < expectedShards) {
+    return `${text} · waiting for ${expectedShards - reported} of ${expectedShards} shards`;
+  }
+  return text;
+}
+
 function readout(entries: ReplicationLagEntry[], expectedShards: number | null): string {
   const known = entries.flatMap((e) => (e.diff === null ? [] : [e.diff]));
-  const base = known.length === 0 ? 'Lag: initial sync' : `Lag: ${formatBytes(Math.max(...known))} behind`;
-  if (expectedShards !== null && entries.length < expectedShards) {
-    return `${base} · waiting for ${expectedShards - entries.length} of ${expectedShards} shards`;
+  if (known.length === 0) {
+    return withWaiting('Lag: initial sync', entries.length, expectedShards);
   }
-  return base;
+  const total = expectedShards ?? entries.length;
+  const syncing = entries.length - known.length;
+  const base = `Lag: ${formatBytes(Math.max(...known))} behind`;
+  const withSyncing = syncing > 0 ? `${base} · ${syncing} of ${total} shards in initial sync` : base;
+  return withWaiting(withSyncing, entries.length, expectedShards);
 }
 
 export function ReplicationLag({ entries, expectedShards, now }: Props) {
