@@ -10,8 +10,10 @@ jest.mock('../execution/toml-builder', () => ({
   buildSyncReaderToml: jest.fn().mockReturnValue('[sync_reader]\naddress = "127.0.0.1:6379"\n'),
 }));
 
+const mockReleaseStatusPort = jest.fn().mockResolvedValue(undefined);
+
 jest.mock('../execution/shake-status', () => ({
-  findFreePort: jest.fn().mockResolvedValue(45678),
+  reservePort: jest.fn().mockImplementation(async () => ({ port: 45678, release: mockReleaseStatusPort })),
   fetchShakeStatus: jest.fn().mockResolvedValue(null),
 }));
 
@@ -343,6 +345,55 @@ describe('MigrationExecutionService', () => {
       expect(result!.status).toBe('cancelled');
       expect(spawn).not.toHaveBeenCalled();
       expect(flushall).not.toHaveBeenCalled();
+    });
+
+    it('releases the status port when cancelled before spawning', async () => {
+      mockReleaseStatusPort.mockClear();
+      const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'present' });
+      const crossForkService = createExecutionService(crossForkRegistry);
+
+      const { id } = await crossForkService.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake_sync',
+      });
+      crossForkService.stopExecution(id);
+      await new Promise(r => setTimeout(r, 30));
+
+      expect(mockReleaseStatusPort).toHaveBeenCalled();
+    });
+
+    it('releases the status port when the sync TOML cannot be built', async () => {
+      mockReleaseStatusPort.mockClear();
+      const { buildSyncReaderToml } = require('../execution/toml-builder');
+      (buildSyncReaderToml as jest.Mock).mockImplementationOnce(() => { throw new Error('Invalid host: empty or too long'); });
+
+      await expect(service.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake_sync',
+      })).rejects.toThrow('Invalid host');
+      expect(mockReleaseStatusPort).toHaveBeenCalled();
+    });
+
+    it('holds the status port through pre-spawn work and releases it just before spawning', async () => {
+      const { spawn } = require('child_process');
+      (spawn as jest.Mock).mockClear();
+      mockReleaseStatusPort.mockClear();
+      const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'present' });
+      const crossForkService = createExecutionService(crossForkRegistry);
+
+      await crossForkService.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake_sync',
+      });
+      expect(mockReleaseStatusPort).not.toHaveBeenCalled();
+      await new Promise(r => setTimeout(r, 5));
+
+      expect(spawn).toHaveBeenCalled();
+      expect(mockReleaseStatusPort.mock.invocationCallOrder[0])
+        .toBeLessThan((spawn as jest.Mock).mock.invocationCallOrder[0]);
     });
 
     it('still surfaces the notice when the source probe fails (unknown presence)', async () => {

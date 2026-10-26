@@ -1,6 +1,6 @@
 import { createServer, type Server } from 'http';
 import type { AddressInfo } from 'net';
-import { fetchShakeStatus, findFreePort, parseShakeStatus } from '../execution/shake-status';
+import { fetchShakeStatus, parseShakeStatus, reservePort } from '../execution/shake-status';
 
 const aof = (received: number, sent: number) => ({
   status: 'syncing aof',
@@ -50,11 +50,27 @@ describe('parseShakeStatus', () => {
   });
 });
 
-describe('findFreePort', () => {
-  it('returns a usable TCP port', async () => {
-    const port = await findFreePort();
-    expect(port).toBeGreaterThan(0);
-    expect(port).toBeLessThan(65536);
+describe('reservePort', () => {
+  function listenOn(port: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const probe = createServer();
+      probe.once('error', reject);
+      probe.listen(port, '127.0.0.1', () => probe.close(() => resolve()));
+    });
+  }
+
+  it('holds the port until released', async () => {
+    const reservation = await reservePort();
+    expect(reservation.port).toBeGreaterThan(0);
+    await expect(listenOn(reservation.port)).rejects.toMatchObject({ code: 'EADDRINUSE' });
+    await reservation.release();
+    await expect(listenOn(reservation.port)).resolves.toBeUndefined();
+  });
+
+  it('can be released more than once', async () => {
+    const reservation = await reservePort();
+    await reservation.release();
+    await expect(reservation.release()).resolves.toBeUndefined();
   });
 });
 
@@ -90,7 +106,9 @@ describe('fetchShakeStatus', () => {
   });
 
   it('returns null when nothing listens on the port', async () => {
-    const closed = await findFreePort();
+    const reservation = await reservePort();
+    await reservation.release();
+    const closed = reservation.port;
     await expect(fetchShakeStatus(closed, 1000)).resolves.toBeNull();
   });
 });

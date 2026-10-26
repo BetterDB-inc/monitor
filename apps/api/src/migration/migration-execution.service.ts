@@ -21,7 +21,7 @@ import {
   STATUS_POLL_MS,
   STATUS_POLL_TIMEOUT_MS,
 } from './execution/replication-lag';
-import { fetchShakeStatus, findFreePort } from './execution/shake-status';
+import { fetchShakeStatus, reservePort, type PortReservation } from './execution/shake-status';
 import { runCommandMigration } from './execution/command-migration-worker';
 import { shouldExcludeFunctions, isRdbRestoreCompatible } from './fork-compat';
 import { probeSourceFunctionsClusterAware, parseNodeAddress } from './function-presence';
@@ -46,6 +46,7 @@ interface RedisShakePreSpawn {
   targetAdapter: ReturnType<ConnectionRegistry['get']>;
   targetConfig: NonNullable<ReturnType<ConnectionRegistry['getConfig']>>;
   targetIsCluster: boolean;
+  statusPortReservation: PortReservation | null;
 }
 
 @Injectable()
@@ -105,7 +106,6 @@ export class MigrationExecutionService {
     const expectedShards = mode === 'redis_shake_sync'
       ? await countSourceShards(sourceAdapter, clusterEnabled)
       : null;
-    const statusPort = mode === 'redis_shake_sync' ? await findFreePort() : null;
 
     // 4. For redis_shake modes, locate the binary upfront
     let binaryPath: string | undefined;
@@ -117,6 +117,9 @@ export class MigrationExecutionService {
         throw new ServiceUnavailableException(message);
       }
     }
+
+    const statusPortReservation = mode === 'redis_shake_sync' ? await reservePort() : null;
+    const statusPort = statusPortReservation?.port ?? null;
 
     // 5. Create the job
     const id = randomUUID();
@@ -159,24 +162,29 @@ export class MigrationExecutionService {
       const targetDbType = targetAdapter.getCapabilities().dbType;
       const excludeFunctions = shouldExcludeFunctions(sourceDbType, targetDbType);
 
-      const tomlContent = mode === 'redis_shake_sync'
-        ? buildSyncReaderToml(sourceConfig, targetConfig, {
-            sourceIsCluster: clusterEnabled,
-            syncReaderOptions: req.syncReaderOptions ?? {},
-            targetIsCluster,
-            rsOptions,
-            excludeFunctions,
-            statusPort: statusPort ?? undefined,
-          })
-        : buildScanReaderToml(sourceConfig, targetConfig, {
-            sourceIsCluster: clusterEnabled,
-            targetIsCluster,
-            rsOptions,
-            excludeFunctions,
-          });
-      const tomlPath = join(os.tmpdir(), `${id}.toml`);
-      writeFileSync(tomlPath, tomlContent, { encoding: 'utf-8', mode: 0o600 });
-      job.tomlPath = tomlPath;
+      try {
+        const tomlContent = mode === 'redis_shake_sync'
+          ? buildSyncReaderToml(sourceConfig, targetConfig, {
+              sourceIsCluster: clusterEnabled,
+              syncReaderOptions: req.syncReaderOptions ?? {},
+              targetIsCluster,
+              rsOptions,
+              excludeFunctions,
+              statusPort: statusPort ?? undefined,
+            })
+          : buildScanReaderToml(sourceConfig, targetConfig, {
+              sourceIsCluster: clusterEnabled,
+              targetIsCluster,
+              rsOptions,
+              excludeFunctions,
+            });
+        const tomlPath = join(os.tmpdir(), `${id}.toml`);
+        writeFileSync(tomlPath, tomlContent, { encoding: 'utf-8', mode: 0o600 });
+        job.tomlPath = tomlPath;
+      } catch (err) {
+        await statusPortReservation?.release();
+        throw err;
+      }
 
       // The function-presence notice and the optional target pre-flush both run inside
       // runRedisShake, before it spawns the process (see RedisShakePreSpawn): the POST
@@ -194,6 +202,7 @@ export class MigrationExecutionService {
         targetAdapter,
         targetConfig,
         targetIsCluster,
+        statusPortReservation,
       };
 
       this.runRedisShake(job, binaryPath!, preSpawn).catch(err => {
@@ -320,6 +329,9 @@ export class MigrationExecutionService {
         if ((job.status as string) === 'cancelled') return;
       }
 
+      await preSpawn.statusPortReservation?.release();
+      if ((job.status as string) === 'cancelled') return;
+
       const proc = spawn(binaryPath, [job.tomlPath!], {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -425,6 +437,7 @@ export class MigrationExecutionService {
         this.logger.error(`Execution ${job.id} error: ${message}`);
       }
     } finally {
+      await preSpawn.statusPortReservation?.release();
       if (!job.completedAt) {
         job.completedAt = Date.now();
       }
