@@ -84,20 +84,24 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
   const [pollFailed, setPollFailed] = useState(false);
   const onStoppedRef = useRef(onStopped);
   onStoppedRef.current = onStopped;
+  const pollGenerationRef = useRef(0);
 
   useEffect(() => {
     let stopped = false;
     let errorCount = 0;
     const poll = async () => {
       try {
+        const generation = pollGenerationRef.current;
         const result = await fetchApi<MigrationExecutionResult>(`/migration/execution/${executionId}`);
         if (stopped) return;
         errorCount = 0;
         setPollFailed(false);
-        setExecution(result);
-        if (result.status === 'completed' || result.status === 'failed' || result.status === 'cancelled') {
-          onStoppedRef.current();
-          return;
+        if (generation === pollGenerationRef.current) {
+          setExecution(result);
+          if (result.status === 'completed' || result.status === 'failed' || result.status === 'cancelled') {
+            onStoppedRef.current();
+            return;
+          }
         }
       } catch {
         if (stopped) return;
@@ -132,6 +136,7 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
       method: 'POST',
       body: JSON.stringify({ force }),
     });
+    pollGenerationRef.current++;
     setExecution((current) =>
       current ? { ...current, status: result.status, cutover: result.cutover ?? current.cutover } : current,
     );
