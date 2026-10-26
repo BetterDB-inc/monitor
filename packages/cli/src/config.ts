@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { BetterDBConfig, DEFAULT_CONFIG } from './types';
@@ -45,6 +45,24 @@ function restrictPermissions(path: string, mode: number): void {
     chmodSync(path, mode);
   } catch {
     // ignore: e.g. a directory owned by another user
+  }
+}
+
+/**
+ * Write `data` so it is never readable by other users, even for an instant:
+ * write a fresh 0600 temp file in the same directory, then rename it over the
+ * target. rename is atomic on the same filesystem and replaces the old file
+ * (and its old 0644 mode). Also avoids a half-written config on crash.
+ */
+function writeFileOwnerOnly(path: string, data: string): void {
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(tmp, data, { mode: 0o600, flag: 'wx' });
+    restrictPermissions(tmp, 0o600); // umask can't widen it, but be explicit
+    renameSync(tmp, path);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* temp may not exist */ }
+    throw err;
   }
 }
 
@@ -111,9 +129,7 @@ export function saveConfig(config: BetterDBConfig): void {
     ...config,
     security: { ...config.security, encryptionKey: undefined },
   });
-  writeFileSync(configPath, JSON.stringify(configToSave, null, 2), { mode: 0o600 });
-  // writeFileSync's mode only applies when it creates the file
-  restrictPermissions(configPath, 0o600);
+  writeFileOwnerOnly(configPath, JSON.stringify(configToSave, null, 2));
 }
 
 /**
