@@ -527,6 +527,7 @@ export class MigrationExecutionService {
       replicationLag: lag.replicationLag,
       expectedShards: job.expectedShards,
       fullySynced: lag.fullySynced && job.status === 'running',
+      cutover: null,
     };
   }
 

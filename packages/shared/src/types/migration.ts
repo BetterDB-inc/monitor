@@ -105,6 +105,7 @@ export interface StartAnalysisResponse {
 export type ExecutionJobStatus =
   | 'pending'
   | 'running'
+  | 'completing'
   | 'completed'
   | 'failed'
   | 'cancelled';
@@ -208,6 +209,27 @@ export interface MigrationExecutionResult {
   replicationLag: ReplicationLagEntry[] | null;
   expectedShards: number | null;
   fullySynced: boolean;
+  cutover: CutoverAttempt | null;
+  cutoverAt?: number;
+}
+
+export type CutoverOutcome = 'waiting' | 'timed_out' | 'completed' | 'forced';
+
+export interface CutoverAttempt {
+  requestedAt: number;
+  deadlineAt: number;
+  outcome: CutoverOutcome;
+  forcedLag?: ReplicationLagEntry[];
+}
+
+export interface CompleteExecutionRequest {
+  force?: boolean;
+  timeoutSeconds?: number;
+}
+
+export interface CompleteExecutionResponse {
+  status: ExecutionJobStatus;
+  cutover: CutoverAttempt;
 }
 
 export interface ReplicationLagEntry {
