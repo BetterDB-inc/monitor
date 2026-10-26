@@ -183,6 +183,8 @@ const SCHEMA_SETUP_LOCK_LOG_MS = 30_000;
  * the orchestrator can retry. The background builder's own wait is unbounded.
  */
 export const SCHEMA_SETUP_LOCK_DEADLINE_MS = 10 * 60_000;
+const BACKEND_EXIT_POLL_MS = 50;
+const BACKEND_EXIT_DEADLINE_MS = 5_000;
 
 type PgNumeric = string | number;
 type PgJsonb<T> = T | string;
@@ -628,11 +630,25 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         await this.pool.query('SELECT pg_cancel_backend($1)', [buildPid]).catch(() => undefined);
       }
       await buildClient.end().catch(() => undefined);
+      if (buildPid !== null && this.pool) {
+        await this.waitForBackendExit(buildPid);
+      }
     }
     if (this.pool) {
       await this.pool.end();
       this.pool = null;
       this.ready = false;
+    }
+  }
+
+  private async waitForBackendExit(pid: number): Promise<void> {
+    const deadline = Date.now() + BACKEND_EXIT_DEADLINE_MS;
+    while (this.pool && Date.now() < deadline) {
+      const result = await this.pool
+        .query('SELECT 1 FROM pg_stat_activity WHERE pid = $1', [pid])
+        .catch(() => null);
+      if (!result || result.rowCount === 0) return;
+      await new Promise((resolve) => setTimeout(resolve, BACKEND_EXIT_POLL_MS));
     }
   }
 
