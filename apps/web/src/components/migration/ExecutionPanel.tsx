@@ -139,7 +139,10 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
             );
           })()}
           {execution.status === 'running' && execution.replicationLag && (
-            <ReplicationLag entries={execution.replicationLag} expectedShards={execution.expectedShards} />
+            <ReplicationLag
+              entries={pollFailed ? execution.replicationLag.map((e) => ({ ...e, stale: true })) : execution.replicationLag}
+              expectedShards={execution.expectedShards}
+            />
           )}
           <span className="text-sm text-muted-foreground">
             {(execution.keysTransferred ?? 0).toLocaleString()}
