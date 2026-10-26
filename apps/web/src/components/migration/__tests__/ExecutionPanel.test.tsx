@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, act } from '@testing-library/react';
+import { render, screen, act, fireEvent } from '@testing-library/react';
 import type { MigrationExecutionResult } from '@betterdb/shared';
 import { ExecutionPanel } from '../ExecutionPanel';
 import { fetchApi } from '../../../api/client';
@@ -20,6 +20,7 @@ function syncResult(partial: Partial<MigrationExecutionResult>): MigrationExecut
     replicationLag: [{ shard: 'src-0', diff: 0, updatedAt: Date.now() }],
     expectedShards: 1,
     fullySynced: false,
+    cutover: null,
     ...partial,
   };
 }
@@ -62,9 +63,87 @@ describe('ExecutionPanel replication lag', () => {
     }
   });
 
-  it('points the banner at the lag readout', async () => {
+  it('points the replicating banner at Complete cutover', async () => {
     vi.mocked(fetchApi).mockResolvedValue(syncResult({}));
     render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
-    expect(await screen.findByText(/the chip turns Fully synced/)).toBeTruthy();
+    expect(await screen.findByText(/then click Complete cutover/)).toBeTruthy();
+  });
+});
+
+describe('ExecutionPanel cutover', () => {
+  beforeEach(() => {
+    vi.mocked(fetchApi).mockReset();
+  });
+
+  it('shows Completing and a countdown while completing', async () => {
+    vi.mocked(fetchApi).mockResolvedValue(
+      syncResult({
+        status: 'completing',
+        cutover: { requestedAt: Date.now(), deadlineAt: Date.now() + 65_000, outcome: 'waiting' },
+      }),
+    );
+    render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+    expect(await screen.findByText('Completing cutover')).toBeTruthy();
+    expect(screen.getByText('Completing')).toBeTruthy();
+    expect(screen.getByText(/Waiting for zero lag · 1m \d+s left/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Stop Migration' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Complete cutover' })).toBeNull();
+  });
+
+  it('posts to the complete endpoint and keeps polling', async () => {
+    const onStopped = vi.fn();
+    vi.mocked(fetchApi).mockImplementation(async (path: string) =>
+      path.endsWith('/complete') ? { status: 'completing', cutover: null } : syncResult({}),
+    );
+    render(<ExecutionPanel executionId="exec-1" onStopped={onStopped} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete cutover' }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Complete cutover' }));
+    });
+    expect(fetchApi).toHaveBeenCalledWith('/migration/execution/exec-1/complete', {
+      method: 'POST',
+      body: JSON.stringify({ force: false }),
+    });
+    expect(onStopped).not.toHaveBeenCalled();
+  });
+
+  it('shows the timed-out banner with retry and force', async () => {
+    vi.mocked(fetchApi).mockResolvedValue(
+      syncResult({ cutover: { requestedAt: 1, deadlineAt: 2, outcome: 'timed_out' } }),
+    );
+    render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+    expect(await screen.findByText(/Cutover timed out/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Retry cutover' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Force cutover' })).toBeTruthy();
+  });
+
+  it('shows the cutover-complete banner', async () => {
+    const cutoverAt = Date.now();
+    vi.mocked(fetchApi).mockResolvedValue(
+      syncResult({
+        status: 'completed',
+        cutover: { requestedAt: 1, deadlineAt: 2, outcome: 'completed' },
+        cutoverAt,
+      }),
+    );
+    render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+    expect(
+      await screen.findByText(
+        `Cutover complete at ${new Date(cutoverAt).toLocaleTimeString()}. Point your application at the target.`,
+      ),
+    ).toBeTruthy();
+  });
+
+  it('shows the accepted lag after a forced cutover', async () => {
+    vi.mocked(fetchApi).mockResolvedValue(
+      syncResult({
+        status: 'completed',
+        cutover: { requestedAt: 1, deadlineAt: 2, outcome: 'forced', forcedLag: [] },
+        cutoverAt: Date.now(),
+        notices: ['Forced cutover with src-0 4 KB behind.'],
+      }),
+    );
+    render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+    expect(await screen.findByText(/Cutover complete at .* Forced cutover with src-0 4 KB behind\./)).toBeTruthy();
   });
 });
