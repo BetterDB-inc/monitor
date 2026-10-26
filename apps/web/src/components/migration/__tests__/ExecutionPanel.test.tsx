@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 import type { MigrationExecutionResult } from '@betterdb/shared';
 import { ExecutionPanel } from '../ExecutionPanel';
 import { fetchApi } from '../../../api/client';
@@ -43,6 +43,23 @@ describe('ExecutionPanel replication lag', () => {
     render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
     expect(await screen.findByText('Replicating')).toBeTruthy();
     expect(screen.getByText('Lag: 512.00 B behind')).toBeTruthy();
+  });
+
+  it('drops Fully synced while the latest poll has failed', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(fetchApi)
+        .mockResolvedValueOnce(syncResult({ fullySynced: true }))
+        .mockRejectedValueOnce(new Error('network'));
+      render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByText('Fully synced')).toBeTruthy();
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(screen.queryByText('Fully synced')).toBeNull();
+      expect(screen.getByText('Replicating')).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('points the banner at the lag readout', async () => {

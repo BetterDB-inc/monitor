@@ -62,6 +62,7 @@ function StatusBadge({ status }: { status: string }) {
 export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPending }: Props) {
   const [execution, setExecution] = useState<MigrationExecutionResult | null>(null);
   const [confirmingFlush, setConfirmingFlush] = useState(false);
+  const [pollFailed, setPollFailed] = useState(false);
   const onStoppedRef = useRef(onStopped);
   onStoppedRef.current = onStopped;
 
@@ -73,6 +74,7 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
         const result = await fetchApi<MigrationExecutionResult>(`/migration/execution/${executionId}`);
         if (stopped) return;
         errorCount = 0;
+        setPollFailed(false);
         setExecution(result);
         if (result.status === 'completed' || result.status === 'failed' || result.status === 'cancelled') {
           onStoppedRef.current();
@@ -81,6 +83,7 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
       } catch {
         if (stopped) return;
         errorCount++;
+        setPollFailed(true);
       }
       if (!stopped) {
         const delay = errorCount > 0 ? Math.min(2000 * 2 ** errorCount, 30000) : 2000;
@@ -127,7 +130,7 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
                 : 'RedisShake'}
           </span>
           {execution.mode === 'redis_shake_sync' && (() => {
-            const stage = syncStageLabel(execution.syncStage, execution.fullySynced);
+            const stage = syncStageLabel(execution.syncStage, execution.fullySynced && !pollFailed);
             if (!stage) return null;
             return (
               <span className={`px-2 py-0.5 rounded text-xs ${stage.className}`}>
