@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
-import { fetchApi } from '../../api/client';
-import type { MigrationExecutionResult, SyncStage } from '@betterdb/shared';
+import { ApiError, fetchApi } from '../../api/client';
+import type { CompleteExecutionResponse, MigrationExecutionResult, SyncStage } from '@betterdb/shared';
 import { ExecutionLogViewer } from './ExecutionLogViewer';
 import { ReplicationLag } from './ReplicationLag';
+import { CutoverControls } from './CutoverControls';
 
 interface Props {
   executionId: string;
@@ -29,7 +30,23 @@ function formatElapsed(startedAt: number, completedAt?: number): string {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-function syncStageLabel(stage: SyncStage, fullySynced: boolean): { label: string; className: string } | null {
+function formatRemaining(deadlineAt: number): string {
+  const seconds = Math.max(0, Math.floor((deadlineAt - Date.now()) / 1000));
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+function latestNotice(notices: string[] | undefined, prefix: string): string | undefined {
+  return [...(notices ?? [])].reverse().find((notice) => notice.startsWith(prefix));
+}
+
+function syncStageLabel(
+  stage: SyncStage,
+  fullySynced: boolean,
+  completing: boolean,
+): { label: string; className: string } | null {
+  if (completing) {
+    return { label: 'Completing cutover', className: 'bg-amber-50 text-amber-800 border border-amber-200' };
+  }
   switch (stage) {
     case 'connecting':
       return { label: 'Connecting', className: 'bg-muted text-muted-foreground' };
@@ -48,6 +65,8 @@ function StatusBadge({ status }: { status: string }) {
   switch (status) {
     case 'running':
       return <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800"><span className="animate-spin h-3 w-3 border-2 border-blue-400 border-t-transparent rounded-full" /> Running</span>;
+    case 'completing':
+      return <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800"><span className="animate-spin h-3 w-3 border-2 border-amber-400 border-t-transparent rounded-full" /> Completing</span>;
     case 'completed':
       return <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">Completed</span>;
     case 'failed':
@@ -63,22 +82,28 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
   const [execution, setExecution] = useState<MigrationExecutionResult | null>(null);
   const [confirmingFlush, setConfirmingFlush] = useState(false);
   const [pollFailed, setPollFailed] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
   const onStoppedRef = useRef(onStopped);
   onStoppedRef.current = onStopped;
+  const pollGenerationRef = useRef(0);
+  const [, setClock] = useState(0);
 
   useEffect(() => {
     let stopped = false;
     let errorCount = 0;
     const poll = async () => {
       try {
+        const generation = pollGenerationRef.current;
         const result = await fetchApi<MigrationExecutionResult>(`/migration/execution/${executionId}`);
         if (stopped) return;
         errorCount = 0;
         setPollFailed(false);
-        setExecution(result);
-        if (result.status === 'completed' || result.status === 'failed' || result.status === 'cancelled') {
-          onStoppedRef.current();
-          return;
+        if (generation === pollGenerationRef.current) {
+          setExecution(result);
+          if (result.status === 'completed' || result.status === 'failed' || result.status === 'cancelled') {
+            onStoppedRef.current();
+            return;
+          }
         }
       } catch {
         if (stopped) return;
@@ -98,14 +123,36 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
     };
   }, [executionId]);
 
+  const completing = execution?.status === 'completing';
+  useEffect(() => {
+    if (!completing) return;
+    const ticker = setInterval(() => setClock((tick) => tick + 1), 1000);
+    return () => clearInterval(ticker);
+  }, [completing]);
+
   const handleStop = async () => {
+    setStopError(null);
     try {
       await fetchApi(`/migration/execution/${executionId}`, { method: 'DELETE' });
-    } catch {
-      /* ignore */
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 409) {
+        setStopError(err.message);
+        return;
+      }
     }
     // Optimistic transition
     onStoppedRef.current();
+  };
+
+  const handleComplete = async (force: boolean) => {
+    const result = await fetchApi<CompleteExecutionResponse>(`/migration/execution/${executionId}/complete`, {
+      method: 'POST',
+      body: JSON.stringify({ force }),
+    });
+    pollGenerationRef.current++;
+    setExecution((current) =>
+      current ? { ...current, status: result.status, cutover: result.cutover ?? current.cutover } : current,
+    );
   };
 
   if (!execution) {
@@ -115,6 +162,9 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
       </div>
     );
   }
+
+  const timedOut = execution.status === 'running' && execution.cutover?.outcome === 'timed_out';
+  const cutoverStopping = execution.cutover?.outcome === 'draining' || execution.cutover?.outcome === 'forced';
 
   return (
     <div className="space-y-4">
@@ -130,7 +180,11 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
                 : 'RedisShake'}
           </span>
           {execution.mode === 'redis_shake_sync' && (() => {
-            const stage = syncStageLabel(execution.syncStage, execution.fullySynced && !pollFailed);
+            const stage = syncStageLabel(
+              execution.syncStage,
+              execution.fullySynced && !pollFailed,
+              execution.status === 'completing',
+            );
             if (!stage) return null;
             return (
               <span className={`px-2 py-0.5 rounded text-xs ${stage.className}`}>
@@ -138,7 +192,7 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
               </span>
             );
           })()}
-          {execution.status === 'running' && execution.replicationLag && (
+          {(execution.status === 'running' || execution.status === 'completing') && execution.replicationLag && (
             <ReplicationLag
               entries={pollFailed ? execution.replicationLag.map((e) => ({ ...e, stale: true })) : execution.replicationLag}
               expectedShards={execution.expectedShards}
@@ -156,16 +210,31 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
           <span className="text-sm text-muted-foreground">
             {formatElapsed(execution.startedAt, execution.completedAt)}
           </span>
+          {execution.status === 'completing' && execution.cutover && (
+            <span className="text-sm text-amber-700">
+              {execution.cutover.outcome === 'forced'
+                ? 'Forcing cutover · waiting for RedisShake to finish writing'
+                : execution.cutover.outcome === 'draining'
+                  ? 'Fully synced · waiting for RedisShake to finish writing'
+                  : `Waiting for Fully synced · ${formatRemaining(execution.cutover.deadlineAt)} left`}
+            </span>
+          )}
         </div>
-        {execution.status === 'running' && (
-          <button
-            onClick={handleStop}
-            className="px-3 py-1.5 text-sm border border-destructive/20 text-destructive rounded-md hover:bg-destructive/10"
-          >
-            Stop Migration
-          </button>
+        {(execution.status === 'running' || execution.status === 'completing') && (
+          <div className="flex items-start gap-2">
+            {!timedOut && <CutoverControls execution={execution} onComplete={handleComplete} />}
+            {!cutoverStopping && (
+              <button
+                onClick={handleStop}
+                className="px-3 py-1.5 text-sm border border-destructive/20 text-destructive rounded-md hover:bg-destructive/10"
+              >
+                Stop Migration
+              </button>
+            )}
+          </div>
         )}
       </div>
+      {stopError && <p className="text-sm text-destructive">{stopError}</p>}
 
       {/* Progress bar — shown while running */}
       {execution.status === 'running' && execution.progress != null && (
@@ -185,14 +254,25 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
 
       {execution.status === 'running' &&
        execution.mode === 'redis_shake_sync' &&
-       execution.syncStage === 'aof_replicating' && (
+       execution.syncStage === 'aof_replicating' &&
+       !timedOut && (
         <div className="bg-green-50 border border-green-200 text-green-800 rounded-lg p-4 text-sm space-y-2">
           <p className="font-medium">Initial sync complete. Replicating new writes.</p>
           <p>
             The migration will keep replicating from source to target until you stop it.
-            When you're ready to cut over: pause writes on the source, wait for the chip to turn
-            Fully synced, then click Stop Migration and point your application at the target.
+            When you're ready to cut over: pause writes on the source, then click Complete cutover.
+            Stop Migration cancels without a cutover.
           </p>
+        </div>
+      )}
+
+      {timedOut && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-lg p-4 text-sm space-y-3">
+          <p>
+            {latestNotice(execution.notices, 'Cutover timed out') ??
+              'Cutover timed out: writes on the source are keeping the target behind. Pause writes and retry, or force the cutover.'}
+          </p>
+          <CutoverControls execution={execution} onComplete={handleComplete} />
         </div>
       )}
 
@@ -238,7 +318,25 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
           )}
         </div>
       )}
-      {execution.status === 'completed' && (
+      {execution.status === 'completed' && execution.cutoverAt !== undefined && (
+        <div
+          className={
+            execution.cutover?.outcome === 'forced'
+              ? 'bg-amber-50 border border-amber-200 text-amber-800 rounded-lg p-4 text-sm'
+              : 'bg-green-50 border border-green-200 text-green-700 rounded-lg p-4 text-sm'
+          }
+        >
+          <p>
+            {[
+              `Cutover complete at ${new Date(execution.cutoverAt).toLocaleTimeString()}. Point your application at the target.`,
+              execution.cutover?.outcome === 'forced' ? latestNotice(execution.notices, 'Forced cutover') : undefined,
+            ]
+              .filter(Boolean)
+              .join(' ')}
+          </p>
+        </div>
+      )}
+      {execution.status === 'completed' && execution.cutoverAt === undefined && (
         <div className="bg-green-50 border border-green-200 text-green-700 rounded-lg p-4 text-sm">
           Migration complete — {(execution.keysTransferred ?? 0).toLocaleString()} keys transferred
           {(execution.keysSkipped ?? 0) > 0 && `, ${execution.keysSkipped!.toLocaleString()} skipped`}.

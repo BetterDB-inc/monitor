@@ -41,7 +41,7 @@ Transfers keys from source to target. Three modes are available:
 
 - **Same engine, same major version** (e.g. Redis 7→Redis 7, Valkey 7→Valkey 7): any mode works. `redis_shake` is fastest for large datasets.
 - **Cross-engine** (Redis→Valkey or vice versa): use `redis_shake_sync` or `command`. The `redis_shake` (DUMP/RESTORE) mode will fail because Redis and Valkey use different RDB format versions and the `RESTORE` command rejects the foreign payload.
-- **Near-zero downtime** required: use `redis_shake_sync`. It completes an initial snapshot and then keeps replicating incremental writes until you manually stop it.
+- **Near-zero downtime** required: use `redis_shake_sync`. It completes an initial snapshot and then keeps replicating incremental writes until you complete the cutover (or stop it).
 
 #### Command mode
 
@@ -120,9 +120,39 @@ reachable only if you publish that port.
 **Cutover procedure**:
 1. Wait for the stage chip to show *Replicating* or *Fully synced*.
 2. Pause or quiesce writes on the source (brief read-only window).
-3. Wait until the stage chip shows *Fully synced*.
-4. Click **Stop Migration** in the execution panel.
-5. Point your application at the target.
+3. Click **Complete cutover** in the execution panel and confirm. The job shows
+   *Completing* and waits until RedisShake stays *Fully synced* for a few
+   seconds (default limit: 5 minutes), then stops RedisShake.
+4. When the job shows *Completed* ("Cutover complete at …"), point your
+   application at the target.
+
+*Fully synced* cannot detect writes that are still arriving: under a steady
+write load RedisShake can briefly report itself consistent while writes
+continue, and anything written to the source after the cutover is lost. Pausing
+writes in step 2 is what makes the cutover safe; the check only confirms that
+RedisShake has caught up.
+RedisShake is given up to 60 seconds after the stop to finish writing to the
+target; if it exits with an error or has to be killed, the cutover ends as
+*Failed* rather than *Completed*.
+
+**If the cutover times out**: RedisShake did not stay *Fully synced*, so the
+migration goes back to *Replicating* and keeps running. Pause writes and
+click **Retry cutover**, or click **Force cutover** to end the migration now.
+A forced cutover finishes as *Completed* and records the per-shard lag you
+accepted; those writes may be missing on the target.
+
+**Stop Migration** cancels the migration without a cutover and ends as
+*Cancelled*, at any point, including while a cutover is waiting. Once the
+cutover has started stopping RedisShake (after *Fully synced* held, or after a
+forced cutover), it can no longer be cancelled: Stop returns `409` and the
+migration finishes as a cutover.
+
+The same actions are available over the API:
+`POST /migration/execution/:id/complete` with an optional body
+`{ "force": boolean, "timeoutSeconds": number }` (`timeoutSeconds` is an integer
+from 10 to 3600, default 300). It returns `409` unless the job is a
+`redis_shake_sync` migration that is replicating or already completing.
+`DELETE /migration/execution/:id` cancels.
 
 **Options**:
 
@@ -362,7 +392,7 @@ starting.
 writes continuously via PSYNC, so keys created or modified after the initial RDB
 sync are captured. The intended workflow is to keep the source running normally,
 wait for the stage to show *Replicating*, then apply a brief read-only window
-only at the moment of cutover and wait for *Fully synced*.
+only at the moment of cutover and click **Complete cutover**.
 
 ### RDB format compatibility
 

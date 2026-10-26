@@ -255,8 +255,8 @@ export function MigrationPage({ isCloudMode }: { isCloudMode: boolean }) {
                   <p className="font-medium">Online sync runs continuously</p>
                   <p className="mt-1">
                     After the initial sync completes, the migration keeps replicating new writes from source to target.
-                    You'll need to manually stop it from the execution panel when you're ready to cut over.
-                    Plan a brief read-only window on the source during cutover.
+                    When you're ready to cut over, pause writes on the source and click Complete cutover in the
+                    execution panel. Plan a brief read-only window on the source during cutover.
                   </p>
                 </div>
 

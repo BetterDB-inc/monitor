@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import { Pool } from 'pg';
 import { PostgresAdapter } from '../src/storage/adapters/postgres.adapter';
 import type { StoredScalingReadinessScore } from '../src/common/interfaces/storage-port.interface';
+import { dropSchema } from './postgres-test-utils';
 
 const DSN =
   process.env.SCALING_READINESS_POSTGRES_TEST_DSN ??
@@ -84,7 +85,7 @@ describePostgres('scaling readiness storage — postgres', () => {
 
   afterAll(async () => {
     await adapter.close();
-    await adminPool.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+    await dropSchema(adminPool, SCHEMA);
     await adminPool.end();
   });
 

@@ -1,6 +1,7 @@
 import { execFileSync } from 'child_process';
 import { Client, Pool } from 'pg';
 import { PostgresAdapter } from '../src/storage/adapters/postgres.adapter';
+import { dropSchema } from './postgres-test-utils';
 
 const DSN =
   process.env.CLIENT_ANALYTICS_POSTGRES_TEST_DSN ??
@@ -108,7 +109,7 @@ describePostgres('postgres schema-setup lock', () => {
   });
 
   afterAll(async () => {
-    await adminPool.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+    await dropSchema(adminPool, SCHEMA);
     await adminPool.end();
   });
 

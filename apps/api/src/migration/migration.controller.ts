@@ -1,11 +1,12 @@
 import { Controller, Get, Post, Delete, Param, Body, UseGuards, NotFoundException, BadRequestException } from '@nestjs/common';
-import type { MigrationAnalysisRequest, StartAnalysisResponse, MigrationAnalysisResult, MigrationExecutionRequest, StartExecutionResponse, MigrationExecutionResult, MigrationValidationRequest, StartValidationResponse, MigrationValidationResult } from '@betterdb/shared';
+import type { MigrationAnalysisRequest, StartAnalysisResponse, MigrationAnalysisResult, MigrationExecutionRequest, StartExecutionResponse, MigrationExecutionResult, MigrationValidationRequest, StartValidationResponse, MigrationValidationResult, CompleteExecutionRequest, CompleteExecutionResponse } from '@betterdb/shared';
 import { Feature } from '@betterdb/shared';
 import { LicenseGuard } from '@proprietary/licenses';
 import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
 import { MigrationService } from './migration.service';
 import { MigrationExecutionService } from './migration-execution.service';
 import { MigrationValidationService } from './migration-validation.service';
+import { parseCutoverTimeout } from './execution/cutover';
 
 // Migration analysis is intentionally community-tier (no license guard).
 // MIGRATION_EXECUTION gating applies to the execution phase only.
@@ -133,6 +134,24 @@ export class MigrationController {
       throw new NotFoundException(`Execution job '${id}' not found`);
     }
     return { stopped: true };
+  }
+
+  @Post('execution/:id/complete')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.MIGRATION_EXECUTION)
+  completeExecution(
+    @Param('id') id: string,
+    @Body() body: CompleteExecutionRequest | undefined,
+  ): CompleteExecutionResponse {
+    const request = body ?? {};
+    if (request.force !== undefined && typeof request.force !== 'boolean') {
+      throw new BadRequestException('force must be a boolean');
+    }
+    const timeoutSeconds = parseCutoverTimeout(request.timeoutSeconds);
+    if (timeoutSeconds === null) {
+      throw new BadRequestException('timeoutSeconds must be an integer between 10 and 3600');
+    }
+    return this.executionService.completeExecution(id, { force: request.force ?? false, timeoutSeconds });
   }
 
   // ── Validation endpoints (Pro-tier) ──

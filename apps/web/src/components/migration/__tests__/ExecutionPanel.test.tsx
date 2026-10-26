@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, act } from '@testing-library/react';
+import { render, screen, act, fireEvent } from '@testing-library/react';
 import type { MigrationExecutionResult } from '@betterdb/shared';
 import { ExecutionPanel } from '../ExecutionPanel';
-import { fetchApi } from '../../../api/client';
+import { ApiError, fetchApi } from '../../../api/client';
 
-vi.mock('../../../api/client', () => ({
+vi.mock('../../../api/client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../api/client')>()),
   fetchApi: vi.fn(),
 }));
 
@@ -20,6 +21,7 @@ function syncResult(partial: Partial<MigrationExecutionResult>): MigrationExecut
     replicationLag: [{ shard: 'src-0', diff: 0, stale: false }],
     expectedShards: 1,
     fullySynced: false,
+    cutover: null,
     ...partial,
   };
 }
@@ -85,9 +87,189 @@ describe('ExecutionPanel replication lag', () => {
     }
   });
 
-  it('points the banner at Fully synced', async () => {
+  it('points the replicating banner at Complete cutover', async () => {
     vi.mocked(fetchApi).mockResolvedValue(syncResult({}));
     render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
-    expect(await screen.findByText(/wait for the chip to turn Fully synced/)).toBeTruthy();
+    expect(await screen.findByText(/then click Complete cutover/)).toBeTruthy();
+  });
+});
+
+describe('ExecutionPanel cutover', () => {
+  beforeEach(() => {
+    vi.mocked(fetchApi).mockReset();
+  });
+
+  it('shows Completing and a countdown while completing', async () => {
+    vi.mocked(fetchApi).mockResolvedValue(
+      syncResult({
+        status: 'completing',
+        cutover: { requestedAt: Date.now(), deadlineAt: Date.now() + 65_000, outcome: 'waiting' },
+      }),
+    );
+    render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+    expect(await screen.findByText('Completing cutover')).toBeTruthy();
+    expect(screen.getByText('Completing')).toBeTruthy();
+    expect(screen.getByText(/Waiting for Fully synced · 1m \d+s left/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Stop Migration' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Complete cutover' })).toBeNull();
+  });
+
+  it('ticks the countdown between polls', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(fetchApi).mockResolvedValueOnce(
+        syncResult({
+          status: 'completing',
+          cutover: { requestedAt: Date.now(), deadlineAt: Date.now() + 65_500, outcome: 'waiting' },
+        }),
+      ).mockReturnValue(new Promise(() => {}));
+      render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByText(/1m 5s left/)).toBeTruthy();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.getByText(/1m 4s left/)).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows a forced cutover without a countdown', async () => {
+    vi.mocked(fetchApi).mockResolvedValue(
+      syncResult({
+        status: 'completing',
+        cutover: { requestedAt: Date.now(), deadlineAt: Date.now(), outcome: 'forced', forcedLag: [] },
+      }),
+    );
+    render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+    expect(await screen.findByText('Forcing cutover · waiting for RedisShake to finish writing')).toBeTruthy();
+    expect(screen.queryByText(/Waiting for Fully synced/)).toBeNull();
+  });
+
+  it('shows the drain phase without a countdown or Stop once RedisShake is stopping', async () => {
+    vi.mocked(fetchApi).mockResolvedValue(
+      syncResult({
+        status: 'completing',
+        fullySynced: true,
+        cutover: { requestedAt: Date.now(), deadlineAt: Date.now() + 65_000, outcome: 'draining' },
+      }),
+    );
+    render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+    expect(await screen.findByText('Fully synced · waiting for RedisShake to finish writing')).toBeTruthy();
+    expect(screen.queryByText(/Waiting for Fully synced/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Stop Migration' })).toBeNull();
+  });
+
+  it('posts to the complete endpoint and keeps polling', async () => {
+    const onStopped = vi.fn();
+    vi.mocked(fetchApi).mockImplementation(async (path: string) =>
+      path.endsWith('/complete') ? { status: 'completing', cutover: null } : syncResult({}),
+    );
+    render(<ExecutionPanel executionId="exec-1" onStopped={onStopped} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete cutover' }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Complete cutover' }));
+    });
+    expect(fetchApi).toHaveBeenCalledWith('/migration/execution/exec-1/complete', {
+      method: 'POST',
+      body: JSON.stringify({ force: false }),
+    });
+    expect(onStopped).not.toHaveBeenCalled();
+  });
+
+  it('ignores a poll that started before the cutover request', async () => {
+    let resolveStalePoll: (value: MigrationExecutionResult) => void = () => {};
+    let gets = 0;
+    vi.mocked(fetchApi).mockImplementation(async (path: string) => {
+      if (path.endsWith('/complete')) {
+        return {
+          status: 'completing',
+          cutover: { requestedAt: Date.now(), deadlineAt: Date.now() + 300_000, outcome: 'waiting' },
+        };
+      }
+      gets++;
+      if (gets === 1) return syncResult({});
+      return new Promise<MigrationExecutionResult>((resolve) => { resolveStalePoll = resolve; });
+    });
+    vi.useFakeTimers();
+    try {
+      render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(gets).toBe(2);
+      fireEvent.click(screen.getByRole('button', { name: 'Complete cutover' }));
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Complete cutover' }));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByText('Completing cutover')).toBeTruthy();
+      await act(async () => {
+        resolveStalePoll(syncResult({}));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByText('Completing cutover')).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Complete cutover' })).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stays on the panel when stop is refused because the cutover is finishing', async () => {
+    const onStopped = vi.fn();
+    vi.mocked(fetchApi).mockImplementation(async (path: string, init?: RequestInit) => {
+      if (init?.method === 'DELETE') {
+        throw new ApiError('The cutover is already finishing and can no longer be stopped', 409);
+      }
+      return syncResult({
+        status: 'completing',
+        cutover: { requestedAt: Date.now(), deadlineAt: Date.now() + 65_000, outcome: 'waiting' },
+      });
+    });
+    render(<ExecutionPanel executionId="exec-1" onStopped={onStopped} />);
+    const stop = await screen.findByRole('button', { name: 'Stop Migration' });
+    await act(async () => {
+      fireEvent.click(stop);
+    });
+    expect(await screen.findByText('The cutover is already finishing and can no longer be stopped')).toBeTruthy();
+    expect(onStopped).not.toHaveBeenCalled();
+  });
+
+  it('shows the timed-out banner with retry and force', async () => {
+    vi.mocked(fetchApi).mockResolvedValue(
+      syncResult({ cutover: { requestedAt: 1, deadlineAt: 2, outcome: 'timed_out' } }),
+    );
+    render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+    expect(await screen.findByText(/Cutover timed out/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Retry cutover' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Force cutover' })).toBeTruthy();
+  });
+
+  it('shows the cutover-complete banner', async () => {
+    const cutoverAt = Date.now();
+    vi.mocked(fetchApi).mockResolvedValue(
+      syncResult({
+        status: 'completed',
+        cutover: { requestedAt: 1, deadlineAt: 2, outcome: 'completed' },
+        cutoverAt,
+      }),
+    );
+    render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+    expect(
+      await screen.findByText(
+        `Cutover complete at ${new Date(cutoverAt).toLocaleTimeString()}. Point your application at the target.`,
+      ),
+    ).toBeTruthy();
+  });
+
+  it('shows the accepted lag after a forced cutover', async () => {
+    vi.mocked(fetchApi).mockResolvedValue(
+      syncResult({
+        status: 'completed',
+        cutover: { requestedAt: 1, deadlineAt: 2, outcome: 'forced', forcedLag: [] },
+        cutoverAt: Date.now(),
+        notices: ['Forced cutover with src-0 4 KB behind.'],
+      }),
+    );
+    render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+    expect(await screen.findByText(/Cutover complete at .* Forced cutover with src-0 4 KB behind\./)).toBeTruthy();
   });
 });
