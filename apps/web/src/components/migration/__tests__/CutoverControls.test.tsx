@@ -4,7 +4,7 @@ import type { MigrationExecutionResult } from '@betterdb/shared';
 import { CutoverControls } from '../CutoverControls';
 
 const CONFIRM_TEXT =
-  "Before you continue: pause writes on the source. The migration finishes once every shard's lag stays at 0. After it completes, point your application at the target.";
+  "Before you continue: pause writes on the source. Lag 0 cannot detect writes that are still arriving, so writes made after the cutover are lost. The migration finishes once every shard's lag stays at 0. After it completes, point your application at the target.";
 
 function execution(partial: Partial<MigrationExecutionResult>): MigrationExecutionResult {
   return {

@@ -41,7 +41,7 @@ Transfers keys from source to target. Three modes are available:
 
 - **Same engine, same major version** (e.g. Redis 7→Redis 7, Valkey 7→Valkey 7): any mode works. `redis_shake` is fastest for large datasets.
 - **Cross-engine** (Redis→Valkey or vice versa): use `redis_shake_sync` or `command`. The `redis_shake` (DUMP/RESTORE) mode will fail because Redis and Valkey use different RDB format versions and the `RESTORE` command rejects the foreign payload.
-- **Near-zero downtime** required: use `redis_shake_sync`. It completes an initial snapshot and then keeps replicating incremental writes until you manually stop it.
+- **Near-zero downtime** required: use `redis_shake_sync`. It completes an initial snapshot and then keeps replicating incremental writes until you complete the cutover (or stop it).
 
 #### Command mode
 
@@ -111,8 +111,16 @@ chip never claims *Fully synced*.
 4. When the job shows *Completed* ("Cutover complete at …"), point your
    application at the target.
 
-**If the cutover times out**: writes on the source kept the target behind, so
-the migration goes back to *Replicating* and keeps running. Pause writes and
+Lag 0 cannot detect writes that are still arriving: under a steady write load
+every shard can report 0 while writes continue, and anything written to the
+source after the cutover is lost. Pausing writes in step 2 is what makes the
+cutover safe; the zero-lag check only confirms that RedisShake has caught up.
+RedisShake is given up to 60 seconds after the stop to finish writing to the
+target; if it exits with an error or has to be killed, the cutover ends as
+*Failed* rather than *Completed*.
+
+**If the cutover times out**: lag did not stay at 0 on every shard, so the
+migration goes back to *Replicating* and keeps running. Pause writes and
 click **Retry cutover**, or click **Force cutover** to end the migration now.
 A forced cutover finishes as *Completed* and records the per-shard lag you
 accepted; those writes may be missing on the target. When the number of source

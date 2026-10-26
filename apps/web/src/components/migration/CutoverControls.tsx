@@ -10,7 +10,7 @@ interface Props {
 type Confirming = 'complete' | 'force' | null;
 
 const CONFIRM_TEXT =
-  "Before you continue: pause writes on the source. The migration finishes once every shard's lag stays at 0. After it completes, point your application at the target.";
+  "Before you continue: pause writes on the source. Lag 0 cannot detect writes that are still arriving, so writes made after the cutover are lost. The migration finishes once every shard's lag stays at 0. After it completes, point your application at the target.";
 
 const primaryButton = 'px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed';
 const amberButton = 'px-3 py-1.5 text-sm rounded-md bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed';

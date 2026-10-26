@@ -90,6 +90,37 @@ describe('ExecutionPanel cutover', () => {
     expect(screen.queryByRole('button', { name: 'Complete cutover' })).toBeNull();
   });
 
+  it('ticks the countdown between polls', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(fetchApi).mockResolvedValueOnce(
+        syncResult({
+          status: 'completing',
+          cutover: { requestedAt: Date.now(), deadlineAt: Date.now() + 65_500, outcome: 'waiting' },
+        }),
+      ).mockReturnValue(new Promise(() => {}));
+      render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByText(/1m 5s left/)).toBeTruthy();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.getByText(/1m 4s left/)).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows a forced cutover without a countdown', async () => {
+    vi.mocked(fetchApi).mockResolvedValue(
+      syncResult({
+        status: 'completing',
+        cutover: { requestedAt: Date.now(), deadlineAt: Date.now(), outcome: 'forced', forcedLag: [] },
+      }),
+    );
+    render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+    expect(await screen.findByText('Forcing cutover · waiting for RedisShake to finish writing')).toBeTruthy();
+    expect(screen.queryByText(/Waiting for zero lag/)).toBeNull();
+  });
+
   it('posts to the complete endpoint and keeps polling', async () => {
     const onStopped = vi.fn();
     vi.mocked(fetchApi).mockImplementation(async (path: string) =>

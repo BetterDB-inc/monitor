@@ -85,6 +85,7 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
   const onStoppedRef = useRef(onStopped);
   onStoppedRef.current = onStopped;
   const pollGenerationRef = useRef(0);
+  const [, setClock] = useState(0);
 
   useEffect(() => {
     let stopped = false;
@@ -120,6 +121,13 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
       if (timer) clearTimeout(timer);
     };
   }, [executionId]);
+
+  const completing = execution?.status === 'completing';
+  useEffect(() => {
+    if (!completing) return;
+    const ticker = setInterval(() => setClock((tick) => tick + 1), 1000);
+    return () => clearInterval(ticker);
+  }, [completing]);
 
   const handleStop = async () => {
     try {
@@ -199,7 +207,9 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
           </span>
           {execution.status === 'completing' && execution.cutover && (
             <span className="text-sm text-amber-700">
-              Waiting for zero lag · {formatRemaining(execution.cutover.deadlineAt)} left
+              {execution.cutover.outcome === 'forced'
+                ? 'Forcing cutover · waiting for RedisShake to finish writing'
+                : `Waiting for zero lag · ${formatRemaining(execution.cutover.deadlineAt)} left`}
             </span>
           )}
         </div>
