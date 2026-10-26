@@ -104,10 +104,30 @@ chip never claims *Fully synced*.
 **Cutover procedure**:
 1. Wait for the stage chip to show *Replicating* or *Fully synced*.
 2. Pause or quiesce writes on the source (brief read-only window).
-3. Wait until the stage chip shows *Fully synced* (every shard's lag is 0).
-   The raw log still prints `diff=[N]` per shard if you need to cross-check.
-4. Click **Stop Migration** in the execution panel.
-5. Point your application at the target.
+3. Click **Complete cutover** in the execution panel and confirm. The job shows
+   *Completing* and waits until every shard's lag stays at 0 for a few seconds
+   (default limit: 5 minutes), then stops RedisShake. The raw log still prints
+   `diff=[N]` per shard if you want to cross-check.
+4. When the job shows *Completed* ("Cutover complete at …"), point your
+   application at the target.
+
+**If the cutover times out**: writes on the source kept the target behind, so
+the migration goes back to *Replicating* and keeps running. Pause writes and
+click **Retry cutover**, or click **Force cutover** to end the migration now.
+A forced cutover finishes as *Completed* and records the per-shard lag you
+accepted; those writes may be missing on the target. When the number of source
+shards can't be determined, a normal cutover can't confirm zero lag and always
+times out, so force is the only way to finish.
+
+**Stop Migration** cancels the migration without a cutover and ends as
+*Cancelled*, at any point, including while a cutover is waiting.
+
+The same actions are available over the API:
+`POST /migration/execution/:id/complete` with an optional body
+`{ "force": boolean, "timeoutSeconds": number }` (`timeoutSeconds` is an integer
+from 10 to 3600, default 300). It returns `409` unless the job is a
+`redis_shake_sync` migration that is replicating or already completing.
+`DELETE /migration/execution/:id` cancels.
 
 **Options**:
 
@@ -305,7 +325,7 @@ starting.
 writes continuously via PSYNC, so keys created or modified after the initial RDB
 sync are captured. The intended workflow is to keep the source running normally,
 wait for the stage to show *Replicating*, then apply a brief read-only window
-only at the moment of cutover and wait for *Fully synced*.
+only at the moment of cutover and click **Complete cutover**.
 
 ### RDB format compatibility
 
