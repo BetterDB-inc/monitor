@@ -18,6 +18,18 @@ export interface ParsedLogLine {
   progress: number | null; // 0–100
   /** Stage signal from sync_reader logs. null if the line carries no stage signal. */
   syncStage: SyncStage | null;
+  shardLag: ShardLag | null;
+  shardState: ShardState | null;
+}
+
+export interface ShardLag {
+  shard: string;
+  diff: number;
+}
+
+export interface ShardState {
+  shard: string;
+  inAof: boolean;
 }
 
 const NULL_RESULT: ParsedLogLine = {
@@ -25,7 +37,28 @@ const NULL_RESULT: ParsedLogLine = {
   bytesTransferred: null,
   progress: null,
   syncStage: null,
+  shardLag: null,
+  shardState: null,
 };
+
+const STATS_STATUS_RE = /write_count=\[\d+\], write_ops=\[[^\]]*\], (?:src-(\d+), )?(.+)$/;
+const AOF_DIFF_RE = /^syncing aof, diff=\[(-?\d+)\]/;
+
+function parseShardStatus(line: string): Pick<ParsedLogLine, 'shardLag' | 'shardState'> {
+  const statusMatch = line.match(STATS_STATUS_RE);
+  if (!statusMatch) {
+    return { shardLag: null, shardState: null };
+  }
+  const shard = `src-${statusMatch[1] ?? '0'}`;
+  const diffMatch = statusMatch[2].match(AOF_DIFF_RE);
+  if (!diffMatch) {
+    return { shardLag: null, shardState: { shard, inAof: false } };
+  }
+  return {
+    shardLag: { shard, diff: Math.max(0, parseInt(diffMatch[1], 10)) },
+    shardState: { shard, inAof: true },
+  };
+}
 
 /**
  * Best-effort detection of which stage of sync_reader a log line indicates.
@@ -189,7 +222,7 @@ export function parseLogLine(line: string): ParsedLogLine {
         progress !== null ||
         syncStage !== null
       ) {
-        return { keysTransferred, bytesTransferred, progress, syncStage };
+        return { keysTransferred, bytesTransferred, progress, syncStage, shardLag: null, shardState: null };
       }
     }
   } catch {
@@ -202,6 +235,7 @@ export function parseLogLine(line: string): ParsedLogLine {
     bytesTransferred: null,
     progress: null,
     syncStage,
+    ...parseShardStatus(line),
   };
 
   // sync_reader periodic stat: "write_count=[26000], write_ops=[5199.92], src-N, syncing aof, diff=[0]"
@@ -233,7 +267,8 @@ export function parseLogLine(line: string): ParsedLogLine {
     result.keysTransferred !== null ||
     result.bytesTransferred !== null ||
     result.progress !== null ||
-    result.syncStage !== null
+    result.syncStage !== null ||
+    result.shardState !== null
   ) {
     return result;
   }
