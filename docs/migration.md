@@ -102,7 +102,7 @@ number of source shards can't be determined, the readout still shows lag but the
 chip never claims *Fully synced*.
 
 **Cutover procedure**:
-1. Wait for the stage chip to show *Replicating*.
+1. Wait for the stage chip to show *Replicating* or *Fully synced*.
 2. Pause or quiesce writes on the source (brief read-only window).
 3. Wait until the stage chip shows *Fully synced* (every shard's lag is 0).
    The raw log still prints `diff=[N]` per shard if you need to cross-check.
