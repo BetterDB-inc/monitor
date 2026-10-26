@@ -93,6 +93,7 @@ class ApiHttpError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly detail?: string,
   ) {
     super(message);
   }
@@ -131,14 +132,16 @@ async function apiRequest(method: string, path: string, body?: unknown): Promise
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
     let message = `Request failed with status ${res.status}`;
+    let detail: string | undefined;
     try {
       const parsed = JSON.parse(errText);
       if (parsed.error) message = String(parsed.error);
       else if (parsed.message) message = String(parsed.message);
+      if (typeof parsed.message === 'string') detail = parsed.message;
     } catch {
       if (errText) message = errText;
     }
-    throw new ApiHttpError(message, res.status);
+    throw new ApiHttpError(message, res.status, detail);
   }
 
   const text = await res.text();
@@ -2066,6 +2069,17 @@ function textResult(text: string): ToolResult {
   return { content: [{ type: 'text' as const, text }] };
 }
 
+const MISSING_ROUTE_RE = /^Cannot (GET|POST|PUT|PATCH|DELETE) /;
+
+/** 404 from a missing route = this monitor build lacks the feature; any other 404 (unknown instance, session not on this instance) is surfaced verbatim. */
+function notFoundResult(err: ApiHttpError, featureLabel: string, requiresPro = true): ToolResult {
+  const detail = err.detail ?? err.message;
+  if (MISSING_ROUTE_RE.test(detail)) {
+    return unavailableResult(featureLabel, requiresPro);
+  }
+  return { content: [{ type: 'text' as const, text: detail }], isError: true };
+}
+
 // --- Capacity & scaling ---
 
 server.tool(
@@ -2082,7 +2096,7 @@ server.tool(
         data = await apiFetch(`/mcp/instance/${id}/scaling-readiness`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          return unavailableResult('Scaling readiness', false);
+          return notFoundResult(err, 'Scaling readiness', false);
         }
         throw err;
       }
@@ -2107,7 +2121,7 @@ server.tool(
         data = await apiFetch(`/mcp/instance/${id}/scaling-readiness/history${qs}`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          return unavailableResult('Scaling readiness history');
+          return notFoundResult(err, 'Scaling readiness history');
         }
         throw err;
       }
@@ -2134,7 +2148,7 @@ server.tool(
         data = await apiFetch(`/mcp/instance/${id}/cache-simulator${qs}`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          return unavailableResult('Cache size simulator');
+          return notFoundResult(err, 'Cache size simulator');
         }
         throw err;
       }
@@ -2161,7 +2175,7 @@ server.tool(
         data = await apiFetch(`/mcp/instance/${id}/kv-cache/status`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          return unavailableResult('KV cache monitoring');
+          return notFoundResult(err, 'KV cache monitoring');
         }
         throw err;
       }
@@ -2191,7 +2205,7 @@ server.tool(
         data = await apiFetch(`/mcp/instance/${id}/kv-cache/hit-rate${qs}`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          return unavailableResult('KV cache monitoring');
+          return notFoundResult(err, 'KV cache monitoring');
         }
         throw err;
       }
@@ -2219,7 +2233,7 @@ server.tool(
         data = await apiFetch(`/mcp/instance/${id}/kv-cache/footprint-history${qs}`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          return unavailableResult('KV cache monitoring');
+          return notFoundResult(err, 'KV cache monitoring');
         }
         throw err;
       }
@@ -2246,7 +2260,7 @@ server.tool(
         data = await apiFetch(`/mcp/instance/${id}/cve`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          return unavailableResult('CVE inspection', false);
+          return notFoundResult(err, 'CVE inspection', false);
         }
         if (err instanceof ApiHttpError && err.status === 503) {
           return textResult(err.message);
@@ -2268,7 +2282,7 @@ server.tool(
         data = await apiFetch('/mcp/fleet/summary');
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          return unavailableResult('Fleet summary', false);
+          return notFoundResult(err, 'Fleet summary', false);
         }
         throw err;
       }
@@ -2296,7 +2310,7 @@ server.tool(
         data = await apiFetch(`/mcp/instance/${id}/key-analytics/summary${qs}`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          return unavailableResult('Key analytics');
+          return notFoundResult(err, 'Key analytics');
         }
         throw err;
       }
@@ -2327,7 +2341,7 @@ server.tool(
         data = await apiFetch(`/mcp/instance/${id}/key-analytics/patterns${qs}`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          return unavailableResult('Key analytics');
+          return notFoundResult(err, 'Key analytics');
         }
         throw err;
       }
@@ -2357,7 +2371,7 @@ server.tool(
         data = await apiFetch(`/mcp/instance/${id}/key-analytics/patterns/trend${qs}`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          return unavailableResult('Key analytics');
+          return notFoundResult(err, 'Key analytics');
         }
         throw err;
       }
@@ -2390,7 +2404,7 @@ server.tool(
         data = await apiFetch(`/mcp/instance/${id}/monitor/sessions${qs}`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          return unavailableResult('MONITOR capture sessions', false);
+          return notFoundResult(err, 'MONITOR capture sessions', false);
         }
         throw err;
       }
@@ -2420,7 +2434,7 @@ server.tool(
         );
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          return textResult(err.message);
+          return notFoundResult(err, 'MONITOR capture sessions', false);
         }
         throw err;
       }

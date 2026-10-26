@@ -128,6 +128,14 @@ describe('redactUrlCredentials', () => {
   it('leaves text without credentials untouched', () => {
     expect(redactUrlCredentials('connect ECONNREFUSED 10.0.0.1:9000')).toBe('connect ECONNREFUSED 10.0.0.1:9000');
   });
+
+  it('strips the whole userinfo when the password contains a literal @', () => {
+    expect(redactUrlCredentials('GET http://user:p@ss@host:9000/metrics -> 401')).toBe('GET http://host:9000/metrics -> 401');
+  });
+
+  it('does not span past a path, query or fragment', () => {
+    expect(redactUrlCredentials('http://host/a@b and https://u:p@c/x')).toBe('http://host/a@b and https://c/x');
+  });
 });
 
 describe('redactScrapeUrl', () => {
@@ -145,5 +153,9 @@ describe('redactScrapeUrl', () => {
 
   it('falls back to regex redaction for unparseable values', () => {
     expect(redactScrapeUrl('not a url?token=1')).toBe('not a url');
+  });
+
+  it('falls back safely for an unparseable URL with @ in the password', () => {
+    expect(redactScrapeUrl('http://u:p@ss@ host/x?t=1')).not.toContain('ss@');
   });
 });

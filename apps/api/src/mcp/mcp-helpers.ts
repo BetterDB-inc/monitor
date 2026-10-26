@@ -140,7 +140,7 @@ export function parseOptionalDbIndex(value: string | undefined): number | undefi
   return parsed;
 }
 
-const URL_USERINFO_RE = /([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@]+@/gi;
+const URL_USERINFO_RE = /([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]+@/gi;
 
 /** Strip `user:pass@` userinfo from every URL embedded in free text (error messages, logs). */
 export function redactUrlCredentials(text: string): string {
