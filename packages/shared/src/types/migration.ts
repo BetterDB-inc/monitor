@@ -207,6 +207,12 @@ export interface MigrationExecutionResult {
   syncStage: SyncStage;
 }
 
+export interface ReplicationLagEntry {
+  shard: string;
+  diff: number | null;
+  updatedAt: number;
+}
+
 export interface StartExecutionResponse {
   id: string;
   status: 'pending';
