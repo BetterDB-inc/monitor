@@ -5,6 +5,8 @@ import { splitSampleBudget, validateSample } from '../validation/sample-validato
 function node(values: Record<string, string>) {
   const keys = Object.keys(values);
   return {
+    has: (key: string) => key in values,
+    read: (key: string) => (key in values ? Buffer.from(values[key]) : null),
     dbsize: jest.fn().mockResolvedValue(keys.length),
     // One SCAN page with every key, so sampling is deterministic.
     scan: jest.fn().mockResolvedValue(['0', keys]),
@@ -28,10 +30,17 @@ function node(values: Record<string, string>) {
   };
 }
 
-function cluster(masters: Array<ReturnType<typeof node>>): Valkey {
+/** Reads route to whichever master holds the key, as the real Cluster client does. */
+function cluster(masters: Array<ReturnType<typeof node>>) {
+  const owner = (key: string) => masters.find((master) => master.has(key));
   const client = Object.create(Cluster.prototype) as Cluster;
   client.nodes = jest.fn().mockReturnValue(masters) as unknown as Cluster['nodes'];
-  return client as unknown as Valkey;
+  const reads = {
+    type: jest.fn(async (key: string) => (owner(key) ? 'string' : 'none')),
+    getBuffer: jest.fn(async (key: string) => owner(key)?.read(key) ?? null),
+  };
+  Object.assign(client, reads);
+  return Object.assign(client as unknown as Valkey, reads);
 }
 
 function shard(prefix: string, count: number): Record<string, string> {
@@ -69,23 +78,40 @@ describe('splitSampleBudget', () => {
 });
 
 describe('validateSample / cluster source', () => {
-  it('samples every master and reads each key from the master it lives on', async () => {
+  it('SCANs every master and reads values through the cluster client', async () => {
     const a = shard('a', 4);
     const b = shard('b', 4);
     const c = shard('c', 4);
     const masters = [node(a), node(b), node(c)];
     const target = node({ ...a, ...b, ...c });
+    const source = cluster(masters);
 
-    const result = await validateSample(cluster(masters), target as unknown as Valkey, 12);
+    const result = await validateSample(source, target as unknown as Valkey, 12);
 
     expect(result).toMatchObject({ sampledKeys: 12, matched: 12, missing: 0 });
-    for (const [index, master] of masters.entries()) {
+    for (const master of masters) {
       expect(master.scan).toHaveBeenCalled();
-      const prefix = ['a', 'b', 'c'][index];
-      const readKeys = master.getBuffer.mock.calls.map(([key]) => String(key));
-      expect(readKeys.length).toBeGreaterThan(0);
-      expect(readKeys.every((key) => key.startsWith(`${prefix}:`))).toBe(true);
+      expect(master.getBuffer).not.toHaveBeenCalled();
     }
+    expect((source.getBuffer as jest.Mock).mock.calls).toHaveLength(12);
+  });
+
+  it('follows a redirect instead of reporting a missing key', async () => {
+    const a = shard('a', 3);
+    const b = shard('b', 3);
+    const masters = [node(a), node(b)];
+    const moved = new Error('MOVED 1234 10.0.0.9:6379');
+    for (const master of masters) {
+      master.getBuffer.mockRejectedValue(moved);
+      master.type.mockRejectedValue(moved);
+    }
+    const target = node({ ...a, ...b });
+
+    const result = await validateSample(cluster(masters), target as unknown as Valkey, 6);
+
+    expect(result.missing).toBe(0);
+    expect(result.matched).toBe(result.sampledKeys);
+    expect(result.sampledKeys).toBe(6);
   });
 
   it('catches a shard that never reached the target', async () => {

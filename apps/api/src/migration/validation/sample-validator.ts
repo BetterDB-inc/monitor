@@ -3,6 +3,7 @@ import type { SampleValidationResult, SampleKeyResult, SampleKeyStatus } from '@
 import { describeStreamGroups } from '../execution/stream-metadata';
 
 const TYPE_BATCH_SIZE = 100;
+const CLUSTER_TYPE_CONCURRENCY = 50;
 const MAX_ISSUES = 50;
 const LARGE_KEY_THRESHOLD = 100;
 
@@ -11,9 +12,10 @@ const LARGE_KEY_THRESHOLD = 100;
  * Never throws — per-key errors are captured as 'missing' with detail.
  *
  * A cluster source (a Cluster client, as createTargetClient() builds it) is
- * sampled on every master: SCAN is node-local, so sampling one node would only
- * ever check that shard's keys. The budget is split by each master's DBSIZE
- * (see splitSampleBudget), and each key is read from the master it was found on.
+ * sampled on every master: SCAN runs on every master (it is node-local), and the
+ * budget is split by each master's DBSIZE (see splitSampleBudget). TYPE and value
+ * reads go through the Cluster client so MOVED/ASK during a slot migration or
+ * failover are followed instead of being reported as missing keys.
  */
 export async function validateSample(
   sourceClient: Valkey,
@@ -21,25 +23,16 @@ export async function validateSample(
   sampleSize: number = 500,
 ): Promise<SampleValidationResult> {
   // 1. Collect sample keys from source via SCAN with random starting cursor
-  const groups = await collectSampleGroups(sourceClient, sampleSize);
-  const keys: string[] = [];
-  const owners: Valkey[] = [];
-  for (const group of groups) {
-    for (const key of group.keys) {
-      keys.push(key);
-      owners.push(group.node);
-    }
-  }
+  const keys = await collectSampleKeysAcrossMasters(sourceClient, sampleSize);
 
   if (keys.length === 0) {
     return { sampledKeys: 0, matched: 0, missing: 0, typeMismatches: 0, valueMismatches: 0, issues: [] };
   }
 
-  // 2. Batch TYPE lookup on source (per node: a pipeline cannot span masters)
-  const sourceTypes: string[] = [];
-  for (const group of groups) {
-    sourceTypes.push(...(await batchType(group.node, group.keys)));
-  }
+  // 2. Batch TYPE lookup on source (a Cluster pipeline cannot span slots)
+  const sourceTypes = isCluster(sourceClient)
+    ? await batchTypeViaCluster(sourceClient, keys)
+    : await batchType(sourceClient, keys);
 
   // 3. Validate each key against target
   let matched = 0;
@@ -58,7 +51,7 @@ export async function validateSample(
     }
 
     try {
-      const result = await validateKey(owners[i], targetClient, key, sourceType);
+      const result = await validateKey(sourceClient, targetClient, key, sourceType);
 
       switch (result.status) {
         case 'match':
@@ -98,27 +91,23 @@ export async function validateSample(
 
 // ── Helpers ──
 
-interface SampleGroup {
-  node: Valkey;
-  keys: string[];
-}
-
-async function collectSampleGroups(client: Valkey, sampleSize: number): Promise<SampleGroup[]> {
+function isCluster(client: Valkey): boolean {
   // createTargetClient() casts Cluster to Valkey, so narrow from unknown.
   const maybeCluster: unknown = client;
-  if (!(maybeCluster instanceof Cluster)) {
-    return [{ node: client, keys: await collectSampleKeys(client, sampleSize) }];
-  }
+  return maybeCluster instanceof Cluster;
+}
+
+async function collectSampleKeysAcrossMasters(client: Valkey, sampleSize: number): Promise<string[]> {
+  const maybeCluster: unknown = client;
+  if (!(maybeCluster instanceof Cluster)) return collectSampleKeys(client, sampleSize);
   const masters = maybeCluster.nodes('master');
   if (masters.length === 0) throw new Error('No cluster masters available to sample keys');
   const sizes = await Promise.all(masters.map((node) => node.dbsize()));
   const quotas = splitSampleBudget(sampleSize, sizes);
-  return Promise.all(
-    masters.map(async (node, index) => ({
-      node,
-      keys: quotas[index] > 0 ? await collectSampleKeys(node, quotas[index]) : [],
-    })),
+  const perMaster = await Promise.all(
+    masters.map((node, index) => (quotas[index] > 0 ? collectSampleKeys(node, quotas[index]) : [])),
   );
+  return perMaster.flat();
 }
 
 /**
@@ -230,6 +219,18 @@ async function batchType(client: Valkey, keys: string[]): Promise<string[]> {
     }
   }
 
+  return results;
+}
+
+/** One TYPE per key through the Cluster client (follows MOVED/ASK), in bounded chunks, order preserved. */
+async function batchTypeViaCluster(client: Valkey, keys: string[]): Promise<string[]> {
+  const results: string[] = [];
+  for (let i = 0; i < keys.length; i += CLUSTER_TYPE_CONCURRENCY) {
+    const chunk = keys.slice(i, i + CLUSTER_TYPE_CONCURRENCY);
+    results.push(
+      ...(await Promise.all(chunk.map((key) => client.type(key).catch(() => 'none')))),
+    );
+  }
   return results;
 }
 

@@ -278,9 +278,11 @@ flags a blocking incompatibility.
 Validation sums `DBSIZE` over every master of a cluster source or target, so
 the key count comparison covers the whole dataset. The sample spot-check also
 covers every master of a cluster source: the ~500-key budget is split across
-masters in proportion to their `DBSIZE`, every master that holds keys gets at
-least one sample, and each sampled key is read from the master it was found on.
-A shard whose keys never reached the target therefore shows up as missing keys
+masters in proportion to their `DBSIZE`, and every master that holds keys gets
+at least one sample as long as the budget is at least the number of non-empty
+masters (above ~500 masters, the smallest shards may get none). Values are read
+through the cluster client, so a slot migration or failover during validation is
+followed rather than reported as missing keys. A shard whose keys never reached the target therefore shows up as missing keys
 rather than passing unnoticed.
 
 ### Concurrent writes on the source
