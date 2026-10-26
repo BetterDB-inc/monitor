@@ -794,6 +794,25 @@ describe('MigrationExecutionService', () => {
       expect(service.getExecution(id)!.status).toBe('failed');
     });
 
+    it('waits for a fresh report from every shard before killing', async () => {
+      const id = await startAofJob();
+      service.completeExecution(id, { force: false, timeoutSeconds: 300 });
+      await jest.advanceTimersByTimeAsync(2_500);
+      expect(kill).not.toHaveBeenCalled();
+      await stream(0, 1000);
+      expect(kill).toHaveBeenCalledWith('SIGTERM');
+    });
+
+    it('keeps a cutover that is already stopping RedisShake when stop is clicked', async () => {
+      const id = await startAofJob();
+      service.completeExecution(id, { force: false, timeoutSeconds: 300 });
+      await stream(0, 2000);
+      expect(kill).toHaveBeenCalledWith('SIGTERM');
+      expect(service.stopExecution(id)).toBe(true);
+      await exitWith(1);
+      expect(service.getExecution(id)).toMatchObject({ status: 'completed', cutover: { outcome: 'completed' } });
+    });
+
     it('keeps fullySynced true while completing', async () => {
       const id = await startAofJob();
       service.completeExecution(id, { force: false, timeoutSeconds: 300 });

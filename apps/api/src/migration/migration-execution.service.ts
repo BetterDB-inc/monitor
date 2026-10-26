@@ -491,6 +491,10 @@ export class MigrationExecutionService {
       return true;
     }
 
+    if (job.terminating === 'cutover') {
+      return true;
+    }
+
     this.clearCutoverTimer(job);
     job.status = 'cancelled';
     job.terminating = 'cancel';
@@ -553,8 +557,11 @@ export class MigrationExecutionService {
       job.cutoverStableSince = null;
       return;
     }
-    job.cutoverStableSince ??= now;
-    if (now - job.cutoverStableSince >= cutoverStableWindowMs(job.expectedShards)) {
+    const stableSince = (job.cutoverStableSince ??= now);
+    const reportedSinceStable = [...(job.replicationLag?.values() ?? [])].every(
+      (entry) => entry.updatedAt > stableSince,
+    );
+    if (reportedSinceStable && now - stableSince >= cutoverStableWindowMs(job.expectedShards)) {
       this.clearCutoverTimer(job);
       job.terminating = 'cutover';
       this.killProcess(job);
