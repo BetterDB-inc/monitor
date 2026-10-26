@@ -44,7 +44,7 @@ function sourceFunctionCall(kind: SourceFunctions): jest.Mock {
   return jest.fn().mockResolvedValue(kind === 'present' ? [['library_name', 'mylib']] : []);
 }
 
-function createMockRegistry(overrides?: { sourceClusterEnabled?: boolean; targetClusterEnabled?: boolean; sourceDbType?: 'valkey' | 'redis'; targetDbType?: 'valkey' | 'redis'; sourceFunctions?: SourceFunctions; sourceClusterNodes?: Array<{ flags: string[] }> }) {
+function createMockRegistry(overrides?: { sourceClusterEnabled?: boolean; targetClusterEnabled?: boolean; sourceDbType?: 'valkey' | 'redis'; targetDbType?: 'valkey' | 'redis'; sourceFunctions?: SourceFunctions; sourceClusterNodes?: Array<{ flags: string[]; slots: number[][] }> }) {
   const sourceCluster = overrides?.sourceClusterEnabled ?? false;
   const targetCluster = overrides?.targetClusterEnabled ?? false;
   const sourceDbType = overrides?.sourceDbType ?? 'valkey';
@@ -528,7 +528,12 @@ describe('MigrationExecutionService', () => {
     it('counts cluster masters into expectedShards for a sync job', async () => {
       const clusterRegistry = createMockRegistry({
         sourceClusterEnabled: true,
-        sourceClusterNodes: [{ flags: ['master'] }, { flags: ['master'] }, { flags: ['slave'] }, { flags: ['myself', 'master'] }],
+        sourceClusterNodes: [
+          { flags: ['master'], slots: [[0, 5460]] },
+          { flags: ['master'], slots: [[5461, 10922]] },
+          { flags: ['slave'], slots: [] },
+          { flags: ['myself', 'master'], slots: [[10923, 16383]] },
+        ],
       });
       const clusterService = createExecutionService(clusterRegistry);
       const { id } = await clusterService.startExecution({

@@ -95,12 +95,21 @@ describe('countSourceShards', () => {
 
   it('counts master nodes for a cluster source', async () => {
     const getClusterNodes = jest.fn().mockResolvedValue([
-      { flags: ['myself', 'master'] },
-      { flags: ['master'] },
-      { flags: ['slave'] },
-      { flags: ['master'] },
+      { flags: ['myself', 'master'], slots: [[0, 5460]] },
+      { flags: ['master'], slots: [[5461, 10922]] },
+      { flags: ['slave'], slots: [] },
+      { flags: ['master'], slots: [[10923, 16383]] },
     ]);
     await expect(countSourceShards({ getClusterNodes }, true)).resolves.toBe(3);
+  });
+
+  it('skips masters that hold no slots, as RedisShake does', async () => {
+    const getClusterNodes = jest.fn().mockResolvedValue([
+      { flags: ['master'], slots: [[0, 8191]] },
+      { flags: ['master'], slots: [[8192, 16383]] },
+      { flags: ['master'], slots: [] },
+    ]);
+    await expect(countSourceShards({ getClusterNodes }, true)).resolves.toBe(2);
   });
 
   it('returns null when topology lookup throws', async () => {
@@ -109,7 +118,7 @@ describe('countSourceShards', () => {
   });
 
   it('returns null when no masters are found', async () => {
-    const getClusterNodes = jest.fn().mockResolvedValue([{ flags: ['slave'] }]);
+    const getClusterNodes = jest.fn().mockResolvedValue([{ flags: ['slave'], slots: [] }]);
     await expect(countSourceShards({ getClusterNodes }, true)).resolves.toBeNull();
   });
 });

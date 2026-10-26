@@ -50,7 +50,7 @@ export function buildLagSnapshot(
 }
 
 export async function countSourceShards(
-  adapter: { getClusterNodes(): Promise<Array<{ flags: string[] }>> },
+  adapter: { getClusterNodes(): Promise<Array<{ flags: string[]; slots: number[][] }>> },
   isCluster: boolean,
 ): Promise<number | null> {
   if (!isCluster) {
@@ -58,7 +58,7 @@ export async function countSourceShards(
   }
   try {
     const nodes = await adapter.getClusterNodes();
-    const masters = nodes.filter((n) => n.flags.includes('master')).length;
+    const masters = nodes.filter((n) => n.flags.includes('master') && n.slots.length > 0).length;
     return masters > 0 ? masters : null;
   } catch {
     return null;
