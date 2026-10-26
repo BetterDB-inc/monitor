@@ -175,6 +175,7 @@ tls = ${target.tls ? 'true' : 'false'}
 
 ${buildFilterSection(excludeFunctions)}[advanced]
 log_level = "info"
+log_interval = 1
 pipeline_count_limit = 256
 try_diskless = ${rsOptions.tryDiskless ? 'true' : 'false'}
 `;

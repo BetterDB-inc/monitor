@@ -13,6 +13,7 @@ import type { ExecutionJob } from './execution/execution-job';
 import { findRedisShakeBinary } from './execution/redisshake-runner';
 import { buildScanReaderToml, buildSyncReaderToml } from './execution/toml-builder';
 import { parseLogLine, classifyRedisShakeFailure, stripAnsi } from './execution/log-parser';
+import { applyLagUpdate, buildLagSnapshot, countSourceShards } from './execution/replication-lag';
 import { runCommandMigration } from './execution/command-migration-worker';
 import { shouldExcludeFunctions, isRdbRestoreCompatible } from './fork-compat';
 import { probeSourceFunctionsClusterAware, parseNodeAddress } from './function-presence';
@@ -93,6 +94,10 @@ export class MigrationExecutionService {
     const targetClusterSection = (targetInfo as Record<string, Record<string, string>>).cluster ?? {};
     const targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
 
+    const expectedShards = mode === 'redis_shake_sync'
+      ? await countSourceShards(sourceAdapter, clusterEnabled)
+      : null;
+
     // 4. For redis_shake modes, locate the binary upfront
     let binaryPath: string | undefined;
     if (mode === 'redis_shake' || mode === 'redis_shake_sync') {
@@ -119,6 +124,8 @@ export class MigrationExecutionService {
       notices: [],
       progress: null,
       syncStage: null,
+      replicationLag: mode === 'redis_shake_sync' ? new Map() : null,
+      expectedShards,
       process: null,
       tomlPath: null,
       pidPath: null,
@@ -330,6 +337,7 @@ export class MigrationExecutionService {
         if (parsed.bytesTransferred !== null) job.bytesTransferred = parsed.bytesTransferred;
         if (parsed.progress !== null) job.progress = parsed.progress;
         if (parsed.syncStage !== null && job.mode === 'redis_shake_sync') job.syncStage = parsed.syncStage;
+        if (job.replicationLag) applyLagUpdate(job.replicationLag, parsed, Date.now());
       };
 
       // Decode both pipes as UTF-8 at the stream level so a multi-byte sequence
@@ -494,6 +502,7 @@ export class MigrationExecutionService {
     const job = this.jobs.get(id);
     if (!job) return undefined;
 
+    const lag = buildLagSnapshot(job.replicationLag, job.expectedShards, job.syncStage, Date.now());
     return {
       id: job.id,
       status: job.status,
@@ -515,6 +524,9 @@ export class MigrationExecutionService {
       notices: [...job.notices],
       progress: job.progress,
       syncStage: job.syncStage,
+      replicationLag: lag.replicationLag,
+      expectedShards: job.expectedShards,
+      fullySynced: lag.fullySynced && job.status === 'running',
     };
   }
 

@@ -205,6 +205,9 @@ export interface MigrationExecutionResult {
   progress: number | null;
   /** Only populated for redis_shake_sync mode; null otherwise. */
   syncStage: SyncStage;
+  replicationLag: ReplicationLagEntry[] | null;
+  expectedShards: number | null;
+  fullySynced: boolean;
 }
 
 export interface ReplicationLagEntry {
