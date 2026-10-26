@@ -213,7 +213,7 @@ export interface MigrationExecutionResult {
   cutoverAt?: number;
 }
 
-export type CutoverOutcome = 'waiting' | 'timed_out' | 'completed' | 'forced' | 'failed';
+export type CutoverOutcome = 'waiting' | 'draining' | 'timed_out' | 'completed' | 'forced' | 'failed';
 
 export interface CutoverAttempt {
   requestedAt: number;

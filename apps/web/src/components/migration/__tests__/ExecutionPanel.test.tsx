@@ -145,6 +145,20 @@ describe('ExecutionPanel cutover', () => {
     expect(screen.queryByText(/Waiting for Fully synced/)).toBeNull();
   });
 
+  it('shows the drain phase without a countdown or Stop once RedisShake is stopping', async () => {
+    vi.mocked(fetchApi).mockResolvedValue(
+      syncResult({
+        status: 'completing',
+        fullySynced: true,
+        cutover: { requestedAt: Date.now(), deadlineAt: Date.now() + 65_000, outcome: 'draining' },
+      }),
+    );
+    render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+    expect(await screen.findByText('Fully synced · waiting for RedisShake to finish writing')).toBeTruthy();
+    expect(screen.queryByText(/Waiting for Fully synced/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Stop Migration' })).toBeNull();
+  });
+
   it('posts to the complete endpoint and keeps polling', async () => {
     const onStopped = vi.fn();
     vi.mocked(fetchApi).mockImplementation(async (path: string) =>

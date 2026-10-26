@@ -164,6 +164,7 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
   }
 
   const timedOut = execution.status === 'running' && execution.cutover?.outcome === 'timed_out';
+  const cutoverStopping = execution.cutover?.outcome === 'draining' || execution.cutover?.outcome === 'forced';
 
   return (
     <div className="space-y-4">
@@ -213,19 +214,23 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
             <span className="text-sm text-amber-700">
               {execution.cutover.outcome === 'forced'
                 ? 'Forcing cutover · waiting for RedisShake to finish writing'
-                : `Waiting for Fully synced · ${formatRemaining(execution.cutover.deadlineAt)} left`}
+                : execution.cutover.outcome === 'draining'
+                  ? 'Fully synced · waiting for RedisShake to finish writing'
+                  : `Waiting for Fully synced · ${formatRemaining(execution.cutover.deadlineAt)} left`}
             </span>
           )}
         </div>
         {(execution.status === 'running' || execution.status === 'completing') && (
           <div className="flex items-start gap-2">
             {!timedOut && <CutoverControls execution={execution} onComplete={handleComplete} />}
-            <button
-              onClick={handleStop}
-              className="px-3 py-1.5 text-sm border border-destructive/20 text-destructive rounded-md hover:bg-destructive/10"
-            >
-              Stop Migration
-            </button>
+            {!cutoverStopping && (
+              <button
+                onClick={handleStop}
+                className="px-3 py-1.5 text-sm border border-destructive/20 text-destructive rounded-md hover:bg-destructive/10"
+              >
+                Stop Migration
+              </button>
+            )}
           </div>
         )}
       </div>

@@ -865,6 +865,28 @@ describe('MigrationExecutionService', () => {
       expect(service.getExecution(id)!.status).toBe('completing');
     });
 
+    it('marks the cutover draining once Fully synced holds and RedisShake is stopped', async () => {
+      const id = await startAofJob();
+      service.completeExecution(id, { force: false, timeoutSeconds: 300 });
+      await stream(0, 2000);
+      expect(kill).toHaveBeenCalledWith('SIGTERM');
+      expect(service.getExecution(id)).toMatchObject({ status: 'completing', cutover: { outcome: 'draining' } });
+    });
+
+    it('completes the cutover when RedisShake exits cleanly just before the drain limit', async () => {
+      const id = await startAofJob();
+      service.completeExecution(id, { force: false, timeoutSeconds: 300 });
+      await stream(0, 2000);
+      await jest.advanceTimersByTimeAsync(CUTOVER_DRAIN_LIMIT_MS - 1000);
+      exitCb(0, null);
+      await jest.advanceTimersByTimeAsync(2000);
+      closeCb();
+      await flushProbe();
+      await flushProbe();
+      expect(kill).not.toHaveBeenCalledWith('SIGKILL');
+      expect(service.getExecution(id)).toMatchObject({ status: 'completed', cutover: { outcome: 'completed' } });
+    });
+
     it('fails the cutover when RedisShake has to be killed after the drain limit', async () => {
       const id = await startAofJob();
       service.completeExecution(id, { force: false, timeoutSeconds: 300 });

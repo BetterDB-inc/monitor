@@ -425,7 +425,10 @@ export class MigrationExecutionService {
       // captures the code; 'close' flushes the buffers and resolves.
       const code = await new Promise<number>((resolve, reject) => {
         let exitCode = 1;
-        proc.on('exit', (c) => { exitCode = c ?? 1; });
+        proc.on('exit', (c) => {
+          exitCode = c ?? 1;
+          job.process = null;
+        });
         proc.on('close', () => {
           stdoutHandler.flush();
           stderrHandler.flush();
@@ -627,6 +630,9 @@ export class MigrationExecutionService {
     if (now - job.cutoverStableSince >= CUTOVER_STABLE_MS) {
       this.clearCutoverTimer(job);
       job.terminating = 'cutover';
+      if (job.cutover) {
+        job.cutover.outcome = 'draining';
+      }
       this.killForCutover(job);
     }
   }
