@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { fetchApi } from '../../api/client';
 import type { MigrationExecutionResult, SyncStage } from '@betterdb/shared';
 import { ExecutionLogViewer } from './ExecutionLogViewer';
+import { ReplicationLag } from './ReplicationLag';
 
 interface Props {
   executionId: string;
@@ -28,14 +29,16 @@ function formatElapsed(startedAt: number, completedAt?: number): string {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-function syncStageLabel(stage: SyncStage): { label: string; className: string } | null {
+function syncStageLabel(stage: SyncStage, fullySynced: boolean): { label: string; className: string } | null {
   switch (stage) {
     case 'connecting':
       return { label: 'Connecting', className: 'bg-muted text-muted-foreground' };
     case 'rdb_syncing':
       return { label: 'Initial sync (RDB)', className: 'bg-blue-50 text-blue-700 border border-blue-200' };
     case 'aof_replicating':
-      return { label: 'Replicating · ready for cutover', className: 'bg-green-50 text-green-700 border border-green-200' };
+      return fullySynced
+        ? { label: 'Fully synced', className: 'bg-green-50 text-green-700 border border-green-200' }
+        : { label: 'Replicating', className: 'bg-blue-50 text-blue-700 border border-blue-200' };
     default:
       return null;
   }
@@ -124,7 +127,7 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
                 : 'RedisShake'}
           </span>
           {execution.mode === 'redis_shake_sync' && (() => {
-            const stage = syncStageLabel(execution.syncStage);
+            const stage = syncStageLabel(execution.syncStage, execution.fullySynced);
             if (!stage) return null;
             return (
               <span className={`px-2 py-0.5 rounded text-xs ${stage.className}`}>
@@ -132,6 +135,13 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
               </span>
             );
           })()}
+          {execution.replicationLag && (
+            <ReplicationLag
+              entries={execution.replicationLag}
+              expectedShards={execution.expectedShards}
+              now={Date.now()}
+            />
+          )}
           <span className="text-sm text-muted-foreground">
             {(execution.keysTransferred ?? 0).toLocaleString()}
             {execution.totalKeys ? ` / ${execution.totalKeys.toLocaleString()}` : ''} keys transferred
@@ -178,8 +188,9 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
           <p className="font-medium">Initial sync complete. Replicating new writes.</p>
           <p>
             The migration will keep replicating from source to target until you stop it.
-            When you're ready to cut over: pause writes on the source, wait briefly for the
-            replication to drain, then click Stop Migration and point your application at the target.
+            When you're ready to cut over: pause writes on the source, wait for the lag above to
+            reach 0 on every shard (the chip turns Fully synced), then click Stop Migration and
+            point your application at the target.
           </p>
         </div>
       )}
