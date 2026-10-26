@@ -1004,6 +1004,19 @@ describe('MigrationExecutionService', () => {
       // Oldest should be evicted
       expect(service.getExecution(ids[0])).toBeUndefined();
     });
+
+    it('releases the status port when every job slot is running', async () => {
+      const jobs = (service as unknown as { jobs: Map<string, { status: string; startedAt: number }> }).jobs;
+      for (let i = 0; i < 10; i++) jobs.set(`running-${i}`, { status: 'running', startedAt: i });
+      mockReleaseStatusPort.mockClear();
+
+      await expect(service.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake_sync',
+      })).rejects.toThrow(ServiceUnavailableException);
+      expect(mockReleaseStatusPort).toHaveBeenCalled();
+    });
   });
 });
 

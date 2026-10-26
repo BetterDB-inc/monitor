@@ -158,7 +158,12 @@ export class MigrationExecutionService {
       pidPath: null,
     };
     // 6. Evict old jobs before inserting the new one
-    this.evictOldJobs();
+    try {
+      this.evictOldJobs();
+    } catch (err) {
+      await statusPortReservation?.release();
+      throw err;
+    }
 
     this.jobs.set(id, job);
 
