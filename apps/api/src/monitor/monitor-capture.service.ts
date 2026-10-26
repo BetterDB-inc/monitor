@@ -94,6 +94,7 @@ export type MonitorSourceFactory = (
 export class MonitorCaptureService {
   private readonly logger = new Logger(MonitorCaptureService.name);
   private readonly active = new Map<string, ActiveSession>();
+  private readonly starting = new Set<string>();
   private monitorSourceFactory: MonitorSourceFactory;
   private counterSampleReader: CounterSampleReader;
 
@@ -156,77 +157,82 @@ export class MonitorCaptureService {
    */
   async startSession(input: StartSessionInput): Promise<StoredCaptureSession> {
     const { connectionId } = input;
-    if (this.active.has(connectionId)) {
+    if (this.active.has(connectionId) || this.starting.has(connectionId)) {
       throw new ConflictException(
         `A capture session is already active on connection ${connectionId}`,
       );
     }
+    this.starting.add(connectionId);
 
-    const durationMs = input.durationMs ?? DEFAULT_DURATION_MS;
-    const byteCap = input.byteCap ?? DEFAULT_BYTE_CAP;
-    const lineCap = input.lineCap ?? DEFAULT_LINE_CAP;
+    try {
+      const durationMs = input.durationMs ?? DEFAULT_DURATION_MS;
+      const byteCap = input.byteCap ?? DEFAULT_BYTE_CAP;
+      const lineCap = input.lineCap ?? DEFAULT_LINE_CAP;
 
-    const fanOutNodes = input.fanOut ? await this.resolveFanOutNodes(connectionId) : [];
-    const isFanOut = fanOutNodes.length > 0;
+      const fanOutNodes = input.fanOut ? await this.resolveFanOutNodes(connectionId) : [];
+      const isFanOut = fanOutNodes.length > 0;
 
-    const targetNode = isFanOut
-      ? undefined
-      : await this.resolveTargetNodeAddress(connectionId, input.targetNodeId);
+      const targetNode = isFanOut
+        ? undefined
+        : await this.resolveTargetNodeAddress(connectionId, input.targetNodeId);
 
-    // Start samples are taken before any MONITOR connection opens so the
-    // window never includes traffic from before the capture. Fail-open and
-    // bounded (2 s per node, in parallel).
-    const startTargets = isFanOut
-      ? await Promise.all(
-          fanOutNodes.map(async (n) => ({
+      // Start samples are taken before any MONITOR connection opens so the
+      // window never includes traffic from before the capture. Fail-open and
+      // bounded (2 s per node, in parallel).
+      const startTargets = isFanOut
+        ? await Promise.all(
+            fanOutNodes.map(async (n) => ({
+              nodeId: n.id,
+              address: n.address,
+              outcome: await this.sampleCounters(connectionId, n.id),
+            })),
+          )
+        : [
+            {
+              nodeId: input.targetNodeId,
+              address: targetNode,
+              outcome: await this.sampleCounters(connectionId, input.targetNodeId),
+            },
+          ];
+
+      const initialSegments: CaptureNodeSegment[] = isFanOut
+        ? fanOutNodes.map((n) => ({
             nodeId: n.id,
             address: n.address,
-            outcome: await this.sampleCounters(connectionId, n.id),
-          })),
-        )
-      : [
-          {
-            nodeId: input.targetNodeId,
-            address: targetNode,
-            outcome: await this.sampleCounters(connectionId, input.targetNodeId),
-          },
-        ];
+            status: 'running',
+            byteCount: 0,
+            lineCount: 0,
+          }))
+        : [];
 
-    const initialSegments: CaptureNodeSegment[] = isFanOut
-      ? fanOutNodes.map((n) => ({
-          nodeId: n.id,
-          address: n.address,
-          status: 'running',
-          byteCount: 0,
-          lineCount: 0,
-        }))
-      : [];
+      const session: StoredCaptureSession = {
+        id: randomUUID(),
+        connectionId,
+        status: 'running',
+        source: input.source ?? 'manual',
+        triggerId: input.triggerId,
+        scheduleId: input.scheduleId,
+        requestedBy: input.requestedBy,
+        startedAt: Date.now(),
+        byteCount: 0,
+        lineCount: 0,
+        byteCap,
+        lineCap,
+        targetNode,
+        nodeSegments: isFanOut ? initialSegments : undefined,
+        counterSnapshots: buildStartSnapshots(startTargets),
+      };
 
-    const session: StoredCaptureSession = {
-      id: randomUUID(),
-      connectionId,
-      status: 'running',
-      source: input.source ?? 'manual',
-      triggerId: input.triggerId,
-      scheduleId: input.scheduleId,
-      requestedBy: input.requestedBy,
-      startedAt: Date.now(),
-      byteCount: 0,
-      lineCount: 0,
-      byteCap,
-      lineCap,
-      targetNode,
-      nodeSegments: isFanOut ? initialSegments : undefined,
-      counterSnapshots: buildStartSnapshots(startTargets),
-    };
+      await this.storage.saveCaptureSession(session, connectionId);
 
-    await this.storage.saveCaptureSession(session, connectionId);
+      if (isFanOut) {
+        return this.startFanOutSession(session, fanOutNodes, durationMs, byteCap, lineCap);
+      }
 
-    if (isFanOut) {
-      return this.startFanOutSession(session, fanOutNodes, durationMs, byteCap, lineCap);
+      return this.startSingleSession(session, input.targetNodeId, durationMs, byteCap, lineCap);
+    } finally {
+      this.starting.delete(connectionId);
     }
-
-    return this.startSingleSession(session, input.targetNodeId, durationMs, byteCap, lineCap);
   }
 
   private async startSingleSession(

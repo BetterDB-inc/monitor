@@ -298,13 +298,10 @@ function addKvCacheCoverageColumns(db: Database.Database): void {
 }
 
 function addCaptureSessionsCounterSnapshotsColumn(db: Database.Database): void {
-  try {
-    const cols = db.prepare(`PRAGMA table_info(capture_sessions)`).all() as { name: string }[];
-    if (cols.length > 0 && !cols.some((c) => c.name === 'counter_snapshots')) {
-      db.prepare(`ALTER TABLE capture_sessions ADD COLUMN counter_snapshots TEXT`).run();
-    }
-  } catch {
-    // Table may not exist yet — createSchema's CREATE TABLE includes the column from day one.
+  const cols = db.prepare(`PRAGMA table_info(capture_sessions)`).all() as { name: string }[];
+  if (cols.length === 0) return;
+  if (!cols.some((c) => c.name === 'counter_snapshots')) {
+    db.prepare(`ALTER TABLE capture_sessions ADD COLUMN counter_snapshots TEXT`).run();
   }
 }
 

@@ -113,6 +113,44 @@ describe('MonitorCaptureService', () => {
       await service.stopSession(second.id);
     });
 
+    it('rejects a concurrent startSession for the same connection while the first is still starting', async () => {
+      const { service } = makeService();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      service.setCounterSampleReader(async () => {
+        await gate;
+        return { capturedAt: 1, counters: { total_commands_processed: 1 } };
+      });
+
+      const first = service.startSession({ connectionId: CONNECTION_ID });
+      await expect(service.startSession({ connectionId: CONNECTION_ID })).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+
+      release();
+      const session = await first;
+      expect(session.status).toBe('running');
+      const stored = await service.listSessions({ connectionId: CONNECTION_ID });
+      expect(stored).toHaveLength(1);
+
+      await service.stopSession(session.id);
+    });
+
+    it('releases the reservation when startSession fails', async () => {
+      const { service, storage } = makeService();
+      jest.spyOn(storage, 'saveCaptureSession').mockRejectedValueOnce(new Error('disk full'));
+
+      await expect(service.startSession({ connectionId: CONNECTION_ID })).rejects.toThrow(
+        'disk full',
+      );
+
+      const session = await service.startSession({ connectionId: CONNECTION_ID });
+      expect(session.status).toBe('running');
+      await service.stopSession(session.id);
+    });
+
     it('records target_node when a cluster node id is supplied', async () => {
       const { service, storage, cluster } = makeService();
       cluster.discoverNodes.mockResolvedValueOnce([
