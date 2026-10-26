@@ -1,11 +1,11 @@
-import { Injectable, Logger, BadRequestException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, NotFoundException, ServiceUnavailableException, NotImplementedException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
 import * as os from 'os';
 import Valkey from 'iovalkey';
-import type { MigrationExecutionRequest, MigrationExecutionResult, StartExecutionResponse, ExecutionMode } from '@betterdb/shared';
+import type { MigrationExecutionRequest, MigrationExecutionResult, StartExecutionResponse, ExecutionMode, CompleteExecutionResponse } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { MigrationService } from './migration.service';
 import { getBlockingIssues } from './analysis/compatibility-checker';
@@ -496,6 +496,10 @@ export class MigrationExecutionService {
     // For command mode, the worker checks job.status === 'cancelled' between batches
 
     return true;
+  }
+
+  completeExecution(id: string, options: { force: boolean; timeoutSeconds: number }): CompleteExecutionResponse {
+    throw new NotImplementedException(`Cutover for '${id}' (force: ${options.force}) is not available`);
   }
 
   getExecution(id: string): MigrationExecutionResult | undefined {
