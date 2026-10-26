@@ -2,9 +2,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, act, fireEvent } from '@testing-library/react';
 import type { MigrationExecutionResult } from '@betterdb/shared';
 import { ExecutionPanel } from '../ExecutionPanel';
-import { fetchApi } from '../../../api/client';
+import { ApiError, fetchApi } from '../../../api/client';
 
-vi.mock('../../../api/client', () => ({
+vi.mock('../../../api/client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../api/client')>()),
   fetchApi: vi.fn(),
 }));
 
@@ -196,6 +197,26 @@ describe('ExecutionPanel cutover', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('stays on the panel when stop is refused because the cutover is finishing', async () => {
+    const onStopped = vi.fn();
+    vi.mocked(fetchApi).mockImplementation(async (path: string, init?: RequestInit) => {
+      if (init?.method === 'DELETE') {
+        throw new ApiError('The cutover is already finishing and can no longer be stopped', 409);
+      }
+      return syncResult({
+        status: 'completing',
+        cutover: { requestedAt: Date.now(), deadlineAt: Date.now() + 65_000, outcome: 'waiting' },
+      });
+    });
+    render(<ExecutionPanel executionId="exec-1" onStopped={onStopped} />);
+    const stop = await screen.findByRole('button', { name: 'Stop Migration' });
+    await act(async () => {
+      fireEvent.click(stop);
+    });
+    expect(await screen.findByText('The cutover is already finishing and can no longer be stopped')).toBeTruthy();
+    expect(onStopped).not.toHaveBeenCalled();
   });
 
   it('shows the timed-out banner with retry and force', async () => {

@@ -142,7 +142,10 @@ A forced cutover finishes as *Completed* and records the per-shard lag you
 accepted; those writes may be missing on the target.
 
 **Stop Migration** cancels the migration without a cutover and ends as
-*Cancelled*, at any point, including while a cutover is waiting.
+*Cancelled*, at any point, including while a cutover is waiting. Once the
+cutover has started stopping RedisShake (after *Fully synced* held, or after a
+forced cutover), it can no longer be cancelled: Stop returns `409` and the
+migration finishes as a cutover.
 
 The same actions are available over the API:
 `POST /migration/execution/:id/complete` with an optional body

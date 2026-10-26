@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { fetchApi } from '../../api/client';
+import { ApiError, fetchApi } from '../../api/client';
 import type { CompleteExecutionResponse, MigrationExecutionResult, SyncStage } from '@betterdb/shared';
 import { ExecutionLogViewer } from './ExecutionLogViewer';
 import { ReplicationLag } from './ReplicationLag';
@@ -82,6 +82,7 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
   const [execution, setExecution] = useState<MigrationExecutionResult | null>(null);
   const [confirmingFlush, setConfirmingFlush] = useState(false);
   const [pollFailed, setPollFailed] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
   const onStoppedRef = useRef(onStopped);
   onStoppedRef.current = onStopped;
   const pollGenerationRef = useRef(0);
@@ -130,10 +131,14 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
   }, [completing]);
 
   const handleStop = async () => {
+    setStopError(null);
     try {
       await fetchApi(`/migration/execution/${executionId}`, { method: 'DELETE' });
-    } catch {
-      /* ignore */
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 409) {
+        setStopError(err.message);
+        return;
+      }
     }
     // Optimistic transition
     onStoppedRef.current();
@@ -224,6 +229,7 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPend
           </div>
         )}
       </div>
+      {stopError && <p className="text-sm text-destructive">{stopError}</p>}
 
       {/* Progress bar — shown while running */}
       {execution.status === 'running' && execution.progress != null && (

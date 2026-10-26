@@ -965,12 +965,12 @@ describe('MigrationExecutionService', () => {
       expect(service.getExecution(id)!.status).toBe('failed');
     });
 
-    it('keeps a cutover that is already stopping RedisShake when stop is clicked', async () => {
+    it('refuses to stop a cutover that is already stopping RedisShake', async () => {
       const id = await startAofJob();
       service.completeExecution(id, { force: false, timeoutSeconds: 300 });
       await stream(0, 2000);
       expect(kill).toHaveBeenCalledWith('SIGTERM');
-      expect(service.stopExecution(id)).toBe(true);
+      expect(() => service.stopExecution(id)).toThrow(ConflictException);
       await exitWith(0);
       expect(service.getExecution(id)).toMatchObject({ status: 'completed', cutover: { outcome: 'completed' } });
     });

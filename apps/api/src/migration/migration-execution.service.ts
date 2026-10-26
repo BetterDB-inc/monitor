@@ -550,7 +550,7 @@ export class MigrationExecutionService {
     }
 
     if (job.terminating === 'cutover') {
-      return true;
+      throw new ConflictException('The cutover is already finishing and can no longer be stopped');
     }
 
     this.clearCutoverTimer(job);
