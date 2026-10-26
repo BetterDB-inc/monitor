@@ -1,6 +1,7 @@
 import { execFileSync } from 'child_process';
 import { Pool } from 'pg';
 import { PostgresAdapter } from '../src/storage/adapters/postgres.adapter';
+import { dropSchema } from './postgres-test-utils';
 
 const DSN =
   process.env.CONNECTION_TYPE_POSTGRES_TEST_DSN ??
@@ -67,7 +68,7 @@ describePostgres('connection type storage — postgres', () => {
   afterAll(async () => {
     await adapter.close();
     const adminPool = new Pool({ connectionString: DSN });
-    await adminPool.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+    await dropSchema(adminPool, SCHEMA);
     await adminPool.end();
   });
 
