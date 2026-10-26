@@ -91,14 +91,20 @@ source — the same protocol a replica uses. This means:
    in near real-time.
 
 The migration **runs continuously** and never exits on its own. The UI shows a
-stage chip that transitions from **Initial sync (RDB)** to
-**Replicating · ready for cutover** once the snapshot phase finishes.
+stage chip that transitions from **Initial sync (RDB)** to **Replicating** once
+the snapshot phase finishes. Next to the chip, a lag readout shows how far the
+target is behind the source on the slowest shard; click it for a per-shard
+breakdown. Lag is measured in replication-stream bytes: data the source has sent
+that has not yet been written to the target. The chip turns **Fully synced** only
+when every source shard has reported recently and every shard's lag is 0. If the
+number of source shards can't be determined, the readout still shows lag but the
+chip never claims *Fully synced*.
 
 **Cutover procedure**:
-1. Wait for the stage chip to show *Replicating · ready for cutover*.
+1. Wait for the stage chip to show *Replicating*.
 2. Pause or quiesce writes on the source (brief read-only window).
-3. Wait a few seconds for the replication lag to drain to zero (`diff=[0]` in
-   the log).
+3. Wait until the stage chip shows *Fully synced* (every shard's lag is 0).
+   The raw log still prints `diff=[N]` per shard if you need to cross-check.
 4. Click **Stop Migration** in the execution panel.
 5. Point your application at the target.
 
@@ -297,8 +303,8 @@ starting.
 **redis_shake_sync mode** is specifically designed for live sources. It replicates
 writes continuously via PSYNC, so keys created or modified after the initial RDB
 sync are captured. The intended workflow is to keep the source running normally,
-wait for the stage to show *Replicating · ready for cutover*, then apply a brief
-read-only window only at the moment of cutover.
+wait for the stage to show *Replicating*, then apply a brief read-only window
+only at the moment of cutover and wait for *Fully synced*.
 
 ### RDB format compatibility
 
