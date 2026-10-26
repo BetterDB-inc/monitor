@@ -26,6 +26,8 @@ export function CutoverControls({ execution, onComplete }: Props) {
   }
 
   const timedOut = execution.cutover?.outcome === 'timed_out';
+  const lagEntries = execution.replicationLag ?? [];
+  const unreported = Math.max(0, (execution.expectedShards ?? 0) - lagEntries.length);
   const ready = execution.syncStage === 'aof_replicating';
 
   const submit = async (force: boolean) => {
@@ -89,15 +91,20 @@ export function CutoverControls({ execution, onComplete }: Props) {
       {confirming === 'force' && (
         <div className="space-y-2 max-w-xl">
           <p className="text-sm">Force the cutover now? Writes not yet on the target will be missing:</p>
-          <ul className="text-sm list-disc pl-5">
-            {(execution.replicationLag ?? []).map((entry) => (
-              <li key={entry.shard}>
-                {entry.diff === null
-                  ? `${entry.shard}: initial sync`
-                  : `${entry.shard}: ${formatBytes(entry.diff)} behind`}
-              </li>
-            ))}
-          </ul>
+          {lagEntries.length === 0 && unreported === 0 ? (
+            <p className="text-sm">No shard has reported lag yet.</p>
+          ) : (
+            <ul className="text-sm list-disc pl-5">
+              {lagEntries.map((entry) => (
+                <li key={entry.shard}>
+                  {entry.diff === null
+                    ? `${entry.shard}: initial sync`
+                    : `${entry.shard}: ${formatBytes(entry.diff)} behind`}
+                </li>
+              ))}
+              {unreported > 0 && <li>{`${unreported} shard(s) with no report`}</li>}
+            </ul>
+          )}
           <div className="flex flex-wrap items-center gap-2">
             <button onClick={() => submit(true)} disabled={submitting} className={amberButton}>
               Force cutover

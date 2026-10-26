@@ -107,6 +107,33 @@ describe('CutoverControls', () => {
     expect(onComplete).toHaveBeenCalledWith(true);
   });
 
+  it('counts shards with no report in the force confirmation', () => {
+    render(
+      <CutoverControls
+        execution={execution({
+          cutover: timedOut,
+          expectedShards: 3,
+          replicationLag: [{ shard: 'src-0', diff: 4096, updatedAt: Date.now() }],
+        })}
+        onComplete={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Force cutover' }));
+    expect(screen.getByText('src-0: 4.00 KB behind')).toBeTruthy();
+    expect(screen.getByText('2 shard(s) with no report')).toBeTruthy();
+  });
+
+  it('says so when no shard has reported lag', () => {
+    render(
+      <CutoverControls
+        execution={execution({ cutover: timedOut, expectedShards: null, replicationLag: [] })}
+        onComplete={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Force cutover' }));
+    expect(screen.getByText('No shard has reported lag yet.')).toBeTruthy();
+  });
+
   it('shows the API error inline', async () => {
     const onComplete = vi.fn().mockRejectedValue(new Error('Cutover is available only while a sync migration is replicating'));
     render(<CutoverControls execution={execution({})} onComplete={onComplete} />);
