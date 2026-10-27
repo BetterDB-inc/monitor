@@ -111,7 +111,9 @@ export class FakeValkey {
   }
 
   get directReads() {
-    return this.calls.filter((c) => READ_COMMANDS.includes(c.name));
+    return this.calls.filter(
+      (c) => READ_COMMANDS.includes(c.name) && String(c.args[0]).toUpperCase() !== 'CLIENT',
+    );
   }
 
   on() {
@@ -129,8 +131,7 @@ export class FakeValkey {
 
   duplicate(overrides: Record<string, unknown> = {}) {
     this.record('duplicate', [overrides]);
-    if (!this.duplicateWith) throw new Error('duplicate unsupported');
-    return this.duplicateWith;
+    return this.duplicateWith ?? this;
   }
 
   async quit() {

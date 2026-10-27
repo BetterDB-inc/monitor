@@ -27,6 +27,7 @@ describe('readSessionKeys', () => {
 
   it('reports that reads touch keys when no NO-TOUCH reader could be opened', async () => {
     const client = new FakeValkey(storeOf({ k: { type: 'string', value: 'v' } }));
+    client.noTouchError = new Error('ERR unknown subcommand');
     const read = await readSessionKeys(fakeDb(client), ['k']);
     expect(read.touchesKeys).toBe(true);
   });

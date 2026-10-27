@@ -307,23 +307,29 @@ describe('scanSessions', () => {
 
   it('rethrows when the only node fails', async () => {
     const client = new FakeValkey();
-    client.scan = async () => {
+    const reader = new FakeValkey();
+    reader.scan = async () => {
       throw new Error('NOAUTH');
     };
+    client.duplicateWith = reader;
     await expect(scanSessions(fakeDb(client), 's:*', preset)).rejects.toThrow('NOAUTH');
     expect(client.disconnected).toBe(false);
+    expect(reader.disconnected).toBe(true);
   });
 });
 
 describe('primaryClients', () => {
   beforeEach(() => ValkeyMock.mockReset());
 
-  it('returns the parent client for standalone and never closes it', async () => {
+  it('reads standalone through a reader it closes, never the parent', async () => {
     const parent = new FakeValkey();
+    const reader = new FakeValkey();
+    parent.duplicateWith = reader;
     const result = await primaryClients(fakeDb(parent));
-    expect(result.clients).toEqual([parent]);
+    expect(result.clients).toEqual([reader]);
     expect(result.failed).toBe(0);
     await result.release();
+    expect(reader.disconnected).toBe(true);
     expect(parent.disconnected).toBe(false);
     expect(ValkeyMock).not.toHaveBeenCalled();
   });

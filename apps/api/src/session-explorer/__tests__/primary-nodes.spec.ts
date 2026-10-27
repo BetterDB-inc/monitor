@@ -58,15 +58,16 @@ describe('withPrimaries', () => {
     expect(parent.callsOf('duplicate')[0].args[0]).toMatchObject({ commandTimeout: 5000 });
   });
 
-  it('falls back to the shared connection when a reader cannot connect', async () => {
+  it('counts the server as failed instead of reading on the shared client', async () => {
     const parent = new FakeValkey();
     const reader = new FakeValkey();
-    reader.connectError = new Error('ECONNREFUSED');
+    reader.connectError = new Error('ERR max number of clients reached');
     parent.duplicateWith = reader;
 
-    const used = await withPrimaries(fakeDb(parent), async ({ clients }) => clients);
+    const result = await withPrimaries(fakeDb(parent), async (p) => p);
 
-    expect(used).toEqual([parent]);
+    expect(result.clients).toEqual([]);
+    expect(result.failed).toBe(1);
     expect(parent.disconnected).toBe(false);
   });
 
@@ -115,7 +116,7 @@ describe('withPrimaries', () => {
     expect(ValkeyMock.mock.calls[0][0]).toMatchObject({ host: '10.0.0.1', port: 7000 });
   });
 
-  it('falls back to the shared connection when its own node cannot be reached', async () => {
+  it('counts its own node as failed when it cannot be reached', async () => {
     const parent = new FakeValkey();
     const unreachable = new FakeValkey();
     unreachable.connectError = new Error('ECONNREFUSED');
@@ -126,9 +127,8 @@ describe('withPrimaries', () => {
 
     const result = await withPrimaries(db, async (p) => p);
 
-    expect(result.clients).toEqual([parent]);
-    expect(result.failed).toBe(0);
-    expect(result.touchesKeys).toBe(true);
+    expect(result.clients).toEqual([]);
+    expect(result.failed).toBe(1);
   });
 
   it('reports that reads leave access times alone when every reader has NO-TOUCH', async () => {
@@ -144,17 +144,6 @@ describe('withPrimaries', () => {
     const parent = new FakeValkey();
     const reader = new FakeValkey();
     reader.noTouchError = new Error('ERR unknown subcommand');
-    parent.duplicateWith = reader;
-
-    const result = await withPrimaries(fakeDb(parent), async (p) => p);
-
-    expect(result.touchesKeys).toBe(true);
-  });
-
-  it('reports that reads touch keys when the shared connection stands in for a reader', async () => {
-    const parent = new FakeValkey();
-    const reader = new FakeValkey();
-    reader.connectError = new Error('ECONNREFUSED');
     parent.duplicateWith = reader;
 
     const result = await withPrimaries(fakeDb(parent), async (p) => p);
