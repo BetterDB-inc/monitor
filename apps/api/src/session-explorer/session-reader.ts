@@ -390,8 +390,9 @@ async function readProbedFields(
   let room = acc.cap - acc.bytes;
   const wanted: Buffer[] = [];
   for (const [i, field] of fields.entries()) {
-    const cost = bulk(field.length) + bulk(numberOf(lengths[i] as PipelineResult) ?? 0);
-    if (cost > acc.cap) {
+    const length = numberOf(lengths[i] as PipelineResult);
+    const cost = length === null ? null : bulk(field.length) + bulk(length);
+    if (cost === null || cost > acc.cap) {
       acc.skipped = true;
       continue;
     }

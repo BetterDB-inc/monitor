@@ -363,6 +363,17 @@ describe('readSessionKeys', () => {
     expect(client.fetchedBytes).toBeLessThan(MB);
   });
 
+  it('leaves hash fields unread when their size probe fails', async () => {
+    const value = { a: 'y'.repeat(3 * MB) };
+    const client = new FakeValkey(storeOf({ h: { type: 'hash', value, memory: 3 * MB } }));
+    client.failHstrlen = true;
+
+    const key = await readOne(client, 'h', { byteCap: 2 * MB });
+
+    expect(key).toMatchObject({ value: {}, truncated: true });
+    expect(client.callsOf('hmgetBuffer')).toHaveLength(0);
+  });
+
   it('reads hash fields with HSCAN when the server has no NOVALUES', async () => {
     const value: Record<string, string> = {};
     for (let i = 0; i < 200; i++) value[`f${i}`] = 'x';

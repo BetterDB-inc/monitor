@@ -80,6 +80,7 @@ export class FakeValkey {
   options: Record<string, unknown>;
   failKeys = new Map<string, string>();
   movedKeys = new Set<string>();
+  failHstrlen = false;
   lfu = false;
   noValues = true;
 
@@ -178,6 +179,7 @@ export class FakeValkey {
       case 'exists':
         return e ? 1 : 0;
       case 'hstrlen': {
+        if (this.failHstrlen) throw new Error('ERR hstrlen failed');
         const v = (raw as Record<string, string | Buffer> | undefined)?.[args[1] as string];
         return v === undefined ? 0 : Buffer.from(v).length;
       }
