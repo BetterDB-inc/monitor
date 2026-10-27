@@ -11,6 +11,8 @@ const { api, connection } = vi.hoisted(() => ({
   api: {
     listNamespaces: vi.fn(),
     deleteNamespace: vi.fn(),
+    createNamespace: vi.fn(),
+    updateNamespace: vi.fn(),
     listSessions: vi.fn(),
     oversize: vi.fn(),
     getSession: vi.fn(),
@@ -80,6 +82,40 @@ describe('SessionExplorer', () => {
     await waitFor(() => expect(api.listSessions).toHaveBeenCalledWith('b', expect.anything()));
     expect(api.listSessions.mock.calls.map(([id]) => id)).not.toContain('a');
     expect(screen.queryByRole('option', { name: 'ns-a' })).toBeNull();
+  });
+
+  const saveSetup = () => {
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Chats' } });
+    fireEvent.change(screen.getByLabelText('Key pattern'), { target: { value: 'b:*' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  };
+
+  it('does not rescan the previous namespace when a new one is created', async () => {
+    api.listNamespaces.mockResolvedValueOnce([ns('a')]).mockResolvedValue([ns('a'), ns('b')]);
+    api.createNamespace.mockResolvedValue(ns('b'));
+    renderPage();
+
+    await waitFor(() => expect(api.listSessions).toHaveBeenCalledWith('a', expect.anything()));
+    api.listSessions.mockClear();
+
+    fireEvent.click(screen.getByRole('button', { name: 'New' }));
+    saveSetup();
+
+    await waitFor(() => expect(api.listSessions).toHaveBeenCalledWith('b', expect.anything()));
+    expect(api.listSessions.mock.calls.map(([id]) => id)).not.toContain('a');
+  });
+
+  it('rescans a namespace after it is edited', async () => {
+    api.listNamespaces.mockResolvedValue([ns('a')]);
+    api.updateNamespace.mockResolvedValue({ ...ns('a'), pattern: 'b:*' });
+    renderPage();
+
+    await waitFor(() => expect(api.listSessions).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    saveSetup();
+
+    await waitFor(() => expect(api.listSessions).toHaveBeenCalledTimes(2));
   });
 
   it('keeps the page when a namespace refetch fails after a successful load', async () => {

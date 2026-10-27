@@ -67,7 +67,9 @@ export function SessionExplorer() {
       (old) => upsertNamespace(old, ns),
     );
     selectNamespace(ns.id);
-    void queryClient.invalidateQueries({ queryKey: sessionExplorerKeys.namespaces(connectionId) });
+    const listKey = sessionExplorerKeys.namespaces(connectionId);
+    void queryClient.invalidateQueries({ queryKey: listKey, exact: true });
+    void queryClient.invalidateQueries({ queryKey: [...listKey, ns.id] });
   };
 
   const onDelete = async () => {
