@@ -99,6 +99,7 @@ class Accumulator<T> {
   fetched = 0;
   largest = 0;
   full = false;
+  skipped = false;
 
   constructor(readonly cap: number) {}
 
@@ -115,7 +116,12 @@ class Accumulator<T> {
   }
 
   result(value: ValkeyValue): ReadResult {
-    return { value, truncated: this.full, bytes: this.bytes, fetched: this.fetched };
+    return {
+      value,
+      truncated: this.full || this.skipped,
+      bytes: this.bytes,
+      fetched: this.fetched,
+    };
   }
 }
 
@@ -354,6 +360,10 @@ async function readHash(
           probing = false;
         }
       }
+      if (hasOversizedElements(at, opts)) {
+        acc.skipped = true;
+        return [0, false];
+      }
       const [next, flat] = await client.hscanBuffer(at.key, cursor, 'COUNT', size);
       cursor = next.toString();
       for (let i = 0; i + 1 < flat.length; i += 2) {
@@ -381,7 +391,14 @@ async function readProbedFields(
   const wanted: Buffer[] = [];
   for (const [i, field] of fields.entries()) {
     const cost = bulk(field.length) + bulk(numberOf(lengths[i] as PipelineResult) ?? 0);
-    if (cost > room) break;
+    if (cost > acc.cap) {
+      acc.skipped = true;
+      continue;
+    }
+    if (cost > room) {
+      acc.full = true;
+      break;
+    }
     room -= cost;
     wanted.push(field);
   }
@@ -393,7 +410,6 @@ async function readProbedFields(
       acc.add(bulk(field.length) + bulk(v.length), () => [field.toString(), decoded(v, cap)]);
     });
   }
-  if (wanted.length < fields.length) acc.full = true;
 }
 
 async function readSet(
@@ -521,7 +537,7 @@ function finishRead(
   cap: number,
   opts: ReadOpts,
 ): Promise<ReadResult | null> | ReadResult | null {
-  if (hasOversizedElements(at, opts)) {
+  if (at.type !== 'hash' && hasOversizedElements(at, opts)) {
     return { value: at.type === 'hash' ? {} : [], truncated: true, bytes: 0, fetched: 0 };
   }
   switch (at.type) {

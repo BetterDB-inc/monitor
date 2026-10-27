@@ -122,7 +122,7 @@ export class SessionExplorerService {
         if (cursor !== '0') searchedAll = false;
       }
       if (succeeded === 0 && fallback === null && lastError !== undefined) throw lastError;
-      if (succeeded === 0 && fallback === null && failed > 0) {
+      if (succeeded === 0 && fallback === null) {
         throw new ServiceUnavailableException('No primary could be reached');
       }
       return { sampleKey: fallback, exhausted: searchedAll, failedNodes };
