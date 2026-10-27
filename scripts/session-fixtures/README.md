@@ -6,8 +6,8 @@ Session Explorer are tested against these captures.
 
 ```
 docker compose up -d valkey
-zsh scripts/session-fixtures/run.sh              # seed + capture
-zsh scripts/session-fixtures/run.sh --seed-only  # seed only
+bash scripts/session-fixtures/run.sh              # seed + capture
+bash scripts/session-fixtures/run.sh --seed-only  # seed only
 ```
 
 Safety: only port 6380 is accepted. The harness never flushes; it

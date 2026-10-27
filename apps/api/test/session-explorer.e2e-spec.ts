@@ -4,10 +4,14 @@ import * as path from 'path';
 import type { NestFastifyApplication } from '@nestjs/platform-fastify';
 import request from 'supertest';
 import type {
+  CustomSchema,
   PresetId,
   SessionDetail,
+  SessionExport,
   SessionListResponse,
   SessionNamespace,
+  SessionNamespaceInput,
+  SessionPreview,
   SessionSummary,
 } from '@betterdb/shared';
 
@@ -41,6 +45,9 @@ const sessionNamed = (sessions: SessionSummary[], name: string) =>
 
 const describeE2E = ENABLED ? describe : describe.skip;
 
+const sessionPath = (namespace: SessionNamespace, sessionId: string) =>
+  `/session-explorer/namespaces/${namespace.id}/sessions/${encodeURIComponent(sessionId)}`;
+
 describeE2E('Session Explorer against seeded library data (E2E)', () => {
   let app: NestFastifyApplication;
   const savedEnv = { host: process.env.DB_HOST, port: process.env.DB_PORT };
@@ -50,7 +57,7 @@ describeE2E('Session Explorer against seeded library data (E2E)', () => {
     process.env.DB_PORT = FIXTURE_PORT;
     expect(fixtures.every((f) => String(f.valkey.port) === FIXTURE_PORT)).toBe(true);
 
-    execFileSync('zsh', [path.join(ROOT, 'scripts/session-fixtures/run.sh'), '--seed-only'], {
+    execFileSync('bash', [path.join(ROOT, 'scripts/session-fixtures/run.sh'), '--seed-only'], {
       stdio: 'inherit',
       timeout: SEED_TIMEOUT_MS,
     });
@@ -67,31 +74,37 @@ describeE2E('Session Explorer against seeded library data (E2E)', () => {
     process.env.DB_PORT = savedEnv.port;
   });
 
+  const createNamespace = async (input: SessionNamespaceInput) => {
+    const created = await request(app.getHttpServer())
+      .post('/session-explorer/namespaces')
+      .send(input)
+      .expect(201);
+    const namespace: SessionNamespace = created.body;
+    const res = await request(app.getHttpServer())
+      .get(`/session-explorer/namespaces/${namespace.id}/sessions`)
+      .expect(200);
+    return { namespace, list: res.body as SessionListResponse };
+  };
+
+  const deleteNamespace = (namespace: SessionNamespace) =>
+    request(app.getHttpServer()).delete(`/session-explorer/namespaces/${namespace.id}`);
+
   describe.each(fixtures.map((f) => [f.preset, f] as const))('%s', (_preset, fixture) => {
+    const input: SessionNamespaceInput = {
+      name: `e2e ${fixture.preset}`,
+      pattern: fixture.namespace,
+      preset: fixture.preset,
+      customSchema: null,
+      oversizeThresholdBytes: 1048576,
+    };
     let namespace: SessionNamespace;
     let list: SessionListResponse;
 
     beforeAll(async () => {
-      const created = await request(app.getHttpServer())
-        .post('/session-explorer/namespaces')
-        .send({
-          name: `e2e ${fixture.preset}`,
-          pattern: fixture.namespace,
-          preset: fixture.preset,
-          customSchema: null,
-          oversizeThresholdBytes: 1048576,
-        })
-        .expect(201);
-      namespace = created.body;
-      const res = await request(app.getHttpServer())
-        .get(`/session-explorer/namespaces/${namespace.id}/sessions`)
-        .expect(200);
-      list = res.body;
+      ({ namespace, list } = await createNamespace(input));
     });
 
-    afterAll(async () => {
-      await request(app.getHttpServer()).delete(`/session-explorer/namespaces/${namespace.id}`);
-    });
+    afterAll(() => deleteNamespace(namespace));
 
     it('lists all six seeded sessions', () => {
       expect(list.partial).toBe(false);
@@ -101,9 +114,7 @@ describeE2E('Session Explorer against seeded library data (E2E)', () => {
     it('reads the multi-turn session as seeded', async () => {
       const summary = sessionNamed(list.sessions, 'multi-turn') as SessionSummary;
       const res = await request(app.getHttpServer())
-        .get(
-          `/session-explorer/namespaces/${namespace.id}/sessions/${encodeURIComponent(summary.sessionId)}`,
-        )
+        .get(sessionPath(namespace, summary.sessionId))
         .expect(200);
       const detail: SessionDetail = res.body;
       const expected = fixture.expectations['multi-turn'];
@@ -120,6 +131,89 @@ describeE2E('Session Explorer against seeded library data (E2E)', () => {
 
     it('lists the oversize session above 1 MiB', () => {
       expect(sessionNamed(list.sessions, 'oversize')?.memoryBytes).toBeGreaterThan(1048576);
+    });
+
+    it('exports the multi-turn session with its raw keys', async () => {
+      const summary = sessionNamed(list.sessions, 'multi-turn') as SessionSummary;
+      const res = await request(app.getHttpServer())
+        .get(`${sessionPath(namespace, summary.sessionId)}/export`)
+        .expect(200);
+      const exported: SessionExport = res.body;
+      expect(exported.sessionId).toBe(summary.sessionId);
+      expect(exported.namespace).toEqual({
+        name: input.name,
+        pattern: input.pattern,
+        preset: input.preset,
+      });
+      expect(exported.keys.length).toBeGreaterThan(0);
+      expect(exported.parsed.keys.map((k) => k.key)).toEqual(exported.keys.map((k) => k.key));
+      expect(exported.parsed.messages).toHaveLength(fixture.expectations['multi-turn'].messages);
+    });
+
+    it('previews a parsed sample without touching keys', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/session-explorer/namespaces/preview')
+        .send(input)
+        .expect(200);
+      const preview: SessionPreview = res.body;
+      expect(preview.sampleKey).not.toBeNull();
+      expect(preview.view?.parsed).toBe(true);
+      expect(preview.touchesKeys).toBe(false);
+    });
+  });
+
+  describe('custom and raw presets over langchain-community keys', () => {
+    const fixture = fixtures.find((f) => f.preset === 'langchain-community') as Fixture;
+    const schema: CustomSchema = {
+      valueType: 'list',
+      messages: { from: 'items' },
+      fields: { role: 'type', content: 'data.content' },
+    };
+    const created: SessionNamespace[] = [];
+
+    afterAll(() => Promise.all(created.map(deleteNamespace)));
+
+    it('reads the multi-turn session through a custom schema', async () => {
+      const { namespace, list } = await createNamespace({
+        name: 'e2e custom',
+        pattern: fixture.namespace,
+        preset: 'custom',
+        customSchema: { ...schema, sessionTemplate: fixture.namespace.replace('*', '{session}') },
+        oversizeThresholdBytes: 1048576,
+      });
+      created.push(namespace);
+      expect(list.sessions.map((s) => s.sessionId).sort()).toEqual([...SESSION_NAMES].sort());
+
+      const res = await request(app.getHttpServer())
+        .get(sessionPath(namespace, 'multi-turn'))
+        .expect(200);
+      const detail: SessionDetail = res.body;
+      const expected = fixture.expectations['multi-turn'];
+      expect(detail.unparsedKeys).toBe(0);
+      expect(detail.messages.map((m) => m.content).sort()).toEqual(
+        [...(expected.contents ?? [])].sort(),
+      );
+    });
+
+    it('shows every key as its own unparsed session under the raw preset', async () => {
+      const { namespace, list } = await createNamespace({
+        name: 'e2e raw',
+        pattern: fixture.namespace,
+        preset: 'raw',
+        customSchema: null,
+        oversizeThresholdBytes: 1048576,
+      });
+      created.push(namespace);
+      const multiTurn = sessionNamed(list.sessions, 'multi-turn') as SessionSummary;
+      expect(multiTurn.sessionId).toBe(fixture.namespace.replace('*', 'multi-turn'));
+
+      const res = await request(app.getHttpServer())
+        .get(sessionPath(namespace, multiTurn.sessionId))
+        .expect(200);
+      const detail: SessionDetail = res.body;
+      expect(detail.messages).toEqual([]);
+      expect(detail.keys).toHaveLength(1);
+      expect(detail.keys[0].parsed).toBe(false);
     });
   });
 });
