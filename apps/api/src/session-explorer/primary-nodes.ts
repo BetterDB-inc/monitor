@@ -19,6 +19,18 @@ export interface PrimaryClients {
   release: () => Promise<void>;
 }
 
+const READER_OPTIONS = {
+  lazyConnect: true,
+  enableOfflineQueue: false,
+  enableReadyCheck: false,
+  maxRetriesPerRequest: 0,
+  retryStrategy: () => null,
+  connectTimeout: NODE_TIMEOUT_MS,
+  connectionName: 'BetterDB-Monitor-SessionExplorer',
+};
+
+const readerTimeout = (parent: Valkey): number => parent.options.commandTimeout ?? NODE_TIMEOUT_MS;
+
 export function routeOf(primaries: PrimaryClients, key: string): Valkey | null {
   if (!primaries.routes) return primaries.clients[0] ?? null;
   const slot = calculateSlot(key);
@@ -34,7 +46,7 @@ const isServingPrimary = (node: ClusterNode) =>
 function nodeClient(parent: Valkey, node: ClusterNode): Valkey | null {
   const address = parseNodeAddress(node.address);
   if (!address) return null;
-  const { username, password, tls, commandTimeout } = parent.options;
+  const { username, password, tls } = parent.options;
   const {
     servername: _servername,
     checkServerIdentity: _checkServerIdentity,
@@ -46,24 +58,19 @@ function nodeClient(parent: Valkey, node: ClusterNode): Valkey | null {
     username,
     password,
     tls: tls ? { ...nodeTls, ...tlsIdentityOptions(address.host, node.hostname) } : undefined,
-    lazyConnect: true,
-    enableOfflineQueue: false,
-    enableReadyCheck: false,
-    maxRetriesPerRequest: 0,
-    retryStrategy: () => null,
-    connectTimeout: NODE_TIMEOUT_MS,
-    commandTimeout: commandTimeout ?? NODE_TIMEOUT_MS,
-    connectionName: 'BetterDB-Monitor-SessionExplorer',
+    ...READER_OPTIONS,
+    commandTimeout: readerTimeout(parent),
   });
   client.on('error', () => undefined);
   return client;
 }
 
-async function connectNode(parent: Valkey, node: ClusterNode): Promise<Valkey | null> {
+async function openReader(create: () => Valkey | null): Promise<Valkey | null> {
   let client: Valkey | null = null;
   try {
-    client = nodeClient(parent, node);
+    client = create();
     if (!client) return null;
+    client.on('error', () => undefined);
     await client.connect();
     return client;
   } catch {
@@ -72,10 +79,26 @@ async function connectNode(parent: Valkey, node: ClusterNode): Promise<Valkey | 
   }
 }
 
+const connectNode = (parent: Valkey, node: ClusterNode) =>
+  openReader(() => nodeClient(parent, node));
+
+const sharedReader = async (parent: Valkey): Promise<Valkey> =>
+  (await openReader(() =>
+    parent.duplicate({ ...READER_OPTIONS, commandTimeout: readerTimeout(parent) }),
+  )) ?? parent;
+
 export async function primaryClients(db: DatabasePort): Promise<PrimaryClients> {
   const parent = db.getClient();
   if (!db.getCapabilities().clusterEnabled) {
-    return { clients: [parent], failed: 0, routes: null, release: async () => undefined };
+    const reader = await sharedReader(parent);
+    return {
+      clients: [reader],
+      failed: 0,
+      routes: null,
+      release: async () => {
+        if (reader !== parent) reader.disconnect();
+      },
+    };
   }
 
   const primaries = (await db.getClusterNodes()).filter(isServingPrimary);
@@ -85,9 +108,10 @@ export async function primaryClients(db: DatabasePort): Promise<PrimaryClients> 
   let failed = 0;
 
   const connected = await Promise.all(
-    primaries.map((node) =>
-      node.flags.includes('myself') ? Promise.resolve(parent) : connectNode(parent, node),
-    ),
+    primaries.map(async (node) => {
+      const reader = await connectNode(parent, node);
+      return node.flags.includes('myself') ? (reader ?? parent) : reader;
+    }),
   );
   connected.forEach((client, i) => {
     if (!client) {

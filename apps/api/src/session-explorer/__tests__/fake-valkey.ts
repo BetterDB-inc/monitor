@@ -74,6 +74,7 @@ export class FakeValkey {
   pipelineExecs = 0;
   scanPages?: string[][];
   connectError?: Error;
+  duplicateWith?: FakeValkey;
   disconnected = false;
   options: Record<string, unknown>;
   failKeys = new Map<string, string>();
@@ -123,6 +124,12 @@ export class FakeValkey {
 
   disconnect() {
     this.disconnected = true;
+  }
+
+  duplicate(overrides: Record<string, unknown> = {}) {
+    this.record('duplicate', [overrides]);
+    if (!this.duplicateWith) throw new Error('duplicate unsupported');
+    return this.duplicateWith;
   }
 
   async quit() {

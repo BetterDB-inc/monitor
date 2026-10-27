@@ -22,6 +22,80 @@ const otherPrimaryOptions = async (parentOptions: Record<string, unknown>) => {
 describe('withPrimaries', () => {
   beforeEach(() => ValkeyMock.mockReset());
 
+  it('reads a standalone server through its own connection', async () => {
+    const parent = new FakeValkey();
+    const reader = new FakeValkey();
+    parent.duplicateWith = reader;
+
+    const used = await withPrimaries(fakeDb(parent), async ({ clients }) => clients);
+
+    expect(used).toEqual([reader]);
+    expect(reader.disconnected).toBe(true);
+    expect(parent.disconnected).toBe(false);
+  });
+
+  it('keeps the shared client command timeout on its own reader', async () => {
+    const parent = new FakeValkey(new Map(), { host: 'seed', port: 7000, commandTimeout: 30_000 });
+    parent.duplicateWith = new FakeValkey();
+
+    await withPrimaries(fakeDb(parent), async ({ clients }) => clients);
+
+    expect(parent.callsOf('duplicate')[0].args[0]).toMatchObject({ commandTimeout: 30_000 });
+  });
+
+  it('bounds commands on its own reader when the shared client has no timeout', async () => {
+    const parent = new FakeValkey();
+    parent.duplicateWith = new FakeValkey();
+
+    await withPrimaries(fakeDb(parent), async ({ clients }) => clients);
+
+    expect(parent.callsOf('duplicate')[0].args[0]).toMatchObject({ commandTimeout: 5000 });
+  });
+
+  it('falls back to the shared connection when a reader cannot connect', async () => {
+    const parent = new FakeValkey();
+    const reader = new FakeValkey();
+    reader.connectError = new Error('ECONNREFUSED');
+    parent.duplicateWith = reader;
+
+    const used = await withPrimaries(fakeDb(parent), async ({ clients }) => clients);
+
+    expect(used).toEqual([parent]);
+    expect(parent.disconnected).toBe(false);
+  });
+
+  it('connects to the address of the node it is attached to, not the configured host', async () => {
+    const parent = new FakeValkey(new Map(), { host: 'clustercfg.example.com', port: 6379 });
+    ValkeyMock.mockImplementation(() => new FakeValkey());
+    const db = fakeDb(parent, {
+      nodes: [masterNode('a', '10.0.0.1:7000', ['myself'], [[0, 16383]])],
+    });
+
+    const used = await withPrimaries(db, async ({ clients }) => clients);
+
+    expect(used).not.toContain(parent);
+    expect(ValkeyMock.mock.calls[0][0]).toMatchObject({
+      host: '10.0.0.1',
+      port: 7000,
+      commandTimeout: 5000,
+    });
+  });
+
+  it('falls back to the shared connection when its own node cannot be reached', async () => {
+    const parent = new FakeValkey();
+    const unreachable = new FakeValkey();
+    unreachable.connectError = new Error('ECONNREFUSED');
+    ValkeyMock.mockImplementation(() => unreachable);
+    const db = fakeDb(parent, {
+      nodes: [masterNode('a', '10.0.0.1:7000', ['myself'], [[0, 16383]])],
+    });
+
+    const result = await withPrimaries(db, async (p) => p);
+
+    expect(result.clients).toEqual([parent]);
+    expect(result.failed).toBe(0);
+  });
+
   it('gives other primaries the shared client command timeout', async () => {
     const options = await otherPrimaryOptions({ host: 'seed', port: 7000, commandTimeout: 30_000 });
 
