@@ -100,7 +100,7 @@ export class SessionExplorerService {
         }
       }
       if (succeeded === 0 && lastError !== undefined) throw lastError;
-      if (succeeded === 0 && failed > 0) {
+      if (succeeded === 0) {
         throw new ServiceUnavailableException('No primary could be reached');
       }
       return null;

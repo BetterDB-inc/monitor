@@ -265,6 +265,14 @@ describe('SessionExplorerService.preview', () => {
     );
   });
 
+  it('reports an outage when the cluster has no serving primary', async () => {
+    const service = serviceOver({});
+
+    await expect(service.preview('conn-1', input)).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
+
   it('rethrows when every primary scan fails', async () => {
     const service = serviceOver({ 7001: failing('LOADING'), 7002: failing('LOADING') });
 

@@ -317,6 +317,39 @@ describe('readSessionKeys', () => {
     expect(client.callsOf('hscanBuffer')[0].args).toContain('NOVALUES');
   });
 
+  it('keeps smaller hash fields scanned after one over the cap', async () => {
+    const value: Record<string, string> = { huge: 'y'.repeat(3 * MB) };
+    for (let i = 0; i < 10; i++) value[`f${i}`] = 'x';
+    const client = new FakeValkey(storeOf({ h: { type: 'hash', value, memory: 3 * MB + 4096 } }));
+
+    const key = await readOne(client, 'h', { byteCap: 2 * MB });
+
+    expect(key.truncated).toBe(true);
+    expect(Object.keys(key.value as object)).toHaveLength(10);
+    expect(client.fetchedBytes).toBeLessThan(MB);
+  });
+
+  it('reads the small fields of a hash whose average field is over the cap', async () => {
+    const value = { huge: 'y'.repeat(6 * MB), small: 'x' };
+    const client = new FakeValkey(storeOf({ h: { type: 'hash', value, memory: 6 * MB } }));
+
+    const key = await readOne(client, 'h', { byteCap: 2 * MB });
+
+    expect(key).toMatchObject({ value: { small: 'x' }, truncated: true });
+    expect(client.fetchedBytes).toBeLessThan(MB);
+  });
+
+  it('skips a hash whose average field is over the cap when the server has no NOVALUES', async () => {
+    const value = { huge: 'y'.repeat(6 * MB), small: 'x' };
+    const client = new FakeValkey(storeOf({ h: { type: 'hash', value, memory: 6 * MB } }));
+    client.noValues = false;
+
+    const key = await readOne(client, 'h', { byteCap: 2 * MB });
+
+    expect(key).toMatchObject({ value: {}, truncated: true });
+    expect(client.fetchedBytes).toBeLessThan(MB);
+  });
+
   it('reads hash fields with HSCAN when the server has no NOVALUES', async () => {
     const value: Record<string, string> = {};
     for (let i = 0; i < 200; i++) value[`f${i}`] = 'x';
