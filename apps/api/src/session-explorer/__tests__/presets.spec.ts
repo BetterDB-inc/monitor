@@ -341,6 +341,41 @@ describe('session presets against captured fixtures', () => {
     expect(preset.defaultPattern('tenant[1]?:')).toBe('tenant\\[1\\]\\?:*');
   });
 
+  it.each(['langchain-community', 'langchain-js', 'llamaindex', 'raw'] as const)(
+    '%s looks a session up by its key',
+    (id) => {
+      expect(getPreset(id).sessionLookup?.('app:s[1]')).toEqual({ key: 'app:s[1]' });
+    },
+  );
+
+  it('custom without a session template looks a session up by its key', () => {
+    const preset = createCustomPreset({
+      valueType: 'list',
+      messages: { from: 'items' },
+      fields: { role: 'role', content: 'content' },
+    });
+    expect(preset.sessionLookup?.('app:1')).toEqual({ key: 'app:1' });
+  });
+
+  it('custom with a session template matches the escaped session id', () => {
+    const preset = createCustomPreset({
+      valueType: 'list',
+      sessionTemplate: 'app:{session}:*:msgs',
+      messages: { from: 'items' },
+      fields: { role: 'role', content: 'content' },
+    });
+    expect(preset.sessionLookup?.('s*1')).toEqual({ match: 'app:s\\*1:*:msgs' });
+  });
+
+  it('agent-cache matches the escaped thread id under the namespace prefix', () => {
+    expect(getPreset('agent-cache', null, 'tenant\\[1]:session:*').sessionLookup?.('t?1')).toEqual({
+      match: 'tenant\\[1\\]:session:t\\?1:*',
+    });
+    expect(getPreset('agent-cache', null, 'ten*:session:*').sessionLookup?.('t1')).toEqual({
+      match: '*:session:t1:*',
+    });
+  });
+
   it('raw preset never parses', () => {
     const preset = getPreset('raw');
     expect(preset.sessionIdOf('a:b')).toBe('a:b');

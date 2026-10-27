@@ -25,6 +25,7 @@ import type {
   KvCacheFootprintSnapshot,
   KvCacheModelFootprint,
   KvCacheSettings,
+  SessionNamespace,
 } from '@betterdb/shared';
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
@@ -1858,6 +1859,19 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         eviction_alert_enabled BOOLEAN NOT NULL DEFAULT TRUE,
         updated_at BIGINT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS session_explorer_namespaces (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        pattern TEXT NOT NULL,
+        preset TEXT NOT NULL,
+        custom_schema JSONB,
+        oversize_threshold_bytes BIGINT NOT NULL DEFAULT 1048576,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_explorer_namespaces_conn
+        ON session_explorer_namespaces(connection_id);
 
       CREATE TABLE IF NOT EXISTS webhooks (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -4567,6 +4581,78 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     for (const table of ['kv_cache_footprint_snapshots', 'kv_cache_engine_samples', 'kv_cache_engines', 'kv_cache_settings']) {
       await chunkedPostgresDelete(this.pool, table, 'connection_id = $1', [connectionId]);
     }
+  }
+
+  private mapSessionNamespaceRow(row: any): SessionNamespace {
+    return {
+      id: row.id,
+      connectionId: row.connection_id,
+      name: row.name,
+      pattern: row.pattern,
+      preset: row.preset,
+      customSchema: row.custom_schema ?? null,
+      oversizeThresholdBytes: Number(row.oversize_threshold_bytes),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  async listSessionNamespaces(connectionId: string): Promise<SessionNamespace[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'SELECT * FROM session_explorer_namespaces WHERE connection_id = $1 ORDER BY created_at ASC, id ASC',
+      [connectionId],
+    );
+    return result.rows.map((row) => this.mapSessionNamespaceRow(row));
+  }
+
+  async getSessionNamespace(connectionId: string, id: string): Promise<SessionNamespace | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'SELECT * FROM session_explorer_namespaces WHERE connection_id = $1 AND id = $2',
+      [connectionId, id],
+    );
+    return result.rows.length > 0 ? this.mapSessionNamespaceRow(result.rows[0]) : null;
+  }
+
+  async saveSessionNamespace(ns: SessionNamespace): Promise<SessionNamespace> {
+    if (!this.pool) throw new Error('Database not initialized');
+    await this.pool.query(
+      `INSERT INTO session_explorer_namespaces
+         (id, connection_id, name, pattern, preset, custom_schema, oversize_threshold_bytes, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (id) DO UPDATE SET
+         name = EXCLUDED.name,
+         pattern = EXCLUDED.pattern,
+         preset = EXCLUDED.preset,
+         custom_schema = EXCLUDED.custom_schema,
+         oversize_threshold_bytes = EXCLUDED.oversize_threshold_bytes,
+         updated_at = EXCLUDED.updated_at
+       WHERE session_explorer_namespaces.connection_id = EXCLUDED.connection_id`,
+      [
+        ns.id,
+        ns.connectionId,
+        ns.name,
+        ns.pattern,
+        ns.preset,
+        ns.customSchema ? JSON.stringify(ns.customSchema) : null,
+        ns.oversizeThresholdBytes,
+        ns.createdAt,
+        ns.updatedAt,
+      ],
+    );
+    const saved = await this.getSessionNamespace(ns.connectionId, ns.id);
+    if (!saved) throw new Error('Session namespace id belongs to another connection');
+    return saved;
+  }
+
+  async deleteSessionNamespace(connectionId: string, id: string): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'DELETE FROM session_explorer_namespaces WHERE connection_id = $1 AND id = $2',
+      [connectionId, id],
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
   // Command Stats Sample Methods

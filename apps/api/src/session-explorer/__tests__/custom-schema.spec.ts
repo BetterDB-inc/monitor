@@ -81,6 +81,17 @@ describe('validateCustomSchema', () => {
     }
   });
 
+  it('rejects a sessionTemplate with more than 8 *', () => {
+    const sessionTemplate = `{session}${':a*'.repeat(9)}`;
+    expect(validateCustomSchema({ ...baseSchema, sessionTemplate })).toEqual({
+      ok: false,
+      errors: ['Session template must contain at most 8 *'],
+    });
+    expect(
+      validateCustomSchema({ ...baseSchema, sessionTemplate: `{session}${':a*'.repeat(8)}` }).ok,
+    ).toBe(true);
+  });
+
   it('accepts a sessionTemplate with {session}', () => {
     const result = validateCustomSchema({ ...baseSchema, sessionTemplate: 'chat:{session}:*' });
     expect(result).toEqual({

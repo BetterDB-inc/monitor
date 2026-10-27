@@ -71,6 +71,7 @@ export interface SessionSummary {
   sessionId: string;
   keyCount: number;
   memoryBytes: number;
+  unmeasuredKeys: number;
   idleSeconds: number | null;
   ttlMs: number | null;
 }
@@ -81,6 +82,7 @@ export interface SessionListResponse {
   truncated: boolean;
   partial: boolean;
   failedNodes: number;
+  idleUntracked: boolean;
 }
 
 export interface ParsedMessage {
@@ -111,4 +113,31 @@ export interface SessionDetail {
   estimatedTokens: number;
   ttlMs: number | null;
   memoryBytes: number;
+  complete: boolean;
+  unparsedKeys: number;
+  truncated: boolean;
+  failedNodes: number;
+  missingKeys: number;
+}
+
+export interface SessionOversizeResponse {
+  thresholdBytes: number;
+  sessionIds: string[];
+  unmeasuredSessionIds: string[];
+  truncated: boolean;
+  partial: boolean;
+  failedNodes: number;
+}
+
+export interface SessionPreview {
+  sampleKey: string | null;
+  view: KeyView | null;
+}
+
+export interface SessionExport {
+  exportedAt: string;
+  namespace: Pick<SessionNamespace, 'name' | 'pattern' | 'preset'>;
+  sessionId: string;
+  keys: CapturedKey[];
+  parsed: SessionDetail;
 }
