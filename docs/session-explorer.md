@@ -20,5 +20,5 @@ Each key is read up to 2 MB, and a whole session up to 32 MB. Anything beyond th
 
 Lists, sets, sorted sets, streams and hashes are read in windows. Before reading, BetterDB divides the key's `MEMORY USAGE` by its length, and skips the key when that average is over 2 MB. Because this check uses the average, it has two limits:
 
-- One very large element among many small ones in a list, set, sorted set or stream keeps the average under the cap, so that element can still be fetched in full.
-- Hashes are measured field by field with `HSCAN … NOVALUES` on Valkey 8+ and Redis 7.4+, so large values are skipped. On older servers only the average check applies, and a hash with one very large field among small ones is read in full.
+- One very large element among many small ones in a list, set, sorted set or stream keeps the average under the cap, so that element is still transferred from the server in full. The page shows at most 2 MB of the key and marks it truncated.
+- On Valkey 8+ and Redis 7.4+, hashes are measured field by field with `HSCAN … NOVALUES`, so oversized values are skipped before they are fetched and the smaller fields are still shown. On older servers only the average check applies, so a hash with one very large field among small ones is transferred in full, then cut to 2 MB like the other types.
