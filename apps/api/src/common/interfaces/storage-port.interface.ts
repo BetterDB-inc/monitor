@@ -39,6 +39,7 @@ import type {
   ReadinessDimension,
   ReadinessDimensionKey,
   ScalingReadinessSettings,
+  SessionNamespace,
   KvCacheEngineSample,
   KvCacheEngineSource,
   KvCacheFootprintSnapshot,
@@ -725,6 +726,11 @@ export interface StoragePort {
   getKvCacheSettings(connectionId: string): Promise<KvCacheSettings | null>;
   saveKvCacheSettings(settings: KvCacheSettings): Promise<KvCacheSettings>;
   deleteKvCacheConnectionData(connectionId: string): Promise<void>;
+
+  listSessionNamespaces(connectionId: string): Promise<SessionNamespace[]>;
+  getSessionNamespace(connectionId: string, id: string): Promise<SessionNamespace | null>;
+  saveSessionNamespace(ns: SessionNamespace): Promise<SessionNamespace>;
+  deleteSessionNamespace(connectionId: string, id: string): Promise<boolean>;
 
   // Command Stats Sample Methods - connectionId required for writes
   saveCommandStatsSamples(

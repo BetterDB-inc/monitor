@@ -105,6 +105,7 @@ export interface StartAnalysisResponse {
 export type ExecutionJobStatus =
   | 'pending'
   | 'running'
+  | 'completing'
   | 'completed'
   | 'failed'
   | 'cancelled';
@@ -205,6 +206,36 @@ export interface MigrationExecutionResult {
   progress: number | null;
   /** Only populated for redis_shake_sync mode; null otherwise. */
   syncStage: SyncStage;
+  replicationLag: ReplicationLagEntry[] | null;
+  expectedShards: number | null;
+  fullySynced: boolean;
+  cutover: CutoverAttempt | null;
+  cutoverAt?: number;
+}
+
+export type CutoverOutcome = 'waiting' | 'draining' | 'timed_out' | 'completed' | 'forced' | 'failed';
+
+export interface CutoverAttempt {
+  requestedAt: number;
+  deadlineAt: number;
+  outcome: CutoverOutcome;
+  forcedLag?: ReplicationLagEntry[];
+}
+
+export interface CompleteExecutionRequest {
+  force?: boolean;
+  timeoutSeconds?: number;
+}
+
+export interface CompleteExecutionResponse {
+  status: ExecutionJobStatus;
+  cutover: CutoverAttempt;
+}
+
+export interface ReplicationLagEntry {
+  shard: string;
+  diff: number | null;
+  stale: boolean;
 }
 
 export interface StartExecutionResponse {

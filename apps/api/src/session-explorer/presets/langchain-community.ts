@@ -1,0 +1,62 @@
+import { escapeGlob, type ParsedMessage } from '@betterdb/shared';
+import type { PresetDefinition } from './types';
+import {
+  chatRole,
+  concatSession,
+  fail,
+  guardedParse,
+  isRecord,
+  parseJson,
+  parseToolCalls,
+  textContent,
+  toolResultOf,
+  toolUseCalls,
+} from './text';
+
+const ROLE_BY_TYPE = new Map([
+  ['human', 'human'],
+  ['ai', 'ai'],
+  ['system', 'system'],
+  ['tool', 'tool'],
+  ['function', 'tool'],
+  ['HumanMessageChunk', 'human'],
+  ['AIMessageChunk', 'ai'],
+  ['SystemMessageChunk', 'system'],
+  ['ToolMessageChunk', 'tool'],
+  ['FunctionMessageChunk', 'tool'],
+]);
+
+const CHAT_TYPES = new Set(['chat', 'generic', 'ChatMessageChunk']);
+
+function roleOf(type: string, data: Record<string, unknown>): string {
+  if (CHAT_TYPES.has(type)) return chatRole(data.role);
+  return ROLE_BY_TYPE.get(type) ?? fail(`Unknown message type "${type}"`);
+}
+
+function parseElement(element: unknown): ParsedMessage {
+  if (typeof element !== 'string') return fail('List element is not a string');
+  const envelope = parseJson(element);
+  if (!isRecord(envelope) || typeof envelope.type !== 'string' || !isRecord(envelope.data)) {
+    return fail('Element is not a {type, data} message envelope');
+  }
+  const data = envelope.data;
+  const role = roleOf(envelope.type, data);
+  const message: ParsedMessage = { role, content: textContent(data.content) };
+  const toolCalls = parseToolCalls(data.tool_calls) ?? toolUseCalls(data.content);
+  if (toolCalls) message.toolCalls = toolCalls;
+  if (role === 'tool') message.toolResult = toolResultOf(message.content, data);
+  return message;
+}
+
+export const langchainCommunityPreset: PresetDefinition = {
+  id: 'langchain-community',
+  defaultPattern: (prefix) => `${escapeGlob(prefix)}*`,
+  sessionIdOf: (key) => key,
+  sessionLookup: (sessionId) => ({ key: sessionId }),
+  parseKey: (k) =>
+    guardedParse(k, () => {
+      if (k.type !== 'list' || !Array.isArray(k.value)) return fail('Expected a list value');
+      return [...k.value].reverse().map(parseElement);
+    }),
+  mergeSession: concatSession,
+};

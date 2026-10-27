@@ -18,6 +18,7 @@ describe('MigrationController', () => {
       startExecution: jest.fn().mockResolvedValue({ id: 'exec-1', status: 'pending' }),
       getExecution: jest.fn().mockReturnValue({ id: 'exec-1', status: 'running' }),
       stopExecution: jest.fn().mockReturnValue(true),
+      completeExecution: jest.fn().mockReturnValue({ status: 'completing', cutover: null }),
     };
 
     validationService = {
@@ -166,6 +167,33 @@ describe('MigrationController', () => {
           targetConnectionId: 'conn-2',
         }),
       ).rejects.toThrow(BadRequestException);
+    });
+  });
+
+  describe('POST /execution/:id/complete', () => {
+    it('passes force and the default timeout to the service', () => {
+      controller.completeExecution('exec-1', {});
+      expect(executionService.completeExecution).toHaveBeenCalledWith('exec-1', { force: false, timeoutSeconds: 300 });
+    });
+
+    it('passes force: true and a custom timeout through', () => {
+      controller.completeExecution('exec-1', { force: true, timeoutSeconds: 60 });
+      expect(executionService.completeExecution).toHaveBeenCalledWith('exec-1', { force: true, timeoutSeconds: 60 });
+    });
+
+    it('accepts a missing body', () => {
+      controller.completeExecution('exec-1', undefined as any);
+      expect(executionService.completeExecution).toHaveBeenCalledWith('exec-1', { force: false, timeoutSeconds: 300 });
+    });
+
+    it('rejects an out-of-range timeout with 400', () => {
+      expect(() => controller.completeExecution('exec-1', { timeoutSeconds: 5 })).toThrow(BadRequestException);
+    });
+
+    it('rejects a non-boolean force with 400', () => {
+      expect(() => controller.completeExecution('exec-1', { force: 'yes' as unknown as boolean })).toThrow(
+        BadRequestException,
+      );
     });
   });
 

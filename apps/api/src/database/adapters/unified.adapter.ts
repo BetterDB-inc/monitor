@@ -81,6 +81,15 @@ export const QUIT_TIMEOUT_MS = 2_000;
 // gets a representative sample. See collectKeyAnalytics.
 export const MIN_DB_SAMPLE_SIZE = 100;
 
+// GRAPH.MEMORY USAGE costs ~1 ms of FalkorDB worker time per MB of graph
+// (~95 ms for a 90 MB graph), so each key-analytics collection runs at most
+// GRAPH_MEMORY_PROBES_PER_SCAN of them and reuses a result for
+// GRAPH_MEMORY_TTL_MS. Graphs over the budget fall back to their last result,
+// kept until GRAPH_MEMORY_MAX_AGE_MS. See probeGraphKey.
+export const GRAPH_MEMORY_PROBES_PER_SCAN = 20;
+export const GRAPH_MEMORY_TTL_MS = 60 * 60 * 1000;
+export const GRAPH_MEMORY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
 async function closeClient(client: Valkey): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   const quit = client.quit().then(
@@ -135,6 +144,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   // configured dbIndex, or 0 when its SELECT was rejected and the connection
   // fell back (see doConnect). Null until a connect has run.
   private activeDbIndex: number | null = null;
+  // GRAPH.MEMORY USAGE results by "<db>:<key>", and the fresh probes left in
+  // the current key-analytics collection. See probeGraphKey.
+  private graphMemoryCache = new Map<string, { bytes: number; measuredAt: number }>();
+  private graphMemoryProbesLeft = GRAPH_MEMORY_PROBES_PER_SCAN;
 
   private createValkeyClient(connectionName: string, db?: number): Valkey {
     return new Valkey({
@@ -517,6 +530,59 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // isSentinel: true, so reaching here means this is not a Sentinel.
       isSentinel: false,
     };
+  }
+
+  // MEMORY USAGE on a FalkorDB graphdata key sees only the module's key header
+  // (~32 bytes), so graphs are sized with GRAPH.MEMORY USAGE and get node + edge
+  // count as their cardinality. Either value is null when its command fails
+  // (e.g. an older FalkorDB without GRAPH.MEMORY), leaving the caller's own
+  // figures in place. GRAPH.MEMORY is cached and budgeted (see
+  // GRAPH_MEMORY_PROBES_PER_SCAN); the node + edge count costs <1 ms and always runs.
+  private async probeGraphKey(
+    client: Valkey,
+    db: number,
+    key: string,
+  ): Promise<{ memoryBytes: number | null; cardinality: number | null }> {
+    const cacheKey = `${db}:${key}`;
+    const cached = this.graphMemoryCache.get(cacheKey);
+    const fresh = cached !== undefined && Date.now() - cached.measuredAt < GRAPH_MEMORY_TTL_MS;
+    const measure = !fresh && this.graphMemoryProbesLeft > 0;
+
+    const pipeline = client
+      .pipeline()
+      .call(
+        'GRAPH.RO_QUERY',
+        key,
+        'CALL db.meta.stats() YIELD nodeCount, relCount RETURN nodeCount + relCount',
+      );
+    if (measure) {
+      this.graphMemoryProbesLeft--;
+      pipeline.call('GRAPH.MEMORY', 'USAGE', key);
+    }
+    const [statsResult, memResult] = (await pipeline.exec()) || [];
+
+    // Flat [field, value, ...] reply; total_graph_sz_mb is whole megabytes,
+    // rounded down.
+    let memoryBytes: number | null = cached?.bytes ?? null;
+    if (memResult && !memResult[0] && Array.isArray(memResult[1])) {
+      const reply = memResult[1] as unknown[];
+      const idx = reply.findIndex((field) => String(field) === 'total_graph_sz_mb');
+      const mb = idx >= 0 ? Number(reply[idx + 1]) : NaN;
+      if (Number.isFinite(mb)) {
+        memoryBytes = mb * 1024 * 1024;
+        this.graphMemoryCache.set(cacheKey, { bytes: memoryBytes, measuredAt: Date.now() });
+      }
+    }
+
+    // [header, rows, statistics] with a single row holding the count.
+    let cardinality: number | null = null;
+    if (statsResult && !statsResult[0] && Array.isArray(statsResult[1])) {
+      const rows = (statsResult[1] as unknown[])[1];
+      const count = Array.isArray(rows) && Array.isArray(rows[0]) ? Number(rows[0][0]) : NaN;
+      if (Number.isFinite(count)) cardinality = count;
+    }
+
+    return { memoryBytes, cardinality };
   }
 
   async getInfoParsed(sections?: string[]): Promise<InfoResponse> {
@@ -910,6 +976,11 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
    * client never switches databases, so concurrent monitoring is unaffected.
    */
   async collectKeyAnalytics(options: KeyAnalyticsOptions): Promise<KeyAnalyticsResult[]> {
+    this.graphMemoryProbesLeft = GRAPH_MEMORY_PROBES_PER_SCAN;
+    const now = Date.now();
+    for (const [cacheKey, entry] of this.graphMemoryCache) {
+      if (now - entry.measuredAt >= GRAPH_MEMORY_MAX_AGE_MS) this.graphMemoryCache.delete(cacheKey);
+    }
     // The shared client's ACTUAL database, which differs from config.dbIndex
     // when the connect-time SELECT fell back to db0.
     const ownDb = this.activeDbIndex ?? this.config.dbIndex ?? 0;
@@ -1088,12 +1159,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
           const num = (r: [Error | null, unknown] | undefined): number | null =>
             r && !r[0] && r[1] != null ? (r[1] as number) : null;
 
-          const mem =
+          let mem =
             memResult && !memResult[0] && memResult[1] != null ? (memResult[1] as number) : null;
-          if (mem !== null) {
-            stats.totalMemory += mem;
-            if (mem > stats.maxMemory) stats.maxMemory = mem;
-          }
 
           const keyType =
             typeResult && !typeResult[0] && typeResult[1] != null ? String(typeResult[1]) : null;
@@ -1117,6 +1184,20 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
             case 'stream':
               cardinality = num(xlenResult);
               break;
+          }
+          // Only FalkorDB's graph module registers the graphdata type, so TYPE
+          // alone proves the GRAPH.* commands exist.
+          if (keyType === 'graphdata') {
+            const graph = await this.probeGraphKey(client, db, key);
+            // A graph under 1 MB reads as 0 MB; keep MEMORY USAGE when larger.
+            if (graph.memoryBytes !== null && (mem === null || graph.memoryBytes > mem)) {
+              mem = graph.memoryBytes;
+            }
+            cardinality = graph.cardinality;
+          }
+          if (mem !== null) {
+            stats.totalMemory += mem;
+            if (mem > stats.maxMemory) stats.maxMemory = mem;
           }
           if (cardinality !== null) {
             stats.totalCardinality += cardinality;
