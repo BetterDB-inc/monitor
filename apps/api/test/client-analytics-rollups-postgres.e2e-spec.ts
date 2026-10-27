@@ -21,6 +21,7 @@ import {
   rollup,
   seedFixture,
 } from '../src/storage/adapters/__tests__/client-analytics-rollups.fixture';
+import { dropSchema } from './postgres-test-utils';
 
 const DSN =
   process.env.CLIENT_ANALYTICS_POSTGRES_TEST_DSN ??
@@ -98,7 +99,7 @@ describePostgres('client analytics rollups — postgres', () => {
     await waitFor(async () => (await validIndexes()).length === 2);
     await pg.close();
     await memory.close();
-    await adminPool.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+    await dropSchema(adminPool, SCHEMA);
     await adminPool.end();
   });
 
@@ -210,7 +211,7 @@ describePostgres('client analytics rollups — postgres', () => {
         expect(await indexState()).toBe('valid');
       } finally {
         await third.close();
-        await adminPool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+        await dropSchema(adminPool, schema);
       }
     });
 
@@ -261,7 +262,7 @@ describePostgres('client analytics rollups — postgres', () => {
         } finally {
           await adapter.close();
           await holder.end();
-          await adminPool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+          await dropSchema(adminPool, schema);
         }
       });
 
@@ -281,7 +282,7 @@ describePostgres('client analytics rollups — postgres', () => {
           expect(adapter['indexRetryTimer']).toBeNull();
         } finally {
           await holder.end();
-          await adminPool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+          await dropSchema(adminPool, schema);
         }
       });
     });
