@@ -27,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - History tools (`get_scaling_readiness_history`, `get_kv_cache_hit_rate`,
   `get_kv_cache_footprint_history`, `get_key_pattern_trend`) take `maxPoints`
   (default 150, 2-1000) and return a `sampling` block. The cap applies to the
-  total across series, and each series keeps its first and last point.
+  total across series, and each series keeps its first and last point when the budget allows; otherwise its latest point, and series beyond the budget are counted in `sampling.omittedSeries`.
+- `get_cache_size_estimate` polls a read-only route (60 calls/min) and only starts a sampling job with `refresh=true`, via a separate `/cache-simulator/refresh` route (10 calls/min).
 - `get_key_patterns` returns the latest snapshot per database, and `limit`
   (max 500) applies to the total.
 

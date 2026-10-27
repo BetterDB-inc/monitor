@@ -2087,18 +2087,17 @@ server.tool(
 
 server.tool(
   'get_cache_size_estimate',
-  'Get the Cache Size Simulator snapshot: sampled dataset size estimate (total bytes with 95% CI, per-type breakdown), current memory state (used memory, maxmemory, eviction policy, total keys) and fitted daily key/byte growth. The first call starts a bounded stratified key sample and returns status "sampling" with progress; call again until status is "ready" (or "failed"). Results are cached for 15 minutes; refresh=true starts a SCAN + MEMORY USAGE sampling job on the instance, so omit it to read the last estimate. Rate-limited. Use to answer "how much memory does this dataset really need?". Requires BetterDB Pro (cacheSizeSimulator).',
+  'Get the Cache Size Simulator snapshot: sampled dataset size estimate (total bytes with 95% CI, per-type breakdown), current memory state (used memory, maxmemory, eviction policy, total keys) and fitted daily key/byte growth. Status is "sampling" (with progress), "ready", "failed", or "none" when nothing has been sampled yet. Results are cached for 15 minutes. Poll without refresh until status is ready; refresh=true starts a SCAN + MEMORY USAGE sampling job and is limited to 10 calls/min. Use to answer "how much memory does this dataset really need?". Requires BetterDB Pro (cacheSizeSimulator).',
   {
-    refresh: z.boolean().optional().describe('Discard the cached result and resample (default false)'),
+    refresh: z.boolean().optional().describe('Start a fresh sampling job (default false: only read the current estimate or job status)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
   async ({ refresh, instanceId }) =>
     withTelemetry('get_cache_size_estimate', async () => {
       const id = resolveInstanceId(instanceId);
-      const qs = buildQuery({ refresh });
       let data: unknown;
       try {
-        data = await apiFetch(`/mcp/instance/${id}/cache-simulator${qs}`);
+        data = await apiFetch(`/mcp/instance/${id}/cache-simulator${refresh === true ? '/refresh' : ''}`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
           return notFoundResult(err, 'Cache size simulator');
@@ -2147,7 +2146,7 @@ server.tool(
 
 server.tool(
   'get_kv_cache_hit_rate',
-  'Get LMCache token counters (requested vs hit tokens) and hit-rate history from linked inference engines, bucketed per engine and per model (bucket width grows with the range), plus the overall hit rate for the range. The buckets are downsampled to maxPoints (default 150) across all engine/model series, each series keeping its first and last bucket; the sampling field says how. Rate-limited. Optionally filter to one engine (id from get_kv_cache_status) or one model. Use to answer "did the KV-cache hit rate drop, and for which model?". Requires BetterDB Pro (kvCacheMonitoring).',
+  'Get LMCache token counters (requested vs hit tokens) and hit-rate history from linked inference engines, bucketed per engine and per model (bucket width grows with the range), plus the overall hit rate for the range. The buckets are downsampled to maxPoints (default 150) across all engine/model series, each series keeping its first and last bucket when the budget allows, otherwise its latest bucket, and series beyond the budget are counted in sampling.omittedSeries; the sampling field says how. Rate-limited. Optionally filter to one engine (id from get_kv_cache_status) or one model. Use to answer "did the KV-cache hit rate drop, and for which model?". Requires BetterDB Pro (kvCacheMonitoring).',
   {
     startTime: z.number().int().min(0).optional().describe('Start time (Unix timestamp ms, default 24h before endTime)'),
     endTime: z.number().int().min(0).optional().describe('End time (Unix timestamp ms, default now). Range may not exceed 31 days'),

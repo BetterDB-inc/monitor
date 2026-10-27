@@ -32,7 +32,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
-    "test": "vitest run"
+    "test": "tsc -p tsconfig.test.json && vitest run"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.0",

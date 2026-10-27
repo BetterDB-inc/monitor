@@ -50,6 +50,19 @@ export class CacheSimulatorService {
     return promise;
   }
 
+  /** Current job or cached result for the instance; never starts sampling. Null when there is neither. */
+  async current(connectionId: string): Promise<CacheSimulatorSnapshot | null> {
+    this.prune();
+    this.registry.get(connectionId);
+    const running = this.jobs.get(connectionId);
+    if (running) return this.inProgress(running);
+    const starting = this.starting.get(connectionId);
+    if (starting) return starting;
+    const cached = this.results.get(connectionId);
+    if (cached && Date.now() < cached.expiresAt) return cached.snapshot;
+    return null;
+  }
+
   private async start(connectionId: string, seed: ScanNode): Promise<CacheSimulatorSnapshot> {
     try {
       const { job, nodes } = await withTimeout(this.prepare(connectionId, seed), SETUP_TIMEOUT_MS, `Setup timed out after ${SETUP_TIMEOUT_MS / 1000} s`);
