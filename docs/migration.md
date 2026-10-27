@@ -170,6 +170,7 @@ Analysis detects the following incompatibilities:
 | `capacity` | warning | A non-evicting master's share fits only once the target is emptied (`emptyDbBeforeSync` or `FLUSHALL`); or is within 10% of the room after emptying (too close to call); or the master evicts (`allkeys-*`, `volatile-*` with TTL keys); or it fits with under 10% headroom; or a blocker whose source size is only the source's `used_memory` (`MEMORY USAGE` unavailable) |
 | `capacity` | info | The capacity and key-overlap checks could not run (for example NOPERM on `INFO`, or an unreachable master) |
 | `key_overlap` | warning | Sampled source keys (up to 200, spread across source nodes) already exist in the target's db0 (command mode overwrites them; RedisShake modes stop with `BUSYKEY` unless the target is flushed first) |
+| `key_overlap` | warning | **Target keys outside db0 (RedisShake modes):** RedisShake copies every db into the same db index on the target, and `emptyDbBeforeSync` runs `FLUSHALL`. When the target holds keys outside db0, analysis warns for the RedisShake modes, names each db and its key count, and says whether the source uses the same db (keys that already exist there stop RedisShake with `BUSYKEY`). Command mode writes only db0 and is not affected. These dbs are counted, not sampled, so this is always a warning |
 | `key_overlap` | info | The target's db0 already holds keys and none of the sampled source keys collide; or no source keys were sampled; or the overlap check could not run (e.g. `EXISTS` denied) |
 
 The capacity check runs per target master. The source size is the analysis
@@ -179,7 +180,8 @@ source also has keys outside db0, the check runs a second time for the
 RedisShake modes, which copy every db, sized by the source's
 `used_memory_dataset` and its TTL keys in every db. Each of those results is
 labelled "(command mode)" or "(RedisShake modes)" and only blocks execution in
-the modes it names. Each master's share
+the modes it names. The execution page counts blockers for the mode you select,
+and the analysis verdict notes which modes a scoped blocker leaves free. Each master's share
 of it is weighted by the hash slots it owns, or split equally when the slot map
 is unavailable, and compared with the master's free memory: `maxmemory -
 (used_memory - mem_not_counted_for_evict)`, the figure Valkey uses to decide

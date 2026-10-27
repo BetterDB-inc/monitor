@@ -10,6 +10,7 @@ import { HowItWorks } from '../components/migration/analysis-form/HowItWorks';
 import { AnalysisProgressBar } from '../components/migration/AnalysisProgressBar';
 import { MigrationReport } from '../components/migration/MigrationReport';
 import { ExportBar } from '../components/migration/ExportBar';
+import { blockingCountForMode } from '../components/migration/blocking-mode';
 import { ExecutionPanel } from '../components/migration/ExecutionPanel';
 import { ValidationPanel } from '../components/migration/ValidationPanel';
 
@@ -60,8 +61,9 @@ export function MigrationPage({ isCloudMode }: { isCloudMode: boolean }) {
   const { hasFeature } = useLicense();
 
   const canExecute = hasFeature(Feature.MIGRATION_EXECUTION);
-  const blockingCount = job?.blockingCount ?? 0;
   const [executionMode, setExecutionMode] = useState<ExecutionMode>('command');
+  // Blockers for the selected mode, by the same rule as the API safety gate.
+  const blockingCount = job ? blockingCountForMode(job, executionMode) : 0;
   const [preferReplica, setPreferReplica] = useState<boolean>(false);
   const [tryDiskless, setTryDiskless] = useState<boolean>(false);
   const [emptyDbBeforeSync, setEmptyDbBeforeSync] = useState<boolean>(false);

@@ -257,8 +257,15 @@ describe('MigrationService capacity preflight', () => {
       expect.objectContaining({
         sourceExpiringKeys: 0,
         allDbsSource: { bytes: 7000000, rough: false, expiringKeys: 40 },
+        sourceDbs: [0, 1],
       }),
     );
+  });
+
+  it('passes the source db list to the probe', async () => {
+    probe.mockResolvedValue([]);
+    await analyze();
+    expect(probe.mock.calls[0][0].sourceDbs).toEqual([0]);
   });
 
   it('reports that the preflight did not run when the target cannot be probed', async () => {

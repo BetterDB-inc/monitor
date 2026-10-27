@@ -35,6 +35,8 @@ export interface TargetMemory {
   masters: MasterMemory[];
   /** db0 keys summed over every master: what overlap checks compare against. */
   db0Keys: number;
+  /** Target dbs other than db0 that hold keys, summed over masters, ascending by db. */
+  otherDbs: { db: number; keys: number }[];
 }
 
 /** Result of checking a sample of source keys against the target. */
@@ -80,6 +82,28 @@ export function keyspaceTotals(info: string): { keys: number; expires: number; d
     if (match[1] === '0') db0Keys = Number(match[2]);
   }
   return { keys, expires, db0Keys };
+}
+
+/** Keys per db index from an INFO keyspace reply, skipping dbs with no keys. */
+export function keysPerDb(keyspace: string | undefined): Map<number, number> {
+  const out = new Map<number, number>();
+  for (const line of (keyspace ?? '').split(/\r?\n/)) {
+    const match = /^db(\d+):keys=(\d+)/.exec(line.trim());
+    if (!match) continue;
+    const keys = Number(match[2]);
+    if (keys > 0) out.set(Number(match[1]), keys);
+  }
+  return out;
+}
+
+/**
+ * db indexes that hold keys on a standalone source. Null when unknown: a cluster
+ * source's INFO keyspace comes from one node, and an empty reply proves nothing.
+ */
+export function sourceDbIndexes(keyspace: string | undefined, isCluster: boolean): number[] | null {
+  if (isCluster) return null;
+  const dbs = [...keysPerDb(keyspace).keys()].sort((a, b) => a - b);
+  return dbs.length > 0 ? dbs : null;
 }
 
 /** TTL counts from analysis's key sample (`ttlDistribution`). */
@@ -202,10 +226,14 @@ export async function readTargetMemory(client: Valkey): Promise<TargetMemory> {
   if (nodes.length === 0) throw new Error('No target masters available');
   const shares = cluster ? slotShares(cluster, nodes) : [1];
 
+  const otherDbTotals = new Map<number, number>();
   const masters = await Promise.all(
     nodes.map(async (node, i): Promise<MasterMemory> => {
       const [memory, keyspace] = await Promise.all([node.info('memory'), node.info('keyspace')]);
       const { keys, expires, db0Keys } = keyspaceTotals(keyspace);
+      for (const [db, count] of keysPerDb(keyspace)) {
+        if (db !== 0) otherDbTotals.set(db, (otherDbTotals.get(db) ?? 0) + count);
+      }
       return {
         name: cluster ? nodeName(node) : 'target',
         maxmemory: infoNumber(memory, 'maxmemory'),
@@ -222,7 +250,13 @@ export async function readTargetMemory(client: Valkey): Promise<TargetMemory> {
       };
     }),
   );
-  return { masters, db0Keys: masters.reduce((s, m) => s + m.db0Keys, 0) };
+  return {
+    masters,
+    db0Keys: masters.reduce((s, m) => s + m.db0Keys, 0),
+    otherDbs: [...otherDbTotals.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([db, keys]) => ({ db, keys })),
+  };
 }
 
 /** EXISTS a sample of source keys on the target, one key per call so cluster routing works. */
@@ -540,6 +574,41 @@ export function checkKeyOverlap(targetKeys: number, overlap: KeyOverlap | null):
   ];
 }
 
+/**
+ * RedisShake copies every db into the same db index on the target, and
+ * emptyDbBeforeSync runs FLUSHALL. Target keys outside db0 are therefore a
+ * RedisShake-only concern; command mode writes db0 alone. Warning only: these
+ * dbs are reported by key count, not sampled for collisions.
+ */
+export function checkTargetOtherDbs(
+  otherDbs: { db: number; keys: number }[],
+  sourceDbs: number[] | null,
+): Incompatibility[] {
+  if (otherDbs.length === 0) return [];
+  const list = otherDbs.map((d) => `db${d.db} (${d.keys.toLocaleString('en-US')} keys)`).join(', ');
+  const shared = sourceDbs ? otherDbs.filter((d) => sourceDbs.includes(d.db)).map((d) => `db${d.db}`) : [];
+
+  let collision: string;
+  if (sourceDbs === null) {
+    collision =
+      'If the source has keys in the same dbs, RedisShake writes them into the same db index here, so keys that already exist stop it with BUSYKEY unless the target is emptied first.';
+  } else if (shared.length > 0) {
+    collision = `The source also has keys in ${shared.join(', ')}, and RedisShake writes each db into the same db index here, so keys that already exist stop it with BUSYKEY unless the target is emptied first.`;
+  } else {
+    collision = 'The source has no keys in these dbs, so they cannot collide with migrated keys.';
+  }
+
+  return [
+    {
+      severity: 'warning',
+      category: 'key_overlap',
+      title: 'Target holds keys outside db0 (RedisShake modes)',
+      detail: `The target has keys in ${list}. ${collision} Emptying the target (emptyDbBeforeSync) runs FLUSHALL, which deletes these keys too, including dbs the source does not use. Command mode only writes db0 and is not affected.`,
+      modes: [...REDISSHAKE_SCOPE.modes],
+    },
+  ];
+}
+
 /** Input for {@link probeTargetCapacity}. */
 export interface CapacityProbeInput {
   targetConfig: DatabaseConnectionConfig;
@@ -561,6 +630,8 @@ export interface CapacityProbeInput {
    * once per mode family and tags each result with the modes it applies to.
    */
   allDbsSource?: SourceSizing;
+  /** db indexes holding keys on the source; null/undefined when unknown (cluster source). */
+  sourceDbs?: number[] | null;
 }
 
 /**
@@ -615,7 +686,7 @@ export async function probeTargetCapacity(input: CapacityProbeInput): Promise<In
         },
       ];
     }
-    return [...capacity, ...overlap];
+    return [...capacity, ...overlap, ...checkTargetOtherDbs(target.otherDbs, input.sourceDbs ?? null)];
   } finally {
     await client.quit().catch(() => undefined);
   }

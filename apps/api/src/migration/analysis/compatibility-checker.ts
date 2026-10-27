@@ -1,4 +1,4 @@
-import type { ExecutionMode, Incompatibility } from '@betterdb/shared';
+import { blocksMode, type ExecutionMode, type Incompatibility } from '@betterdb/shared';
 import type { DatabaseCapabilities } from '../../common/interfaces/database-port.interface';
 import { shouldExcludeFunctions } from '../fork-compat';
 
@@ -281,8 +281,5 @@ export function getBlockingIssues(
   issues: Incompatibility[] | undefined,
   mode?: ExecutionMode,
 ): Incompatibility[] {
-  if (!issues) return [];
-  return issues.filter(
-    i => i.severity === 'blocking' && (!mode || !i.modes || i.modes.includes(mode)),
-  );
+  return issues ? issues.filter(i => blocksMode(i, mode)) : [];
 }

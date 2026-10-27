@@ -16,6 +16,7 @@ import {
   pickOverlapSample,
   probeTargetCapacity,
   sourceDb0Share,
+  sourceDbIndexes,
   sourceExpiringKeysFrom,
   sourceHasKeysOutsideDb0,
   type SourceSizing,
@@ -579,6 +580,7 @@ export class MigrationService {
             sampledKeys: pickOverlapSample(sampledKeys),
             sourceExpiringKeys,
             allDbsSource,
+            sourceDbs: sourceDbIndexes(keyspaceText, isCluster),
           }));
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);

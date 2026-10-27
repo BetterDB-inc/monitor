@@ -5,12 +5,15 @@ import {
   db0Keyspace,
   checkKeyOverlap,
   checkTargetCapacity,
+  checkTargetOtherDbs,
   keyspaceTotals,
+  keysPerDb,
   pickOverlapSample,
   probeTargetCapacity,
   readTargetMemory,
   sampleKeyOverlap,
   sourceDb0Share,
+  sourceDbIndexes,
   sourceExpiringKeysFrom,
   sourceHasKeysOutsideDb0,
   type MasterMemory,
@@ -51,7 +54,7 @@ function shard(name: string, overrides: Partial<MasterMemory> = {}): MasterMemor
 
 function target(...masters: MasterMemory[]): TargetMemory {
   const list = masters.length > 0 ? masters : [master()];
-  return { masters: list, db0Keys: list.reduce((s, m) => s + m.db0Keys, 0) };
+  return { masters: list, db0Keys: list.reduce((s, m) => s + m.db0Keys, 0), otherDbs: [] };
 }
 
 interface NodeSpec {
@@ -62,6 +65,7 @@ interface NodeSpec {
   dataset?: number;
   keys?: number;
   expires?: number;
+  extraKeyspace?: string;
   host?: string;
   port?: number;
 }
@@ -75,7 +79,7 @@ function node(spec: NodeSpec) {
         Promise.resolve(
           section === 'memory'
             ? `# Memory\r\nused_memory:${spec.used}\r\nused_memory_dataset:${spec.dataset ?? 0}\r\nmaxmemory:${spec.maxmemory}\r\nmaxmemory_policy:${spec.policy}\r\nmem_not_counted_for_evict:${spec.notCounted ?? 0}\r\n`
-            : `# Keyspace\r\ndb0:keys=${spec.keys ?? 0},expires=${spec.expires ?? 0},avg_ttl=0\r\n`,
+            : `# Keyspace\r\ndb0:keys=${spec.keys ?? 0},expires=${spec.expires ?? 0},avg_ttl=0\r\n${spec.extraKeyspace ?? ''}`,
         ),
       ),
     exists: jest.fn(),
@@ -385,6 +389,7 @@ describe('capacity-checker / readTargetMemory', () => {
         },
       ],
       db0Keys: 42,
+      otherDbs: [],
     });
   });
 
@@ -429,10 +434,69 @@ describe('capacity-checker / readTargetMemory', () => {
     expect(memory.masters.map((m) => m.slotShare)).toEqual([0.5, 0.5]);
   });
 
+  it('reports target dbs outside db0, summed over cluster masters', async () => {
+    const c = cluster([
+      node({ maxmemory: GiB, used: 0, policy: 'noeviction', keys: 1, host: '10.0.0.1',
+             extraKeyspace: 'db3:keys=4,expires=0,avg_ttl=0\r\n' }),
+      node({ maxmemory: GiB, used: 0, policy: 'noeviction', keys: 1, host: '10.0.0.2',
+             extraKeyspace: 'db3:keys=6,expires=0,avg_ttl=0\r\ndb1:keys=2,expires=0,avg_ttl=0\r\n' }),
+    ]);
+    const memory = await readTargetMemory(c as unknown as Valkey);
+    expect(memory.otherDbs).toEqual([{ db: 1, keys: 2 }, { db: 3, keys: 10 }]);
+    expect(memory.db0Keys).toBe(2);
+  });
+
   it('throws when the cluster reports no masters', async () => {
     await expect(readTargetMemory(cluster([]) as unknown as Valkey)).rejects.toThrow(
       'No target masters available',
     );
+  });
+});
+
+describe('capacity-checker / keysPerDb and sourceDbIndexes', () => {
+  const multi = '# Keyspace\r\ndb0:keys=5,expires=0,avg_ttl=0\r\ndb3:keys=10,expires=0,avg_ttl=0\r\ndb4:keys=0,expires=0,avg_ttl=0\r\n';
+  it('maps db index to key count and skips empty dbs', () => {
+    expect([...keysPerDb(multi).entries()]).toEqual([[0, 5], [3, 10]]);
+    expect(keysPerDb(undefined).size).toBe(0);
+  });
+  it('lists source dbs for a standalone source, null for a cluster or empty reply', () => {
+    expect(sourceDbIndexes(multi, false)).toEqual([0, 3]);
+    expect(sourceDbIndexes(multi, true)).toBeNull();
+    expect(sourceDbIndexes('# Keyspace\r\n', false)).toBeNull();
+  });
+});
+
+describe('capacity-checker / checkTargetOtherDbs', () => {
+  it('is silent when the target only has db0 keys', () => {
+    expect(checkTargetOtherDbs([], [0, 3])).toEqual([]);
+  });
+  it('warns for the RedisShake modes only, naming dbs the source shares (BUSYKEY)', () => {
+    const [issue] = checkTargetOtherDbs([{ db: 3, keys: 1204 }], [0, 3]);
+    expect(issue).toMatchObject({
+      severity: 'warning',
+      category: 'key_overlap',
+      title: 'Target holds keys outside db0 (RedisShake modes)',
+      modes: ['redis_shake', 'redis_shake_sync'],
+    });
+    expect(issue.detail).toContain('db3 (1,204 keys)');
+    expect(issue.detail).toContain('The source also has keys in db3');
+    expect(issue.detail).toContain('BUSYKEY');
+    expect(issue.detail).toContain('FLUSHALL');
+    expect(issue.detail).toContain('Command mode only writes db0');
+  });
+  it('still warns about FLUSHALL when the source does not use those dbs', () => {
+    const [issue] = checkTargetOtherDbs([{ db: 3, keys: 10 }], [0]);
+    expect(issue.severity).toBe('warning');
+    expect(issue.detail).toContain('cannot collide');
+    expect(issue.detail).not.toContain('BUSYKEY');
+    expect(issue.detail).toContain('FLUSHALL');
+  });
+  it('uses conditional wording when the source dbs are unknown', () => {
+    const [issue] = checkTargetOtherDbs([{ db: 3, keys: 10 }], null);
+    expect(issue.detail).toContain('If the source has keys in the same dbs');
+  });
+  it('never blocks', () => {
+    expect(checkTargetOtherDbs([{ db: 1, keys: 1e9 }], [1])[0].severity).toBe('warning');
   });
 });
 
@@ -610,6 +674,36 @@ describe('capacity-checker / probeTargetCapacity', () => {
         title: 'Target may not have enough memory (RedisShake modes)',
       }),
     ]);
+  });
+
+  it('flags target keys outside db0 for RedisShake without sampling db0 (keys only in db3)', async () => {
+    const client = probeClient({
+      maxmemory: 10 * GiB, used: GiB, policy: 'noeviction', keys: 0,
+      extraKeyspace: 'db3:keys=50,expires=0,avg_ttl=0\r\n',
+    });
+    const issues = await probeTargetCapacity({ ...probeBase, sourceBytes: GiB, sampledKeys: ['a'], sourceDbs: [0, 3] });
+    expect(client.exists).not.toHaveBeenCalled();
+    expect(issues).toEqual([
+      expect.objectContaining({
+        severity: 'warning',
+        category: 'key_overlap',
+        title: 'Target holds keys outside db0 (RedisShake modes)',
+        modes: ['redis_shake', 'redis_shake_sync'],
+      }),
+    ]);
+  });
+
+  it('keeps the outside-db0 warning when the db0 overlap check fails', async () => {
+    const client = probeClient({
+      maxmemory: 10 * GiB, used: GiB, policy: 'noeviction', keys: 5,
+      extraKeyspace: 'db2:keys=7,expires=0,avg_ttl=0\r\n',
+    });
+    client.exists.mockRejectedValue(new Error('NOPERM'));
+    const issues = await probeTargetCapacity({ ...probeBase, sourceBytes: GiB, sampledKeys: ['a'], sourceDbs: null });
+    expect(issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: 'Key-overlap check did not run' }),
+      expect.objectContaining({ title: 'Target holds keys outside db0 (RedisShake modes)' }),
+    ]));
   });
 
   it('keeps the capacity finding when the overlap check fails', async () => {

@@ -1,5 +1,6 @@
 import type { MigrationAnalysisResult, Incompatibility } from '@betterdb/shared';
 import { CheckCircle, AlertTriangle, XCircle, Info } from 'lucide-react';
+import { EXECUTION_MODE_LABELS, blockingCountForMode, modesWithoutBlockers } from '../blocking-mode';
 
 const SEVERITY_ORDER: Record<Incompatibility['severity'], number> = {
   blocking: 0,
@@ -30,7 +31,8 @@ export function VerdictSection({ job }: Props) {
     );
   }
 
-  const blockingCount = job.blockingCount ?? 0;
+  const blockingCount = blockingCountForMode(job);
+  const freeModes = modesWithoutBlockers(job.incompatibilities);
   const warningCount = job.warningCount ?? 0;
 
   let bannerBg: string;
@@ -64,7 +66,14 @@ export function VerdictSection({ job }: Props) {
       <h2 className="text-lg font-semibold">Compatibility</h2>
       <div className={`border rounded-lg px-4 py-3 flex items-start gap-3 ${bannerBg} ${bannerText}`}>
         <BannerIcon className="w-5 h-5 mt-0.5 flex-shrink-0" />
-        <p className="font-medium">{bannerMessage}</p>
+        <div>
+          <p className="font-medium">{bannerMessage}</p>
+          {blockingCount > 0 && freeModes.length > 0 && (
+            <p className="text-sm mt-1">
+              Some blockers only apply to specific modes. {freeModes.map((m) => EXECUTION_MODE_LABELS[m]).join(', ')} can run without force.
+            </p>
+          )}
+        </div>
       </div>
 
       {sorted.length > 0 && (
