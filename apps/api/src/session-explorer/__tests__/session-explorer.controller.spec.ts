@@ -231,7 +231,7 @@ describe('SessionExplorerController', () => {
         payload: input,
       });
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ sampleKey: null, view: null, exhausted: true, failedNodes: 0 });
+      expect(res.json()).toEqual({ sampleKey: null, view: null, exhausted: true, failedNodes: 0, touchesKeys: false });
     });
 
     it('follows the SCAN cursor past empty pages', async () => {
@@ -242,7 +242,7 @@ describe('SessionExplorerController', () => {
         headers,
         payload: { ...input, pattern: 'lc:*', preset: 'langchain-community' },
       });
-      expect(res.json()).toMatchObject({ sampleKey: 'lc:good', exhausted: true });
+      expect(res.json()).toMatchObject({ sampleKey: 'lc:good', exhausted: false });
       expect(valkey.callsOf('scan')).toHaveLength(3);
     });
 
@@ -254,7 +254,7 @@ describe('SessionExplorerController', () => {
         headers,
         payload: input,
       });
-      expect(res.json()).toEqual({ sampleKey: null, view: null, exhausted: false, failedNodes: 0 });
+      expect(res.json()).toEqual({ sampleKey: null, view: null, exhausted: false, failedNodes: 0, touchesKeys: false });
       expect(valkey.callsOf('scan')).toHaveLength(10);
     });
 

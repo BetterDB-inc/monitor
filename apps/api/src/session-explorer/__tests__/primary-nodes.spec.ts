@@ -75,9 +75,8 @@ describe('withPrimaries', () => {
   it('turns on NO-TOUCH for every cluster primary it connects to', async () => {
     const parent = new FakeValkey();
     const self = new FakeValkey();
-    parent.duplicateWith = self;
     const other = new FakeValkey();
-    ValkeyMock.mockImplementation(() => other);
+    ValkeyMock.mockImplementationOnce(() => self).mockImplementationOnce(() => other);
     const db = fakeDb(parent, {
       nodes: [
         masterNode('a', '10.0.0.1:7000', ['myself'], [[0, 8191]]),
@@ -91,6 +90,67 @@ describe('withPrimaries', () => {
     expect(noTouchCalls(self)).toHaveLength(1);
     expect(noTouchCalls(other)).toHaveLength(1);
     expect(noTouchCalls(parent)).toHaveLength(0);
+  });
+
+  it('connects to the address of the node it is attached to, not the configured host', async () => {
+    const parent = new FakeValkey(new Map(), { host: 'clustercfg.example.com', port: 6379 });
+    parent.duplicateWith = new FakeValkey();
+    ValkeyMock.mockImplementation(() => new FakeValkey());
+    const db = fakeDb(parent, {
+      nodes: [masterNode('a', '10.0.0.1:7000', ['myself'], [[0, 16383]])],
+    });
+
+    await withPrimaries(db, async ({ clients }) => clients);
+
+    expect(parent.callsOf('duplicate')).toHaveLength(0);
+    expect(ValkeyMock.mock.calls[0][0]).toMatchObject({ host: '10.0.0.1', port: 7000 });
+  });
+
+  it('falls back to the shared connection when its own node cannot be reached', async () => {
+    const parent = new FakeValkey();
+    const unreachable = new FakeValkey();
+    unreachable.connectError = new Error('ECONNREFUSED');
+    ValkeyMock.mockImplementation(() => unreachable);
+    const db = fakeDb(parent, {
+      nodes: [masterNode('a', '10.0.0.1:7000', ['myself'], [[0, 16383]])],
+    });
+
+    const result = await withPrimaries(db, async (p) => p);
+
+    expect(result.clients).toEqual([parent]);
+    expect(result.failed).toBe(0);
+    expect(result.touchesKeys).toBe(true);
+  });
+
+  it('reports that reads leave access times alone when every reader has NO-TOUCH', async () => {
+    const parent = new FakeValkey();
+    parent.duplicateWith = new FakeValkey();
+
+    const result = await withPrimaries(fakeDb(parent), async (p) => p);
+
+    expect(result.touchesKeys).toBe(false);
+  });
+
+  it('reports that reads touch keys when the server does not know CLIENT NO-TOUCH', async () => {
+    const parent = new FakeValkey();
+    const reader = new FakeValkey();
+    reader.noTouchError = new Error('ERR unknown subcommand');
+    parent.duplicateWith = reader;
+
+    const result = await withPrimaries(fakeDb(parent), async (p) => p);
+
+    expect(result.touchesKeys).toBe(true);
+  });
+
+  it('reports that reads touch keys when the shared connection stands in for a reader', async () => {
+    const parent = new FakeValkey();
+    const reader = new FakeValkey();
+    reader.connectError = new Error('ECONNREFUSED');
+    parent.duplicateWith = reader;
+
+    const result = await withPrimaries(fakeDb(parent), async (p) => p);
+
+    expect(result.touchesKeys).toBe(true);
   });
 
   it('gives other primaries the shared client command timeout', async () => {

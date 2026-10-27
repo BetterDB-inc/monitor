@@ -292,10 +292,11 @@ describe('primaryClients', () => {
     expect(ValkeyMock).not.toHaveBeenCalled();
   });
 
-  it('keeps only masters with slots and reuses the parent for myself', async () => {
+  it('keeps only masters with slots and connects to each by its own address', async () => {
     const parent = new FakeValkey();
+    const nodeA = new FakeValkey();
     const nodeB = new FakeValkey();
-    ValkeyMock.mockImplementation(() => nodeB);
+    ValkeyMock.mockImplementationOnce(() => nodeA).mockImplementationOnce(() => nodeB);
     const replica = { ...masterNode('r', '10.0.0.9:7009'), flags: ['slave'], master: 'a' };
     const empty = { ...masterNode('e', '10.0.0.8:7008'), slots: [] };
     const db = fakeDb(parent, {
@@ -309,12 +310,16 @@ describe('primaryClients', () => {
 
     const result = await primaryClients(db);
 
-    expect(result.clients).toEqual([parent, nodeB]);
-    expect(ValkeyMock).toHaveBeenCalledTimes(1);
+    expect(result.clients).toEqual([nodeA, nodeB]);
+    expect(ValkeyMock).toHaveBeenCalledTimes(2);
+    expect(ValkeyMock).toHaveBeenCalledWith(
+      expect.objectContaining({ host: '10.0.0.1', port: 7000, lazyConnect: true }),
+    );
     expect(ValkeyMock).toHaveBeenCalledWith(
       expect.objectContaining({ host: '10.0.0.2', port: 7002, lazyConnect: true }),
     );
     await result.release();
+    expect(nodeA.disconnected).toBe(true);
     expect(nodeB.disconnected).toBe(true);
     expect(parent.disconnected).toBe(false);
   });

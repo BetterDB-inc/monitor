@@ -25,6 +25,19 @@ function clusterOf(nodes: Record<number, FakeValkey>, slotsByPort: Record<number
 describe('readSessionKeys', () => {
   beforeEach(() => ValkeyMock.mockReset());
 
+  it('reports that reads touch keys when no NO-TOUCH reader could be opened', async () => {
+    const client = new FakeValkey(storeOf({ k: { type: 'string', value: 'v' } }));
+    const read = await readSessionKeys(fakeDb(client), ['k']);
+    expect(read.touchesKeys).toBe(true);
+  });
+
+  it('reports that reads leave access times alone through a NO-TOUCH reader', async () => {
+    const parent = new FakeValkey();
+    parent.duplicateWith = new FakeValkey(storeOf({ k: { type: 'string', value: 'v' } }));
+    const read = await readSessionKeys(fakeDb(parent), ['k']);
+    expect(read.touchesKeys).toBe(false);
+  });
+
   it('reads a small string whole', async () => {
     const client = new FakeValkey(storeOf({ k: { type: 'string', value: 'hello', pttl: 500 } }));
     const key = await readOne(client, 'k');

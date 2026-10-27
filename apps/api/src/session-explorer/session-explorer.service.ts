@@ -109,7 +109,7 @@ export class SessionExplorerService {
             pages++;
             const accepted = page.find((k) => preset.sessionIdOf(k) !== null);
             if (accepted !== undefined) {
-              return { sampleKey: accepted, exhausted: true, failedNodes };
+              return { sampleKey: accepted, exhausted: false, failedNodes };
             }
             fallback ??= page[0] ?? null;
           } while (cursor !== '0' && pages < PREVIEW_SCAN_PAGES);
@@ -125,7 +125,9 @@ export class SessionExplorerService {
       return { sampleKey: fallback, exhausted: searchedAll, failedNodes };
     });
     const { sampleKey, exhausted, failedNodes } = scanned;
-    if (sampleKey === null) return { sampleKey: null, view: null, exhausted, failedNodes };
+    if (sampleKey === null) {
+      return { sampleKey: null, view: null, exhausted, failedNodes, touchesKeys: false };
+    }
     const read = await readSessionKeys(db, [sampleKey]);
     const captured = read.keys[0];
     return {
@@ -133,6 +135,7 @@ export class SessionExplorerService {
       view: captured ? preset.parseKey(captured) : null,
       exhausted,
       failedNodes,
+      touchesKeys: read.touchesKeys,
     };
   }
 
@@ -204,6 +207,7 @@ export class SessionExplorerService {
         truncated,
         failedNodes,
         missingKeys: read.missingKeys,
+        touchesKeys: read.touchesKeys,
       },
     };
   }

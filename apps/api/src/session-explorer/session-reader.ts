@@ -21,6 +21,7 @@ export interface SessionKeysRead {
   truncated: boolean;
   failedNodes: number;
   missingKeys: number;
+  touchesKeys: boolean;
 }
 
 export interface ReadOptions {
@@ -616,6 +617,7 @@ export async function readSessionKeys(
       truncated: state.exhausted,
       failedNodes,
       missingKeys: state.missing,
+      touchesKeys: primaries.touchesKeys,
     };
   });
 }
