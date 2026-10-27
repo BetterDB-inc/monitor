@@ -57,6 +57,15 @@ export function SessionDetailPanel({ detail, onExport, exporting }: Props) {
             </AlertDescription>
           </Alert>
         )}
+        {detail.touchesKeys && (
+          <Alert>
+            <AlertDescription>
+              This server could not read without touching keys (CLIENT NO-TOUCH needs Valkey or
+              Redis 7.2+), so viewing this session reset the idle time and access frequency of its
+              keys.
+            </AlertDescription>
+          </Alert>
+        )}
         <section>
           <h3 className="mb-2 text-sm font-medium">Timeline</h3>
           <MessageTimeline messages={detail.messages} />

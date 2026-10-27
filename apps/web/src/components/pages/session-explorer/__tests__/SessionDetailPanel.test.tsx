@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { SessionDetailPanel } from '../SessionDetailPanel';
-import { detail, failedKey } from './fixtures';
+import { detail, failedKey, parsedKey } from './fixtures';
 
 describe('SessionDetailPanel', () => {
   it('shows tool calls as a structured block with pretty-printed args', () => {
@@ -26,6 +26,34 @@ describe('SessionDetailPanel', () => {
     );
     expect(screen.getByText(/Timeline incomplete/)).toBeInTheDocument();
     expect(screen.getByText(/1 key could not be parsed/)).toBeInTheDocument();
+  });
+
+  it('renders each message once, not again inside every key', () => {
+    const key = parsedKey();
+    render(
+      <SessionDetailPanel
+        detail={detail({ keys: [key], messages: key.parsed ? key.messages : [] })}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
+    expect(screen.getAllByText('Where should I stay?')).toHaveLength(1);
+  });
+
+  it('says when viewing the session reset its access time', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({ touchesKeys: true })}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
+    expect(screen.getByText(/reset the idle time/i)).toBeInTheDocument();
+  });
+
+  it('says nothing about access times when reads used NO-TOUCH', () => {
+    render(<SessionDetailPanel detail={detail()} onExport={vi.fn()} exporting={false} />);
+    expect(screen.queryByText(/reset the idle time/i)).not.toBeInTheDocument();
   });
 
   it('exports on request', () => {

@@ -1,6 +1,7 @@
-import { ApiError, apiUrl, fetchApi, getCurrentConnectionId } from './client';
+import { fetchApi } from './client';
 import type {
   SessionDetail,
+  SessionExport,
   SessionListResponse,
   SessionNamespace,
   SessionNamespaceInput,
@@ -14,8 +15,7 @@ const namespacePath = (id: string) => `${BASE}/${encodeURIComponent(id)}`;
 const sessionPath = (id: string, sessionId: string) =>
   `${namespacePath(id)}/sessions/${encodeURIComponent(sessionId)}`;
 
-const filenameOf = (disposition: string | null, sessionId: string): string =>
-  disposition?.match(/filename="([^"]+)"/)?.[1] ??
+const filenameOf = (sessionId: string): string =>
   `session-${sessionId.replace(/[^A-Za-z0-9._-]/g, '_')}.json`;
 
 export const sessionExplorerApi = {
@@ -34,19 +34,12 @@ export const sessionExplorerApi = {
   oversize: (id: string, signal?: AbortSignal) =>
     fetchApi<SessionOversizeResponse>(`${namespacePath(id)}/oversize`, { signal }),
   exportSession: async (id: string, sessionId: string): Promise<void> => {
-    const connectionId = getCurrentConnectionId();
-    const response = await fetch(apiUrl(`${sessionPath(id, sessionId)}/export`), {
-      credentials: 'include',
-      headers: connectionId ? { 'x-connection-id': connectionId } : {},
-    });
-    if (!response.ok) {
-      throw new ApiError(`Export failed: ${response.status}`, response.status);
-    }
-    const blob = await response.blob();
+    const data = await fetchApi<SessionExport>(`${sessionPath(id, sessionId)}/export`);
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = filenameOf(response.headers.get('content-disposition'), sessionId);
+    anchor.download = filenameOf(sessionId);
     anchor.click();
     URL.revokeObjectURL(url);
   },

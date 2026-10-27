@@ -208,7 +208,11 @@ export function SessionExplorer() {
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => void sessions.refetch()}
+              onClick={() =>
+                void queryClient.invalidateQueries({
+                  queryKey: [...sessionExplorerKeys.namespaces(connectionId), nsId],
+                })
+              }
               disabled={sessions.isFetching}
             >
               <RefreshCw className="h-4 w-4" aria-hidden />

@@ -284,7 +284,20 @@ export function NamespaceSetup({ initial, onSaved, onCancel }: Props) {
           (preview.view ? (
             <div className="space-y-1">
               <p className="text-sm text-muted-foreground">Preview of one sampled key</p>
-              <KeyPanel key={preview.sampleKey} view={preview.view} />
+              {preview.failedNodes > 0 && (
+                <p className="text-sm text-muted-foreground">
+                  {preview.failedNodes === 1
+                    ? '1 node could not be scanned.'
+                    : `${preview.failedNodes} nodes could not be scanned.`}
+                </p>
+              )}
+              {preview.touchesKeys && (
+                <p className="text-sm text-muted-foreground">
+                  This server does not support CLIENT NO-TOUCH, so reading the sample reset the idle
+                  time of {preview.sampleKey}.
+                </p>
+              )}
+              <KeyPanel key={preview.sampleKey} view={preview.view} expanded />
             </div>
           ) : (
             <p className="text-sm text-muted-foreground">

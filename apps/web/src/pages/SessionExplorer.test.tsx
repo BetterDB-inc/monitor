@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { SessionNamespace } from '@betterdb/shared';
 import { SessionExplorer } from './SessionExplorer';
 import { sessionExplorerKeys } from '../hooks/useSessionExplorer';
-import { listResponse } from '../components/pages/session-explorer/__tests__/fixtures';
+import { detail, listResponse } from '../components/pages/session-explorer/__tests__/fixtures';
 
 const { api, connection } = vi.hoisted(() => ({
   connection: { id: 'c1' },
@@ -108,6 +108,21 @@ describe('SessionExplorer', () => {
     await screen.findByText('namespaces unavailable');
     expect(screen.queryByLabelText('Namespace')).toBeNull();
     expect(screen.queryByText('Sessions')).toBeNull();
+  });
+
+  it('rereads the list and the open session when Refresh is pressed', async () => {
+    api.listNamespaces.mockResolvedValue([ns('a')]);
+    api.getSession.mockResolvedValue(detail({ sessionId: 'alpha' }));
+    renderPage();
+
+    fireEvent.click(await screen.findByText('alpha'));
+    await waitFor(() => expect(api.getSession).toHaveBeenCalledTimes(1));
+    expect(api.listSessions).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+
+    await waitFor(() => expect(api.listSessions).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(api.getSession).toHaveBeenCalledTimes(2));
   });
 
   it('does not request the previous session after switching connections', async () => {

@@ -67,5 +67,6 @@ export const detail = (overrides: Partial<SessionDetail> = {}): SessionDetail =>
   truncated: false,
   failedNodes: 0,
   missingKeys: 0,
+  touchesKeys: false,
   ...overrides,
 });

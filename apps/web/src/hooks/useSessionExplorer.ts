@@ -5,6 +5,8 @@ import { sessionExplorerApi } from '../api/session-explorer';
 
 const ROOT = 'session-explorer';
 
+const ON_DEMAND = { staleTime: Infinity, refetchOnWindowFocus: false } as const;
+
 export const sessionExplorerKeys = {
   namespaces: (connectionId?: string) => [ROOT, connectionId, 'namespaces'] as const,
   sessions: (connectionId: string | undefined, nsId: string) =>
@@ -38,7 +40,7 @@ export function useSessionList(connectionId: string | undefined, nsId: string | 
     queryKey: sessionExplorerKeys.sessions(connectionId, nsId ?? ''),
     queryFn: ({ signal }) => sessionExplorerApi.listSessions(nsId as string, signal),
     enabled: !!connectionId && !!nsId,
-    refetchInterval: 60_000,
+    ...ON_DEMAND,
   });
 }
 
@@ -51,7 +53,7 @@ export function useOversizeSessions(
     queryKey: sessionExplorerKeys.oversize(connectionId, nsId ?? ''),
     queryFn: ({ signal }) => sessionExplorerApi.oversize(nsId as string, signal),
     enabled: entitled && !!connectionId && !!nsId,
-    refetchInterval: 60_000,
+    ...ON_DEMAND,
   });
   return useMemo(
     () => (entitled && data ? new Set(data.sessionIds) : null),
@@ -69,5 +71,6 @@ export function useSessionDetail(
     queryFn: ({ signal }) =>
       sessionExplorerApi.getSession(nsId as string, sessionId as string, signal),
     enabled: !!connectionId && !!nsId && !!sessionId,
+    ...ON_DEMAND,
   });
 }

@@ -45,7 +45,7 @@ function SortHeader({
   const active = sort.key === column;
   const Icon = sort.descending ? ArrowDown : ArrowUp;
   return (
-    <TableHead>
+    <TableHead aria-sort={active ? (sort.descending ? 'descending' : 'ascending') : undefined}>
       <button
         type="button"
         onClick={() => onSort(column)}
@@ -110,9 +110,16 @@ export function SessionList({ data, oversizeIds, selectedId, onSelect }: Props) 
             {sessions.map((s) => (
               <TableRow
                 key={s.sessionId}
+                tabIndex={0}
+                aria-selected={s.sessionId === selectedId}
                 onClick={() => onSelect(s.sessionId)}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter' && e.key !== ' ') return;
+                  e.preventDefault();
+                  onSelect(s.sessionId);
+                }}
                 data-state={s.sessionId === selectedId ? 'selected' : undefined}
-                className="cursor-pointer"
+                className="cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
               >
                 <TableCell className="max-w-xs">
                   <span className="break-all font-mono text-xs">{s.sessionId}</span>

@@ -24,10 +24,12 @@ function rawText(view: KeyView): string {
   return JSON.stringify(raw, null, 2) ?? String(raw);
 }
 
-export function KeyPanel({ view }: { view: KeyView }) {
-  const [mode, setMode] = useState<'structured' | 'raw'>(view.parsed ? 'structured' : 'raw');
+export function KeyPanel({ view, expanded = false }: { view: KeyView; expanded?: boolean }) {
+  const [mode, setMode] = useState<'hidden' | 'structured' | 'raw'>(
+    expanded ? (view.parsed ? 'structured' : 'raw') : 'hidden',
+  );
   const labelId = useId();
-  const showRaw = mode === 'raw' || !view.parsed;
+  const showRaw = mode === 'raw' || (mode === 'structured' && !view.parsed);
 
   return (
     <section aria-labelledby={labelId} className="rounded-md border p-3">
@@ -41,7 +43,8 @@ export function KeyPanel({ view }: { view: KeyView }) {
         <div className="ms-auto flex gap-1">
           <Button
             size="sm"
-            variant={showRaw ? 'ghost' : 'secondary'}
+            variant={mode === 'structured' ? 'secondary' : 'ghost'}
+            aria-pressed={mode === 'structured'}
             disabled={!view.parsed}
             onClick={() => setMode('structured')}
           >
@@ -50,16 +53,22 @@ export function KeyPanel({ view }: { view: KeyView }) {
           <Button
             size="sm"
             variant={showRaw ? 'secondary' : 'ghost'}
+            aria-pressed={showRaw}
             onClick={() => setMode('raw')}
           >
             Raw
           </Button>
+          {mode !== 'hidden' && (
+            <Button size="sm" variant="ghost" onClick={() => setMode('hidden')}>
+              Hide
+            </Button>
+          )}
         </div>
       </div>
       {!view.parsed && (
         <p className="mb-2 text-sm text-destructive">Not parsed: {view.reason}</p>
       )}
-      {showRaw ? (
+      {mode === 'hidden' ? null : showRaw ? (
         <>
           {binaryOf(view) !== null && (
             <p className="mb-1 text-xs text-muted-foreground">

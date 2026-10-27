@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sessionExplorerApi } from './session-explorer';
-import { setCurrentConnectionId } from './client';
+import { UnauthorizedError, setCurrentConnectionId } from './client';
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -78,8 +78,17 @@ describe('sessionExplorerApi', () => {
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:session');
   });
 
-  it('rejects when the export request fails', async () => {
+  it('rejects an export with the message the server sent', async () => {
     fetchMock.mockResolvedValue(json({ message: 'Session not found' }, 404));
-    await expect(sessionExplorerApi.exportSession('ns-1', 'gone')).rejects.toThrow();
+    await expect(sessionExplorerApi.exportSession('ns-1', 'gone')).rejects.toThrow(
+      'Session not found',
+    );
+  });
+
+  it('treats an unauthorised export like any other unauthorised request', async () => {
+    fetchMock.mockResolvedValue(json({ message: 'Unauthorized' }, 401));
+    await expect(sessionExplorerApi.exportSession('ns-1', 'chat:1')).rejects.toBeInstanceOf(
+      UnauthorizedError,
+    );
   });
 });

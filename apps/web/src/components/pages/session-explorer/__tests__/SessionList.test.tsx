@@ -54,6 +54,34 @@ describe('SessionList', () => {
     expect(order()).toEqual(['bravo', 'alpha', 'charlie']);
   });
 
+  it('opens a session from the keyboard', () => {
+    const onSelect = vi.fn();
+    renderList({ onSelect });
+    const row = screen.getByText('alpha').closest('tr')!;
+    expect(row.tabIndex).toBe(0);
+    fireEvent.keyDown(row, { key: 'Enter' });
+    fireEvent.keyDown(row, { key: ' ' });
+    fireEvent.keyDown(row, { key: 'a' });
+    expect(onSelect).toHaveBeenCalledTimes(2);
+    expect(onSelect).toHaveBeenCalledWith('alpha');
+  });
+
+  it('marks the selected row', () => {
+    renderList({ selectedId: 'alpha' });
+    expect(screen.getByText('alpha').closest('tr')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('bravo').closest('tr')).toHaveAttribute('aria-selected', 'false');
+  });
+
+  it('announces the sort order on the sorted column only', () => {
+    renderList();
+    const header = (name: RegExp) => screen.getByRole('button', { name }).closest('th')!;
+    expect(header(/Last access/)).toHaveAttribute('aria-sort', 'ascending');
+    expect(header(/Size/)).not.toHaveAttribute('aria-sort');
+    fireEvent.click(screen.getByRole('button', { name: /Size/ }));
+    expect(header(/Size/)).toHaveAttribute('aria-sort', 'descending');
+    expect(header(/Last access/)).not.toHaveAttribute('aria-sort');
+  });
+
   it('notices a capped scan', () => {
     renderList({ data: listResponse({ truncated: true }) });
     expect(screen.getByText(/Showing the first 10,000 keys/)).toBeInTheDocument();
