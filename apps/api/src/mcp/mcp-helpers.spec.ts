@@ -234,15 +234,38 @@ describe('downsampleSeries', () => {
     expect(sampling.method).toBe('none');
   });
 
-  it('keeps first and last of every series even when there are more series than maxPoints / 2', () => {
+  it('keeps the last point of the first maxPoints series when there are more series than maxPoints', () => {
     const many = Array.from({ length: 10 }, (_, s) => {
       return Array.from({ length: 50 }, (_, t) => ({ s: `s${s}`, t }));
     }).flat();
-    const { rows: out } = downsampleSeries(many, (row) => row.s, 6);
-    expect(out).toHaveLength(20);
-    for (let s = 0; s < 10; s++) {
-      const series = out.filter((row) => row.s === `s${s}`);
-      expect(series.map((row) => row.t)).toEqual([0, 49]);
+    const { rows: out, sampling } = downsampleSeries(many, (row) => row.s, 6);
+    expect(out).toHaveLength(6);
+    expect(out.map((row) => row.s)).toEqual(['s0', 's1', 's2', 's3', 's4', 's5']);
+    expect(out.every((row) => row.t === 49)).toBe(true);
+    expect(sampling.omittedSeries).toBe(4);
+    expect(sampling.method).toBe('even');
+  });
+
+  it('keeps one latest point per series when the share is 1', () => {
+    const few = Array.from({ length: 5 }, (_, s) => {
+      return Array.from({ length: 50 }, (_, t) => ({ s: `s${s}`, t }));
+    }).flat();
+    const { rows: out, sampling } = downsampleSeries(few, (row) => row.s, 6);
+    expect(out).toHaveLength(5);
+    expect(out.every((row) => row.t === 49)).toBe(true);
+    expect(sampling.omittedSeries).toBeUndefined();
+  });
+
+  it('never returns more than maxPoints in total', () => {
+    for (const maxPoints of [2, 3, 7, 150]) {
+      for (let seriesCount = 1; seriesCount <= 40; seriesCount++) {
+        const data = Array.from({ length: seriesCount }, (_, s) => {
+          const length = 1 + Math.floor(Math.random() * 300);
+          return Array.from({ length }, (_, t) => ({ s: `s${s}`, t }));
+        }).flat();
+        const { rows: out } = downsampleSeries(data, (row) => row.s, maxPoints);
+        expect(out.length).toBeLessThanOrEqual(maxPoints);
+      }
     }
   });
 });

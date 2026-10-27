@@ -186,6 +186,8 @@ export interface SamplingInfo {
   maxPoints: number;
   /** none: nothing dropped; rebucketed: service aggregated into wider buckets; even: evenly spaced subset of the original points. */
   method: 'none' | 'rebucketed' | 'even';
+  /** Series dropped entirely because there were more series than maxPoints. */
+  omittedSeries?: number;
 }
 
 /**
@@ -216,11 +218,13 @@ export function evenSampling(originalPoints: number, returnedPoints: number, max
 
 /**
  * Downsample several interleaved series (e.g. per engine × model) so the
- * TOTAL returned stays within `maxPoints`. Each series gets an equal share
- * (at least 2 points, so its first and last survive). Series order and the
- * order within each series are preserved. With more than `maxPoints / 2`
- * series the total can reach 2 × series, because every series keeps its
- * first and last point.
+ * TOTAL returned never exceeds `maxPoints`. Each series gets an equal share
+ * of floor(maxPoints / series). With a share of 2 or more, each series keeps
+ * its first and last point. With a share of 1, each series keeps only its
+ * latest point. With more series than `maxPoints`, only the first `maxPoints`
+ * series (input order) keep their latest point and the rest are counted in
+ * `sampling.omittedSeries`. Series order and the order within each series are
+ * preserved.
  */
 export function downsampleSeries<T>(
   rows: readonly T[],
@@ -237,10 +241,25 @@ export function downsampleSeries<T>(
       groups.set(key, [row]);
     }
   }
-  const perSeries = Math.max(2, Math.floor(maxPoints / Math.max(1, groups.size)));
+  const perSeries = Math.floor(maxPoints / Math.max(1, groups.size));
   const out: T[] = [];
-  for (const list of groups.values()) {
-    out.push(...downsampleEvenly(list, perSeries));
+  let omittedSeries = 0;
+  if (perSeries >= 2) {
+    for (const list of groups.values()) {
+      out.push(...downsampleEvenly(list, perSeries));
+    }
+  } else {
+    for (const list of groups.values()) {
+      if (out.length < maxPoints) {
+        out.push(list[list.length - 1]);
+      } else {
+        omittedSeries++;
+      }
+    }
   }
-  return { rows: out, sampling: evenSampling(rows.length, out.length, maxPoints) };
+  const sampling = evenSampling(rows.length, out.length, maxPoints);
+  if (omittedSeries > 0) {
+    sampling.omittedSeries = omittedSeries;
+  }
+  return { rows: out, sampling };
 }
