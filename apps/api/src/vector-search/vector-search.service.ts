@@ -17,7 +17,7 @@ import {
 } from '../common/services/multi-connection-poller';
 import { PrometheusService } from '../prometheus/prometheus.service';
 import { RetentionPolicyService } from '../retention/retention-policy.service';
-import type { VectorIndexSnapshot } from '@betterdb/shared';
+import { escapeGlob, type VectorIndexSnapshot } from '@betterdb/shared';
 
 @Injectable()
 export class VectorSearchService extends MultiConnectionPoller implements OnModuleInit {
@@ -249,10 +249,11 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
         }
         const remaining = cappedLimit - allKeys.length;
         const useCursor = i === prefixIdx ? currentCursor : '0';
+        // Index prefixes are literal strings, but SCAN MATCH reads * ? [ ] and \ as glob syntax.
         const [nc, keys] = await rawClient.scan(
           useCursor,
           'MATCH',
-          `${prefixes[i]}*`,
+          `${escapeGlob(prefixes[i])}*`,
           'COUNT',
           remaining,
         );
