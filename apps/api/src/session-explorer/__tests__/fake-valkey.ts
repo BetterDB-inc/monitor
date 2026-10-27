@@ -74,6 +74,7 @@ export class FakeValkey {
   pipelineExecs = 0;
   scanPages?: string[][];
   connectError?: Error;
+  noTouchError?: Error;
   duplicateWith?: FakeValkey;
   disconnected = false;
   options: Record<string, unknown>;
@@ -277,6 +278,10 @@ export class FakeValkey {
       case 'callBuffer': {
         const command = String(args[0]).toUpperCase();
         if (WRITE_CALLS.includes(command)) throw new Error(`write command ${command} issued`);
+        if (command === 'CLIENT' && args[1] === 'NO-TOUCH') {
+          if (this.noTouchError) throw this.noTouchError;
+          return 'OK';
+        }
         if (command === 'JSON.GET') return e ? Buffer.from(raw as string) : null;
         if (command === 'JSON.DEBUG' && args[1] === 'MEMORY') {
           if (!e || e.jsonMemory === null || e.jsonMemory === undefined) {

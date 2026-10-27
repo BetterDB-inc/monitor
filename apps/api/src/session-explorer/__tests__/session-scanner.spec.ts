@@ -471,7 +471,7 @@ describe('keysForSession', () => {
     const result = await keysForSession(db, 'chat:*', byKey, 'chat:1');
 
     expect(result.keys).toEqual(['chat:1']);
-    expect(nodeA.calls.filter((c) => c.name !== 'connect')).toHaveLength(0);
+    expect(nodeA.callsOf('exists')).toHaveLength(0);
   });
 
   it('reports the owning primary as failed when the lookup errors', async () => {

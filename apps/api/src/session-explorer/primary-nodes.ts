@@ -16,6 +16,7 @@ export interface PrimaryClients {
   clients: Valkey[];
   failed: number;
   routes: PrimaryRoute[] | null;
+  touchesKeys: boolean;
   release: () => Promise<void>;
 }
 
@@ -29,7 +30,8 @@ const READER_OPTIONS = {
   connectionName: 'BetterDB-Monitor-SessionExplorer',
 };
 
-const readerTimeout = (parent: Valkey): number => parent.options.commandTimeout ?? NODE_TIMEOUT_MS;
+const readerTimeout = (parent: Valkey): number =>
+  parent.options.commandTimeout ?? NODE_TIMEOUT_MS;
 
 export function routeOf(primaries: PrimaryClients, key: string): Valkey | null {
   if (!primaries.routes) return primaries.clients[0] ?? null;
@@ -65,14 +67,23 @@ function nodeClient(parent: Valkey, node: ClusterNode): Valkey | null {
   return client;
 }
 
-async function openReader(create: () => Valkey | null): Promise<Valkey | null> {
+interface Reader {
+  client: Valkey;
+  noTouch: boolean;
+}
+
+async function openReader(create: () => Valkey | null): Promise<Reader | null> {
   let client: Valkey | null = null;
   try {
     client = create();
     if (!client) return null;
     client.on('error', () => undefined);
     await client.connect();
-    return client;
+    const noTouch = await client.call('CLIENT', 'NO-TOUCH', 'ON').then(
+      () => true,
+      () => false,
+    );
+    return { client, noTouch };
   } catch {
     client?.disconnect();
     return null;
@@ -82,19 +93,26 @@ async function openReader(create: () => Valkey | null): Promise<Valkey | null> {
 const connectNode = (parent: Valkey, node: ClusterNode) =>
   openReader(() => nodeClient(parent, node));
 
-const sharedReader = async (parent: Valkey): Promise<Valkey> =>
-  (await openReader(() =>
-    parent.duplicate({ ...READER_OPTIONS, commandTimeout: readerTimeout(parent) }),
-  )) ?? parent;
+const orShared = (parent: Valkey, reader: Reader | null): Reader =>
+  reader ?? { client: parent, noTouch: false };
+
+const sharedReader = async (parent: Valkey) =>
+  orShared(
+    parent,
+    await openReader(() =>
+      parent.duplicate({ ...READER_OPTIONS, commandTimeout: readerTimeout(parent) }),
+    ),
+  );
 
 export async function primaryClients(db: DatabasePort): Promise<PrimaryClients> {
   const parent = db.getClient();
   if (!db.getCapabilities().clusterEnabled) {
-    const reader = await sharedReader(parent);
+    const { client: reader, noTouch } = await sharedReader(parent);
     return {
       clients: [reader],
       failed: 0,
       routes: null,
+      touchesKeys: !noTouch,
       release: async () => {
         if (reader !== parent) reader.disconnect();
       },
@@ -106,18 +124,21 @@ export async function primaryClients(db: DatabasePort): Promise<PrimaryClients> 
   const clients: Valkey[] = [];
   const routes: PrimaryRoute[] = [];
   let failed = 0;
+  let touchesKeys = false;
 
   const connected = await Promise.all(
     primaries.map(async (node) => {
       const reader = await connectNode(parent, node);
-      return node.flags.includes('myself') ? (reader ?? parent) : reader;
+      return node.flags.includes('myself') ? orShared(parent, reader) : reader;
     }),
   );
-  connected.forEach((client, i) => {
-    if (!client) {
+  connected.forEach((reader, i) => {
+    if (!reader) {
       failed++;
       return;
     }
+    const { client, noTouch } = reader;
+    if (!noTouch) touchesKeys = true;
     clients.push(client);
     routes.push({ client, slots: primaries[i].slots });
     if (client !== parent) owned.push(client);
@@ -127,6 +148,7 @@ export async function primaryClients(db: DatabasePort): Promise<PrimaryClients> 
     clients,
     failed,
     routes,
+    touchesKeys,
     release: async () => {
       for (const client of owned) client.disconnect();
     },

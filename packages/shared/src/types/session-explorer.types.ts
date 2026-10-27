@@ -118,6 +118,7 @@ export interface SessionDetail {
   truncated: boolean;
   failedNodes: number;
   missingKeys: number;
+  touchesKeys: boolean;
 }
 
 export interface SessionOversizeResponse {
@@ -132,6 +133,9 @@ export interface SessionOversizeResponse {
 export interface SessionPreview {
   sampleKey: string | null;
   view: KeyView | null;
+  exhausted: boolean;
+  failedNodes: number;
+  touchesKeys: boolean;
 }
 
 export interface SessionExport {

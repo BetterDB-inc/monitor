@@ -29,7 +29,7 @@ describe('withPrimaries against a stalled server', () => {
       /timed out/i,
     );
 
-    expect(Date.now() - started).toBeLessThan(8000);
+    expect(Date.now() - started).toBeLessThan(12_000);
     parent.disconnect();
-  }, 10_000);
+  }, 15_000);
 });
