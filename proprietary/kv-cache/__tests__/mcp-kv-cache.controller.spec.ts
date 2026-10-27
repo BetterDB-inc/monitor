@@ -1,5 +1,6 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { THROTTLER_LIMIT, THROTTLER_TTL } from '@nestjs/throttler/dist/throttler.constants';
 import type { KvCacheEngine } from '@betterdb/shared';
 import { LicenseGuard } from '@proprietary/licenses';
 import { AgentTokenGuard } from '@app/common/guards/agent-token.guard';
@@ -103,11 +104,76 @@ describe('McpKvCacheController', () => {
     });
   });
 
+  describe('getHitRate maxPoints', () => {
+    const rows = ['e1', 'e2', 'e3'].flatMap((engineId) => {
+      return ['m1', 'm2'].flatMap((modelName) => {
+        return Array.from({ length: 1440 }, (_, i) => ({ engineId, modelName, timestamp: i * 60_000, hitRate: 0.5 }));
+      });
+    });
+
+    beforeEach(() => {
+      samples.getSamples.mockResolvedValue({ buckets: rows, rangeHitRate: 0.5, truncated: false, bucketMs: 60_000 });
+    });
+
+    it('caps a large series at 150 by default and reports sampling', async () => {
+      const res = await controller.getHitRate('inst1');
+      expect(res.buckets.length).toBeLessThanOrEqual(150);
+      expect(res.sampling).toEqual({ originalPoints: 8640, returnedPoints: res.buckets.length, maxPoints: 150, method: 'even' });
+      expect(res.rangeHitRate).toBe(0.5);
+      expect(res.bucketMs).toBe(60_000);
+    });
+
+    it('honours an explicit maxPoints', async () => {
+      const res = await controller.getHitRate('inst1', undefined, undefined, undefined, undefined, '60');
+      expect(res.buckets).toHaveLength(60);
+      expect(res.sampling.maxPoints).toBe(60);
+    });
+
+    it.each(['1', '1001', 'abc'])('rejects maxPoints=%s before calling the service', async (value) => {
+      await expect(controller.getHitRate('inst1', undefined, undefined, undefined, undefined, value)).rejects.toBeInstanceOf(BadRequestException);
+      expect(samples.getSamples).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getFootprintHistory maxPoints', () => {
+    const snapshots = Array.from({ length: 1000 }, (_, i) => ({ connectionId: 'inst1', timestamp: i }));
+
+    beforeEach(() => {
+      status.getFootprintHistory.mockResolvedValue(snapshots);
+    });
+
+    it('caps at 150 by default, keeping first and last', async () => {
+      const res = await controller.getFootprintHistory('inst1');
+      expect(res.snapshots).toHaveLength(150);
+      expect(res.snapshots[0]).toBe(snapshots[0]);
+      expect(res.snapshots[149]).toBe(snapshots[999]);
+      expect(res.sampling).toEqual({ originalPoints: 1000, returnedPoints: 150, maxPoints: 150, method: 'even' });
+    });
+
+    it('honours an explicit maxPoints', async () => {
+      const res = await controller.getFootprintHistory('inst1', undefined, undefined, '10');
+      expect(res.snapshots).toHaveLength(10);
+    });
+
+    it('rejects an invalid maxPoints before calling the service', async () => {
+      await expect(controller.getFootprintHistory('inst1', undefined, undefined, '1')).rejects.toBeInstanceOf(BadRequestException);
+      expect(status.getFootprintHistory).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('throttling', () => {
+    it.each(['getHitRate', 'getFootprintHistory'] as const)('%s is limited to 30 requests per minute', (handler) => {
+      const fn = McpKvCacheController.prototype[handler];
+      expect(Reflect.getMetadata(`${THROTTLER_LIMIT}default`, fn)).toBe(30);
+      expect(Reflect.getMetadata(`${THROTTLER_TTL}default`, fn)).toBe(60000);
+    });
+  });
+
   describe('getFootprintHistory', () => {
     it('wraps snapshots and defaults to the last 24 hours', async () => {
       const res = await controller.getFootprintHistory('inst1');
       expect(status.getFootprintHistory).toHaveBeenCalledWith('inst1', NOW - DAY_MS, NOW);
-      expect(res).toEqual({ snapshots: [] });
+      expect(res).toEqual({ snapshots: [], sampling: { originalPoints: 0, returnedPoints: 0, maxPoints: 150, method: 'none' } });
     });
 
     it('maps failures to 500', async () => {

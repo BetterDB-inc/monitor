@@ -161,7 +161,7 @@ Once connected, your AI assistant can query your databases directly:
 | `get_latency_regressions` | Detected sustained p99 latency regressions vs baseline from the anomaly store *(Pro)* |
 | `get_largest_keys` | Largest keys by measured memory usage from key analytics snapshots *(Pro)* |
 | `get_key_analytics_summary` | Keyspace totals, hot/cold/stale counts, per-pattern breakdown and databases with stored analytics *(Pro)* |
-| `get_key_patterns` | Per-pattern key count, memory, TTL coverage and hot/cold/stale counts *(Pro)* |
+| `get_key_patterns` | Per-pattern key count, memory, TTL coverage and hot/cold/stale counts; latest snapshot per db, `limit` (max 500) applies to the total *(Pro)* |
 | `get_key_pattern_trend` | Time series for one key pattern *(Pro)* |
 
 ### Capacity & Scaling Tools
@@ -179,7 +179,7 @@ For deployments running [LMCache](https://github.com/LMCache/LMCache) with a Val
 | Tool | Description |
 |---|---|
 | `get_kv_cache_status` | LMCache detection, latest footprint and linked inference engines (credentials redacted) *(Pro)* |
-| `get_kv_cache_hit_rate` | Per-minute requested vs hit tokens and hit rate, filterable by engine or model *(Pro)* |
+| `get_kv_cache_hit_rate` | Requested vs hit tokens and hit rate, bucketed per engine and per model (bucket width grows with the range), downsampled to `maxPoints` (default 150); filterable by engine or model *(Pro)* |
 | `get_kv_cache_footprint_history` | Stored KV-cache footprint snapshots over time *(Pro)* |
 
 ### Security & Fleet Tools

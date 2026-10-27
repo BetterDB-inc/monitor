@@ -37,7 +37,9 @@ export class McpInsightsController {
     }
   }
 
+  /** May run and store a CVE scan when none is cached, so it gets the tighter default limit. */
   @Get('instance/:id/cve')
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   async getCveExposure(
     @Param('id', ValidateInstanceIdPipe) id: string,
   ): Promise<{ scan: CveScanResult; dataset: CveDatasetStatus }> {

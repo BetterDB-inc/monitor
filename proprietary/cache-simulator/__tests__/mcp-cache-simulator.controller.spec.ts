@@ -1,5 +1,6 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { THROTTLER_LIMIT, THROTTLER_TTL } from '@nestjs/throttler/dist/throttler.constants';
 import { LicenseGuard } from '@proprietary/licenses';
 import { AgentTokenGuard } from '@app/common/guards/agent-token.guard';
 import { McpCacheSimulatorController } from '../mcp-cache-simulator.controller';
@@ -51,5 +52,11 @@ describe('McpCacheSimulatorController', () => {
   it('maps unexpected failures to 500', async () => {
     svc.snapshot.mockRejectedValueOnce(new Error('boom'));
     await expect(controller.getSnapshot('inst1')).rejects.toMatchObject({ status: 500 });
+  });
+
+  it('is rate-limited to 10 requests per minute', () => {
+    const fn = McpCacheSimulatorController.prototype.getSnapshot;
+    expect(Reflect.getMetadata(`${THROTTLER_LIMIT}default`, fn)).toBe(10);
+    expect(Reflect.getMetadata(`${THROTTLER_TTL}default`, fn)).toBe(60000);
   });
 });

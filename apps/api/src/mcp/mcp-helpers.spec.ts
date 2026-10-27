@@ -3,9 +3,13 @@ import { CapabilityUnavailableError } from '../common/errors/capability-unavaila
 import { ExternalConnectionUnsupportedError } from '../external-metrics/external-connection-unsupported.error';
 import {
   DAY_MS,
+  DEFAULT_MAX_POINTS,
   HOUR_MS,
   MAX_DB_INDEX,
+  downsampleEvenly,
+  downsampleSeries,
   mapMcpError,
+  parseMaxPoints,
   parseOptionalDbIndex,
   redactScrapeUrl,
   redactUrlCredentials,
@@ -157,5 +161,88 @@ describe('redactScrapeUrl', () => {
 
   it('falls back safely for an unparseable URL with @ in the password', () => {
     expect(redactScrapeUrl('http://u:p@ss@ host/x?t=1')).not.toContain('ss@');
+  });
+});
+
+describe('parseMaxPoints', () => {
+  it('defaults to 150 when blank or missing', () => {
+    expect(parseMaxPoints(undefined)).toBe(DEFAULT_MAX_POINTS);
+    expect(parseMaxPoints('')).toBe(150);
+    expect(parseMaxPoints('  ')).toBe(150);
+  });
+
+  it('accepts the bounds', () => {
+    expect(parseMaxPoints('2')).toBe(2);
+    expect(parseMaxPoints('1000')).toBe(1000);
+  });
+
+  it.each(['1', '1001', '1.5', 'abc', '-5', '0'])('rejects %s with 400', (value) => {
+    expect(() => parseMaxPoints(value)).toThrow(BadRequestException);
+  });
+});
+
+describe('downsampleEvenly', () => {
+  it('returns a copy unchanged when within the budget', () => {
+    const input = [1, 2, 3];
+    const out = downsampleEvenly(input, 5);
+    expect(out).toEqual([1, 2, 3]);
+    expect(out).not.toBe(input);
+  });
+
+  it('thins 1,440 points to 150, keeping first, last and only original elements', () => {
+    const input = Array.from({ length: 1440 }, (_, i) => ({ t: i }));
+    const out = downsampleEvenly(input, 150);
+    expect(out).toHaveLength(150);
+    expect(out[0]).toBe(input[0]);
+    expect(out[149]).toBe(input[1439]);
+    for (const point of out) {
+      expect(input).toContain(point);
+    }
+    const times = out.map((point) => point.t);
+    expect([...times].sort((a, b) => a - b)).toEqual(times);
+  });
+});
+
+describe('downsampleSeries', () => {
+  const engines = ['e1', 'e2', 'e3'];
+  const models = ['m1', 'm2'];
+  const rows = engines.flatMap((engineId) => {
+    return models.flatMap((model) => {
+      return Array.from({ length: 1440 }, (_, t) => ({ engineId, model, t }));
+    });
+  });
+  const key = (row: { engineId: string; model: string; t: number }) => `${row.engineId}|${row.model}`;
+
+  it('splits the budget across series and reports sampling', () => {
+    const { rows: out, sampling } = downsampleSeries(rows, key, 150);
+    expect(out).toHaveLength(150);
+    expect(sampling).toEqual({ originalPoints: 8640, returnedPoints: 150, maxPoints: 150, method: 'even' });
+    for (const engineId of engines) {
+      for (const model of models) {
+        const series = out.filter((row) => row.engineId === engineId && row.model === model);
+        expect(series).toHaveLength(25);
+        expect(series[0].t).toBe(0);
+        expect(series[24].t).toBe(1439);
+      }
+    }
+  });
+
+  it('reports method none when nothing is dropped', () => {
+    const small = rows.filter((row) => row.t < 3);
+    const { rows: out, sampling } = downsampleSeries(small, key, 150);
+    expect(out).toHaveLength(small.length);
+    expect(sampling.method).toBe('none');
+  });
+
+  it('keeps first and last of every series even when there are more series than maxPoints / 2', () => {
+    const many = Array.from({ length: 10 }, (_, s) => {
+      return Array.from({ length: 50 }, (_, t) => ({ s: `s${s}`, t }));
+    }).flat();
+    const { rows: out } = downsampleSeries(many, (row) => row.s, 6);
+    expect(out).toHaveLength(20);
+    for (let s = 0; s < 10; s++) {
+      const series = out.filter((row) => row.s === `s${s}`);
+      expect(series.map((row) => row.t)).toEqual([0, 49]);
+    }
   });
 });

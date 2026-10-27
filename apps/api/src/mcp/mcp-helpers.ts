@@ -163,3 +163,84 @@ export function redactScrapeUrl(raw: string | null): string | null {
     return redactUrlCredentials(raw.split(/[?#]/)[0]);
   }
 }
+
+/** Default and ceiling for `maxPoints` on MCP history routes (agent context budget). */
+export const DEFAULT_MAX_POINTS = 150;
+export const MAX_MAX_POINTS = 1000;
+
+/** Parse `maxPoints`; blank → default, integer in [2, MAX_MAX_POINTS] otherwise 400. */
+export function parseMaxPoints(value: string | undefined): number {
+  if (isBlank(value)) {
+    return DEFAULT_MAX_POINTS;
+  }
+  const parsed = Number(value);
+  if (Number.isInteger(parsed) === false || parsed < 2 || parsed > MAX_MAX_POINTS) {
+    throw new BadRequestException(`maxPoints must be an integer between 2 and ${MAX_MAX_POINTS}`);
+  }
+  return parsed;
+}
+
+export interface SamplingInfo {
+  originalPoints: number;
+  returnedPoints: number;
+  maxPoints: number;
+  /** none: nothing dropped; rebucketed: service aggregated into wider buckets; even: evenly spaced subset of the original points. */
+  method: 'none' | 'rebucketed' | 'even';
+}
+
+/**
+ * Evenly spaced subset of `points`, always keeping the first and last.
+ * Every returned element is an original point, unchanged.
+ */
+export function downsampleEvenly<T>(points: readonly T[], maxPoints: number): T[] {
+  if (points.length <= maxPoints) {
+    return [...points];
+  }
+  const step = (points.length - 1) / (maxPoints - 1);
+  const out: T[] = [];
+  for (let i = 0; i < maxPoints; i++) {
+    out.push(points[Math.round(i * step)]);
+  }
+  return out;
+}
+
+/** Sampling block for a single series downsampled with {@link downsampleEvenly}. */
+export function evenSampling(originalPoints: number, returnedPoints: number, maxPoints: number): SamplingInfo {
+  return {
+    originalPoints,
+    returnedPoints,
+    maxPoints,
+    method: returnedPoints === originalPoints ? 'none' : 'even',
+  };
+}
+
+/**
+ * Downsample several interleaved series (e.g. per engine × model) so the
+ * TOTAL returned stays within `maxPoints`. Each series gets an equal share
+ * (at least 2 points, so its first and last survive). Series order and the
+ * order within each series are preserved. With more than `maxPoints / 2`
+ * series the total can reach 2 × series, because every series keeps its
+ * first and last point.
+ */
+export function downsampleSeries<T>(
+  rows: readonly T[],
+  seriesKey: (row: T) => string,
+  maxPoints: number,
+): { rows: T[]; sampling: SamplingInfo } {
+  const groups = new Map<string, T[]>();
+  for (const row of rows) {
+    const key = seriesKey(row);
+    const list = groups.get(key);
+    if (list) {
+      list.push(row);
+    } else {
+      groups.set(key, [row]);
+    }
+  }
+  const perSeries = Math.max(2, Math.floor(maxPoints / Math.max(1, groups.size)));
+  const out: T[] = [];
+  for (const list of groups.values()) {
+    out.push(...downsampleEvenly(list, perSeries));
+  }
+  return { rows: out, sampling: evenSampling(rows.length, out.length, maxPoints) };
+}

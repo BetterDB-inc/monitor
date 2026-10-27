@@ -1,5 +1,6 @@
 import { HttpException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { THROTTLER_LIMIT, THROTTLER_TTL } from '@nestjs/throttler/dist/throttler.constants';
 import { McpInsightsController } from '../mcp-insights.controller';
 import { AgentTokenGuard } from '../../common/guards/agent-token.guard';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
@@ -94,5 +95,11 @@ describe('McpInsightsController', () => {
       fleet.getSummary.mockRejectedValueOnce(new Error('boom'));
       await expect(controller.getFleetSummary()).rejects.toMatchObject({ status: 500 });
     });
+  });
+
+  it('is rate-limited to 10 requests per minute', () => {
+    const fn = McpInsightsController.prototype.getCveExposure;
+    expect(Reflect.getMetadata(`${THROTTLER_LIMIT}default`, fn)).toBe(10);
+    expect(Reflect.getMetadata(`${THROTTLER_TTL}default`, fn)).toBe(60000);
   });
 });

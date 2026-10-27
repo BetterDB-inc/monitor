@@ -1,4 +1,5 @@
 import { BadRequestException, Controller, Get, Logger, Param, Query, UseGuards } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { Feature, type CacheSimulatorSnapshot } from '@betterdb/shared';
 import { LicenseGuard } from '@proprietary/licenses';
 import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
@@ -21,6 +22,7 @@ export class McpCacheSimulatorController {
    * unless refresh=true.
    */
   @Get('instance/:id/cache-simulator')
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   async getSnapshot(
     @Param('id', ValidateInstanceIdPipe) id: string,
     @Query('refresh') refresh?: string,

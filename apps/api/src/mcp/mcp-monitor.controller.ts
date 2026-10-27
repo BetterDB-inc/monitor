@@ -8,6 +8,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import type { CaptureSessionStatus, StoredCaptureSession } from '@betterdb/shared';
 import { AgentTokenGuard } from '../common/guards/agent-token.guard';
 import { BaselineWindow, CrossReferenceEngine, CrossReferenceResult } from '../monitor/cross-reference.engine';
@@ -97,7 +98,9 @@ export class McpMonitorController {
     }
   }
 
+  /** Reads every capture chunk and up to 100k slowlog rows, so it gets the tighter default limit. */
   @Get('instance/:id/monitor/sessions/:sessionId/cross-reference')
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   async getCaptureCrossReference(
     @Param('id', ValidateInstanceIdPipe) id: string,
     @Param('sessionId') sessionId: string,

@@ -24,6 +24,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - MONITOR captures: `list_capture_sessions` and
     `get_capture_cross_reference`. Cross-reference lookups are scoped to the
     selected instance; a session id from another instance returns not found.
+- History tools (`get_scaling_readiness_history`, `get_kv_cache_hit_rate`,
+  `get_kv_cache_footprint_history`, `get_key_pattern_trend`) take `maxPoints`
+  (default 150, 2-1000) and return a `sampling` block. The cap applies to the
+  total across series, and each series keeps its first and last point.
+- `get_key_patterns` returns the latest snapshot per database, and `limit`
+  (max 500) applies to the total.
+
+### Changed
+
+- Tool results are compact JSON (no indentation).
+- `get_cache_size_estimate`, `get_cve_exposure` and
+  `get_capture_cross_reference` are rate-limited, as are the history tools;
+  their descriptions state the load each call puts on the instance.
 
 ## [1.4.0] - 2026-07-28
 

@@ -1,5 +1,6 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { THROTTLER_LIMIT, THROTTLER_TTL } from '@nestjs/throttler/dist/throttler.constants';
 import type { StoredCaptureSession } from '@betterdb/shared';
 import { McpMonitorController, toCaptureSessionSummary } from '../mcp-monitor.controller';
 import { AgentTokenGuard } from '../../common/guards/agent-token.guard';
@@ -126,5 +127,11 @@ describe('McpMonitorController', () => {
       engine.compute.mockRejectedValueOnce(new Error('boom'));
       await expect(controller.getCaptureCrossReference('inst1', SESSION_ID)).rejects.toMatchObject({ status: 500 });
     });
+  });
+
+  it('is rate-limited to 10 requests per minute', () => {
+    const fn = McpMonitorController.prototype.getCaptureCrossReference;
+    expect(Reflect.getMetadata(`${THROTTLER_LIMIT}default`, fn)).toBe(10);
+    expect(Reflect.getMetadata(`${THROTTLER_TTL}default`, fn)).toBe(60000);
   });
 });
