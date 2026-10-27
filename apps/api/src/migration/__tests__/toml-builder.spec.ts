@@ -171,6 +171,16 @@ describe('buildScanReaderToml', () => {
 });
 
 describe('buildSyncReaderToml', () => {
+  it('sets status_port for the sync reader when given', () => {
+    const toml = buildSyncReaderToml(makeConfig(), makeConfig(), { sourceIsCluster: false, statusPort: 45678 });
+    expect(toml).toMatch(/\[advanced\][\s\S]*\nstatus_port = 45678\n/);
+  });
+
+  it('omits status_port without a port', () => {
+    expect(buildSyncReaderToml(makeConfig(), makeConfig(), { sourceIsCluster: false })).not.toContain('status_port');
+    expect(buildScanReaderToml(makeConfig(), makeConfig(), { sourceIsCluster: false })).not.toContain('status_port');
+  });
+
   it('should generate valid TOML for single-node source and target', () => {
     const source = makeConfig({ host: '10.0.0.1', port: 6379, password: 'srcpass' });
     const target = makeConfig({ host: '10.0.0.2', port: 6380, password: 'tgtpass' });

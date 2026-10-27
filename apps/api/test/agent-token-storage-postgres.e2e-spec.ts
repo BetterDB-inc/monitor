@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import { Pool } from 'pg';
 import type { AgentToken } from '@betterdb/shared';
 import { PostgresAdapter } from '../src/storage/adapters/postgres.adapter';
+import { dropSchema } from './postgres-test-utils';
 
 const CONNECTION_STRING =
   process.env.AGENT_TOKEN_POSTGRES_TEST_DSN ??
@@ -94,7 +95,7 @@ describePostgres('PostgresAdapter agent tokens (live Postgres)', () => {
   });
 
   afterAll(async () => {
-    await adminPool.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+    await dropSchema(adminPool, SCHEMA);
     await adminPool.end();
   });
 

@@ -1,0 +1,57 @@
+{
+  "multi-turn": {
+    "messages": [
+      { "role": "system", "content": "You are a concise travel assistant." },
+      { "role": "human", "content": "I want to visit Lisbon in May." },
+      { "role": "ai", "content": "May is lovely in Lisbon: warm days and fewer crowds." },
+      { "role": "human", "content": "Where should I stay?" },
+      { "role": "ai", "content": "Alfama for atmosphere, Baixa for convenience." },
+      { "role": "human", "content": "How many days do I need?" },
+      { "role": "ai", "content": "Four days covers the city, add two for Sintra." }
+    ]
+  },
+  "tool-call": {
+    "messages": [
+      { "role": "human", "content": "What is the weather in Sofia?" },
+      {
+        "role": "ai",
+        "content": "",
+        "toolCalls": [
+          { "id": "call_weather_1", "name": "get_weather", "args": { "city": "Sofia" } }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "{\"city\":\"Sofia\",\"tempC\":21,\"sky\":\"clear\"}",
+        "toolCallId": "call_weather_1",
+        "name": "get_weather"
+      },
+      { "role": "ai", "content": "It is 21 C and clear in Sofia." }
+    ]
+  },
+  "long": {
+    "messages": [{ "role": "human", "generate": { "chars": 20000, "tag": "long" } }]
+  },
+  "unicode": {
+    "messages": [
+      { "role": "human", "content": "Здравей! Как си днес? Искам да науча за Валкей." },
+      { "role": "ai", "content": "Здравей! Valkey е бърза база данни 🚀 за кеширане и сесии 🎉." },
+      { "role": "human", "content": "日本語と中文：你好，世界。こんにちは世界。" },
+      { "role": "ai", "content": "你好！こんにちは！👋 Mixed: café, naïve, Ωmega, 😀😃😄" }
+    ]
+  },
+  "ttl": {
+    "ttl": 3600,
+    "messages": [
+      { "role": "system", "content": "You are a short-lived assistant." },
+      { "role": "human", "content": "Remember this for an hour." },
+      { "role": "ai", "content": "Noted, I will remember it for an hour." },
+      { "role": "human", "content": "What did I ask?" },
+      { "role": "ai", "content": "You asked me to remember something for an hour." }
+    ]
+  },
+  "oversize": {
+    "oversize": { "pairs": 60, "chars": 9000 },
+    "messages": []
+  }
+}

@@ -25,7 +25,7 @@
     "@aws-sdk/util-format-url": "^3.667.0",
     "iovalkey": "^0.3.3",
     "ws": "^8.21.0",
-    "zod": "^4.3.6"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@betterdb/shared": "workspace:*",

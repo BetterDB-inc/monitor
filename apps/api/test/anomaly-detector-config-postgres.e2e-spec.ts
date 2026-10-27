@@ -2,6 +2,7 @@ import { execFileSync } from 'child_process';
 import { Pool } from 'pg';
 import type { AppSettings } from '@betterdb/shared';
 import { PostgresAdapter } from '../src/storage/adapters/postgres.adapter';
+import { dropSchema } from './postgres-test-utils';
 
 const DSN =
   process.env.ANOMALY_DETECTOR_CONFIG_POSTGRES_TEST_DSN ??
@@ -68,7 +69,7 @@ describePostgres('anomaly detector config — postgres', () => {
   afterAll(async () => {
     await adapter.close();
     const adminPool = new Pool({ connectionString: DSN });
-    await adminPool.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+    await dropSchema(adminPool, SCHEMA);
     await adminPool.end();
   });
 
