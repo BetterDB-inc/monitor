@@ -293,8 +293,8 @@ export function NamespaceSetup({ initial, onSaved, onCancel }: Props) {
               )}
               {preview.touchesKeys && (
                 <p className="text-sm text-muted-foreground">
-                  This server does not support CLIENT NO-TOUCH, so reading the sample reset the idle
-                  time of {preview.sampleKey}.
+                  Reading the sample could not use CLIENT NO-TOUCH, so it reset the idle time of{' '}
+                  {preview.sampleKey}.
                 </p>
               )}
               <KeyPanel key={preview.sampleKey} view={preview.view} expanded />

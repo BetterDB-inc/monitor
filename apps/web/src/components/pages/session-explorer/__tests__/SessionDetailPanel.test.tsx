@@ -48,7 +48,7 @@ describe('SessionDetailPanel', () => {
         exporting={false}
       />,
     );
-    expect(screen.getByText(/reset the idle time/i)).toBeInTheDocument();
+    expect(screen.getByText(/could not use CLIENT NO-TOUCH/i)).toBeInTheDocument();
   });
 
   it('says nothing about access times when reads used NO-TOUCH', () => {

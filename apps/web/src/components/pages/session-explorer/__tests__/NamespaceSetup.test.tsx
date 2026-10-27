@@ -72,7 +72,11 @@ describe('NamespaceSetup', () => {
     render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);
     fill();
     fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
-    await waitFor(() => expect(screen.getByText(/reset the idle time/i)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(
+        screen.getByText(/could not use CLIENT NO-TOUCH, so it reset the idle time/i),
+      ).toBeInTheDocument(),
+    );
   });
 
   it('sends the custom schema with the preview', async () => {

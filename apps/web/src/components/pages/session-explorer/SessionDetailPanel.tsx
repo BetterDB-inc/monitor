@@ -60,9 +60,9 @@ export function SessionDetailPanel({ detail, onExport, exporting }: Props) {
         {detail.touchesKeys && (
           <Alert>
             <AlertDescription>
-              This server could not read without touching keys (CLIENT NO-TOUCH needs Valkey or
-              Redis 7.2+), so viewing this session reset the idle time and access frequency of its
-              keys.
+              Viewing this session could not use CLIENT NO-TOUCH, so it reset the idle time and
+              access frequency of its keys. NO-TOUCH needs Valkey or Redis 7.2+ and a dedicated
+              connection to each primary.
             </AlertDescription>
           </Alert>
         )}
