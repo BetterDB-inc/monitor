@@ -302,7 +302,9 @@ export function NamespaceSetup({ initial, onSaved, onCancel }: Props) {
           ) : (
             <p className="text-sm text-muted-foreground">
               {preview.sampleKey !== null
-                ? `Matched ${preview.sampleKey}, but it could not be read. It may have expired.`
+                ? preview.failedNodes > 0
+                  ? `Matched ${preview.sampleKey}, but part of the cluster could not be read.`
+                  : `Matched ${preview.sampleKey}, but it could not be read. It may have expired.`
                 : preview.exhausted
                   ? 'No key matched this pattern.'
                   : preview.failedNodes > 0

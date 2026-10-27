@@ -134,7 +134,7 @@ export class SessionExplorerService {
       sampleKey,
       view: captured ? preset.parseKey(captured) : null,
       exhausted,
-      failedNodes,
+      failedNodes: Math.max(failedNodes, read.failedNodes),
       touchesKeys: read.touchesKeys,
     };
   }

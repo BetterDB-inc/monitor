@@ -125,6 +125,19 @@ describe('NamespaceSetup', () => {
     expect(screen.queryByText('No key matched this pattern.')).not.toBeInTheDocument();
   });
 
+  it('blames an unreachable node rather than expiry when the sample read failed', async () => {
+    api.preview.mockResolvedValue({ sampleKey: 'chat:1', view: null, exhausted: false, failedNodes: 1, touchesKeys: false });
+    render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);
+    fill();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    await waitFor(() =>
+      expect(
+        screen.getByText('Matched chat:1, but part of the cluster could not be read.'),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/may have expired/)).not.toBeInTheDocument();
+  });
+
   it('says the sampled key could not be read instead of reporting no match', async () => {
     api.preview.mockResolvedValue({ sampleKey: 'chat:1', view: null, exhausted: true, failedNodes: 0, touchesKeys: false });
     render(<NamespaceSetup onSaved={vi.fn()} onCancel={vi.fn()} />);

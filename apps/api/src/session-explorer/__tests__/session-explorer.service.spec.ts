@@ -328,6 +328,23 @@ describe('SessionExplorerService.preview', () => {
     expect(result).toMatchObject({ sampleKey: 'lc:1', exhausted: false, touchesKeys: false });
   });
 
+  it('counts a primary that failed while reading the sample', async () => {
+    read.mockResolvedValueOnce({
+      keys: [],
+      truncated: false,
+      failedNodes: 1,
+      missingKeys: 0,
+      touchesKeys: false,
+    });
+    const service = serviceOver({ 7001: new FakeValkey(new Map([['lc:1', { type: 'list' }]])) });
+
+    expect(await service.preview('conn-1', input)).toMatchObject({
+      sampleKey: 'lc:1',
+      view: null,
+      failedNodes: 1,
+    });
+  });
+
   it('says when reading the sample reset its access time', async () => {
     read.mockResolvedValueOnce({
       keys: [captured()],
