@@ -1,3 +1,4 @@
+import { ServiceUnavailableException } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import calculateSlot from 'cluster-key-slot';
 import type { PresetDefinition } from '../presets/types';
@@ -305,6 +306,16 @@ describe('scanSessions', () => {
     expect(result.sessions).toHaveLength(1);
   });
 
+  it('reports the server unavailable when its reader cannot connect', async () => {
+    const client = new FakeValkey();
+    const reader = new FakeValkey();
+    reader.connectError = new Error('ERR max number of clients reached');
+    client.duplicateWith = reader;
+    await expect(scanSessions(fakeDb(client), 's:*', preset)).rejects.toThrow(
+      ServiceUnavailableException,
+    );
+  });
+
   it('rethrows when the only node fails', async () => {
     const client = new FakeValkey();
     const reader = new FakeValkey();
@@ -375,7 +386,9 @@ describe('keysForSession', () => {
     const nodeA = new FakeValkey(
       storeOf({ 's:x:1': { type: 'string' }, 's:y:1': { type: 'string' } }),
     );
-    const nodeB = new FakeValkey(storeOf({ 's:x:2': { type: 'string' }, other: { type: 'string' } }));
+    const nodeB = new FakeValkey(
+      storeOf({ 's:x:2': { type: 'string' }, other: { type: 'string' } }),
+    );
     const byPort: Record<number, FakeValkey> = { 7001: nodeA, 7002: nodeB };
     ValkeyMock.mockImplementation((opts: { port: number }) => byPort[opts.port]);
     const db = fakeDb(parent, {

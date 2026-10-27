@@ -1,3 +1,4 @@
+import { ServiceUnavailableException } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import { withPrimaries } from '../primary-nodes';
 import { FakeValkey, fakeDb, masterNode } from './fake-valkey';
@@ -58,16 +59,16 @@ describe('withPrimaries', () => {
     expect(parent.callsOf('duplicate')[0].args[0]).toMatchObject({ commandTimeout: 5000 });
   });
 
-  it('counts the server as failed instead of reading on the shared client', async () => {
+  it('reports the server unavailable instead of reading on the shared client', async () => {
     const parent = new FakeValkey();
     const reader = new FakeValkey();
     reader.connectError = new Error('ERR max number of clients reached');
     parent.duplicateWith = reader;
+    const run = jest.fn();
 
-    const result = await withPrimaries(fakeDb(parent), async (p) => p);
+    await expect(withPrimaries(fakeDb(parent), run)).rejects.toThrow(ServiceUnavailableException);
 
-    expect(result.clients).toEqual([]);
-    expect(result.failed).toBe(1);
+    expect(run).not.toHaveBeenCalled();
     expect(parent.disconnected).toBe(false);
   });
 
@@ -116,7 +117,7 @@ describe('withPrimaries', () => {
     expect(ValkeyMock.mock.calls[0][0]).toMatchObject({ host: '10.0.0.1', port: 7000 });
   });
 
-  it('counts its own node as failed when it cannot be reached', async () => {
+  it('reports the cluster unavailable when its only primary cannot be reached', async () => {
     const parent = new FakeValkey();
     const unreachable = new FakeValkey();
     unreachable.connectError = new Error('ECONNREFUSED');
@@ -125,10 +126,7 @@ describe('withPrimaries', () => {
       nodes: [masterNode('a', '10.0.0.1:7000', ['myself'], [[0, 16383]])],
     });
 
-    const result = await withPrimaries(db, async (p) => p);
-
-    expect(result.clients).toEqual([]);
-    expect(result.failed).toBe(1);
+    await expect(withPrimaries(db, async (p) => p)).rejects.toThrow(ServiceUnavailableException);
   });
 
   it('reports that reads leave access times alone when every reader has NO-TOUCH', async () => {

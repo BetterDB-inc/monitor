@@ -1,3 +1,4 @@
+import { ServiceUnavailableException } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import calculateSlot from 'cluster-key-slot';
 import type { DatabasePort } from '../common/interfaces/database-port.interface';
@@ -144,6 +145,10 @@ export async function withPrimaries<T>(
   run: (primaries: PrimaryClients) => Promise<T>,
 ): Promise<T> {
   const primaries = await primaryClients(db);
+  if (primaries.clients.length === 0 && primaries.failed > 0) {
+    await primaries.release();
+    throw new ServiceUnavailableException('No primary could be reached');
+  }
   try {
     return await run(primaries);
   } finally {
