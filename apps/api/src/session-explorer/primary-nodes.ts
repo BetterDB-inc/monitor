@@ -1,4 +1,5 @@
 import Valkey from 'iovalkey';
+import calculateSlot from 'cluster-key-slot';
 import type { DatabasePort } from '../common/interfaces/database-port.interface';
 import type { ClusterNode } from '../common/types/metrics.types';
 import { tlsIdentityOptions } from '../database/adapters/tls-servername';
@@ -26,17 +27,28 @@ const READER_OPTIONS = {
   maxRetriesPerRequest: 0,
   retryStrategy: () => null,
   connectTimeout: NODE_TIMEOUT_MS,
-  commandTimeout: NODE_TIMEOUT_MS,
   connectionName: 'BetterDB-Monitor-SessionExplorer',
 };
 
-const isServingPrimary =(node: ClusterNode) =>
+const readerTimeout = (parent: Valkey): number =>
+  parent.options.commandTimeout ?? NODE_TIMEOUT_MS;
+
+export function routeOf(primaries: PrimaryClients, key: string): Valkey | null {
+  if (!primaries.routes) return primaries.clients[0] ?? null;
+  const slot = calculateSlot(key);
+  const route = primaries.routes.find((r) =>
+    r.slots.some(([start, end]) => slot >= start && slot <= end),
+  );
+  return route?.client ?? null;
+}
+
+const isServingPrimary = (node: ClusterNode) =>
   node.flags.includes('master') && node.slots.length > 0;
 
 function nodeClient(parent: Valkey, node: ClusterNode): Valkey | null {
   const address = parseNodeAddress(node.address);
   if (!address) return null;
-  const { username, password, tls, commandTimeout } = parent.options;
+  const { username, password, tls } = parent.options;
   const {
     servername: _servername,
     checkServerIdentity: _checkServerIdentity,
@@ -49,7 +61,7 @@ function nodeClient(parent: Valkey, node: ClusterNode): Valkey | null {
     password,
     tls: tls ? { ...nodeTls, ...tlsIdentityOptions(address.host, node.hostname) } : undefined,
     ...READER_OPTIONS,
-    commandTimeout,
+    commandTimeout: readerTimeout(parent),
   });
   client.on('error', () => undefined);
   return client;
@@ -88,7 +100,7 @@ const sharedReader = async (parent: Valkey) =>
   orShared(
     parent,
     await openReader(() =>
-      parent.duplicate({ ...READER_OPTIONS, commandTimeout: parent.options.commandTimeout }),
+      parent.duplicate({ ...READER_OPTIONS, commandTimeout: readerTimeout(parent) }),
     ),
   );
 

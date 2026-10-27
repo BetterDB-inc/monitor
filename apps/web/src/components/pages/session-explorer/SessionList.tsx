@@ -93,6 +93,14 @@ export function SessionList({ data, oversizeIds, selectedId, onSelect }: Props) 
           </AlertDescription>
         </Alert>
       )}
+      {data.idleUntracked && (
+        <Alert>
+          <AlertDescription>
+            Last access is unknown because the server uses an LFU eviction policy, which does not
+            track idle time.
+          </AlertDescription>
+        </Alert>
+      )}
       {sessions.length === 0 ? (
         <p className="text-sm text-muted-foreground">No sessions match this pattern.</p>
       ) : (

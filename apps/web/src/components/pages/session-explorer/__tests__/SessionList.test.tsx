@@ -100,10 +100,16 @@ describe('SessionList', () => {
     expect(screen.getByText(/2 nodes did not respond/)).toBeInTheDocument();
   });
 
+  it('explains unknown last access under an LFU eviction policy', () => {
+    renderList({ data: listResponse({ idleUntracked: true }) });
+    expect(screen.getByText(/LFU eviction policy/)).toBeInTheDocument();
+  });
+
   it('shows no notices for a complete scan', () => {
     renderList();
     expect(screen.queryByText(/Showing the first/)).not.toBeInTheDocument();
     expect(screen.queryByText(/did not respond/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/LFU eviction policy/)).not.toBeInTheDocument();
   });
 
   it('badges only sessions in the oversize list', () => {

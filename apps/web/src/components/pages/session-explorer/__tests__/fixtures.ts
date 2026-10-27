@@ -10,6 +10,7 @@ export const listResponse = (overrides: Partial<SessionListResponse> = {}): Sess
   truncated: false,
   partial: false,
   failedNodes: 0,
+  idleUntracked: false,
   ...overrides,
 });
 

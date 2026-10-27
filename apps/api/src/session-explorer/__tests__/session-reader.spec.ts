@@ -1,6 +1,6 @@
 import Valkey from 'iovalkey';
 import calculateSlot from 'cluster-key-slot';
-import { EXACT_LIST_LENGTH, readSessionKeys } from '../session-reader';
+import { readSessionKeys } from '../session-reader';
 import { FakeEntry, FakeValkey, fakeDb, masterNode } from './fake-valkey';
 
 jest.mock('iovalkey', () => ({ __esModule: true, default: jest.fn() }));
@@ -286,28 +286,60 @@ describe('readSessionKeys', () => {
     expect(client.fetchedBytes).toBeLessThanOrEqual(2 * MB + MB);
   });
 
-  it('samples the size of a list too long to measure exactly', async () => {
-    const items = Array.from({ length: EXACT_LIST_LENGTH + 1 }, () => 'x');
-    const client = new FakeValkey(storeOf({ l: { type: 'list', value: items } }));
-
-    await readOne(client, 'l');
-
-    expect(client.callsOf('pipeline.memory').map((c) => c.args)).toEqual([['USAGE', 'l']]);
-  });
-
-  it('bounds a long list whose sampled size hides large elements', async () => {
-    const items = [
-      ...Array.from({ length: EXACT_LIST_LENGTH + 1 }, () => 't'),
-      ...Array.from({ length: 20 }, () => 'y'.repeat(MB)),
-    ];
+  it('skips a list whose elements are each larger than the byte cap', async () => {
     const client = new FakeValkey(
-      storeOf({ l: { type: 'list', value: items, memory: 22 * MB, sampledMemory: 100 * 1024 } }),
+      storeOf({ l: { type: 'list', value: ['y'.repeat(3 * MB)], memory: 3 * MB + 64 } }),
     );
 
     const key = await readOne(client, 'l', { byteCap: 2 * MB });
 
+    expect(key).toMatchObject({ value: [], truncated: true });
+    expect(client.callsOf('lrangeBuffer')).toHaveLength(0);
+  });
+
+  it.each([
+    ['zset', ['y'.repeat(3 * MB), '1'], 'zrangeBuffer'],
+    ['stream', [['1-0', { f: 'y'.repeat(3 * MB) }]], 'xrangeBuffer'],
+    ['set', ['y'.repeat(3 * MB)], 'sscanBuffer'],
+  ] as const)(
+    'skips a %s whose elements are each larger than the byte cap',
+    async (type, value, read) => {
+      const entry = { type, value: value as unknown as FakeEntry['value'], memory: 3 * MB + 64 };
+      const client = new FakeValkey(storeOf({ k: entry }));
+
+      const key = await readOne(client, 'k', { byteCap: 2 * MB });
+
+      expect(key).toMatchObject({ value: [], truncated: true });
+      expect(client.callsOf(read)).toHaveLength(0);
+      expect(client.fetchedBytes).toBeLessThan(MB);
+    },
+  );
+
+  it('probes hash field sizes and leaves a field over the cap unread', async () => {
+    const value: Record<string, string> = {};
+    for (let i = 0; i < 200; i++) value[`f${i}`] = 'x';
+    value.huge = 'y'.repeat(3 * MB);
+    const client = new FakeValkey(storeOf({ h: { type: 'hash', value, memory: 3 * MB + 4096 } }));
+
+    const key = await readOne(client, 'h', { byteCap: 2 * MB });
+
     expect(key.truncated).toBe(true);
-    expect(client.fetchedBytes).toBeLessThanOrEqual(2 * MB + 4 * MB);
+    expect(key.value).not.toHaveProperty('huge');
+    expect(Object.keys(key.value as object).length).toBe(200);
+    expect(client.fetchedBytes).toBeLessThan(MB);
+    expect(client.callsOf('hscanBuffer')[0].args).toContain('NOVALUES');
+  });
+
+  it('reads hash fields with HSCAN when the server has no NOVALUES', async () => {
+    const value: Record<string, string> = {};
+    for (let i = 0; i < 200; i++) value[`f${i}`] = 'x';
+    const client = new FakeValkey(storeOf({ h: { type: 'hash', value, memory: 3 * MB } }));
+    client.noValues = false;
+
+    const key = await readOne(client, 'h', { byteCap: 2 * MB });
+
+    expect(Object.keys(key.value as object).length).toBe(200);
+    expect(key.truncated).toBeFalsy();
   });
 
   it('counts per-element wire overhead against the cap', async () => {
@@ -382,7 +414,9 @@ describe('readSessionKeys', () => {
 
   it('reads a hash larger than the cap with a bounded HSCAN', async () => {
     const client = new FakeValkey(
-      storeOf({ h: { type: 'hash', value: { a: 'x'.repeat(60), b: 'y'.repeat(60) }, memory: 5000 } }),
+      storeOf({
+        h: { type: 'hash', value: { a: 'x'.repeat(60), b: 'y'.repeat(60) }, memory: 150 },
+      }),
     );
     const key = await readOne(client, 'h', { byteCap: 100 });
     expect(client.callsOf('pipeline.hgetallBuffer')).toHaveLength(0);
@@ -560,7 +594,9 @@ describe('readSessionKeys', () => {
     const huge = 'h'.repeat(6 * MB);
     const entries: Record<string, FakeEntry> = {};
     const keys = Array.from({ length: 20 }, (_, i) => `l${i}`);
-    for (const key of keys) entries[key] = { type: 'list', value: [huge, 'tail'], memory: 6 * MB };
+    for (const key of keys) {
+      entries[key] = { type: 'list', value: [huge, 't', 't', 't'], memory: 6 * MB };
+    }
     const client = new FakeValkey(storeOf(entries));
 
     const result = await readSessionKeys(fakeDb(client), keys);
@@ -610,7 +646,7 @@ describe('readSessionKeys', () => {
     expect(nodeA.disconnected && nodeB.disconnected).toBe(true);
   });
 
-  it('omits a key answered with MOVED during slot migration', async () => {
+  it('reports a key answered with MOVED as a node issue, not a missing key', async () => {
     const nodeA = new FakeValkey(
       storeOf({ a: { type: 'string', value: '1' }, b: { type: 'string', value: '2' } }),
     );
@@ -620,7 +656,23 @@ describe('readSessionKeys', () => {
     const result = await readSessionKeys(db, ['a', 'b']);
 
     expect(result.keys.map((k) => k.key)).toEqual(['b']);
-    expect(result.missingKeys).toBe(1);
+    expect(result.missingKeys).toBe(0);
+    expect(result.failedNodes).toBe(1);
+  });
+
+  it('reports a key that turns MOVED while its value is read as a node issue', async () => {
+    const nodeA = new FakeValkey(
+      storeOf({ a: { type: 'list', value: ['1'] }, b: { type: 'string', value: '2' } }),
+    );
+    (nodeA as unknown as Record<string, unknown>).lrangeBuffer = async () => {
+      throw new Error('MOVED 1 10.0.0.9:7000');
+    };
+    const db = clusterOf({ 7001: nodeA }, { 7001: [[0, 16383]] });
+
+    const result = await readSessionKeys(db, ['a', 'b']);
+
+    expect(result.missingKeys).toBe(0);
+    expect(result.failedNodes).toBe(1);
   });
 
   it('reports keys owned by an unreachable primary', async () => {

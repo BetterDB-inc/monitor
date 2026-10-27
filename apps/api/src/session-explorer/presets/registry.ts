@@ -22,6 +22,7 @@ const rawPreset: PresetDefinition = {
   id: 'raw',
   defaultPattern: (prefix) => `${escapeGlob(prefix)}*`,
   sessionIdOf: (key) => key,
+  sessionLookup: (sessionId) => ({ key: sessionId }),
   parseKey: (k) => failedView(k, 'No schema configured'),
   mergeSession: () => [],
 };

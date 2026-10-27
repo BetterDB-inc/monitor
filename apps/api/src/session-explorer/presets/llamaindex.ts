@@ -100,6 +100,7 @@ export const llamaindexPreset: PresetDefinition = {
   id: 'llamaindex',
   defaultPattern: (prefix) => `${escapeGlob(prefix)}*`,
   sessionIdOf: (key) => key,
+  sessionLookup: (sessionId) => ({ key: sessionId }),
   parseKey: (k) =>
     guardedParse(k, () => {
       if (k.type !== 'list' || !Array.isArray(k.value)) return fail('Expected a list value');

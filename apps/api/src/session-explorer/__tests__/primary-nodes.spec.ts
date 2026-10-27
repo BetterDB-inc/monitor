@@ -49,6 +49,15 @@ describe('withPrimaries', () => {
     expect(parent.callsOf('duplicate')[0].args[0]).toMatchObject({ commandTimeout: 30_000 });
   });
 
+  it('bounds commands on its own reader when the shared client has no timeout', async () => {
+    const parent = new FakeValkey();
+    parent.duplicateWith = new FakeValkey();
+
+    await withPrimaries(fakeDb(parent), async ({ clients }) => clients);
+
+    expect(parent.callsOf('duplicate')[0].args[0]).toMatchObject({ commandTimeout: 5000 });
+  });
+
   it('falls back to the shared connection when a reader cannot connect', async () => {
     const parent = new FakeValkey();
     const reader = new FakeValkey();
@@ -159,10 +168,27 @@ describe('withPrimaries', () => {
     expect(options).toMatchObject({ commandTimeout: 30_000, connectTimeout: 5000 });
   });
 
-  it('sets no command timeout on other primaries when the shared client has none', async () => {
+  it('bounds commands on other primaries when the shared client has no timeout', async () => {
     const options = await otherPrimaryOptions({ host: 'seed', port: 7000 });
 
-    expect(options.commandTimeout).toBeUndefined();
-    expect(options.connectTimeout).toBe(5000);
+    expect(options).toMatchObject({ commandTimeout: 5000, connectTimeout: 5000 });
+  });
+
+  it('releases the other primaries when the work throws', async () => {
+    const node = new FakeValkey();
+    ValkeyMock.mockImplementation(() => node);
+    const db = fakeDb(new FakeValkey(), {
+      nodes: [
+        masterNode('a', '10.0.0.1:7000', ['myself'], [[0, 8191]]),
+        masterNode('b', '10.0.0.2:7001', [], [[8192, 16383]]),
+      ],
+    });
+
+    await expect(
+      withPrimaries(db, async () => {
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+    expect(node.disconnected).toBe(true);
   });
 });

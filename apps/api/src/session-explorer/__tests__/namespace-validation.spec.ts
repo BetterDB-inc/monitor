@@ -43,6 +43,24 @@ describe('validateNamespaceInput', () => {
     expect(errorsOf({ ...valid, pattern: 'app: *' })).toContain('Pattern must not contain whitespace');
   });
 
+  it('rejects a pattern with more than 8 stars', () => {
+    expect(errorsOf({ ...valid, pattern: `p${'a*'.repeat(9)}b` })).toEqual([
+      'Pattern must contain at most 8 *',
+    ]);
+    expect(errorsOf({ ...valid, pattern: `p${'a*'.repeat(8)}b` })).toEqual([]);
+  });
+
+  it('collapses runs of stars before counting them', () => {
+    const result = validateNamespaceInput({ ...valid, pattern: `p${'a**'.repeat(7)}b***` });
+    expect(result.ok && result.value.pattern).toBe(`p${'a*'.repeat(7)}b*`);
+    expect(errorsOf({ ...valid, pattern: 'app:\\**' })).toEqual([]);
+  });
+
+  it('does not count escaped stars', () => {
+    const result = validateNamespaceInput({ ...valid, pattern: `p${'\\*\\*'.repeat(9)}*` });
+    expect(result.ok && result.value.pattern).toBe(`p${'\\*\\*'.repeat(9)}*`);
+  });
+
   it('rejects a name over 200 characters and a pattern over 1024', () => {
     expect(errorsOf({ ...valid, name: 'n'.repeat(201) })).toEqual([
       'Name must be at most 200 characters',
