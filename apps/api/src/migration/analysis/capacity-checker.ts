@@ -18,7 +18,7 @@ export interface MasterMemory {
   usedMemory: number;
   /** `used_memory_dataset`: memory held by keys, which FLUSHALL frees (the rest is baseline). */
   datasetMemory: number;
-  /** This master's own maxmemory-policy. */
+  /** This master's own maxmemory-policy; 'unknown' when it did not report one. */
   policy: string;
   /** Keys in every db. 0 means FLUSHALL has nothing to free. */
   keys: number;
@@ -28,6 +28,8 @@ export interface MasterMemory {
   expires: number;
   /** Share of the hash slots this master owns, 0..1 (1 for a standalone target). */
   slotShare: number;
+  /** true when slotShare is an equal split because the slot map could not be matched. */
+  slotShareAssumed: boolean;
 }
 
 /** Memory picture of the whole target, one entry per master. */
@@ -37,6 +39,8 @@ export interface TargetMemory {
   db0Keys: number;
   /** Target dbs other than db0 that hold keys, summed over masters, ascending by db. */
   otherDbs: { db: number; keys: number }[];
+  /** Masters whose INFO could not be read, with the reason. */
+  unreadMasters: { name: string; reason: string }[];
 }
 
 /** Result of checking a sample of source keys against the target. */
@@ -205,7 +209,7 @@ function nodeName(node: Valkey): string {
  * map. Falls back to equal shares when the map is empty or its node keys do
  * not match the masters (e.g. NAT-mapped addresses).
  */
-function slotShares(cluster: Cluster, masters: Valkey[]): number[] {
+function slotShares(cluster: Cluster, masters: Valkey[]): { shares: number[]; assumed: boolean } {
   const owned = new Map<string, number>();
   const slots = (cluster as unknown as { slots?: string[][] }).slots ?? [];
   for (const owners of slots) {
@@ -214,8 +218,8 @@ function slotShares(cluster: Cluster, masters: Valkey[]): number[] {
   }
   const counts = masters.map((m) => owned.get(nodeName(m)) ?? 0);
   const matched = counts.reduce((s, c) => s + c, 0);
-  if (matched === 0) return masters.map(() => 1 / masters.length);
-  return counts.map((c) => c / matched);
+  if (matched === 0) return { shares: masters.map(() => 1 / masters.length), assumed: true };
+  return { shares: counts.map((c) => c / matched), assumed: false };
 }
 
 /** Read memory, dataset size, policy, keys and TTL keys from every master of the target. */
@@ -224,10 +228,10 @@ export async function readTargetMemory(client: Valkey): Promise<TargetMemory> {
   const cluster = maybeCluster instanceof Cluster ? maybeCluster : null;
   const nodes = masterNodes(client);
   if (nodes.length === 0) throw new Error('No target masters available');
-  const shares = cluster ? slotShares(cluster, nodes) : [1];
+  const { shares, assumed } = cluster ? slotShares(cluster, nodes) : { shares: [1], assumed: false };
 
   const otherDbTotals = new Map<number, number>();
-  const masters = await Promise.all(
+  const settled = await Promise.allSettled(
     nodes.map(async (node, i): Promise<MasterMemory> => {
       const [memory, keyspace] = await Promise.all([node.info('memory'), node.info('keyspace')]);
       const { keys, expires, db0Keys } = keyspaceTotals(keyspace);
@@ -242,20 +246,32 @@ export async function readTargetMemory(client: Valkey): Promise<TargetMemory> {
           infoNumber(memory, 'used_memory') - infoNumber(memory, 'mem_not_counted_for_evict'),
         ),
         datasetMemory: infoNumber(memory, 'used_memory_dataset'),
-        policy: infoField(memory, 'maxmemory_policy') ?? 'noeviction',
+        policy: infoField(memory, 'maxmemory_policy') ?? 'unknown',
         keys,
         db0Keys,
         expires,
         slotShare: shares[i],
+        slotShareAssumed: assumed,
       };
     }),
   );
+  const masters: MasterMemory[] = [];
+  const unreadMasters: { name: string; reason: string }[] = [];
+  settled.forEach((result, i) => {
+    if (result.status === 'fulfilled') masters.push(result.value);
+    else unreadMasters.push({ name: cluster ? nodeName(nodes[i]) : 'target', reason: errorMessage(result.reason) });
+  });
+  if (masters.length === 0) {
+    const first = settled[0];
+    throw first.status === 'rejected' ? first.reason : new Error('No target masters available');
+  }
   return {
     masters,
     db0Keys: masters.reduce((s, m) => s + m.db0Keys, 0),
     otherDbs: [...otherDbTotals.entries()]
       .sort(([a], [b]) => a - b)
       .map(([db, keys]) => ({ db, keys })),
+    unreadMasters,
   };
 }
 
@@ -385,6 +401,12 @@ function describeFit(f: MasterFinding, sourceBytes: number, clustered: boolean):
   return `The source dataset is about ${formatBytes(sourceBytes)}. Target master ${f.master.name} owns about ${pct}% of the hash slots, so it receives about ${formatBytes(f.need)}; it has ${have}`;
 }
 
+function unknownPolicyNote(f: MasterFinding): string {
+  return f.master.policy === 'unknown'
+    ? ' The target did not report maxmemory_policy, so whether it evicts or fails with OOM is unknown; this is reported as a warning rather than a blocker.'
+    : '';
+}
+
 function volatileNote(f: MasterFinding): string {
   if (!f.volatileNoSourceTtl) return '';
   return f.master.expires === 0
@@ -399,6 +421,13 @@ export interface CapacityCheckOptions {
    * unavailable), not a dataset estimate: report at most a warning.
    */
   roughSourceSize?: boolean;
+  /** Target dbs other than db0 with keys; named when the fix is to empty the target. */
+  otherDbs?: { db: number; keys: number }[];
+}
+
+/** `db3 (1,204 keys), db5 (2 keys)` */
+function formatDbList(dbs: { db: number; keys: number }[]): string {
+  return dbs.map((d) => `db${d.db} (${d.keys.toLocaleString('en-US')} keys)`).join(', ');
 }
 
 /**
@@ -419,6 +448,23 @@ export function checkTargetCapacity(
   sourceExpiringKeys: number | null = null,
   options: CapacityCheckOptions = {},
 ): Incompatibility[] {
+  const issues = evaluateCapacity(sourceBytes, target, sourceExpiringKeys, options);
+  if (target.masters.length < 2) return issues;
+  // Cluster estimates assume an even key spread over each master's slots.
+  const caveat =
+    " Each master's share assumes keys are spread evenly across its hash slots; hash tags can put more data on one shard." +
+    (target.masters.some((m) => m.slotShareAssumed)
+      ? ' The slot map could not be matched to the masters, so an equal split was assumed.'
+      : '');
+  return issues.map((issue) => ({ ...issue, detail: `${issue.detail}${caveat}` }));
+}
+
+function evaluateCapacity(
+  sourceBytes: number,
+  target: TargetMemory,
+  sourceExpiringKeys: number | null,
+  options: CapacityCheckOptions,
+): Incompatibility[] {
   if (sourceBytes <= 0) return [];
   const findings = target.masters
     .map((m) => assessMaster(sourceBytes, m, sourceExpiringKeys))
@@ -436,13 +482,16 @@ export function checkTargetCapacity(
   const afterFlush = formatBytes(worst.roomAfterFlush);
 
   if (worst.kind === 'oom') {
-    if (options.roughSourceSize) {
+    if (options.roughSourceSize || worst.master.policy === 'unknown') {
+      const roughNote = options.roughSourceSize
+        ? " The source size here is its used_memory, because MEMORY USAGE sampling was unavailable, and that includes replication and client buffers, so this is not treated as a hard block. Check the source's dataset size before migrating."
+        : '';
       return [
         {
           severity: 'warning',
           category: 'capacity',
           title: 'Target may not have enough memory',
-          detail: `${fit} (policy '${policy}'); about ${afterFlush} would be available after emptying it.${volatileNote(worst)} The source size here is its used_memory, because MEMORY USAGE sampling was unavailable, and that includes replication and client buffers, so this is not treated as a hard block. Check the source's dataset size before migrating.${spread}`,
+          detail: `${fit} (policy '${policy}'); about ${afterFlush} would be available after emptying it.${volatileNote(worst)}${roughNote}${unknownPolicyNote(worst)}${spread}`,
         },
       ];
     }
@@ -457,12 +506,17 @@ export function checkTargetCapacity(
   }
 
   if (worst.kind === 'flush') {
+    const others = options.otherDbs ?? [];
+    const flushNote =
+      others.length > 0
+        ? ` Emptying with emptyDbBeforeSync runs FLUSHALL, which also deletes the target's keys in ${formatDbList(others)}; command mode does not need those dbs emptied.`
+        : '';
     return [
       {
         severity: 'warning',
         category: 'capacity',
         title: 'Target only has room if it is emptied first',
-        detail: `${fit} (policy '${policy}'). The source does not fit next to the data already on the target, but about ${afterFlush} would be available after emptying it, which is enough. Use a RedisShake mode with emptyDbBeforeSync or run FLUSHALL on the target before migrating; otherwise writes fail with OOM part-way through.${volatileNote(worst)}${spread}`,
+        detail: `${fit} (policy '${policy}'). The source does not fit next to the data already on the target, but about ${afterFlush} would be available after emptying it, which is enough. Use a RedisShake mode with emptyDbBeforeSync or run FLUSHALL on the target before migrating; otherwise writes fail with OOM part-way through.${volatileNote(worst)}${flushNote}${unknownPolicyNote(worst)}${spread}`,
       },
     ];
   }
@@ -473,7 +527,7 @@ export function checkTargetCapacity(
         severity: 'warning',
         category: 'capacity',
         title: 'Target memory may not hold the source',
-        detail: `${fit} (policy '${policy}'). Even after emptying the target only about ${afterFlush} would be available, and the source estimate is within 10% of that, too close to call from a sampled estimate. Writes may fail with OOM part-way through; raise maxmemory or add shards before migrating.${volatileNote(worst)}${spread}`,
+        detail: `${fit} (policy '${policy}'). Even after emptying the target only about ${afterFlush} would be available, and the source estimate is within 10% of that, too close to call from a sampled estimate. Writes may fail with OOM part-way through; raise maxmemory or add shards before migrating.${volatileNote(worst)}${unknownPolicyNote(worst)}${spread}`,
       },
     ];
   }
@@ -569,7 +623,7 @@ export function checkKeyOverlap(targetKeys: number, overlap: KeyOverlap | null):
       severity: 'info',
       category: 'key_overlap',
       title: 'Target is not empty',
-      detail: `The target already holds ${targetKeys.toLocaleString()} keys in db0. None of the sampled source keys exist there, so they are not expected to collide, but the target's key count will not match the source after migration.`,
+      detail: `The target already holds ${targetKeys.toLocaleString()} keys in db0, and none of the ${overlap.sampled} sampled source keys exist there. Only db0 key names were sampled. A sample of ${overlap.sampled} reliably detects an overlap rate above about ${((1 - Math.pow(0.05, 1 / overlap.sampled)) * 100).toFixed(1)}%; a lower rate can still exist, and RedisShake stops at the first BUSYKEY unless the target is emptied first. The target's key count will not match the source after migration.`,
     },
   ];
 }
@@ -585,7 +639,7 @@ export function checkTargetOtherDbs(
   sourceDbs: number[] | null,
 ): Incompatibility[] {
   if (otherDbs.length === 0) return [];
-  const list = otherDbs.map((d) => `db${d.db} (${d.keys.toLocaleString('en-US')} keys)`).join(', ');
+  const list = formatDbList(otherDbs);
   const shared = sourceDbs ? otherDbs.filter((d) => sourceDbs.includes(d.db)).map((d) => `db${d.db}`) : [];
 
   let collision: string;
@@ -655,7 +709,7 @@ export async function probeTargetCapacity(input: CapacityProbeInput): Promise<In
       input.sourceBytes,
       target,
       input.sourceExpiringKeys ?? null,
-      { roughSourceSize: input.roughSourceSize === true },
+      { roughSourceSize: input.roughSourceSize === true, otherDbs: target.otherDbs },
     );
     const capacity = input.allDbsSource
       ? [
@@ -665,7 +719,7 @@ export async function probeTargetCapacity(input: CapacityProbeInput): Promise<In
               input.allDbsSource.bytes,
               target,
               input.allDbsSource.expiringKeys,
-              { roughSourceSize: input.allDbsSource.rough },
+              { roughSourceSize: input.allDbsSource.rough, otherDbs: target.otherDbs },
             ),
             REDISSHAKE_SCOPE,
           ),
@@ -686,7 +740,23 @@ export async function probeTargetCapacity(input: CapacityProbeInput): Promise<In
         },
       ];
     }
-    return [...capacity, ...overlap, ...checkTargetOtherDbs(target.otherDbs, input.sourceDbs ?? null)];
+    const unread: Incompatibility[] =
+      target.unreadMasters.length > 0
+        ? [
+            {
+              severity: 'info',
+              category: 'capacity',
+              title: 'Some target masters could not be read',
+              detail: `${target.unreadMasters.length} of ${target.masters.length + target.unreadMasters.length} target masters could not be read (${target.unreadMasters.map((u) => `${u.name}: ${u.reason}`).join('; ')}). Capacity was checked on the others only; check the unread masters manually.`,
+            },
+          ]
+        : [];
+    return [
+      ...capacity,
+      ...overlap,
+      ...checkTargetOtherDbs(target.otherDbs, input.sourceDbs ?? null),
+      ...unread,
+    ];
   } finally {
     await client.quit().catch(() => undefined);
   }

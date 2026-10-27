@@ -524,6 +524,7 @@ export class MigrationService {
 
       // Capacity + key-overlap preflight. Best-effort: a target that cannot be
       // probed (ACL, unreachable master) adds an info item and never fails analysis.
+      if (job.cancelled) return;
       if (targetConfig) {
         // INFO keyspace already read in step 2, as text.
         let keyspaceText = '';
@@ -571,26 +572,38 @@ export class MigrationService {
           });
           allDbsSource = { bytes: size.bytes, rough: size.rough, expiringKeys: allDbsExpiringKeys };
         }
-        try {
-          incompatibilities.push(...await probeTargetCapacity({
-            targetConfig,
-            targetIsCluster: job.result.targetIsCluster === true,
-            sourceBytes: sourceSize.bytes,
-            roughSourceSize: sourceSize.rough,
-            sampledKeys: pickOverlapSample(sampledKeys),
-            sourceExpiringKeys,
-            allDbsSource,
-            sourceDbs: sourceDbIndexes(keyspaceText, isCluster),
-          }));
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          this.logger.warn(`Analysis ${job.id}: capacity preflight skipped: ${message}`);
+        // The key sample and size estimate come from the source's selected db,
+        // while command mode copies db0 and the target checks look at db0.
+        const sourceDbIndex = config?.dbIndex ?? 0;
+        if (!isCluster && sourceDbIndex !== 0) {
           incompatibilities.push({
             severity: 'info',
             category: 'capacity',
-            title: 'Capacity and key-overlap checks did not run',
-            detail: `The target's memory and keys could not be read (${message}), so this analysis did not check whether the source fits or whether its keys already exist there. Allow INFO and EXISTS for the target user, or check target capacity manually before migrating.`,
+            title: 'Capacity and key-overlap checks did not run (source uses a non-default db)',
+            detail: `The source connection selects db${sourceDbIndex}, so the key sample and size estimate come from db${sourceDbIndex}, while command mode copies db0 and the target checks look at db0. The results would not describe the migration, so they were skipped. Check target capacity manually, or point the source connection at db0 to get these checks.`,
           });
+        } else {
+          try {
+            incompatibilities.push(...await probeTargetCapacity({
+              targetConfig,
+              targetIsCluster: job.result.targetIsCluster === true,
+              sourceBytes: sourceSize.bytes,
+              roughSourceSize: sourceSize.rough,
+              sampledKeys: pickOverlapSample(sampledKeys),
+              sourceExpiringKeys,
+              allDbsSource,
+              sourceDbs: sourceDbIndexes(keyspaceText, isCluster),
+            }));
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            this.logger.warn(`Analysis ${job.id}: capacity preflight skipped: ${message}`);
+            incompatibilities.push({
+              severity: 'info',
+              category: 'capacity',
+              title: 'Capacity and key-overlap checks did not run',
+              detail: `The target's memory and keys could not be read (${message}), so this analysis did not check whether the source fits or whether its keys already exist there. Allow INFO and EXISTS for the target user, or check target capacity manually before migrating.`,
+            });
+          }
         }
       }
       job.result.incompatibilities = incompatibilities;

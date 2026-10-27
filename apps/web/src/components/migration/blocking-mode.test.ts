@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { Incompatibility } from '@betterdb/shared';
-import { blockingCountForMode, modesWithoutBlockers } from './blocking-mode';
+import {
+  FORCE_REASON_MIN_LENGTH,
+  blockingCountForMode,
+  buildStartExecutionBody,
+  isForceReasonValid,
+  modesWithoutBlockers,
+} from './blocking-mode';
 
 const unscoped: Incompatibility = { severity: 'blocking', category: 'hfe', title: 'HFE', detail: 'd' };
 const shakeOnly: Incompatibility = {
@@ -34,5 +40,30 @@ describe('modesWithoutBlockers', () => {
     expect(modesWithoutBlockers([unscoped])).toEqual([]);
     expect(modesWithoutBlockers([warning])).toEqual([]);
     expect(modesWithoutBlockers(undefined)).toEqual([]);
+  });
+});
+
+describe('buildStartExecutionBody', () => {
+  const base = { sourceConnectionId: 's', targetConnectionId: 't', mode: 'command' as const };
+  it('sends no force fields when the selected mode has no blockers', () => {
+    expect(buildStartExecutionBody({ ...base, blockers: [], forceReason: 'ignored' })).toEqual(base);
+  });
+  it('sends force and the trimmed reason when the mode has blockers', () => {
+    expect(buildStartExecutionBody({ ...base, blockers: [unscoped], forceReason: '  checked manually  ' }))
+      .toEqual({ ...base, force: true, forceReason: 'checked manually' });
+  });
+  it('passes other request fields through unchanged', () => {
+    expect(buildStartExecutionBody({ ...base, blockers: [], extra: { redisShakeOptions: { tryDiskless: true } } }))
+      .toEqual({ ...base, redisShakeOptions: { tryDiskless: true } });
+  });
+});
+
+describe('isForceReasonValid', () => {
+  it('rejects empty and whitespace-only reasons', () => {
+    expect(isForceReasonValid(undefined)).toBe(false);
+    expect(isForceReasonValid('   ')).toBe(false);
+  });
+  it('accepts a reason that meets the server minimum', () => {
+    expect(isForceReasonValid('x'.repeat(FORCE_REASON_MIN_LENGTH))).toBe(true);
   });
 });

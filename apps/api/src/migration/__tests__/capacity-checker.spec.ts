@@ -37,6 +37,7 @@ function master(overrides: Partial<MasterMemory> = {}): MasterMemory {
     db0Keys: 0,
     expires: 0,
     slotShare: 1,
+    slotShareAssumed: false,
     ...overrides,
   };
 }
@@ -54,13 +55,13 @@ function shard(name: string, overrides: Partial<MasterMemory> = {}): MasterMemor
 
 function target(...masters: MasterMemory[]): TargetMemory {
   const list = masters.length > 0 ? masters : [master()];
-  return { masters: list, db0Keys: list.reduce((s, m) => s + m.db0Keys, 0), otherDbs: [] };
+  return { masters: list, db0Keys: list.reduce((s, m) => s + m.db0Keys, 0), otherDbs: [], unreadMasters: [] };
 }
 
 interface NodeSpec {
   maxmemory: number;
   used: number;
-  policy: string;
+  policy?: string;
   notCounted?: number;
   dataset?: number;
   keys?: number;
@@ -78,7 +79,7 @@ function node(spec: NodeSpec) {
       .mockImplementation((section: string) =>
         Promise.resolve(
           section === 'memory'
-            ? `# Memory\r\nused_memory:${spec.used}\r\nused_memory_dataset:${spec.dataset ?? 0}\r\nmaxmemory:${spec.maxmemory}\r\nmaxmemory_policy:${spec.policy}\r\nmem_not_counted_for_evict:${spec.notCounted ?? 0}\r\n`
+            ? `# Memory\r\nused_memory:${spec.used}\r\nused_memory_dataset:${spec.dataset ?? 0}\r\nmaxmemory:${spec.maxmemory}\r\n${spec.policy === undefined ? '' : `maxmemory_policy:${spec.policy}\r\n`}mem_not_counted_for_evict:${spec.notCounted ?? 0}\r\n`
             : `# Keyspace\r\ndb0:keys=${spec.keys ?? 0},expires=${spec.expires ?? 0},avg_ttl=0\r\n${spec.extraKeyspace ?? ''}`,
         ),
       ),
@@ -234,6 +235,41 @@ describe('capacity-checker / checkTargetCapacity (standalone)', () => {
   });
 });
 
+describe('capacity-checker / unknown policy, FLUSHALL dbs and slot caveat', () => {
+  it('caps a would-be blocker at a warning when the policy is unknown', () => {
+    const [issue] = checkTargetCapacity(12 * GiB, target(master({ policy: 'unknown' })));
+    expect(issue.severity).toBe('warning');
+    expect(issue.detail).toContain('did not report maxmemory_policy');
+  });
+
+  it('names the other dbs FLUSHALL would delete in the empty-first warning', () => {
+    const opts = { otherDbs: [{ db: 3, keys: 1204 }] };
+    const [issue] = checkTargetCapacity(9 * GiB, target(flushable()), null, opts);
+    expect(issue.detail).toContain('db3 (1,204 keys)');
+    const [plain] = checkTargetCapacity(9 * GiB, target(flushable()));
+    expect(plain.detail).not.toContain('also deletes');
+  });
+
+  it('notes the hash-tag caveat on cluster findings only, and the equal split when assumed', () => {
+    const blocked = [
+      shard('10.0.0.1:6379', { usedMemory: 4 * GiB }),
+      shard('10.0.0.2:6379', { usedMemory: 4 * GiB }),
+    ];
+    const [clustered] = checkTargetCapacity(20 * GiB, target(...blocked));
+    expect(clustered.severity).toBe('blocking');
+    expect(clustered.detail).toContain('hash tags');
+    expect(clustered.detail).not.toContain('equal split was assumed');
+    const [assumed] = checkTargetCapacity(
+      20 * GiB,
+      target(...blocked.map((m) => ({ ...m, slotShareAssumed: true }))),
+    );
+    expect(assumed.detail).toContain('equal split was assumed');
+    const [standalone] = checkTargetCapacity(12 * GiB, target());
+    expect(standalone.detail).not.toContain('hash tags');
+    expect(standalone.detail).not.toContain('equal split was assumed');
+  });
+});
+
 describe('capacity-checker / checkTargetCapacity (cluster)', () => {
   it('still checks a capped master when another master has no limit', () => {
     const issues = checkTargetCapacity(
@@ -386,10 +422,12 @@ describe('capacity-checker / readTargetMemory', () => {
           db0Keys: 42,
           expires: 7,
           slotShare: 1,
+          slotShareAssumed: false,
         },
       ],
       db0Keys: 42,
       otherDbs: [],
+      unreadMasters: [],
     });
   });
 
@@ -444,6 +482,40 @@ describe('capacity-checker / readTargetMemory', () => {
     const memory = await readTargetMemory(c as unknown as Valkey);
     expect(memory.otherDbs).toEqual([{ db: 1, keys: 2 }, { db: 3, keys: 10 }]);
     expect(memory.db0Keys).toBe(2);
+  });
+
+  it('reads a missing maxmemory_policy as unknown', async () => {
+    const client = node({ maxmemory: GiB, used: 0 }) as unknown as Valkey;
+    expect((await readTargetMemory(client)).masters[0].policy).toBe('unknown');
+  });
+
+  it('marks the equal split as assumed when the slot map is unavailable', async () => {
+    const c = cluster([
+      node({ maxmemory: GiB, used: 0, policy: 'noeviction', host: '10.0.0.1' }),
+      node({ maxmemory: GiB, used: 0, policy: 'noeviction', host: '10.0.0.2' }),
+    ]);
+    const memory = await readTargetMemory(c as unknown as Valkey);
+    expect(memory.masters.every((m) => m.slotShareAssumed)).toBe(true);
+  });
+
+  it('judges the reachable masters and lists the unread one', async () => {
+    const down = {
+      ...node({ maxmemory: GiB, used: 0, policy: 'noeviction', host: '10.0.0.2' }),
+      info: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+    };
+    const c = cluster([node({ maxmemory: GiB, used: 0, policy: 'noeviction', host: '10.0.0.1' }), down]);
+    const memory = await readTargetMemory(c as unknown as Valkey);
+    expect(memory.masters).toHaveLength(1);
+    expect(memory.unreadMasters).toEqual([{ name: '10.0.0.2:6379', reason: 'ECONNREFUSED' }]);
+  });
+
+  it('rejects when every master is unreadable', async () => {
+    const down = (host: string) => ({
+      ...node({ maxmemory: GiB, used: 0, policy: 'noeviction', host }),
+      info: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+    });
+    const c = cluster([down('10.0.0.1'), down('10.0.0.2')]);
+    await expect(readTargetMemory(c as unknown as Valkey)).rejects.toThrow('ECONNREFUSED');
   });
 
   it('throws when the cluster reports no masters', async () => {
@@ -608,6 +680,16 @@ describe('capacity-checker / pickOverlapSample', () => {
   });
 });
 
+describe('capacity-checker / checkKeyOverlap wording', () => {
+  it('states what the sample can detect and that RedisShake stops at the first BUSYKEY', () => {
+    const [issue] = checkKeyOverlap(5000, { sampled: 200, existing: 0 });
+    expect(issue.severity).toBe('info');
+    expect(issue.detail).toContain('about 1.5%');
+    expect(issue.detail).toContain('BUSYKEY');
+    expect(issue.detail).toContain('Only db0 key names were sampled');
+  });
+});
+
 describe('capacity-checker / probeTargetCapacity', () => {
   function probeClient(spec: NodeSpec) {
     const client = {
@@ -704,6 +786,29 @@ describe('capacity-checker / probeTargetCapacity', () => {
       expect.objectContaining({ title: 'Key-overlap check did not run' }),
       expect.objectContaining({ title: 'Target holds keys outside db0 (RedisShake modes)' }),
     ]));
+  });
+
+  it('keeps the capacity blocker and reports an unreadable master', async () => {
+    const full = node({ maxmemory: 4 * GiB, used: 4 * GiB, policy: 'noeviction', host: '10.0.0.1' });
+    const down = {
+      ...node({ maxmemory: 4 * GiB, used: 0, policy: 'noeviction', host: '10.0.0.2' }),
+      info: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+    };
+    const c = Object.assign(cluster([full, down]), {
+      connect: jest.fn().mockResolvedValue(undefined),
+      quit: jest.fn().mockResolvedValue('OK'),
+    });
+    jest.mocked(createTargetClient).mockReturnValue(c as unknown as ReturnType<typeof createTargetClient>);
+    const issues = await probeTargetCapacity({ ...probeBase, targetIsCluster: true, sourceBytes: 20 * GiB });
+    expect(issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ severity: 'blocking', category: 'capacity' }),
+        expect.objectContaining({ severity: 'info', title: 'Some target masters could not be read' }),
+      ]),
+    );
+    const info = issues.find((i) => i.title === 'Some target masters could not be read');
+    expect(info?.detail).toContain('10.0.0.2:6379');
+    expect(info?.detail).toContain('ECONNREFUSED');
   });
 
   it('keeps the capacity finding when the overlap check fails', async () => {

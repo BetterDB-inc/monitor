@@ -189,6 +189,12 @@ when to evict or reject writes. Each master is judged by its own
 `maxmemory-policy`; masters without `maxmemory` are skipped, while capped
 masters in the same cluster are still checked.
 
+- **Overriding a blocker:** when the selected mode has blocking issues, the confirm dialog lists them and asks for a reason; starting sends `force` and `forceReason`, which the server records. Without blockers for that mode nothing changes.
+- **Non-default source db:** if the source connection selects a db other than db0 (standalone), analysis samples that db while command mode copies db0, so the capacity and key-overlap checks are skipped with an info item.
+- **Cluster estimates:** each master's share assumes keys are spread evenly across its hash slots; hash tags can put more data on one shard. If the slot map can't be matched to the masters, an equal split is assumed and the finding says so. Masters that can't be read are listed, and capacity is checked on the rest.
+- **Unknown eviction policy:** a target that doesn't report `maxmemory_policy` (some proxies and managed services) is never blocked on capacity; findings are warnings.
+- **Sampled overlap:** up to 200 db0 source keys are checked. That reliably detects an overlap rate above about 1.5%; lower rates can still exist, and RedisShake stops at the first `BUSYKEY`.
+
 A master that cannot evict is also judged against the room it would have after
 emptying the target: `emptyDbBeforeSync` runs `FLUSHALL` on every master, which
 frees `used_memory_dataset` in every db, never the baseline. If the share fits there, the analysis warns to empty the target first;

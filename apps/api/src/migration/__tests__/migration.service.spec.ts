@@ -184,8 +184,16 @@ describe('MigrationService capacity preflight', () => {
     else process.env.MIGRATION_VERDICT_DIR = OLD_VERDICT_DIR;
   });
 
-  async function analyze(usedMemory?: string, sections: Record<string, unknown> = {}) {
+  async function analyze(
+    usedMemory?: string,
+    sections: Record<string, unknown> = {},
+    sourceConfig: Record<string, unknown> = {},
+  ) {
     const mock = createMockRegistry();
+    if (Object.keys(sourceConfig).length > 0) {
+      const base = mock.getConfig() as Record<string, unknown>;
+      mock.getConfig.mockImplementation((id: string) => (id === 'conn-1' ? { ...base, ...sourceConfig } : base));
+    }
     if (usedMemory || Object.keys(sections).length > 0) {
       mock.mockAdapter.getInfo.mockResolvedValue({
         ...(await mock.mockAdapter.getInfo()),
@@ -260,6 +268,32 @@ describe('MigrationService capacity preflight', () => {
         sourceDbs: [0, 1],
       }),
     );
+  });
+
+  it('skips the preflight with an info item when a standalone source selects another db', async () => {
+    const job = await analyze(undefined, {}, { dbIndex: 3 });
+
+    expect(probe).not.toHaveBeenCalled();
+    expect(job.blockingCount).toBe(0);
+    const item = job.incompatibilities?.find((i) => i.title.includes('source uses a non-default db'));
+    expect(item?.severity).toBe('info');
+    expect(item?.detail).toContain('db3');
+  });
+
+  it('does not probe when the analysis is cancelled before the preflight', async () => {
+    const mock = createMockRegistry();
+    const registry = mock as unknown as ConstructorParameters<typeof MigrationService>[0];
+    const service = new MigrationService(registry);
+    let jobId = '';
+    mock.mockAdapter.getClient().call.mockImplementation(async (command: string) => {
+      if (command === 'MODULE') service.cancelJob(jobId);
+      return [];
+    });
+    ({ id: jobId } = await service.startAnalysis({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2' }));
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(service.getJob(jobId)?.status).toBe('cancelled');
+    expect(probe).not.toHaveBeenCalled();
   });
 
   it('passes the source db list to the probe', async () => {
