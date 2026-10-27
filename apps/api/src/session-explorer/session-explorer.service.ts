@@ -86,7 +86,7 @@ export class SessionExplorerService {
     const input = this.validate(body);
     const preset = this.presetOf(input);
     const db = this.registry.get(connectionId);
-    const sampleKey = await withPrimaries(db, async ({ clients }) => {
+    const sampleKey = await withPrimaries(db, async ({ clients, failed }) => {
       let lastError: unknown;
       let succeeded = 0;
       for (const client of clients) {
@@ -100,6 +100,9 @@ export class SessionExplorerService {
         }
       }
       if (succeeded === 0 && lastError !== undefined) throw lastError;
+      if (succeeded === 0 && failed > 0) {
+        throw new ServiceUnavailableException('No primary could be reached');
+      }
       return null;
     });
     if (sampleKey === null) return { sampleKey: null, view: null };

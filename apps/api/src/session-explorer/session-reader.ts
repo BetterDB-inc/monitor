@@ -12,6 +12,7 @@ export const DEFAULT_LIST_WINDOW = 500;
 export const DEFAULT_READ_BATCH = 1000;
 export const UNMEASURED_WINDOW = 4;
 export const EXACT_MEMORY_LENGTH = 128;
+export const EXACT_LIST_LENGTH = 10_000;
 const JSON_MEMORY_HEADROOM = 4;
 
 type PipelineResult = [Error | null, unknown] | undefined;
@@ -125,14 +126,15 @@ function nextWindow(
   previous: number,
   opts: ReadOpts,
 ): number {
-  const unreadBytes = at.memory === null ? 0 : at.memory - acc.fetched;
+  const sized = at.memory !== null && (at.exact || at.type !== 'list');
+  const unreadBytes = sized ? at.memory! - acc.fetched : 0;
   const left = Math.max(1, (at.length ?? 0) - read);
   const pessimistic = Math.max(acc.largest, unreadBytes > 0 ? unreadBytes / left : 0);
   const fit =
     pessimistic > 0
       ? Math.floor((acc.cap - acc.bytes) / pessimistic) + 1
       : Number.POSITIVE_INFINITY;
-  const ceiling = at.memory === null ? UNMEASURED_WINDOW : opts.listWindow;
+  const ceiling = sized ? opts.listWindow : UNMEASURED_WINDOW;
   return Math.max(1, Math.min(ceiling, previous * 2, fit));
 }
 
@@ -197,8 +199,8 @@ async function measure(client: Valkey, found: Located[]): Promise<void> {
   const exactly = found.filter(
     (at) =>
       at.type === 'ReJSON-RL' ||
-      at.type === 'list' ||
-      (at.length !== null && at.length <= EXACT_MEMORY_LENGTH),
+      (at.length !== null &&
+        at.length <= (at.type === 'list' ? EXACT_LIST_LENGTH : EXACT_MEMORY_LENGTH)),
   );
   if (exactly.length === 0) return;
   const exact = client.pipeline();
@@ -261,12 +263,8 @@ function queueFirstRead(
       pipeline.getrangeBuffer(key, 0, cap - 1);
       return 2;
     case 'ReJSON-RL':
-      if (memory === null) {
-        pipeline.call('JSON.DEBUG', 'MEMORY', key);
-        return 1;
-      }
-      if (memory > opts.byteCap * JSON_MEMORY_HEADROOM) return 0;
-      pipeline.callBuffer('JSON.GET', key);
+      if (memory !== null) return 0;
+      pipeline.call('JSON.DEBUG', 'MEMORY', key);
       return 1;
   }
   if (!readsWhole(at, opts)) return 0;
@@ -409,17 +407,9 @@ async function readJson(
   cap: number,
   opts: ReadOpts,
 ): Promise<ReadResult | null> {
-  const limit = opts.byteCap * JSON_MEMORY_HEADROOM;
-  let buf: Buffer | null;
-  if (at.memory === null) {
-    const size = numberOf(results[0]);
-    if (size === null || size > limit) return UNREAD_JSON;
-    buf = (await client.callBuffer('JSON.GET', at.key)) as Buffer | null;
-  } else if (at.memory > limit) {
-    return UNREAD_JSON;
-  } else {
-    buf = resultOf(results[0]) as Buffer | null;
-  }
+  const size = at.memory ?? numberOf(results[0]);
+  if (size === null || size > opts.byteCap * JSON_MEMORY_HEADROOM) return UNREAD_JSON;
+  const buf = (await client.callBuffer('JSON.GET', at.key)) as Buffer | null;
   if (buf === null) return null;
   return { ...decodeValue(buf, cap), bytes: Math.min(buf.length, cap), fetched: buf.length };
 }
@@ -499,9 +489,6 @@ function finishRead(
 function reservation(at: Located, opts: ReadOpts): number {
   if (at.type === 'string') {
     return Math.max(1, Math.min(at.memory ?? opts.byteCap, opts.byteCap));
-  }
-  if (at.type === 'ReJSON-RL') {
-    return Math.max(1, Math.min(at.memory ?? opts.byteCap, opts.byteCap * JSON_MEMORY_HEADROOM));
   }
   return readsWhole(at, opts) ? Math.max(1, at.memory ?? 0) : 0;
 }
