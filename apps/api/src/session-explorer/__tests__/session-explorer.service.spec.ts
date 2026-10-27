@@ -185,6 +185,7 @@ describe('SessionExplorerService.oversizeSessions', () => {
       truncated: false,
       partial: true,
       failedNodes: 1,
+      idleUntracked: false,
     });
     expect(await service.oversizeSessions('conn-1', 'ns-1')).toEqual({
       thresholdBytes: 100,
@@ -215,6 +216,7 @@ describe('SessionExplorerService.listSessions', () => {
       truncated: false,
       partial: false,
       failedNodes: 0,
+      idleUntracked: false,
     });
     await service.listSessions('conn-1', 'ns-1');
     const preset = scan.mock.lastCall![2];

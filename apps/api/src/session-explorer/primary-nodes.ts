@@ -1,4 +1,5 @@
 import Valkey from 'iovalkey';
+import calculateSlot from 'cluster-key-slot';
 import type { DatabasePort } from '../common/interfaces/database-port.interface';
 import type { ClusterNode } from '../common/types/metrics.types';
 import { tlsIdentityOptions } from '../database/adapters/tls-servername';
@@ -16,6 +17,15 @@ export interface PrimaryClients {
   failed: number;
   routes: PrimaryRoute[] | null;
   release: () => Promise<void>;
+}
+
+export function routeOf(primaries: PrimaryClients, key: string): Valkey | null {
+  if (!primaries.routes) return primaries.clients[0] ?? null;
+  const slot = calculateSlot(key);
+  const route = primaries.routes.find((r) =>
+    r.slots.some(([start, end]) => slot >= start && slot <= end),
+  );
+  return route?.client ?? null;
 }
 
 const isServingPrimary = (node: ClusterNode) =>
@@ -42,7 +52,7 @@ function nodeClient(parent: Valkey, node: ClusterNode): Valkey | null {
     maxRetriesPerRequest: 0,
     retryStrategy: () => null,
     connectTimeout: NODE_TIMEOUT_MS,
-    commandTimeout,
+    commandTimeout: commandTimeout ?? NODE_TIMEOUT_MS,
     connectionName: 'BetterDB-Monitor-SessionExplorer',
   });
   client.on('error', () => undefined);

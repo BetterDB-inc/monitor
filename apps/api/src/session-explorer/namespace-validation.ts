@@ -1,4 +1,5 @@
 import type { PresetId, SessionNamespaceInput } from '@betterdb/shared';
+import { MAX_GLOB_STARS } from './glob-match';
 import { validateCustomSchema } from './presets/custom';
 
 export const DEFAULT_OVERSIZE_THRESHOLD_BYTES = 1048576;
@@ -19,6 +20,29 @@ const GLOB_METACHARACTERS = new Set(['*', '?', '[']);
 const hasLiteralPrefix = (pattern: string): boolean =>
   pattern.length > 0 && !GLOB_METACHARACTERS.has(pattern[0]);
 
+function collapseStars(pattern: string): { pattern: string; stars: number } {
+  let collapsed = '';
+  let stars = 0;
+  let afterStar = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === '\\' && i + 1 < pattern.length) {
+      collapsed += c + pattern[++i];
+      afterStar = false;
+    } else if (c === '*') {
+      if (!afterStar) {
+        collapsed += c;
+        stars++;
+      }
+      afterStar = true;
+    } else {
+      collapsed += c;
+      afterStar = false;
+    }
+  }
+  return { pattern: collapsed, stars };
+}
+
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
@@ -35,12 +59,15 @@ export function validateNamespaceInput(
     errors.push(`Name must be at most ${MAX_NAME_LENGTH} characters`);
   }
 
-  const pattern = typeof input.pattern === 'string' ? input.pattern.trim() : '';
+  const { pattern, stars } = collapseStars(
+    typeof input.pattern === 'string' ? input.pattern.trim() : '',
+  );
   if (!hasLiteralPrefix(pattern)) errors.push('Pattern must include a literal prefix');
   if (/\s/.test(pattern)) errors.push('Pattern must not contain whitespace');
   if (pattern.length > MAX_PATTERN_LENGTH) {
     errors.push(`Pattern must be at most ${MAX_PATTERN_LENGTH} characters`);
   }
+  if (stars > MAX_GLOB_STARS) errors.push(`Pattern must contain at most ${MAX_GLOB_STARS} *`);
 
   const preset = PRESET_IDS.find((id) => id === input.preset);
   if (!preset) errors.push('Unknown preset');

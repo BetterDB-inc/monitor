@@ -82,6 +82,7 @@ export interface SessionListResponse {
   truncated: boolean;
   partial: boolean;
   failedNodes: number;
+  idleUntracked: boolean;
 }
 
 export interface ParsedMessage {

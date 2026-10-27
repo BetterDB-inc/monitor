@@ -1,10 +1,9 @@
 import type Valkey from 'iovalkey';
 import type { ChainableCommander } from 'iovalkey';
-import calculateSlot from 'cluster-key-slot';
 import type { CapturedKey, ValkeyElement, ValkeyValue } from '@betterdb/shared';
 import type { DatabasePort } from '../common/interfaces/database-port.interface';
 import { decodeValue } from './presets/text';
-import { PrimaryClients, withPrimaries } from './primary-nodes';
+import { PrimaryClients, routeOf, withPrimaries } from './primary-nodes';
 
 export const DEFAULT_BYTE_CAP = 2 * 1024 * 1024;
 export const DEFAULT_TOTAL_BYTE_CAP = 32 * 1024 * 1024;
@@ -12,7 +11,6 @@ export const DEFAULT_LIST_WINDOW = 500;
 export const DEFAULT_READ_BATCH = 1000;
 export const UNMEASURED_WINDOW = 4;
 export const EXACT_MEMORY_LENGTH = 128;
-export const EXACT_LIST_LENGTH = 10_000;
 const JSON_MEMORY_HEADROOM = 4;
 
 type PipelineResult = [Error | null, unknown] | undefined;
@@ -69,9 +67,13 @@ const isCollection = (type: string): type is keyof typeof LENGTH_COMMANDS =>
 class KeyReadError extends Error {}
 
 const resultOf = (r: PipelineResult): unknown => {
-  if (!r || r[0]) throw new KeyReadError();
+  if (!r) throw new KeyReadError();
+  if (r[0]) throw r[0];
   return r[1];
 };
+
+const isMoved = (err: unknown): boolean =>
+  err instanceof Error && /^(MOVED|ASK) /.test(err.message);
 
 const numberOf = (r: PipelineResult): number | null =>
   r && !r[0] && typeof r[1] === 'number' ? r[1] : null;
@@ -116,6 +118,13 @@ class Accumulator<T> {
   }
 }
 
+const hasOversizedElements = (at: Located, opts: ReadOpts): boolean =>
+  isCollection(at.type) &&
+  at.memory !== null &&
+  at.length !== null &&
+  at.length > 0 &&
+  at.memory / at.length > opts.byteCap;
+
 const readsWhole = (at: Located, opts: ReadOpts): boolean =>
   at.exact && at.memory !== null && at.memory <= opts.byteCap && at.type !== 'list';
 
@@ -126,15 +135,14 @@ function nextWindow(
   previous: number,
   opts: ReadOpts,
 ): number {
-  const sized = at.memory !== null && (at.exact || at.type !== 'list');
-  const unreadBytes = sized ? at.memory! - acc.fetched : 0;
+  const unreadBytes = at.memory === null ? 0 : at.memory - acc.fetched;
   const left = Math.max(1, (at.length ?? 0) - read);
   const pessimistic = Math.max(acc.largest, unreadBytes > 0 ? unreadBytes / left : 0);
   const fit =
     pessimistic > 0
       ? Math.floor((acc.cap - acc.bytes) / pessimistic) + 1
       : Number.POSITIVE_INFINITY;
-  const ceiling = sized ? opts.listWindow : UNMEASURED_WINDOW;
+  const ceiling = at.memory === null ? UNMEASURED_WINDOW : opts.listWindow;
   return Math.max(1, Math.min(ceiling, previous * 2, fit));
 }
 
@@ -169,15 +177,8 @@ function routeKeys(
     groups.set(client, list);
   };
   for (const key of keys) {
-    if (!primaries.routes) {
-      add(primaries.clients[0], key);
-      continue;
-    }
-    const slot = calculateSlot(key);
-    const route = primaries.routes.find((r) =>
-      r.slots.some(([start, end]) => slot >= start && slot <= end),
-    );
-    if (route) add(route.client, key);
+    const client = routeOf(primaries, key);
+    if (client) add(client, key);
     else unrouted++;
   }
   return { groups, unrouted };
@@ -199,8 +200,8 @@ async function measure(client: Valkey, found: Located[]): Promise<void> {
   const exactly = found.filter(
     (at) =>
       at.type === 'ReJSON-RL' ||
-      (at.length !== null &&
-        at.length <= (at.type === 'list' ? EXACT_LIST_LENGTH : EXACT_MEMORY_LENGTH)),
+      at.type === 'list' ||
+      (at.length !== null && at.length <= EXACT_MEMORY_LENGTH),
   );
   if (exactly.length === 0) return;
   const exact = client.pipeline();
@@ -216,9 +217,10 @@ async function locate(
   client: Valkey,
   keys: string[],
   batch: number,
-): Promise<{ located: Located[]; missing: number }> {
+): Promise<{ located: Located[]; missing: number; moved: boolean }> {
   const located: Located[] = [];
   let missing = 0;
+  let moved = false;
   for (let start = 0; start < keys.length; start += batch) {
     const slice = keys.slice(start, start + batch);
     const pipeline = client.pipeline();
@@ -231,6 +233,10 @@ async function locate(
     const found: Located[] = [];
     slice.forEach((key, i) => {
       const [type, pttl, memory] = results.slice(i * 3, i * 3 + 3) as PipelineResult[];
+      if (type && isMoved(type[0])) {
+        moved = true;
+        return;
+      }
       if (!type || type[0] || typeof type[1] !== 'string' || type[1] === 'none') {
         missing++;
         return;
@@ -247,7 +253,7 @@ async function locate(
     await measure(client, found);
     located.push(...found);
   }
-  return { located, missing };
+  return { located, missing, moved };
 }
 
 function queueFirstRead(
@@ -328,7 +334,25 @@ async function readHash(
     }
   } else {
     let cursor = '0';
+    let probing = true;
     await readWindows(acc, at, opts, async (_, size) => {
+      if (probing) {
+        try {
+          const [next, fields] = await client.hscanBuffer(
+            at.key,
+            cursor,
+            'COUNT',
+            size,
+            'NOVALUES',
+          );
+          await readProbedFields(client, at, acc, fields, cap);
+          cursor = next.toString();
+          return [fields.length, cursor !== '0'];
+        } catch (err) {
+          if (isMoved(err)) throw err;
+          probing = false;
+        }
+      }
       const [next, flat] = await client.hscanBuffer(at.key, cursor, 'COUNT', size);
       cursor = next.toString();
       for (let i = 0; i + 1 < flat.length; i += 2) {
@@ -339,6 +363,36 @@ async function readHash(
     });
   }
   return acc.result(Object.fromEntries(acc.items));
+}
+
+async function readProbedFields(
+  client: Valkey,
+  at: Located,
+  acc: Accumulator<[string, ValkeyValue]>,
+  fields: Buffer[],
+  cap: number,
+): Promise<void> {
+  if (fields.length === 0) return;
+  const probe = client.pipeline();
+  for (const field of fields) probe.hstrlen(at.key, field);
+  const lengths = (await probe.exec()) ?? [];
+  let room = acc.cap - acc.bytes;
+  const wanted: Buffer[] = [];
+  for (const [i, field] of fields.entries()) {
+    const cost = bulk(field.length) + bulk(numberOf(lengths[i] as PipelineResult) ?? 0);
+    if (cost > room) break;
+    room -= cost;
+    wanted.push(field);
+  }
+  if (wanted.length > 0) {
+    const values = await client.hmgetBuffer(at.key, ...wanted);
+    wanted.forEach((field, i) => {
+      const v = values[i];
+      if (!v) return;
+      acc.add(bulk(field.length) + bulk(v.length), () => [field.toString(), decoded(v, cap)]);
+    });
+  }
+  if (wanted.length < fields.length) acc.full = true;
 }
 
 async function readSet(
@@ -466,6 +520,9 @@ function finishRead(
   cap: number,
   opts: ReadOpts,
 ): Promise<ReadResult | null> | ReadResult | null {
+  if (hasOversizedElements(at, opts)) {
+    return { value: at.type === 'hash' ? {} : [], truncated: true, bytes: 0, fetched: 0 };
+  }
   switch (at.type) {
     case 'string':
       return readString(results, cap);
@@ -497,6 +554,7 @@ interface ReadState {
   remaining: number;
   exhausted: boolean;
   missing: number;
+  moved: Set<Valkey>;
   captured: Map<string, CapturedKey>;
 }
 
@@ -550,8 +608,9 @@ async function readNode(
           ...(read.truncated ? { truncated: true } : {}),
           ...(at.memory !== null ? { bytes: at.memory } : {}),
         });
-      } catch {
-        state.missing++;
+      } catch (err) {
+        if (isMoved(err)) state.moved.add(client);
+        else state.missing++;
       }
     }
   }
@@ -574,6 +633,7 @@ export async function readSessionKeys(
       remaining: opts.totalByteCap,
       exhausted: false,
       missing: unrouted,
+      moved: new Set(),
       captured: new Map(),
     };
     let failedNodes = primaries.failed;
@@ -583,8 +643,9 @@ export async function readSessionKeys(
     for (const [client, nodeKeys] of groups) {
       if (state.exhausted) break;
       try {
-        const { located, missing } = await locate(client, nodeKeys, opts.batch);
+        const { located, missing, moved } = await locate(client, nodeKeys, opts.batch);
         state.missing += missing;
+        if (moved) state.moved.add(client);
         await readNode(client, located, opts, state);
         succeeded++;
       } catch (err) {
@@ -601,7 +662,7 @@ export async function readSessionKeys(
         return captured ? [captured] : [];
       }),
       truncated: state.exhausted,
-      failedNodes,
+      failedNodes: failedNodes + state.moved.size,
       missingKeys: state.missing,
     };
   });

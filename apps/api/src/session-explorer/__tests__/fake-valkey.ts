@@ -35,6 +35,9 @@ const WRITE_CALLS = ['JSON.SET', 'JSON.DEL', 'SET', 'DEL', 'EXPIRE', 'PERSIST', 
 const READ_COMMANDS = [
   'type',
   'pttl',
+  'exists',
+  'hstrlen',
+  'hmgetBuffer',
   'memory',
   'object',
   'strlen',
@@ -75,6 +78,8 @@ export class FakeValkey {
   options: Record<string, unknown>;
   failKeys = new Map<string, string>();
   movedKeys = new Set<string>();
+  lfu = false;
+  noValues = true;
 
   constructor(
     public store: Map<string, FakeEntry> = new Map(),
@@ -162,11 +167,25 @@ export class FakeValkey {
         return e ? e.type : 'none';
       case 'pttl':
         return e ? (e.pttl ?? -1) : -2;
+      case 'exists':
+        return e ? 1 : 0;
+      case 'hstrlen': {
+        const v = (raw as Record<string, string | Buffer> | undefined)?.[args[1] as string];
+        return v === undefined ? 0 : Buffer.from(v).length;
+      }
+      case 'hmgetBuffer':
+        return (args.slice(1) as string[]).map((f) => {
+          const v = (raw as Record<string, string | Buffer> | undefined)?.[f];
+          return v === undefined ? null : Buffer.from(v);
+        });
       case 'memory':
         if (e && e.memory === null) throw new Error('NOPERM memory');
         if (e && e.sampledMemory !== undefined && !args.includes('SAMPLES')) return e.sampledMemory;
         return e ? (e.memory ?? 100) : null;
       case 'object':
+        if (this.lfu) {
+          throw new Error('ERR An LFU maxmemory policy is selected, idle time not tracked.');
+        }
         if (!e) throw new Error('ERR no such key');
         return e.idle ?? 0;
       case 'strlen':
@@ -208,13 +227,17 @@ export class FakeValkey {
           Object.entries((raw as Record<string, string>) ?? {}).map(([k, v]) => [k, Buffer.from(v)]),
         );
       case 'hscanBuffer': {
-        const [, cursor, , count] = args as [string, string, string, number];
+        const [, cursor, , count, flag] = args as [string, string, string, number, string?];
+        if (flag === 'NOVALUES' && !this.noValues) throw new Error('ERR syntax error');
         const fields = Object.entries((raw as Record<string, string>) ?? {});
         const from = Number(cursor);
         const to = from + Number(count);
+        const page = fields.slice(from, to);
         return [
           Buffer.from(to >= fields.length ? '0' : String(to)),
-          fields.slice(from, to).flatMap(([k, v]) => [Buffer.from(k), Buffer.from(v)]),
+          flag === 'NOVALUES'
+            ? page.map(([k]) => Buffer.from(k))
+            : page.flatMap(([k, v]) => [Buffer.from(k), Buffer.from(v)]),
         ];
       }
       case 'zrangeBuffer': {

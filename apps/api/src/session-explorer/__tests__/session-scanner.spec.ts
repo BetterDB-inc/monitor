@@ -1,4 +1,5 @@
 import Valkey from 'iovalkey';
+import calculateSlot from 'cluster-key-slot';
 import type { PresetDefinition } from '../presets/types';
 import { primaryClients } from '../primary-nodes';
 import { keysForSession, scanSessions } from '../session-scanner';
@@ -250,6 +251,41 @@ describe('scanSessions', () => {
     expect(parent.disconnected).toBe(false);
   });
 
+  it('counts a key seen on two primaries during slot migration once', async () => {
+    const nodeA = new FakeValkey(storeOf({ 's:a:1': { type: 'string', memory: 10 } }));
+    const nodeB = new FakeValkey(storeOf({ 's:a:1': { type: 'string', memory: 10 } }));
+    const byPort: Record<number, FakeValkey> = { 7001: nodeA, 7002: nodeB };
+    ValkeyMock.mockImplementation((opts: { port: number }) => byPort[opts.port]);
+    const db = fakeDb(new FakeValkey(), {
+      nodes: [masterNode('a', '10.0.0.1:7001'), masterNode('b', '10.0.0.2:7002')],
+    });
+
+    const result = await scanSessions(db, 's:*', preset);
+
+    expect(result.scannedKeys).toBe(1);
+    expect(result.sessions).toEqual([
+      expect.objectContaining({ sessionId: 'a', keyCount: 1, memoryBytes: 10 }),
+    ]);
+  });
+
+  it('says idle time is not tracked under an LFU eviction policy', async () => {
+    const client = new FakeValkey(storeOf({ 's:a:1': { type: 'string' } }));
+    client.lfu = true;
+
+    const result = await scanSessions(fakeDb(client), 's:*', preset);
+
+    expect(result.idleUntracked).toBe(true);
+    expect(result.sessions[0].idleSeconds).toBeNull();
+  });
+
+  it('says idle time is tracked otherwise', async () => {
+    const client = new FakeValkey(storeOf({ 's:a:1': { type: 'string', idle: 5 } }));
+
+    const result = await scanSessions(fakeDb(client), 's:*', preset);
+
+    expect(result.idleUntracked).toBe(false);
+  });
+
   it('counts a primary whose scan fails as failed', async () => {
     const parent = new FakeValkey();
     const nodeA = new FakeValkey(storeOf({ 's:a:1': { type: 'string' } }));
@@ -379,5 +415,116 @@ describe('keysForSession', () => {
     const result = await keysForSession(db, 's:*', preset, 'x');
 
     expect(result).toEqual({ keys: ['s:x:1'], truncated: false, failedNodes: 2 });
+  });
+
+  const byKey: PresetDefinition = {
+    ...preset,
+    sessionIdOf: (key) => key,
+    sessionLookup: (sessionId) => ({ key: sessionId }),
+  };
+
+  it('looks a session key up directly instead of scanning', async () => {
+    const client = new FakeValkey(storeOf({ 'chat:1': { type: 'list', value: [] } }));
+
+    const result = await keysForSession(fakeDb(client), 'chat:*', byKey, 'chat:1');
+
+    expect(result).toEqual({ keys: ['chat:1'], truncated: false, failedNodes: 0 });
+    expect(client.callsOf('scan')).toHaveLength(0);
+  });
+
+  it('finds no session for a key outside the namespace pattern', async () => {
+    const client = new FakeValkey(storeOf({ 'other:1': { type: 'list', value: [] } }));
+
+    const result = await keysForSession(fakeDb(client), 'chat:*', byKey, 'other:1');
+
+    expect(result.keys).toEqual([]);
+    expect(client.calls).toHaveLength(0);
+  });
+
+  it('finds no session for a key that does not exist', async () => {
+    const client = new FakeValkey();
+
+    const result = await keysForSession(fakeDb(client), 'chat:*', byKey, 'chat:1');
+
+    expect(result).toEqual({ keys: [], truncated: false, failedNodes: 0 });
+  });
+
+  it('looks a session key up on the primary that owns its slot', async () => {
+    const nodeA = new FakeValkey();
+    const nodeB = new FakeValkey(storeOf({ 'chat:1': { type: 'list', value: [] } }));
+    const byPort: Record<number, FakeValkey> = { 7001: nodeA, 7002: nodeB };
+    ValkeyMock.mockImplementation((opts: { port: number }) => byPort[opts.port]);
+    const slot = calculateSlot('chat:1');
+    const db = fakeDb(new FakeValkey(), {
+      nodes: [
+        masterNode('a', '10.0.0.1:7001', [], [[(slot + 1) % 16384, (slot + 1) % 16384]]),
+        masterNode('b', '10.0.0.2:7002', [], [[slot, slot]]),
+      ],
+    });
+
+    const result = await keysForSession(db, 'chat:*', byKey, 'chat:1');
+
+    expect(result.keys).toEqual(['chat:1']);
+    expect(nodeA.calls.filter((c) => c.name !== 'connect')).toHaveLength(0);
+  });
+
+  it('reports the owning primary as failed when the lookup errors', async () => {
+    const client = new FakeValkey(storeOf({ 'chat:1': { type: 'list', value: [] } }));
+    client.movedKeys.add('chat:1');
+
+    const result = await keysForSession(fakeDb(client), 'chat:*', byKey, 'chat:1');
+
+    expect(result).toEqual({ keys: [], truncated: false, failedNodes: 1 });
+  });
+
+  const byMatch: PresetDefinition = {
+    ...preset,
+    sessionLookup: (sessionId) => ({ match: `s:${sessionId}:*` }),
+  };
+
+  it('scans with a MATCH built from the session id', async () => {
+    const client = new FakeValkey(storeOf({ 's:x:1': { type: 'string' } }));
+
+    await keysForSession(fakeDb(client), 's:*', byMatch, 'x');
+
+    expect(client.callsOf('scan')[0].args).toEqual(['0', 'MATCH', 's:x:*', 'COUNT', 1000]);
+  });
+
+  it('keeps only session keys inside the namespace pattern', async () => {
+    const client = new FakeValkey(
+      storeOf({
+        's:x:1': { type: 'string' },
+        's:x:2': { type: 'string' },
+        's:y:1': { type: 'string' },
+      }),
+    );
+
+    const result = await keysForSession(fakeDb(client), 's:*:1', byMatch, 'x');
+
+    expect(result.keys).toEqual(['s:x:1']);
+  });
+
+  it('stops scanning for a session after the page budget', async () => {
+    const client = new FakeValkey();
+    client.scanPages = [keyRange(0, 10, 'y'), keyRange(10, 10, 'y'), ['s:x:1'], ['s:x:2']];
+
+    const result = await keysForSession(fakeDb(client), 's:*', preset, 'x', 10_000, 2);
+
+    expect(client.callsOf('scan')).toHaveLength(2);
+    expect(result).toEqual({ keys: [], truncated: true, failedNodes: 0 });
+  });
+
+  it('lists a key seen on two primaries during slot migration once', async () => {
+    const nodeA = new FakeValkey(storeOf({ 's:x:1': { type: 'string' } }));
+    const nodeB = new FakeValkey(storeOf({ 's:x:1': { type: 'string' } }));
+    const byPort: Record<number, FakeValkey> = { 7001: nodeA, 7002: nodeB };
+    ValkeyMock.mockImplementation((opts: { port: number }) => byPort[opts.port]);
+    const db = fakeDb(new FakeValkey(), {
+      nodes: [masterNode('a', '10.0.0.1:7001'), masterNode('b', '10.0.0.2:7002')],
+    });
+
+    const result = await keysForSession(db, 's:*', preset, 'x');
+
+    expect(result.keys).toEqual(['s:x:1']);
   });
 });

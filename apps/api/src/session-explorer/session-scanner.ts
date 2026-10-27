@@ -1,11 +1,13 @@
 import type Valkey from 'iovalkey';
 import type { SessionListResponse, SessionSummary } from '@betterdb/shared';
 import type { DatabasePort } from '../common/interfaces/database-port.interface';
+import { globMatches } from './glob-match';
 import type { PresetDefinition } from './presets/types';
-import { withPrimaries } from './primary-nodes';
+import { PrimaryClients, routeOf, withPrimaries } from './primary-nodes';
 
 export const DEFAULT_KEY_CAP = 10000;
 export const DEFAULT_BATCH = 1000;
+export const DEFAULT_SESSION_SCAN_PAGES = 1000;
 const SCAN_COUNT = 1000;
 
 type PipelineResult = [Error | null, unknown] | undefined;
@@ -13,12 +15,14 @@ type PipelineResult = [Error | null, unknown] | undefined;
 interface KeyMeta {
   memory: number | null;
   idle: number | null;
+  idleUntracked: boolean;
   pttl: number;
 }
 
 interface ScanOutcome {
   keys: string[];
   exhausted: boolean;
+  overflowed: boolean;
 }
 
 interface NodeKeys {
@@ -43,37 +47,48 @@ type KeyFilter = (key: string) => boolean;
 
 const acceptAll: KeyFilter = () => true;
 
+interface ScanLimits {
+  keyCap: number;
+  pages: number;
+}
+
 async function scanNode(
   client: Valkey,
   pattern: string,
   limit: number,
+  pages: number,
   accept: KeyFilter,
+  seen: Set<string>,
 ): Promise<ScanOutcome> {
-  const seen = new Set<string>();
+  const keys: string[] = [];
   let cursor = '0';
   let overflowed = false;
+  let scanned = 0;
   do {
     const [next, page] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', SCAN_COUNT);
     cursor = next;
+    scanned++;
     for (const key of page) {
       if (!accept(key) || seen.has(key)) continue;
-      if (seen.size >= limit) {
+      if (keys.length >= limit) {
         overflowed = true;
         break;
       }
       seen.add(key);
+      keys.push(key);
     }
-  } while (cursor !== '0' && !overflowed);
-  return { keys: [...seen], exhausted: cursor === '0' && !overflowed };
+  } while (cursor !== '0' && !overflowed && scanned < pages);
+  return { keys, exhausted: cursor === '0' && !overflowed, overflowed };
 }
 
 async function scanAll(
   clients: Valkey[],
   pattern: string,
-  keyCap: number,
+  limits: ScanLimits,
   accept: KeyFilter = acceptAll,
 ): Promise<ScanAllOutcome> {
   const nodes: NodeKeys[] = [];
+  const seen = new Set<string>();
   let scannedKeys = 0;
   let truncated = false;
   let failed = 0;
@@ -81,13 +96,18 @@ async function scanAll(
 
   for (const client of clients) {
     try {
-      const { keys, exhausted } = await scanNode(client, pattern, keyCap - scannedKeys, accept);
+      const { keys, exhausted, overflowed } = await scanNode(
+        client,
+        pattern,
+        limits.keyCap - scannedKeys,
+        limits.pages,
+        accept,
+        seen,
+      );
       scannedKeys += keys.length;
       nodes.push({ client, keys });
-      if (!exhausted) {
-        truncated = true;
-        break;
-      }
+      truncated ||= !exhausted;
+      if (overflowed) break;
     } catch (err) {
       failed++;
       lastError = err;
@@ -100,6 +120,9 @@ async function scanAll(
 
 const numberOf = (r: PipelineResult): number | null =>
   r && !r[0] && typeof r[1] === 'number' ? r[1] : null;
+
+const isLfuError = (r: PipelineResult): boolean =>
+  r?.[0] instanceof Error && r[0].message.includes('LFU');
 
 async function fetchMeta(
   client: Valkey,
@@ -122,7 +145,12 @@ async function fetchMeta(
       if (!type || type[0] || type[1] === 'none') return;
       const ttl = numberOf(pttl);
       if (ttl === -2) return;
-      meta.set(key, { memory: numberOf(memory), idle: numberOf(idle), pttl: ttl ?? -1 });
+      meta.set(key, {
+        memory: numberOf(memory),
+        idle: numberOf(idle),
+        idleUntracked: isLfuError(idle),
+        pttl: ttl ?? -1,
+      });
     });
   }
   return meta;
@@ -161,8 +189,9 @@ export async function scanSessions(
   const batch = opts.batch ?? DEFAULT_BATCH;
 
   return withPrimaries(db, async ({ clients, failed: unreachable }) => {
-    const scan = await scanAll(clients, pattern, keyCap);
+    const scan = await scanAll(clients, pattern, { keyCap, pages: Number.POSITIVE_INFINITY });
     const grouped = new Map<string, KeyMeta[]>();
+    let idleUntracked = false;
     let failed = unreachable + scan.failed;
     let lastError: unknown;
     let succeeded = 0;
@@ -173,6 +202,7 @@ export async function scanSessions(
         const meta = await fetchMeta(client, sessionKeys, batch);
         for (const [key, m] of meta) {
           const sessionId = preset.sessionIdOf(key) as string;
+          idleUntracked ||= m.idleUntracked;
           const list = grouped.get(sessionId) ?? [];
           list.push(m);
           grouped.set(sessionId, list);
@@ -192,8 +222,25 @@ export async function scanSessions(
       truncated: scan.truncated,
       partial: failed > 0,
       failedNodes: failed,
+      idleUntracked,
     };
   });
+}
+
+async function lookupKey(
+  primaries: PrimaryClients,
+  pattern: string,
+  key: string,
+): Promise<SessionKeysResult> {
+  const none = { keys: [], truncated: false, failedNodes: primaries.failed };
+  if (!globMatches(pattern, key)) return none;
+  const client = routeOf(primaries, key);
+  if (!client) return { ...none, failedNodes: none.failedNodes + 1 };
+  try {
+    return { ...none, keys: (await client.exists(key)) > 0 ? [key] : [] };
+  } catch {
+    return { ...none, failedNodes: none.failedNodes + 1 };
+  }
 }
 
 export async function keysForSession(
@@ -202,18 +249,21 @@ export async function keysForSession(
   preset: PresetDefinition,
   sessionId: string,
   keyCap: number = DEFAULT_KEY_CAP,
+  pages: number = DEFAULT_SESSION_SCAN_PAGES,
 ): Promise<SessionKeysResult> {
-  return withPrimaries(db, async ({ clients, failed }) => {
+  return withPrimaries(db, async (primaries) => {
+    const lookup = preset.sessionLookup?.(sessionId);
+    if (lookup && 'key' in lookup) return lookupKey(primaries, pattern, lookup.key);
     const scan = await scanAll(
-      clients,
-      pattern,
-      keyCap,
-      (key) => preset.sessionIdOf(key) === sessionId,
+      primaries.clients,
+      lookup?.match ?? pattern,
+      { keyCap, pages },
+      (key) => preset.sessionIdOf(key) === sessionId && (!lookup || globMatches(pattern, key)),
     );
     return {
       keys: scan.nodes.flatMap(({ keys }) => keys),
       truncated: scan.truncated,
-      failedNodes: failed + scan.failed,
+      failedNodes: primaries.failed + scan.failed,
     };
   });
 }
