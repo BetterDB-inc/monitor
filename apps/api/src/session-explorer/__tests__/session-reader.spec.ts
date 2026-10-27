@@ -1,6 +1,6 @@
 import Valkey from 'iovalkey';
 import calculateSlot from 'cluster-key-slot';
-import { readSessionKeys } from '../session-reader';
+import { EXACT_LIST_LENGTH, readSessionKeys } from '../session-reader';
 import { FakeEntry, FakeValkey, fakeDb, masterNode } from './fake-valkey';
 
 jest.mock('iovalkey', () => ({ __esModule: true, default: jest.fn() }));
@@ -286,6 +286,30 @@ describe('readSessionKeys', () => {
     expect(client.fetchedBytes).toBeLessThanOrEqual(2 * MB + MB);
   });
 
+  it('samples the size of a list too long to measure exactly', async () => {
+    const items = Array.from({ length: EXACT_LIST_LENGTH + 1 }, () => 'x');
+    const client = new FakeValkey(storeOf({ l: { type: 'list', value: items } }));
+
+    await readOne(client, 'l');
+
+    expect(client.callsOf('pipeline.memory').map((c) => c.args)).toEqual([['USAGE', 'l']]);
+  });
+
+  it('bounds a long list whose sampled size hides large elements', async () => {
+    const items = [
+      ...Array.from({ length: EXACT_LIST_LENGTH + 1 }, () => 't'),
+      ...Array.from({ length: 20 }, () => 'y'.repeat(MB)),
+    ];
+    const client = new FakeValkey(
+      storeOf({ l: { type: 'list', value: items, memory: 22 * MB, sampledMemory: 100 * 1024 } }),
+    );
+
+    const key = await readOne(client, 'l', { byteCap: 2 * MB });
+
+    expect(key.truncated).toBe(true);
+    expect(client.fetchedBytes).toBeLessThanOrEqual(2 * MB + 4 * MB);
+  });
+
   it('counts per-element wire overhead against the cap', async () => {
     const items = Array.from({ length: 100_000 }, () => 'x');
     const client = new FakeValkey(storeOf({ l: { type: 'list', value: items } }));
@@ -408,7 +432,7 @@ describe('readSessionKeys', () => {
     const client = new FakeValkey(storeOf({ j: { type: 'ReJSON-RL', value: '{"a":[1,2]}' } }));
     const key = await readOne(client, 'j');
     expect(key.value).toBe('{"a":[1,2]}');
-    expect(client.callsOf('pipeline.callBuffer')[0].args).toEqual(['JSON.GET', 'j']);
+    expect(client.callsOf('callBuffer')[0].args).toEqual(['JSON.GET', 'j']);
   });
 
   it('applies the byte cap to JSON values', async () => {
@@ -445,6 +469,23 @@ describe('readSessionKeys', () => {
     });
 
     expect(client.fetchedBytes).toBeLessThanOrEqual(32 * MB + 8 * MB + MB);
+  });
+
+  it('reads JSON one document at a time against the fetched bytes', async () => {
+    const doc = JSON.stringify({ v: '\u0001'.repeat(MB) });
+    const entries = Object.fromEntries(
+      Array.from({ length: 16 }, (_, i) => [`j${i}`, { type: 'ReJSON-RL', value: doc, memory: MB }]),
+    );
+    const client = new FakeValkey(storeOf(entries));
+
+    const result = await readSessionKeys(fakeDb(client), Object.keys(entries), {
+      byteCap: 2 * MB,
+      totalByteCap: 8 * MB,
+    });
+
+    expect(result.truncated).toBe(true);
+    expect(client.callsOf('pipeline.callBuffer')).toHaveLength(0);
+    expect(client.fetchedBytes).toBeLessThanOrEqual(8 * MB + doc.length + MB);
   });
 
   it('measures JSON exactly before trusting a sampled size', async () => {

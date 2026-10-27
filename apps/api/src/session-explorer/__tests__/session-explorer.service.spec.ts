@@ -370,6 +370,15 @@ describe('SessionExplorerService.preview', () => {
     });
   });
 
+  it('reports an outage instead of no match when no primary can be reached', async () => {
+    const down = () => Object.assign(new FakeValkey(), { connectError: new Error('ECONNREFUSED') });
+    const service = serviceOver({ 7001: down(), 7002: down() });
+
+    await expect(service.preview('conn-1', input)).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
+
   it('rethrows when every primary scan fails', async () => {
     const service = serviceOver({ 7001: failing('LOADING'), 7002: failing('LOADING') });
 
