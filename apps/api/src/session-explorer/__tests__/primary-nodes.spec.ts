@@ -117,6 +117,16 @@ describe('withPrimaries', () => {
     expect(ValkeyMock.mock.calls[0][0]).toMatchObject({ host: '10.0.0.1', port: 7000 });
   });
 
+  it('reports the cluster unavailable when it lists no serving primary', async () => {
+    const run = jest.fn();
+
+    await expect(withPrimaries(fakeDb(new FakeValkey(), { nodes: [] }), run)).rejects.toThrow(
+      ServiceUnavailableException,
+    );
+
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it('reports the cluster unavailable when its only primary cannot be reached', async () => {
     const parent = new FakeValkey();
     const unreachable = new FakeValkey();

@@ -145,7 +145,7 @@ export async function withPrimaries<T>(
   run: (primaries: PrimaryClients) => Promise<T>,
 ): Promise<T> {
   const primaries = await primaryClients(db);
-  if (primaries.clients.length === 0 && primaries.failed > 0) {
+  if (primaries.clients.length === 0) {
     await primaries.release();
     throw new ServiceUnavailableException('No primary could be reached');
   }
