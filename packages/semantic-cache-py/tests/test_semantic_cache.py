@@ -364,8 +364,8 @@ async def test_flush_escapes_glob_chars_in_name():
 
 @pytest.mark.asyncio
 async def test_check_batch_ttl_refresh_pipelined():
-    """When usage tracking is disabled and default_ttl is set, check_batch()
-    refreshes TTL per matched key via client.expire()."""
+    """When usage tracking is off and default_ttl is set, check_batch() gets hits,
+    all TTL refreshes must be issued in a single pipeline call after the result loop."""
     cache, client = _make_cache(default_ttl=3600, usage_tracking_enabled=False)
     await cache.initialize()
 
@@ -381,7 +381,8 @@ async def test_check_batch_ttl_refresh_pipelined():
     assert results[0].hit is True
     assert results[1].hit is True
 
-    expire_calls = client.expire.call_args_list
+    # expire() must have been called on the pipeline (not the raw client)
+    expire_calls = pipe.expire.call_args_list
     assert len(expire_calls) == 2
     called_keys = {c.args[0] for c in expire_calls}
     assert "key1" in called_keys
@@ -389,3 +390,23 @@ async def test_check_batch_ttl_refresh_pipelined():
     # All expire calls should use the configured TTL
     for c in expire_calls:
         assert c.args[1] == 3600
+    client.expire.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_check_batch_ttl_refresh_error_keeps_hits():
+    """A failed opt-out TTL pipeline must not fail a batch that already hit."""
+    cache, client = _make_cache(default_ttl=3600, usage_tracking_enabled=False)
+    await cache.initialize()
+
+    pipe = client.pipeline()
+    pipe.execute = AsyncMock(side_effect=[
+        [
+            ["1", "key1", ["response", "Answer 1", "__score", "0.01"]],
+            ["1", "key2", ["response", "Answer 2", "__score", "0.02"]],
+        ],
+        Exception("expire failed"),
+    ])
+
+    results = await cache.check_batch(["prompt1", "prompt2"])
+    assert [r.hit for r in results] == [True, True]

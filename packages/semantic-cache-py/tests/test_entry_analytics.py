@@ -1,10 +1,13 @@
 """Unit tests for per-entry hit tracking and entry_analytics()."""
 from __future__ import annotations
 
+import os
 import time
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from valkey.exceptions import NoPermissionError, NoScriptError, ReadOnlyError
 
 from betterdb_semantic_cache import (
     DiscoveryOptions,
@@ -157,6 +160,7 @@ async def test_check_triggers_fire_and_forget_usage_write():
     assert exec_call.args[2] == "1"
     assert exec_call.args[3] == "test_analytics:entry:k1"
     assert exec_call.args[5] == "3600"
+    assert client.pipeline.call_args.kwargs.get("transaction") is False
 
 
 @pytest.mark.asyncio
@@ -167,11 +171,11 @@ async def test_noscript_retries_with_eval():
     await cache.initialize()
 
     pipe = client.pipeline()
-    # When EVALSHA is sent, return NOSCRIPT exception; when EVAL is sent, return 1
+    # valkey-py surfaces a NOSCRIPT reply as NoScriptError and strips the code.
     async def _pipe_execute(*args, **kwargs):
         last_cmd = pipe.execute_command.call_args.args[0] if pipe.execute_command.call_args else ""
         if last_cmd == "EVALSHA":
-            return [Exception("NOSCRIPT No matching script. Please use EVAL.")]
+            return [NoScriptError("No matching script. Please use EVAL.")]
         return [1]
 
     pipe.execute = AsyncMock(side_effect=_pipe_execute)
@@ -246,6 +250,12 @@ async def test_entry_analytics_option_validation():
 
     with pytest.raises(ValueError, match="top_n must be an integer in"):
         await cache.entry_analytics(EntryAnalyticsOptions(top_n=True))  # type: ignore
+
+    with pytest.raises(ValueError, match="top_n must be an integer in"):
+        await cache.entry_analytics(EntryAnalyticsOptions(top_n=5.5))  # type: ignore
+
+    integral = await cache.entry_analytics(EntryAnalyticsOptions(top_n=5.0))  # type: ignore
+    assert integral.total_entries == 0
 
     # Invalid cold_after_days
     with pytest.raises(ValueError, match="cold_after_days must be a non-negative number"):
@@ -416,3 +426,72 @@ async def test_entry_analytics_falls_back_to_scan_on_ft_search_error():
     assert mock_logger.warning.call_count == 1
     warn_text = mock_logger.warning.call_args[0][0]
     assert "FT.SEARCH failed, falling back to sampled SCAN" in warn_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [ReadOnlyError, NoPermissionError])
+async def test_replica_and_permission_errors_hint_opt_out(error_type: type[Exception]):
+    cache, client = _make_analytics_cache(
+        search_result={"key": "test_analytics:entry:k1", "fields": {"response": "res"}},
+    )
+    await cache.initialize()
+    cache._logger = MagicMock()
+
+    pipe = client.pipeline()
+    pipe.execute = AsyncMock(return_value=[error_type("write was rejected")])
+
+    res = await cache.check("prompt")
+    assert res.hit is True
+    await cache._drain_usage_writes()
+
+    warn_text = cache._logger.warning.call_args.args[0]
+    assert "read replica or scripting is blocked" in warn_text
+    assert "UsageTrackingOptions(enabled=False)" in warn_text
+
+
+@pytest.mark.asyncio
+async def test_live_valkey_reloads_usage_script_and_refreshes_ttl():
+    """Hit counts survive SCRIPT FLUSH, and default_ttl is applied by the reloaded script.
+
+    Set BETTERDB_TEST_VALKEY_PORT to a disposable Valkey. The test runs SCRIPT FLUSH.
+    """
+    port = os.environ.get("BETTERDB_TEST_VALKEY_PORT")
+    if not port:
+        pytest.skip("set BETTERDB_TEST_VALKEY_PORT to a disposable Valkey")
+
+    import valkey.asyncio as valkey
+
+    host = os.environ.get("BETTERDB_TEST_VALKEY_HOST", "127.0.0.1")
+    client = valkey.Valkey(host=host, port=int(port))
+    try:
+        await client.ping()
+    except Exception as exc:
+        await client.aclose()
+        pytest.skip(f"valkey not reachable: {exc}")
+
+    key = f"usage-live:{uuid.uuid4()}"
+    cache = SemanticCache(
+        SemanticCacheOptions(
+            client=client,
+            embed_fn=AsyncMock(return_value=[0.1, 0.2]),
+            name="usage_live",
+            default_ttl=120,
+            discovery=DiscoveryOptions(enabled=False),
+            telemetry=TelemetryOptions(tracer_name="test", metrics_prefix="test_sc"),
+        )
+    )
+    cache._telemetry = make_telemetry()
+    try:
+        await client.hset(key, mapping={"response": "x", "hit_count": "0", "last_accessed_at": "0"})
+        await cache._track_entry_usage([key])
+        assert int(await client.hget(key, "hit_count")) == 1
+
+        await client.script_flush()
+        await client.expire(key, 5)
+        await cache._track_entry_usage([key])
+
+        assert int(await client.hget(key, "hit_count")) == 2
+        assert int(await client.ttl(key)) > 5
+    finally:
+        await client.delete(key)
+        await client.aclose()

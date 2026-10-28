@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Per-entry hit analytics.** Hits record `hit_count` and `last_accessed_at`
+  (millisecond timestamps) with a fire-and-forget Lua script, and refresh
+  `default_ttl` inside that script. `entry_analytics()` reports how many
+  entries were ever hit, how many are cold, and the hottest keys.
+  `SemanticCacheOptions.logger` receives warnings when those writes fail or
+  when analytics falls back from FT.SEARCH to a sampled SCAN. The discovery
+  marker advertises the `entry_analytics` capability.
+- **Usage-tracking opt-out.** `usage_tracking=UsageTrackingOptions(enabled=False)`
+  stops hit-count writes. With `default_ttl` set, hits still extend TTL:
+  `check()` calls `EXPIRE`, and `check_batch()` sends every `EXPIRE` plus the
+  cost `HINCRBY` in one best-effort pipeline. Cost saved (`cost_micros` on the
+  entry, and `cost_saved_micros` on the stats hash) is recorded either way.
+- **Older indexes stay in place.** `initialize()` does not `FT.DROPINDEX` an
+  existing index. New indexes include the usage fields. An index created by an
+  older release is left untouched and `entry_analytics()` uses a sampled SCAN
+  until the index is recreated. `flush()` drops the index with `FT.DROPINDEX`
+  and no `DD` flag, then deletes the keys itself.
+
 ### Fixed
 
 - **`flush()` could delete another cache's keys.** The cache name was put into

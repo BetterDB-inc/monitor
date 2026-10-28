@@ -10,6 +10,7 @@ import uuid
 from typing import Any
 
 from opentelemetry.trace import StatusCode
+from valkey.exceptions import NoPermissionError, NoScriptError, ReadOnlyError
 
 from .analytics import NOOP_ANALYTICS, Analytics, create_analytics
 from .cluster import cluster_scan, is_cluster_client
@@ -61,6 +62,41 @@ if ARGV[2] ~= '' then redis.call('EXPIRE', KEYS[1], ARGV[2]) end
 return 1"""
 
 RECORD_USAGE_SHA = hashlib.sha1(RECORD_USAGE_LUA.encode("utf-8")).hexdigest()
+
+_USAGE_WRITE_OPT_OUT_HINT = (
+    ": hits may be served from a read replica or scripting is blocked; "
+    "set `usage_tracking=UsageTrackingOptions(enabled=False)` to stop usage writes"
+)
+
+
+def _usage_write_needs_opt_out_hint(err: BaseException | None) -> bool:
+    if isinstance(err, (ReadOnlyError, NoPermissionError)):
+        return True
+    message = str(err).upper() if err else ""
+    return any(
+        token in message
+        for token in ("READONLY", "UNKNOWN COMMAND", "NOT ALLOWED", "NOPERM")
+    )
+
+
+def _coerce_entry_analytics_top_n(top_n: Any) -> int:
+    """Accept ints and integral floats (5.0). Reject bools and non-integral numbers."""
+    if isinstance(top_n, bool):
+        raise ValueError(
+            f"entry_analytics: top_n must be an integer in [0, {ENTRY_ANALYTICS_TOP_N_MAX}], got {top_n}"
+        )
+    if isinstance(top_n, float):
+        if not math.isfinite(top_n) or not top_n.is_integer():
+            raise ValueError(
+                f"entry_analytics: top_n must be an integer in [0, {ENTRY_ANALYTICS_TOP_N_MAX}], got {top_n}"
+            )
+        top_n = int(top_n)
+    if not isinstance(top_n, int) or not (0 <= top_n <= ENTRY_ANALYTICS_TOP_N_MAX):
+        raise ValueError(
+            f"entry_analytics: top_n must be an integer in [0, {ENTRY_ANALYTICS_TOP_N_MAX}], got {top_n}"
+        )
+    return top_n
+
 
 ALL_ENTRIES_QUERY = "@inserted_at:[-inf +inf]"
 HIT_AT_LEAST_ONCE_QUERY = "@hit_count:[1 +inf]"
@@ -790,13 +826,31 @@ class SemanticCache:
                     r.content_blocks = content_blocks
                 results.append(r)
 
-            if total_cost_micros:
-                try:
-                    await self._client.hincrby(self._stats_key, "cost_saved_micros", total_cost_micros)
-                except Exception:
-                    pass
-
-            await self._record_entry_usage_batch(hit_keys)
+            if self._usage_tracking_enabled:
+                if total_cost_micros:
+                    try:
+                        await self._client.hincrby(
+                            self._stats_key, "cost_saved_micros", total_cost_micros
+                        )
+                    except Exception:
+                        pass
+                await self._record_entry_usage_batch(hit_keys)
+            else:
+                # Opt-out keeps master's best-effort pipeline: every EXPIRE plus the
+                # cost HINCRBY, so one failure cannot fail a batch already computed.
+                keys_to_expire = hit_keys if self._default_ttl is not None else []
+                if keys_to_expire or total_cost_micros:
+                    try:
+                        post_pipe = self._client.pipeline()
+                        for expire_key in keys_to_expire:
+                            post_pipe.expire(expire_key, self._default_ttl)
+                        if total_cost_micros:
+                            post_pipe.hincrby(
+                                self._stats_key, "cost_saved_micros", total_cost_micros
+                            )
+                        await post_pipe.execute()
+                    except Exception:
+                        pass
 
             return results
 
@@ -1552,13 +1606,9 @@ class SemanticCache:
             except Exception:
                 pass
 
-        try:
-            loop = asyncio.get_running_loop()
-            task = loop.create_task(_run())
-            self._pending_usage_writes.add(task)
-            task.add_done_callback(self._pending_usage_writes.discard)
-        except RuntimeError:
-            pass
+        task = asyncio.create_task(_run())
+        self._pending_usage_writes.add(task)
+        task.add_done_callback(self._pending_usage_writes.discard)
 
     async def _drain_usage_writes(self) -> None:
         """Wait for every in-flight usage write started by a hit.
@@ -1604,9 +1654,7 @@ class SemanticCache:
 
         if failed > 0:
             first_msg = str(first_error) if first_error else "unknown error"
-            hint = ""
-            if any(h in first_msg.upper() for h in ("READONLY", "UNKNOWN COMMAND", "NOT ALLOWED", "NOPERM")):
-                hint = " — hits may be served from a read replica or scripting is blocked; set `usage_tracking=UsageTrackingOptions(enabled=False)` to stop usage writes"
+            hint = _USAGE_WRITE_OPT_OUT_HINT if _usage_write_needs_opt_out_hint(first_error) else ""
             msg = (
                 f"@betterdb/semantic-cache '{self._name}': failed to record entry usage for "
                 f"{failed}/{len(matched_keys)} key(s); hit_count/last_accessed_at and TTL "
@@ -1624,7 +1672,10 @@ class SemanticCache:
         ttl = str(self._default_ttl) if self._default_ttl is not None else ""
 
         async def _send(command: str, batch: list[str]) -> list[Any] | None:
-            pipe = self._client.pipeline()
+            if is_cluster_client(self._client):
+                pipe = self._client.pipeline()
+            else:
+                pipe = self._client.pipeline(transaction=False)
             script = RECORD_USAGE_SHA if command == "EVALSHA" else RECORD_USAGE_LUA
             for key in batch:
                 pipe.execute_command(command, script, "1", key, now, ttl)
@@ -1636,7 +1687,7 @@ class SemanticCache:
 
         missing_indices: list[int] = []
         for idx, res in enumerate(results):
-            if isinstance(res, Exception) and "NOSCRIPT" in str(res).upper():
+            if isinstance(res, NoScriptError):
                 missing_indices.append(idx)
 
         if not missing_indices:
@@ -1679,17 +1730,13 @@ class SemanticCache:
         SORTBY hit_count DESC with LIMIT 0 top_n. For an older index it falls back
         to a SCAN + pipelined HMGET (sampled, max 10,000).
 
-        top_n must be an integer in [0, 10000]; cold_after_days must be a non-negative
-        finite number.
+        top_n must be an integer in [0, 10000]. Integral floats such as 5.0 are
+        accepted. cold_after_days must be a non-negative finite number.
         """
         self._assert_initialized("entry_analytics")
         top_n = options.top_n if options and options.top_n is not None else 10
         cold_after_days = options.cold_after_days if options and options.cold_after_days is not None else 7.0
-
-        if not isinstance(top_n, int) or isinstance(top_n, bool) or not (0 <= top_n <= ENTRY_ANALYTICS_TOP_N_MAX):
-            raise ValueError(
-                f"entry_analytics: top_n must be an integer in [0, {ENTRY_ANALYTICS_TOP_N_MAX}], got {top_n}"
-            )
+        top_n = _coerce_entry_analytics_top_n(top_n)
         if (
             not isinstance(cold_after_days, (int, float))
             or isinstance(cold_after_days, bool)

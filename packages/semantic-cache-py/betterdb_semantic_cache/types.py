@@ -228,8 +228,9 @@ class ThresholdEffectivenessResult:
 class EntryAnalyticsOptions:
     """Options for entry_analytics()."""
     top_n: int = 10
-    """Number of hottest entries to return. Must be an integer in [0, 10000];
-    0 returns an empty top_entries and skips the SORTBY query entirely (counts only).
+    """Number of hottest entries to return. Must be an integer in [0, 10000].
+    Integral floats such as 5.0 are accepted. 0 returns an empty top_entries
+    and skips the SORTBY query entirely (counts only).
     """
     cold_after_days: float = 7.0
     """An entry is "cold" if it has not been accessed within this many days.
