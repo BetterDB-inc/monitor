@@ -248,6 +248,17 @@ describe('buildSnapshot', () => {
     ]);
   });
 
+  it('gives each dtype of one model its own layout', () => {
+    const bf16 = [key(0, 'kv_bytes'), key(0, 'metadata')];
+    const half = [key(1, '', M, 'half')];
+    const node: NodeObservation = { scannedKeys: 3, matchedKeys: parse([...bf16, ...half]), scanComplete: true, dbSize: 3, samples: [] };
+    const s = buildSnapshot({ ...base, nodes: [node] });
+    expect(s.perModel.map((m) => [m.model, m.dtype, m.layout])).toEqual([
+      [M, 'bfloat16', 'two_key'],
+      [M, 'half', 'single_key'],
+    ]);
+  });
+
   it('scales each model by the sampling rate of the node it lives on', () => {
     const full: NodeObservation = {
       scannedKeys: 2,
