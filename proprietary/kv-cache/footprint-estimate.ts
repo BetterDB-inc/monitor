@@ -64,6 +64,18 @@ export function layoutOf(keys: ParsedLmcacheKey[]): KvCacheLayout | null {
   return suffixed ? 'two_key' : 'single_key';
 }
 
+const modelId = (m: { model: string; dtype: string }) => `${m.model}|${m.dtype}`;
+
+function modelLayouts(keys: ParsedLmcacheKey[]): Map<string, KvCacheLayout | null> {
+  const byModel = new Map<string, ParsedLmcacheKey[]>();
+  for (const k of keys) {
+    const modelKeys = byModel.get(modelId(k)) ?? [];
+    modelKeys.push(k);
+    byModel.set(modelId(k), modelKeys);
+  }
+  return new Map([...byModel].map(([id, modelKeys]) => [id, layoutOf(modelKeys)]));
+}
+
 function isPresent(sample: KeySample): boolean {
   return sample.ttl !== -2;
 }
@@ -105,7 +117,7 @@ const meanBytes = (samples: KeySample[]): number | null =>
 const addBytes = (a: number | null, b: number | null) => (a === null || b === null ? null : a + b);
 
 function tallyFor(tallies: Map<string, ModelTally>, parsed: ParsedLmcacheKey): ModelTally {
-  const id = `${parsed.model}|${parsed.dtype}`;
+  const id = modelId(parsed);
   const tally = tallies.get(id) ?? {
     model: parsed.model,
     dtype: parsed.dtype,
@@ -148,11 +160,20 @@ function scaleModel(m: KvCacheModelFootprint, factor: number): KvCacheModelFootp
   return { ...m, chunksEst: m.chunksEst * factor, bytesEst: m.bytesEst === null ? null : m.bytesEst * factor };
 }
 
-function mergeModels(models: KvCacheModelFootprint[]): KvCacheModelFootprint[] {
+function mergeModels(
+  models: KvCacheModelFootprint[],
+  layouts: Map<string, KvCacheLayout | null>,
+): KvCacheModelFootprint[] {
   const merged = new Map<string, KvCacheModelFootprint>();
   for (const m of models) {
-    const id = `${m.model}|${m.dtype}`;
-    const total = merged.get(id) ?? { model: m.model, dtype: m.dtype, chunksEst: 0, bytesEst: 0 };
+    const id = modelId(m);
+    const total = merged.get(id) ?? {
+      model: m.model,
+      dtype: m.dtype,
+      chunksEst: 0,
+      bytesEst: 0,
+      layout: layouts.get(id) ?? null,
+    };
     total.chunksEst += m.chunksEst;
     total.bytesEst = addBytes(total.bytesEst, m.bytesEst);
     merged.set(id, total);
@@ -211,6 +232,6 @@ export function buildSnapshot(input: SnapshotInput): KvCacheFootprintSnapshot {
     evictedKeysDelta: input.evictedKeysDelta,
     evictedKeysIntervalMs: input.evictedKeysDelta === null ? null : input.evictedKeysIntervalMs,
     otherDbs: input.otherDbs,
-    perModel: mergeModels(nodeTallies),
+    perModel: mergeModels(nodeTallies, modelLayouts(allParsed)),
   };
 }

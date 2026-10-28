@@ -41,7 +41,7 @@ describe('buildSnapshot', () => {
       noTtlRatio: 1,
       orphanRatio: null,
     });
-    expect(s.perModel).toEqual([{ model: M, dtype: 'bfloat16', chunksEst: 10, bytesEst: 36_701_120 }]);
+    expect(s.perModel).toEqual([{ model: M, dtype: 'bfloat16', chunksEst: 10, bytesEst: 36_701_120, layout: 'single_key' }]);
   });
 
   it('reports every node as scanned when no coverage is given', () => {
@@ -60,7 +60,7 @@ describe('buildSnapshot', () => {
       bytesEst: 146_804_480,
       lmcacheMemoryShare: 0.367,
     });
-    expect(s.perModel).toEqual([{ model: M, dtype: 'bfloat16', chunksEst: 40, bytesEst: 146_804_480 }]);
+    expect(s.perModel).toEqual([{ model: M, dtype: 'bfloat16', chunksEst: 40, bytesEst: 146_804_480, layout: 'single_key' }]);
   });
 
   it('does not scale when the scanned slot share is unknown', () => {
@@ -231,8 +231,20 @@ describe('buildSnapshot', () => {
     const node: NodeObservation = { scannedKeys: 4, matchedKeys: parse([...a, ...b]), scanComplete: true, dbSize: 4, samples: [...a, ...b].map((k) => sample(k, { memoryBytes: 100 })) };
     const s = buildSnapshot({ ...base, nodes: [node] });
     expect(s.perModel).toEqual([
-      { model: M, dtype: 'bfloat16', chunksEst: 3, bytesEst: 300 },
-      { model: 'other', dtype: 'half', chunksEst: 1, bytesEst: 100 },
+      { model: M, dtype: 'bfloat16', chunksEst: 3, bytesEst: 300, layout: 'single_key' },
+      { model: 'other', dtype: 'half', chunksEst: 1, bytesEst: 100, layout: 'single_key' },
+    ]);
+  });
+
+  it('gives each model the layout of its own keys', () => {
+    const twoKey = [key(0, 'kv_bytes'), key(0, 'metadata')];
+    const single = [key(1, '', 'other', 'half')];
+    const node: NodeObservation = { scannedKeys: 3, matchedKeys: parse([...twoKey, ...single]), scanComplete: true, dbSize: 3, samples: [] };
+    const s = buildSnapshot({ ...base, nodes: [node] });
+    expect(s.layout).toBe('mixed');
+    expect(s.perModel.map((m) => [m.model, m.layout])).toEqual([
+      [M, 'two_key'],
+      ['other', 'single_key'],
     ]);
   });
 
@@ -255,8 +267,8 @@ describe('buildSnapshot', () => {
     const s = buildSnapshot({ ...base, nodes: [full, sampled] });
     expect(s.chunksEst).toBe(1002);
     expect(s.perModel).toEqual([
-      { model: 'other', dtype: 'bfloat16', chunksEst: 1000, bytesEst: 10_000 },
-      { model: M, dtype: 'bfloat16', chunksEst: 2, bytesEst: 20 },
+      { model: 'other', dtype: 'bfloat16', chunksEst: 1000, bytesEst: 10_000, layout: 'single_key' },
+      { model: M, dtype: 'bfloat16', chunksEst: 2, bytesEst: 20, layout: 'single_key' },
     ]);
   });
 
@@ -271,8 +283,8 @@ describe('buildSnapshot', () => {
       samples: [...a, ...b].map((k) => sample(k, { memoryBytes: null })),
     };
     expect(buildSnapshot({ ...base, nodes: [node] }).perModel).toEqual([
-      { model: M, dtype: 'bfloat16', chunksEst: 3, bytesEst: null },
-      { model: 'other', dtype: 'half', chunksEst: 1, bytesEst: null },
+      { model: M, dtype: 'bfloat16', chunksEst: 3, bytesEst: null, layout: 'single_key' },
+      { model: 'other', dtype: 'half', chunksEst: 1, bytesEst: null, layout: 'single_key' },
     ]);
   });
 
@@ -291,7 +303,7 @@ describe('buildSnapshot', () => {
     const s = buildSnapshot({ ...base, nodes: [node] });
     expect(s.chunksEst).toBe(4);
     expect(s.bytesEst).toBe(layered.length * 10);
-    expect(s.perModel).toEqual([{ model: M, dtype: 'bfloat16', chunksEst: 4, bytesEst: layered.length * 10 }]);
+    expect(s.perModel).toEqual([{ model: M, dtype: 'bfloat16', chunksEst: 4, bytesEst: layered.length * 10, layout: 'single_key' }]);
   });
 
   it('weighs layered keys per model when models mix layerwise and whole-chunk storage', () => {
@@ -319,7 +331,7 @@ describe('buildSnapshot', () => {
     const node: NodeObservation = { scannedKeys: 6, matchedKeys: parse(keys), scanComplete: true, dbSize: 6, samples: keys.map((k) => sample(k)) };
     const s = buildSnapshot({ ...base, nodes: [node] });
     expect(s).toMatchObject({ detected: true, layout: 'single_key', chunksEst: 6, orphanRatio: null });
-    expect(s.perModel).toEqual([{ model: M, dtype: 'unknown', chunksEst: 6, bytesEst: 6 * 3_670_112 }]);
+    expect(s.perModel).toEqual([{ model: M, dtype: 'unknown', chunksEst: 6, bytesEst: 6 * 3_670_112, layout: 'single_key' }]);
   });
 
   it('computes the eviction delta per node and treats a lower counter as a restart', () => {
@@ -359,8 +371,8 @@ describe('buildSnapshot', () => {
     const n2: NodeObservation = { scannedKeys: 1, matchedKeys: parse([b]), scanComplete: true, dbSize: 1, samples: [sample(b, { memoryBytes: 100 })] };
     const s = buildSnapshot({ ...base, nodes: [n1, n2] });
     expect(s.perModel).toEqual([
-      { model: M, dtype: 'bfloat16', chunksEst: 100, bytesEst: 10_000 },
-      { model: 'other', dtype: 'half', chunksEst: 1, bytesEst: 100 },
+      { model: M, dtype: 'bfloat16', chunksEst: 100, bytesEst: 10_000, layout: 'single_key' },
+      { model: 'other', dtype: 'half', chunksEst: 1, bytesEst: 100, layout: 'single_key' },
     ]);
   });
 });

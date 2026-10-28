@@ -46,7 +46,7 @@ export function KvCacheModelTable({ latest, buckets }: Props) {
                 <TableRow key={`${entry.model}|${entry.dtype}`}>
                   <TableCell className="font-mono text-xs">{entry.model}</TableCell>
                   <TableCell>{entry.dtype}</TableCell>
-                  <TableCell>{latest.layout ?? '—'}</TableCell>
+                  <TableCell>{entry.layout ?? '—'}</TableCell>
                   <TableCell className="text-right">{entry.chunksEst.toLocaleString()}</TableCell>
                   <TableCell className="text-right">{entry.bytesEst === null ? '—' : formatBytes(entry.bytesEst)}</TableCell>
                   <TableCell className="text-right">

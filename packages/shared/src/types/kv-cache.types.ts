@@ -7,6 +7,7 @@ export interface KvCacheModelFootprint {
   dtype: string;
   chunksEst: number;
   bytesEst: number | null;
+  layout?: KvCacheLayout | null;
 }
 
 export interface KvCacheFootprintSnapshot {
