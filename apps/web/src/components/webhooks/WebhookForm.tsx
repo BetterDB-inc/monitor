@@ -5,6 +5,7 @@ import {
   getEventsByTierCategory,
   isEventAllowedForTier,
   suggestPayloadFormatForUrl,
+  isPagerDutyEventsUrl,
   WebhookEventType as WebhookEventTypeEnum,
   WebhookPayloadFormat,
   PAGERDUTY_EVENTS_URL,
@@ -12,6 +13,14 @@ import {
 } from '@betterdb/shared';
 import { Card } from '../ui/card';
 import { licenseApi } from '../../api/license';
+
+// Chat vendors whose URL must never receive a PagerDuty integration key.
+const OTHER_VENDOR_FORMATS = new Set<WebhookPayloadFormat>([
+  WebhookPayloadFormat.SLACK,
+  WebhookPayloadFormat.DISCORD,
+  WebhookPayloadFormat.TEAMS,
+  WebhookPayloadFormat.GOOGLE_CHAT,
+]);
 
 // Events that have configurable thresholds
 const THRESHOLD_EVENTS: WebhookEventType[] = [
@@ -261,12 +270,17 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
     : [];
 
   const handleFormatChange = (payloadFormat: WebhookPayloadFormat) => {
-    setFormData((prev) => ({
-      ...prev,
-      payloadFormat,
-      // PagerDuty has one well-known endpoint; fill it in rather than make users look it up.
-      url: payloadFormat === WebhookPayloadFormat.PAGERDUTY && prev.url === '' ? PAGERDUTY_EVENTS_URL : prev.url,
-    }));
+    setFormData((prev) => {
+      // PagerDuty has one well-known endpoint; fill it in rather than make users look it up,
+      // and never leave the integration key pointed at another chat vendor's URL.
+      const suggested = prev.url ? suggestPayloadFormatForUrl(prev.url) : undefined;
+      const url =
+        payloadFormat === WebhookPayloadFormat.PAGERDUTY &&
+        (prev.url === '' || (suggested !== undefined && OTHER_VENDOR_FORMATS.has(suggested)))
+          ? PAGERDUTY_EVENTS_URL
+          : prev.url;
+      return { ...prev, payloadFormat, url };
+    });
   };
 
   return (
@@ -300,6 +314,12 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
               className="w-full px-3 py-2 border rounded-md"
               placeholder={FORMAT_PLACEHOLDERS[formData.payloadFormat ?? WebhookPayloadFormat.GENERIC]}
             />
+            {isPagerDuty && formData.url !== '' && !isPagerDutyEventsUrl(formData.url) && (
+              <p className="text-xs text-yellow-600 dark:text-yellow-500 mt-1">
+                The PagerDuty integration key is sent in the body to this URL. Use{' '}
+                https://events.pagerduty.com/v2/enqueue (or events.eu.pagerduty.com) unless this is your own relay.
+              </p>
+            )}
             {showFormatHint && (
               <p className="text-xs text-primary mt-1">
                 This looks like a {suggestedFormat} URL.{' '}

@@ -22,6 +22,7 @@ import {
 import {
   EVENT_SEVERITY,
   PAGERDUTY_CHANGE_EVENTS,
+  PAGERDUTY_OPENERS_WITH_RESOLVER,
   incidentAction,
   incidentDedupKey,
   incidentSeverity,
@@ -412,5 +413,43 @@ describe('format auto-suggest and routing key shape', () => {
     expect(isValidPagerDutyRoutingKey(ROUTING_KEY.slice(1))).toBe(false);
     expect(isValidPagerDutyRoutingKey(`${ROUTING_KEY.slice(1)}-`)).toBe(false);
     expect(isValidPagerDutyRoutingKey('R012***')).toBe(false);
+  });
+});
+
+describe('PAGERDUTY_OPENERS_WITH_RESOLVER', () => {
+  it('contains the events that have a resolver and nothing else', () => {
+    expect(PAGERDUTY_OPENERS_WITH_RESOLVER.has(WebhookEventType.INSTANCE_DOWN)).toBe(true);
+    expect(PAGERDUTY_OPENERS_WITH_RESOLVER.has(WebhookEventType.WRITES_REJECTED)).toBe(true);
+    expect(PAGERDUTY_OPENERS_WITH_RESOLVER.has(WebhookEventType.FAILOVER_STARTED)).toBe(true);
+    expect(PAGERDUTY_OPENERS_WITH_RESOLVER.has(WebhookEventType.INSTANCE_UP)).toBe(false);
+    expect(PAGERDUTY_OPENERS_WITH_RESOLVER.has(WebhookEventType.MEMORY_CRITICAL)).toBe(false);
+  });
+});
+
+describe('suggestPayloadFormatForUrl host matching', () => {
+  it.each([
+    'https://prod.logic.azure.com.example.org/workflows/abc',
+    'https://evil.example.com/?u=.webhook.office.com/',
+    'https://evil.example.com/workflows/x?u=.logic.azure.com',
+  ])('does not suggest Teams for spoofed %s', (url) => {
+    expect(suggestPayloadFormatForUrl(url)).toBeUndefined();
+  });
+
+  it.each([
+    ['https://prod-12.westus.logic.azure.com:443/workflows/abc/triggers/manual/paths/invoke?x=1', WebhookPayloadFormat.TEAMS],
+    ['https://contoso.webhook.office.com/webhookb2/abc', WebhookPayloadFormat.TEAMS],
+    ['https://chat.googleapis.com/v1/spaces/AAA/messages?key=k', WebhookPayloadFormat.GOOGLE_CHAT],
+    ['https://events.eu.pagerduty.com/v2/enqueue', WebhookPayloadFormat.PAGERDUTY],
+    ['https://events.pagerduty.com/v2/enqueue', WebhookPayloadFormat.PAGERDUTY],
+    ['https://hooks.slack.com/services/T/B/x', WebhookPayloadFormat.SLACK],
+    ['https://discord.com/api/webhooks/1/abc', WebhookPayloadFormat.DISCORD],
+    ['https://ptb.discord.com/api/webhooks/1/abc', WebhookPayloadFormat.DISCORD],
+  ])('suggests the right format for %s', (url, format) => {
+    expect(suggestPayloadFormatForUrl(url)).toBe(format);
+  });
+
+  it('returns no suggestion for an invalid URL without throwing', () => {
+    expect(suggestPayloadFormatForUrl('not a url')).toBeUndefined();
+    expect(suggestPayloadFormatForUrl('')).toBeUndefined();
   });
 });

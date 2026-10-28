@@ -21,6 +21,12 @@ import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { WebhooksService } from './webhooks.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { formatWebhookBody, pagerDutyTestEvent, renderWebhookRequest } from './webhook-payload-formatter';
+import {
+  PAGERDUTY_OPENERS_WITH_RESOLVER,
+  incidentAction,
+  incidentDedupKey,
+  redactRoutingKey,
+} from './webhook-incident';
 import { BlockedAddressError, guardedLookup } from '../common/utils/outbound-url-guard';
 import { pinnedRequest } from '../common/utils/pinned-request';
 
@@ -50,6 +56,10 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   private readonly STORAGE_RETRY_INITIAL_DELAY_MS = 1_000;
   private readonly STORAGE_RETRY_MAX_DELAY_MS = 60_000;
   private readonly UNCONFIRMED_DELIVERY_LOOKBACK = 100;
+  private readonly PAGERDUTY_RESOLVED_MAX_ENTRIES = 10_000;
+  private readonly PAGERDUTY_RESOLVED_LOOKBACK = 50;
+  // `${webhookId}|${dedupKey}` -> payload.timestamp of the latest delivered resolving event
+  private readonly pagerDutyResolvedAt = new Map<string, number>();
   private storageRetryBuffer: PendingEvent[] = [];
   private inFlightEvent: PendingEvent | null = null;
   private readonly inFlightDirectDispatches = new Set<Promise<boolean>>();
@@ -708,6 +718,16 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     const timeoutMs = deliveryConfig.timeoutMs;
     const maxResponseBodyBytes = deliveryConfig.maxResponseBodyBytes;
 
+    if (await this.isSupersededPagerDutyRetry(webhook, deliveryId, payload)) {
+      const dedupKey = incidentDedupKey(payload);
+      this.logger.log(`PagerDuty retry for ${webhook.id} skipped: ${dedupKey} was resolved after this trigger`);
+      await this.updateDelivery(deliveryId, webhook, DeliveryStatus.SUCCESS, {
+        responseBody: 'Not sent: incident already resolved by a later recovery event',
+        durationMs: Date.now() - startTime,
+      });
+      return DeliveryStatus.SUCCESS;
+    }
+
     try {
       // Prepare request (body rendered per webhook.payloadFormat; PagerDuty
       // change events go to the Change Events endpoint of the same region)
@@ -750,6 +770,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
         if (response.ok) {
           status = DeliveryStatus.SUCCESS;
           this.logger.log(`Webhook delivered successfully: ${webhook.id} -> ${webhook.url}`);
+          this.recordPagerDutyResolve(webhook, payload);
         } else if (statusCode >= 300 && statusCode < 400) {
           status = DeliveryStatus.FAILED;
           this.logger.warn(
@@ -811,6 +832,75 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     });
 
     return status;
+  }
+
+  private recordPagerDutyResolve(webhook: Webhook, payload: WebhookPayload): void {
+    if (webhook.payloadFormat !== WebhookPayloadFormat.PAGERDUTY || incidentAction(payload.event) !== 'resolve') {
+      return;
+    }
+    const key = `${webhook.id}|${incidentDedupKey(payload)}`;
+    const previous = this.pagerDutyResolvedAt.get(key) ?? 0;
+    this.pagerDutyResolvedAt.delete(key);
+    this.pagerDutyResolvedAt.set(key, Math.max(previous, payload.timestamp));
+    if (this.pagerDutyResolvedAt.size > this.PAGERDUTY_RESOLVED_MAX_ENTRIES) {
+      const oldest = this.pagerDutyResolvedAt.keys().next();
+      if (!oldest.done) this.pagerDutyResolvedAt.delete(oldest.value);
+    }
+  }
+
+  /**
+   * True when `payload` is a retried PagerDuty trigger whose incident a later
+   * recovery event already resolved; sending it would reopen a recovered
+   * condition. First attempts are never checked. Never throws.
+   */
+  private async isSupersededPagerDutyRetry(
+    webhook: Webhook,
+    deliveryId: string,
+    payload: WebhookPayload,
+  ): Promise<boolean> {
+    if (
+      webhook.payloadFormat !== WebhookPayloadFormat.PAGERDUTY ||
+      incidentAction(payload.event) !== 'trigger' ||
+      !PAGERDUTY_OPENERS_WITH_RESOLVER.has(payload.event)
+    ) {
+      return false;
+    }
+    try {
+      const delivery = await this.storageClient.getDelivery(deliveryId);
+      if (!delivery || delivery.attempts <= 0) return false;
+      return await this.resolvedAfter(webhook, incidentDedupKey(payload), payload.timestamp);
+    } catch (error) {
+      this.logger.warn(
+        `PagerDuty supersede check failed for ${webhook.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Whether a resolve for this webhook and dedup key was delivered at or after
+   * `since`. The in-memory map is empty after a restart, so it falls back to
+   * the most recent stored deliveries.
+   */
+  private async resolvedAfter(webhook: Webhook, dedupKey: string, since: number): Promise<boolean> {
+    const seen = this.pagerDutyResolvedAt.get(`${webhook.id}|${dedupKey}`);
+    if (seen !== undefined && seen >= since) return true;
+    try {
+      const recent = await this.storageClient.getDeliveriesByWebhook(
+        webhook.id,
+        this.PAGERDUTY_RESOLVED_LOOKBACK,
+      );
+      return recent.some(
+        (row) =>
+          row.status === DeliveryStatus.SUCCESS &&
+          row.payload !== undefined &&
+          incidentAction(row.payload.event) === 'resolve' &&
+          incidentDedupKey(row.payload) === dedupKey &&
+          row.payload.timestamp >= since,
+      );
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -905,6 +995,18 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   }
 
   /**
+   * Resolve the PagerDuty test incident unless the trigger was definitively
+   * rejected (4xx other than 429). A resolve on a key with no open incident is
+   * a no-op, so resolving after a lost response is harmless.
+   */
+  private shouldResolvePagerDutyTest(triggerSent: boolean, triggerStatus: number | undefined): boolean {
+    if (!triggerSent) return false;
+    if (triggerStatus === undefined) return true; // timeout / network error after send
+    if (triggerStatus === 429) return true;
+    return !(triggerStatus >= 400 && triggerStatus < 500); // 2xx, 3xx, 5xx -> resolve
+  }
+
+  /**
    * Test a webhook by sending a test event
    */
   async testWebhook(webhook: Webhook): Promise<{
@@ -924,6 +1026,12 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     const timeoutMs = deliveryConfig.timeoutMs;
 
     let renderedPayload: Record<string, unknown> | undefined;
+    let headers: Record<string, string> | undefined;
+    let testPayload: WebhookPayload | undefined;
+    let triggerSent = false;
+    let triggerStatus: number | undefined;
+    let testIncidentResolved: boolean | undefined;
+    const isPagerDuty = webhook.payloadFormat === WebhookPayloadFormat.PAGERDUTY;
 
     try {
       // Use first subscribed event for testing, or instance.down as fallback
@@ -933,7 +1041,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       // Get instance info for the webhook's connection (consistent with real dispatches)
       const instanceInfo = this.getInstanceInfo(webhook.connectionId);
 
-      const testPayload: WebhookPayload = {
+      testPayload = {
         id: crypto.randomUUID(),
         event: testEventType,
         timestamp: Date.now(),
@@ -950,11 +1058,14 @@ export class WebhookDispatcherService implements OnModuleDestroy {
 
       // A PagerDuty test must not page on, or resolve, a real incident: send
       // an info trigger on a per-webhook test key and resolve it afterwards.
-      const isPagerDuty = webhook.payloadFormat === WebhookPayloadFormat.PAGERDUTY;
       const payloadString = isPagerDuty
         ? JSON.stringify(pagerDutyTestEvent(webhook.routingKey ?? '', webhook.id, 'trigger', testPayload))
         : formatWebhookBody(webhook, testPayload, this.appBaseUrl);
       renderedPayload = JSON.parse(payloadString) as Record<string, unknown>;
+      // The outbound body keeps the full key; only the returned preview is masked.
+      if (isPagerDuty && typeof renderedPayload['routing_key'] === 'string' && renderedPayload['routing_key'] !== '') {
+        renderedPayload = { ...renderedPayload, routing_key: redactRoutingKey(renderedPayload['routing_key']) };
+      }
       const timestamp = testPayload.timestamp;
       const signature = this.generateSignatureWithTimestamp(
         payloadString,
@@ -965,7 +1076,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       // Sanitize custom headers
       const sanitizedCustomHeaders = this.sanitizeHeaders(webhook.headers || {});
 
-      const headers: Record<string, string> = {
+      headers = {
         'Content-Type': 'application/json',
         'User-Agent': 'BetterDB-Monitor/1.0',
         'X-Webhook-Signature': signature,
@@ -979,14 +1090,18 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-      const response = await this.post(webhook.url, headers, payloadString, controller.signal);
-
-      clearTimeout(timeoutId);
+      let response: Response;
+      try {
+        triggerSent = true;
+        response = await this.post(webhook.url, headers, payloadString, controller.signal);
+        triggerStatus = response.status;
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
       const responseBody = await response.text().catch(() => '');
 
-      let testIncidentResolved: boolean | undefined;
-      if (isPagerDuty && response.ok) {
+      if (isPagerDuty && this.shouldResolvePagerDutyTest(triggerSent, triggerStatus)) {
         testIncidentResolved = await this.resolvePagerDutyTest(webhook, headers, testPayload, timeoutMs);
       }
       const durationMs = Date.now() - startTime;
@@ -1001,6 +1116,9 @@ export class WebhookDispatcherService implements OnModuleDestroy {
         ...(testIncidentResolved === undefined ? {} : { testIncidentResolved }),
       };
     } catch (error) {
+      if (isPagerDuty && headers && testPayload && this.shouldResolvePagerDutyTest(triggerSent, triggerStatus)) {
+        testIncidentResolved = await this.resolvePagerDutyTest(webhook, headers, testPayload, timeoutMs);
+      }
       const durationMs = Date.now() - startTime;
       return {
         success: false,
@@ -1008,6 +1126,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
         durationMs,
         payloadFormat: webhook.payloadFormat ?? WebhookPayloadFormat.GENERIC,
         renderedPayload,
+        ...(testIncidentResolved === undefined ? {} : { testIncidentResolved }),
       };
     }
   }

@@ -82,6 +82,12 @@ describe('WebhooksService routing key and credential handling', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
+    it('rejects a redacted placeholder as the secret', async () => {
+      await expect(create({ secret: 'whsec_abcd***' })).rejects.toThrow(BadRequestException);
+      await expect(create({ secret: 'whsec_abcd***' })).rejects.toThrow(/redacted value/);
+      expect(storage.createWebhook).not.toHaveBeenCalled();
+    });
+
     it('does not need a routing key for other formats', async () => {
       await create({ payloadFormat: WebhookPayloadFormat.TEAMS, routingKey: undefined });
       expect(storage.createWebhook).toHaveBeenCalledWith(
@@ -116,6 +122,21 @@ describe('WebhooksService routing key and credential handling', () => {
 
     it('treats an empty routing key as "unchanged"', async () => {
       await service.updateWebhook('wh-1', { name: 'x', routingKey: '' } as never);
+      expect(storage.updateWebhook.mock.calls[0][1]).toEqual({ name: 'x' });
+    });
+
+    it('drops a stale routing key placeholder instead of failing', async () => {
+      await service.updateWebhook('wh-1', { name: 'x', routingKey: 'Z987***' } as never);
+      expect(storage.updateWebhook.mock.calls[0][1]).toEqual({ name: 'x' });
+    });
+
+    it('drops a stale secret placeholder instead of storing it', async () => {
+      await service.updateWebhook('wh-1', { name: 'x', secret: 'whsec_zzzz***' } as never);
+      expect(storage.updateWebhook.mock.calls[0][1]).toEqual({ name: 'x' });
+    });
+
+    it('treats null routingKey and secret as "unchanged"', async () => {
+      await service.updateWebhook('wh-1', { name: 'x', routingKey: null, secret: null } as never);
       expect(storage.updateWebhook.mock.calls[0][1]).toEqual({ name: 'x' });
     });
 

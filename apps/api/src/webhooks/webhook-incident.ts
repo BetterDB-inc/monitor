@@ -64,6 +64,18 @@ export function incidentAction(event: WebhookEventType): 'trigger' | 'resolve' {
   return openingEventFor(event) === undefined ? 'trigger' : 'resolve';
 }
 
+/** Opening events that have a resolver (e.g. instance.down -> instance.up). */
+export const PAGERDUTY_OPENERS_WITH_RESOLVER: ReadonlySet<WebhookEventType> = new Set(
+  (Object.values(WebhookEventType) as WebhookEventType[])
+    .map((event) => openingEventFor(event))
+    .filter((opener): opener is WebhookEventType => opener !== undefined),
+);
+
+/** Redacted form of a PagerDuty routing key, as returned by every API response. */
+export function redactRoutingKey(routingKey: string): string {
+  return `${routingKey.substring(0, 4)}***`;
+}
+
 /** PagerDuty caps dedup_key at 255 characters. */
 const MAX_DEDUP_KEY_LENGTH = 255;
 

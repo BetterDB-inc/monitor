@@ -7,7 +7,14 @@ import { assertSafeOutboundUrl } from '../common/utils/outbound-url-guard';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { CreateWebhookDto, UpdateWebhookDto } from '../common/dto/webhook.dto';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { redactRoutingKey } from './webhook-incident';
 import { LicenseService } from '@proprietary/licenses';
+
+/** Matches the forms redactSecret / redactRoutingKey produce, for any stored value. */
+const REDACTED_PLACEHOLDER = /^(whsec_)?[^*]{0,4}\*\*\*$/;
+function isRedactedPlaceholder(value: string): boolean {
+  return REDACTED_PLACEHOLDER.test(value);
+}
 
 @Injectable()
 export class WebhooksService {
@@ -87,6 +94,11 @@ export class WebhooksService {
 
     const payloadFormat = dto.payloadFormat ?? WebhookPayloadFormat.GENERIC;
     this.validateRoutingKey(payloadFormat, dto.routingKey);
+    if (typeof dto.secret === 'string' && isRedactedPlaceholder(dto.secret)) {
+      throw new BadRequestException(
+        'secret looks like a redacted value; send the real secret or omit it to generate one',
+      );
+    }
 
     // Generate secret if not provided
     const secret = dto.secret || this.generateSecret();
@@ -186,16 +198,11 @@ export class WebhooksService {
     // and sends the object back (the web UI does) must not overwrite the real
     // secret / routing key with the redacted placeholder.
     const updates: UpdateWebhookDto = { ...dto };
-    const redacted = this.redactSecret(existing);
-    if (updates.secret !== undefined && existing.secret && updates.secret === redacted.secret) {
-      delete updates.secret;
-    }
-    if (updates.routingKey !== undefined && existing.routingKey && updates.routingKey === redacted.routingKey) {
-      delete updates.routingKey;
-    }
-    if (updates.routingKey === '') {
-      delete updates.routingKey;
-    }
+    // Any redacted placeholder, '' or null means "keep the stored value".
+    if (typeof updates.secret === 'string' && isRedactedPlaceholder(updates.secret)) delete updates.secret;
+    if (typeof updates.routingKey === 'string' && isRedactedPlaceholder(updates.routingKey)) delete updates.routingKey;
+    if (updates.routingKey === '' || (updates.routingKey as unknown) === null) delete updates.routingKey;
+    if (updates.secret === '' || (updates.secret as unknown) === null) delete updates.secret;
 
     this.validateRoutingKey(
       updates.payloadFormat ?? existing.payloadFormat ?? WebhookPayloadFormat.GENERIC,
@@ -284,7 +291,7 @@ export class WebhooksService {
   redactSecret(webhook: Webhook): Webhook {
     const redacted: Webhook = { ...webhook };
     if (webhook.routingKey) {
-      redacted.routingKey = `${webhook.routingKey.substring(0, 4)}***`;
+      redacted.routingKey = redactRoutingKey(webhook.routingKey);
     }
     if (!webhook.secret) {
       return redacted;

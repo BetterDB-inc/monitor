@@ -110,4 +110,30 @@ describe('WebhookForm incident formats', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Use teams format' }));
     expect(screen.getByLabelText('Payload format')).toHaveValue('teams');
   });
+
+  describe('switching an existing webhook to PagerDuty', () => {
+    const switchToPagerDuty = (url: string, format: WebhookPayloadFormat) => {
+      render(<WebhookForm webhook={existing({ url, payloadFormat: format, routingKey: undefined })} onSubmit={vi.fn()} onCancel={vi.fn()} />);
+      fireEvent.change(screen.getByLabelText('Payload format'), { target: { value: 'pagerduty' } });
+    };
+    const warning = /integration key is sent in the body to this URL/;
+
+    it('replaces a Slack URL with the PagerDuty endpoint', () => {
+      switchToPagerDuty('https://hooks.slack.com/services/T/B/x', WebhookPayloadFormat.SLACK);
+      expect(screen.getByPlaceholderText(PAGERDUTY_EVENTS_URL)).toHaveValue(PAGERDUTY_EVENTS_URL);
+      expect(screen.queryByText(warning)).not.toBeInTheDocument();
+    });
+
+    it('keeps a custom relay URL and warns about it', () => {
+      switchToPagerDuty('https://relay.example.com/pd', WebhookPayloadFormat.GENERIC);
+      expect(screen.getByPlaceholderText(PAGERDUTY_EVENTS_URL)).toHaveValue('https://relay.example.com/pd');
+      expect(screen.getByText(warning)).toBeInTheDocument();
+    });
+
+    it('keeps an EU PagerDuty URL without a warning', () => {
+      switchToPagerDuty('https://events.eu.pagerduty.com/v2/enqueue', WebhookPayloadFormat.GENERIC);
+      expect(screen.getByPlaceholderText(PAGERDUTY_EVENTS_URL)).toHaveValue('https://events.eu.pagerduty.com/v2/enqueue');
+      expect(screen.queryByText(warning)).not.toBeInTheDocument();
+    });
+  });
 });

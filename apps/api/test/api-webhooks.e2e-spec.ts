@@ -293,6 +293,14 @@ describe('Webhooks API (e2e)', () => {
       expect(updated.body.routingKey).toBe('R012***');
       expect(updated.body.secret).toBe(created.body.secret);
 
+      // null means "keep the stored value", not "clear it".
+      await request(app.getHttpServer())
+        .patch(`/webhooks/${created.body.id}`)
+        .send({ routingKey: null })
+        .expect(200);
+      const fetched = await request(app.getHttpServer()).get(`/webhooks/${created.body.id}`).expect(200);
+      expect(fetched.body.routingKey).toBe('R012***');
+
       await request(app.getHttpServer()).delete(`/webhooks/${created.body.id}`);
     });
 

@@ -136,6 +136,8 @@ describe('WebhookDispatcherService incident formats', () => {
       testIncidentResolved: true,
       renderedPayload: expect.objectContaining({ event_action: 'trigger' }),
     });
+    expect(result.renderedPayload?.['routing_key']).toBe('R012***');
+    expect(hits[0].body.routing_key).toBe(ROUTING_KEY);
   });
 
   it('signs the resolve request for its own body', async () => {
@@ -175,6 +177,128 @@ describe('WebhookDispatcherService incident formats', () => {
     expect(hits).toHaveLength(1);
     expect(result.success).toBe(false);
     expect(result.testIncidentResolved).toBeUndefined();
+  });
+
+  describe('test incident when the trigger response is lost', () => {
+    type Poster = { post: (...args: unknown[]) => Promise<Response> };
+
+    it('resolves after a trigger timeout', async () => {
+      const abort = Object.assign(new Error('aborted'), { name: 'AbortError' });
+      const post = jest
+        .spyOn(service as unknown as Poster, 'post')
+        .mockRejectedValueOnce(abort)
+        .mockResolvedValueOnce(new Response('{}', { status: 202 }));
+      const result = await service.testWebhook(hook());
+      expect(result.success).toBe(false);
+      expect(post).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(post.mock.calls[1][2] as string).event_action).toBe('resolve');
+      expect(result.testIncidentResolved).toBe(true);
+    });
+
+    it('resolves after a 500', async () => {
+      statuses = [500, 202];
+      const result = await service.testWebhook(hook());
+      expect(hits.map((hit) => hit.body['event_action'])).toEqual(['trigger', 'resolve']);
+      expect(result).toMatchObject({ success: false, testIncidentResolved: true });
+    });
+
+    it('resolves after a 429', async () => {
+      statuses = [429, 202];
+      await service.testWebhook(hook());
+      expect(hits.map((hit) => hit.body['event_action'])).toEqual(['trigger', 'resolve']);
+    });
+
+    it('sends nothing, and reports no resolve, when the request is never sent', async () => {
+      const post = jest.spyOn(service as unknown as Poster, 'post');
+      jest
+        .spyOn(service as unknown as { sanitizeHeaders: () => never }, 'sanitizeHeaders')
+        .mockImplementation(() => {
+          throw new Error('blocked before send');
+        });
+      const result = await service.testWebhook(hook());
+      expect(post).not.toHaveBeenCalled();
+      expect(result.success).toBe(false);
+      expect('testIncidentResolved' in result).toBe(false);
+    });
+  });
+
+  describe('retried trigger after the incident was resolved', () => {
+    const up: WebhookPayload = {
+      ...payload,
+      id: 'p-up',
+      event: WebhookEventType.INSTANCE_UP,
+      timestamp: payload.timestamp + 60_000,
+    };
+
+    const deliver = async (deliveryAttempts: number, p: WebhookPayload) => {
+      storage.getDelivery.mockResolvedValue({ id: 'd1', attempts: deliveryAttempts });
+      return service.sendWebhook(hook(), 'd1', p);
+    };
+
+    it('skips the retry without sending, and finishes the delivery', async () => {
+      await deliver(0, up);
+      hits = [];
+      storage.updateDelivery.mockClear();
+
+      await expect(deliver(1, payload)).resolves.toBe(DeliveryStatus.SUCCESS);
+
+      expect(hits).toHaveLength(0);
+      const update = storage.updateDelivery.mock.calls[0][1];
+      expect(update).toMatchObject({
+        status: DeliveryStatus.SUCCESS,
+        responseBody: 'Not sent: incident already resolved by a later recovery event',
+      });
+      expect(update.statusCode).toBeUndefined();
+      expect(update.nextRetryAt).toBeUndefined();
+    });
+
+    it('sends the retry when the resolve was for a different connection', async () => {
+      await deliver(0, { ...up, instance: { host: 'localhost', port: 6379, connectionId: 'conn-2' } });
+      hits = [];
+      await deliver(1, payload);
+      expect(hits).toHaveLength(1);
+      expect(hits[0].body['event_action']).toBe('trigger');
+    });
+
+    it('sends a first attempt even after a resolve', async () => {
+      await deliver(0, up);
+      hits = [];
+      await deliver(0, payload);
+      expect(hits).toHaveLength(1);
+    });
+
+    it('sends the retry when the resolve is older than the trigger', async () => {
+      await deliver(0, { ...up, timestamp: payload.timestamp - 1 });
+      hits = [];
+      await deliver(1, payload);
+      expect(hits).toHaveLength(1);
+    });
+
+    it('does not check non-PagerDuty formats', async () => {
+      const teams = hook({ payloadFormat: WebhookPayloadFormat.TEAMS, routingKey: undefined });
+      await service.sendWebhook(teams, 'd1', up);
+      hits = [];
+      storage.getDelivery.mockResolvedValue({ id: 'd1', attempts: 1 });
+      await service.sendWebhook(teams, 'd1', payload);
+      expect(hits).toHaveLength(1);
+    });
+
+    it('falls back to stored deliveries after a restart', async () => {
+      const getDeliveriesByWebhook = jest.fn().mockResolvedValue([
+        { status: DeliveryStatus.SUCCESS, payload: up },
+      ]);
+      (storage as unknown as { getDeliveriesByWebhook: jest.Mock }).getDeliveriesByWebhook = getDeliveriesByWebhook;
+      await deliver(1, payload);
+      expect(hits).toHaveLength(0);
+    });
+
+    it('never blocks a delivery when the check fails', async () => {
+      (storage as unknown as { getDeliveriesByWebhook: jest.Mock }).getDeliveriesByWebhook = jest
+        .fn()
+        .mockRejectedValue(new Error('db down'));
+      await deliver(1, payload);
+      expect(hits).toHaveLength(1);
+    });
   });
 
   it('sends a Teams card on test and omits the PagerDuty-only field', async () => {
