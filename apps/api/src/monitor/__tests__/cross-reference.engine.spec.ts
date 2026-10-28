@@ -636,6 +636,46 @@ describe('CrossReferenceEngine.compute', () => {
     expect(result.counterDeltas.coverage).toBe('complete');
   });
 
+  it('marks a running session as capture_running when a live capture owns it', async () => {
+    const session = { ...baseSession(), status: 'running' as const, endedAt: undefined };
+    const engine = new CrossReferenceEngine(makeStorage({ session }));
+    const result = await engine.compute({
+      sessionId: SESSION_ID,
+      baseline: '24h',
+      isSessionLive: () => true,
+    });
+    expect(result.counterDeltas.coverage).toBe('unavailable');
+    expect(result.counterDeltas.pending).toBe('capture_running');
+  });
+
+  it('marks a running session with no live capture as capture_interrupted', async () => {
+    const session = { ...baseSession(), status: 'running' as const, endedAt: undefined };
+    const engine = new CrossReferenceEngine(makeStorage({ session }));
+    const result = await engine.compute({
+      sessionId: SESSION_ID,
+      baseline: '24h',
+      isSessionLive: () => false,
+    });
+    expect(result.counterDeltas.pending).toBe('capture_interrupted');
+  });
+
+  it('defaults a running session to capture_running when no liveness check is given', async () => {
+    const session = { ...baseSession(), status: 'running' as const, endedAt: undefined };
+    const engine = new CrossReferenceEngine(makeStorage({ session }));
+    const result = await engine.compute({ sessionId: SESSION_ID, baseline: '24h' });
+    expect(result.counterDeltas.pending).toBe('capture_running');
+  });
+
+  it('leaves pending unset for an ended session', async () => {
+    const engine = new CrossReferenceEngine(makeStorage());
+    const result = await engine.compute({
+      sessionId: SESSION_ID,
+      baseline: '24h',
+      isSessionLive: () => false,
+    });
+    expect(result.counterDeltas).not.toHaveProperty('pending');
+  });
+
   it('does not set baselineCounterDeltas outside capture diffs', async () => {
     const engine = new CrossReferenceEngine(makeStorage());
     const result = await engine.compute({ sessionId: SESSION_ID, baseline: '24h' });

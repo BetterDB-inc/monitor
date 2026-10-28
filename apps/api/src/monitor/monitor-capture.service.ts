@@ -95,6 +95,8 @@ export class MonitorCaptureService {
   private readonly logger = new Logger(MonitorCaptureService.name);
   private readonly active = new Map<string, ActiveSession>();
   private readonly starting = new Set<string>();
+  /** Session id → resolves when its startSession call settles (started or failed). */
+  private readonly startingById = new Map<string, Promise<void>>();
   private monitorSourceFactory: MonitorSourceFactory;
   private counterSampleReader: CounterSampleReader;
 
@@ -122,7 +124,10 @@ export class MonitorCaptureService {
       const client = nodeId
         ? await this.clusterDiscovery.getNodeConnection(nodeId, connectionId)
         : this.connectionRegistry.get(connectionId).getClient();
-      const infoText = await client.info('stats');
+      // Default INFO (no section argument) carries both # Stats and # Server
+      // (run_id, uptime_in_seconds, used for restart detection) in one command,
+      // on every server version.
+      const infoText = await client.info();
       return sampleFromInfoText(infoText, Date.now());
     };
   }
@@ -163,6 +168,11 @@ export class MonitorCaptureService {
       );
     }
     this.starting.add(connectionId);
+    let startingSessionId: string | undefined;
+    let markSettled!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      markSettled = resolve;
+    });
 
     try {
       const durationMs = input.durationMs ?? DEFAULT_DURATION_MS;
@@ -223,6 +233,10 @@ export class MonitorCaptureService {
         counterSnapshots: buildStartSnapshots(startTargets),
       };
 
+      // From here the row is visible to clients, so a stop for this id can
+      // arrive before MONITOR is open; stopSession waits on `settled`.
+      startingSessionId = session.id;
+      this.startingById.set(session.id, settled);
       await this.storage.saveCaptureSession(session, connectionId);
 
       if (isFanOut) {
@@ -232,6 +246,10 @@ export class MonitorCaptureService {
       return await this.startSingleSession(session, input.targetNodeId, durationMs, byteCap, lineCap);
     } finally {
       this.starting.delete(connectionId);
+      if (startingSessionId !== undefined) {
+        this.startingById.delete(startingSessionId);
+      }
+      markSettled();
     }
   }
 
@@ -507,6 +525,13 @@ export class MonitorCaptureService {
    * writer (fan-out captures have N) and awaits the aggregate finalize.
    */
   async stopSession(id: string): Promise<StoredCaptureSession | null> {
+    // A stop that arrives while the session is still starting (row saved,
+    // MONITOR not open yet) waits for the start to settle and then stops it,
+    // instead of being dropped and letting the capture run its full duration.
+    const starting = this.startingById.get(id);
+    if (starting !== undefined) {
+      await starting;
+    }
     const active = this.findActiveById(id);
     if (active) {
       for (const w of active.writers) {
@@ -530,6 +555,15 @@ export class MonitorCaptureService {
   /** True while a session on the connection is active or still starting. */
   hasActiveSessionOn(connectionId: string): boolean {
     return this.active.has(connectionId) || this.starting.has(connectionId);
+  }
+
+  /**
+   * True when this process owns the session: it is starting or running here.
+   * A row still marked `running` that this returns false for was orphaned
+   * (for example the API restarted mid-capture).
+   */
+  isSessionLive(sessionId: string): boolean {
+    return this.startingById.has(sessionId) || this.findActiveById(sessionId) !== undefined;
   }
 
   private findActiveById(sessionId: string): ActiveSession | undefined {

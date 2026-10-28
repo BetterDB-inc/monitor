@@ -29,7 +29,12 @@ function decodeSample(raw: unknown): CaptureCounterSample | null {
       counters[name as CaptureCounterName] = value;
     }
   }
-  return { capturedAt: raw.capturedAt, counters };
+  const sample: CaptureCounterSample = { capturedAt: raw.capturedAt, counters };
+  if (typeof raw.runId === 'string' && raw.runId !== '') sample.runId = raw.runId;
+  if (typeof raw.uptimeSec === 'number' && Number.isFinite(raw.uptimeSec) && raw.uptimeSec >= 0) {
+    sample.uptimeSec = raw.uptimeSec;
+  }
+  return sample;
 }
 
 /**

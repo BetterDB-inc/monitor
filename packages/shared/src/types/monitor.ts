@@ -200,6 +200,10 @@ export interface CaptureCounterSample {
   capturedAt: number;
   /** Counters the server reported. A field this server version does not emit is absent, never 0. */
   counters: Partial<Record<CaptureCounterName, number>>;
+  /** INFO server `run_id`; changes when the process restarts. Absent when the server does not report it. */
+  runId?: string;
+  /** INFO server `uptime_in_seconds`. Absent when the server does not report it. */
+  uptimeSec?: number;
 }
 
 export interface CaptureNodeCounterSnapshot {
@@ -221,31 +225,53 @@ export interface CaptureCounterSnapshots {
 }
 
 /**
- * complete: every node has both samples and no counter went backwards.
- * partial: at least one node measured, but some node lacks a sample or reset a counter.
- * unavailable: no node has both samples (including sessions recorded before this field existed).
+ * complete: every node has both samples, none restarted or reset its stats, and every
+ *   counter that any node reports is reported by all of them.
+ * partial: some node lacks a sample, restarted or reset its stats (excluded and named
+ *   in `resets`), or some counter is reported by only some nodes (`incompleteCounters`).
+ * unavailable: no node has both samples (including sessions recorded before this field
+ *   existed and captures that have not ended).
  */
 export type CaptureCounterCoverage = 'complete' | 'partial' | 'unavailable';
 
 export interface CaptureCounterReset {
-  /** Node address (or id) whose counters went backwards during the window. */
+  /** Node address (or id) that restarted or reset its stats during the window. */
   node: string;
+  /**
+   * restart: run_id changed or uptime_in_seconds fell behind the window.
+   * counter_reset: a counter went backwards with the same process (CONFIG RESETSTAT).
+   */
+  reason: 'restart' | 'counter_reset';
+  /** Counters that went backwards on this node; may be empty for a restart. */
   counters: CaptureCounterName[];
 }
 
 export interface CaptureCounterDeltas {
   coverage: CaptureCounterCoverage;
   nodesTotal: number;
+  /** Nodes with both samples and no restart or reset; only these are summed. */
   nodesMeasured: number;
   /** Longest start→end sample span across measured nodes; null when unavailable. */
   windowMs: number | null;
-  /** Sum of end − start across measured nodes; null when no node reported the counter on both samples. */
+  /** Sum of end − start across measured nodes; null when no measured node reported the counter on both samples. */
   deltas: Record<CaptureCounterName, number | null>;
+  /** Nodes excluded from every sum because they restarted or reset their stats. */
   resets: CaptureCounterReset[];
+  /**
+   * Counters reported on both samples by some measured nodes but not all of them
+   * (e.g. a field a pre-6.2 node does not emit). Their sums cover fewer nodes.
+   */
+  incompleteCounters: CaptureCounterName[];
+  /**
+   * Set only while the session row is still `running`: `capture_running` when a live
+   * capture owns it, `capture_interrupted` when none does (e.g. the API restarted
+   * mid-capture), so the end sample will never be taken.
+   */
+  pending?: 'capture_running' | 'capture_interrupted';
   derived: {
     /** deltas.total_commands_processed / windowMs, per second. */
     commandsPerSec: number | null;
-    /** hits / (hits + misses) over the window; null when there were no lookups. */
+    /** hits / (hits + misses) over measured nodes that reported both; null when there were no lookups. */
     keyspaceHitRatio: number | null;
   };
 }

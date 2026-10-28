@@ -16,6 +16,7 @@ describe('MonitorController', () => {
     startSession: jest.Mock;
     stopSession: jest.Mock;
     getSession: jest.Mock;
+    isSessionLive: jest.Mock;
   };
   let healthGateService: { evaluate: jest.Mock };
   let preflightService: { run: jest.Mock };
@@ -39,6 +40,7 @@ describe('MonitorController', () => {
       startSession: jest.fn().mockResolvedValue({ id: 'sess-1', status: 'running' }),
       stopSession: jest.fn().mockResolvedValue({ id: 'sess-1', status: 'completed' }),
       getSession: jest.fn().mockResolvedValue({ id: 'sess-1', status: 'running' }),
+      isSessionLive: jest.fn().mockReturnValue(true),
     };
     healthGateService = {
       evaluate: jest.fn().mockResolvedValue({ allow: true, signals: {}, thresholds: {} }),
@@ -263,7 +265,16 @@ describe('MonitorController', () => {
       expect(crossReferenceEngine.compute).toHaveBeenCalledWith({
         sessionId: 'sess-1',
         baseline: '24h',
+        isSessionLive: expect.any(Function),
       });
+    });
+
+    it('passes a liveness check backed by the capture service', async () => {
+      await controller.crossReference('sess-1');
+      const { isSessionLive } = crossReferenceEngine.compute.mock.calls[0][0];
+      captureService.isSessionLive.mockReturnValueOnce(false);
+      expect(isSessionLive('sess-1')).toBe(false);
+      expect(captureService.isSessionLive).toHaveBeenCalledWith('sess-1');
     });
 
     it('honors explicit baseline windows', async () => {
@@ -272,6 +283,7 @@ describe('MonitorController', () => {
         expect(crossReferenceEngine.compute).toHaveBeenLastCalledWith({
           sessionId: 'sess-1',
           baseline: window,
+          isSessionLive: expect.any(Function),
         });
       }
     });
@@ -383,7 +395,11 @@ describe('MonitorController', () => {
       captureService.getSession.mockResolvedValueOnce({ id: 'sess-1' });
       captureService.getSession.mockResolvedValueOnce({ id: 'sess-2' });
       await controller.sessionDiff('sess-1', 'sess-2');
-      expect(crossReferenceEngine.computeCaptureDiff).toHaveBeenCalledWith('sess-1', 'sess-2');
+      expect(crossReferenceEngine.computeCaptureDiff).toHaveBeenCalledWith(
+        'sess-1',
+        'sess-2',
+        expect.any(Function),
+      );
     });
 
     it('throws BadRequest when vs is missing', async () => {

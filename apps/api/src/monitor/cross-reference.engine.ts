@@ -22,6 +22,25 @@ const HOT_KEY_TOP_K = 50;
 export interface CrossReferenceInput {
   sessionId: string;
   baseline: BaselineWindow;
+  /**
+   * Whether a live capture in this process owns the session. Used only for a
+   * `running` row, to tell a capture in progress from one orphaned by an API
+   * restart. When omitted, a `running` row is reported as `capture_running`.
+   */
+  isSessionLive?: (sessionId: string) => boolean;
+}
+
+/** Why counter deltas are not final yet; undefined once the session row has ended. */
+function pendingCounters(
+  session: StoredCaptureSession,
+  isSessionLive: ((sessionId: string) => boolean) | undefined,
+): CaptureCounterDeltas['pending'] {
+  if (session.status !== 'running') {
+    return undefined;
+  }
+  return isSessionLive !== undefined && !isSessionLive(session.id)
+    ? 'capture_interrupted'
+    : 'capture_running';
 }
 
 export interface NewShape {
@@ -163,7 +182,10 @@ export class CrossReferenceEngine {
       sessionStartMs,
       sessionEndMs,
     );
-    const counterDeltas = computeCounterDeltas(session.counterSnapshots);
+    const counterDeltas = computeCounterDeltas(
+      session.counterSnapshots,
+      pendingCounters(session, input.isSessionLive),
+    );
 
     return {
       sessionId: input.sessionId,
@@ -201,6 +223,7 @@ export class CrossReferenceEngine {
   async computeCaptureDiff(
     sessionId: string,
     baselineSessionId: string,
+    isSessionLive?: (sessionId: string) => boolean,
   ): Promise<CrossReferenceResult> {
     if (sessionId === baselineSessionId) {
       throw new Error('Cannot diff a capture against itself');
@@ -226,8 +249,14 @@ export class CrossReferenceEngine {
 
     const newShapes = computeNewShapes(capturedLines, baselineShapes);
     const hotKeyDelta = computeHotKeyDelta(capturedLines, baselineKeyCounts);
-    const counterDeltas = computeCounterDeltas(session.counterSnapshots);
-    const baselineCounterDeltas = computeCounterDeltas(baselineSession.counterSnapshots);
+    const counterDeltas = computeCounterDeltas(
+      session.counterSnapshots,
+      pendingCounters(session, isSessionLive),
+    );
+    const baselineCounterDeltas = computeCounterDeltas(
+      baselineSession.counterSnapshots,
+      pendingCounters(baselineSession, isSessionLive),
+    );
 
     return {
       sessionId,

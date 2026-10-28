@@ -100,32 +100,51 @@ deltas are shown for both captures side by side.
 
 ## Session-boundary INFO counters
 
-Every capture samples `INFO stats` on each captured node twice: once just
-before MONITOR opens and once right after it stops (so the probe itself is
-never captured). The cross-reference panel shows the difference for 16
-monotonic counters — commands processed, connections received/rejected,
-keyspace hits/misses, expired and evicted keys, network bytes in, error
-replies, ACL denials (auth / command / key / channel) and full/partial
-resyncs — plus commands/sec and the keyspace hit ratio over the window.
-Fan-out captures sum across primaries.
+Every capture samples `INFO` on each captured node twice: once just before
+MONITOR opens and once right after it stops (so the probe itself is never
+captured). Each sample is one default `INFO` command, which carries both the
+`# Stats` counters and `# Server` `run_id` / `uptime_in_seconds`. The
+cross-reference panel shows the difference for 16 monotonic counters —
+commands processed, connections received/rejected, keyspace hits/misses,
+expired and evicted keys, network bytes in, error replies, ACL denials
+(auth / command / key / channel) and full/partial resyncs — plus
+commands/sec and the keyspace hit ratio over the window. Fan-out captures
+sum across primaries.
 
-- Each sample has a 2 s budget and fails open: an unreachable node never
-  delays or fails the capture; it is reported as not measured.
-- Coverage is `complete`, `partial` (a node missing a sample, or a counter
-  that went backwards because of `CONFIG RESETSTAT` / a restart — that
-  node's value is excluded and named), or `unavailable` (sessions recorded
-  before this feature).
+- Each sample has a 2 s budget and fails open: a slow or unreachable node
+  never fails the capture and is reported as not measured. Start samples
+  run in parallel before the session row is created, so starting a capture
+  can take up to 2 s longer when a node is slow or unreachable.
+- Restarts and stat resets: a node whose `run_id` changed, or whose
+  `uptime_in_seconds` went down, restarted during the window. A node where
+  any counter went backwards ran `CONFIG RESETSTAT`. Either way the whole
+  node is excluded from every sum and from the hit ratio, and it is named
+  with the reason. A `CONFIG RESETSTAT` after which every counter climbs back
+  past its start value is not visible in `INFO` and cannot be detected.
+- Coverage is `complete`, `partial` (a node is missing a sample, restarted
+  or reset its stats, or a counter is reported by only some nodes — e.g.
+  `total_error_replies` during a rolling upgrade from before Redis 6.2 —
+  listed in `incompleteCounters`), or `unavailable` (no node has both
+  samples).
+- A capture that is still running reports `pending: "capture_running"`; the
+  values appear when it ends. A row left `running` with no live capture
+  behind it (for example after an API restart) reports
+  `pending: "capture_interrupted"` and never gets an end sample.
 - `aclDeltas.counters.aclAccessDeniedAuthDelta` / `rejectedConnectionsDelta`
   in the API response are populated from the same samples.
-- Self-measurement: each node's window includes the capture's own
-  footprint — up to 2 extra commands (the start `INFO` and `MONITOR`) and 1
-  extra connection (the MONITOR connection). Outbound network bytes are not
-  tracked because the server counts the MONITOR stream itself in
-  `total_net_output_bytes`.
-- Start sampling happens before the session starts, so a start request can
-  take up to 2 s longer when a node is slow or unreachable.
-- Counters a server version does not report (e.g. `total_error_replies`
-  before Redis 6.2) are shown as `—`, never as 0.
+- Self-measurement: each node's window includes the capture's own footprint.
+  That is the start `INFO`, the MONITOR connection's handshake (`AUTH` when
+  configured, the client's ready-check `INFO`, `SELECT` / `CLIENT SETNAME`
+  when configured) and `MONITOR` itself, so a few commands and 1 connection.
+  Other BetterDB polling of the same node during the window is counted too.
+  Outbound network bytes are not tracked because the server counts the
+  MONITOR stream itself in `total_net_output_bytes`.
+- Counters a server version does not report are shown as `—`, never as 0.
+- Stopping a capture while it is still starting (row created, MONITOR not
+  open yet) waits for the start to finish and then stops it.
+- While a capture is starting, a second start on the same connection is
+  rejected with `409 Conflict`, and scheduled and triggered captures treat
+  the connection as busy and skip.
 
 ## Value redaction
 

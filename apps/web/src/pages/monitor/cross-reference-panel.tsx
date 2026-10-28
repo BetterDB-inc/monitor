@@ -231,8 +231,21 @@ function RegressionsList({ regressions }: { regressions: CrossReferenceSlowlogRe
   );
 }
 
+function unavailableCountersNote(deltas: CrossReferenceResult['counterDeltas']): string | null {
+  if (deltas.coverage !== 'unavailable') {
+    return null;
+  }
+  if (deltas.pending === 'capture_running') {
+    return 'INFO counters are available when the capture ends.';
+  }
+  if (deltas.pending === 'capture_interrupted') {
+    return 'INFO counters were not recorded: the capture was interrupted before it ended.';
+  }
+  return 'INFO counters were not recorded for this capture.';
+}
+
 function AclDeltas({ result }: { result: CrossReferenceResult }) {
-  const countersUnavailable = result.counterDeltas.coverage === 'unavailable';
+  const countersNote = unavailableCountersNote(result.counterDeltas);
   return (
     <dl className="space-y-1 text-xs">
       <Row label="Audit entries in window">{result.aclDeltas.auditEntriesInWindow}</Row>
@@ -242,10 +255,8 @@ function AclDeltas({ result }: { result: CrossReferenceResult }) {
       <Row label="rejected_connections Δ">
         {result.aclDeltas.counters.rejectedConnectionsDelta ?? '—'}
       </Row>
-      {countersUnavailable && (
-        <p className="pt-1 text-[10px] text-muted-foreground">
-          INFO counters were not recorded for this capture.
-        </p>
+      {countersNote !== null && (
+        <p className="pt-1 text-[10px] text-muted-foreground">{countersNote}</p>
       )}
     </dl>
   );

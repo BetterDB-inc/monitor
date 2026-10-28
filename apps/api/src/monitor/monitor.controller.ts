@@ -228,7 +228,11 @@ export class MonitorController {
     if (!session) {
       throw new NotFoundException(`Session ${id} not found`);
     }
-    return this.crossReferenceEngine.compute({ sessionId: id, baseline: window });
+    return this.crossReferenceEngine.compute({
+      sessionId: id,
+      baseline: window,
+      isSessionLive: (sessionId) => this.captureService.isSessionLive(sessionId),
+    });
   }
 
   @Get('sessions/:id/diff')
@@ -254,7 +258,9 @@ export class MonitorController {
     if (!baselineSession) {
       throw new NotFoundException(`Baseline session ${vs} not found`);
     }
-    return this.crossReferenceEngine.computeCaptureDiff(id, vs);
+    return this.crossReferenceEngine.computeCaptureDiff(id, vs, (sessionId) =>
+      this.captureService.isSessionLive(sessionId),
+    );
   }
 
   @Get('sessions/:id/export')

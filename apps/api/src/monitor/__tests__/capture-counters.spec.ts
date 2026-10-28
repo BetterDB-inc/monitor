@@ -259,26 +259,40 @@ describe('computeCounterDeltas', () => {
     expect(d.deltas.sync_full).toBe(1);
   });
 
-  it('excludes and reports a counter that went backwards on one node', () => {
+  it('excludes the whole node when any counter went backwards (CONFIG RESETSTAT)', () => {
     const d = computeCounterDeltas(
       snaps([
         {
           nodeId: 'A',
           address: 'h1:6379',
-          start: sample(START, { keyspace_hits: 100, keyspace_misses: 5 }),
-          end: sample(START + 1_000, { keyspace_hits: 3, keyspace_misses: 9 }),
+          start: sample(START, { keyspace_hits: 100, keyspace_misses: 5, rejected_connections: 0 }),
+          end: sample(START + 1_000, {
+            keyspace_hits: 3,
+            keyspace_misses: 9,
+            rejected_connections: 0,
+          }),
         },
         {
           nodeId: 'B',
-          start: sample(START, { keyspace_hits: 10 }),
-          end: sample(START + 1_000, { keyspace_hits: 15 }),
+          start: sample(START, { keyspace_hits: 10, keyspace_misses: 0, rejected_connections: 1 }),
+          end: sample(START + 1_000, {
+            keyspace_hits: 15,
+            keyspace_misses: 5,
+            rejected_connections: 1,
+          }),
         },
       ]),
     );
     expect(d.coverage).toBe('partial');
-    expect(d.resets).toEqual([{ node: 'h1:6379', counters: ['keyspace_hits'] }]);
+    expect(d.nodesMeasured).toBe(1);
+    expect(d.resets).toEqual([
+      { node: 'h1:6379', reason: 'counter_reset', counters: ['keyspace_hits'] },
+    ]);
+    // A's misses (+4) and its flat rejected_connections are not summed either.
     expect(d.deltas.keyspace_hits).toBe(5);
-    expect(d.deltas.keyspace_misses).toBe(4);
+    expect(d.deltas.keyspace_misses).toBe(5);
+    expect(d.deltas.rejected_connections).toBe(0);
+    expect(d.derived.keyspaceHitRatio).toBeCloseTo(0.5);
   });
 
   it('ignores a node whose end sample predates its start (clock skew)', () => {
@@ -304,5 +318,216 @@ describe('deriveCounterRates', () => {
     deltas.keyspace_hits = 0;
     deltas.keyspace_misses = 0;
     expect(deriveCounterRates(deltas, 0)).toEqual({ commandsPerSec: null, keyspaceHitRatio: null });
+  });
+});
+
+describe('computeCounterDeltas restart detection', () => {
+  const START = 1_700_000_000_000;
+  function node(
+    start: CaptureCounterSample | null,
+    end: CaptureCounterSample | null,
+    extra: Partial<CaptureCounterSnapshots['nodes'][number]> = {},
+  ): CaptureCounterSnapshots['nodes'][number] {
+    return { start, end, ...extra };
+  }
+  function snaps(nodes: CaptureCounterSnapshots['nodes']): CaptureCounterSnapshots {
+    return { version: 1, nodes };
+  }
+
+  it('detects a restart by run_id even when every counter climbed back past its start value', () => {
+    const d = computeCounterDeltas(
+      snaps([
+        node(
+          {
+            capturedAt: START,
+            counters: { total_commands_processed: 100, rejected_connections: 0 },
+            runId: 'aaa',
+            uptimeSec: 500,
+          },
+          {
+            capturedAt: START + 600_000,
+            counters: { total_commands_processed: 900, rejected_connections: 0 },
+            runId: 'bbb',
+            uptimeSec: 300,
+          },
+          { address: 'h1:6379' },
+        ),
+      ]),
+    );
+    expect(d.coverage).toBe('unavailable');
+    expect(d.nodesMeasured).toBe(0);
+    expect(d.resets).toEqual([{ node: 'h1:6379', reason: 'restart', counters: [] }]);
+    expect(d.deltas.total_commands_processed).toBeNull();
+    expect(d.deltas.rejected_connections).toBeNull();
+  });
+
+  it('detects a restart by uptime when run_id is not reported', () => {
+    const d = computeCounterDeltas(
+      snaps([
+        node(
+          { capturedAt: START, counters: { total_commands_processed: 100 }, uptimeSec: 5_000 },
+          {
+            capturedAt: START + 60_000,
+            counters: { total_commands_processed: 200 },
+            uptimeSec: 30,
+          },
+        ),
+      ]),
+    );
+    expect(d.resets).toEqual([{ node: 'instance', reason: 'restart', counters: [] }]);
+    expect(d.coverage).toBe('unavailable');
+  });
+
+  it('detects a restart when only the end uptime is known and it is shorter than the window', () => {
+    const d = computeCounterDeltas(
+      snaps([
+        node(
+          { capturedAt: START, counters: { total_commands_processed: 100 } },
+          {
+            capturedAt: START + 60_000,
+            counters: { total_commands_processed: 200 },
+            uptimeSec: 10,
+          },
+        ),
+      ]),
+    );
+    expect(d.resets[0]?.reason).toBe('restart');
+  });
+
+  it('does not flag a restart for a steady process', () => {
+    const d = computeCounterDeltas(
+      snaps([
+        node(
+          {
+            capturedAt: START,
+            counters: { total_commands_processed: 100 },
+            runId: 'aaa',
+            uptimeSec: 500,
+          },
+          {
+            capturedAt: START + 10_000,
+            counters: { total_commands_processed: 200 },
+            runId: 'aaa',
+            uptimeSec: 510,
+          },
+        ),
+      ]),
+    );
+    expect(d.coverage).toBe('complete');
+    expect(d.resets).toEqual([]);
+    expect(d.deltas.total_commands_processed).toBe(100);
+  });
+
+  it('keeps summing the other nodes when one restarts', () => {
+    const d = computeCounterDeltas(
+      snaps([
+        node(
+          { capturedAt: START, counters: { evicted_keys: 1 }, runId: 'a1' },
+          { capturedAt: START + 5_000, counters: { evicted_keys: 9 }, runId: 'a2' },
+          { nodeId: 'A' },
+        ),
+        node(
+          { capturedAt: START, counters: { evicted_keys: 0 }, runId: 'b1' },
+          { capturedAt: START + 5_000, counters: { evicted_keys: 2 }, runId: 'b1' },
+          { nodeId: 'B' },
+        ),
+      ]),
+    );
+    expect(d.coverage).toBe('partial');
+    expect(d.nodesMeasured).toBe(1);
+    expect(d.deltas.evicted_keys).toBe(2);
+    expect(d.resets).toEqual([{ node: 'A', reason: 'restart', counters: [] }]);
+  });
+});
+
+describe('computeCounterDeltas per-field coverage', () => {
+  const START = 1_700_000_000_000;
+  function snaps(nodes: CaptureCounterSnapshots['nodes']): CaptureCounterSnapshots {
+    return { version: 1, nodes };
+  }
+
+  it('is partial and lists the counter when a field is present on some nodes but not others', () => {
+    const d = computeCounterDeltas(
+      snaps([
+        {
+          nodeId: 'A',
+          start: sample(START, { total_commands_processed: 10, total_error_replies: 1 }),
+          end: sample(START + 1_000, { total_commands_processed: 20, total_error_replies: 4 }),
+        },
+        {
+          nodeId: 'B',
+          start: sample(START, { total_commands_processed: 5 }),
+          end: sample(START + 1_000, { total_commands_processed: 8 }),
+        },
+      ]),
+    );
+    expect(d.coverage).toBe('partial');
+    expect(d.nodesMeasured).toBe(2);
+    expect(d.incompleteCounters).toEqual(['total_error_replies']);
+    expect(d.deltas.total_error_replies).toBe(3);
+    expect(d.deltas.total_commands_processed).toBe(13);
+  });
+
+  it('is complete when no measured node reports a field at all', () => {
+    const d = computeCounterDeltas(
+      snaps([
+        {
+          nodeId: 'A',
+          start: sample(START, { keyspace_hits: 1 }),
+          end: sample(START + 1, { keyspace_hits: 2 }),
+        },
+        {
+          nodeId: 'B',
+          start: sample(START, { keyspace_hits: 1 }),
+          end: sample(START + 1, { keyspace_hits: 3 }),
+        },
+      ]),
+    );
+    expect(d.coverage).toBe('complete');
+    expect(d.incompleteCounters).toEqual([]);
+    expect(d.deltas.total_error_replies).toBeNull();
+  });
+
+  it('computes the hit ratio only over nodes that report both hits and misses', () => {
+    const d = computeCounterDeltas(
+      snaps([
+        {
+          nodeId: 'A',
+          start: sample(START, { keyspace_hits: 0, keyspace_misses: 0 }),
+          end: sample(START + 1, { keyspace_hits: 9, keyspace_misses: 1 }),
+        },
+        {
+          nodeId: 'B',
+          start: sample(START, { keyspace_hits: 0 }),
+          end: sample(START + 1, { keyspace_hits: 90 }),
+        },
+      ]),
+    );
+    expect(d.deltas.keyspace_hits).toBe(99);
+    expect(d.derived.keyspaceHitRatio).toBeCloseTo(0.9);
+  });
+
+  it('passes the pending marker through and leaves it unset otherwise', () => {
+    expect(computeCounterDeltas(undefined, 'capture_running').pending).toBe('capture_running');
+    expect(computeCounterDeltas(undefined, 'capture_interrupted').pending).toBe(
+      'capture_interrupted',
+    );
+    expect(computeCounterDeltas(undefined)).not.toHaveProperty('pending');
+  });
+});
+
+describe('sampleFromInfoText process identity', () => {
+  it('reads run_id and uptime_in_seconds from # Server alongside # Stats', () => {
+    const text = ['# Server', 'run_id:abc123', 'uptime_in_seconds:42', '', INFO_STATS].join('\r\n');
+    const s = sampleFromInfoText(text, 7);
+    expect(s.runId).toBe('abc123');
+    expect(s.uptimeSec).toBe(42);
+    expect(s.counters.total_commands_processed).toBe(1000);
+  });
+
+  it('omits identity when # Server is absent', () => {
+    const s = sampleFromInfoText(INFO_STATS, 7);
+    expect(s).not.toHaveProperty('runId');
+    expect(s).not.toHaveProperty('uptimeSec');
   });
 });

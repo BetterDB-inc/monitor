@@ -23,17 +23,46 @@ function formatRatio(value: number | null): string {
   return value === null ? '—' : `${(value * 100).toFixed(1)}%`;
 }
 
+function resetText(d: CaptureCounterDeltas): string | null {
+  const restarted = d.resets.filter((r) => r.reason === 'restart').map((r) => r.node);
+  const statsReset = d.resets.filter((r) => r.reason === 'counter_reset').map((r) => r.node);
+  const parts: string[] = [];
+  if (restarted.length > 0) {
+    parts.push(`restarted: ${restarted.join(', ')}`);
+  }
+  if (statsReset.length > 0) {
+    parts.push(`stats reset: ${statsReset.join(', ')}`);
+  }
+  return parts.length > 0 ? `${parts.join('; ')} (excluded)` : null;
+}
+
 function coverageText(d: CaptureCounterDeltas): string {
   if (d.coverage === 'unavailable') {
+    if (d.pending === 'capture_running') {
+      return 'Available when the capture ends — the end sample is taken right after MONITOR stops.';
+    }
+    if (d.pending === 'capture_interrupted') {
+      return 'Not recorded — the capture was interrupted (for example the API restarted) before its end sample was taken.';
+    }
+    const resets = resetText(d);
+    if (resets !== null) {
+      return `Not measured — every sampled node restarted or reset its stats during the capture · ${resets}`;
+    }
     return 'Not recorded for this capture — it predates session-boundary snapshots, or INFO was unreachable at start or end.';
   }
   const seconds = d.windowMs === null ? '—' : (d.windowMs / 1000).toFixed(1);
   const parts = [`Δ over ${seconds}s across ${d.nodesMeasured} node${d.nodesMeasured === 1 ? '' : 's'}`];
-  if (d.nodesMeasured < d.nodesTotal) {
-    parts.push(`${d.nodesTotal - d.nodesMeasured} of ${d.nodesTotal} nodes not measured`);
+  const unmeasured = d.nodesTotal - d.nodesMeasured - d.resets.length;
+  if (unmeasured > 0) {
+    parts.push(`${unmeasured} of ${d.nodesTotal} nodes not measured`);
   }
-  if (d.resets.length > 0) {
-    parts.push(`counter reset on ${d.resets.map((r) => r.node).join(', ')} (excluded)`);
+  const resets = resetText(d);
+  if (resets !== null) {
+    parts.push(resets);
+  }
+  if (d.incompleteCounters.length > 0) {
+    const labels = d.incompleteCounters.map((name) => CAPTURE_COUNTER_LABELS[name]).join(', ');
+    parts.push(`reported by only some nodes: ${labels}`);
   }
   return parts.join(' · ');
 }

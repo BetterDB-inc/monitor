@@ -58,8 +58,34 @@ export function extractCaptureCounters(
   return counters;
 }
 
+/** Pick `run_id` and `uptime_in_seconds` out of a parsed INFO `# Server` section, when present. */
+export function extractProcessIdentity(
+  info: Record<string, unknown>,
+): Pick<CaptureCounterSample, 'runId' | 'uptimeSec'> {
+  const server = info.server;
+  const identity: Pick<CaptureCounterSample, 'runId' | 'uptimeSec'> = {};
+  if (typeof server !== 'object' || server === null) {
+    return identity;
+  }
+  const section = server as Record<string, unknown>;
+  const runId = section.run_id;
+  if (typeof runId === 'string' && runId.trim() !== '') {
+    identity.runId = runId.trim();
+  }
+  const uptime = section.uptime_in_seconds;
+  if (typeof uptime === 'string' && uptime.trim() !== '') {
+    const value = Number(uptime);
+    if (Number.isFinite(value) && value >= 0) {
+      identity.uptimeSec = value;
+    }
+  }
+  return identity;
+}
+
+/** Build a sample from a raw INFO reply. Reads `# Stats` counters plus `# Server` identity when present. */
 export function sampleFromInfoText(infoText: string, capturedAt: number): CaptureCounterSample {
-  return { capturedAt, counters: extractCaptureCounters(InfoParser.parse(infoText)) };
+  const info = InfoParser.parse(infoText);
+  return { capturedAt, counters: extractCaptureCounters(info), ...extractProcessIdentity(info) };
 }
 
 function describeError(error: unknown): string {
@@ -168,27 +194,58 @@ export function deriveCounterRates(
   return { commandsPerSec, keyspaceHitRatio };
 }
 
+/** Slack for uptime_in_seconds (whole seconds, sampled independently of capturedAt). */
+const UPTIME_SLACK_SEC = 2;
+
+/**
+ * True when the process behind a node restarted between its two samples:
+ * run_id changed, or uptime_in_seconds is lower at the end than at the start,
+ * or (start uptime missing) lower at the end than the sampled window.
+ */
+function restartedBetween(start: CaptureCounterSample, end: CaptureCounterSample): boolean {
+  if (start.runId !== undefined && end.runId !== undefined) {
+    return start.runId !== end.runId;
+  }
+  if (end.uptimeSec === undefined) {
+    return false;
+  }
+  if (start.uptimeSec !== undefined) {
+    return end.uptimeSec + UPTIME_SLACK_SEC < start.uptimeSec;
+  }
+  return end.uptimeSec + UPTIME_SLACK_SEC < (end.capturedAt - start.capturedAt) / 1000;
+}
+
 /**
  * Turn stored start/end samples into per-counter deltas summed across nodes.
  *
- * - A node counts as measured only when it has both samples and end.capturedAt >= start.capturedAt.
- * - A counter that went backwards on a node (CONFIG RESETSTAT, restart) is
- *   excluded for that node and reported in `resets`; the other nodes still sum.
- * - The window includes the capture's own footprint on each node:
- *   total_commands_processed can be up to two higher than the captured traffic
- *   (the start INFO and the MONITOR command), and total_connections_received
- *   includes the MONITOR connection (+1). total_net_output_bytes is
- *   deliberately not tracked: the server counts the MONITOR stream it sends to
- *   the capture connection in it.
+ * - A node is measured only when it has both samples, end.capturedAt >= start.capturedAt,
+ *   and it neither restarted nor reset its stats in between.
+ * - Restart: run_id changed or uptime_in_seconds fell (see restartedBetween). Reset: any
+ *   counter went backwards. CONFIG RESETSTAT zeroes every stat at once, so one decreasing
+ *   counter excludes the whole node from every sum (and from the hit ratio), and the
+ *   node is named in `resets`. A RESETSTAT whose counters all climb back past their start
+ *   values is not observable from INFO and cannot be detected.
+ * - A counter reported on both samples by some measured nodes but not all is summed over
+ *   the nodes that report it, listed in `incompleteCounters`, and coverage drops to partial.
+ * - The window includes the capture's own footprint on each node: the start INFO, the
+ *   MONITOR connection's handshake (AUTH/HELLO, the client's ready-check INFO, SELECT and
+ *   CLIENT SETNAME when configured) and MONITOR itself add a few commands and one
+ *   connection. total_net_output_bytes is deliberately not tracked: the server counts the
+ *   MONITOR stream it sends to the capture connection in it.
  */
 export function computeCounterDeltas(
   snapshots: CaptureCounterSnapshots | undefined,
+  pending?: CaptureCounterDeltas['pending'],
 ): CaptureCounterDeltas {
   const deltas = emptyDeltas();
   const nodes = snapshots?.nodes ?? [];
   const resets: CaptureCounterReset[] = [];
+  const reportedBy = new Map<CaptureCounterName, number>();
   let windowMs: number | null = null;
   let measured = 0;
+  let ratioHits = 0;
+  let ratioMisses = 0;
+  let ratioNodes = 0;
 
   for (const node of nodes) {
     const start = node.start;
@@ -196,42 +253,79 @@ export function computeCounterDeltas(
     if (start === null || end === null || end.capturedAt < start.capturedAt) {
       continue;
     }
+
+    const backwards = CAPTURE_COUNTER_FIELDS.filter((field) => {
+      const before = start.counters[field];
+      const after = end.counters[field];
+      return before !== undefined && after !== undefined && after < before;
+    });
+    if (restartedBetween(start, end)) {
+      resets.push({ node: nodeLabel(node), reason: 'restart', counters: backwards });
+      continue;
+    }
+    if (backwards.length > 0) {
+      resets.push({ node: nodeLabel(node), reason: 'counter_reset', counters: backwards });
+      continue;
+    }
+
     measured += 1;
     const span = end.capturedAt - start.capturedAt;
     windowMs = windowMs === null ? span : Math.max(windowMs, span);
 
-    const resetFields: CaptureCounterName[] = [];
     for (const field of CAPTURE_COUNTER_FIELDS) {
       const before = start.counters[field];
       const after = end.counters[field];
       if (before === undefined || after === undefined) {
         continue;
       }
-      if (after < before) {
-        resetFields.push(field);
-        continue;
-      }
       deltas[field] = (deltas[field] ?? 0) + (after - before);
+      reportedBy.set(field, (reportedBy.get(field) ?? 0) + 1);
     }
-    if (resetFields.length > 0) {
-      resets.push({ node: nodeLabel(node), counters: resetFields });
+
+    const hitsBefore = start.counters.keyspace_hits;
+    const hitsAfter = end.counters.keyspace_hits;
+    const missesBefore = start.counters.keyspace_misses;
+    const missesAfter = end.counters.keyspace_misses;
+    if (
+      hitsBefore !== undefined &&
+      hitsAfter !== undefined &&
+      missesBefore !== undefined &&
+      missesAfter !== undefined
+    ) {
+      ratioHits += hitsAfter - hitsBefore;
+      ratioMisses += missesAfter - missesBefore;
+      ratioNodes += 1;
     }
   }
+
+  const incompleteCounters = CAPTURE_COUNTER_FIELDS.filter((field) => {
+    const count = reportedBy.get(field) ?? 0;
+    return count > 0 && count < measured;
+  });
 
   let coverage: CaptureCounterDeltas['coverage'] = 'complete';
   if (measured === 0) {
     coverage = 'unavailable';
-  } else if (measured < nodes.length || resets.length > 0) {
+  } else if (measured < nodes.length || incompleteCounters.length > 0) {
     coverage = 'partial';
   }
 
-  return {
+  const derived = deriveCounterRates(deltas, windowMs);
+  derived.keyspaceHitRatio =
+    ratioNodes > 0 && ratioHits + ratioMisses > 0 ? ratioHits / (ratioHits + ratioMisses) : null;
+
+  const result: CaptureCounterDeltas = {
     coverage,
     nodesTotal: nodes.length,
     nodesMeasured: measured,
     windowMs,
     deltas,
     resets,
-    derived: deriveCounterRates(deltas, windowMs),
+    incompleteCounters,
+    derived,
   };
+  if (pending !== undefined) {
+    result.pending = pending;
+  }
+  return result;
 }

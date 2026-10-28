@@ -25,6 +25,7 @@ function deltas(
     nodesMeasured: 1,
     windowMs: 10_000,
     resets: [],
+    incompleteCounters: [],
     derived: { commandsPerSec: null, keyspaceHitRatio: null },
     ...overrides,
     deltas: { ...base, ...overrides.deltas },
@@ -73,16 +74,80 @@ describe('CounterDeltasTable', () => {
       <CounterDeltasTable
         deltas={deltas({
           coverage: 'partial',
-          nodesTotal: 2,
+          nodesTotal: 3,
           nodesMeasured: 1,
-          resets: [{ node: 'h1:6379', counters: ['keyspace_hits'] }],
+          resets: [{ node: 'h1:6379', reason: 'counter_reset', counters: ['keyspace_hits'] }],
           deltas: { keyspace_misses: 4 },
         })}
       />,
     );
     const text = screen.getByTestId('counter-coverage').textContent ?? '';
-    expect(text).toContain('1 of 2 nodes not measured');
-    expect(text).toContain('counter reset on h1:6379 (excluded)');
+    expect(text).toContain('1 of 3 nodes not measured');
+    expect(text).toContain('stats reset: h1:6379 (excluded)');
+  });
+
+  it('names restarted nodes separately and does not count them as unmeasured', () => {
+    render(
+      <CounterDeltasTable
+        deltas={deltas({
+          coverage: 'partial',
+          nodesTotal: 2,
+          nodesMeasured: 1,
+          resets: [{ node: 'h2:6379', reason: 'restart', counters: [] }],
+        })}
+      />,
+    );
+    const text = screen.getByTestId('counter-coverage').textContent ?? '';
+    expect(text).toContain('restarted: h2:6379 (excluded)');
+    expect(text).not.toContain('not measured');
+  });
+
+  it('lists counters reported by only some nodes', () => {
+    render(
+      <CounterDeltasTable
+        deltas={deltas({
+          coverage: 'partial',
+          nodesTotal: 2,
+          nodesMeasured: 2,
+          incompleteCounters: ['total_error_replies'],
+          deltas: { total_error_replies: 3 },
+        })}
+      />,
+    );
+    expect(screen.getByTestId('counter-coverage').textContent).toContain(
+      'reported by only some nodes: Error replies',
+    );
+  });
+
+  it('says counters are available when a running capture ends', () => {
+    render(<CounterDeltasTable deltas={{ ...unavailable(), pending: 'capture_running' }} />);
+    const text = screen.getByTestId('counter-coverage').textContent ?? '';
+    expect(text).toContain('Available when the capture ends');
+    expect(text).not.toContain('predates');
+  });
+
+  it('explains an interrupted capture instead of the legacy text', () => {
+    render(<CounterDeltasTable deltas={{ ...unavailable(), pending: 'capture_interrupted' }} />);
+    const text = screen.getByTestId('counter-coverage').textContent ?? '';
+    expect(text).toContain('the capture was interrupted');
+    expect(text).not.toContain('predates');
+  });
+
+  it('explains when every node restarted or reset its stats', () => {
+    render(
+      <CounterDeltasTable
+        deltas={deltas({
+          coverage: 'unavailable',
+          nodesTotal: 1,
+          nodesMeasured: 0,
+          windowMs: null,
+          resets: [{ node: 'h1:6379', reason: 'restart', counters: [] }],
+        })}
+      />,
+    );
+    const text = screen.getByTestId('counter-coverage').textContent ?? '';
+    expect(text).toContain('every sampled node restarted or reset its stats');
+    expect(text).toContain('restarted: h1:6379');
   });
 
   it('adds a baseline column and shows baseline-only rows with a dash on the current side', () => {

@@ -21,6 +21,7 @@ function counterDeltas(
     windowMs: coverage === 'unavailable' ? null : 5_000,
     deltas,
     resets: [],
+    incompleteCounters: [],
     derived: { commandsPerSec: null, keyspaceHitRatio: null },
   };
 }
@@ -53,6 +54,31 @@ describe('CrossReferenceSections', () => {
     render(<CrossReferenceSections result={result()} />);
     expect(screen.getByText('INFO counters were not recorded for this capture.')).toBeTruthy();
     expect(screen.queryByText(/follow-up PR/)).toBeNull();
+  });
+
+  it('tells a running capture that counters arrive when it ends', () => {
+    render(
+      <CrossReferenceSections
+        result={result({
+          counterDeltas: { ...counterDeltas('unavailable'), pending: 'capture_running' },
+        })}
+      />,
+    );
+    expect(screen.getByText('INFO counters are available when the capture ends.')).toBeTruthy();
+    expect(screen.queryByText('INFO counters were not recorded for this capture.')).toBeNull();
+  });
+
+  it('explains counters missing from an interrupted capture', () => {
+    render(
+      <CrossReferenceSections
+        result={result({
+          counterDeltas: { ...counterDeltas('unavailable'), pending: 'capture_interrupted' },
+        })}
+      />,
+    );
+    expect(
+      screen.getByText('INFO counters were not recorded: the capture was interrupted before it ended.'),
+    ).toBeTruthy();
   });
 
   it('renders populated ACL counters instead of dashes', () => {

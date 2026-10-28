@@ -46,6 +46,20 @@ describe('capture counter snapshots codec', () => {
     expect(decoded?.nodes[0].end?.counters).toEqual({ keyspace_hits: 9 });
   });
 
+  it('round-trips run_id and uptime and drops malformed values', () => {
+    const decoded = decodeCounterSnapshots({
+      version: 1,
+      nodes: [
+        {
+          start: { capturedAt: 1, counters: {}, runId: 'abc', uptimeSec: 10 },
+          end: { capturedAt: 2, counters: {}, runId: 7, uptimeSec: -1 },
+        },
+      ],
+    });
+    expect(decoded?.nodes[0].start).toEqual({ capturedAt: 1, counters: {}, runId: 'abc', uptimeSec: 10 });
+    expect(decoded?.nodes[0].end).toEqual({ capturedAt: 2, counters: {} });
+  });
+
   it('decodes null and undefined to undefined', () => {
     expect(decodeCounterSnapshots(null)).toBeUndefined();
     expect(decodeCounterSnapshots(undefined)).toBeUndefined();

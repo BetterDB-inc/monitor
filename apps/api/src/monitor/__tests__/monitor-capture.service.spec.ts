@@ -730,7 +730,7 @@ describe('MonitorCaptureService session-boundary counter snapshots', () => {
   });
 
   it('records no_end_sample when MONITOR fails to open on a single session', async () => {
-    const { service, storage } = makeService();
+    const { service } = makeService();
     service.setCounterSampleReader(makeReader());
     service.setMonitorSourceFactory(async () => {
       throw new Error('boom');
@@ -743,5 +743,122 @@ describe('MonitorCaptureService session-boundary counter snapshots', () => {
     const node = persisted.counterSnapshots?.nodes[0];
     expect(node?.start).toBeTruthy();
     expect(node?.endError).toBe('no_end_sample');
+  });
+});
+
+describe('MonitorCaptureService stop while starting', () => {
+  function gate() {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { promise, release };
+  }
+
+  async function waitFor(check: () => boolean): Promise<void> {
+    for (let i = 0; i < 100 && !check(); i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+  }
+
+  it('applies a stop that arrives before MONITOR is open instead of dropping it', async () => {
+    const { service, storage, source } = makeService();
+    const opening = gate();
+    const factory = jest.fn(async () => {
+      await opening.promise;
+      return source;
+    });
+    service.setMonitorSourceFactory(factory);
+
+    const starting = service.startSession({ connectionId: CONNECTION_ID, durationMs: 600_000 });
+    await waitFor(() => factory.mock.calls.length > 0);
+    const [row] = await service.listSessions({ connectionId: CONNECTION_ID });
+    expect(row.status).toBe('running');
+
+    const stopping = service.stopSession(row.id);
+    opening.release();
+    await starting;
+    const stopped = await stopping;
+
+    expect(stopped?.status).toBe('completed');
+    expect(stopped?.terminationReason).toBe('manual_stop');
+    expect(service.hasActiveSessionOn(CONNECTION_ID)).toBe(false);
+    expect((await storage.getCaptureSession(row.id))?.endedAt).toBeDefined();
+  }, 5_000);
+
+  it('returns the failed row when the start it waited on fails', async () => {
+    const { service } = makeService();
+    const opening = gate();
+    const factory = jest.fn(async () => {
+      await opening.promise;
+      throw new Error('connect ECONNREFUSED');
+    });
+    service.setMonitorSourceFactory(factory);
+
+    const starting = service.startSession({ connectionId: CONNECTION_ID });
+    await waitFor(() => factory.mock.calls.length > 0);
+    const [row] = await service.listSessions({ connectionId: CONNECTION_ID });
+
+    const stopping = service.stopSession(row.id);
+    opening.release();
+    await expect(starting).rejects.toThrow('ECONNREFUSED');
+    const stopped = await stopping;
+    expect(stopped?.status).toBe('failed');
+    expect(service.hasActiveSessionOn(CONNECTION_ID)).toBe(false);
+  });
+
+  it('isSessionLive tracks starting, running and stopped sessions', async () => {
+    const { service, source } = makeService();
+    const opening = gate();
+    const factory = jest.fn(async () => {
+      await opening.promise;
+      return source;
+    });
+    service.setMonitorSourceFactory(factory);
+
+    const starting = service.startSession({ connectionId: CONNECTION_ID });
+    await waitFor(() => factory.mock.calls.length > 0);
+    const [row] = await service.listSessions({ connectionId: CONNECTION_ID });
+    expect(service.isSessionLive(row.id)).toBe(true);
+
+    opening.release();
+    await starting;
+    expect(service.isSessionLive(row.id)).toBe(true);
+
+    await service.stopSession(row.id);
+    expect(service.isSessionLive(row.id)).toBe(false);
+    expect(service.isSessionLive('unknown-session')).toBe(false);
+  });
+
+  it('the default reader issues one INFO with no section and records process identity', async () => {
+    const info = jest
+      .fn()
+      .mockResolvedValue(
+        '# Server\r\nrun_id:abc\r\nuptime_in_seconds:9\r\n# Stats\r\ntotal_commands_processed:1\r\n',
+      );
+    const registry = {
+      get: jest.fn().mockReturnValue({ getClient: () => ({ info }) }),
+    } as unknown as ConnectionRegistry;
+    const service = new MonitorCaptureService(
+      new MemoryAdapter(),
+      registry,
+      makeDispatcher() as unknown as WebhookDispatcherService,
+      {
+        discoverNodes: jest.fn().mockResolvedValue([]),
+        getNodeConnection: jest.fn(),
+      } as unknown as ClusterDiscoveryService,
+    );
+    service.setMonitorSourceFactory(async () => new FakeSource());
+
+    const session = await service.startSession({ connectionId: CONNECTION_ID });
+    const stopped = await service.stopSession(session.id);
+
+    expect(info).toHaveBeenCalledTimes(2);
+    for (const call of info.mock.calls) {
+      expect(call).toEqual([]);
+    }
+    const node = stopped?.counterSnapshots?.nodes[0];
+    expect(node?.start).toMatchObject({ runId: 'abc', uptimeSec: 9 });
+    expect(node?.end).toMatchObject({ runId: 'abc', uptimeSec: 9 });
   });
 });
