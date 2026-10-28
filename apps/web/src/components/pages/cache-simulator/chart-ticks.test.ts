@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { byteTicks, dayTicks } from './chart-ticks';
+import { byteTicks, dayAxis, dayTicks } from './chart-ticks';
 
 const GB = 1024 ** 3;
 const MB = 1024 ** 2;
@@ -29,11 +29,22 @@ describe('dayTicks', () => {
     expect(dayTicks(180)).toEqual([0, 30, 60, 90, 120, 150, 180]);
   });
 
+  it('spaces the six-month horizon by month', () => {
+    expect(dayTicks(182)).toEqual([0, 30, 60, 90, 120, 150, 180]);
+  });
+
   it('spaces a month by week', () => {
     expect(dayTicks(30)).toEqual([0, 7, 14, 21, 28]);
   });
 
   it('spaces a year by quarter', () => {
     expect(dayTicks(365)).toEqual([0, 90, 180, 270, 360]);
+  });
+});
+
+describe('dayAxis', () => {
+  it('ends the domain at the horizon when the last tick falls short of it', () => {
+    expect(dayAxis(30)).toEqual({ domain: [0, 30], ticks: dayTicks(30) });
+    expect(dayAxis(182)).toEqual({ domain: [0, 182], ticks: dayTicks(182) });
   });
 });
