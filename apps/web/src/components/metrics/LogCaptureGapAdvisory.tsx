@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { AlertTriangle, Info } from 'lucide-react';
 import {
   LOG_CAPTURE_THRESHOLD_PARAMETER,
@@ -21,6 +22,8 @@ const CAUSE_LABELS: Record<CaptureGapCause, string> = {
   monitor_offline: 'while BetterDB was not polling',
 };
 
+const CAUSE_ORDER: readonly CaptureGapCause[] = ['server_evicted', 'fetch_limit', 'monitor_offline'];
+
 function formatCount(value: number): string {
   return value.toLocaleString();
 }
@@ -32,43 +35,11 @@ function formatWindow(windowMs: number): string {
   return `${hours} hours`;
 }
 
-function CauseBreakdown({ log }: { log: LogCaptureLogSummary }) {
-  const causes = (Object.keys(log.missingByCause) as CaptureGapCause[]).filter(
-    (cause) => log.missingByCause[cause] > 0,
-  );
-  if (causes.length < 2) return null;
-  return (
-    <ul className="mt-2 space-y-0.5 text-xs text-muted-foreground">
-      {causes.map((cause) => (
-        <li key={cause}>
-          {formatCount(log.missingByCause[cause])} {CAUSE_LABELS[cause]}
-        </li>
-      ))}
-    </ul>
-  );
+function ThresholdCode({ log }: { log: LogCaptureLogSummary }) {
+  return <code className="font-mono">{LOG_CAPTURE_THRESHOLD_PARAMETER[log.logType]}</code>;
 }
 
-function Remedy({ log, maxFetchPerPoll }: { log: LogCaptureLogSummary; maxFetchPerPoll: number }) {
-  if (log.dominantCause === 'monitor_offline') {
-    return (
-      <p>
-        These entries were overwritten while BetterDB was not polling (a restart or an outage).
-        No server change is needed.
-      </p>
-    );
-  }
-
-  if (log.dominantCause === 'fetch_limit') {
-    return (
-      <p>
-        More than {formatCount(maxFetchPerPoll)} entries were logged between two polls, which is
-        more than BetterDB reads in one poll. Raise{' '}
-        <code className="font-mono">{LOG_CAPTURE_THRESHOLD_PARAMETER[log.logType]}</code> so only
-        the commands worth investigating are logged.
-      </p>
-    );
-  }
-
+function EvictedRemedy({ log }: { log: LogCaptureLogSummary }) {
   const retained = log.currentMaxLen === null ? 'only the newest' : `only the newest ${formatCount(log.currentMaxLen)}`;
   return (
     <>
@@ -77,20 +48,77 @@ function Remedy({ log, maxFetchPerPoll }: { log: LogCaptureLogSummary; maxFetchP
         and more than that were logged between two polls, so the oldest were overwritten before
         BetterDB could read them.
       </p>
-      {log.recommendedMaxLen !== null ? (
+      {log.burstExceedsRecommendation && (
         <p className="mt-1">
-          Raise it to at least {formatCount(log.recommendedMaxLen)}:{' '}
-          <code className="font-mono">
-            CONFIG SET {log.configParameter} {log.recommendedMaxLen}
-          </code>{' '}
-          (on managed services, change it in the parameter group instead).
-        </p>
-      ) : (
-        <p className="mt-1">
-          The current setting already covers the largest burst seen, so new gaps should stop.
+          Bursts of up to {formatCount(log.peakEvictedArrivals)} entries arrived between polls, more
+          than any retained length BetterDB recommends. Raise <ThresholdCode log={log} /> so fewer
+          commands are logged.
         </p>
       )}
+      {log.recommendedMaxLen !== null ? (
+        <>
+          <p className="mt-1">
+            Raise it to at least {formatCount(log.recommendedMaxLen)}:{' '}
+            <code className="font-mono">
+              CONFIG SET {log.configParameter} {log.recommendedMaxLen}
+            </code>
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            On ElastiCache and MemoryDB, change it in the parameter group instead. On Redis Cloud,
+            CONFIG SET works but the allowed range is 128-1024
+            {log.recommendedMaxLen > 1024 ? '; use 1024 there and raise the threshold instead' : ''}.
+          </p>
+        </>
+      ) : (
+        !log.burstExceedsRecommendation && (
+          <p className="mt-1">
+            The current setting already covers the largest burst seen, so new gaps should stop.
+          </p>
+        )
+      )}
     </>
+  );
+}
+
+function CauseBlock({
+  cause,
+  log,
+  maxFetchPerPoll,
+  onlyCause,
+}: {
+  cause: CaptureGapCause;
+  log: LogCaptureLogSummary;
+  maxFetchPerPoll: number;
+  onlyCause: boolean;
+}) {
+  let body: ReactNode;
+  if (cause === 'server_evicted') {
+    body = <EvictedRemedy log={log} />;
+  } else if (cause === 'fetch_limit') {
+    body = (
+      <p>
+        More than {formatCount(maxFetchPerPoll)} entries were logged between two polls, which is
+        more than BetterDB reads in one poll. Raise <ThresholdCode log={log} /> so only the commands
+        worth investigating are logged.
+      </p>
+    );
+  } else {
+    body = (
+      <p>
+        These entries were overwritten while BetterDB was not polling (a restart or an outage).
+        {onlyCause ? ' No server change is needed.' : ''}
+      </p>
+    );
+  }
+  return (
+    <div className={onlyCause ? undefined : 'mt-2'} data-testid={`log-capture-cause-${cause}`}>
+      {!onlyCause && (
+        <p className="text-xs font-medium text-muted-foreground">
+          {formatCount(log.missingByCause[cause])} {CAUSE_LABELS[cause]}
+        </p>
+      )}
+      {body}
+    </div>
   );
 }
 
@@ -111,7 +139,11 @@ export function LogCaptureGapAdvisory({
     return null;
   }
 
-  const offlineOnly = log.dominantCause === 'monitor_offline';
+  const causes = CAUSE_ORDER.filter((cause) => log.missingByCause[cause] > 0);
+  const offlineOnly =
+    log.missingByCause.server_evicted === 0 &&
+    log.missingByCause.fetch_limit === 0 &&
+    log.missingByCause.monitor_offline > 0;
   const Icon = offlineOnly ? Info : AlertTriangle;
   const title = `${formatCount(log.missingEntries)} ${LOG_LABELS[logType]} ${
     log.missingEntries === 1 ? 'entry was' : 'entries were'
@@ -122,8 +154,15 @@ export function LogCaptureGapAdvisory({
       <Icon className={offlineOnly ? 'w-4 h-4' : 'w-4 h-4 text-yellow-500'} />
       <AlertTitle>{title}</AlertTitle>
       <AlertDescription>
-        <Remedy log={log} maxFetchPerPoll={summary.maxFetchPerPoll} />
-        <CauseBreakdown log={log} />
+        {causes.map((cause) => (
+          <CauseBlock
+            key={cause}
+            cause={cause}
+            log={log}
+            maxFetchPerPoll={summary.maxFetchPerPoll}
+            onlyCause={causes.length === 1}
+          />
+        ))}
         {log.lastGapAt !== null && (
           <p className="mt-1 text-xs text-muted-foreground">
             {log.gapCount === 1 ? '1 gap' : `${formatCount(log.gapCount)} gaps`} · last{' '}
@@ -132,5 +171,29 @@ export function LogCaptureGapAdvisory({
         )}
       </AlertDescription>
     </Alert>
+  );
+}
+
+/**
+ * Advisories for logs with retained gaps that this page cannot show (for
+ * example command log gaps after the server lost COMMANDLOG), so history is
+ * never hidden.
+ */
+export function UnviewableLogGapAdvisories({
+  summary,
+  viewableLogTypes,
+}: {
+  summary: LogCaptureSummary | null | undefined;
+  viewableLogTypes: readonly CapturedLogType[];
+}) {
+  if (summary === null || summary === undefined) return null;
+  return (
+    <>
+      {summary.logs
+        .filter((log) => log.missingEntries > 0 && !viewableLogTypes.includes(log.logType))
+        .map((log) => (
+          <LogCaptureGapAdvisory key={log.logType} summary={summary} logType={log.logType} />
+        ))}
+    </>
   );
 }

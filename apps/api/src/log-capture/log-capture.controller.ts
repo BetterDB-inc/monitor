@@ -37,7 +37,8 @@ export class LogCaptureController {
 
   @Get('summary')
   @ApiOperation({
-    summary: 'Slow log / command log entries the server evicted before BetterDB could read them',
+    summary:
+      'Slow log / command log entries BetterDB missed, by cause (server eviction, per-poll read limit, monitor offline)',
   })
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: false })
   @ApiQuery({

@@ -13,7 +13,15 @@ import { analyzeScanSkew, ScanSkewReport } from './scan-skew-analyzer';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
-import { LOG_CATCH_UP_MAX_FETCH, LOG_POLL_BATCH, planCatchUpFetch } from '../log-capture/capture-gap';
+import {
+  LOG_CATCH_UP_MAX_FETCH,
+  LOG_POLL_BATCH,
+  mergeById,
+  planCatchUpFetch,
+  readRunId,
+} from '../log-capture/capture-gap';
+import { MaxLenCacheEntry, readServerMaxLen } from '../log-capture/max-len-reader';
+import { LOG_CAPTURE_MAX_LEN_PARAMETER } from '@betterdb/shared';
 import { recordCaptureGap } from '../log-capture/capture-gap-recorder';
 
 @Injectable()
@@ -34,6 +42,12 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
   // connectionId -> (type -> end of the last successful poll). A missing entry
   // means this process has not completed a poll yet (classifies capture gaps).
   private lastPollAt = new Map<string, Map<CommandLogType, number>>();
+
+  // connectionId -> server run_id seen on the previous poll (changes on restart)
+  private lastRunId = new Map<string, string>();
+
+  // Cached `*-max-len` reads (only used to split fetch_limit gaps)
+  private maxLenCache = new Map<string, MaxLenCacheEntry>();
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -100,6 +114,17 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
       }
     }
 
+    // A restarted server restarts its id counters, which can climb past
+    // lastSeenId before the next poll; run_id tells the two cases apart.
+    const runId = await readRunId(ctx.client);
+    const previousRunId = this.lastRunId.get(ctx.connectionId);
+    const restarted = runId !== null && previousRunId !== undefined && runId !== previousRunId;
+    if (runId !== null) this.lastRunId.set(ctx.connectionId, runId);
+    if (restarted) {
+      this.logger.log(`Commandlog for ${ctx.connectionName}: server restarted (run_id changed), resetting capture baseline`);
+      for (const type of this.LOG_TYPES) connectionLastSeenIds.set(type, null);
+    }
+
     const now = Date.now();
     const connectionCachedEntries = this.cachedEntries.get(ctx.connectionId)!;
     const connectionCachedAnalysis = this.cachedAnalysis.get(ctx.connectionId)!;
@@ -107,7 +132,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
     for (const type of this.LOG_TYPES) {
       try {
         const batch = await ctx.client.getCommandLog(LOG_POLL_BATCH, type);
-        let entries = batch;
+        let entries: CommandLogEntry[] = batch;
         const lastSeenId = connectionLastSeenIds.get(type) ?? null;
 
         // Update cache for Prometheus metrics (always the regular batch, so the
@@ -135,6 +160,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
         // that arrived since the last poll, read back to the last seen id (up
         // to LOG_CATCH_UP_MAX_FETCH) instead of silently skipping the rest.
         let requested = LOG_POLL_BATCH;
+        let received = batch.length;
         const catchUp = planCatchUpFetch({
           lastSeenId: currentLastSeenId,
           batch,
@@ -142,8 +168,17 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
           maxFetch: LOG_CATCH_UP_MAX_FETCH,
         });
         if (catchUp !== null) {
-          requested = catchUp;
-          entries = await ctx.client.getCommandLog(catchUp, type);
+          try {
+            const extra = await ctx.client.getCommandLog(catchUp, type);
+            requested = catchUp;
+            received = extra.length;
+            entries = mergeById(batch, extra);
+          } catch (error) {
+            // The poll saves the regular batch and advances normally.
+            this.logger.warn(
+              `Catch-up read failed for ${ctx.connectionName} (${type}), keeping the regular batch: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
         }
 
         // Filter out entries we've already seen
@@ -152,7 +187,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
           : entries;
 
         if (newEntries.length === 0) {
-          pollTimes.set(type, now);
+          pollTimes.set(type, Date.now());
           continue;
         }
 
@@ -180,6 +215,11 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
           lastSeenId: currentLastSeenId,
           entries,
           requested,
+          received,
+          readServerMaxLen: () => {
+            const parameter = LOG_CAPTURE_MAX_LEN_PARAMETER[`commandlog-${type}`];
+            return readServerMaxLen(ctx.client, parameter, this.maxLenCache, `${ctx.connectionId}:${parameter}`, Date.now());
+          },
           previousPollAt: pollTimes.get(type) ?? null,
           intervalMs: this.getIntervalMs(),
           now,
@@ -190,7 +230,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
         if (currentLastSeenId === null || maxId > currentLastSeenId) {
           connectionLastSeenIds.set(type, maxId);
         }
-        pollTimes.set(type, now);
+        pollTimes.set(type, Date.now());
 
         this.logger.debug(`Saved ${saved} new ${type} command log entries for ${ctx.connectionName}`);
       } catch (error) {
@@ -215,6 +255,10 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
   protected onConnectionRemoved(connectionId: string): void {
     this.lastSeenIds.delete(connectionId);
     this.lastPollAt.delete(connectionId);
+    this.lastRunId.delete(connectionId);
+    for (const type of this.LOG_TYPES) {
+      this.maxLenCache.delete(`${connectionId}:${LOG_CAPTURE_MAX_LEN_PARAMETER[`commandlog-${type}`]}`);
+    }
     this.cachedEntries.delete(connectionId);
     this.cachedAnalysis.delete(connectionId);
     this.lastCacheUpdate.delete(connectionId);

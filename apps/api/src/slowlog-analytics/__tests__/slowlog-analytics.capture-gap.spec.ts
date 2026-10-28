@@ -6,7 +6,7 @@ import type { ConnectionRegistry } from '../../connections/connection-registry.s
 import type { SettingsService } from '../../settings/settings.service';
 import type { RuntimeCapabilityTracker } from '../../connections/runtime-capability-tracker.service';
 import type { ConnectionContext } from '../../common/services/multi-connection-poller';
-import { LOG_CATCH_UP_MAX_FETCH } from '../../log-capture/capture-gap';
+import { LOG_CAPTURE_AUX_TIMEOUT_MS, LOG_CATCH_UP_MAX_FETCH } from '../../log-capture/capture-gap';
 
 const T0 = 1_800_000_000_000;
 const INTERVAL = 30_000;
@@ -40,6 +40,8 @@ describe('SlowLogAnalyticsService capture gaps', () => {
   let gapRepo: { insert: jest.Mock };
   let service: SlowLogAnalyticsService;
   let getSlowLog: jest.Mock;
+  let getInfo: jest.Mock;
+  let getConfigValue: jest.Mock;
   let now: number;
 
   const ctx = (): ConnectionContext =>
@@ -48,7 +50,12 @@ describe('SlowLogAnalyticsService capture gaps', () => {
       connectionName: 'primary',
       host: 'localhost',
       port: 6379,
-      client: { getSlowLog } as unknown as ConnectionContext['client'],
+      client: {
+        getSlowLog,
+        getInfo,
+        getCapabilities: () => ({ hasConfig: true }),
+        getConfigValue,
+      } as unknown as ConnectionContext['client'],
     }) as ConnectionContext;
 
   const poll = (): Promise<void> =>
@@ -68,6 +75,8 @@ describe('SlowLogAnalyticsService capture gaps', () => {
       getLogCaptureGapRepository: jest.fn().mockReturnValue(gapRepo),
     };
     getSlowLog = jest.fn();
+    getInfo = jest.fn().mockResolvedValue({ server: { run_id: 'run-A' } });
+    getConfigValue = jest.fn().mockResolvedValue(null);
     service = new SlowLogAnalyticsService(
       { getDefaultId: jest.fn().mockReturnValue('conn-1') } as unknown as ConnectionRegistry,
       storage as unknown as StoragePort,
@@ -182,6 +191,140 @@ describe('SlowLogAnalyticsService capture gaps', () => {
 
     expect(getSlowLog).toHaveBeenCalledTimes(1);
     expect(gapRepo.insert).not.toHaveBeenCalled();
+  });
+
+  it('merges the regular batch with the catch-up read when the server advanced in between', async () => {
+    storage.getLatestSlowLogId.mockResolvedValue(100);
+    getSlowLog.mockImplementation(serverLog(1, 100));
+    await poll();
+
+    now = T0 + INTERVAL;
+    getSlowLog.mockReset();
+    getSlowLog
+      .mockImplementationOnce(serverLog(103, 230))
+      .mockImplementationOnce(serverLog(151, 280));
+    await poll();
+
+    expect(getSlowLog.mock.calls).toEqual([[128], [130]]);
+    const ids = savedIds(0);
+    expect(ids).toHaveLength(178);
+    expect(Math.min(...ids)).toBe(103);
+    expect(Math.max(...ids)).toBe(280);
+    expect(insertedGaps()).toEqual([
+      expect.objectContaining({ firstMissingId: 101, lastMissingId: 102, missingCount: 2, cause: 'server_evicted' }),
+    ]);
+    expect(service.getLastSeenId('conn-1')).toBe(280);
+  });
+
+  it('keeps the regular batch when the catch-up read fails', async () => {
+    storage.getLatestSlowLogId.mockResolvedValue(100);
+    getSlowLog
+      .mockImplementationOnce(serverLog(273, 400))
+      .mockRejectedValueOnce(new Error('timeout'));
+
+    await expect(poll()).resolves.toBeUndefined();
+
+    expect(savedIds(0)).toHaveLength(128);
+    expect(service.getLastSeenId('conn-1')).toBe(400);
+    const logger = (service as unknown as { logger: { warn: jest.Mock } }).logger;
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Catch-up read failed'));
+  });
+
+  it('splits a fetch_limit hole using the server max-len', async () => {
+    storage.getLatestSlowLogId.mockResolvedValue(0);
+    getSlowLog.mockImplementation(serverLog(0, 0));
+    await poll();
+
+    now = T0 + INTERVAL;
+    getConfigValue.mockResolvedValue('4096');
+    getSlowLog.mockImplementation(serverLog(1, 10_000));
+    await poll();
+
+    expect(getConfigValue).toHaveBeenCalledWith('slowlog-max-len');
+    expect(insertedGaps().map((gap) => [gap.cause, gap.firstMissingId, gap.lastMissingId])).toEqual([
+      ['server_evicted', 1, 5_904],
+      ['fetch_limit', 5_905, 8_976],
+    ]);
+  });
+
+  describe('server restart detection (run_id)', () => {
+    it('saves everything and records no gap when run_id changes and new ids pass lastSeenId', async () => {
+      storage.getLatestSlowLogId.mockResolvedValue(100);
+      getSlowLog.mockImplementation(serverLog(1, 110));
+      await poll();
+
+      now = T0 + INTERVAL;
+      getInfo.mockResolvedValue({ server: { run_id: 'run-B' } });
+      // The restarted server already logged past lastSeenId (110) with a 128-entry log.
+      getSlowLog.mockImplementation(serverLog(73, 200));
+      await poll();
+
+      expect(getSlowLog).toHaveBeenCalledTimes(2);
+      expect(savedIds(1)).toHaveLength(128);
+      expect(gapRepo.insert).not.toHaveBeenCalled();
+      expect(service.getLastSeenId('conn-1')).toBe(200);
+    });
+
+    it('keeps the existing gap behaviour when run_id is unchanged', async () => {
+      storage.getLatestSlowLogId.mockResolvedValue(100);
+      getSlowLog.mockImplementation(serverLog(1, 110));
+      await poll();
+
+      now = T0 + INTERVAL;
+      getSlowLog.mockImplementation(serverLog(283, 410));
+      await poll();
+
+      expect(insertedGaps()).toHaveLength(1);
+      expect(insertedGaps()[0].cause).toBe('server_evicted');
+    });
+
+    it('falls back to id-based detection when INFO fails', async () => {
+      getInfo.mockRejectedValue(new Error('NOPERM'));
+      storage.getLatestSlowLogId.mockResolvedValue(100);
+      getSlowLog.mockImplementation(serverLog(1, 110));
+      await poll();
+
+      now = T0 + INTERVAL;
+      getSlowLog.mockImplementation(serverLog(283, 410));
+      await expect(poll()).resolves.toBeUndefined();
+
+      expect(insertedGaps()).toHaveLength(1);
+      expect(service.getLastSeenId('conn-1')).toBe(410);
+    });
+
+    it('forgets the run_id when the connection is removed', async () => {
+      storage.getLatestSlowLogId.mockResolvedValue(100);
+      getSlowLog.mockImplementation(serverLog(1, 110));
+      await poll();
+      (service as unknown as { onConnectionRemoved(id: string): void }).onConnectionRemoved('conn-1');
+
+      getInfo.mockResolvedValue({ server: { run_id: 'run-B' } });
+      storage.getLatestSlowLogId.mockResolvedValue(110);
+      getSlowLog.mockImplementation(serverLog(283, 410));
+      await poll();
+
+      // No previous run_id: the id-based path decides, so the hole is still reported.
+      expect(insertedGaps()).toHaveLength(1);
+    });
+  });
+
+  it('stops waiting for a hung gap insert and still advances the last seen id', async () => {
+    jest.useFakeTimers({ doNotFake: ['Date'] });
+    try {
+      storage.getLatestSlowLogId.mockResolvedValue(100);
+      gapRepo.insert.mockReturnValue(new Promise(() => undefined));
+      getSlowLog.mockImplementation(serverLog(273, 400));
+
+      const pending = poll();
+      await jest.advanceTimersByTimeAsync(LOG_CAPTURE_AUX_TIMEOUT_MS);
+      await expect(pending).resolves.toBeUndefined();
+
+      expect(service.getLastSeenId('conn-1')).toBe(400);
+      const logger = (service as unknown as { logger: { warn: jest.Mock } }).logger;
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to record'));
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('still advances the last seen id when the gap cannot be stored', async () => {

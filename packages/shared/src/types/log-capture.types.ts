@@ -58,7 +58,11 @@ export interface LogCaptureGap {
   lastMissingId: number;
   missingCount: number;
   cause: CaptureGapCause;
-  /** New entries BetterDB did capture in the same poll. */
+  /**
+   * Entries of the same burst that are not part of this gap. For `server_evicted`
+   * the entries the server still held (read or not), so `missingCount + capturedCount`
+   * is the full burst size; otherwise the new entries BetterDB read in the same poll.
+   */
   capturedCount: number;
   /** Epoch ms of the previous successful poll of this log, or null when unknown (process restart). */
   previousPollAt: number | null;
@@ -93,6 +97,10 @@ export interface LogCaptureLogSummary {
    * seen in the window, or null when no server-side change would help.
    */
   recommendedMaxLen: number | null;
+  /** Largest server_evicted burst (entries arrived between two polls) in the window; 0 if none. */
+  peakEvictedArrivals: number;
+  /** True when the largest evicting burst exceeds even the highest value BetterDB recommends. */
+  burstExceedsRecommendation: boolean;
 }
 
 export interface LogCaptureSummary {

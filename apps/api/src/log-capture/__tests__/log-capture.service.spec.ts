@@ -4,7 +4,7 @@ import { MemoryAdapter } from '../../storage/adapters/memory.adapter';
 import type { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { LogCaptureService } from '../log-capture.service';
 import { LogCaptureController, DEFAULT_WINDOW_HOURS } from '../log-capture.controller';
-import { LOG_CATCH_UP_MAX_FETCH } from '../capture-gap';
+import { LOG_CAPTURE_AUX_TIMEOUT_MS, LOG_CATCH_UP_MAX_FETCH } from '../capture-gap';
 
 const NOW = 1_800_000_000_000;
 const HOUR = 60 * 60 * 1000;
@@ -125,6 +125,37 @@ describe('LogCaptureService', () => {
     (Date.now as jest.Mock).mockReturnValue(NOW + 5 * 60_000);
     await service.getSummary('conn-1', 24 * HOUR);
     expect(getConfigValue).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-reads max-len when a gap newer than the cached read exists', async () => {
+    const repo = storage.getLogCaptureGapRepository();
+    await repo.insert(gap());
+    await service.getSummary('conn-1', 24 * HOUR);
+    expect(getConfigValue).toHaveBeenCalledTimes(1);
+
+    // An operator raised the setting after the first read; a fresh gap arrived since.
+    getConfigValue.mockResolvedValue('4096');
+    (Date.now as jest.Mock).mockReturnValue(NOW + 60_000);
+    await repo.insert(gap({ detectedAt: NOW + 30_000 }));
+    const [slowlog] = (await service.getSummary('conn-1', 24 * HOUR)).logs;
+
+    expect(getConfigValue).toHaveBeenCalledTimes(2);
+    expect(slowlog.currentMaxLen).toBe(4096);
+  });
+
+  it('returns with currentMaxLen null when CONFIG GET never resolves', async () => {
+    jest.useFakeTimers({ doNotFake: ['Date'] });
+    try {
+      await storage.getLogCaptureGapRepository().insert(gap());
+      getConfigValue.mockReturnValue(new Promise(() => undefined));
+      const pending = service.getSummary('conn-1', 24 * HOUR);
+      await jest.advanceTimersByTimeAsync(LOG_CAPTURE_AUX_TIMEOUT_MS);
+      const [slowlog] = (await pending).logs;
+      expect(slowlog.currentMaxLen).toBeNull();
+      expect(slowlog.recommendedMaxLen).toBe(1024);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('does not fail when the connection is not registered any more', async () => {

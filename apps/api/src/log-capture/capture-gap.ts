@@ -1,6 +1,7 @@
 import type { CaptureGapCause, CapturedLogType, LogCaptureLogSummary } from '@betterdb/shared';
 import { LOG_CAPTURE_MAX_LEN_PARAMETER } from '@betterdb/shared';
 import type { LogCaptureGapAggregate } from '../common/interfaces/log-capture-gap-repository.interface';
+import { withTimeout } from '../common/utils/with-timeout';
 
 /** Entries the slowlog and commandlog pollers read on every poll (unchanged steady state). */
 export const LOG_POLL_BATCH = 128;
@@ -13,6 +14,9 @@ export const LOG_POLL_BATCH = 128;
  */
 export const LOG_CATCH_UP_MAX_FETCH = 1024;
 
+/** Upper bound on any server round-trip made only to label or explain a gap. */
+export const LOG_CAPTURE_AUX_TIMEOUT_MS = 2_000;
+
 /** A poll this many intervals late means BetterDB itself was not watching. */
 export const MONITOR_OFFLINE_INTERVAL_FACTOR = 3;
 
@@ -22,6 +26,30 @@ export const MAX_RECOMMENDED_MAX_LEN = 8192;
 
 interface IdEntry {
   id: number;
+}
+
+/** Union of two newest-first reads by id, newest first, no duplicates. */
+export function mergeById<T extends { id: number }>(a: readonly T[], b: readonly T[]): T[] {
+  const byId = new Map<number, T>();
+  for (const e of a) byId.set(e.id, e);
+  for (const e of b) if (!byId.has(e.id)) byId.set(e.id, e);
+  return [...byId.values()].sort((x, y) => y.id - x.id);
+}
+
+/**
+ * The server's `run_id` (changes on every restart), or null when INFO is
+ * blocked, slow or fails. Never throws.
+ */
+export async function readRunId(client: {
+  getInfo(sections?: string[]): Promise<Record<string, unknown>>;
+}): Promise<string | null> {
+  try {
+    const info = await withTimeout(client.getInfo(['server']), LOG_CAPTURE_AUX_TIMEOUT_MS);
+    const runId = (info.server as Record<string, unknown> | undefined)?.run_id;
+    return typeof runId === 'string' && runId !== '' ? runId : null;
+  } catch {
+    return null;
+  }
 }
 
 function maxId(entries: readonly IdEntry[]): number {
@@ -65,6 +93,11 @@ export interface DetectedCaptureGap {
   lastMissingId: number;
   missingCount: number;
   cause: CaptureGapCause;
+  /**
+   * For `server_evicted`: entries of the burst the server still held (read or
+   * not), so `missingCount + capturedCount` is the full burst size. For the
+   * other causes: new entries actually read in this poll.
+   */
   capturedCount: number;
 }
 
@@ -94,22 +127,30 @@ export function classifyGapCause(input: {
 
 /**
  * Find the hole between the last id BetterDB persisted and the oldest new id
- * it just read. Returns null when there is no baseline, nothing new, the id
+ * it just read. Returns [] when there is no baseline, nothing new, the id
  * sequence restarted (newest <= lastSeenId), or the read is contiguous.
+ *
+ * `entries` is the union of every read in the poll; `received` is how many
+ * entries the read that bounds the window returned. When the hole is a
+ * `fetch_limit` and the server's `*-max-len` is known, it is split into the
+ * part the server had already evicted and the part it still held but BetterDB
+ * did not read.
  */
 export function detectCaptureGap(input: {
   lastSeenId: number | null;
   entries: readonly IdEntry[];
   requested: number;
+  received: number;
   maxFetch: number;
   now: number;
   previousPollAt: number | null;
   intervalMs: number;
-}): DetectedCaptureGap | null {
+  serverMaxLen?: number | null;
+}): DetectedCaptureGap[] {
   const { lastSeenId, entries } = input;
-  if (lastSeenId === null || entries.length === 0) return null;
+  if (lastSeenId === null || entries.length === 0) return [];
   const newest = maxId(entries);
-  if (!(newest > lastSeenId)) return null;
+  if (!(newest > lastSeenId)) return [];
 
   let oldestNew = Infinity;
   let capturedCount = 0;
@@ -120,25 +161,45 @@ export function detectCaptureGap(input: {
     }
   }
 
-  const firstMissingId = lastSeenId + 1;
-  const lastMissingId = oldestNew - 1;
-  if (lastMissingId < firstMissingId) return null;
+  const first = lastSeenId + 1;
+  const last = oldestNew - 1;
+  if (last < first) return [];
 
-  return {
+  const needed = newest - lastSeenId;
+  const cause = classifyGapCause({
+    previousPollAt: input.previousPollAt,
+    now: input.now,
+    intervalMs: input.intervalMs,
+    requested: input.requested,
+    received: input.received,
+    needed,
+    maxFetch: input.maxFetch,
+  });
+  const piece = (
+    firstMissingId: number,
+    lastMissingId: number,
+    pieceCause: CaptureGapCause,
+    pieceCaptured: number,
+  ): DetectedCaptureGap => ({
     firstMissingId,
     lastMissingId,
     missingCount: lastMissingId - firstMissingId + 1,
-    capturedCount,
-    cause: classifyGapCause({
-      previousPollAt: input.previousPollAt,
-      now: input.now,
-      intervalMs: input.intervalMs,
-      requested: input.requested,
-      received: entries.length,
-      needed: newest - lastSeenId,
-      maxFetch: input.maxFetch,
-    }),
-  };
+    cause: pieceCause,
+    capturedCount: pieceCaptured,
+  });
+
+  const serverMaxLen = input.serverMaxLen ?? null;
+  if (cause !== 'fetch_limit' || serverMaxLen === null) {
+    return [piece(first, last, cause, capturedCount)];
+  }
+
+  // The server keeps the newest `serverMaxLen` entries: ids at or below this were already gone.
+  const evictedLast = newest - serverMaxLen;
+  if (evictedLast < first) return [piece(first, last, 'fetch_limit', capturedCount)];
+  const evicted = (to: number): DetectedCaptureGap =>
+    piece(first, to, 'server_evicted', needed - (to - first + 1));
+  if (evictedLast >= last) return [evicted(last)];
+  return [evicted(evictedLast), piece(evictedLast + 1, last, 'fetch_limit', capturedCount)];
 }
 
 function nextPowerOfTwo(value: number): number {
@@ -153,7 +214,9 @@ function nextPowerOfTwo(value: number): number {
  * to [MIN_RECOMMENDED_MAX_LEN, MAX_RECOMMENDED_MAX_LEN]. Only `server_evicted`
  * gaps count: raising the server setting cannot fix a BetterDB outage or the
  * per-poll read cap. Returns null when there was no evicting burst or the
- * current setting already meets the suggestion.
+ * current setting already meets the suggestion. A burst larger than the
+ * highest suggestion is flagged separately (`burstExceedsRecommendation`), so
+ * a null here does not mean the setting is known to cover the burst.
  */
 export function recommendMaxLen(peakEvictedArrivals: number, currentMaxLen: number | null): number | null {
   if (!(peakEvictedArrivals > 0)) return null;
@@ -210,5 +273,7 @@ export function summarizeLogGaps(
     configParameter: LOG_CAPTURE_MAX_LEN_PARAMETER[logType],
     currentMaxLen,
     recommendedMaxLen: recommendMaxLen(peakEvictedArrivals, currentMaxLen),
+    peakEvictedArrivals,
+    burstExceedsRecommendation: peakEvictedArrivals > MAX_RECOMMENDED_MAX_LEN,
   };
 }

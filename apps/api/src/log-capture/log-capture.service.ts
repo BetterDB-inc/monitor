@@ -7,12 +7,11 @@ import {
   type LogCaptureGapQuery,
   type LogCaptureSummary,
 } from '@betterdb/shared';
+import type { LogCaptureGapAggregate } from '../common/interfaces/log-capture-gap-repository.interface';
 import type { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { LOG_CATCH_UP_MAX_FETCH, summarizeLogGaps } from './capture-gap';
-
-/** CONFIG GET results are cached this long per connection and parameter. */
-const MAX_LEN_CACHE_TTL_MS = 5 * 60_000;
+import { MaxLenCacheEntry, readServerMaxLen } from './max-len-reader';
 
 const COMMANDLOG_TYPES: ReadonlySet<CapturedLogType> = new Set([
   'commandlog-slow',
@@ -23,7 +22,7 @@ const COMMANDLOG_TYPES: ReadonlySet<CapturedLogType> = new Set([
 @Injectable()
 export class LogCaptureService {
   private readonly logger = new Logger(LogCaptureService.name);
-  private readonly maxLenCache = new Map<string, { value: number | null; at: number }>();
+  private readonly maxLenCache = new Map<string, MaxLenCacheEntry>();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -40,7 +39,7 @@ export class LogCaptureService {
     const logs = [];
     for (const logType of this.capturedLogTypes(id, typesWithGaps)) {
       // Only ask the server when there is something to recommend against.
-      const currentMaxLen = typesWithGaps.has(logType) ? await this.readMaxLen(id, logType, now) : null;
+      const currentMaxLen = typesWithGaps.has(logType) ? await this.readMaxLen(id, logType, now, aggregates) : null;
       logs.push(summarizeLogGaps(logType, aggregates, currentMaxLen));
     }
 
@@ -89,28 +88,38 @@ export class LogCaptureService {
     });
   }
 
-  /** Current `*-max-len` for a log, or null when CONFIG is unavailable or unreadable. */
-  private async readMaxLen(connectionId: string, logType: CapturedLogType, now: number): Promise<number | null> {
+  /**
+   * Current `*-max-len` for a log, or null when CONFIG is unavailable or unreadable.
+   * A cached value read before the newest gap is re-read: the operator may have
+   * changed the setting in response to it.
+   */
+  private async readMaxLen(
+    connectionId: string,
+    logType: CapturedLogType,
+    now: number,
+    aggregates: readonly LogCaptureGapAggregate[],
+  ): Promise<number | null> {
     const parameter = LOG_CAPTURE_MAX_LEN_PARAMETER[logType];
-    const cacheKey = `${connectionId}:${parameter}`;
-    const cached = this.maxLenCache.get(cacheKey);
-    if (cached && now - cached.at < MAX_LEN_CACHE_TTL_MS) return cached.value;
-
-    let value: number | null = null;
-    try {
-      const client = this.connectionRegistry.get(connectionId);
-      if (client.getCapabilities().hasConfig) {
-        const raw = await client.getConfigValue(parameter);
-        const parsed = raw === null ? NaN : Number(raw);
-        value = Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+    let lastGapAt: number | undefined;
+    for (const aggregate of aggregates) {
+      if (aggregate.logType === logType && (lastGapAt === undefined || aggregate.lastGapAt > lastGapAt)) {
+        lastGapAt = aggregate.lastGapAt;
       }
+    }
+    try {
+      return await readServerMaxLen(
+        this.connectionRegistry.get(connectionId),
+        parameter,
+        this.maxLenCache,
+        `${connectionId}:${parameter}`,
+        now,
+        lastGapAt,
+      );
     } catch (error) {
       this.logger.debug(
         `Could not read ${parameter} for ${connectionId}: ${error instanceof Error ? error.message : String(error)}`,
       );
-      value = null;
+      return null;
     }
-    this.maxLenCache.set(cacheKey, { value, at: now });
-    return value;
   }
 }

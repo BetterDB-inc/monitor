@@ -42,6 +42,7 @@ describe('CommandLogAnalyticsService capture gaps', () => {
   };
   let gapRepo: { insert: jest.Mock };
   let getCommandLog: jest.Mock;
+  let getInfo: jest.Mock;
   let service: CommandLogAnalyticsService;
   let now: number;
 
@@ -52,8 +53,10 @@ describe('CommandLogAnalyticsService capture gaps', () => {
       host: 'localhost',
       port: 6379,
       client: {
-        getCapabilities: () => ({ hasCommandLog: true }),
+        getCapabilities: () => ({ hasCommandLog: true, hasConfig: true }),
         getCommandLog,
+        getInfo,
+        getConfigValue: jest.fn().mockResolvedValue(null),
       } as unknown as ConnectionContext['client'],
     }) as ConnectionContext;
 
@@ -72,6 +75,7 @@ describe('CommandLogAnalyticsService capture gaps', () => {
       getLogCaptureGapRepository: jest.fn().mockReturnValue(gapRepo),
     };
     getCommandLog = jest.fn();
+    getInfo = jest.fn().mockResolvedValue({ server: { run_id: 'run-A' } });
     service = new CommandLogAnalyticsService(
       { getDefaultId: jest.fn().mockReturnValue('conn-1') } as unknown as ConnectionRegistry,
       storage as unknown as StoragePort,
@@ -138,6 +142,104 @@ describe('CommandLogAnalyticsService capture gaps', () => {
     expect(gap.logType).toBe('commandlog-large-reply');
     expect(gap.previousPollAt).toBe(T0);
     expect(gap.cause).toBe('server_evicted');
+  });
+
+  it('records the poll time per type after that type finishes', async () => {
+    // A slow read of the first type must not age the previous-poll time of the others.
+    getCommandLog.mockImplementation(async (count: number, type: CommandLogType) => {
+      if (type === 'slow') now += 3 * INTERVAL + 1;
+      return serverLogs({ slow: [1, 100], 'large-reply': [1, 100] })(count, type);
+    });
+    await poll();
+    const firstPollEnd = T0 + 3 * INTERVAL + 1;
+
+    now = firstPollEnd + INTERVAL;
+    getCommandLog.mockImplementation(serverLogs({ slow: [1, 100], 'large-reply': [473, 600] }));
+    await poll();
+
+    const [gap] = insertedGaps();
+    expect(gap.logType).toBe('commandlog-large-reply');
+    expect(gap.previousPollAt).toBe(firstPollEnd);
+    expect(gap.cause).toBe('server_evicted');
+  });
+
+  it('merges the regular batch with the catch-up read and records only the true hole', async () => {
+    getCommandLog.mockImplementation(serverLogs({ slow: [1, 100] }));
+    await poll();
+
+    now = T0 + INTERVAL;
+    getCommandLog.mockReset();
+    // First slow read sees 103..230; by the catch-up read the server is at 280.
+    getCommandLog
+      .mockImplementationOnce(serverLogs({ slow: [103, 230] }))
+      .mockImplementationOnce(serverLogs({ slow: [151, 280] }))
+      .mockResolvedValue([]);
+    await poll();
+
+    expect(getCommandLog.mock.calls.slice(0, 2)).toEqual([[128, 'slow'], [130, 'slow']]);
+    const saved = storage.saveCommandLogEntries.mock.calls[0][0].map((row: { id: number }) => row.id);
+    expect(saved).toHaveLength(178);
+    expect(insertedGaps()).toEqual([
+      expect.objectContaining({ logType: 'commandlog-slow', firstMissingId: 101, lastMissingId: 102, missingCount: 2 }),
+    ]);
+  });
+
+  it('keeps the regular batch when the catch-up read fails', async () => {
+    getCommandLog.mockImplementation(serverLogs({ slow: [1, 100] }));
+    await poll();
+
+    now = T0 + INTERVAL;
+    getCommandLog.mockReset();
+    getCommandLog
+      .mockImplementationOnce(serverLogs({ slow: [273, 400] }))
+      .mockRejectedValueOnce(new Error('timeout'))
+      .mockResolvedValue([]);
+    await expect(poll()).resolves.toBeUndefined();
+
+    expect(storage.saveCommandLogEntries.mock.calls[0][0]).toHaveLength(128);
+    const logger = (service as unknown as { logger: { warn: jest.Mock } }).logger;
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Catch-up read failed'));
+  });
+
+  describe('server restart detection (run_id)', () => {
+    it('saves everything and records no gap for any type when run_id changes', async () => {
+      getCommandLog.mockImplementation(serverLogs({ slow: [1, 100], 'large-request': [1, 100], 'large-reply': [1, 100] }));
+      await poll();
+
+      now = T0 + INTERVAL;
+      getInfo.mockResolvedValue({ server: { run_id: 'run-B' } });
+      getCommandLog.mockImplementation(
+        serverLogs({ slow: [73, 200], 'large-request': [73, 200], 'large-reply': [73, 200] }),
+      );
+      await poll();
+
+      expect(gapRepo.insert).not.toHaveBeenCalled();
+      expect(storage.saveCommandLogEntries).toHaveBeenCalledTimes(3);
+      for (const call of storage.saveCommandLogEntries.mock.calls) expect(call[0]).toHaveLength(128);
+    });
+
+    it('keeps the existing gap behaviour when run_id is unchanged', async () => {
+      getCommandLog.mockImplementation(serverLogs({ slow: [1, 100], 'large-reply': [1, 100] }));
+      await poll();
+
+      now = T0 + INTERVAL;
+      getCommandLog.mockImplementation(serverLogs({ slow: [1, 100], 'large-reply': [473, 600] }));
+      await poll();
+
+      expect(insertedGaps()).toHaveLength(1);
+    });
+
+    it('falls back to id-based detection when INFO fails', async () => {
+      getInfo.mockRejectedValue(new Error('NOPERM'));
+      getCommandLog.mockImplementation(serverLogs({ slow: [1, 100], 'large-reply': [1, 100] }));
+      await poll();
+
+      now = T0 + INTERVAL;
+      getCommandLog.mockImplementation(serverLogs({ slow: [1, 100], 'large-reply': [473, 600] }));
+      await expect(poll()).resolves.toBeUndefined();
+
+      expect(insertedGaps()).toHaveLength(1);
+    });
   });
 
   it('forgets per-connection poll times when the connection is removed', async () => {
