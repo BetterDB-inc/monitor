@@ -150,6 +150,39 @@ describe('KvCacheGuard', () => {
     expect(screen.queryByTestId('children')).toBeNull();
   });
 
+  it('opens the link-engine dialog while the first scan is running', async () => {
+    getStatus.mockResolvedValue({ hasLmcache: false, latest: null, sampleKey: null, engines: [] });
+    renderGuard();
+    fireEvent.click(await screen.findByRole('button', { name: 'Link an engine' }));
+    expect(await screen.findByText('Link LMCache engine')).toBeInTheDocument();
+    expect(screen.getByText('Scanning for LMCache keys')).toBeInTheDocument();
+  });
+
+  it('hides Link during the first scan on the demo instance', async () => {
+    demo.isDemo = true;
+    getStatus.mockResolvedValue({ hasLmcache: false, latest: null, sampleKey: null, engines: [] });
+    renderGuard();
+    expect(await screen.findByText('Scanning for LMCache keys')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Link an engine' })).toBeNull();
+  });
+
+  it('polls every five seconds until the first scan finishes', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      getStatus
+        .mockResolvedValueOnce({ hasLmcache: false, latest: null, sampleKey: null, engines: [] })
+        .mockResolvedValue({ hasLmcache: false, latest, sampleKey: null, engines: [] });
+      renderGuard();
+      expect(await screen.findByText('Scanning for LMCache keys')).toBeInTheDocument();
+      expect(getStatus).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(getStatus).toHaveBeenCalledTimes(2);
+      expect(await screen.findByText('No LMCache KV cache detected')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps the page and its history available when detection drops after earlier detections', async () => {
     getStatus.mockResolvedValue({ hasLmcache: false, latest, sampleKey: null, engines: [] });
     getFootprintHistory.mockResolvedValue([{ ...latest, detected: true, timestamp: 0 }, latest]);

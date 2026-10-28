@@ -3,10 +3,12 @@ import { useQuery } from '@tanstack/react-query';
 import { Feature } from '@betterdb/shared';
 import { kvCacheApi, kvCacheKeys } from '../api/kv-cache';
 import { awaitingFirstScan, kvCacheInUse, useKvCacheStatus } from '../hooks/useKvCacheStatus';
+import { useCanEditKvCache } from '../hooks/useCanEditKvCache';
 import { useConnection } from '../hooks/useConnection';
 import { useLicense, useLicenseStatus } from '../hooks/useLicense';
 import { hasKvCacheFootprint } from '../utils/connectionType';
 import { KvCacheNotDetected, KvCacheProLocked, LinkEngineDialog } from './pages/kv-cache';
+import { Button } from './ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Skeleton } from './ui/skeleton';
 
@@ -54,7 +56,12 @@ export function KvCacheGuard({ children }: Props) {
     return <GuardSkeleton />;
   }
   if (awaitingFirstScan(status.data)) {
-    return <FirstScanPending />;
+    return (
+      <>
+        <FirstScanPending onLinkEngine={() => setLinkOpen(true)} />
+        <LinkEngineDialog open={linkOpen} onOpenChange={setLinkOpen} />
+      </>
+    );
   }
   const notDetected = (
     <KvCacheNotDetected latest={status.data.latest} onLinkEngine={() => setLinkOpen(true)} />
@@ -76,7 +83,8 @@ export function KvCacheGuard({ children }: Props) {
   );
 }
 
-function FirstScanPending() {
+function FirstScanPending({ onLinkEngine }: { onLinkEngine: () => void }) {
+  const canMutate = useCanEditKvCache();
   return (
     <div className="flex items-center justify-center py-8">
       <Card className="max-w-2xl shadow-lg">
@@ -85,6 +93,13 @@ function FirstScanPending() {
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground">
           The first scan of this connection has not finished yet. This page updates when it does.
+          {canMutate && (
+            <div className="pt-2">
+              <Button variant="outline" onClick={onLinkEngine}>
+                Link an engine
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>
