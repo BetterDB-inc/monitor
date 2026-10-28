@@ -236,7 +236,7 @@ function unavailableCountersNote(deltas: CrossReferenceResult['counterDeltas']):
     return null;
   }
   if (deltas.pending === 'capture_running') {
-    return 'INFO counters are available when the capture ends.';
+    return 'INFO counters are available when the capture ends, if INFO responded at start.';
   }
   if (deltas.pending === 'capture_interrupted') {
     return 'INFO counters were not recorded: the capture was interrupted before it ended.';

@@ -6,7 +6,7 @@ import type { ClusterDiscoveryService } from '../../cluster/cluster-discovery.se
 import type { ConnectionRegistry } from '../../connections/connection-registry.service';
 import type { WebhookDispatcherService } from '../../webhooks/webhook-dispatcher.service';
 import { MonitorSource } from '../capture-writer';
-import { MonitorCaptureService } from '../monitor-capture.service';
+import { MonitorCaptureService, STOP_WAIT_FOR_START_MS } from '../monitor-capture.service';
 
 class FakeSource extends EventEmitter implements MonitorSource {
   stopped = false;
@@ -786,6 +786,39 @@ describe('MonitorCaptureService stop while starting', () => {
     expect((await storage.getCaptureSession(row.id))?.endedAt).toBeDefined();
   }, 5_000);
 
+  it('returns after the bounded wait when the open stalls, then stops once it opens', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+    try {
+      const { service, storage, source } = makeService();
+      const opening = gate();
+      const factory = jest.fn(async () => {
+        await opening.promise;
+        return source;
+      });
+      service.setMonitorSourceFactory(factory);
+
+      const starting = service.startSession({ connectionId: CONNECTION_ID, durationMs: 600_000 });
+      await waitFor(() => factory.mock.calls.length > 0);
+      const [row] = await service.listSessions({ connectionId: CONNECTION_ID });
+
+      const stopping = service.stopSession(row.id);
+      await jest.advanceTimersByTimeAsync(STOP_WAIT_FOR_START_MS);
+      const returned = await stopping;
+      expect(returned?.status).toBe('running');
+
+      opening.release();
+      await starting;
+      await waitFor(() => !service.hasActiveSessionOn(CONNECTION_ID));
+
+      const final = await storage.getCaptureSession(row.id);
+      expect(final?.terminationReason).toBe('manual_stop');
+      expect(service.hasActiveSessionOn(CONNECTION_ID)).toBe(false);
+      expect((service as unknown as { stopRequested: Set<string> }).stopRequested.size).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  }, 5_000);
+
   it('returns the failed row when the start it waited on fails', async () => {
     const { service } = makeService();
     const opening = gate();
@@ -805,6 +838,7 @@ describe('MonitorCaptureService stop while starting', () => {
     const stopped = await stopping;
     expect(stopped?.status).toBe('failed');
     expect(service.hasActiveSessionOn(CONNECTION_ID)).toBe(false);
+    expect((service as unknown as { stopRequested: Set<string> }).stopRequested.size).toBe(0);
   });
 
   it('isSessionLive tracks starting, running and stopped sessions', async () => {

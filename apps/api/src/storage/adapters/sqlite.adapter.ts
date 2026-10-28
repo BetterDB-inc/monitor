@@ -298,8 +298,12 @@ function addKvCacheCoverageColumns(db: Database.Database): void {
 }
 
 function addCaptureSessionsCounterSnapshotsColumn(db: Database.Database): void {
+  const table = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'capture_sessions'`)
+    .get();
+  // Fresh databases get the column from createSchema's CREATE TABLE.
+  if (table === undefined) return;
   const cols = db.prepare(`PRAGMA table_info(capture_sessions)`).all() as { name: string }[];
-  if (cols.length === 0) return;
   if (!cols.some((c) => c.name === 'counter_snapshots')) {
     db.prepare(`ALTER TABLE capture_sessions ADD COLUMN counter_snapshots TEXT`).run();
   }

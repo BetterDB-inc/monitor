@@ -418,6 +418,58 @@ describe('computeCounterDeltas restart detection', () => {
     expect(d.deltas.total_commands_processed).toBe(100);
   });
 
+  it('detects a restart whose end uptime is still higher than the start uptime', () => {
+    const d = computeCounterDeltas(
+      snaps([
+        node(
+          { capturedAt: START, counters: { total_commands_processed: 100 }, uptimeSec: 1_000 },
+          {
+            capturedAt: START + 3_600_000,
+            counters: { total_commands_processed: 500 },
+            uptimeSec: 3_000,
+          },
+        ),
+      ]),
+    );
+    expect(d.resets[0]?.reason).toBe('restart');
+    expect(d.coverage).toBe('unavailable');
+  });
+
+  it('does not flag a steady one-hour capture by uptime', () => {
+    const d = computeCounterDeltas(
+      snaps([
+        node(
+          { capturedAt: START, counters: { total_commands_processed: 100 }, uptimeSec: 1_000 },
+          {
+            capturedAt: START + 3_600_000,
+            counters: { total_commands_processed: 500 },
+            uptimeSec: 4_600,
+          },
+        ),
+      ]),
+    );
+    expect(d.resets).toEqual([]);
+    expect(d.coverage).toBe('complete');
+  });
+
+  it('does not flag uptime jitter within the slack', () => {
+    const slackSec = 2; // mirrors UPTIME_SLACK_SEC in capture-counters.ts
+    const d = computeCounterDeltas(
+      snaps([
+        node(
+          { capturedAt: START, counters: { total_commands_processed: 100 }, uptimeSec: 1_000 },
+          {
+            capturedAt: START + 3_600_000,
+            counters: { total_commands_processed: 500 },
+            uptimeSec: 1_000 + 3_600 - (slackSec - 1),
+          },
+        ),
+      ]),
+    );
+    expect(d.resets).toEqual([]);
+    expect(d.coverage).toBe('complete');
+  });
+
   it('keeps summing the other nodes when one restarts', () => {
     const d = computeCounterDeltas(
       snaps([

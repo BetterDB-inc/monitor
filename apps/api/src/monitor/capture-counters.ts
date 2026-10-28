@@ -199,7 +199,7 @@ const UPTIME_SLACK_SEC = 2;
 
 /**
  * True when the process behind a node restarted between its two samples:
- * run_id changed, or uptime_in_seconds is lower at the end than at the start,
+ * run_id changed, or end uptime is lower than start uptime plus the elapsed capture time,
  * or (start uptime missing) lower at the end than the sampled window.
  */
 function restartedBetween(start: CaptureCounterSample, end: CaptureCounterSample): boolean {
@@ -210,7 +210,8 @@ function restartedBetween(start: CaptureCounterSample, end: CaptureCounterSample
     return false;
   }
   if (start.uptimeSec !== undefined) {
-    return end.uptimeSec + UPTIME_SLACK_SEC < start.uptimeSec;
+    const elapsedSec = Math.max(0, (end.capturedAt - start.capturedAt) / 1000);
+    return end.uptimeSec + UPTIME_SLACK_SEC < start.uptimeSec + elapsedSec;
   }
   return end.uptimeSec + UPTIME_SLACK_SEC < (end.capturedAt - start.capturedAt) / 1000;
 }

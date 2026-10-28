@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, OctagonX } from 'lucide-react';
@@ -59,6 +59,19 @@ export function MonitorSession() {
       return s?.status === 'running' ? 2000 : false;
     },
   });
+
+  // The cross-reference and capture-diff results are cached while the capture runs;
+  // refetch them once it leaves `running` so the counter deltas replace the placeholder.
+  const status = data?.status;
+  const previousStatus = useRef(status);
+  useEffect(() => {
+    const prev = previousStatus.current;
+    previousStatus.current = status;
+    if (sessionId && prev === 'running' && status && status !== 'running') {
+      void queryClient.invalidateQueries({ queryKey: ['monitor', 'cross-reference', sessionId] });
+      void queryClient.invalidateQueries({ queryKey: ['monitor', 'session-diff', sessionId] });
+    }
+  }, [status, sessionId, queryClient]);
 
   if (!sessionId) {
     return <p className="text-sm text-destructive">Missing session id.</p>;

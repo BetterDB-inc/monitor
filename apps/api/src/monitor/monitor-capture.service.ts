@@ -24,6 +24,8 @@ import {
 
 /** Default capture duration if the caller does not specify one. Matches the start-session modal default. */
 export const DEFAULT_DURATION_MS = 30_000;
+/** Longest a stop request waits for a session that is still opening MONITOR. */
+export const STOP_WAIT_FOR_START_MS = 5_000;
 
 /** Community-tier defaults; overridable per session and via env. PR 24 will resolve from license tier. */
 const COMMUNITY_BYTE_CAP = 50 * 1024 * 1024; // 50 MB
@@ -97,6 +99,8 @@ export class MonitorCaptureService {
   private readonly starting = new Set<string>();
   /** Session id → resolves when its startSession call settles (started or failed). */
   private readonly startingById = new Map<string, Promise<void>>();
+  /** Sessions with a stop requested while still starting; applied once MONITOR is open. */
+  private readonly stopRequested = new Set<string>();
   private monitorSourceFactory: MonitorSourceFactory;
   private counterSampleReader: CounterSampleReader;
 
@@ -239,15 +243,21 @@ export class MonitorCaptureService {
       this.startingById.set(session.id, settled);
       await this.storage.saveCaptureSession(session, connectionId);
 
-      if (isFanOut) {
-        return await this.startFanOutSession(session, fanOutNodes, durationMs, byteCap, lineCap);
-      }
+      const started = isFanOut
+        ? await this.startFanOutSession(session, fanOutNodes, durationMs, byteCap, lineCap)
+        : await this.startSingleSession(session, input.targetNodeId, durationMs, byteCap, lineCap);
 
-      return await this.startSingleSession(session, input.targetNodeId, durationMs, byteCap, lineCap);
+      // A stop that timed out waiting for this start is applied now that the
+      // writers are live.
+      if (this.stopRequested.delete(session.id)) {
+        this.stopActive(this.findActiveById(session.id));
+      }
+      return started;
     } finally {
       this.starting.delete(connectionId);
       if (startingSessionId !== undefined) {
         this.startingById.delete(startingSessionId);
+        this.stopRequested.delete(startingSessionId);
       }
       markSettled();
     }
@@ -530,16 +540,39 @@ export class MonitorCaptureService {
     // instead of being dropped and letting the capture run its full duration.
     const starting = this.startingById.get(id);
     if (starting !== undefined) {
-      await starting;
+      this.stopRequested.add(id);
+      let timer: NodeJS.Timeout | undefined;
+      const settled = await Promise.race([
+        starting.then(
+          () => true,
+          () => true,
+        ),
+        new Promise<false>((resolve) => {
+          timer = setTimeout(() => resolve(false), STOP_WAIT_FOR_START_MS);
+        }),
+      ]);
+      clearTimeout(timer);
+      if (!settled) {
+        // Start is stalled; it will stop itself as soon as MONITOR opens (see startSession).
+        this.logger.warn(
+          `Stop for ${id} requested while MONITOR is still opening; it will stop when the open completes`,
+        );
+        return this.storage.getCaptureSession(id);
+      }
+      this.stopRequested.delete(id);
     }
     const active = this.findActiveById(id);
     if (active) {
-      for (const w of active.writers) {
-        w.writer.stop('manual_stop');
-      }
+      this.stopActive(active);
       await active.donePromise;
     }
     return this.storage.getCaptureSession(id);
+  }
+
+  private stopActive(active: ActiveSession | undefined): void {
+    for (const w of active?.writers ?? []) {
+      w.writer.stop('manual_stop');
+    }
   }
 
   /**

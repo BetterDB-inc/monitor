@@ -64,7 +64,9 @@ describe('CrossReferenceSections', () => {
         })}
       />,
     );
-    expect(screen.getByText('INFO counters are available when the capture ends.')).toBeTruthy();
+    expect(
+      screen.getByText('INFO counters are available when the capture ends, if INFO responded at start.'),
+    ).toBeTruthy();
     expect(screen.queryByText('INFO counters were not recorded for this capture.')).toBeNull();
   });
 

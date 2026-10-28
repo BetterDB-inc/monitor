@@ -427,6 +427,58 @@ describe('Capture session storage (SqliteAdapter counter_snapshots column)', () 
     }
   });
 
+  it('fails initialization when the counter_snapshots ALTER fails', async () => {
+    const filepath = tempDb();
+    const raw = new Database(filepath);
+    raw.exec(`
+      CREATE TABLE capture_sessions (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('running','completed','truncated','failed','skipped')),
+        source TEXT NOT NULL CHECK (source IN ('manual','trigger','schedule')),
+        trigger_id TEXT,
+        schedule_id TEXT,
+        requested_by TEXT,
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        duration_ms INTEGER,
+        byte_count INTEGER NOT NULL DEFAULT 0,
+        line_count INTEGER NOT NULL DEFAULT 0,
+        byte_cap INTEGER NOT NULL,
+        line_cap INTEGER NOT NULL,
+        termination_reason TEXT,
+        target_node TEXT,
+        node_segments TEXT,
+        created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
+      );
+    `);
+    raw.close();
+
+    const originalPrepare = Database.prototype.prepare;
+    const prepareSpy = jest
+      .spyOn(Database.prototype, 'prepare')
+      .mockImplementation(function (this: Database.Database, source: string) {
+        if (source.includes('ADD COLUMN counter_snapshots')) {
+          throw new Error('disk I/O error');
+        }
+        return originalPrepare.call(this, source);
+      } as typeof Database.prototype.prepare);
+    try {
+      const storage = new SqliteAdapter({ filepath });
+      try {
+        await expect(storage.initialize()).rejects.toThrow('disk I/O error');
+      } finally {
+        // initialize() failed midway; release the file handle so the temp db can be removed.
+        (storage as unknown as { db?: Database.Database }).db?.close();
+      }
+    } finally {
+      prepareSpy.mockRestore();
+    }
+  });
+
+  // A fresh database (no capture_sessions table before createSchema) is exercised by every
+  // other test in this file, which all start from tempDb().
+
   it('decodes a corrupted counter_snapshots value to undefined', async () => {
     const storage = new SqliteAdapter({ filepath: tempDb() });
     await storage.initialize();

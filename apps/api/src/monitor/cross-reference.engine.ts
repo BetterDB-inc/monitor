@@ -182,9 +182,11 @@ export class CrossReferenceEngine {
       sessionStartMs,
       sessionEndMs,
     );
+    // The capture may have finalized while chunks and baselines were read.
+    const latest = (await this.storage.getCaptureSession(session.id).catch(() => null)) ?? session;
     const counterDeltas = computeCounterDeltas(
-      session.counterSnapshots,
-      pendingCounters(session, input.isSessionLive),
+      latest.counterSnapshots,
+      pendingCounters(latest, input.isSessionLive),
     );
 
     return {
@@ -249,13 +251,18 @@ export class CrossReferenceEngine {
 
     const newShapes = computeNewShapes(capturedLines, baselineShapes);
     const hotKeyDelta = computeHotKeyDelta(capturedLines, baselineKeyCounts);
+    // Either capture may have finalized while chunks were read.
+    const [latest, latestBaseline] = await Promise.all([
+      this.storage.getCaptureSession(sessionId).catch(() => null),
+      this.storage.getCaptureSession(baselineSessionId).catch(() => null),
+    ]);
     const counterDeltas = computeCounterDeltas(
-      session.counterSnapshots,
-      pendingCounters(session, isSessionLive),
+      (latest ?? session).counterSnapshots,
+      pendingCounters(latest ?? session, isSessionLive),
     );
     const baselineCounterDeltas = computeCounterDeltas(
-      baselineSession.counterSnapshots,
-      pendingCounters(baselineSession, isSessionLive),
+      (latestBaseline ?? baselineSession).counterSnapshots,
+      pendingCounters(latestBaseline ?? baselineSession, isSessionLive),
     );
 
     return {

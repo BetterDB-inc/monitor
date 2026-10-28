@@ -648,6 +648,31 @@ describe('CrossReferenceEngine.compute', () => {
     expect(result.counterDeltas.pending).toBe('capture_running');
   });
 
+  it('derives counter status from a fresh read when the capture finalizes mid-compute', async () => {
+    const running = { ...baseSession(), status: 'running' as const, endedAt: undefined };
+    const completed = {
+      ...baseSession(),
+      ...withCounters([
+        {
+          start: { capturedAt: 1_000, counters: { rejected_connections: 0 } },
+          end: { capturedAt: 6_000, counters: { rejected_connections: 2 } },
+        },
+      ]),
+    };
+    const storage = makeStorage({ session: running });
+    (storage.getCaptureSession as jest.Mock)
+      .mockResolvedValueOnce(running)
+      .mockResolvedValueOnce(completed);
+    const engine = new CrossReferenceEngine(storage);
+    const result = await engine.compute({
+      sessionId: SESSION_ID,
+      baseline: '24h',
+      isSessionLive: () => true,
+    });
+    expect(result.counterDeltas.coverage).toBe('complete');
+    expect(result.counterDeltas).not.toHaveProperty('pending');
+  });
+
   it('marks a running session with no live capture as capture_interrupted', async () => {
     const session = { ...baseSession(), status: 'running' as const, endedAt: undefined };
     const engine = new CrossReferenceEngine(makeStorage({ session }));

@@ -100,9 +100,10 @@ deltas are shown for both captures side by side.
 
 ## Session-boundary INFO counters
 
-Every capture samples `INFO` on each captured node twice: once just before
-MONITOR opens and once right after it stops (so the probe itself is never
-captured). Each sample is one default `INFO` command, which carries both the
+Every capture that opens MONITOR samples `INFO` on each captured node twice:
+once just before MONITOR opens and once right after it stops (so the probe
+itself is never captured). If MONITOR fails to open, only the start sample is
+taken and the node is reported with no end sample. Each sample is one default `INFO` command, which carries both the
 `# Stats` counters and `# Server` `run_id` / `uptime_in_seconds`. The
 cross-reference panel shows the difference for 16 monotonic counters —
 commands processed, connections received/rejected, keyspace hits/misses,
@@ -116,16 +117,20 @@ sum across primaries.
   run in parallel before the session row is created, so starting a capture
   can take up to 2 s longer when a node is slow or unreachable.
 - Restarts and stat resets: a node whose `run_id` changed, or whose
-  `uptime_in_seconds` went down, restarted during the window. A node where
+  `uptime_in_seconds` ended lower than its start uptime plus the elapsed
+  capture time, restarted during the window. Uptime is compared against the
+  elapsed capture time, so a restart is detected even when the node's uptime at
+  the end is higher than at the start. A node where
   any counter went backwards ran `CONFIG RESETSTAT`. Either way the whole
   node is excluded from every sum and from the hit ratio, and it is named
   with the reason. A `CONFIG RESETSTAT` after which every counter climbs back
   past its start value is not visible in `INFO` and cannot be detected.
-- Coverage is `complete`, `partial` (a node is missing a sample, restarted
-  or reset its stats, or a counter is reported by only some nodes — e.g.
-  `total_error_replies` during a rolling upgrade from before Redis 6.2 —
-  listed in `incompleteCounters`), or `unavailable` (no node has both
-  samples).
+- Coverage is `complete`, `partial` (a node is missing a sample, or restarted
+  or reset its stats while at least one other node is measured, or a counter
+  is reported by only some nodes — e.g. `total_error_replies` during a rolling
+  upgrade from before Redis 6.2 — listed in `incompleteCounters`), or
+  `unavailable` (no node could be measured: none has both samples, or every
+  node that has them restarted or reset its stats during the capture).
 - A capture that is still running reports `pending: "capture_running"`; the
   values appear when it ends. A row left `running` with no live capture
   behind it (for example after an API restart) reports
@@ -141,10 +146,13 @@ sum across primaries.
   MONITOR stream itself in `total_net_output_bytes`.
 - Counters a server version does not report are shown as `—`, never as 0.
 - Stopping a capture while it is still starting (row created, MONITOR not
-  open yet) waits for the start to finish and then stops it.
+  open yet) waits for the start to finish and then stops it. A stop requested
+  while MONITOR is still opening returns after at most 5 s; the capture stops
+  as soon as the open completes.
 - While a capture is starting, a second start on the same connection is
-  rejected with `409 Conflict`, and scheduled and triggered captures treat
-  the connection as busy and skip.
+  rejected with `409 Conflict`. Scheduled captures treat the connection as busy
+  and skip (recorded in `lastSkipReason`); triggered captures are queued and
+  retried, as described above.
 
 ## Value redaction
 

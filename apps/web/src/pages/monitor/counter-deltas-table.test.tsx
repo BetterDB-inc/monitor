@@ -122,7 +122,7 @@ describe('CounterDeltasTable', () => {
   it('says counters are available when a running capture ends', () => {
     render(<CounterDeltasTable deltas={{ ...unavailable(), pending: 'capture_running' }} />);
     const text = screen.getByTestId('counter-coverage').textContent ?? '';
-    expect(text).toContain('Available when the capture ends');
+    expect(text).toContain('Available when the capture ends, if INFO responded at start');
     expect(text).not.toContain('predates');
   });
 
@@ -148,6 +148,41 @@ describe('CounterDeltasTable', () => {
     const text = screen.getByTestId('counter-coverage').textContent ?? '';
     expect(text).toContain('every sampled node restarted or reset its stats');
     expect(text).toContain('restarted: h1:6379');
+  });
+
+  it('does not claim every node reset when other nodes simply have no complete sample', () => {
+    render(
+      <CounterDeltasTable
+        deltas={deltas({
+          coverage: 'unavailable',
+          nodesTotal: 2,
+          nodesMeasured: 0,
+          windowMs: null,
+          resets: [{ node: 'h1:6379', reason: 'restart', counters: [] }],
+        })}
+      />,
+    );
+    const text = screen.getByTestId('counter-coverage').textContent ?? '';
+    expect(text).toContain('1 of 2 nodes');
+    expect(text).not.toContain('every sampled node');
+  });
+
+  it('shows both coverage reasons when this capture and the baseline are unavailable', () => {
+    render(
+      <CounterDeltasTable
+        deltas={unavailable()}
+        baseline={deltas({
+          coverage: 'unavailable',
+          nodesTotal: 1,
+          nodesMeasured: 0,
+          windowMs: null,
+          resets: [{ node: 'h1:6379', reason: 'restart', counters: [] }],
+        })}
+      />,
+    );
+    expect(screen.getByTestId('counter-coverage').textContent).toContain('This capture:');
+    expect(screen.getByTestId('counter-coverage').textContent).toContain('Not recorded');
+    expect(screen.getByTestId('baseline-counter-coverage').textContent).toContain('restarted');
   });
 
   it('adds a baseline column and shows baseline-only rows with a dash on the current side', () => {

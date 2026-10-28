@@ -228,3 +228,38 @@ describe('MonitorSession — stop session', () => {
     resolve({ ...BASE_SESSION, status: 'completed' });
   });
 });
+
+describe('MonitorSession — refetch when the capture ends', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function mockStatus(status: StoredCaptureSession['status']) {
+    vi.mocked(useQuery).mockReturnValue({
+      data: { ...BASE_SESSION, status },
+      isLoading: false,
+      error: null,
+    } as ReturnType<typeof useQuery>);
+  }
+
+  it('invalidates the cross-reference and diff queries when the session leaves running', () => {
+    mockStatus('running');
+    const { rerender } = render(<MonitorSession />);
+    expect(mockInvalidateQueries).not.toHaveBeenCalled();
+
+    mockStatus('completed');
+    rerender(<MonitorSession />);
+    expect(mockInvalidateQueries).toHaveBeenCalledWith({
+      queryKey: ['monitor', 'cross-reference', 'session-abc'],
+    });
+    expect(mockInvalidateQueries).toHaveBeenCalledWith({
+      queryKey: ['monitor', 'session-diff', 'session-abc'],
+    });
+  });
+
+  it('does not invalidate for a session that was never running in this view', () => {
+    mockStatus('completed');
+    render(<MonitorSession />);
+    expect(mockInvalidateQueries).not.toHaveBeenCalled();
+  });
+});

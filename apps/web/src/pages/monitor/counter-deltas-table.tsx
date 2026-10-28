@@ -39,14 +39,17 @@ function resetText(d: CaptureCounterDeltas): string | null {
 function coverageText(d: CaptureCounterDeltas): string {
   if (d.coverage === 'unavailable') {
     if (d.pending === 'capture_running') {
-      return 'Available when the capture ends — the end sample is taken right after MONITOR stops.';
+      return 'Available when the capture ends, if INFO responded at start — the end sample is taken right after MONITOR stops.';
     }
     if (d.pending === 'capture_interrupted') {
       return 'Not recorded — the capture was interrupted (for example the API restarted) before its end sample was taken.';
     }
     const resets = resetText(d);
     if (resets !== null) {
-      return `Not measured — every sampled node restarted or reset its stats during the capture · ${resets}`;
+      const allReset = d.resets.length >= d.nodesTotal;
+      return allReset
+        ? `Not measured — every sampled node restarted or reset its stats during the capture · ${resets}`
+        : `Not measured — ${d.resets.length} of ${d.nodesTotal} nodes restarted or reset their stats and the rest have no complete sample · ${resets}`;
     }
     return 'Not recorded for this capture — it predates session-boundary snapshots, or INFO was unreachable at start or end.';
   }
@@ -76,10 +79,18 @@ export function CounterDeltasTable({ deltas, baseline }: Props) {
   const nothingRecorded =
     deltas.coverage === 'unavailable' && (baseline === undefined || baseline.coverage === 'unavailable');
   if (nothingRecorded) {
+    if (baseline === undefined) {
+      return (
+        <p className="text-xs text-muted-foreground" data-testid="counter-coverage">
+          {coverageText(deltas)}
+        </p>
+      );
+    }
     return (
-      <p className="text-xs text-muted-foreground" data-testid="counter-coverage">
-        {coverageText(deltas)}
-      </p>
+      <div className="space-y-1 text-xs text-muted-foreground">
+        <p data-testid="counter-coverage">This capture: {coverageText(deltas)}</p>
+        <p data-testid="baseline-counter-coverage">Baseline: {coverageText(baseline)}</p>
+      </div>
     );
   }
 
