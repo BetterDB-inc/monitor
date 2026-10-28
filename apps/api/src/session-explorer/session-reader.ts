@@ -3,7 +3,7 @@ import type { ChainableCommander } from 'iovalkey';
 import type { CapturedKey, ValkeyElement, ValkeyValue } from '@betterdb/shared';
 import type { DatabasePort } from '../common/interfaces/database-port.interface';
 import { decodeValue } from './presets/text';
-import { PrimaryClients, routeOf, withPrimaries } from './primary-nodes';
+import { failedNodeOf, PrimaryClients, routeOf, withPrimaries } from './primary-nodes';
 
 export const DEFAULT_BYTE_CAP = 2 * 1024 * 1024;
 export const DEFAULT_TOTAL_BYTE_CAP = 32 * 1024 * 1024;
@@ -175,8 +175,9 @@ async function readWindows(
 function routeKeys(
   primaries: PrimaryClients,
   keys: string[],
-): { groups: Map<Valkey, string[]>; unrouted: number } {
+): { groups: Map<Valkey, string[]>; unrouted: number; failedOwners: Set<number> } {
   const groups = new Map<Valkey, string[]>();
+  const failedOwners = new Set<number>();
   let unrouted = 0;
   const add = (client: Valkey, key: string) => {
     const list = groups.get(client) ?? [];
@@ -185,10 +186,12 @@ function routeKeys(
   };
   for (const key of keys) {
     const client = routeOf(primaries, key);
+    const owner = client ? null : failedNodeOf(primaries, key);
     if (client) add(client, key);
+    else if (owner !== null) failedOwners.add(owner);
     else unrouted++;
   }
-  return { groups, unrouted };
+  return { groups, unrouted, failedOwners };
 }
 
 async function measure(client: Valkey, found: Located[]): Promise<void> {
@@ -634,8 +637,16 @@ async function readNode(
   }
 }
 
-export async function readSessionKeys(
+export function readSessionKeys(
   db: DatabasePort,
+  keys: string[],
+  options: ReadOptions = {},
+): Promise<SessionKeysRead> {
+  return withPrimaries(db, (primaries) => readSessionKeysOn(primaries, keys, options));
+}
+
+export async function readSessionKeysOn(
+  primaries: PrimaryClients,
   keys: string[],
   options: ReadOptions = {},
 ): Promise<SessionKeysRead> {
@@ -645,8 +656,8 @@ export async function readSessionKeys(
     listWindow: options.listWindow ?? DEFAULT_LIST_WINDOW,
     batch: options.batch ?? DEFAULT_READ_BATCH,
   };
-  return withPrimaries(db, async (primaries) => {
-    const { groups, unrouted } = routeKeys(primaries, keys);
+  {
+    const { groups, unrouted, failedOwners } = routeKeys(primaries, keys);
     const state: ReadState = {
       remaining: opts.totalByteCap,
       exhausted: false,
@@ -654,7 +665,7 @@ export async function readSessionKeys(
       moved: new Set(),
       captured: new Map(),
     };
-    let failedNodes = primaries.failed;
+    let failedNodes = failedOwners.size;
     let lastError: unknown;
     let succeeded = 0;
 
@@ -684,5 +695,5 @@ export async function readSessionKeys(
       missingKeys: state.missing,
       touchesKeys: primaries.touchesKeys,
     };
-  });
+  }
 }

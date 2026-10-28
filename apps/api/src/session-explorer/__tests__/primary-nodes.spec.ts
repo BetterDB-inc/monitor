@@ -59,10 +59,14 @@ describe('withPrimaries', () => {
     expect(parent.callsOf('duplicate')[0].args[0]).toMatchObject({ commandTimeout: 5000 });
   });
 
-  it('reports the server unavailable instead of reading on the shared client', async () => {
+  it.each([
+    'ERR max number of clients reached',
+    'NOAUTH Authentication required.',
+    'WRONGPASS invalid username-password pair or user is disabled.',
+  ])('reports the server unavailable when it answers %s', async (message) => {
     const parent = new FakeValkey();
     const reader = new FakeValkey();
-    reader.connectError = new Error('ERR max number of clients reached');
+    reader.serverError = new Error(message);
     parent.duplicateWith = reader;
     const run = jest.fn();
 
@@ -83,11 +87,26 @@ describe('withPrimaries', () => {
     expect(used).toEqual([reader]);
   });
 
+  it('still reads when the user may not run CLIENT NO-TOUCH', async () => {
+    const parent = new FakeValkey();
+    const reader = new FakeValkey();
+    reader.noTouchError = new Error(
+      "NOPERM User reader has no permissions to run the 'client' command",
+    );
+    parent.duplicateWith = reader;
+
+    const result = await withPrimaries(fakeDb(parent), async (p) => p);
+
+    expect(result.clients).toEqual([reader]);
+    expect(result.touchesKeys).toBe(true);
+  });
+
   it('turns on NO-TOUCH for every cluster primary it connects to', async () => {
     const parent = new FakeValkey();
     const self = new FakeValkey();
     const other = new FakeValkey();
-    ValkeyMock.mockImplementationOnce(() => self).mockImplementationOnce(() => other);
+    parent.duplicateWith = self;
+    ValkeyMock.mockImplementationOnce(() => other);
     const db = fakeDb(parent, {
       nodes: [
         masterNode('a', '10.0.0.1:7000', ['myself'], [[0, 8191]]),
@@ -103,18 +122,52 @@ describe('withPrimaries', () => {
     expect(noTouchCalls(parent)).toHaveLength(0);
   });
 
-  it('connects to the address of the node it is attached to, not the configured host', async () => {
+  it('reads its own node through the reader that listed the topology', async () => {
     const parent = new FakeValkey(new Map(), { host: 'clustercfg.example.com', port: 6379 });
-    parent.duplicateWith = new FakeValkey();
-    ValkeyMock.mockImplementation(() => new FakeValkey());
+    const seed = new FakeValkey();
+    parent.duplicateWith = seed;
     const db = fakeDb(parent, {
       nodes: [masterNode('a', '10.0.0.1:7000', ['myself'], [[0, 16383]])],
     });
 
-    await withPrimaries(db, async ({ clients }) => clients);
+    const used = await withPrimaries(db, async ({ clients }) => clients);
 
-    expect(parent.callsOf('duplicate')).toHaveLength(0);
-    expect(ValkeyMock.mock.calls[0][0]).toMatchObject({ host: '10.0.0.1', port: 7000 });
+    expect(used).toEqual([seed]);
+    expect(seed.callsOf('call').some((c) => c.args[0] === 'CLUSTER')).toBe(true);
+    expect(parent.callsOf('call')).toHaveLength(0);
+    expect(ValkeyMock).not.toHaveBeenCalled();
+  });
+
+  it('reads its own node when the address it announces cannot be parsed', async () => {
+    const parent = new FakeValkey();
+    const seed = new FakeValkey();
+    parent.duplicateWith = seed;
+    const db = fakeDb(parent, { nodes: [masterNode('a', ':7000', ['myself'], [[0, 16383]])] });
+
+    const used = await withPrimaries(db, async ({ clients }) => clients);
+
+    expect(used).toEqual([seed]);
+  });
+
+  it('reads the other primaries when one cannot be reached and counts its slots as failed', async () => {
+    const parent = new FakeValkey();
+    const seed = new FakeValkey();
+    const unreachable = new FakeValkey();
+    unreachable.connectError = new Error('ECONNREFUSED');
+    parent.duplicateWith = seed;
+    ValkeyMock.mockImplementation(() => unreachable);
+    const db = fakeDb(parent, {
+      nodes: [
+        masterNode('a', '10.0.0.1:7000', ['myself'], [[0, 8191]]),
+        masterNode('b', '10.0.0.2:7001', [], [[8192, 16383]]),
+      ],
+    });
+
+    const result = await withPrimaries(db, async (p) => p);
+
+    expect(result.clients).toEqual([seed]);
+    expect(result.failed).toBe(1);
+    expect(result.failedRoutes).toEqual([[[8192, 16383]]]);
   });
 
   it('reports the cluster unavailable when it lists no serving primary', async () => {
@@ -127,16 +180,19 @@ describe('withPrimaries', () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it('reports the cluster unavailable when its only primary cannot be reached', async () => {
+  it('reports the cluster unavailable when the topology reader cannot open', async () => {
     const parent = new FakeValkey();
-    const unreachable = new FakeValkey();
-    unreachable.connectError = new Error('ECONNREFUSED');
-    ValkeyMock.mockImplementation(() => unreachable);
+    const seed = new FakeValkey();
+    seed.serverError = new Error('ERR max number of clients reached');
+    parent.duplicateWith = seed;
+    const run = jest.fn();
     const db = fakeDb(parent, {
       nodes: [masterNode('a', '10.0.0.1:7000', ['myself'], [[0, 16383]])],
     });
 
-    await expect(withPrimaries(db, async (p) => p)).rejects.toThrow(ServiceUnavailableException);
+    await expect(withPrimaries(db, run)).rejects.toThrow(ServiceUnavailableException);
+    expect(run).not.toHaveBeenCalled();
+    expect(parent.callsOf('call')).toHaveLength(0);
   });
 
   it('reports that reads leave access times alone when every reader has NO-TOUCH', async () => {

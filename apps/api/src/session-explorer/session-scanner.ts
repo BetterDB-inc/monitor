@@ -3,7 +3,7 @@ import type { SessionListResponse, SessionSummary } from '@betterdb/shared';
 import type { DatabasePort } from '../common/interfaces/database-port.interface';
 import { globMatches } from './glob-match';
 import type { PresetDefinition } from './presets/types';
-import { PrimaryClients, routeOf, withPrimaries } from './primary-nodes';
+import { failedNodeOf, PrimaryClients, routeOf, withPrimaries } from './primary-nodes';
 
 export const DEFAULT_KEY_CAP = 10000;
 export const DEFAULT_BATCH = 1000;
@@ -232,18 +232,18 @@ async function lookupKey(
   pattern: string,
   key: string,
 ): Promise<SessionKeysResult> {
-  const none = { keys: [], truncated: false, failedNodes: primaries.failed };
+  const none = { keys: [], truncated: false, failedNodes: 0 };
   if (!globMatches(pattern, key)) return none;
   const client = routeOf(primaries, key);
-  if (!client) return { ...none, failedNodes: none.failedNodes + 1 };
+  if (!client) return { ...none, failedNodes: failedNodeOf(primaries, key) === null ? 0 : 1 };
   try {
     return { ...none, keys: (await client.exists(key)) > 0 ? [key] : [] };
   } catch {
-    return { ...none, failedNodes: none.failedNodes + 1 };
+    return { ...none, failedNodes: 1 };
   }
 }
 
-export async function keysForSession(
+export function keysForSession(
   db: DatabasePort,
   pattern: string,
   preset: PresetDefinition,
@@ -251,19 +251,30 @@ export async function keysForSession(
   keyCap: number = DEFAULT_KEY_CAP,
   pages: number = DEFAULT_SESSION_SCAN_PAGES,
 ): Promise<SessionKeysResult> {
-  return withPrimaries(db, async (primaries) => {
-    const lookup = preset.sessionLookup?.(sessionId);
-    if (lookup && 'key' in lookup) return lookupKey(primaries, pattern, lookup.key);
-    const scan = await scanAll(
-      primaries.clients,
-      lookup?.match ?? pattern,
-      { keyCap, pages },
-      (key) => preset.sessionIdOf(key) === sessionId && (!lookup || globMatches(pattern, key)),
-    );
-    return {
-      keys: scan.nodes.flatMap(({ keys }) => keys),
-      truncated: scan.truncated,
-      failedNodes: primaries.failed + scan.failed,
-    };
-  });
+  return withPrimaries(db, (primaries) =>
+    keysForSessionOn(primaries, pattern, preset, sessionId, keyCap, pages),
+  );
+}
+
+export async function keysForSessionOn(
+  primaries: PrimaryClients,
+  pattern: string,
+  preset: PresetDefinition,
+  sessionId: string,
+  keyCap: number = DEFAULT_KEY_CAP,
+  pages: number = DEFAULT_SESSION_SCAN_PAGES,
+): Promise<SessionKeysResult> {
+  const lookup = preset.sessionLookup?.(sessionId);
+  if (lookup && 'key' in lookup) return lookupKey(primaries, pattern, lookup.key);
+  const scan = await scanAll(
+    primaries.clients,
+    lookup?.match ?? pattern,
+    { keyCap, pages },
+    (key) => preset.sessionIdOf(key) === sessionId && (!lookup || globMatches(pattern, key)),
+  );
+  return {
+    keys: scan.nodes.flatMap(({ keys }) => keys),
+    truncated: scan.truncated,
+    failedNodes: primaries.failed + scan.failed,
+  };
 }

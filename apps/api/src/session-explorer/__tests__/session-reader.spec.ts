@@ -732,6 +732,24 @@ describe('readSessionKeys', () => {
     const result = await readSessionKeys(db, ['a', 'b']);
 
     expect(result.keys.map((k) => k.key)).toEqual(['a']);
-    expect(result).toMatchObject({ failedNodes: 1, missingKeys: 1 });
+    expect(result).toMatchObject({ failedNodes: 1, missingKeys: 0 });
+  });
+
+  it('does not count an unreachable primary that owns none of the keys', async () => {
+    const nodeA = new FakeValkey(storeOf({ a: { type: 'string', value: '1' } }));
+    const nodeB = new FakeValkey();
+    nodeB.connectError = new Error('ECONNREFUSED');
+    const db = clusterOf(
+      { 7001: nodeA, 7002: nodeB },
+      {
+        7001: [[calculateSlot('a'), calculateSlot('a')]],
+        7002: [[calculateSlot('b'), calculateSlot('b')]],
+      },
+    );
+
+    const result = await readSessionKeys(db, ['a', 'gone']);
+
+    expect(result.keys.map((k) => k.key)).toEqual(['a']);
+    expect(result).toMatchObject({ failedNodes: 0, missingKeys: 1 });
   });
 });

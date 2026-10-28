@@ -74,6 +74,8 @@ export class FakeValkey {
   pipelineExecs = 0;
   scanPages?: string[][];
   connectError?: Error;
+  serverError?: Error;
+  clusterNodes?: ClusterNode[];
   noTouchError?: Error;
   duplicateWith?: FakeValkey;
   disconnected = false;
@@ -104,6 +106,7 @@ export class FakeValkey {
 
   private record(name: string, args: unknown[]) {
     this.calls.push({ name, args });
+    if (this.serverError) throw this.serverError;
   }
 
   callsOf(name: string) {
@@ -121,7 +124,7 @@ export class FakeValkey {
   }
 
   async connect() {
-    this.record('connect', []);
+    this.calls.push({ name: 'connect', args: [] });
     if (this.connectError) throw this.connectError;
   }
 
@@ -130,8 +133,24 @@ export class FakeValkey {
   }
 
   duplicate(overrides: Record<string, unknown> = {}) {
-    this.record('duplicate', [overrides]);
-    return this.duplicateWith ?? this;
+    this.calls.push({ name: 'duplicate', args: [overrides] });
+    if (this.duplicateWith) {
+      this.duplicateWith.clusterNodes ??= this.clusterNodes;
+      return this.duplicateWith;
+    }
+    let disconnected = false;
+    return new Proxy(this, {
+      get: (target, prop, receiver) => {
+        if (prop === 'disconnected') return disconnected;
+        if (prop === 'disconnect') {
+          return () => {
+            disconnected = true;
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
   }
 
   async quit() {
@@ -279,6 +298,8 @@ export class FakeValkey {
       case 'callBuffer': {
         const command = String(args[0]).toUpperCase();
         if (WRITE_CALLS.includes(command)) throw new Error(`write command ${command} issued`);
+        if (command === 'CLUSTER' && args[1] === 'NODES')
+          return clusterNodesText(this.clusterNodes ?? []);
         if (command === 'CLIENT' && args[1] === 'NO-TOUCH') {
           if (this.noTouchError) throw this.noTouchError;
           return 'OK';
@@ -345,7 +366,25 @@ export function masterNode(
   };
 }
 
+const clusterNodesText = (nodes: ClusterNode[]) =>
+  nodes
+    .map((n) =>
+      [
+        n.id,
+        n.address,
+        n.flags.join(','),
+        n.master,
+        0,
+        0,
+        0,
+        'connected',
+        ...n.slots.map(([start, end]) => (start === end ? `${start}` : `${start}-${end}`)),
+      ].join(' '),
+    )
+    .join('\n');
+
 export function fakeDb(parent: FakeValkey, cluster?: { nodes: ClusterNode[] }): DatabasePort {
+  if (cluster) parent.clusterNodes = cluster.nodes;
   return {
     getClient: () => parent as unknown as Valkey,
     getCapabilities: () => ({ clusterEnabled: cluster !== undefined }),

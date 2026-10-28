@@ -1,12 +1,15 @@
-import { ServiceUnavailableException } from '@nestjs/common';
+import { Logger, ServiceUnavailableException } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import calculateSlot from 'cluster-key-slot';
 import type { DatabasePort } from '../common/interfaces/database-port.interface';
 import type { ClusterNode } from '../common/types/metrics.types';
+import { MetricsParser } from '../database/parsers/metrics.parser';
 import { tlsIdentityOptions } from '../database/adapters/tls-servername';
 import { parseNodeAddress } from '../topology/membership-diff';
 
 const NODE_TIMEOUT_MS = 5000;
+const NO_TOUCH_UNSUPPORTED = /unknown (sub)?command|NOPERM/i;
+const logger = new Logger('SessionExplorer');
 
 export interface PrimaryRoute {
   client: Valkey;
@@ -17,6 +20,7 @@ export interface PrimaryClients {
   clients: Valkey[];
   failed: number;
   routes: PrimaryRoute[] | null;
+  failedRoutes: number[][][];
   touchesKeys: boolean;
   release: () => Promise<void>;
 }
@@ -36,10 +40,17 @@ const readerTimeout = (parent: Valkey): number => parent.options.commandTimeout 
 export function routeOf(primaries: PrimaryClients, key: string): Valkey | null {
   if (!primaries.routes) return primaries.clients[0] ?? null;
   const slot = calculateSlot(key);
-  const route = primaries.routes.find((r) =>
-    r.slots.some(([start, end]) => slot >= start && slot <= end),
-  );
+  const route = primaries.routes.find((r) => inSlots(r.slots, slot));
   return route?.client ?? null;
+}
+
+const inSlots = (slots: number[][], slot: number) =>
+  slots.some(([start, end]) => slot >= start && slot <= end);
+
+export function failedNodeOf(primaries: PrimaryClients, key: string): number | null {
+  const slot = calculateSlot(key);
+  const index = primaries.failedRoutes.findIndex((slots) => inSlots(slots, slot));
+  return index === -1 ? null : index;
 }
 
 const isServingPrimary = (node: ClusterNode) =>
@@ -72,67 +83,101 @@ interface Reader {
   noTouch: boolean;
 }
 
-async function openReader(create: () => Valkey | null): Promise<Reader | null> {
+async function openReader(label: string, create: () => Valkey | null): Promise<Reader | null> {
   let client: Valkey | null = null;
   try {
     client = create();
-    if (!client) return null;
+    if (!client) throw new Error('unparseable node address');
     client.on('error', () => undefined);
     await client.connect();
     const noTouch = await client.call('CLIENT', 'NO-TOUCH', 'ON').then(
       () => true,
-      () => false,
+      (err: Error) => {
+        if (NO_TOUCH_UNSUPPORTED.test(err.message)) return false;
+        throw err;
+      },
     );
     return { client, noTouch };
-  } catch {
+  } catch (err) {
+    logger.warn(`Session reader for ${label} could not be opened: ${(err as Error).message}`);
     client?.disconnect();
     return null;
   }
 }
 
 const connectNode = (parent: Valkey, node: ClusterNode) =>
-  openReader(() => nodeClient(parent, node));
+  openReader(node.address, () => nodeClient(parent, node));
 
-const sharedReader = (parent: Valkey) =>
-  openReader(() => parent.duplicate({ ...READER_OPTIONS, commandTimeout: readerTimeout(parent) }));
+const ownReader = (parent: Valkey) =>
+  openReader(`${parent.options.host}:${parent.options.port}`, () =>
+    parent.duplicate({ ...READER_OPTIONS, commandTimeout: readerTimeout(parent) }),
+  );
+
+const unavailable = (failed: number): PrimaryClients => ({
+  clients: [],
+  failed,
+  routes: null,
+  failedRoutes: [],
+  touchesKeys: false,
+  release: async () => undefined,
+});
+
+async function clusterNodes(seed: Reader): Promise<ClusterNode[] | null> {
+  try {
+    return MetricsParser.parseClusterNodes((await seed.client.call('CLUSTER', 'NODES')) as string);
+  } catch (err) {
+    logger.warn(`CLUSTER NODES failed on the session reader: ${(err as Error).message}`);
+    return null;
+  }
+}
 
 export async function primaryClients(db: DatabasePort): Promise<PrimaryClients> {
   const parent = db.getClient();
+  const seed = await ownReader(parent);
+  if (!seed) return unavailable(1);
   if (!db.getCapabilities().clusterEnabled) {
-    const reader = await sharedReader(parent);
     return {
-      clients: reader ? [reader.client] : [],
-      failed: reader ? 0 : 1,
+      clients: [seed.client],
+      failed: 0,
       routes: null,
-      touchesKeys: reader ? !reader.noTouch : false,
+      failedRoutes: [],
+      touchesKeys: !seed.noTouch,
       release: async () => {
-        reader?.client.disconnect();
+        seed.client.disconnect();
       },
     };
   }
 
-  const primaries = (await db.getClusterNodes()).filter(isServingPrimary);
+  const nodes = await clusterNodes(seed);
+  if (!nodes) {
+    seed.client.disconnect();
+    return unavailable(1);
+  }
+  const primaries = nodes.filter(isServingPrimary);
+  const connected = await Promise.all(
+    primaries.map((node) => (node.flags.includes('myself') ? seed : connectNode(parent, node))),
+  );
+  if (!connected.includes(seed)) seed.client.disconnect();
+
   const clients: Valkey[] = [];
   const routes: PrimaryRoute[] = [];
-  let failed = 0;
+  const failedRoutes: number[][][] = [];
   let touchesKeys = false;
-
-  const connected = await Promise.all(primaries.map((node) => connectNode(parent, node)));
   connected.forEach((reader, i) => {
     if (!reader) {
-      failed++;
+      failedRoutes.push(primaries[i].slots);
       return;
     }
-    const { client, noTouch } = reader;
-    if (!noTouch) touchesKeys = true;
-    clients.push(client);
-    routes.push({ client, slots: primaries[i].slots });
+    if (!reader.noTouch) touchesKeys = true;
+    clients.push(reader.client);
+    routes.push({ client: reader.client, slots: primaries[i].slots });
   });
 
   return {
     clients,
-    failed,
+    failed: failedRoutes.length,
     routes,
+    failedRoutes,
     touchesKeys,
     release: async () => {
       for (const client of clients) client.disconnect();
@@ -146,8 +191,7 @@ export async function withPrimaries<T>(
 ): Promise<T> {
   const primaries = await primaryClients(db);
   if (primaries.clients.length === 0) {
-    await primaries.release();
-    throw new ServiceUnavailableException('No primary could be reached');
+    throw new ServiceUnavailableException('Could not open a read connection to the server');
   }
   try {
     return await run(primaries);

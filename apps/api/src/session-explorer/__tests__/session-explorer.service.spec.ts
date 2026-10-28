@@ -2,16 +2,16 @@ import { NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import type { CapturedKey, SessionNamespace } from '@betterdb/shared';
 import Valkey from 'iovalkey';
 import { SessionExplorerService } from '../session-explorer.service';
-import { keysForSession, scanSessions } from '../session-scanner';
-import { readSessionKeys } from '../session-reader';
-import { withPrimaries } from '../primary-nodes';
+import { keysForSessionOn, scanSessions } from '../session-scanner';
+import { readSessionKeysOn } from '../session-reader';
+import { type PrimaryClients, withPrimaries } from '../primary-nodes';
 import { FakeValkey, fakeDb, masterNode } from './fake-valkey';
 
 jest.mock('iovalkey', () => ({ __esModule: true, default: jest.fn() }));
 
 jest.mock('../session-scanner', () => ({
   ...jest.requireActual('../session-scanner'),
-  keysForSession: jest.fn(),
+  keysForSessionOn: jest.fn(),
   scanSessions: jest.fn(),
 }));
 jest.mock('../primary-nodes', () => {
@@ -20,11 +20,20 @@ jest.mock('../primary-nodes', () => {
 });
 jest.mock('../session-reader', () => ({
   ...jest.requireActual('../session-reader'),
-  readSessionKeys: jest.fn(),
+  readSessionKeysOn: jest.fn(),
 }));
 
-const keysFor = keysForSession as jest.MockedFunction<typeof keysForSession>;
-const read = readSessionKeys as jest.MockedFunction<typeof readSessionKeys>;
+const keysFor = keysForSessionOn as jest.MockedFunction<typeof keysForSessionOn>;
+const read = readSessionKeysOn as jest.MockedFunction<typeof readSessionKeysOn>;
+const actualWithPrimaries = jest.requireActual('../primary-nodes').withPrimaries;
+const stubPrimaries: PrimaryClients = {
+  clients: [],
+  failed: 0,
+  routes: null,
+  failedRoutes: [],
+  touchesKeys: false,
+  release: async () => undefined,
+};
 const ValkeyMock = Valkey as unknown as jest.Mock;
 
 const ns: SessionNamespace = {
@@ -50,12 +59,15 @@ const captured = (overrides: Partial<CapturedKey> = {}): CapturedKey => ({
   ...overrides,
 });
 
+afterEach(() => jest.mocked(withPrimaries).mockImplementation(actualWithPrimaries));
+
 describe('SessionExplorerService.getSession', () => {
   const storage = { getSessionNamespace: jest.fn(async () => ns) };
   const registry = { get: jest.fn(() => ({})) };
   const service = new SessionExplorerService(registry as never, storage as never);
 
   beforeEach(() => {
+    jest.mocked(withPrimaries).mockImplementation(async (_db, fn) => fn(stubPrimaries));
     keysFor.mockResolvedValue({ keys: ['lc:1'], truncated: false, failedNodes: 0 });
     read.mockResolvedValue({
       keys: [captured()],
@@ -414,6 +426,7 @@ describe('SessionExplorerService.preview', () => {
         clients: [client as never],
         failed: 1,
         routes: null,
+        failedRoutes: [],
         touchesKeys: false,
         release: async () => undefined,
       }),

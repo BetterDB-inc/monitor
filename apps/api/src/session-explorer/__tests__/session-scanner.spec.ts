@@ -345,11 +345,12 @@ describe('primaryClients', () => {
     expect(ValkeyMock).not.toHaveBeenCalled();
   });
 
-  it('keeps only masters with slots and connects to each by its own address', async () => {
+  it('keeps only masters with slots and connects to the others by their own address', async () => {
     const parent = new FakeValkey();
     const nodeA = new FakeValkey();
     const nodeB = new FakeValkey();
-    ValkeyMock.mockImplementationOnce(() => nodeA).mockImplementationOnce(() => nodeB);
+    parent.duplicateWith = nodeA;
+    ValkeyMock.mockImplementationOnce(() => nodeB);
     const replica = { ...masterNode('r', '10.0.0.9:7009'), flags: ['slave'], master: 'a' };
     const empty = { ...masterNode('e', '10.0.0.8:7008'), slots: [] };
     const db = fakeDb(parent, {
@@ -364,10 +365,7 @@ describe('primaryClients', () => {
     const result = await primaryClients(db);
 
     expect(result.clients).toEqual([nodeA, nodeB]);
-    expect(ValkeyMock).toHaveBeenCalledTimes(2);
-    expect(ValkeyMock).toHaveBeenCalledWith(
-      expect.objectContaining({ host: '10.0.0.1', port: 7000, lazyConnect: true }),
-    );
+    expect(ValkeyMock).toHaveBeenCalledTimes(1);
     expect(ValkeyMock).toHaveBeenCalledWith(
       expect.objectContaining({ host: '10.0.0.2', port: 7002, lazyConnect: true }),
     );
@@ -491,6 +489,46 @@ describe('keysForSession', () => {
 
     expect(result.keys).toEqual(['chat:1']);
     expect(nodeA.callsOf('exists')).toHaveLength(0);
+  });
+
+  const splitCluster = (owner: FakeValkey, other: FakeValkey) => {
+    const byPort: Record<number, FakeValkey> = { 7001: other, 7002: owner };
+    ValkeyMock.mockImplementation((opts: { port: number }) => byPort[opts.port]);
+    const slot = calculateSlot('chat:1');
+    return fakeDb(new FakeValkey(), {
+      nodes: [
+        masterNode('a', '10.0.0.1:7001', [], [[(slot + 1) % 16384, (slot + 1) % 16384]]),
+        masterNode('b', '10.0.0.2:7002', [], [[slot, slot]]),
+      ],
+    });
+  };
+
+  it('finds no session when its owner answers but another primary is down', async () => {
+    const down = new FakeValkey();
+    down.connectError = new Error('ECONNREFUSED');
+
+    const result = await keysForSession(
+      splitCluster(new FakeValkey(), down),
+      'chat:*',
+      byKey,
+      'chat:1',
+    );
+
+    expect(result).toEqual({ keys: [], truncated: false, failedNodes: 0 });
+  });
+
+  it('counts the owner once when it is the primary that is down', async () => {
+    const down = new FakeValkey();
+    down.connectError = new Error('ECONNREFUSED');
+
+    const result = await keysForSession(
+      splitCluster(down, new FakeValkey()),
+      'chat:*',
+      byKey,
+      'chat:1',
+    );
+
+    expect(result).toEqual({ keys: [], truncated: false, failedNodes: 1 });
   });
 
   it('reports the owning primary as failed when the lookup errors', async () => {
