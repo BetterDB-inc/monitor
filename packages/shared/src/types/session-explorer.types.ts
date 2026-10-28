@@ -114,6 +114,7 @@ export interface SessionDetail {
   ttlMs: number | null;
   memoryBytes: number;
   totalKeys: number;
+  skippedKeys: number;
   totalMemoryBytes: number;
   complete: boolean;
   unparsedKeys: number;

@@ -19,7 +19,7 @@ describe('SessionDetailPanel', () => {
   it('shows the session totals and how much of it the timeline reads', () => {
     render(
       <SessionDetailPanel
-        detail={detail({ totalKeys: 4, totalMemoryBytes: 4577, memoryBytes: 1618 })}
+        detail={detail({ totalKeys: 4, skippedKeys: 3, totalMemoryBytes: 4577, memoryBytes: 1618 })}
         onExport={vi.fn()}
         exporting={false}
       />,
@@ -30,6 +30,17 @@ describe('SessionDetailPanel', () => {
 
   it('does not mention a checkpoint when every key was read', () => {
     render(<SessionDetailPanel detail={detail()} onExport={vi.fn()} exporting={false} />);
+    expect(screen.queryByText(/latest checkpoint/)).toBeNull();
+  });
+
+  it('does not mention a checkpoint when keys are missing but none were skipped', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({ totalKeys: 3, missingKeys: 2, complete: false })}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
     expect(screen.queryByText(/latest checkpoint/)).toBeNull();
   });
 

@@ -41,7 +41,7 @@ export function SessionDetailPanel({ detail, onExport, exporting }: Props) {
             ~{detail.estimatedTokens.toLocaleString()} tokens ·{' '}
             {formatBytes(detail.totalMemoryBytes)} · TTL {formatTtl(detail.ttlMs)} ·{' '}
             {plural(detail.totalKeys, 'key')}
-            {detail.keys.length < detail.totalKeys &&
+            {detail.skippedKeys > 0 &&
               `, showing latest checkpoint (${plural(detail.keys.length, 'key')} · ${formatBytes(detail.memoryBytes)})`}
           </p>
         </div>

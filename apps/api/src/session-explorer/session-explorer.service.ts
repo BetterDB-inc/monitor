@@ -210,6 +210,7 @@ export class SessionExplorerService {
         ttlMs: minPositive(read.keys.map((k) => k.pttl)),
         memoryBytes,
         totalKeys: scan.keys.length,
+        skippedKeys: skipped.length,
         totalMemoryBytes: memoryBytes + skippedBytes,
         complete,
         unparsedKeys,

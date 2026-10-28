@@ -137,14 +137,14 @@ describe('SessionExplorerService.getSession', () => {
       `${p}:checkpoint:1f0-b`,
       `${p}:writes:1f0-a|task-1|messages|0`,
     ]);
-    expect(detail).toMatchObject({ memoryBytes: 64, totalKeys: 4, totalMemoryBytes: 364 });
+    expect(detail).toMatchObject({ memoryBytes: 64, totalKeys: 4, skippedKeys: 3, totalMemoryBytes: 364 });
   });
 
   it('totals equal the read keys when the preset reads every key', async () => {
     measure.mockClear();
     const detail = await service.getSession('conn-1', 'ns-1', 'lc:1');
     expect(measure).not.toHaveBeenCalled();
-    expect(detail).toMatchObject({ totalKeys: 1, totalMemoryBytes: 64 });
+    expect(detail).toMatchObject({ totalKeys: 1, skippedKeys: 0, totalMemoryBytes: 64 });
   });
 
   it('is incomplete when the key scan was capped', async () => {

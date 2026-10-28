@@ -64,6 +64,7 @@ export const detail = (overrides: Partial<SessionDetail> = {}): SessionDetail =>
   ttlMs: 5000,
   memoryBytes: 2048,
   totalKeys: 1,
+  skippedKeys: 0,
   totalMemoryBytes: 2048,
   complete: true,
   unparsedKeys: 0,
