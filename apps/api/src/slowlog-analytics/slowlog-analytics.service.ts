@@ -11,6 +11,8 @@ import { analyzeSlowLogPatterns } from '../metrics/slowlog-analyzer';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
+import { LOG_CATCH_UP_MAX_FETCH, LOG_POLL_BATCH, planCatchUpFetch } from '../log-capture/capture-gap';
+import { recordCaptureGap } from '../log-capture/capture-gap-recorder';
 
 @Injectable()
 export class SlowLogAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
@@ -23,6 +25,10 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
   private cachedEntries = new Map<string, SlowLogEntry[]>();
   private cachedAnalysis = new Map<string, SlowLogPatternAnalysis | null>();
   private lastCacheUpdate = new Map<string, number>();
+
+  // End of the last successful poll per connection; a missing entry means this
+  // process has not completed a poll for it yet (used to classify capture gaps).
+  private lastPollAt = new Map<string, number>();
 
   // Poll every 30 seconds by default
   private readonly DEFAULT_POLL_INTERVAL_MS = 30000;
@@ -59,13 +65,15 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
       }
 
       // Fetch slow log from Valkey/Redis (up to 128 entries)
-      const entries = await ctx.client.getSlowLog(128);
+      const batch = await ctx.client.getSlowLog(LOG_POLL_BATCH);
+      let entries = batch;
       const now = Date.now();
       const lastSeenId = this.lastSeenIds.get(ctx.connectionId) ?? null;
 
-      // Update cache for Prometheus metrics
-      this.cachedEntries.set(ctx.connectionId, entries);
-      this.cachedAnalysis.set(ctx.connectionId, analyzeSlowLogPatterns(entries));
+      // Update cache for Prometheus metrics (always the regular batch, so the
+      // pattern metrics keep their 128-entry window even after a catch-up read)
+      this.cachedEntries.set(ctx.connectionId, batch);
+      this.cachedAnalysis.set(ctx.connectionId, analyzeSlowLogPatterns(batch));
       this.lastCacheUpdate.set(ctx.connectionId, now);
 
       // Detect ID wraparound (e.g., after SLOWLOG RESET)
@@ -80,13 +88,30 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
       }
 
       // Filter out entries we've already seen
-      const currentLastSeenId = this.lastSeenIds.get(ctx.connectionId);
+      const currentLastSeenId = this.lastSeenIds.get(ctx.connectionId) ?? null;
+
+      // The regular batch only holds the newest 128 entries. When more than
+      // that arrived since the last poll, read back to the last seen id (up to
+      // LOG_CATCH_UP_MAX_FETCH) instead of silently skipping the older ones.
+      let requested = LOG_POLL_BATCH;
+      const catchUp = planCatchUpFetch({
+        lastSeenId: currentLastSeenId,
+        batch,
+        batchLimit: LOG_POLL_BATCH,
+        maxFetch: LOG_CATCH_UP_MAX_FETCH,
+      });
+      if (catchUp !== null) {
+        requested = catchUp;
+        entries = await ctx.client.getSlowLog(catchUp);
+      }
+
       const newEntries = currentLastSeenId !== null
-        ? entries.filter(e => e.id > currentLastSeenId!)
+        ? entries.filter(e => e.id > currentLastSeenId)
         : entries;
 
       if (newEntries.length === 0) {
         this.logger.debug(`No new slow log entries to save for ${ctx.connectionName}`);
+        this.lastPollAt.set(ctx.connectionId, now);
         return;
       }
 
@@ -106,12 +131,25 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
 
       const saved = await this.storage.saveSlowLogEntries(storedEntries, ctx.connectionId);
 
+      await recordCaptureGap(this.storage, this.logger, {
+        connectionId: ctx.connectionId,
+        connectionName: ctx.connectionName,
+        logType: 'slowlog',
+        lastSeenId: currentLastSeenId,
+        entries,
+        requested,
+        previousPollAt: this.lastPollAt.get(ctx.connectionId) ?? null,
+        intervalMs: this.getIntervalMs(),
+        now,
+      });
+
       // Update lastSeenId to the highest ID we've seen
       const maxId = Math.max(...newEntries.map(e => e.id));
       const storedLastSeenId = this.lastSeenIds.get(ctx.connectionId);
       if (storedLastSeenId === null || storedLastSeenId === undefined || maxId > storedLastSeenId) {
         this.lastSeenIds.set(ctx.connectionId, maxId);
       }
+      this.lastPollAt.set(ctx.connectionId, now);
 
       this.logger.debug(`Saved ${saved} new slow log entries for ${ctx.connectionName} (lastSeenId: ${this.lastSeenIds.get(ctx.connectionId)})`);
     } catch (error) {
@@ -126,6 +164,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
 
   protected onConnectionRemoved(connectionId: string): void {
     this.lastSeenIds.delete(connectionId);
+    this.lastPollAt.delete(connectionId);
     this.cachedEntries.delete(connectionId);
     this.cachedAnalysis.delete(connectionId);
     this.lastCacheUpdate.delete(connectionId);

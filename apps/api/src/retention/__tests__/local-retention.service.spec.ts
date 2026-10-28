@@ -9,6 +9,7 @@ const NOW = 1_700_000_000_000;
 describe('LocalRetentionService', () => {
   let originalCloudMode: string | undefined;
   let storage: any;
+  let logCaptureGaps: { prune: jest.Mock };
 
   beforeEach(() => {
     originalCloudMode = process.env.CLOUD_MODE;
@@ -41,6 +42,13 @@ describe('LocalRetentionService', () => {
       pruneOldLatencyStatsSamples: jest.fn().mockResolvedValue(0),
       pruneOldVectorIndexSnapshots: jest.fn().mockResolvedValue(0),
     };
+    // Repository-backed store: kept non-enumerable so the "every prune method"
+    // loops below keep iterating only the pruneOld* mocks.
+    logCaptureGaps = { prune: jest.fn().mockResolvedValue(6) };
+    Object.defineProperty(storage, 'getLogCaptureGapRepository', {
+      value: () => logCaptureGaps,
+      enumerable: false,
+    });
 
     jest.spyOn(Date, 'now').mockReturnValue(NOW);
   });
@@ -77,6 +85,13 @@ describe('LocalRetentionService', () => {
         method === 'pruneOldClientAnalyticsRollups' ? clientRollupBucketStart(expectedCutoff) : expectedCutoff,
       );
     }
+  });
+
+  it('prunes log capture gaps with the same cutoff and reports them under their own name', async () => {
+    const results = await runRetentionSweep(storage, 1_234, { error: jest.fn() } as any);
+
+    expect(logCaptureGaps.prune).toHaveBeenCalledWith(1_234);
+    expect(results.log_capture_gaps).toBe(6);
   });
 
   it('reports pruned scaling readiness scores under their own name', async () => {

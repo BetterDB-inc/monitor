@@ -98,6 +98,8 @@ import { SlowLogMemoryRepository } from './repositories/slowlog.memory.repositor
 import { InvitationMemoryRepository } from './repositories/invitation.memory.repository';
 import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
 import { ActivityMemoryRepository } from './repositories/activity.memory.repository';
+import { LogCaptureGapMemoryRepository } from './repositories/log-capture-gap.memory.repository';
+import type { LogCaptureGapRepository } from '../../common/interfaces/log-capture-gap-repository.interface';
 import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
 
 import type {
@@ -159,6 +161,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   private readonly slowlogRepo = new SlowLogMemoryRepository();
   private readonly invitationRepo = new InvitationMemoryRepository();
   private readonly activityRepo = new ActivityMemoryRepository();
+  private readonly logCaptureGapRepo = new LogCaptureGapMemoryRepository();
   private idCounter = 1;
   private ready: boolean = false;
 
@@ -2468,5 +2471,9 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   getActivityRepository(): ActivityRepository {
     return this.activityRepo;
+  }
+
+  getLogCaptureGapRepository(): LogCaptureGapRepository {
+    return this.logCaptureGapRepo;
   }
 }

@@ -120,6 +120,40 @@ Common issues and solutions for BetterDB Monitor.
 - The specific feature is available for that version
 - Data exists (e.g., COMMANDLOG has entries)
 
+## Slow Log / Command Log Issues
+
+### "Entries were never captured" warning on the Slow Log page
+
+**Symptoms:** The Slow Log page shows *"N slow log entries were never captured in the last 24 hours"* (or the same for a command log tab).
+
+**Explanation:** Valkey and Redis keep only the newest `slowlog-max-len` (default 128) slow log entries, and the newest `commandlog-*-max-len` entries per command log type. BetterDB reads each log every 30 seconds. When more entries are logged between two reads than the server keeps, the oldest are overwritten before BetterDB sees them. Every entry carries an id that only ever increases (it is not reset by `SLOWLOG RESET` / `COMMANDLOG RESET`), so BetterDB counts exactly how many ids it never received and records each gap.
+
+BetterDB first tries to recover: when the regular 128-entry read does not reach back to the last entry it stored, it reads up to 1,024 entries in the same poll, so a server with a larger `*-max-len` loses nothing. The warning only appears when entries were really gone.
+
+Each gap has a cause:
+
+| Cause | Meaning | What to do |
+|-------|---------|------------|
+| Overwritten by the server | More entries arrived in one poll interval than the server keeps | Raise the `*-max-len` shown in the warning, e.g. `CONFIG SET slowlog-max-len 1024`, and persist it in your config file. On managed services (ElastiCache, MemoryDB, Redis Cloud) change it in the parameter group. Each retained entry costs memory, so prefer the suggested value over a much larger one. |
+| Over the per-poll read limit | More than 1,024 entries arrived between two polls | Raise the logging threshold (`slowlog-log-slower-than`, `commandlog-execution-slower-than`, `commandlog-request-larger-than` or `commandlog-reply-larger-than`) so only commands worth investigating are logged |
+| While BetterDB was not polling | BetterDB was restarting or unreachable | Nothing on the server; the gap covers the time BetterDB was down |
+
+The suggested value is twice the largest burst seen in the window, rounded up to a power of two, between 256 and 8192.
+
+**API:**
+
+```bash
+# Per-log totals for the last 24 hours (windowHours: 1-720)
+curl -b cookies.txt -H "x-connection-id: <id>" "http://localhost:3001/api/log-capture/summary?windowHours=24"
+
+# Individual gaps, newest first
+curl -b cookies.txt -H "x-connection-id: <id>" "http://localhost:3001/api/log-capture/gaps?logType=slowlog&limit=50"
+```
+
+Gap records follow the same retention as the slow log itself.
+
+**Known limitation:** if the server restarts while BetterDB is down and logs more entries than BetterDB had already stored, the new ids overlap the old range and BetterDB cannot tell the restart apart from a gap. The gap is then reported as *while BetterDB was not polling*.
+
 ## Getting Help
 
 If your issue isn't listed here:

@@ -12,6 +12,8 @@ import { SlowLogTable } from '../components/metrics/SlowLogTable';
 import { CommandLogTable } from '../components/metrics/CommandLogTable';
 import { SlowLogPatternAnalysisView } from '../components/metrics/SlowLogPatternAnalysis';
 import { ScanSkewAdvisory } from '../components/metrics/ScanSkewAdvisory';
+import { LogCaptureGapAdvisory } from '../components/metrics/LogCaptureGapAdvisory';
+import { logCaptureApi } from '../api/log-capture';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 import { CapabilityStatusBanner } from '../components/CapabilityStatusBanner';
 import type { CommandLogType, LogSortBy } from '../types/metrics';
@@ -237,6 +239,16 @@ export function SlowLog() {
   // banner when BOTH are missing, so we never spam "COMMANDLOG not exposed"
   // on every Redis SlowLog page.
   const bothMissing = !hasSlowLog && !hasCommandLog;
+  // Entries the server overwrote before BetterDB read them. Checked once a
+  // minute: gaps are only written by the 30s pollers.
+  const { data: logCaptureSummary } = usePolling({
+    fetcher: (signal) => logCaptureApi.getSummary(signal),
+    interval: 60_000,
+    enabled: hasSlowLog || hasCommandLog,
+    queryKey: ['log-capture-summary', currentConnection?.id],
+  });
+  const visibleCapturedLog = hasCommandLog ? (`commandlog-${activeTab}` as const) : ('slowlog' as const);
+
   const showSlowLogBanner = !hasSlowLog && (Boolean(slowLogReason) || bothMissing);
   const showCommandLogBanner = !hasCommandLog && (Boolean(commandLogReason) || bothMissing);
   const FALLBACK_REASON = 'Not exposed by this server.';
@@ -296,6 +308,8 @@ export function SlowLog() {
           onRetry={commandLogReason ? handleRetryCommandLog : undefined}
         />
       )}
+
+      <LogCaptureGapAdvisory summary={logCaptureSummary} logType={visibleCapturedLog} />
 
       {hasCommandLog ? (
         <Card>
