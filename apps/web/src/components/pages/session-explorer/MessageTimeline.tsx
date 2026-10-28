@@ -1,5 +1,6 @@
 import type { ParsedMessage } from '@betterdb/shared';
 import { Badge } from '../../ui/badge';
+import { CollapsibleText } from './CollapsibleText';
 import { prettyArgs } from './format';
 
 function ToolCalls({ calls }: { calls: NonNullable<ParsedMessage['toolCalls']> }) {
@@ -14,7 +15,11 @@ function ToolCalls({ calls }: { calls: NonNullable<ParsedMessage['toolCalls']> }
           <div className="text-xs font-medium">
             Tool call: <span className="font-mono">{call.name}</span>
           </div>
-          <pre className="mt-1 overflow-x-auto whitespace-pre-wrap text-xs">{prettyArgs(call.args)}</pre>
+          <CollapsibleText
+            as="pre"
+            text={prettyArgs(call.args)}
+            className="mt-1 overflow-x-auto whitespace-pre-wrap text-xs"
+          />
         </div>
       ))}
     </div>
@@ -36,7 +41,9 @@ export function MessageTimeline({ messages }: { messages: ParsedMessage[] }) {
             )}
             {m.timestamp && <span className="text-xs text-muted-foreground">{m.timestamp}</span>}
           </div>
-          {m.content !== '' && <p className="whitespace-pre-wrap break-words text-sm">{m.content}</p>}
+          {m.content !== '' && (
+            <CollapsibleText text={m.content} className="whitespace-pre-wrap break-words text-sm" />
+          )}
           {m.toolCalls && m.toolCalls.length > 0 && <ToolCalls calls={m.toolCalls} />}
         </li>
       ))}
