@@ -2,6 +2,7 @@ import { execFileSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { Pool } from 'pg';
 import { PostgresAdapter } from '../src/storage/adapters/postgres.adapter';
+import { dropSchema } from './postgres-test-utils';
 
 const DSN =
   process.env.NULLABLE_METRICS_POSTGRES_TEST_DSN ??
@@ -128,7 +129,7 @@ describePostgres('nullable pushed metrics — postgres upgrade from NOT NULL col
 
   afterAll(async () => {
     await adapter.close();
-    await adminPool.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+    await dropSchema(adminPool, SCHEMA);
     await adminPool.end();
   });
 

@@ -260,6 +260,9 @@ export function createAgentCachePreset(pattern?: string): PresetDefinition {
     id: 'agent-cache',
     defaultPattern,
     sessionIdOf: (key) => partsOfKey(key)?.threadId || null,
+    sessionLookup: (sessionId) => ({
+      match: `${base === null ? `*${SESSION_MARKER}` : escapeGlob(base)}${escapeGlob(sessionId)}:*`,
+    }),
     parseKey,
     selectKeys,
     parseKeys: (keys) => {

@@ -1,6 +1,6 @@
 {
   "name": "web",
-  "version": "0.51.1",
+  "version": "0.52.0",
   "homepage": "https://betterdb.com",
   "private": true,
   "type": "module",
@@ -51,7 +51,7 @@
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.4.0",
-    "happy-dom": "^20.8.9",
+    "happy-dom": "^21.0.4",
     "react-grab": "^0.1.28",
     "shadcn": "^4.1.2",
     "tailwindcss": "^4.2.2",

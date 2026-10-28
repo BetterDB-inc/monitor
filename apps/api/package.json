@@ -1,6 +1,6 @@
 {
   "name": "api",
-  "version": "0.51.1",
+  "version": "0.52.0",
   "homepage": "https://betterdb.com",
   "private": true,
   "scripts": {
@@ -78,6 +78,7 @@
     "better-sqlite3": "^12.8.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
+    "cluster-key-slot": "^1.1.2",
     "cron": "^4.4.0",
     "fastify": "^5.12.5",
     "hnswlib-node": "^3.0.0",
@@ -98,7 +99,7 @@
     "semver": "^7.7.4",
     "ssh2": "^1.17.0",
     "ws": "^8.21.0",
-    "zod": "^4.3.6"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

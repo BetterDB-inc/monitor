@@ -29,6 +29,7 @@ import type {
   KvCacheFootprintSnapshot,
   KvCacheModelFootprint,
   KvCacheSettings,
+  SessionNamespace,
 } from '@betterdb/shared';
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
@@ -2001,6 +2002,19 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         eviction_alert_enabled INTEGER NOT NULL DEFAULT 1,
         updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS session_explorer_namespaces (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        pattern TEXT NOT NULL,
+        preset TEXT NOT NULL,
+        custom_schema TEXT,
+        oversize_threshold_bytes INTEGER NOT NULL DEFAULT 1048576,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_explorer_namespaces_conn
+        ON session_explorer_namespaces(connection_id);
 
       CREATE TABLE IF NOT EXISTS webhooks (
         id TEXT PRIMARY KEY,
@@ -4436,6 +4450,88 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     for (const table of ['kv_cache_footprint_snapshots', 'kv_cache_engine_samples', 'kv_cache_engines', 'kv_cache_settings']) {
       await chunkedSqliteDelete(this.db, table, 'connection_id = ?', [connectionId]);
     }
+  }
+
+  private mapSessionNamespaceRow(row: {
+    id: string;
+    connection_id: string;
+    name: string;
+    pattern: string;
+    preset: string;
+    custom_schema: string | null;
+    oversize_threshold_bytes: number;
+    created_at: number;
+    updated_at: number;
+  }): SessionNamespace {
+    return {
+      id: row.id,
+      connectionId: row.connection_id,
+      name: row.name,
+      pattern: row.pattern,
+      preset: row.preset as SessionNamespace['preset'],
+      customSchema: row.custom_schema ? JSON.parse(row.custom_schema) : null,
+      oversizeThresholdBytes: row.oversize_threshold_bytes,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async listSessionNamespaces(connectionId: string): Promise<SessionNamespace[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM session_explorer_namespaces WHERE connection_id = ? ORDER BY created_at ASC, id ASC',
+      )
+      .all(connectionId) as Parameters<SqliteAdapter['mapSessionNamespaceRow']>[0][];
+    return rows.map((row) => this.mapSessionNamespaceRow(row));
+  }
+
+  async getSessionNamespace(connectionId: string, id: string): Promise<SessionNamespace | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db
+      .prepare('SELECT * FROM session_explorer_namespaces WHERE connection_id = ? AND id = ?')
+      .get(connectionId, id) as Parameters<SqliteAdapter['mapSessionNamespaceRow']>[0] | undefined;
+    return row ? this.mapSessionNamespaceRow(row) : null;
+  }
+
+  async saveSessionNamespace(ns: SessionNamespace): Promise<SessionNamespace> {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db
+      .prepare(
+        `INSERT INTO session_explorer_namespaces
+           (id, connection_id, name, pattern, preset, custom_schema, oversize_threshold_bytes, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           pattern = excluded.pattern,
+           preset = excluded.preset,
+           custom_schema = excluded.custom_schema,
+           oversize_threshold_bytes = excluded.oversize_threshold_bytes,
+           updated_at = excluded.updated_at
+         WHERE session_explorer_namespaces.connection_id = excluded.connection_id`,
+      )
+      .run(
+        ns.id,
+        ns.connectionId,
+        ns.name,
+        ns.pattern,
+        ns.preset,
+        ns.customSchema ? JSON.stringify(ns.customSchema) : null,
+        ns.oversizeThresholdBytes,
+        ns.createdAt,
+        ns.updatedAt,
+      );
+    const saved = await this.getSessionNamespace(ns.connectionId, ns.id);
+    if (!saved) throw new Error('Session namespace id belongs to another connection');
+    return saved;
+  }
+
+  async deleteSessionNamespace(connectionId: string, id: string): Promise<boolean> {
+    if (!this.db) throw new Error('Database not initialized');
+    const result = this.db
+      .prepare('DELETE FROM session_explorer_namespaces WHERE connection_id = ? AND id = ?')
+      .run(connectionId, id);
+    return result.changes > 0;
   }
 
   // Command Stats Sample Methods

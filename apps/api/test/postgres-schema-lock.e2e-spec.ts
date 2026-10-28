@@ -1,6 +1,7 @@
 import { execFileSync } from 'child_process';
 import { Client, Pool } from 'pg';
 import { PostgresAdapter } from '../src/storage/adapters/postgres.adapter';
+import { dropSchema } from './postgres-test-utils';
 
 const DSN =
   process.env.CLIENT_ANALYTICS_POSTGRES_TEST_DSN ??
@@ -108,7 +109,7 @@ describePostgres('postgres schema-setup lock', () => {
   });
 
   afterAll(async () => {
-    await adminPool.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+    await dropSchema(adminPool, SCHEMA);
     await adminPool.end();
   });
 
@@ -257,10 +258,12 @@ describePostgres('postgres schema-setup lock', () => {
       expect(await waitFor(async () => (await indexBuildPids(SCHEMA)).length > 0)).toBe(true);
       const build = adapter['indexBuild'] as Promise<void>;
 
+      const buildPid = adapter['indexBuildPid'] as number;
+
       await adapter.close();
       await expect(build).resolves.toBeUndefined();
-      // Still blocked by the open snapshot had it not been cancelled.
-      expect(await waitFor(async () => (await indexBuildPids(SCHEMA)).length === 0, 2_000)).toBe(true);
+      const alive = await adminPool.query('SELECT 1 FROM pg_stat_activity WHERE pid = $1', [buildPid]);
+      expect(alive.rowCount).toBe(0);
     } finally {
       await blocker.query('ROLLBACK').catch(() => undefined);
       await blocker.end();

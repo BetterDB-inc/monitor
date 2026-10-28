@@ -52,6 +52,7 @@ export const langchainCommunityPreset: PresetDefinition = {
   id: 'langchain-community',
   defaultPattern: (prefix) => `${escapeGlob(prefix)}*`,
   sessionIdOf: (key) => key,
+  sessionLookup: (sessionId) => ({ key: sessionId }),
   parseKey: (k) =>
     guardedParse(k, () => {
       if (k.type !== 'list' || !Array.isArray(k.value)) return fail('Expected a list value');
