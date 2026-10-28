@@ -173,6 +173,28 @@ describe('SessionExplorer', () => {
     await waitFor(() => expect(api.getSession).toHaveBeenCalledTimes(2));
   });
 
+  it('clears the session filter when switching to a cached namespace', async () => {
+    api.listNamespaces.mockResolvedValue([ns('a'), ns('b')]);
+    const { client } = renderPage();
+    client.setQueryData(
+      sessionExplorerKeys.sessions('c1', 'b'),
+      listResponse({
+        sessions: [
+          { sessionId: 'delta', keyCount: 1, memoryBytes: 1, unmeasuredKeys: 0, idleSeconds: 1, ttlMs: null },
+        ],
+      }),
+    );
+
+    await screen.findByText('alpha');
+    fireEvent.change(screen.getByLabelText('Filter sessions'), { target: { value: 'alpha' } });
+    expect(screen.queryByText('bravo')).toBeNull();
+
+    fireEvent.change(screen.getByLabelText('Namespace'), { target: { value: 'b' } });
+
+    await screen.findByText('delta');
+    expect((screen.getByLabelText('Filter sessions') as HTMLInputElement).value).toBe('');
+  });
+
   it('does not request the previous session after switching connections', async () => {
     api.listNamespaces.mockResolvedValue([ns('a')]);
     api.getSession.mockReturnValue(new Promise(() => {}));

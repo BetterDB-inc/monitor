@@ -235,6 +235,7 @@ export function SessionExplorer() {
             )}
             {sessions.data && (
               <SessionList
+                key={namespace.id}
                 data={sessions.data}
                 oversizeIds={oversizeIds}
                 selectedId={sessionId}
