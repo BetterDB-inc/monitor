@@ -142,6 +142,14 @@ describe('KvCacheGuard', () => {
     await waitFor(() => expect(refreshFootprint).toHaveBeenCalledTimes(1));
   });
 
+  it('says the first scan is still running instead of reporting LMCache as missing', async () => {
+    getStatus.mockResolvedValue({ hasLmcache: false, latest: null, sampleKey: null, engines: [] });
+    renderGuard();
+    expect(await screen.findByText('Scanning for LMCache keys')).toBeInTheDocument();
+    expect(screen.queryByText('No LMCache KV cache detected')).toBeNull();
+    expect(screen.queryByTestId('children')).toBeNull();
+  });
+
   it('keeps the page and its history available when detection drops after earlier detections', async () => {
     getStatus.mockResolvedValue({ hasLmcache: false, latest, sampleKey: null, engines: [] });
     getFootprintHistory.mockResolvedValue([{ ...latest, detected: true, timestamp: 0 }, latest]);

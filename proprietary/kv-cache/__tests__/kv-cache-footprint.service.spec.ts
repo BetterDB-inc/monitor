@@ -48,7 +48,10 @@ function setup(keys = Array.from({ length: 6 }, (_, i) => KEY(i)), licensed = tr
     getKvCacheFootprintSnapshots: jest.fn().mockResolvedValue([]),
     deleteKvCacheConnectionData: jest.fn().mockResolvedValue(undefined),
   } as any;
-  const license = { hasFeature: jest.fn((f: string) => licensed && f === Feature.KV_CACHE_MONITORING) } as any;
+  const license = {
+    hasFeature: jest.fn((f: string) => licensed && f === Feature.KV_CACHE_MONITORING),
+    ensureValidated: jest.fn().mockResolvedValue({}),
+  } as any;
   const service = new KvCacheFootprintService(registry, storage, license);
   return { service, storage, client, registry, license };
 }
@@ -818,7 +821,28 @@ describe('KvCacheFootprintService', () => {
     const { service } = setup(undefined, false);
     const start = jest.spyOn(service as any, 'start').mockImplementation(() => undefined);
     await service.onModuleInit();
+    await new Promise((resolve) => setImmediate(resolve));
     expect(start).toHaveBeenCalled();
+  });
+
+  it('runs the first scan as soon as the licence resolves instead of a full interval later', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+    const { service, storage, license } = setup(undefined, false);
+    let resolveLicence!: (value: unknown) => void;
+    license.ensureValidated.mockReturnValue(new Promise((resolve) => (resolveLicence = resolve)));
+    try {
+      await service.onModuleInit();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(storage.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
+
+      license.hasFeature.mockImplementation((f: string) => f === Feature.KV_CACHE_MONITORING);
+      resolveLicence({});
+      for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+      expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledTimes(1);
+    } finally {
+      await service.onModuleDestroy();
+      jest.useRealTimers();
+    }
   });
 
   it('skips collection while unlicensed and collects once the licence resolves', async () => {

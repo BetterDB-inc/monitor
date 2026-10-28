@@ -2,11 +2,12 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Feature } from '@betterdb/shared';
 import { kvCacheApi, kvCacheKeys } from '../api/kv-cache';
-import { kvCacheInUse, useKvCacheStatus } from '../hooks/useKvCacheStatus';
+import { awaitingFirstScan, kvCacheInUse, useKvCacheStatus } from '../hooks/useKvCacheStatus';
 import { useConnection } from '../hooks/useConnection';
 import { useLicense, useLicenseStatus } from '../hooks/useLicense';
 import { hasKvCacheFootprint } from '../utils/connectionType';
 import { KvCacheNotDetected, KvCacheProLocked, LinkEngineDialog } from './pages/kv-cache';
+import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Skeleton } from './ui/skeleton';
 
 const PAST_DETECTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -52,6 +53,9 @@ export function KvCacheGuard({ children }: Props) {
   if (!status.data) {
     return <GuardSkeleton />;
   }
+  if (awaitingFirstScan(status.data)) {
+    return <FirstScanPending />;
+  }
   const notDetected = (
     <KvCacheNotDetected latest={status.data.latest} onLinkEngine={() => setLinkOpen(true)} />
   );
@@ -69,6 +73,21 @@ export function KvCacheGuard({ children }: Props) {
       )}
       <LinkEngineDialog open={linkOpen} onOpenChange={setLinkOpen} />
     </>
+  );
+}
+
+function FirstScanPending() {
+  return (
+    <div className="flex items-center justify-center py-8">
+      <Card className="max-w-2xl shadow-lg">
+        <CardHeader>
+          <CardTitle>Scanning for LMCache keys</CardTitle>
+        </CardHeader>
+        <CardContent className="text-sm text-muted-foreground">
+          The first scan of this connection has not finished yet. This page updates when it does.
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 
