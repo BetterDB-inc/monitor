@@ -1,4 +1,4 @@
-# Cache Size Simulator (Pro)
+# Cache Size Simulator
 
 The Cache Size Simulator measures how much memory your data really uses, projects it forward, and tells you when you will hit `maxmemory` and which cloud node would hold it.
 
