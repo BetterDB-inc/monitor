@@ -37,4 +37,32 @@ describe('MessageTimeline', () => {
     fireEvent.click(screen.getByRole('button', { name: /show more/i }));
     expect(screen.getByTestId('tool-call-c1')).toHaveTextContent('TAIL');
   });
+
+  it('renders a message at the collapse threshold in full', () => {
+    const atLimit = 'b'.repeat(2_000);
+    render(<MessageTimeline messages={[{ role: 'ai', content: atLimit }]} />);
+    expect(screen.getByText(atLimit)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /show more/i })).not.toBeInTheDocument();
+  });
+
+  it('collapses a message one character past the threshold', () => {
+    render(<MessageTimeline messages={[{ role: 'ai', content: 'c'.repeat(2_001) }]} />);
+    expect(screen.getByText('c'.repeat(2_000) + '…')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /show more/i })).toBeInTheDocument();
+  });
+
+  it('does not split a surrogate pair at the collapse boundary', () => {
+    const text = 'a'.repeat(1_999) + '😀' + 'b'.repeat(10);
+    render(<MessageTimeline messages={[{ role: 'ai', content: text }]} />);
+    expect(screen.getByText('a'.repeat(1_999) + '…')).toBeInTheDocument();
+  });
+
+  it('collapses again when the messages change', () => {
+    const { rerender } = render(<MessageTimeline messages={[{ role: 'ai', content: long }]} />);
+    fireEvent.click(screen.getByRole('button', { name: /show more/i }));
+    expect(screen.getByText(/TAIL/)).toBeInTheDocument();
+    rerender(<MessageTimeline messages={[{ role: 'ai', content: long + 'NEXT' }]} />);
+    expect(screen.queryByText(/NEXT/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /show more/i })).toBeInTheDocument();
+  });
 });
