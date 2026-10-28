@@ -113,6 +113,8 @@ export interface SessionDetail {
   estimatedTokens: number;
   ttlMs: number | null;
   memoryBytes: number;
+  totalKeys: number;
+  totalMemoryBytes: number;
   complete: boolean;
   unparsedKeys: number;
   truncated: boolean;

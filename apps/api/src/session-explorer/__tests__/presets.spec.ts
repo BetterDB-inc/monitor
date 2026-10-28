@@ -678,12 +678,32 @@ describe('presets with content blocks beyond text', () => {
         'first b',
         'second',
         'interrupted',
+        'ask',
+      ]);
+    });
+
+    it('ends the session with the interrupts of the newest checkpoint', () => {
+      const interrupt = (key: string, value: unknown) => str(key, JSON.stringify(value));
+      const withInterrupts = [
+        ...keys,
+        interrupt(`${p}:writes:1f0-a|task-1|__interrupt__|0`, [{ value: 'stale' }]),
+        interrupt(`${p}:writes:1f0-b|task-1|__interrupt__|0`, [
+          { value: 'Confirm the booking?', resumable: true },
+          { value: { question: 'Seats?', options: [1, 2] } },
+        ]),
+      ];
+      const merged = preset.mergeSession(parseSessionKeys(preset, withInterrupts));
+      expect(merged.slice(-4)).toEqual([
+        { role: 'ai', content: 'second' },
+        { role: 'interrupt', content: 'Confirm the booking?' },
+        { role: 'interrupt', content: '{"question":"Seats?","options":[1,2]}' },
+        { role: 'interrupt', content: 'ask' },
       ]);
     });
 
     it('appends pending message writes of the newest checkpoint in task and index order', () => {
       const merged = preset.mergeSession(parseSessionKeys(preset, keys));
-      expect(merged.map((m) => m.content)).toEqual(['hi', 'hello', 'first a', 'first b', 'second']);
+      expect(merged.map((m) => m.content)).toEqual(['hi', 'hello', 'first a', 'first b', 'second', 'ask']);
       const selected = new Set(preset.selectKeys!(keys.map((k) => k.key)));
       const fetched = keys.filter((k) => selected.has(k.key));
       expect(preset.mergeSession(parseSessionKeys(preset, fetched))).toEqual(merged);

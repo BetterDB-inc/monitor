@@ -21,13 +21,29 @@ function ToolCalls({ calls }: { calls: NonNullable<ParsedMessage['toolCalls']> }
   );
 }
 
+function InterruptEntry({ index, text }: { index: number; text: string }) {
+  return (
+    <li
+      data-testid={`interrupt-${index}`}
+      className="rounded-md border border-dashed border-amber-500/60 bg-amber-500/5 p-3"
+    >
+      <div className="mb-1 text-xs font-medium text-amber-700 dark:text-amber-400">
+        Waiting for input
+      </div>
+      <p className="whitespace-pre-wrap break-words text-sm">{text}</p>
+    </li>
+  );
+}
+
 export function MessageTimeline({ messages }: { messages: ParsedMessage[] }) {
   if (messages.length === 0) {
     return <p className="text-sm text-muted-foreground">No messages.</p>;
   }
+  const entries = messages.filter((m) => m.role !== 'interrupt');
+  const interrupts = messages.filter((m) => m.role === 'interrupt');
   return (
     <ol className="space-y-3">
-      {messages.map((m, i) => (
+      {entries.map((m, i) => (
         <li key={i} className="rounded-md border p-3">
           <div className="mb-1 flex items-center gap-2">
             <Badge variant="secondary">{m.role}</Badge>
@@ -39,6 +55,9 @@ export function MessageTimeline({ messages }: { messages: ParsedMessage[] }) {
           {m.content !== '' && <p className="whitespace-pre-wrap break-words text-sm">{m.content}</p>}
           {m.toolCalls && m.toolCalls.length > 0 && <ToolCalls calls={m.toolCalls} />}
         </li>
+      ))}
+      {interrupts.map((m, i) => (
+        <InterruptEntry key={`interrupt-${i}`} index={i} text={m.content} />
       ))}
     </ol>
   );

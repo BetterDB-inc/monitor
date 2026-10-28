@@ -2,7 +2,7 @@ import { NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import type { CapturedKey, SessionNamespace } from '@betterdb/shared';
 import Valkey from 'iovalkey';
 import { SessionExplorerService } from '../session-explorer.service';
-import { keysForSession, scanSessions } from '../session-scanner';
+import { keysForSession, measureKeys, scanSessions } from '../session-scanner';
 import { readSessionKeys } from '../session-reader';
 import { withPrimaries } from '../primary-nodes';
 import { FakeValkey, fakeDb, masterNode } from './fake-valkey';
@@ -12,6 +12,7 @@ jest.mock('iovalkey', () => ({ __esModule: true, default: jest.fn() }));
 jest.mock('../session-scanner', () => ({
   ...jest.requireActual('../session-scanner'),
   keysForSession: jest.fn(),
+  measureKeys: jest.fn(),
   scanSessions: jest.fn(),
 }));
 jest.mock('../primary-nodes', () => {
@@ -25,6 +26,7 @@ jest.mock('../session-reader', () => ({
 
 const keysFor = keysForSession as jest.MockedFunction<typeof keysForSession>;
 const read = readSessionKeys as jest.MockedFunction<typeof readSessionKeys>;
+const measure = measureKeys as jest.MockedFunction<typeof measureKeys>;
 const ValkeyMock = Valkey as unknown as jest.Mock;
 
 const ns: SessionNamespace = {
@@ -113,6 +115,36 @@ describe('SessionExplorerService.getSession', () => {
       `${p}:__checkpoint_latest`,
       `${p}:writes:1f0-b|task-2|messages|0`,
     ]);
+  });
+
+  it('totals the whole session when it reads only the selected keys', async () => {
+    storage.getSessionNamespace.mockResolvedValueOnce({ ...ns, preset: 'agent-cache' });
+    const p = 'ac:session:t1';
+    keysFor.mockResolvedValue({
+      keys: [
+        `${p}:checkpoint:1f0-a`,
+        `${p}:checkpoint:1f0-b`,
+        `${p}:__checkpoint_latest`,
+        `${p}:writes:1f0-a|task-1|messages|0`,
+      ],
+      truncated: false,
+      failedNodes: 0,
+    });
+    measure.mockResolvedValueOnce(300);
+    const detail = await service.getSession('conn-1', 'ns-1', 't1');
+    expect(measure).toHaveBeenLastCalledWith(expect.anything(), [
+      `${p}:checkpoint:1f0-a`,
+      `${p}:checkpoint:1f0-b`,
+      `${p}:writes:1f0-a|task-1|messages|0`,
+    ]);
+    expect(detail).toMatchObject({ memoryBytes: 64, totalKeys: 4, totalMemoryBytes: 364 });
+  });
+
+  it('totals equal the read keys when the preset reads every key', async () => {
+    measure.mockClear();
+    const detail = await service.getSession('conn-1', 'ns-1', 'lc:1');
+    expect(measure).not.toHaveBeenCalled();
+    expect(detail).toMatchObject({ totalKeys: 1, totalMemoryBytes: 64 });
   });
 
   it('is incomplete when the key scan was capped', async () => {

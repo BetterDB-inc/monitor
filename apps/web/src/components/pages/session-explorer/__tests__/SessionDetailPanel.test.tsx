@@ -16,6 +16,36 @@ describe('SessionDetailPanel', () => {
     expect(screen.getByText(/~42 tokens/)).toBeInTheDocument();
   });
 
+  it('shows the session totals and how much of it the timeline reads', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({ totalKeys: 4, totalMemoryBytes: 4577, memoryBytes: 1618 })}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
+    expect(screen.getByText(/4\.47 KB · TTL 5s · 4 keys/)).toBeInTheDocument();
+    expect(screen.getByText(/showing latest checkpoint \(1 key · 1\.58 KB\)/)).toBeInTheDocument();
+  });
+
+  it('does not mention a checkpoint when every key was read', () => {
+    render(<SessionDetailPanel detail={detail()} onExport={vi.fn()} exporting={false} />);
+    expect(screen.queryByText(/latest checkpoint/)).toBeNull();
+  });
+
+  it('shows a pending interrupt as a request for input', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({ messages: [{ role: 'interrupt', content: 'Confirm the booking?' }] })}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
+    const entry = screen.getByTestId('interrupt-0');
+    expect(entry.textContent).toContain('Waiting for input');
+    expect(entry.textContent).toContain('Confirm the booking?');
+  });
+
   it('warns when the timeline is incomplete', () => {
     render(
       <SessionDetailPanel

@@ -267,3 +267,23 @@ export async function keysForSession(
     };
   });
 }
+
+export async function measureKeys(db: DatabasePort, keys: string[]): Promise<number> {
+  if (keys.length === 0) return 0;
+  return withPrimaries(db, async (primaries) => {
+    const byClient = new Map<Valkey, string[]>();
+    for (const key of keys) {
+      const client = routeOf(primaries, key);
+      if (client) byClient.set(client, [...(byClient.get(client) ?? []), key]);
+    }
+    const totals = await Promise.all(
+      [...byClient].map(async ([client, owned]) => {
+        const pipeline = client.pipeline();
+        for (const key of owned) pipeline.memory('USAGE', key);
+        const results = ((await pipeline.exec().catch(() => [])) ?? []) as PipelineResult[];
+        return results.reduce((sum, r) => sum + (numberOf(r) ?? 0), 0);
+      }),
+    );
+    return totals.reduce((sum, n) => sum + n, 0);
+  });
+}

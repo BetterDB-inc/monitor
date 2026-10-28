@@ -38,8 +38,11 @@ export function SessionDetailPanel({ detail, onExport, exporting }: Props) {
         <div className="min-w-0">
           <CardTitle className="break-all font-mono text-base">{detail.sessionId}</CardTitle>
           <p className="mt-1 text-sm text-muted-foreground">
-            ~{detail.estimatedTokens.toLocaleString()} tokens · {formatBytes(detail.memoryBytes)} ·{' '}
-            TTL {formatTtl(detail.ttlMs)} · {plural(detail.keys.length, 'key')}
+            ~{detail.estimatedTokens.toLocaleString()} tokens ·{' '}
+            {formatBytes(detail.totalMemoryBytes)} · TTL {formatTtl(detail.ttlMs)} ·{' '}
+            {plural(detail.totalKeys, 'key')}
+            {detail.keys.length < detail.totalKeys &&
+              `, showing latest checkpoint (${plural(detail.keys.length, 'key')} · ${formatBytes(detail.memoryBytes)})`}
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={onExport} disabled={exporting}>

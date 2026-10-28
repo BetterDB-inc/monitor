@@ -22,6 +22,8 @@ const SESSION_MARKER = ':session:';
 const CHECKPOINT_MARKER = ':checkpoint:';
 const LATEST_SUFFIX = ':__checkpoint_latest';
 const WRITES_MARKER = ':writes:';
+const MESSAGES_CHANNEL = 'messages';
+const INTERRUPT_CHANNEL = '__interrupt__';
 
 const ROLE_BY_CONSTRUCTOR = new Map([
   ['HumanMessage', 'human'],
@@ -189,16 +191,17 @@ const newestCheckpointId = (entries: Entry[]): string | undefined =>
 const pendingOrder = (a: WriteKey, b: WriteKey) =>
   a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : a.idx - b.idx;
 
-function pendingMessages(
+function pendingWrites(
   views: KeyView[],
   entries: Entry[],
   newestId: string | undefined,
+  channel: string,
 ): ParsedMessage[] {
   if (newestId === undefined) return [];
   return views
     .map((view, i) => ({ view, parts: entries[i].parts }))
     .flatMap(({ view, parts }) =>
-      parts?.kind === 'write' && parts.write.checkpointId === newestId && parts.write.channel === 'messages'
+      parts?.kind === 'write' && parts.write.checkpointId === newestId && parts.write.channel === channel
         ? [{ view, write: parts.write }]
         : [],
     )
@@ -212,6 +215,18 @@ const defaultPattern = (prefix: string) =>
 function parseWrite(value: string): ParsedMessage[] {
   const written = parseJson(value);
   return (Array.isArray(written) ? written : [written]).map(parseWritten);
+}
+
+const interruptText = (value: unknown): string =>
+  typeof value === 'string' ? value : (JSON.stringify(value) ?? '');
+
+function parseInterrupts(value: string): ParsedMessage[] {
+  const written = parseJson(value);
+  return (Array.isArray(written) ? written : [written]).map((entry) =>
+    isRecord(entry) && 'value' in entry
+      ? { role: 'interrupt', content: interruptText(entry.value) }
+      : fail('Write is not an interrupt'),
+  );
 }
 
 const skipKey = (k: CapturedKey): KeyView =>
@@ -252,7 +267,9 @@ export function createAgentCachePreset(pattern?: string): PresetDefinition {
       if (k.type !== 'string' || typeof k.value !== 'string') return fail('Expected a string value');
       const parts = partsOfKey(k.key);
       if (isCheckpoint(parts)) return parseCheckpoint(k.value);
-      if (parts?.kind === 'write' && parts.write.channel === 'messages') return parseWrite(k.value);
+      if (parts?.kind !== 'write') return [];
+      if (parts.write.channel === MESSAGES_CHANNEL) return parseWrite(k.value);
+      if (parts.write.channel === INTERRUPT_CHANNEL) return parseInterrupts(k.value);
       return [];
     });
 
@@ -274,7 +291,12 @@ export function createAgentCachePreset(pattern?: string): PresetDefinition {
       const newest = newestCheckpointKey(entries);
       const view = views.find((v) => v.key === newest);
       if (!view || !view.parsed) return [];
-      return [...view.messages, ...pendingMessages(views, entries, newestCheckpointId(entries))];
+      const newestId = newestCheckpointId(entries);
+      return [
+        ...view.messages,
+        ...pendingWrites(views, entries, newestId, MESSAGES_CHANNEL),
+        ...pendingWrites(views, entries, newestId, INTERRUPT_CHANNEL),
+      ];
     },
   };
 }

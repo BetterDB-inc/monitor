@@ -22,7 +22,7 @@ import { getPreset, parseSessionKeys } from './presets/registry';
 import { estimateTokens } from './presets/text';
 import type { PresetDefinition } from './presets/types';
 import { withPrimaries } from './primary-nodes';
-import { keysForSession, scanSessions } from './session-scanner';
+import { keysForSession, measureKeys, scanSessions } from './session-scanner';
 import { readSessionKeys } from './session-reader';
 
 const PREVIEW_SCAN_COUNT = 1000;
@@ -181,6 +181,10 @@ export class SessionExplorerService {
     const selected = preset.selectKeys ? preset.selectKeys(scan.keys) : scan.keys;
     const read = await readSessionKeys(db, selected);
     if (read.keys.length === 0) throw sessionMissing(read.failedNodes);
+    const chosen = new Set(selected);
+    const skipped = scan.keys.filter((key) => !chosen.has(key));
+    const skippedBytes = skipped.length > 0 ? await measureKeys(db, skipped) : 0;
+    const memoryBytes = read.keys.reduce((sum, k) => sum + (k.bytes ?? 0), 0);
 
     const views = parseSessionKeys(preset, read.keys);
     const messages = preset.mergeSession(views);
@@ -204,7 +208,9 @@ export class SessionExplorerService {
         messages,
         estimatedTokens: estimateTokens(messages),
         ttlMs: minPositive(read.keys.map((k) => k.pttl)),
-        memoryBytes: read.keys.reduce((sum, k) => sum + (k.bytes ?? 0), 0),
+        memoryBytes,
+        totalKeys: scan.keys.length,
+        totalMemoryBytes: memoryBytes + skippedBytes,
         complete,
         unparsedKeys,
         truncated,

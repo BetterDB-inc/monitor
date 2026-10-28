@@ -2,7 +2,7 @@ import Valkey from 'iovalkey';
 import calculateSlot from 'cluster-key-slot';
 import type { PresetDefinition } from '../presets/types';
 import { primaryClients } from '../primary-nodes';
-import { keysForSession, scanSessions } from '../session-scanner';
+import { keysForSession, measureKeys, scanSessions } from '../session-scanner';
 import { FakeEntry, FakeValkey, fakeDb, masterNode } from './fake-valkey';
 
 jest.mock('iovalkey', () => ({ __esModule: true, default: jest.fn() }));
@@ -532,5 +532,40 @@ describe('keysForSession', () => {
     const result = await keysForSession(db, 's:*', preset, 'x');
 
     expect(result.keys).toEqual(['s:x:1']);
+  });
+});
+
+describe('measureKeys', () => {
+  beforeEach(() => ValkeyMock.mockReset());
+
+  it('sums the memory of the given keys on the primaries that own them', async () => {
+    const nodeA = new FakeValkey(storeOf({ 's:x:1': { type: 'string', memory: 300 } }));
+    const nodeB = new FakeValkey(
+      storeOf({ 's:x:2': { type: 'string', memory: 200 }, 's:x:3': { type: 'string', memory: 999 } }),
+    );
+    const byPort: Record<number, FakeValkey> = { 7001: nodeA, 7002: nodeB };
+    ValkeyMock.mockImplementation((opts: { port: number }) => byPort[opts.port]);
+    const [slotA, slotB] = ['s:x:1', 's:x:2'].map((key) => calculateSlot(key));
+    const db = fakeDb(new FakeValkey(), {
+      nodes: [
+        masterNode('a', '10.0.0.1:7001', [], [[slotA, slotA]]),
+        masterNode('b', '10.0.0.2:7002', [], [[slotB, slotB]]),
+      ],
+    });
+
+    expect(await measureKeys(db, ['s:x:1', 's:x:2'])).toBe(500);
+  });
+
+  it('counts keys it cannot measure as zero', async () => {
+    const client = new FakeValkey(
+      storeOf({ 's:x:1': { type: 'string', memory: 300 }, 's:x:2': { type: 'string', memory: null } }),
+    );
+    expect(await measureKeys(fakeDb(client), ['s:x:1', 's:x:2', 's:x:gone'])).toBe(300);
+  });
+
+  it('measures nothing without keys', async () => {
+    const client = new FakeValkey();
+    expect(await measureKeys(fakeDb(client), [])).toBe(0);
+    expect(client.callsOf('memory')).toHaveLength(0);
   });
 });
