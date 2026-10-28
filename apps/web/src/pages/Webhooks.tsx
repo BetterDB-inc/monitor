@@ -150,6 +150,18 @@ export function Webhooks() {
                 <div>
                   <span className="font-medium">Duration:</span> {testResult.durationMs}ms
                 </div>
+                {testResult.testIncidentResolved !== undefined && (
+                  <div>
+                    <span className="font-medium">Test incident:</span>{' '}
+                    {testResult.testIncidentResolved ? (
+                      <span className="text-green-600">resolved automatically</span>
+                    ) : (
+                      <span className="text-destructive">
+                        could not be resolved; resolve it in PagerDuty
+                      </span>
+                    )}
+                  </div>
+                )}
                 {testResult.responseBody && (
                   <div>
                     <span className="font-medium">Response:</span>

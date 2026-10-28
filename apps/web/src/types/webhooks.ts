@@ -37,6 +37,8 @@ export interface WebhookFormData {
   alertConfig?: SharedWebhookAlertConfig;
   thresholds?: SharedWebhookThresholds;
   payloadFormat?: SharedWebhookPayloadFormat;
+  /** PagerDuty integration key; required when payloadFormat is 'pagerduty'. */
+  routingKey?: string;
 }
 
 export interface TestWebhookResponse {
@@ -47,4 +49,6 @@ export interface TestWebhookResponse {
   durationMs: number;
   payloadFormat?: SharedWebhookPayloadFormat;
   renderedPayload?: Record<string, unknown>;
+  /** PagerDuty only: whether the test incident was resolved right after it was triggered. */
+  testIncidentResolved?: boolean;
 }

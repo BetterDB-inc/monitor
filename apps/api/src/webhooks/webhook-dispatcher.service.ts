@@ -20,7 +20,7 @@ import {
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { WebhooksService } from './webhooks.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
-import { formatWebhookBody } from './webhook-payload-formatter';
+import { formatWebhookBody, pagerDutyTestEvent, renderWebhookRequest } from './webhook-payload-formatter';
 import { BlockedAddressError, guardedLookup } from '../common/utils/outbound-url-guard';
 import { pinnedRequest } from '../common/utils/pinned-request';
 
@@ -709,8 +709,10 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     const maxResponseBodyBytes = deliveryConfig.maxResponseBodyBytes;
 
     try {
-      // Prepare request (body rendered per webhook.payloadFormat)
-      const payloadString = formatWebhookBody(webhook, payload, this.appBaseUrl);
+      // Prepare request (body rendered per webhook.payloadFormat; PagerDuty
+      // change events go to the Change Events endpoint of the same region)
+      const rendered = renderWebhookRequest(webhook, payload, this.appBaseUrl);
+      const payloadString = rendered.body;
       const timestamp = payload.timestamp;
       const signature = this.generateSignatureWithTimestamp(
         payloadString,
@@ -737,7 +739,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       try {
-        const response = await this.post(webhook.url, headers, payloadString, controller.signal);
+        const response = await this.post(rendered.url, headers, payloadString, controller.signal);
 
         clearTimeout(timeoutId);
 
@@ -753,6 +755,12 @@ export class WebhookDispatcherService implements OnModuleDestroy {
           this.logger.warn(
             `Webhook delivery redirect not followed (HTTP ${statusCode}): ${webhook.id} -> ${webhook.url}`,
           );
+        } else if (statusCode === 429) {
+          // Rate limited (PagerDuty, Slack, Discord, Teams all answer 429 under
+          // burst): the event is valid, so retry with backoff instead of
+          // dropping it like other 4xx responses.
+          status = DeliveryStatus.RETRYING;
+          this.logger.warn(`Webhook delivery rate limited (HTTP 429): ${webhook.id} -> ${webhook.url}`);
         } else if (statusCode >= 400 && statusCode < 500) {
           // 4xx errors are client errors - don't retry
           status = DeliveryStatus.FAILED;
@@ -863,6 +871,40 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   }
 
   /**
+   * Close the incident a PagerDuty test opened. Best effort: a failure leaves
+   * one low-urgency test incident behind, which the result reports.
+   */
+  private async resolvePagerDutyTest(
+    webhook: Webhook,
+    headers: Record<string, string>,
+    testPayload: WebhookPayload,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    const body = JSON.stringify(
+      pagerDutyTestEvent(webhook.routingKey ?? '', webhook.id, 'resolve', testPayload),
+    );
+    // Same headers as the trigger, re-signed for this body.
+    const signedHeaders = {
+      ...headers,
+      'X-Webhook-Signature': this.generateSignatureWithTimestamp(body, webhook.secret || '', testPayload.timestamp),
+    };
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await this.post(webhook.url, signedHeaders, body, controller.signal);
+      await response.text().catch(() => '');
+      return response.ok;
+    } catch (error) {
+      this.logger.warn(
+        `Failed to resolve PagerDuty test incident for webhook ${webhook.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  /**
    * Test a webhook by sending a test event
    */
   async testWebhook(webhook: Webhook): Promise<{
@@ -873,6 +915,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     durationMs: number;
     payloadFormat?: WebhookPayloadFormat;
     renderedPayload?: Record<string, unknown>;
+    testIncidentResolved?: boolean;
   }> {
     const startTime = Date.now();
 
@@ -905,7 +948,12 @@ export class WebhookDispatcherService implements OnModuleDestroy {
         },
       };
 
-      const payloadString = formatWebhookBody(webhook, testPayload, this.appBaseUrl);
+      // A PagerDuty test must not page on, or resolve, a real incident: send
+      // an info trigger on a per-webhook test key and resolve it afterwards.
+      const isPagerDuty = webhook.payloadFormat === WebhookPayloadFormat.PAGERDUTY;
+      const payloadString = isPagerDuty
+        ? JSON.stringify(pagerDutyTestEvent(webhook.routingKey ?? '', webhook.id, 'trigger', testPayload))
+        : formatWebhookBody(webhook, testPayload, this.appBaseUrl);
       renderedPayload = JSON.parse(payloadString) as Record<string, unknown>;
       const timestamp = testPayload.timestamp;
       const signature = this.generateSignatureWithTimestamp(
@@ -936,6 +984,11 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       clearTimeout(timeoutId);
 
       const responseBody = await response.text().catch(() => '');
+
+      let testIncidentResolved: boolean | undefined;
+      if (isPagerDuty && response.ok) {
+        testIncidentResolved = await this.resolvePagerDutyTest(webhook, headers, testPayload, timeoutMs);
+      }
       const durationMs = Date.now() - startTime;
 
       return {
@@ -945,6 +998,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
         durationMs,
         payloadFormat: webhook.payloadFormat ?? WebhookPayloadFormat.GENERIC,
         renderedPayload,
+        ...(testIncidentResolved === undefined ? {} : { testIncidentResolved }),
       };
     } catch (error) {
       const durationMs = Date.now() - startTime;

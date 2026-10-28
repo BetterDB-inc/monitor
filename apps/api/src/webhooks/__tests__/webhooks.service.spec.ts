@@ -275,6 +275,19 @@ describe('WebhooksService', () => {
         createdAt: Date.now(),
         updatedAt: Date.now(),
       } as any);
+      // updateWebhook reads the stored webhook first (redacted-echo guard).
+      storageClient.getWebhook.mockResolvedValue({
+        id: '123',
+        name: 'Test',
+        url: 'https://example.com/webhook',
+        secret: 'whsec_test',
+        enabled: true,
+        events: [],
+        headers: {},
+        retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      } as any);
     });
 
     describe('Community Tier', () => {

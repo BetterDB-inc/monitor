@@ -269,6 +269,11 @@ export interface Webhook {
   thresholds?: WebhookThresholds;
   /** Payload rendering format. Defaults to 'generic' for backward compat. */
   payloadFormat?: WebhookPayloadFormat;
+  /**
+   * PagerDuty Events API v2 routing (integration) key. Required when
+   * payloadFormat is 'pagerduty', ignored otherwise. Redacted in API responses.
+   */
+  routingKey?: string;
   connectionId?: string;
   createdAt: number;
   updatedAt: number;
@@ -279,6 +284,22 @@ export enum WebhookPayloadFormat {
   GENERIC = 'generic',
   SLACK = 'slack',
   DISCORD = 'discord',
+  /** PagerDuty Events API v2: trigger / resolve with a stable dedup_key. */
+  PAGERDUTY = 'pagerduty',
+  /** Microsoft Teams Workflows webhook: Adaptive Card message. */
+  TEAMS = 'teams',
+  /** Google Chat space webhook: cardsV2 message. */
+  GOOGLE_CHAT = 'google_chat',
+}
+
+/** PagerDuty Events API v2 endpoint (US service region). */
+export const PAGERDUTY_EVENTS_URL = 'https://events.pagerduty.com/v2/enqueue';
+
+/** PagerDuty integration (routing) keys are 32 alphanumeric characters. */
+export const PAGERDUTY_ROUTING_KEY_PATTERN = /^[A-Za-z0-9]{32}$/;
+
+export function isValidPagerDutyRoutingKey(value: string): boolean {
+  return PAGERDUTY_ROUTING_KEY_PATTERN.test(value);
 }
 
 /**
@@ -290,6 +311,17 @@ export function suggestPayloadFormatForUrl(url: string): WebhookPayloadFormat | 
   if (url.includes('discord.com/api/webhooks') || url.includes('discordapp.com/api/webhooks')) {
     return WebhookPayloadFormat.DISCORD;
   }
+  // events.pagerduty.com and the EU service region events.eu.pagerduty.com
+  if (/^https:\/\/events\.(eu\.)?pagerduty\.com\//.test(url)) return WebhookPayloadFormat.PAGERDUTY;
+  // Teams Workflows ("When a Teams webhook request is received") and legacy incoming webhooks
+  if (
+    (url.includes('.logic.azure.com') && url.includes('/workflows/')) ||
+    (url.includes('.api.powerplatform.com') && url.includes('/workflows/')) ||
+    url.includes('.webhook.office.com/')
+  ) {
+    return WebhookPayloadFormat.TEAMS;
+  }
+  if (url.startsWith('https://chat.googleapis.com/v1/spaces/')) return WebhookPayloadFormat.GOOGLE_CHAT;
   return undefined;
 }
 

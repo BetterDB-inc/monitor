@@ -19,8 +19,8 @@ export class WebhookSqliteRepository {
     const id = randomUUID();
     const now = Date.now();
     const stmt = this.db.prepare(`
-      INSERT INTO webhooks (id, name, url, secret, enabled, events, headers, retry_policy, delivery_config, alert_config, thresholds, payload_format, connection_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO webhooks (id, name, url, secret, enabled, events, headers, retry_policy, delivery_config, alert_config, thresholds, payload_format, routing_key, connection_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -36,6 +36,7 @@ export class WebhookSqliteRepository {
       webhook.alertConfig ? JSON.stringify(webhook.alertConfig) : null,
       webhook.thresholds ? JSON.stringify(webhook.thresholds) : null,
       webhook.payloadFormat ?? WebhookPayloadFormat.GENERIC,
+      webhook.routingKey ?? null,
       webhook.connectionId || null,
       now,
       now,
@@ -54,6 +55,7 @@ export class WebhookSqliteRepository {
       alertConfig: webhook.alertConfig,
       thresholds: webhook.thresholds,
       payloadFormat: webhook.payloadFormat ?? WebhookPayloadFormat.GENERIC,
+      routingKey: webhook.routingKey,
       connectionId: webhook.connectionId,
       createdAt: now,
       updatedAt: now,
@@ -156,6 +158,10 @@ export class WebhookSqliteRepository {
     if (updates.payloadFormat !== undefined) {
       setClauses.push('payload_format = ?');
       params.push(updates.payloadFormat);
+    }
+    if (updates.routingKey !== undefined) {
+      setClauses.push('routing_key = ?');
+      params.push(updates.routingKey);
     }
     if (updates.connectionId !== undefined) {
       setClauses.push('connection_id = ?');

@@ -269,6 +269,72 @@ describe('Webhooks API (e2e)', () => {
         .expect(404);
     });
 
+    it('should create a PagerDuty webhook, redact its routing key and keep it across an echoed update', async () => {
+      const routingKey = 'R0123456789ABCDEFGHIJKLMNOPQRSTU';
+      const created = await request(app.getHttpServer())
+        .post('/webhooks')
+        .send({
+          name: 'PagerDuty e2e',
+          url: 'https://events.pagerduty.com/v2/enqueue',
+          events: [WebhookEventType.INSTANCE_DOWN, WebhookEventType.INSTANCE_UP],
+          payloadFormat: 'pagerduty',
+          routingKey,
+        })
+        .expect(201);
+      expect(created.body.payloadFormat).toBe('pagerduty');
+      expect(created.body.routingKey).toBe('R012***');
+
+      // The web UI sends the redacted values back on every edit.
+      const updated = await request(app.getHttpServer())
+        .patch(`/webhooks/${created.body.id}`)
+        .send({ name: 'PagerDuty e2e renamed', routingKey: created.body.routingKey, secret: created.body.secret })
+        .expect(200);
+      expect(updated.body.name).toBe('PagerDuty e2e renamed');
+      expect(updated.body.routingKey).toBe('R012***');
+      expect(updated.body.secret).toBe(created.body.secret);
+
+      await request(app.getHttpServer()).delete(`/webhooks/${created.body.id}`);
+    });
+
+    it('should reject a PagerDuty webhook without a valid routing key', async () => {
+      await request(app.getHttpServer())
+        .post('/webhooks')
+        .send({
+          name: 'PagerDuty missing key',
+          url: 'https://events.pagerduty.com/v2/enqueue',
+          events: [WebhookEventType.INSTANCE_DOWN],
+          payloadFormat: 'pagerduty',
+        })
+        .expect(400);
+
+      await request(app.getHttpServer())
+        .post('/webhooks')
+        .send({
+          name: 'PagerDuty bad key',
+          url: 'https://events.pagerduty.com/v2/enqueue',
+          events: [WebhookEventType.INSTANCE_DOWN],
+          payloadFormat: 'pagerduty',
+          routingKey: 'not-a-routing-key',
+        })
+        .expect(400);
+    });
+
+    it('should accept the teams payload format', async () => {
+      const created = await request(app.getHttpServer())
+        .post('/webhooks')
+        .send({
+          name: 'Teams e2e',
+          url: 'https://example.com/teams',
+          events: [WebhookEventType.MEMORY_CRITICAL],
+          payloadFormat: 'teams',
+        })
+        .expect(201);
+      expect(created.body.payloadFormat).toBe('teams');
+      expect(created.body.routingKey).toBeUndefined();
+
+      await request(app.getHttpServer()).delete(`/webhooks/${created.body.id}`);
+    });
+
     it('should persist payloadFormat and return rendered preview', async () => {
       const created = await request(app.getHttpServer())
         .post('/webhooks')

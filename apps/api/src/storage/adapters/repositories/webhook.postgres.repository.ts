@@ -16,8 +16,8 @@ export class WebhookPostgresRepository {
 
   async createWebhook(webhook: Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>): Promise<Webhook> {
     const result = await this.pool.query(
-      `INSERT INTO webhooks (name, url, secret, enabled, events, headers, retry_policy, delivery_config, alert_config, thresholds, payload_format, connection_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      `INSERT INTO webhooks (name, url, secret, enabled, events, headers, retry_policy, delivery_config, alert_config, thresholds, payload_format, routing_key, connection_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        RETURNING *`,
       [
         webhook.name,
@@ -31,6 +31,7 @@ export class WebhookPostgresRepository {
         webhook.alertConfig ? JSON.stringify(webhook.alertConfig) : null,
         webhook.thresholds ? JSON.stringify(webhook.thresholds) : null,
         webhook.payloadFormat ?? WebhookPayloadFormat.GENERIC,
+        webhook.routingKey ?? null,
         webhook.connectionId || null,
       ],
     );
@@ -131,6 +132,10 @@ export class WebhookPostgresRepository {
     if (updates.payloadFormat !== undefined) {
       setClauses.push(`payload_format = $${paramIndex++}`);
       params.push(updates.payloadFormat);
+    }
+    if (updates.routingKey !== undefined) {
+      setClauses.push(`routing_key = $${paramIndex++}`);
+      params.push(updates.routingKey);
     }
     if (updates.connectionId !== undefined) {
       setClauses.push(`connection_id = $${paramIndex++}`);
