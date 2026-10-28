@@ -9,6 +9,7 @@ import type { CapabilityRetryVerdict, RuntimeCapabilities } from './types/metric
 import { LicenseContext, useLicenseStatus } from './hooks/useLicense';
 import { UpgradePromptContext, useUpgradePromptState } from './hooks/useUpgradePrompt';
 import { ConnectionContext, useConnectionState } from './hooks/useConnection';
+import { useConnectionUrlSync } from './hooks/useConnectionUrlSync';
 import { VersionCheckContext, useVersionCheckState } from './hooks/useVersionCheck';
 import { UpgradePrompt } from './components/UpgradePrompt';
 import { ServerStartupGuard } from './components/ServerStartupGuard';
@@ -29,6 +30,11 @@ function App() {
       </BrowserRouter>
     </ServerStartupGuard>
   );
+}
+
+function ConnectionUrlSync({ connectionId }: { connectionId?: string }) {
+  useConnectionUrlSync(connectionId);
+  return null;
 }
 
 /**
@@ -96,6 +102,7 @@ function AppContent() {
             <LicenseContext.Provider value={license}>
               <CapabilitiesContext.Provider value={capabilitiesState}>
                 <VersionCheckContext.Provider value={versionCheckState}>
+                  <ConnectionUrlSync connectionId={currentConnectionId} />
                   <AppLayout />
                   <Tooltip id="license-tooltip" />
                   <Tooltip

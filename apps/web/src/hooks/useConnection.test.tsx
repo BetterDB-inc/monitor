@@ -1,6 +1,11 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { CONNECTIONS_REFRESH_MS, useConnectionState, type Connection } from './useConnection';
+import {
+  CONNECTION_STORAGE_KEY,
+  CONNECTIONS_REFRESH_MS,
+  useConnectionState,
+  type Connection,
+} from './useConnection';
 
 const mocks = vi.hoisted(() => {
   return { fetchApi: vi.fn(), setCurrentConnectionId: vi.fn() };
@@ -23,6 +28,45 @@ describe('useConnectionState', () => {
     mocks.fetchApi.mockReset();
     mocks.fetchApi.mockResolvedValue(connectionsResponse([]));
     mocks.setCurrentConnectionId.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, '', '/');
+  });
+
+  const loadWith = async (ids: string[], expected: string) => {
+    mocks.fetchApi.mockResolvedValueOnce(connectionsResponse(ids));
+    const hook = renderHook(() => useConnectionState());
+    await waitFor(() => {
+      expect(hook.result.current.currentConnection?.id).toBe(expected);
+    });
+    return hook;
+  };
+
+  it('opens the connection named in the URL', async () => {
+    window.history.replaceState(null, '', '/slowlog?connection=conn-2');
+    await loadWith(['conn-1', 'conn-2'], 'conn-2');
+    expect(mocks.setCurrentConnectionId).toHaveBeenLastCalledWith('conn-2');
+  });
+
+  it('reopens the last chosen connection after a reload', async () => {
+    const first = await loadWith(['conn-1', 'conn-2'], 'conn-1');
+    act(() => {
+      first.result.current.setConnection('conn-2');
+    });
+    first.unmount();
+
+    await loadWith(['conn-1', 'conn-2'], 'conn-2');
+  });
+
+  it('prefers the URL over the remembered connection', async () => {
+    window.localStorage.setItem(CONNECTION_STORAGE_KEY, 'conn-3');
+    window.history.replaceState(null, '', '/?connection=conn-2');
+    await loadWith(['conn-1', 'conn-2', 'conn-3'], 'conn-2');
+  });
+
+  it('falls back to the default when the remembered connection is gone', async () => {
+    window.localStorage.setItem(CONNECTION_STORAGE_KEY, 'gone');
+    window.history.replaceState(null, '', '/?connection=also-gone');
+    await loadWith(['conn-1', 'conn-2'], 'conn-1');
   });
 
   it('moves off a connection that no longer exists instead of holding a dead selection', async () => {

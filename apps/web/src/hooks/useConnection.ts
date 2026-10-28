@@ -4,6 +4,29 @@ import { setCurrentConnectionId, fetchApi } from '../api/client';
 import { isUnavailableMember } from '../utils/connectionType';
 
 export const CONNECTIONS_REFRESH_MS = 30_000;
+export const CONNECTION_PARAM = 'connection';
+export const CONNECTION_STORAGE_KEY = 'betterdb:connectionId';
+
+function preferredConnectionIds(): string[] {
+  const ids: string[] = [];
+  const fromUrl = new URLSearchParams(window.location.search).get(CONNECTION_PARAM);
+  if (fromUrl) ids.push(fromUrl);
+  try {
+    const stored = window.localStorage.getItem(CONNECTION_STORAGE_KEY);
+    if (stored) ids.push(stored);
+  } catch {
+    return ids;
+  }
+  return ids;
+}
+
+function rememberConnectionId(id: string): void {
+  try {
+    window.localStorage.setItem(CONNECTION_STORAGE_KEY, id);
+  } catch {
+    return;
+  }
+}
 
 export interface Connection {
   id: string;
@@ -96,7 +119,11 @@ export function useConnectionState(): ConnectionContextValue {
         }
       } else {
         const selectable = data.filter((c) => !isUnavailableMember(c));
+        const preferred = preferredConnectionIds()
+          .map((id) => selectable.find((c) => c.id === id))
+          .find((c) => c !== undefined);
         const defaultConnection =
+          preferred ||
           (responseData.currentId && selectable.find((c) => c.id === responseData.currentId)) ||
           selectable.find((c) => c.isConnected) ||
           selectable[0] ||
@@ -119,6 +146,7 @@ export function useConnectionState(): ConnectionContextValue {
       selected.current = connection;
       setCurrentConnection(connection);
       setCurrentConnectionId(connection.id);
+      rememberConnectionId(connection.id);
       fetchApi('/telemetry/event', {
         method: 'POST',
         body: JSON.stringify({
