@@ -17,6 +17,7 @@ const LABEL = 'Cache simulator';
 interface Job {
   instant: CacheSimulatorInstant;
   ceiling: number | undefined;
+  datasets: Array<number | null>;
   growth: CacheSimulatorGrowth | null;
   progress: { sampled: number; target: number };
 }
@@ -78,7 +79,8 @@ export class CacheSimulatorService {
       ? readings.reduce((sum, reading) => sum + (reading.stats.datasetMemory ?? 0), 0)
       : null;
     const ceiling = dataset === null ? undefined : keyMemoryCeiling(dataset, instant.totalKeys);
-    return { job: { instant, ceiling, growth, progress: { sampled: 0, target: SAMPLE_BUDGET } }, nodes };
+    const datasets = readings.map((reading) => reading.stats.datasetMemory);
+    return { job: { instant, ceiling, datasets, growth, progress: { sampled: 0, target: SAMPLE_BUDGET } }, nodes };
   }
 
   private settle(connectionId: string, snapshot: CacheSimulatorSnapshot): CacheSimulatorSnapshot {
@@ -101,6 +103,7 @@ export class CacheSimulatorService {
         budget: SAMPLE_BUDGET,
         hardCap: SAMPLE_HARD_CAP,
         deadlineMs: SAMPLE_DEADLINE_MS,
+        datasetBytes: job.datasets,
         onProgress: (sampled) => {
           job.progress = { sampled, target: SAMPLE_BUDGET };
         },

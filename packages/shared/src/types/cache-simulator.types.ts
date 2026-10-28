@@ -24,6 +24,7 @@ export interface CacheSimulatorEstimate {
   byType: CacheSimulatorTypeEstimate[];
   sampledAt: number;
   partial: boolean;
+  likelyMissedLargeKeys: boolean;
 }
 
 export interface CacheSimulatorGrowth {

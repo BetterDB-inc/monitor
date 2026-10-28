@@ -4,6 +4,7 @@ import type { NodeSample } from './sample-types';
 
 const Z95 = 1.96;
 export const DICT_ENTRY_BYTES = 24;
+export const MISSED_GAP_SHARE = 0.15;
 
 export function keyMemoryCeiling(datasetBytes: number, keys: number): number {
   return datasetBytes + keys * DICT_ENTRY_BYTES;
@@ -73,6 +74,10 @@ export function estimate(nodes: NodeSample[], sampledAt: number, memoryCeiling?:
     cells.some((cell) => cell.sizes.length < cell.estimatedKeys) ||
     nodes.some((node) => node.strata.reduce((sum, stratum) => sum + stratum.sizes.length, 0) < node.dbSize);
   const unexplained = memoryCeiling !== undefined && unsampled ? Math.abs(memoryCeiling - total) : 0;
+  const likelyMissedLargeKeys =
+    memoryCeiling !== undefined &&
+    unsampled &&
+    memoryCeiling - total > Math.max(statistical, MISSED_GAP_SHARE * memoryCeiling);
   const keys = byType.reduce((sum, entry) => sum + entry.keys, 0);
   const second = [...types.values()].reduce((sum, entry) => sum + entry.second, 0);
   const avgKeyBytes = keys > 0 ? total / keys : 0;
@@ -85,5 +90,6 @@ export function estimate(nodes: NodeSample[], sampledAt: number, memoryCeiling?:
     byType,
     sampledAt,
     partial: nodes.some((node) => node.timedOut),
+    likelyMissedLargeKeys,
   };
 }

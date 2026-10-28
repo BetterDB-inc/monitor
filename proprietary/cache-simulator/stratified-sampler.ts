@@ -1,7 +1,7 @@
 import { neymanAllocation, splitBudget } from './allocation';
 import type { AllocationInput } from './allocation';
 import { adjustedSkewness, isHeavyTailed, sampleVariance } from './sample-stats';
-import { estimate } from './size-estimator';
+import { estimate, keyMemoryCeiling } from './size-estimator';
 import type { NodeSample, SamplerClient, Stratum } from './sample-types';
 
 export const SAMPLE_BUDGET = 4000;
@@ -29,6 +29,7 @@ export interface SamplerOptions {
   budget: number;
   deadlineMs: number;
   hardCap?: number;
+  datasetBytes?: Array<number | null>;
   onProgress?: (sampled: number) => void;
 }
 
@@ -39,6 +40,7 @@ interface NodeState {
   dbSize: number;
   client: SamplerClient;
   deadline: number;
+  ceiling?: number;
   seen: Set<string>;
   classified: Set<string>;
   sizes: Map<string, number[]>;
@@ -65,6 +67,7 @@ export async function sampleNodes(nodes: SamplerNode[], options: SamplerOptions)
         dbSize: dbSizes[index],
         client: node.client,
         deadline,
+        ceiling: ceilingOf(options.datasetBytes?.[index], dbSizes[index]),
         seen: new Set(),
         classified: new Set(),
         sizes: new Map(),
@@ -78,6 +81,10 @@ export async function sampleNodes(nodes: SamplerNode[], options: SamplerOptions)
       }),
     ),
   );
+}
+
+function ceilingOf(datasetBytes: number | null | undefined, dbSize: number): number | undefined {
+  return datasetBytes === null || datasetBytes === undefined ? undefined : keyMemoryCeiling(datasetBytes, dbSize);
 }
 
 async function sampleNode(quota: number, cap: number, state: NodeState): Promise<NodeSample> {
@@ -109,7 +116,8 @@ async function extend(state: NodeState, cap: number): Promise<void> {
     const heavyShort = new Set(
       sample.strata.filter((stratum) => isHeavyTailed(stratum) && stratum.sizes.length < Math.min(stratum.estimatedKeys, HEAVY_TAIL_MIN_SAMPLES)).map((stratum) => stratum.type),
     );
-    if (totalBytes <= 0 || (ci95Bytes / totalBytes <= TARGET_RELATIVE_CI && ciTrusted(sample) && heavyShort.size === 0)) return;
+    const missed = state.ceiling !== undefined && estimate([sample], 0, state.ceiling).likelyMissedLargeKeys;
+    if (totalBytes <= 0 || (ci95Bytes / totalBytes <= TARGET_RELATIVE_CI && ciTrusted(sample) && heavyShort.size === 0 && !missed)) return;
     const inputs = allocationInputs(state).filter((input) => heavyShort.size === 0 || heavyShort.has(input.type));
     await grow(state, neymanAllocation(Math.min(measured, cap - measured), inputs));
     if (sampledTotal(state) <= measured) return;

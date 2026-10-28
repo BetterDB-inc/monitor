@@ -1,4 +1,4 @@
-import { estimate } from '../size-estimator';
+import { DICT_ENTRY_BYTES, estimate, keyMemoryCeiling } from '../size-estimator';
 import { sampleNodes, HEAVY_TAIL_MIN_SAMPLES, SamplerUnsupportedError, TARGET_RELATIVE_CI } from '../stratified-sampler';
 import { fakeClient, keyspace } from './fake-keyspace';
 
@@ -181,6 +181,42 @@ describe('sampleNodes', () => {
     it('never exceeds the budget without a hard cap', async () => {
       const [result] = await sampleNodes([{ name: 'a', client: fakeClient(heavyTail()) }], { budget: 400, deadlineMs: 60_000 });
       expect(sampledOf(result.strata)).toBeLessThanOrEqual(400);
+    });
+  });
+
+  describe('large keys the sample misses', () => {
+    const huge = 2 * 1024 * 1024;
+    const keys = keyspace(20_000, (index) =>
+      index % 10 !== 0 ? string() : { type: 'hash', size: index % 3_000 === 0 ? huge : 500 },
+    );
+    const truth = [...keys.values()].reduce((sum, key) => sum + (key.size ?? 0), 0);
+    const datasetBytes = [truth - keys.size * DICT_ENTRY_BYTES];
+    const sampledOf = (strata: { sizes: number[] }[]) => strata.reduce((sum, stratum) => sum + stratum.sizes.length, 0);
+    const runs = Array.from({ length: 10 }, (_, index) => index + 1);
+
+    it('keeps sampling past the budget while the sample is far below the dataset memory', async () => {
+      for (const seed of runs) {
+        const [result] = await sampleNodes([{ name: 'a', client: fakeClient(keys, { seed }) }], {
+          budget: 400,
+          hardCap: 10_000,
+          deadlineMs: 60_000,
+          datasetBytes,
+        });
+        const final = estimate([result], 0, keyMemoryCeiling(datasetBytes[0], keys.size));
+        expect(sampledOf(result.strata)).toBeGreaterThan(400);
+        expect(sampledOf(result.strata) >= 10_000 || !final.likelyMissedLargeKeys).toBe(true);
+      }
+    });
+
+    it('stops at the budget when the sample explains the dataset memory', async () => {
+      const plain = keyspace(20_000, () => string());
+      const [result] = await sampleNodes([{ name: 'a', client: fakeClient(plain) }], {
+        budget: 400,
+        hardCap: 20_000,
+        deadlineMs: 60_000,
+        datasetBytes: [20_000 * 100 - 20_000 * DICT_ENTRY_BYTES],
+      });
+      expect(sampledOf(result.strata)).toBe(400);
     });
   });
 

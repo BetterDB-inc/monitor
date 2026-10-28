@@ -270,6 +270,15 @@ describe('CacheSimulatorService', () => {
     expect((await second.service.snapshot('seed')).growth).toBeNull();
   });
 
+  it('passes each node its dataset memory so sampling can chase missed large keys', async () => {
+    const spy = jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
+    const connections = { c1: client() };
+    connections.c1.getInfoParsed.mockResolvedValue(info(1000, 10_000, 'allkeys-lru', 800));
+    const { service } = setup(connections);
+    await service.snapshot('c1');
+    expect(spy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ datasetBytes: [800] }));
+  });
+
   it('joins a refresh in progress instead of serving the cached result', async () => {
     const spy = jest.spyOn(sampler, 'sampleNodes').mockResolvedValue([nodeSample]);
     const { service } = setup();
