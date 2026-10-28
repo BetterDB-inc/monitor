@@ -84,6 +84,7 @@ export type {
   ScheduledCaptureQueryOptions,
   ScheduledCapturePatch,
 } from '@betterdb/shared';
+import type { MaintenanceWindowRepository } from './maintenance-window-repository.interface';
 import type { InvitationRepository } from './invitation-repository.interface';
 import type { ActivityRepository } from './activity-repository.interface';
 import type {
@@ -860,6 +861,8 @@ export interface StoragePort {
     store_name: string;
     target_discriminator: string;
   }): Promise<number>;
+
+  getMaintenanceWindowRepository(): MaintenanceWindowRepository;
 
   getInvitationRepository(): InvitationRepository;
 

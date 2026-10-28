@@ -130,6 +130,8 @@ import { PostgresDialect, RowMappers } from './base-sql.adapter';
 import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
 import { clientAddrIp, foldClientAnalyticsStats, mapClientAnalyticsRollupRow } from './client-analytics-stats';
 import { WebhookPostgresRepository } from './repositories/webhook.postgres.repository';
+import { MaintenanceWindowPostgresRepository } from './repositories/maintenance-window.postgres.repository';
+import type { MaintenanceWindowRepository } from '../../common/interfaces/maintenance-window-repository.interface';
 import { SlowLogPostgresRepository } from './repositories/slowlog.postgres.repository';
 import { InvitationPostgresRepository } from './repositories/invitation.postgres.repository';
 import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
@@ -316,6 +318,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   private closing = false;
   private readonly mappers = new RowMappers(PostgresDialect);
   private webhookRepo!: WebhookPostgresRepository;
+  private maintenanceWindowRepo!: MaintenanceWindowPostgresRepository;
   private slowlogRepo!: SlowLogPostgresRepository;
   private invitationRepo!: InvitationPostgresRepository;
   private activityRepo!: ActivityPostgresRepository;
@@ -489,6 +492,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       }
 
       this.webhookRepo = new WebhookPostgresRepository(this.pool, this.mappers);
+      this.maintenanceWindowRepo = new MaintenanceWindowPostgresRepository(this.pool);
       this.slowlogRepo = new SlowLogPostgresRepository(this.pool, this.mappers);
       this.invitationRepo = new InvitationPostgresRepository(this.pool);
       this.activityRepo = new ActivityPostgresRepository(this.pool);
@@ -2560,6 +2564,24 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       -- Idempotent migration for deployments that ran the PR 19 schema
       ALTER TABLE scheduled_captures
         ADD COLUMN IF NOT EXISTS cron_expression TEXT;
+
+      CREATE TABLE IF NOT EXISTS maintenance_windows (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        reason TEXT,
+        connection_id TEXT,
+        events TEXT NOT NULL,
+        starts_at BIGINT NOT NULL,
+        ends_at BIGINT NOT NULL,
+        ended_at BIGINT,
+        created_by TEXT,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL,
+        CHECK (ends_at > starts_at)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_maintenance_windows_ends_at
+        ON maintenance_windows(ends_at);
 
       CREATE TABLE IF NOT EXISTS invitations (
         id TEXT PRIMARY KEY,
@@ -7010,6 +7032,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       lastTs: toNumber(row.last_ts),
       nodeId: (row.node_id as string | null) ?? undefined,
     }));
+  }
+
+  getMaintenanceWindowRepository(): MaintenanceWindowRepository {
+    return this.maintenanceWindowRepo;
   }
 
   getInvitationRepository(): InvitationRepository {

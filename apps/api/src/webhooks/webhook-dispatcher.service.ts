@@ -2,6 +2,7 @@ import { Injectable, Inject, Logger, OnModuleDestroy, Optional } from '@nestjs/c
 import { ConfigService } from '@nestjs/config';
 import { LRUCache } from 'lru-cache';
 import type {
+  MaintenanceWindow,
   Webhook,
   WebhookDelivery,
   WebhookPayload,
@@ -23,6 +24,7 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { formatWebhookBody } from './webhook-payload-formatter';
 import { BlockedAddressError, guardedLookup } from '../common/utils/outbound-url-guard';
 import { pinnedRequest } from '../common/utils/pinned-request';
+import { MaintenanceWindowService } from './maintenance/maintenance-window.service';
 
 interface AlertState {
   fired: boolean;
@@ -39,6 +41,11 @@ interface PendingEvent {
   payloads: Map<string, WebhookPayload>;
   pendingWebhookIds: Set<string> | null;
   unconfirmedWebhookIds: Set<string>;
+  /**
+   * Maintenance decision, made once on the first delivery attempt so an event
+   * retried through the storage buffer is judged the same way every time.
+   */
+  maintenance?: { suppressedBy: MaintenanceWindow | null };
 }
 
 const STORAGE_UNAVAILABLE = 'storage-unavailable' as const;
@@ -108,7 +115,13 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     private readonly webhooksService: WebhooksService,
     private readonly configService: ConfigService,
     @Optional() private readonly connectionRegistry?: ConnectionRegistry,
+    @Optional() private readonly maintenance?: MaintenanceWindowService,
   ) {
+    // An opener silenced by a maintenance window that is still unresolved
+    // when the window ends is sent then, through the normal path.
+    this.maintenance?.setReplayHandler((eventType, data, connectionId) =>
+      this.dispatchEvent(eventType, data, connectionId),
+    );
     this.DEFAULT_REQUEST_TIMEOUT_MS = this.configService.get<number>(
       'WEBHOOK_TIMEOUT_MS',
       DEFAULT_DELIVERY_CONFIG.timeoutMs,
@@ -236,6 +249,15 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     knownWebhooks?: Webhook[],
   ): Promise<{ storageUnavailable: boolean; terminalFailure: boolean }> {
     const { eventType, connectionId } = event;
+    // Decided once, at the event's own time: an event buffered through a
+    // storage outage is judged by the window that covered it when it fired.
+    if (event.maintenance === undefined) {
+      event.maintenance = {
+        suppressedBy: this.maintenance?.evaluate(eventType, event.data, connectionId, event.timestamp) ?? null,
+      };
+    }
+    const { suppressedBy } = event.maintenance;
+
     let webhooks: Webhook[];
     if (knownWebhooks) {
       webhooks = knownWebhooks;
@@ -255,6 +277,16 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     if (targets.length === 0) {
       this.logger.debug(
         `No webhooks subscribed to event: ${eventType}${connectionId ? ` for connection ${connectionId}` : ''}`,
+      );
+      return { storageUnavailable: false, terminalFailure: false };
+    }
+
+    if (suppressedBy !== null) {
+      this.logger.log(
+        `Suppressed ${eventType} for ${targets.length} webhook(s): maintenance window "${suppressedBy.name}" (${suppressedBy.id})`,
+      );
+      await Promise.allSettled(
+        targets.map((webhook) => this.recordSuppressedDelivery(webhook, event, suppressedBy)),
       );
       return { storageUnavailable: false, terminalFailure: false };
     }
@@ -286,6 +318,41 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     }
 
     return { storageUnavailable, terminalFailure: failed.length > 0 };
+  }
+
+  private isSuppressed(eventType: WebhookEventType, connectionId?: string): boolean {
+    return (this.maintenance?.findSuppressing(eventType, connectionId) ?? null) !== null;
+  }
+
+  /**
+   * Leave a SUPPRESSED row in the delivery log instead of sending, so the
+   * log answers "why was nobody paged?". Best effort: the alert is not sent
+   * either way, so a storage failure here is only logged.
+   */
+  private async recordSuppressedDelivery(
+    webhook: Webhook,
+    event: PendingEvent,
+    window: MaintenanceWindow,
+  ): Promise<void> {
+    event.pendingWebhookIds?.delete(webhook.id);
+    if (!webhook.enabled) return;
+    const payload = this.getOrCreatePayload(webhook.id, event);
+    try {
+      await this.storageClient.createDelivery({
+        webhookId: webhook.id,
+        eventType: event.eventType,
+        payload,
+        status: DeliveryStatus.SUPPRESSED,
+        attempts: 0,
+        responseBody: `Suppressed by maintenance window "${window.name}" (${window.id})`,
+        completedAt: Date.now(),
+        connectionId: event.connectionId,
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Failed to record suppressed ${event.eventType} delivery for webhook ${webhook.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   private bufferEvent(event: PendingEvent): boolean {
@@ -440,6 +507,12 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     data: Record<string, unknown>,
     connectionId?: string,
   ): Promise<boolean> {
+    // Skip the hysteresis state entirely while silenced: recording a "fired"
+    // edge now would stop a condition that outlives the window from ever
+    // alerting once the window ends.
+    if (this.isSuppressed(eventType, connectionId)) {
+      return false;
+    }
     if (!this.shouldFireAlert(alertKey, currentValue, threshold, isAbove)) {
       return false;
     }
@@ -489,6 +562,11 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     data: Record<string, unknown> | ((threshold: number) => Record<string, unknown>),
     connectionId?: string,
   ): Promise<boolean> {
+    // See dispatchThresholdAlert: no hysteresis state is touched while silenced,
+    // so a breach that is still there when the window ends alerts then.
+    if (this.isSuppressed(eventType, connectionId)) {
+      return false;
+    }
     let firedAny = false;
     const settleLookup = this.trackLookup(alertKeyPrefix, connectionId);
     try {

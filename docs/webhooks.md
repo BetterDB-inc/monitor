@@ -16,6 +16,7 @@ BetterDB can send HTTP POST requests to your endpoints when monitoring events oc
 - [Retry Policy](#retry-policy)
 - [Per-Webhook Configuration](#per-webhook-configuration)
 - [Rate Limiting & Hysteresis](#rate-limiting--hysteresis)
+- [Maintenance Windows](#maintenance-windows)
 - [API Reference](#api-reference)
 - [Troubleshooting](#troubleshooting)
 
@@ -973,6 +974,70 @@ These events fire immediately without hysteresis:
 
 `writes.rejected` fires immediately; `writes.recovered` waits for a 60s quiet window (see [writes.rejected / writes.recovered](#writesrejected--writesrecovered) above).
 
+## Maintenance Windows
+
+A maintenance window pauses webhook alerts during planned work: a version upgrade, a failover drill, a migration cutover, a rolling restart. Without one, the work itself pages on-call (`instance.down`, `failover.started`, `writes.rejected` with `READONLY` during a switchover) and teams learn to ignore the pager.
+
+While a window is active, every matching event is still recorded, but as a **suppressed** delivery instead of an HTTP request. The delivery log shows `status: "suppressed"` with the window in `responseBody`, so "why was nobody paged?" always has an answer. A suppressed delivery can still be sent by hand with the normal retry endpoint.
+
+A window has:
+
+| Field | Meaning |
+|-------|---------|
+| `name` | Short label shown in the UI and on suppressed deliveries (required, up to 120 characters) |
+| `reason` | Optional change ticket, runbook link or note (up to 500 characters) |
+| `connectionId` | Connection to silence; omit or `null` for every connection (and events that have no connection) |
+| `events` | Events to silence; omit or `[]` for every event |
+| `startsAt` | Start in epoch ms; defaults to now. May not be in the past |
+| `endsAt` | End in epoch ms; at most 7 days after the start, so a forgotten window cannot mute paging for good |
+
+Semantics:
+
+- **Conditions that outlive the window still page.** When an opening event (`instance.down`, `writes.rejected`, `failover.started`) was silenced and its recovery (`instance.up`, `writes.recovered`, `failover.completed`) has not arrived by the time the window ends, the opener is sent then, with `data.replayedAfterMaintenance: true` and `data.maintenanceWindow: { id, name, endedAt }`. If the recovery happened inside the window, nothing is sent. This list is kept in memory, so a held-back opener is lost if BetterDB restarts before the window ends.
+- **Incidents opened before the window can still close.** A recovery event whose opener was sent before the window started (for example `instance.up` after an `instance.down` that already paged) is always sent, so the PagerDuty incident or chat thread it belongs to is resolved. A recovery whose opener was itself silenced is silenced too.
+- **Threshold alerts re-evaluate after the window.** For `memory.critical`, `connection.critical` and the other threshold events, hysteresis state is not updated while the window is active, so a breach that is still there when the window ends alerts on the next poll.
+- **Fail open.** Windows are cached in memory and reloaded every 30 seconds (so a window created on another replica applies within 30 seconds). If they cannot be loaded, nothing is suppressed: an unexpected page is better than a missed one.
+- **Overlap.** Any active window that matches silences the event; a suppressed delivery names the one that ends last. A held-back opener is sent only once no window covers it.
+- Webhook alerts only. OTLP event export and the Prometheus endpoint are unaffected, so dashboards still show what happened during the window.
+- Creating, changing, ending and deleting windows are admin actions (read-only members cannot pause alerts) and appear in the workspace activity log as `maintenance_window.create`, `.update`, `.end` and `.delete`.
+- Windows that ended before the retention cutoff are pruned with the rest of the monitoring history.
+
+In the UI, open **Webhooks → Maintenance windows → Schedule maintenance**, pick this connection or all connections, a start (now or later), a duration, and optionally the events to silence. Active windows show a banner with **End now**.
+
+### Maintenance Window API
+
+```bash
+# Pause all alerts for one connection for the next hour
+curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/maintenance-windows \
+  -H "Content-Type: application/json" \
+  -d "{\"name\": \"Valkey 8.1 upgrade\", \"reason\": \"CHG-1234\", \"connectionId\": \"<connection-id>\", \"endsAt\": $(( $(date +%s) * 1000 + 3600000 ))}"
+
+# Only silence failover noise on every connection, tonight 22:00-23:00 UTC
+curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/maintenance-windows \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Failover drill",
+    "events": ["failover.started", "failover.completed", "cluster.failover", "instance.down", "instance.up"],
+    "startsAt": 1767304800000,
+    "endsAt": 1767308400000
+  }'
+
+# List (active and scheduled first, then the 20 most recently ended); filter with ?state=active|scheduled|ended
+curl -b cookies.txt -c cookies.txt http://localhost:3001/api/maintenance-windows
+
+# Extend or rename an open window
+curl -b cookies.txt -c cookies.txt -X PATCH http://localhost:3001/api/maintenance-windows/{id} \
+  -H "Content-Type: application/json" -d '{"endsAt": 1767312000000}'
+
+# End it now (or cancel a scheduled one); held-back alerts are sent immediately
+curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/maintenance-windows/{id}/end
+
+# Delete it
+curl -b cookies.txt -c cookies.txt -X DELETE http://localhost:3001/api/maintenance-windows/{id}
+```
+
+Responses carry the stored window plus `state` (`scheduled`, `active` or `ended`) and `endedAt` when it was ended early.
+
 ## API Reference
 
 ### List Webhooks
@@ -1191,6 +1256,7 @@ GET /api/webhooks/stats/retry-queue
    ```bash
    curl -b cookies.txt -c cookies.txt http://localhost:3001/api/webhooks/{id}/deliveries
    ```
+5. A delivery with `status: "suppressed"` was held back by a [maintenance window](#maintenance-windows); its `responseBody` names the window. List active windows with `GET /api/maintenance-windows?state=active`
 
 **Check event is being triggered:**
 
@@ -1254,6 +1320,10 @@ console.log('Received signature:', signature);
 
 - If multiple webhooks subscribe to the same event, all will fire
 - Review webhook configuration to avoid duplicates
+
+**Alerts during planned work:**
+
+- Schedule a [maintenance window](#maintenance-windows) for upgrades, failover drills and migrations instead of disabling webhooks; anything still broken when the window ends is still sent
 
 ### High Delivery Latency
 
