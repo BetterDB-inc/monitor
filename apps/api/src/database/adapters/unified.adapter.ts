@@ -52,6 +52,7 @@ import type {
 import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_SECONDS } from '@betterdb/shared';
 
 import type { SshTunnelConfig } from '@betterdb/shared';
+import { resolveSshHops, isClusterViaTunnel } from '@betterdb/shared';
 import { SshTunnelService } from '../ssh/ssh-tunnel.service';
 import { tlsIdentityOptions } from './tls-servername';
 
@@ -132,10 +133,12 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   private readonly tunnelKey: string;
   private readonly usesTunnel: boolean;
   private tunnelActive: boolean = false;
+  private tunnelEpoch = 0;
   // SHA256 fingerprint the SSH server presented, captured on first connect when
   // no fingerprint was pinned (trust-on-first-use). The registry reads this back
   // after a successful connect to persist it for subsequent verification.
   private observedHostKeyFingerprint?: string;
+  private observedHostKeyFingerprints: (string | undefined)[] = [];
   // Host/port the Valkey clients actually dial. Rewritten to 127.0.0.1:<localPort>
   // once an SSH tunnel is established.
   private connectHost: string;
@@ -222,6 +225,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   private async establishTunnel(): Promise<void> {
     const tunnel = this.config.sshTunnel!;
     const service = this.config.sshTunnelService!;
+    const hops = resolveSshHops(tunnel);
+    this.observedHostKeyFingerprints = new Array(hops.length).fill(undefined);
     const localPort = await service.createTunnel(this.tunnelKey, {
       sshHost: tunnel.host,
       sshPort: tunnel.port,
@@ -233,10 +238,31 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       privateKeyPath: tunnel.privateKeyPath,
       passphrase: tunnel.passphrase,
       hostKeyFingerprint: tunnel.hostKeyFingerprint,
-      // Trust-on-first-use: record the key the server presents so the registry
-      // can persist it and pin it on the next connect.
+      hops: hops.map((hop, i) => ({
+        sshHost: hop.host,
+        sshPort: hop.port,
+        sshUsername: hop.username,
+        authMethod: hop.authMethod,
+        password: hop.password,
+        keySource: hop.keySource,
+        privateKey: hop.privateKey,
+        privateKeyPath: hop.privateKeyPath,
+        passphrase: hop.passphrase,
+        hostKeyFingerprint: hop.hostKeyFingerprint,
+        onHostKey: (fingerprint) => {
+          this.observedHostKeyFingerprints[i] = fingerprint;
+          if (i === 0) {
+            this.observedHostKeyFingerprint = fingerprint;
+          }
+        },
+      })),
       onHostKey: (fingerprint) => {
         this.observedHostKeyFingerprint = fingerprint;
+        if (this.observedHostKeyFingerprints.length === 0) {
+          this.observedHostKeyFingerprints = [fingerprint];
+        } else if (!this.observedHostKeyFingerprints[0]) {
+          this.observedHostKeyFingerprints[0] = fingerprint;
+        }
       },
       // If the tunnel drops on its own, stop dialing the dead local port.
       onUnexpectedClose: () => this.handleTunnelDropped(),
@@ -246,6 +272,39 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     this.connectHost = '127.0.0.1';
     this.connectPort = localPort;
     this.tunnelActive = true;
+    this.tunnelEpoch += 1;
+  }
+
+  async dialNodeThroughTunnel(
+    remoteHost: string,
+    remotePort: number,
+  ): Promise<{ host: string; port: number }> {
+    const tunnel = this.config.sshTunnel;
+    if (!this.usesTunnel || !tunnel || !isClusterViaTunnel(tunnel)) {
+      return { host: remoteHost, port: remotePort };
+    }
+    if (!this.tunnelActive) {
+      throw new Error('SSH tunnel is not established; reconnect the connection before dialling nodes.');
+    }
+    const service = this.config.sshTunnelService;
+    if (!service) {
+      throw new Error('SSH tunnel is not established; reconnect the connection before dialling nodes.');
+    }
+    const localPort = await service.createNodeForward(this.tunnelKey, remoteHost, remotePort);
+    return { host: '127.0.0.1', port: localPort };
+  }
+
+  /** Release a per-node forward opened via {@link dialNodeThroughTunnel}. */
+  releaseNodeThroughTunnel(remoteHost: string, remotePort: number): void {
+    const tunnel = this.config.sshTunnel;
+    if (!this.usesTunnel || !tunnel || !isClusterViaTunnel(tunnel)) {
+      return;
+    }
+    try {
+      this.config.sshTunnelService?.closeNodeForward(this.tunnelKey, remoteHost, remotePort);
+    } catch {
+      // Best-effort eviction.
+    }
   }
 
   /**
@@ -260,6 +319,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     }
     this.logger.warn('SSH tunnel dropped; marking connection down until re-established');
     this.tunnelActive = false;
+    this.tunnelEpoch += 1;
     this.connected = false;
     if (this._client) {
       this._client.disconnect();
@@ -279,6 +339,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     if (this.tunnelActive && this.config.sshTunnelService) {
       await this.config.sshTunnelService.closeTunnel(this.tunnelKey).catch(() => {});
       this.tunnelActive = false;
+      this.tunnelEpoch += 1;
       // The current client's options still point at the now-closed local port,
       // so it must be rebuilt (against a freshly established tunnel) before the
       // next connect(). Discard it and restore the pre-tunnel target.
@@ -294,6 +355,16 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   /** The host-key fingerprint observed on connect, if learned via TOFU. */
   getObservedHostKeyFingerprint(): string | undefined {
     return this.observedHostKeyFingerprint;
+  }
+
+  getObservedHostKeyFingerprints(): (string | undefined)[] | undefined {
+    return this.observedHostKeyFingerprints.length > 0
+      ? [...this.observedHostKeyFingerprints]
+      : undefined;
+  }
+
+  getTunnelEpoch(): number {
+    return this.tunnelEpoch;
   }
 
   private connectPromise: Promise<void> | null = null;
