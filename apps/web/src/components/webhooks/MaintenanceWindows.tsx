@@ -40,7 +40,7 @@ export function MaintenanceWindows() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const { data: windows = [], isError } = useQuery({
+  const { data: windows = [], isError, isLoading } = useQuery({
     queryKey: QUERY_KEY,
     queryFn: ({ signal }) => maintenanceWindowsApi.list(signal),
     refetchInterval: 30_000,
@@ -331,7 +331,7 @@ export function MaintenanceWindows() {
         </div>
       )}
 
-      {active.length === 0 && scheduled.length === 0 && !showForm && (
+      {!isError && !isLoading && active.length === 0 && scheduled.length === 0 && !showForm && (
         <p className="text-sm text-muted-foreground">No maintenance scheduled. Alerts are being sent normally.</p>
       )}
     </Card>

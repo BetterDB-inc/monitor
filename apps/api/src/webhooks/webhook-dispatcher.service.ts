@@ -302,6 +302,16 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     const storageUnavailable = settled.some(
       (result) => result.status === 'fulfilled' && result.value === STORAGE_UNAVAILABLE,
     );
+    const accepted = settled.some(
+      (result) =>
+        result.status === 'fulfilled' &&
+        (result.value === DeliveryStatus.SUCCESS ||
+          result.value === DeliveryStatus.RETRYING ||
+          result.value === DeliveryStatus.PENDING),
+    );
+    if (accepted) {
+      this.maintenance?.markOpenerDelivered(eventType, connectionId);
+    }
     const failed = settled.filter((result) => {
       if (result.status === 'rejected') {
         return true;
@@ -469,6 +479,22 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     }
 
     // Already fired - check for recovery (configurable hysteresis)
+    this.applyAlertRecovery(alertKey, currentValue, threshold, isAbove, hysteresisFactor);
+
+    return false;
+  }
+
+  /** Clears fired state when the value is back past the recovery threshold. Returns true if it cleared. */
+  private applyAlertRecovery(
+    alertKey: string,
+    currentValue: number,
+    threshold: number,
+    isAbove: boolean,
+    hysteresisFactor: number = this.DEFAULT_ALERT_HYSTERESIS_FACTOR,
+  ): boolean {
+    if (!this.alertStates.has(alertKey)) {
+      return false;
+    }
     const recoveryThreshold = isAbove
       ? threshold * hysteresisFactor
       : threshold * (2 - hysteresisFactor); // Mirror for below-threshold alerts
@@ -478,8 +504,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       this.alertStates.delete(alertKey);
       this.logger.debug(`Alert ${alertKey} recovered: ${currentValue} (threshold: ${threshold})`);
     }
-
-    return false;
+    return recovered;
   }
 
   clearThresholdAlertPerWebhook(alertKeyPrefix: string, connectionId: string): void {
@@ -507,10 +532,11 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     data: Record<string, unknown>,
     connectionId?: string,
   ): Promise<boolean> {
-    // Skip the hysteresis state entirely while silenced: recording a "fired"
-    // edge now would stop a condition that outlives the window from ever
-    // alerting once the window ends.
+    // While silenced, process recoveries so a breach after the window alerts,
+    // but never record a fired edge or dispatch: a "fired" edge written now
+    // would stop a condition that outlives the window from alerting at its end.
     if (this.isSuppressed(eventType, connectionId)) {
+      this.applyAlertRecovery(alertKey, currentValue, threshold, isAbove);
       return false;
     }
     if (!this.shouldFireAlert(alertKey, currentValue, threshold, isAbove)) {
@@ -562,11 +588,9 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     data: Record<string, unknown> | ((threshold: number) => Record<string, unknown>),
     connectionId?: string,
   ): Promise<boolean> {
-    // See dispatchThresholdAlert: no hysteresis state is touched while silenced,
-    // so a breach that is still there when the window ends alerts then.
-    if (this.isSuppressed(eventType, connectionId)) {
-      return false;
-    }
+    // See dispatchThresholdAlert: while silenced, recovery runs per webhook
+    // (below) but nothing is recorded as fired or dispatched.
+    const silenced = this.isSuppressed(eventType, connectionId);
     let firedAny = false;
     const settleLookup = this.trackLookup(alertKeyPrefix, connectionId);
     try {
@@ -595,6 +619,17 @@ export class WebhookDispatcherService implements OnModuleDestroy {
           const alertKey = connectionId
             ? `${alertKeyPrefix}:${connectionId}:${webhook.id}`
             : `${alertKeyPrefix}:${webhook.id}`;
+
+          if (silenced) {
+            this.applyAlertRecovery(
+              alertKey,
+              currentValue,
+              threshold,
+              isAbove,
+              alertConfig.hysteresisFactor,
+            );
+            return;
+          }
 
           if (
             this.shouldFireAlert(

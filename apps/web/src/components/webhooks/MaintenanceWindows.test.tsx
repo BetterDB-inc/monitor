@@ -66,6 +66,13 @@ describe('MaintenanceWindows', () => {
     expect(await screen.findByText(/Alerts are being sent normally/)).toBeInTheDocument();
   });
 
+  it('does not claim alerts are flowing when the list failed to load', async () => {
+    list.mockRejectedValue(new Error('boom'));
+    renderPanel();
+    expect(await screen.findByText('Could not load maintenance windows.')).toBeInTheDocument();
+    expect(screen.queryByText(/No maintenance scheduled/)).not.toBeInTheDocument();
+  });
+
   it('shows an active window with its scope and lets an admin end it', async () => {
     list.mockResolvedValue([view()]);
     renderPanel();

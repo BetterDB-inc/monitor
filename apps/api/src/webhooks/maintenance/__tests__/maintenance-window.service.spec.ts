@@ -143,6 +143,15 @@ describe('MaintenanceWindowService', () => {
     });
   });
 
+  describe('names', () => {
+    it('rejects a blank name on create and update, leaving the stored name unchanged', async () => {
+      await expect(service.create({ name: '   ', endsAt: NOW + HOUR } as never, null)).rejects.toThrow(BadRequestException);
+      const created = await create();
+      await expect(service.update(created.id, { name: '   ' } as never)).rejects.toThrow(BadRequestException);
+      expect((await service.get(created.id)).name).toBe('Upgrade');
+    });
+  });
+
   describe('update, end and delete', () => {
     it('extends an active window and refuses to move its start', async () => {
       const created = await create();
@@ -271,11 +280,50 @@ describe('MaintenanceWindowService', () => {
 
     it('always sends the resolver of an opener that was sent before the window', async () => {
       expect(service.evaluate(down, {}, 'conn-1', NOW - 1)).toBeNull();
+      service.markOpenerDelivered(down, 'conn-1');
       await create();
       // The incident instance.down opened must be able to close.
       expect(service.evaluate(up, {}, 'conn-1', NOW)).toBeNull();
       // Only once: a later flap inside the window is silenced again.
       expect(service.evaluate(down, {}, 'conn-1', NOW)).not.toBeNull();
+      expect(service.evaluate(up, {}, 'conn-1', NOW)).not.toBeNull();
+    });
+
+    it('keeps the sent-opener record when an escalated opener is silenced inside the window', async () => {
+      const rejected = WebhookEventType.WRITES_REJECTED;
+      const recovered = WebhookEventType.WRITES_RECOVERED;
+      expect(service.evaluate(rejected, {}, 'conn-1', NOW - 1)).toBeNull();
+      service.markOpenerDelivered(rejected, 'conn-1');
+      await create();
+      expect(service.evaluate(rejected, { escalated: true }, 'conn-1', NOW)).not.toBeNull();
+      expect(service.evaluate(recovered, {}, 'conn-1', NOW)).toBeNull();
+      expect(service.pendingReplayCount()).toBe(0);
+    });
+
+    it('silences the recovery of an opener first seen inside the window, with nothing to replay', async () => {
+      await create();
+      expect(service.evaluate(WebhookEventType.WRITES_REJECTED, {}, 'conn-1', NOW)).not.toBeNull();
+      expect(service.evaluate(WebhookEventType.WRITES_RECOVERED, {}, 'conn-1', NOW)).not.toBeNull();
+      expect(await service.replayEnded(NOW + HOUR)).toBe(0);
+    });
+
+    it('replays an escalated opener that is still open when the window ends', async () => {
+      const rejected = WebhookEventType.WRITES_REJECTED;
+      service.evaluate(rejected, {}, 'conn-1', NOW - 1);
+      service.markOpenerDelivered(rejected, 'conn-1');
+      await create();
+      service.evaluate(rejected, { escalated: true }, 'conn-1', NOW);
+      expect(await service.replayEnded(NOW + HOUR)).toBe(1);
+      expect(replay).toHaveBeenCalledWith(
+        rejected,
+        expect.objectContaining({ escalated: true, replayedAfterMaintenance: true }),
+        'conn-1',
+      );
+    });
+
+    it('does not count an opener as sent until the dispatcher marks it', async () => {
+      expect(service.evaluate(down, {}, 'conn-1', NOW - 1)).toBeNull();
+      await create();
       expect(service.evaluate(up, {}, 'conn-1', NOW)).not.toBeNull();
     });
 

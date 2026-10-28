@@ -208,6 +208,106 @@ describe('WebhookDispatcherService with maintenance windows', () => {
     expect(received).toHaveLength(1);
   });
 
+  it('sends the recovery after an escalated opener was silenced inside the window', async () => {
+    await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_DOWN, { message: 'down' }, 'conn-1');
+    await openWindow();
+    await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_DOWN, { message: 'down', escalated: true }, 'conn-1');
+    await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_UP, { message: 'up' }, 'conn-1');
+
+    expect(received.map((body) => body.event)).toEqual(['instance.down', 'instance.up']);
+  });
+
+  it('suppresses the recovery of an outage nobody was told about (no subscriber)', async () => {
+    webhooks[0].events = [WebhookEventType.INSTANCE_UP];
+    await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_DOWN, { message: 'down' }, 'conn-1');
+    webhooks[0].events = [WebhookEventType.INSTANCE_DOWN, WebhookEventType.INSTANCE_UP];
+    await openWindow();
+    await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_UP, { message: 'up' }, 'conn-1');
+
+    expect(received).toHaveLength(0);
+    expect((await deliveries())[0].status).toBe(DeliveryStatus.SUPPRESSED);
+  });
+
+  describe('opener acceptance by the receiver', () => {
+    let status: number;
+    let flaky: Server;
+
+    beforeEach(async () => {
+      status = 400;
+      flaky = createServer((req, res) => {
+        req.resume();
+        req.on('end', () => res.writeHead(status).end('no'));
+      });
+      await new Promise<void>((resolve) => flaky.listen(0, '127.0.0.1', resolve));
+      webhooks[0].url = `http://127.0.0.1:${(flaky.address() as AddressInfo).port}/hook`;
+    });
+
+    afterEach(() => new Promise<void>((resolve) => flaky.close(() => resolve())));
+
+    it('suppresses the recovery when the opener failed terminally', async () => {
+      await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_DOWN, { message: 'down' }, 'conn-1');
+      await openWindow();
+      await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_UP, { message: 'up' }, 'conn-1');
+
+      const statuses = (await deliveries()).map((delivery) => delivery.status);
+      expect(statuses).toContain(DeliveryStatus.SUPPRESSED);
+    });
+
+    it('sends the recovery when the opener is merely retrying', async () => {
+      status = 500;
+      await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_DOWN, { message: 'down' }, 'conn-1');
+      await openWindow();
+      status = 200;
+      await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_UP, { message: 'up' }, 'conn-1');
+
+      const statuses = (await deliveries()).map((delivery) => delivery.status);
+      expect(statuses).not.toContain(DeliveryStatus.SUPPRESSED);
+    });
+  });
+
+  describe('threshold recovery while silenced', () => {
+    const perWebhook = (value: number) =>
+      dispatcher.dispatchThresholdAlertPerWebhook(
+        WebhookEventType.MEMORY_CRITICAL,
+        'memory_critical',
+        value,
+        'memoryCriticalPercent',
+        true,
+        { message: `Memory at ${value}%` },
+        'conn-1',
+      );
+    const global = (value: number) =>
+      dispatcher.dispatchThresholdAlert(WebhookEventType.MEMORY_CRITICAL, 'mem:conn-1', value, 90, true, {}, 'conn-1');
+
+    it.each([
+      ['per-webhook', perWebhook],
+      ['global', global],
+    ])('alerts after the window when the condition dipped and returned inside it (%s path)', async (_name, fire) => {
+      await expect(fire(95)).resolves.toBe(true);
+      await openWindow();
+      await expect(fire(50)).resolves.toBe(false);
+      await expect(fire(95)).resolves.toBe(false);
+      expect(received).toHaveLength(1);
+
+      now += HOUR;
+      await expect(fire(95)).resolves.toBe(true);
+      expect(received).toHaveLength(2);
+    });
+
+    it.each([
+      ['per-webhook', perWebhook],
+      ['global', global],
+    ])('keeps the fired state while the value stays high inside the window (%s path)', async (_name, fire) => {
+      await expect(fire(95)).resolves.toBe(true);
+      await openWindow();
+      await expect(fire(96)).resolves.toBe(false);
+
+      now += HOUR;
+      await expect(fire(96)).resolves.toBe(false);
+      expect(received).toHaveLength(1);
+    });
+  });
+
   it('keeps sending when maintenance windows could not be loaded', async () => {
     const cold = new MaintenanceWindowService({
       getMaintenanceWindowRepository: () => ({ list: jest.fn().mockRejectedValue(new Error('down')) }),

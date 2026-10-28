@@ -168,10 +168,12 @@ export class MaintenanceWindowService implements OnModuleInit, OnModuleDestroy {
     if (resolvingEventFor(event) !== undefined) {
       const key = pendingKey(event, connectionId);
       if (window === null) {
+        // Marked delivered by markOpenerDelivered once a webhook accepts it.
         this.pendingOpens.delete(key);
-        this.deliveredOpens.add(key);
       } else {
-        this.deliveredOpens.delete(key);
+        // Leave deliveredOpens alone: if the condition already paged before the
+        // window (e.g. writes.rejected, then an escalated re-send inside it), its
+        // recovery must still be sent so that incident can close.
         this.pendingOpens.set(key, { event, data, connectionId, window });
       }
     }
@@ -179,6 +181,12 @@ export class MaintenanceWindowService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Send silenced openers whose window has ended and that no other window still covers. */
+  /** Called by the dispatcher once at least one webhook accepted an unsuppressed opener. */
+  markOpenerDelivered(event: WebhookEventType, connectionId: string | undefined): void {
+    if (resolvingEventFor(event) === undefined) return;
+    this.deliveredOpens.add(pendingKey(event, connectionId));
+  }
+
   async replayEnded(now: number = Date.now()): Promise<number> {
     if (this.replayHandler === null || this.pendingOpens.size === 0) return 0;
     let replayed = 0;
@@ -258,7 +266,7 @@ export class MaintenanceWindowService implements OnModuleInit, OnModuleDestroy {
 
     const window: MaintenanceWindow = {
       id: randomUUID(),
-      name: input.name.trim(),
+      name: requireName(input.name),
       reason: normalizeReason(input.reason),
       connectionId,
       events: dedupe(input.events ?? []),
@@ -296,7 +304,7 @@ export class MaintenanceWindowService implements OnModuleInit, OnModuleDestroy {
 
     const updated: MaintenanceWindow = {
       ...existing,
-      name: patch.name !== undefined ? patch.name.trim() : existing.name,
+      name: patch.name !== undefined ? requireName(patch.name) : existing.name,
       reason: patch.reason !== undefined ? normalizeReason(patch.reason) : existing.reason,
       events: patch.events !== undefined ? dedupe(patch.events) : existing.events,
       startsAt: patch.startsAt ?? existing.startsAt,
@@ -354,6 +362,12 @@ export class MaintenanceWindowService implements OnModuleInit, OnModuleDestroy {
 
 function pendingKey(event: WebhookEventType, connectionId: string | undefined): string {
   return `${connectionId ?? ''}|${event}`;
+}
+
+function requireName(raw: string): string {
+  const name = raw.trim();
+  if (name === '') throw new BadRequestException('name must not be blank');
+  return name;
 }
 
 function validateRange(startsAt: number, endsAt: number): void {

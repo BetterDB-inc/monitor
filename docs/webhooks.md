@@ -978,7 +978,7 @@ These events fire immediately without hysteresis:
 
 A maintenance window pauses webhook alerts during planned work: a version upgrade, a failover drill, a migration cutover, a rolling restart. Without one, the work itself pages on-call (`instance.down`, `failover.started`, `writes.rejected` with `READONLY` during a switchover) and teams learn to ignore the pager.
 
-While a window is active, every matching event is still recorded, but as a **suppressed** delivery instead of an HTTP request. The delivery log shows `status: "suppressed"` with the window in `responseBody`, so "why was nobody paged?" always has an answer. A suppressed delivery can still be sent by hand with the normal retry endpoint.
+While a window is active, every matching event is still recorded, but as a **suppressed** delivery instead of an HTTP request. Threshold alerts (`memory.critical`, `connection.critical` and the other threshold events) are the exception: while silenced they are not dispatched at all, so they leave no suppressed row. Their recovery is still tracked, and a breach that is present after the window alerts on the next poll. The delivery log shows `status: "suppressed"` with the window in `responseBody`, so "why was nobody paged?" always has an answer. A suppressed delivery can still be sent by hand with the normal retry endpoint.
 
 A window has:
 
@@ -994,9 +994,9 @@ A window has:
 Semantics:
 
 - **Conditions that outlive the window still page.** When an opening event (`instance.down`, `writes.rejected`, `failover.started`) was silenced and its recovery (`instance.up`, `writes.recovered`, `failover.completed`) has not arrived by the time the window ends, the opener is sent then, with `data.replayedAfterMaintenance: true` and `data.maintenanceWindow: { id, name, endedAt }`. If the recovery happened inside the window, nothing is sent. This list is kept in memory, so a held-back opener is lost if BetterDB restarts before the window ends.
-- **Incidents opened before the window can still close.** A recovery event whose opener was sent before the window started (for example `instance.up` after an `instance.down` that already paged) is always sent, so the PagerDuty incident or chat thread it belongs to is resolved. A recovery whose opener was itself silenced is silenced too.
-- **Threshold alerts re-evaluate after the window.** For `memory.critical`, `connection.critical` and the other threshold events, hysteresis state is not updated while the window is active, so a breach that is still there when the window ends alerts on the next poll.
-- **Fail open.** Windows are cached in memory and reloaded every 30 seconds (so a window created on another replica applies within 30 seconds). If they cannot be loaded, nothing is suppressed: an unexpected page is better than a missed one.
+- **Incidents opened before the window can still close.** A recovery event whose opener was sent before the window started (for example `instance.up` after an `instance.down` that already paged) is always sent, so the PagerDuty incident or chat thread it belongs to is resolved. A recovery whose opener was itself silenced is silenced too. This holds even when the opener is re-sent inside the window (for example an escalated `writes.rejected`). An opener counts as sent once at least one webhook accepted it.
+- **Threshold alerts re-evaluate after the window.** For `memory.critical`, `connection.critical` and the other threshold events, no fired state is recorded while the window is active (recoveries are still processed), so a breach that is still there when the window ends alerts on the next poll.
+- **Fail open.** Windows are cached in memory and reloaded every 30 seconds (so a window created on another replica applies within 30 seconds). If windows cannot be loaded at startup, nothing is suppressed. If a later reload fails, the last loaded copy stays in effect until the next successful reload (every 30 seconds) or until each window's own end, so a window ended on another replica may keep silencing alerts on this one until then.
 - **Overlap.** Any active window that matches silences the event; a suppressed delivery names the one that ends last. A held-back opener is sent only once no window covers it.
 - Webhook alerts only. OTLP event export and the Prometheus endpoint are unaffected, so dashboards still show what happened during the window.
 - Creating, changing, ending and deleting windows are admin actions (read-only members cannot pause alerts) and appear in the workspace activity log as `maintenance_window.create`, `.update`, `.end` and `.delete`.
@@ -1012,15 +1012,12 @@ curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/maintenance
   -H "Content-Type: application/json" \
   -d "{\"name\": \"Valkey 8.1 upgrade\", \"reason\": \"CHG-1234\", \"connectionId\": \"<connection-id>\", \"endsAt\": $(( $(date +%s) * 1000 + 3600000 ))}"
 
-# Only silence failover noise on every connection, tonight 22:00-23:00 UTC
+# Only silence failover noise on every connection, starting one hour from now for one hour
+START=$(( ($(date +%s) + 3600) * 1000 ))
+END=$(( START + 3600 * 1000 ))
 curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/maintenance-windows \
   -H "Content-Type: application/json" \
-  -d '{
-    "name": "Failover drill",
-    "events": ["failover.started", "failover.completed", "cluster.failover", "instance.down", "instance.up"],
-    "startsAt": 1767304800000,
-    "endsAt": 1767308400000
-  }'
+  -d "{\"name\":\"Failover drill\",\"events\":[\"failover.started\",\"failover.completed\",\"cluster.failover\",\"instance.down\",\"instance.up\"],\"startsAt\":$START,\"endsAt\":$END}"
 
 # List (active and scheduled first, then the 20 most recently ended); filter with ?state=active|scheduled|ended
 curl -b cookies.txt -c cookies.txt http://localhost:3001/api/maintenance-windows
