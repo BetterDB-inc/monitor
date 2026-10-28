@@ -145,6 +145,52 @@ describe('SessionList', () => {
   });
 });
 
+describe('SessionList search and paging', () => {
+  const many = (count: number, prefix = '') =>
+    listResponse({
+      sessions: Array.from({ length: count }, (_, i) => ({
+        sessionId: `${prefix}session-${String(i).padStart(3, '0')}`,
+        keyCount: 1,
+        memoryBytes: 100,
+        unmeasuredKeys: 0,
+        idleSeconds: i,
+        ttlMs: null,
+      })),
+    });
+
+  it('filters sessions by id', () => {
+    renderList();
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Filter sessions' }), {
+      target: { value: 'RAV' },
+    });
+    expect(order()).toEqual(['bravo']);
+  });
+
+  it('says when no session matches the filter', () => {
+    renderList();
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Filter sessions' }), {
+      target: { value: 'zulu' },
+    });
+    expect(screen.getByText('No sessions match this filter.')).toBeInTheDocument();
+  });
+
+  it('shows 50 sessions at a time and loads more on request', () => {
+    renderList({ data: many(120) });
+    expect(screen.getAllByRole('row')).toHaveLength(51);
+    fireEvent.click(screen.getByRole('button', { name: 'Show more (70 remaining)' }));
+    expect(screen.getAllByRole('row')).toHaveLength(101);
+  });
+
+  it('shows ids without the namespace prefix and keeps the full key as a tooltip', () => {
+    const onSelect = vi.fn();
+    renderList({ data: many(1, 'message_store:'), pattern: 'message_store:*', onSelect });
+    const id = screen.getByText('session-000');
+    expect(id).toHaveAttribute('title', 'message_store:session-000');
+    fireEvent.click(id);
+    expect(onSelect).toHaveBeenCalledWith('message_store:session-000');
+  });
+});
+
 describe('useOversizeSessions', () => {
   const oversize = vi.mocked(sessionExplorerApi.oversize);
 

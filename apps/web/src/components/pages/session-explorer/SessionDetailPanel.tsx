@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../../ui/card';
 import { formatBytes } from '../../../lib/utils';
 import { KeyPanel } from './KeyPanel';
 import { MessageTimeline } from './MessageTimeline';
-import { formatTtl } from './format';
+import { displaySessionId, formatTtl } from './format';
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
@@ -28,15 +28,18 @@ interface Props {
   detail: SessionDetail;
   onExport: () => void;
   exporting: boolean;
+  pattern?: string;
 }
 
-export function SessionDetailPanel({ detail, onExport, exporting }: Props) {
+export function SessionDetailPanel({ detail, onExport, exporting, pattern }: Props) {
   const reasons = detail.complete ? [] : incompleteReasons(detail);
   return (
     <Card>
       <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
-          <CardTitle className="break-all font-mono text-base">{detail.sessionId}</CardTitle>
+          <CardTitle className="break-all font-mono text-base" title={detail.sessionId}>
+            {displaySessionId(detail.sessionId, pattern)}
+          </CardTitle>
           <p className="mt-1 text-sm text-muted-foreground">
             ~{detail.estimatedTokens.toLocaleString()} tokens · {formatBytes(detail.memoryBytes)} ·{' '}
             TTL {formatTtl(detail.ttlMs)} · {plural(detail.keys.length, 'key')}

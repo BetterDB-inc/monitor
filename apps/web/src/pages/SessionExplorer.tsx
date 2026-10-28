@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
 import { Feature, type SessionNamespace } from '@betterdb/shared';
@@ -34,6 +34,11 @@ export function SessionExplorer() {
   const [selectedNs, setSelectedNs] = useState<string | null>(null);
   const [editing, setEditing] = useState<SessionNamespace | 'new' | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const detailRef = useRef<HTMLDivElement>(null);
+  const selectSession = (id: string) => {
+    setSessionId(id);
+    detailRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  };
   const [exporting, setExporting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [shownConnection, setShownConnection] = useState(connectionId);
@@ -203,7 +208,7 @@ export function SessionExplorer() {
         </Alert>
       )}
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+      <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle>Sessions</CardTitle>
@@ -233,13 +238,17 @@ export function SessionExplorer() {
                 data={sessions.data}
                 oversizeIds={oversizeIds}
                 selectedId={sessionId}
-                onSelect={setSessionId}
+                onSelect={selectSession}
+                pattern={namespace.pattern}
               />
             )}
           </CardContent>
         </Card>
 
-        <div>
+        <div
+          ref={detailRef}
+          className="scroll-mt-4 2xl:sticky 2xl:top-4 2xl:max-h-[calc(100vh-2rem)] 2xl:self-start 2xl:overflow-y-auto"
+        >
           {!sessionId && (
             <p className="text-sm text-muted-foreground">Select a session to see its timeline.</p>
           )}
@@ -250,7 +259,12 @@ export function SessionExplorer() {
             </Alert>
           )}
           {sessionId && detail.data && (
-            <SessionDetailPanel detail={detail.data} onExport={onExport} exporting={exporting} />
+            <SessionDetailPanel
+              detail={detail.data}
+              onExport={onExport}
+              exporting={exporting}
+              pattern={namespace.pattern}
+            />
           )}
         </div>
       </div>

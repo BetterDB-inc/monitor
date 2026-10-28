@@ -146,6 +146,18 @@ describe('SessionExplorer', () => {
     expect(screen.queryByText('Sessions')).toBeNull();
   });
 
+  it('brings the session detail into view when a session is selected', async () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    api.listNamespaces.mockResolvedValue([ns('a')]);
+    api.getSession.mockResolvedValue(detail({ sessionId: 'alpha' }));
+    renderPage();
+
+    fireEvent.click(await screen.findByText('alpha'));
+
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+  });
+
   it('rereads the list and the open session when Refresh is pressed', async () => {
     api.listNamespaces.mockResolvedValue([ns('a')]);
     api.getSession.mockResolvedValue(detail({ sessionId: 'alpha' }));

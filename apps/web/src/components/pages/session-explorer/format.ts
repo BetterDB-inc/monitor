@@ -27,3 +27,12 @@ export function prettyArgs(value: unknown): string {
   }
   return JSON.stringify(value, null, 2) ?? String(value);
 }
+
+export function displaySessionId(sessionId: string, pattern?: string): string {
+  if (!pattern) return sessionId;
+  const glob = pattern.search(/[*?[\\]/);
+  const prefix = glob === -1 ? '' : pattern.slice(0, glob);
+  return prefix !== '' && sessionId.startsWith(prefix) && sessionId.length > prefix.length
+    ? sessionId.slice(prefix.length)
+    : sessionId;
+}
