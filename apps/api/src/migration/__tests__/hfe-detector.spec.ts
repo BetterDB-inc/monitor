@@ -145,7 +145,10 @@ describe('detectHfe with binary keys', () => {
     expect(result.hfeKeyCount).toBe(10);
     const pipelines = client.pipeline.mock.results.map((r: { value: Record<string, jest.Mock> }) => r.value);
     expect(pipelines[0].hlen.mock.calls[0][0]).toBe(first);
+    expect(pipelines[0].hlen.mock.calls[1][0]).toBe(second);
     expect(pipelines[1].call.mock.calls[0][1]).toBe(first);
+    expect(pipelines[1].call.mock.calls[1][1]).toBe(second);
     expect(pipelines[2].call.mock.calls[0][1]).toBe(first);
+    expect(pipelines[2].call.mock.calls[1][1]).toBe(second);
   });
 });
