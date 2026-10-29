@@ -751,6 +751,25 @@ describe('readSessionKeys', () => {
     expect(result.missingKeys).toBe(1);
   });
 
+  it('counts a key whose TYPE reply failed as unmeasured, not gone', async () => {
+    const client = new FakeValkey(
+      storeOf({
+        a: { type: 'string', value: '1', memory: 300 },
+        broken: { type: 'string', value: '2', memory: 40 },
+        'broken-selected': { type: 'string', value: '3', memory: 40 },
+      }),
+    );
+    client.failTypeKeys = new Set(['broken', 'broken-selected']);
+
+    const result = await readSessionKeys(fakeDb(client), ['a', 'broken', 'broken-selected', 'gone'], {
+      selected: ['a', 'broken-selected'],
+    });
+
+    expect(result.keys.map((k) => k.key)).toEqual(['a']);
+    expect(result.totals).toMatchObject({ memoryBytes: 300, unmeasuredKeys: 2, goneKeys: 1 });
+    expect(result.missingKeys).toBe(1);
+  });
+
   it('still measures the keys left unread once the byte budget is spent', async () => {
     const nodeA = new FakeValkey(storeOf({ a: { type: 'string', value: 'x'.repeat(100), memory: 100 } }));
     const nodeB = new FakeValkey(storeOf({ b: { type: 'string', value: 'y'.repeat(100), memory: 80 } }));

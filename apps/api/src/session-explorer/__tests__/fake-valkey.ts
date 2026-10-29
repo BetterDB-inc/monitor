@@ -80,6 +80,7 @@ export class FakeValkey {
   options: Record<string, unknown>;
   failKeys = new Map<string, string>();
   movedKeys = new Set<string>();
+  failTypeKeys = new Set<string>();
   failHstrlen = false;
   lfu = false;
   noValues = true;
@@ -166,6 +167,7 @@ export class FakeValkey {
   private answer(name: string, args: unknown[]): unknown {
     const key = this.keyOf(name, args);
     if (this.movedKeys.has(key)) throw new Error('MOVED 1 10.0.0.9:7000');
+    if (name === 'type' && this.failTypeKeys.has(key)) throw new Error('ERR type failed');
     if (this.failKeys.has(key) && !['type', 'pttl', 'memory', 'object'].includes(name)) {
       throw new Error(this.failKeys.get(key));
     }

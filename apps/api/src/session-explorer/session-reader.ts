@@ -238,9 +238,10 @@ async function locate(
   client: Valkey,
   keys: string[],
   batch: number,
-): Promise<{ located: Located[]; missing: string[]; moved: string[] }> {
+): Promise<{ located: Located[]; missing: string[]; errored: string[]; moved: string[] }> {
   const located: Located[] = [];
   const missing: string[] = [];
+  const errored: string[] = [];
   const moved: string[] = [];
   for (let start = 0; start < keys.length; start += batch) {
     const slice = keys.slice(start, start + batch);
@@ -258,7 +259,11 @@ async function locate(
         moved.push(key);
         return;
       }
-      if (!type || type[0] || typeof type[1] !== 'string' || type[1] === 'none') {
+      if (!type || type[0] || typeof type[1] !== 'string') {
+        errored.push(key);
+        return;
+      }
+      if (type[1] === 'none') {
         missing.push(key);
         return;
       }
@@ -274,7 +279,7 @@ async function locate(
     await measure(client, found);
     located.push(...found);
   }
-  return { located, missing, moved };
+  return { located, missing, errored, moved };
 }
 
 function queueFirstRead(
@@ -678,17 +683,21 @@ export async function readSessionKeys(
     for (const [client, nodeKeys] of groups) {
       let measured = false;
       try {
-        const { located, missing, moved } = await locate(client, nodeKeys, opts.batch);
+        const { located, missing, errored, moved } = await locate(client, nodeKeys, opts.batch);
         measured = true;
         for (const at of located) {
           totals.memoryBytes += at.memory ?? 0;
           totals.ttls.push(at.pttl);
         }
         const missingSelected = missing.filter(isSelected).length;
+        const erroredSelected = errored.filter(isSelected).length;
         totals.goneKeys += missing.length - missingSelected;
         totals.unmeasuredKeys +=
-          missingSelected + moved.length + located.filter((at) => at.memory === null).length;
-        state.missing += missingSelected;
+          missingSelected +
+          errored.length +
+          moved.length +
+          located.filter((at) => at.memory === null).length;
+        state.missing += missingSelected + erroredSelected;
         if (moved.some(isSelected)) state.moved.add(client);
         if (!state.exhausted) {
           await readNode(client, located.filter((at) => isSelected(at.key)), opts, state);
