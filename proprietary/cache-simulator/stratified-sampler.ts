@@ -39,6 +39,7 @@ type Reply = [Error | null, unknown];
 interface TypePass {
   cursor: string;
   keys: Set<string>;
+  pending: string[];
 }
 
 interface NodeState {
@@ -167,23 +168,24 @@ async function pilot(state: NodeState, pilotQuota: number, censusLimit: number):
 }
 
 async function topUp(state: NodeState, type: string, target: number): Promise<number | null> {
-  const pass = state.typePasses.get(type) ?? { cursor: '0', keys: new Set<string>() };
+  const pass = state.typePasses.get(type) ?? { cursor: '0', keys: new Set<string>(), pending: [] };
   state.typePasses.set(type, pass);
   do {
-    if (expired(state)) return null;
-    const [next, keys] = await scan(state.client, pass.cursor, ['TYPE', type]);
-    pass.cursor = next;
-    keys.forEach((key) => pass.keys.add(key));
-    const fresh = keys.filter((key) => !state.seen.has(key));
-    let index = 0;
-    while (index < fresh.length && sizesOf(state, type).length < target) {
+    if (pass.pending.length === 0) {
+      if (expired(state)) return null;
+      const [next, keys] = await scan(state.client, pass.cursor, ['TYPE', type]);
+      pass.cursor = next;
+      keys.forEach((key) => pass.keys.add(key));
+      pass.pending = keys.filter((key) => !state.seen.has(key));
+    }
+    while (pass.pending.length > 0 && sizesOf(state, type).length < target) {
       const take = Math.min(BATCH_SIZE, target - sizesOf(state, type).length);
-      await measure(state, fresh.slice(index, index + take), type);
-      index += take;
+      await measure(state, pass.pending.slice(0, take), type);
+      pass.pending = pass.pending.slice(take);
     }
   } while (pass.cursor !== '0' && sizesOf(state, type).length < target);
   if (pass.cursor !== '0') return null;
-  state.typePasses.delete(type);
+  if (pass.pending.length === 0) state.typePasses.delete(type);
   return pass.keys.size;
 }
 

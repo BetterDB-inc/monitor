@@ -196,6 +196,21 @@ describe('sampleNodes', () => {
       expect(sampledOf(result.strata)).toBeGreaterThan(4000);
       expect(typeScans).toBeLessThanOrEqual(keys.size / 1000 + 1);
     });
+
+    it('measures the rest of a TYPE scan page in the next round instead of skipping it', async () => {
+      const keys = keyspace(3000, (index) => ({ type: 'string', size: index % 50 === 0 ? 160 : 100 }));
+      const client = fakeClient(keys);
+      const call = client.call;
+      let typeScans = 0;
+      client.call = (command: string, args: string[]) => {
+        if (args.includes('TYPE')) typeScans += 1;
+        return call(command, args);
+      };
+      const [result] = await sampleNodes([{ name: 'a', client }], { budget: 100, hardCap: 3000, deadlineMs: 60_000 });
+      expect(sampledOf(result.strata)).toBe(3000);
+      expect(estimate([result], 0).totalBytes).toBe(2940 * 100 + 60 * 160);
+      expect(typeScans).toBe(keys.size / 1000);
+    });
   });
 
   describe('large keys the sample misses', () => {
