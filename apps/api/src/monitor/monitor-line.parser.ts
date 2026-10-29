@@ -1,3 +1,5 @@
+import { globMatches } from '../session-explorer/glob-match';
+
 /**
  * Parse a textual MONITOR line as emitted by `valkey-cli MONITOR` and our
  * iovalkey adapter:
@@ -103,20 +105,13 @@ export function matchesFilters(line: ParsedMonitorLine, filters: MonitorLineFilt
   if (filters.client && !line.addr.includes(filters.client)) return false;
   if (filters.key) {
     if (line.key === null) return false;
-    const re = globToRegex(filters.key);
-    if (!re.test(line.key)) return false;
+    // Linear-time matcher: a compiled `.*` regex backtracks catastrophically on
+    // user-supplied patterns like `*a*a*a*a*!` and would stall the event loop.
+    if (!globMatches(filters.key, line.key)) return false;
   }
   if (filters.afterTs !== undefined && line.ts < filters.afterTs) return false;
   if (filters.beforeTs !== undefined && line.ts > filters.beforeTs) return false;
   return true;
-}
-
-function globToRegex(glob: string): RegExp {
-  const escaped = glob
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*/g, '.*')
-    .replace(/\?/g, '.');
-  return new RegExp(`^${escaped}$`);
 }
 
 /** Encode a row as a single CSV record per RFC 4180 (commas, quotes, newlines escaped). */

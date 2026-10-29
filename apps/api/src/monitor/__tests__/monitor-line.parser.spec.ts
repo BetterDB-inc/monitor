@@ -108,6 +108,15 @@ describe('matchesFilters', () => {
       expect(matchesFilters(dot, { key: 'aXb' })).toBe(false);
     });
 
+    it('matches adversarial star patterns without catastrophic backtracking', () => {
+      const long = parseMonitorLine(
+        `1700000000.0 [0 1.2.3.4:5] "GET" "${'a'.repeat(4096)}"`,
+      )!;
+      const started = Date.now();
+      expect(matchesFilters(long, { key: `${'*a'.repeat(24)}!` })).toBe(false);
+      expect(Date.now() - started).toBeLessThan(1000);
+    });
+
     it('returns false for keyless commands', () => {
       const ping = parseMonitorLine('1700000000.0 [0 1.2.3.4:5] "PING"')!;
       expect(matchesFilters(ping, { key: '*' })).toBe(false);

@@ -335,7 +335,12 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     if (options.addr) {
       if (options.addr.includes('%')) {
-        const pattern = options.addr.replace(/%/g, '.*');
+        // Escape everything but the `%` wildcard so the user-supplied filter can't
+        // inject a backtracking regex (e.g. `%(a+)+$`).
+        const pattern = options.addr
+          .split('%')
+          .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+          .join('.*');
         const regex = new RegExp(pattern);
         filtered = filtered.filter((c) => regex.test(c.addr));
       } else {
