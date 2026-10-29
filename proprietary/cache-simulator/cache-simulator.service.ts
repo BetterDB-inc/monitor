@@ -2,12 +2,13 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { CacheSimulatorGrowth, CacheSimulatorInstant, CacheSimulatorSnapshot } from '@betterdb/shared';
 import type { StoragePort } from '@app/common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
+import { parseKeyspaceDatabases } from '@app/database/parsers/keyspace-databases';
 import { collectionPlan } from '../key-analytics/key-analytics-plan';
 import { clusterNodes, primaryNodes, type ScanNode } from './cluster-nodes';
 import { readInstantStats, type InstantStats } from './instant-stats';
 import { readGrowth, sumGrowth } from './growth-fit';
 import { estimate, keyMemoryCeiling } from './size-estimator';
-import { sampleNodes, SAMPLE_BUDGET, SAMPLE_DEADLINE_MS, SAMPLE_HARD_CAP } from './stratified-sampler';
+import { sampleNodes, SAMPLE_BUDGET, SAMPLE_DEADLINE_MS, SAMPLE_HARD_CAP, type SamplerNode } from './stratified-sampler';
 
 export const RESULT_TTL_MS = 15 * 60_000;
 export const FAILURE_TTL_MS = 60_000;
@@ -16,8 +17,6 @@ const LABEL = 'Cache simulator';
 
 interface Job {
   instant: CacheSimulatorInstant;
-  ceiling: number | undefined;
-  datasets: Array<number | null>;
   growth: CacheSimulatorGrowth | null;
   progress: { sampled: number; target: number };
 }
@@ -71,16 +70,16 @@ export class CacheSimulatorService {
     }
   }
 
-  private async prepare(connectionId: string, seed: ScanNode): Promise<{ job: Job; nodes: ScanNode[] }> {
-    const nodes = await this.nodesFor(connectionId, seed);
-    const [readings, growth] = await Promise.all([Promise.all(nodes.map((node) => this.read(node))), this.growth(nodes)]);
-    const instant = summarize(readings);
-    const dataset = readings.every((reading) => reading.stats.datasetMemory !== null)
-      ? readings.reduce((sum, reading) => sum + (reading.stats.datasetMemory ?? 0), 0)
-      : null;
-    const ceiling = dataset === null ? undefined : keyMemoryCeiling(dataset, instant.totalKeys);
-    const datasets = readings.map((reading) => reading.stats.datasetMemory);
-    return { job: { instant, ceiling, datasets, growth, progress: { sampled: 0, target: SAMPLE_BUDGET } }, nodes };
+  private async prepare(connectionId: string, seed: ScanNode): Promise<{ job: Job; nodes: SamplerNode[] }> {
+    const scanNodes = await this.nodesFor(connectionId, seed);
+    const [readings, growth] = await Promise.all([Promise.all(scanNodes.map((node) => this.read(node))), this.growth(scanNodes)]);
+    const nodes = readings.map(({ node, stats, keys, otherDbKeys }) => ({
+      name: node.name,
+      client: node.client,
+      ceiling: stats.datasetMemory === null ? undefined : keyMemoryCeiling(stats.datasetMemory, keys),
+      otherDbKeys,
+    }));
+    return { job: { instant: summarize(readings), growth, progress: { sampled: 0, target: SAMPLE_BUDGET } }, nodes };
   }
 
   private settle(connectionId: string, snapshot: CacheSimulatorSnapshot): CacheSimulatorSnapshot {
@@ -96,14 +95,13 @@ export class CacheSimulatorService {
     return snapshot;
   }
 
-  private async run(connectionId: string, job: Job, nodes: ScanNode[]): Promise<void> {
+  private async run(connectionId: string, job: Job, nodes: SamplerNode[]): Promise<void> {
     let snapshot: CacheSimulatorSnapshot;
     try {
       const samples = await sampleNodes(nodes, {
         budget: SAMPLE_BUDGET,
         hardCap: SAMPLE_HARD_CAP,
         deadlineMs: SAMPLE_DEADLINE_MS,
-        datasetBytes: job.datasets,
         onProgress: (sampled) => {
           job.progress = { sampled, target: SAMPLE_BUDGET };
         },
@@ -112,7 +110,7 @@ export class CacheSimulatorService {
         status: 'ready',
         progress: null,
         instant: job.instant,
-        estimate: estimate(samples, Date.now(), job.ceiling),
+        estimate: estimate(samples, Date.now()),
         growth: job.growth,
       };
     } catch (error) {
@@ -192,10 +190,16 @@ export class CacheSimulatorService {
   }
 
   private async read(node: ScanNode): Promise<Reading> {
-    const attempt = async (): Promise<Reading> => ({
-      stats: readInstantStats(await node.client.getInfoParsed(['memory'])),
-      keys: await node.client.getDbSize(),
-    });
+    const attempt = async (): Promise<Reading> => {
+      const info = await node.client.getInfoParsed(['memory', 'keyspace']);
+      const ownDb = node.client.getActiveDbIndex?.() ?? 0;
+      return {
+        node,
+        stats: readInstantStats(info),
+        keys: await node.client.getDbSize(),
+        otherDbKeys: parseKeyspaceDatabases(info.keyspace).some(({ db }) => db !== ownDb),
+      };
+    };
     try {
       return await attempt();
     } catch (error) {
@@ -206,8 +210,10 @@ export class CacheSimulatorService {
 }
 
 interface Reading {
+  node: ScanNode;
   stats: InstantStats;
   keys: number;
+  otherDbKeys: boolean;
 }
 
 function summarize(readings: Reading[]): CacheSimulatorInstant {

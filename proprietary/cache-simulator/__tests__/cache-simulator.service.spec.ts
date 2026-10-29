@@ -270,13 +270,42 @@ describe('CacheSimulatorService', () => {
     expect((await second.service.snapshot('seed')).growth).toBeNull();
   });
 
-  it('passes each node its dataset memory so sampling can chase missed large keys', async () => {
+  it('gives each node its own memory ceiling so sampling can chase missed large keys', async () => {
     const spy = jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
     const connections = { c1: client() };
     connections.c1.getInfoParsed.mockResolvedValue(info(1000, 10_000, 'allkeys-lru', 800));
     const { service } = setup(connections);
     await service.snapshot('c1');
-    expect(spy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ datasetBytes: [800] }));
+    expect(spy.mock.calls[0][0]).toEqual([expect.objectContaining({ name: 'c1', ceiling: 800 + 5 * 24, otherDbKeys: false })]);
+  });
+
+  it('leaves the ceiling off a node whose dataset memory is unknown', async () => {
+    const spy = jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
+    const { service } = setup();
+    await service.snapshot('c1');
+    expect(spy.mock.calls[0][0][0].ceiling).toBeUndefined();
+  });
+
+  it('marks a node whose dataset memory also covers keys in other databases', async () => {
+    const spy = jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
+    const connections = { c1: client() };
+    connections.c1.getInfoParsed.mockResolvedValue({
+      ...info(1000, 10_000, 'allkeys-lru', 800),
+      keyspace: { db0: { keys: 5, expires: 0, avg_ttl: 0 }, db1: { keys: 40, expires: 0, avg_ttl: 0 } },
+    });
+    const { service } = setup(connections);
+    await service.snapshot('c1');
+    expect(connections.c1.getInfoParsed).toHaveBeenCalledWith(['memory', 'keyspace']);
+    expect(spy.mock.calls[0][0][0].otherDbKeys).toBe(true);
+  });
+
+  it('compares the keyspace against the database the connection selected', async () => {
+    const spy = jest.spyOn(sampler, 'sampleNodes').mockReturnValue(new Promise(() => undefined));
+    const connections = { c1: { ...client(), getActiveDbIndex: () => 2 } };
+    connections.c1.getInfoParsed.mockResolvedValue({ ...info(1000, 10_000, 'allkeys-lru', 800), keyspace: { db2: { keys: 5, expires: 0, avg_ttl: 0 } } });
+    const { service } = setup(connections);
+    await service.snapshot('c1');
+    expect(spy.mock.calls[0][0][0].otherDbKeys).toBe(false);
   });
 
   it('joins a refresh in progress instead of serving the cached result', async () => {
@@ -398,7 +427,7 @@ describe('CacheSimulatorService', () => {
 
   it('bounds the interval by the dataset memory when keys go unsampled', async () => {
     const partial = { ...nodeSample, strata: [{ ...nodeSample.strata[0], estimatedKeys: 10 }], exhausted: false };
-    jest.spyOn(sampler, 'sampleNodes').mockResolvedValue([partial]);
+    jest.spyOn(sampler, 'sampleNodes').mockImplementation(async (nodes) => [{ ...partial, ceiling: nodes[0].ceiling }]);
     const connections = { c1: client() };
     connections.c1.getInfoParsed.mockResolvedValue(info(5000, 10_000, 'allkeys-lru', 1000));
     const { service } = setup(connections);

@@ -1,7 +1,7 @@
 import { evenAllocation, neymanAllocation, splitBudget } from './allocation';
 import type { AllocationInput } from './allocation';
 import { adjustedSkewness, isHeavyTailed, sampleVariance } from './sample-stats';
-import { estimate, keyMemoryCeiling } from './size-estimator';
+import { estimate, likelyMissed } from './size-estimator';
 import type { NodeSample, SamplerClient, Stratum } from './sample-types';
 
 export const SAMPLE_BUDGET = 4000;
@@ -23,13 +23,14 @@ export class SamplerUnsupportedError extends Error {}
 export interface SamplerNode {
   name: string;
   client: SamplerClient;
+  ceiling?: number;
+  otherDbKeys?: boolean;
 }
 
 export interface SamplerOptions {
   budget: number;
   deadlineMs: number;
   hardCap?: number;
-  datasetBytes?: Array<number | null>;
   onProgress?: (sampled: number) => void;
 }
 
@@ -41,6 +42,7 @@ interface NodeState {
   client: SamplerClient;
   deadline: number;
   ceiling?: number;
+  otherDbKeys: boolean;
   seen: Set<string>;
   classified: Set<string>;
   sizes: Map<string, number[]>;
@@ -67,7 +69,8 @@ export async function sampleNodes(nodes: SamplerNode[], options: SamplerOptions)
         dbSize: dbSizes[index],
         client: node.client,
         deadline,
-        ceiling: ceilingOf(options.datasetBytes?.[index], dbSizes[index]),
+        ceiling: node.ceiling,
+        otherDbKeys: node.otherDbKeys ?? false,
         seen: new Set(),
         classified: new Set(),
         sizes: new Map(),
@@ -83,11 +86,11 @@ export async function sampleNodes(nodes: SamplerNode[], options: SamplerOptions)
   );
 }
 
-function ceilingOf(datasetBytes: number | null | undefined, dbSize: number): number | undefined {
-  return datasetBytes === null || datasetBytes === undefined ? undefined : keyMemoryCeiling(datasetBytes, dbSize);
+async function sampleNode(quota: number, cap: number, state: NodeState): Promise<NodeSample> {
+  return { ...(await collect(quota, cap, state)), ceiling: state.ceiling, otherDbKeys: state.otherDbKeys };
 }
 
-async function sampleNode(quota: number, cap: number, state: NodeState): Promise<NodeSample> {
+async function collect(quota: number, cap: number, state: NodeState): Promise<NodeSample> {
   if (quota === 0) return { node: state.name, dbSize: state.dbSize, strata: [], exhausted: state.dbSize === 0, timedOut: false };
   const pilotQuota = Math.min(quota, Math.max(PILOT_MIN, Math.round(quota * PILOT_SHARE)));
   await pilot(state, pilotQuota, quota * CENSUS_FACTOR);
@@ -116,7 +119,7 @@ async function extend(state: NodeState, cap: number): Promise<void> {
     const heavyShort = new Set(
       sample.strata.filter((stratum) => isHeavyTailed(stratum) && stratum.sizes.length < Math.min(stratum.estimatedKeys, HEAVY_TAIL_MIN_SAMPLES)).map((stratum) => stratum.type),
     );
-    const missed = state.ceiling !== undefined && estimate([sample], 0, state.ceiling).likelyMissedLargeKeys;
+    const missed = state.ceiling !== undefined && !state.otherDbKeys && likelyMissed(totalBytes, ci95Bytes, state.ceiling);
     if (totalBytes <= 0 || (ci95Bytes / totalBytes <= TARGET_RELATIVE_CI && ciTrusted(sample) && heavyShort.size === 0 && !missed)) return;
     const extra = Math.min(measured, cap - measured);
     const inputs = allocationInputs(state);

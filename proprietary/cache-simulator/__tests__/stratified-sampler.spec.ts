@@ -197,17 +197,17 @@ describe('sampleNodes', () => {
 
     it.each(scenarios)('finds the large keys hidden in a uniform-looking type among $name', async ({ keys }) => {
       const truth = [...keys.values()].reduce((sum, key) => sum + (key.size ?? 0), 0);
-      const datasetBytes = [truth - keys.size * DICT_ENTRY_BYTES];
+      const ceiling = keyMemoryCeiling(truth - keys.size * DICT_ENTRY_BYTES, keys.size);
       const hugeCount = [...keys.values()].filter((key) => key.size === huge).length;
       for (const seed of runs) {
-        const [result] = await sampleNodes([{ name: 'a', client: fakeClient(keys, { seed }) }], {
+        const [result] = await sampleNodes([{ name: 'a', client: fakeClient(keys, { seed }), ceiling }], {
           budget: 400,
           hardCap: 10_000,
           deadlineMs: 60_000,
-          datasetBytes,
         });
         const hashes = result.strata.find((stratum) => stratum.type === 'hash')!;
-        const final = estimate([result], 0, keyMemoryCeiling(datasetBytes[0], keys.size));
+        const final = estimate([result], 0);
+        expect(result.ceiling).toBe(ceiling);
         expect(hashes.sizes.filter((size) => size === huge)).toHaveLength(hugeCount);
         expect(final.likelyMissedLargeKeys).toBe(false);
         expect(Math.abs(final.totalBytes - truth)).toBeLessThanOrEqual(final.ci95Bytes);
@@ -216,13 +216,24 @@ describe('sampleNodes', () => {
 
     it('stops at the budget when the sample explains the dataset memory', async () => {
       const plain = keyspace(20_000, () => string());
-      const [result] = await sampleNodes([{ name: 'a', client: fakeClient(plain) }], {
+      const [result] = await sampleNodes([{ name: 'a', client: fakeClient(plain), ceiling: 20_000 * 100 }], {
         budget: 400,
         hardCap: 20_000,
         deadlineMs: 60_000,
-        datasetBytes: [20_000 * 100 - 20_000 * DICT_ENTRY_BYTES],
       });
       expect(sampledOf(result.strata)).toBe(400);
+    });
+
+    it('does not chase the gap when other databases share the dataset memory', async () => {
+      const plain = keyspace(20_000, () => string());
+      const [result] = await sampleNodes([{ name: 'a', client: fakeClient(plain), ceiling: 20_000 * 100 * 3, otherDbKeys: true }], {
+        budget: 400,
+        hardCap: 20_000,
+        deadlineMs: 60_000,
+      });
+      expect(sampledOf(result.strata)).toBe(400);
+      expect(result.otherDbKeys).toBe(true);
+      expect(estimate([result], 0).likelyMissedLargeKeys).toBe(false);
     });
   });
 
@@ -235,7 +246,7 @@ describe('sampleNodes', () => {
     it('covers the true size with the memory ceiling on every scan order', async () => {
       for (const seed of runs) {
         const [result] = await sampleNodes([{ name: 'a', client: fakeClient(keys, { seed }) }], { budget: 4000, hardCap: 50_000, deadlineMs: 60_000 });
-        const { totalBytes, ci95Bytes } = estimate([result], 0, truth + 1024 * 1024);
+        const { totalBytes, ci95Bytes } = estimate([{ ...result, ceiling: truth + 1024 * 1024 }], 0);
         expect(Math.abs(totalBytes - truth)).toBeLessThanOrEqual(ci95Bytes);
       }
     });
