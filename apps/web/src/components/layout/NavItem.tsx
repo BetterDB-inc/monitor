@@ -1,4 +1,4 @@
-import { Link } from 'react-router-dom';
+import { ConnectionLink } from '../ConnectionLink';
 import { useLicense } from '../../hooks/useLicense';
 import { Feature } from '@betterdb/shared';
 import { chordForPath, labelFor } from '@/keybindings/bindings';
@@ -44,7 +44,7 @@ export function NavItem({
 
   if (isLocked) {
     return (
-      <Link
+      <ConnectionLink
         to="/settings?section=license"
         data-tooltip-id="license-tooltip"
         data-tooltip-content={tooltipText}
@@ -54,7 +54,7 @@ export function NavItem({
         <span className="text-[10px] px-1.5 py-0.5 bg-green-600 text-white rounded font-medium">
           Free
         </span>
-      </Link>
+      </ConnectionLink>
     );
   }
 
@@ -63,7 +63,7 @@ export function NavItem({
   const chord = chordForPath(to);
 
   return (
-    <Link
+    <ConnectionLink
       to={to}
       className={`group/navitem flex w-full items-center justify-between gap-2 rounded-md ps-3 pe-2 py-2 text-sm transition-colors ${
         active ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'
@@ -75,6 +75,6 @@ export function NavItem({
           {labelFor(chord)}
         </kbd>
       )}
-    </Link>
+    </ConnectionLink>
   );
 }
