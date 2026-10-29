@@ -31,6 +31,7 @@ function limitedHeadline(sizing: Projection, maxmemory: number): string {
   if (sizing.daysToMaxmemory !== null) return `Reaches maxmemory in ~${sizing.daysToMaxmemory} days.`;
   const rangeDay = sizing.points.find((point) => point.high >= maxmemory)?.day;
   if (rangeDay === undefined) return 'Stays under maxmemory for at least 6 months.';
+  if (rangeDay === 0) return 'Stays under maxmemory for at least 6 months at the projected rate, but the upper end of the range is already at it.';
   return `Stays under maxmemory for at least 6 months at the projected rate, but the upper end of the range reaches it in ~${rangeDay} days.`;
 }
 

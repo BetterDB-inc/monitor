@@ -72,6 +72,15 @@ describe('OutcomePanel', () => {
     ).toBeInTheDocument();
   });
 
+  it('says the upper end of the range is already at maxmemory when it starts there', () => {
+    renderPanel(sizingProjection, 5 * GB);
+    expect(
+      screen.getByText(
+        'Stays under maxmemory for at least 6 months at the projected rate, but the upper end of the range is already at it.',
+      ),
+    ).toBeInTheDocument();
+  });
+
   it('says it stays under maxmemory when the whole range does', () => {
     renderPanel(sizingProjection, 20 * GB);
     expect(screen.getByText('Stays under maxmemory for at least 6 months.')).toBeInTheDocument();
