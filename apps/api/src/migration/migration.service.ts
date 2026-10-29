@@ -229,6 +229,7 @@ export class MigrationService {
       let masterUsedMemory = [usedMemory];
       let masterMemorySections: Array<Record<string, string> | null> = [memorySection];
       const scanClients: Valkey[] = [];
+      const unreachableMasters: string[] = [];
 
       const clusterEnabled = String(clusterSection['cluster_enabled'] ?? '0');
       if (clusterEnabled === '1') {
@@ -258,8 +259,14 @@ export class MigrationService {
             lazyConnect: true,
             connectionName: 'BetterDB-Migration-Analysis',
           });
-          await client.connect();
           tempClients.push(client);
+          try {
+            await client.connect();
+          } catch {
+            client.disconnect();
+            unreachableMasters.push(`${host}:${port}`);
+            continue;
+          }
           job.nodeClients.push(client);
           scanClients.push(client);
         }
@@ -503,6 +510,15 @@ export class MigrationService {
       const sourceHasFunctions = functionPresence !== 'absent';
 
       const incompatibilities: Incompatibility[] = [];
+
+      if (unreachableMasters.length > 0) {
+        incompatibilities.push({
+          severity: 'warning',
+          category: 'cluster_topology',
+          title: 'Source master unreachable',
+          detail: `Could not connect to ${unreachableMasters.join(', ')}. Keys, memory and command history on ${unreachableMasters.length === 1 ? 'this master are' : 'these masters are'} missing from the analysis.`,
+        });
+      }
 
       if (target) {
         // Fetch RDB save config from both instances for reliable persistence detection

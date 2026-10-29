@@ -22,6 +22,37 @@ jest.mock('../analysis/commandlog-analyzer', () => ({
     analysis: { sourceUsed: 'unavailable', topCommands: [] },
     entries: [],
   }),
+  collectNodeCommandEntries: jest.fn().mockResolvedValue([]),
+}));
+
+type MockNodeClient = {
+  host: string;
+  port: number;
+  connect: jest.Mock;
+  quit: jest.Mock;
+  disconnect: jest.Mock;
+  dbsize: jest.Mock;
+  info: jest.Mock;
+  call: jest.Mock;
+};
+const nodeClients: MockNodeClient[] = [];
+let unreachableHosts = new Set<string>();
+
+jest.mock('iovalkey', () => jest.fn().mockImplementation((opts: { host: string; port: number }) => {
+  const client: MockNodeClient = {
+    host: opts.host,
+    port: opts.port,
+    connect: jest.fn().mockImplementation(async () => {
+      if (unreachableHosts.has(opts.host)) throw new Error('connect ECONNREFUSED');
+    }),
+    quit: jest.fn().mockResolvedValue('OK'),
+    disconnect: jest.fn(),
+    dbsize: jest.fn().mockResolvedValue(10),
+    info: jest.fn().mockResolvedValue('# Memory\r\nused_memory:1000\r\n'),
+    call: jest.fn().mockImplementation(async (...args: string[]) => (args[0] === 'FUNCTION' ? [] : '')),
+  };
+  nodeClients.push(client);
+  return client;
 }));
 jest.mock('../analysis/analysis-verdict-store', () => ({
   resolveVerdictDir: jest.fn().mockReturnValue('/nonexistent/verdicts'),
@@ -454,5 +485,48 @@ describe('MigrationService ElastiCache Serverless readiness', () => {
         service.startAnalysis({ sourceConnectionId: 'conn-1', targetProfile: 'elasticache_serverless' }),
       ).rejects.toThrow(BadRequestException);
     });
+  });
+});
+
+describe('MigrationService cluster analysis', () => {
+  beforeEach(() => {
+    nodeClients.length = 0;
+    unreachableHosts = new Set();
+  });
+
+  it('reports an unreachable master as a warning and still cleans up its client', async () => {
+    const registry = createMockRegistry();
+    readyReplicationCommands(registry);
+    registry.mockAdapter.getInfo.mockResolvedValue({
+      keyspace: { db0: 'keys=100,expires=0,avg_ttl=0' },
+      memory: { used_memory: '1000000' },
+      cluster: { cluster_enabled: '1' },
+      server: {},
+      persistence: {},
+    });
+    registry.mockAdapter.getClusterNodes.mockResolvedValue([
+      { id: 'a', address: '10.0.0.1:6379@16379', flags: ['master'], slots: [[0, 8191]] },
+      { id: 'b', address: '10.0.0.2:6379@16379', flags: ['master'], slots: [[8192, 16383]] },
+    ]);
+    unreachableHosts = new Set(['10.0.0.2']);
+    const service = new MigrationService(registry as any);
+
+    const { id } = await service.startAnalysis({
+      sourceConnectionId: 'conn-1',
+      targetProfile: 'elasticache_serverless',
+    });
+    const job = await waitForTerminal(service, id);
+
+    expect(job.status).toBe('completed');
+    const unreachable = (job.incompatibilities ?? []).filter(i => i.title === 'Source master unreachable');
+    expect(unreachable).toHaveLength(1);
+    expect(unreachable[0].severity).toBe('warning');
+    expect(unreachable[0].detail).toContain('10.0.0.2:6379');
+    expect(unreachable[0].detail).not.toContain('10.0.0.1:6379');
+    const failed = nodeClients.find(c => c.host === '10.0.0.2')!;
+    expect(failed.disconnect).toHaveBeenCalled();
+    expect(failed.dbsize).not.toHaveBeenCalled();
+    expect(failed.quit).toHaveBeenCalled();
+    expect(nodeClients.find(c => c.host === '10.0.0.1')!.dbsize).toHaveBeenCalled();
   });
 });
