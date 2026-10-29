@@ -8,7 +8,7 @@ import { CapabilitiesContext, CapabilitiesState } from './hooks/useCapabilities'
 import type { CapabilityRetryVerdict, RuntimeCapabilities } from './types/metrics';
 import { LicenseContext, useLicenseStatus } from './hooks/useLicense';
 import { UpgradePromptContext, useUpgradePromptState } from './hooks/useUpgradePrompt';
-import { ConnectionContext, useConnectionState } from './hooks/useConnection';
+import { ConnectionContext, useConnection, useConnectionState } from './hooks/useConnection';
 import { useConnectionUrlSync } from './hooks/useConnectionUrlSync';
 import { VersionCheckContext, useVersionCheckState } from './hooks/useVersionCheck';
 import { UpgradePrompt } from './components/UpgradePrompt';
@@ -32,8 +32,9 @@ function App() {
   );
 }
 
-function ConnectionUrlSync({ connectionId }: { connectionId?: string }) {
-  useConnectionUrlSync(connectionId);
+function ConnectionUrlSync() {
+  const { currentConnection, connections, loading, setConnection } = useConnection();
+  useConnectionUrlSync({ connectionId: currentConnection?.id, connections, loading, setConnection });
   return null;
 }
 
@@ -102,7 +103,7 @@ function AppContent() {
             <LicenseContext.Provider value={license}>
               <CapabilitiesContext.Provider value={capabilitiesState}>
                 <VersionCheckContext.Provider value={versionCheckState}>
-                  <ConnectionUrlSync connectionId={currentConnectionId} />
+                  <ConnectionUrlSync />
                   <AppLayout />
                   <Tooltip id="license-tooltip" />
                   <Tooltip

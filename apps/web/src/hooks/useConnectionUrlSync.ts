@@ -1,20 +1,61 @@
-import { useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { CONNECTION_PARAM } from './useConnection';
+import { useEffect, useRef } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { CONNECTION_PARAM, type Connection } from './useConnection';
 
-export function useConnectionUrlSync(connectionId: string | undefined): void {
-  const [params, setParams] = useSearchParams();
-  const inUrl = params.get(CONNECTION_PARAM);
+interface ConnectionUrlSyncOptions {
+  connectionId: string | undefined;
+  connections: Connection[];
+  loading: boolean;
+  setConnection: (connectionId: string) => void;
+}
+
+export function useConnectionUrlSync({
+  connectionId,
+  connections,
+  loading,
+  setConnection,
+}: ConnectionUrlSyncOptions): void {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const inUrl = new URLSearchParams(location.search).get(CONNECTION_PARAM);
+  const lastInUrl = useRef(inUrl);
 
   useEffect(() => {
-    if (!connectionId || inUrl === connectionId) return;
-    setParams(
-      (prev) => {
-        const next = new URLSearchParams(prev);
-        next.set(CONNECTION_PARAM, connectionId);
-        return next;
-      },
-      { replace: true },
+    const urlMoved = inUrl !== lastInUrl.current;
+    lastInUrl.current = inUrl;
+    if (loading) return;
+    if (
+      urlMoved &&
+      inUrl !== null &&
+      inUrl !== connectionId &&
+      connections.some((c) => c.id === inUrl)
+    ) {
+      setConnection(inUrl);
+      return;
+    }
+    const wanted = connectionId ?? null;
+    if (inUrl === wanted) return;
+    const params = new URLSearchParams(location.search);
+    if (wanted === null) {
+      params.delete(CONNECTION_PARAM);
+    } else {
+      params.set(CONNECTION_PARAM, wanted);
+    }
+    const search = params.toString();
+    navigate(
+      { pathname: location.pathname, search: search ? `?${search}` : '', hash: location.hash },
+      { replace: true, state: location.state },
     );
-  }, [connectionId, inUrl, setParams]);
+  }, [
+    inUrl,
+    connectionId,
+    connections,
+    loading,
+    setConnection,
+    navigate,
+    location.pathname,
+    location.search,
+    location.hash,
+    location.state,
+  ]);
 }
