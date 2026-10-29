@@ -3,12 +3,12 @@ import { sampleKeyTypes } from '../analysis/type-sampler';
 function createMockClient(keys: string[], types: Record<string, string> = {}) {
   let callCount = 0;
   return {
-    scan: jest.fn().mockImplementation((_cursor: string, ..._args: unknown[]) => {
+    scanBuffer: jest.fn().mockImplementation((_cursor: string, ..._args: unknown[]) => {
       if (callCount === 0) {
         callCount++;
-        return Promise.resolve(['0', keys]);
+        return Promise.resolve([Buffer.from('0'), keys.map(k => Buffer.from(k))]);
       }
-      return Promise.resolve(['0', []]);
+      return Promise.resolve([Buffer.from('0'), []]);
     }),
     pipeline: jest.fn().mockReturnValue({
       type: jest.fn().mockReturnThis(),
@@ -30,9 +30,9 @@ describe('sampleKeyTypes', () => {
     const result = await sampleKeyTypes([client], 1000);
 
     expect(result).toHaveLength(3);
-    expect(result[0]).toEqual({ key: 'key:1', type: 'string', clientIndex: 0 });
-    expect(result[1]).toEqual({ key: 'key:2', type: 'hash', clientIndex: 0 });
-    expect(result[2]).toEqual({ key: 'key:3', type: 'list', clientIndex: 0 });
+    expect(result[0]).toEqual({ key: 'key:1', keyBytes: 5, type: 'string', clientIndex: 0 });
+    expect(result[1]).toEqual({ key: 'key:2', keyBytes: 5, type: 'hash', clientIndex: 0 });
+    expect(result[2]).toEqual({ key: 'key:3', keyBytes: 5, type: 'list', clientIndex: 0 });
   });
 
   it('should return empty array for empty database', async () => {
@@ -57,13 +57,13 @@ describe('sampleKeyTypes', () => {
     // Return keys in two batches via cursor
     let callCount = 0;
     const client = {
-      scan: jest.fn().mockImplementation(() => {
+      scanBuffer: jest.fn().mockImplementation(() => {
         if (callCount === 0) {
           callCount++;
-          return Promise.resolve(['1', keys.slice(0, 50)]);
+          return Promise.resolve([Buffer.from('1'), keys.slice(0, 50).map(k => Buffer.from(k))]);
         }
         callCount++;
-        return Promise.resolve(['0', keys.slice(50)]);
+        return Promise.resolve([Buffer.from('0'), keys.slice(50).map(k => Buffer.from(k))]);
       }),
       pipeline: jest.fn().mockReturnValue({
         type: jest.fn().mockReturnThis(),
@@ -99,7 +99,7 @@ describe('sampleKeyTypes', () => {
 
   it('should mark type as unknown on pipeline error', async () => {
     const client = {
-      scan: jest.fn().mockResolvedValue(['0', ['key:1']]),
+      scanBuffer: jest.fn().mockResolvedValue([Buffer.from('0'), [Buffer.from('key:1')]]),
       pipeline: jest.fn().mockReturnValue({
         type: jest.fn().mockReturnThis(),
         exec: jest.fn().mockResolvedValue([
@@ -112,5 +112,21 @@ describe('sampleKeyTypes', () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].type).toBe('unknown');
+  });
+
+  it('records the raw byte length of a binary key name', async () => {
+    const raw = Buffer.from([0xff, 0xfe, 0x00, 0x41]);
+    const client = {
+      scanBuffer: jest.fn().mockResolvedValue([Buffer.from('0'), [raw]]),
+      pipeline: jest.fn().mockReturnValue({
+        type: jest.fn().mockReturnThis(),
+        exec: jest.fn().mockResolvedValue([[null, 'string']]),
+      }),
+    } as any;
+
+    const result = await sampleKeyTypes([client], 1000);
+
+    expect(result[0].keyBytes).toBe(4);
+    expect(result[0].key).toBe(raw.toString());
   });
 });

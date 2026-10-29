@@ -200,6 +200,9 @@ export class MigrationService {
         job.result.targetDbVersion = target.capabilities.version;
         const targetClusterSection = (target.info as Record<string, Record<string, string>>).cluster ?? {};
         job.result.targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
+        if (checkServerless) {
+          job.result.targetProfile = 'elasticache_serverless';
+        }
       } else {
         job.result.targetProfile = req.targetProfile;
       }
@@ -534,7 +537,7 @@ export class MigrationService {
           isCluster,
           clusterMasterCount: servingMasterCount,
           masterUsedMemory,
-          sampledKeyNames: sampledKeys.map(k => k.key),
+          sampledKeyBytes: sampledKeys.map(k => k.keyBytes),
           clusterMasters,
           commandEntries: commandLog.entries,
           ...probes,

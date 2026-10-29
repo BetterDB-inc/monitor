@@ -97,7 +97,7 @@ export interface ServerlessReadinessFacts {
   isCluster: boolean;
   clusterMasterCount: number;
   masterUsedMemory: number[];
-  sampledKeyNames: string[];
+  sampledKeyBytes: number[];
   missingReplicationCommands: string[] | null;
   clusterMasters: ServerlessClusterMaster[] | null;
   cachedScripts: number | null;
@@ -105,7 +105,31 @@ export interface ServerlessReadinessFacts {
   commandEntries: ServerlessCommandEntry[];
 }
 
-const NON_SERVING_FLAGS = ['fail', 'fail?', 'handshake', 'noaddr'];
+const INTERNAL_CLIENT_NAMES = new Set([
+  'betterdb-monitor',
+  'betterdb-monitor-keyscan',
+  'betterdb-monitor-discovery',
+  'betterdb-monitor-sentinel-discovery',
+  'betterdb-monitor-sessionexplorer',
+  'betterdb-cli',
+  'betterdb-agent',
+  'betterdb-agent-cli',
+  'betterdb-migration-analysis',
+  'betterdb-migration-discovery',
+  'betterdb-migration-source',
+  'betterdb-migration-target',
+  'betterdb-validation-source',
+  'betterdb-validation-source-cluster',
+  'betterdb-validation-target',
+]);
+const INTERNAL_NODE_CLIENT_PATTERN = /^betterdb-monitor-node-[0-9a-f]{8}$/i;
+
+function isInternalClient(clientName: string | undefined): boolean {
+  if (!clientName) return false;
+  return INTERNAL_CLIENT_NAMES.has(clientName.toLowerCase()) || INTERNAL_NODE_CLIENT_PATTERN.test(clientName);
+}
+
+const NON_SERVING_FLAGS = ['fail', 'handshake', 'noaddr'];
 
 export function countServingMasters(nodes: ReadonlyArray<{ flags: string[] }>): number {
   return nodes.filter((node) => {
@@ -122,7 +146,7 @@ export function findRestrictedCommands(
 ): Array<{ command: string; count: number }> {
   const counts = new Map<string, number>();
   for (const entry of entries) {
-    if (entry.clientName && /^betterdb/i.test(entry.clientName)) continue;
+    if (isInternalClient(entry.clientName)) continue;
     const first = String(entry.command[0] ?? '').toUpperCase();
     if (!first) continue;
     const second = String(entry.command[1] ?? '').toUpperCase();
@@ -177,7 +201,7 @@ function slotProblems(masters: ServerlessClusterMaster[]): string[] {
 export function checkServerlessReadiness(facts: ServerlessReadinessFacts): Incompatibility[] {
   const issues: Incompatibility[] = [];
 
-  const longKeys = facts.sampledKeyNames.filter(k => Buffer.byteLength(k, 'utf8') > MAX_KEY_NAME_BYTES);
+  const longKeys = facts.sampledKeyBytes.filter(bytes => bytes > MAX_KEY_NAME_BYTES);
   if (longKeys.length > 0) {
     issues.push({
       severity: 'blocking',
@@ -250,8 +274,9 @@ export function checkServerlessReadiness(facts: ServerlessReadinessFacts): Incom
 
   if (facts.missingReplicationCommands && facts.missingReplicationCommands.length > 0) {
     issues.push({
-      severity: 'blocking',
+      severity: 'warning',
       category: CATEGORY,
+      awsToolOnly: true,
       title: 'Replication commands unavailable',
       detail:
         `${facts.missingReplicationCommands.join(', ')} ${facts.missingReplicationCommands.length === 1 ? 'is' : 'are'} renamed or absent on the source. ` +

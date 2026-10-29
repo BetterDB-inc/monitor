@@ -23,7 +23,7 @@ function facts(overrides: Partial<ServerlessReadinessFacts> = {}): ServerlessRea
     isCluster: true,
     clusterMasterCount: 2,
     masterUsedMemory: [1 * GIB, 1 * GIB],
-    sampledKeyNames: ['user:1', 'user:2'],
+    sampledKeyBytes: [6, 6],
     missingReplicationCommands: [],
     clusterMasters: fullCoverage(),
     cachedScripts: 0,
@@ -52,23 +52,17 @@ describe('checkServerlessReadiness', () => {
 
   describe('key name length', () => {
     it('stays quiet for a 4096-byte key name', () => {
-      expect(checkServerlessReadiness(facts({ sampledKeyNames: ['k'.repeat(4096)] }))).toEqual([]);
+      expect(checkServerlessReadiness(facts({ sampledKeyBytes: [4096] }))).toEqual([]);
     });
 
     it('blocks on a 4097-byte key name and says it was found in the sample', () => {
-      const issues = checkServerlessReadiness(facts({ sampledKeyNames: ['k'.repeat(4097), 'short'] }));
+      const issues = checkServerlessReadiness(facts({ sampledKeyBytes: [4097, 5] }));
       expect(issues).toHaveLength(1);
       expect(issues[0].severity).toBe('blocking');
       expect(issues[0].detail).toMatch(/in the sample/i);
       expect(issues[0].detail).toMatch(/\b1\b/);
     });
 
-    it('measures bytes, not characters', () => {
-      const multiByte = 'é'.repeat(2049);
-      const issues = checkServerlessReadiness(facts({ sampledKeyNames: [multiByte] }));
-      expect(issues).toHaveLength(1);
-      expect(issues[0].severity).toBe('blocking');
-    });
   });
 
   describe('memory per master', () => {
@@ -168,10 +162,11 @@ describe('checkServerlessReadiness', () => {
   });
 
   describe('replication commands', () => {
-    it('blocks when PSYNC or REPLCONF is missing', () => {
+    it('warns for the AWS tool only when PSYNC or REPLCONF is missing', () => {
       const issues = checkServerlessReadiness(facts({ missingReplicationCommands: ['PSYNC'] }));
       expect(issues).toHaveLength(1);
-      expect(issues[0].severity).toBe('blocking');
+      expect(issues[0].severity).toBe('warning');
+      expect(issues[0].awsToolOnly).toBe(true);
       expect(issues[0].detail).toContain('PSYNC');
     });
 
@@ -313,6 +308,26 @@ describe('findRestrictedCommands', () => {
     ])).toEqual([{ command: 'KEYS', count: 1 }]);
   });
 
+  it.each([
+    'BetterDB-Monitor',
+    'betterdb-monitor-keyscan',
+    'BetterDB-Monitor-Node-1a2b3c4d',
+    'BetterDB-Agent',
+    'BetterDB-Agent-CLI',
+    'BetterDB-CLI',
+    'BetterDB-Migration-Source',
+    'BetterDB-Validation-Source-Cluster',
+  ])('ignores the internal client %s', (clientName) => {
+    expect(findRestrictedCommands([{ command: ['KEYS', '*'], clientName }])).toEqual([]);
+  });
+
+  it.each(['BetterDB-Orders', 'BetterDB-Monitor-Orders', 'BetterDB-Monitor-Node-orders1', 'betterdb'])(
+    'counts the application client %s',
+    (clientName) => {
+      expect(findRestrictedCommands([{ command: ['KEYS', '*'], clientName }])).toEqual([{ command: 'KEYS', count: 1 }]);
+    },
+  );
+
   it('ignores empty entries', () => {
     expect(findRestrictedCommands([{ command: [] }])).toEqual([]);
   });
@@ -354,7 +369,14 @@ describe('countServingMasters', () => {
     ])).toBe(2);
   });
 
-  it.each(['fail', 'fail?', 'handshake', 'noaddr'])('excludes a master flagged %s', (flag) => {
+  it('counts a master only suspected of failing (fail?)', () => {
+    expect(countServingMasters([
+      { flags: ['master'] },
+      { flags: ['master', 'fail?'] },
+    ])).toBe(2);
+  });
+
+  it.each(['fail', 'handshake', 'noaddr'])('excludes a master flagged %s', (flag) => {
     expect(countServingMasters([
       { flags: ['master'] },
       { flags: ['master', flag] },

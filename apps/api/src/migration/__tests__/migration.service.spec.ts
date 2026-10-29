@@ -256,6 +256,8 @@ describe('MigrationService ElastiCache Serverless readiness', () => {
     const job = await waitForTerminal(service, id);
 
     expect(serverlessCategory(job)).toHaveLength(1);
+    expect(job.targetConnectionId).toBe('conn-2');
+    expect(job.targetProfile).toBe('elasticache_serverless');
   });
 
   it('adds no serverless readiness issues for an ordinary target', async () => {
@@ -268,6 +270,7 @@ describe('MigrationService ElastiCache Serverless readiness', () => {
 
     expect(job.status).toBe('completed');
     expect(serverlessCategory(job)).toEqual([]);
+    expect(job.targetProfile).toBeUndefined();
   });
 
   it('does not report missing replication commands when COMMAND INFO is refused', async () => {

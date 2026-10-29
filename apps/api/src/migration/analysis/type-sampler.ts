@@ -2,6 +2,7 @@ import type Valkey from 'iovalkey';
 
 export interface SampledKey {
   key: string;
+  keyBytes: number;
   type: string;
   clientIndex: number;
 }
@@ -20,13 +21,15 @@ export async function sampleKeyTypes(
   for (let ci = 0; ci < clients.length; ci++) {
     const client = clients[ci];
     const nodeKeys: string[] = [];
+    const nodeKeyBytes: number[] = [];
     let cursor = '0';
     do {
-      const [nextCursor, keys] = await client.scan(cursor, 'COUNT', 1000);
-      cursor = nextCursor;
+      const [nextCursor, keys] = await client.scanBuffer(cursor, 'COUNT', 1000);
+      cursor = String(nextCursor);
       for (const k of keys) {
         if (nodeKeys.length >= maxKeysPerNode) break;
-        nodeKeys.push(k);
+        nodeKeys.push(k.toString());
+        nodeKeyBytes.push(k.length);
       }
       onProgress?.(allKeys.length + nodeKeys.length);
     } while (cursor !== '0' && nodeKeys.length < maxKeysPerNode);
@@ -42,7 +45,7 @@ export async function sampleKeyTypes(
       if (results) {
         for (let j = 0; j < batch.length; j++) {
           const [err, type] = results[j] ?? [];
-          allKeys.push({ key: batch[j], type: err ? 'unknown' : String(type), clientIndex: ci });
+          allKeys.push({ key: batch[j], keyBytes: nodeKeyBytes[i + j], type: err ? 'unknown' : String(type), clientIndex: ci });
         }
       }
     }
