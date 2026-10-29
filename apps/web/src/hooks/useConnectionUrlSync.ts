@@ -7,6 +7,7 @@ interface ConnectionUrlSyncOptions {
   connectionId: string | undefined;
   connections: Connection[];
   loading: boolean;
+  error: string | null;
   setConnection: (connectionId: string) => void;
 }
 
@@ -14,6 +15,7 @@ export function useConnectionUrlSync({
   connectionId,
   connections,
   loading,
+  error,
   setConnection,
 }: ConnectionUrlSyncOptions): void {
   const location = useLocation();
@@ -36,6 +38,7 @@ export function useConnectionUrlSync({
     }
     const wanted = connectionId ?? null;
     if (inUrl === wanted) return;
+    if (wanted === null && error !== null) return;
     const params = new URLSearchParams(location.search);
     if (wanted === null) {
       params.delete(CONNECTION_PARAM);
@@ -52,6 +55,7 @@ export function useConnectionUrlSync({
     connectionId,
     connections,
     loading,
+    error,
     setConnection,
     navigate,
     location.pathname,

@@ -33,8 +33,14 @@ function App() {
 }
 
 function ConnectionUrlSync() {
-  const { currentConnection, connections, loading, setConnection } = useConnection();
-  useConnectionUrlSync({ connectionId: currentConnection?.id, connections, loading, setConnection });
+  const { currentConnection, connections, loading, error, setConnection } = useConnection();
+  useConnectionUrlSync({
+    connectionId: currentConnection?.id,
+    connections,
+    loading,
+    error,
+    setConnection,
+  });
   return null;
 }
 

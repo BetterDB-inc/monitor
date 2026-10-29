@@ -18,10 +18,11 @@ interface ProbeProps {
   connectionId?: string;
   connections?: Connection[];
   loading?: boolean;
+  error?: string | null;
 }
 
-function Probe({ connectionId, connections = known, loading = false }: ProbeProps) {
-  useConnectionUrlSync({ connectionId, connections, loading, setConnection });
+function Probe({ connectionId, connections = known, loading = false, error = null }: ProbeProps) {
+  useConnectionUrlSync({ connectionId, connections, loading, error, setConnection });
   const location = useLocation();
   const navigate = useNavigate();
   const [, setParams] = useSearchParams();
@@ -96,6 +97,11 @@ describe('useConnectionUrlSync', () => {
     renderAt(['/?connection=conn-1&tab=x'], { connections: [] });
     expect(search().has('connection')).toBe(false);
     expect(search().get('tab')).toBe('x');
+  });
+
+  it('keeps the connection in the URL when connections failed to load', () => {
+    renderAt(['/?connection=conn-1'], { connections: [], error: 'offline' });
+    expect(search().get('connection')).toBe('conn-1');
   });
 
   it('keeps the hash when it names the connection', () => {
