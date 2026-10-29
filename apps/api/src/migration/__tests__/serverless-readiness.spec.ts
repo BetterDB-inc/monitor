@@ -400,6 +400,9 @@ describe('isElastiCacheServerlessHost', () => {
   it.each([
     'my-cache-abc123.serverless.use1.cache.amazonaws.com',
     'MY-CACHE.SERVERLESS.EUW1.CACHE.AMAZONAWS.COM',
+    'my-cache-abc123.serverless.cnn1.cache.amazonaws.com.cn',
+    'my-cache-abc123.serverless.use1.cache.amazonaws.com.',
+    'my-cache-abc123.serverless.cnn1.cache.amazonaws.com.cn.',
   ])('detects %s', (host) => {
     expect(isElastiCacheServerlessHost(host)).toBe(true);
   });
@@ -408,6 +411,7 @@ describe('isElastiCacheServerlessHost', () => {
     'my-cluster.abc123.clustercfg.use1.cache.amazonaws.com',
     'serverless.example.com',
     'my-cache.serverless.use1.cache.amazonaws.com.evil.com',
+    'my-cache.serverless.use1.cache.amazonaws.com.cn.evil.com',
     '127.0.0.1',
     '',
   ])('does not detect %s', (host) => {

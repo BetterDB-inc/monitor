@@ -1,4 +1,5 @@
 import type { Incompatibility } from '@betterdb/shared';
+export { isElastiCacheServerlessHost } from '@betterdb/shared';
 import { MetricsParser } from '../../database/parsers/metrics.parser';
 
 export const SERVERLESS_RESTRICTED_COMMANDS: readonly string[] = [
@@ -65,8 +66,6 @@ export const SERVERLESS_RESTRICTED_COMMANDS: readonly string[] = [
 ];
 
 const RESTRICTED = new Set(SERVERLESS_RESTRICTED_COMMANDS);
-
-const SERVERLESS_HOST_PATTERN = /\.serverless\.[a-z0-9-]+\.cache\.amazonaws\.com$/i;
 
 const CATEGORY = 'serverless_readiness';
 const GIB = 1024 * 1024 * 1024;
@@ -202,10 +201,6 @@ export function countSlotOwningMasters(nodes: ReadonlyArray<{ flags: string[]; s
   return nodes.filter((node) => {
     return node.flags.includes('master') && node.slots.length > 0;
   }).length;
-}
-
-export function isElastiCacheServerlessHost(host: string): boolean {
-  return SERVERLESS_HOST_PATTERN.test(host);
 }
 
 export function findRestrictedCommands(

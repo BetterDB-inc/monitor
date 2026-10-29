@@ -198,6 +198,15 @@ describe('Agent.onWsOpen - hello', () => {
     expect(hello.valkey.serverless).toBe(false);
   });
 
+  it('detects a Serverless endpoint from the host in password mode', () => {
+    const hello = sentHello({
+      ...IAM_CONFIG,
+      authMode: 'password',
+      valkeyHost: 'my-cache-abc123.serverless.use1.cache.amazonaws.com',
+    });
+    expect(hello.valkey.serverless).toBe(true);
+  });
+
   it('defaults serverless to false when the flag is unset', () => {
     const hello = sentHello({ ...IAM_CONFIG, authMode: 'password' });
     expect(hello.valkey.serverless).toBe(false);
