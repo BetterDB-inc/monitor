@@ -344,14 +344,24 @@ export function checkServerlessReadiness(facts: ServerlessReadinessFacts): Incom
 
   if (facts.pubsub) {
     const { channels, patterns, shardChannels } = facts.pubsub;
-    if (channels + patterns + shardChannels > 0) {
+    if (channels + shardChannels > 0) {
       issues.push({
         severity: 'warning',
         category: CATEGORY,
         title: 'Pub/sub subscribers present',
         detail:
-          `The source has ${channels} subscribed channel${channels === 1 ? '' : 's'}, ${patterns} pattern${patterns === 1 ? '' : 's'} ` +
+          `The source has ${channels} subscribed channel${channels === 1 ? '' : 's'} ` +
           `and ${shardChannels} sharded channel${shardChannels === 1 ? '' : 's'}. Subscribers are disconnected at cutover and must resubscribe.`,
+      });
+    }
+    if (patterns > 0) {
+      issues.push({
+        severity: 'warning',
+        category: CATEGORY,
+        title: 'Pattern subscribers present',
+        detail:
+          `The source has ${patterns} pattern subscription${patterns === 1 ? '' : 's'}. ElastiCache Serverless restricts PSUBSCRIBE and PUNSUBSCRIBE, ` +
+          'so these clients cannot subscribe again after cutover. Switch them to channel or sharded subscriptions before migrating.',
       });
     }
   }

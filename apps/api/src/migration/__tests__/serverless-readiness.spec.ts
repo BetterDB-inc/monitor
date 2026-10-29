@@ -262,12 +262,27 @@ describe('checkServerlessReadiness', () => {
   describe('pub/sub subscribers', () => {
     it.each([
       [{ channels: 1, patterns: 0, shardChannels: 0 }],
-      [{ channels: 0, patterns: 1, shardChannels: 0 }],
       [{ channels: 0, patterns: 0, shardChannels: 1 }],
-    ])('warns when subscribers are present (%o)', (pubsub) => {
+    ])('warns that channel subscribers must resubscribe (%o)', (pubsub) => {
       const issues = checkServerlessReadiness(facts({ pubsub }));
       expect(issues).toHaveLength(1);
       expect(issues[0].severity).toBe('warning');
+      expect(issues[0].title).toBe('Pub/sub subscribers present');
+    });
+
+    it('raises a separate issue for pattern subscribers, which cannot resubscribe', () => {
+      const issues = checkServerlessReadiness(facts({ pubsub: { channels: 0, patterns: 2, shardChannels: 0 } }));
+      expect(issues).toHaveLength(1);
+      expect(issues[0].title).toBe('Pattern subscribers present');
+      expect(issues[0].detail).toMatch(/PSUBSCRIBE/);
+      expect(issues[0].detail).not.toMatch(/must resubscribe/);
+    });
+
+    it('raises both issues when channel and pattern subscribers are present', () => {
+      expect(titles(facts({ pubsub: { channels: 1, patterns: 1, shardChannels: 0 } }))).toEqual([
+        'Pub/sub subscribers present',
+        'Pattern subscribers present',
+      ]);
     });
 
     it('skips when the counts are unknown', () => {
