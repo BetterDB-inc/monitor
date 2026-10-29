@@ -203,6 +203,70 @@ describe('KvCacheGuard', () => {
     ).toBeInTheDocument();
   });
 
+  it('shows a failed scheduled scan to users who cannot rescan', async () => {
+    demo.isDemo = true;
+    getStatus.mockResolvedValue({
+      hasLmcache: false,
+      latest: null,
+      sampleKey: null,
+      engines: [],
+      footprintIntervalMs: 300_000,
+      lastScanAttemptAt: 1,
+      lastScanError: "NOPERM User monitor has no permissions to run the 'scan' command",
+    });
+    renderGuard();
+    expect(
+      await screen.findByText(
+        "The last scan failed: NOPERM User monitor has no permissions to run the 'scan' command",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/retries within 5 minutes/)).toBeInTheDocument();
+    expect(screen.queryByText(/has not finished yet/)).toBeNull();
+    expect(screen.queryByText('Scanning for LMCache keys')).toBeNull();
+  });
+
+  it('shows a failed scan once when the rescan fails the same way', async () => {
+    getStatus.mockResolvedValue({
+      hasLmcache: false,
+      latest,
+      sampleKey: null,
+      engines: [],
+      footprintIntervalMs: 300_000,
+      lastScanAttemptAt: 1,
+      lastScanError: 'No reachable primary found for one',
+    });
+    refreshFootprint.mockRejectedValue(new Error('No reachable primary found for one'));
+    renderGuard();
+    fireEvent.click(await screen.findByRole('button', { name: 'Rescan now' }));
+    await waitFor(() => expect(refreshFootprint).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText('The last scan failed: No reachable primary found for one')).toBeInTheDocument();
+    expect(screen.queryByText(/Could not rescan/)).toBeNull();
+  });
+
+  it('gives a connection with a cached status its own first scan and rescan state', async () => {
+    const pending = { hasLmcache: false, latest: null, sampleKey: null, engines: [], lastScanAttemptAt: null, lastScanError: null };
+    getStatus.mockResolvedValue(pending);
+    refreshFootprint.mockRejectedValueOnce(new Error("Connection 'c1' is not connected"));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(['kv-cache', 'status', 'c2'], pending);
+    const tree = () => (
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <KvCacheGuard>
+            <div data-testid="children" />
+          </KvCacheGuard>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree());
+    expect(await screen.findByText("Could not rescan: Connection 'c1' is not connected")).toBeInTheDocument();
+    connection.current = { id: 'c2' };
+    rerender(tree());
+    await waitFor(() => expect(refreshFootprint).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText(/Could not rescan/)).toBeNull();
+  });
+
   it('does not start a scan from the demo instance', async () => {
     demo.isDemo = true;
     getStatus.mockResolvedValue({ hasLmcache: false, latest: null, sampleKey: null, engines: [] });

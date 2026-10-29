@@ -30,4 +30,4 @@ export const kvCacheInUse = (status: KvCacheStatus | undefined) =>
   !!status && (status.hasLmcache || status.engines.length > 0);
 
 export const awaitingFirstScan = (status: KvCacheStatus | undefined) =>
-  !!status && status.latest === null && !kvCacheInUse(status);
+  !!status && status.latest === null && !status.lastScanError && !kvCacheInUse(status);

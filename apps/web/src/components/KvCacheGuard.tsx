@@ -58,8 +58,11 @@ export function KvCacheGuard({ children }: Props) {
   }
   const notDetected = (
     <KvCacheNotDetected
+      key={connectionId}
       latest={status.data.latest}
       pending={awaitingFirstScan(status.data)}
+      scanError={status.data.lastScanError ?? null}
+      intervalMs={status.data.footprintIntervalMs}
       onLinkEngine={() => setLinkOpen(true)}
     />
   );
