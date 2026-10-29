@@ -131,3 +131,26 @@ groups:
         annotations:
           summary: "BGSAVE failing on {{ $labels.connection }} (writes are refused only if stop-writes-on-bgsave-error=yes)"
           description: "Last BGSAVE failed. Writes are rejected with MISCONF only when stop-writes-on-bgsave-error is yes (the default) and save points are configured. Check disk space, permissions and fork memory."
+
+      # Edge alert: maxclients reached — new clients get "ERR max number of
+      # clients reached" until connections are released
+      - alert: BetterDBConnectionsRejected
+        expr: increase(betterdb_rejected_connections_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Connections rejected on {{ $labels.connection }} (maxclients reached)"
+          description: "{{ $value }} client connections were refused in the last 5 minutes because maxclients was reached. Raise maxclients or find the client that is leaking connections."
+
+      # Replicas keep needing full syncs instead of partial ones — usually a
+      # replication backlog that is too small or replicas dropped for output
+      # buffer overflow
+      - alert: BetterDBRepeatedFullResyncs
+        expr: increase(betterdb_sync_full_total[15m]) > 2
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Repeated full resyncs served by {{ $labels.connection }}"
+          description: "{{ $value }} full resynchronizations in the last 15 minutes. Each one forks and transfers the whole dataset. Check repl-backlog-size, client-output-buffer-limit replica and replica network stability."
