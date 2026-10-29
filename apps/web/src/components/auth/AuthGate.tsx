@@ -47,7 +47,7 @@ export function AuthGate({ children }: { children: ReactNode }): ReactElement {
   if (user === null) {
     const target = `${location.pathname}${location.search}`;
     const loginTarget =
-      location.pathname === '/' ? '/login' : `/login?next=${encodeURIComponent(target)}`;
+      target === '/' ? '/login' : `/login?next=${encodeURIComponent(target)}`;
     return (
       <Routes>
         <Route path="/invite/:token" element={<AcceptInvite />} />
