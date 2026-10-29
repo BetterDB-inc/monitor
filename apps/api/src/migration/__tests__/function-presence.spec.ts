@@ -94,6 +94,26 @@ describe('probeSourceFunctionsClusterAware', () => {
     expect(constructed.map((c) => c.host)).toEqual(['10.0.0.1', '10.0.0.3']);
   });
 
+  it("is 'unknown' when a master's connect never settles", async () => {
+    jest.useFakeTimers();
+    try {
+      const nodes = [{ flags: ['master'], address: '10.0.0.9:6379@16379' }];
+      const iovalkey = jest.requireMock('iovalkey') as jest.Mock;
+      const disconnect = jest.fn();
+      iovalkey.mockImplementationOnce((opts: { host: string; port: number }) => {
+        const client = { host: opts.host, port: opts.port, connect: jest.fn(() => new Promise<void>(() => undefined)), quit: jest.fn(), disconnect, call: jest.fn() };
+        constructed.push(client);
+        return client;
+      });
+      const pending = probeSourceFunctionsClusterAware(makeAdapter(nodes), {}, true);
+      await jest.advanceTimersByTimeAsync(60_000);
+      expect(await pending).toBe('unknown');
+      expect(disconnect).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('falls back to the seed when masters cannot be enumerated', async () => {
     const adapter = {
       getClient: jest.fn().mockReturnValue({ call: jest.fn().mockResolvedValue([['library_name', 'lib']]) }),

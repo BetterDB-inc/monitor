@@ -5,6 +5,7 @@ import {
   FunctionPresence,
   FunctionProbeClient,
 } from './fork-compat';
+import { connectWithin, NODE_CONNECT_OPTIONS, NODE_CONNECT_TIMEOUT_MS } from './node-connect';
 
 /** The bits of a cluster node this module needs (subset of ClusterNode). */
 interface ClusterNodeLike {
@@ -88,14 +89,10 @@ export async function probeSourceFunctionsClusterAware(
           username: config.username || undefined,
           password: config.password || undefined,
           tls: config.tls ? {} : undefined,
-          lazyConnect: true,
-          // A dead master must not spawn an endless 2s reconnect loop for the life of
-          // the process. With no retry, a failed connect() rejects immediately and the
-          // client is disposable.
-          retryStrategy: () => null,
+          ...NODE_CONNECT_OPTIONS,
           maxRetriesPerRequest: 1,
         });
-        await client.connect();
+        await connectWithin(client, NODE_CONNECT_TIMEOUT_MS);
         return await probeSourceFunctions(client);
       } catch {
         return 'unknown';

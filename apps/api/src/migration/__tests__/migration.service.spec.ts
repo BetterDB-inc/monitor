@@ -28,6 +28,7 @@ jest.mock('../analysis/commandlog-analyzer', () => ({
 type MockNodeClient = {
   host: string;
   port: number;
+  options: Record<string, unknown>;
   connect: jest.Mock;
   quit: jest.Mock;
   disconnect: jest.Mock;
@@ -37,13 +38,17 @@ type MockNodeClient = {
 };
 const nodeClients: MockNodeClient[] = [];
 let unreachableHosts = new Set<string>();
+let stalledHosts = new Set<string>();
 
 jest.mock('iovalkey', () => jest.fn().mockImplementation((opts: { host: string; port: number }) => {
   const client: MockNodeClient = {
     host: opts.host,
     port: opts.port,
-    connect: jest.fn().mockImplementation(async () => {
-      if (unreachableHosts.has(opts.host)) throw new Error('connect ECONNREFUSED');
+    options: opts,
+    connect: jest.fn().mockImplementation(() => {
+      if (stalledHosts.has(opts.host)) return new Promise<void>(() => undefined);
+      if (unreachableHosts.has(opts.host)) return Promise.reject(new Error('connect ECONNREFUSED'));
+      return Promise.resolve();
     }),
     quit: jest.fn().mockResolvedValue('OK'),
     disconnect: jest.fn(),
@@ -492,6 +497,47 @@ describe('MigrationService cluster analysis', () => {
   beforeEach(() => {
     nodeClients.length = 0;
     unreachableHosts = new Set();
+    stalledHosts = new Set();
+  });
+
+  afterEach(() => jest.useRealTimers());
+
+  it('reports a master whose connect never settles as unreachable', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] });
+    const registry = createMockRegistry();
+    readyReplicationCommands(registry);
+    registry.mockAdapter.getInfo.mockResolvedValue({
+      keyspace: { db0: 'keys=100,expires=0,avg_ttl=0' },
+      memory: { used_memory: '1000000' },
+      cluster: { cluster_enabled: '1' },
+      server: {},
+      persistence: {},
+    });
+    registry.mockAdapter.getClusterNodes.mockResolvedValue([
+      { id: 'a', address: '10.0.0.1:6379@16379', flags: ['master'], slots: [[0, 8191]] },
+      { id: 'b', address: '10.0.0.2:6379@16379', flags: ['master'], slots: [[8192, 16383]] },
+    ]);
+    stalledHosts = new Set(['10.0.0.2']);
+    const service = new MigrationService(registry as any);
+
+    const { id } = await service.startAnalysis({
+      sourceConnectionId: 'conn-1',
+      targetProfile: 'elasticache_serverless',
+    });
+    let job = service.getJob(id)!;
+    for (let i = 0; i < 400 && (job.status === 'pending' || job.status === 'running'); i++) {
+      jest.advanceTimersByTime(1000);
+      await new Promise(resolve => setImmediate(resolve));
+      job = service.getJob(id)!;
+    }
+
+    expect(job.status).toBe('completed');
+    const unreachable = (job.incompatibilities ?? []).filter(i => i.title === 'Source master unreachable');
+    expect(unreachable.map(i => i.detail).join()).toContain('10.0.0.2:6379');
+    const stalled = nodeClients.find(c => c.host === '10.0.0.2')!;
+    expect(stalled.disconnect).toHaveBeenCalled();
+    expect((stalled.options.retryStrategy as () => unknown)()).toBeNull();
+    expect(stalled.options.connectTimeout).toEqual(expect.any(Number));
   });
 
   it('reports an unreachable master as a warning and still cleans up its client', async () => {

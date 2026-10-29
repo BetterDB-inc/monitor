@@ -26,6 +26,7 @@ import {
 } from './analysis/analysis-verdict-store';
 import { probeSourceFunctions, aggregateFunctionPresence } from './fork-compat';
 import { isScannableMaster, parseNodeAddress } from './function-presence';
+import { connectWithin, NODE_CONNECT_OPTIONS, NODE_CONNECT_TIMEOUT_MS } from './node-connect';
 import { assertLiveMigrationPair } from './live-connections';
 
 @Injectable()
@@ -256,12 +257,12 @@ export class MigrationService {
             username: config?.username || undefined,
             password: config?.password || undefined,
             tls: config?.tls ? {} : undefined,
-            lazyConnect: true,
+            ...NODE_CONNECT_OPTIONS,
             connectionName: 'BetterDB-Migration-Analysis',
           });
           tempClients.push(client);
           try {
-            await client.connect();
+            await connectWithin(client, NODE_CONNECT_TIMEOUT_MS);
           } catch {
             client.disconnect();
             unreachableMasters.push(`${host}:${port}`);
