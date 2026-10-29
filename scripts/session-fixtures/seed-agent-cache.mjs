@@ -69,7 +69,6 @@ const pending = {
     { role: 'human', content: 'Book a table for two at 8pm.' },
   ],
   written: { role: 'ai', content: 'Taberna has a table at 20:00. Shall I confirm it?' },
-  interrupt: { role: 'interrupt', content: 'Confirm the booking?' },
 };
 {
   const cache = newCache();
@@ -92,12 +91,12 @@ const pending = {
     config,
     [
       ['messages', [await lcMessage(pending.written)]],
-      ['__interrupt__', [{ value: pending.interrupt.content, resumable: true }]],
+      ['__interrupt__', [{ value: 'Confirm the booking?', resumable: true }]],
     ],
     'agent',
   );
   sessions[PENDING_SESSION] = {
-    messages: [...pending.checkpointed, pending.written, pending.interrupt],
+    messages: [...pending.checkpointed, pending.written],
     ttl: null,
   };
 }

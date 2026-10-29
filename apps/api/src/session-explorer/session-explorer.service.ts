@@ -22,7 +22,7 @@ import { getPreset, parseSessionKeys } from './presets/registry';
 import { estimateTokens } from './presets/text';
 import type { PresetDefinition } from './presets/types';
 import { withPrimaries } from './primary-nodes';
-import { keysForSession, measureKeys, scanSessions } from './session-scanner';
+import { keysForSession, scanSessions } from './session-scanner';
 import { readSessionKeys } from './session-reader';
 
 const PREVIEW_SCAN_COUNT = 1000;
@@ -38,11 +38,6 @@ export interface SessionCapture {
   keys: CapturedKey[];
   detail: SessionDetail;
 }
-
-const minPositive = (values: number[]): number | null => {
-  const positive = values.filter((v) => v > 0);
-  return positive.length > 0 ? Math.min(...positive) : null;
-};
 
 @Injectable()
 export class SessionExplorerService {
@@ -179,12 +174,10 @@ export class SessionExplorerService {
     const scan = await keysForSession(db, namespace.pattern, preset, sessionId);
     if (scan.keys.length === 0) throw sessionMissing(scan.failedNodes);
     const selected = preset.selectKeys ? preset.selectKeys(scan.keys) : scan.keys;
-    const read = await readSessionKeys(db, selected);
+    const read = await readSessionKeys(db, scan.keys, { selected });
     if (read.keys.length === 0) throw sessionMissing(read.failedNodes);
     const chosen = new Set(selected);
-    const skipped = scan.keys.filter((key) => !chosen.has(key));
-    const skippedBytes = skipped.length > 0 ? await measureKeys(db, skipped) : 0;
-    const memoryBytes = read.keys.reduce((sum, k) => sum + (k.bytes ?? 0), 0);
+    const skippedKeys = scan.keys.filter((key) => !chosen.has(key)).length;
 
     const views = parseSessionKeys(preset, read.keys);
     const messages = preset.mergeSession(views);
@@ -206,12 +199,15 @@ export class SessionExplorerService {
         preset: namespace.preset,
         keys: views,
         messages,
+        interrupts: preset.pendingInterrupts?.(views) ?? [],
         estimatedTokens: estimateTokens(messages),
-        ttlMs: minPositive(read.keys.map((k) => k.pttl)),
-        memoryBytes,
+        ttlMs: read.totals.ttlMs,
+        memoryBytes: read.keys.reduce((sum, k) => sum + (k.bytes ?? 0), 0),
         totalKeys: scan.keys.length,
-        skippedKeys: skipped.length,
-        totalMemoryBytes: memoryBytes + skippedBytes,
+        skippedKeys,
+        totalMemoryBytes: read.totals.memoryBytes,
+        unmeasuredKeys: read.totals.unmeasuredKeys,
+        selection: skippedKeys > 0 ? (preset.selection ?? null) : null,
         complete,
         unparsedKeys,
         truncated,

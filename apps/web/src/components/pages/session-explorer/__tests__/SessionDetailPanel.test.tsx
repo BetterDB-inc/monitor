@@ -19,13 +19,32 @@ describe('SessionDetailPanel', () => {
   it('shows the session totals and how much of it the timeline reads', () => {
     render(
       <SessionDetailPanel
-        detail={detail({ totalKeys: 4, skippedKeys: 3, totalMemoryBytes: 4577, memoryBytes: 1618 })}
+        detail={detail({
+          totalKeys: 4,
+          skippedKeys: 3,
+          totalMemoryBytes: 4577,
+          memoryBytes: 1618,
+          selection: 'latest checkpoint and its pending writes',
+        })}
         onExport={vi.fn()}
         exporting={false}
       />,
     );
     expect(screen.getByText(/4\.47 KB · TTL 5s · 4 keys/)).toBeInTheDocument();
-    expect(screen.getByText(/showing latest checkpoint \(1 key · 1\.58 KB\)/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/showing latest checkpoint and its pending writes \(1 key · 1\.58 KB\)/),
+    ).toBeInTheDocument();
+  });
+
+  it('marks the session memory as a lower bound when keys could not be measured', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({ totalKeys: 4, totalMemoryBytes: 4577, unmeasuredKeys: 2 })}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
+    expect(screen.getByTitle('2 keys could not be measured').textContent).toBe('≥ 4.47 KB');
   });
 
   it('does not mention a checkpoint when every key was read', () => {
@@ -44,17 +63,45 @@ describe('SessionDetailPanel', () => {
     expect(screen.queryByText(/latest checkpoint/)).toBeNull();
   });
 
-  it('shows a pending interrupt as a request for input', () => {
+  it('shows pending interrupts as requests for input after the messages', () => {
     render(
       <SessionDetailPanel
-        detail={detail({ messages: [{ role: 'interrupt', content: 'Confirm the booking?' }] })}
+        detail={detail({
+          interrupts: [{ value: 'Confirm the booking?' }, { value: { seats: 2 } }, {}],
+        })}
         onExport={vi.fn()}
         exporting={false}
       />,
     );
-    const entry = screen.getByTestId('interrupt-0');
-    expect(entry.textContent).toContain('Waiting for input');
-    expect(entry.textContent).toContain('Confirm the booking?');
+    const first = screen.getByTestId('interrupt-0');
+    expect(first.textContent).toContain('Waiting for input');
+    expect(first.textContent).toContain('Confirm the booking?');
+    expect(screen.getByTestId('interrupt-1').textContent).toContain('{\n  "seats": 2\n}');
+    expect(screen.getByTestId('interrupt-2').textContent).toBe('Waiting for input');
+  });
+
+  it('shows a message with the role interrupt as an ordinary message', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({ messages: [{ role: 'interrupt', content: 'a user role' }] })}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
+    expect(screen.getByText('a user role')).toBeInTheDocument();
+    expect(screen.queryByTestId('interrupt-0')).toBeNull();
+  });
+
+  it('shows interrupts even when the timeline holds no messages', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({ messages: [], interrupts: [{ value: 'Proceed?' }] })}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
+    expect(screen.queryByText('No messages.')).toBeNull();
+    expect(screen.getByTestId('interrupt-0').textContent).toContain('Proceed?');
   });
 
   it('warns when the timeline is incomplete', () => {

@@ -123,6 +123,28 @@ describeE2E('Session Explorer against seeded library data (E2E)', () => {
       expect(detail.messages.map((m) => m.content)).toEqual(expected.contents);
     });
 
+    const itWithCheckpoints = fixture.preset === 'agent-cache' ? it : it.skip;
+
+    itWithCheckpoints('totals the multi-checkpoint session as its list row does', async () => {
+      const summary = sessionNamed(list.sessions, 'multi-turn') as SessionSummary;
+      const res = await request(app.getHttpServer())
+        .get(sessionPath(namespace, summary.sessionId))
+        .expect(200);
+      const detail: SessionDetail = res.body;
+      expect(detail.skippedKeys).toBeGreaterThan(0);
+      expect({
+        keyCount: detail.totalKeys,
+        memoryBytes: detail.totalMemoryBytes,
+        unmeasuredKeys: detail.unmeasuredKeys,
+        ttlMs: detail.ttlMs,
+      }).toEqual({
+        keyCount: summary.keyCount,
+        memoryBytes: summary.memoryBytes,
+        unmeasuredKeys: summary.unmeasuredKeys,
+        ttlMs: summary.ttlMs,
+      });
+    });
+
     it('reports a live TTL for the ttl session', () => {
       const ttl = sessionNamed(list.sessions, 'ttl')?.ttlMs;
       expect(ttl).toBeGreaterThan(0);

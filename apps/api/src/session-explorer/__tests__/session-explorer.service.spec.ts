@@ -2,8 +2,8 @@ import { NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import type { CapturedKey, SessionNamespace } from '@betterdb/shared';
 import Valkey from 'iovalkey';
 import { SessionExplorerService } from '../session-explorer.service';
-import { keysForSession, measureKeys, scanSessions } from '../session-scanner';
-import { readSessionKeys } from '../session-reader';
+import { keysForSession, scanSessions } from '../session-scanner';
+import { readSessionKeys, type SessionKeysRead } from '../session-reader';
 import { withPrimaries } from '../primary-nodes';
 import { FakeValkey, fakeDb, masterNode } from './fake-valkey';
 
@@ -12,7 +12,6 @@ jest.mock('iovalkey', () => ({ __esModule: true, default: jest.fn() }));
 jest.mock('../session-scanner', () => ({
   ...jest.requireActual('../session-scanner'),
   keysForSession: jest.fn(),
-  measureKeys: jest.fn(),
   scanSessions: jest.fn(),
 }));
 jest.mock('../primary-nodes', () => {
@@ -26,7 +25,6 @@ jest.mock('../session-reader', () => ({
 
 const keysFor = keysForSession as jest.MockedFunction<typeof keysForSession>;
 const read = readSessionKeys as jest.MockedFunction<typeof readSessionKeys>;
-const measure = measureKeys as jest.MockedFunction<typeof measureKeys>;
 const ValkeyMock = Valkey as unknown as jest.Mock;
 
 const ns: SessionNamespace = {
@@ -52,6 +50,16 @@ const captured = (overrides: Partial<CapturedKey> = {}): CapturedKey => ({
   ...overrides,
 });
 
+const readOf = (overrides: Partial<SessionKeysRead> = {}): SessionKeysRead => ({
+  keys: [captured()],
+  truncated: false,
+  failedNodes: 0,
+  missingKeys: 0,
+  touchesKeys: false,
+  totals: { memoryBytes: 64, unmeasuredKeys: 0, ttlMs: 5000 },
+  ...overrides,
+});
+
 describe('SessionExplorerService.getSession', () => {
   const storage = { getSessionNamespace: jest.fn(async () => ns) };
   const registry = { get: jest.fn(() => ({})) };
@@ -59,13 +67,7 @@ describe('SessionExplorerService.getSession', () => {
 
   beforeEach(() => {
     keysFor.mockResolvedValue({ keys: ['lc:1'], truncated: false, failedNodes: 0 });
-    read.mockResolvedValue({
-      keys: [captured()],
-      truncated: false,
-      failedNodes: 0,
-      missingKeys: 0,
-      touchesKeys: false,
-    });
+    read.mockResolvedValue(readOf());
   });
 
   it('summarises a clean session as complete with a token estimate', async () => {
@@ -85,66 +87,83 @@ describe('SessionExplorerService.getSession', () => {
   });
 
   it('says when reading the session reset its access time', async () => {
-    read.mockResolvedValueOnce({
-      keys: [captured()],
-      truncated: false,
-      failedNodes: 0,
-      missingKeys: 0,
-      touchesKeys: true,
-    });
+    read.mockResolvedValueOnce(readOf({ touchesKeys: true }));
     const detail = await service.getSession('conn-1', 'ns-1', 'lc:1');
     expect(detail.touchesKeys).toBe(true);
   });
 
-  it('reads only the keys the preset selects from their names', async () => {
+  const agentCacheKeys = (p: string) => [
+    `${p}:checkpoint:1f0-a`,
+    `${p}:checkpoint:1f0-b`,
+    `${p}:__checkpoint_latest`,
+    `${p}:writes:1f0-a|task-1|messages|0`,
+    `${p}:writes:1f0-b|task-2|messages|0`,
+  ];
+
+  it('measures every session key but reads only the keys the preset selects', async () => {
     storage.getSessionNamespace.mockResolvedValueOnce({ ...ns, preset: 'agent-cache' });
     const p = 'ac:session:t1';
-    keysFor.mockResolvedValue({
-      keys: [
-        `${p}:checkpoint:1f0-a`,
-        `${p}:checkpoint:1f0-b`,
-        `${p}:__checkpoint_latest`,
-        `${p}:writes:1f0-a|task-1|messages|0`,
-        `${p}:writes:1f0-b|task-2|messages|0`,
-      ],
-      truncated: false,
-      failedNodes: 0,
-    });
+    keysFor.mockResolvedValue({ keys: agentCacheKeys(p), truncated: false, failedNodes: 0 });
     await service.getSession('conn-1', 'ns-1', 't1');
-    expect(read).toHaveBeenLastCalledWith(expect.anything(), [
-      `${p}:__checkpoint_latest`,
-      `${p}:writes:1f0-b|task-2|messages|0`,
-    ]);
+    expect(read).toHaveBeenLastCalledWith(expect.anything(), agentCacheKeys(p), {
+      selected: [`${p}:__checkpoint_latest`, `${p}:writes:1f0-b|task-2|messages|0`],
+    });
   });
 
   it('totals the whole session when it reads only the selected keys', async () => {
     storage.getSessionNamespace.mockResolvedValueOnce({ ...ns, preset: 'agent-cache' });
-    const p = 'ac:session:t1';
-    keysFor.mockResolvedValue({
-      keys: [
-        `${p}:checkpoint:1f0-a`,
-        `${p}:checkpoint:1f0-b`,
-        `${p}:__checkpoint_latest`,
-        `${p}:writes:1f0-a|task-1|messages|0`,
-      ],
-      truncated: false,
-      failedNodes: 0,
-    });
-    measure.mockResolvedValueOnce(300);
+    keysFor.mockResolvedValue({ keys: agentCacheKeys('ac:session:t1'), truncated: false, failedNodes: 0 });
+    read.mockResolvedValueOnce(
+      readOf({ totals: { memoryBytes: 364, unmeasuredKeys: 2, ttlMs: 1200 } }),
+    );
     const detail = await service.getSession('conn-1', 'ns-1', 't1');
-    expect(measure).toHaveBeenLastCalledWith(expect.anything(), [
-      `${p}:checkpoint:1f0-a`,
-      `${p}:checkpoint:1f0-b`,
-      `${p}:writes:1f0-a|task-1|messages|0`,
-    ]);
-    expect(detail).toMatchObject({ memoryBytes: 64, totalKeys: 4, skippedKeys: 3, totalMemoryBytes: 364 });
+    expect(detail).toMatchObject({
+      memoryBytes: 64,
+      totalKeys: 5,
+      skippedKeys: 3,
+      totalMemoryBytes: 364,
+      unmeasuredKeys: 2,
+      ttlMs: 1200,
+      selection: 'latest checkpoint and its pending writes',
+    });
   });
 
   it('totals equal the read keys when the preset reads every key', async () => {
-    measure.mockClear();
     const detail = await service.getSession('conn-1', 'ns-1', 'lc:1');
-    expect(measure).not.toHaveBeenCalled();
-    expect(detail).toMatchObject({ totalKeys: 1, skippedKeys: 0, totalMemoryBytes: 64 });
+    expect(read).toHaveBeenLastCalledWith(expect.anything(), ['lc:1'], { selected: ['lc:1'] });
+    expect(detail).toMatchObject({
+      totalKeys: 1,
+      skippedKeys: 0,
+      totalMemoryBytes: 64,
+      unmeasuredKeys: 0,
+      selection: null,
+    });
+  });
+
+  it('keeps pending interrupts out of the messages and the token estimate', async () => {
+    storage.getSessionNamespace.mockResolvedValueOnce({ ...ns, preset: 'agent-cache' });
+    const p = 'ac:session:t1';
+    const latest = `${p}:__checkpoint_latest`;
+    const interrupt = `${p}:writes:1f0-b|task-2|__interrupt__|0`;
+    keysFor.mockResolvedValue({ keys: [latest, interrupt], truncated: false, failedNodes: 0 });
+    const str = (key: string, value: unknown): CapturedKey =>
+      captured({ key, type: 'string', value: JSON.stringify(value) });
+    read.mockResolvedValueOnce(
+      readOf({
+        keys: [
+          str(latest, { checkpoint: { channel_values: { messages: [] } } }),
+          str(interrupt, [{ value: 'a question long enough to count as tokens' }]),
+        ],
+      }),
+    );
+    const detail = await service.getSession('conn-1', 'ns-1', 't1');
+    expect(detail.messages).toEqual([]);
+    expect(detail.estimatedTokens).toBe(0);
+    expect(detail.interrupts).toEqual([{ value: 'a question long enough to count as tokens' }]);
+  });
+
+  it('lists no interrupts for a preset without them', async () => {
+    expect((await service.getSession('conn-1', 'ns-1', 'lc:1')).interrupts).toEqual([]);
   });
 
   it('is incomplete when the key scan was capped', async () => {
@@ -156,13 +175,7 @@ describe('SessionExplorerService.getSession', () => {
   });
 
   it('is incomplete when the read budget ran out', async () => {
-    read.mockResolvedValue({
-      keys: [captured()],
-      truncated: true,
-      failedNodes: 0,
-      missingKeys: 0,
-      touchesKeys: false,
-    });
+    read.mockResolvedValue(readOf({ truncated: true }));
     expect(await service.getSession('conn-1', 'ns-1', 'lc:1')).toMatchObject({
       complete: false,
       truncated: true,
@@ -170,25 +183,13 @@ describe('SessionExplorerService.getSession', () => {
   });
 
   it('is incomplete when a value was cut at the byte cap', async () => {
-    read.mockResolvedValue({
-      keys: [captured({ truncated: true })],
-      truncated: false,
-      failedNodes: 0,
-      missingKeys: 0,
-      touchesKeys: false,
-    });
+    read.mockResolvedValue(readOf({ keys: [captured({ truncated: true })] }));
     expect(await service.getSession('conn-1', 'ns-1', 'lc:1')).toMatchObject({ complete: false });
   });
 
   it('is incomplete when nodes failed or keys vanished', async () => {
     keysFor.mockResolvedValue({ keys: ['lc:1', 'lc:2'], truncated: false, failedNodes: 1 });
-    read.mockResolvedValue({
-      keys: [captured()],
-      truncated: false,
-      failedNodes: 1,
-      missingKeys: 1,
-      touchesKeys: false,
-    });
+    read.mockResolvedValue(readOf({ failedNodes: 1, missingKeys: 1 }));
     expect(await service.getSession('conn-1', 'ns-1', 'lc:1')).toMatchObject({
       complete: false,
       failedNodes: 1,
@@ -198,24 +199,12 @@ describe('SessionExplorerService.getSession', () => {
 
   it('counts a node that failed both the scan and the read once', async () => {
     keysFor.mockResolvedValue({ keys: ['lc:1'], truncated: false, failedNodes: 2 });
-    read.mockResolvedValue({
-      keys: [captured()],
-      truncated: false,
-      failedNodes: 1,
-      missingKeys: 0,
-      touchesKeys: false,
-    });
+    read.mockResolvedValue(readOf({ failedNodes: 1 }));
     expect(await service.getSession('conn-1', 'ns-1', 'lc:1')).toMatchObject({ failedNodes: 2 });
   });
 
   it('answers not found when every key vanished before the read', async () => {
-    read.mockResolvedValue({
-      keys: [],
-      truncated: false,
-      failedNodes: 0,
-      missingKeys: 1,
-      touchesKeys: false,
-    });
+    read.mockResolvedValue(readOf({ keys: [], missingKeys: 1 }));
     await expect(service.getSession('conn-1', 'ns-1', 'lc:1')).rejects.toBeInstanceOf(
       NotFoundException,
     );
@@ -229,13 +218,7 @@ describe('SessionExplorerService.getSession', () => {
   });
 
   it('answers unavailable when no key was read and a primary failed', async () => {
-    read.mockResolvedValue({
-      keys: [],
-      truncated: false,
-      failedNodes: 1,
-      missingKeys: 1,
-      touchesKeys: false,
-    });
+    read.mockResolvedValue(readOf({ keys: [], failedNodes: 1, missingKeys: 1 }));
     await expect(service.getSession('conn-1', 'ns-1', 'lc:1')).rejects.toBeInstanceOf(
       ServiceUnavailableException,
     );
@@ -336,13 +319,7 @@ describe('SessionExplorerService.preview', () => {
 
   beforeEach(() => {
     ValkeyMock.mockReset();
-    read.mockResolvedValue({
-      keys: [captured()],
-      truncated: false,
-      failedNodes: 0,
-      missingKeys: 0,
-      touchesKeys: false,
-    });
+    read.mockResolvedValue(readOf());
   });
 
   it('keeps searching the other primaries when one scan fails', async () => {
@@ -363,13 +340,7 @@ describe('SessionExplorerService.preview', () => {
   });
 
   it('counts a primary that failed while reading the sample', async () => {
-    read.mockResolvedValueOnce({
-      keys: [],
-      truncated: false,
-      failedNodes: 1,
-      missingKeys: 0,
-      touchesKeys: false,
-    });
+    read.mockResolvedValueOnce(readOf({ keys: [], failedNodes: 1 }));
     const service = serviceOver({ 7001: new FakeValkey(new Map([['lc:1', { type: 'list' }]])) });
 
     expect(await service.preview('conn-1', input)).toMatchObject({
@@ -380,13 +351,7 @@ describe('SessionExplorerService.preview', () => {
   });
 
   it('says when reading the sample reset its access time', async () => {
-    read.mockResolvedValueOnce({
-      keys: [captured()],
-      truncated: false,
-      failedNodes: 0,
-      missingKeys: 0,
-      touchesKeys: true,
-    });
+    read.mockResolvedValueOnce(readOf({ touchesKeys: true }));
     const service = serviceOver({ 7001: new FakeValkey(new Map([['lc:1', { type: 'list' }]])) });
 
     expect((await service.preview('conn-1', input)).touchesKeys).toBe(true);

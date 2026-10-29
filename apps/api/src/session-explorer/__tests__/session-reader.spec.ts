@@ -719,6 +719,68 @@ describe('readSessionKeys', () => {
     expect(result.failedNodes).toBe(1);
   });
 
+  it('measures every key but reads only the selected ones', async () => {
+    const client = new FakeValkey(
+      storeOf({
+        a: { type: 'string', value: 'read', memory: 300, pttl: 9000 },
+        b: { type: 'string', value: 'skipped', memory: 200, pttl: 4000 },
+        c: { type: 'string', value: 'skipped', memory: 50, pttl: -1 },
+      }),
+    );
+
+    const result = await readSessionKeys(fakeDb(client), ['a', 'b', 'c'], { selected: ['a'] });
+
+    expect(result.keys.map((k) => k.key)).toEqual(['a']);
+    expect(client.callsOf('pipeline.getrangeBuffer').map((c) => c.args[0])).toEqual(['a']);
+    expect(result.totals).toEqual({ memoryBytes: 550, unmeasuredKeys: 0, ttlMs: 4000 });
+  });
+
+  it('counts keys it could not measure without failing the read', async () => {
+    const client = new FakeValkey(
+      storeOf({
+        a: { type: 'string', value: '1', memory: 300 },
+        b: { type: 'string', value: '2', memory: null },
+      }),
+    );
+
+    const result = await readSessionKeys(fakeDb(client), ['a', 'b', 'gone', 'skipped-gone'], {
+      selected: ['a', 'b', 'gone'],
+    });
+
+    expect(result.totals).toMatchObject({ memoryBytes: 300, unmeasuredKeys: 3 });
+    expect(result.missingKeys).toBe(1);
+  });
+
+  it('still measures the keys left unread once the byte budget is spent', async () => {
+    const nodeA = new FakeValkey(storeOf({ a: { type: 'string', value: 'x'.repeat(100), memory: 100 } }));
+    const nodeB = new FakeValkey(storeOf({ b: { type: 'string', value: 'y'.repeat(100), memory: 80 } }));
+    const db = clusterOf(
+      { 7001: nodeA, 7002: nodeB },
+      { 7001: [[calculateSlot('a'), calculateSlot('a')]], 7002: [[calculateSlot('b'), calculateSlot('b')]] },
+    );
+
+    const result = await readSessionKeys(db, ['a', 'b'], { totalByteCap: 100 });
+
+    expect(result.truncated).toBe(true);
+    expect(result.keys.map((k) => k.key)).toEqual(['a']);
+    expect(result.totals).toMatchObject({ memoryBytes: 180, unmeasuredKeys: 0 });
+  });
+
+  it('counts the keys of an unreachable primary as unmeasured', async () => {
+    const nodeA = new FakeValkey(storeOf({ a: { type: 'string', value: '1', memory: 10 } }));
+    const nodeB = new FakeValkey(storeOf({ b: { type: 'string', value: '2' } }));
+    nodeB.connectError = new Error('ECONNREFUSED');
+    const db = clusterOf(
+      { 7001: nodeA, 7002: nodeB },
+      { 7001: [[calculateSlot('a'), calculateSlot('a')]], 7002: [[calculateSlot('b'), calculateSlot('b')]] },
+    );
+
+    const result = await readSessionKeys(db, ['a', 'b'], { selected: ['a'] });
+
+    expect(result.totals).toMatchObject({ memoryBytes: 10, unmeasuredKeys: 1 });
+    expect(result.missingKeys).toBe(0);
+  });
+
   it('reports keys owned by an unreachable primary', async () => {
     const nodeA = new FakeValkey(storeOf({ a: { type: 'string', value: '1' } }));
     const nodeB = new FakeValkey(storeOf({ b: { type: 'string', value: '2' } }));

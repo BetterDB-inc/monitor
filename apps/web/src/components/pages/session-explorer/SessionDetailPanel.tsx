@@ -39,10 +39,16 @@ export function SessionDetailPanel({ detail, onExport, exporting }: Props) {
           <CardTitle className="break-all font-mono text-base">{detail.sessionId}</CardTitle>
           <p className="mt-1 text-sm text-muted-foreground">
             ~{detail.estimatedTokens.toLocaleString()} tokens ·{' '}
-            {formatBytes(detail.totalMemoryBytes)} · TTL {formatTtl(detail.ttlMs)} ·{' '}
-            {plural(detail.totalKeys, 'key')}
+            {detail.unmeasuredKeys > 0 ? (
+              <span title={`${plural(detail.unmeasuredKeys, 'key')} could not be measured`}>
+                ≥ {formatBytes(detail.totalMemoryBytes)}
+              </span>
+            ) : (
+              formatBytes(detail.totalMemoryBytes)
+            )}{' '}
+            · TTL {formatTtl(detail.ttlMs)} · {plural(detail.totalKeys, 'key')}
             {detail.skippedKeys > 0 &&
-              `, showing latest checkpoint (${plural(detail.keys.length, 'key')} · ${formatBytes(detail.memoryBytes)})`}
+              `, showing ${detail.selection ?? 'part of the session'} (${plural(detail.keys.length, 'key')} · ${formatBytes(detail.memoryBytes)})`}
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={onExport} disabled={exporting}>
@@ -71,7 +77,7 @@ export function SessionDetailPanel({ detail, onExport, exporting }: Props) {
         )}
         <section>
           <h3 className="mb-2 text-sm font-medium">Timeline</h3>
-          <MessageTimeline messages={detail.messages} />
+          <MessageTimeline messages={detail.messages} interrupts={detail.interrupts} />
         </section>
         <section className="space-y-2">
           <h3 className="text-sm font-medium">Keys</h3>

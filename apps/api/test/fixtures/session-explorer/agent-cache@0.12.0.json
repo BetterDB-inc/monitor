@@ -330,20 +330,18 @@
       "hasTtl": false
     },
     "pending-write": {
-      "messages": 4,
+      "messages": 3,
       "toolCalls": 0,
       "roles": [
         "system",
         "human",
-        "ai",
-        "interrupt"
+        "ai"
       ],
       "hasTtl": false,
       "contents": [
         "You book restaurant tables.",
         "Book a table for two at 8pm.",
-        "Taberna has a table at 20:00. Shall I confirm it?",
-        "Confirm the booking?"
+        "Taberna has a table at 20:00. Shall I confirm it?"
       ]
     }
   }

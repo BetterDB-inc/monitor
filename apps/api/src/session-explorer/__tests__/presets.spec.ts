@@ -138,6 +138,7 @@ describe('session presets against captured fixtures', () => {
     expect(preset.mergeSession(views).map((m) => m.content)).toEqual(
       fixture.expectations['pending-write'].contents,
     );
+    expect(preset.pendingInterrupts!(views)).toEqual([{ value: 'Confirm the booking?' }]);
   });
 
   it('agent-cache leaves writes folded into a newer checkpoint out of the merge', () => {
@@ -678,32 +679,68 @@ describe('presets with content blocks beyond text', () => {
         'first b',
         'second',
         'interrupted',
-        'ask',
       ]);
     });
 
-    it('ends the session with the interrupts of the newest checkpoint', () => {
-      const interrupt = (key: string, value: unknown) => str(key, JSON.stringify(value));
+    const write = (key: string, value: unknown) => str(key, JSON.stringify(value));
+
+    it('lists the interrupts of the newest checkpoint apart from the messages', () => {
       const withInterrupts = [
         ...keys,
-        interrupt(`${p}:writes:1f0-a|task-1|__interrupt__|0`, [{ value: 'stale' }]),
-        interrupt(`${p}:writes:1f0-b|task-1|__interrupt__|0`, [
+        write(`${p}:writes:1f0-a|task-1|__interrupt__|0`, [{ value: 'stale' }]),
+        write(`${p}:writes:1f0-b|task-1|__interrupt__|0`, [
           { value: 'Confirm the booking?', resumable: true },
           { value: { question: 'Seats?', options: [1, 2] } },
         ]),
       ];
-      const merged = preset.mergeSession(parseSessionKeys(preset, withInterrupts));
-      expect(merged.slice(-4)).toEqual([
-        { role: 'ai', content: 'second' },
-        { role: 'interrupt', content: 'Confirm the booking?' },
-        { role: 'interrupt', content: '{"question":"Seats?","options":[1,2]}' },
-        { role: 'interrupt', content: 'ask' },
+      const views = parseSessionKeys(preset, withInterrupts);
+      expect(preset.pendingInterrupts!(views)).toEqual([
+        { value: 'Confirm the booking?' },
+        { value: { question: 'Seats?', options: [1, 2] } },
+        { value: 'ask' },
       ]);
+      expect(preset.mergeSession(views).map((m) => m.role)).not.toContain('interrupt');
+    });
+
+    it('drops interrupts already answered by a resume write on the same checkpoint', () => {
+      const pending = [
+        ...keys,
+        write(`${p}:writes:1f0-b|task-1|__interrupt__|0`, [{ id: 'i-1', value: 'by task' }]),
+        write(`${p}:writes:1f0-b|task-4|__interrupt__|0`, [{ id: 'i-4', value: 'by id' }]),
+        write(`${p}:writes:1f0-b|task-5|__interrupt__|0`, [{ id: 'i-5', value: 'open' }]),
+        write(`${p}:writes:1f0-b|task-1|__resume__|0`, ['yes']),
+        write(`${p}:writes:1f0-b|i-4|__resume__|0`, ['yes']),
+        write(`${p}:writes:1f0-a|task-5|__resume__|0`, ['stale']),
+      ];
+      expect(preset.pendingInterrupts!(parseSessionKeys(preset, pending))).toEqual([
+        { value: 'ask' },
+        { value: 'open' },
+      ]);
+    });
+
+    it('drops every interrupt once the checkpoint holds a plain resume', () => {
+      const resumed = [
+        ...keys,
+        write(`${p}:writes:1f0-b|00000000-0000-0000-0000-000000000000|__resume__|0`, 'yes'),
+      ];
+      expect(preset.pendingInterrupts!(parseSessionKeys(preset, resumed))).toEqual([]);
+    });
+
+    it('reads an interrupt raised without a value as an empty interrupt', () => {
+      const empty = [...keys, write(`${p}:writes:1f0-b|task-6|__interrupt__|0`, [{ id: 'i-6' }])];
+      const views = parseSessionKeys(preset, empty);
+      expect(views.every((v) => v.parsed)).toBe(true);
+      expect(preset.pendingInterrupts!(views)).toEqual([{ value: 'ask' }, {}]);
+    });
+
+    it('fails an interrupt write that is not a list of interrupts', () => {
+      const view = preset.parseKey(write(`${p}:writes:1f0-b|task-6|__interrupt__|0`, ['nope']));
+      expect(view.parsed).toBe(false);
     });
 
     it('appends pending message writes of the newest checkpoint in task and index order', () => {
       const merged = preset.mergeSession(parseSessionKeys(preset, keys));
-      expect(merged.map((m) => m.content)).toEqual(['hi', 'hello', 'first a', 'first b', 'second', 'ask']);
+      expect(merged.map((m) => m.content)).toEqual(['hi', 'hello', 'first a', 'first b', 'second']);
       const selected = new Set(preset.selectKeys!(keys.map((k) => k.key)));
       const fetched = keys.filter((k) => selected.has(k.key));
       expect(preset.mergeSession(parseSessionKeys(preset, fetched))).toEqual(merged);

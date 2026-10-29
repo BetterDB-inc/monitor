@@ -105,17 +105,24 @@ export type KeyView = {
   | { parsed: false; reason: string }
 );
 
+export interface PendingInterrupt {
+  value?: JsonValue;
+}
+
 export interface SessionDetail {
   sessionId: string;
   preset: PresetId;
   keys: KeyView[];
   messages: ParsedMessage[];
+  interrupts: PendingInterrupt[];
   estimatedTokens: number;
   ttlMs: number | null;
   memoryBytes: number;
   totalKeys: number;
   skippedKeys: number;
   totalMemoryBytes: number;
+  unmeasuredKeys: number;
+  selection: string | null;
   complete: boolean;
   unparsedKeys: number;
   truncated: boolean;
