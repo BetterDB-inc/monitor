@@ -8,7 +8,17 @@ import { tlsIdentityOptions } from '../database/adapters/tls-servername';
 import { parseNodeAddress } from '../topology/membership-diff';
 
 const NODE_TIMEOUT_MS = 5000;
+const WARN_INTERVAL_MS = 60_000;
 const logger = new Logger('SessionExplorer');
+const lastWarned = new Map<string, number>();
+
+function warnOnce(label: string, message: string): void {
+  const now = Date.now();
+  const last = lastWarned.get(label);
+  if (last !== undefined && now - last < WARN_INTERVAL_MS) return;
+  lastWarned.set(label, now);
+  logger.warn(message);
+}
 
 export interface PrimaryRoute {
   client: Valkey;
@@ -100,7 +110,7 @@ async function openReader(label: string, create: () => Valkey | null): Promise<R
     if (!noTouch) await client.ping();
     return { client, noTouch };
   } catch (err) {
-    logger.warn(`Session reader for ${label} could not be opened: ${(err as Error).message}`);
+    warnOnce(label, `Session reader for ${label} could not be opened: ${(err as Error).message}`);
     client?.disconnect();
     return null;
   }

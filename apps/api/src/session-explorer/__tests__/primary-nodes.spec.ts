@@ -1,4 +1,4 @@
-import { ServiceUnavailableException } from '@nestjs/common';
+import { Logger, ServiceUnavailableException } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import { withPrimaries } from '../primary-nodes';
 import { FakeValkey, fakeDb, masterNode } from './fake-valkey';
@@ -74,6 +74,28 @@ describe('withPrimaries', () => {
 
     expect(run).not.toHaveBeenCalled();
     expect(parent.disconnected).toBe(false);
+  });
+
+  it('warns about a reader that cannot open once a minute per address', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const now = jest.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const parent = new FakeValkey(new Map(), { host: 'full', port: 7100 });
+    const reader = new FakeValkey();
+    reader.serverError = new Error('ERR max number of clients reached');
+    parent.duplicateWith = reader;
+    const attempt = () => withPrimaries(fakeDb(parent), jest.fn()).catch(() => undefined);
+    const warnings = () => warn.mock.calls.filter(([m]) => String(m).includes('full:7100'));
+
+    await attempt();
+    await attempt();
+    expect(warnings()).toHaveLength(1);
+
+    now.mockReturnValue(1_061_000);
+    await attempt();
+    expect(warnings()).toHaveLength(2);
+
+    now.mockRestore();
+    warn.mockRestore();
   });
 
   it('still reads when the server does not know CLIENT NO-TOUCH', async () => {
