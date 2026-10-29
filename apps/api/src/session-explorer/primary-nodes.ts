@@ -133,9 +133,10 @@ async function clusterNodes(seed: Reader): Promise<ClusterNode[] | null> {
 
 export async function primaryClients(db: DatabasePort): Promise<PrimaryClients> {
   const parent = db.getClient();
+  const { clusterEnabled } = db.getCapabilities();
   const seed = await ownReader(parent);
   if (!seed) return unavailable(1);
-  if (!db.getCapabilities().clusterEnabled) {
+  if (!clusterEnabled) {
     return {
       clients: [seed.client],
       failed: 0,

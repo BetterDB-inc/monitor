@@ -195,6 +195,23 @@ describe('withPrimaries', () => {
     expect(parent.callsOf('call')).toHaveLength(0);
   });
 
+  it('opens no reader before the server capabilities are known', async () => {
+    const parent = new FakeValkey();
+    const seed = new FakeValkey();
+    parent.duplicateWith = seed;
+    const db = {
+      ...fakeDb(parent),
+      getCapabilities: () => {
+        throw new Error('Capabilities not yet detected. Call connect() first.');
+      },
+    };
+
+    await expect(withPrimaries(db, jest.fn())).rejects.toThrow('Capabilities not yet detected');
+
+    expect(parent.callsOf('duplicate')).toHaveLength(0);
+    expect(seed.callsOf('connect')).toHaveLength(0);
+  });
+
   it('reports that reads leave access times alone when every reader has NO-TOUCH', async () => {
     const parent = new FakeValkey();
     parent.duplicateWith = new FakeValkey();
