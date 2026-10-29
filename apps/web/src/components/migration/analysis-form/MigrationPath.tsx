@@ -19,7 +19,9 @@ export function MigrationPath({ direction, endpointsChosen, serverlessCheck = fa
     return (
       <div className="flex flex-col items-center justify-center gap-2 px-4">
         <div className="h-px w-full bg-border" />
-        <span className="text-xs text-muted-foreground">pick both endpoints</span>
+        <span className="text-xs text-muted-foreground">
+          {serverlessCheck ? 'pick a source' : 'pick both endpoints'}
+        </span>
       </div>
     );
   }

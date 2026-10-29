@@ -3,6 +3,7 @@ import { render, screen, cleanup } from '@testing-library/react';
 import type { MigrationAnalysisResult } from '@betterdb/shared';
 import { VerdictSection } from '../VerdictSection';
 import { SummarySection } from '../SummarySection';
+import { MigrationPath } from '../../analysis-form/MigrationPath';
 
 afterEach(() => {
   cleanup();
@@ -65,7 +66,63 @@ describe('VerdictSection AWS-only issues', () => {
   });
 });
 
+describe('VerdictSection clean result', () => {
+  it('reports a clean readiness check without calling the migration safe', () => {
+    render(
+      <VerdictSection
+        job={{ ...BASE, targetProfile: 'elasticache_serverless', incompatibilities: [], blockingCount: 0, warningCount: 0 }}
+      />,
+    );
+
+    expect(screen.getByText('No ElastiCache Serverless readiness issues found.')).toBeInTheDocument();
+    expect(screen.queryByText(/Migration appears safe/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the safe banner for a migration with a target', () => {
+    render(
+      <VerdictSection
+        job={{ ...BASE, targetConnectionId: 'conn-2', incompatibilities: [], blockingCount: 0, warningCount: 0 }}
+      />,
+    );
+
+    expect(screen.getByText('No compatibility issues found. Migration appears safe.')).toBeInTheDocument();
+  });
+});
+
+describe('MigrationPath empty copy', () => {
+  it('asks for a source only in Serverless mode', () => {
+    render(<MigrationPath direction={null} endpointsChosen={false} serverlessCheck />);
+
+    expect(screen.getByText('pick a source')).toBeInTheDocument();
+    expect(screen.queryByText('pick both endpoints')).not.toBeInTheDocument();
+  });
+
+  it('asks for both endpoints otherwise', () => {
+    render(<MigrationPath direction={null} endpointsChosen={false} />);
+
+    expect(screen.getByText('pick both endpoints')).toBeInTheDocument();
+  });
+});
+
 describe('SummarySection target profile', () => {
+  it('shows the connected target and the Serverless badge for a Serverless target connection', () => {
+    render(
+      <SummarySection
+        job={{
+          ...BASE,
+          targetConnectionId: 'conn-2',
+          targetConnectionName: 'aws-serverless',
+          targetDbType: 'valkey',
+          targetDbVersion: '8.1.0',
+          targetProfile: 'elasticache_serverless',
+        }}
+      />,
+    );
+
+    expect(screen.getByText('aws-serverless')).toBeInTheDocument();
+    expect(screen.getByText('ElastiCache Serverless')).toBeInTheDocument();
+  });
+
   it('names ElastiCache Serverless as the target of a standalone check', () => {
     render(<SummarySection job={{ ...BASE, targetProfile: 'elasticache_serverless' }} />);
 

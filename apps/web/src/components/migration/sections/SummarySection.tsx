@@ -49,7 +49,7 @@ export function SummarySection({ job }: Props) {
           connectionName={job.sourceConnectionName}
         />
         <span className="text-muted-foreground font-medium">&rarr;</span>
-        {job.targetProfile === 'elasticache_serverless' ? (
+        {job.targetConnectionId === undefined && job.targetProfile === 'elasticache_serverless' ? (
           <span className="text-sm font-medium">ElastiCache Serverless</span>
         ) : (
           <DbBadge
@@ -57,6 +57,9 @@ export function SummarySection({ job }: Props) {
             dbVersion={job.targetDbVersion}
             connectionName={job.targetConnectionName}
           />
+        )}
+        {job.targetConnectionId !== undefined && job.targetProfile === 'elasticache_serverless' && (
+          <span className="px-2 py-0.5 text-xs rounded font-medium bg-muted text-foreground">ElastiCache Serverless</span>
         )}
       </div>
 
