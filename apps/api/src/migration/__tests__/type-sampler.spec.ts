@@ -116,17 +116,19 @@ describe('sampleKeyTypes', () => {
 
   it('records the raw byte length of a binary key name', async () => {
     const raw = Buffer.from([0xff, 0xfe, 0x00, 0x41]);
+    const pipeline = {
+      type: jest.fn().mockReturnThis(),
+      exec: jest.fn().mockResolvedValue([[null, 'string']]),
+    };
     const client = {
       scanBuffer: jest.fn().mockResolvedValue([Buffer.from('0'), [raw]]),
-      pipeline: jest.fn().mockReturnValue({
-        type: jest.fn().mockReturnThis(),
-        exec: jest.fn().mockResolvedValue([[null, 'string']]),
-      }),
+      pipeline: jest.fn().mockReturnValue(pipeline),
     } as any;
 
     const result = await sampleKeyTypes([client], 1000);
 
     expect(result[0].keyBytes).toBe(4);
     expect(result[0].key).toBe(raw.toString());
+    expect(pipeline.type).toHaveBeenCalledWith(raw);
   });
 });
