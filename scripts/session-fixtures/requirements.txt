@@ -1,0 +1,5 @@
+langchain-community==0.4.2
+langchain-core==1.6.11
+llama-index-core==0.14.25
+llama-index-storage-chat-store-redis==0.8.0
+redis==8.1.0

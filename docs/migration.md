@@ -41,7 +41,7 @@ Transfers keys from source to target. Three modes are available:
 
 - **Same engine, same major version** (e.g. Redis 7→Redis 7, Valkey 7→Valkey 7): any mode works. `redis_shake` is fastest for large datasets.
 - **Cross-engine** (Redis→Valkey or vice versa): use `redis_shake_sync` or `command`. The `redis_shake` (DUMP/RESTORE) mode will fail because Redis and Valkey use different RDB format versions and the `RESTORE` command rejects the foreign payload.
-- **Near-zero downtime** required: use `redis_shake_sync`. It completes an initial snapshot and then keeps replicating incremental writes until you manually stop it.
+- **Near-zero downtime** required: use `redis_shake_sync`. It completes an initial snapshot and then keeps replicating incremental writes until you complete the cutover (or stop it).
 
 #### Command mode
 
@@ -91,16 +91,68 @@ source — the same protocol a replica uses. This means:
    in near real-time.
 
 The migration **runs continuously** and never exits on its own. The UI shows a
-stage chip that transitions from **Initial sync (RDB)** to
-**Replicating · ready for cutover** once the snapshot phase finishes.
+stage chip that transitions from **Initial sync (RDB)** to **Replicating** once
+the snapshot phase finishes. Next to the chip, a lag readout shows how far
+RedisShake is behind the source on the slowest shard; click it for a per-shard
+breakdown. BetterDB reads this from RedisShake's status endpoint (`status_port`,
+a free local port chosen per run) once a second. Lag is the replication-stream
+bytes RedisShake has received from a shard but not yet handed to its writer,
+so it is not the same as "written to the target". A shard shows *initial sync*
+until its first replicated command has been processed, which on an idle source
+can take a few seconds after the snapshot.
+
+The chip turns **Fully synced** only when RedisShake itself reports the run as
+consistent on two polls in a row: every shard has handed off everything it
+received, its internal queue is empty, and the target has acknowledged every
+write sent to it. A command in transit between RedisShake's reader and writer
+is not counted for that instant, which is why two polls in a row are required.
+If the status endpoint stops answering, the readout is marked
+as not updated recently and the chip drops back to *Replicating*.
+
+RedisShake reads the source topology once, at start. A shard added or resharded
+to a new master during the migration is not replicated; restart the migration
+after a topology change.
+
+The status endpoint listens on all interfaces of the host running RedisShake and
+reports source and target addresses (no credentials). In a container it is
+reachable only if you publish that port.
 
 **Cutover procedure**:
-1. Wait for the stage chip to show *Replicating · ready for cutover*.
+1. Wait for the stage chip to show *Replicating* or *Fully synced*.
 2. Pause or quiesce writes on the source (brief read-only window).
-3. Wait a few seconds for the replication lag to drain to zero (`diff=[0]` in
-   the log).
-4. Click **Stop Migration** in the execution panel.
-5. Point your application at the target.
+3. Click **Complete cutover** in the execution panel and confirm. The job shows
+   *Completing* and waits until RedisShake stays *Fully synced* for a few
+   seconds (default limit: 5 minutes), then stops RedisShake.
+4. When the job shows *Completed* ("Cutover complete at …"), point your
+   application at the target.
+
+*Fully synced* cannot detect writes that are still arriving: under a steady
+write load RedisShake can briefly report itself consistent while writes
+continue, and anything written to the source after the cutover is lost. Pausing
+writes in step 2 is what makes the cutover safe; the check only confirms that
+RedisShake has caught up.
+RedisShake is given up to 60 seconds after the stop to finish writing to the
+target; if it exits with an error or has to be killed, the cutover ends as
+*Failed* rather than *Completed*.
+
+**If the cutover times out**: RedisShake did not stay *Fully synced*, so the
+migration goes back to *Replicating* and keeps running. Pause writes and
+click **Retry cutover**, or click **Force cutover** to end the migration now.
+A forced cutover finishes as *Completed* and records the per-shard lag you
+accepted; those writes may be missing on the target.
+
+**Stop Migration** cancels the migration without a cutover and ends as
+*Cancelled*, at any point, including while a cutover is waiting. Once the
+cutover has started stopping RedisShake (after *Fully synced* held, or after a
+forced cutover), it can no longer be cancelled: Stop returns `409` and the
+migration finishes as a cutover.
+
+The same actions are available over the API:
+`POST /migration/execution/:id/complete` with an optional body
+`{ "force": boolean, "timeoutSeconds": number }` (`timeoutSeconds` is an integer
+from 10 to 3600, default 300). It returns `409` unless the job is a
+`redis_shake_sync` migration that is replicating or already completing.
+`DELETE /migration/execution/:id` cancels.
 
 **Options**:
 
@@ -164,6 +216,48 @@ is below 1%.
 | Standalone | Cluster | Supported | Keys are resharded across target slots. Analysis reports a warning. |
 | Cluster | Cluster | Supported | Per-master scanning, slot-aware writes |
 | Cluster | Standalone | **Blocked** | Analysis reports a blocking incompatibility. The data is spread across slots and cannot be safely collapsed into a single node. |
+
+### Other engines
+
+BetterDB detects the engine from `INFO server`: a `valkey_version` field means
+`valkey`, anything else is `redis`. Redis and Valkey are what the migration
+test suite covers. Other RESP-compatible engines are reachable because the
+three modes only need standard commands, but each mode has a protocol
+requirement the engine has to meet, and neither KeyDB nor Dragonfly is
+exercised by the tests. The rows below come from the engines' source and
+docs, not from a test run.
+
+| Engine | Detected as | `redis_shake_sync` | `redis_shake` | `command` | Notes |
+|--------|-------------|:------------------:|:-------------:|:---------:|-------|
+| Redis 7.x, Valkey 7.x/8.x | `redis` / `valkey` | ✅ | ✅ (same RDB version) | ✅ | Tested. See [RDB format compatibility](#rdb-format-compatibility). |
+| Redis < 7 | `redis` | ✅ | ✅ as source (RDB v9/v10 restores on newer targets); ❌ as target from a 7.x source | ✅ | Analysis probes `INFO` section by section because these engines reject the multi-section form. |
+| KeyDB | `redis` | ✅ as source (Redis 6.2 fork, serves `PSYNC`) | ✅ as source (RDB v9); ❌ as target from a 7.x source | ✅ | Same `INFO` handling as Redis < 7. Keys of KeyDB's own `CRON` type have no equivalent on the target. Untested. |
+| Dragonfly | `redis` (reports `redis_version 7.4.0`) | ❌ as source: Dragonfly implements `REPLICAOF`, `REPLCONF` and `ROLE` but not `PSYNC` or `SYNC`, so nothing can attach to it as a Redis-protocol replica. ✅ as target | Untested in either direction. Dragonfly's `RESTORE` rejects payloads newer than the RDB version it implements, and the analysis RDB check treats it as Redis, so it will not warn you. | ✅ | `command` mode is the dependable path out of Dragonfly. Untested. |
+
+### Managed providers
+
+Managed services are supported on either side as long as BetterDB can reach
+them (see the [provider guides](providers/)). Two constraints follow from the
+mechanisms above:
+
+- **`redis_shake_sync` needs a replica connection to the source.** Managed
+  providers commonly restrict `PSYNC` and `SYNC` (AWS does on every ElastiCache
+  and MemoryDB cache). A managed source that restricts them can only be
+  migrated with `redis_shake` (DUMP/RESTORE, same RDB version) or `command`
+  mode, and only where the provider guide lists that mode for that direction.
+  Both read a point-in-time copy per key, so quiesce writes on the source for a
+  consistent result. A managed source that permits the replication commands
+  can use `redis_shake_sync` as usual.
+- **`redis_shake` (DUMP/RESTORE) needs matching RDB versions.** Managed
+  providers do not always run the engine version their name suggests, so for
+  a managed target prefer `redis_shake_sync` or `command`.
+- **Execution and validation connect to the stored host and port directly.**
+  They do not go through the BetterDB Agent or an SSH tunnel; an agent
+  connection has no addressable endpoint and a tunnelled connection is reached
+  at its remote address. Those connection types support monitoring and the
+  analysis phase only. To execute a migration involving a VPC-only cache, run
+  BetterDB Monitor on a host that can reach both caches directly, for example
+  self-hosted on an EC2 instance in the same VPC.
 
 ## Compatibility checks
 
@@ -312,8 +406,8 @@ starting.
 **redis_shake_sync mode** is specifically designed for live sources. It replicates
 writes continuously via PSYNC, so keys created or modified after the initial RDB
 sync are captured. The intended workflow is to keep the source running normally,
-wait for the stage to show *Replicating · ready for cutover*, then apply a brief
-read-only window only at the moment of cutover.
+wait for the stage to show *Replicating*, then apply a brief read-only window
+only at the moment of cutover and click **Complete cutover**.
 
 ### RDB format compatibility
 

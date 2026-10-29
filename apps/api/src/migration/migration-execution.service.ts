@@ -4,6 +4,7 @@ import {
   BadRequestException,
   NotFoundException,
   ServiceUnavailableException,
+  ConflictException,
   type OnModuleDestroy,
   type OnModuleInit,
 } from '@nestjs/common';
@@ -13,7 +14,7 @@ import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
 import * as os from 'os';
 import Valkey from 'iovalkey';
-import type { MigrationExecutionRequest, MigrationExecutionResult, StartExecutionResponse, ExecutionMode } from '@betterdb/shared';
+import type { MigrationExecutionRequest, MigrationExecutionResult, StartExecutionResponse, ExecutionMode, CompleteExecutionResponse } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { MigrationService } from './migration.service';
 import { getBlockingIssues } from './analysis/compatibility-checker';
@@ -21,7 +22,24 @@ import type { ExecutionJob } from './execution/execution-job';
 import { findRedisShakeBinary } from './execution/redisshake-runner';
 import { buildScanReaderToml, buildSyncReaderToml } from './execution/toml-builder';
 import { parseLogLine, classifyRedisShakeFailure, stripAnsi } from './execution/log-parser';
+import {
+  applyStatusPoll,
+  buildLagSnapshot,
+  countSourceShards,
+  createLagState,
+  STATUS_POLL_MS,
+  STATUS_POLL_TIMEOUT_MS,
+} from './execution/replication-lag';
+import { fetchShakeStatus, reservePort, type PortReservation } from './execution/shake-status';
 import { runCommandMigration } from './execution/command-migration-worker';
+import {
+  CUTOVER_DRAIN_LIMIT_MS,
+  CUTOVER_KILL_GRACE_MS,
+  CUTOVER_STABLE_MS,
+  CUTOVER_POLL_MS,
+  CUTOVER_TIMEOUT_NOTICE,
+  forcedCutoverNotice,
+} from './execution/cutover';
 import { shouldExcludeFunctions, isRdbRestoreCompatible } from './fork-compat';
 import { probeSourceFunctionsClusterAware, parseNodeAddress } from './function-presence';
 import { assertLiveMigrationPair } from './live-connections';
@@ -53,6 +71,7 @@ interface RedisShakePreSpawn {
   targetAdapter: ReturnType<ConnectionRegistry['get']>;
   targetConfig: NonNullable<ReturnType<ConnectionRegistry['getConfig']>>;
   targetIsCluster: boolean;
+  statusPortReservation: PortReservation | null;
 }
 
 @Injectable()
@@ -116,6 +135,7 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
       (job) =>
         job.status === 'pending' ||
         job.status === 'running' ||
+        job.status === 'completing' ||
         this.runs.has(job.id) ||
         job.process !== null,
     );
@@ -123,8 +143,10 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
 
     this.logger.warn(`Stopping ${active.length} migration(s) because BetterDB is shutting down`);
     for (const job of active) {
-      if (job.status === 'pending' || job.status === 'running') {
+      if (job.status === 'pending' || job.status === 'running' || job.status === 'completing') {
+        this.clearCutoverTimer(job);
         job.status = 'cancelled';
+        job.terminating = 'cancel';
         job.error = job.error ?? SHUTDOWN_CANCEL_MESSAGE;
       }
       if (job.process) {
@@ -209,6 +231,10 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
     const targetClusterSection = (targetInfo as Record<string, Record<string, string>>).cluster ?? {};
     const targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
 
+    const expectedShards = mode === 'redis_shake_sync'
+      ? await countSourceShards(sourceAdapter, clusterEnabled)
+      : null;
+
     // 4. For redis_shake modes, locate the binary upfront
     let binaryPath: string | undefined;
     if (mode === 'redis_shake' || mode === 'redis_shake_sync') {
@@ -220,11 +246,15 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
       }
     }
 
+    const statusPortReservation = mode === 'redis_shake_sync' ? await reservePort() : null;
+    const statusPort = statusPortReservation?.port ?? null;
+
     // Re-check after the awaits above: shutdown may have started (and taken its
-    // snapshot of jobs and runs) while the cluster probes were outstanding. From
-    // here to trackRun() there is no await, so a job registered below is always
-    // visible to onModuleDestroy.
+    // snapshot of jobs and runs) while the cluster probes and port reservation
+    // were outstanding. From here to trackRun() there is no await on the success
+    // path, so a job registered below is always visible to onModuleDestroy.
     if (this.shuttingDown) {
+      await statusPortReservation?.release();
       throw new ServiceUnavailableException(SHUTDOWN_START_MESSAGE);
     }
 
@@ -243,12 +273,26 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
       notices: [],
       progress: null,
       syncStage: null,
+      replicationLag: mode === 'redis_shake_sync' ? createLagState() : null,
+      expectedShards,
+      statusPort,
+      statusPoller: null,
+      cutover: null,
+      cutoverTimer: null,
+      cutoverStableSince: null,
+      cutoverKilled: false,
+      terminating: null,
       process: null,
       tomlPath: null,
       pidPath: null,
     };
     // 6. Evict old jobs before inserting the new one
-    this.evictOldJobs();
+    try {
+      this.evictOldJobs();
+    } catch (err) {
+      await statusPortReservation?.release();
+      throw err;
+    }
 
     this.jobs.set(id, job);
 
@@ -265,23 +309,29 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
       const targetDbType = targetAdapter.getCapabilities().dbType;
       const excludeFunctions = shouldExcludeFunctions(sourceDbType, targetDbType);
 
-      const tomlContent = mode === 'redis_shake_sync'
-        ? buildSyncReaderToml(sourceConfig, targetConfig, {
-            sourceIsCluster: clusterEnabled,
-            syncReaderOptions: req.syncReaderOptions ?? {},
-            targetIsCluster,
-            rsOptions,
-            excludeFunctions,
-          })
-        : buildScanReaderToml(sourceConfig, targetConfig, {
-            sourceIsCluster: clusterEnabled,
-            targetIsCluster,
-            rsOptions,
-            excludeFunctions,
-          });
-      const tomlPath = join(os.tmpdir(), `${id}.toml`);
-      writeFileSync(tomlPath, tomlContent, { encoding: 'utf-8', mode: 0o600 });
-      job.tomlPath = tomlPath;
+      try {
+        const tomlContent = mode === 'redis_shake_sync'
+          ? buildSyncReaderToml(sourceConfig, targetConfig, {
+              sourceIsCluster: clusterEnabled,
+              syncReaderOptions: req.syncReaderOptions ?? {},
+              targetIsCluster,
+              rsOptions,
+              excludeFunctions,
+              statusPort: statusPort ?? undefined,
+            })
+          : buildScanReaderToml(sourceConfig, targetConfig, {
+              sourceIsCluster: clusterEnabled,
+              targetIsCluster,
+              rsOptions,
+              excludeFunctions,
+            });
+        const tomlPath = join(os.tmpdir(), `${id}.toml`);
+        writeFileSync(tomlPath, tomlContent, { encoding: 'utf-8', mode: 0o600 });
+        job.tomlPath = tomlPath;
+      } catch (err) {
+        await statusPortReservation?.release();
+        throw err;
+      }
 
       // The function-presence notice and the optional target pre-flush both run inside
       // runRedisShake, before it spawns the process (see RedisShakePreSpawn): the POST
@@ -299,6 +349,7 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
         targetAdapter,
         targetConfig,
         targetIsCluster,
+        statusPortReservation,
       };
 
       this.trackRun(id, this.runRedisShake(job, binaryPath!, preSpawn));
@@ -421,6 +472,9 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
         if ((job.status as string) === 'cancelled') return;
       }
 
+      await preSpawn.statusPortReservation?.release();
+      if ((job.status as string) === 'cancelled') return;
+
       const proc = spawn(binaryPath, [job.tomlPath!], {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -443,6 +497,8 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
         const message = err instanceof Error ? err.message : String(err);
         throw new Error(`Could not record the RedisShake PID file: ${message}`, { cause: err });
       }
+
+      this.startStatusPoller(job);
 
       const processLine = (rawLine: string) => {
         // Strip ANSI first: RedisShake colourises output, and the codes otherwise
@@ -504,7 +560,10 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
       // captures the code; 'close' flushes the buffers and resolves.
       const code = await new Promise<number>((resolve, reject) => {
         let exitCode = 1;
-        proc.on('exit', (c) => { exitCode = c ?? 1; });
+        proc.on('exit', (c) => {
+          exitCode = c ?? 1;
+          job.process = null;
+        });
         proc.on('close', () => {
           stdoutHandler.flush();
           stderrHandler.flush();
@@ -515,7 +574,14 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
 
       // Status may have been set to 'cancelled' by stopExecution() while the process was running
       const statusAfterExit = job.status as string;
-      if (code === 0) {
+      this.clearCutoverTimer(job);
+      if (job.terminating === 'cutover' && statusAfterExit !== 'cancelled') {
+        if (code === 0 && !job.cutoverKilled) {
+          this.finishCutover(job);
+        } else {
+          this.failCutover(job, code);
+        }
+      } else if (code === 0) {
         if (statusAfterExit !== 'cancelled') {
           job.status = 'completed';
           job.progress = 100;
@@ -525,15 +591,19 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
         job.status = 'failed';
         job.error = failure.message;
         job.failureCode = failure.code;
+        this.markCutoverFailed(job);
       }
     } catch (err: unknown) {
       if ((job.status as string) !== 'cancelled') {
         const message = err instanceof Error ? err.message : String(err);
+        this.markCutoverFailed(job);
         job.status = 'failed';
         job.error = message;
         this.logger.error(`Execution ${job.id} error: ${message}`);
       }
     } finally {
+      this.clearCutoverTimer(job);
+      await preSpawn.statusPortReservation?.release();
       if (!job.completedAt) {
         job.completedAt = Date.now();
       }
@@ -544,9 +614,33 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
           } catch { /* ignore cleanup errors */ }
         }
       }
+      this.stopStatusPoller(job);
       job.process = null;
       job.tomlPath = null;
       job.pidPath = null;
+    }
+  }
+
+  private startStatusPoller(job: ExecutionJob): void {
+    const port = job.statusPort;
+    const lag = job.replicationLag;
+    if (port === null || lag === null) return;
+    let inFlight = false;
+    job.statusPoller = setInterval(() => {
+      if (inFlight) return;
+      inFlight = true;
+      void fetchShakeStatus(port, STATUS_POLL_TIMEOUT_MS).then((status) => {
+        inFlight = false;
+        if (job.statusPoller === null) return;
+        applyStatusPoll(lag, status, Date.now());
+      });
+    }, STATUS_POLL_MS);
+  }
+
+  private stopStatusPoller(job: ExecutionJob): void {
+    if (job.statusPoller !== null) {
+      clearInterval(job.statusPoller);
+      job.statusPoller = null;
     }
   }
 
@@ -610,32 +704,175 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
       return true;
     }
 
-    job.status = 'cancelled';
-
-    // For redis_shake mode, kill the subprocess
-    if (job.process) {
-      const proc = job.process;
-      try {
-        proc.kill('SIGTERM');
-      } catch { /* process may already be dead */ }
-
-      setTimeout(() => {
-        if (job.process) {
-          try {
-            proc.kill('SIGKILL');
-          } catch { /* ignore */ }
-        }
-      }, 3000);
+    if (job.terminating === 'cutover') {
+      throw new ConflictException('The cutover is already finishing and can no longer be stopped');
     }
+
+    this.clearCutoverTimer(job);
+    job.status = 'cancelled';
+    job.terminating = 'cancel';
+    this.killProcess(job);
     // For command mode, the worker checks job.status === 'cancelled' between batches
 
     return true;
+  }
+
+  completeExecution(id: string, options: { force: boolean; timeoutSeconds: number }): CompleteExecutionResponse {
+    const job = this.jobs.get(id);
+    if (!job) {
+      throw new NotFoundException(`Execution job '${id}' not found`);
+    }
+    const canStart = job.status === 'running' && job.syncStage === 'aof_replicating';
+    if (job.mode !== 'redis_shake_sync' || (!canStart && job.status !== 'completing')) {
+      throw new ConflictException('Cutover is available only while a sync migration is replicating');
+    }
+    if (job.terminating !== 'cutover') {
+      const now = Date.now();
+      if (options.force) {
+        this.forceCutover(job, now);
+      } else if (job.status === 'running') {
+        this.beginCutoverWait(job, now, options.timeoutSeconds);
+      }
+    }
+    return { status: job.status, cutover: this.copyCutover(job.cutover)! };
+  }
+
+  private beginCutoverWait(job: ExecutionJob, now: number, timeoutSeconds: number): void {
+    this.clearCutoverTimer(job);
+    job.status = 'completing';
+    job.cutover = { requestedAt: now, deadlineAt: now + timeoutSeconds * 1000, outcome: 'waiting' };
+    job.cutoverStableSince = null;
+    job.cutoverKilled = false;
+    this.evaluateCutover(job, now);
+    if (job.terminating !== 'cutover') {
+      job.cutoverTimer = setInterval(() => this.tickCutover(job), CUTOVER_POLL_MS);
+    }
+  }
+
+  private tickCutover(job: ExecutionJob): void {
+    if (job.status !== 'completing' || !job.cutover) {
+      this.clearCutoverTimer(job);
+      return;
+    }
+    const now = Date.now();
+    this.evaluateCutover(job, now);
+    if (job.terminating === 'cutover' || now < job.cutover.deadlineAt) {
+      return;
+    }
+    this.clearCutoverTimer(job);
+    job.status = 'running';
+    job.cutover.outcome = 'timed_out';
+    job.notices.push(CUTOVER_TIMEOUT_NOTICE);
+  }
+
+  private evaluateCutover(job: ExecutionJob, now: number): void {
+    const { fullySynced } = buildLagSnapshot(job.replicationLag, now);
+    if (!fullySynced) {
+      job.cutoverStableSince = null;
+      return;
+    }
+    if (job.cutoverStableSince === null) {
+      job.cutoverStableSince = now;
+    }
+    if (now - job.cutoverStableSince >= CUTOVER_STABLE_MS) {
+      this.clearCutoverTimer(job);
+      job.terminating = 'cutover';
+      if (job.cutover) {
+        job.cutover.outcome = 'draining';
+      }
+      this.killForCutover(job);
+    }
+  }
+
+  private forceCutover(job: ExecutionJob, now: number): void {
+    this.clearCutoverTimer(job);
+    const inProgress = job.status === 'completing' ? job.cutover : null;
+    const { replicationLag, shards } = buildLagSnapshot(job.replicationLag, now);
+    job.cutover = {
+      requestedAt: inProgress?.requestedAt ?? now,
+      deadlineAt: inProgress?.deadlineAt ?? now,
+      outcome: 'forced',
+      forcedLag: replicationLag ?? [],
+    };
+    job.notices.push(forcedCutoverNotice(replicationLag, shards ?? job.expectedShards));
+    job.status = 'completing';
+    job.terminating = 'cutover';
+    job.cutoverKilled = false;
+    this.killForCutover(job);
+  }
+
+  private finishCutover(job: ExecutionJob): void {
+    job.status = 'completed';
+    job.progress = 100;
+    job.cutoverAt = Date.now();
+    if (job.cutover && job.cutover.outcome !== 'forced') {
+      job.cutover.outcome = 'completed';
+    }
+  }
+
+  private failCutover(job: ExecutionJob, code: number): void {
+    if (job.cutoverKilled) {
+      job.error = `RedisShake did not finish writing to the target within ${CUTOVER_DRAIN_LIMIT_MS / 1000}s of the cutover stop and was killed. The target may be missing writes; validate it before switching your application.`;
+      job.failureCode = 'UNKNOWN';
+    } else {
+      const failure = classifyRedisShakeFailure(code, job.logs);
+      job.error = failure.message;
+      job.failureCode = failure.code;
+    }
+    job.status = 'failed';
+    this.markCutoverFailed(job);
+  }
+
+  private markCutoverFailed(job: ExecutionJob): void {
+    if (job.cutover && job.cutover.outcome !== 'timed_out') {
+      job.cutover.outcome = 'failed';
+    }
+  }
+
+  private killForCutover(job: ExecutionJob): void {
+    this.killProcess(job, CUTOVER_DRAIN_LIMIT_MS, () => {
+      job.cutoverKilled = true;
+    });
+  }
+
+  private clearCutoverTimer(job: ExecutionJob): void {
+    if (job.cutoverTimer) {
+      clearInterval(job.cutoverTimer);
+      job.cutoverTimer = null;
+    }
+  }
+
+  private killProcess(job: ExecutionJob, graceMs = CUTOVER_KILL_GRACE_MS, beforeKill?: () => void): void {
+    if (!job.process) {
+      return;
+    }
+    const proc = job.process;
+    try {
+      proc.kill('SIGTERM');
+    } catch { /* process may already be dead */ }
+
+    setTimeout(() => {
+      if (job.process) {
+        beforeKill?.();
+        try {
+          proc.kill('SIGKILL');
+        } catch { /* ignore */ }
+      }
+    }, graceMs);
+  }
+
+  private copyCutover(cutover: ExecutionJob['cutover']): ExecutionJob['cutover'] {
+    if (!cutover) {
+      return null;
+    }
+    return { ...cutover, ...(cutover.forcedLag ? { forcedLag: cutover.forcedLag.map((entry) => ({ ...entry })) } : {}) };
   }
 
   getExecution(id: string): MigrationExecutionResult | undefined {
     const job = this.jobs.get(id);
     if (!job) return undefined;
 
+    const lag = buildLagSnapshot(job.replicationLag, Date.now());
     return {
       id: job.id,
       status: job.status,
@@ -657,6 +894,11 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
       notices: [...job.notices],
       progress: job.progress,
       syncStage: job.syncStage,
+      replicationLag: lag.replicationLag,
+      expectedShards: lag.shards ?? job.expectedShards,
+      fullySynced: lag.fullySynced && (job.status === 'running' || job.status === 'completing'),
+      cutover: this.copyCutover(job.cutover),
+      cutoverAt: job.cutoverAt,
     };
   }
 

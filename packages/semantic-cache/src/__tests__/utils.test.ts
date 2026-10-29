@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   sha256,
   encodeFloat32,
+  escapeGlobPattern,
   parseFtSearchResponse,
 } from '../utils';
 
@@ -14,6 +15,18 @@ describe('sha256', () => {
     expect(sha256('hello')).toBe(
       '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
     );
+  });
+});
+
+describe('escapeGlobPattern', () => {
+  it.each([
+    ['plain', 'plain'],
+    ['app?', 'app\\?'],
+    ['a*', 'a\\*'],
+    ['a[b]', 'a\\[b\\]'],
+    ['a\\b', 'a\\\\b'],
+  ])('escapes %j as %j', (input, expected) => {
+    expect(escapeGlobPattern(input)).toBe(expected);
   });
 });
 

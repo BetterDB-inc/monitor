@@ -9,7 +9,7 @@ import { readFileSync } from 'fs';
 import fastifyStatic from '@fastify/static';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { validateEnv } from './config/env.schema';
-import { resolveTrustProxy } from './config/trust-proxy';
+import { fastifyAdapterOptions } from './config/fastify-options';
 import { categorizeError } from './common/utils/error-categorizer';
 import { CliGateway } from './cli/cli.gateway';
 import { TailGateway } from './monitor/tail.gateway';
@@ -31,7 +31,7 @@ async function bootstrap(): Promise<void> {
 
   const isProduction = process.env.NODE_ENV === 'production';
 
-  const fastifyAdapter = new FastifyAdapter({ trustProxy: resolveTrustProxy(process.env) });
+  const fastifyAdapter = new FastifyAdapter(fastifyAdapterOptions(process.env));
 
   // Compute publicPath once to avoid divergence between SPA fallback and static file serving
   const publicPath = isProduction

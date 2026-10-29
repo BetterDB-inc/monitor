@@ -278,6 +278,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private keyspaceMissesTotal: Gauge;
   private evictedKeysTotal: Gauge;
   private expiredKeysTotal: Gauge;
+  private rejectedConnectionsTotal: Gauge;
+  private syncFullTotal: Gauge;
+  private syncPartialOkTotal: Gauge;
+  private syncPartialErrTotal: Gauge;
+  private netInputBytesTotal: Gauge;
+  private netOutputBytesTotal: Gauge;
+  private errorRepliesTotal: Gauge;
   private pubsubChannels: Gauge;
   private pubsubPatterns: Gauge;
 
@@ -830,6 +837,34 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.keyspaceMissesTotal = this.createGauge('keyspace_misses_total', 'Total keyspace misses');
     this.evictedKeysTotal = this.createGauge('evicted_keys_total', 'Total evicted keys');
     this.expiredKeysTotal = this.createGauge('expired_keys_total', 'Total expired keys');
+    this.rejectedConnectionsTotal = this.createGauge(
+      'rejected_connections_total',
+      'Connections rejected because maxclients was reached',
+    );
+    this.syncFullTotal = this.createGauge(
+      'sync_full_total',
+      'Full resynchronizations this node has served to replicas',
+    );
+    this.syncPartialOkTotal = this.createGauge(
+      'sync_partial_ok_total',
+      'Partial resynchronization requests this node accepted',
+    );
+    this.syncPartialErrTotal = this.createGauge(
+      'sync_partial_err_total',
+      'Partial resynchronization requests this node denied (each forces a full sync)',
+    );
+    this.netInputBytesTotal = this.createGauge(
+      'net_input_bytes_total',
+      'Total bytes read from the network',
+    );
+    this.netOutputBytesTotal = this.createGauge(
+      'net_output_bytes_total',
+      'Total bytes written to the network',
+    );
+    this.errorRepliesTotal = this.createGauge(
+      'error_replies_total',
+      'Total error replies sent to clients (Redis 6.2+ / Valkey)',
+    );
     this.pubsubChannels = this.createGauge('pubsub_channels', 'Number of pub/sub channels');
     this.pubsubPatterns = this.createGauge('pubsub_patterns', 'Number of pub/sub patterns');
 
@@ -1982,8 +2017,22 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     set(this.keyspaceMissesTotal, stats.keyspace_misses);
     set(this.evictedKeysTotal, stats.evicted_keys);
     set(this.expiredKeysTotal, stats.expired_keys);
+    set(this.rejectedConnectionsTotal, stats.rejected_connections);
+    set(this.syncFullTotal, stats.sync_full);
+    set(this.syncPartialOkTotal, stats.sync_partial_ok);
+    set(this.syncPartialErrTotal, stats.sync_partial_err);
+    set(this.netInputBytesTotal, stats.total_net_input_bytes);
+    set(this.netOutputBytesTotal, stats.total_net_output_bytes);
     set(this.pubsubChannels, stats.pubsub_channels);
     set(this.pubsubPatterns, stats.pubsub_patterns);
+    // total_error_replies only exists on Redis 6.2+ and Valkey. An older server
+    // omits it, and reporting 0 there would read as "no errors" rather than
+    // "not reported", so it is removed when absent even for live connections.
+    this.setOrRemove(
+      this.errorRepliesTotal,
+      connLabel,
+      this.readInfoNumber(stats.total_error_replies, false),
+    );
   }
 
   private updateCpuMetrics(info: InfoResponse, connLabel: string, absentAsZero: boolean): void {
