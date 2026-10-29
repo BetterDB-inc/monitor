@@ -73,6 +73,7 @@ function createMockRegistry() {
     call: jest.fn().mockImplementation(async (...args: string[]) => (args[0] === 'FUNCTION' ? [] : ['default'])),
     quit: jest.fn().mockResolvedValue(undefined),
     ping: jest.fn().mockResolvedValue('PONG'),
+    info: jest.fn().mockResolvedValue('# Stats\r\npubsub_channels:0\r\npubsub_patterns:0\r\npubsubshard_channels:0\r\n'),
   };
   const mockAdapter = {
     getCapabilities: jest.fn().mockReturnValue({
@@ -386,7 +387,7 @@ describe('MigrationService ElastiCache Serverless readiness', () => {
     const job = await waitForTerminal(service, id);
 
     expect(job.status).toBe('completed');
-    expect(serverlessCategory(job).map(i => i.title)).toEqual(['Standalone source']);
+    expect(serverlessCategory(job).map(i => i.title)).toEqual(['Standalone source', 'Some readiness checks could not run']);
   });
 
   it('reports PSYNC missing when COMMAND INFO returns nil for it', async () => {

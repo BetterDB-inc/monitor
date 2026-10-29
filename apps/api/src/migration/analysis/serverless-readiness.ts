@@ -105,6 +105,7 @@ export interface ServerlessReadinessFacts {
   cachedScripts: number | null;
   pubsub: { channels: number; patterns: number; shardChannels: number } | null;
   commandEntries: ServerlessCommandEntry[];
+  unreadProbeNodes: number;
 }
 
 const INTERNAL_CLIENT_PATTERN = /^betterdb-/i;
@@ -129,13 +130,15 @@ function readNumber(section: Record<string, string> | null, field: string): numb
 
 export function summarizeServerlessProbes(
   probes: ServerlessNodeProbe[],
-): Pick<ServerlessReadinessFacts, 'missingReplicationCommands' | 'cachedScripts' | 'pubsub'> {
+): Pick<ServerlessReadinessFacts, 'missingReplicationCommands' | 'cachedScripts' | 'pubsub' | 'unreadProbeNodes'> {
   let missingReplicationCommands: string[] | null = null;
+  let unreadProbeNodes = 0;
   let cachedScripts: number | null = null;
   const pubsubTotals = { channels: 0, patterns: 0, shardChannels: 0 };
   let pubsubRead = false;
 
   for (const { commandInfo, memory, stats } of probes) {
+    if (!Array.isArray(commandInfo) || memory === null || stats === null) unreadProbeNodes++;
     if (Array.isArray(commandInfo)) {
       const missing = ['PSYNC', 'REPLCONF'].filter((_, i) => !commandInfo[i]);
       missingReplicationCommands = Array.from(new Set([...(missingReplicationCommands ?? []), ...missing]));
@@ -153,7 +156,7 @@ export function summarizeServerlessProbes(
     }
   }
 
-  return { missingReplicationCommands, cachedScripts, pubsub: pubsubRead ? pubsubTotals : null };
+  return { missingReplicationCommands, cachedScripts, pubsub: pubsubRead ? pubsubTotals : null, unreadProbeNodes };
 }
 
 export function clusterMastersWithOwnSlotMoves(
@@ -420,6 +423,18 @@ export function checkServerlessReadiness(facts: ServerlessReadinessFacts): Incom
       detail:
         `The command log shows ${restricted.map(r => `${r.command} (${r.count})`).join(', ')}. ElastiCache Serverless rejects these ` +
         'commands from the moment the application is redirected to it.',
+    });
+  }
+
+  if (facts.unreadProbeNodes > 0) {
+    const nodes = facts.unreadProbeNodes;
+    issues.push({
+      severity: 'warning',
+      category: CATEGORY,
+      title: 'Some readiness checks could not run',
+      detail:
+        `COMMAND INFO, INFO stats or INFO memory could not be read on ${nodes} node${nodes === 1 ? '' : 's'}, ` +
+        'so replication command support, cached scripts and pub/sub subscribers may be under-reported. Confirm them on the source before migrating.',
     });
   }
 

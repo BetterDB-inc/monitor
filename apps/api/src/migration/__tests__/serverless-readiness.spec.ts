@@ -33,6 +33,7 @@ function facts(overrides: Partial<ServerlessReadinessFacts> = {}): ServerlessRea
     cachedScripts: 0,
     pubsub: { channels: 0, patterns: 0, shardChannels: 0 },
     commandEntries: [],
+    unreadProbeNodes: 0,
     ...overrides,
   };
 }
@@ -473,6 +474,25 @@ describe('countSlotOwningMasters', () => {
   });
 });
 
+describe('unread readiness checks', () => {
+  it('stays quiet when every probe was read', () => {
+    expect(titles(facts())).not.toContain('Some readiness checks could not run');
+  });
+
+  it('warns when probe reads failed on some nodes', () => {
+    const issue = checkServerlessReadiness(facts({ unreadProbeNodes: 2 }))
+      .find(i => i.title === 'Some readiness checks could not run');
+    expect(issue?.severity).toBe('warning');
+    expect(issue?.detail).toContain('2 nodes');
+  });
+
+  it('uses the singular for one node', () => {
+    const issue = checkServerlessReadiness(facts({ unreadProbeNodes: 1 }))
+      .find(i => i.title === 'Some readiness checks could not run');
+    expect(issue?.detail).toContain('1 node,');
+  });
+});
+
 describe('summarizeServerlessProbes', () => {
   it('takes the largest per-node script cache instead of the sum', () => {
     const summary = summarizeServerlessProbes([
@@ -504,7 +524,27 @@ describe('summarizeServerlessProbes', () => {
       missingReplicationCommands: null,
       cachedScripts: null,
       pubsub: null,
+      unreadProbeNodes: 1,
     });
+  });
+
+  it('counts nodes where any probe read failed', () => {
+    const ok = { commandInfo: [['psync'], ['replconf']], memory: { used_memory: '1' }, stats: { pubsub_channels: '0' } };
+    const summary = summarizeServerlessProbes([
+      ok,
+      { ...ok, commandInfo: undefined },
+      { ...ok, stats: null },
+      { ...ok, memory: null },
+    ]);
+    expect(summary.unreadProbeNodes).toBe(3);
+  });
+
+  it('never reads a failed COMMAND INFO as missing replication commands', () => {
+    const summary = summarizeServerlessProbes([
+      { commandInfo: undefined, memory: null, stats: null },
+      { commandInfo: [['psync'], ['replconf']], memory: null, stats: null },
+    ]);
+    expect(summary.missingReplicationCommands).toEqual([]);
   });
 });
 
