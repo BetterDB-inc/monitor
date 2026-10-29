@@ -26,18 +26,20 @@ function unlimitedHeadline(change: number, plateauBytes: number | null, horizonL
   return `No maxmemory limit is set. Memory stays flat over the next ${horizonLabel}.`;
 }
 
+function limitedHeadline(sizing: Projection, maxmemory: number): string {
+  if (sizing.daysToMaxmemory === 0) return 'Already at maxmemory.';
+  if (sizing.daysToMaxmemory !== null) return `Reaches maxmemory in ~${sizing.daysToMaxmemory} days.`;
+  const rangeDay = sizing.points.find((point) => point.high >= maxmemory)?.day;
+  if (rangeDay === undefined) return 'Stays under maxmemory for at least 6 months.';
+  return `Stays under maxmemory for at least 6 months at the projected rate, but the upper end of the range reaches it in ~${rangeDay} days.`;
+}
+
 export function OutcomePanel({ projection, sizingProjection, maxmemory, policy, plateauBytes, horizonLabel }: Props) {
   const [provider, setProvider] = useState<CloudProvider>('aws');
   const peak = Math.max(...sizingProjection.points.map((point) => point.high));
   const change = projection.points[projection.points.length - 1].bytes - projection.points[0].bytes;
-  const headline =
-    maxmemory === null
-      ? unlimitedHeadline(change, plateauBytes, horizonLabel)
-      : sizingProjection.daysToMaxmemory === null
-        ? 'Stays under maxmemory for at least 6 months.'
-        : sizingProjection.daysToMaxmemory === 0
-          ? 'Already at maxmemory.'
-          : `Reaches maxmemory in ~${sizingProjection.daysToMaxmemory} days.`;
+  const hasRange = sizingProjection.points.some((point) => point.high > point.bytes);
+  const headline = maxmemory === null ? unlimitedHeadline(change, plateauBytes, horizonLabel) : limitedHeadline(sizingProjection, maxmemory);
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -54,7 +56,11 @@ export function OutcomePanel({ projection, sizingProjection, maxmemory, policy, 
           </p>
         )}
         <div className="space-y-2">
-          <p className="text-sm text-muted-foreground">Smallest nodes that keep the 6-month projection&apos;s upper bound ({formatBytes(peak)}) under 80% of usable memory:</p>
+          <p className="text-sm text-muted-foreground">
+            {hasRange
+              ? `Smallest nodes that keep the 6-month projection's highest point, at the upper end of its range (${formatBytes(peak)}), under 80% of usable memory:`
+              : `Smallest nodes that keep the 6-month projection's highest point (${formatBytes(peak)}) under 80% of usable memory:`}
+          </p>
           <Tabs value={provider} onValueChange={(value) => setProvider(value as CloudProvider)}>
             <TabsList>
               {PROVIDERS.map((entry) => (
