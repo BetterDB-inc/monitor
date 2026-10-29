@@ -308,6 +308,12 @@ describe('findRestrictedCommands', () => {
     ])).toEqual([{ command: 'KEYS', count: 1 }]);
   });
 
+  it('ignores the analysis MEMORY USAGE calls issued on the monitor client', () => {
+    expect(findRestrictedCommands([
+      { command: ['MEMORY', 'USAGE', 'user:1', 'SAMPLES', '0'], clientName: 'BetterDB-Monitor' },
+    ])).toEqual([]);
+  });
+
   it.each([
     'BetterDB-Monitor',
     'betterdb-monitor-keyscan',
