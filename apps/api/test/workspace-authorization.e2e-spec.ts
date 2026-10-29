@@ -18,7 +18,6 @@ const OWNER = { email: 'owner@example.com', password: 'correct horse battery', n
 const MEMBER_EMAIL = 'member@example.com';
 const MEMBER_PASSWORD = 'member horse battery';
 const TRUSTED_ORIGIN = 'http://localhost:5173';
-const LOCAL_CREDENTIAL_ISSUER = 'local:credential';
 
 const TOUCHED = [
   'WORKSPACE_DISABLED',
@@ -164,7 +163,6 @@ describe('Workspace authorization (E2E)', () => {
     await context.internalAdapter.linkAccount({
       userId: member.id,
       providerId: 'credential',
-      issuer: LOCAL_CREDENTIAL_ISSUER,
       accountId: member.id,
       password: hashedPassword,
     });

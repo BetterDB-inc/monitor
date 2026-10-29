@@ -8,13 +8,8 @@ export const MEMBER_CHANGED_MESSAGE =
   'This member changed while the request was running. Reload and try again.';
 export const ONLY_ADMINS_CAN_BECOME_OWNER_MESSAGE = 'Only admins can become the owner';
 
-const LOCAL_CREDENTIAL_ISSUER = 'local:credential';
 const CREDENTIAL_PROVIDER = 'credential';
 export const LIST_LIMIT = 1000;
-
-function brokerAccountIssuer(provider: BrokerProvider): string {
-  return `local:oauth:${provider}`;
-}
 
 export interface MemberRecord {
   id: string;
@@ -248,7 +243,6 @@ export class MemberService {
       await context.internalAdapter.linkAccount({
         userId: user.id,
         providerId: CREDENTIAL_PROVIDER,
-        issuer: LOCAL_CREDENTIAL_ISSUER,
         accountId: user.id,
         password: hashedPassword,
       });
@@ -289,7 +283,6 @@ export class MemberService {
       await context.internalAdapter.linkAccount({
         userId: user.id,
         providerId: input.provider,
-        issuer: brokerAccountIssuer(input.provider),
         accountId: input.providerAccountId,
       });
     } catch (error) {
@@ -315,7 +308,6 @@ export class MemberService {
     await context.internalAdapter.linkAccount({
       userId,
       providerId: provider,
-      issuer: brokerAccountIssuer(provider),
       accountId: providerAccountId,
     });
   }
