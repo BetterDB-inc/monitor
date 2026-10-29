@@ -68,7 +68,7 @@ export function SessionDetailPanel({ detail, onExport, exporting }: Props) {
         )}
         <section>
           <h3 className="mb-2 text-sm font-medium">Timeline</h3>
-          <MessageTimeline messages={detail.messages} />
+          <MessageTimeline key={detail.sessionId} messages={detail.messages} />
         </section>
         <section className="space-y-2">
           <h3 className="text-sm font-medium">Keys</h3>
