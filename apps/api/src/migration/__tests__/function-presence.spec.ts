@@ -19,10 +19,10 @@ jest.mock('iovalkey', () => {
   });
 });
 
-function makeAdapter(nodes: Array<{ flags: string[]; address?: string }>, seedReply: unknown[] = []) {
+function makeAdapter(nodes: Array<{ flags: string[]; address?: string; slots?: number[][] }>, seedReply: unknown[] = []) {
   return {
     getClient: jest.fn().mockReturnValue({ call: jest.fn().mockResolvedValue(seedReply) }),
-    getClusterNodes: jest.fn().mockResolvedValue(nodes),
+    getClusterNodes: jest.fn().mockResolvedValue(nodes.map((n) => ({ slots: [], ...n }))),
   };
 }
 
@@ -82,6 +82,16 @@ describe('probeSourceFunctionsClusterAware', () => {
       return client;
     });
     expect(await probeSourceFunctionsClusterAware(adapter, {}, true)).toBe('unknown');
+  });
+
+  it('applies the shared scannable-master rule before probing', async () => {
+    const nodes = [
+      { flags: ['master'], address: '10.0.0.1:6379@16379', slots: [[0, 100]] },
+      { flags: ['master', 'fail'], address: '10.0.0.2:6379@16379' },
+      { flags: ['master', 'fail'], address: '10.0.0.3:6379@16379', slots: [[101, 200]] },
+    ];
+    expect(await probeSourceFunctionsClusterAware(makeAdapter(nodes), {}, true)).toBe('absent');
+    expect(constructed.map((c) => c.host)).toEqual(['10.0.0.1', '10.0.0.3']);
   });
 
   it('falls back to the seed when masters cannot be enumerated', async () => {

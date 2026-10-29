@@ -9,6 +9,7 @@ import {
 /** The bits of a cluster node this module needs (subset of ClusterNode). */
 interface ClusterNodeLike {
   flags: string[];
+  slots: number[][];
   address?: string; // host:port@bus
 }
 
@@ -63,7 +64,7 @@ export async function probeSourceFunctionsClusterAware(
   let masters: ClusterNodeLike[];
   try {
     const nodes = await adapter.getClusterNodes();
-    masters = nodes.filter((n) => n.flags.includes('master'));
+    masters = nodes.filter((n) => n.flags.includes('master') && isScannableMaster(n));
   } catch {
     return 'unknown';
   }
