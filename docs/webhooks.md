@@ -406,6 +406,9 @@ Notes:
 - A single finding that is both critical and KEV-exploited emits both
   `cve.critical_detected` (Pro) and `cve.kev_detected` (Enterprise) plus one
   OTel event each, so subscribe accordingly.
+- Findings with confidence `broad` (matched only through NVD data for a branch
+  the vendor advisory doesn't list, typically an end-of-life branch) are shown
+  in the UI but don't fire these events unless `CVE_ALERT_ON_BROAD=true`.
 
 ```json
 {
@@ -414,7 +417,7 @@ Notes:
   "fingerprint": "a1b2c3d4e5f60718",
   "datasetVersion": "2026-09-15T00:00:00Z",
   "topFindings": [
-    { "cveId": "CVE-2026-12345", "severity": "critical", "knownExploited": true, "fixedIn": "8.0.10" }
+    { "cveId": "CVE-2026-12345", "severity": "critical", "knownExploited": true, "fixedIn": "8.0.10", "confidence": "exact" }
   ],
   "drift": false,
   "partial": false,
@@ -496,7 +499,7 @@ previous stored scan, even when severity is below critical.
   "fingerprint": "a1b2c3d4e5f60718",
   "datasetVersion": "2026-09-15T00:00:00Z",
   "topFindings": [
-    { "cveId": "CVE-2026-54321", "severity": "high", "knownExploited": true, "fixedIn": "8.0.10" }
+    { "cveId": "CVE-2026-54321", "severity": "high", "knownExploited": true, "fixedIn": "8.0.10", "confidence": "exact" }
   ],
   "drift": false,
   "partial": false,

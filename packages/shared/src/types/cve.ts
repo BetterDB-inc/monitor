@@ -18,6 +18,21 @@ export interface BranchRange {
   vulnerableBelow?: string;
   vulnerableFrom?: string;
   patchedAt?: string;
+  /**
+   * True for an NVD '*' range kept by the normalizer even though GHSA pins
+   * branches for this advisory. It only applies to a version whose branch has
+   * no on-branch range from any source. A finding matched only through it
+   * reports confidence 'broad'.
+   */
+  fallback?: true;
+}
+
+/** Confidence for a finding: 'broad' when matched only via a fallback range. */
+export function resolveFindingConfidence(
+  matchedViaFallback: boolean | undefined,
+  advisoryConfidence: CveConfidence,
+): CveConfidence {
+  return matchedViaFallback ? 'broad' : advisoryConfidence;
 }
 
 export interface SourceProvenance {
@@ -53,6 +68,8 @@ export interface CveFinding {
   matchedVersion: string;
   moduleName?: string;
   fixedIn?: string;
+  /** 'broad' when matched only through a fallback range; else the advisory's confidence. */
+  confidence?: CveConfidence;
 }
 
 export interface ScannedNode {
@@ -147,4 +164,6 @@ export interface CveWebhookFindingSummary {
   severity: CveSeverity;
   knownExploited: boolean;
   fixedIn?: string;
+  /** 'broad' when the finding matched only through a fallback range. */
+  confidence?: CveConfidence;
 }
