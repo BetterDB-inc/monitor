@@ -101,6 +101,7 @@ describe('CacheSimulator page', () => {
     useQuery.mockReturnValue({ data: { ...ready, estimate: { ...ready.estimate, likelyMissedLargeKeys: true } } });
     render(<CacheSimulator />);
     expect(screen.getByText(/Some large keys were likely missed; the estimate may be low/)).toBeInTheDocument();
+    expect(screen.getByText(/dataset memory reported by INFO plus 24 bytes per key/)).toBeInTheDocument();
   });
 
   it('does not warn about missed keys when the sample explains the memory', () => {

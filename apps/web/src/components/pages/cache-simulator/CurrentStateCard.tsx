@@ -57,7 +57,7 @@ export function CurrentStateCard({ snapshot }: { snapshot: CacheSimulatorSnapsho
             </p>
             {estimate.likelyMissedLargeKeys && (
               <p className="text-sm text-amber-700 dark:text-amber-400">
-                Some large keys were likely missed; the estimate may be low. The range reaches up to the dataset memory reported by INFO.
+                Some large keys were likely missed; the estimate may be low. The range reaches up to the dataset memory reported by INFO plus 24 bytes per key for its entry in the keyspace index.
               </p>
             )}
             <table className="w-full text-sm">
