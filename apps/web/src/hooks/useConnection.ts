@@ -85,6 +85,7 @@ export function useConnectionState(): ConnectionContextValue {
   const [autoRegisterNodesDefault, setAutoRegisterNodesDefault] = useState(false);
   const [autoRegisterSentinelNodesDefault, setAutoRegisterSentinelNodesDefault] = useState(false);
   const initialLoadDone = useRef(false);
+  const initialPickDone = useRef(false);
   const [requestedId] = useState(urlConnectionId);
   const selected = useRef<Connection | null>(null);
   selected.current = currentConnection;
@@ -119,7 +120,7 @@ export function useConnectionState(): ConnectionContextValue {
         }
       } else {
         const selectable = data.filter((c) => !isUnavailableMember(c));
-        const preferred = initialLoadDone.current
+        const preferred = initialPickDone.current
           ? undefined
           : [requestedId, storedConnectionId()]
               .map((id) => selectable.find((c) => c.id === id))
@@ -133,6 +134,7 @@ export function useConnectionState(): ConnectionContextValue {
         setCurrentConnection(defaultConnection);
         setCurrentConnectionId(defaultConnection?.id ?? null);
       }
+      initialPickDone.current = true;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch connections');
       console.error('Failed to fetch connections:', err);

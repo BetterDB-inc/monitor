@@ -82,6 +82,23 @@ describe('useConnectionState', () => {
     expect(result.current.currentConnection?.id).toBe('conn-2');
   });
 
+  it('still opens the URL connection when the first load fails', async () => {
+    window.history.replaceState(null, '', '/?connection=conn-2');
+    mocks.fetchApi.mockRejectedValueOnce(new Error('offline'));
+    const { result } = renderHook(() => useConnectionState());
+    await waitFor(() => {
+      expect(result.current.error).toBe('offline');
+    });
+
+    window.history.replaceState(null, '', '/');
+    mocks.fetchApi.mockResolvedValueOnce(connectionsResponse(['conn-1', 'conn-2']));
+    await act(async () => {
+      await result.current.refreshConnections();
+    });
+
+    expect(result.current.currentConnection?.id).toBe('conn-2');
+  });
+
   it('prefers the remembered connection over the server default', async () => {
     window.localStorage.setItem(CONNECTION_STORAGE_KEY, 'conn-2');
     mocks.fetchApi.mockResolvedValueOnce({ connections: [connection('conn-1'), connection('conn-2')], currentId: 'conn-1' });
