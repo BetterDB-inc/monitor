@@ -87,6 +87,7 @@ export class FakeValkey {
   movedKeys = new Set<string>();
   failTypeKeys = new Set<string>();
   failPipelinesWith = new Set<string>();
+  failExactMemory = false;
   failHstrlen = false;
   lfu = false;
   noValues = true;
@@ -367,6 +368,10 @@ export class FakeValkey {
       if (failing) {
         this.failPipelinesWith.delete(failing.name);
         throw new Error(`ERR pipeline with ${failing.name} failed`);
+      }
+      if (this.failExactMemory && ops.some(({ name, args }) => name === 'memory' && args.includes('SAMPLES'))) {
+        this.failExactMemory = false;
+        throw new Error('ERR exact memory pipeline failed');
       }
       return ops.map(({ name, args }) => {
         try {

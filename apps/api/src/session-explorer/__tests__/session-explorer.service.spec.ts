@@ -258,6 +258,13 @@ describe('SessionExplorerService.getSession', () => {
     );
   });
 
+  it('answers unavailable when no key could be read and none vanished', async () => {
+    read.mockResolvedValue(readOf({ keys: [], erroredKeys: 1 }));
+    await expect(service.getSession('conn-1', 'ns-1', 'lc:1')).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
+
   it('answers unavailable when no keys were found and a primary failed', async () => {
     keysFor.mockResolvedValue({ keys: [], truncated: false, failed: failedRoutes(1) });
     await expect(service.getSession('conn-1', 'ns-1', 'lc:1')).rejects.toBeInstanceOf(

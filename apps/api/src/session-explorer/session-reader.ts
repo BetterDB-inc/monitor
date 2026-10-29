@@ -220,7 +220,7 @@ async function measure(client: Valkey, found: Located[]): Promise<void> {
     for (const at of collections) {
       if (isCollection(at.type)) lengths[LENGTH_COMMANDS[at.type]](at.key);
     }
-    const counted = (await lengths.exec()) ?? [];
+    const counted = (await lengths.exec().catch(() => null)) ?? [];
     collections.forEach((at, i) => {
       at.length = numberOf(counted[i] as PipelineResult);
     });
@@ -235,7 +235,8 @@ async function measure(client: Valkey, found: Located[]): Promise<void> {
   if (exactly.length === 0) return;
   const exact = client.pipeline();
   for (const at of exactly) exact.memory('USAGE', at.key, 'SAMPLES', 0);
-  const measured = (await exact.exec()) ?? [];
+  const measured = await exact.exec().catch(() => null);
+  if (!measured) return;
   exactly.forEach((at, i) => {
     at.memory = numberOf(measured[i] as PipelineResult);
     at.exact = at.memory !== null;
@@ -284,13 +285,7 @@ async function locate(
         exact: false,
       });
     });
-    await measure(client, found).catch(() => {
-      for (const at of found) {
-        at.memory = null;
-        at.length = null;
-        at.exact = false;
-      }
-    });
+    await measure(client, found);
     located.push(...found);
   }
   return { located, missing, errored, moved };

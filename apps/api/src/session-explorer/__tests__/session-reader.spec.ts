@@ -770,7 +770,25 @@ describe('readSessionKeys', () => {
 
     expect(result.keys.map((k) => k.key)).toEqual(['s']);
     expect(result.failed.size).toBe(0);
-    expect(result.totals).toMatchObject({ memoryBytes: 0, unmeasuredKeys: 2, ttlMs: 7000 });
+    expect(result).toMatchObject({ missingKeys: 0, erroredKeys: 1 });
+    expect(result.totals).toMatchObject({ memoryBytes: 130, unmeasuredKeys: 0, ttlMs: 7000 });
+  });
+
+  it('keeps the sampled memory and lengths when the exact memory pipeline fails', async () => {
+    const client = new FakeValkey(
+      storeOf({
+        l: { type: 'list', value: ['a', 'b'], memory: 90, sampledMemory: 80, pttl: 7000 },
+        s: { type: 'string', value: 'v', memory: 40, pttl: 9000 },
+      }),
+    );
+    client.failExactMemory = true;
+
+    const result = await readSessionKeys(fakeDb(client), ['l', 's']);
+
+    expect(result.keys.map((k) => k.key)).toEqual(['l', 's']);
+    expect(result.keys[0].value).toEqual(['a', 'b']);
+    expect(result).toMatchObject({ missingKeys: 0, erroredKeys: 0 });
+    expect(result.totals).toMatchObject({ memoryBytes: 120, unmeasuredKeys: 0 });
   });
 
   it('counts a key whose TYPE reply failed as unmeasured, not gone', async () => {

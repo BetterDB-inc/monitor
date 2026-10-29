@@ -35,10 +35,14 @@ import { readSessionKeysOn } from './session-reader';
 const PREVIEW_SCAN_COUNT = 1000;
 const PREVIEW_SCAN_PAGES = 10;
 
-const sessionMissing = (failedNodes: number) =>
-  failedNodes > 0
-    ? new ServiceUnavailableException('Session keys may live on primaries that could not be read')
+const sessionMissing = (failedNodes: number, erroredKeys = 0) => {
+  if (failedNodes > 0) {
+    return new ServiceUnavailableException('Session keys may live on primaries that could not be read');
+  }
+  return erroredKeys > 0
+    ? new ServiceUnavailableException('Session keys could not be read')
     : new NotFoundException('Session not found');
+};
 
 export interface SessionCapture {
   namespace: SessionNamespace;
@@ -208,7 +212,9 @@ export class SessionExplorerService {
         if (scan.keys.length === 0) throw sessionMissing(scan.failed.size);
         const selected = preset.selectKeys ? preset.selectKeys(scan.keys) : scan.keys;
         const read = await readSessionKeysOn(primaries, scan.keys, { selected });
-        if (read.keys.length === 0) throw sessionMissing(union(scan.failed, read.failed).size);
+        if (read.keys.length === 0) {
+          throw sessionMissing(union(scan.failed, read.failed).size, read.erroredKeys);
+        }
         return { scan, read, selected };
       },
     );
