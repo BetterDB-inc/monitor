@@ -36,6 +36,11 @@ export interface SamplerOptions {
 
 type Reply = [Error | null, unknown];
 
+interface TypePass {
+  cursor: string;
+  keys: Set<string>;
+}
+
 interface NodeState {
   name: string;
   dbSize: number;
@@ -48,6 +53,7 @@ interface NodeState {
   sizes: Map<string, number[]>;
   census: Map<string, number>;
   exactCounts: Map<string, number>;
+  typePasses: Map<string, TypePass>;
   unmeasured: number;
   wrapped: boolean;
   counter: { sampled: number };
@@ -76,6 +82,7 @@ export async function sampleNodes(nodes: SamplerNode[], options: SamplerOptions)
         sizes: new Map(),
         census: new Map(),
         exactCounts: new Map(),
+        typePasses: new Map(),
         unmeasured: 0,
         wrapped: false,
         counter,
@@ -160,13 +167,13 @@ async function pilot(state: NodeState, pilotQuota: number, censusLimit: number):
 }
 
 async function topUp(state: NodeState, type: string, target: number): Promise<number | null> {
-  const ofType = new Set<string>();
-  let cursor = '0';
+  const pass = state.typePasses.get(type) ?? { cursor: '0', keys: new Set<string>() };
+  state.typePasses.set(type, pass);
   do {
     if (expired(state)) return null;
-    const [next, keys] = await scan(state.client, cursor, ['TYPE', type]);
-    cursor = next;
-    keys.forEach((key) => ofType.add(key));
+    const [next, keys] = await scan(state.client, pass.cursor, ['TYPE', type]);
+    pass.cursor = next;
+    keys.forEach((key) => pass.keys.add(key));
     const fresh = keys.filter((key) => !state.seen.has(key));
     let index = 0;
     while (index < fresh.length && sizesOf(state, type).length < target) {
@@ -174,9 +181,10 @@ async function topUp(state: NodeState, type: string, target: number): Promise<nu
       await measure(state, fresh.slice(index, index + take), type);
       index += take;
     }
-    if (sizesOf(state, type).length >= target) return cursor === '0' ? ofType.size : null;
-  } while (cursor !== '0');
-  return ofType.size;
+  } while (pass.cursor !== '0' && sizesOf(state, type).length < target);
+  if (pass.cursor !== '0') return null;
+  state.typePasses.delete(type);
+  return pass.keys.size;
 }
 
 function raiseOnError(reply: Reply | undefined): void {

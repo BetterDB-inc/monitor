@@ -182,6 +182,20 @@ describe('sampleNodes', () => {
       const [result] = await sampleNodes([{ name: 'a', client: fakeClient(heavyTail()) }], { budget: 400, deadlineMs: 60_000 });
       expect(sampledOf(result.strata)).toBeLessThanOrEqual(400);
     });
+
+    it('resumes the TYPE scan across rounds instead of restarting it', async () => {
+      const keys = heavyTail();
+      const client = fakeClient(keys);
+      const call = client.call;
+      let typeScans = 0;
+      client.call = (command: string, args: string[]) => {
+        if (args.includes('TYPE')) typeScans += 1;
+        return call(command, args);
+      };
+      const [result] = await sampleNodes([{ name: 'a', client }], { budget: 400, hardCap: 10_000, deadlineMs: 60_000 });
+      expect(sampledOf(result.strata)).toBeGreaterThan(4000);
+      expect(typeScans).toBeLessThanOrEqual(keys.size / 1000 + 1);
+    });
   });
 
   describe('large keys the sample misses', () => {
