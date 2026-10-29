@@ -43,18 +43,19 @@ export function ClientAnalytics() {
   const [timeRange, setTimeRange] = useState<TimeRange>('1h');
   const [selectedClient, setSelectedClient] = useState<{ name?: string; user?: string; addr?: string } | null>(null);
 
+  const nameParam = searchParams.get('name');
+  const userParam = searchParams.get('user');
+  const addrParam = searchParams.get('addr');
+
   useEffect(() => {
-    const name = searchParams.get('name');
-    const user = searchParams.get('user');
-    const addr = searchParams.get('addr');
-    if (name || user || addr) {
+    if (nameParam || userParam || addrParam) {
       setSelectedClient({
-        ...(name && { name }),
-        ...(user && { user }),
-        ...(addr && { addr }),
+        ...(nameParam && { name: nameParam }),
+        ...(userParam && { user: userParam }),
+        ...(addrParam && { addr: addrParam }),
       });
     }
-  }, [searchParams]);
+  }, [nameParam, userParam, addrParam]);
 
   const { start, end, bucket } = getTimeRangeMs(timeRange);
 
