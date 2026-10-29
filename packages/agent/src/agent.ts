@@ -329,6 +329,7 @@ export class Agent {
         version: this.valkeyVersion,
         tls: this.config.valkeyTls,
         cluster: this.isCluster,
+        serverless: this.config.awsServerless ?? false,
       },
       authMode: this.authProvider.mode,
     };

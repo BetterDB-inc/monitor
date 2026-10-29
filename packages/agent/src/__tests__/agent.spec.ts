@@ -177,3 +177,29 @@ describe('Agent.createValkeyClient - retryStrategy', () => {
     expect(retryStrategy(100)).toBe(30000); // capped
   });
 });
+
+describe('Agent.onWsOpen - hello', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  function sentHello(config: AgentConfig): any {
+    const a = new Agent(config) as any;
+    a.wsClient = { send: jest.fn() };
+    a.onWsOpen();
+    return JSON.parse(a.wsClient.send.mock.calls[0][0]);
+  }
+
+  it('reports a serverless target in the valkey block', () => {
+    const hello = sentHello({ ...IAM_CONFIG, awsServerless: true });
+    expect(hello.valkey.serverless).toBe(true);
+  });
+
+  it('reports a non-serverless target as false', () => {
+    const hello = sentHello({ ...IAM_CONFIG, awsServerless: false });
+    expect(hello.valkey.serverless).toBe(false);
+  });
+
+  it('defaults serverless to false when the flag is unset', () => {
+    const hello = sentHello({ ...IAM_CONFIG, authMode: 'password' });
+    expect(hello.valkey.serverless).toBe(false);
+  });
+});

@@ -89,6 +89,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ConnectionRegistry.name);
   private connections = new Map<string, DatabasePort>();
   private configs = new Map<string, DatabaseConnectionConfig>();
+  private serverlessAgentIds = new Set<string>();
   private defaultId: string | null = null;
   private readonly encryption: EnvelopeEncryptionService | null;
   private startupConnectionErrors: Array<{ name: string; host: string; port: number; error: string }> = [];
@@ -1056,7 +1057,12 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async registerAgentConnection(id: string, name: string, adapter: DatabasePort): Promise<void> {
+  async registerAgentConnection(
+    id: string,
+    name: string,
+    adapter: DatabasePort,
+    options: { serverless?: boolean } = {},
+  ): Promise<void> {
     const now = Date.now();
     const config: DatabaseConnectionConfig = {
       id,
@@ -1071,6 +1077,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
     this.connections.set(id, adapter);
     this.configs.set(id, config);
+    if (options.serverless === true) {
+      this.serverlessAgentIds.add(id);
+    } else {
+      this.serverlessAgentIds.delete(id);
+    }
 
     // If no default connection, make this the default
     if (!this.defaultId) {
@@ -1080,9 +1091,14 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`Registered agent connection: ${name} (${id})`);
   }
 
+  isServerlessAgentConnection(id: string): boolean {
+    return this.serverlessAgentIds.has(id);
+  }
+
   removeAgentConnection(id: string): void {
     this.connections.delete(id);
     this.configs.delete(id);
+    this.serverlessAgentIds.delete(id);
     this.runtimeCapabilityTracker.removeConnection(id);
 
     if (this.defaultId === id) {
