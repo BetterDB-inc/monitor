@@ -31,6 +31,11 @@ function semverGte(a: string, b: string): boolean {
   return true; // equal
 }
 
+/** Hash Field Expiry (HEXPIRE/HPEXPIRE/HPTTL): Valkey 9.0.0+, Redis 7.4.0+. */
+export function supportsHashFieldExpiry(dbType: 'valkey' | 'redis', version: string): boolean {
+  return dbType === 'valkey' ? semverGte(version, '9.0.0') : semverGte(version, '7.4.0');
+}
+
 export function buildInstanceMeta(
   info: Record<string, unknown>,
   capabilities: DatabaseCapabilities,
@@ -166,15 +171,14 @@ export function checkCompatibility(
 
   // 2. HFE unsupported on target
   if (hfeDetected) {
-    const targetSupportsHfe =
-      target.dbType === 'valkey' && semverGte(target.version, '8.1.0');
+    const targetSupportsHfe = supportsHashFieldExpiry(target.dbType, target.version);
     if (!targetSupportsHfe) {
       issues.push({
         severity: 'blocking',
         category: 'hfe',
         title: 'Hash Field Expiry unsupported',
         detail:
-          'Source uses Hash Field Expiry (HFE). Target does not support HFE \u2014 per-field TTLs will be lost during migration. Requires Valkey 8.1+.',
+          'Source uses Hash Field Expiry (HFE) but the target does not support it, so per-field TTLs cannot be preserved. Requires Valkey 9.0+ or Redis 7.4+ on the target.',
       });
     }
   }

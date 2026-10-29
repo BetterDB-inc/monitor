@@ -1,4 +1,4 @@
-import { buildInstanceMeta, checkCompatibility, InstanceMeta } from '../analysis/compatibility-checker';
+import { buildInstanceMeta, checkCompatibility, supportsHashFieldExpiry, InstanceMeta } from '../analysis/compatibility-checker';
 import type { DatabaseCapabilities } from '../../common/interfaces/database-port.interface';
 
 function makeMeta(overrides: Partial<InstanceMeta> = {}): InstanceMeta {
@@ -133,12 +133,48 @@ describe('compatibility-checker', () => {
       expect(hfeIssue!.severity).toBe('blocking');
     });
 
-    it('should not flag HFE when target supports it (Valkey 8.1+)', () => {
+    it('should flag HFE as blocking on a Valkey 8.1 target (HFE shipped in 9.0)', () => {
       const source = makeMeta();
       const target = makeMeta({ dbType: 'valkey', version: '8.1.0' });
       const issues = checkCompatibility(source, target, true);
       const hfeIssue = issues.find(i => i.category === 'hfe');
-      expect(hfeIssue).toBeUndefined();
+      expect(hfeIssue).toBeDefined();
+      expect(hfeIssue!.severity).toBe('blocking');
+      expect(hfeIssue!.detail).toContain('Valkey 9.0+ or Redis 7.4+');
+    });
+
+    it.each([
+      ['valkey', '9.0.0'],
+      ['valkey', '9.1.2'],
+      ['redis', '7.4.0'],
+      ['redis', '8.2.1'],
+    ] as const)('should not flag HFE when target is %s %s', (dbType, version) => {
+      const target = makeMeta({ dbType, version, capabilities: { dbType, version } as DatabaseCapabilities });
+      const issues = checkCompatibility(makeMeta(), target, true);
+      expect(issues.find(i => i.category === 'hfe')).toBeUndefined();
+    });
+
+    it('should flag HFE as blocking on Redis 7.2.5', () => {
+      const target = makeMeta({ dbType: 'redis', version: '7.2.5', capabilities: { dbType: 'redis', version: '7.2.5' } as DatabaseCapabilities });
+      const issues = checkCompatibility(makeMeta(), target, true);
+      expect(issues.find(i => i.category === 'hfe')!.severity).toBe('blocking');
+    });
+
+    describe('supportsHashFieldExpiry', () => {
+      it.each([
+        ['valkey', '7.2.0', false],
+        ['valkey', '8.1.0', false],
+        ['valkey', '8.9.9', false],
+        ['valkey', '9.0.0', true],
+        ['valkey', '9.0.0-rc1', true],
+        ['valkey', '9.1.2', true],
+        ['redis', '7.2.5', false],
+        ['redis', '7.4.0', true],
+        ['redis', '7.4.2', true],
+        ['redis', '8.2.1', true],
+      ] as const)('%s %s -> %s', (dbType, version, expected) => {
+        expect(supportsHashFieldExpiry(dbType, version)).toBe(expected);
+      });
     });
 
     it('should return modules blocking issue when source has modules target does not', () => {

@@ -338,7 +338,40 @@ async function compareHash(source: Valkey, target: Valkey, key: string): Promise
     }
   }
 
+  // Per-field TTL presence (values drift between reads, so compare has/hasn't, not ms).
+  const names = sourceEntries.map((e) => e.field);
+  const [srcTtls, tgtTtls] = await Promise.all([
+    fieldTtls(source, key, names),
+    fieldTtls(target, key, names),
+  ]);
+  if (srcTtls && tgtTtls) {
+    let lost = 0;
+    let extra = 0;
+    for (let i = 0; i < names.length; i++) {
+      if (srcTtls[i] > 0 && tgtTtls[i] === -1) lost++;
+      else if (srcTtls[i] === -1 && tgtTtls[i] > 0) extra++;
+    }
+    if (lost > 0) return `${lost} field TTL(s) missing on target`;
+    if (extra > 0) return `${extra} field(s) have a TTL on target but not on source`;
+  }
+
   return null;
+}
+
+/**
+ * HPTTL for the given fields, or null when it cannot be read (no HFE on the
+ * server, ACL denial, no fields) so validation never fails on such servers.
+ */
+async function fieldTtls(client: Valkey, key: string, names: Buffer[]): Promise<number[] | null> {
+  if (names.length === 0) return null;
+  try {
+    const raw = (await client.call('HPTTL', key, 'FIELDS', String(names.length), ...names)) as unknown[];
+    return Array.isArray(raw) ? raw.map((v) => Number(v)) : null;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/unknown command|unknown subcommand|NOPERM/i.test(msg)) return null;
+    throw err;
+  }
 }
 
 async function compareList(source: Valkey, target: Valkey, key: string): Promise<string | null> {
