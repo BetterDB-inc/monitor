@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import type { KvCacheFootprintSnapshot } from '@betterdb/shared';
 import { useCanEditKvCache } from '../../../hooks/useCanEditKvCache';
 import { useRescanKvCache } from '../../../hooks/useRescanKvCache';
@@ -11,19 +12,33 @@ const MP_KEY_SHAPE = '[<key_prefix>@]<model>@<kv_rank:08x>@<group_hex>@<chunk_ha
 interface Props {
   latest: KvCacheFootprintSnapshot | null;
   onLinkEngine: () => void;
+  pending?: boolean;
 }
 
-export function KvCacheNotDetected({ latest, onLinkEngine }: Props) {
+export function KvCacheNotDetected({ latest, onLinkEngine, pending = false }: Props) {
   const rescan = useRescanKvCache();
   const canMutate = useCanEditKvCache();
+  const { mutate } = rescan;
+  const triggered = useRef(false);
+
+  useEffect(() => {
+    if (!pending || !canMutate || triggered.current) return;
+    triggered.current = true;
+    mutate();
+  }, [pending, canMutate, mutate]);
 
   return (
     <div className="flex items-center justify-center py-8">
       <Card className="max-w-2xl shadow-lg">
         <CardHeader>
-          <CardTitle>No LMCache KV cache detected</CardTitle>
+          <CardTitle>{pending ? 'Scanning for LMCache keys' : 'No LMCache KV cache detected'}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
+          {pending && (
+            <p className="text-muted-foreground">
+              The first scan of this connection has not finished yet. This page updates when it does.
+            </p>
+          )}
           <p className="text-muted-foreground">
             BetterDB looks for LMCache chunk keys in this connection&apos;s database. Keys have
             the shape{' '}

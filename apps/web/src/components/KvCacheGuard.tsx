@@ -3,13 +3,10 @@ import { useQuery } from '@tanstack/react-query';
 import { Feature } from '@betterdb/shared';
 import { kvCacheApi, kvCacheKeys } from '../api/kv-cache';
 import { awaitingFirstScan, kvCacheInUse, useKvCacheStatus } from '../hooks/useKvCacheStatus';
-import { useCanEditKvCache } from '../hooks/useCanEditKvCache';
 import { useConnection } from '../hooks/useConnection';
 import { useLicense, useLicenseStatus } from '../hooks/useLicense';
 import { hasKvCacheFootprint } from '../utils/connectionType';
 import { KvCacheNotDetected, KvCacheProLocked, LinkEngineDialog } from './pages/kv-cache';
-import { Button } from './ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Skeleton } from './ui/skeleton';
 
 const PAST_DETECTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -32,7 +29,11 @@ export function KvCacheGuard({ children }: Props) {
       const history = await kvCacheApi.getFootprintHistory(end - PAST_DETECTION_MS, end, signal);
       return history.some((snapshot) => snapshot.detected);
     },
-    enabled: connectionId !== null && status.data !== undefined && !kvCacheInUse(status.data),
+    enabled:
+      connectionId !== null &&
+      status.data !== undefined &&
+      !kvCacheInUse(status.data) &&
+      !awaitingFirstScan(status.data),
   });
 
   if (license === null && licenseLoading) {
@@ -55,16 +56,12 @@ export function KvCacheGuard({ children }: Props) {
   if (!status.data) {
     return <GuardSkeleton />;
   }
-  if (awaitingFirstScan(status.data)) {
-    return (
-      <>
-        <FirstScanPending onLinkEngine={() => setLinkOpen(true)} />
-        <LinkEngineDialog open={linkOpen} onOpenChange={setLinkOpen} />
-      </>
-    );
-  }
   const notDetected = (
-    <KvCacheNotDetected latest={status.data.latest} onLinkEngine={() => setLinkOpen(true)} />
+    <KvCacheNotDetected
+      latest={status.data.latest}
+      pending={awaitingFirstScan(status.data)}
+      onLinkEngine={() => setLinkOpen(true)}
+    />
   );
   return (
     <>
@@ -80,29 +77,6 @@ export function KvCacheGuard({ children }: Props) {
       )}
       <LinkEngineDialog open={linkOpen} onOpenChange={setLinkOpen} />
     </>
-  );
-}
-
-function FirstScanPending({ onLinkEngine }: { onLinkEngine: () => void }) {
-  const canMutate = useCanEditKvCache();
-  return (
-    <div className="flex items-center justify-center py-8">
-      <Card className="max-w-2xl shadow-lg">
-        <CardHeader>
-          <CardTitle>Scanning for LMCache keys</CardTitle>
-        </CardHeader>
-        <CardContent className="text-sm text-muted-foreground">
-          The first scan of this connection has not finished yet. This page updates when it does.
-          {canMutate && (
-            <div className="pt-2">
-              <Button variant="outline" onClick={onLinkEngine}>
-                Link an engine
-              </Button>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-    </div>
   );
 }
 
