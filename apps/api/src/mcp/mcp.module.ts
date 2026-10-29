@@ -17,6 +17,12 @@ import { AiObservabilityModule } from '../ai-observability/ai-observability.modu
 import { VectorSearchModule } from '../vector-search/vector-search.module';
 import { InferenceLatencyModule } from '../inference-latency/inference-latency.module';
 import { HealthModule } from '../health/health.module';
+import { McpInsightsController } from './mcp-insights.controller';
+import { McpMonitorController } from './mcp-monitor.controller';
+import { ScalingReadinessModule } from '../scaling-readiness/scaling-readiness.module';
+import { CveModule } from '../cve/cve.module';
+import { FleetModule } from '../fleet/fleet.module';
+import { MonitorModule } from '../monitor/monitor.module';
 
 const logger = new Logger('McpModule');
 
@@ -37,8 +43,19 @@ const tokenProviders = createAgentTokenProviders(logger, () => {
     VectorSearchModule,
     InferenceLatencyModule,
     HealthModule,
+    ScalingReadinessModule,
+    CveModule,
+    FleetModule,
+    MonitorModule,
   ],
-  controllers: [McpController, McpMemoryController, McpAiController, McpAnalyticsController],
+  controllers: [
+    McpController,
+    McpMemoryController,
+    McpAiController,
+    McpAnalyticsController,
+    McpInsightsController,
+    McpMonitorController,
+  ],
   providers: [AgentTokenGuard, McpMemoryService, ...tokenProviders],
 })
 export class McpModule {}
