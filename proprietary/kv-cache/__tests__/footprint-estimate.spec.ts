@@ -1,4 +1,4 @@
-import { buildSnapshot, evictedKeysDelta, layoutOf, type KeySample, type NodeObservation } from '../footprint-estimate';
+import { buildSnapshot, evictedKeysDelta, type KeySample, type NodeObservation } from '../footprint-estimate';
 import { classifyKey } from '../key-classifier';
 
 const M = 'Qwen/Qwen2.5-0.5B-Instruct';
@@ -14,12 +14,15 @@ const parse = (keys: string[]) => keys.map((k) => classifyKey(k)!);
 const memory = { usedMemory: 100_000_000, maxmemory: 0, maxmemoryPolicy: 'noeviction', evictedKeys: 0 };
 const base = { connectionId: 'c', timestamp: 1, memory, evictedKeysDelta: null, evictedKeysIntervalMs: null, otherDbs: [], clientDetected: false };
 
-describe('layoutOf', () => {
-  it('detects each layout', () => {
-    expect(layoutOf([])).toBeNull();
-    expect(layoutOf([classifyKey(key(0))!])).toBe('single_key');
-    expect(layoutOf([classifyKey(key(0, 'kv_bytes'))!, classifyKey(key(0, 'metadata'))!])).toBe('two_key');
-    expect(layoutOf([classifyKey(key(0))!, classifyKey(key(1, 'kv_bytes'))!])).toBe('mixed');
+describe('connection layout', () => {
+  const layoutFor = (keys: string[]) =>
+    buildSnapshot({ ...base, nodes: [{ scannedKeys: keys.length, matchedKeys: parse(keys), scanComplete: true, dbSize: keys.length, samples: [] }] }).layout;
+
+  it('detects each layout from the model layouts', () => {
+    expect(layoutFor([])).toBeNull();
+    expect(layoutFor([key(0), key(1, '', 'other', 'half')])).toBe('single_key');
+    expect(layoutFor([key(0, 'kv_bytes'), key(0, 'metadata'), key(1, 'kv_bytes', 'other')])).toBe('two_key');
+    expect(layoutFor([key(0), key(1, 'kv_bytes')])).toBe('mixed');
   });
 });
 

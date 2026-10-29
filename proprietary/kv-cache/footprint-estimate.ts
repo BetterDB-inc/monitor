@@ -1,5 +1,5 @@
 import type { KvCacheFootprintSnapshot, KvCacheLayout, KvCacheModelFootprint } from '@betterdb/shared';
-import { isChunkKey, type ParsedLmcacheKey } from './key-classifier';
+import { isChunkKey, modelId, type ParsedLmcacheKey } from './key-classifier';
 
 export interface KeySample {
   parsed: ParsedLmcacheKey;
@@ -56,24 +56,30 @@ export function evictedKeysDelta(previous: Map<string, number> | undefined, curr
 
 const ratio = (value: number) => Math.round(value * 1e4) / 1e4;
 
-export function layoutOf(keys: ParsedLmcacheKey[]): KvCacheLayout | null {
-  if (keys.length === 0) return null;
-  const suffixed = keys.some((k) => k.suffix !== null);
-  const plain = keys.some((k) => k.suffix === null);
-  if (suffixed && plain) return 'mixed';
-  return suffixed ? 'two_key' : 'single_key';
+interface SuffixFlags {
+  suffixed: boolean;
+  plain: boolean;
 }
 
-const modelId = (m: { model: string; dtype: string }) => `${m.model}|${m.dtype}`;
+const layoutFrom = ({ suffixed, plain }: SuffixFlags): KvCacheLayout =>
+  suffixed && plain ? 'mixed' : suffixed ? 'two_key' : 'single_key';
 
-function modelLayouts(keys: ParsedLmcacheKey[]): Map<string, KvCacheLayout | null> {
-  const byModel = new Map<string, ParsedLmcacheKey[]>();
+function modelLayouts(keys: ParsedLmcacheKey[]): Map<string, KvCacheLayout> {
+  const flags = new Map<string, SuffixFlags>();
   for (const k of keys) {
-    const modelKeys = byModel.get(modelId(k)) ?? [];
-    modelKeys.push(k);
-    byModel.set(modelId(k), modelKeys);
+    const id = modelId(k);
+    const model = flags.get(id) ?? { suffixed: false, plain: false };
+    if (k.suffix === null) model.plain = true;
+    else model.suffixed = true;
+    flags.set(id, model);
   }
-  return new Map([...byModel].map(([id, modelKeys]) => [id, layoutOf(modelKeys)]));
+  return new Map([...flags].map(([id, model]) => [id, layoutFrom(model)]));
+}
+
+function connectionLayout(layouts: Map<string, KvCacheLayout>): KvCacheLayout | null {
+  const distinct = new Set(layouts.values());
+  if (distinct.size === 0) return null;
+  return distinct.size === 1 ? [...distinct][0] : 'mixed';
 }
 
 function isPresent(sample: KeySample): boolean {
@@ -162,7 +168,7 @@ function scaleModel(m: KvCacheModelFootprint, factor: number): KvCacheModelFootp
 
 function mergeModels(
   models: KvCacheModelFootprint[],
-  layouts: Map<string, KvCacheLayout | null>,
+  layouts: Map<string, KvCacheLayout>,
 ): KvCacheModelFootprint[] {
   const merged = new Map<string, KvCacheModelFootprint>();
   for (const m of models) {
@@ -172,7 +178,7 @@ function mergeModels(
       dtype: m.dtype,
       chunksEst: 0,
       bytesEst: 0,
-      layout: layouts.get(id) ?? null,
+      layout: layouts.get(id),
     };
     total.chunksEst += m.chunksEst;
     total.bytesEst = addBytes(total.bytesEst, m.bytesEst);
@@ -192,6 +198,7 @@ export function buildSnapshot(input: SnapshotInput): KvCacheFootprintSnapshot {
   const scanned = input.nodes.reduce((sum, node) => sum + node.scannedKeys, 0);
   const matched = allParsed.length;
   const layers = layerCounts(allParsed);
+  const layouts = modelLayouts(allParsed);
   const scannedTallies = input.nodes.flatMap((node) => nodeModels(node, layers, meanBytes(live)));
   const scannedBytes = scannedTallies.reduce<number | null>((sum, m) => addBytes(sum, m.bytesEst), 0);
   const coverage = input.coverage ?? {
@@ -210,7 +217,7 @@ export function buildSnapshot(input: SnapshotInput): KvCacheFootprintSnapshot {
     connectionId: input.connectionId,
     timestamp: input.timestamp,
     detected: matched >= DETECTION_MIN_MATCHES || input.clientDetected,
-    layout: layoutOf(allParsed),
+    layout: connectionLayout(layouts),
     scannedKeys: scanned,
     matchedKeys: matched,
     sampledKeys: live.length,
@@ -232,6 +239,6 @@ export function buildSnapshot(input: SnapshotInput): KvCacheFootprintSnapshot {
     evictedKeysDelta: input.evictedKeysDelta,
     evictedKeysIntervalMs: input.evictedKeysDelta === null ? null : input.evictedKeysIntervalMs,
     otherDbs: input.otherDbs,
-    perModel: mergeModels(nodeTallies, modelLayouts(allParsed)),
+    perModel: mergeModels(nodeTallies, layouts),
   };
 }
