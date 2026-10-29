@@ -34,7 +34,7 @@ import { saveAnalysisVerdict } from '../analysis/analysis-verdict-store';
 
 function createMockRegistry() {
   const mockClient = {
-    call: jest.fn().mockResolvedValue(['default']),
+    call: jest.fn().mockImplementation(async (...args: string[]) => (args[0] === 'FUNCTION' ? [] : ['default'])),
     quit: jest.fn().mockResolvedValue(undefined),
     ping: jest.fn().mockResolvedValue('PONG'),
   };
@@ -81,6 +81,7 @@ async function waitForTerminal(service: MigrationService, id: string) {
 function readyReplicationCommands(registry: ReturnType<typeof createMockRegistry>) {
   registry.mockClient.call.mockImplementation(async (...args: string[]) => {
     if (args[0] === 'COMMAND' && args[1] === 'INFO') return [['psync'], ['replconf']];
+    if (args[0] === 'FUNCTION') return [];
     return ['default'];
   });
 }
@@ -281,6 +282,24 @@ describe('MigrationService ElastiCache Serverless readiness', () => {
     expect(serverlessCategory(job).map(i => i.title)).toContain('Keys outside database 0');
   });
 
+  it('flags function libraries in a Serverless check', async () => {
+    const registry = createMockRegistry();
+    registry.mockClient.call.mockImplementation(async (...args: string[]) => {
+      if (args[0] === 'COMMAND' && args[1] === 'INFO') return [['psync'], ['replconf']];
+      if (args[0] === 'FUNCTION' && args[1] === 'LIST') return [['library_name', 'mylib']];
+      return ['default'];
+    });
+    const service = new MigrationService(registry as any);
+
+    const { id } = await service.startAnalysis({
+      sourceConnectionId: 'conn-1',
+      targetProfile: 'elasticache_serverless',
+    });
+    const job = await waitForTerminal(service, id);
+
+    expect(serverlessCategory(job).map(i => i.title)).toContain('Function libraries on the source');
+  });
+
   it('adds no serverless readiness issues for an ordinary target', async () => {
     const registry = createMockRegistry();
     readyReplicationCommands(registry);
@@ -298,6 +317,7 @@ describe('MigrationService ElastiCache Serverless readiness', () => {
     const registry = createMockRegistry();
     registry.mockClient.call.mockImplementation(async (...args: string[]) => {
       if (args[0] === 'COMMAND') throw new Error('NOPERM');
+      if (args[0] === 'FUNCTION') return [];
       return ['default'];
     });
     const service = new MigrationService(registry as any);
@@ -316,6 +336,7 @@ describe('MigrationService ElastiCache Serverless readiness', () => {
     const registry = createMockRegistry();
     registry.mockClient.call.mockImplementation(async (...args: string[]) => {
       if (args[0] === 'COMMAND' && args[1] === 'INFO') return [null, ['replconf']];
+      if (args[0] === 'FUNCTION') return [];
       return ['default'];
     });
     const service = new MigrationService(registry as any);

@@ -99,6 +99,7 @@ export interface ServerlessReadinessFacts {
   masterUsedMemory: number[];
   sampledKeyBytes: number[];
   databasesBeyondZero: string[];
+  functionPresence: 'present' | 'absent' | 'unknown';
   missingReplicationCommands: string[] | null;
   clusterMasters: ServerlessClusterMaster[] | null;
   cachedScripts: number | null;
@@ -221,6 +222,25 @@ export function checkServerlessReadiness(facts: ServerlessReadinessFacts): Incom
       detail:
         `The source holds keys in ${facts.databasesBeyondZero.join(', ')}. ElastiCache Serverless runs in cluster mode and serves db0 only, ` +
         'so these keys cannot be migrated as they are.',
+    });
+  }
+
+  if (facts.functionPresence === 'present') {
+    issues.push({
+      severity: 'blocking',
+      category: CATEGORY,
+      title: 'Function libraries on the source',
+      detail:
+        'The source holds function libraries. ElastiCache Serverless restricts FUNCTION and FCALL, so every FCALL fails after cutover. ' +
+        'Move this logic to EVAL scripts or client code before migrating.',
+    });
+  } else if (facts.functionPresence === 'unknown') {
+    issues.push({
+      severity: 'warning',
+      category: CATEGORY,
+      title: 'Function libraries could not be checked',
+      detail:
+        'FUNCTION LIST could not be read on every node. ElastiCache Serverless restricts FUNCTION and FCALL, so confirm the source uses no function libraries.',
     });
   }
 

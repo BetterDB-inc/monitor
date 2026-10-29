@@ -25,6 +25,7 @@ function facts(overrides: Partial<ServerlessReadinessFacts> = {}): ServerlessRea
     masterUsedMemory: [1 * GIB, 1 * GIB],
     sampledKeyBytes: [6, 6],
     databasesBeyondZero: [],
+    functionPresence: 'absent',
     missingReplicationCommands: [],
     clusterMasters: fullCoverage(),
     cachedScripts: 0,
@@ -73,6 +74,21 @@ describe('checkServerlessReadiness', () => {
       expect(issues[0].severity).toBe('blocking');
       expect(issues[0].awsToolOnly).toBeUndefined();
       expect(issues[0].detail).toContain('db3, db7');
+    });
+  });
+
+  describe('function libraries', () => {
+    it('blocks when the source holds function libraries', () => {
+      const issues = checkServerlessReadiness(facts({ functionPresence: 'present' }));
+      expect(issues).toHaveLength(1);
+      expect(issues[0].severity).toBe('blocking');
+      expect(issues[0].detail).toMatch(/FCALL/);
+    });
+
+    it('warns when function presence could not be determined', () => {
+      const issues = checkServerlessReadiness(facts({ functionPresence: 'unknown' }));
+      expect(issues).toHaveLength(1);
+      expect(issues[0].severity).toBe('warning');
     });
   });
 

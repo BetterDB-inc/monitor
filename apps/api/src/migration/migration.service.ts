@@ -541,6 +541,7 @@ export class MigrationService {
           masterUsedMemory,
           sampledKeyBytes: sampledKeys.map(k => k.keyBytes),
           databasesBeyondZero,
+          functionPresence,
           clusterMasters,
           commandEntries: commandLog.entries,
           ...probes,
