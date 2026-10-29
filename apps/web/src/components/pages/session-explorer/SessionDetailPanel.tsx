@@ -37,6 +37,8 @@ interface Props {
 export function SessionDetailPanel({ detail, onExport, exporting, idPrefix = '' }: Props) {
   const reasons = detail.complete ? [] : incompleteReasons(detail);
   const shownId = displaySessionId(detail.sessionId, idPrefix);
+  const totalMemoryBytes = detail.totalMemoryBytes ?? detail.memoryBytes;
+  const totalKeys = detail.totalKeys ?? detail.keys.length;
   return (
     <Card>
       <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-2">
@@ -53,12 +55,12 @@ export function SessionDetailPanel({ detail, onExport, exporting, idPrefix = '' 
             ~{detail.estimatedTokens.toLocaleString()} tokens ·{' '}
             {detail.unmeasuredKeys > 0 ? (
               <span title={`${plural(detail.unmeasuredKeys, 'key')} could not be measured`}>
-                ≥ {formatBytes(detail.totalMemoryBytes)}
+                ≥ {formatBytes(totalMemoryBytes)}
               </span>
             ) : (
-              formatBytes(detail.totalMemoryBytes)
+              formatBytes(totalMemoryBytes)
             )}{' '}
-            · TTL {formatTtl(detail.ttlMs)} · {plural(detail.totalKeys, 'key')}
+            · TTL {formatTtl(detail.ttlMs)} · {plural(totalKeys, 'key')}
             {detail.skippedKeys > 0 &&
               `, showing ${detail.selection ?? 'part of the session'} (${plural(detail.keys.length, 'key')} · ${formatBytes(detail.memoryBytes)})`}
           </p>

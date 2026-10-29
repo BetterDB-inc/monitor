@@ -73,6 +73,27 @@ describe('SessionDetailPanel', () => {
     expect(screen.getByTitle('2 keys could not be measured').textContent).toBe('≥ 4.47 KB');
   });
 
+  it('falls back to the keys it read when the server sends no session totals', () => {
+    const {
+      totalKeys: _totalKeys,
+      totalMemoryBytes: _totalMemoryBytes,
+      skippedKeys: _skippedKeys,
+      unmeasuredKeys: _unmeasuredKeys,
+      selection: _selection,
+      erroredKeys: _erroredKeys,
+      interrupts: _interrupts,
+      ...older
+    } = detail();
+    render(
+      <SessionDetailPanel
+        detail={older as ReturnType<typeof detail>}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
+    expect(screen.getByText(/2\.00 KB · TTL 5s · 1 key$/)).toBeInTheDocument();
+  });
+
   it('does not mention a checkpoint when every key was read', () => {
     render(<SessionDetailPanel detail={detail()} onExport={vi.fn()} exporting={false} />);
     expect(screen.queryByText(/latest checkpoint/)).toBeNull();
