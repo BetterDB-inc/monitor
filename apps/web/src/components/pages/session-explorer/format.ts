@@ -1,3 +1,5 @@
+import { globLiteralPrefix, type SessionNamespace } from '@betterdb/shared';
+
 export function formatTtl(ms: number | null): string {
   if (ms === null) return 'No expiry';
   const seconds = Math.round(ms / 1000);
@@ -28,11 +30,16 @@ export function prettyArgs(value: unknown): string {
   return JSON.stringify(value, null, 2) ?? String(value);
 }
 
-export function displaySessionId(sessionId: string, pattern?: string): string {
-  if (!pattern) return sessionId;
-  const glob = pattern.search(/[*?[\\]/);
-  const prefix = glob === -1 ? '' : pattern.slice(0, glob);
-  return prefix !== '' && sessionId.startsWith(prefix) && sessionId.length > prefix.length
+export function sessionIdPrefix(
+  namespace: Pick<SessionNamespace, 'pattern' | 'preset' | 'customSchema'>,
+): string {
+  if (namespace.preset === 'agent-cache') return '';
+  if (namespace.preset === 'custom' && namespace.customSchema?.sessionTemplate) return '';
+  return globLiteralPrefix(namespace.pattern);
+}
+
+export function displaySessionId(sessionId: string, prefix: string): string {
+  return prefix !== '' && sessionId.length > prefix.length && sessionId.startsWith(prefix)
     ? sessionId.slice(prefix.length)
     : sessionId;
 }

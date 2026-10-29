@@ -17,10 +17,23 @@ describe('SessionDetailPanel', () => {
         detail={detail({ sessionId: 'message_store:support-0296' })}
         onExport={vi.fn()}
         exporting={false}
-        pattern="message_store:*"
+        idPrefix="message_store:"
       />,
     );
     expect(screen.getByText('support-0296')).toHaveAttribute('title', 'message_store:support-0296');
+    expect(screen.getByText('message_store:support-0296')).toBeInTheDocument();
+  });
+
+  it('does not repeat the id when nothing was stripped', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({ sessionId: 'support-0296' })}
+        onExport={vi.fn()}
+        exporting={false}
+        idPrefix="message_store:"
+      />,
+    );
+    expect(screen.getAllByText('support-0296')).toHaveLength(1);
   });
 
   it('shows the token estimate', () => {

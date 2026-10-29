@@ -183,11 +183,42 @@ describe('SessionList search and paging', () => {
 
   it('shows ids without the namespace prefix and keeps the full key as a tooltip', () => {
     const onSelect = vi.fn();
-    renderList({ data: many(1, 'message_store:'), pattern: 'message_store:*', onSelect });
+    renderList({ data: many(1, 'message_store:'), idPrefix: 'message_store:', onSelect });
     const id = screen.getByText('session-000');
     expect(id).toHaveAttribute('title', 'message_store:session-000');
     fireEvent.click(id);
     expect(onSelect).toHaveBeenCalledWith('message_store:session-000');
+  });
+
+  it('matches the filter against the id it shows, not the hidden prefix', () => {
+    renderList({ data: many(3, 'message_store:'), idPrefix: 'message_store:' });
+    const search = screen.getByRole('searchbox', { name: 'Filter sessions' });
+    fireEvent.change(search, { target: { value: 'store' } });
+    expect(screen.getByText('No sessions match this filter.')).toBeInTheDocument();
+    fireEvent.change(search, { target: { value: 'session-001' } });
+    expect(order()).toEqual(['session-001']);
+  });
+
+  it('clears the filter but keeps the sort when the namespace changes', () => {
+    const props = { data: listResponse(), oversizeIds: null, selectedId: null, onSelect: vi.fn() };
+    const { rerender } = render(<SessionList {...props} namespaceId="a" />);
+    fireEvent.click(screen.getByRole('button', { name: /Size/ }));
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Filter sessions' }), {
+      target: { value: 'a' },
+    });
+
+    rerender(<SessionList {...props} namespaceId="b" />);
+
+    expect(screen.getByRole('searchbox', { name: 'Filter sessions' })).toHaveValue('');
+    expect(order()).toEqual(['bravo', 'alpha', 'charlie']);
+  });
+
+  it('only fixes the column widths on wide screens, so narrow screens keep the whole id', () => {
+    renderList();
+    const table = screen.getByRole('table');
+    expect(table).toHaveClass('lg:table-fixed');
+    expect(table).not.toHaveClass('table-fixed');
+    expect(screen.getByText('alpha')).toHaveClass('break-all');
   });
 });
 

@@ -18,7 +18,8 @@ interface Props {
   oversizeIds: Set<string> | null;
   selectedId: string | null;
   onSelect: (sessionId: string) => void;
-  pattern?: string;
+  idPrefix?: string;
+  namespaceId?: string;
 }
 
 const DEFAULT_DESCENDING: Record<SortKey, boolean> = { access: false, size: true, ttl: false };
@@ -68,13 +69,27 @@ function SortHeader({
   );
 }
 
-export function SessionList({ data, oversizeIds, selectedId, onSelect, pattern }: Props) {
+export function SessionList({
+  data,
+  oversizeIds,
+  selectedId,
+  onSelect,
+  idPrefix = '',
+  namespaceId,
+}: Props) {
   const [sort, setSort] = useState<{ key: SortKey; descending: boolean }>({
     key: 'access',
     descending: DEFAULT_DESCENDING.access,
   });
   const [filter, setFilter] = useState('');
   const [shown, setShown] = useState(PAGE_SIZE);
+  const [shownNamespace, setShownNamespace] = useState(namespaceId);
+
+  if (shownNamespace !== namespaceId) {
+    setShownNamespace(namespaceId);
+    setFilter('');
+    setShown(PAGE_SIZE);
+  }
 
   const onSort = (key: SortKey) =>
     setSort((prev) =>
@@ -83,12 +98,17 @@ export function SessionList({ data, oversizeIds, selectedId, onSelect, pattern }
         : { key, descending: DEFAULT_DESCENDING[key] },
     );
 
+  const sorted = useMemo(
+    () => [...data.sessions].sort((a, b) => comparators[sort.key](a, b, sort.descending)),
+    [data.sessions, sort],
+  );
   const sessions = useMemo(() => {
     const needle = filter.trim().toLowerCase();
-    return data.sessions
-      .filter((s) => needle === '' || s.sessionId.toLowerCase().includes(needle))
-      .sort((a, b) => comparators[sort.key](a, b, sort.descending));
-  }, [data.sessions, sort, filter]);
+    if (needle === '') return sorted;
+    return sorted.filter((s) =>
+      displaySessionId(s.sessionId, idPrefix).toLowerCase().includes(needle),
+    );
+  }, [sorted, filter, idPrefix]);
   const visible = sessions.slice(0, shown);
   const remaining = sessions.length - visible.length;
 
@@ -134,20 +154,32 @@ export function SessionList({ data, oversizeIds, selectedId, onSelect, pattern }
       ) : sessions.length === 0 ? (
         <p className="text-sm text-muted-foreground">No sessions match this filter.</p>
       ) : (
-        <Table className="table-fixed">
+        <Table className="lg:table-fixed">
           <TableHeader>
             <TableRow>
               <TableHead>Session</TableHead>
-              <TableHead className="w-14">Keys</TableHead>
+              <TableHead className="lg:w-20">Keys</TableHead>
               <SortHeader
                 label="Last access"
                 column="access"
                 sort={sort}
                 onSort={onSort}
-                className="w-32"
+                className="lg:w-32"
               />
-              <SortHeader label="Size" column="size" sort={sort} onSort={onSort} className="w-24" />
-              <SortHeader label="TTL" column="ttl" sort={sort} onSort={onSort} className="w-24" />
+              <SortHeader
+                label="Size"
+                column="size"
+                sort={sort}
+                onSort={onSort}
+                className="lg:w-32"
+              />
+              <SortHeader
+                label="TTL"
+                column="ttl"
+                sort={sort}
+                onSort={onSort}
+                className="lg:w-24"
+              />
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -167,15 +199,15 @@ export function SessionList({ data, oversizeIds, selectedId, onSelect, pattern }
               >
                 <TableCell>
                   <div className="flex min-w-0 items-center gap-2">
-                    <span className="truncate font-mono text-xs" title={s.sessionId}>
-                      {displaySessionId(s.sessionId, pattern)}
+                    <span className="break-all font-mono text-xs lg:truncate" title={s.sessionId}>
+                      {displaySessionId(s.sessionId, idPrefix)}
                     </span>
                     {oversizeIds?.has(s.sessionId) && <Badge variant="warning">Oversize</Badge>}
                   </div>
                 </TableCell>
                 <TableCell>{s.keyCount}</TableCell>
                 <TableCell>{formatIdle(s.idleSeconds)}</TableCell>
-                <TableCell>
+                <TableCell className="whitespace-nowrap">
                   {s.unmeasuredKeys > 0 ? (
                     <span
                       title={`${s.unmeasuredKeys} ${s.unmeasuredKeys === 1 ? 'key' : 'keys'} could not be measured`}

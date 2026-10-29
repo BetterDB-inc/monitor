@@ -1,8 +1,9 @@
-import { useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
 import { Feature, type SessionNamespace } from '@betterdb/shared';
 import { useConnection } from '../hooks/useConnection';
+import { useIsDemo } from '../contexts/DemoContext';
 import { useLicense } from '../hooks/useLicense';
 import {
   sessionExplorerKeys,
@@ -21,6 +22,13 @@ import { SessionExplorerEmptyState } from '../components/pages/session-explorer/
 import { NamespaceSetup } from '../components/pages/session-explorer/NamespaceSetup';
 import { SessionList } from '../components/pages/session-explorer/SessionList';
 import { SessionDetailPanel } from '../components/pages/session-explorer/SessionDetailPanel';
+import { sessionIdPrefix } from '../components/pages/session-explorer/format';
+import { cn } from '../lib/utils';
+
+const SIDE_BY_SIDE = '(min-width: 1536px)';
+const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
+
+const prefers = (query: string) => window.matchMedia?.(query).matches ?? false;
 
 const errorText = (err: unknown) => (err instanceof Error ? err.message : 'Request failed');
 
@@ -30,15 +38,12 @@ export function SessionExplorer() {
   const queryClient = useQueryClient();
   const { hasFeature } = useLicense();
   const entitled = hasFeature(Feature.SESSION_OVERSIZE_FLAGS);
+  const isDemo = useIsDemo();
 
   const [selectedNs, setSelectedNs] = useState<string | null>(null);
   const [editing, setEditing] = useState<SessionNamespace | 'new' | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const detailRef = useRef<HTMLDivElement>(null);
-  const selectSession = (id: string) => {
-    setSessionId(id);
-    detailRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
-  };
+  const detailRef = useRef<HTMLElement>(null);
   const [exporting, setExporting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [shownConnection, setShownConnection] = useState(connectionId);
@@ -59,6 +64,19 @@ export function SessionExplorer() {
   const sessions = useSessionList(connectionId, nsId);
   const oversizeIds = useOversizeSessions(connectionId, nsId, entitled);
   const detail = useSessionDetail(connectionId, nsId, sessionId);
+  const detailSettled = sessionId !== null && !detail.isPending;
+  const idPrefix = useMemo(() => (namespace ? sessionIdPrefix(namespace) : ''), [namespace]);
+
+  useEffect(() => {
+    if (detailRef.current) detailRef.current.scrollTop = 0;
+  }, [sessionId]);
+
+  useEffect(() => {
+    const el = detailRef.current;
+    if (!el || !detailSettled || prefers(SIDE_BY_SIDE)) return;
+    el.scrollIntoView?.({ behavior: prefers(REDUCED_MOTION) ? 'auto' : 'smooth', block: 'start' });
+    el.focus({ preventScroll: true });
+  }, [sessionId, detailSettled]);
 
   const selectNamespace = (id: string) => {
     setSelectedNs(id);
@@ -235,20 +253,27 @@ export function SessionExplorer() {
             )}
             {sessions.data && (
               <SessionList
-                key={namespace.id}
                 data={sessions.data}
                 oversizeIds={oversizeIds}
                 selectedId={sessionId}
-                onSelect={selectSession}
-                pattern={namespace.pattern}
+                onSelect={setSessionId}
+                idPrefix={idPrefix}
+                namespaceId={namespace.id}
               />
             )}
           </CardContent>
         </Card>
 
-        <div
+        <section
           ref={detailRef}
-          className="scroll-mt-4 2xl:sticky 2xl:top-4 2xl:max-h-[calc(100vh-2rem)] 2xl:self-start 2xl:overflow-y-auto"
+          aria-label="Session detail"
+          tabIndex={-1}
+          className={cn(
+            'outline-none 2xl:sticky 2xl:self-start 2xl:overflow-y-auto',
+            isDemo
+              ? 'scroll-mt-[3.25rem] 2xl:top-[3.25rem] 2xl:max-h-[calc(100vh-4.25rem)]'
+              : 'scroll-mt-4 2xl:top-4 2xl:max-h-[calc(100vh-2rem)]',
+          )}
         >
           {!sessionId && (
             <p className="text-sm text-muted-foreground">Select a session to see its timeline.</p>
@@ -264,10 +289,10 @@ export function SessionExplorer() {
               detail={detail.data}
               onExport={onExport}
               exporting={exporting}
-              pattern={namespace.pattern}
+              idPrefix={idPrefix}
             />
           )}
-        </div>
+        </section>
       </div>
     </div>
   );

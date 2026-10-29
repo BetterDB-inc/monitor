@@ -28,18 +28,24 @@ interface Props {
   detail: SessionDetail;
   onExport: () => void;
   exporting: boolean;
-  pattern?: string;
+  idPrefix?: string;
 }
 
-export function SessionDetailPanel({ detail, onExport, exporting, pattern }: Props) {
+export function SessionDetailPanel({ detail, onExport, exporting, idPrefix = '' }: Props) {
   const reasons = detail.complete ? [] : incompleteReasons(detail);
+  const shownId = displaySessionId(detail.sessionId, idPrefix);
   return (
     <Card>
       <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
           <CardTitle className="break-all font-mono text-base" title={detail.sessionId}>
-            {displaySessionId(detail.sessionId, pattern)}
+            {shownId}
           </CardTitle>
+          {shownId !== detail.sessionId && (
+            <p className="mt-1 break-all font-mono text-xs text-muted-foreground">
+              {detail.sessionId}
+            </p>
+          )}
           <p className="mt-1 text-sm text-muted-foreground">
             ~{detail.estimatedTokens.toLocaleString()} tokens · {formatBytes(detail.memoryBytes)} ·{' '}
             TTL {formatTtl(detail.ttlMs)} · {plural(detail.keys.length, 'key')}
