@@ -7,24 +7,23 @@ export const CONNECTIONS_REFRESH_MS = 30_000;
 export const CONNECTION_PARAM = 'connection';
 export const CONNECTION_STORAGE_KEY = 'betterdb:connectionId';
 
-function preferredConnectionIds(): string[] {
-  const ids: string[] = [];
-  const fromUrl = new URLSearchParams(window.location.search).get(CONNECTION_PARAM);
-  if (fromUrl) ids.push(fromUrl);
+function urlConnectionId(): string | null {
+  return new URLSearchParams(window.location.search).get(CONNECTION_PARAM);
+}
+
+function storedConnectionId(): string | null {
   try {
-    const stored = window.localStorage.getItem(CONNECTION_STORAGE_KEY);
-    if (stored) ids.push(stored);
+    return window.localStorage.getItem(CONNECTION_STORAGE_KEY);
   } catch {
-    return ids;
+    return null;
   }
-  return ids;
 }
 
 function rememberConnectionId(id: string): void {
   try {
     window.localStorage.setItem(CONNECTION_STORAGE_KEY, id);
-  } catch {
-    return;
+  } catch (err) {
+    console.debug('[connection] failed to remember the selected connection:', err);
   }
 }
 
@@ -86,6 +85,7 @@ export function useConnectionState(): ConnectionContextValue {
   const [autoRegisterNodesDefault, setAutoRegisterNodesDefault] = useState(false);
   const [autoRegisterSentinelNodesDefault, setAutoRegisterSentinelNodesDefault] = useState(false);
   const initialLoadDone = useRef(false);
+  const [requestedId] = useState(urlConnectionId);
   const selected = useRef<Connection | null>(null);
   selected.current = currentConnection;
 
@@ -119,9 +119,11 @@ export function useConnectionState(): ConnectionContextValue {
         }
       } else {
         const selectable = data.filter((c) => !isUnavailableMember(c));
-        const preferred = preferredConnectionIds()
-          .map((id) => selectable.find((c) => c.id === id))
-          .find((c) => c !== undefined);
+        const preferred = initialLoadDone.current
+          ? undefined
+          : [requestedId, storedConnectionId()]
+              .map((id) => selectable.find((c) => c.id === id))
+              .find((c) => c !== undefined);
         const defaultConnection =
           preferred ||
           (responseData.currentId && selectable.find((c) => c.id === responseData.currentId)) ||
@@ -138,7 +140,7 @@ export function useConnectionState(): ConnectionContextValue {
       setLoading(false);
       initialLoadDone.current = true;
     }
-  }, []);
+  }, [requestedId]);
 
   const setConnection = useCallback((connectionId: string) => {
     const connection = connections.find(c => c.id === connectionId);

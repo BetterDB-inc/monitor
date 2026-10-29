@@ -63,6 +63,46 @@ describe('useConnectionState', () => {
     await loadWith(['conn-1', 'conn-2', 'conn-3'], 'conn-2');
   });
 
+  it('keeps the URL connection when the address changes before connections load', async () => {
+    window.history.replaceState(null, '', '/team?connection=conn-2');
+    let finish: (value: unknown) => void = () => undefined;
+    mocks.fetchApi.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const { result } = renderHook(() => useConnectionState());
+
+    window.history.replaceState(null, '', '/settings?section=team');
+    await act(async () => {
+      finish(connectionsResponse(['conn-1', 'conn-2']));
+    });
+
+    expect(result.current.currentConnection?.id).toBe('conn-2');
+  });
+
+  it('prefers the remembered connection over the server default', async () => {
+    window.localStorage.setItem(CONNECTION_STORAGE_KEY, 'conn-2');
+    mocks.fetchApi.mockResolvedValueOnce({ connections: [connection('conn-1'), connection('conn-2')], currentId: 'conn-1' });
+    const { result } = renderHook(() => useConnectionState());
+    await waitFor(() => {
+      expect(result.current.currentConnection?.id).toBe('conn-2');
+    });
+  });
+
+  it('ignores another tab’s pick when the current connection is removed', async () => {
+    const { result } = await loadWith(['conn-1', 'conn-2', 'conn-3'], 'conn-1');
+    window.localStorage.setItem(CONNECTION_STORAGE_KEY, 'conn-3');
+
+    mocks.fetchApi.mockResolvedValueOnce(connectionsResponse(['conn-2', 'conn-3']));
+    await act(async () => {
+      await result.current.refreshConnections();
+    });
+
+    expect(result.current.currentConnection?.id).toBe('conn-2');
+  });
+
   it('falls back to the default when the remembered connection is gone', async () => {
     window.localStorage.setItem(CONNECTION_STORAGE_KEY, 'gone');
     window.history.replaceState(null, '', '/?connection=also-gone');
