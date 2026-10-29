@@ -300,6 +300,27 @@ describe('MigrationService ElastiCache Serverless readiness', () => {
     expect(serverlessCategory(job).map(i => i.title)).toContain('Function libraries on the source');
   });
 
+  it('reads the cached script count from the INFO memory already fetched for the source', async () => {
+    const registry = createMockRegistry();
+    readyReplicationCommands(registry);
+    registry.mockAdapter.getInfo.mockResolvedValue({
+      keyspace: { db0: 'keys=100,expires=0,avg_ttl=0' },
+      memory: { used_memory: '1000000', number_of_cached_scripts: '4' },
+      cluster: { cluster_enabled: '0' },
+      server: {},
+      persistence: {},
+    });
+    const service = new MigrationService(registry as any);
+
+    const { id } = await service.startAnalysis({
+      sourceConnectionId: 'conn-1',
+      targetProfile: 'elasticache_serverless',
+    });
+    const job = await waitForTerminal(service, id);
+
+    expect(serverlessCategory(job).map(i => i.title)).toContain('Scripts in the script cache');
+  });
+
   it('adds no serverless readiness issues for an ordinary target', async () => {
     const registry = createMockRegistry();
     readyReplicationCommands(registry);
@@ -353,14 +374,14 @@ describe('MigrationService ElastiCache Serverless readiness', () => {
     expect(replication!.detail).not.toContain('REPLCONF is');
   });
 
-  it('reads cached scripts and pub/sub counts from INFO', async () => {
+  it('reads pub/sub counts from INFO stats without fetching INFO memory again', async () => {
     const registry = createMockRegistry();
     readyReplicationCommands(registry);
-    (registry.mockClient as Record<string, unknown>).info = jest.fn(async (section: string) => {
-      if (section === 'memory') return '# Memory\r\nused_memory:1000\r\nnumber_of_cached_scripts:3\r\n';
+    const info = jest.fn(async (section: string) => {
       if (section === 'stats') return '# Stats\r\npubsub_channels:2\r\npubsub_patterns:0\r\npubsubshard_channels:1\r\n';
       return '';
     });
+    (registry.mockClient as Record<string, unknown>).info = info;
     const service = new MigrationService(registry as any);
 
     const { id } = await service.startAnalysis({
@@ -370,8 +391,8 @@ describe('MigrationService ElastiCache Serverless readiness', () => {
     const job = await waitForTerminal(service, id);
 
     const titles = serverlessCategory(job).map(i => i.title);
-    expect(titles).toContain('Scripts in the script cache');
     expect(titles).toContain('Pub/sub subscribers present');
+    expect(info).not.toHaveBeenCalledWith('memory');
   });
 
   describe('standalone check against ElastiCache Serverless', () => {

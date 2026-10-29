@@ -4,6 +4,7 @@ import {
   findRestrictedCommands,
   isElastiCacheServerlessHost,
   SERVERLESS_RESTRICTED_COMMANDS,
+  summarizeServerlessProbes,
 } from '../analysis/serverless-readiness';
 import type { ServerlessReadinessFacts } from '../analysis/serverless-readiness';
 
@@ -461,5 +462,40 @@ describe('countSlotOwningMasters', () => {
     ];
     const issues = checkServerlessReadiness(facts({ clusterMasterCount: countSlotOwningMasters(nodes) }));
     expect(issues.map(i => i.title)).toEqual(['More than 166 masters']);
+  });
+});
+
+describe('summarizeServerlessProbes', () => {
+  it('takes the largest per-node script cache instead of the sum', () => {
+    const summary = summarizeServerlessProbes([
+      { commandInfo: undefined, memory: { number_of_cached_scripts: '5' }, stats: null },
+      { commandInfo: undefined, memory: { number_of_cached_scripts: '5' }, stats: null },
+      { commandInfo: undefined, memory: { number_of_cached_scripts: '7' }, stats: null },
+    ]);
+    expect(summary.cachedScripts).toBe(7);
+  });
+
+  it('sums pub/sub counts across nodes', () => {
+    const summary = summarizeServerlessProbes([
+      { commandInfo: undefined, memory: null, stats: { pubsub_channels: '1', pubsub_patterns: '2', pubsubshard_channels: '0' } },
+      { commandInfo: undefined, memory: null, stats: { pubsub_channels: '3', pubsub_patterns: '0', pubsubshard_channels: '4' } },
+    ]);
+    expect(summary.pubsub).toEqual({ channels: 4, patterns: 2, shardChannels: 4 });
+  });
+
+  it('collects replication commands missing on any node', () => {
+    const summary = summarizeServerlessProbes([
+      { commandInfo: [['psync'], ['replconf']], memory: null, stats: null },
+      { commandInfo: [null, ['replconf']], memory: null, stats: null },
+    ]);
+    expect(summary.missingReplicationCommands).toEqual(['PSYNC']);
+  });
+
+  it('reports unknown when nothing could be read', () => {
+    expect(summarizeServerlessProbes([{ commandInfo: undefined, memory: null, stats: null }])).toEqual({
+      missingReplicationCommands: null,
+      cachedScripts: null,
+      pubsub: null,
+    });
   });
 });

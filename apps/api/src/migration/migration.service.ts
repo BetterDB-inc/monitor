@@ -9,8 +9,14 @@ import { sampleTtls } from './analysis/ttl-sampler';
 import { detectHfe } from './analysis/hfe-detector';
 import { collectCommandAnalysis } from './analysis/commandlog-analyzer';
 import { buildInstanceMeta, checkCompatibility } from './analysis/compatibility-checker';
-import { checkServerlessReadiness, countSlotOwningMasters, isElastiCacheServerlessHost } from './analysis/serverless-readiness';
-import type { ServerlessClusterMaster, ServerlessReadinessFacts } from './analysis/serverless-readiness';
+import {
+  checkServerlessReadiness,
+  countSlotOwningMasters,
+  isElastiCacheServerlessHost,
+  summarizeServerlessProbes,
+} from './analysis/serverless-readiness';
+import type { ServerlessClusterMaster } from './analysis/serverless-readiness';
+import { InfoParser } from '../database/parsers/info.parser';
 import {
   loadAnalysisVerdict,
   resolveVerdictDir,
@@ -218,6 +224,7 @@ export class MigrationService {
       let slotOwningMasterCount = 0;
       let clusterMasters: ServerlessClusterMaster[] | null = null;
       let masterUsedMemory = [usedMemory];
+      let masterMemorySections: Array<Record<string, string> | null> = [memorySection];
       const scanClients: Valkey[] = [];
 
       const clusterEnabled = String(clusterSection['cluster_enabled'] ?? '0');
@@ -269,16 +276,18 @@ export class MigrationService {
             nodeClient.dbsize() as Promise<number>,
             nodeClient.info('memory') as Promise<string>,
           ]);
-          const memMatch = String(nodeMemStr).match(/\bused_memory:(\d+)/);
+          const memorySectionOfNode = readInfoSection(nodeMemStr, 'memory');
           return {
             keys: Number(nodeKeys) || 0,
-            memory: memMatch ? parseInt(memMatch[1], 10) : 0,
+            memory: Number(memorySectionOfNode?.['used_memory']) || 0,
+            memorySection: memorySectionOfNode,
           };
         }));
         totalKeys = nodeStats.reduce((s, n) => s + n.keys, 0);
         job.result.totalKeys = totalKeys;
         job.result.totalMemoryBytes = nodeStats.reduce((s, n) => s + n.memory, 0);
         masterUsedMemory = nodeStats.map(n => n.memory);
+        masterMemorySections = nodeStats.map(n => n.memorySection);
       }
 
       if (job.cancelled) return;
@@ -532,7 +541,10 @@ export class MigrationService {
       }
 
       if (checkServerless) {
-        const probes = await probeServerlessFacts(scanClients.length > 0 ? scanClients : [adapter.getClient()]);
+        const probes = await probeServerlessFacts(
+          scanClients.length > 0 ? scanClients : [adapter.getClient()],
+          masterMemorySections,
+        );
         incompatibilities.push(...checkServerlessReadiness({
           dbType: capabilities.dbType,
           version: capabilities.version,
@@ -651,46 +663,22 @@ export class MigrationService {
 
 async function probeServerlessFacts(
   clients: Valkey[],
-): Promise<Pick<ServerlessReadinessFacts, 'missingReplicationCommands' | 'cachedScripts' | 'pubsub'>> {
-  const results = await Promise.all(clients.map(async (client) => {
-    const [commandInfo, memory, stats] = await Promise.all([
+  memorySections: Array<Record<string, string> | null>,
+) {
+  const probes = await Promise.all(clients.map(async (client, index) => {
+    const [commandInfo, stats] = await Promise.all([
       Promise.resolve().then(() => client.call('COMMAND', 'INFO', 'PSYNC', 'REPLCONF')).catch(() => undefined),
-      Promise.resolve().then(() => client.info('memory')).catch(() => undefined),
       Promise.resolve().then(() => client.info('stats')).catch(() => undefined),
     ]);
-    return { commandInfo, memory, stats };
+    return { commandInfo, memory: memorySections[index] ?? null, stats: readInfoSection(stats, 'stats') };
   }));
-
-  let missingReplicationCommands: string[] | null = null;
-  let cachedScripts: number | null = null;
-  const pubsubTotals = { channels: 0, patterns: 0, shardChannels: 0 };
-  let pubsubRead = false;
-
-  for (const { commandInfo, memory, stats } of results) {
-    if (Array.isArray(commandInfo)) {
-      const missing = ['PSYNC', 'REPLCONF'].filter((_, i) => !commandInfo[i]);
-      missingReplicationCommands = Array.from(new Set([...(missingReplicationCommands ?? []), ...missing]));
-    }
-    const scripts = readInfoNumber(memory, 'number_of_cached_scripts');
-    if (scripts !== null) cachedScripts = (cachedScripts ?? 0) + scripts;
-    const channels = readInfoNumber(stats, 'pubsub_channels');
-    const patterns = readInfoNumber(stats, 'pubsub_patterns');
-    const shardChannels = readInfoNumber(stats, 'pubsubshard_channels');
-    if (channels !== null || patterns !== null || shardChannels !== null) {
-      pubsubRead = true;
-      pubsubTotals.channels += channels ?? 0;
-      pubsubTotals.patterns += patterns ?? 0;
-      pubsubTotals.shardChannels += shardChannels ?? 0;
-    }
-  }
-
-  return { missingReplicationCommands, cachedScripts, pubsub: pubsubRead ? pubsubTotals : null };
+  return summarizeServerlessProbes(probes);
 }
 
-function readInfoNumber(raw: unknown, field: string): number | null {
+function readInfoSection(raw: unknown, section: string): Record<string, string> | null {
   if (typeof raw !== 'string') return null;
-  const match = raw.match(new RegExp(`^${field}:(\\d+)`, 'm'));
-  return match ? parseInt(match[1], 10) : null;
+  const parsed = InfoParser.parse(raw)[section];
+  return parsed && typeof parsed === 'object' ? (parsed as Record<string, string>) : null;
 }
 
 /**

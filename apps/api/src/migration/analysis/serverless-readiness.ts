@@ -131,6 +131,48 @@ function isInternalClient(clientName: string | undefined): boolean {
   return INTERNAL_CLIENT_NAMES.has(clientName.toLowerCase()) || INTERNAL_NODE_CLIENT_PATTERN.test(clientName);
 }
 
+export interface ServerlessNodeProbe {
+  commandInfo: unknown;
+  memory: Record<string, string> | null;
+  stats: Record<string, string> | null;
+}
+
+function readNumber(section: Record<string, string> | null, field: string): number | null {
+  const raw = section?.[field];
+  if (raw === undefined) return null;
+  const value = parseInt(raw, 10);
+  return Number.isNaN(value) ? null : value;
+}
+
+export function summarizeServerlessProbes(
+  probes: ServerlessNodeProbe[],
+): Pick<ServerlessReadinessFacts, 'missingReplicationCommands' | 'cachedScripts' | 'pubsub'> {
+  let missingReplicationCommands: string[] | null = null;
+  let cachedScripts: number | null = null;
+  const pubsubTotals = { channels: 0, patterns: 0, shardChannels: 0 };
+  let pubsubRead = false;
+
+  for (const { commandInfo, memory, stats } of probes) {
+    if (Array.isArray(commandInfo)) {
+      const missing = ['PSYNC', 'REPLCONF'].filter((_, i) => !commandInfo[i]);
+      missingReplicationCommands = Array.from(new Set([...(missingReplicationCommands ?? []), ...missing]));
+    }
+    const scripts = readNumber(memory, 'number_of_cached_scripts');
+    if (scripts !== null) cachedScripts = Math.max(cachedScripts ?? 0, scripts);
+    const channels = readNumber(stats, 'pubsub_channels');
+    const patterns = readNumber(stats, 'pubsub_patterns');
+    const shardChannels = readNumber(stats, 'pubsubshard_channels');
+    if (channels !== null || patterns !== null || shardChannels !== null) {
+      pubsubRead = true;
+      pubsubTotals.channels += channels ?? 0;
+      pubsubTotals.patterns += patterns ?? 0;
+      pubsubTotals.shardChannels += shardChannels ?? 0;
+    }
+  }
+
+  return { missingReplicationCommands, cachedScripts, pubsub: pubsubRead ? pubsubTotals : null };
+}
+
 export function countSlotOwningMasters(nodes: ReadonlyArray<{ flags: string[]; slots: number[][] }>): number {
   return nodes.filter((node) => {
     return node.flags.includes('master') && node.slots.length > 0;
