@@ -56,7 +56,7 @@ const readOf = (overrides: Partial<SessionKeysRead> = {}): SessionKeysRead => ({
   failedNodes: 0,
   missingKeys: 0,
   touchesKeys: false,
-  totals: { memoryBytes: 64, unmeasuredKeys: 0, ttlMs: 5000 },
+  totals: { memoryBytes: 64, unmeasuredKeys: 0, goneKeys: 0, ttlMs: 5000 },
   ...overrides,
 });
 
@@ -114,7 +114,7 @@ describe('SessionExplorerService.getSession', () => {
     storage.getSessionNamespace.mockResolvedValueOnce({ ...ns, preset: 'agent-cache' });
     keysFor.mockResolvedValue({ keys: agentCacheKeys('ac:session:t1'), truncated: false, failedNodes: 0 });
     read.mockResolvedValueOnce(
-      readOf({ totals: { memoryBytes: 364, unmeasuredKeys: 2, ttlMs: 1200 } }),
+      readOf({ totals: { memoryBytes: 364, unmeasuredKeys: 2, goneKeys: 0, ttlMs: 1200 } }),
     );
     const detail = await service.getSession('conn-1', 'ns-1', 't1');
     expect(detail).toMatchObject({
@@ -125,6 +125,21 @@ describe('SessionExplorerService.getSession', () => {
       unmeasuredKeys: 2,
       ttlMs: 1200,
       selection: 'latest checkpoint and its pending writes',
+    });
+  });
+
+  it('leaves skipped keys that expired before the read out of the totals', async () => {
+    storage.getSessionNamespace.mockResolvedValueOnce({ ...ns, preset: 'agent-cache' });
+    keysFor.mockResolvedValue({ keys: agentCacheKeys('ac:session:t1'), truncated: false, failedNodes: 0 });
+    read.mockResolvedValueOnce(
+      readOf({ totals: { memoryBytes: 300, unmeasuredKeys: 0, goneKeys: 2, ttlMs: 1200 } }),
+    );
+    const detail = await service.getSession('conn-1', 'ns-1', 't1');
+    expect(detail).toMatchObject({
+      totalKeys: 3,
+      skippedKeys: 1,
+      totalMemoryBytes: 300,
+      unmeasuredKeys: 0,
     });
   });
 

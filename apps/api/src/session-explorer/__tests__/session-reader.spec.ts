@@ -732,7 +732,7 @@ describe('readSessionKeys', () => {
 
     expect(result.keys.map((k) => k.key)).toEqual(['a']);
     expect(client.callsOf('pipeline.getrangeBuffer').map((c) => c.args[0])).toEqual(['a']);
-    expect(result.totals).toEqual({ memoryBytes: 550, unmeasuredKeys: 0, ttlMs: 4000 });
+    expect(result.totals).toEqual({ memoryBytes: 550, unmeasuredKeys: 0, goneKeys: 0, ttlMs: 4000 });
   });
 
   it('counts keys it could not measure without failing the read', async () => {
@@ -747,7 +747,7 @@ describe('readSessionKeys', () => {
       selected: ['a', 'b', 'gone'],
     });
 
-    expect(result.totals).toMatchObject({ memoryBytes: 300, unmeasuredKeys: 3 });
+    expect(result.totals).toMatchObject({ memoryBytes: 300, unmeasuredKeys: 2, goneKeys: 1 });
     expect(result.missingKeys).toBe(1);
   });
 

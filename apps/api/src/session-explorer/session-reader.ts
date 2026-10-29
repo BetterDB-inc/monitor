@@ -18,6 +18,7 @@ type PipelineResult = [Error | null, unknown] | undefined;
 export interface SessionTotals {
   memoryBytes: number;
   unmeasuredKeys: number;
+  goneKeys: number;
   ttlMs: number | null;
 }
 
@@ -669,7 +670,7 @@ export async function readSessionKeys(
       moved: new Set(),
       captured: new Map(),
     };
-    const totals = { memoryBytes: 0, unmeasuredKeys: unrouted.length, ttls: [] as number[] };
+    const totals = { memoryBytes: 0, unmeasuredKeys: unrouted.length, goneKeys: 0, ttls: [] as number[] };
     let failedNodes = primaries.failed;
     let lastError: unknown;
     let succeeded = 0;
@@ -683,9 +684,11 @@ export async function readSessionKeys(
           totals.memoryBytes += at.memory ?? 0;
           totals.ttls.push(at.pttl);
         }
+        const missingSelected = missing.filter(isSelected).length;
+        totals.goneKeys += missing.length - missingSelected;
         totals.unmeasuredKeys +=
-          missing.length + moved.length + located.filter((at) => at.memory === null).length;
-        state.missing += missing.filter(isSelected).length;
+          missingSelected + moved.length + located.filter((at) => at.memory === null).length;
+        state.missing += missingSelected;
         if (moved.some(isSelected)) state.moved.add(client);
         if (!state.exhausted) {
           await readNode(client, located.filter((at) => isSelected(at.key)), opts, state);
@@ -712,6 +715,7 @@ export async function readSessionKeys(
       totals: {
         memoryBytes: totals.memoryBytes,
         unmeasuredKeys: totals.unmeasuredKeys,
+        goneKeys: totals.goneKeys,
         ttlMs: minPositive(totals.ttls),
       },
     };

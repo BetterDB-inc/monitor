@@ -177,7 +177,7 @@ export class SessionExplorerService {
     const read = await readSessionKeys(db, scan.keys, { selected });
     if (read.keys.length === 0) throw sessionMissing(read.failedNodes);
     const chosen = new Set(selected);
-    const skippedKeys = scan.keys.filter((key) => !chosen.has(key)).length;
+    const skippedKeys = scan.keys.filter((key) => !chosen.has(key)).length - read.totals.goneKeys;
 
     const views = parseSessionKeys(preset, read.keys);
     const messages = preset.mergeSession(views);
@@ -203,7 +203,7 @@ export class SessionExplorerService {
         estimatedTokens: estimateTokens(messages),
         ttlMs: read.totals.ttlMs,
         memoryBytes: read.keys.reduce((sum, k) => sum + (k.bytes ?? 0), 0),
-        totalKeys: scan.keys.length,
+        totalKeys: scan.keys.length - read.totals.goneKeys,
         skippedKeys,
         totalMemoryBytes: read.totals.memoryBytes,
         unmeasuredKeys: read.totals.unmeasuredKeys,
