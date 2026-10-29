@@ -188,6 +188,23 @@ describe('SessionExplorer', () => {
     expect(document.activeElement).toBe(region);
   });
 
+  it('brings the detail back into view when the open session is clicked again', async () => {
+    const scrollIntoView = spyScroll();
+    api.listNamespaces.mockResolvedValue([ns('a')]);
+    api.getSession.mockResolvedValue(detail({ sessionId: 'alpha' }));
+    renderPage();
+
+    const row = (await screen.findByText('alpha')).closest('tr')!;
+    fireEvent.click(row);
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+
+    row.focus();
+    fireEvent.click(row);
+
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2));
+    expect(document.activeElement).toBe(screen.getByRole('region', { name: 'Session detail' }));
+  });
+
   it('does not scroll when the detail sits beside the list', async () => {
     media(['(min-width: 1536px)']);
     const scrollIntoView = spyScroll();

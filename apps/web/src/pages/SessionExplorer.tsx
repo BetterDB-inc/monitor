@@ -43,6 +43,11 @@ export function SessionExplorer() {
   const [selectedNs, setSelectedNs] = useState<string | null>(null);
   const [editing, setEditing] = useState<SessionNamespace | 'new' | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [selections, setSelections] = useState(0);
+  const selectSession = (id: string) => {
+    setSessionId(id);
+    setSelections((n) => n + 1);
+  };
   const detailRef = useRef<HTMLElement>(null);
   const [exporting, setExporting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -76,7 +81,7 @@ export function SessionExplorer() {
     if (!el || !detailSettled || prefers(SIDE_BY_SIDE)) return;
     el.scrollIntoView?.({ behavior: prefers(REDUCED_MOTION) ? 'auto' : 'smooth', block: 'start' });
     el.focus({ preventScroll: true });
-  }, [sessionId, detailSettled]);
+  }, [selections, detailSettled]);
 
   const selectNamespace = (id: string) => {
     setSelectedNs(id);
@@ -256,7 +261,7 @@ export function SessionExplorer() {
                 data={sessions.data}
                 oversizeIds={oversizeIds}
                 selectedId={sessionId}
-                onSelect={setSessionId}
+                onSelect={selectSession}
                 idPrefix={idPrefix}
                 namespaceId={namespace.id}
               />
