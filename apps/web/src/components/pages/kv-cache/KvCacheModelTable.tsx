@@ -23,7 +23,8 @@ export function KvCacheModelTable({ latest, buckets }: Props) {
       <CardHeader>
         <CardTitle>Models</CardTitle>
         <p className="text-sm text-muted-foreground">
-          Chunks and bytes are from the latest scan; hit rate covers the selected range.
+          Chunks and bytes are from the latest scan; hit rate covers the selected range. The
+          hit rate is per model, so every dtype row of a model shows the same rate.
         </p>
       </CardHeader>
       <CardContent>
@@ -46,7 +47,9 @@ export function KvCacheModelTable({ latest, buckets }: Props) {
                 <TableRow key={`${entry.model}|${entry.dtype}`}>
                   <TableCell className="font-mono text-xs">{entry.model}</TableCell>
                   <TableCell>{entry.dtype}</TableCell>
-                  <TableCell>{entry.layout ?? '—'}</TableCell>
+                  <TableCell>
+                    {entry.layout ?? (latest.layout && latest.layout !== 'mixed' ? latest.layout : '—')}
+                  </TableCell>
                   <TableCell className="text-right">{entry.chunksEst.toLocaleString()}</TableCell>
                   <TableCell className="text-right">{entry.bytesEst === null ? '—' : formatBytes(entry.bytesEst)}</TableCell>
                   <TableCell className="text-right">
