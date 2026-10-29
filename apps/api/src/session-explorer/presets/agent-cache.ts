@@ -241,13 +241,20 @@ function interruptsOf(value: string): RaisedInterrupt[] {
   );
 }
 
+const assertInterrupts = (value: string): void => {
+  interruptsOf(value);
+};
+
 function pendingInterrupts(writes: PendingWrite[]): PendingInterrupt[] {
   const resumed = new Set(onChannel(writes, RESUME_CHANNEL).map(({ write }) => write.taskId));
-  if (resumed.has(NULL_TASK_ID)) return [];
+  const answered = ({ id }: RaisedInterrupt) =>
+    resumed.has(NULL_TASK_ID) || (id !== undefined && resumed.has(id));
   return onChannel(writes, INTERRUPT_CHANNEL)
-    .filter(({ view, write }) => view.parsed && !resumed.has(write.taskId))
-    .flatMap(({ view }) => (typeof view.raw === 'string' ? interruptsOf(view.raw) : []))
-    .filter(({ id }) => id === undefined || !resumed.has(id))
+    .flatMap(({ view, write }) =>
+      view.parsed && typeof view.raw === 'string'
+        ? interruptsOf(view.raw).filter((raised) => resumed.has(write.taskId) || !answered(raised))
+        : [],
+    )
     .map(({ value }) => (value === undefined ? {} : { value }));
 }
 
@@ -291,7 +298,7 @@ export function createAgentCachePreset(pattern?: string): PresetDefinition {
       if (isCheckpoint(parts)) return parseCheckpoint(k.value);
       if (parts?.kind !== 'write') return [];
       if (parts.write.channel === MESSAGES_CHANNEL) return parseWrite(k.value);
-      if (parts.write.channel === INTERRUPT_CHANNEL) interruptsOf(k.value);
+      if (parts.write.channel === INTERRUPT_CHANNEL) assertInterrupts(k.value);
       return [];
     });
 

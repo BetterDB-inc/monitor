@@ -702,19 +702,42 @@ describe('presets with content blocks beyond text', () => {
       expect(preset.mergeSession(views).map((m) => m.role)).not.toContain('interrupt');
     });
 
-    it('drops interrupts already answered by a resume write on the same checkpoint', () => {
+    it('drops an interrupt answered by a resume keyed by its interrupt id', () => {
       const pending = [
         ...keys,
-        write(`${p}:writes:1f0-b|task-1|__interrupt__|0`, [{ id: 'i-1', value: 'by task' }]),
         write(`${p}:writes:1f0-b|task-4|__interrupt__|0`, [{ id: 'i-4', value: 'by id' }]),
         write(`${p}:writes:1f0-b|task-5|__interrupt__|0`, [{ id: 'i-5', value: 'open' }]),
-        write(`${p}:writes:1f0-b|task-1|__resume__|0`, ['yes']),
         write(`${p}:writes:1f0-b|i-4|__resume__|0`, ['yes']),
         write(`${p}:writes:1f0-a|task-5|__resume__|0`, ['stale']),
       ];
       expect(preset.pendingInterrupts!(parseSessionKeys(preset, pending))).toEqual([
         { value: 'ask' },
         { value: 'open' },
+      ]);
+    });
+
+    it('keeps an interrupt re-raised after a resume while the task still waits', () => {
+      const reraised = [
+        ...keys,
+        write(`${p}:writes:1f0-b|task-7|__interrupt__|0`, [{ id: 'i-7', value: 'second?' }]),
+        write(`${p}:writes:1f0-b|00000000-0000-0000-0000-000000000000|__resume__|0`, 'A'),
+        write(`${p}:writes:1f0-b|task-7|__resume__|1`, ['A']),
+      ];
+      expect(preset.pendingInterrupts!(parseSessionKeys(preset, reraised))).toEqual([
+        { value: 'second?' },
+      ]);
+    });
+
+    it('keeps a re-raised interrupt even when a resume is keyed by its interrupt id', () => {
+      const reraised = [
+        ...keys,
+        write(`${p}:writes:1f0-b|task-7|__interrupt__|0`, [{ id: 'i-7', value: 'second?' }]),
+        write(`${p}:writes:1f0-b|i-7|__resume__|0`, 'A'),
+        write(`${p}:writes:1f0-b|task-7|__resume__|1`, ['A']),
+      ];
+      expect(preset.pendingInterrupts!(parseSessionKeys(preset, reraised))).toEqual([
+        { value: 'ask' },
+        { value: 'second?' },
       ]);
     });
 
