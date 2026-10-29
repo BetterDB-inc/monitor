@@ -56,7 +56,7 @@ export function failedNodeOf(primaries: PrimaryClients, key: string): number | n
 const isServingPrimary = (node: ClusterNode) =>
   node.flags.includes('master') && node.slots.length > 0;
 
-function nodeClient(parent: Valkey, node: ClusterNode): Valkey | null {
+function nodeClient(parent: Valkey, node: ClusterNode, dbIndex: number): Valkey | null {
   const address = parseNodeAddress(node.address);
   if (!address) return null;
   const { username, password, tls } = parent.options;
@@ -70,6 +70,7 @@ function nodeClient(parent: Valkey, node: ClusterNode): Valkey | null {
     port: address.port,
     username,
     password,
+    db: dbIndex,
     tls: tls ? { ...nodeTls, ...tlsIdentityOptions(address.host, node.hostname) } : undefined,
     ...READER_OPTIONS,
     commandTimeout: readerTimeout(parent),
@@ -105,12 +106,12 @@ async function openReader(label: string, create: () => Valkey | null): Promise<R
   }
 }
 
-const connectNode = (parent: Valkey, node: ClusterNode) =>
-  openReader(node.address, () => nodeClient(parent, node));
+const connectNode = (parent: Valkey, node: ClusterNode, dbIndex: number) =>
+  openReader(node.address, () => nodeClient(parent, node, dbIndex));
 
-const ownReader = (parent: Valkey) =>
+const ownReader = (parent: Valkey, dbIndex: number) =>
   openReader(`${parent.options.host}:${parent.options.port}`, () =>
-    parent.duplicate({ ...READER_OPTIONS, commandTimeout: readerTimeout(parent) }),
+    parent.duplicate({ ...READER_OPTIONS, db: dbIndex, commandTimeout: readerTimeout(parent) }),
   );
 
 const unavailable = (failed: number): PrimaryClients => ({
@@ -134,7 +135,8 @@ async function clusterNodes(seed: Reader): Promise<ClusterNode[] | null> {
 export async function primaryClients(db: DatabasePort): Promise<PrimaryClients> {
   const parent = db.getClient();
   const { clusterEnabled } = db.getCapabilities();
-  const seed = await ownReader(parent);
+  const dbIndex = db.getActiveDbIndex?.() ?? parent.options.db ?? 0;
+  const seed = await ownReader(parent, dbIndex);
   if (!seed) return unavailable(1);
   if (!clusterEnabled) {
     return {
@@ -156,7 +158,9 @@ export async function primaryClients(db: DatabasePort): Promise<PrimaryClients> 
   }
   const primaries = nodes.filter(isServingPrimary);
   const connected = await Promise.all(
-    primaries.map((node) => (node.flags.includes('myself') ? seed : connectNode(parent, node))),
+    primaries.map((node) =>
+      node.flags.includes('myself') ? seed : connectNode(parent, node, dbIndex),
+    ),
   );
   if (!connected.includes(seed)) seed.client.disconnect();
 

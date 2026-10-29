@@ -244,6 +244,36 @@ describe('withPrimaries', () => {
     expect(options).toMatchObject({ commandTimeout: 5000, connectTimeout: 5000 });
   });
 
+  it('reads every primary from the database the shared client is on', async () => {
+    const parent = new FakeValkey(new Map(), { host: 'seed', port: 7000, db: 2 });
+    parent.duplicateWith = new FakeValkey();
+    ValkeyMock.mockImplementation(() => new FakeValkey());
+    const db = {
+      ...fakeDb(parent, {
+        nodes: [
+          masterNode('a', '10.0.0.1:7000', ['myself'], [[0, 8191]]),
+          masterNode('b', '10.0.0.2:7001', [], [[8192, 16383]]),
+        ],
+      }),
+      getActiveDbIndex: () => 2,
+    };
+
+    await withPrimaries(db, async ({ clients }) => clients);
+
+    expect(parent.callsOf('duplicate')[0].args[0]).toMatchObject({ db: 2 });
+    expect(ValkeyMock.mock.calls[0][0]).toMatchObject({ db: 2 });
+  });
+
+  it('reads from database 0 when the shared client fell back from its configured one', async () => {
+    const parent = new FakeValkey(new Map(), { host: 'seed', port: 7000, db: 2 });
+    parent.duplicateWith = new FakeValkey();
+    const db = { ...fakeDb(parent), getActiveDbIndex: () => 0 };
+
+    await withPrimaries(db, async ({ clients }) => clients);
+
+    expect(parent.callsOf('duplicate')[0].args[0]).toMatchObject({ db: 0 });
+  });
+
   it('releases the other primaries when the work throws', async () => {
     const node = new FakeValkey();
     ValkeyMock.mockImplementation(() => node);
