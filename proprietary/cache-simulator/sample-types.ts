@@ -16,4 +16,6 @@ export interface NodeSample {
   strata: Stratum[];
   exhausted: boolean;
   timedOut: boolean;
+  ceiling?: number;
+  otherDbKeys?: boolean;
 }

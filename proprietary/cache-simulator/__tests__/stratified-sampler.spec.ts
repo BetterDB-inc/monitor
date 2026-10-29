@@ -1,4 +1,4 @@
-import { estimate } from '../size-estimator';
+import { DICT_ENTRY_BYTES, estimate, keyMemoryCeiling } from '../size-estimator';
 import { sampleNodes, HEAVY_TAIL_MIN_SAMPLES, SamplerUnsupportedError, TARGET_RELATIVE_CI } from '../stratified-sampler';
 import { fakeClient, keyspace } from './fake-keyspace';
 
@@ -182,6 +182,88 @@ describe('sampleNodes', () => {
       const [result] = await sampleNodes([{ name: 'a', client: fakeClient(heavyTail()) }], { budget: 400, deadlineMs: 60_000 });
       expect(sampledOf(result.strata)).toBeLessThanOrEqual(400);
     });
+
+    it('resumes the TYPE scan across rounds instead of restarting it', async () => {
+      const keys = heavyTail();
+      const client = fakeClient(keys);
+      const call = client.call;
+      let typeScans = 0;
+      client.call = (command: string, args: string[]) => {
+        if (args.includes('TYPE')) typeScans += 1;
+        return call(command, args);
+      };
+      const [result] = await sampleNodes([{ name: 'a', client }], { budget: 400, hardCap: 10_000, deadlineMs: 60_000 });
+      expect(sampledOf(result.strata)).toBeGreaterThan(4000);
+      expect(typeScans).toBeLessThanOrEqual(keys.size / 1000 + 1);
+    });
+
+    it('measures the rest of a TYPE scan page in the next round instead of skipping it', async () => {
+      const keys = keyspace(3000, (index) => ({ type: 'string', size: index % 50 === 0 ? 160 : 100 }));
+      const client = fakeClient(keys);
+      const call = client.call;
+      let typeScans = 0;
+      client.call = (command: string, args: string[]) => {
+        if (args.includes('TYPE')) typeScans += 1;
+        return call(command, args);
+      };
+      const [result] = await sampleNodes([{ name: 'a', client }], { budget: 100, hardCap: 3000, deadlineMs: 60_000 });
+      expect(sampledOf(result.strata)).toBe(3000);
+      expect(estimate([result], 0).totalBytes).toBe(2940 * 100 + 60 * 160);
+      expect(typeScans).toBe(keys.size / 1000);
+    });
+  });
+
+  describe('large keys the sample misses', () => {
+    const huge = 2 * 1024 * 1024;
+    const sampledOf = (strata: { sizes: number[] }[]) => strata.reduce((sum, stratum) => sum + stratum.sizes.length, 0);
+    const runs = Array.from({ length: 10 }, (_, index) => index + 1);
+    const withHiddenHashes = (strings: (index: number) => number) =>
+      keyspace(20_000, (index) => (index % 10 !== 0 ? string(strings(index)) : { type: 'hash', size: index % 3_000 === 0 ? huge : 500 }));
+    const scenarios = [
+      { name: 'uniform strings', keys: withHiddenHashes((index) => 50 + ((index * 7919) % 1000)) },
+      { name: 'heavy-tailed strings', keys: withHiddenHashes((index) => (index % 201 === 0 ? 100_000 : 50 + (index % 100))) },
+    ];
+
+    it.each(scenarios)('finds the large keys hidden in a uniform-looking type among $name', async ({ keys }) => {
+      const truth = [...keys.values()].reduce((sum, key) => sum + (key.size ?? 0), 0);
+      const ceiling = keyMemoryCeiling(truth - keys.size * DICT_ENTRY_BYTES, keys.size);
+      const hugeCount = [...keys.values()].filter((key) => key.size === huge).length;
+      for (const seed of runs) {
+        const [result] = await sampleNodes([{ name: 'a', client: fakeClient(keys, { seed }), ceiling }], {
+          budget: 400,
+          hardCap: 10_000,
+          deadlineMs: 60_000,
+        });
+        const hashes = result.strata.find((stratum) => stratum.type === 'hash')!;
+        const final = estimate([result], 0);
+        expect(result.ceiling).toBe(ceiling);
+        expect(hashes.sizes.filter((size) => size === huge)).toHaveLength(hugeCount);
+        expect(final.likelyMissedLargeKeys).toBe(false);
+        expect(Math.abs(final.totalBytes - truth)).toBeLessThanOrEqual(final.ci95Bytes);
+      }
+    });
+
+    it('stops at the budget when the sample explains the dataset memory', async () => {
+      const plain = keyspace(20_000, () => string());
+      const [result] = await sampleNodes([{ name: 'a', client: fakeClient(plain), ceiling: 20_000 * 100 }], {
+        budget: 400,
+        hardCap: 20_000,
+        deadlineMs: 60_000,
+      });
+      expect(sampledOf(result.strata)).toBe(400);
+    });
+
+    it('does not chase the gap when other databases share the dataset memory', async () => {
+      const plain = keyspace(20_000, () => string());
+      const [result] = await sampleNodes([{ name: 'a', client: fakeClient(plain), ceiling: 20_000 * 100 * 3, otherDbKeys: true }], {
+        budget: 400,
+        hardCap: 20_000,
+        deadlineMs: 60_000,
+      });
+      expect(sampledOf(result.strata)).toBe(400);
+      expect(result.otherDbKeys).toBe(true);
+      expect(estimate([result], 0).likelyMissedLargeKeys).toBe(false);
+    });
   });
 
   describe('rare dominating key', () => {
@@ -193,7 +275,7 @@ describe('sampleNodes', () => {
     it('covers the true size with the memory ceiling on every scan order', async () => {
       for (const seed of runs) {
         const [result] = await sampleNodes([{ name: 'a', client: fakeClient(keys, { seed }) }], { budget: 4000, hardCap: 50_000, deadlineMs: 60_000 });
-        const { totalBytes, ci95Bytes } = estimate([result], 0, truth + 1024 * 1024);
+        const { totalBytes, ci95Bytes } = estimate([{ ...result, ceiling: truth + 1024 * 1024 }], 0);
         expect(Math.abs(totalBytes - truth)).toBeLessThanOrEqual(ci95Bytes);
       }
     });

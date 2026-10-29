@@ -4,9 +4,31 @@ import type { NodeSample } from './sample-types';
 
 const Z95 = 1.96;
 export const DICT_ENTRY_BYTES = 24;
+export const MISSED_GAP_SHARE = 0.15;
+export const MISSED_GAP_KEY_BYTES = 32;
+export const MISSED_GAP_BASE_BYTES = 1024 * 1024;
 
 export function keyMemoryCeiling(datasetBytes: number, keys: number): number {
   return datasetBytes + keys * DICT_ENTRY_BYTES;
+}
+
+export function likelyMissed(totalBytes: number, statisticalBytes: number, ceiling: number, keys: number): boolean {
+  const overhead = MISSED_GAP_BASE_BYTES + keys * MISSED_GAP_KEY_BYTES;
+  return ceiling - totalBytes > Math.max(statisticalBytes, MISSED_GAP_SHARE * ceiling, overhead);
+}
+
+function measuredOf(node: NodeSample): number {
+  return node.strata.reduce((sum, stratum) => sum + stratum.sizes.length, 0);
+}
+
+function unsampled(node: NodeSample): boolean {
+  return node.strata.some((stratum) => stratum.estimatedKeys > 0 && stratum.sizes.length < stratum.estimatedKeys) || measuredOf(node) < node.dbSize;
+}
+
+function missesLargeKeys(node: NodeSample): boolean {
+  if (node.ceiling === undefined || node.otherDbKeys || measuredOf(node) === 0 || !unsampled(node)) return false;
+  const { totalBytes, ci95Bytes } = estimate([{ ...node, ceiling: undefined }], 0);
+  return likelyMissed(totalBytes, ci95Bytes, node.ceiling, node.dbSize);
 }
 
 interface TypeTotals {
@@ -28,12 +50,13 @@ function countVariance(strata: NodeSample['strata'], pooledMean: number): number
   return ((keys * keys) / observed) * spread * (1 - observed / keys);
 }
 
-export function estimate(nodes: NodeSample[], sampledAt: number, memoryCeiling?: number): CacheSimulatorEstimate {
-  const cells = nodes.flatMap((node) => node.strata.filter((stratum) => stratum.estimatedKeys > 0));
+export function estimate(nodes: NodeSample[], sampledAt: number): CacheSimulatorEstimate {
+  const cells = nodes.flatMap((node) => node.strata.filter((stratum) => stratum.estimatedKeys > 0).map((stratum) => ({ ...stratum, node })));
   const pooled = cells.flatMap((cell) => cell.sizes);
   const pooledMean = mean(pooled);
   const pooledVariance = sampleVariance(pooled);
   const types = new Map<string, TypeTotals>();
+  const nodeTotals = new Map<NodeSample, number>();
   let total = 0;
   let variance = nodes.reduce((sum, node) => sum + countVariance(node.strata, pooledMean), 0);
 
@@ -43,6 +66,7 @@ export function estimate(nodes: NodeSample[], sampledAt: number, memoryCeiling?:
     const cellMean = n > 0 ? mean(cell.sizes) : pooledMean;
     const cellVariance = n < 2 && N > n ? pooledVariance : sampleVariance(cell.sizes);
     total += N * cellMean;
+    nodeTotals.set(cell.node, (nodeTotals.get(cell.node) ?? 0) + N * cellMean);
     variance += n === 0 ? N * N * pooledVariance : ((N * N) / n) * cellVariance * Math.max(0, 1 - n / N);
     const totals = types.get(cell.type) ?? { keys: 0, weighted: 0, second: 0, sampled: 0 };
     totals.keys += N;
@@ -69,10 +93,10 @@ export function estimate(nodes: NodeSample[], sampledAt: number, memoryCeiling?:
   byType.sort((a, b) => b.keys * b.avgBytes - a.keys * a.avgBytes);
 
   const statistical = Z95 * Math.sqrt(variance) + tailAllowance;
-  const unsampled =
-    cells.some((cell) => cell.sizes.length < cell.estimatedKeys) ||
-    nodes.some((node) => node.strata.reduce((sum, stratum) => sum + stratum.sizes.length, 0) < node.dbSize);
-  const unexplained = memoryCeiling !== undefined && unsampled ? Math.abs(memoryCeiling - total) : 0;
+  const bounded = nodes.filter((node) => node.ceiling !== undefined);
+  const boundedCeiling = bounded.reduce((sum, node) => sum + (node.ceiling ?? 0), 0);
+  const boundedTotal = bounded.reduce((sum, node) => sum + (nodeTotals.get(node) ?? 0), 0);
+  const unexplained = bounded.some(unsampled) ? Math.abs(boundedCeiling - boundedTotal) : 0;
   const keys = byType.reduce((sum, entry) => sum + entry.keys, 0);
   const second = [...types.values()].reduce((sum, entry) => sum + entry.second, 0);
   const avgKeyBytes = keys > 0 ? total / keys : 0;
@@ -85,5 +109,6 @@ export function estimate(nodes: NodeSample[], sampledAt: number, memoryCeiling?:
     byType,
     sampledAt,
     partial: nodes.some((node) => node.timedOut),
+    likelyMissedLargeKeys: nodes.some(missesLargeKeys),
   };
 }
