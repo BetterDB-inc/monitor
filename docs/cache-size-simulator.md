@@ -37,12 +37,12 @@ Every input is filled in from measured data and can be changed; the chart redraw
 - **Per-key overhead** — memory per key on top of the average key size. Sampled sizes (`MEMORY USAGE`) already include it, so it is 0 once sampling finishes; before that the INFO-based average uses 88 bytes.
 - **maxmemory** — from `INFO`; 0 means no limit.
 
-The headline about reaching maxmemory always looks six months ahead, whichever horizon the chart shows.
+The headline about reaching maxmemory always looks six months ahead, whichever horizon the chart shows. It follows the projected line; if only the upper end of the range reaches maxmemory within six months, the headline says so.
 
 ## Requirements and limits
 
 - Needs `SCAN … TYPE` (Redis 6.0+ / any Valkey) and `MEMORY USAGE`. If either is missing or blocked by ACLs, the page shows the `INFO` figures and lets you enter values by hand.
 - Cloud node sizes are capacity only (no prices) and were checked against each provider's published specs on the date shown in the catalog.
-- Node picks keep the projection under 80% of usable memory: 75% of node memory on ElastiCache (default reserved memory), all of it on MemoryDB (no reserved memory; maxmemory is the node size), 80% on Memorystore and Azure Cache for Redis.
+- Node picks keep the six-month projection's highest point (the upper end of the range, when sampling gives one) under 80% of usable memory: 75% of node memory on ElastiCache (default reserved memory), all of it on MemoryDB (no reserved memory; maxmemory is the node size), 80% on Memorystore and Azure Cache for Redis.
 - Memorystore picks assume one replica per shard, so a cluster tops out at 125 shards.
 - Azure Cache for Redis tiers are marked legacy: Microsoft no longer offers them to new customers.
