@@ -38,7 +38,7 @@ import {
   scanLmcacheKeys,
   type ScanResult,
 } from './footprint-scanner';
-import { hasSingleKeyEvidence, hasTwoKeyEvidence, maskKey, resolveTagSuffixes } from './key-classifier';
+import { maskKey, resolveTagSuffixes, suffixEvidence, type SuffixEvidence } from './key-classifier';
 import { slotOwner, type SlotOwnership } from './key-slot';
 
 export interface SnapshotContext {
@@ -526,7 +526,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   ): Promise<PromiseSettledResult<NodeReading>[]> {
     const scanned = await Promise.allSettled(nodes.map((node) => this.scanNode(node, probe)));
     const runKeys = scanned.flatMap((result) => (result.status === 'fulfilled' ? result.value.scan.matchedKeys : []));
-    const evidence = { twoKey: hasTwoKeyEvidence(runKeys), singleKey: hasSingleKeyEvidence(runKeys) };
+    const evidence = suffixEvidence(runKeys);
     const checkClients = runKeys.length < DETECTION_MIN_MATCHES;
     return Promise.allSettled(
       scanned.map((result, index) =>
@@ -566,12 +566,12 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
 
   private async sampleNode(
     { node, scan, ...rest }: NodeScan,
-    { twoKey, singleKey }: { twoKey: boolean; singleKey: boolean },
+    evidence: Map<string, SuffixEvidence>,
     checkClients: boolean,
     ownsSlot?: SlotOwnership,
     replica = false,
   ): Promise<NodeReading> {
-    const matchedKeys = resolveTagSuffixes(scan.matchedKeys, twoKey, singleKey);
+    const matchedKeys = resolveTagSuffixes(scan.matchedKeys, evidence);
     const [samples, glide] = await Promise.all([
       replica ? ([] as KeySample[]) : sampleLmcacheKeys(node.client, downsampleSeries(matchedKeys, this.sampleSize), ownsSlot),
       checkClients ? hasLmcacheGlideClient(node.client, node.client.getActiveDbIndex?.() ?? 0) : false,

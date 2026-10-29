@@ -263,6 +263,22 @@ describe('KvCacheFootprintService', () => {
     expect(await service.triggerCollection('c1')).toMatchObject({ matchedKeys: 2, chunksEst: 2 });
   });
 
+  it('resolves tag suffixes per model so two-key keys of another model do not change it', async () => {
+    const { service } = setup([
+      'a/m@1@0@1@bfloat16kv_bytes',
+      'a/m@1@0@1@bfloat16metadata',
+      'b/m@1@0@2@half@salt%user_metadata',
+      'b/m@1@0@3@half@salt%user_prefill',
+    ]);
+    const snapshot = await service.triggerCollection('c1');
+    expect(snapshot?.perModel.map((m) => [m.model, m.layout, m.chunksEst])).toEqual(
+      expect.arrayContaining([
+        ['a/m', 'two_key', 1],
+        ['b/m', 'single_key', 2],
+      ]),
+    );
+  });
+
   it('drops the eviction baseline of a node that misses a run', async () => {
     const { service, client } = setup();
     const other = fakeClient([]);
