@@ -139,6 +139,28 @@ describe('KvCacheStatusService', () => {
     expect(recovered.lastScanAttemptAt).toBeNull();
   });
 
+  it('reports a disconnected connection with no snapshot as a failed scan', async () => {
+    const connections = {
+      list: jest.fn().mockReturnValue([{ id: 'c1', name: 'one', isConnected: false, connectionType: 'direct' }]),
+      get: jest.fn().mockReturnValue({}),
+      getConfig: jest.fn().mockReturnValue({ id: 'c1', name: 'one', host: 'h', port: 6379, dbIndex: 0 }),
+    } as any;
+    const store = {
+      saveKvCacheFootprintSnapshot: jest.fn(),
+      getKvCacheFootprintSnapshots: jest.fn().mockResolvedValue([]),
+    } as any;
+    const license = { hasFeature: (feature: string) => feature === Feature.KV_CACHE_MONITORING } as any;
+    const realFootprint = new KvCacheFootprintService(connections, store, license);
+    const statuses = new KvCacheStatusService(store, realFootprint, { list: () => [] } as any);
+
+    await (realFootprint as any).tick();
+    const status = await statuses.getStatus('c1');
+    expect(status.latest).toBeNull();
+    expect(status.lastScanError).toBe("Connection 'c1' is not connected");
+    expect(status.lastScanAttemptAt).toEqual(expect.any(Number));
+    expect(store.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
+  });
+
   it('caps the history range and buckets it in storage', async () => {
     storage.getKvCacheFootprintSnapshots.mockResolvedValue([]);
     const to = 100 * 24 * 60 * 60_000;

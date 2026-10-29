@@ -822,6 +822,16 @@ describe('KvCacheFootprintService', () => {
     expect(service.getLastScanAttempt('c1')).toBeNull();
   });
 
+  it('records a manual scan of a disconnected connection until it scans again', async () => {
+    const { service, registry } = setup();
+    registry.list.mockReturnValue([{ id: 'c1', name: 'one', isConnected: false, connectionType: 'direct' }]);
+    await expect(service.triggerCollection('c1')).rejects.toBeInstanceOf(ServiceUnavailableException);
+    expect(service.getLastScanAttempt('c1')).toEqual({ at: expect.any(Number), error: "Connection 'c1' is not connected" });
+    registry.list.mockReturnValue([{ id: 'c1', name: 'one', isConnected: true, connectionType: 'direct' }]);
+    await service.triggerCollection('c1');
+    expect(service.getLastScanAttempt('c1')).toBeNull();
+  });
+
   it('forgets a failed scan when the connection is removed', async () => {
     const { service, client, registry } = setup();
     client.call.mockRejectedValueOnce(new Error('NOPERM'));

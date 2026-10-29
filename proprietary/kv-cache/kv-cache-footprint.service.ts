@@ -189,8 +189,17 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     return this.intervalMs;
   }
 
+  protected shouldPollDisconnected(): boolean {
+    return true;
+  }
+
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     if (!this.license.hasFeature(Feature.KV_CACHE_MONITORING)) return;
+    const target = this.target(ctx.connectionId);
+    if (target?.connection && !target.connection.isConnected) {
+      if (!target.rejection) this.recordFailure(ctx.connectionId, this.notConnected(ctx.connectionId));
+      return;
+    }
     if (Date.now() < (this.undetectedUntil.get(ctx.connectionId) ?? 0)) return;
     await this.collect(ctx);
   }
@@ -312,7 +321,9 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     if (!target) throw new NotFoundException(`Connection '${connectionId}' not found`);
     if (target.rejection) throw new BadRequestException(target.rejection);
     if (target.connection && !target.connection.isConnected) {
-      throw new ServiceUnavailableException(`Connection '${connectionId}' is not connected`);
+      const message = this.notConnected(connectionId);
+      this.recordFailure(connectionId, message);
+      throw new ServiceUnavailableException(message);
     }
     const running = this.running.get(connectionId);
     if (running) return running;
@@ -379,13 +390,19 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
       if (snapshot) this.lastAttempts.delete(ctx.connectionId);
       return snapshot;
     } catch (error) {
-      if (this.generationOf(ctx.connectionId) === generation) {
-        this.lastAttempts.set(ctx.connectionId, { at: Date.now(), error: errorMessage(error) });
-      }
+      if (this.generationOf(ctx.connectionId) === generation) this.recordFailure(ctx.connectionId, errorMessage(error));
       throw error;
     } finally {
       if (this.running.get(ctx.connectionId) === run) this.running.delete(ctx.connectionId);
     }
+  }
+
+  private notConnected(connectionId: string): string {
+    return `Connection '${connectionId}' is not connected`;
+  }
+
+  private recordFailure(connectionId: string, error: string): void {
+    this.lastAttempts.set(connectionId, { at: Date.now(), error });
   }
 
   private generationOf(connectionId: string): number {
