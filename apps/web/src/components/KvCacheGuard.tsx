@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Feature } from '@betterdb/shared';
 import { kvCacheApi, kvCacheKeys } from '../api/kv-cache';
-import { kvCacheInUse, useKvCacheStatus } from '../hooks/useKvCacheStatus';
+import { awaitingFirstScan, kvCacheInUse, useKvCacheStatus } from '../hooks/useKvCacheStatus';
 import { useConnection } from '../hooks/useConnection';
 import { useLicense, useLicenseStatus } from '../hooks/useLicense';
 import { hasKvCacheFootprint } from '../utils/connectionType';
@@ -29,7 +29,11 @@ export function KvCacheGuard({ children }: Props) {
       const history = await kvCacheApi.getFootprintHistory(end - PAST_DETECTION_MS, end, signal);
       return history.some((snapshot) => snapshot.detected);
     },
-    enabled: connectionId !== null && status.data !== undefined && !kvCacheInUse(status.data),
+    enabled:
+      connectionId !== null &&
+      status.data !== undefined &&
+      !kvCacheInUse(status.data) &&
+      !awaitingFirstScan(status.data),
   });
 
   if (license === null && licenseLoading) {
@@ -53,7 +57,15 @@ export function KvCacheGuard({ children }: Props) {
     return <GuardSkeleton />;
   }
   const notDetected = (
-    <KvCacheNotDetected latest={status.data.latest} onLinkEngine={() => setLinkOpen(true)} />
+    <KvCacheNotDetected
+      key={connectionId}
+      latest={status.data.latest}
+      pending={awaitingFirstScan(status.data)}
+      scanError={status.data.lastScanError ?? null}
+      intervalMs={status.data.footprintIntervalMs}
+      cooldownUntil={status.data.scanCooldownUntil ?? null}
+      onLinkEngine={() => setLinkOpen(true)}
+    />
   );
   return (
     <>

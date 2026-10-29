@@ -142,6 +142,180 @@ describe('KvCacheGuard', () => {
     await waitFor(() => expect(refreshFootprint).toHaveBeenCalledTimes(1));
   });
 
+  it('says the first scan is still running instead of reporting LMCache as missing', async () => {
+    getStatus.mockResolvedValue({ hasLmcache: false, latest: null, sampleKey: null, engines: [] });
+    renderGuard();
+    expect(await screen.findByText('Scanning for LMCache keys')).toBeInTheDocument();
+    expect(screen.queryByText('No LMCache KV cache detected')).toBeNull();
+    expect(screen.queryByTestId('children')).toBeNull();
+  });
+
+  it('opens the link-engine dialog while the first scan is running', async () => {
+    getStatus.mockResolvedValue({ hasLmcache: false, latest: null, sampleKey: null, engines: [] });
+    renderGuard();
+    fireEvent.click(await screen.findByRole('button', { name: 'Link an engine' }));
+    expect(await screen.findByText('Link LMCache engine')).toBeInTheDocument();
+    expect(screen.getByText('Scanning for LMCache keys')).toBeInTheDocument();
+  });
+
+  it('hides Link during the first scan on the demo instance', async () => {
+    demo.isDemo = true;
+    getStatus.mockResolvedValue({ hasLmcache: false, latest: null, sampleKey: null, engines: [] });
+    renderGuard();
+    expect(await screen.findByText('Scanning for LMCache keys')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Link an engine' })).toBeNull();
+  });
+
+  it('polls every five seconds until the first scan finishes', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    refreshFootprint.mockReturnValue(new Promise(() => undefined));
+    try {
+      getStatus
+        .mockResolvedValueOnce({ hasLmcache: false, latest: null, sampleKey: null, engines: [] })
+        .mockResolvedValue({ hasLmcache: false, latest, sampleKey: null, engines: [] });
+      renderGuard();
+      expect(await screen.findByText('Scanning for LMCache keys')).toBeInTheDocument();
+      expect(getStatus).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(getStatus).toHaveBeenCalledTimes(2);
+      expect(await screen.findByText('No LMCache KV cache detected')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('starts a scan once and keeps Rescan and the docs on the first-scan card', async () => {
+    getStatus.mockResolvedValue({ hasLmcache: false, latest: null, sampleKey: null, engines: [] });
+    renderGuard();
+    expect(await screen.findByText('Scanning for LMCache keys')).toBeInTheDocument();
+    await waitFor(() => expect(refreshFootprint).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('link', { name: 'Read the docs' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Rescan now' }));
+    await waitFor(() => expect(refreshFootprint).toHaveBeenCalledTimes(2));
+  });
+
+  it('shows why the first scan could not run', async () => {
+    getStatus.mockResolvedValue({ hasLmcache: false, latest: null, sampleKey: null, engines: [] });
+    refreshFootprint.mockRejectedValue(new Error("Connection 'c1' is not connected"));
+    renderGuard();
+    expect(
+      await screen.findByText("Could not rescan: Connection 'c1' is not connected"),
+    ).toBeInTheDocument();
+  });
+
+  it('shows a failed scheduled scan to users who cannot rescan', async () => {
+    demo.isDemo = true;
+    getStatus.mockResolvedValue({
+      hasLmcache: false,
+      latest: null,
+      sampleKey: null,
+      engines: [],
+      footprintIntervalMs: 300_000,
+      lastScanAttemptAt: 1,
+      lastScanError: "NOPERM User monitor has no permissions to run the 'scan' command",
+    });
+    renderGuard();
+    expect(
+      await screen.findByText(
+        "The last scan failed: NOPERM User monitor has no permissions to run the 'scan' command",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/retries within 5 minutes/)).toBeInTheDocument();
+    expect(screen.queryByText(/has not finished yet/)).toBeNull();
+    expect(screen.queryByText('Scanning for LMCache keys')).toBeNull();
+  });
+
+  it('counts the undetected recheck cooldown in the retry time', async () => {
+    getStatus.mockResolvedValue({
+      hasLmcache: false,
+      latest,
+      sampleKey: null,
+      engines: [],
+      footprintIntervalMs: 300_000,
+      lastScanAttemptAt: 1,
+      lastScanError: "Connection 'c1' is not connected",
+      scanCooldownUntil: Date.now() + 25 * 60_000,
+    });
+    renderGuard();
+    expect(await screen.findByText(/retries within 30 minutes/)).toBeInTheDocument();
+  });
+
+  it('shows a failed scan once when the rescan fails the same way', async () => {
+    getStatus.mockResolvedValue({
+      hasLmcache: false,
+      latest,
+      sampleKey: null,
+      engines: [],
+      footprintIntervalMs: 300_000,
+      lastScanAttemptAt: 1,
+      lastScanError: 'No reachable primary found for one',
+    });
+    refreshFootprint.mockRejectedValue(new Error('No reachable primary found for one'));
+    renderGuard();
+    fireEvent.click(await screen.findByRole('button', { name: 'Rescan now' }));
+    await waitFor(() => expect(refreshFootprint).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText('The last scan failed: No reachable primary found for one')).toBeInTheDocument();
+    expect(screen.queryByText(/Could not rescan/)).toBeNull();
+  });
+
+  it('gives a connection with a cached status its own first scan and rescan state', async () => {
+    const pending = { hasLmcache: false, latest: null, sampleKey: null, engines: [], lastScanAttemptAt: null, lastScanError: null };
+    getStatus.mockResolvedValue(pending);
+    refreshFootprint.mockRejectedValueOnce(new Error("Connection 'c1' is not connected"));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(['kv-cache', 'status', 'c2'], pending);
+    const tree = () => (
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <KvCacheGuard>
+            <div data-testid="children" />
+          </KvCacheGuard>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree());
+    expect(await screen.findByText("Could not rescan: Connection 'c1' is not connected")).toBeInTheDocument();
+    connection.current = { id: 'c2' };
+    rerender(tree());
+    await waitFor(() => expect(refreshFootprint).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText(/Could not rescan/)).toBeNull();
+  });
+
+  it('does not start a scan from the demo instance', async () => {
+    demo.isDemo = true;
+    getStatus.mockResolvedValue({ hasLmcache: false, latest: null, sampleKey: null, engines: [] });
+    renderGuard();
+    expect(await screen.findByText('Scanning for LMCache keys')).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(refreshFootprint).not.toHaveBeenCalled();
+  });
+
+  it('skips the detection history while the first scan is running', async () => {
+    getStatus.mockResolvedValue({ hasLmcache: false, latest: null, sampleKey: null, engines: [] });
+    renderGuard();
+    expect(await screen.findByText('Scanning for LMCache keys')).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(getFootprintHistory).not.toHaveBeenCalled();
+  });
+
+  it('backs off to a minute once the first scan has been pending for two minutes', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      getStatus.mockResolvedValue({ hasLmcache: false, latest: null, sampleKey: null, engines: [] });
+      renderGuard();
+      expect(await screen.findByText('Scanning for LMCache keys')).toBeInTheDocument();
+      await vi.advanceTimersByTimeAsync(180_000);
+      const calls = getStatus.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(getStatus).toHaveBeenCalledTimes(calls);
+      await vi.advanceTimersByTimeAsync(50_000);
+      expect(getStatus).toHaveBeenCalledTimes(calls + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps the page and its history available when detection drops after earlier detections', async () => {
     getStatus.mockResolvedValue({ hasLmcache: false, latest, sampleKey: null, engines: [] });
     getFootprintHistory.mockResolvedValue([{ ...latest, detected: true, timestamp: 0 }, latest]);
