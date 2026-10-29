@@ -1,10 +1,10 @@
-import { analyzeCommands } from '../analysis/commandlog-analyzer';
+import { analyzeCommands, collectCommandAnalysis } from '../analysis/commandlog-analyzer';
 import type { DatabasePort, DatabaseCapabilities } from '../../common/interfaces/database-port.interface';
 
 function createMockAdapter(options: {
   hasCommandLog?: boolean;
-  commandLogEntries?: Array<{ command: string[] }>;
-  slowLogEntries?: Array<{ command: string[] }>;
+  commandLogEntries?: Array<{ command: string[]; clientName?: string }>;
+  slowLogEntries?: Array<{ command: string[]; clientName?: string }>;
   commandLogError?: boolean;
   slowLogError?: boolean;
 } = {}): DatabasePort {
@@ -129,5 +129,49 @@ describe('analyzeCommands', () => {
     expect(result.topCommands[1].count).toBe(2);
     expect(result.topCommands[2].command).toBe('DEL');
     expect(result.topCommands[2].count).toBe(1);
+  });
+});
+
+describe('collectCommandAnalysis', () => {
+  it('returns the raw log entries with full arguments and client names', async () => {
+    const adapter = createMockAdapter({
+      hasCommandLog: true,
+      commandLogEntries: [
+        { command: ['CLIENT', 'LIST'], clientName: 'app' },
+        { command: ['GET', 'a'], clientName: 'BetterDB-Monitor' },
+      ],
+    });
+
+    const { analysis, entries } = await collectCommandAnalysis(adapter);
+
+    expect(analysis.sourceUsed).toBe('commandlog');
+    expect(analysis.topCommands).toEqual([
+      { command: 'CLIENT', count: 1 },
+      { command: 'GET', count: 1 },
+    ]);
+    expect(entries).toEqual([
+      { command: ['CLIENT', 'LIST'], clientName: 'app' },
+      { command: ['GET', 'a'], clientName: 'BetterDB-Monitor' },
+    ]);
+  });
+
+  it('returns slowlog entries when it falls back', async () => {
+    const adapter = createMockAdapter({
+      hasCommandLog: false,
+      slowLogEntries: [{ command: ['KEYS', '*'], clientName: 'worker' }],
+    });
+
+    const { entries } = await collectCommandAnalysis(adapter);
+
+    expect(entries).toEqual([{ command: ['KEYS', '*'], clientName: 'worker' }]);
+  });
+
+  it('returns no entries when both sources fail', async () => {
+    const adapter = createMockAdapter({ hasCommandLog: false, slowLogError: true });
+
+    const { analysis, entries } = await collectCommandAnalysis(adapter);
+
+    expect(analysis.sourceUsed).toBe('unavailable');
+    expect(entries).toEqual([]);
   });
 });

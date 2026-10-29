@@ -1,25 +1,33 @@
 import type { DatabasePort } from '../../common/interfaces/database-port.interface';
 import type { CommandAnalysis } from '@betterdb/shared';
 
+export interface CommandLogSample {
+  command: string[];
+  clientName?: string;
+}
+
 export async function analyzeCommands(
   adapter: DatabasePort,
 ): Promise<CommandAnalysis> {
+  const { analysis } = await collectCommandAnalysis(adapter);
+  return analysis;
+}
+
+export async function collectCommandAnalysis(
+  adapter: DatabasePort,
+): Promise<{ analysis: CommandAnalysis; entries: CommandLogSample[] }> {
   const result: CommandAnalysis = {
     sourceUsed: 'unavailable',
     topCommands: [],
   };
 
   const capabilities = adapter.getCapabilities();
-  let commandNames: string[] = [];
+  let entries: CommandLogSample[] = [];
 
   // Try COMMANDLOG first
   if (capabilities.hasCommandLog) {
     try {
-      const entries = await adapter.getCommandLog(200);
-      commandNames = entries.map(e => {
-        const args = e.command ?? [];
-        return args.length > 0 ? String(args[0]).toUpperCase() : '';
-      }).filter(Boolean);
+      entries = toSamples(await adapter.getCommandLog(200));
       result.sourceUsed = 'commandlog';
     } catch {
       // Fall through to slowlog
@@ -29,17 +37,17 @@ export async function analyzeCommands(
   // Fallback to SLOWLOG
   if (result.sourceUsed === 'unavailable') {
     try {
-      const entries = await adapter.getSlowLog(128);
-      commandNames = entries.map(e => {
-        const args = e.command ?? [];
-        return args.length > 0 ? String(args[0]).toUpperCase() : '';
-      }).filter(Boolean);
+      entries = toSamples(await adapter.getSlowLog(128));
       result.sourceUsed = 'slowlog';
     } catch {
       // Both unavailable
-      return result;
+      return { analysis: result, entries: [] };
     }
   }
+
+  const commandNames = entries.map(e => {
+    return e.command.length > 0 ? String(e.command[0]).toUpperCase() : '';
+  }).filter(Boolean);
 
   // Top commands
   const counts = new Map<string, number>();
@@ -51,5 +59,13 @@ export async function analyzeCommands(
     .sort((a, b) => b.count - a.count)
     .slice(0, 50);
 
-  return result;
+  return { analysis: result, entries };
+}
+
+function toSamples(entries: Array<{ command?: string[]; clientName?: string }>): CommandLogSample[] {
+  return entries.map(e => {
+    const sample: CommandLogSample = { command: (e.command ?? []).map(String) };
+    if (e.clientName !== undefined) sample.clientName = e.clientName;
+    return sample;
+  });
 }
