@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { CONNECTION_PARAM, type Connection } from './useConnection';
+import { CONNECTION_PARAM } from '../lib/connectionParam';
+import type { Connection } from './useConnection';
 
 interface ConnectionUrlSyncOptions {
   connectionId: string | undefined;

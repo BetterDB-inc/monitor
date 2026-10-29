@@ -2,9 +2,9 @@ import { createContext, useContext, useState, useEffect, useCallback, useRef } f
 import type { TopologyMembership } from '@betterdb/shared';
 import { setCurrentConnectionId, fetchApi } from '../api/client';
 import { isUnavailableMember } from '../utils/connectionType';
+import { CONNECTION_PARAM } from '../lib/connectionParam';
 
 export const CONNECTIONS_REFRESH_MS = 30_000;
-export const CONNECTION_PARAM = 'connection';
 export const CONNECTION_STORAGE_KEY = 'betterdb:connectionId';
 
 function urlConnectionId(): string | null {
