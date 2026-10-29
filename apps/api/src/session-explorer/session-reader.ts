@@ -57,6 +57,7 @@ interface Located {
   key: string;
   type: string;
   pttl: number;
+  sampled: number | null;
   memory: number | null;
   length: number | null;
   exact: boolean;
@@ -280,6 +281,7 @@ async function locate(
         key,
         type: type[1],
         pttl: numberOf(pttl) ?? -1,
+        sampled: numberOf(memory),
         memory: numberOf(memory),
         length: null,
         exact: false,
@@ -707,7 +709,7 @@ export async function readSessionKeysOn(
       const { located, missing, errored, moved } = await locate(route.client, nodeKeys, opts.batch);
       measured = true;
       for (const at of located) {
-        totals.memoryBytes += at.memory ?? 0;
+        totals.memoryBytes += at.sampled ?? 0;
         totals.ttls.push(at.pttl);
       }
       const missingSelected = missing.filter(isSelected).length;
@@ -717,7 +719,7 @@ export async function readSessionKeysOn(
         missingSelected +
         errored.length +
         moved.length +
-        located.filter((at) => at.memory === null).length;
+        located.filter((at) => at.sampled === null).length;
       state.missing += missingSelected;
       state.errored += erroredSelected;
       if (moved.some(isSelected)) state.moved.add(route);

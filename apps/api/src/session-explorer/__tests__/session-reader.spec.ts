@@ -774,6 +774,21 @@ describe('readSessionKeys', () => {
     expect(result.totals).toMatchObject({ memoryBytes: 130, unmeasuredKeys: 0, ttlMs: 7000 });
   });
 
+  it('totals the sampled memory the session list reports, not the exact memory used for reading', async () => {
+    const client = new FakeValkey(
+      storeOf({
+        l: { type: 'list', value: ['a', 'b'], memory: 90, sampledMemory: 80 },
+        j: { type: 'ReJSON-RL', value: '{}', memory: 70, sampledMemory: 50 },
+        s: { type: 'string', value: 'v', memory: 40 },
+      }),
+    );
+
+    const result = await readSessionKeys(fakeDb(client), ['l', 'j', 's']);
+
+    expect(result.totals).toMatchObject({ memoryBytes: 170, unmeasuredKeys: 0 });
+    expect(result.keys.find((k) => k.key === 'l')?.bytes).toBe(90);
+  });
+
   it('keeps the sampled memory and lengths when the exact memory pipeline fails', async () => {
     const client = new FakeValkey(
       storeOf({
