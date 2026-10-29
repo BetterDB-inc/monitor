@@ -400,6 +400,9 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
     try {
       await fetchApi(`/connections/${id}/default`, { method: 'POST' });
       await refreshConnections();
+      if (currentConnection?.id !== id) {
+        setConnection(id);
+      }
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to set default');
     }
