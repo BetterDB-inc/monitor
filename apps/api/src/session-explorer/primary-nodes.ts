@@ -8,7 +8,6 @@ import { tlsIdentityOptions } from '../database/adapters/tls-servername';
 import { parseNodeAddress } from '../topology/membership-diff';
 
 const NODE_TIMEOUT_MS = 5000;
-const NO_TOUCH_UNSUPPORTED = /unknown (sub)?command|NOPERM/i;
 const logger = new Logger('SessionExplorer');
 
 export interface PrimaryRoute {
@@ -94,10 +93,11 @@ async function openReader(label: string, create: () => Valkey | null): Promise<R
     const noTouch = await client.call('CLIENT', 'NO-TOUCH', 'ON').then(
       () => true,
       (err: Error) => {
-        if (NO_TOUCH_UNSUPPORTED.test(err.message)) return false;
-        throw err;
+        if (err.name !== 'ReplyError') throw err;
+        return false;
       },
     );
+    if (!noTouch) await client.ping();
     return { client, noTouch };
   } catch (err) {
     logger.warn(`Session reader for ${label} could not be opened: ${(err as Error).message}`);

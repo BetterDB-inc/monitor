@@ -57,6 +57,7 @@ const READ_COMMANDS = [
   'xrangeBuffer',
   'callBuffer',
   'call',
+  'ping',
 ];
 
 const KEY_INDEPENDENT = new Set(['memory', 'object']);
@@ -77,6 +78,7 @@ export class FakeValkey {
   serverError?: Error;
   clusterNodes?: ClusterNode[];
   noTouchError?: Error;
+  pingError?: Error;
   duplicateWith?: FakeValkey;
   disconnected = false;
   options: Record<string, unknown>;
@@ -198,6 +200,9 @@ export class FakeValkey {
         return e ? (e.pttl ?? -1) : -2;
       case 'exists':
         return e ? 1 : 0;
+      case 'ping':
+        if (this.pingError) throw this.pingError;
+        return 'PONG';
       case 'hstrlen': {
         if (this.failHstrlen) throw new Error('ERR hstrlen failed');
         const v = (raw as Record<string, string | Buffer> | undefined)?.[args[1] as string];
@@ -301,7 +306,7 @@ export class FakeValkey {
         if (command === 'CLUSTER' && args[1] === 'NODES')
           return clusterNodesText(this.clusterNodes ?? []);
         if (command === 'CLIENT' && args[1] === 'NO-TOUCH') {
-          if (this.noTouchError) throw this.noTouchError;
+          if (this.noTouchError) throw Object.assign(this.noTouchError, { name: 'ReplyError' });
           return 'OK';
         }
         if (command === 'JSON.GET') return e ? Buffer.from(raw as string) : null;

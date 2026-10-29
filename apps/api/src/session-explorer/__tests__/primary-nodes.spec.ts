@@ -101,6 +101,32 @@ describe('withPrimaries', () => {
     expect(result.touchesKeys).toBe(true);
   });
 
+  it('still reads when a proxy rejects CLIENT NO-TOUCH in its own words', async () => {
+    const parent = new FakeValkey();
+    const reader = new FakeValkey();
+    reader.noTouchError = new Error('ERR command not allowed by proxy');
+    parent.duplicateWith = reader;
+
+    const result = await withPrimaries(fakeDb(parent), async (p) => p);
+
+    expect(result.clients).toEqual([reader]);
+    expect(result.touchesKeys).toBe(true);
+  });
+
+  it('reports the server unavailable when it rejects CLIENT NO-TOUCH and then stops answering', async () => {
+    const parent = new FakeValkey();
+    const reader = new FakeValkey();
+    reader.noTouchError = new Error('ERR max number of clients reached');
+    reader.pingError = new Error('Connection is closed.');
+    parent.duplicateWith = reader;
+    const run = jest.fn();
+
+    await expect(withPrimaries(fakeDb(parent), run)).rejects.toThrow(ServiceUnavailableException);
+
+    expect(run).not.toHaveBeenCalled();
+    expect(reader.disconnected).toBe(true);
+  });
+
   it('turns on NO-TOUCH for every cluster primary it connects to', async () => {
     const parent = new FakeValkey();
     const self = new FakeValkey();
