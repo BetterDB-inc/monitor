@@ -105,6 +105,14 @@ export interface ServerlessReadinessFacts {
   commandEntries: ServerlessCommandEntry[];
 }
 
+const NON_SERVING_FLAGS = ['fail', 'fail?', 'handshake', 'noaddr'];
+
+export function countServingMasters(nodes: ReadonlyArray<{ flags: string[] }>): number {
+  return nodes.filter((node) => {
+    return node.flags.includes('master') && node.flags.every((flag) => !NON_SERVING_FLAGS.includes(flag));
+  }).length;
+}
+
 export function isElastiCacheServerlessHost(host: string): boolean {
   return SERVERLESS_HOST_PATTERN.test(host);
 }

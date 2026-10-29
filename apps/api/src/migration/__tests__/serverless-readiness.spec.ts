@@ -1,5 +1,6 @@
 import {
   checkServerlessReadiness,
+  countServingMasters,
   findRestrictedCommands,
   isElastiCacheServerlessHost,
   SERVERLESS_RESTRICTED_COMMANDS,
@@ -341,5 +342,30 @@ describe('isElastiCacheServerlessHost', () => {
     '',
   ])('does not detect %s', (host) => {
     expect(isElastiCacheServerlessHost(host)).toBe(false);
+  });
+});
+
+describe('countServingMasters', () => {
+  it('counts masters that are serving', () => {
+    expect(countServingMasters([
+      { flags: ['master'] },
+      { flags: ['myself', 'master'] },
+      { flags: ['slave'] },
+    ])).toBe(2);
+  });
+
+  it.each(['fail', 'fail?', 'handshake', 'noaddr'])('excludes a master flagged %s', (flag) => {
+    expect(countServingMasters([
+      { flags: ['master'] },
+      { flags: ['master', flag] },
+    ])).toBe(1);
+  });
+
+  it('keeps a 166-shard source under the limit when a failed master is listed', () => {
+    const nodes = [
+      ...Array.from({ length: 166 }, () => ({ flags: ['master'] })),
+      { flags: ['master', 'fail'] },
+    ];
+    expect(checkServerlessReadiness(facts({ clusterMasterCount: countServingMasters(nodes) }))).toEqual([]);
   });
 });
