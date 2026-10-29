@@ -693,7 +693,7 @@ export async function readSessionKeys(
         succeeded++;
       } catch (err) {
         if (!measured) totals.unmeasuredKeys += nodeKeys.length;
-        failedNodes++;
+        if (nodeKeys.some(isSelected)) failedNodes++;
         lastError = err;
       }
     }

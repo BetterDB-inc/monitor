@@ -781,6 +781,40 @@ describe('readSessionKeys', () => {
     expect(result.missingKeys).toBe(0);
   });
 
+  it('does not report a node as failed when it holds only skipped keys', async () => {
+    const nodeA = new FakeValkey(storeOf({ a: { type: 'string', value: '1', memory: 10 } }));
+    const nodeB = new FakeValkey(storeOf({ b: { type: 'string', value: '2' } }));
+    nodeB.pipeline = () => {
+      throw new Error('ETIMEDOUT');
+    };
+    const db = clusterOf(
+      { 7001: nodeA, 7002: nodeB },
+      { 7001: [[calculateSlot('a'), calculateSlot('a')]], 7002: [[calculateSlot('b'), calculateSlot('b')]] },
+    );
+
+    const result = await readSessionKeys(db, ['a', 'b'], { selected: ['a'] });
+
+    expect(result.keys.map((k) => k.key)).toEqual(['a']);
+    expect(result).toMatchObject({ failedNodes: 0, missingKeys: 0 });
+    expect(result.totals).toMatchObject({ memoryBytes: 10, unmeasuredKeys: 1 });
+  });
+
+  it('reports a node as failed when it holds a selected key', async () => {
+    const nodeA = new FakeValkey(storeOf({ a: { type: 'string', value: '1', memory: 10 } }));
+    const nodeB = new FakeValkey(storeOf({ b: { type: 'string', value: '2' } }));
+    nodeB.pipeline = () => {
+      throw new Error('ETIMEDOUT');
+    };
+    const db = clusterOf(
+      { 7001: nodeA, 7002: nodeB },
+      { 7001: [[calculateSlot('a'), calculateSlot('a')]], 7002: [[calculateSlot('b'), calculateSlot('b')]] },
+    );
+
+    const result = await readSessionKeys(db, ['a', 'b'], { selected: ['a', 'b'] });
+
+    expect(result.failedNodes).toBe(1);
+  });
+
   it('reports keys owned by an unreachable primary', async () => {
     const nodeA = new FakeValkey(storeOf({ a: { type: 'string', value: '1' } }));
     const nodeB = new FakeValkey(storeOf({ b: { type: 'string', value: '2' } }));
