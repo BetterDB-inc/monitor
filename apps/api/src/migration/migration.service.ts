@@ -11,12 +11,14 @@ import { collectCommandAnalysis } from './analysis/commandlog-analyzer';
 import { buildInstanceMeta, checkCompatibility } from './analysis/compatibility-checker';
 import {
   checkServerlessReadiness,
+  clusterMastersWithOwnSlotMoves,
   countSlotOwningMasters,
   isElastiCacheServerlessHost,
   summarizeServerlessProbes,
 } from './analysis/serverless-readiness';
 import type { ServerlessClusterMaster } from './analysis/serverless-readiness';
 import { InfoParser } from '../database/parsers/info.parser';
+import type { ClusterNode } from '../common/types/metrics.types';
 import {
   loadAnalysisVerdict,
   resolveVerdictDir,
@@ -223,6 +225,7 @@ export class MigrationService {
       let clusterMasterCount = 0;
       let slotOwningMasterCount = 0;
       let clusterMasters: ServerlessClusterMaster[] | null = null;
+      let clusterMasterNodes: ClusterNode[] = [];
       let masterUsedMemory = [usedMemory];
       let masterMemorySections: Array<Record<string, string> | null> = [memorySection];
       const scanClients: Valkey[] = [];
@@ -232,6 +235,7 @@ export class MigrationService {
         isCluster = true;
         const nodes = await adapter.getClusterNodes();
         const masters = nodes.filter(n => n.flags.includes('master'));
+        clusterMasterNodes = masters;
         clusterMasterCount = masters.length;
         slotOwningMasterCount = countSlotOwningMasters(nodes);
         clusterMasters = masters.map(m => ({
@@ -538,6 +542,13 @@ export class MigrationService {
         } catch { /* ignore */ }
 
         incompatibilities.push(...checkCompatibility(sourceMeta, targetMeta, job.result.hfeDetected ?? false, sourceHasFunctions));
+      }
+
+      if (checkServerless && isCluster && clusterMasterNodes.length > 0) {
+        const nodeOutputs = await Promise.all(scanClients.map((client) => {
+          return Promise.resolve().then(() => client.call('CLUSTER', 'NODES')).catch(() => undefined);
+        }));
+        clusterMasters = clusterMastersWithOwnSlotMoves(clusterMasterNodes, nodeOutputs);
       }
 
       if (checkServerless) {

@@ -1,4 +1,5 @@
 import type { Incompatibility } from '@betterdb/shared';
+import { MetricsParser } from '../../database/parsers/metrics.parser';
 
 export const SERVERLESS_RESTRICTED_COMMANDS: readonly string[] = [
   'ACL SETUSER',
@@ -171,6 +172,30 @@ export function summarizeServerlessProbes(
   }
 
   return { missingReplicationCommands, cachedScripts, pubsub: pubsubRead ? pubsubTotals : null };
+}
+
+export function clusterMastersWithOwnSlotMoves(
+  masters: ReadonlyArray<{ id: string; slots: number[][]; migratingSlots?: unknown[]; importingSlots?: unknown[] }>,
+  nodeOutputs: unknown[],
+): ServerlessClusterMaster[] {
+  const ownMoves = new Map<string, { migrating: number; importing: number }>();
+  for (const output of nodeOutputs) {
+    if (typeof output !== 'string' || output.trim() === '') continue;
+    const myself = MetricsParser.parseClusterNodes(output).find((node) => node.flags.includes('myself'));
+    if (!myself) continue;
+    ownMoves.set(myself.id, {
+      migrating: myself.migratingSlots?.length ?? 0,
+      importing: myself.importingSlots?.length ?? 0,
+    });
+  }
+  return masters.map((master) => {
+    const own = ownMoves.get(master.id);
+    return {
+      slots: master.slots,
+      migratingSlots: Math.max(master.migratingSlots?.length ?? 0, own?.migrating ?? 0),
+      importingSlots: Math.max(master.importingSlots?.length ?? 0, own?.importing ?? 0),
+    };
+  });
 }
 
 export function countSlotOwningMasters(nodes: ReadonlyArray<{ flags: string[]; slots: number[][] }>): number {

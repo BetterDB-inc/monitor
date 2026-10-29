@@ -1,5 +1,6 @@
 import {
   checkServerlessReadiness,
+  clusterMastersWithOwnSlotMoves,
   countSlotOwningMasters,
   findRestrictedCommands,
   isElastiCacheServerlessHost,
@@ -497,5 +498,45 @@ describe('summarizeServerlessProbes', () => {
       cachedScripts: null,
       pubsub: null,
     });
+  });
+});
+
+describe('clusterMastersWithOwnSlotMoves', () => {
+  const A = 'a'.repeat(40);
+  const B = 'b'.repeat(40);
+  const C = 'c'.repeat(40);
+  const seedMasters = [
+    { id: A, slots: [[0, 5000]], migratingSlots: [], importingSlots: [] },
+    { id: B, slots: [[5001, 10000]], migratingSlots: [], importingSlots: [] },
+    { id: C, slots: [[10001, 16383]], migratingSlots: [], importingSlots: [] },
+  ];
+
+  function nodesFrom(myself: string, extra = ''): string {
+    return [
+      `${A} 10.0.0.1:6379@16379 ${myself === A ? 'myself,' : ''}master - 0 0 1 connected 0-5000${myself === A ? extra : ''}`,
+      `${B} 10.0.0.2:6379@16379 ${myself === B ? 'myself,' : ''}master - 0 0 2 connected 5001-10000${myself === B ? extra : ''}`,
+      `${C} 10.0.0.3:6379@16379 ${myself === C ? 'myself,' : ''}master - 0 0 3 connected 10001-16383${myself === C ? extra : ''}`,
+    ].join('\n');
+  }
+
+  it('catches a reshard between two masters that only their own myself lines show', () => {
+    const masters = clusterMastersWithOwnSlotMoves(seedMasters, [
+      nodesFrom(A),
+      nodesFrom(B, ` [5001->-${C}]`),
+      nodesFrom(C, ` [5001-<-${B}]`),
+    ]);
+    expect(masters.map(m => [m.migratingSlots, m.importingSlots])).toEqual([[0, 0], [1, 0], [0, 1]]);
+    expect(titles(facts({ clusterMasters: masters, clusterMasterCount: 3 }))).toEqual(['Slot coverage incomplete or changing']);
+  });
+
+  it('ignores markers on lines that are not the node itself', () => {
+    const masters = clusterMastersWithOwnSlotMoves(seedMasters, [nodesFrom(A).replace('connected 5001-10000', `connected 5001-10000 [5001->-${C}]`)]);
+    expect(masters.every(m => m.migratingSlots === 0 && m.importingSlots === 0)).toBe(true);
+  });
+
+  it('skips node output that could not be read', () => {
+    const masters = clusterMastersWithOwnSlotMoves(seedMasters, [undefined, 42]);
+    expect(masters).toHaveLength(3);
+    expect(masters[0].slots).toEqual([[0, 5000]]);
   });
 });
