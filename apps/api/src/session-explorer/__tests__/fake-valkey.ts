@@ -86,6 +86,7 @@ export class FakeValkey {
   failKeys = new Map<string, string>();
   movedKeys = new Set<string>();
   failTypeKeys = new Set<string>();
+  failPipelinesWith = new Set<string>();
   failHstrlen = false;
   lfu = false;
   noValues = true;
@@ -362,6 +363,11 @@ export class FakeValkey {
     }
     chain.exec = async () => {
       this.pipelineExecs++;
+      const failing = ops.find(({ name }) => this.failPipelinesWith.has(name));
+      if (failing) {
+        this.failPipelinesWith.delete(failing.name);
+        throw new Error(`ERR pipeline with ${failing.name} failed`);
+      }
       return ops.map(({ name, args }) => {
         try {
           return [null, this.run(name, args)];

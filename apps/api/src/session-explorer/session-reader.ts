@@ -192,6 +192,12 @@ async function readWindows(
   }
 }
 
+function append<K>(map: Map<K, string[]>, owner: K, key: string): void {
+  const list = map.get(owner);
+  if (list) list.push(key);
+  else map.set(owner, [key]);
+}
+
 function routeKeys(
   primaries: PrimaryClients,
   keys: string[],
@@ -200,8 +206,8 @@ function routeKeys(
   const unrouted = new Map<PrimaryRoute, string[]>();
   for (const key of keys) {
     const route = ownerOf(primaries, key);
-    if (isReadable(route)) groups.set(route, [...(groups.get(route) ?? []), key]);
-    else unrouted.set(route, [...(unrouted.get(route) ?? []), key]);
+    if (isReadable(route)) append(groups, route, key);
+    else append(unrouted, route, key);
   }
   return { groups, unrouted };
 }
@@ -277,7 +283,13 @@ async function locate(
         exact: false,
       });
     });
-    await measure(client, found);
+    await measure(client, found).catch(() => {
+      for (const at of found) {
+        at.memory = null;
+        at.length = null;
+        at.exact = false;
+      }
+    });
     located.push(...found);
   }
   return { located, missing, errored, moved };

@@ -757,6 +757,22 @@ describe('readSessionKeys', () => {
     expect(result.missingKeys).toBe(1);
   });
 
+  it('keeps a route readable when measuring its keys fails', async () => {
+    const client = new FakeValkey(
+      storeOf({
+        l: { type: 'list', value: ['a', 'b'], memory: 90, pttl: 7000 },
+        s: { type: 'string', value: 'v', memory: 40, pttl: 9000 },
+      }),
+    );
+    client.failPipelinesWith = new Set(['llen']);
+
+    const result = await readSessionKeys(fakeDb(client), ['l', 's']);
+
+    expect(result.keys.map((k) => k.key)).toEqual(['s']);
+    expect(result.failed.size).toBe(0);
+    expect(result.totals).toMatchObject({ memoryBytes: 0, unmeasuredKeys: 2, ttlMs: 7000 });
+  });
+
   it('counts a key whose TYPE reply failed as unmeasured, not gone', async () => {
     const client = new FakeValkey(
       storeOf({
