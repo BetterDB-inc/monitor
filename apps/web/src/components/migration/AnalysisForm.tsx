@@ -52,7 +52,10 @@ export function AnalysisForm({ onStart, isCloudMode }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (connections.length < 2) {
+  const hasEligibleSource = connections.some((connection) => {
+    return serverlessCheckBlock(connection) === null;
+  });
+  if (connections.length === 0 || (connections.length < 2 && hasEligibleSource === false)) {
     return <NoConnectionsState connections={connections} />;
   }
 

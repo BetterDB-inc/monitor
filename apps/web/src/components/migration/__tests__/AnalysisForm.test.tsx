@@ -70,8 +70,8 @@ describe('AnalysisForm', () => {
     setConnections([]);
   });
 
-  it('blocks with an explanation when fewer than two connections exist', () => {
-    setConnections([SOURCE], SOURCE);
+  it('blocks with an explanation when no connections exist', () => {
+    setConnections([]);
     renderForm();
 
     expect(screen.getByText(/a migration needs two instances/i)).toBeInTheDocument();
@@ -79,11 +79,49 @@ describe('AnalysisForm', () => {
     expect(screen.queryByRole('button', { name: /start analysis/i })).not.toBeInTheDocument();
   });
 
-  it('names the single connection you do have so the screen does not look broken', () => {
+  it('names a single connection that cannot be analysed so the screen does not look broken', () => {
+    const agent = conn({ id: 'agent', name: 'edge-agent-us', connectionType: 'agent' });
+    setConnections([agent], agent);
+    renderForm();
+
+    expect(screen.getByText(/a migration needs two instances/i)).toBeInTheDocument();
+    expect(screen.getByText('edge-agent-us')).toBeInTheDocument();
+  });
+
+  it('lets a single eligible connection run the ElastiCache Serverless check', async () => {
+    setConnections([SOURCE], SOURCE);
+    vi.mocked(fetchApi).mockResolvedValue({ id: 'analysis-3' });
+    renderForm();
+
+    expect(screen.queryByText(/a migration needs two instances/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /start analysis/i })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: /select target/i }));
+    fireEvent.click(
+      await screen.findByRole('button', { name: /check against elasticache serverless/i }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /start analysis/i }));
+
+    await waitFor(() => {
+      expect(fetchApi).toHaveBeenCalledWith('/migration/analysis', {
+        method: 'POST',
+        body: JSON.stringify({
+          sourceConnectionId: 'src',
+          targetProfile: 'elasticache_serverless',
+          scanSampleSize: 10000,
+        }),
+      });
+    });
+  });
+
+  it('offers no connection target when only the source exists', async () => {
     setConnections([SOURCE], SOURCE);
     renderForm();
 
-    expect(screen.getByText('prod-cache-eu')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /select target/i }));
+
+    const sourceRow = await screen.findByRole('button', { name: /prod-cache-eu/i });
+    expect(sourceRow).toBeDisabled();
   });
 
   it('cannot start until both endpoints are chosen', () => {
