@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **`flush()` could delete another cache's keys.** The cache name was put into
+  the `SCAN MATCH` pattern unescaped, so a cache named e.g. `app?` also matched
+  and deleted `appX:*` keys, and a name containing `[` could miss its own keys.
+  The name is now glob-escaped in the pattern; key names and the index prefix
+  are unchanged.
+
 ## [0.13.0] - 2026-10-16
 
 ### Fixed
