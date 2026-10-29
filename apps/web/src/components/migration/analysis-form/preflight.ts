@@ -30,6 +30,13 @@ export const EXTERNAL_BLOCK_MESSAGE =
 export const CLUSTER_MEMBER_BLOCK_MESSAGE =
   'One or more selected instances is a node registered under a cluster seed. Pick the cluster seed instead.';
 
+export const SSH_TUNNEL_BLOCK_MESSAGE =
+  'One or more selected instances is reached through an SSH tunnel. Migration connects to both instances directly and cannot use the tunnel yet.';
+
+export function usesSshTunnel(connection: Connection): boolean {
+  return connection.sshTunnel?.enabled === true;
+}
+
 function engineName(dbType: 'valkey' | 'redis'): string {
   if (dbType === 'valkey') {
     return 'Valkey';
@@ -149,6 +156,10 @@ export function planBlock(source: Connection | null, target: Connection | null):
 
   if (isClusterChild(from) || isClusterChild(to)) {
     return CLUSTER_MEMBER_BLOCK_MESSAGE;
+  }
+
+  if (usesSshTunnel(from) || usesSshTunnel(to)) {
+    return SSH_TUNNEL_BLOCK_MESSAGE;
   }
 
   return null;

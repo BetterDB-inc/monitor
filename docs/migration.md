@@ -417,6 +417,17 @@ version it does not understand.
 internally and writes to the target using application-level commands, bypassing
 the `RESTORE` compatibility constraint entirely.
 
+### SSH tunnels
+
+Connections reached through an SSH tunnel cannot be migrated yet. Analysis,
+execution and validation reject them with a 400 before doing anything, and the
+connection picker marks them as unavailable. Execution and validation open their
+own connections to `host:port` (and RedisShake runs as a separate process), so
+they would bypass the tunnel and fail partway through — in the worst case after
+an `emptyDbBeforeSync` flush has already emptied the target. To migrate such an
+instance, register a connection BetterDB can reach directly, for example through
+a VPN or a port-forward you run yourself.
+
 ## Batching and concurrency
 
 | Parameter | Value |
