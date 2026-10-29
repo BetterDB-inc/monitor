@@ -229,19 +229,67 @@ describe('withPrimaries', () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it('reports the cluster unavailable when the topology reader cannot open', async () => {
-    const parent = new FakeValkey();
+  const seedDown = (parentOptions: Record<string, unknown> = { host: 'seed', port: 7000 }) => {
+    const parent = new FakeValkey(new Map(), parentOptions);
     const seed = new FakeValkey();
     seed.serverError = new Error('ERR max number of clients reached');
     parent.duplicateWith = seed;
-    const run = jest.fn();
+    return parent;
+  };
+
+  it('reads the other primaries when its own node cannot be opened', async () => {
+    const parent = seedDown();
+    const other = new FakeValkey();
+    ValkeyMock.mockImplementation(() => other);
     const db = fakeDb(parent, {
+      nodes: [
+        masterNode('a', '10.0.0.1:7000', ['myself'], [[0, 8191]]),
+        masterNode('b', '10.0.0.2:7001', [], [[8192, 16383]]),
+      ],
+    });
+
+    const result = await withPrimaries(db, async (p) => p);
+
+    expect(result.routes).toEqual([
+      { slots: [[0, 8191]], client: null },
+      { slots: [[8192, 16383]], client: other },
+    ]);
+    expect(ValkeyMock).toHaveBeenCalledTimes(1);
+    expect(other.disconnected).toBe(true);
+  });
+
+  it('reports the cluster unavailable when its own node is its only primary and cannot open', async () => {
+    const run = jest.fn();
+    const db = fakeDb(seedDown(), {
       nodes: [masterNode('a', '10.0.0.1:7000', ['myself'], [[0, 16383]])],
     });
 
     await expect(withPrimaries(db, run)).rejects.toThrow(ServiceUnavailableException);
     expect(run).not.toHaveBeenCalled();
-    expect(parent.callsOf('call')).toHaveLength(0);
+  });
+
+  it('reports the cluster unavailable when the topology cannot be read another way', async () => {
+    const run = jest.fn();
+    const db = {
+      ...fakeDb(seedDown(), { nodes: [] }),
+      getClusterNodes: async () => {
+        throw new Error('ERR max number of clients reached');
+      },
+    };
+
+    await expect(withPrimaries(db, run)).rejects.toThrow(ServiceUnavailableException);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('stops waiting for the shared client topology after the reader timeout', async () => {
+    const run = jest.fn();
+    const db = {
+      ...fakeDb(seedDown({ host: 'seed', port: 7000, commandTimeout: 20 }), { nodes: [] }),
+      getClusterNodes: () => new Promise<never>(() => undefined),
+    };
+
+    await expect(withPrimaries(db, run)).rejects.toThrow(ServiceUnavailableException);
+    expect(run).not.toHaveBeenCalled();
   });
 
   it('opens no reader before the server capabilities are known', async () => {

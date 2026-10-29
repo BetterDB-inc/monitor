@@ -149,17 +149,36 @@ async function clusterNodes(seed: Reader): Promise<ClusterNode[] | null> {
   }
 }
 
+async function sharedTopology(db: DatabasePort, timeoutMs: number): Promise<ClusterNode[] | null> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('timed out')), timeoutMs);
+  });
+  try {
+    return await Promise.race([db.getClusterNodes(), timeout]);
+  } catch (err) {
+    warnOnce('topology', `Cluster topology could not be read: ${(err as Error).message}`);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function primaryClients(db: DatabasePort): Promise<PrimaryClients> {
   const parent = db.getClient();
   const { clusterEnabled } = db.getCapabilities();
   const dbIndex = db.getActiveDbIndex?.() ?? parent.options.db ?? 0;
   const seed = await ownReader(parent, dbIndex);
-  if (!seed) return unavailable();
-  if (!clusterEnabled) return routesOf([{ slots: ALL_SLOTS, client: seed.client }], !seed.noTouch);
+  if (!clusterEnabled) {
+    return seed
+      ? routesOf([{ slots: ALL_SLOTS, client: seed.client }], !seed.noTouch)
+      : unavailable();
+  }
 
-  const nodes = await clusterNodes(seed);
+  const nodes =
+    (seed && (await clusterNodes(seed))) ?? (await sharedTopology(db, readerTimeout(parent)));
   if (!nodes) {
-    seed.client.disconnect();
+    seed?.client.disconnect();
     return unavailable();
   }
   const primaries = nodes.filter(isServingPrimary);
@@ -168,7 +187,7 @@ export async function primaryClients(db: DatabasePort): Promise<PrimaryClients> 
       node.flags.includes('myself') ? seed : connectNode(parent, node, dbIndex),
     ),
   );
-  if (!connected.includes(seed)) seed.client.disconnect();
+  if (seed && !connected.includes(seed)) seed.client.disconnect();
 
   return routesOf(
     primaries.map((node, i) => ({ slots: node.slots, client: connected[i]?.client ?? null })),
