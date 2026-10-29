@@ -372,11 +372,14 @@ describe('findRestrictedCommands', () => {
     'BetterDB-CLI',
     'BetterDB-Migration-Source',
     'BetterDB-Validation-Source-Cluster',
+    'BetterDB-Orders',
+    'BetterDB-Monitor-Orders',
+    'BetterDB-Monitor-Node-orders1',
   ])('ignores the internal client %s', (clientName) => {
     expect(findRestrictedCommands([{ command: ['KEYS', '*'], clientName }])).toEqual([]);
   });
 
-  it.each(['BetterDB-Orders', 'BetterDB-Monitor-Orders', 'BetterDB-Monitor-Node-orders1', 'betterdb'])(
+  it.each(['betterdb', 'BetterDBOrders', 'orders-betterdb-1'])(
     'counts the application client %s',
     (clientName) => {
       expect(findRestrictedCommands([{ command: ['KEYS', '*'], clientName }])).toEqual([{ command: 'KEYS', count: 1 }]);

@@ -107,28 +107,11 @@ export interface ServerlessReadinessFacts {
   commandEntries: ServerlessCommandEntry[];
 }
 
-const INTERNAL_CLIENT_NAMES = new Set([
-  'betterdb-monitor',
-  'betterdb-monitor-keyscan',
-  'betterdb-monitor-discovery',
-  'betterdb-monitor-sentinel-discovery',
-  'betterdb-monitor-sessionexplorer',
-  'betterdb-cli',
-  'betterdb-agent',
-  'betterdb-agent-cli',
-  'betterdb-migration-analysis',
-  'betterdb-migration-discovery',
-  'betterdb-migration-source',
-  'betterdb-migration-target',
-  'betterdb-validation-source',
-  'betterdb-validation-source-cluster',
-  'betterdb-validation-target',
-]);
-const INTERNAL_NODE_CLIENT_PATTERN = /^betterdb-monitor-node-[0-9a-f]{8}$/i;
+const INTERNAL_CLIENT_PATTERN = /^betterdb-/i;
 
 function isInternalClient(clientName: string | undefined): boolean {
   if (!clientName) return false;
-  return INTERNAL_CLIENT_NAMES.has(clientName.toLowerCase()) || INTERNAL_NODE_CLIENT_PATTERN.test(clientName);
+  return INTERNAL_CLIENT_PATTERN.test(clientName);
 }
 
 export interface ServerlessNodeProbe {
