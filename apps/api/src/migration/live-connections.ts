@@ -13,10 +13,10 @@ export const SSH_TUNNEL_MIGRATION_MESSAGE =
 export function assertLiveMigrationPair(
   registry: Pick<ConnectionRegistry, 'getConfig'>,
   sourceConnectionId: string,
-  targetConnectionId: string,
+  targetConnectionId: string | undefined,
 ): void {
   const source = registry.getConfig(sourceConnectionId);
-  const target = registry.getConfig(targetConnectionId);
+  const target = targetConnectionId === undefined ? null : registry.getConfig(targetConnectionId);
   if (source?.connectionType === 'external' || target?.connectionType === 'external') {
     throw new BadRequestException(EXTERNAL_MIGRATION_MESSAGE);
   }

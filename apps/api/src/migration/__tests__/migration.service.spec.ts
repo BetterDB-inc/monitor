@@ -18,10 +18,19 @@ jest.mock('../analysis/hfe-detector', () => ({
   }),
 }));
 jest.mock('../analysis/commandlog-analyzer', () => ({
-  analyzeCommands: jest.fn().mockResolvedValue({
-    sourceUsed: 'unavailable', topCommands: [],
+  collectCommandAnalysis: jest.fn().mockResolvedValue({
+    analysis: { sourceUsed: 'unavailable', topCommands: [] },
+    entries: [],
   }),
 }));
+jest.mock('../analysis/analysis-verdict-store', () => ({
+  resolveVerdictDir: jest.fn().mockReturnValue('/nonexistent/verdicts'),
+  saveAnalysisVerdict: jest.fn(),
+  loadAnalysisVerdict: jest.fn().mockReturnValue(undefined),
+}));
+
+import type { Incompatibility, MigrationAnalysisResult } from '@betterdb/shared';
+import { saveAnalysisVerdict } from '../analysis/analysis-verdict-store';
 
 function createMockRegistry() {
   const mockClient = {
@@ -54,8 +63,26 @@ function createMockRegistry() {
       port: 6379,
       createdAt: Date.now(),
     }),
+    isServerlessAgentConnection: jest.fn().mockReturnValue(false),
     mockAdapter,
+    mockClient,
   };
+}
+
+async function waitForTerminal(service: MigrationService, id: string) {
+  for (let i = 0; i < 200; i++) {
+    const job = service.getJob(id);
+    if (job && job.status !== 'pending' && job.status !== 'running') return job;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  throw new Error('analysis did not finish');
+}
+
+function readyReplicationCommands(registry: ReturnType<typeof createMockRegistry>) {
+  registry.mockClient.call.mockImplementation(async (...args: string[]) => {
+    if (args[0] === 'COMMAND' && args[1] === 'INFO') return [['psync'], ['replconf']];
+    return ['default'];
+  });
 }
 
 describe('MigrationService', () => {
@@ -188,5 +215,178 @@ describe('MigrationService with external connections', () => {
     expect(runAnalysis).not.toHaveBeenCalled();
     expect(registry.mockAdapter.getClient).not.toHaveBeenCalled();
     expect((service as unknown as { jobs: Map<string, unknown> }).jobs.size).toBe(0);
+  });
+});
+
+describe('MigrationService ElastiCache Serverless readiness', () => {
+  beforeEach(() => {
+    jest.mocked(saveAnalysisVerdict).mockClear();
+  });
+
+  function serverlessCategory(job: MigrationAnalysisResult): Incompatibility[] {
+    return (job.incompatibilities ?? []).filter(i => i.category === 'serverless_readiness');
+  }
+
+  it('adds serverless readiness issues when the target endpoint is ElastiCache Serverless', async () => {
+    const registry = createMockRegistry();
+    readyReplicationCommands(registry);
+    registry.getConfig.mockImplementation((id: string) => ({
+      id,
+      name: id,
+      host: id === 'conn-2' ? 'my-cache-x1y2z3.serverless.use1.cache.amazonaws.com' : '127.0.0.1',
+      port: 6379,
+      createdAt: Date.now(),
+    }));
+    const service = new MigrationService(registry as any);
+
+    const { id } = await service.startAnalysis({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2' });
+    const job = await waitForTerminal(service, id);
+
+    expect(job.status).toBe('completed');
+    expect(serverlessCategory(job).map(i => i.title)).toEqual(['Standalone source']);
+  });
+
+  it('adds serverless readiness issues when the target agent reported AWS_SERVERLESS', async () => {
+    const registry = createMockRegistry();
+    readyReplicationCommands(registry);
+    registry.isServerlessAgentConnection.mockImplementation((id: string) => id === 'conn-2');
+    const service = new MigrationService(registry as any);
+
+    const { id } = await service.startAnalysis({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2' });
+    const job = await waitForTerminal(service, id);
+
+    expect(serverlessCategory(job)).toHaveLength(1);
+  });
+
+  it('adds no serverless readiness issues for an ordinary target', async () => {
+    const registry = createMockRegistry();
+    readyReplicationCommands(registry);
+    const service = new MigrationService(registry as any);
+
+    const { id } = await service.startAnalysis({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2' });
+    const job = await waitForTerminal(service, id);
+
+    expect(job.status).toBe('completed');
+    expect(serverlessCategory(job)).toEqual([]);
+  });
+
+  it('does not report missing replication commands when COMMAND INFO is refused', async () => {
+    const registry = createMockRegistry();
+    registry.mockClient.call.mockImplementation(async (...args: string[]) => {
+      if (args[0] === 'COMMAND') throw new Error('NOPERM');
+      return ['default'];
+    });
+    const service = new MigrationService(registry as any);
+
+    const { id } = await service.startAnalysis({
+      sourceConnectionId: 'conn-1',
+      targetProfile: 'elasticache_serverless',
+    });
+    const job = await waitForTerminal(service, id);
+
+    expect(job.status).toBe('completed');
+    expect(serverlessCategory(job).map(i => i.title)).toEqual(['Standalone source']);
+  });
+
+  it('reports PSYNC missing when COMMAND INFO returns nil for it', async () => {
+    const registry = createMockRegistry();
+    registry.mockClient.call.mockImplementation(async (...args: string[]) => {
+      if (args[0] === 'COMMAND' && args[1] === 'INFO') return [null, ['replconf']];
+      return ['default'];
+    });
+    const service = new MigrationService(registry as any);
+
+    const { id } = await service.startAnalysis({
+      sourceConnectionId: 'conn-1',
+      targetProfile: 'elasticache_serverless',
+    });
+    const job = await waitForTerminal(service, id);
+
+    const replication = serverlessCategory(job).find(i => i.title === 'Replication commands unavailable');
+    expect(replication).toBeDefined();
+    expect(replication!.detail).toContain('PSYNC');
+    expect(replication!.detail).not.toContain('REPLCONF is');
+  });
+
+  it('reads cached scripts and pub/sub counts from INFO', async () => {
+    const registry = createMockRegistry();
+    readyReplicationCommands(registry);
+    (registry.mockClient as Record<string, unknown>).info = jest.fn(async (section: string) => {
+      if (section === 'memory') return '# Memory\r\nused_memory:1000\r\nnumber_of_cached_scripts:3\r\n';
+      if (section === 'stats') return '# Stats\r\npubsub_channels:2\r\npubsub_patterns:0\r\npubsubshard_channels:1\r\n';
+      return '';
+    });
+    const service = new MigrationService(registry as any);
+
+    const { id } = await service.startAnalysis({
+      sourceConnectionId: 'conn-1',
+      targetProfile: 'elasticache_serverless',
+    });
+    const job = await waitForTerminal(service, id);
+
+    const titles = serverlessCategory(job).map(i => i.title);
+    expect(titles).toContain('Scripts in the script cache');
+    expect(titles).toContain('Pub/sub subscribers present');
+  });
+
+  describe('standalone check against ElastiCache Serverless', () => {
+    it('runs without a target connection and only reports serverless readiness', async () => {
+      const registry = createMockRegistry();
+      readyReplicationCommands(registry);
+      const service = new MigrationService(registry as any);
+
+      const { id } = await service.startAnalysis({
+        sourceConnectionId: 'conn-1',
+        targetProfile: 'elasticache_serverless',
+      });
+      const job = await waitForTerminal(service, id);
+
+      expect(job.status).toBe('completed');
+      expect(registry.get).not.toHaveBeenCalledWith(undefined);
+      expect(registry.getConfig).not.toHaveBeenCalledWith(undefined);
+      expect(job.targetConnectionId).toBeUndefined();
+      expect(job.targetProfile).toBe('elasticache_serverless');
+      expect(job.incompatibilities!.length).toBeGreaterThan(0);
+      expect(job.incompatibilities!.every(i => i.category === 'serverless_readiness')).toBe(true);
+      expect(job.warningCount).toBe(1);
+    });
+
+    it('persists no verdict and cannot be found as the latest analysis for a pair', async () => {
+      const registry = createMockRegistry();
+      readyReplicationCommands(registry);
+      const service = new MigrationService(registry as any);
+
+      const { id } = await service.startAnalysis({
+        sourceConnectionId: 'conn-1',
+        targetProfile: 'elasticache_serverless',
+      });
+      await waitForTerminal(service, id);
+
+      expect(saveAnalysisVerdict).not.toHaveBeenCalled();
+      expect(service.findLatestCompletedAnalysis('conn-1', 'conn-2')).toBeUndefined();
+    });
+
+    it('still persists a verdict for an analysis with a target', async () => {
+      const registry = createMockRegistry();
+      readyReplicationCommands(registry);
+      const service = new MigrationService(registry as any);
+
+      const { id } = await service.startAnalysis({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2' });
+      await waitForTerminal(service, id);
+
+      expect(saveAnalysisVerdict).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects a source that cannot be migrated before creating a job', async () => {
+      const registry = createMockRegistry();
+      registry.getConfig.mockReturnValue({
+        id: 'conn-1', name: 'x', host: '127.0.0.1', port: 6379, createdAt: Date.now(), connectionType: 'external',
+      });
+      const service = new MigrationService(registry as any);
+
+      await expect(
+        service.startAnalysis({ sourceConnectionId: 'conn-1', targetProfile: 'elasticache_serverless' }),
+      ).rejects.toThrow(BadRequestException);
+    });
   });
 });

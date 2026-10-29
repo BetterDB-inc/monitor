@@ -15,9 +15,12 @@ export interface Incompatibility {
   awsToolOnly?: boolean;
 }
 
+export type MigrationTargetProfile = 'elasticache_serverless';
+
 export interface MigrationAnalysisRequest {
   sourceConnectionId: string;
-  targetConnectionId: string;
+  targetConnectionId?: string;
+  targetProfile?: MigrationTargetProfile;
   scanSampleSize?: number; // default 10000, range 1000-50000
 }
 
@@ -73,6 +76,7 @@ export interface MigrationAnalysisResult {
   targetDbType?: 'valkey' | 'redis';
   targetDbVersion?: string;
   targetIsCluster?: boolean;
+  targetProfile?: MigrationTargetProfile;
 
   // Key / memory overview
   totalKeys?: number;

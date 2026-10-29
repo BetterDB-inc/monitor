@@ -30,6 +30,13 @@ describe('assertLiveMigrationPair', () => {
     expect(() => assertLiveMigrationPair(registry, 'seed', 'other')).not.toThrow();
   });
 
+  it('checks only the source when there is no target connection', () => {
+    expect(() => assertLiveMigrationPair(registry, 'seed', undefined)).not.toThrow();
+    expect(() => assertLiveMigrationPair(registry, 'pushed', undefined)).toThrow(EXTERNAL_MIGRATION_MESSAGE);
+    expect(() => assertLiveMigrationPair(registry, 'child', undefined)).toThrow(CLUSTER_MEMBER_MIGRATION_MESSAGE);
+    expect(() => assertLiveMigrationPair(registry, 'tunneled', undefined)).toThrow(SSH_TUNNEL_MIGRATION_MESSAGE);
+  });
+
   it('rejects an OTLP push endpoint', () => {
     expect(() => assertLiveMigrationPair(registry, 'seed', 'pushed')).toThrow(EXTERNAL_MIGRATION_MESSAGE);
   });

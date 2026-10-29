@@ -1,14 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import Valkey from 'iovalkey';
-import type { MigrationAnalysisRequest, MigrationAnalysisResult, StartAnalysisResponse, DataTypeBreakdown, DataTypeCount, TtlDistribution } from '@betterdb/shared';
+import type { MigrationAnalysisRequest, MigrationAnalysisResult, StartAnalysisResponse, DataTypeBreakdown, DataTypeCount, TtlDistribution, Incompatibility } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import type { AnalysisJob } from './analysis/analysis-job';
 import { sampleKeyTypes } from './analysis/type-sampler';
 import { sampleTtls } from './analysis/ttl-sampler';
 import { detectHfe } from './analysis/hfe-detector';
-import { analyzeCommands } from './analysis/commandlog-analyzer';
+import { collectCommandAnalysis } from './analysis/commandlog-analyzer';
 import { buildInstanceMeta, checkCompatibility } from './analysis/compatibility-checker';
+import { checkServerlessReadiness, isElastiCacheServerlessHost } from './analysis/serverless-readiness';
+import type { ServerlessClusterMaster, ServerlessReadinessFacts } from './analysis/serverless-readiness';
 import {
   loadAnalysisVerdict,
   resolveVerdictDir,
@@ -32,7 +34,9 @@ export class MigrationService {
   async startAnalysis(req: MigrationAnalysisRequest): Promise<StartAnalysisResponse> {
     // Verify both connections exist before creating job (get() throws NotFoundException if not found)
     this.connectionRegistry.get(req.sourceConnectionId);
-    this.connectionRegistry.get(req.targetConnectionId);
+    if (req.targetConnectionId !== undefined) {
+      this.connectionRegistry.get(req.targetConnectionId);
+    }
     assertLiveMigrationPair(this.connectionRegistry, req.sourceConnectionId, req.targetConnectionId);
 
     this.evictOldJobs();
@@ -183,24 +187,22 @@ export class MigrationService {
       // Step 2b: Read target info
       if (job.cancelled) return;
 
-      const targetAdapter = this.connectionRegistry.get(req.targetConnectionId);
-      const targetConfig = this.connectionRegistry.getConfig(req.targetConnectionId);
-      const targetInfo = await targetAdapter.getInfo(['server', 'keyspace', 'cluster', 'memory', 'persistence']);
-      const targetCapabilities = targetAdapter.getCapabilities();
+      const targetConnectionId = req.targetConnectionId;
+      const target = targetConnectionId === undefined ? null : await this.readTarget(targetConnectionId);
+      const checkServerless =
+        req.targetProfile === 'elasticache_serverless' ||
+        (targetConnectionId !== undefined && this.isServerlessTarget(targetConnectionId));
 
-      let targetAclUsers: string[] = [];
-      try {
-        const client = targetAdapter.getClient();
-        const result = await client.call('ACL', 'USERS') as string[];
-        targetAclUsers = result ?? [];
-      } catch { /* ignore - ACL not supported or no permission */ }
-
-      job.result.targetConnectionId = req.targetConnectionId;
-      job.result.targetConnectionName = targetConfig?.name;
-      job.result.targetDbType = targetCapabilities.dbType;
-      job.result.targetDbVersion = targetCapabilities.version;
-      const targetClusterSection = (targetInfo as Record<string, Record<string, string>>).cluster ?? {};
-      job.result.targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
+      if (target) {
+        job.result.targetConnectionId = targetConnectionId;
+        job.result.targetConnectionName = target.config?.name;
+        job.result.targetDbType = target.capabilities.dbType;
+        job.result.targetDbVersion = target.capabilities.version;
+        const targetClusterSection = (target.info as Record<string, Record<string, string>>).cluster ?? {};
+        job.result.targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
+      } else {
+        job.result.targetProfile = req.targetProfile;
+      }
 
       if (job.cancelled) return;
       job.progress = 13;
@@ -208,6 +210,8 @@ export class MigrationService {
       // Step 3: Cluster check (source)
       let isCluster = false;
       let clusterMasterCount = 0;
+      let clusterMasters: ServerlessClusterMaster[] | null = null;
+      let masterUsedMemory = [usedMemory];
       const scanClients: Valkey[] = [];
 
       const clusterEnabled = String(clusterSection['cluster_enabled'] ?? '0');
@@ -216,6 +220,11 @@ export class MigrationService {
         const nodes = await adapter.getClusterNodes();
         const masters = nodes.filter(n => n.flags.includes('master'));
         clusterMasterCount = masters.length;
+        clusterMasters = masters.map(m => ({
+          slots: m.slots,
+          migratingSlots: m.migratingSlots?.length ?? 0,
+          importingSlots: m.importingSlots?.length ?? 0,
+        }));
 
         for (const master of masters) {
           // Parse 'host:port@clusterport' (IPv6-aware) via the shared helper.
@@ -262,6 +271,7 @@ export class MigrationService {
         totalKeys = nodeStats.reduce((s, n) => s + n.keys, 0);
         job.result.totalKeys = totalKeys;
         job.result.totalMemoryBytes = nodeStats.reduce((s, n) => s + n.memory, 0);
+        masterUsedMemory = nodeStats.map(n => n.memory);
       }
 
       if (job.cancelled) return;
@@ -435,7 +445,8 @@ export class MigrationService {
       job.progress = 85;
 
       // Step 8: Command analysis
-      job.result.commandAnalysis = await analyzeCommands(adapter);
+      const commandLog = await collectCommandAnalysis(adapter);
+      job.result.commandAnalysis = commandLog.analysis;
 
       if (job.cancelled) return;
       job.progress = 90;
@@ -471,43 +482,63 @@ export class MigrationService {
       const functionPresence = aggregateFunctionPresence(functionPresences);
       const sourceHasFunctions = functionPresence !== 'absent';
 
-      // Fetch RDB save config from both instances for reliable persistence detection
-      let sourceRdbSaveConfig: string | undefined;
-      let targetRdbSaveConfig: string | undefined;
-      try {
-        const sourceClient = adapter.getClient();
-        const result = await sourceClient.call('CONFIG', 'GET', 'save') as string[];
-        if (result && result.length >= 2) sourceRdbSaveConfig = result[1];
-      } catch { /* ignore - CONFIG not permitted */ }
-      try {
-        const targetClient = targetAdapter.getClient();
-        const result = await targetClient.call('CONFIG', 'GET', 'save') as string[];
-        if (result && result.length >= 2) targetRdbSaveConfig = result[1];
-      } catch { /* ignore - CONFIG not permitted */ }
+      const incompatibilities: Incompatibility[] = [];
 
-      // Build source meta (buildInstanceMeta expects a flat key-value object)
-      const flatSourceInfo = flattenInfo(info);
-      const sourceMeta = buildInstanceMeta(flatSourceInfo, capabilities, sourceAclUsers, sourceRdbSaveConfig);
+      if (target) {
+        // Fetch RDB save config from both instances for reliable persistence detection
+        let sourceRdbSaveConfig: string | undefined;
+        let targetRdbSaveConfig: string | undefined;
+        try {
+          const sourceClient = adapter.getClient();
+          const result = await sourceClient.call('CONFIG', 'GET', 'save') as string[];
+          if (result && result.length >= 2) sourceRdbSaveConfig = result[1];
+        } catch { /* ignore - CONFIG not permitted */ }
+        try {
+          const targetClient = target.adapter.getClient();
+          const result = await targetClient.call('CONFIG', 'GET', 'save') as string[];
+          if (result && result.length >= 2) targetRdbSaveConfig = result[1];
+        } catch { /* ignore - CONFIG not permitted */ }
 
-      // Fetch source modules
-      try {
-        const sourceClient = adapter.getClient();
-        const moduleResult = await sourceClient.call('MODULE', 'LIST') as unknown[];
-        sourceMeta.modules = parseModuleList(moduleResult);
-      } catch { /* ignore */ }
+        // Build source meta (buildInstanceMeta expects a flat key-value object)
+        const flatSourceInfo = flattenInfo(info);
+        const sourceMeta = buildInstanceMeta(flatSourceInfo, capabilities, sourceAclUsers, sourceRdbSaveConfig);
 
-      // Build target meta
-      const flatTargetInfo = flattenInfo(targetInfo);
-      const targetMeta = buildInstanceMeta(flatTargetInfo, targetCapabilities, targetAclUsers, targetRdbSaveConfig);
+        // Fetch source modules
+        try {
+          const sourceClient = adapter.getClient();
+          const moduleResult = await sourceClient.call('MODULE', 'LIST') as unknown[];
+          sourceMeta.modules = parseModuleList(moduleResult);
+        } catch { /* ignore */ }
 
-      // Fetch target modules
-      try {
-        const targetClient = targetAdapter.getClient();
-        const moduleResult = await targetClient.call('MODULE', 'LIST') as unknown[];
-        targetMeta.modules = parseModuleList(moduleResult);
-      } catch { /* ignore */ }
+        // Build target meta
+        const flatTargetInfo = flattenInfo(target.info);
+        const targetMeta = buildInstanceMeta(flatTargetInfo, target.capabilities, target.aclUsers, targetRdbSaveConfig);
 
-      const incompatibilities = checkCompatibility(sourceMeta, targetMeta, job.result.hfeDetected ?? false, sourceHasFunctions);
+        // Fetch target modules
+        try {
+          const targetClient = target.adapter.getClient();
+          const moduleResult = await targetClient.call('MODULE', 'LIST') as unknown[];
+          targetMeta.modules = parseModuleList(moduleResult);
+        } catch { /* ignore */ }
+
+        incompatibilities.push(...checkCompatibility(sourceMeta, targetMeta, job.result.hfeDetected ?? false, sourceHasFunctions));
+      }
+
+      if (checkServerless) {
+        const probes = await probeServerlessFacts(scanClients.length > 0 ? scanClients : [adapter.getClient()]);
+        incompatibilities.push(...checkServerlessReadiness({
+          dbType: capabilities.dbType,
+          version: capabilities.version,
+          isCluster,
+          clusterMasterCount,
+          masterUsedMemory,
+          sampledKeyNames: sampledKeys.map(k => k.key),
+          clusterMasters,
+          commandEntries: commandLog.entries,
+          ...probes,
+        }));
+      }
+
       job.result.incompatibilities = incompatibilities;
       job.result.blockingCount = incompatibilities.filter(i => i.severity === 'blocking').length;
       job.result.warningCount = incompatibilities.filter(i => i.severity === 'warning').length;
@@ -556,6 +587,29 @@ export class MigrationService {
     }
   }
 
+  private async readTarget(targetConnectionId: string) {
+    const adapter = this.connectionRegistry.get(targetConnectionId);
+    const config = this.connectionRegistry.getConfig(targetConnectionId);
+    const info = await adapter.getInfo(['server', 'keyspace', 'cluster', 'memory', 'persistence']);
+    const capabilities = adapter.getCapabilities();
+
+    let aclUsers: string[] = [];
+    try {
+      const result = await adapter.getClient().call('ACL', 'USERS') as string[];
+      aclUsers = result ?? [];
+    } catch { /* ignore - ACL not supported or no permission */ }
+
+    return { adapter, config, info, capabilities, aclUsers };
+  }
+
+  private isServerlessTarget(targetConnectionId: string): boolean {
+    const config = this.connectionRegistry.getConfig(targetConnectionId);
+    return (
+      isElastiCacheServerlessHost(config?.host ?? '') ||
+      this.connectionRegistry.isServerlessAgentConnection(targetConnectionId)
+    );
+  }
+
   private evictOldJobs(): void {
     if (this.jobs.size < this.MAX_JOBS) return;
 
@@ -584,6 +638,50 @@ export class MigrationService {
   private isJobStuck(job: AnalysisJob): boolean {
     return job.status === 'running' && Date.now() - job.createdAt > this.STUCK_JOB_TTL_MS;
   }
+}
+
+async function probeServerlessFacts(
+  clients: Valkey[],
+): Promise<Pick<ServerlessReadinessFacts, 'missingReplicationCommands' | 'cachedScripts' | 'pubsub'>> {
+  const results = await Promise.all(clients.map(async (client) => {
+    const [commandInfo, memory, stats] = await Promise.all([
+      Promise.resolve().then(() => client.call('COMMAND', 'INFO', 'PSYNC', 'REPLCONF')).catch(() => undefined),
+      Promise.resolve().then(() => client.info('memory')).catch(() => undefined),
+      Promise.resolve().then(() => client.info('stats')).catch(() => undefined),
+    ]);
+    return { commandInfo, memory, stats };
+  }));
+
+  let missingReplicationCommands: string[] | null = null;
+  let cachedScripts: number | null = null;
+  const pubsubTotals = { channels: 0, patterns: 0, shardChannels: 0 };
+  let pubsubRead = false;
+
+  for (const { commandInfo, memory, stats } of results) {
+    if (Array.isArray(commandInfo)) {
+      const missing = ['PSYNC', 'REPLCONF'].filter((_, i) => !commandInfo[i]);
+      missingReplicationCommands = Array.from(new Set([...(missingReplicationCommands ?? []), ...missing]));
+    }
+    const scripts = readInfoNumber(memory, 'number_of_cached_scripts');
+    if (scripts !== null) cachedScripts = (cachedScripts ?? 0) + scripts;
+    const channels = readInfoNumber(stats, 'pubsub_channels');
+    const patterns = readInfoNumber(stats, 'pubsub_patterns');
+    const shardChannels = readInfoNumber(stats, 'pubsubshard_channels');
+    if (channels !== null || patterns !== null || shardChannels !== null) {
+      pubsubRead = true;
+      pubsubTotals.channels += channels ?? 0;
+      pubsubTotals.patterns += patterns ?? 0;
+      pubsubTotals.shardChannels += shardChannels ?? 0;
+    }
+  }
+
+  return { missingReplicationCommands, cachedScripts, pubsub: pubsubRead ? pubsubTotals : null };
+}
+
+function readInfoNumber(raw: unknown, field: string): number | null {
+  if (typeof raw !== 'string') return null;
+  const match = raw.match(new RegExp(`^${field}:(\\d+)`, 'm'));
+  return match ? parseInt(match[1], 10) : null;
 }
 
 /**
