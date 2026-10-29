@@ -10,6 +10,13 @@ import { HowItWorks } from '../components/migration/analysis-form/HowItWorks';
 import { AnalysisProgressBar } from '../components/migration/AnalysisProgressBar';
 import { MigrationReport } from '../components/migration/MigrationReport';
 import { ExportBar } from '../components/migration/ExportBar';
+import {
+  FORCE_REASON_MAX_LENGTH,
+  blockingCountForMode,
+  blockingIssuesForMode,
+  buildStartExecutionBody,
+  isForceReasonValid,
+} from '../components/migration/blocking-mode';
 import { ExecutionPanel } from '../components/migration/ExecutionPanel';
 import { ValidationPanel } from '../components/migration/ValidationPanel';
 
@@ -60,8 +67,12 @@ export function MigrationPage({ isCloudMode }: { isCloudMode: boolean }) {
   const { hasFeature } = useLicense();
 
   const canExecute = hasFeature(Feature.MIGRATION_EXECUTION);
-  const blockingCount = job?.blockingCount ?? 0;
   const [executionMode, setExecutionMode] = useState<ExecutionMode>('command');
+  // Blockers for the selected mode, by the same rule as the API safety gate.
+  const blockingCount = job ? blockingCountForMode(job, executionMode) : 0;
+  const blockers = job ? blockingIssuesForMode(job.incompatibilities, executionMode) : [];
+  // Recorded with the migration when the user overrides blockers for the selected mode.
+  const [forceReason, setForceReason] = useState('');
   const [preferReplica, setPreferReplica] = useState<boolean>(false);
   const [tryDiskless, setTryDiskless] = useState<boolean>(false);
   const [emptyDbBeforeSync, setEmptyDbBeforeSync] = useState<boolean>(false);
@@ -102,6 +113,7 @@ export function MigrationPage({ isCloudMode }: { isCloudMode: boolean }) {
     setPreferReplica(false);
     setTryDiskless(false);
     setEmptyDbBeforeSync(false);
+    setForceReason('');
   };
 
   // Issue 1: open dialog instead of window.confirm
@@ -123,15 +135,19 @@ export function MigrationPage({ isCloudMode }: { isCloudMode: boolean }) {
 
       const result = await fetchApi<{ id: string }>('/migration/execution', {
         method: 'POST',
-        body: JSON.stringify({
+        body: JSON.stringify(buildStartExecutionBody({
           sourceConnectionId: job.sourceConnectionId,
           targetConnectionId: job.targetConnectionId,
           mode: executionMode,
-          ...(executionMode === 'redis_shake_sync' && {
-            syncReaderOptions: { preferReplica },
-          }),
-          ...(hasRsOptions && { redisShakeOptions: rsOptions }),
-        }),
+          blockers,
+          forceReason,
+          extra: {
+            ...(executionMode === 'redis_shake_sync' && {
+              syncReaderOptions: { preferReplica },
+            }),
+            ...(hasRsOptions && { redisShakeOptions: rsOptions }),
+          },
+        })),
       });
       setShowConfirmDialog(false);
       setExecutionResult(null);
@@ -239,7 +255,7 @@ export function MigrationPage({ isCloudMode }: { isCloudMode: boolean }) {
                 <label className="text-sm font-medium">Migration mode:</label>
                 <select
                   value={executionMode}
-                  onChange={(e) => setExecutionMode(e.target.value as ExecutionMode)}
+                  onChange={(e) => { setExecutionMode(e.target.value as ExecutionMode); setForceReason(''); }}
                   className="text-sm border rounded-md px-2 py-1 bg-background"
                 >
                   <option value="command">Command-based (cross-version compatible)</option>
@@ -461,7 +477,7 @@ export function MigrationPage({ isCloudMode }: { isCloudMode: boolean }) {
       {showConfirmDialog && job && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-          onClick={() => { if (!migrationStarting) setShowConfirmDialog(false); }}
+          onClick={() => { if (!migrationStarting) { setShowConfirmDialog(false); setForceReason(''); } }}
         >
           <div
             className="bg-card border rounded-xl shadow-lg p-6 max-w-md w-full mx-4 space-y-4"
@@ -504,9 +520,28 @@ export function MigrationPage({ isCloudMode }: { isCloudMode: boolean }) {
               </div>
             )}
 
+            {blockers.length > 0 && (
+              <div className="space-y-2">
+                <ul className="list-disc pl-5 text-sm text-destructive">
+                  {blockers.map((b, idx) => <li key={idx}>{b.title}</li>)}
+                </ul>
+                <label className="block text-sm font-medium" htmlFor="force-reason">
+                  Reason for overriding (recorded with the migration)
+                </label>
+                <textarea
+                  id="force-reason"
+                  value={forceReason}
+                  onChange={(e) => setForceReason(e.target.value)}
+                  maxLength={FORCE_REASON_MAX_LENGTH}
+                  rows={3}
+                  className="w-full text-sm border rounded-md px-2 py-1 bg-background"
+                />
+              </div>
+            )}
+
             <div className="flex justify-end gap-3 pt-2">
               <button
-                onClick={() => setShowConfirmDialog(false)}
+                onClick={() => { setShowConfirmDialog(false); setForceReason(''); }}
                 disabled={migrationStarting}
                 className="px-4 py-2 text-sm border rounded-lg hover:bg-muted disabled:opacity-50"
               >
@@ -514,16 +549,16 @@ export function MigrationPage({ isCloudMode }: { isCloudMode: boolean }) {
               </button>
               <button
                 onClick={handleConfirmMigration}
-                disabled={migrationStarting}
+                disabled={migrationStarting || (blockers.length > 0 && !isForceReasonValid(forceReason))}
                 className={`px-4 py-2 text-sm rounded-lg inline-flex items-center gap-2 disabled:opacity-70 ${blockingCount > 0
-                  ? 'border border-amber-400 bg-amber-50 text-amber-800 hover:bg-amber-100'
+                  ? 'border border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/20'
                   : 'bg-primary text-primary-foreground hover:bg-primary/90'
                   }`}
               >
                 {migrationStarting && (
                   <span className="h-3 w-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
                 )}
-                Yes, start migration
+                {blockers.length > 0 ? 'Override and start migration' : 'Yes, start migration'}
               </button>
             </div>
           </div>

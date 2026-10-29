@@ -958,7 +958,8 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
       });
     }
 
-    const blocking = getBlockingIssues(latest.incompatibilities);
+    // Capacity issues can be scoped to some modes (command copies db0 only).
+    const blocking = getBlockingIssues(latest.incompatibilities, req.mode ?? 'redis_shake');
     if (blocking.length === 0) return;
 
     const forced = req.force === true;

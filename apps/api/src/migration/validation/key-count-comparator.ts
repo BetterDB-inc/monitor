@@ -2,19 +2,23 @@ import Valkey, { Cluster } from 'iovalkey';
 import type { KeyCountComparison, MigrationAnalysisResult } from '@betterdb/shared';
 
 /**
+ * The masters of a cluster client, or the client itself when standalone.
+ * createTargetClient() casts Cluster to Valkey, so narrow from unknown.
+ */
+export function masterNodes(client: Valkey): Valkey[] {
+  const maybeCluster: unknown = client;
+  return maybeCluster instanceof Cluster ? maybeCluster.nodes('master') : [client];
+}
+
+/**
  * DBSIZE that covers the whole dataset. On a Cluster client a bare DBSIZE goes
  * to one random node, so sum it over every master instead.
  */
 export async function countKeys(client: Valkey): Promise<number> {
-  // createTargetClient() casts Cluster to Valkey, so narrow from unknown.
-  const maybeCluster: unknown = client;
-  if (maybeCluster instanceof Cluster) {
-    const masters = maybeCluster.nodes('master');
-    if (masters.length === 0) throw new Error('No cluster masters available to count keys');
-    const counts = await Promise.all(masters.map((node) => node.dbsize()));
-    return counts.reduce((sum, count) => sum + count, 0);
-  }
-  return client.dbsize();
+  const masters = masterNodes(client);
+  if (masters.length === 0) throw new Error('No cluster masters available to count keys');
+  const counts = await Promise.all(masters.map((node) => node.dbsize()));
+  return counts.reduce((sum, count) => sum + count, 0);
 }
 
 /**

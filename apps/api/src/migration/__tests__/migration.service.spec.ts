@@ -1,5 +1,9 @@
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { MigrationService } from '../migration.service';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { probeTargetCapacity } from '../analysis/capacity-checker';
 
 // Mock dependencies to prevent actual analysis from running
 jest.mock('../analysis/type-sampler', () => ({
@@ -16,6 +20,10 @@ jest.mock('../analysis/hfe-detector', () => ({
     hfeDetected: false, hfeSupported: true, hfeKeyCount: 0,
     hfeOversizedHashesSkipped: 0, sampledHashCount: 0,
   }),
+}));
+jest.mock('../analysis/capacity-checker', () => ({
+  ...jest.requireActual('../analysis/capacity-checker'),
+  probeTargetCapacity: jest.fn().mockResolvedValue([]),
 }));
 jest.mock('../analysis/commandlog-analyzer', () => ({
   analyzeCommands: jest.fn().mockResolvedValue({
@@ -156,6 +164,163 @@ describe('MigrationService', () => {
       // At least the oldest should have been evicted
       expect(service.getJob(ids[0])).toBeUndefined();
     });
+  });
+});
+
+describe('MigrationService capacity preflight', () => {
+  const probe = probeTargetCapacity as jest.MockedFunction<typeof probeTargetCapacity>;
+  const OLD_VERDICT_DIR = process.env.MIGRATION_VERDICT_DIR;
+  let verdictDir: string;
+
+  beforeEach(() => {
+    verdictDir = mkdtempSync(join(tmpdir(), 'verdicts-'));
+    process.env.MIGRATION_VERDICT_DIR = verdictDir;
+    probe.mockReset();
+  });
+
+  afterEach(() => {
+    rmSync(verdictDir, { recursive: true, force: true });
+    if (OLD_VERDICT_DIR === undefined) delete process.env.MIGRATION_VERDICT_DIR;
+    else process.env.MIGRATION_VERDICT_DIR = OLD_VERDICT_DIR;
+  });
+
+  async function analyze(
+    usedMemory?: string,
+    sections: Record<string, unknown> = {},
+    sourceConfig: Record<string, unknown> = {},
+  ) {
+    const mock = createMockRegistry();
+    if (Object.keys(sourceConfig).length > 0) {
+      const base = mock.getConfig() as Record<string, unknown>;
+      mock.getConfig.mockImplementation((id: string) => (id === 'conn-1' ? { ...base, ...sourceConfig } : base));
+    }
+    if (usedMemory || Object.keys(sections).length > 0) {
+      mock.mockAdapter.getInfo.mockResolvedValue({
+        ...(await mock.mockAdapter.getInfo()),
+        ...(usedMemory ? { memory: { used_memory: usedMemory } } : {}),
+        ...sections,
+      });
+    }
+    const registry = mock as unknown as ConstructorParameters<typeof MigrationService>[0];
+    const service = new MigrationService(registry);
+    const { id } = await service.startAnalysis({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2' });
+    for (let i = 0; i < 100 && service.getJob(id)?.status !== 'completed'; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    return service.getJob(id)!;
+  }
+
+  it('adds the probe issues to the analysis and counts a capacity blocker', async () => {
+    probe.mockResolvedValue([
+      { severity: 'blocking', category: 'capacity', title: 'Target does not have enough memory', detail: 'd' },
+      { severity: 'warning', category: 'key_overlap', title: 'Source keys already exist on the target', detail: 'd' },
+    ]);
+
+    const job = await analyze();
+
+    expect(job.status).toBe('completed');
+    expect(probe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetIsCluster: false,
+        sourceBytes: 1000000,
+        roughSourceSize: true,
+        sampledKeys: [],
+        sourceExpiringKeys: 0,
+      }),
+    );
+    expect(job.incompatibilities).toEqual(
+      expect.arrayContaining([expect.objectContaining({ category: 'capacity', severity: 'blocking' })]),
+    );
+    expect(job.blockingCount).toBe(1);
+    expect(job.warningCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it('sizes the source by its used_memory and flags it rough when sampling gave no estimate', async () => {
+    probe.mockResolvedValue([]);
+
+    const job = await analyze('5000000');
+
+    expect(job.totalMemoryBytes).toBe(5000000);
+    expect(probe).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceBytes: 5000000, roughSourceSize: true }),
+    );
+  });
+
+  it('passes no all-db sizing when the source only has db0', async () => {
+    probe.mockResolvedValue([]);
+    await analyze();
+    expect(probe.mock.calls[0][0].allDbsSource).toBeUndefined();
+  });
+
+  it('sizes RedisShake by every db and command mode by db0 TTLs when the source has keys outside db0', async () => {
+    probe.mockResolvedValue([]);
+    await analyze(undefined, {
+      keyspace: {
+        db0: 'keys=100,expires=0,avg_ttl=0',
+        db1: 'keys=300,expires=40,avg_ttl=0',
+      },
+      memory: { used_memory: '9000000', used_memory_dataset: '7000000' },
+    });
+    expect(probe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceExpiringKeys: 0,
+        allDbsSource: { bytes: 7000000, rough: false, expiringKeys: 40 },
+        sourceDbs: [0, 1],
+      }),
+    );
+  });
+
+  it('skips the preflight with an info item when a standalone source selects another db', async () => {
+    const job = await analyze(undefined, {}, { dbIndex: 3 });
+
+    expect(probe).not.toHaveBeenCalled();
+    expect(job.blockingCount).toBe(0);
+    const item = job.incompatibilities?.find((i) => i.title.includes('source uses a non-default db'));
+    expect(item?.severity).toBe('info');
+    expect(item?.detail).toContain('db3');
+  });
+
+  it('does not probe when the analysis is cancelled before the preflight', async () => {
+    const mock = createMockRegistry();
+    const registry = mock as unknown as ConstructorParameters<typeof MigrationService>[0];
+    const service = new MigrationService(registry);
+    let jobId = '';
+    mock.mockAdapter.getClient().call.mockImplementation(async (command: string) => {
+      if (command === 'MODULE') service.cancelJob(jobId);
+      return [];
+    });
+    ({ id: jobId } = await service.startAnalysis({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2' }));
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(service.getJob(jobId)?.status).toBe('cancelled');
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it('passes the source db list to the probe', async () => {
+    probe.mockResolvedValue([]);
+    await analyze();
+    expect(probe.mock.calls[0][0].sourceDbs).toEqual([0]);
+  });
+
+  it('reports that the preflight did not run when the target cannot be probed', async () => {
+    probe.mockRejectedValue(new Error('NOPERM this user has no permissions to run the info command'));
+
+    const job = await analyze();
+
+    expect(job.status).toBe('completed');
+    expect(job.blockingCount).toBe(0);
+    expect(job.incompatibilities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          severity: 'info',
+          category: 'capacity',
+          title: 'Capacity and key-overlap checks did not run',
+        }),
+      ]),
+    );
+    expect(
+      job.incompatibilities?.find((i) => i.title === 'Capacity and key-overlap checks did not run')?.detail,
+    ).toContain('NOPERM');
   });
 });
 

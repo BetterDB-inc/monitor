@@ -12,6 +12,11 @@ export interface Incompatibility {
   category: string;
   title: string;
   detail: string;
+  /**
+   * Execution modes this issue applies to. Omitted means every mode. A
+   * blocking issue only stops execution in the modes it lists.
+   */
+  modes?: ExecutionMode[];
 }
 
 export interface MigrationAnalysisRequest {
@@ -91,6 +96,11 @@ export interface MigrationAnalysisResult {
 
   // Compatibility
   incompatibilities?: Incompatibility[];
+  /**
+   * Blocking issues that apply to at least one execution mode. Issues with
+   * `modes` block only those modes; filter by the selected mode for a
+   * per-mode count (as the execution safety gate does).
+   */
   blockingCount?: number;
   warningCount?: number;
 }
@@ -111,6 +121,14 @@ export type ExecutionJobStatus =
   | 'cancelled';
 
 export type ExecutionMode = 'redis_shake' | 'redis_shake_sync' | 'command';
+
+/**
+ * Whether an issue blocks execution in `mode`. Used by the API safety gate and
+ * the web UI so they can't disagree. Without a mode, any blocker counts.
+ */
+export function blocksMode(issue: Incompatibility, mode?: ExecutionMode): boolean {
+  return issue.severity === 'blocking' && (!mode || !issue.modes || issue.modes.includes(mode));
+}
 
 /**
  * Options that apply only when mode === 'redis_shake_sync'.
