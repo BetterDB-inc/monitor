@@ -970,6 +970,10 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return this.webhookRepo.getRetriableDeliveries(limit, connectionId);
   }
 
+  async getDeliveriesForEventsSince(events: WebhookEventType[], since: number): Promise<WebhookDelivery[]> {
+    return this.webhookRepo.getDeliveriesForEventsSince(events, since);
+  }
+
   async pruneOldDeliveries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     return this.webhookRepo.pruneOldDeliveries(cutoffTimestamp, connectionId);
   }

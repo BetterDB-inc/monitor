@@ -86,6 +86,13 @@ describe('maintenance window DTO validation', () => {
     expect(await errorsFor(CreateMaintenanceWindowDto, { name: 'x', endsAt: 1.5 })).toEqual(['endsAt']);
   });
 
+  it('rejects null for non-nullable update fields, and accepts an empty patch or a null reason', async () => {
+    expect(await errorsFor(UpdateMaintenanceWindowDto, { name: null })).toEqual(['name']);
+    expect(await errorsFor(UpdateMaintenanceWindowDto, { events: null })).toEqual(['events']);
+    expect(await errorsFor(UpdateMaintenanceWindowDto, {})).toEqual([]);
+    expect(await errorsFor(UpdateMaintenanceWindowDto, { reason: null })).toEqual([]);
+  });
+
   it('does not let an update change the connection a window covers', async () => {
     expect(await errorsFor(UpdateMaintenanceWindowDto, { connectionId: 'other' })).toEqual(['connectionId']);
     expect(await errorsFor(UpdateMaintenanceWindowDto, { endsAt: 1_800_000_000_000, reason: null })).toEqual([]);

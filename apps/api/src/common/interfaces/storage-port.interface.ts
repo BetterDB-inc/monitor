@@ -665,6 +665,8 @@ export interface StoragePort {
   ): Promise<boolean>;
   getRetriableDeliveries(limit?: number, connectionId?: string): Promise<WebhookDelivery[]>;
   pruneOldDeliveries(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+  /** Deliveries for the given events created at or after `since` (epoch ms), oldest first. */
+  getDeliveriesForEventsSince(events: WebhookEventType[], since: number): Promise<WebhookDelivery[]>;
 
   // Bulk-Delete Audit Methods - one row per execute run
   saveBulkDeleteAudit(record: StoredBulkDeleteAudit): Promise<string>;

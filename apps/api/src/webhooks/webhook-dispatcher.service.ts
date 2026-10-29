@@ -45,7 +45,7 @@ interface PendingEvent {
    * Maintenance decision, made once on the first delivery attempt so an event
    * retried through the storage buffer is judged the same way every time.
    */
-  maintenance?: { suppressedBy: MaintenanceWindow | null };
+  maintenance?: { suppressedBy: MaintenanceWindow | null; openerSettled?: boolean };
 }
 
 const STORAGE_UNAVAILABLE = 'storage-unavailable' as const;
@@ -278,6 +278,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       this.logger.debug(
         `No webhooks subscribed to event: ${eventType}${connectionId ? ` for connection ${connectionId}` : ''}`,
       );
+      this.settleOpener(event, false);
       return { storageUnavailable: false, terminalFailure: false };
     }
 
@@ -309,8 +310,9 @@ export class WebhookDispatcherService implements OnModuleDestroy {
           result.value === DeliveryStatus.RETRYING ||
           result.value === DeliveryStatus.PENDING),
     );
-    if (accepted) {
-      this.maintenance?.markOpenerDelivered(eventType, connectionId);
+    // A storage outage mid-send leaves the event to be retried; settle then.
+    if (accepted || !storageUnavailable) {
+      this.settleOpener(event, accepted);
     }
     const failed = settled.filter((result) => {
       if (result.status === 'rejected') {
@@ -328,6 +330,14 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     }
 
     return { storageUnavailable, terminalFailure: failed.length > 0 };
+  }
+
+  /** Tell the maintenance service how an unsuppressed opener ended, once per event. */
+  private settleOpener(event: PendingEvent, accepted: boolean): void {
+    if (event.maintenance === undefined || event.maintenance.suppressedBy !== null) return;
+    if (event.maintenance.openerSettled) return;
+    event.maintenance.openerSettled = true;
+    this.maintenance?.settleOpener(event.eventType, event.connectionId, accepted);
   }
 
   private isSuppressed(eventType: WebhookEventType, connectionId?: string): boolean {
@@ -359,8 +369,8 @@ export class WebhookDispatcherService implements OnModuleDestroy {
         connectionId: event.connectionId,
       });
     } catch (error) {
-      this.logger.warn(
-        `Failed to record suppressed ${event.eventType} delivery for webhook ${webhook.id}: ${error instanceof Error ? error.message : String(error)}`,
+      this.logger.error(
+        `Failed to record suppressed ${event.eventType} delivery for webhook ${webhook.id} (connection ${event.connectionId ?? 'none'}, window ${window.id}): ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -590,7 +600,6 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   ): Promise<boolean> {
     // See dispatchThresholdAlert: while silenced, recovery runs per webhook
     // (below) but nothing is recorded as fired or dispatched.
-    const silenced = this.isSuppressed(eventType, connectionId);
     let firedAny = false;
     const settleLookup = this.trackLookup(alertKeyPrefix, connectionId);
     try {
@@ -606,6 +615,10 @@ export class WebhookDispatcherService implements OnModuleDestroy {
         );
         return false;
       }
+
+      // Sampled after the lookup: a window that opened while it awaited must
+      // not let a fired edge be recorded for an alert that is not sent.
+      const silenced = this.isSuppressed(eventType, connectionId);
 
       // Dispatch to each webhook with its own threshold
       await Promise.allSettled(

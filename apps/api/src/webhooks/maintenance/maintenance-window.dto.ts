@@ -67,7 +67,7 @@ export class CreateMaintenanceWindowDto implements CreateMaintenanceWindowReques
 
 export class UpdateMaintenanceWindowDto implements UpdateMaintenanceWindowRequest {
   @ApiPropertyOptional({ description: 'Short label' })
-  @IsOptional()
+  @ValidateIf((_, value) => value !== undefined)
   @IsString()
   @Length(1, 120)
   name?: string;
@@ -80,7 +80,7 @@ export class UpdateMaintenanceWindowDto implements UpdateMaintenanceWindowReques
   reason?: string | null;
 
   @ApiPropertyOptional({ description: 'Events to silence ([] = every event)', enum: WebhookEventType, isArray: true })
-  @IsOptional()
+  @ValidateIf((_, value) => value !== undefined)
   @IsArray()
   @IsEnum(WebhookEventType, { each: true })
   events?: WebhookEventType[];

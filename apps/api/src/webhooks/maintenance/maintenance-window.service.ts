@@ -11,14 +11,17 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import {
+  DeliveryStatus,
   MAX_MAINTENANCE_WINDOW_MS,
   MAX_OPEN_MAINTENANCE_WINDOWS,
   maintenanceWindowCovers,
   maintenanceWindowEffectiveEnd,
   maintenanceWindowState,
   openingEventFor,
+  WEBHOOK_RESOLVING_EVENT,
   resolvingEventFor,
   type CreateMaintenanceWindowRequest,
+  type WebhookDelivery,
   type MaintenanceWindow,
   type MaintenanceWindowState,
   type MaintenanceWindowView,
@@ -79,6 +82,10 @@ export class MaintenanceWindowService implements OnModuleInit, OnModuleDestroy {
   private readonly pendingOpens = new Map<string, PendingOpen>();
   /** Openers that were sent (not silenced) and have not been resolved yet. */
   private readonly deliveredOpens = new Set<string>();
+  /** Openers evaluated as unsuppressed whose delivery has not settled yet (refcount per key). */
+  private readonly inFlightOpens = new Map<string, number>();
+  /** False when rebuilding from stored deliveries failed: resolvers are then never suppressed. */
+  private lifecycleStateKnown = true;
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -87,6 +94,7 @@ export class MaintenanceWindowService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit(): Promise<void> {
     await this.refresh();
+    await this.rebuildLifecycleState(Date.now());
     this.refreshTimer = setInterval(() => void this.refresh(), MAINTENANCE_REFRESH_INTERVAL_MS);
     this.refreshTimer.unref?.();
     this.replayTimer = setInterval(() => void this.replayEnded(), MAINTENANCE_REPLAY_INTERVAL_MS);
@@ -159,8 +167,10 @@ export class MaintenanceWindowService implements OnModuleInit, OnModuleDestroy {
     const closedOpener = openingEventFor(event);
     if (closedOpener !== undefined) {
       const key = pendingKey(closedOpener, connectionId);
-      const openerWasSent = this.deliveredOpens.delete(key);
+      const openerWasSent = this.deliveredOpens.delete(key) || this.inFlightOpens.has(key);
       this.pendingOpens.delete(key);
+      // Unknown state: a spurious recovery is acceptable, a missing one is not.
+      if (!this.lifecycleStateKnown) return null;
       return openerWasSent ? null : window;
     }
 
@@ -168,8 +178,9 @@ export class MaintenanceWindowService implements OnModuleInit, OnModuleDestroy {
     if (resolvingEventFor(event) !== undefined) {
       const key = pendingKey(event, connectionId);
       if (window === null) {
-        // Marked delivered by markOpenerDelivered once a webhook accepts it.
+        // Settled by settleOpener once the dispatcher knows whether a webhook accepted it.
         this.pendingOpens.delete(key);
+        this.inFlightOpens.set(key, (this.inFlightOpens.get(key) ?? 0) + 1);
       } else {
         // Leave deliveredOpens alone: if the condition already paged before the
         // window (e.g. writes.rejected, then an escalated re-send inside it), its
@@ -180,13 +191,20 @@ export class MaintenanceWindowService implements OnModuleInit, OnModuleDestroy {
     return window;
   }
 
-  /** Send silenced openers whose window has ended and that no other window still covers. */
-  /** Called by the dispatcher once at least one webhook accepted an unsuppressed opener. */
-  markOpenerDelivered(event: WebhookEventType, connectionId: string | undefined): void {
+  /**
+   * Called by the dispatcher when an unsuppressed opener's delivery settles;
+   * `accepted` is true when at least one webhook succeeded or is retrying.
+   */
+  settleOpener(event: WebhookEventType, connectionId: string | undefined, accepted: boolean): void {
     if (resolvingEventFor(event) === undefined) return;
-    this.deliveredOpens.add(pendingKey(event, connectionId));
+    const key = pendingKey(event, connectionId);
+    const remaining = (this.inFlightOpens.get(key) ?? 0) - 1;
+    if (remaining > 0) this.inFlightOpens.set(key, remaining);
+    else this.inFlightOpens.delete(key);
+    if (accepted) this.deliveredOpens.add(key);
   }
 
+  /** Send silenced openers whose window has ended and that no other window still covers. */
   async replayEnded(now: number = Date.now()): Promise<number> {
     if (this.replayHandler === null || this.pendingOpens.size === 0) return 0;
     let replayed = 0;
@@ -346,6 +364,74 @@ export class MaintenanceWindowService implements OnModuleInit, OnModuleDestroy {
     }
     await this.refresh();
     await this.replayEnded(now);
+  }
+
+  /**
+   * Restore pendingOpens / deliveredOpens from stored deliveries after a
+   * restart. The last lifecycle event per (opener, connection) wins. On
+   * failure resolvers are not suppressed until the next restart.
+   */
+  private async rebuildLifecycleState(now: number): Promise<void> {
+    const events = [
+      ...(Object.keys(WEBHOOK_RESOLVING_EVENT) as WebhookEventType[]),
+      ...Object.values(WEBHOOK_RESOLVING_EVENT),
+    ] as WebhookEventType[];
+    const since = now - MAX_MAINTENANCE_WINDOW_MS - 60 * 60 * 1000;
+    try {
+      const deliveries = await this.storage.getDeliveriesForEventsSince(events, since);
+      for (const d of deliveries) {
+        const closedOpener = openingEventFor(d.eventType);
+        if (closedOpener !== undefined) {
+          const key = pendingKey(closedOpener, d.connectionId);
+          this.deliveredOpens.delete(key);
+          this.pendingOpens.delete(key);
+          continue;
+        }
+        if (resolvingEventFor(d.eventType) === undefined) continue;
+        const key = pendingKey(d.eventType, d.connectionId);
+        if (d.status === DeliveryStatus.SUPPRESSED) {
+          this.deliveredOpens.delete(key);
+          this.pendingOpens.set(key, {
+            event: d.eventType,
+            data: d.payload.data ?? {},
+            connectionId: d.connectionId,
+            window: this.windowFromDelivery(d),
+          });
+        } else if (d.status !== DeliveryStatus.DEAD_LETTER && d.status !== DeliveryStatus.FAILED) {
+          this.pendingOpens.delete(key);
+          this.deliveredOpens.add(key);
+        }
+      }
+    } catch (error) {
+      this.lifecycleStateKnown = false;
+      this.logger.warn(
+        `Could not rebuild maintenance lifecycle state; resolvers will not be suppressed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * The window named in a SUPPRESSED delivery's responseBody, from the loaded
+   * copy. A window that no longer exists is treated as ended at the delivery's
+   * time so the opener is replayed.
+   */
+  private windowFromDelivery(delivery: WebhookDelivery): MaintenanceWindow {
+    const id = /\(([^()]+)\)$/.exec(delivery.responseBody ?? '')?.[1] ?? '';
+    const known = this.windows.find((window) => window.id === id);
+    if (known) return known;
+    return {
+      id,
+      name: /"(.*)"/.exec(delivery.responseBody ?? '')?.[1] ?? 'unknown',
+      reason: null,
+      connectionId: delivery.connectionId ?? null,
+      events: [],
+      startsAt: delivery.createdAt,
+      endsAt: delivery.createdAt,
+      endedAt: delivery.createdAt,
+      createdBy: null,
+      createdAt: delivery.createdAt,
+      updatedAt: delivery.createdAt,
+    };
   }
 
   /** Held-back openers, for tests and diagnostics. */

@@ -1,7 +1,8 @@
-import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import {
   MAX_MAINTENANCE_WINDOW_MS,
   MAX_OPEN_MAINTENANCE_WINDOWS,
+  DeliveryStatus,
   WebhookEventType,
   maintenanceWindowCovers,
   maintenanceWindowEffectiveEnd,
@@ -280,7 +281,7 @@ describe('MaintenanceWindowService', () => {
 
     it('always sends the resolver of an opener that was sent before the window', async () => {
       expect(service.evaluate(down, {}, 'conn-1', NOW - 1)).toBeNull();
-      service.markOpenerDelivered(down, 'conn-1');
+      service.settleOpener(down, 'conn-1', true);
       await create();
       // The incident instance.down opened must be able to close.
       expect(service.evaluate(up, {}, 'conn-1', NOW)).toBeNull();
@@ -293,7 +294,7 @@ describe('MaintenanceWindowService', () => {
       const rejected = WebhookEventType.WRITES_REJECTED;
       const recovered = WebhookEventType.WRITES_RECOVERED;
       expect(service.evaluate(rejected, {}, 'conn-1', NOW - 1)).toBeNull();
-      service.markOpenerDelivered(rejected, 'conn-1');
+      service.settleOpener(rejected, 'conn-1', true);
       await create();
       expect(service.evaluate(rejected, { escalated: true }, 'conn-1', NOW)).not.toBeNull();
       expect(service.evaluate(recovered, {}, 'conn-1', NOW)).toBeNull();
@@ -310,7 +311,7 @@ describe('MaintenanceWindowService', () => {
     it('replays an escalated opener that is still open when the window ends', async () => {
       const rejected = WebhookEventType.WRITES_REJECTED;
       service.evaluate(rejected, {}, 'conn-1', NOW - 1);
-      service.markOpenerDelivered(rejected, 'conn-1');
+      service.settleOpener(rejected, 'conn-1', true);
       await create();
       service.evaluate(rejected, { escalated: true }, 'conn-1', NOW);
       expect(await service.replayEnded(NOW + HOUR)).toBe(1);
@@ -323,6 +324,7 @@ describe('MaintenanceWindowService', () => {
 
     it('does not count an opener as sent until the dispatcher marks it', async () => {
       expect(service.evaluate(down, {}, 'conn-1', NOW - 1)).toBeNull();
+      service.settleOpener(down, 'conn-1', false);
       await create();
       expect(service.evaluate(up, {}, 'conn-1', NOW)).not.toBeNull();
     });
@@ -382,6 +384,113 @@ describe('MaintenanceWindowService', () => {
       service.evaluate(down, {}, 'conn-1', NOW);
       expect(await service.replayEnded(NOW + HOUR)).toBe(0);
       expect(service.pendingReplayCount()).toBe(0);
+    });
+  });
+
+  describe('in-flight openers', () => {
+    const down = WebhookEventType.INSTANCE_DOWN;
+    const up = WebhookEventType.INSTANCE_UP;
+
+    it('sends the resolver of an opener that has not settled yet', async () => {
+      expect(service.evaluate(down, {}, 'conn-1', NOW - 1)).toBeNull();
+      await create();
+      expect(service.evaluate(up, {}, 'conn-1', NOW)).toBeNull();
+    });
+
+    it('counts several in-flight openers for one key', async () => {
+      service.evaluate(down, {}, 'conn-1', NOW - 1);
+      service.evaluate(down, {}, 'conn-1', NOW - 1);
+      service.settleOpener(down, 'conn-1', false);
+      await create();
+      expect(service.evaluate(up, {}, 'conn-1', NOW)).toBeNull();
+    });
+  });
+
+  describe('lifecycle state rebuilt on startup', () => {
+    const down = WebhookEventType.INSTANCE_DOWN;
+    const up = WebhookEventType.INSTANCE_UP;
+    let restarted: MaintenanceWindowService;
+
+    afterEach(() => restarted?.onModuleDestroy());
+
+    async function record(
+      eventType: WebhookEventType,
+      status: DeliveryStatus,
+      at: number,
+      responseBody?: string,
+    ): Promise<void> {
+      const spy = jest.spyOn(Date, 'now').mockReturnValue(at);
+      const webhook = await storage.createWebhook({
+        name: 'hook',
+        url: 'https://example.com/h',
+        enabled: true,
+        events: [eventType],
+      } as never);
+      await storage.createDelivery({
+        webhookId: webhook.id,
+        eventType,
+        payload: { event: eventType, timestamp: at, data: { message: 'x' } },
+        status,
+        attempts: 0,
+        responseBody,
+        connectionId: 'conn-1',
+      });
+      spy.mockReturnValue(NOW);
+    }
+
+    async function restart(at: number = NOW): Promise<void> {
+      jest.spyOn(Date, 'now').mockReturnValue(at);
+      restarted = new MaintenanceWindowService(storage, registry as unknown as ConnectionRegistry);
+      restarted.setReplayHandler(replay);
+      await restarted.onModuleInit();
+    }
+
+    const suppressedBody = (id: string) => `Suppressed by maintenance window "Upgrade" (${id})`;
+
+    it('holds a stored silenced opener and replays it when its window ends', async () => {
+      const created = await create();
+      await record(down, DeliveryStatus.SUPPRESSED, NOW, suppressedBody(created.id));
+      await restart();
+      expect(restarted.pendingReplayCount()).toBe(1);
+      expect(await restarted.replayEnded(NOW + HOUR)).toBe(1);
+      expect(replay).toHaveBeenCalledWith(
+        down,
+        expect.objectContaining({ message: 'x', replayedAfterMaintenance: true }),
+        'conn-1',
+      );
+    });
+
+    it('holds nothing when the silenced opener was followed by its resolver', async () => {
+      const created = await create();
+      await record(down, DeliveryStatus.SUPPRESSED, NOW - 2, suppressedBody(created.id));
+      await record(up, DeliveryStatus.SUPPRESSED, NOW - 1, suppressedBody(created.id));
+      await restart();
+      expect(restarted.pendingReplayCount()).toBe(0);
+      expect(await restarted.replayEnded(NOW + HOUR)).toBe(0);
+      expect(replay).not.toHaveBeenCalled();
+    });
+
+    it('sends the resolver of an opener that was delivered before the window', async () => {
+      await record(down, DeliveryStatus.SUCCESS, NOW - 1);
+      await create();
+      await restart();
+      expect(restarted.evaluate(up, {}, 'conn-1', NOW)).toBeNull();
+    });
+
+    it('replays on the first tick an opener whose window ended during downtime', async () => {
+      const created = await create();
+      await record(down, DeliveryStatus.SUPPRESSED, NOW, suppressedBody(created.id));
+      await restart(NOW + 2 * HOUR);
+      expect(await restarted.replayEnded(NOW + 2 * HOUR)).toBe(1);
+    });
+
+    it('does not suppress resolvers, and warns, when the rebuild query fails', async () => {
+      await create();
+      jest.spyOn(storage, 'getDeliveriesForEventsSince').mockRejectedValue(new Error('db down'));
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      await restart();
+      expect(restarted.evaluate(up, {}, 'conn-1', NOW)).toBeNull();
+      expect(warn).toHaveBeenCalled();
     });
   });
 });

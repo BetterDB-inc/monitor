@@ -262,7 +262,70 @@ describe('WebhookDispatcherService with maintenance windows', () => {
 
       const statuses = (await deliveries()).map((delivery) => delivery.status);
       expect(statuses).not.toContain(DeliveryStatus.SUPPRESSED);
+      const recovery = (await deliveries()).filter((d) => d.eventType === WebhookEventType.INSTANCE_UP);
+      expect(recovery.map((d) => d.status)).toContain(DeliveryStatus.SUCCESS);
     });
+
+    it('sends the recovery while its opener is still in flight', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let openerArrived!: () => void;
+      const arrived = new Promise<void>((resolve) => (openerArrived = resolve));
+      await new Promise<void>((resolve) => flaky.close(() => resolve()));
+      flaky = createServer((req, res) => {
+        let body = '';
+        req.on('data', (chunk) => (body += chunk));
+        req.on('end', () => {
+          if (JSON.parse(body).event === WebhookEventType.INSTANCE_DOWN) {
+            openerArrived();
+            void gate.then(() => res.writeHead(200).end('ok'));
+          } else {
+            res.writeHead(200).end('ok');
+          }
+        });
+      });
+      await new Promise<void>((resolve) => flaky.listen(0, '127.0.0.1', resolve));
+      webhooks[0].url = `http://127.0.0.1:${(flaky.address() as AddressInfo).port}/hook`;
+
+      const opener = dispatcher.dispatchEvent(WebhookEventType.INSTANCE_DOWN, { message: 'down' }, 'conn-1');
+      await arrived;
+      await openWindow();
+      await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_UP, { message: 'up' }, 'conn-1');
+      release();
+      await opener;
+
+      const all = await deliveries();
+      expect(all.map((d) => d.status)).not.toContain(DeliveryStatus.SUPPRESSED);
+      expect(all.filter((d) => d.eventType === WebhookEventType.INSTANCE_UP).map((d) => d.status)).toContain(
+        DeliveryStatus.SUCCESS,
+      );
+    });
+  });
+
+  it('does not record a fired edge when a window opens during the webhook lookup', async () => {
+    const lookup = (dispatcher as unknown as { webhooksService: { getWebhooksByEvent: jest.Mock } }).webhooksService
+      .getWebhooksByEvent;
+    lookup.mockImplementationOnce(async () => {
+      await openWindow();
+      return webhooks;
+    });
+    const fire = () =>
+      dispatcher.dispatchThresholdAlertPerWebhook(
+        WebhookEventType.MEMORY_CRITICAL,
+        'memory_critical',
+        95,
+        'memoryCriticalPercent',
+        true,
+        { message: 'Memory at 95%' },
+        'conn-1',
+      );
+
+    await expect(fire()).resolves.toBe(false);
+    expect(received).toHaveLength(0);
+
+    now += HOUR;
+    await expect(fire()).resolves.toBe(true);
+    expect(received.map((body) => body.event)).toEqual(['memory.critical']);
   });
 
   describe('threshold recovery while silenced', () => {

@@ -3742,6 +3742,11 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return this.webhookRepo.getRetriableDeliveries(limit, connectionId);
   }
 
+  async getDeliveriesForEventsSince(events: WebhookEventType[], since: number): Promise<WebhookDelivery[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    return this.webhookRepo.getDeliveriesForEventsSince(events, since);
+  }
+
   async pruneOldDeliveries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
     return this.webhookRepo.pruneOldDeliveries(cutoffTimestamp, connectionId);
