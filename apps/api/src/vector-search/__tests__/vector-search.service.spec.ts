@@ -284,19 +284,19 @@ describe('VectorSearchService.sampleKeys: SCAN MATCH glob escaping', () => {
 
   it('escapes ? so a single character wildcard cannot leak keys of other indexes', async () => {
     const { client, scanPatterns } = buildRawClient(['cache?:'], {
-      'cache\\?:*': ['cacheA:1'],
+      'cache\\?:*': ['cache?:1'],
     });
 
     const { keys } = await buildService(client).sampleKeys('conn-keys', 'idx_keys', '0', 10);
 
     expect(scanPatterns).toEqual(['cache\\?:*']);
-    expect(keys.map((k) => k.key)).toEqual(['cacheA:1']);
+    expect(keys.map((k) => k.key)).toEqual(['cache?:1']);
   });
 
   it('escapes the prefix of every index when an index has several prefixes', async () => {
     const { client, scanPatterns } = buildRawClient(['a[1]:', 'b?:'], {
       'a\\[1\\]:*': ['a[1]:1'],
-      'b\\?:*': ['b:z:2'],
+      'b\\?:*': ['b?:2'],
     });
 
     const { keys, cursor } = await buildService(client).sampleKeys(
@@ -307,7 +307,7 @@ describe('VectorSearchService.sampleKeys: SCAN MATCH glob escaping', () => {
     );
 
     expect(scanPatterns).toEqual(['a\\[1\\]:*', 'b\\?:*']);
-    expect(keys.map((k) => k.key)).toEqual(['a[1]:1', 'b:z:2']);
+    expect(keys.map((k) => k.key)).toEqual(['a[1]:1', 'b?:2']);
     expect(cursor).toBe('0');
   });
 
@@ -320,5 +320,41 @@ describe('VectorSearchService.sampleKeys: SCAN MATCH glob escaping', () => {
 
     expect(scanPatterns).toEqual(['doc:*']);
     expect(keys.map((k) => k.key)).toEqual(['doc:1']);
+  });
+
+  it('starts at the first prefix when the cursor index is negative', async () => {
+    const { client, scanPatterns } = buildRawClient(['a[1]:', 'b?:'], {
+      'a\\[1\\]:*': ['a[1]:1'],
+      'b\\?:*': ['b?:2'],
+    });
+
+    const { keys, cursor } = await buildService(client).sampleKeys(
+      'conn-keys',
+      'idx_keys',
+      '-1:0',
+      10,
+    );
+
+    expect(scanPatterns).toEqual(['a\\[1\\]:*', 'b\\?:*']);
+    expect(keys.map((k) => k.key)).toEqual(['a[1]:1', 'b?:2']);
+    expect(cursor).toBe('0');
+  });
+
+  it('starts at the first prefix when the cursor index is past the last prefix', async () => {
+    const { client, scanPatterns } = buildRawClient(['a[1]:', 'b?:'], {
+      'a\\[1\\]:*': ['a[1]:1'],
+      'b\\?:*': ['b?:2'],
+    });
+
+    const { keys, cursor } = await buildService(client).sampleKeys(
+      'conn-keys',
+      'idx_keys',
+      '5:0',
+      10,
+    );
+
+    expect(scanPatterns).toEqual(['a\\[1\\]:*', 'b\\?:*']);
+    expect(keys.map((k) => k.key)).toEqual(['a[1]:1', 'b?:2']);
+    expect(cursor).toBe('0');
   });
 });

@@ -227,7 +227,9 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
     let scanCursor = cursor;
     if (prefixes.length > 1 && cursor !== '0' && cursor.includes(':')) {
       const colonPos = cursor.indexOf(':');
-      prefixIdx = parseInt(cursor.substring(0, colonPos), 10) || 0;
+      const parsed = parseInt(cursor.substring(0, colonPos), 10);
+      prefixIdx =
+        Number.isInteger(parsed) && parsed >= 0 && parsed < prefixes.length ? parsed : 0;
       scanCursor = cursor.substring(colonPos + 1) || '0';
     }
 
