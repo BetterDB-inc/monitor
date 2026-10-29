@@ -1,4 +1,4 @@
-import { neymanAllocation, splitBudget } from './allocation';
+import { evenAllocation, neymanAllocation, splitBudget } from './allocation';
 import type { AllocationInput } from './allocation';
 import { adjustedSkewness, isHeavyTailed, sampleVariance } from './sample-stats';
 import { estimate, keyMemoryCeiling } from './size-estimator';
@@ -118,8 +118,12 @@ async function extend(state: NodeState, cap: number): Promise<void> {
     );
     const missed = state.ceiling !== undefined && estimate([sample], 0, state.ceiling).likelyMissedLargeKeys;
     if (totalBytes <= 0 || (ci95Bytes / totalBytes <= TARGET_RELATIVE_CI && ciTrusted(sample) && heavyShort.size === 0 && !missed)) return;
-    const inputs = allocationInputs(state).filter((input) => heavyShort.size === 0 || heavyShort.has(input.type));
-    await grow(state, neymanAllocation(Math.min(measured, cap - measured), inputs));
+    const extra = Math.min(measured, cap - measured);
+    const inputs = allocationInputs(state);
+    await grow(
+      state,
+      missed ? evenAllocation(extra, inputs) : neymanAllocation(extra, inputs.filter((input) => heavyShort.size === 0 || heavyShort.has(input.type))),
+    );
     if (sampledTotal(state) <= measured) return;
   }
 }

@@ -186,15 +186,19 @@ describe('sampleNodes', () => {
 
   describe('large keys the sample misses', () => {
     const huge = 2 * 1024 * 1024;
-    const keys = keyspace(20_000, (index) =>
-      index % 10 !== 0 ? string() : { type: 'hash', size: index % 3_000 === 0 ? huge : 500 },
-    );
-    const truth = [...keys.values()].reduce((sum, key) => sum + (key.size ?? 0), 0);
-    const datasetBytes = [truth - keys.size * DICT_ENTRY_BYTES];
     const sampledOf = (strata: { sizes: number[] }[]) => strata.reduce((sum, stratum) => sum + stratum.sizes.length, 0);
     const runs = Array.from({ length: 10 }, (_, index) => index + 1);
+    const withHiddenHashes = (strings: (index: number) => number) =>
+      keyspace(20_000, (index) => (index % 10 !== 0 ? string(strings(index)) : { type: 'hash', size: index % 3_000 === 0 ? huge : 500 }));
+    const scenarios = [
+      { name: 'uniform strings', keys: withHiddenHashes((index) => 50 + ((index * 7919) % 1000)) },
+      { name: 'heavy-tailed strings', keys: withHiddenHashes((index) => (index % 201 === 0 ? 100_000 : 50 + (index % 100))) },
+    ];
 
-    it('keeps sampling past the budget while the sample is far below the dataset memory', async () => {
+    it.each(scenarios)('finds the large keys hidden in a uniform-looking type among $name', async ({ keys }) => {
+      const truth = [...keys.values()].reduce((sum, key) => sum + (key.size ?? 0), 0);
+      const datasetBytes = [truth - keys.size * DICT_ENTRY_BYTES];
+      const hugeCount = [...keys.values()].filter((key) => key.size === huge).length;
       for (const seed of runs) {
         const [result] = await sampleNodes([{ name: 'a', client: fakeClient(keys, { seed }) }], {
           budget: 400,
@@ -202,9 +206,11 @@ describe('sampleNodes', () => {
           deadlineMs: 60_000,
           datasetBytes,
         });
+        const hashes = result.strata.find((stratum) => stratum.type === 'hash')!;
         const final = estimate([result], 0, keyMemoryCeiling(datasetBytes[0], keys.size));
-        expect(sampledOf(result.strata)).toBeGreaterThan(400);
-        expect(sampledOf(result.strata) >= 10_000 || !final.likelyMissedLargeKeys).toBe(true);
+        expect(hashes.sizes.filter((size) => size === huge)).toHaveLength(hugeCount);
+        expect(final.likelyMissedLargeKeys).toBe(false);
+        expect(Math.abs(final.totalBytes - truth)).toBeLessThanOrEqual(final.ci95Bytes);
       }
     });
 
