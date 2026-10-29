@@ -219,7 +219,7 @@ describe('SessionExplorerController', () => {
       expect(body.view.parsed).toBe(true);
       expect(body.view.key).toBe(body.sampleKey);
       expect(storage.calls).toEqual([]);
-      expect(valkey.callsOf('scan')).toHaveLength(1);
+      expect(valkey.reader.callsOf('scan')).toHaveLength(1);
     });
 
     it('answers nulls when no key matches', async () => {
@@ -243,7 +243,7 @@ describe('SessionExplorerController', () => {
         payload: { ...input, pattern: 'lc:*', preset: 'langchain-community' },
       });
       expect(res.json()).toMatchObject({ sampleKey: 'lc:good', exhausted: false });
-      expect(valkey.callsOf('scan')).toHaveLength(3);
+      expect(valkey.reader.callsOf('scan')).toHaveLength(3);
     });
 
     it('stops after a bounded number of SCAN pages and says the search was partial', async () => {
@@ -255,7 +255,7 @@ describe('SessionExplorerController', () => {
         payload: input,
       });
       expect(res.json()).toEqual({ sampleKey: null, view: null, exhausted: false, failedNodes: 0, touchesKeys: false });
-      expect(valkey.callsOf('scan')).toHaveLength(10);
+      expect(valkey.reader.callsOf('scan')).toHaveLength(10);
     });
 
     it('rejects an invalid preview body with 400', async () => {

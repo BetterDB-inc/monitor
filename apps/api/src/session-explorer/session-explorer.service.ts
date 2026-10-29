@@ -21,9 +21,16 @@ import { validateNamespaceInput } from './namespace-validation';
 import { getPreset, parseSessionKeys } from './presets/registry';
 import { estimateTokens } from './presets/text';
 import type { PresetDefinition } from './presets/types';
-import { withPrimaries } from './primary-nodes';
-import { keysForSession, scanSessions } from './session-scanner';
-import { readSessionKeys } from './session-reader';
+import {
+  PrimaryClients,
+  PrimaryRoute,
+  readable,
+  union,
+  unreadable,
+  withPrimaries,
+} from './primary-nodes';
+import { keysForSessionOn, scanSessions } from './session-scanner';
+import { readSessionKeysOn } from './session-reader';
 
 const PREVIEW_SCAN_COUNT = 1000;
 const PREVIEW_SCAN_PAGES = 10;
@@ -43,6 +50,47 @@ const minPositive = (values: number[]): number | null => {
   const positive = values.filter((v) => v > 0);
   return positive.length > 0 ? Math.min(...positive) : null;
 };
+
+async function sampleSessionKey(
+  primaries: PrimaryClients,
+  pattern: string,
+  preset: PresetDefinition,
+): Promise<{ sampleKey: string | null; exhausted: boolean; failed: Set<PrimaryRoute> }> {
+  let fallback: string | null = null;
+  const failed = unreadable(primaries);
+  let searchedAll = failed.size === 0;
+  let lastError: unknown;
+  let succeeded = 0;
+  for (const route of readable(primaries)) {
+    const { client } = route;
+    let cursor = '0';
+    let pages = 0;
+    try {
+      do {
+        const [next, page] = await client.scan(
+          cursor,
+          'MATCH',
+          pattern,
+          'COUNT',
+          PREVIEW_SCAN_COUNT,
+        );
+        cursor = next;
+        pages++;
+        const accepted = page.find((k) => preset.sessionIdOf(k) !== null);
+        if (accepted !== undefined) return { sampleKey: accepted, exhausted: false, failed };
+        fallback ??= page[0] ?? null;
+      } while (cursor !== '0' && pages < PREVIEW_SCAN_PAGES);
+      succeeded++;
+    } catch (err) {
+      lastError = err;
+      failed.add(route);
+      cursor = '';
+    }
+    if (cursor !== '0') searchedAll = false;
+  }
+  if (succeeded === 0 && fallback === null && lastError !== undefined) throw lastError;
+  return { sampleKey: fallback, exhausted: searchedAll, failed };
+}
 
 @Injectable()
 export class SessionExplorerService {
@@ -67,7 +115,11 @@ export class SessionExplorerService {
     });
   }
 
-  async updateNamespace(connectionId: string, id: string, body: unknown): Promise<SessionNamespace> {
+  async updateNamespace(
+    connectionId: string,
+    id: string,
+    body: unknown,
+  ): Promise<SessionNamespace> {
     const input = this.validate(body);
     const existing = await this.namespace(connectionId, id);
     return this.storage.saveSessionNamespace({
@@ -86,65 +138,40 @@ export class SessionExplorerService {
   async preview(connectionId: string, body: unknown): Promise<SessionPreview> {
     const input = this.validate(body);
     const preset = this.presetOf(input);
-    const db = this.registry.get(connectionId);
-    const scanned = await withPrimaries(db, async ({ clients, failed }) => {
-      let fallback: string | null = null;
-      let failedNodes = failed;
-      let searchedAll = failed === 0;
-      let lastError: unknown;
-      let succeeded = 0;
-      for (const client of clients) {
-        let cursor = '0';
-        let pages = 0;
-        try {
-          do {
-            const [next, page] = await client.scan(
-              cursor,
-              'MATCH',
-              input.pattern,
-              'COUNT',
-              PREVIEW_SCAN_COUNT,
-            );
-            cursor = next;
-            pages++;
-            const accepted = page.find((k) => preset.sessionIdOf(k) !== null);
-            if (accepted !== undefined) {
-              return { sampleKey: accepted, exhausted: false, failedNodes };
-            }
-            fallback ??= page[0] ?? null;
-          } while (cursor !== '0' && pages < PREVIEW_SCAN_PAGES);
-          succeeded++;
-        } catch (err) {
-          lastError = err;
-          failedNodes++;
-          cursor = '';
-        }
-        if (cursor !== '0') searchedAll = false;
+    return withPrimaries(this.registry.get(connectionId), async (primaries) => {
+      const { sampleKey, exhausted, failed } = await sampleSessionKey(
+        primaries,
+        input.pattern,
+        preset,
+      );
+      if (sampleKey === null) {
+        return {
+          sampleKey: null,
+          view: null,
+          exhausted,
+          failedNodes: failed.size,
+          touchesKeys: false,
+        };
       }
-      if (succeeded === 0 && fallback === null && lastError !== undefined) throw lastError;
-      if (succeeded === 0 && fallback === null) {
-        throw new ServiceUnavailableException('No primary could be reached');
-      }
-      return { sampleKey: fallback, exhausted: searchedAll, failedNodes };
+      const read = await readSessionKeysOn(primaries, [sampleKey]);
+      const captured = read.keys[0];
+      return {
+        sampleKey,
+        view: captured ? preset.parseKey(captured) : null,
+        exhausted,
+        failedNodes: union(failed, read.failed).size,
+        touchesKeys: read.touchesKeys,
+      };
     });
-    const { sampleKey, exhausted, failedNodes } = scanned;
-    if (sampleKey === null) {
-      return { sampleKey: null, view: null, exhausted, failedNodes, touchesKeys: false };
-    }
-    const read = await readSessionKeys(db, [sampleKey]);
-    const captured = read.keys[0];
-    return {
-      sampleKey,
-      view: captured ? preset.parseKey(captured) : null,
-      exhausted,
-      failedNodes: Math.max(failedNodes, read.failedNodes),
-      touchesKeys: read.touchesKeys,
-    };
   }
 
   async listSessions(connectionId: string, id: string): Promise<SessionListResponse> {
     const namespace = await this.namespace(connectionId, id);
-    return scanSessions(this.registry.get(connectionId), namespace.pattern, this.presetOf(namespace));
+    return scanSessions(
+      this.registry.get(connectionId),
+      namespace.pattern,
+      this.presetOf(namespace),
+    );
   }
 
   async oversizeSessions(connectionId: string, id: string): Promise<SessionOversizeResponse> {
@@ -172,21 +199,30 @@ export class SessionExplorerService {
     return (await this.captureSession(connectionId, id, sessionId)).detail;
   }
 
-  async captureSession(connectionId: string, id: string, sessionId: string): Promise<SessionCapture> {
+  async captureSession(
+    connectionId: string,
+    id: string,
+    sessionId: string,
+  ): Promise<SessionCapture> {
     const namespace = await this.namespace(connectionId, id);
     const preset = this.presetOf(namespace);
-    const db = this.registry.get(connectionId);
-    const scan = await keysForSession(db, namespace.pattern, preset, sessionId);
-    if (scan.keys.length === 0) throw sessionMissing(scan.failedNodes);
-    const selected = preset.selectKeys ? preset.selectKeys(scan.keys) : scan.keys;
-    const read = await readSessionKeys(db, selected);
-    if (read.keys.length === 0) throw sessionMissing(read.failedNodes);
+    const { scan, read } = await withPrimaries(
+      this.registry.get(connectionId),
+      async (primaries) => {
+        const scan = await keysForSessionOn(primaries, namespace.pattern, preset, sessionId);
+        if (scan.keys.length === 0) throw sessionMissing(scan.failed.size);
+        const selected = preset.selectKeys ? preset.selectKeys(scan.keys) : scan.keys;
+        const read = await readSessionKeysOn(primaries, selected);
+        if (read.keys.length === 0) throw sessionMissing(union(scan.failed, read.failed).size);
+        return { scan, read };
+      },
+    );
 
     const views = parseSessionKeys(preset, read.keys);
     const messages = preset.mergeSession(views);
     const unparsedKeys = views.filter((v) => !v.parsed).length;
     const truncated = scan.truncated || read.truncated;
-    const failedNodes = Math.max(scan.failedNodes, read.failedNodes);
+    const failedNodes = union(scan.failed, read.failed).size;
     const complete =
       unparsedKeys === 0 &&
       !truncated &&
