@@ -249,7 +249,10 @@ export class MigrationService {
         for (const master of masters.filter(isScannableMaster)) {
           // Parse 'host:port@clusterport' (IPv6-aware) via the shared helper.
           const { host, port } = parseNodeAddress(master.address);
-          if (!host || isNaN(port)) continue;
+          if (!host || isNaN(port)) {
+            unreachableMasters.push(master.address || master.id);
+            continue;
+          }
 
           const client = new Valkey({
             host,
