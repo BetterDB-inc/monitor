@@ -15,6 +15,7 @@ export * from './utils/key-patterns';
 export * from './utils/key-sizes';
 export * from './utils/url-credentials';
 export * from './utils/glob';
+export * from './utils/elasticache-host';
 export * from './license/index';
 export * from './auth/broker';
 export * from './webhooks/index';

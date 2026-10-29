@@ -1,21 +1,32 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import Valkey from 'iovalkey';
-import type { MigrationAnalysisRequest, MigrationAnalysisResult, StartAnalysisResponse, DataTypeBreakdown, DataTypeCount, TtlDistribution } from '@betterdb/shared';
+import type { MigrationAnalysisRequest, MigrationAnalysisResult, StartAnalysisResponse, DataTypeBreakdown, DataTypeCount, TtlDistribution, Incompatibility } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import type { AnalysisJob } from './analysis/analysis-job';
 import { sampleKeyTypes } from './analysis/type-sampler';
 import { sampleTtls } from './analysis/ttl-sampler';
 import { detectHfe } from './analysis/hfe-detector';
-import { analyzeCommands } from './analysis/commandlog-analyzer';
+import { collectCommandAnalysis, collectNodeCommandEntries } from './analysis/commandlog-analyzer';
 import { buildInstanceMeta, checkCompatibility } from './analysis/compatibility-checker';
+import {
+  checkServerlessReadiness,
+  clusterMastersWithOwnSlotMoves,
+  countSlotOwningMasters,
+  isElastiCacheServerlessHost,
+  summarizeServerlessProbes,
+} from './analysis/serverless-readiness';
+import type { ServerlessClusterMaster } from './analysis/serverless-readiness';
+import { InfoParser } from '../database/parsers/info.parser';
+import type { ClusterNode } from '../common/types/metrics.types';
 import {
   loadAnalysisVerdict,
   resolveVerdictDir,
   saveAnalysisVerdict,
 } from './analysis/analysis-verdict-store';
 import { probeSourceFunctions, aggregateFunctionPresence } from './fork-compat';
-import { parseNodeAddress } from './function-presence';
+import { isScannableMaster, parseNodeAddress } from './function-presence';
+import { connectWithin, NODE_CONNECT_OPTIONS, NODE_CONNECT_TIMEOUT_MS } from './node-connect';
 import { assertLiveMigrationPair } from './live-connections';
 
 @Injectable()
@@ -32,7 +43,9 @@ export class MigrationService {
   async startAnalysis(req: MigrationAnalysisRequest): Promise<StartAnalysisResponse> {
     // Verify both connections exist before creating job (get() throws NotFoundException if not found)
     this.connectionRegistry.get(req.sourceConnectionId);
-    this.connectionRegistry.get(req.targetConnectionId);
+    if (req.targetConnectionId !== undefined) {
+      this.connectionRegistry.get(req.targetConnectionId);
+    }
     assertLiveMigrationPair(this.connectionRegistry, req.sourceConnectionId, req.targetConnectionId);
 
     this.evictOldJobs();
@@ -165,10 +178,12 @@ export class MigrationService {
 
       // Parse total keys from keyspace section
       let totalKeys = 0;
+      const databasesBeyondZero: string[] = [];
       for (const [key, val] of Object.entries(keyspaceSection)) {
         if (key.startsWith('db') && typeof val === 'string') {
           const match = val.match(/keys=(\d+)/);
           if (match) totalKeys += parseInt(match[1], 10);
+          if (match && key !== 'db0' && parseInt(match[1], 10) > 0) databasesBeyondZero.push(key);
         }
       }
       job.result.totalKeys = totalKeys;
@@ -183,24 +198,25 @@ export class MigrationService {
       // Step 2b: Read target info
       if (job.cancelled) return;
 
-      const targetAdapter = this.connectionRegistry.get(req.targetConnectionId);
-      const targetConfig = this.connectionRegistry.getConfig(req.targetConnectionId);
-      const targetInfo = await targetAdapter.getInfo(['server', 'keyspace', 'cluster', 'memory', 'persistence']);
-      const targetCapabilities = targetAdapter.getCapabilities();
+      const targetConnectionId = req.targetConnectionId;
+      const target = targetConnectionId === undefined ? null : await this.readTarget(targetConnectionId);
+      const checkServerless =
+        req.targetProfile === 'elasticache_serverless' ||
+        (targetConnectionId !== undefined && this.isServerlessTarget(targetConnectionId));
 
-      let targetAclUsers: string[] = [];
-      try {
-        const client = targetAdapter.getClient();
-        const result = await client.call('ACL', 'USERS') as string[];
-        targetAclUsers = result ?? [];
-      } catch { /* ignore - ACL not supported or no permission */ }
-
-      job.result.targetConnectionId = req.targetConnectionId;
-      job.result.targetConnectionName = targetConfig?.name;
-      job.result.targetDbType = targetCapabilities.dbType;
-      job.result.targetDbVersion = targetCapabilities.version;
-      const targetClusterSection = (targetInfo as Record<string, Record<string, string>>).cluster ?? {};
-      job.result.targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
+      if (target) {
+        job.result.targetConnectionId = targetConnectionId;
+        job.result.targetConnectionName = target.config?.name;
+        job.result.targetDbType = target.capabilities.dbType;
+        job.result.targetDbVersion = target.capabilities.version;
+        const targetClusterSection = (target.info as Record<string, Record<string, string>>).cluster ?? {};
+        job.result.targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
+        if (checkServerless) {
+          job.result.targetProfile = 'elasticache_serverless';
+        }
+      } else {
+        job.result.targetProfile = req.targetProfile;
+      }
 
       if (job.cancelled) return;
       job.progress = 13;
@@ -208,19 +224,35 @@ export class MigrationService {
       // Step 3: Cluster check (source)
       let isCluster = false;
       let clusterMasterCount = 0;
+      let slotOwningMasterCount = 0;
+      let clusterMasters: ServerlessClusterMaster[] | null = null;
+      let clusterMasterNodes: ClusterNode[] = [];
+      let masterUsedMemory = [usedMemory];
+      let masterMemorySections: Array<Record<string, string> | null> = [memorySection];
       const scanClients: Valkey[] = [];
+      const unreachableMasters: string[] = [];
 
       const clusterEnabled = String(clusterSection['cluster_enabled'] ?? '0');
       if (clusterEnabled === '1') {
         isCluster = true;
         const nodes = await adapter.getClusterNodes();
         const masters = nodes.filter(n => n.flags.includes('master'));
+        clusterMasterNodes = masters;
         clusterMasterCount = masters.length;
+        slotOwningMasterCount = countSlotOwningMasters(nodes);
+        clusterMasters = masters.map(m => ({
+          slots: m.slots,
+          migratingSlots: m.migratingSlots?.length ?? 0,
+          importingSlots: m.importingSlots?.length ?? 0,
+        }));
 
-        for (const master of masters) {
+        for (const master of masters.filter(isScannableMaster)) {
           // Parse 'host:port@clusterport' (IPv6-aware) via the shared helper.
           const { host, port } = parseNodeAddress(master.address);
-          if (!host || isNaN(port)) continue;
+          if (!host || isNaN(port)) {
+            unreachableMasters.push(master.address || master.id);
+            continue;
+          }
 
           const client = new Valkey({
             host,
@@ -228,11 +260,17 @@ export class MigrationService {
             username: config?.username || undefined,
             password: config?.password || undefined,
             tls: config?.tls ? {} : undefined,
-            lazyConnect: true,
+            ...NODE_CONNECT_OPTIONS,
             connectionName: 'BetterDB-Migration-Analysis',
           });
-          await client.connect();
           tempClients.push(client);
+          try {
+            await connectWithin(client, NODE_CONNECT_TIMEOUT_MS);
+          } catch {
+            client.disconnect();
+            unreachableMasters.push(`${host}:${port}`);
+            continue;
+          }
           job.nodeClients.push(client);
           scanClients.push(client);
         }
@@ -253,15 +291,18 @@ export class MigrationService {
             nodeClient.dbsize() as Promise<number>,
             nodeClient.info('memory') as Promise<string>,
           ]);
-          const memMatch = String(nodeMemStr).match(/\bused_memory:(\d+)/);
+          const memorySectionOfNode = readInfoSection(nodeMemStr, 'memory');
           return {
             keys: Number(nodeKeys) || 0,
-            memory: memMatch ? parseInt(memMatch[1], 10) : 0,
+            memory: Number(memorySectionOfNode?.['used_memory']) || 0,
+            memorySection: memorySectionOfNode,
           };
         }));
         totalKeys = nodeStats.reduce((s, n) => s + n.keys, 0);
         job.result.totalKeys = totalKeys;
         job.result.totalMemoryBytes = nodeStats.reduce((s, n) => s + n.memory, 0);
+        masterUsedMemory = nodeStats.map(n => n.memory);
+        masterMemorySections = nodeStats.map(n => n.memorySection);
       }
 
       if (job.cancelled) return;
@@ -301,8 +342,8 @@ export class MigrationService {
           if (job.cancelled) return;
           const batch = clientKeys.slice(i, i + 1000);
           const pipeline = client.pipeline();
-          for (const { key } of batch) {
-            pipeline.call('MEMORY', 'USAGE', key, 'SAMPLES', '0');
+          for (const { rawKey } of batch) {
+            pipeline.call('MEMORY', 'USAGE', rawKey, 'SAMPLES', '0');
           }
           const results = await pipeline.exec();
           if (results) {
@@ -378,7 +419,7 @@ export class MigrationService {
         expiresWithin7d: 0, expiresAfter7d: 0, sampledKeyCount: sampledKeys.length,
       };
       for (const [clientIndex, clientKeys] of keysByClientIndex) {
-        const nodeTtl = await sampleTtls(scanClients[clientIndex], clientKeys.map(k => k.key));
+        const nodeTtl = await sampleTtls(scanClients[clientIndex], clientKeys.map(k => k.rawKey));
         mergedTtl.noExpiry += nodeTtl.noExpiry;
         mergedTtl.expiresWithin1h += nodeTtl.expiresWithin1h;
         mergedTtl.expiresWithin24h += nodeTtl.expiresWithin24h;
@@ -398,10 +439,10 @@ export class MigrationService {
           : hashKeys.length;
 
         // Group hash keys by originating client
-        const hashByClient = new Map<number, string[]>();
+        const hashByClient = new Map<number, Buffer[]>();
         for (const hk of hashKeys) {
           const group = hashByClient.get(hk.clientIndex) ?? [];
-          group.push(hk.key);
+          group.push(hk.rawKey);
           hashByClient.set(hk.clientIndex, group);
         }
 
@@ -435,7 +476,8 @@ export class MigrationService {
       job.progress = 85;
 
       // Step 8: Command analysis
-      job.result.commandAnalysis = await analyzeCommands(adapter);
+      const commandLog = await collectCommandAnalysis(adapter);
+      job.result.commandAnalysis = commandLog.analysis;
 
       if (job.cancelled) return;
       job.progress = 90;
@@ -471,43 +513,91 @@ export class MigrationService {
       const functionPresence = aggregateFunctionPresence(functionPresences);
       const sourceHasFunctions = functionPresence !== 'absent';
 
-      // Fetch RDB save config from both instances for reliable persistence detection
-      let sourceRdbSaveConfig: string | undefined;
-      let targetRdbSaveConfig: string | undefined;
-      try {
-        const sourceClient = adapter.getClient();
-        const result = await sourceClient.call('CONFIG', 'GET', 'save') as string[];
-        if (result && result.length >= 2) sourceRdbSaveConfig = result[1];
-      } catch { /* ignore - CONFIG not permitted */ }
-      try {
-        const targetClient = targetAdapter.getClient();
-        const result = await targetClient.call('CONFIG', 'GET', 'save') as string[];
-        if (result && result.length >= 2) targetRdbSaveConfig = result[1];
-      } catch { /* ignore - CONFIG not permitted */ }
+      const incompatibilities: Incompatibility[] = [];
 
-      // Build source meta (buildInstanceMeta expects a flat key-value object)
-      const flatSourceInfo = flattenInfo(info);
-      const sourceMeta = buildInstanceMeta(flatSourceInfo, capabilities, sourceAclUsers, sourceRdbSaveConfig);
+      if (unreachableMasters.length > 0) {
+        incompatibilities.push({
+          severity: 'warning',
+          category: 'cluster_topology',
+          title: 'Source master unreachable',
+          detail: `Could not connect to ${unreachableMasters.join(', ')}. Keys, memory and command history on ${unreachableMasters.length === 1 ? 'this master are' : 'these masters are'} missing from the analysis.`,
+        });
+      }
 
-      // Fetch source modules
-      try {
-        const sourceClient = adapter.getClient();
-        const moduleResult = await sourceClient.call('MODULE', 'LIST') as unknown[];
-        sourceMeta.modules = parseModuleList(moduleResult);
-      } catch { /* ignore */ }
+      if (target) {
+        // Fetch RDB save config from both instances for reliable persistence detection
+        let sourceRdbSaveConfig: string | undefined;
+        let targetRdbSaveConfig: string | undefined;
+        try {
+          const sourceClient = adapter.getClient();
+          const result = await sourceClient.call('CONFIG', 'GET', 'save') as string[];
+          if (result && result.length >= 2) sourceRdbSaveConfig = result[1];
+        } catch { /* ignore - CONFIG not permitted */ }
+        try {
+          const targetClient = target.adapter.getClient();
+          const result = await targetClient.call('CONFIG', 'GET', 'save') as string[];
+          if (result && result.length >= 2) targetRdbSaveConfig = result[1];
+        } catch { /* ignore - CONFIG not permitted */ }
 
-      // Build target meta
-      const flatTargetInfo = flattenInfo(targetInfo);
-      const targetMeta = buildInstanceMeta(flatTargetInfo, targetCapabilities, targetAclUsers, targetRdbSaveConfig);
+        // Build source meta (buildInstanceMeta expects a flat key-value object)
+        const flatSourceInfo = flattenInfo(info);
+        const sourceMeta = buildInstanceMeta(flatSourceInfo, capabilities, sourceAclUsers, sourceRdbSaveConfig);
 
-      // Fetch target modules
-      try {
-        const targetClient = targetAdapter.getClient();
-        const moduleResult = await targetClient.call('MODULE', 'LIST') as unknown[];
-        targetMeta.modules = parseModuleList(moduleResult);
-      } catch { /* ignore */ }
+        // Fetch source modules
+        try {
+          const sourceClient = adapter.getClient();
+          const moduleResult = await sourceClient.call('MODULE', 'LIST') as unknown[];
+          sourceMeta.modules = parseModuleList(moduleResult);
+        } catch { /* ignore */ }
 
-      const incompatibilities = checkCompatibility(sourceMeta, targetMeta, job.result.hfeDetected ?? false, sourceHasFunctions);
+        // Build target meta
+        const flatTargetInfo = flattenInfo(target.info);
+        const targetMeta = buildInstanceMeta(flatTargetInfo, target.capabilities, target.aclUsers, targetRdbSaveConfig);
+
+        // Fetch target modules
+        try {
+          const targetClient = target.adapter.getClient();
+          const moduleResult = await targetClient.call('MODULE', 'LIST') as unknown[];
+          targetMeta.modules = parseModuleList(moduleResult);
+        } catch { /* ignore */ }
+
+        incompatibilities.push(...checkCompatibility(sourceMeta, targetMeta, job.result.hfeDetected ?? false, sourceHasFunctions));
+      }
+
+      if (checkServerless && isCluster && clusterMasterNodes.length > 0) {
+        const nodeOutputs = await Promise.all(scanClients.map((client) => {
+          return Promise.resolve().then(() => client.call('CLUSTER', 'NODES')).catch(() => undefined);
+        }));
+        clusterMasters = clusterMastersWithOwnSlotMoves(clusterMasterNodes, nodeOutputs);
+      }
+
+      if (checkServerless) {
+        const commandLogRead = isCluster && scanClients.length > 0
+          ? await collectNodeCommandEntries(scanClients, capabilities.hasCommandLog)
+          : {
+            entries: commandLog.entries,
+            unreadNodes: commandLog.analysis.sourceUsed === 'unavailable' ? 1 : 0,
+          };
+        const probes = await probeServerlessFacts(
+          scanClients.length > 0 ? scanClients : [adapter.getClient()],
+          masterMemorySections,
+        );
+        incompatibilities.push(...checkServerlessReadiness({
+          dbType: capabilities.dbType,
+          version: capabilities.version,
+          isCluster,
+          clusterMasterCount: slotOwningMasterCount,
+          masterUsedMemory,
+          sampledKeyBytes: sampledKeys.map(k => k.keyBytes),
+          databasesBeyondZero,
+          functionPresence,
+          clusterMasters,
+          commandEntries: commandLogRead.entries,
+          unreadCommandLogNodes: commandLogRead.unreadNodes,
+          ...probes,
+        }));
+      }
+
       job.result.incompatibilities = incompatibilities;
       job.result.blockingCount = incompatibilities.filter(i => i.severity === 'blocking').length;
       job.result.warningCount = incompatibilities.filter(i => i.severity === 'warning').length;
@@ -556,6 +646,29 @@ export class MigrationService {
     }
   }
 
+  private async readTarget(targetConnectionId: string) {
+    const adapter = this.connectionRegistry.get(targetConnectionId);
+    const config = this.connectionRegistry.getConfig(targetConnectionId);
+    const info = await adapter.getInfo(['server', 'keyspace', 'cluster', 'memory', 'persistence']);
+    const capabilities = adapter.getCapabilities();
+
+    let aclUsers: string[] = [];
+    try {
+      const result = await adapter.getClient().call('ACL', 'USERS') as string[];
+      aclUsers = result ?? [];
+    } catch { /* ignore - ACL not supported or no permission */ }
+
+    return { adapter, config, info, capabilities, aclUsers };
+  }
+
+  private isServerlessTarget(targetConnectionId: string): boolean {
+    const config = this.connectionRegistry.getConfig(targetConnectionId);
+    return (
+      isElastiCacheServerlessHost(config?.host ?? '') ||
+      this.connectionRegistry.isServerlessAgentConnection(targetConnectionId)
+    );
+  }
+
   private evictOldJobs(): void {
     if (this.jobs.size < this.MAX_JOBS) return;
 
@@ -584,6 +697,26 @@ export class MigrationService {
   private isJobStuck(job: AnalysisJob): boolean {
     return job.status === 'running' && Date.now() - job.createdAt > this.STUCK_JOB_TTL_MS;
   }
+}
+
+async function probeServerlessFacts(
+  clients: Valkey[],
+  memorySections: Array<Record<string, string> | null>,
+) {
+  const probes = await Promise.all(clients.map(async (client, index) => {
+    const [commandInfo, stats] = await Promise.all([
+      Promise.resolve().then(() => client.call('COMMAND', 'INFO', 'PSYNC', 'REPLCONF')).catch(() => undefined),
+      Promise.resolve().then(() => client.info('stats')).catch(() => undefined),
+    ]);
+    return { commandInfo, memory: memorySections[index] ?? null, stats: readInfoSection(stats, 'stats') };
+  }));
+  return summarizeServerlessProbes(probes);
+}
+
+function readInfoSection(raw: unknown, section: string): Record<string, string> | null {
+  if (typeof raw !== 'string') return null;
+  const parsed = InfoParser.parse(raw)[section];
+  return parsed && typeof parsed === 'object' ? (parsed as Record<string, string>) : null;
 }
 
 /**

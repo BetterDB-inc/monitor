@@ -21,12 +21,21 @@ export class MigrationController {
   // ── Analysis endpoints (community-tier) ──
 
   @Post('analysis')
-  async startAnalysis(@Body() body: MigrationAnalysisRequest): Promise<StartAnalysisResponse> {
+  async startAnalysis(@Body() rawBody: MigrationAnalysisRequest): Promise<StartAnalysisResponse> {
+    const { targetConnectionId, targetProfile, ...rest } = rawBody;
+    const body: MigrationAnalysisRequest = {
+      ...rest,
+      ...(targetConnectionId ? { targetConnectionId } : {}),
+      ...(targetProfile ? { targetProfile } : {}),
+    };
     if (!body.sourceConnectionId) {
       throw new BadRequestException('sourceConnectionId is required');
     }
-    if (!body.targetConnectionId) {
-      throw new BadRequestException('targetConnectionId is required');
+    if (Boolean(body.targetConnectionId) === Boolean(body.targetProfile)) {
+      throw new BadRequestException('Exactly one of targetConnectionId or targetProfile is required');
+    }
+    if (body.targetProfile !== undefined && body.targetProfile !== 'elasticache_serverless') {
+      throw new BadRequestException('targetProfile must be "elasticache_serverless"');
     }
     if (body.sourceConnectionId === body.targetConnectionId) {
       throw new BadRequestException('Source and target must be different connections');
