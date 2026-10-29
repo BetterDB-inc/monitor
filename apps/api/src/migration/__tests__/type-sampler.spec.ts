@@ -30,9 +30,9 @@ describe('sampleKeyTypes', () => {
     const result = await sampleKeyTypes([client], 1000);
 
     expect(result).toHaveLength(3);
-    expect(result[0]).toEqual({ key: 'key:1', keyBytes: 5, type: 'string', clientIndex: 0 });
-    expect(result[1]).toEqual({ key: 'key:2', keyBytes: 5, type: 'hash', clientIndex: 0 });
-    expect(result[2]).toEqual({ key: 'key:3', keyBytes: 5, type: 'list', clientIndex: 0 });
+    expect(result[0]).toEqual({ key: 'key:1', rawKey: Buffer.from('key:1'), keyBytes: 5, type: 'string', clientIndex: 0 });
+    expect(result[1]).toEqual({ key: 'key:2', rawKey: Buffer.from('key:2'), keyBytes: 5, type: 'hash', clientIndex: 0 });
+    expect(result[2]).toEqual({ key: 'key:3', rawKey: Buffer.from('key:3'), keyBytes: 5, type: 'list', clientIndex: 0 });
   });
 
   it('should return empty array for empty database', async () => {
@@ -129,6 +129,7 @@ describe('sampleKeyTypes', () => {
 
     expect(result[0].keyBytes).toBe(4);
     expect(result[0].key).toBe(raw.toString());
+    expect(result[0].rawKey).toBe(raw);
     expect(pipeline.type).toHaveBeenCalledWith(raw);
   });
 });

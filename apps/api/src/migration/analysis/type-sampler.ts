@@ -2,6 +2,7 @@ import type Valkey from 'iovalkey';
 
 export interface SampledKey {
   key: string;
+  rawKey: Buffer;
   keyBytes: number;
   type: string;
   clientIndex: number;
@@ -46,7 +47,7 @@ export async function sampleKeyTypes(
       if (results) {
         for (let j = 0; j < batch.length; j++) {
           const [err, type] = results[j] ?? [];
-          allKeys.push({ key: batch[j], keyBytes: rawBatch[j].length, type: err ? 'unknown' : String(type), clientIndex: ci });
+          allKeys.push({ key: batch[j], rawKey: rawBatch[j], keyBytes: rawBatch[j].length, type: err ? 'unknown' : String(type), clientIndex: ci });
         }
       }
     }

@@ -128,3 +128,24 @@ describe('detectHfe', () => {
     expect(result.hfeKeyCount).toBe(500);
   });
 });
+
+describe('detectHfe with binary keys', () => {
+  it('sends raw key buffers and counts distinct keys that decode to the same string', async () => {
+    const first = Buffer.from([0xff, 0x01]);
+    const second = Buffer.from([0xfe, 0x01]);
+    const decoded = first.toString();
+    const client = createMockClient({
+      hlens: { [decoded]: 5 },
+      hrandfields: { [decoded]: ['f1'] },
+      hexpiretimes: { [decoded]: [1700000000] },
+    });
+
+    const result = await detectHfe(client, [first, second], 10);
+
+    expect(result.hfeKeyCount).toBe(10);
+    const pipelines = client.pipeline.mock.results.map((r: { value: Record<string, jest.Mock> }) => r.value);
+    expect(pipelines[0].hlen.mock.calls[0][0]).toBe(first);
+    expect(pipelines[1].call.mock.calls[0][1]).toBe(first);
+    expect(pipelines[2].call.mock.calls[0][1]).toBe(first);
+  });
+});

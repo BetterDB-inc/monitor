@@ -331,8 +331,8 @@ export class MigrationService {
           if (job.cancelled) return;
           const batch = clientKeys.slice(i, i + 1000);
           const pipeline = client.pipeline();
-          for (const { key } of batch) {
-            pipeline.call('MEMORY', 'USAGE', key, 'SAMPLES', '0');
+          for (const { rawKey } of batch) {
+            pipeline.call('MEMORY', 'USAGE', rawKey, 'SAMPLES', '0');
           }
           const results = await pipeline.exec();
           if (results) {
@@ -408,7 +408,7 @@ export class MigrationService {
         expiresWithin7d: 0, expiresAfter7d: 0, sampledKeyCount: sampledKeys.length,
       };
       for (const [clientIndex, clientKeys] of keysByClientIndex) {
-        const nodeTtl = await sampleTtls(scanClients[clientIndex], clientKeys.map(k => k.key));
+        const nodeTtl = await sampleTtls(scanClients[clientIndex], clientKeys.map(k => k.rawKey));
         mergedTtl.noExpiry += nodeTtl.noExpiry;
         mergedTtl.expiresWithin1h += nodeTtl.expiresWithin1h;
         mergedTtl.expiresWithin24h += nodeTtl.expiresWithin24h;
@@ -428,10 +428,10 @@ export class MigrationService {
           : hashKeys.length;
 
         // Group hash keys by originating client
-        const hashByClient = new Map<number, string[]>();
+        const hashByClient = new Map<number, Buffer[]>();
         for (const hk of hashKeys) {
           const group = hashByClient.get(hk.clientIndex) ?? [];
-          group.push(hk.key);
+          group.push(hk.rawKey);
           hashByClient.set(hk.clientIndex, group);
         }
 
