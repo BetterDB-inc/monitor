@@ -19,10 +19,10 @@ jest.mock('../analysis/hfe-detector', () => ({
 }));
 jest.mock('../analysis/commandlog-analyzer', () => ({
   collectCommandAnalysis: jest.fn().mockResolvedValue({
-    analysis: { sourceUsed: 'unavailable', topCommands: [] },
+    analysis: { sourceUsed: 'slowlog', topCommands: [] },
     entries: [],
   }),
-  collectNodeCommandEntries: jest.fn().mockResolvedValue([]),
+  collectNodeCommandEntries: jest.fn().mockResolvedValue({ entries: [], unreadNodes: 0 }),
 }));
 
 type MockNodeClient = {
@@ -388,6 +388,20 @@ describe('MigrationService ElastiCache Serverless readiness', () => {
 
     expect(job.status).toBe('completed');
     expect(serverlessCategory(job).map(i => i.title)).toEqual(['Standalone source', 'Some readiness checks could not run']);
+  });
+
+  it('notes that the restricted-command check could not run when no command log is readable', async () => {
+    const { collectCommandAnalysis } = jest.requireMock('../analysis/commandlog-analyzer') as { collectCommandAnalysis: jest.Mock };
+    collectCommandAnalysis.mockResolvedValueOnce({ analysis: { sourceUsed: 'unavailable', topCommands: [] }, entries: [] });
+    const registry = createMockRegistry();
+    readyReplicationCommands(registry);
+    const service = new MigrationService(registry as any);
+
+    const { id } = await service.startAnalysis({ sourceConnectionId: 'conn-1', targetProfile: 'elasticache_serverless' });
+    const job = await waitForTerminal(service, id);
+
+    const notice = serverlessCategory(job).find(i => i.title === 'Some readiness checks could not run');
+    expect(notice?.detail).toContain('COMMANDLOG and SLOWLOG could not be read on 1 node');
   });
 
   it('reports PSYNC missing when COMMAND INFO returns nil for it', async () => {

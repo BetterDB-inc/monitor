@@ -34,6 +34,7 @@ function facts(overrides: Partial<ServerlessReadinessFacts> = {}): ServerlessRea
     pubsub: { channels: 0, patterns: 0, shardChannels: 0 },
     commandEntries: [],
     unreadProbeNodes: 0,
+    unreadCommandLogNodes: 0,
     ...overrides,
   };
 }
@@ -484,6 +485,22 @@ describe('unread readiness checks', () => {
       .find(i => i.title === 'Some readiness checks could not run');
     expect(issue?.severity).toBe('warning');
     expect(issue?.detail).toContain('2 nodes');
+  });
+
+  it('warns when the command log could not be read', () => {
+    const issue = checkServerlessReadiness(facts({ unreadCommandLogNodes: 3 }))
+      .find(i => i.title === 'Some readiness checks could not run');
+    expect(issue?.severity).toBe('warning');
+    expect(issue?.detail).toContain('COMMANDLOG and SLOWLOG could not be read on 3 nodes');
+    expect(issue?.detail).not.toContain('INFO stats');
+  });
+
+  it('folds probe and command log failures into one warning', () => {
+    const issues = checkServerlessReadiness(facts({ unreadProbeNodes: 1, unreadCommandLogNodes: 1 }))
+      .filter(i => i.title === 'Some readiness checks could not run');
+    expect(issues).toHaveLength(1);
+    expect(issues[0].detail).toContain('INFO stats');
+    expect(issues[0].detail).toContain('COMMANDLOG and SLOWLOG');
   });
 
   it('uses the singular for one node', () => {

@@ -185,12 +185,13 @@ describe('collectNodeCommandEntries', () => {
     const a = { call: jest.fn().mockResolvedValue([logEntry(['KEYS', '*'], 'app')]) };
     const b = { call: jest.fn().mockResolvedValue([logEntry(['OBJECT', 'FREQ', 'k'], 'app')]) };
 
-    const entries = await collectNodeCommandEntries([a, b] as any, true);
+    const { entries, unreadNodes } = await collectNodeCommandEntries([a, b] as any, true);
 
     expect(entries).toEqual([
       { command: ['KEYS', '*'], clientName: 'app' },
       { command: ['OBJECT', 'FREQ', 'k'], clientName: 'app' },
     ]);
+    expect(unreadNodes).toBe(0);
     expect(a.call).toHaveBeenCalledWith('COMMANDLOG', 'GET', 200, 'slow');
   });
 
@@ -202,9 +203,10 @@ describe('collectNodeCommandEntries', () => {
       }),
     };
 
-    const entries = await collectNodeCommandEntries([a] as any, true);
+    const { entries, unreadNodes } = await collectNodeCommandEntries([a] as any, true);
 
     expect(entries).toEqual([{ command: ['CLIENT', 'KILL', 'ID', '1'], clientName: 'app' }]);
+    expect(unreadNodes).toBe(0);
     expect(a.call).toHaveBeenCalledWith('SLOWLOG', 'GET', 128);
   });
 
@@ -212,6 +214,16 @@ describe('collectNodeCommandEntries', () => {
     const a = { call: jest.fn().mockRejectedValue(new Error('NOPERM')) };
     const b = { call: jest.fn().mockResolvedValue([logEntry(['KEYS', '*'], 'app')]) };
 
-    expect(await collectNodeCommandEntries([a, b] as any, false)).toEqual([{ command: ['KEYS', '*'], clientName: 'app' }]);
+    expect(await collectNodeCommandEntries([a, b] as any, false)).toEqual({
+      entries: [{ command: ['KEYS', '*'], clientName: 'app' }],
+      unreadNodes: 1,
+    });
+  });
+
+  it('counts a node as unread only when both COMMANDLOG and SLOWLOG fail', async () => {
+    const empty = { call: jest.fn().mockResolvedValue([]) };
+    const broken = { call: jest.fn().mockRejectedValue(new Error('NOPERM')) };
+
+    expect(await collectNodeCommandEntries([empty, broken, broken] as any, true)).toEqual({ entries: [], unreadNodes: 2 });
   });
 });

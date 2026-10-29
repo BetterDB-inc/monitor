@@ -67,7 +67,7 @@ export async function collectCommandAnalysis(
 export async function collectNodeCommandEntries(
   clients: Valkey[],
   hasCommandLog: boolean,
-): Promise<CommandLogSample[]> {
+): Promise<{ entries: CommandLogSample[]; unreadNodes: number }> {
   const perNode = await Promise.all(clients.map(async (client) => {
     if (hasCommandLog) {
       try {
@@ -79,15 +79,18 @@ export async function collectNodeCommandEntries(
     }
     return readSlowLog(client);
   }));
-  return perNode.flat();
+  return {
+    entries: perNode.flatMap((samples) => samples ?? []),
+    unreadNodes: perNode.filter((samples) => samples === null).length,
+  };
 }
 
-async function readSlowLog(client: Valkey): Promise<CommandLogSample[]> {
+async function readSlowLog(client: Valkey): Promise<CommandLogSample[] | null> {
   try {
     const raw = await client.call('SLOWLOG', 'GET', 128);
     return toSamples(MetricsParser.parseSlowLog(raw as unknown[]));
   } catch {
-    return [];
+    return null;
   }
 }
 

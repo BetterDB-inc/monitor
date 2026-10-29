@@ -569,9 +569,12 @@ export class MigrationService {
       }
 
       if (checkServerless) {
-        const commandEntries = isCluster && scanClients.length > 0
+        const commandLogRead = isCluster && scanClients.length > 0
           ? await collectNodeCommandEntries(scanClients, capabilities.hasCommandLog)
-          : commandLog.entries;
+          : {
+            entries: commandLog.entries,
+            unreadNodes: commandLog.analysis.sourceUsed === 'unavailable' ? 1 : 0,
+          };
         const probes = await probeServerlessFacts(
           scanClients.length > 0 ? scanClients : [adapter.getClient()],
           masterMemorySections,
@@ -586,7 +589,8 @@ export class MigrationService {
           databasesBeyondZero,
           functionPresence,
           clusterMasters,
-          commandEntries,
+          commandEntries: commandLogRead.entries,
+          unreadCommandLogNodes: commandLogRead.unreadNodes,
           ...probes,
         }));
       }

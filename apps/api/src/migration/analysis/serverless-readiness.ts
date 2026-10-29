@@ -106,6 +106,7 @@ export interface ServerlessReadinessFacts {
   pubsub: { channels: number; patterns: number; shardChannels: number } | null;
   commandEntries: ServerlessCommandEntry[];
   unreadProbeNodes: number;
+  unreadCommandLogNodes: number;
 }
 
 const INTERNAL_CLIENT_PATTERN = /^betterdb-/i;
@@ -216,6 +217,10 @@ function parseMajorMinor(version: string): [number, number] | null {
 
 function compareMajorMinor(a: [number, number], b: [number, number]): number {
   return a[0] !== b[0] ? a[0] - b[0] : a[1] - b[1];
+}
+
+function nodeCount(nodes: number): string {
+  return `${nodes} node${nodes === 1 ? '' : 's'}`;
 }
 
 function formatGiB(bytes: number): string {
@@ -426,15 +431,25 @@ export function checkServerlessReadiness(facts: ServerlessReadinessFacts): Incom
     });
   }
 
+  const unread: string[] = [];
   if (facts.unreadProbeNodes > 0) {
-    const nodes = facts.unreadProbeNodes;
+    unread.push(
+      `COMMAND INFO, INFO stats or INFO memory could not be read on ${nodeCount(facts.unreadProbeNodes)}, ` +
+      'so replication command support, cached scripts and pub/sub subscribers may be under-reported.',
+    );
+  }
+  if (facts.unreadCommandLogNodes > 0) {
+    unread.push(
+      `COMMANDLOG and SLOWLOG could not be read on ${nodeCount(facts.unreadCommandLogNodes)}, ` +
+      'so restricted commands the application sends may be missing from this report.',
+    );
+  }
+  if (unread.length > 0) {
     issues.push({
       severity: 'warning',
       category: CATEGORY,
       title: 'Some readiness checks could not run',
-      detail:
-        `COMMAND INFO, INFO stats or INFO memory could not be read on ${nodes} node${nodes === 1 ? '' : 's'}, ` +
-        'so replication command support, cached scripts and pub/sub subscribers may be under-reported. Confirm them on the source before migrating.',
+      detail: `${unread.join(' ')} Confirm these on the source before migrating.`,
     });
   }
 
